@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No trailing whitespace or CRLF in tracked text files
+        run: git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin'
+      - name: No committed secrets or build output
+        run: |
+          ! git ls-files | grep -E '(^|/)(build|test/build)/|\.pem$' | grep -v 'laptimer_pub\.pem$'
+
+  host-tests:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('test/CMakeLists.txt') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure
+        run: cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build test/build --parallel
+      - name: Test
+        run: ctest --test-dir test/build --output-on-failure
+
+  tracks-generated:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('tools/tracks/gen_tracks.py') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate bundled tracks and check they are committed
+        run: |
+          python3 tools/tracks/gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c
+          git diff --exit-code components/core/tracks/trk_bundled.c

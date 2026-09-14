@@ -1,0 +1,32 @@
+name: firmware
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('build.sh') != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [moto_neo6m, moto_sim]
+    container:
+      image: espressif/idf:v5.3.2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build ${{ matrix.env }}
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          ./build.sh ${{ matrix.env }} build
+          ./build.sh ${{ matrix.env }} size
+      - uses: actions/upload-artifact@v4
+        with:
+          name: laptimer-${{ matrix.env }}
+          path: build/${{ matrix.env }}/*.bin
+          if-no-files-found: ignore
