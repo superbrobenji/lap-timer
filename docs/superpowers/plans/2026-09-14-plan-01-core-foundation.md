@@ -3813,39 +3813,14 @@ git commit -m "feat(core): NMEA and JSON summary exporters"
 
 ---
 
-### Task 13: Continuous integration for host tests
+### Task 13: Verify CI runs the host tests
 
 **Files:**
-- Create: `.github/workflows/host-tests.yml`
+- Modify: none (the workflows were created in plan 00; `host-tests` and `tracks-generated` jobs are guarded by `hashFiles` and become active now that `test/CMakeLists.txt` and `tools/tracks/gen_tracks.py` exist).
 
 **Interfaces:** none (CI only).
 
-- [ ] **Step 1: Write the workflow**
-
-`.github/workflows/host-tests.yml`:
-```yaml
-name: host-tests
-on: [push, pull_request]
-jobs:
-  host:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Configure
-        run: cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build test/build --parallel
-      - name: Test
-        run: ctest --test-dir test/build --output-on-failure
-      - name: Regenerate bundled tracks and check they are committed
-        run: |
-          python3 tools/tracks/gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c
-          git diff --exit-code components/core/tracks/trk_bundled.c
-```
-
-- [ ] **Step 2: Verify locally that the same commands pass from a clean tree**
+- [ ] **Step 1: Verify locally from a clean tree**
 
 Run:
 ```bash
@@ -3854,12 +3829,21 @@ python3 tools/tracks/gen_tracks.py tools/tracks/*.json -o components/core/tracks
 ```
 Expected: all tests pass; `git diff` prints nothing and exits 0.
 
-- [ ] **Step 3: Commit and tag**
+- [ ] **Step 2: Push the session branch, open the PR, watch CI**
 
 ```bash
-git add .github/workflows/host-tests.yml
-git commit -m "ci: run host unit tests and check generated track table"
-git tag plan-01-done
+git push -u origin HEAD
+gh pr create --fill --base main
+gh pr checks --watch
+```
+Expected: `hygiene`, `host-tests`, `tracks-generated` all succeed (no longer skipped); `firmware` still skipped (no `build.sh` yet).
+
+- [ ] **Step 3: Merge and tag**
+
+```bash
+gh pr merge --squash --delete-branch
+git switch main && git pull --ff-only
+git tag plan-01-done && git push origin plan-01-done
 ```
 
 ---
@@ -3875,6 +3859,7 @@ git tag plan-01-done
 - §15.1 config table: every row has a field, a clamp, and a JSON key in Task 9. ✔
 - §10.1–10.2 track model, JSON schema, `same`/`reverse`, generator validation (line length 10–60 m): Task 10. The `flags`/`verified` addition is written back into the spec in Task 10 step 3. ✔
 - §17.9 `-Wconversion` non-fatal and vendored-file relaxation: Task 1. ✔
+- §21.6 CI: workflows from plan 00 activate automatically; Task 13 verifies. ✔
 - `ring.h` (§4.4): Task 3. ✔
 
 **Placeholder scan:** no TBD/TODO; every code step has full code; the only "adjust if" guidance is the numeric assertion in the generator, which states the exact fix.
