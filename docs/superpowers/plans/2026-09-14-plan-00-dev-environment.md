@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Default branch is `main`. Session branches are named `s<plan>.<day>-<topic>` (e.g. `s1.1-harness`). Merge by pull request, squash merge, delete branch. Tags (`pNN-dD`, `plan-NN-done`, `vX.Y.Z`) are created on `main` after merge.
-- CI must be green on every push to `main`. Workflows are guarded with `hashFiles` so a job is skipped, not failed, when its inputs do not exist yet.
+- CI must be green on every push to `main`. Workflows probe for their inputs after checkout and run a green no-op step when the inputs do not exist yet.
 - No secrets in the repository. The OTA signing key (plan 5.5) will live in a GitHub Actions secret `OTA_SIGNING_KEY`; `*.pem` stays git-ignored except the committed public key.
 - Working directory for all commands: `/Users/benji/projects/personal/lap-timer`.
 
@@ -163,27 +163,41 @@ jobs:
 
   host-tests:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('test/CMakeLists.txt') != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f test/CMakeLists.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Configure
+        if: steps.probe.outputs.present == 'true'
         run: cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug
       - name: Build
+        if: steps.probe.outputs.present == 'true'
         run: cmake --build test/build --parallel
       - name: Test
+        if: steps.probe.outputs.present == 'true'
         run: ctest --test-dir test/build --output-on-failure
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "test/CMakeLists.txt not present yet"
 
   tracks-generated:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('tools/tracks/gen_tracks.py') != '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f tools/tracks/gen_tracks.py ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Regenerate bundled tracks and check they are committed
+        if: steps.probe.outputs.present == 'true'
         run: |
           python3 tools/tracks/gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c
           git diff --exit-code components/core/tracks/trk_bundled.c
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "tools/tracks/gen_tracks.py not present yet"
 ```
 
 - [ ] **Step 2: Write `firmware.yml`**
@@ -199,7 +213,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('build.sh') != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -210,17 +223,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f build.sh ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Build ${{ matrix.env }}
+        if: steps.probe.outputs.present == 'true'
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           ./build.sh ${{ matrix.env }} build
           ./build.sh ${{ matrix.env }} size
       - uses: actions/upload-artifact@v4
+        if: steps.probe.outputs.present == 'true'
         with:
           name: laptimer-${{ matrix.env }}
           path: build/${{ matrix.env }}/*.bin
           if-no-files-found: ignore
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "build.sh not present yet"
 ```
 
 The `espressif/idf` tag must match `.idf-version` (created in Task 6). `moto_sim` is the `GPS=sim IMU=sim` environment used until sensors arrive (spec §4.6).
@@ -251,7 +272,7 @@ Expected: `✓ Created repository superbrobenji/lap-timer on GitHub` and `main` 
 - [ ] **Step 3: Watch the first workflow run**
 
 Run: `gh run list --limit 5` then `gh run watch` on the `ci` run.
-Expected: `hygiene` succeeds; `host-tests` and `tracks-generated` are skipped (inputs absent); `firmware` skipped.
+Expected: `hygiene` succeeds; `host-tests`, `tracks-generated`, and `firmware` run and finish on their 'Nothing to do' step (inputs absent).
 
 - [ ] **Step 4: Repository settings**
 
@@ -291,7 +312,7 @@ gh pr checks --watch
 gh pr merge --squash --delete-branch
 git switch main && git pull --ff-only
 ```
-Expected: PR checks show `hygiene` passed and the guarded jobs skipped; squash merge lands on `main`.
+Expected: PR checks show `hygiene` passed and the probed jobs finish on 'Nothing to do'; squash merge lands on `main`.
 
 - [ ] **Step 3: Tag the session**
 

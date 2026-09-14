@@ -18,24 +18,38 @@ jobs:
 
   host-tests:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('test/CMakeLists.txt') != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f test/CMakeLists.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Configure
+        if: steps.probe.outputs.present == 'true'
         run: cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug
       - name: Build
+        if: steps.probe.outputs.present == 'true'
         run: cmake --build test/build --parallel
       - name: Test
+        if: steps.probe.outputs.present == 'true'
         run: ctest --test-dir test/build --output-on-failure
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "test/CMakeLists.txt not present yet"
 
   tracks-generated:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('tools/tracks/gen_tracks.py') != '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f tools/tracks/gen_tracks.py ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Regenerate bundled tracks and check they are committed
+        if: steps.probe.outputs.present == 'true'
         run: |
           python3 tools/tracks/gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c
           git diff --exit-code components/core/tracks/trk_bundled.c
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "tools/tracks/gen_tracks.py not present yet"

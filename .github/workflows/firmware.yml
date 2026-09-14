@@ -8,7 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('build.sh') != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,14 +18,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f build.sh ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Build ${{ matrix.env }}
+        if: steps.probe.outputs.present == 'true'
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           ./build.sh ${{ matrix.env }} build
           ./build.sh ${{ matrix.env }} size
       - uses: actions/upload-artifact@v4
+        if: steps.probe.outputs.present == 'true'
         with:
           name: laptimer-${{ matrix.env }}
           path: build/${{ matrix.env }}/*.bin
           if-no-files-found: ignore
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "build.sh not present yet"
