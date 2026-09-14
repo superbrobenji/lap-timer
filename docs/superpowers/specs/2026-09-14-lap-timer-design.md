@@ -233,7 +233,7 @@ lap-timer/
   components/
     core/
       CMakeLists.txt             idf_component_register(SRCS ... INCLUDE_DIRS include)
-      include/core/*.h           public API (§5.2)
+      include/core/*.h           public API (§5.2); core/types.h holds gps_fix_t, imu_raw_t, fused_sample_t, lap_result_t, drag_result_t (HAL headers include it)
       timebase/tb.c
       geo/geo.c
       fusion/fus.c  fusion/fus_calib.c
@@ -242,14 +242,18 @@ lap-timer/
       tracks/trk.c  tracks/trk_bundled.c (generated)
       session/ses_frame.c  ses_records.c  ses_crc.c
       export/exp_vbo.c  exp_nmea.c  exp_json.c
-      config/cfg.c  cfg_json.c (uses bundled jsmn-style minimal parser)
+      config/cfg.c  cfg_json.c (jsmn vendored in include/core/jsmn.h; jw.c minimal JSON writer)
+      util/ring.h  util/jw.c  util/bw.h (byte writer/reader for packed records)
+      ui/render.c  ui/fonts.c (generated)  ui/screens_moto.c  ui/screens_car.c  ui/model.h   pure-C framebuffer renderer and screens; host tests snapshot to PBM
     hal/
       CMakeLists.txt             INTERFACE component
       include/hal/gps.h imu.h display.h storage.h board.h conn.h
     drivers/
       gps_neo6m/     gps_ubx_common/ (shared UBX framing used by both GPS drivers)
       gps_m10/
+      gps_sim/       bench driver: replays /sim/gps.ubx or synthesises a circuit
       imu_mpu6050/
+      imu_sim/       bench driver: replays /sim/imu.bin or synthesises samples
       display_epaper_ssd1680/
       display_oled_ssd1309/
       storage_internal/
@@ -262,9 +266,7 @@ lap-timer/
     app/
       pipeline/pipeline.c
       logger/logger.c
-      ui/ui.c ui_render.c ui_fonts.c ui_buttons.c
-      ui/moto/screens_moto.c
-      ui/car/screens_car.c
+      ui/ui.c ui_buttons.c        task, event handling, display glue (renderer and screens live in core/ui)
       power/power.c power_battery.c
       supervisor/sup.c sup_errlog.c
       ota/ota.c
@@ -355,14 +357,16 @@ SPSC rings are implemented in `core/util/ring.h` as a header-only lock-free ring
 | Variable | Values | Default |
 |----------|--------|---------|
 | `VARIANT` | `moto`, `car` | required |
-| `GPS` | `neo6m`, `m10` | required |
-| `IMU` | `mpu6050` | `mpu6050` |
+| `GPS` | `neo6m`, `m10`, `sim` | required |
+| `IMU` | `mpu6050`, `sim` | `mpu6050` |
 | `DISPLAY` | `epaper_ssd1680`, `oled_ssd1309` | required |
 | `STORAGE` | `internal`, `sd` | `internal` |
 | `CONN` | `ble`, `wifi`, `ble_wifi` | `ble` |
 | `CONN_BLE_RC` | `ON`/`OFF` | `OFF` |
 | `EXPORT_SERIAL` | `ON`/`OFF` | `ON` |
 | `PANEL` | `ws213v4`, `ws29v2` | `ws29v2` |
+
+`GPS=sim` and `IMU=sim` select bench drivers (`gps_sim`, `imu_sim`) that implement the HAL by replaying a capture file from LittleFS (`/sim/gps.ubx`, `/sim/imu.bin`) at real-time rate, or generating a synthetic circuit when no file exists. They exist so the whole firmware can be developed and bench-tested before the physical sensors are available. They are never part of a release build (`sign_release.sh` refuses them).
 
 Validation in CMake: `moto` requires `DISPLAY` ∈ {epaper_ssd1680, oled_ssd1309}; `car` requires `oled_ssd1309`; `CONN_BLE_RC=ON` requires `CONN` containing `ble`; `GPS=m10` enables PPS handling. Invalid combinations fail configuration with a message.
 
@@ -582,7 +586,7 @@ double  geo_dist_m(double lat1, double lon1, double lat2, double lon2);   /* hav
 int     geo_segment_cross(geo_enu_t a, geo_enu_t b, geo_enu_t p, geo_enu_t q, double *t_out, int *dir_sign_out);
 double  geo_dist_point_segment(geo_enu_t x, geo_enu_t p, geo_enu_t q);
 /* constant-acceleration interpolation: distance d along a segment traversed from speed v0 to v1 over dt */
-double  geo_interp_time(double d, double seg_len, double v0, double v1, double dt);
+double  geo_interp_time(double d, double v0, double v1, double dt);   /* returns τ in [0, dt] */
 ```
 
 #### `core/fus.h` — fusion
@@ -1097,6 +1101,8 @@ User venues: `/tracks/user.bin` = `u8 version | u8 count | trk_venue_t[count]` p
   ]
 }
 ```
+
+Line endpoint convention: `p1` is the **left** end and `p2` the **right** end of the line as seen in the driving direction of the layout; with that convention `dir` is `+1`. A reverse layout keeps the same endpoints and sets `dir` to `-1`. Formally `dir = sign(cross(p2 − p1, motion))` in ENU, the same expression the engine evaluates at every crossing and that on-device creation uses to set `dir_sign`.
 
 `"sf": "same"` copies the S/F line of the first layout; `"sectors": "reverse"` reverses the sector order of the first layout. The generator expands these before emitting C.
 
@@ -1664,7 +1670,7 @@ Classic ESP32 disables the instruction cache during SPI flash erase/write; code 
 
 ### 17.9 Code rules
 
-- C11, `-Wall -Wextra -Werror -Wshadow -Wconversion` (core), `-Os`.
+- C11, `-Wall -Wextra -Werror -Wshadow` plus `-Wconversion` as a non-fatal warning (core), `-Os` on target. Vendored third-party files (Unity, jsmn) are compiled with warnings relaxed.
 - No `malloc` after init; all buffers static or in task-owned structs. `CONFIG_COMPILER_STACK_CHECK_MODE_STRONG` in debug builds.
 - Core assertions: `CORE_ASSERT(cond, code)` logs `code` and returns an error; never aborts on target. Host tests map it to Unity `TEST_FAIL`.
 - All time int64 µs; no floating-point time.
@@ -1849,11 +1855,12 @@ Command sequence (SSD1680):
 - Rotation: the driver rotates the logical landscape framebuffer into the panel's portrait RAM order during the write (nibble/bit transposition in a 128-byte line buffer; ≈ 1 ms at 80 MHz).
 - Temperature: the panel's internal sensor is used by the on-chip LUT selection (`0x18 0x80`); the MPU6050 temperature only gates refresh permission (§17.2).
 
-### 20.2 Framebuffer and renderer (`app/ui/ui_render.c`)
+### 20.2 Framebuffer and renderer (`core/ui/render.c`, pure C, host-testable; screens in `core/ui/screens_moto.c`)
 
 - 1 bpp, `width/8 × height` bytes, `0 = black` (e-paper convention inverted at blit if `display.invert`). Logical origin top-left, landscape.
 - Primitives: `fb_clear`, `fb_rect`, `fb_hline`, `fb_text(font, x, y, str)`, `fb_text_right(...)`, `fb_icon(id, x, y)`, `fb_bar(x, y, w, h, pct)`.
 - Dirty tracking: renderer accumulates a bounding box; `ui` passes it to `disp_refresh(PARTIAL)` via the driver's window API (`disp_set_window` extension in the e-paper driver; other drivers ignore).
+- Host tests render every screen from a fixed model and write `test/snapshots/<screen>.pbm`; a golden comparison guards against layout regressions, and the PBMs are the review artefact before a panel exists.
 - Fonts generated by `tools/fonts/gen_fonts.py` from DejaVu Sans Mono Bold: `FONT_BIG` 40 px (glyphs `0-9 : . - + S`), `FONT_MED` 24 px (`0-9 : . - + A-Z`), `FONT_SMALL` 12 px (ASCII 32–126). Stored as 1-bpp glyph bitmaps with a fixed advance per font.
 - Icons 12×12: GPS, GPS-strike, IMU-q, disk, disk-full, disk-warn, battery-low, thermometer, BLE, SAFE.
 
@@ -2033,6 +2040,7 @@ Plain CMake ≥ 3.16, C11, `-Wall -Wextra -Werror -Wshadow -Wconversion -fsaniti
 | `test_exp.c` | VBO golden file byte-equal for a 3-fix fixture (checks west-positive longitude, minute conversion, formatting); NMEA checksums verified by independent computation; JSON parses (using a tiny reference parser in the test) |
 | `test_trk.c` | nearest lookup; user override on id clash; JSON parse/emit round-trip; `"sf":"same"` / `"sectors":"reverse"` expansion |
 | `test_cfg.c` | defaults valid; each field clamped; JSON merge semantics; unknown keys ignored; migration v1→v1 no-op |
+| `test_ui.c` | every screen renders from a fixed model without out-of-bounds writes; PBM snapshots match goldens; bench rows rule (§11.4); fault icon strip only when flags set |
 | `test_ring.c` | SPSC ring overwrite-oldest vs drop-newest policies, wraparound |
 
 Coverage target: ≥ 90 % lines in `core/` (gcov in CI).
