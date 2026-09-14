@@ -1496,7 +1496,7 @@ any ──► SHUTDOWN
 | PIT | ACTIVE | `EV_MOTION`, or any button, or IMU motion interrupt (wakes light sleep) |
 | PIT | PARK | no `EV_MOTION` for `power.park_after_s` (counted from ACTIVE exit) |
 | PARK | (BOOT) | EXT1 any-high (IMU INT, buttons) or EXT0 (charger) → deep-sleep wake → boot sequence with RTC resume |
-| ACTIVE/PIT | CONNECTED | menu "Export" and `still` | 
+| ACTIVE/PIT | CONNECTED | menu "Export" and `still` |
 | CONNECTED | previous | disconnect + `power.conn_idle_s`, or menu exit, or `EV_MOTION` (transfer aborted with `E_CONN_XFER_ABORT`) |
 | any | SHUTDOWN | `batt_mv < power.shutdown_mv` for `BATT_SHUTDOWN_HOLD_S` while ACTIVE/PIT, or menu "Sleep now" long-hold |
 | SHUTDOWN | (BOOT) | EXT0 charger low or EXT1 button; boot refuses to leave BOOT unless `batt_mv ≥ BATT_RESTART_MIN_V` (shows LOW BATT, sleeps again) |
