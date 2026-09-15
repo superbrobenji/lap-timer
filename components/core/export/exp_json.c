@@ -29,7 +29,7 @@ static int open_hdr(exp_t *e, const ses_hdr_t *h, const char *venue_name)
     return emit(e, &w);
 }
 
-int exp_json_open(exp_t *e) { e->json_stage = 0; e->have_hdr = 0; e->venue_name[0] = '\0'; return 0; }
+int exp_json_open(exp_t *e) { e->json_stage = 0; e->have_hdr = 0; e->venue_name[0] = '\0'; e->run_pending = 0; e->run_gate_idx = 0; return 0; }
 
 int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
@@ -43,9 +43,9 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     }
     if (type == SES_T_LAP) {
         if (e->json_stage != 1) return 0;                     /* laps after runs began: ignore (log order guarantees this never happens) */
-        if (exp_win_free(e) < 300) return EXP_FULL;
+        if (exp_win_free(e) < 400) return EXP_FULL;
         lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) return -1;
-        char buf[300]; jw_t w; jw_init(&w, buf, sizeof buf);
+        char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
         if (e->laps > 0) exp_win_puts(e, ",");
         jw_obj_open(&w);
         jw_key(&w, "n"); jw_uint(&w, lap.lap_no);
@@ -67,36 +67,48 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
         return emit(e, &w);
     }
     if (type == SES_T_DRAG_RUN) {
-        if (exp_win_free(e) < 500) return EXP_FULL;
-        if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
         drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) return -1;
-        char buf[500]; jw_t w; jw_init(&w, buf, sizeof buf);
-        if (e->runs > 0) exp_win_puts(e, ",");
-        jw_obj_open(&w);
-        jw_key(&w, "n"); jw_uint(&w, run.run_no);
-        jw_key(&w, "t0_utc_us"); jw_int(&w, run.t0_gps_us);
-        jw_key(&w, "rollout"); jw_bool(&w, (run.flags & DRAG_F_ROLLOUT) != 0);
-        jw_key(&w, "trap_cms"); jw_uint(&w, run.trap_cms);
-        jw_key(&w, "gates"); jw_arr_open(&w);
-        for (uint8_t i = 0; i < run.n_gates; i++) {
+        if (!e->run_pending) {
+            if (exp_win_free(e) < 200) return EXP_FULL;
+            if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
+            if (e->runs > 0) exp_win_puts(e, ",");
+            char buf[200]; jw_t w; jw_init(&w, buf, sizeof buf);
             jw_obj_open(&w);
-            jw_key(&w, "id"); jw_uint(&w, run.gates[i].gate_id);
-            jw_key(&w, "ms"); jw_uint(&w, run.gates[i].time_ms);
-            jw_key(&w, "speed_cms"); jw_uint(&w, run.gates[i].speed_cms);
-            jw_key(&w, "dist_cm"); jw_uint(&w, run.gates[i].dist_cm);
-            jw_key(&w, "hit"); jw_bool(&w, run.gates[i].hit != 0);
-            jw_obj_close(&w);
+            jw_key(&w, "n"); jw_uint(&w, run.run_no);
+            jw_key(&w, "t0_utc_us"); jw_int(&w, run.t0_gps_us);
+            jw_key(&w, "rollout"); jw_bool(&w, (run.flags & DRAG_F_ROLLOUT) != 0);
+            jw_key(&w, "trap_cms"); jw_uint(&w, run.trap_cms);
+            jw_key(&w, "gates"); jw_arr_open(&w);
+            if (emit(e, &w) < 0) return -1;
+            e->run_pending = 1; e->run_gate_idx = 0;
         }
-        jw_arr_close(&w);
-        jw_obj_close(&w);
-        e->runs++;
-        return emit(e, &w);
+        /* one gate object per step; after EXP_FULL the caller pulls and re-feeds the same frame, and we resume here */
+        while (e->run_gate_idx < run.n_gates) {
+            if (exp_win_free(e) < 120) return EXP_FULL;
+            const drag_gate_res_t *g = &run.gates[e->run_gate_idx];
+            char buf[120]; jw_t w; jw_init(&w, buf, sizeof buf);
+            if (e->run_gate_idx > 0) exp_win_puts(e, ",");
+            jw_obj_open(&w);
+            jw_key(&w, "id"); jw_uint(&w, g->gate_id);
+            jw_key(&w, "ms"); jw_uint(&w, g->time_ms);
+            jw_key(&w, "speed_cms"); jw_uint(&w, g->speed_cms);
+            jw_key(&w, "dist_cm"); jw_uint(&w, g->dist_cm);
+            jw_key(&w, "hit"); jw_bool(&w, g->hit != 0);
+            jw_obj_close(&w);
+            if (emit(e, &w) < 0) return -1;
+            e->run_gate_idx++;
+        }
+        if (exp_win_free(e) < 4) return EXP_FULL;
+        exp_win_puts(e, "]}");
+        e->run_pending = 0; e->runs++;
+        return 0;
     }
     return 0;
 }
 
 int exp_json_finish(exp_t *e)
 {
+    if (e->run_pending) return -1;
     if (exp_win_free(e) < 400) return EXP_FULL;
     if (e->json_stage == 0) { if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1; }
     if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }

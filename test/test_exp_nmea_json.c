@@ -80,10 +80,41 @@ static void test_json_summary_structure(void)
     int valid = json_obj_get(out, toks, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
 }
 
+static void test_json_sixteen_gate_run_streams_across_pulls(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_002");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[8192]; size_t at = 0;
+    uint8_t fr[256]; int n;
+    drag_result_t run; memset(&run, 0, sizeof run); run.run_no = 3; run.n_gates = DRAG_MAX_GATES; run.trap_cms = 8472; run.flags = DRAG_F_QUARTER;
+    for (uint8_t i = 0; i < DRAG_MAX_GATES; i++) run.gates[i] = (drag_gate_res_t){ (uint8_t)(i + 1), 1000u * (i + 1u), (uint16_t)(500u * (i + 1u)), 2500u * (i + 1u), 1 };
+    n = ses_encode_drag_run(&run, fr, sizeof fr);
+    /* small pulls force several EXP_FULL/resume cycles inside the run */
+    int r;
+    while ((r = exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD))) == EXP_FULL) {
+        uint8_t chunk[64]; size_t got; exp_pull(&e, chunk, sizeof chunk, &got); memcpy(out + at, chunk, got); at += got;
+    }
+    TEST_ASSERT_EQUAL_INT(0, r);
+    while ((r = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, exp_finish(&e));                       /* idempotent */
+    TEST_ASSERT_EQUAL_UINT(at, drain(&e, out, at));                  /* nothing more emitted */
+    jsmntok_t toks[512];
+    int cnt = json_parse(out, at, toks, 512);
+    TEST_ASSERT_GREATER_THAN(0, cnt);
+    int runs = json_obj_get(out, toks, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int gates = json_obj_get(out, toks, runs + 1, "gates"); TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
+    int last = gates + 1; for (int i = 0; i < DRAG_MAX_GATES - 1; i++) last = json_skip(toks, last);
+    int dist = json_obj_get(out, toks, last, "dist_cm"); int64_t v; json_tok_int(out, &toks[dist], &v);
+    TEST_ASSERT_EQUAL_INT64(2500 * DRAG_MAX_GATES, v);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_nmea_sentences_and_checksums);
     RUN_TEST(test_json_summary_structure);
+    RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);
     return UNITY_END();
 }

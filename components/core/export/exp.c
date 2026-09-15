@@ -73,6 +73,7 @@ int exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out)
 
 int exp_finish(exp_t *e)
 {
+    if (e->finished) return 0;
     int r;
     switch (e->fmt) {
     case EXP_VBO:  r = exp_vbo_finish(e); break;
