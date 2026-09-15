@@ -33,8 +33,12 @@ Disconnect the battery pack before connecting USB (spec §3.2).
 
 `main` is always releasable. One branch per roadmap session, named `s<plan>.<day>-<topic>`, merged by squash PR once CI is green. Tags `pNN-dD` mark finished sessions, `plan-NN-done` finished plans, `vX.Y.Z` releases.
 
-Branch protection is not enforced (private repository on a free plan); the PR-and-CI protocol above is followed by convention.
+`main` is protected: pull requests only, all five CI checks required and up to date, linear history, no force pushes, enforced for admins.
 
 ## Status
 
 Session 0.1 complete.
+
+## License
+
+Source-available under the [PolyForm Strict License 1.0.0](LICENSE): noncommercial use only, no distribution of modified versions. Copyright (c) 2026 Bennie Swanepoel.
