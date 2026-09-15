@@ -64,23 +64,47 @@ int  ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len
 
 int  ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
 int  ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out);
+
+/* Every decoder below validates `len` exactly and returns 1 on success, -1 on a malformed payload.
+ * The structs mirror the wire payloads of §12.3; char arrays carry one extra byte so the decoded
+ * value is always NUL-terminated (the wire size is unchanged). */
+typedef struct { uint16_t lap_no; uint8_t idx; int64_t gps_us; uint32_t split_ms; int32_t delta_ms; } ses_sector_t;
+typedef struct { uint16_t run_no; uint8_t gate_id; int64_t gps_us; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; } ses_drag_gate_t;
+typedef struct { int64_t mono_us, gps_us; uint16_t code; uint32_t arg; } ses_event_t;
+typedef struct { int64_t mono_us, gps_us; uint8_t quality; } ses_time_map_t;
+typedef struct { uint16_t venue_id, layout_id; char name[33]; } ses_venue_t;     /* name is char[32] on the wire */
+typedef struct { int64_t mono_us; uint8_t state; uint16_t batt_mv; } ses_power_t;
+typedef struct { int64_t gps_us; uint8_t reason; } ses_end_t;
+typedef struct { int64_t gps_us; uint8_t kind; } ses_mark_t;
+typedef struct { int16_t r_e4[9]; int16_t gbias[3]; uint8_t calib_flags; } ses_calib_t;   /* 25 B payload */
+
 int  ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap);
+int  ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out);
 int  ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap);
 int  ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out);
 int  ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap);
+int  ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out);
 int  ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap);
+int  ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out);
 int  ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap);
+int  ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out);
 int  ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap);
+int  ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out);
 int  ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap);
+int  ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out);
 int  ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap);
+int  ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out);
 int  ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap);
+int  ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out);
+int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
+int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
 
 typedef struct {
     char     session_id[10];
     uint8_t  mode, variant;
     uint16_t venue_id, layout_id;
-    char     fw[16];
-    char     hwid[24];
+    char     fw[17];              /* char[16] on the wire + NUL */
+    char     hwid[25];            /* char[24] on the wire + NUL */
     uint8_t  log_profile, fused_hz, gps_hz;
     int64_t  start_gps_us;
     int16_t  r_e4[9];             /* rotation matrix × 1e4, row-major */

@@ -1,5 +1,6 @@
 #include "core/exp.h"
 #include "core/jw.h"
+#include "core/core.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -35,7 +36,11 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
     if (e->json_stage == 0) {
         if (type == SES_T_SESSION_HDR) { if (ses_decode_hdr(p, len, &e->hdr) == 1) e->have_hdr = 1; return 0; }
-        if (type == SES_T_VENUE) { if (len == 36) { memcpy(e->venue_name, p + 4, 32); e->venue_name[31] = '\0'; } return 0; }
+        if (type == SES_T_VENUE) {
+            ses_venue_t v;
+            if (ses_decode_venue(p, len, &v) == 1) memcpy(e->venue_name, v.name, sizeof e->venue_name);
+            return 0;
+        }
         if (type != SES_T_LAP && type != SES_T_DRAG_RUN && type != SES_T_END) return 0;
         if (exp_win_free(e) < 400) return EXP_FULL;
         if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1;
@@ -46,7 +51,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
         if (exp_win_free(e) < 400) return EXP_FULL;
         lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) return -1;
         char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
-        if (e->laps > 0) exp_win_puts(e, ",");
+        if (e->laps > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
         jw_obj_open(&w);
         jw_key(&w, "n"); jw_uint(&w, lap.lap_no);
         jw_key(&w, "ms"); jw_uint(&w, lap.time_ms);
@@ -70,8 +75,11 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
         drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) return -1;
         if (!e->run_pending) {
             if (exp_win_free(e) < 200) return EXP_FULL;
-            if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
-            if (e->runs > 0) exp_win_puts(e, ",");
+            if (e->json_stage == 1) {
+                CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
+                e->json_stage = 2;
+            }
+            if (e->runs > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
             char buf[200]; jw_t w; jw_init(&w, buf, sizeof buf);
             jw_obj_open(&w);
             jw_key(&w, "n"); jw_uint(&w, run.run_no);
@@ -87,7 +95,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
             if (exp_win_free(e) < 120) return EXP_FULL;
             const drag_gate_res_t *g = &run.gates[e->run_gate_idx];
             char buf[120]; jw_t w; jw_init(&w, buf, sizeof buf);
-            if (e->run_gate_idx > 0) exp_win_puts(e, ",");
+            if (e->run_gate_idx > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
             jw_obj_open(&w);
             jw_key(&w, "id"); jw_uint(&w, g->gate_id);
             jw_key(&w, "ms"); jw_uint(&w, g->time_ms);
@@ -99,7 +107,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
             e->run_gate_idx++;
         }
         if (exp_win_free(e) < 4) return EXP_FULL;
-        exp_win_puts(e, "]}");
+        CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
         e->run_pending = 0; e->runs++;
         return 0;
     }
@@ -111,7 +119,10 @@ int exp_json_finish(exp_t *e)
     if (e->run_pending) return -1;
     if (exp_win_free(e) < 400) return EXP_FULL;
     if (e->json_stage == 0) { if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1; }
-    if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
-    exp_win_puts(e, "]}");
+    if (e->json_stage == 1) {
+        CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
+        e->json_stage = 2;
+    }
+    CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
     return 0;
 }

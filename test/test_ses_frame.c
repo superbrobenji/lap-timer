@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "core/ses.h"
+#include <stdint.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -119,6 +120,72 @@ static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
+/* deterministic LCG, same pattern as the other suites */
+static uint32_t lcg = 22695477u;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+
+#define FUZZ_MAX_FRAMES 6
+#define FUZZ_MAX_PAYLOAD 24
+typedef struct { uint8_t type, len, first, last; } frame_sig_t;
+typedef struct { int n; frame_sig_t sig[32]; } fuzz_cap_t;
+
+static void fuzz_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)
+{
+    fuzz_cap_t *c = ctx;
+    if (c->n < (int)(sizeof c->sig / sizeof c->sig[0])) {
+        c->sig[c->n].type = type; c->sig[c->n].len = len;
+        c->sig[c->n].first = len ? payload[0] : 0;
+        c->sig[c->n].last = len ? payload[len - 1] : 0;
+    }
+    c->n++;
+}
+
+static void test_fuzz_frames_buried_in_garbage_are_all_recovered(void)
+{
+    for (int it = 0; it < 1000; it++) {
+        uint8_t stream[512]; size_t sn = 0;
+        frame_sig_t want[FUZZ_MAX_FRAMES]; int nwant = 0;
+        int nframes = 1 + (int)(rnd() % FUZZ_MAX_FRAMES);
+        for (int f = 0; f < nframes; f++) {
+            int gap = (int)(rnd() % 13u);                       /* garbage before each frame */
+            for (int g = 0; g < gap; g++) stream[sn++] = (uint8_t)(rnd() % 256u);
+            uint8_t payload[FUZZ_MAX_PAYLOAD];
+            uint8_t len = (uint8_t)(rnd() % (FUZZ_MAX_PAYLOAD + 1u));
+            for (uint8_t i = 0; i < len; i++) payload[i] = (uint8_t)(rnd() % 256u);
+            uint8_t type = (uint8_t)(1u + rnd() % 0x7Fu);
+            int w = ses_frame_encode(type, payload, len, stream + sn, sizeof stream - sn);
+            TEST_ASSERT_GREATER_THAN(0, w);
+            sn += (size_t)w;
+            want[nwant].type = type; want[nwant].len = len;
+            want[nwant].first = len ? payload[0] : 0;
+            want[nwant].last = len ? payload[len - 1] : 0;
+            nwant++;
+        }
+        int tail = (int)(rnd() % 13u);                          /* trailing garbage */
+        for (int g = 0; g < tail; g++) stream[sn++] = (uint8_t)(rnd() % 256u);
+
+        ses_reader_t r; ses_reader_init(&r);
+        fuzz_cap_t c; memset(&c, 0, sizeof c);
+        size_t pos = 0;
+        while (pos < sn) {                                      /* random chunk sizes */
+            size_t chunk = 1u + rnd() % 17u;
+            if (pos + chunk > sn) chunk = sn - pos;
+            ses_reader_feed(&r, stream + pos, chunk, fuzz_cb, &c);
+            pos += chunk;
+        }
+        ses_reader_flush(&r, fuzz_cb, &c);
+        TEST_ASSERT_EQUAL_INT(nwant, c.n);
+        for (int i = 0; i < nwant; i++) {
+            TEST_ASSERT_EQUAL_HEX8(want[i].type, c.sig[i].type);
+            TEST_ASSERT_EQUAL_UINT8(want[i].len, c.sig[i].len);
+            TEST_ASSERT_EQUAL_HEX8(want[i].first, c.sig[i].first);
+            TEST_ASSERT_EQUAL_HEX8(want[i].last, c.sig[i].last);
+        }
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)nwant, r.frames_ok);
+        TEST_ASSERT_EQUAL_UINT8(0, r.state);                    /* flush always leaves the reader idle */
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -130,5 +197,6 @@ int main(void)
     RUN_TEST(test_reader_rejects_oversize_len_without_stalling);
     RUN_TEST(test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof);
     RUN_TEST(test_flush_on_truncated_frame_counts_bad_and_is_idempotent);
+    RUN_TEST(test_fuzz_frames_buried_in_garbage_are_all_recovered);
     return UNITY_END();
 }
