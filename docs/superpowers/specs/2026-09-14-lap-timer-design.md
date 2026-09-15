@@ -386,7 +386,7 @@ Generated `build_config.h`:
 #define CFG_FUSED_LOG_HZ 10
 ```
 
-Named environments: `moto_neo6m` (= moto, neo6m, epaper, internal, ble), `moto_neo6m_wifi`, `moto_m10`, `moto_m10_sd`, `car_neo6m`, `car_m10`. `build.sh` maps names to flag sets and uses `-B build/<env>`.
+Named environments: `moto_neo6m` (= moto, neo6m, epaper, internal, ble), `moto_sim` (= moto, sim, sim, epaper_ssd1680, internal, ble; bench builds until sensors arrive), `moto_neo6m_wifi`, `moto_m10`, `moto_m10_sd`, `car_neo6m`, `car_m10`. `build.sh` maps names to flag sets and uses `-B build/<env>`.
 
 ### 4.7 Boot sequence (`app_main`)
 
@@ -1946,7 +1946,7 @@ if(CONN MATCHES "ble") list(APPEND EXTRA_COMPONENT_DIRS components/drivers/conn_
 if(CONN MATCHES "wifi") list(APPEND EXTRA_COMPONENT_DIRS components/drivers/conn_wifi) endif()
 if(CONN_BLE_RC) list(APPEND EXTRA_COMPONENT_DIRS components/drivers/conn_ble_rc) endif()
 if(EXPORT_SERIAL) list(APPEND EXTRA_COMPONENT_DIRS components/drivers/export_serial) endif()
-# git describe → CFG_FW_VERSION ; configure_file(main/build_config.h.in ${CMAKE_BINARY_DIR}/build_config.h)
+# git describe --tags --match 'v*' → CFG_FW_VERSION ; configure_file(main/build_config.h.in ${CMAKE_BINARY_DIR}/build_config.h)
 set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.${VARIANT}")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(laptimer)
@@ -2002,6 +2002,8 @@ CONFIG_LITTLEFS_MAX_PARTITIONS=1
 CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
 ```
 
+The three `CONFIG_SECURE_*` lines and `CONFIG_SECURE_BOOT_VERIFICATION_KEY` are added in roadmap session 5.5 together with the generated public key `keys/laptimer_pub.pem` (committed with `git add -f`; `.gitignore` carries a `!keys/laptimer_pub.pem` exception). Until then `sdkconfig.defaults` omits them so dev builds are unsigned.
+
 `sdkconfig.defaults.moto` / `.car` currently only differ in `CONFIG_LAPTIMER_VARIANT_*` Kconfig symbols used by `app/ui` (kept for menuconfig visibility; the authoritative switch is `build_config.h`).
 
 ### 21.3 `build.sh`
@@ -2016,11 +2018,11 @@ Maps `<env>` to flags (§4.6), runs `idf.py -B build/<env> -D<flags> <cmd>`, `si
 Plain CMake ≥ 3.16, C11, `-Wall -Wextra -Werror -Wshadow -Wconversion -fsanitize=address,undefined` (Debug). Adds `components/core/**/*.c` with `include/`, vendored Unity, one executable per `test_*.c`, `add_test` for each; `tools/replay` built as `replay`. Works on macOS (Apple clang) and Linux (gcc). No IDF, no network.
 
 ### 21.5 Versioning
-`git describe --tags --dirty --always` → `CFG_FW_VERSION`. Tags `vMAJOR.MINOR.PATCH`. Release builds require a clean tree (`sign_release.sh` refuses `-dirty`).
+`git describe --tags --match 'v*' --dirty --always` → `CFG_FW_VERSION` (session tags `pNN-dD` and `plan-NN-done` are excluded by the `--match` filter). Tags `vMAJOR.MINOR.PATCH`. Release builds require a clean tree (`sign_release.sh` refuses `-dirty`).
 
 ### 21.6 CI (GitHub Actions)
 - `host-tests`: ubuntu, cmake + ctest with sanitizers.
-- `firmware`: matrix over envs `moto_neo6m`, `moto_neo6m_wifi`, `moto_m10`, `car_neo6m` in container `espressif/idf:<pinned>`; runs `build.sh <env> build` and `size`; uploads `.bin` artifacts (unsigned).
+- `firmware`: matrix over the environments that exist at the time (initially `moto_neo6m` and `moto_sim`; adding a matrix entry requires updating the branch-protection required checks in the same change) in container `espressif/idf:<pinned>`; runs `build.sh <env> build` and `size`; uploads `.bin` artifacts (unsigned).
 - `web`: HTML validity check and a size cap for `export.html`.
 
 ---

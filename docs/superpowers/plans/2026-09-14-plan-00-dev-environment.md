@@ -378,28 +378,37 @@ Expected: ends with `All done! You can now run: . ./export.sh`.
 Create `tools/idf-env.sh`:
 ```bash
 #!/usr/bin/env bash
-# usage: source tools/idf-env.sh   (works from bash and zsh, any working directory)
+# usage: source tools/idf-env.sh   (bash or zsh, any working directory; do not execute)
+(return 0 2>/dev/null) || { echo "source this file: source tools/idf-env.sh"; exit 1; }
 if [ -n "${ZSH_VERSION:-}" ]; then
   _idf_env_self="${(%):-%x}"
 else
   _idf_env_self="${BASH_SOURCE[0]}"
 fi
 _idf_env_dir="$(cd "$(dirname "$_idf_env_self")" && pwd)"
-IDF_VER="$(cat "$_idf_env_dir/../.idf-version")"
-export IDF_PATH="$HOME/esp/esp-idf-$IDF_VER"
-[ -d "$IDF_PATH" ] || { echo "ESP-IDF $IDF_VER not found at $IDF_PATH"; return 1; }
+_idf_env_ver="$(cat "$_idf_env_dir/../.idf-version")"
+export IDF_PATH="$HOME/esp/esp-idf-$_idf_env_ver"
+[ -d "$IDF_PATH" ] || { echo "ESP-IDF $_idf_env_ver not found at $IDF_PATH"; unset _idf_env_self _idf_env_dir _idf_env_ver; return 1; }
 # ESP-IDF 5.3 needs Python >= 3.10; macOS ships 3.9. Prefer Homebrew's python@3.12 (or 3.11) when present.
-for py in /opt/homebrew/opt/python@3.12/libexec/bin /opt/homebrew/opt/python@3.11/libexec/bin; do
-  if [ -x "$py/python3" ]; then export PATH="$py:$PATH"; break; fi
+for _idf_env_py in /opt/homebrew/opt/python@3.12/libexec/bin /opt/homebrew/opt/python@3.11/libexec/bin; do
+  if [ -x "$_idf_env_py/python3" ]; then export PATH="$_idf_env_py:$PATH"; break; fi
 done
-unset _idf_env_self _idf_env_dir
-. "$IDF_PATH/export.sh" > /dev/null
-echo "ESP-IDF $(idf.py --version)"
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+  echo "ESP-IDF $_idf_env_ver needs Python >= 3.10; found $(python3 --version 2>&1). Install with: brew install python@3.12"
+  unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py; return 1
+fi
+if ! _idf_env_out="$(. "$IDF_PATH/export.sh" 2>&1)"; then
+  echo "$_idf_env_out"; echo "ESP-IDF export.sh failed"
+  unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py _idf_env_out; return 1
+fi
+. "$IDF_PATH/export.sh" > /dev/null 2>&1
+unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py _idf_env_out
+idf.py --version
 ```
 ESP-IDF v5.3.2's `idf.py` fails under macOS's system Python 3.9 (`importlib.metadata` cannot resolve `ruamel.yaml`), so the helper prefers Homebrew's Python 3.12.
 
 Run: `source tools/idf-env.sh`
-Expected: `ESP-IDF ESP-IDF v5.3.2`.
+Expected: `ESP-IDF v5.3.2` (single line; the helper no longer wraps `idf.py --version`'s own output).
 
 - [ ] **Step 4: Commit**
 
@@ -459,7 +468,7 @@ git switch main && git pull --ff-only && git tag p00-d2 && git push origin p00-d
 
 ## Self-review
 
-- Spec §21.5 versioning (`git describe --tags`) needs at least one tag on `main`: `p00-d1` provides it.
+- Spec §21.5 versioning uses `git describe --tags --match 'v*'`; session tags such as `p00-d1` are deliberately excluded from the version string and the first `v0.1.0` tag is created at the end of plan 03.
 - Spec §21.6 CI: both workflows exist from session 0.1; plan 1 task 13 now only removes nothing and verifies the `host-tests` job runs once `test/CMakeLists.txt` exists (updated in plan 01).
 - Spec §25 item 1 (flash size) resolved in Task 7.
 - No placeholders; every command is concrete. The only user-specific value is the serial port name, which is discovered in Task 7 step 1.

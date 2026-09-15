@@ -3816,7 +3816,7 @@ git commit -m "feat(core): NMEA and JSON summary exporters"
 ### Task 13: Verify CI runs the host tests
 
 **Files:**
-- Modify: none (the workflows were created in plan 00; `host-tests` and `tracks-generated` jobs are guarded by `hashFiles` and become active now that `test/CMakeLists.txt` and `tools/tracks/gen_tracks.py` exist).
+- Modify: none (the workflows were created in plan 00; the `host-tests` and `tracks-generated` jobs probe for `test/CMakeLists.txt` and `tools/tracks/gen_tracks.py` after checkout and now run their real steps instead of "Nothing to do").
 
 **Interfaces:** none (CI only).
 
@@ -3833,10 +3833,11 @@ Expected: all tests pass; `git diff` prints nothing and exits 0.
 
 ```bash
 git push -u origin HEAD
-gh pr create --fill --base main
+gh pr create --base main --title "feat(core): plan 01 core foundation" --body-file .github/PULL_REQUEST_TEMPLATE.md
 gh pr checks --watch
 ```
-Expected: `hygiene`, `host-tests`, `tracks-generated` all succeed (no longer skipped); `firmware` still skipped (no `build.sh` yet).
+Edit the PR body checklist before merging.
+Expected: `hygiene`, `host-tests`, `tracks-generated` succeed running their real steps; `build (moto_neo6m)` and `build (moto_sim)` succeed on "Nothing to do" (no `build.sh` yet).
 
 - [ ] **Step 3: Merge and tag**
 
