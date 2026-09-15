@@ -29,6 +29,7 @@ void app_main(void)
 {
     esp_pthread_cfg_t pcfg = esp_pthread_get_default_config();
     pcfg.stack_size = 6144; pcfg.prio = 5;
+    pcfg.pin_to_core = 1;           /* app_main is pinned to core 0; spinning test threads must not starve it */
     esp_pthread_set_cfg(&pcfg);
 
     const size_t n = sizeof suites / sizeof suites[0];

@@ -129,7 +129,7 @@ endif()
 
 add_library(unity STATIC unity/src/unity.c)
 target_include_directories(unity PUBLIC unity/src)
-target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12)
+target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12 UNITY_SUPPORT_64)
 
 enable_testing()
 find_package(Threads REQUIRED)
@@ -4226,7 +4226,7 @@ CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
 ```cmake
 idf_component_register(SRCS "${CMAKE_CURRENT_LIST_DIR}/../../../../test/unity/src/unity.c"
                        INCLUDE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../../../test/unity/src")
-target_compile_definitions(${COMPONENT_LIB} PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12)
+target_compile_definitions(${COMPONENT_LIB} PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12 UNITY_SUPPORT_64)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function)
 ```
 
@@ -4281,6 +4281,7 @@ void app_main(void)
 {
     esp_pthread_cfg_t pcfg = esp_pthread_get_default_config();
     pcfg.stack_size = 6144; pcfg.prio = 5;
+    pcfg.pin_to_core = 1;           /* app_main is pinned to core 0; spinning test threads must not starve it */
     esp_pthread_set_cfg(&pcfg);
 
     const size_t n = sizeof suites / sizeof suites[0];
