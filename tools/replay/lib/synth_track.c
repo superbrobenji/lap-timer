@@ -12,27 +12,36 @@
  * length s runs 0 .. length_m starting at the end of the arc at vertex 0 (= the start of straight 0);
  * the driving order is straight 0, arc 1, straight 1, arc 2, ... straight N-1, arc 0. Every piece has
  * constant acceleration, so position, speed and time invert in closed form and gate crossing times
- * are exact. Each lap table scales both cfg.v_corner_mps and cfg.v_max_mps by one draw
- * k = 1 + lap_var*U(-1,1), so a lap is driven faster or slower as a whole and lap times differ even
- * on a track whose straights never reach the cruise cap. */
+ * are exact. Each table applies one rider-factor draw k = 1 + lap_var*U(-1,1) to cfg.a_acc_mps2,
+ * cfg.a_brk_mps2 and cfg.v_max_mps; cfg.v_corner_mps is never scaled, so every table starts and ends
+ * its straights, and drives every arc, at the same constant speed -- truth speed is therefore
+ * continuous at every table boundary (s = 0, the arc-at-vertex-0 exit). Lap times still differ across
+ * tables because the accelerations and the cruise cap differ. */
 
 #define TWO_PI      (2.0 * GEO_PI)
 #define RAD_PER_DEG (GEO_PI / 180.0)
 #define DEG_PER_RAD (180.0 / GEO_PI)
 
-/* A vertex whose turn is smaller than this has an arc shorter than a micrometre: the piece table
- * needs len > 0 everywhere, so such a configuration is rejected instead of silently degenerate. */
+/* A vertex whose turn is smaller than this has an arc well under a millimetre at any sane
+ * corner_radius_m (40 um at the default 40 m radius): the piece table needs len > 0 everywhere, so
+ * such a configuration is rejected instead of silently degenerate. */
 static const double MIN_TURN_RAD = 1e-6;
 /* atan2 returns (-pi, pi]; a turn of pi is a hairpin back along the same edge and tan(pi/2) = inf. */
 static const double MAX_TURN_RAD = GEO_PI - 1e-9;
 /* Beyond this the radius factor 1 + irregularity*U(-1,1) can reach 0 and the polygon collapses. */
 static const double MAX_IRREGULARITY = 0.9;
-/* Same reason for the per-lap speed scale 1 + lap_var*U(-1,1): k stays in [0.5, 1.5]. */
+/* Same reason for the per-table rider factor 1 + lap_var*U(-1,1): k stays in [0.5, 1.5]. */
 static const double MAX_LAP_VAR = 0.5;
 /* trk_validate_venue rejects a gate line shorter than 1 m (§10.1), so each half must reach 0.5 m. */
 static const double MIN_GATE_HALF_M = 0.5;
 /* Two gates are "the same point" when their adjusted arc lengths agree to within a nanometre. */
 static const double SAME_POINT_M = 1e-9;
+/* Sane upper bound so llround(length_m) always fits the venue's uint32_t length_m without truncating
+ * or silently producing an absurd venue. */
+static const double MAX_LENGTH_M = 100000.0;
+/* Geodetic sanity bounds for the venue origin: well clear of the poles and the antimeridian. */
+static const double MAX_ABS_LAT_DEG = 89.0;
+static const double MAX_ABS_LON_DEG = 180.0;
 
 /* ---------------------------------------------------------------------------
  * Private RNG. splitmix64, deliberately NOT synth_rng_* from synth_gps.h: that stream belongs to
@@ -117,13 +126,14 @@ static int check_cfg(const synth_cfg_t *c, char *err, size_t err_cap)
     if (c->n_vertices < 3 || c->n_vertices > SYNTH_MAX_VERTICES) return fail(err, err_cap, "n_vertices out of range");
     if (c->laps < 1 || c->laps > SYNTH_MAX_LAPS) return fail(err, err_cap, "laps out of range");
     if (c->n_sector_gates < 0 || c->n_sector_gates > LAP_MAX_SECTORS) return fail(err, err_cap, "n_sector_gates out of range");
-    if (!isfinite(c->length_m) || c->length_m <= 0.0) return fail(err, err_cap, "length_m must be positive");
+    if (!isfinite(c->length_m) || c->length_m <= 0.0 || c->length_m > MAX_LENGTH_M) return fail(err, err_cap, "length_m out of range");
     if (!isfinite(c->corner_radius_m) || c->corner_radius_m <= 0.0) return fail(err, err_cap, "corner_radius_m must be positive");
     if (!isfinite(c->irregularity) || c->irregularity < 0.0 || c->irregularity > MAX_IRREGULARITY) return fail(err, err_cap, "irregularity out of range");
     if (!isfinite(c->lap_var) || c->lap_var < 0.0 || c->lap_var > MAX_LAP_VAR) return fail(err, err_cap, "lap_var out of range");
     if (!isfinite(c->v_corner_mps) || c->v_corner_mps <= 0.0) return fail(err, err_cap, "v_corner_mps must be positive");
-    /* lap_var scales both speeds by the same k, so this ordering holds in every table. */
-    if (!isfinite(c->v_max_mps) || c->v_max_mps <= c->v_corner_mps) return fail(err, err_cap, "v_max_mps must exceed v_corner_mps");
+    /* v_corner no longer moves with lap_var (only a_acc, a_brk and v_max do), so the cruise cap must
+     * still clear it at the smallest rider factor (k = 1 - lap_var, the worst case). */
+    if (!isfinite(c->v_max_mps) || c->v_max_mps * (1.0 - c->lap_var) <= c->v_corner_mps) return fail(err, err_cap, "v_max_mps must exceed v_corner_mps at the smallest lap_var scale");
     if (!isfinite(c->a_acc_mps2) || c->a_acc_mps2 <= 0.0) return fail(err, err_cap, "a_acc_mps2 must be positive");
     if (!isfinite(c->a_brk_mps2) || c->a_brk_mps2 <= 0.0) return fail(err, err_cap, "a_brk_mps2 must be positive");
     if (!isfinite(c->start_before_m) || c->start_before_m < 0.0) return fail(err, err_cap, "start_before_m must be >= 0");
@@ -131,8 +141,8 @@ static int check_cfg(const synth_cfg_t *c, char *err, size_t err_cap)
     if (c->start_before_m + c->stop_after_m >= c->length_m) return fail(err, err_cap, "start_before_m + stop_after_m >= length_m");
     if (!isfinite(c->sf_frac) || c->sf_frac < 0.0 || c->sf_frac >= 1.0) return fail(err, err_cap, "sf_frac out of range");
     if (!isfinite(c->gate_half_width_m) || c->gate_half_width_m < MIN_GATE_HALF_M) return fail(err, err_cap, "gate_half_width_m too small");
-    if (!isfinite(c->origin_lat_deg) || c->origin_lat_deg < -89.0 || c->origin_lat_deg > 89.0) return fail(err, err_cap, "origin_lat_deg out of range");
-    if (!isfinite(c->origin_lon_deg) || c->origin_lon_deg < -180.0 || c->origin_lon_deg > 180.0) return fail(err, err_cap, "origin_lon_deg out of range");
+    if (!isfinite(c->origin_lat_deg) || c->origin_lat_deg < -MAX_ABS_LAT_DEG || c->origin_lat_deg > MAX_ABS_LAT_DEG) return fail(err, err_cap, "origin_lat_deg out of range");
+    if (!isfinite(c->origin_lon_deg) || c->origin_lon_deg < -MAX_ABS_LON_DEG || c->origin_lon_deg > MAX_ABS_LON_DEG) return fail(err, err_cap, "origin_lon_deg out of range");
     if (c->venue_id == 0) return fail(err, err_cap, "venue_id must be non-zero");
     return 0;
 }
@@ -237,18 +247,23 @@ static void push(synth_lap_t *tb, synth_piece_kind_t kind, double s0, double len
     p->ce = ce; p->cn = cn; p->turn_rad = turn;
 }
 
-/* One lap driven at speed scale k: both the arc speed and the cruise cap are cfg's values times k,
- * so every table has a distinct lap time whether or not its straights reach the cap. */
-static void build_table(synth_lap_t *tb, const synth_run_t *r, const synth_geom_t *g, double k_speed)
+/* One lap-frame period driven with rider factor k applied to the accelerations and the cruise cap.
+ * v_corner stays at cfg's value on every table -- so truth speed is continuous where tables meet,
+ * s = 0 -- but accelerating harder or softer out of every corner still gives each table a distinct
+ * lap time, even when its straights never reach the cap. */
+static void build_table(synth_lap_t *tb, const synth_run_t *r, const synth_geom_t *g, double k)
 {
     const synth_cfg_t *c = &r->cfg;
-    const double vc = c->v_corner_mps * k_speed, vmax = c->v_max_mps * k_speed;
-    const double aa = c->a_acc_mps2, ab = c->a_brk_mps2, rc = c->corner_radius_m;
+    const double vc = c->v_corner_mps;                              /* constant across every table */
+    const double aa = c->a_acc_mps2 * k, ab = c->a_brk_mps2 * k, vmax = c->v_max_mps * k;
+    const double rc = c->corner_radius_m;
     double s = 0.0, t = 0.0;
 
     tb->n_pieces = 0;
-    tb->v_corner_mps = vc;
+    tb->k = k;
     tb->v_max_mps = vmax;
+    tb->a_acc_mps2 = aa;
+    tb->a_brk_mps2 = ab;
     for (int j = 0; j < g->n; j++) {
         const double L = r->straight_len[j];
         const double h = g->head[j], sh = sin(h), ch = cos(h);
@@ -389,13 +404,14 @@ static void fill_gate(const synth_run_t *r, synth_gate_t *gate, double s)
     double half = r->cfg.gate_half_width_m;
     /* Left normal of compass heading h in ENU is (-cos h, sin h): with p1 = centre + half*left and
      * p2 = centre - half*left, sign(cross(p2 - p1, motion)) = +1, which is the dir_sign of §6.4. */
+    const double lx = -ch, ly = sh;                 /* left normal unit vector */
     gate->s_m = s;
     gate->e_m = e;
     gate->n_m = nn;
     gate->heading_deg = head_deg_norm(head);
-    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e + half * -ch, nn + half * sh,
+    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e + half * lx, nn + half * ly,
                     &gate->line.p1.lat, &gate->line.p1.lon);
-    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e - half * -ch, nn - half * sh,
+    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e - half * lx, nn - half * ly,
                     &gate->line.p2.lat, &gate->line.p2.lon);
 }
 
@@ -410,10 +426,18 @@ static int build_gates(synth_run_t *r, const synth_geom_t *g, char *err, size_t 
         double want = wrap_s(s_sf + (double)i * step, r->length_m);
         fill_gate(r, &r->gates[i], first_admissible(r, g, want));
     }
-    for (int i = 0; i < r->n_gates; i++)
-        for (int j = i + 1; j < r->n_gates; j++)
-            if (fabs(r->gates[i].s_m - r->gates[j].s_m) < SAME_POINT_M)
-                return fail(err, err_cap, "two gates adjusted onto the same point");
+    /* Driving order: every gate's wrapped distance from S/F must be strictly increasing. This is
+     * guaranteed for every reachable config (first_admissible is monotone non-decreasing and the
+     * requested sector offsets are themselves strictly increasing), but is made an explicit,
+     * defended invariant here rather than an implicit one; it also subsumes a plain "two gates
+     * landed on the same point" check. */
+    double prev = -1.0;
+    for (int i = 0; i < r->n_gates; i++) {
+        double d = wrap_s(r->gates[i].s_m - s_sf, r->length_m);
+        if (d < prev + SAME_POINT_M)
+            return fail(err, err_cap, "gates are not in strictly increasing driving order from S/F");
+        prev = d;
+    }
     return 0;
 }
 
@@ -429,13 +453,15 @@ int synth_run_build(synth_run_t *r, const synth_cfg_t *cfg, char *err, size_t er
     r->cfg = *cfg;
 
     uint64_t rs;
-    sr_seed(&rs, cfg->seed);                       /* vertex radii first, then one speed scale per table */
+    sr_seed(&rs, cfg->seed);                       /* vertex radii first, then one rider factor per table */
 
     synth_geom_t g;
     memset(&g, 0, sizeof g);
     if (build_geometry(r, &g, &rs, err, err_cap) != 0) return -1;
 
-    r->n_tables = cfg->laps + 3;                   /* out-lap, the laps themselves, and the run-out */
+    /* out-lap, the laps themselves, and the run-out; tied to SYNTH_MAX_TABLES/SYNTH_MAX_LAPS in the
+     * header instead of a bare "+ 3" so the two stay in sync. */
+    r->n_tables = cfg->laps + (SYNTH_MAX_TABLES - SYNTH_MAX_LAPS);
     double acc = 0.0;
     for (int i = 0; i < r->n_tables; i++) {
         r->table_t0[i] = acc;
@@ -533,7 +559,7 @@ double synth_run_lap_time(const synth_run_t *r, int lap_no)
 {
     double t[SYNTH_MAX_GATES + 1];
     int n = synth_run_lap_crossings(r, lap_no, t, sizeof t / sizeof t[0]);
-    if (n < 0) return 0.0;
+    if (n < 0) return -1.0;
     return t[n - 1] - t[0];
 }
 

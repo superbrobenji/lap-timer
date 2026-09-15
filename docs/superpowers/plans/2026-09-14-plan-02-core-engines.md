@@ -786,26 +786,32 @@ static void test_default_geometry_is_a_regular_12gon(void)
 }
 
 /* ------------------------------------------------------------------ 2 */
-static void test_lap_var_scales_both_speeds(void)
+static void test_lap_var_scales_accelerations_and_cap(void)
 {
     synth_cfg_t c; synth_cfg_defaults(&c);
     TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &c, errbuf, sizeof errbuf));
     for (int i = 0; i < run->n_tables; i++) {
         const synth_lap_t *tb = &run->tables[i];
-        double k = tb->v_corner_mps / 15.0;
-        TEST_ASSERT_TRUE(fabs(k - 1.0) <= 0.03 + 1e-12);            /* k = 1 + lap_var*U(-1,1) */
-        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 50.0 * k, tb->v_max_mps);  /* same factor on both speeds */
-        TEST_ASSERT_DOUBLE_WITHIN(1e-12, tb->v_corner_mps, tb->pieces[0].v0);   /* accel enters at it */
-        TEST_ASSERT_DOUBLE_WITHIN(1e-12, tb->v_corner_mps, tb->pieces[2].v0);   /* the arc is driven at it */
+        TEST_ASSERT_TRUE(fabs(tb->k - 1.0) <= 0.03 + 1e-12);              /* k = 1 + lap_var*U(-1,1) */
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 3.0 * tb->k, tb->a_acc_mps2);    /* the same factor on every scaled field */
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 6.0 * tb->k, tb->a_brk_mps2);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 50.0 * tb->k, tb->v_max_mps);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 15.0, tb->pieces[0].v0);   /* accel enters at the constant v_corner */
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 15.0, tb->pieces[2].v0);   /* the arc is driven at v_corner too */
     }
-    TEST_ASSERT_TRUE(fabs(run->tables[0].v_corner_mps - run->tables[1].v_corner_mps) > 1e-6);
+    TEST_ASSERT_TRUE(fabs(run->tables[0].k - run->tables[1].k) > 1e-6);
+    /* Default lap_var: consecutive laps of the default track differ even though v_corner never moves,
+     * because the accelerations and the cruise cap do. */
+    TEST_ASSERT_TRUE(fabs(synth_run_lap_time(run, 1) - synth_run_lap_time(run, 2)) > 1e-3);
 
     synth_cfg_t c0; synth_cfg_defaults(&c0); c0.lap_var = 0.0;
     TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &c0, errbuf, sizeof errbuf));
     for (int i = 0; i < run->n_tables; i++) {
-        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 15.0, run->tables[i].v_corner_mps);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.0, run->tables[i].k);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 3.0, run->tables[i].a_acc_mps2);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, 6.0, run->tables[i].a_brk_mps2);
         TEST_ASSERT_DOUBLE_WITHIN(1e-12, 50.0, run->tables[i].v_max_mps);
-        TEST_ASSERT_DOUBLE_WITHIN(1e-12, run->tables[0].lap_time_s, run->tables[i].lap_time_s);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-12, run->tables[0].lap_time_s, run->tables[i].lap_time_s);  /* identical with lap_var 0 */
     }
 }
 
@@ -814,10 +820,10 @@ static void test_default_straights_are_accel_brake_only(void)
     synth_cfg_t c; synth_cfg_defaults(&c);
     TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &c, errbuf, sizeof errbuf));
     const synth_lap_t *tb = &run->tables[0];
-    /* 187.4 m straights at 3 m/s^2 from ~15 m/s peak at ~31 m/s, far below v_max = 50, so the
+    /* 187.4 m straights at ~3 m/s^2 from ~15 m/s peak at ~31 m/s, far below v_max = 50, so the
      * default track has NO cruise piece: 12 straights x 2 pieces + 12 arcs = 36. */
     TEST_ASSERT_EQUAL_INT(36, tb->n_pieces);
-    const double L = run->straight_len[0], vc = tb->v_corner_mps, aa = 3.0, ab = 6.0;
+    const double L = run->straight_len[0], vc = c.v_corner_mps, aa = tb->a_acc_mps2, ab = tb->a_brk_mps2;
     double vp2 = (2.0 * aa * ab * L + vc * vc * (aa + ab)) / (aa + ab);
     TEST_ASSERT_TRUE(sqrt(vp2) < tb->v_max_mps);
     TEST_ASSERT_EQUAL_INT(SYNTH_P_ACCEL, tb->pieces[0].kind);
@@ -827,7 +833,7 @@ static void test_default_straights_are_accel_brake_only(void)
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, sqrt(vp2), v_peak);          /* no-cruise peak formula */
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, (vp2 - vc * vc) / (2.0 * aa), tb->pieces[0].len);
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, L, tb->pieces[0].len + tb->pieces[1].len);
-    /* The arc is one piece at the table's corner speed. */
+    /* The arc is one piece at the constant corner speed. */
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, run->arc_len[1] / vc, tb->pieces[2].dur);
 }
 
@@ -891,6 +897,50 @@ static void test_piece_table_is_continuous_and_matches_integration(void)
     TEST_ASSERT_DOUBLE_WITHIN(1e-4, tb->lap_time_s, t_num);
 }
 
+/* ------------------------------------------------------------------ 2b (review I1) */
+/* Table boundaries sit at s = 0, the arc-at-vertex-0 -> straight-0 transition. Truth speed must be
+ * continuous there (I1's fix: v_corner is a single cfg-level constant, never scaled per table, so
+ * every table both ends its closing arc and starts its opening ACCEL at exactly v_corner). a_lon is
+ * NOT continuous there -- every arc-to-straight transition in the lap, including this one, carries the
+ * ordinary a = 0 (arc) -> a = a_acc_mps2 (straight ACCEL) step -- but each side must resolve to
+ * exactly the value its own piece/table defines, with no boundary-selection glitch. */
+static void check_truth_continuous_at_table_boundaries(const synth_run_t *r)
+{
+    int checked = 0;
+    for (int i = 1; i < r->n_tables; i++) {
+        double t = r->table_t0[i] - r->t_offset_s;
+        if (t <= 0.0 || t >= r->duration_s) continue;      /* this boundary isn't reached by the run */
+        /* eps = 1e-9 s: the "after" side is already inside the straight's ACCEL piece, so v is
+         * drifting there at up to a_acc_mps2 (~3 m/s^2, ~4.5 with lap_var = 0.5); a 1e-6 s window
+         * would itself admit a ~3e-6 to 4.5e-6 m/s drift that has nothing to do with the table
+         * boundary, swamping a 1e-6 m/s tolerance. 1e-9 s keeps that drift near 3e-9-4.5e-9 m/s,
+         * three orders below the tolerance, while remaining far above double's ~1e-13 s resolution
+         * at these run-time magnitudes (up to ~1e3 s). */
+        synth_state_t a, b;
+        synth_run_state_at(r, t - 1e-9, &a);
+        synth_run_state_at(r, t + 1e-9, &b);
+        TEST_ASSERT_TRUE(fabs(b.v_mps - a.v_mps) < 1e-6);
+        TEST_ASSERT_DOUBLE_WITHIN(1e-9, 0.0, a.a_lon_mps2);                     /* still on the closing arc */
+        TEST_ASSERT_DOUBLE_WITHIN(1e-9, r->tables[i].a_acc_mps2, b.a_lon_mps2); /* table i's own ACCEL rate */
+        checked++;
+    }
+    TEST_ASSERT_TRUE(checked > 0);          /* the run must actually reach at least one table boundary */
+}
+
+static void test_truth_speed_continuous_across_tables(void)
+{
+    synth_cfg_t c; synth_cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &c, errbuf, sizeof errbuf));
+    check_truth_continuous_at_table_boundaries(run);
+
+    synth_cfg_t c5; synth_cfg_defaults(&c5); c5.lap_var = 0.5;
+    synth_run_t *r5 = malloc(sizeof *r5);
+    TEST_ASSERT_NOT_NULL(r5);
+    TEST_ASSERT_EQUAL_INT(0, synth_run_build(r5, &c5, errbuf, sizeof errbuf));
+    check_truth_continuous_at_table_boundaries(r5);
+    free(r5);
+}
+
 /* ------------------------------------------------------------------ 3 */
 static void test_state_at_and_time_at_s_are_inverses(void)
 {
@@ -898,7 +948,7 @@ static void test_state_at_and_time_at_s_are_inverses(void)
     TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &c, errbuf, sizeof errbuf));
     /* Round trip t -> s_total -> t. Worst measured residual is 3.4e-13 s (cancellation in
      * s_total - table*length_m at s_total ~ 2.8e4 m divided by v >= 14.5 m/s). */
-    const double v_min = 15.0 * (1.0 - c.lap_var);
+    const double v_min = c.v_corner_mps;    /* v_corner is constant across every table; nothing is slower */
     for (int i = 0; i <= 500; i++) {
         double t = run->duration_s * (double)i / 500.0;
         synth_state_t st;
@@ -919,7 +969,7 @@ static void test_arc_kinematics_signs(void)
     /* Table 1 piece 2 is the arc at vertex 1; pick its midpoint in run time. */
     const synth_piece_t *p = &run->tables[1].pieces[2];
     TEST_ASSERT_EQUAL_INT(SYNTH_P_ARC, p->kind);
-    const double vc = run->tables[1].v_corner_mps;
+    const double vc = c.v_corner_mps;      /* constant: every table drives every arc at v_corner */
     double t_mid = run->table_t0[1] + p->t0 + 0.5 * p->dur - run->t_offset_s;
     synth_state_t st;
     synth_run_state_at(run, t_mid, &st);
@@ -939,16 +989,18 @@ static void test_arc_kinematics_signs(void)
     TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.0, stz.g_lat);
     TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.0, stz.lean_deg);
     TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.0, stz.yaw_rate_dps);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 3.0, stz.a_lon_mps2);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, run->tables[1].a_acc_mps2, stz.a_lon_mps2);   /* table 1's own scaled rate */
 
-    /* Anticlockwise is the same track driven the other way round: all three signs flip. The speed
-     * scale comes from the same RNG stream, so table 1's corner speed is the same draw. */
+    /* Anticlockwise is the same track driven the other way round: all three signs flip. The rider
+     * factor comes from the same RNG stream (clockwise doesn't change how many draws are consumed or
+     * in what order), so table 1's factor -- and hence v_corner, which is unaffected by it anyway --
+     * is the same draw. */
     synth_cfg_t ca; synth_cfg_defaults(&ca); ca.clockwise = false;
     synth_run_t *acw = malloc(sizeof *acw);
     TEST_ASSERT_NOT_NULL(acw);
     TEST_ASSERT_EQUAL_INT(0, synth_run_build(acw, &ca, errbuf, sizeof errbuf));
     TEST_ASSERT_DOUBLE_WITHIN(1e-12, 2.0 * PI / 12.0, acw->turn_rad[1]);
-    TEST_ASSERT_DOUBLE_WITHIN(1e-12, vc, acw->tables[1].v_corner_mps);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, run->tables[1].k, acw->tables[1].k);
     const synth_piece_t *pa = &acw->tables[1].pieces[2];
     synth_state_t sa;
     synth_run_state_at(acw, acw->table_t0[1] + pa->t0 + 0.5 * pa->dur - acw->t_offset_s, &sa);
@@ -980,14 +1032,17 @@ static void test_lap_crossings_and_lap_times(void)
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, run->gates[0].s_m, st.s_m);
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, 300.0, st.s_total_m - run->s_total_start);
 
-    /* Default lap_var: consecutive laps of the default track differ (the speed scale moves the arcs
-     * too, so it bites even though these straights never cruise). */
+    /* Default lap_var: consecutive laps of the default track differ (the accelerations and cruise cap
+     * move with the table, so it bites even though these straights never cruise). */
     TEST_ASSERT_TRUE(fabs(synth_run_lap_time(run, 1) - synth_run_lap_time(run, 2)) > 1e-3);
 
     /* Out of range and short buffers are rejected. */
     TEST_ASSERT_EQUAL_INT(-1, synth_run_lap_crossings(run, 0, t, sizeof t / sizeof t[0]));
     TEST_ASSERT_EQUAL_INT(-1, synth_run_lap_crossings(run, 11, t, sizeof t / sizeof t[0]));
     TEST_ASSERT_EQUAL_INT(-1, synth_run_lap_crossings(run, 1, t, (size_t)run->n_gates));
+    /* synth_run_lap_time itself returns a negative sentinel, not a plausible 0.0, for a bad lap_no. */
+    TEST_ASSERT_TRUE(synth_run_lap_time(run, 0) < 0.0);
+    TEST_ASSERT_TRUE(synth_run_lap_time(run, 11) < 0.0);
 
     /* lap_var = 0: every lap is the table lap time exactly. */
     synth_cfg_t c0; synth_cfg_defaults(&c0); c0.lap_var = 0.0;
@@ -1005,6 +1060,23 @@ static void test_lap_crossings_and_lap_times(void)
     TEST_ASSERT_EQUAL_INT(0, synth_run_build(rv, &cv, errbuf, sizeof errbuf));
     TEST_ASSERT_TRUE(fabs(synth_run_lap_time(rv, 1) - synth_run_lap_time(rv, 2)) > 1e-3);
     free(rv);
+
+    /* review I2: sf_frac = 0.5 puts s_sf = 1250 m, well past start_before_m = 300, so s_start does NOT
+     * wrap behind S/F -- this exercises the "extra = 0" branch of synth_run_sf_s_total (every other
+     * config in this file has s_sf < start_before_m, always the wrap branch) -- and because some
+     * sector gates then land behind s_sf, it also exercises the wrap_s(...) branch inside
+     * synth_run_lap_crossings that brings a "behind S/F" gate forward into the lap. */
+    synth_cfg_t cw; synth_cfg_defaults(&cw); cw.sf_frac = 0.5;
+    synth_run_t *rw = malloc(sizeof *rw);
+    TEST_ASSERT_NOT_NULL(rw);
+    TEST_ASSERT_EQUAL_INT(0, synth_run_build(rw, &cw, errbuf, sizeof errbuf));
+    TEST_ASSERT_TRUE(rw->s_total_start <= rw->gates[0].s_m);                                /* no wrap */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, rw->gates[0].s_m, synth_run_sf_s_total(rw, 0));          /* no "+ length_m" */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, cw.start_before_m, synth_run_sf_s_total(rw, 0) - rw->s_total_start);
+    double tw[SYNTH_MAX_GATES + 1];
+    TEST_ASSERT_EQUAL_INT(rw->n_gates + 1, synth_run_lap_crossings(rw, 1, tw, sizeof tw / sizeof tw[0]));
+    for (int i = 0; i < rw->n_gates; i++) TEST_ASSERT_TRUE(tw[i + 1] > tw[i]);
+    free(rw);
 }
 
 /* ------------------------------------------------------------------ 6 */
@@ -1118,6 +1190,7 @@ static void test_invalid_configs_are_rejected(void)
     synth_cfg_defaults(&c); c.laps = 0;                             expect_reject(&c);
     synth_cfg_defaults(&c); c.v_corner_mps = 60.0;                  expect_reject(&c);   /* >= v_max */
     synth_cfg_defaults(&c); c.n_sector_gates = LAP_MAX_SECTORS + 1; expect_reject(&c);
+    synth_cfg_defaults(&c); c.length_m = 200000.0;                  expect_reject(&c);   /* > MAX_LENGTH_M */
     /* A 3-vertex 300 m track: r = 40 leaves 16 m straights, r = 80 makes the tangents longer than
      * the edge itself. start/stop are shortened so the geometry check is the one that fires. */
     synth_cfg_defaults(&c); c.n_vertices = 3; c.length_m = 300.0; c.start_before_m = 50.0; c.stop_after_m = 50.0;
@@ -1144,10 +1217,11 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_default_geometry_is_a_regular_12gon);
-    RUN_TEST(test_lap_var_scales_both_speeds);
+    RUN_TEST(test_lap_var_scales_accelerations_and_cap);
     RUN_TEST(test_default_straights_are_accel_brake_only);
     RUN_TEST(test_long_straights_reach_cruise);
     RUN_TEST(test_piece_table_is_continuous_and_matches_integration);
+    RUN_TEST(test_truth_speed_continuous_across_tables);
     RUN_TEST(test_state_at_and_time_at_s_are_inverses);
     RUN_TEST(test_arc_kinematics_signs);
     RUN_TEST(test_lap_crossings_and_lap_times);
@@ -1186,27 +1260,36 @@ implementation does not).
  * length s runs 0 .. length_m starting at the end of the arc at vertex 0 (= the start of straight 0);
  * the driving order is straight 0, arc 1, straight 1, arc 2, ... straight N-1, arc 0. Every piece has
  * constant acceleration, so position, speed and time invert in closed form and gate crossing times
- * are exact. Each lap table scales both cfg.v_corner_mps and cfg.v_max_mps by one draw
- * k = 1 + lap_var*U(-1,1), so a lap is driven faster or slower as a whole and lap times differ even
- * on a track whose straights never reach the cruise cap. */
+ * are exact. Each table applies one rider-factor draw k = 1 + lap_var*U(-1,1) to cfg.a_acc_mps2,
+ * cfg.a_brk_mps2 and cfg.v_max_mps; cfg.v_corner_mps is never scaled, so every table starts and ends
+ * its straights, and drives every arc, at the same constant speed -- truth speed is therefore
+ * continuous at every table boundary (s = 0, the arc-at-vertex-0 exit). Lap times still differ across
+ * tables because the accelerations and the cruise cap differ. */
 
 #define TWO_PI      (2.0 * GEO_PI)
 #define RAD_PER_DEG (GEO_PI / 180.0)
 #define DEG_PER_RAD (180.0 / GEO_PI)
 
-/* A vertex whose turn is smaller than this has an arc shorter than a micrometre: the piece table
- * needs len > 0 everywhere, so such a configuration is rejected instead of silently degenerate. */
+/* A vertex whose turn is smaller than this has an arc well under a millimetre at any sane
+ * corner_radius_m (40 um at the default 40 m radius): the piece table needs len > 0 everywhere, so
+ * such a configuration is rejected instead of silently degenerate. */
 static const double MIN_TURN_RAD = 1e-6;
 /* atan2 returns (-pi, pi]; a turn of pi is a hairpin back along the same edge and tan(pi/2) = inf. */
 static const double MAX_TURN_RAD = GEO_PI - 1e-9;
 /* Beyond this the radius factor 1 + irregularity*U(-1,1) can reach 0 and the polygon collapses. */
 static const double MAX_IRREGULARITY = 0.9;
-/* Same reason for the per-lap speed scale 1 + lap_var*U(-1,1): k stays in [0.5, 1.5]. */
+/* Same reason for the per-table rider factor 1 + lap_var*U(-1,1): k stays in [0.5, 1.5]. */
 static const double MAX_LAP_VAR = 0.5;
 /* trk_validate_venue rejects a gate line shorter than 1 m (§10.1), so each half must reach 0.5 m. */
 static const double MIN_GATE_HALF_M = 0.5;
 /* Two gates are "the same point" when their adjusted arc lengths agree to within a nanometre. */
 static const double SAME_POINT_M = 1e-9;
+/* Sane upper bound so llround(length_m) always fits the venue's uint32_t length_m without truncating
+ * or silently producing an absurd venue. */
+static const double MAX_LENGTH_M = 100000.0;
+/* Geodetic sanity bounds for the venue origin: well clear of the poles and the antimeridian. */
+static const double MAX_ABS_LAT_DEG = 89.0;
+static const double MAX_ABS_LON_DEG = 180.0;
 
 /* ---------------------------------------------------------------------------
  * Private RNG. splitmix64, deliberately NOT synth_rng_* from synth_gps.h: that stream belongs to
@@ -1291,13 +1374,14 @@ static int check_cfg(const synth_cfg_t *c, char *err, size_t err_cap)
     if (c->n_vertices < 3 || c->n_vertices > SYNTH_MAX_VERTICES) return fail(err, err_cap, "n_vertices out of range");
     if (c->laps < 1 || c->laps > SYNTH_MAX_LAPS) return fail(err, err_cap, "laps out of range");
     if (c->n_sector_gates < 0 || c->n_sector_gates > LAP_MAX_SECTORS) return fail(err, err_cap, "n_sector_gates out of range");
-    if (!isfinite(c->length_m) || c->length_m <= 0.0) return fail(err, err_cap, "length_m must be positive");
+    if (!isfinite(c->length_m) || c->length_m <= 0.0 || c->length_m > MAX_LENGTH_M) return fail(err, err_cap, "length_m out of range");
     if (!isfinite(c->corner_radius_m) || c->corner_radius_m <= 0.0) return fail(err, err_cap, "corner_radius_m must be positive");
     if (!isfinite(c->irregularity) || c->irregularity < 0.0 || c->irregularity > MAX_IRREGULARITY) return fail(err, err_cap, "irregularity out of range");
     if (!isfinite(c->lap_var) || c->lap_var < 0.0 || c->lap_var > MAX_LAP_VAR) return fail(err, err_cap, "lap_var out of range");
     if (!isfinite(c->v_corner_mps) || c->v_corner_mps <= 0.0) return fail(err, err_cap, "v_corner_mps must be positive");
-    /* lap_var scales both speeds by the same k, so this ordering holds in every table. */
-    if (!isfinite(c->v_max_mps) || c->v_max_mps <= c->v_corner_mps) return fail(err, err_cap, "v_max_mps must exceed v_corner_mps");
+    /* v_corner no longer moves with lap_var (only a_acc, a_brk and v_max do), so the cruise cap must
+     * still clear it at the smallest rider factor (k = 1 - lap_var, the worst case). */
+    if (!isfinite(c->v_max_mps) || c->v_max_mps * (1.0 - c->lap_var) <= c->v_corner_mps) return fail(err, err_cap, "v_max_mps must exceed v_corner_mps at the smallest lap_var scale");
     if (!isfinite(c->a_acc_mps2) || c->a_acc_mps2 <= 0.0) return fail(err, err_cap, "a_acc_mps2 must be positive");
     if (!isfinite(c->a_brk_mps2) || c->a_brk_mps2 <= 0.0) return fail(err, err_cap, "a_brk_mps2 must be positive");
     if (!isfinite(c->start_before_m) || c->start_before_m < 0.0) return fail(err, err_cap, "start_before_m must be >= 0");
@@ -1305,8 +1389,8 @@ static int check_cfg(const synth_cfg_t *c, char *err, size_t err_cap)
     if (c->start_before_m + c->stop_after_m >= c->length_m) return fail(err, err_cap, "start_before_m + stop_after_m >= length_m");
     if (!isfinite(c->sf_frac) || c->sf_frac < 0.0 || c->sf_frac >= 1.0) return fail(err, err_cap, "sf_frac out of range");
     if (!isfinite(c->gate_half_width_m) || c->gate_half_width_m < MIN_GATE_HALF_M) return fail(err, err_cap, "gate_half_width_m too small");
-    if (!isfinite(c->origin_lat_deg) || c->origin_lat_deg < -89.0 || c->origin_lat_deg > 89.0) return fail(err, err_cap, "origin_lat_deg out of range");
-    if (!isfinite(c->origin_lon_deg) || c->origin_lon_deg < -180.0 || c->origin_lon_deg > 180.0) return fail(err, err_cap, "origin_lon_deg out of range");
+    if (!isfinite(c->origin_lat_deg) || c->origin_lat_deg < -MAX_ABS_LAT_DEG || c->origin_lat_deg > MAX_ABS_LAT_DEG) return fail(err, err_cap, "origin_lat_deg out of range");
+    if (!isfinite(c->origin_lon_deg) || c->origin_lon_deg < -MAX_ABS_LON_DEG || c->origin_lon_deg > MAX_ABS_LON_DEG) return fail(err, err_cap, "origin_lon_deg out of range");
     if (c->venue_id == 0) return fail(err, err_cap, "venue_id must be non-zero");
     return 0;
 }
@@ -1411,18 +1495,23 @@ static void push(synth_lap_t *tb, synth_piece_kind_t kind, double s0, double len
     p->ce = ce; p->cn = cn; p->turn_rad = turn;
 }
 
-/* One lap driven at speed scale k: both the arc speed and the cruise cap are cfg's values times k,
- * so every table has a distinct lap time whether or not its straights reach the cap. */
-static void build_table(synth_lap_t *tb, const synth_run_t *r, const synth_geom_t *g, double k_speed)
+/* One lap-frame period driven with rider factor k applied to the accelerations and the cruise cap.
+ * v_corner stays at cfg's value on every table -- so truth speed is continuous where tables meet,
+ * s = 0 -- but accelerating harder or softer out of every corner still gives each table a distinct
+ * lap time, even when its straights never reach the cap. */
+static void build_table(synth_lap_t *tb, const synth_run_t *r, const synth_geom_t *g, double k)
 {
     const synth_cfg_t *c = &r->cfg;
-    const double vc = c->v_corner_mps * k_speed, vmax = c->v_max_mps * k_speed;
-    const double aa = c->a_acc_mps2, ab = c->a_brk_mps2, rc = c->corner_radius_m;
+    const double vc = c->v_corner_mps;                              /* constant across every table */
+    const double aa = c->a_acc_mps2 * k, ab = c->a_brk_mps2 * k, vmax = c->v_max_mps * k;
+    const double rc = c->corner_radius_m;
     double s = 0.0, t = 0.0;
 
     tb->n_pieces = 0;
-    tb->v_corner_mps = vc;
+    tb->k = k;
     tb->v_max_mps = vmax;
+    tb->a_acc_mps2 = aa;
+    tb->a_brk_mps2 = ab;
     for (int j = 0; j < g->n; j++) {
         const double L = r->straight_len[j];
         const double h = g->head[j], sh = sin(h), ch = cos(h);
@@ -1563,13 +1652,14 @@ static void fill_gate(const synth_run_t *r, synth_gate_t *gate, double s)
     double half = r->cfg.gate_half_width_m;
     /* Left normal of compass heading h in ENU is (-cos h, sin h): with p1 = centre + half*left and
      * p2 = centre - half*left, sign(cross(p2 - p1, motion)) = +1, which is the dir_sign of §6.4. */
+    const double lx = -ch, ly = sh;                 /* left normal unit vector */
     gate->s_m = s;
     gate->e_m = e;
     gate->n_m = nn;
     gate->heading_deg = head_deg_norm(head);
-    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e + half * -ch, nn + half * sh,
+    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e + half * lx, nn + half * ly,
                     &gate->line.p1.lat, &gate->line.p1.lon);
-    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e - half * -ch, nn - half * sh,
+    synth_enu_to_ll(r->cfg.origin_lat_deg, r->cfg.origin_lon_deg, e - half * lx, nn - half * ly,
                     &gate->line.p2.lat, &gate->line.p2.lon);
 }
 
@@ -1584,10 +1674,18 @@ static int build_gates(synth_run_t *r, const synth_geom_t *g, char *err, size_t 
         double want = wrap_s(s_sf + (double)i * step, r->length_m);
         fill_gate(r, &r->gates[i], first_admissible(r, g, want));
     }
-    for (int i = 0; i < r->n_gates; i++)
-        for (int j = i + 1; j < r->n_gates; j++)
-            if (fabs(r->gates[i].s_m - r->gates[j].s_m) < SAME_POINT_M)
-                return fail(err, err_cap, "two gates adjusted onto the same point");
+    /* Driving order: every gate's wrapped distance from S/F must be strictly increasing. This is
+     * guaranteed for every reachable config (first_admissible is monotone non-decreasing and the
+     * requested sector offsets are themselves strictly increasing), but is made an explicit,
+     * defended invariant here rather than an implicit one; it also subsumes a plain "two gates
+     * landed on the same point" check. */
+    double prev = -1.0;
+    for (int i = 0; i < r->n_gates; i++) {
+        double d = wrap_s(r->gates[i].s_m - s_sf, r->length_m);
+        if (d < prev + SAME_POINT_M)
+            return fail(err, err_cap, "gates are not in strictly increasing driving order from S/F");
+        prev = d;
+    }
     return 0;
 }
 
@@ -1603,13 +1701,15 @@ int synth_run_build(synth_run_t *r, const synth_cfg_t *cfg, char *err, size_t er
     r->cfg = *cfg;
 
     uint64_t rs;
-    sr_seed(&rs, cfg->seed);                       /* vertex radii first, then one speed scale per table */
+    sr_seed(&rs, cfg->seed);                       /* vertex radii first, then one rider factor per table */
 
     synth_geom_t g;
     memset(&g, 0, sizeof g);
     if (build_geometry(r, &g, &rs, err, err_cap) != 0) return -1;
 
-    r->n_tables = cfg->laps + 3;                   /* out-lap, the laps themselves, and the run-out */
+    /* out-lap, the laps themselves, and the run-out; tied to SYNTH_MAX_TABLES/SYNTH_MAX_LAPS in the
+     * header instead of a bare "+ 3" so the two stay in sync. */
+    r->n_tables = cfg->laps + (SYNTH_MAX_TABLES - SYNTH_MAX_LAPS);
     double acc = 0.0;
     for (int i = 0; i < r->n_tables; i++) {
         r->table_t0[i] = acc;
@@ -1707,7 +1807,7 @@ double synth_run_lap_time(const synth_run_t *r, int lap_no)
 {
     double t[SYNTH_MAX_GATES + 1];
     int n = synth_run_lap_crossings(r, lap_no, t, sizeof t / sizeof t[0]);
-    if (n < 0) return 0.0;
+    if (n < 0) return -1.0;
     return t[n - 1] - t[0];
 }
 
