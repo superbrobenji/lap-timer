@@ -39,7 +39,7 @@ typedef struct {
     double   v_max_mps;         /* cruise cap; default 50 */
     double   a_acc_mps2;        /* default 3 */
     double   a_brk_mps2;        /* default 6 (magnitude) */
-    double   lap_var;           /* per-lap speed scale k = 1 + lap_var·U(-1,1) applied to v_corner and v_max; default 0.03 */
+    double   lap_var;           /* per-table rider factor k = 1 + lap_var·U(-1,1) applied to a_acc, a_brk and v_max (v_corner stays constant, so speed is continuous where tables meet); default 0.03 */
     int      laps;              /* full laps after the first S/F crossing; 1..SYNTH_MAX_LAPS; default 10 */
     double   start_before_m;    /* run starts this far before S/F (out-lap length); default 300 */
     double   stop_after_m;      /* run continues this far past the last S/F; default 200 */
@@ -64,12 +64,14 @@ typedef struct {
     double ce, cn, turn_rad;    /* arcs only: centre and signed turn over the piece (+ = left) */
 } synth_piece_t;
 
-typedef struct {                /* one lap's kinematic table, lap frame */
+typedef struct {                /* one lap-frame period's kinematic table (s = 0 .. length_m) */
     synth_piece_t pieces[SYNTH_MAX_PIECES];
     int    n_pieces;
-    double lap_time_s;          /* time from s = 0 to s = length_m */
-    double v_corner_mps;        /* this table's arc speed (cfg.v_corner_mps scaled by lap_var) */
-    double v_max_mps;           /* this table's cruise cap (cfg.v_max_mps scaled by the same factor) */
+    double lap_time_s;          /* time from s = 0 to s = length_m in this table */
+    double k;                   /* this table's rider factor 1 + lap_var·U(-1,1) */
+    double v_max_mps;           /* cfg.v_max_mps · k */
+    double a_acc_mps2;          /* cfg.a_acc_mps2 · k */
+    double a_brk_mps2;          /* cfg.a_brk_mps2 · k */
 } synth_lap_t;
 
 typedef struct {                /* truth at one instant */
@@ -126,7 +128,7 @@ double synth_run_sf_s_total(const synth_run_t *r, int n);
 /* Run times of a full lap's crossings: out[0] = S/F starting lap_no, out[1..n_gates-1] = sector gates
  * in driving order, out[n_gates] = the S/F ending the lap. lap_no = 1..cfg.laps. Returns n_gates + 1. */
 int    synth_run_lap_crossings(const synth_run_t *r, int lap_no, double *out, size_t out_cap);
-/* Lap time = out[n_gates] - out[0] of the above. */
+/* Lap time = out[n_gates] - out[0] of the above; negative if lap_no is out of range. */
 double synth_run_lap_time(const synth_run_t *r, int lap_no);
 /* Fills a venue that passes trk_validate_venue: id cfg.venue_id, name "Synthetic", centre = origin,
  * radius VENUE_RADIUS_DEFAULT_M, one layout {id 1, "Full", dir_sign +1, sf = gates[0].line,
