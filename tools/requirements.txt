@@ -1,0 +1,4 @@
+# created with /opt/homebrew/opt/python@3.12/libexec/bin/python3 3.12.14
+pyserial==3.5
+Pillow==10.4.0
+esptool==4.8.1

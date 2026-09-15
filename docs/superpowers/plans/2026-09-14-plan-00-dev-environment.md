@@ -328,8 +328,8 @@ git tag p00-d1 && git push origin p00-d1
 
 - [ ] **Step 1: Install ninja and confirm cmake**
 
-Run: `brew install ninja && cmake --version && ninja --version`
-Expected: cmake ≥ 3.16, ninja prints a version.
+Run: `brew install ninja python@3.12 && cmake --version && ninja --version && /opt/homebrew/opt/python@3.12/libexec/bin/python3 --version`
+Expected: cmake ≥ 3.16, ninja prints a version, python 3.12.x.
 
 - [ ] **Step 2: Python virtual environment for tools**
 
@@ -341,7 +341,7 @@ esptool==4.8.1
 ```
 Run:
 ```bash
-python3 -m venv tools/.venv
+/opt/homebrew/opt/python@3.12/libexec/bin/python3 -m venv tools/.venv
 tools/.venv/bin/pip install -r tools/requirements.txt
 echo 'tools/.venv/' >> .gitignore
 tools/.venv/bin/esptool.py version
@@ -382,9 +382,14 @@ Create `tools/idf-env.sh`:
 IDF_VER="$(cat "$(dirname "${BASH_SOURCE[0]}")/../.idf-version")"
 export IDF_PATH="$HOME/esp/esp-idf-$IDF_VER"
 [ -d "$IDF_PATH" ] || { echo "ESP-IDF $IDF_VER not found at $IDF_PATH"; return 1; }
+# ESP-IDF 5.3 needs Python >= 3.10; macOS ships 3.9. Prefer Homebrew's python@3.12 (or 3.11) when present.
+for py in /opt/homebrew/opt/python@3.12/libexec/bin /opt/homebrew/opt/python@3.11/libexec/bin; do
+  if [ -x "$py/python3" ]; then export PATH="$py:$PATH"; break; fi
+done
 . "$IDF_PATH/export.sh" > /dev/null
 echo "ESP-IDF $(idf.py --version)"
 ```
+ESP-IDF v5.3.2's `idf.py` fails under macOS's system Python 3.9 (`importlib.metadata` cannot resolve `ruamel.yaml`), so the helper prefers Homebrew's Python 3.12.
 
 Run: `source tools/idf-env.sh`
 Expected: `ESP-IDF ESP-IDF v5.3.2`.

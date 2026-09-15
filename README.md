@@ -22,6 +22,8 @@ ESP32 GPS + IMU lap timer for track days and drag runs. Battery powered, fully o
 
 ## Firmware
 
+Prerequisites: `brew install cmake ninja python@3.12`, ESP-IDF v5.3.2 at `~/esp/esp-idf-v5.3.2` (see `tools/idf-env.sh`; run `source tools/idf-env.sh` first).
+
     ./build.sh moto_neo6m build        # see build.sh for environments
     ./build.sh moto_neo6m flash monitor --port /dev/cu.usbserial-XXXX
 
