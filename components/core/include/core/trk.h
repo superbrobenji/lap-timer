@@ -37,7 +37,7 @@ void               trk_init(void);                                   /* clears t
 int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
 const trk_venue_t *trk_get(uint16_t venue_id);
-int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full */
+int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full or invalid */
 int                trk_user_count(void);
 uint16_t           trk_next_user_id(void);
 /* Blob v2: u8 version(2) | u8 count | trk_venue_t[count] | u16 crc16 LE. Load rejects a wrong

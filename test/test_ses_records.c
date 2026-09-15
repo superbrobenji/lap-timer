@@ -180,6 +180,9 @@ static void test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated(voi
     TEST_ASSERT_EQUAL_INT(94 + SES_FRAME_OVERHEAD, w);            /* wire payload unchanged */
     ses_hdr_t out;
     TEST_ASSERT_EQUAL_INT(1, ses_decode_hdr(buf + 3, 94, &out));
+    TEST_ASSERT_EQUAL_STRING("S00042_001", out.session_id);
+    TEST_ASSERT_EQUAL_UINT(10, strlen(out.session_id));
+    TEST_ASSERT_EQUAL_INT('\0', out.session_id[10]);
     TEST_ASSERT_EQUAL_STRING("v0.3.1-abcdefghi", out.fw);
     TEST_ASSERT_EQUAL_UINT(16, strlen(out.fw));
     TEST_ASSERT_EQUAL_STRING("moto_neo6m_epaper_int_bl", out.hwid);

@@ -100,7 +100,7 @@ int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
 int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
 
 typedef struct {
-    char     session_id[10];
+    char     session_id[11];      /* char[10] on the wire + NUL */
     uint8_t  mode, variant;
     uint16_t venue_id, layout_id;
     char     fw[17];              /* char[16] on the wire + NUL */

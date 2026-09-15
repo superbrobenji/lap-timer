@@ -588,7 +588,10 @@ int64_t conn_last_activity_mono_us(void);
 
 The blocks below are the declarations as they exist in `components/core/include/core/`. Modules not
 yet implemented (`fus`, `lap`, `drag`) show the intended function list with their types marked as
-planned; everything else is copied from the headers.
+planned. Of the nine implemented headers shown, `tb.h`, `geo.h`, `ses.h` and `cfg.h` are verbatim
+slices of the file; `core.h`, `types.h`, `exp.h`, `json.h` and `trk.h` are excerpts — every
+declaration and signature matches the header exactly, with a few trailing implementation comments
+trimmed for space.
 
 #### `core/core.h`
 
@@ -866,7 +869,7 @@ int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
 int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
 
 typedef struct {
-    char     session_id[10];
+    char     session_id[11];      /* char[10] on the wire + NUL */
     uint8_t  mode, variant;
     uint16_t venue_id, layout_id;
     char     fw[17];              /* char[16] on the wire + NUL */
@@ -900,7 +903,27 @@ typedef struct {
     double  sf_lat1, sf_lon1, sf_lat2, sf_lon2;
 } exp_meta_t;
 
-typedef struct { /* format, output window, decoder state, JSON summary state; see the header */ } exp_t;
+typedef struct {
+    uint8_t  fmt;
+    uint8_t  finished;
+    exp_meta_t meta;
+    /* output window */
+    uint8_t  win[EXP_WINDOW];
+    size_t   win_len, win_pos;
+    /* decoder state shared by formats */
+    ses_fix_state_t   fix_st;
+    ses_fused_state_t fus_st;
+    fused_sample_t    held;            /* latest fused values, sample-and-hold */
+    uint8_t           have_held;
+    /* JSON summary state */
+    uint16_t  laps, runs;
+    uint8_t   json_stage;              /* 0 header pending, 1 in laps, 2 in runs */
+    ses_hdr_t hdr;
+    uint8_t   have_hdr;
+    char      venue_name[33];
+    uint8_t   run_pending;
+    uint8_t   run_gate_idx;            /* DRAG_RUN emission resumes after EXP_FULL */
+} exp_t;
 
 int  exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
 int  exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len);   /* 0 consumed, EXP_FULL retry after pull, -1 error */
@@ -1576,8 +1599,9 @@ Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc;
 
 The `char[n]` fields above are exactly `n` bytes on the wire and are *not* required to be
 NUL-terminated there — a 16-character firmware version fills `fw char[16]` completely. The matching
-in-memory structs (`ses_hdr_t.fw`, `.hwid`, `ses_venue_t.name`, and the `exp_meta_t` strings) carry
-one extra byte for a NUL so a decoded value is always a valid C string; wire sizes are unchanged.
+in-memory structs (`ses_hdr_t.session_id`, `.fw`, `.hwid`, `ses_venue_t.name`, and the `exp_meta_t`
+strings) carry one extra byte for a NUL so a decoded value is always a valid C string; wire sizes
+are unchanged.
 
 ### 12.4 Delta encoding rules
 

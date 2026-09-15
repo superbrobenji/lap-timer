@@ -27,6 +27,7 @@ int json_skip(const jsmntok_t *toks, int ntoks, int i)
     /* Every descendant of i starts before i ends and jsmn emits them contiguously, so a forward
      * scan finds the end of the subtree without recursion. Primitives and strings have no
      * descendants and the loop exits on the first test. */
+    if (i < 0 || i >= ntoks) return ntoks;
     int j = i + 1;
     while (j < ntoks && toks[j].start < toks[i].end) j++;
     return j;

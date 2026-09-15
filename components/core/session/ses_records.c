@@ -393,7 +393,7 @@ int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
     memset(out, 0, sizeof *out);
     if (br_u8(&r) != 1) return -1;
     br_u8(&r);                                      /* reserved, currently unused */
-    br_bytes(&r, out->session_id, 10); out->mode = br_u8(&r); out->variant = br_u8(&r);
+    br_bytes(&r, out->session_id, 10); out->session_id[10] = '\0'; out->mode = br_u8(&r); out->variant = br_u8(&r);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
     br_bytes(&r, out->fw, 16); out->fw[16] = '\0';          /* the wire field may use all 16 bytes */
     br_bytes(&r, out->hwid, 24); out->hwid[24] = '\0';

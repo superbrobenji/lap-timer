@@ -1,12 +1,10 @@
 #include "core/trk.h"
 #include "core/json.h"
 #include "core/jw.h"
-#include "core/geo.h"
 #include <string.h>
 #include <stdio.h>
 
 #define MAX_TOKS 512
-#define MIN_GATE_LEN_M 1.0        /* a line shorter than this cannot define a crossing direction */
 
 static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
 
@@ -19,10 +17,9 @@ static bool get_line(const char *js, const jsmntok_t *toks, int ntoks, int arr, 
 {
     if (arr < 0 || arr >= ntoks || toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
     int p1 = arr + 1, p2 = json_skip(toks, ntoks, p1);
-    if (!get_pt(js, toks, ntoks, p1, &out->p1) || !get_pt(js, toks, ntoks, p2, &out->p2)) return false;
-    /* Degenerate line: the two endpoints must be distinguishable, otherwise the crossing test in
-     * §6.4 has no gate direction and geo_segment_cross always reports "parallel". */
-    return geo_dist_m(out->p1.lat, out->p1.lon, out->p2.lat, out->p2.lon) >= MIN_GATE_LEN_M;
+    /* Degenerate/too-short lines (§6.4 needs a gate direction) are rejected once, by the shared
+     * trk_validate_venue() call trk_from_json makes at the end -- not duplicated here. */
+    return get_pt(js, toks, ntoks, p1, &out->p1) && get_pt(js, toks, ntoks, p2, &out->p2);
 }
 
 /* Not reentrant: static token array (single caller task). */

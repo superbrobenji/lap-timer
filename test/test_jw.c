@@ -69,6 +69,18 @@ static void test_skip_over_nested_object_values(void)
     TEST_ASSERT_EQUAL_INT(vb - 1, json_skip(toks, n, va));          /* skipping the array lands on key "b" */
 }
 
+static void test_skip_out_of_range_index_returns_ntoks_without_reading(void)
+{
+    const char *js = "{\"a\":1}";
+    jsmntok_t toks[4];
+    int n = json_parse(js, strlen(js), toks, 4);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    /* A truncated token array (a stale index past the real count) must not dereference toks[i]. */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, n));         /* i == ntoks */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, n + 100));   /* i far past ntoks: would be OOB on toks[4] */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, -1));        /* i < 0 */
+}
+
 static void test_parse_rejects_documents_deeper_than_the_cap(void)
 {
     static char js[1024];
@@ -130,6 +142,7 @@ int main(void)
     RUN_TEST(test_tokenizer_helpers);
     RUN_TEST(test_double_guard_clamps_decimals_and_flags_unfittable_values);
     RUN_TEST(test_skip_over_nested_object_values);
+    RUN_TEST(test_skip_out_of_range_index_returns_ntoks_without_reading);
     RUN_TEST(test_parse_rejects_documents_deeper_than_the_cap);
     RUN_TEST(test_tok_str_with_zero_capacity_writes_nothing);
     RUN_TEST(test_fuzz_jw_str_always_emits_a_parsable_string);

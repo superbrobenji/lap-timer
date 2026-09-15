@@ -36,6 +36,8 @@ static void test_user_venue_wins_on_id_clash_and_persists(void)
     static trk_venue_t u; memset(&u, 0, sizeof u);
     u.id = 6; strcpy(u.name, "Killarney (mine)"); u.lat = -33.8567; u.lon = 18.5170; u.radius_m = 2000; u.n_layouts = 1;
     u.layouts[0].id = 1; strcpy(u.layouts[0].name, "L1"); u.layouts[0].dir_sign = 1;
+    u.layouts[0].sf.p1.lat = -33.8567; u.layouts[0].sf.p1.lon = 18.5170;
+    u.layouts[0].sf.p2.lat = -33.8567; u.layouts[0].sf.p2.lon = 18.5173;    /* a real S/F line, not the degenerate default */
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u));
     TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
     static uint8_t blob[16384]; size_t n;
@@ -51,6 +53,8 @@ static void test_user_store_is_bounded(void)
 {
     static trk_venue_t u; memset(&u, 0, sizeof u); u.radius_m = 100; u.n_layouts = 1;
     u.layouts[0].id = 1; u.layouts[0].dir_sign = 1;
+    u.layouts[0].sf.p1.lat = -26.001; u.layouts[0].sf.p1.lon = 28.0;
+    u.layouts[0].sf.p2.lat = -26.001; u.layouts[0].sf.p2.lon = 28.0003;     /* a real S/F line, not the degenerate default */
     for (int i = 0; i < TRK_MAX_USER; i++) { u.id = (uint16_t)(1000 + i); TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u)); }
     u.id = 1000 + TRK_MAX_USER;
     TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&u));
@@ -167,6 +171,70 @@ static void test_user_blob_v2_rejects_bad_version_count_crc_and_venue(void)
     TEST_ASSERT_NULL(trk_get(1000));
 }
 
+static void test_user_blob_rejects_sub_metre_gate_line(void)
+{
+    static trk_venue_t v;
+    mk_venue(&v, 1000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob[sizeof(trk_venue_t) + 16]; size_t n;    /* one venue's worth, not the 16 KB multi-venue headroom */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
+
+    /* structurally valid except the S/F line is under the 1 m gate rule (trk_from_json's rule,
+     * shared via trk_validate_venue -- the loader must enforce it too) */
+    static trk_venue_t degenerate;
+    mk_venue(&degenerate, 1000);
+    degenerate.layouts[0].sf.p2.lat = degenerate.layouts[0].sf.p1.lat;
+    degenerate.layouts[0].sf.p2.lon = degenerate.layouts[0].sf.p1.lon;
+    static uint8_t copy[sizeof(trk_venue_t) + 16];
+    memcpy(copy, blob, n);
+    memcpy(copy + 2, &degenerate, sizeof degenerate);
+    uint16_t crc = ses_crc16(copy, n - 2);                        /* recompute so only validation can reject */
+    copy[n - 2] = (uint8_t)crc; copy[n - 1] = (uint8_t)(crc >> 8);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+    TEST_ASSERT_NULL(trk_get(1000));
+}
+
+/* Same named fields as mk_venue, built on top of a struct pre-filled with `fill` so any byte the
+ * assignments below do not touch (compiler padding between fields) keeps the fill pattern instead
+ * of being zero, unlike mk_venue which memsets to 0 first. */
+static void mk_dirty_venue(trk_venue_t *v, uint16_t id, uint8_t fill)
+{
+    memset(v, (int)fill, sizeof *v);
+    v->id = id;
+    memset(v->name, 0, sizeof v->name); strcpy(v->name, "User");
+    v->lat = -26.0; v->lon = 28.0; v->radius_m = 1500; v->flags = 0; v->n_layouts = 1;
+    trk_layout_t *L = &v->layouts[0];
+    L->id = 1;
+    memset(L->name, 0, sizeof L->name); strcpy(L->name, "Full");
+    L->dir_sign = 1; L->n_sectors = 0; L->length_m = 0;
+    L->sf.p1.lat = -26.001; L->sf.p1.lon = 28.0;
+    L->sf.p2.lat = -26.001; L->sf.p2.lon = 28.0003;
+}
+
+static void test_save_produces_identical_blobs_regardless_of_padding_garbage(void)
+{
+    /* a and b are used one at a time (never simultaneously live), so one static struct -- sized and
+     * kept off the stack for the same 6 KB task-stack reason as the rest of this suite -- is reused
+     * for both fill patterns instead of allocating two. */
+    static trk_venue_t v;
+
+    trk_init();
+    mk_dirty_venue(&v, 1000, 0xAA);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));            /* struct assignment carries v's padding into the store */
+    static uint8_t blob_a[sizeof(trk_venue_t) + 16]; size_t n_a;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob_a, sizeof blob_a, &n_a));
+
+    trk_init();
+    mk_dirty_venue(&v, 1000, 0x55);                         /* same fields, different padding garbage */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob_b[sizeof(trk_venue_t) + 16]; size_t n_b;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob_b, sizeof blob_b, &n_b));
+
+    TEST_ASSERT_EQUAL_UINT(n_a, n_b);
+    TEST_ASSERT_EQUAL_MEMORY(blob_a, blob_b, n_a);          /* including the CRC: identical bytes throughout */
+}
+
 static void test_json_rejects_degenerate_line_and_duplicate_layout_ids(void)
 {
     static trk_venue_t v; char err[64];
@@ -217,6 +285,8 @@ int main(void)
     RUN_TEST(test_json_rejects_bad_line);
     RUN_TEST(test_user_add_rejects_invalid_venue);
     RUN_TEST(test_user_blob_v2_rejects_bad_version_count_crc_and_venue);
+    RUN_TEST(test_user_blob_rejects_sub_metre_gate_line);
+    RUN_TEST(test_save_produces_identical_blobs_regardless_of_padding_garbage);
     RUN_TEST(test_json_rejects_degenerate_line_and_duplicate_layout_ids);
     RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
     return UNITY_END();

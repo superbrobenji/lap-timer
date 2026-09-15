@@ -216,16 +216,20 @@ void core_assert_fail(uint16_t code, const char *file, int line);
 ```c
 #include "core/core.h"
 #include <stddef.h>
+#include <stdatomic.h>
 
 const char *core_version(void) { return "0.0.1"; }
 
-static core_assert_hook_t assert_hook;
+/* _Atomic with explicit acquire/release (as ring.h already does for the SPSC ring) so installing
+ * the hook from core 0 while core 1 is mid-read of it is defined behaviour, not a data race. */
+static _Atomic core_assert_hook_t assert_hook;
 
-void core_set_assert_hook(core_assert_hook_t hook) { assert_hook = hook; }
+void core_set_assert_hook(core_assert_hook_t hook) { atomic_store_explicit(&assert_hook, hook, memory_order_release); }
 
 void core_assert_fail(uint16_t code, const char *file, int line)
 {
-    if (assert_hook) assert_hook(code, file, line);
+    core_assert_hook_t hook = atomic_load_explicit(&assert_hook, memory_order_acquire);
+    if (hook) hook(code, file, line);
 }
 ```
 
@@ -1364,6 +1368,7 @@ git commit -m "feat(core): time base — civil date math, min-filter mono→gps 
 ```c
 #include "unity.h"
 #include "core/ses.h"
+#include "core/core.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -1484,6 +1489,48 @@ static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
+static int      assert_calls;
+static uint16_t assert_code;
+static void record_assert(uint16_t code, const char *file, int line) { (void)file; (void)line; assert_calls++; assert_code = code; }
+
+static void test_on_bad_guard_resets_the_reader_before_returning(void)
+{
+    /* Force the internal bounds guard in on_bad(): collected + pending must exceed sizeof(r.replay),
+     * a combination normal traffic cannot reach (idx caps at 251; a prior on_bad's own output is
+     * itself bounded). ses_reader_t's fields are public precisely so a whitebox test can build this
+     * otherwise-unreachable state directly, the same way the surrounding "resync" tests read them. */
+    ses_reader_t r; ses_reader_init(&r);
+    r.state = 1;
+    r.buf[0] = 0x02;
+    r.buf[1] = SES_MAX_PAYLOAD;                                 /* len byte: claims the largest payload */
+    r.idx = (uint16_t)(2 + SES_MAX_PAYLOAD);                    /* type+len+payload already collected: 2 CRC bytes short */
+    r.need = (uint16_t)(2 + SES_MAX_PAYLOAD + 2);
+    uint16_t crc = ses_crc16(r.buf, (size_t)2 + SES_MAX_PAYLOAD);
+    r.replay[0] = (uint8_t)~crc; r.replay[1] = (uint8_t)(~(crc >> 8));   /* guaranteed CRC mismatch: bad frame */
+    r.replay_len = sizeof r.replay;                             /* pending alone already exceeds sizeof(replay) - idx: forces the guard */
+    r.replay_pos = 0;
+
+    assert_calls = 0;
+    core_set_assert_hook(record_assert);
+    cap_t c = { 0 };
+    ses_reader_feed(&r, NULL, 0, cb, &c);
+    core_set_assert_hook(NULL);
+
+    TEST_ASSERT_EQUAL_INT(1, assert_calls);
+    TEST_ASSERT_EQUAL_HEX16(0x0A02, assert_code);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);              /* the guard did not leave the reader mid-frame */
+    TEST_ASSERT_EQUAL_UINT16(0, r.idx);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+
+    /* the reader must still recognise a normal frame after the guard trips */
+    uint8_t stream[16]; uint8_t p[1] = { 42 };
+    int n = ses_frame_encode(0x0B, p, 1, stream, sizeof stream);
+    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    TEST_ASSERT_EQUAL_INT(1, c.calls);
+    TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
+    TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
+}
+
 /* deterministic LCG, same pattern as the other suites */
 static uint32_t lcg = 22695477u;
 static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
@@ -1561,6 +1608,7 @@ int main(void)
     RUN_TEST(test_reader_rejects_oversize_len_without_stalling);
     RUN_TEST(test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof);
     RUN_TEST(test_flush_on_truncated_frame_counts_bad_and_is_idempotent);
+    RUN_TEST(test_on_bad_guard_resets_the_reader_before_returning);
     RUN_TEST(test_fuzz_frames_buried_in_garbage_are_all_recovered);
     return UNITY_END();
 }
@@ -1684,6 +1732,10 @@ static void on_bad(ses_reader_t *r)
     /* Re-scan everything collected after the sync byte, plus whatever replay input was still pending. */
     uint16_t collected = r->idx;
     uint16_t pending = (uint16_t)(r->replay_len - r->replay_pos);
+    /* Reset the reader state first: whether or not the bounds guard below trips, a caller must be
+     * able to keep feeding bytes afterwards without the reader staying wedged mid-frame. */
+    r->frames_bad++;
+    r->state = 0; r->idx = 0; r->need = 0;
     /* collected <= 2+SES_MAX_PAYLOAD+2 and pending is what is left of an equally bounded replay,
      * so the sum fits the 2x-sized replay buffer. Checked rather than assumed: a corrupted reader
      * struct must not turn into a memcpy past the end. */
@@ -1694,8 +1746,6 @@ static void on_bad(ses_reader_t *r)
     r->replay_len = (uint16_t)(collected + pending);
     r->replay_pos = 0;
     memcpy(r->replay, tmp, r->replay_len);
-    r->frames_bad++;
-    r->state = 0; r->idx = 0; r->need = 0;
 }
 
 void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx)
@@ -1942,6 +1992,9 @@ static void test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated(voi
     TEST_ASSERT_EQUAL_INT(94 + SES_FRAME_OVERHEAD, w);            /* wire payload unchanged */
     ses_hdr_t out;
     TEST_ASSERT_EQUAL_INT(1, ses_decode_hdr(buf + 3, 94, &out));
+    TEST_ASSERT_EQUAL_STRING("S00042_001", out.session_id);
+    TEST_ASSERT_EQUAL_UINT(10, strlen(out.session_id));
+    TEST_ASSERT_EQUAL_INT('\0', out.session_id[10]);
     TEST_ASSERT_EQUAL_STRING("v0.3.1-abcdefghi", out.fw);
     TEST_ASSERT_EQUAL_UINT(16, strlen(out.fw));
     TEST_ASSERT_EQUAL_STRING("moto_neo6m_epaper_int_bl", out.hwid);
@@ -2237,7 +2290,7 @@ int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
 int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
 
 typedef struct {
-    char     session_id[10];
+    char     session_id[11];      /* char[10] on the wire + NUL */
     uint8_t  mode, variant;
     uint16_t venue_id, layout_id;
     char     fw[17];              /* char[16] on the wire + NUL */
@@ -2651,7 +2704,7 @@ int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
     memset(out, 0, sizeof *out);
     if (br_u8(&r) != 1) return -1;
     br_u8(&r);                                      /* reserved, currently unused */
-    br_bytes(&r, out->session_id, 10); out->mode = br_u8(&r); out->variant = br_u8(&r);
+    br_bytes(&r, out->session_id, 10); out->session_id[10] = '\0'; out->mode = br_u8(&r); out->variant = br_u8(&r);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
     br_bytes(&r, out->fw, 16); out->fw[16] = '\0';          /* the wire field may use all 16 bytes */
     br_bytes(&r, out->hwid, 24); out->hwid[24] = '\0';
@@ -2773,6 +2826,18 @@ static void test_skip_over_nested_object_values(void)
     TEST_ASSERT_EQUAL_INT(vb - 1, json_skip(toks, n, va));          /* skipping the array lands on key "b" */
 }
 
+static void test_skip_out_of_range_index_returns_ntoks_without_reading(void)
+{
+    const char *js = "{\"a\":1}";
+    jsmntok_t toks[4];
+    int n = json_parse(js, strlen(js), toks, 4);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    /* A truncated token array (a stale index past the real count) must not dereference toks[i]. */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, n));         /* i == ntoks */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, n + 100));   /* i far past ntoks: would be OOB on toks[4] */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, -1));        /* i < 0 */
+}
+
 static void test_parse_rejects_documents_deeper_than_the_cap(void)
 {
     static char js[1024];
@@ -2834,6 +2899,7 @@ int main(void)
     RUN_TEST(test_tokenizer_helpers);
     RUN_TEST(test_double_guard_clamps_decimals_and_flags_unfittable_values);
     RUN_TEST(test_skip_over_nested_object_values);
+    RUN_TEST(test_skip_out_of_range_index_returns_ntoks_without_reading);
     RUN_TEST(test_parse_rejects_documents_deeper_than_the_cap);
     RUN_TEST(test_tok_str_with_zero_capacity_writes_nothing);
     RUN_TEST(test_fuzz_jw_str_always_emits_a_parsable_string);
@@ -3039,6 +3105,7 @@ int json_skip(const jsmntok_t *toks, int ntoks, int i)
     /* Every descendant of i starts before i ends and jsmn emits them contiguously, so a forward
      * scan finds the end of the subtree without recursion. Primitives and strings have no
      * descendants and the loop exits on the first test. */
+    if (i < 0 || i >= ntoks) return ntoks;
     int j = i + 1;
     while (j < ntoks && toks[j].start < toks[i].end) j++;
     return j;
@@ -3132,7 +3199,13 @@ git commit -m "feat(core): minimal JSON writer and jsmn tokenizer helpers"
 #include <stdio.h>
 #include <string.h>
 
-void setUp(void) {}
+/* deterministic LCG, same pattern as the other suites; reseeded in setUp so a second run within the
+ * same process (the on-target 6 KB stack rerun in test_apps/core_selftest) replays the exact same
+ * fuzz sequence as the first. */
+static uint32_t lcg;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+
+void setUp(void) { lcg = 987654321u; }
 void tearDown(void) {}
 
 static void test_defaults_are_valid(void)
@@ -3364,10 +3437,6 @@ static void test_profile_with_bad_name_leaves_the_struct_untouched(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &bad));
     TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
 }
-
-/* deterministic LCG, same pattern as the other suites */
-static uint32_t lcg = 987654321u;
-static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
 
 static void test_fuzz_mutated_documents_never_corrupt_the_struct(void)
 {
@@ -3816,6 +3885,8 @@ static void test_user_venue_wins_on_id_clash_and_persists(void)
     static trk_venue_t u; memset(&u, 0, sizeof u);
     u.id = 6; strcpy(u.name, "Killarney (mine)"); u.lat = -33.8567; u.lon = 18.5170; u.radius_m = 2000; u.n_layouts = 1;
     u.layouts[0].id = 1; strcpy(u.layouts[0].name, "L1"); u.layouts[0].dir_sign = 1;
+    u.layouts[0].sf.p1.lat = -33.8567; u.layouts[0].sf.p1.lon = 18.5170;
+    u.layouts[0].sf.p2.lat = -33.8567; u.layouts[0].sf.p2.lon = 18.5173;    /* a real S/F line, not the degenerate default */
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u));
     TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
     static uint8_t blob[16384]; size_t n;
@@ -3831,6 +3902,8 @@ static void test_user_store_is_bounded(void)
 {
     static trk_venue_t u; memset(&u, 0, sizeof u); u.radius_m = 100; u.n_layouts = 1;
     u.layouts[0].id = 1; u.layouts[0].dir_sign = 1;
+    u.layouts[0].sf.p1.lat = -26.001; u.layouts[0].sf.p1.lon = 28.0;
+    u.layouts[0].sf.p2.lat = -26.001; u.layouts[0].sf.p2.lon = 28.0003;     /* a real S/F line, not the degenerate default */
     for (int i = 0; i < TRK_MAX_USER; i++) { u.id = (uint16_t)(1000 + i); TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u)); }
     u.id = 1000 + TRK_MAX_USER;
     TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&u));
@@ -3947,6 +4020,70 @@ static void test_user_blob_v2_rejects_bad_version_count_crc_and_venue(void)
     TEST_ASSERT_NULL(trk_get(1000));
 }
 
+static void test_user_blob_rejects_sub_metre_gate_line(void)
+{
+    static trk_venue_t v;
+    mk_venue(&v, 1000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob[sizeof(trk_venue_t) + 16]; size_t n;    /* one venue's worth, not the 16 KB multi-venue headroom */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
+
+    /* structurally valid except the S/F line is under the 1 m gate rule (trk_from_json's rule,
+     * shared via trk_validate_venue -- the loader must enforce it too) */
+    static trk_venue_t degenerate;
+    mk_venue(&degenerate, 1000);
+    degenerate.layouts[0].sf.p2.lat = degenerate.layouts[0].sf.p1.lat;
+    degenerate.layouts[0].sf.p2.lon = degenerate.layouts[0].sf.p1.lon;
+    static uint8_t copy[sizeof(trk_venue_t) + 16];
+    memcpy(copy, blob, n);
+    memcpy(copy + 2, &degenerate, sizeof degenerate);
+    uint16_t crc = ses_crc16(copy, n - 2);                        /* recompute so only validation can reject */
+    copy[n - 2] = (uint8_t)crc; copy[n - 1] = (uint8_t)(crc >> 8);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+    TEST_ASSERT_NULL(trk_get(1000));
+}
+
+/* Same named fields as mk_venue, built on top of a struct pre-filled with `fill` so any byte the
+ * assignments below do not touch (compiler padding between fields) keeps the fill pattern instead
+ * of being zero, unlike mk_venue which memsets to 0 first. */
+static void mk_dirty_venue(trk_venue_t *v, uint16_t id, uint8_t fill)
+{
+    memset(v, (int)fill, sizeof *v);
+    v->id = id;
+    memset(v->name, 0, sizeof v->name); strcpy(v->name, "User");
+    v->lat = -26.0; v->lon = 28.0; v->radius_m = 1500; v->flags = 0; v->n_layouts = 1;
+    trk_layout_t *L = &v->layouts[0];
+    L->id = 1;
+    memset(L->name, 0, sizeof L->name); strcpy(L->name, "Full");
+    L->dir_sign = 1; L->n_sectors = 0; L->length_m = 0;
+    L->sf.p1.lat = -26.001; L->sf.p1.lon = 28.0;
+    L->sf.p2.lat = -26.001; L->sf.p2.lon = 28.0003;
+}
+
+static void test_save_produces_identical_blobs_regardless_of_padding_garbage(void)
+{
+    /* a and b are used one at a time (never simultaneously live), so one static struct -- sized and
+     * kept off the stack for the same 6 KB task-stack reason as the rest of this suite -- is reused
+     * for both fill patterns instead of allocating two. */
+    static trk_venue_t v;
+
+    trk_init();
+    mk_dirty_venue(&v, 1000, 0xAA);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));            /* struct assignment carries v's padding into the store */
+    static uint8_t blob_a[sizeof(trk_venue_t) + 16]; size_t n_a;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob_a, sizeof blob_a, &n_a));
+
+    trk_init();
+    mk_dirty_venue(&v, 1000, 0x55);                         /* same fields, different padding garbage */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob_b[sizeof(trk_venue_t) + 16]; size_t n_b;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob_b, sizeof blob_b, &n_b));
+
+    TEST_ASSERT_EQUAL_UINT(n_a, n_b);
+    TEST_ASSERT_EQUAL_MEMORY(blob_a, blob_b, n_a);          /* including the CRC: identical bytes throughout */
+}
+
 static void test_json_rejects_degenerate_line_and_duplicate_layout_ids(void)
 {
     static trk_venue_t v; char err[64];
@@ -3997,6 +4134,8 @@ int main(void)
     RUN_TEST(test_json_rejects_bad_line);
     RUN_TEST(test_user_add_rejects_invalid_venue);
     RUN_TEST(test_user_blob_v2_rejects_bad_version_count_crc_and_venue);
+    RUN_TEST(test_user_blob_rejects_sub_metre_gate_line);
+    RUN_TEST(test_save_produces_identical_blobs_regardless_of_padding_garbage);
     RUN_TEST(test_json_rejects_degenerate_line_and_duplicate_layout_ids);
     RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
     return UNITY_END();
@@ -4057,7 +4196,7 @@ void               trk_init(void);                                   /* clears t
 int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
 const trk_venue_t *trk_get(uint16_t venue_id);
-int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full */
+int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full or invalid */
 int                trk_user_count(void);
 uint16_t           trk_next_user_id(void);
 /* Blob v2: u8 version(2) | u8 count | trk_venue_t[count] | u16 crc16 LE. Load rejects a wrong
@@ -4094,6 +4233,12 @@ int trk_user_count(void) { return user_n; }
 static bool pt_finite(const trk_pt_t *p) { return isfinite(p->lat) && isfinite(p->lon); }
 static bool line_finite(const trk_line_t *l) { return pt_finite(&l->p1) && pt_finite(&l->p2); }
 
+#define MIN_GATE_LEN_M 1.0        /* a line shorter than this cannot define a crossing direction (§6.4) */
+/* Shared by both entry points that can install a venue (trk_from_json, via the final
+ * trk_validate_venue() call, and trk_user_load()/trk_user_add(), via this function directly), so
+ * the two never disagree about what a valid gate line is. */
+static bool line_ok(const trk_line_t *l) { return geo_dist_m(l->p1.lat, l->p1.lon, l->p2.lat, l->p2.lon) >= MIN_GATE_LEN_M; }
+
 int trk_validate_venue(const trk_venue_t *v)
 {
     if (v->id == 0) return -1;
@@ -4108,8 +4253,8 @@ int trk_validate_venue(const trk_venue_t *v)
         if (L->dir_sign != 1 && L->dir_sign != -1) return -1;
         if (L->n_sectors > LAP_MAX_SECTORS) return -1;
         if (L->name[sizeof L->name - 1] != '\0') return -1;
-        if (!line_finite(&L->sf)) return -1;
-        for (uint8_t s = 0; s < L->n_sectors; s++) if (!line_finite(&L->sectors[s])) return -1;
+        if (!line_finite(&L->sf) || !line_ok(&L->sf)) return -1;
+        for (uint8_t s = 0; s < L->n_sectors; s++) if (!line_finite(&L->sectors[s]) || !line_ok(&L->sectors[s])) return -1;
     }
     return 0;
 }
@@ -4182,12 +4327,49 @@ int trk_user_load(const uint8_t *blob, size_t n)
     return 0;
 }
 
+/* Field-by-field copy into an already-zeroed destination: struct assignment (or a raw memcpy) also
+ * copies the source's compiler-inserted padding bytes verbatim, which the language never promises
+ * are zero, so two structurally identical venues could otherwise CRC differently (§10.1's blob is
+ * declared build-specific but should still be deterministic within one build). Every named field is
+ * written explicitly; nothing else touches dst, so the gaps between fields stay at the memset zero. */
+static void canon_venue(trk_venue_t *dst, const trk_venue_t *src)
+{
+    memset(dst, 0, sizeof *dst);
+    dst->id = src->id;
+    memcpy(dst->name, src->name, sizeof dst->name);
+    dst->lat = src->lat; dst->lon = src->lon;
+    dst->radius_m = src->radius_m;
+    dst->flags = src->flags;
+    dst->n_layouts = src->n_layouts;
+    /* Only the active layouts/sectors (src has already passed trk_validate_venue, so n_layouts and
+     * every n_sectors are in range) are copied; slots beyond them are left at the memset zero rather
+     * than carrying through whatever unused array content src happened to hold. */
+    for (uint8_t i = 0; i < src->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
+        const trk_layout_t *sl = &src->layouts[i];
+        trk_layout_t       *dl = &dst->layouts[i];
+        dl->id = sl->id;
+        memcpy(dl->name, sl->name, sizeof dl->name);
+        dl->sf = sl->sf;                    /* trk_line_t is four packed doubles: no internal padding */
+        dl->dir_sign = sl->dir_sign;
+        dl->n_sectors = sl->n_sectors;
+        for (uint8_t s = 0; s < sl->n_sectors && s < LAP_MAX_SECTORS; s++) dl->sectors[s] = sl->sectors[s];
+        dl->length_m = sl->length_m;
+    }
+}
+
 int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
 {
     size_t need = 2 + (size_t)user_n * sizeof(trk_venue_t) + 2;
     if (cap < need) return -1;
     blob[0] = BLOB_VERSION; blob[1] = user_n;
-    memcpy(blob + 2, user, (size_t)user_n * sizeof(trk_venue_t));
+    /* static, not a stack local: this module is already non-reentrant (see the file-top comment),
+     * and a ~2.7 KB trk_venue_t on the stack here would eat into the conn task's budget for no
+     * reason. */
+    static trk_venue_t tmp;
+    for (uint8_t i = 0; i < user_n; i++) {
+        canon_venue(&tmp, &user[i]);
+        memcpy(blob + 2 + (size_t)i * sizeof(trk_venue_t), &tmp, sizeof tmp);
+    }
     uint16_t crc = ses_crc16(blob, need - 2);
     blob[need - 2] = (uint8_t)crc; blob[need - 1] = (uint8_t)(crc >> 8);
     *n_out = need;
@@ -4204,12 +4386,10 @@ int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
 #include "core/trk.h"
 #include "core/json.h"
 #include "core/jw.h"
-#include "core/geo.h"
 #include <string.h>
 #include <stdio.h>
 
 #define MAX_TOKS 512
-#define MIN_GATE_LEN_M 1.0        /* a line shorter than this cannot define a crossing direction */
 
 static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
 
@@ -4222,10 +4402,9 @@ static bool get_line(const char *js, const jsmntok_t *toks, int ntoks, int arr, 
 {
     if (arr < 0 || arr >= ntoks || toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
     int p1 = arr + 1, p2 = json_skip(toks, ntoks, p1);
-    if (!get_pt(js, toks, ntoks, p1, &out->p1) || !get_pt(js, toks, ntoks, p2, &out->p2)) return false;
-    /* Degenerate line: the two endpoints must be distinguishable, otherwise the crossing test in
-     * §6.4 has no gate direction and geo_segment_cross always reports "parallel". */
-    return geo_dist_m(out->p1.lat, out->p1.lon, out->p2.lat, out->p2.lon) >= MIN_GATE_LEN_M;
+    /* Degenerate/too-short lines (§6.4 needs a gate direction) are rejected once, by the shared
+     * trk_validate_venue() call trk_from_json makes at the end -- not duplicated here. */
+    return get_pt(js, toks, ntoks, p1, &out->p1) && get_pt(js, toks, ntoks, p2, &out->p2);
 }
 
 /* Not reentrant: static token array (single caller task). */
@@ -5346,6 +5525,7 @@ foreach(f ${TEST_SRCS})
   string(REGEX REPLACE "^test_" "" s "${base}")        # test_cfg       -> cfg
   list(APPEND SUITES "${s}")
 endforeach()
+list(SORT SUITES)
 set(WRAP_DIR "${CMAKE_CURRENT_BINARY_DIR}/wrap")
 file(MAKE_DIRECTORY "${WRAP_DIR}")
 set(WRAPPERS "")
@@ -5354,7 +5534,17 @@ foreach(s ${SUITES})
   file(WRITE "${w}" "#define main run_test_${s}\n#define setUp setUp_test_${s}\n#define tearDown tearDown_test_${s}\n#include \"${TEST_DIR}/test_${s}.c\"\n")
   list(APPEND WRAPPERS "${w}")
 endforeach()
+# suites_gen.h: one SUITE(name) line per globbed test, sorted, consumed twice as an X-macro by
+# main.c -- so a new test/test_*.c is always declared, built into the suite table and run; it
+# cannot be linked but silently skipped.
+set(SUITES_GEN "${CMAKE_CURRENT_BINARY_DIR}/suites_gen.h")
+set(SUITES_GEN_CONTENT "")
+foreach(s ${SUITES})
+  string(APPEND SUITES_GEN_CONTENT "SUITE(${s})\n")
+endforeach()
+file(WRITE "${SUITES_GEN}" "${SUITES_GEN_CONTENT}")
 idf_component_register(SRCS "main.c" ${WRAPPERS} INCLUDE_DIRS "." REQUIRES core unity_vendored pthread esp_timer)
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function -Wno-unused-parameter)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEST_DIR})
@@ -5379,16 +5569,19 @@ static hook_t cur_setup, cur_teardown;
 void setUp(void) { if (cur_setup) cur_setup(); }
 void tearDown(void) { if (cur_teardown) cur_teardown(); }
 
-#define SUITE_DECL(name) int run_test_##name(void); void setUp_test_##name(void); void tearDown_test_##name(void);
-SUITE_DECL(smoke) SUITE_DECL(bw) SUITE_DECL(ring) SUITE_DECL(geo) SUITE_DECL(tb) SUITE_DECL(ses_frame)
-SUITE_DECL(ses_records) SUITE_DECL(jw) SUITE_DECL(cfg) SUITE_DECL(trk) SUITE_DECL(exp_vbo) SUITE_DECL(exp_nmea_json)
+/* suites_gen.h is generated by CMakeLists.txt from the same test/test_*.c glob that builds the
+ * wrappers, one SUITE(name) line per file, so a new suite is always declared, built into the table
+ * below and run -- it cannot be linked but silently skipped. */
+#define SUITE(name) int run_test_##name(void); void setUp_test_##name(void); void tearDown_test_##name(void);
+#include "suites_gen.h"
+#undef SUITE
 
 typedef struct { const char *name; int (*run)(void); hook_t setup, teardown; } suite_t;
-#define SUITE(name) { #name, run_test_##name, setUp_test_##name, tearDown_test_##name }
+#define SUITE(name) { #name, run_test_##name, setUp_test_##name, tearDown_test_##name },
 static const suite_t suites[] = {
-    SUITE(smoke), SUITE(bw), SUITE(ring), SUITE(geo), SUITE(tb), SUITE(ses_frame),
-    SUITE(ses_records), SUITE(jw), SUITE(cfg), SUITE(trk), SUITE(exp_vbo), SUITE(exp_nmea_json),
+#include "suites_gen.h"
 };
+#undef SUITE
 
 /* The suites above run in app_main's 40 KB task, which says nothing about whether the core fits an
  * ordinary app task. The two suites that drive the deepest core call chains (cfg walks a JSON tree,

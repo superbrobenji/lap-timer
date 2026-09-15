@@ -5,7 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 
-void setUp(void) {}
+/* deterministic LCG, same pattern as the other suites; reseeded in setUp so a second run within the
+ * same process (the on-target 6 KB stack rerun in test_apps/core_selftest) replays the exact same
+ * fuzz sequence as the first. */
+static uint32_t lcg;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+
+void setUp(void) { lcg = 987654321u; }
 void tearDown(void) {}
 
 static void test_defaults_are_valid(void)
@@ -237,10 +243,6 @@ static void test_profile_with_bad_name_leaves_the_struct_untouched(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &bad));
     TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
 }
-
-/* deterministic LCG, same pattern as the other suites */
-static uint32_t lcg = 987654321u;
-static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
 
 static void test_fuzz_mutated_documents_never_corrupt_the_struct(void)
 {
