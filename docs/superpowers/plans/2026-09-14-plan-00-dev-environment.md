@@ -413,6 +413,7 @@ Expected: a `/dev/cu.usbserial-XXXX` (CH340) entry appears. If not, install the 
 
 Run: `tools/.venv/bin/esptool.py --port /dev/cu.usbserial-XXXX flash_id`
 Expected output includes `Chip is ESP32-D0WD…`, `Detected flash size: 4MB` (or larger).
+Result 2026-09-15: ESP32-D0WD-V3 (revision v3.1), 4 MB flash, 40 MHz crystal, VRef calibration in eFuse, port /dev/cu.usbserial-0001.
 
 - [ ] **Step 3: Record the result in the spec**
 
@@ -426,6 +427,7 @@ cp -r $IDF_PATH/examples/get-started/hello_world /tmp/hello && cd /tmp/hello
 idf.py set-target esp32 && idf.py build && idf.py -p /dev/cu.usbserial-XXXX flash monitor
 ```
 Expected: `Hello world!` and chip info on the monitor; `Ctrl+]` exits. This proves toolchain, USB, and CH340 before plan 3.
+Note: the board only enters download mode while the BOOT button is held, so the flash step is run by the operator on the user's "ready", never unattended.
 
 - [ ] **Step 5: Commit, PR, tag**
 

@@ -110,7 +110,7 @@ A self-contained, battery-powered GPS + IMU lap timer for track days and drag ru
 
 | Item | Part | Interface | Notes |
 |------|------|-----------|-------|
-| MCU | ESP32 DevKit V1 (ESP32-WROOM-32, CH340) | — | Assumed 4 MB flash **[VERIFY]** `esptool.py flash_id`. Dual core 240 MHz, 520 KB SRAM, 8 KB slow RTC RAM. |
+| MCU | ESP32 DevKit V1 (ESP32-WROOM-32, CH340) | — | Flash 4 MB, verified 2026-09-15 with esptool flash_id (ESP32-D0WD-V3 rev 3.1, 40 MHz crystal, VRef calibration in eFuse). Dual core 240 MHz, 520 KB SRAM, 8 KB slow RTC RAM. |
 | GPS | GY-NEO6M v2 (u-blox NEO-6M) | UART, 3.3 V logic | 5 Hz max nav rate, ~40 mA, onboard LDO + backup cell (MS621FE) + EEPROM, no PPS pin. Firmware **[VERIFY]** via `UBX-MON-VER` (NAV-PVT needs 7.03). |
 | IMU | GY-521 (MPU6050) | I2C 400 kHz, addr 0x68 (AD0 low) | 16-bit accel ±16 g, gyro ±2000 dps, 1 KB FIFO, motion interrupt. Authenticity **[VERIFY]** via self-test. |
 | Display | Waveshare-class SSD1680 e-paper 2.13" (250×122) or 2.9" (296×128) | SPI mode 0, ≤ 20 MHz | Exact panel **[VERIFY]**; driver parameterised by panel table. |
@@ -1528,7 +1528,7 @@ UART wake from light sleep is not used (classic ESP32 loses the first bytes). In
 
 ### 16.4 Battery measurement
 
-- `adc1_config_width(ADC_WIDTH_BIT_12)`, `adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11)`, `esp_adc_cal_characterize` with eFuse Vref/Two-Point when present.
+- `adc1_config_width(ADC_WIDTH_BIT_12)`, `adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11)`, `esp_adc_cal_characterize` with eFuse Vref/Two-Point when present. This board has VRef calibration in eFuse (verified 2026-09-15).
 - Read: 64 samples, discard 8 highest and 8 lowest, mean → `esp_adc_cal_raw_to_voltage` → `v_tap_mv`. `batt_mv = v_tap_mv · 2` then two-point correction `batt_mv = a·batt_mv + b` from `battery.cal`.
 - Filtering: EMA α = 0.2 at 1 Hz. Shutdown decision on the filtered value.
 - SoC: piecewise-linear OCV table for INR cells `{4200:100, 4100:90, 4000:78, 3900:64, 3800:48, 3700:30, 3600:16, 3500:8, 3400:3, 3300:0}` (mV → %). Under load (ACTIVE) add +60 mV IR compensation before lookup.
@@ -2116,7 +2116,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 
 ## 25. Items to verify on hardware before or during Phase 1
 
-1. Flash size (`esptool.py flash_id`); partition table assumes 4 MB.
+1. ~~Flash size~~ — verified 4 MB on 2026-09-15 (ESP32-D0WD-V3 rev 3.1); partition table §19.1 stands.
 2. NEO-6M firmware via `MON-VER` (NAV-PVT ≥ 7.03 else fallback set).
 3. TP4056 module protection (6 pads).
 4. Dev board accepts 3.3 V injection on `3V3` without back-feed issues.
