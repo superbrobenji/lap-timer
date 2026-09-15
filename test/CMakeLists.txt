@@ -34,3 +34,4 @@ function(add_core_test name)
 endfunction()
 
 add_core_test(test_smoke)
+add_core_test(test_bw)
