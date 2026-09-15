@@ -37,6 +37,10 @@ Prerequisites: `brew install cmake ninja python@3.12`, ESP-IDF v5.3.2 at `~/esp/
 
 Disconnect the battery pack before connecting USB (spec §3.2).
 
+## Hardware
+
+Prototype parts, quantities, order status and South African sources: [docs/hardware/bom.md](docs/hardware/bom.md). Pin map and electrical details: spec §3.
+
 ## Branching
 
 `main` is always releasable. One branch per roadmap session, named `s<plan>.<day>-<topic>`, merged by squash PR once CI is green. Tags `pNN-dD` mark finished sessions, `plan-NN-done` finished plans, `vX.Y.Z` releases.

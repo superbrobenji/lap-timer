@@ -25,7 +25,7 @@ endif()
 
 add_library(unity STATIC unity/src/unity.c)
 target_include_directories(unity PUBLIC unity/src)
-target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12)
+target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12 UNITY_SUPPORT_64)
 
 enable_testing()
 find_package(Threads REQUIRED)

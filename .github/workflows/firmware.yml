@@ -22,6 +22,16 @@ jobs:
       - name: Probe inputs
         id: probe
         run: echo "present=$([ -f build.sh ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Probe core_selftest
+        id: probe_selftest
+        run: echo "present=$([ -f test_apps/core_selftest/CMakeLists.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Build core_selftest (ESP32)
+        if: steps.probe_selftest.outputs.present == 'true' && matrix.env == 'moto_neo6m'
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          idf.py -C test_apps/core_selftest -B test_apps/core_selftest/build set-target esp32 build
       - name: Build ${{ matrix.env }}
         if: steps.probe.outputs.present == 'true'
         shell: bash
