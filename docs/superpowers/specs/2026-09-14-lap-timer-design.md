@@ -318,7 +318,7 @@ Priorities are FreeRTOS numeric (higher = more urgent). `configMAX_PRIORITIES` =
 | `hb[]` | volatile uint32 array | every task → supervisor | 6 | heartbeat counters |
 | `sys_flags` | atomic uint32 | supervisor, drivers → all | — | fault flags (§17.4) |
 
-SPSC rings are implemented in `core/util/ring.h` as a header-only lock-free ring with `head`/`tail` `_Atomic uint32_t`, power-of-two capacity, overwrite-oldest policy for `fused_ring` (sample loss is tolerable) and drop-newest with a counter for `fix_ring` (fix loss is logged).
+SPSC rings are implemented in `components/core/include/core/ring.h` as a header-only lock-free ring with `head`/`tail` `_Atomic uint32_t`, power-of-two capacity, overwrite-oldest policy for `fused_ring` (sample loss is tolerable) and drop-newest with a counter for `fix_ring` (fix loss is logged); the consumer publishes its pop with a compare-and-swap on `tail` so an eviction that races a read is detected and retried, never returned torn.
 
 ### 4.5 Events and commands
 
@@ -2152,7 +2152,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `FWD_LEARN_ACC_MPS2` / `FWD_LEARN_MIN_S` / `FWD_LEARN_WINDOWS` | 1.5 / 1 / 3 | §9.2 |
 | `TB_WINDOW_S` | 30 | §6.2 |
 | `TB_LOCK_FIXES` | 10 | §6.2 |
-| `TB_PPS_DISAGREE_MS` | 50 | §6.2 |
+| `TB_PPS_DISAGREE_US` | 50000 | §6.2 |
 | `EARTH_R_M` | 6371008.8 | §6.3 |
 | `FIX_HACC_MAX_M` | 15 | §6.5 |
 | `FIX_MIN_SATS` | 5 | §6.5 |
