@@ -17,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
       - name: Probe inputs
         id: probe
@@ -32,7 +33,9 @@ jobs:
         if: steps.probe.outputs.present == 'true'
         with:
           name: laptimer-${{ matrix.env }}
-          path: build/${{ matrix.env }}/*.bin
+          path: |
+            build/${{ matrix.env }}/**/*.bin
+            build/${{ matrix.env }}/flasher_args.json
           if-no-files-found: ignore
       - name: Nothing to do
         if: steps.probe.outputs.present != 'true'

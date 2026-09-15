@@ -18,14 +18,18 @@ ESP32 GPS + IMU lap timer for track days and drag runs. Battery powered, fully o
 
 ## Host tests
 
-    cmake -S test -B test/build && cmake --build test/build && ctest --test-dir test/build --output-on-failure
+(The `test/` tree arrives with plan 01.)
+
+    cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug && cmake --build test/build && ctest --test-dir test/build --output-on-failure
 
 ## Firmware
 
+(`build.sh` arrives with plan 03; until then use the ESP-IDF hello-world flow in plan 00 task 7.)
+
 Prerequisites: `brew install cmake ninja python@3.12`, ESP-IDF v5.3.2 at `~/esp/esp-idf-v5.3.2` (see `tools/idf-env.sh`; run `source tools/idf-env.sh` first).
 
-    ./build.sh moto_neo6m build        # see build.sh for environments
-    ./build.sh moto_neo6m flash monitor --port /dev/cu.usbserial-XXXX
+    ./build.sh moto_neo6m build                    # see build.sh for environments
+    ./build.sh moto_neo6m flash-monitor --yes --port /dev/cu.usbserial-0001
 
 Disconnect the battery pack before connecting USB (spec §3.2).
 
@@ -34,10 +38,6 @@ Disconnect the battery pack before connecting USB (spec §3.2).
 `main` is always releasable. One branch per roadmap session, named `s<plan>.<day>-<topic>`, merged by squash PR once CI is green. Tags `pNN-dD` mark finished sessions, `plan-NN-done` finished plans, `vX.Y.Z` releases.
 
 `main` is protected: pull requests only, all five CI checks required and up to date, linear history, no force pushes, enforced for admins.
-
-## Status
-
-Session 0.1 complete.
 
 ## License
 

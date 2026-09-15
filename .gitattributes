@@ -3,3 +3,5 @@
 *.bin binary
 *.ubx binary
 *.png binary
+*.log binary
+*.sum binary
