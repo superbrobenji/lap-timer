@@ -275,7 +275,11 @@ lap-timer/
       cmd/cmd.c                  transport-agnostic command handler (§18.1)
   tools/
     web/export.html
-    replay/CMakeLists.txt replay.c
+    replay/CMakeLists.txt        host-only tools, built by test/CMakeLists.txt (§21.4, §22.2)
+    replay/include/replay/*.h    synth.h synth_gps.h logio.h replay.h synth_truth.h
+    replay/lib/*.c               synth_track.c synth_gps.c synth_truth.c logio.c replay_summary.c replay_version.c
+    replay/synth_main.c replay/replay_main.c
+    replay/test/test_*.c         Unity tests for the tools (host only; not compiled into core_selftest)
     tracks/*.json  tracks/gen_tracks.py
     fonts/gen_fonts.py
     gps_sim.py
@@ -2368,6 +2372,10 @@ Maps `<env>` to flags (§4.6), runs `idf.py -B build/<env> -D<flags> <cmd>`, `si
 
 Plain CMake ≥ 3.16, C11, `-Wall -Wextra -Werror -Wshadow -Wconversion -fsanitize=address,undefined` (Debug). Adds `components/core/**/*.c` with `include/`, vendored Unity, one executable per `test_*.c`, `add_test` for each; `tools/replay` built as `replay`. Works on macOS (Apple clang) and Linux (gcc). No IDF, no network.
 
+`tools/replay` is added with `add_subdirectory` and builds `replaylib` (the synthetic model, the
+`.log` writer/reader and the replay summary), the `synth` and `replay` executables, and one test
+executable per `tools/replay/test/test_*.c`, all registered with the same `ctest`.
+
 ### 21.5 Versioning
 `git describe --tags --match 'v*' --dirty --always` → `CFG_FW_VERSION` (session tags `pNN-dD` and `plan-NN-done` are excluded by the `--match` filter). Tags `vMAJOR.MINOR.PATCH`. Release builds require a clean tree (`sign_release.sh` refuses `-dirty`).
 
@@ -2400,8 +2408,8 @@ Coverage target: ≥ 90 % lines in `core/` (gcov in CI).
 
 ### 22.2 Replay and synthetic generator (host)
 
-- `replay <session.log|capture.ubx> [--imu capture.csv] [--venue id] [--mode lap|drag] [--json]` runs the pipeline core (same call sequence as `app/pipeline` minus IDF) and prints laps/sectors/runs. `--json` emits a machine-readable result compared against `test/data/<name>.expected.json` by `ctest`.
-- `tools/replay/synth.c` generates a polygonal circuit (default 12 vertices, 2.5 km) driven at a speed profile with configurable GPS rate (5/10 Hz), position noise (σ = 1.5 m, correlated with τ = 20 s), speed noise (σ = 0.05 m/s), and latency jitter; ground-truth crossing times are analytic. Acceptance: at 5 Hz, |error| ≤ 30 ms for 95 % of crossings; at 10 Hz ≤ 15 ms.
+- `replay <session.log|capture.ubx> [--imu capture.csv] [--venue id] [--mode lap|drag] [--json]` runs the pipeline core (same call sequence as `app/pipeline` minus IDF) and prints laps/sectors/runs. `--json` emits a machine-readable result compared against `test/data/<name>.expected.json` by `ctest`. Until the engines exist (session 2.7), `replay <file.log> [--json]` prints a summary of the decoded records (counts per type, fix time span, laps listed).
+- `synth` (`tools/replay/synth_main.c`, model in `lib/synth_track.c`, sampling in `lib/synth_gps.c`) generates a polygonal circuit (default 12 vertices, 2.5 km) whose corners are circular arcs (default radius 40 m) driven at a constant corner speed (default 15 m/s); every straight carries a trapezoidal profile (accelerate at 3 m/s², cruise at a per-lap `v_max` of 50 m/s ± 3 %, brake at 6 m/s²). The kinematics are piecewise constant-acceleration, so the position, speed, heading, longitudinal g, lateral g, lean and yaw rate at any instant and every gate crossing time are closed-form. GPS sampling at 5 or 10 Hz adds a first-order Gauss–Markov position error (σ = 1.5 m, τ = 20 s), white speed noise (σ = 0.05 m/s), white heading noise (σ = 0.5°), a fixed arrival latency (80 ms) with uniform jitter (±20 ms), and an optional dropout window. Outputs for `--out <prefix>`: `<prefix>.log` (SESSION_HDR, VENUE, TIME_MAP, FIX_*, FUSED at 10 Hz from truth, END), `<prefix>.truth.json` (configuration, lap length, gate positions and lines, per-lap crossing times in run seconds and `gps_us`, lap and sector times) and `<prefix>.venue.json` (§10.2 schema, loadable with `trk_from_json`). Acceptance: at 5 Hz, |error| ≤ 30 ms for 95 % of crossings; at 10 Hz ≤ 15 ms.
 - Fixtures in `test/data/`: `killarney_full.log`, `killarney_short.log`, `killarney_full_rev.log`, `zwartkops.log`, `drag_0_180.log`, `drag_0_320.log`, `gps_dropout.log`, `truncated.log`. Initially synthetic; replaced by real device captures as they are recorded (first real captures are the Phase 1 exit criterion).
 
 ### 22.3 Bench tests (target)
@@ -2439,7 +2447,7 @@ Three track sessions with RaceChrono on a phone as reference (phone GPS 1 Hz is 
 | Tool | Language | Purpose | Interface |
 |------|----------|---------|-----------|
 | `tools/web/export.html` | JS | phone client (§18.3) | Web Bluetooth / HTTP |
-| `tools/replay/` | C | offline pipeline (§22.2) | CLI |
+| `tools/replay/` | C | offline pipeline `replay` and synthetic fixture generator `synth` (§22.2) | CLI |
 | `tools/tracks/gen_tracks.py` | Python 3 | `*.json` → `trk_bundled.c`; validates schema, lengths, line lengths (10–60 m) | `python gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c` |
 | `tools/fonts/gen_fonts.py` | Python 3 (Pillow) | TTF → 1-bpp glyph arrays | `python gen_fonts.py DejaVuSansMono-Bold.ttf -o components/app/ui/ui_fonts.c` |
 | `tools/gps_sim.py` | Python 3 (pyserial) | replay `.ubx` or `.log` fixes as UBX NAV-PVT at real-time rate to a serial port | `--port --file --rate --loop` |
