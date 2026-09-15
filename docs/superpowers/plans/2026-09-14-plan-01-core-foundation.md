@@ -639,6 +639,8 @@ Expected: FAIL — `core/ring.h: No such file`.
  * the very slot the consumer is copying; the consumer detects that by publishing
  * its consumption with a compare-and-swap on tail and retries when it lost the
  * race, so a torn copy is never returned.
+ * The discarded copy is a formal C11 data race (seqlock-style read of a slot being
+ * overwritten); it is never observed, and the two-thread stress tests guard the invariant.
  *
  * A ring_t must not be copied or moved once either side has started using it.
  * ring_count() and ring_dropped() are approximate snapshots for diagnostics. */
@@ -702,7 +704,7 @@ static inline bool ring_pop(ring_t *r, void *out)
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cmake --build test/build && ctest --test-dir test/build --output-on-failure`
-Expected: `100% tests passed` (5 tests).
+Expected: `100% tests passed` (3 test executables; `test_ring` itself runs 5 cases).
 
 - [ ] **Step 5: Commit**
 
