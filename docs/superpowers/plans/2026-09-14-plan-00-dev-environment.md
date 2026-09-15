@@ -440,6 +440,14 @@ git switch main && git pull --ff-only && git tag p00-d2 && git push origin p00-d
 
 ---
 
+### Task 8: Public repository, branch protection, license (added 2026-09-15)
+
+- Repository visibility changed to public (`gh repo edit --visibility public --accept-visibility-change-consequences`).
+- Branch protection on `main`: required status checks `hygiene`, `host-tests`, `tracks-generated`, `build (moto_neo6m)`, `build (moto_sim)` (strict), enforce for admins, linear history, no force pushes, no deletions, no required reviews.
+- `LICENSE`: PolyForm Strict 1.0.0, copyright Bennie Swanepoel. README gains a License section and the protection note replaces the "not enforced" note.
+
+---
+
 ## Self-review
 
 - Spec §21.5 versioning (`git describe --tags`) needs at least one tag on `main`: `p00-d1` provides it.
