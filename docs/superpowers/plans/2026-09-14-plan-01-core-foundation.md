@@ -185,18 +185,12 @@ function(add_core_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-add_core_test(test_smoke)
-add_core_test(test_bw)
-add_core_test(test_ring)
-add_core_test(test_geo)
-add_core_test(test_tb)
-add_core_test(test_ses_frame)
-add_core_test(test_ses_records)
-add_core_test(test_jw)
-add_core_test(test_cfg)
-add_core_test(test_trk)
-add_core_test(test_exp_vbo)
-add_core_test(test_exp_nmea_json)
+# One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no edit here)
+file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
+foreach(src ${CORE_TEST_SRCS})
+  get_filename_component(name ${src} NAME_WE)
+  add_core_test(${name})
+endforeach()
 
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
@@ -550,6 +544,12 @@ typedef struct {
 #define TRK_MAX_LAYOUTS        8
 #define TRK_MAX_USER           4
 #define MOVING_SPEED_KMH       3
+#define IMU_ACC_LSB_PER_G      2048.0f
+#define IMU_GYR_LSB_PER_DPS    16.4f
+#define FWD_LEARN_MAX_YAW_DPS  2.0f
+#define FUS_ORIENT_MIN_G       0.5f
+#define FUS_ORIENT_MAX_G       1.5f
+#define FUS_REF_MAX_AGE_US     1000000LL
 #endif
 ```
 
