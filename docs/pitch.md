@@ -61,6 +61,6 @@ Every GPS lap timer on the market has the same limit: the satellite fix is good 
 
 ## Where it is
 
-The design is written down in full. The timing, track-recognition and export software is built and tested on a desktop computer, and is about to be proven on the real board. Batteries arrive next week; the GPS and motion sensor in about a month; the display is still to be ordered. First real track session follows once those are in hand.
+The design is written down in full. The device itself is not built yet. The first building blocks of the software, the timing maths, track recognition and data export, are being written and tested on a desktop computer before anything runs on the board. Batteries arrive next week; the GPS and motion sensor in about a month; the display is still to be ordered. First real track session follows once those are in hand.
 
 **After the motorcycle version:** a car version with a bright OLED screen and live "faster or slower" readout, Wi-Fi download without an app, live streaming to RaceChrono on the phone, and the better GPS as a plug-in upgrade.
