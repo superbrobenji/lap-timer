@@ -40,11 +40,12 @@ Tasks are designed so that several implementers can run at once without touching
 
 ```
 components/core/
-  include/core/fus.h    fusion/fus.c  fusion/fus_calib.c          (sessions 2.2–2.3)
+  include/core/fus.h    fusion/fus.c  fusion/fus_still.c  fusion/fus_orient.c  fusion/fus_fwd.c   (session 2.2; 2.3 extends fus.c)
   include/core/lap.h    lapengine/lap.c  lapengine/lap_gate.c     (sessions 2.4–2.5)
   include/core/drag.h   dragengine/drag.c                          (session 2.6)
 test/
-  test_fus.c  test_lap.c  test_drag.c                              (sessions 2.2–2.6)
+  test_fus.c  test_fus_still.c  test_fus_orient.c  test_fus_fwd.c    (session 2.2)
+  test_lap.c  test_drag.c                                          (sessions 2.4–2.6)
   data/*.log  data/*.expected.json                                 (session 2.7)
 tools/replay/
   CMakeLists.txt                       replaylib + synth + replay + tool tests (Task 1)
@@ -5540,5 +5541,2814 @@ Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
 ```
 
 ---
+
+---
+
+## Session 2.2 — fusion part 1: stillness, gyro bias, orientation capture, forward-axis learning
+
+Roadmap exit criterion: `test_fus` calibration cases green (§22.1: rotation with identity and 90° mounts; gyro bias applied; still detection; orientation capture from tilted gravity; forward learning from synthetic straight-line acceleration; lean invalid before forward learned); tag `p02-d2`.
+
+Task graph: **Task 1** (serial) → **Tasks 2, 3, 4** [parallel group 2] → **Task 5** (serial).
+
+Decisions fixed for the session (rulings, spec is the authority; write-backs are in Task 1 Step 6):
+
+- Units inside fusion: accel in g (`raw / IMU_ACC_LSB_PER_G`), gyro in dps (`(raw − gbias) / IMU_GYR_LSB_PER_DPS`), rad/s only where the math needs it; all math `float`, window accumulators `double` (a 2 s window sums 200 squared LSB values, which float32 cannot hold without cancellation).
+- Stillness uses tumbling 2 s windows (200 samples): `FUS_STILL` and `fus_is_still` reflect the last completed window; no per-sample sliding statistics (memory and CPU stay trivial, latency ≤ 2 s is acceptable for bias capture and drag arming).
+- `fus_calib_t` gains `bias_ok` (the spec's struct had no way to tell a stored zero bias from an uncaptured one); the IMU temperature reaches fusion through a new `fus_set_temp` (the raw sample has no temperature field; the driver's `imu_read_temp_c100` is polled by the pipeline at ~1 Hz).
+- `FUS_ORIENT_OK` on a sample means both rotation rows are known (`orient_ok && forward_ok`); before that `g_lon` is the sign-less horizontal magnitude, `g_lat` is 0 and `FUS_LEAN_VALID` is clear. Lateral g in this session is the specific-force formula `−a.y` for both variants; session 2.3 replaces it for the moto with `−v·ψ̇` and adds the lean filter.
+- Forward learning counts a run of qualifying fixes as one window the moment it reaches `FWD_LEARN_MIN_S` and keeps accumulating until the run ends; `fus_calib_forward_step` returns 1 exactly once, when the forward row is set.
+- A zeroed `fus_still_t` / `fus_fwd_t` is a valid initialised state, so `fus_init` needs no calls into the parallel modules (Task 5 wires their use into `fus_step` and the public calibration calls).
+- Host test executables are discovered by a CMake glob from this session on (`test/test_*.c`), so parallel tasks add suites without touching `test/CMakeLists.txt`; `core_selftest` already globs the same files and will run the new suites on the ESP32.
+
+### Task 1: Fusion header, constants, step skeleton, test glob, spec write-backs (serial)
+
+**Files:**
+- Create: `components/core/include/core/fus.h`, `components/core/fusion/fus.c`, `test/test_fus.c`
+- Modify: `components/core/include/core/consts.h` (six constants), `test/CMakeLists.txt` (glob), `docs/superpowers/specs/2026-09-14-lap-timer-design.md` (§5.2 fus block, §9.2, Appendix A), `docs/superpowers/plans/2026-09-14-plan-01-core-foundation.md` (its `consts.h` and `test/CMakeLists.txt` blocks), this plan's Task 1 Step 4 block for `test/CMakeLists.txt`
+
+**Interfaces:**
+- Consumes: `core/types.h` (`imu_raw_t`, `fused_sample_t`, `FUS_*` flags), `core/consts.h`, `core/ses.h` (`ses_calib_t`).
+- Produces: `core/fus.h` below, verbatim. Tasks 2–4 implement `fus_still_*`, `fus_orient_*`/`fus_rotate` is here, `fus_fwd_*`; Task 5 wires them. Tasks 2–4 MUST NOT change the header.
+
+- [ ] **Step 1: Write the failing tests**
+
+`test/test_fus.c`:
+
+```c
+#include "unity.h"
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* Raw sample helpers: accel in g and gyro in dps expressed as MPU-6050 LSB (types.h scales). */
+static imu_raw_t raw_g_dps(double ax_g, double ay_g, double az_g, double gx, double gy, double gz)
+{
+    imu_raw_t r;
+    r.mono_us = 1000000;
+    r.ax = (int16_t)lround(ax_g * IMU_ACC_LSB_PER_G);
+    r.ay = (int16_t)lround(ay_g * IMU_ACC_LSB_PER_G);
+    r.az = (int16_t)lround(az_g * IMU_ACC_LSB_PER_G);
+    r.gx = (int16_t)lround(gx * IMU_GYR_LSB_PER_DPS);
+    r.gy = (int16_t)lround(gy * IMU_GYR_LSB_PER_DPS);
+    r.gz = (int16_t)lround(gz * IMU_GYR_LSB_PER_DPS);
+    return r;
+}
+
+static void test_defaults_are_identity_and_valid(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    TEST_ASSERT_EQUAL_UINT8(FUS_CALIB_VERSION, c.version);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, c.r[0]); TEST_ASSERT_EQUAL_FLOAT(1.0f, c.r[4]); TEST_ASSERT_EQUAL_FLOAT(1.0f, c.r[8]);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.r[1]);
+    TEST_ASSERT_EQUAL_UINT8(0, c.orient_ok); TEST_ASSERT_EQUAL_UINT8(0, c.forward_ok); TEST_ASSERT_EQUAL_UINT8(0, c.bias_ok);
+}
+
+static void test_invalid_calibration_is_rejected_and_init_falls_back(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.version = 0;
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.r[0] = 2.0f;                       /* row x not unit length */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.r[3] = 1.0f;                       /* row y = (1,0,0) parallel to row x */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.forward_ok = 1;                    /* forward without orientation */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.gbias[1] = 40000.0f;               /* beyond the raw range */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+
+    fus_t f; c.version = 0;
+    fus_init(&f, &c, 1);
+    TEST_ASSERT_TRUE(fus_calib_valid(fus_calib(&f)));
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, fus_calib(&f)->r[0]);
+    fus_init(&f, NULL, 0);
+    TEST_ASSERT_TRUE(fus_calib_valid(fus_calib(&f)));
+    TEST_ASSERT_EQUAL_UINT8(0, f.moto);
+}
+
+static void test_identity_mount_gravity_bias_and_yaw_sign(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.gbias[0] = 5.0f * IMU_GYR_LSB_PER_DPS;                     /* 5 dps bias on X */
+    c.bias_ok = 1;
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o;
+    imu_raw_t r = raw_g_dps(0.0, 0.0, 1.0, 5.0, 0.0, 10.0);
+    TEST_ASSERT_EQUAL_INT(1, fus_step(&f, &r, &o));
+    TEST_ASSERT_EQUAL_INT64(1000000, o.mono_us);
+    /* orientation not learned: sign-less horizontal magnitude, no lateral, no lean, ORIENT_OK clear */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, o.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, o.g_lat);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, o.lean_deg);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & (FUS_ORIENT_OK | FUS_LEAN_VALID));
+    /* yaw: +10 dps about body Z = left turn, bias-free because the bias is on X only */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 10.0f, o.yaw_dps);
+
+    c.orient_ok = 1; c.forward_ok = 1;                            /* identity mount fully known */
+    fus_init(&f, &c, 1);
+    r = raw_g_dps(0.3, 0.5, 1.0, 5.0, 0.0, 0.0);
+    fus_step(&f, &r, &o);
+    /* accel tolerance 1e-3 g: raw LSB quantisation is 1/2048 g ≈ 4.9e-4 g */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.3f, o.g_lon);              /* +X forward: accelerating */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, -0.5f, o.g_lat);             /* +Y is left, so lateral g is -a.y */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, sqrtf(0.34f), o.g_comb);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.yaw_dps);            /* 5 dps on X minus the 5 dps bias */
+    TEST_ASSERT_EQUAL_UINT8(FUS_ORIENT_OK, o.flags & FUS_ORIENT_OK);
+    TEST_ASSERT_EQUAL_UINT32(1, f.samples);
+}
+
+static void test_ninety_degree_mount_rotates_into_the_vehicle_frame(void)
+{
+    /* IMU mounted with body +X pointing left (vehicle +Y) and body +Y pointing backwards (vehicle -X);
+     * body +Z up. Rows are the vehicle axes in body coordinates: x = (0,-1,0), y = (1,0,0), z = (0,0,1). */
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float R[9] = { 0.0f, -1.0f, 0.0f,   1.0f, 0.0f, 0.0f,   0.0f, 0.0f, 1.0f };
+    memcpy(c.r, R, sizeof R);
+    c.orient_ok = 1; c.forward_ok = 1;
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o;
+    /* vehicle accelerating at 0.3 g forward appears on body -Y; a 10 dps left turn is body +Z */
+    imu_raw_t r = raw_g_dps(0.0, -0.3, 1.0, 0.0, 0.0, 10.0);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.3f, o.g_lon);              /* 1e-3 g: LSB quantisation */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 10.0f, o.yaw_dps);
+    /* a right-hand lateral specific force (vehicle -Y = body -X) reads as positive g_lat */
+    r = raw_g_dps(-0.4, 0.0, 1.0, 0.0, 0.0, 0.0);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.4f, o.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.g_lon);
+
+    float v[3]; const float b[3] = { 1.0f, 2.0f, 3.0f };
+    fus_rotate(R, b, v);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -2.0f, v[0]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, v[1]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.0f, v[2]);
+}
+
+static void test_temperature_drift_marks_the_bias_stale(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.bias_ok = 1; c.gbias_temp_c100 = 2500;
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o; imu_raw_t r = raw_g_dps(0, 0, 1, 0, 0, 0);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);        /* temperature unknown: not stale */
+    fus_set_temp(&f, 3900);                                      /* 14 °C away: within BIAS_TEMP_STALE_C */
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);
+    fus_set_temp(&f, 4100);                                      /* 16 °C away */
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(FUS_BIAS_STALE, o.flags & FUS_BIAS_STALE);
+    fus_set_temp(&f, 900);                                       /* 16 °C the other way */
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(FUS_BIAS_STALE, o.flags & FUS_BIAS_STALE);
+    /* no bias captured: temperature can never make it stale */
+    fus_calib_defaults(&c); fus_init(&f, &c, 1); fus_set_temp(&f, 9000);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);
+}
+
+static void test_calibration_round_trips_through_the_calib_record(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float ang = 30.0f * 3.14159265358979f / 180.0f;         /* rotation about Z by 30° (M_PI is not C11) */
+    const float R[9] = { cosf(ang), sinf(ang), 0.0f,  -sinf(ang), cosf(ang), 0.0f,  0.0f, 0.0f, 1.0f };
+    memcpy(c.r, R, sizeof R);
+    c.gbias[0] = 12.4f; c.gbias[1] = -7.6f; c.gbias[2] = 0.4f; c.gbias_temp_c100 = 2712;
+    c.orient_ok = 1; c.forward_ok = 1; c.bias_ok = 1;
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    ses_calib_t w; fus_calib_to_ses(&c, &w);
+    TEST_ASSERT_EQUAL_INT16(8660, w.r_e4[0]);                     /* cos 30° × 1e4 rounded */
+    TEST_ASSERT_EQUAL_INT16(5000, w.r_e4[1]);
+    TEST_ASSERT_EQUAL_INT16(12, w.gbias[0]); TEST_ASSERT_EQUAL_INT16(-8, w.gbias[1]); TEST_ASSERT_EQUAL_INT16(0, w.gbias[2]);
+    TEST_ASSERT_EQUAL_UINT8(0x07, w.calib_flags);
+    fus_calib_t d; fus_calib_from_ses(&w, &d);
+    for (int i = 0; i < 9; i++) TEST_ASSERT_FLOAT_WITHIN(1e-4f, c.r[i], d.r[i]);
+    TEST_ASSERT_TRUE(fus_calib_valid(&d));                        /* 1e-4 quantisation stays inside FUS_ORTHO_TOL */
+    TEST_ASSERT_EQUAL_FLOAT(12.0f, d.gbias[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, d.orient_ok); TEST_ASSERT_EQUAL_UINT8(1, d.forward_ok); TEST_ASSERT_EQUAL_UINT8(1, d.bias_ok);
+    TEST_ASSERT_EQUAL_UINT8(FUS_CALIB_VERSION, d.version);
+    TEST_ASSERT_EQUAL_INT16(0, d.gbias_temp_c100);                 /* not carried by the record */
+    /* a saturating bias clamps instead of wrapping */
+    c.gbias[2] = 40000.0f; fus_calib_to_ses(&c, &w);
+    TEST_ASSERT_EQUAL_INT16(32767, w.gbias[2]);
+}
+
+static void test_gps_speed_is_held_with_its_validity_and_time(void)
+{
+    fus_t f; fus_init(&f, NULL, 1);
+    fus_set_gps_speed(&f, 27.5f, 5000000, true);
+    TEST_ASSERT_EQUAL_FLOAT(27.5f, f.v_mps); TEST_ASSERT_EQUAL_INT64(5000000, f.v_mono_us); TEST_ASSERT_TRUE(f.v_valid);
+    fus_set_gps_speed(&f, 0.0f, 5200000, false);
+    TEST_ASSERT_FALSE(f.v_valid);
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_defaults_are_identity_and_valid);
+    RUN_TEST(test_invalid_calibration_is_rejected_and_init_falls_back);
+    RUN_TEST(test_identity_mount_gravity_bias_and_yaw_sign);
+    RUN_TEST(test_ninety_degree_mount_rotates_into_the_vehicle_frame);
+    RUN_TEST(test_temperature_drift_marks_the_bias_stale);
+    RUN_TEST(test_calibration_round_trips_through_the_calib_record);
+    RUN_TEST(test_gps_speed_is_held_with_its_validity_and_time);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Add the constants**
+
+Append to `components/core/include/core/consts.h` immediately after the line `#define MOVING_SPEED_KMH       3` (before `#endif`):
+
+```c
+#define IMU_ACC_LSB_PER_G      2048.0f
+#define IMU_GYR_LSB_PER_DPS    16.4f
+#define FWD_LEARN_MAX_YAW_DPS  2.0f
+#define FUS_ORIENT_MIN_G       0.5f
+#define FUS_ORIENT_MAX_G       1.5f
+#define FUS_REF_MAX_AGE_US     1000000LL
+```
+
+Update the `consts.h` block in `docs/superpowers/plans/2026-09-14-plan-01-core-foundation.md` (search for `#define MOVING_SPEED_KMH`) to match the file byte-for-byte.
+
+- [ ] **Step 3: Write the header**
+
+`components/core/include/core/fus.h`:
+
+```c
+#ifndef CORE_FUS_H
+#define CORE_FUS_H
+#include <stdint.h>
+#include <stdbool.h>
+#include "core/types.h"
+#include "core/consts.h"
+#include "core/ses.h"
+
+/* Sensor fusion and calibration (spec §9.2–9.3). Pure C11, no allocation; all state in fus_t.
+ *
+ * Frames: body = the IMU's own axes as mounted; vehicle = X forward, Y left, Z up. The rotation R has
+ * rows x, y, z = the vehicle axes expressed in body coordinates, so vehicle = R · body.
+ * Units: accel in g (raw / IMU_ACC_LSB_PER_G); gyro in dps ((raw − gbias) / IMU_GYR_LSB_PER_DPS),
+ * converted to rad/s only where the math needs it. Signs (core/types.h): g_lat and lean + right,
+ * yaw + left turn, g_lon + accelerating.
+ *
+ * A zeroed fus_still_t or fus_fwd_t is a valid initialised state (the *_init functions memset). */
+
+#define FUS_CALIB_VERSION   1
+#define FUS_ORTHO_TOL       1e-3f                               /* row norm / dot tolerance for a valid R */
+#define FUS_STILL_WINDOW_N  (STILL_WINDOW_S * FUSION_HZ)        /* 200 samples per stillness window */
+#define FUS_FWD_MIN_SAMPLES (FWD_LEARN_MIN_S * FUSION_HZ)       /* 100 samples before a run counts */
+#define FUS_CALIB_F_ORIENT  0x01                                /* ses_calib_t.calib_flags bits */
+#define FUS_CALIB_F_FORWARD 0x02
+#define FUS_CALIB_F_BIAS    0x04
+
+typedef struct {
+    float   r[9];             /* rows x, y, z (row-major) */
+    float   gbias[3];         /* gyro bias, raw LSB */
+    int16_t gbias_temp_c100;  /* IMU temperature when gbias was captured */
+    uint8_t bias_ok;          /* gbias captured at least once */
+    uint8_t orient_ok;        /* z row captured */
+    uint8_t forward_ok;       /* x and y rows learned (implies orient_ok) */
+    uint8_t version;          /* FUS_CALIB_VERSION */
+} fus_calib_t;
+void fus_calib_defaults(fus_calib_t *c);                        /* identity R, zero bias, flags 0, current version */
+/* version matches, every value finite, |gbias| < 32768, forward_ok implies orient_ok, R orthonormal within FUS_ORTHO_TOL */
+bool fus_calib_valid(const fus_calib_t *c);
+/* CALIB record (§12.3): r × 1e4 → int16, gbias rounded and clamped to int16, flags FUS_CALIB_F_*. The record
+ * carries no temperature: fus_calib_from_ses sets gbias_temp_c100 = 0 and version = FUS_CALIB_VERSION. */
+void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out);
+void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out);
+
+/* ---- Stillness detector: tumbling windows of FUS_STILL_WINDOW_N raw samples (§9.2) ---- */
+typedef struct {
+    double   sum_amag, sum_amag2;    /* |accel| in g over the current window */
+    double   sum_g[3], sum_g2[3];    /* gyro in dps (bias not removed) */
+    double   sum_acc[3];             /* accel in g, for the orientation mean */
+    double   sum_graw[3];            /* gyro raw LSB, for the bias mean */
+    uint16_t n;                      /* samples in the current window */
+    bool     have_window;            /* a window has completed at least once */
+    bool     still;                  /* the last completed window was still */
+    float    acc_var;                /* last completed window: variance of |a|, g² */
+    float    gyr_var_max;            /* last completed window: largest gyro axis variance, dps² */
+    float    mean_acc[3];            /* last completed window: mean accel, g (body) */
+    float    mean_graw[3];           /* last completed window: mean gyro, raw LSB */
+} fus_still_t;
+void fus_still_init(fus_still_t *s);
+/* Accumulates one raw sample. Returns 1 when this sample completed a window (the last-window fields are
+ * then updated and the window restarts), else 0. still = acc_var < STILL_ACC_VAR && gyr_var_max < STILL_GYRO_VAR. */
+int  fus_still_push(fus_still_t *s, const imu_raw_t *raw);
+
+/* ---- Orientation rows (§9.2) ---- */
+/* z = normalize(mean_acc); rows x, y become a provisional orthonormal completion (the body axis least aligned
+ * with z, projected); orient_ok = 1, forward_ok = 0. Returns -1 (calib untouched) unless
+ * FUS_ORIENT_MIN_G ≤ |mean_acc| ≤ FUS_ORIENT_MAX_G. */
+int  fus_orient_from_gravity(fus_calib_t *c, const float mean_acc_g[3]);
+/* x = normalize(sum_ah − (sum_ah·z)z), y = z × x, x = y × z; forward_ok = 1. Returns -1 (calib untouched) if
+ * !orient_ok or the horizontal component is shorter than 1e-6. */
+int  fus_orient_set_forward(fus_calib_t *c, const float sum_ah[3]);
+void fus_rotate(const float r[9], const float b[3], float v[3]);   /* v = R · b */
+
+/* ---- Forward-axis learning window tracker (§9.2) ---- */
+typedef struct {
+    bool     cond;            /* the latest fix qualifies: |yaw| < FWD_LEARN_MAX_YAW_DPS and gps_acc > FWD_LEARN_ACC_MPS2 */
+    uint32_t run_samples;     /* consecutive fus_step samples with cond true */
+    double   run_sum[3];      /* a_h accumulated during the current run (g, body) */
+    double   sum[3];          /* a_h accumulated over counted runs */
+    uint8_t  windows;         /* runs counted so far */
+    bool     counted;         /* the current run has been counted (it reached FUS_FWD_MIN_SAMPLES) */
+} fus_fwd_t;
+void fus_fwd_init(fus_fwd_t *w);
+/* Per GPS fix: sets cond. A run ends when cond turns false; its samples count only if it was counted. */
+void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps);
+/* Per fus_step while orientation is known: accumulates a_h = a − (a·z)z when cond. When a run reaches
+ * FUS_FWD_MIN_SAMPLES it is counted (its run_sum so far moves into sum, later samples add to sum directly).
+ * Returns 1 exactly once, when the FWD_LEARN_WINDOWS-th run is counted; else 0. */
+int  fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3]);
+bool fus_fwd_ready(const fus_fwd_t *w);                          /* windows >= FWD_LEARN_WINDOWS */
+
+/* ---- Fusion state ---- */
+typedef struct {
+    fus_calib_t calib;
+    uint8_t     moto;                /* variant: 1 moto (lean filter), 0 car */
+    fus_still_t still;
+    fus_fwd_t   fwd;
+    float       v_mps;               /* latest GPS speed (fus_set_gps_speed) */
+    int64_t     v_mono_us;
+    bool        v_valid;
+    int16_t     temp_c100;           /* latest IMU temperature (fus_set_temp) */
+    bool        temp_known;
+    bool        bias_stale;          /* |temp − gbias_temp| > BIAS_TEMP_STALE_C since the last bias update */
+    bool        fwd_learned_pending; /* set by fus_step when the forward row was just learned; consumed by fus_calib_forward_step */
+    float       lean_rad;            /* session 2.3: lean filter state */
+    int64_t     last_ref_mono_us;    /* session 2.3: last time a lean reference was applied */
+    uint32_t    samples;             /* fus_step calls since init */
+} fus_t;
+
+/* calib NULL or invalid → defaults. */
+void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);
+void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid);
+/* IMU temperature (~1 Hz from the pipeline). Sets bias_stale when a captured bias is more than
+ * BIAS_TEMP_STALE_C away from its capture temperature. */
+void fus_set_temp(fus_t *f, int16_t temp_c100);
+/* Processes one raw sample into out; always produces a sample and returns 1. out->gps_us is left 0 for the
+ * pipeline to fill from the time base. */
+int  fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);
+bool fus_is_still(const fus_t *f);                               /* last completed stillness window was still */
+/* gbias = last still window's mean raw gyro, gbias_temp = current temperature (0 if unknown), bias_ok = 1,
+ * bias_stale cleared. No-op unless fus_is_still. */
+void fus_gyro_bias_update(fus_t *f);
+/* Upright capture (menu action): z row from the last still window's mean accel. 0 ok / -1 not still or
+ * fus_orient_from_gravity rejected the mean. */
+int  fus_calib_orient_capture(fus_t *f);
+/* Per GPS fix: feeds the forward-learning tracker. Returns 1 when the forward row was just learned (caller
+ * persists the calibration and emits EV_CALIB_DONE), 0 otherwise, -1 if orientation is not captured. */
+int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);
+const fus_calib_t *fus_calib(const fus_t *f);
+#endif
+```
+
+- [ ] **Step 4: Write the step skeleton**
+
+`components/core/fusion/fus.c` (this session's Task 5 replaces the four bottom functions and extends `fus_step`; everything else is final):
+
+```c
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+/* ---- calibration ---- */
+
+static float dot3(const float *a, const float *b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static bool all_finite(const float *v, int n)
+{
+    for (int i = 0; i < n; i++) if (!isfinite(v[i])) return false;
+    return true;
+}
+
+void fus_calib_defaults(fus_calib_t *c)
+{
+    memset(c, 0, sizeof *c);
+    c->r[0] = 1.0f; c->r[4] = 1.0f; c->r[8] = 1.0f;
+    c->version = FUS_CALIB_VERSION;
+}
+
+bool fus_calib_valid(const fus_calib_t *c)
+{
+    if (c->version != FUS_CALIB_VERSION) return false;
+    if (!all_finite(c->r, 9) || !all_finite(c->gbias, 3)) return false;
+    for (int i = 0; i < 3; i++) if (fabsf(c->gbias[i]) >= 32768.0f) return false;
+    if (c->forward_ok && !c->orient_ok) return false;
+    for (int i = 0; i < 3; i++) {
+        const float *ri = c->r + 3 * i;
+        if (fabsf(dot3(ri, ri) - 1.0f) > FUS_ORTHO_TOL) return false;
+        for (int j = i + 1; j < 3; j++)
+            if (fabsf(dot3(ri, c->r + 3 * j)) > FUS_ORTHO_TOL) return false;
+    }
+    return true;
+}
+
+static int16_t clamp_i16(float v)
+{
+    if (v >= 32767.0f) return 32767;
+    if (v <= -32768.0f) return -32768;
+    return (int16_t)lroundf(v);
+}
+
+void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out)
+{
+    memset(out, 0, sizeof *out);
+    for (int i = 0; i < 9; i++) out->r_e4[i] = clamp_i16(c->r[i] * 1e4f);
+    for (int i = 0; i < 3; i++) out->gbias[i] = clamp_i16(c->gbias[i]);
+    out->calib_flags = (uint8_t)((c->orient_ok ? FUS_CALIB_F_ORIENT : 0) |
+                                 (c->forward_ok ? FUS_CALIB_F_FORWARD : 0) |
+                                 (c->bias_ok ? FUS_CALIB_F_BIAS : 0));
+}
+
+void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out)
+{
+    fus_calib_defaults(out);
+    for (int i = 0; i < 9; i++) out->r[i] = (float)in->r_e4[i] * 1e-4f;
+    for (int i = 0; i < 3; i++) out->gbias[i] = (float)in->gbias[i];
+    out->orient_ok  = (in->calib_flags & FUS_CALIB_F_ORIENT) ? 1 : 0;
+    out->forward_ok = (in->calib_flags & FUS_CALIB_F_FORWARD) ? 1 : 0;
+    out->bias_ok    = (in->calib_flags & FUS_CALIB_F_BIAS) ? 1 : 0;
+}
+
+void fus_rotate(const float r[9], const float b[3], float v[3])
+{
+    for (int i = 0; i < 3; i++) v[i] = r[3 * i] * b[0] + r[3 * i + 1] * b[1] + r[3 * i + 2] * b[2];
+}
+
+/* ---- state ---- */
+
+void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto)
+{
+    memset(f, 0, sizeof *f);                 /* zeroed still/fwd trackers are initialised (fus.h) */
+    if (calib && fus_calib_valid(calib)) f->calib = *calib;
+    else fus_calib_defaults(&f->calib);
+    f->moto = variant_is_moto ? 1 : 0;
+}
+
+void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid)
+{
+    f->v_mps = v_mps; f->v_mono_us = mono_us; f->v_valid = valid;
+}
+
+static void update_bias_stale(fus_t *f)
+{
+    if (!f->calib.bias_ok || !f->temp_known) { f->bias_stale = false; return; }
+    int32_t d = (int32_t)f->temp_c100 - (int32_t)f->calib.gbias_temp_c100;
+    if (d < 0) d = -d;
+    f->bias_stale = d > (int32_t)BIAS_TEMP_STALE_C * 100;
+}
+
+void fus_set_temp(fus_t *f, int16_t temp_c100)
+{
+    f->temp_c100 = temp_c100; f->temp_known = true;
+    update_bias_stale(f);
+}
+
+int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out)
+{
+    const float a_b[3] = { (float)raw->ax / IMU_ACC_LSB_PER_G, (float)raw->ay / IMU_ACC_LSB_PER_G, (float)raw->az / IMU_ACC_LSB_PER_G };
+    const float w_b[3] = { ((float)raw->gx - f->calib.gbias[0]) / IMU_GYR_LSB_PER_DPS,
+                           ((float)raw->gy - f->calib.gbias[1]) / IMU_GYR_LSB_PER_DPS,
+                           ((float)raw->gz - f->calib.gbias[2]) / IMU_GYR_LSB_PER_DPS };
+    float a[3], w[3];
+    fus_rotate(f->calib.r, a_b, a);
+    fus_rotate(f->calib.r, w_b, w);
+
+    memset(out, 0, sizeof *out);
+    out->mono_us = raw->mono_us;
+    const bool oriented = f->calib.orient_ok && f->calib.forward_ok;
+    if (oriented) {
+        out->g_lon = a[0];                       /* specific force along forward, in g (§9.3 step 2) */
+        out->g_lat = -a[1];                      /* +Y is left; lateral g is + to the right (§9.3 step 5, car form) */
+    } else {
+        out->g_lon = sqrtf(a[0] * a[0] + a[1] * a[1]);   /* sign-less horizontal magnitude until forward is learned (§9.2) */
+        out->g_lat = 0.0f;
+    }
+    out->g_comb  = sqrtf(out->g_lon * out->g_lon + out->g_lat * out->g_lat);
+    out->lean_deg = 0.0f;                        /* lean filter arrives in session 2.3 */
+    out->yaw_dps  = w[2];                        /* session 2.3 applies the lean correction of §9.3 step 3 */
+    uint8_t flags = 0;
+    if (oriented) flags |= FUS_ORIENT_OK;
+    if (f->bias_stale) flags |= FUS_BIAS_STALE;
+    out->flags = flags;
+    f->samples++;
+    return 1;
+}
+
+const fus_calib_t *fus_calib(const fus_t *f)
+{
+    return &f->calib;
+}
+
+/* ---- wired to the still / orient / fwd modules in Task 5 ---- */
+
+bool fus_is_still(const fus_t *f)
+{
+    (void)f;
+    return false;
+}
+
+void fus_gyro_bias_update(fus_t *f)
+{
+    (void)f;
+}
+
+int fus_calib_orient_capture(fus_t *f)
+{
+    (void)f;
+    return -1;
+}
+
+int fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps)
+{
+    (void)f; (void)gps_acc_mps2; (void)yaw_dps;
+    return -1;
+}
+```
+
+- [ ] **Step 5: Switch the host test list to a glob**
+
+Replace the twelve `add_core_test(...)` lines in `test/CMakeLists.txt` with:
+
+```cmake
+# One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no edit here)
+file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
+foreach(src ${CORE_TEST_SRCS})
+  get_filename_component(name ${src} NAME_WE)
+  add_core_test(${name})
+endforeach()
+```
+
+so the file reads, in full:
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(laptimer_host C)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+# One strict flag set for core, tools and tests (spec §17.9, §21.4).
+set(LAPTIMER_STRICT_FLAGS -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+
+set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
+file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
+
+add_library(core STATIC ${CORE_SRCS})
+target_include_directories(core PUBLIC ${CORE_DIR}/include)
+target_compile_options(core PRIVATE ${LAPTIMER_STRICT_FLAGS})
+# vendored third-party sources get relaxed warnings (file added in Task 8)
+set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # -fno-sanitize-recover makes a UBSan finding abort the test run instead of printing and continuing,
+  # so a ctest pass really means no undefined behaviour was executed.
+  target_compile_options(core PUBLIC -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g)
+  target_link_options(core PUBLIC -fsanitize=address,undefined -fno-sanitize-recover=undefined)
+endif()
+
+add_library(unity STATIC unity/src/unity.c)
+target_include_directories(unity PUBLIC unity/src)
+target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12 UNITY_SUPPORT_64)
+
+enable_testing()
+find_package(Threads REQUIRED)
+function(add_core_test name)
+  add_executable(${name} ${name}.c)
+  target_compile_options(${name} PRIVATE ${LAPTIMER_STRICT_FLAGS})
+  target_link_libraries(${name} PRIVATE core unity m Threads::Threads)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+# One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no edit here)
+file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
+foreach(src ${CORE_TEST_SRCS})
+  get_filename_component(name ${src} NAME_WE)
+  add_core_test(${name})
+endforeach()
+
+# Host-only tools and their tests (spec §21.4, §22.2)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
+```
+
+Update the two other restatements of this file to the same content: the block in `docs/superpowers/plans/2026-09-14-plan-01-core-foundation.md` and this plan's Session 2.1 Task 1 Step 4 block.
+
+- [ ] **Step 6: Build and run**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug 2>&1 | tail -1 && cmake --build test/build --parallel 2>&1 | grep -E "error|warning" | head; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: `100% tests passed out of 21` (`test_fus` added: 7 cases).
+
+- [ ] **Step 7: Spec write-backs**
+
+In `docs/superpowers/specs/2026-09-14-lap-timer-design.md`:
+
+(a) §5.2: replace the block that begins `#### \`core/fus.h\` — fusion (planned, plan 02)` and ends with the closing fence after `const fus_calib_t *fus_calib(const fus_t *f);` with:
+
+````
+#### `core/fus.h` — fusion (plan 02)
+
+`fused_sample_t` lives in `core/types.h` above. Calibration and the public entry points (excerpt; the
+internal stillness and forward-learning trackers `fus_still_t` / `fus_fwd_t` are documented in the
+header):
+
+```c
+#define FUS_CALIB_VERSION 1
+typedef struct {
+    float   r[9];             /* rows x, y, z (row-major): vehicle axes in body coordinates, vehicle = R · body */
+    float   gbias[3];         /* gyro bias, raw LSB */
+    int16_t gbias_temp_c100;  /* IMU temperature when gbias was captured */
+    uint8_t bias_ok;          /* gbias captured at least once */
+    uint8_t orient_ok;        /* z row captured */
+    uint8_t forward_ok;       /* x and y rows learned (implies orient_ok) */
+    uint8_t version;          /* FUS_CALIB_VERSION */
+} fus_calib_t;
+void fus_calib_defaults(fus_calib_t *c);
+bool fus_calib_valid(const fus_calib_t *c);           /* version, finite, R orthonormal within 1e-3 */
+void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out);      /* CALIB record (§12.3) */
+void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out);
+
+void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);   /* NULL/invalid calib → defaults */
+void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid);
+void fus_set_temp(fus_t *f, int16_t temp_c100);       /* IMU temperature, ~1 Hz; drives FUS_BIAS_STALE */
+int  fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);   /* one raw sample → one fused sample */
+bool fus_is_still(const fus_t *f);
+void fus_gyro_bias_update(fus_t *f);                  /* call when still; updates calib */
+int  fus_calib_orient_capture(fus_t *f);              /* upright capture; fills the Z row */
+int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* per fix; 1 when the X row is learned */
+const fus_calib_t *fus_calib(const fus_t *f);
+```
+````
+
+(b) §9.2: after the paragraph beginning `- Until \`forward_ok\`, lean and lateral g are flagged invalid` append:
+
+```
+**Temperature.** The pipeline polls `imu_read_temp_c100` (~1 Hz) and passes it to `fus_set_temp`;
+`FUS_BIAS_STALE` is derived from it and `gbias_temp_c100`, and only once a bias has been captured
+(`bias_ok`).
+
+**Stillness windows.** The detector uses tumbling windows of `STILL_WINDOW_S · FUSION_HZ` samples;
+`fus_is_still` and the `FUS_STILL` flag reflect the last completed window, so stillness is reported
+with at most one window of latency.
+
+**Forward-learning windows.** `fus_calib_forward_step` is called once per GPS fix with `Δv/Δt` and
+the current yaw rate; while the condition holds, every fusion step accumulates `a_h`. A run counts as
+one window the moment it has lasted `FWD_LEARN_MIN_S` and keeps accumulating until it ends; when the
+`FWD_LEARN_WINDOWS`-th run is counted the forward row is set and the call returns 1 (the pipeline
+persists the calibration and emits `EV_CALIB_DONE`).
+
+**Flags.** `FUS_ORIENT_OK` on a sample means both the Z row and the forward row are known; until
+then `g_lon` is the sign-less horizontal specific-force magnitude, `g_lat` is 0 and `FUS_LEAN_VALID`
+is clear. `FUS_STILL` mirrors `fus_is_still`; `FUS_BIAS_STALE` is described above.
+```
+
+(c) Appendix A: after the row `| \`FWD_LEARN_ACC_MPS2\` / \`FWD_LEARN_MIN_S\` / \`FWD_LEARN_WINDOWS\` | 1.5 / 1 / 3 | §9.2 |` insert:
+
+```
+| `FWD_LEARN_MAX_YAW_DPS` | 2 | §9.2 |
+| `FUS_ORIENT_MIN_G` / `FUS_ORIENT_MAX_G` | 0.5 / 1.5 | §9.2 |
+| `FUS_REF_MAX_AGE_US` | 1000000 | §9.3 |
+| `IMU_ACC_LSB_PER_G` / `IMU_GYR_LSB_PER_DPS` | 2048 / 16.4 | §8.2 |
+```
+
+Verify: `grep -c "fus_set_temp" docs/superpowers/specs/2026-09-14-lap-timer-design.md` prints 2; `grep -c "FWD_LEARN_MAX_YAW_DPS" docs/superpowers/specs/2026-09-14-lap-timer-design.md` prints 1.
+
+- [ ] **Step 8: Hygiene and commit**
+
+Run: `git diff --check`
+Expected: no output.
+
+```bash
+git add components/core/include/core/fus.h components/core/include/core/consts.h components/core/fusion/fus.c test/test_fus.c test/CMakeLists.txt docs/superpowers/specs/2026-09-14-lap-timer-design.md docs/superpowers/plans/2026-09-14-plan-01-core-foundation.md docs/superpowers/plans/2026-09-14-plan-02-core-engines.md
+git commit -m "feat(core): fusion header, calibration codec, rotation step skeleton, host test glob
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+### Task 2: Stillness detector (`components/core/fusion/fus_still.c`) [parallel group 2]
+
+**Files:**
+- Create: `components/core/fusion/fus_still.c`, `test/test_fus_still.c`
+- Modify: none. The host test list (`test/CMakeLists.txt`, Task 1 Step 5) and the on-target
+  `test_apps/core_selftest` wrapper list are both CMake globs over `test/test_*.c`, and `core` globs
+  `components/core/*.c` recursively, so neither build file is touched. `test_fus_still.c` therefore
+  also has to compile for the ESP32: it includes only `unity.h`, `core/fus.h` and `<math.h>`, keeps
+  every helper `static` (the self-test renames `main`/`setUp`/`tearDown` per suite and compiles each
+  suite as its own TU) and puts no large arrays on the stack.
+
+**Interfaces:**
+- Consumes: `core/fus.h` (`fus_still_t`, `FUS_STILL_WINDOW_N` = `STILL_WINDOW_S · FUSION_HZ` = 200),
+  `core/types.h` (`imu_raw_t`), `core/consts.h` (`STILL_ACC_VAR` = 4e-4 g², `STILL_GYRO_VAR` = 4 dps²,
+  `IMU_ACC_LSB_PER_G` = 2048, `IMU_GYR_LSB_PER_DPS` = 16.4).
+- Produces (declared by Task 1 in `core/fus.h`, which this task MUST NOT change):
+  `void fus_still_init(fus_still_t *s);`
+  `int  fus_still_push(fus_still_t *s, const imu_raw_t *raw);` — returns 1 on the sample that
+  completes a window (last-window fields updated, sums restarted), 0 otherwise.
+
+Design (binding, from the session rulings and spec §9.2):
+
+- `fus_still_init` memsets: a zeroed `fus_still_t` is the initialised state (`core/fus.h`).
+- `fus_still_push` converts the raw sample once — accel axes `raw / IMU_ACC_LSB_PER_G` (g) plus the
+  magnitude `|a|`, gyro axes `raw / IMU_GYR_LSB_PER_DPS` (dps, bias **not** removed, because the mean
+  raw gyro of a still window is what later becomes the bias) — and adds them into `sum_amag`,
+  `sum_amag2`, `sum_g[i]`, `sum_g2[i]`, `sum_acc[i]`, `sum_graw[i]`, then `n++`.
+- On `n == FUS_STILL_WINDOW_N`: `acc_var = E[|a|²] − E[|a|]²` clamped at 0 against round-off,
+  `gyr_var_max = max_i (E[g_i²] − E[g_i]²)`, `mean_acc` and `mean_graw` latched as floats,
+  `still = acc_var < STILL_ACC_VAR && gyr_var_max < STILL_GYRO_VAR`, `have_window = true`, sums and
+  `n` zeroed, return 1. Otherwise return 0. The last-window fields persist until the next completion,
+  which is what gives `fus_is_still` its ≤ 2 s latency.
+- The accumulators are `double` because the variance is taken as `E[x²] − E[x]²`, which cancels
+  catastrophically in float32 (the file's header comment carries the numbers).
+
+- [ ] **Step 1: Write the failing test**
+
+`test/test_fus_still.c`:
+
+```c
+#include "unity.h"
+#include "core/fus.h"
+#include <math.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* Raw-LSB sample (mono_us is unused by the detector: it counts samples, not time). */
+static imu_raw_t raw_lsb(int ax, int ay, int az, int gx, int gy, int gz)
+{
+    imu_raw_t r;
+    r.mono_us = 0;
+    r.ax = (int16_t)ax; r.ay = (int16_t)ay; r.az = (int16_t)az;
+    r.gx = (int16_t)gx; r.gy = (int16_t)gy; r.gz = (int16_t)gz;
+    return r;
+}
+
+/* Physical-unit sample rounded to the MPU-6050 LSB scales of core/types.h. */
+static imu_raw_t raw_g_dps(double ax_g, double ay_g, double az_g, double gx, double gy, double gz)
+{
+    return raw_lsb((int)lround(ax_g * IMU_ACC_LSB_PER_G), (int)lround(ay_g * IMU_ACC_LSB_PER_G),
+                   (int)lround(az_g * IMU_ACC_LSB_PER_G), (int)lround(gx * IMU_GYR_LSB_PER_DPS),
+                   (int)lround(gy * IMU_GYR_LSB_PER_DPS), (int)lround(gz * IMU_GYR_LSB_PER_DPS));
+}
+
+/* Deterministic LCG (Numerical Recipes constants) so the noise is identical on every run and host. */
+static uint32_t lcg_next(uint32_t *st)
+{
+    *st = *st * 1664525u + 1013904223u;
+    return *st;
+}
+
+/* Uniform draw on [-half, +half] from the top 16 bits (an LCG's low bits are weakly random).
+ * A uniform on [a, b] has variance (b − a)² / 12, so here the variance is half² / 3. */
+static double lcg_uniform(uint32_t *st, double half)
+{
+    const uint32_t u = lcg_next(st) >> 16;                 /* 0 .. 65535 */
+    return ((double)u / 65535.0 * 2.0 - 1.0) * half;
+}
+
+/* One full window of accel-magnitude noise: |a| = 1 g + U(-h, h) with h = sigma·sqrt(3). */
+static void push_accel_noise_window(fus_still_t *s, uint32_t *st, double sigma_g)
+{
+    const double h = sigma_g * sqrt(3.0);
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) {
+        const imu_raw_t r = raw_g_dps(0.0, 0.0, 1.0 + lcg_uniform(st, h), 0.0, 0.0, 0.0);
+        (void)fus_still_push(s, &r);
+    }
+}
+
+/* One full window of gyro noise on the Y axis only, accel held at a clean 1 g on Z. */
+static void push_gyro_noise_window(fus_still_t *s, uint32_t *st, double sigma_dps)
+{
+    const double h = sigma_dps * sqrt(3.0);
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) {
+        const imu_raw_t r = raw_g_dps(0.0, 0.0, 1.0, 0.0, lcg_uniform(st, h), 0.0);
+        (void)fus_still_push(s, &r);
+    }
+}
+
+static void test_constant_window_completes_on_the_two_hundredth_sample(void)
+{
+    fus_still_t s; fus_still_init(&s);
+    const imu_raw_t r = raw_lsb(0, 0, 2048, 10, -5, 3);          /* exactly 1 g on Z, a tiny gyro offset */
+    for (int i = 0; i < FUS_STILL_WINDOW_N - 1; i++) TEST_ASSERT_EQUAL_INT(0, fus_still_push(&s, &r));
+    TEST_ASSERT_EQUAL_INT(1, fus_still_push(&s, &r));
+    TEST_ASSERT_TRUE(s.have_window);
+    TEST_ASSERT_TRUE(s.still);
+    /* identical samples: E[x²] − E[x]² is zero up to double round-off, ~1e-16 relative at |a|² = 1 g² */
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, s.acc_var);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, s.gyr_var_max);
+    /* means are exact in float: 2048/2048 = 1 g, and the raw gyro mean is the repeated raw value */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, s.mean_acc[0]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, s.mean_acc[1]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, s.mean_acc[2]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 10.0f, s.mean_graw[0]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -5.0f, s.mean_graw[1]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.0f, s.mean_graw[2]);
+    TEST_ASSERT_EQUAL_UINT16(0, s.n);                            /* the window restarted */
+}
+
+static void test_nothing_is_reported_before_the_first_window_completes(void)
+{
+    fus_still_t s; fus_still_init(&s);
+    TEST_ASSERT_FALSE(s.have_window);
+    TEST_ASSERT_FALSE(s.still);
+    const imu_raw_t r = raw_lsb(0, 0, 2048, 0, 0, 0);             /* a perfectly still stream */
+    for (int i = 0; i < FUS_STILL_WINDOW_N - 1; i++) {
+        TEST_ASSERT_EQUAL_INT(0, fus_still_push(&s, &r));
+        TEST_ASSERT_FALSE(s.have_window);                        /* still-looking input reports nothing yet */
+        TEST_ASSERT_FALSE(s.still);
+    }
+    TEST_ASSERT_EQUAL_UINT16(FUS_STILL_WINDOW_N - 1, s.n);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, s.acc_var);                    /* last-window fields untouched since init */
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, s.gyr_var_max);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, s.mean_acc[2]);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, s.mean_graw[0]);
+}
+
+static void test_noise_variances_match_the_analytic_value_and_the_thresholds(void)
+{
+    /* 20 % band: the sample variance of N = 200 uniform draws has relative sd
+     * sqrt((mu4/sigma⁴ − (N−3)/(N−1))/N) = sqrt((1.8 − 1)/200) ≈ 6.3 %, so 20 % is about 3 sd.
+     * The LSB quantisation adds q²/12 = 2.0e-8 g² and 3.1e-4 dps², both negligible here. */
+    uint32_t st = 2026u;
+    fus_still_t s; fus_still_init(&s);
+
+    push_accel_noise_window(&s, &st, 0.01);                      /* variance 1e-4 g² < STILL_ACC_VAR = 4e-4 */
+    TEST_ASSERT_TRUE(s.have_window);
+    TEST_ASSERT_TRUE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(0.2f * 1e-4f, 1e-4f, s.acc_var);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, s.gyr_var_max);        /* gyro was constant zero */
+
+    fus_still_init(&s);
+    push_accel_noise_window(&s, &st, 0.03);                      /* variance 9e-4 g² > 4e-4 */
+    TEST_ASSERT_FALSE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(0.2f * 9e-4f, 9e-4f, s.acc_var);
+
+    fus_still_init(&s);
+    push_gyro_noise_window(&s, &st, 1.0);                        /* variance 1 dps² < STILL_GYRO_VAR = 4 */
+    TEST_ASSERT_TRUE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(0.2f * 1.0f, 1.0f, s.gyr_var_max);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, s.acc_var);            /* accel was constant 1 g */
+
+    fus_still_init(&s);
+    push_gyro_noise_window(&s, &st, 3.0);                        /* variance 9 dps² > 4 */
+    TEST_ASSERT_FALSE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(0.2f * 9.0f, 9.0f, s.gyr_var_max);
+}
+
+static void test_tumbling_windows_latch_until_the_next_completion(void)
+{
+    fus_still_t s; fus_still_init(&s);
+    const imu_raw_t calm = raw_lsb(0, 0, 2048, 0, 0, 0);         /* 1 g */
+    const imu_raw_t hi   = raw_lsb(0, 0, 3 * 2048, 0, 0, 0);     /* 3 g */
+
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, &calm);
+    TEST_ASSERT_TRUE(s.still);
+
+    /* |a| alternates 1 g / 3 g: mean 2 g, E[x²] = 5 g², so the variance is exactly 1 g² */
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, (i & 1) ? &hi : &calm);
+    TEST_ASSERT_FALSE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 1.0f, s.acc_var);            /* 1e-5: float32 ULP at 1 g² is 6e-8 */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 2.0f, s.mean_acc[2]);
+
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, &calm);
+    TEST_ASSERT_TRUE(s.still);
+
+    /* 150 moving samples (three quarters of a window) cannot change the latched flag */
+    for (int i = 0; i < 150; i++) {
+        (void)fus_still_push(&s, (i & 1) ? &hi : &calm);
+        TEST_ASSERT_TRUE(s.still);
+        TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, s.acc_var);
+    }
+    TEST_ASSERT_EQUAL_UINT16(150, s.n);
+}
+
+static void test_one_spike_breaks_the_window_and_the_next_one_recovers(void)
+{
+    fus_still_t s; fus_still_init(&s);
+    const imu_raw_t calm  = raw_lsb(0, 0, 2048, 0, 0, 0);        /* |a| = 1 g */
+    const imu_raw_t spike = raw_lsb(0, 0, 9 * 2048, 0, 0, 0);    /* |a| = 9 g, i.e. delta = +8 g */
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, (i == 100) ? &spike : &calm);
+    TEST_ASSERT_FALSE(s.still);
+    /* one outlier of delta in N identical samples: var = delta²·(1/N)(1 − 1/N) = 64·199/200² = 0.3184 g² */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.3184f, s.acc_var);         /* 1e-5: float32 ULP at 0.32 g² is 3e-8 */
+    TEST_ASSERT_FLOAT_WITHIN(1e-5f, 1.0f + 8.0f / (float)FUS_STILL_WINDOW_N, s.mean_acc[2]);
+
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, &calm);
+    TEST_ASSERT_TRUE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(1e-9f, 0.0f, s.acc_var);
+}
+
+static void test_full_scale_constant_window_does_not_overflow(void)
+{
+    fus_still_t s; fus_still_init(&s);
+    /* Sigma|a|² reaches 200·768 g² = 1.5e5 g² and Sigma g² reaches 200·(32767/16.4)² = 8.0e8 dps²;
+     * a double's ULP there is 3.3e-11 g² and 1.8e-7 dps², so a constant window still reads zero. */
+    const imu_raw_t hi = raw_lsb(32767, 32767, 32767, 32767, 32767, 32767);
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, &hi);
+    TEST_ASSERT_TRUE(s.still);                                   /* constant, however large */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, s.acc_var);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, s.gyr_var_max);
+    const float a_g = 32767.0f / IMU_ACC_LSB_PER_G;              /* 15.99951 g, exact in float32 */
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, a_g, s.mean_acc[i]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-2f, 32767.0f, s.mean_graw[i]);   /* float32 ULP at 32767 is 3.9e-3 */
+    }
+
+    const imu_raw_t lo = raw_lsb(-32767, -32767, -32767, -32767, -32767, -32767);
+    for (int i = 0; i < FUS_STILL_WINDOW_N; i++) (void)fus_still_push(&s, &lo);
+    TEST_ASSERT_TRUE(s.still);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, s.acc_var);
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-4f, -a_g, s.mean_acc[i]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-2f, -32767.0f, s.mean_graw[i]);
+    }
+}
+
+static void test_window_is_exactly_fus_still_window_n_pushes_long(void)
+{
+    fus_still_t s; fus_still_init(&s);
+    const imu_raw_t r = raw_lsb(0, 0, 2048, 0, 0, 0);
+    const int total = 5 * FUS_STILL_WINDOW_N;                    /* 1000 pushes → 5 completions */
+    int completions = 0;
+    int last_completion = 0;
+    for (int i = 1; i <= total; i++) {
+        const int rc = fus_still_push(&s, &r);
+        if (rc == 1) {
+            completions++;
+            last_completion = i;
+            TEST_ASSERT_EQUAL_INT(0, i % FUS_STILL_WINDOW_N);    /* completes only on multiples of 200 */
+        } else {
+            TEST_ASSERT_EQUAL_INT(0, rc);
+            TEST_ASSERT_NOT_EQUAL_INT(0, i % FUS_STILL_WINDOW_N);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(5, completions);
+    TEST_ASSERT_EQUAL_INT(total, last_completion);
+    TEST_ASSERT_EQUAL_UINT16(0, s.n);
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_constant_window_completes_on_the_two_hundredth_sample);
+    RUN_TEST(test_nothing_is_reported_before_the_first_window_completes);
+    RUN_TEST(test_noise_variances_match_the_analytic_value_and_the_thresholds);
+    RUN_TEST(test_tumbling_windows_latch_until_the_next_completion);
+    RUN_TEST(test_one_spike_breaks_the_window_and_the_next_one_recovers);
+    RUN_TEST(test_full_scale_constant_window_does_not_overflow);
+    RUN_TEST(test_window_is_exactly_fus_still_window_n_pushes_long);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug > /dev/null && cmake --build test/build --parallel 2>&1 | grep -A2 "Undefined symbols"`
+Expected: FAIL —
+
+```
+Undefined symbols for architecture arm64:
+  "_fus_still_init", referenced from:
+      _test_constant_window_completes_on_the_two_hundredth_sample in test_fus_still.c.o
+```
+
+(the CMake glob picked the new suite up on its own; `fus_still_init` / `fus_still_push` are declared
+in `core/fus.h` but not yet defined, so the link fails. On Linux/gcc the same failure reads
+`undefined reference to 'fus_still_init'`.)
+
+- [ ] **Step 3: Implement**
+
+`components/core/fusion/fus_still.c`:
+
+```c
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+/* Stillness detector (spec §9.2): tumbling windows of FUS_STILL_WINDOW_N samples
+ * (STILL_WINDOW_S · FUSION_HZ = 200 at 100 Hz). A window is still when the variance of the accel
+ * magnitude is below STILL_ACC_VAR and every gyro axis variance is below STILL_GYRO_VAR. The
+ * last-completed-window fields persist until the next window completes, so stillness is reported
+ * with at most one window of latency and no per-sample sliding statistics are needed.
+ *
+ * Why the accumulators are double (fus.h fixes the type; this is the reason): the variance is taken
+ * as E[x²] − E[x]², which cancels catastrophically in float32 when the mean is far from zero. At
+ * full scale one raw axis is 32767 LSB, so a squared sample reaches 1.07e9 and a 200-sample sum
+ * 2.1e11; in the units accumulated here a window holds Σ|a|² up to 1.5e5 g² and Σg² up to 8.0e8
+ * dps². One float32 ULP at 8.0e8 is 64 dps², 16× the 4 dps² gyro threshold, and at 1.5e5 g² it is
+ * 0.0156 g², 39× the 4e-4 g² accel threshold: a float32 accumulator could not tell still from
+ * moving at all. A double's 53-bit mantissa puts one ULP at 1.8e-7 dps² and 3.3e-11 g², seven
+ * orders below either threshold. The per-sample cost stays one sqrt plus ~20 flops at 100 Hz. */
+
+static void window_restart(fus_still_t *s)
+{
+    s->sum_amag = 0.0;
+    s->sum_amag2 = 0.0;
+    memset(s->sum_g, 0, sizeof s->sum_g);
+    memset(s->sum_g2, 0, sizeof s->sum_g2);
+    memset(s->sum_acc, 0, sizeof s->sum_acc);
+    memset(s->sum_graw, 0, sizeof s->sum_graw);
+    s->n = 0;
+}
+
+void fus_still_init(fus_still_t *s)
+{
+    memset(s, 0, sizeof *s);   /* a zeroed struct is the initialised state (fus.h) */
+}
+
+/* Closes the current window: computes the two statistics, latches the means, restarts the sums. */
+static void window_close(fus_still_t *s)
+{
+    const double n = (double)FUS_STILL_WINDOW_N;
+    const double mean_amag = s->sum_amag / n;
+    double acc_var = s->sum_amag2 / n - mean_amag * mean_amag;
+    if (acc_var < 0.0) acc_var = 0.0;   /* a constant window can land microscopically negative */
+    double gyr_var_max = 0.0;
+    for (int i = 0; i < 3; i++) {
+        const double mean_g = s->sum_g[i] / n;
+        double v = s->sum_g2[i] / n - mean_g * mean_g;
+        if (v < 0.0) v = 0.0;
+        if (v > gyr_var_max) gyr_var_max = v;
+        s->mean_acc[i] = (float)(s->sum_acc[i] / n);
+        s->mean_graw[i] = (float)(s->sum_graw[i] / n);
+    }
+    s->acc_var = (float)acc_var;
+    s->gyr_var_max = (float)gyr_var_max;
+    s->still = (acc_var < (double)STILL_ACC_VAR) && (gyr_var_max < (double)STILL_GYRO_VAR);
+    s->have_window = true;
+    window_restart(s);
+}
+
+int fus_still_push(fus_still_t *s, const imu_raw_t *raw)
+{
+    /* One conversion per sample: accel LSB → g, gyro LSB → dps (the bias is not removed here — the
+     * mean raw gyro of a still window is what becomes the bias, §9.2). */
+    const double ax = (double)raw->ax / (double)IMU_ACC_LSB_PER_G;
+    const double ay = (double)raw->ay / (double)IMU_ACC_LSB_PER_G;
+    const double az = (double)raw->az / (double)IMU_ACC_LSB_PER_G;
+    const double amag = sqrt(ax * ax + ay * ay + az * az);
+    const double graw[3] = { (double)raw->gx, (double)raw->gy, (double)raw->gz };
+
+    s->sum_amag += amag;
+    s->sum_amag2 += amag * amag;
+    s->sum_acc[0] += ax;
+    s->sum_acc[1] += ay;
+    s->sum_acc[2] += az;
+    for (int i = 0; i < 3; i++) {
+        const double gd = graw[i] / (double)IMU_GYR_LSB_PER_DPS;
+        s->sum_g[i] += gd;
+        s->sum_g2[i] += gd * gd;
+        s->sum_graw[i] += graw[i];
+    }
+    s->n = (uint16_t)(s->n + 1u);
+
+    if (s->n >= FUS_STILL_WINDOW_N) {
+        window_close(s);
+        return 1;
+    }
+    return 0;
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cmake --build test/build --parallel 2>&1 | grep -E "error|warning"; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: no `error` or `warning` line, and
+
+```
+100% tests passed out of 22
+```
+
+(`test_fus_still` is the 22nd executable — 21 after session 2.2 Task 1 — and reports `7 Tests 0 Failures 0 Ignored`.)
+
+Parity check (both compilers, strict flags with no `-Wno-error` relaxation, to confirm the explicit
+casts are complete):
+
+Run: `for CC in clang gcc-16; do $CC -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Icomponents/core/include -Itest/unity/src -c components/core/fusion/fus_still.c -o /dev/null && $CC -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Icomponents/core/include -Itest/unity/src -c test/test_fus_still.c -o /dev/null && echo "$CC ok"; done`
+Expected:
+
+```
+clang ok
+gcc-16 ok
+```
+
+- [ ] **Step 5: Hygiene and commit**
+
+Run: `git diff --check`
+Expected: no output.
+
+```bash
+git add components/core/fusion/fus_still.c test/test_fus_still.c
+git commit -m "feat(core): stillness detector over tumbling 2 s windows (fusion)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+**Header change needed:** none. `core/fus.h` as landed by session 2.2 Task 1 is sufficient and is
+used verbatim.
+
+---
+
+### Task 3: Orientation rows (`components/core/fusion/fus_orient.c`) [parallel group 2]
+
+**Files:**
+- Create: `components/core/fusion/fus_orient.c`, `test/test_fus_orient.c`
+- Modify: none — the host test list is a `test/test_*.c` glob from this session's Task 1 and
+  `test_apps/core_selftest` globs the same files, so the suite needs no CMake edit and is also built
+  for the ESP32 (nothing in either file is host-only).
+
+**Interfaces:**
+- Consumes (Task 1, unchanged): `core/fus.h` — `fus_calib_t`, `void fus_calib_defaults(fus_calib_t *c)`,
+  `bool fus_calib_valid(const fus_calib_t *c)`, `void fus_rotate(const float r[9], const float b[3], float v[3])`,
+  `FUS_CALIB_VERSION`; `core/consts.h` — `FUS_ORIENT_MIN_G` (0.5), `FUS_ORIENT_MAX_G` (1.5); `<math.h>`.
+  `fus_rotate` and `fus_calib_valid` are defined in `fusion/fus.c`; this task does not redefine them.
+- Produces (bodies for two declarations that already exist in `core/fus.h`; no new header):
+  - `int fus_orient_from_gravity(fus_calib_t *c, const float mean_acc_g[3])` — 0 on success, −1 with the
+    calibration byte-untouched when `|mean_acc_g|` is not finite or falls outside
+    `[FUS_ORIENT_MIN_G, FUS_ORIENT_MAX_G]`.
+  - `int fus_orient_set_forward(fus_calib_t *c, const float sum_ah[3])` — 0 on success, −1 with the
+    calibration byte-untouched when `!orient_ok` or the horizontal part of `sum_ah` is shorter than
+    `FUS_FWD_MIN_NORM` (1e-6, a `static const float` in this file).
+
+**Geometry (spec §9.2 "Orientation").** `R`'s rows `x, y, z` are the vehicle axes (X forward, Y left,
+Z up) expressed in body coordinates, so `vehicle = R · body` and the triad is right-handed
+(`y = z × x`, `x = y × z`).
+
+- `fus_orient_from_gravity`: a still upright vehicle reads +1 g along vehicle up, so `z = mean/|mean|`.
+  The forward row is not yet known, so the function completes the triad provisionally: it takes the
+  body axis `e_k` least aligned with `z` (smallest `|z[k]|`, ties to the lowest index — that projection
+  has length `sqrt(1 − z[k]²) ≥ sqrt(2/3)`, so it is never degenerate), projects it,
+  `x = normalize(e_k − (e_k·z)z)`, then `y = z × x` and `x = y × z`. It sets `orient_ok = 1` and clears
+  `forward_ok` (a forward row learned against the old `z` means nothing against a new one), and leaves
+  `gbias`, `gbias_temp_c100`, `bias_ok` and `version` alone.
+- `fus_orient_set_forward`: `h = sum_ah − (sum_ah·z)z` drops whatever leaked onto vehicle up,
+  `x = h/|h|`, `y = z × x`, `x = y × z`, both renormalised; `forward_ok = 1`. The `z` row is rewritten
+  with the value it already had.
+- After either call the calibration satisfies `fus_calib_valid` (the tests assert this).
+
+- [ ] **Step 1: Write the failing test**
+
+`test/test_fus_orient.c`:
+
+```c
+#include "unity.h"
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* Tolerance for the analytic row values. Each row is a handful of float32 multiplies, one divide and
+ * one sqrtf away from its exact value, i.e. a few ulps of 1.0 (~1e-7); 1e-6 leaves a clear margin. */
+#define VEC_TOL 1e-6f
+
+/* <math.h> M_PI is an extension, not C11, and this suite also builds for the ESP32. */
+static const float PI_F = 3.14159265358979323846f;
+
+static void cross3(float out[3], const float a[3], const float b[3])
+{
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static float det3(const float r[9])
+{
+    return r[0] * (r[4] * r[8] - r[5] * r[7])
+         - r[1] * (r[3] * r[8] - r[5] * r[6])
+         + r[2] * (r[3] * r[7] - r[4] * r[6]);
+}
+
+static void assert_row(const fus_calib_t *c, int row, float ex, float ey, float ez)
+{
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, ex, c->r[3 * row + 0]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, ey, c->r[3 * row + 1]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, ez, c->r[3 * row + 2]);
+}
+
+/* Unit rows, zero pairwise dots and y = z × x: a right-handed orthonormal triad. */
+static void assert_orthonormal(const fus_calib_t *c)
+{
+    for (int i = 0; i < 3; i++) {
+        const float *ri = c->r + 3 * i;
+        TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 1.0f, ri[0] * ri[0] + ri[1] * ri[1] + ri[2] * ri[2]);
+        for (int j = i + 1; j < 3; j++) {
+            const float *rj = c->r + 3 * j;
+            TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, ri[0] * rj[0] + ri[1] * rj[1] + ri[2] * rj[2]);
+        }
+    }
+    float y[3];
+    cross3(y, c->r + 6, c->r + 0);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, y[0], c->r[3]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, y[1], c->r[4]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, y[2], c->r[5]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 1.0f, det3(c->r));
+}
+
+static void test_upright_capture_gives_the_identity_triad(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float mean[3] = { 0.0f, 0.0f, 1.0f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, mean));
+    assert_row(&c, 2, 0.0f, 0.0f, 1.0f);
+    /* body X and Y are equally unaligned with z; the tie goes to the lowest index, so x is body X */
+    assert_row(&c, 0, 1.0f, 0.0f, 0.0f);
+    assert_row(&c, 1, 0.0f, 1.0f, 0.0f);
+    TEST_ASSERT_EQUAL_UINT8(1, c.orient_ok);
+    TEST_ASSERT_EQUAL_UINT8(0, c.forward_ok);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    assert_orthonormal(&c);
+    float v[3];
+    fus_rotate(c.r, mean, v);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[0]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[1]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 1.0f, v[2]);
+}
+
+static void test_tilted_gravity_lands_entirely_on_vehicle_z(void)
+{
+    const float ang = 20.0f * PI_F / 180.0f;           /* IMU pitched 20° nose-up about body Y */
+    const float mags[2] = { 1.0f, 0.98f };             /* unit mean, then a 0.98 g bench reading */
+    for (int i = 0; i < 2; i++) {
+        const float mean[3] = { mags[i] * sinf(ang), 0.0f, mags[i] * cosf(ang) };
+        fus_calib_t c; fus_calib_defaults(&c);
+        TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, mean));
+        assert_row(&c, 2, sinf(ang), 0.0f, cosf(ang)); /* z is the normalised mean */
+        TEST_ASSERT_TRUE(fus_calib_valid(&c));
+        assert_orthonormal(&c);
+        /* body Y is the axis least aligned with z here, so the provisional forward is body Y */
+        assert_row(&c, 0, 0.0f, 1.0f, 0.0f);
+        float v[3];
+        fus_rotate(c.r, mean, v);
+        TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[0]);
+        TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[1]);
+        TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, mags[i], v[2]);
+    }
+}
+
+static void test_imu_on_its_side_stays_right_handed(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float mean[3] = { 0.0f, 1.0f, 0.0f };        /* vehicle up is body +Y */
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, mean));
+    assert_row(&c, 2, 0.0f, 1.0f, 0.0f);
+    assert_row(&c, 0, 1.0f, 0.0f, 0.0f);               /* body X least aligned (tie with Z, lowest index wins) */
+    assert_row(&c, 1, 0.0f, 0.0f, -1.0f);              /* y = z × x = (0,1,0) × (1,0,0) */
+    float y[3];
+    cross3(y, c.r + 6, c.r + 0);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, y[0], c.r[3]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, y[1], c.r[4]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, y[2], c.r[5]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 1.0f, det3(c.r));  /* +1, not -1: a rotation, not a reflection */
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+}
+
+static void test_gravity_outside_the_window_or_not_finite_is_rejected(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.gbias[0] = 3.0f; c.bias_ok = 1;
+    fus_calib_t before; memcpy(&before, &c, sizeof before);   /* memcpy so padding bytes compare too */
+
+    const float low[3] = { 0.0f, 0.0f, 0.3f };         /* 0.3 g < FUS_ORIENT_MIN_G */
+    TEST_ASSERT_EQUAL_INT(-1, fus_orient_from_gravity(&c, low));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &c, sizeof c));
+    const float high[3] = { 0.0f, 0.0f, 1.6f };        /* 1.6 g > FUS_ORIENT_MAX_G */
+    TEST_ASSERT_EQUAL_INT(-1, fus_orient_from_gravity(&c, high));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &c, sizeof c));
+    const float bad[3] = { 0.0f, NAN, 1.0f };          /* NaN makes |mean| NaN, which fails both bounds */
+    TEST_ASSERT_EQUAL_INT(-1, fus_orient_from_gravity(&c, bad));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &c, sizeof c));
+}
+
+static void test_forward_from_a_horizontal_sum_gives_the_ninety_degree_mount(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, up));
+    const float sum[3] = { 0.0f, -5.0f, 0.0f };        /* accumulated a_h: the vehicle accelerates along body -Y */
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_set_forward(&c, sum));
+    assert_row(&c, 0, 0.0f, -1.0f, 0.0f);              /* the 90° mount of test_fus.c */
+    assert_row(&c, 1, 1.0f, 0.0f, 0.0f);
+    assert_row(&c, 2, 0.0f, 0.0f, 1.0f);
+    TEST_ASSERT_EQUAL_UINT8(1, c.orient_ok);
+    TEST_ASSERT_EQUAL_UINT8(1, c.forward_ok);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    assert_orthonormal(&c);
+    const float b[3] = { 0.0f, -0.3f, 1.0f };          /* 0.3 g along body -Y = forward, 1 g up */
+    float v[3];
+    fus_rotate(c.r, b, v);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.3f, v[0]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[1]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 1.0f, v[2]);
+}
+
+static void test_forward_projects_out_the_vertical_component(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, up));
+    const float sum[3] = { 0.7f, 0.0f, 0.7f };         /* half of it leaked onto vehicle up */
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_set_forward(&c, sum));
+    assert_row(&c, 0, 1.0f, 0.0f, 0.0f);
+    assert_row(&c, 1, 0.0f, 1.0f, 0.0f);
+    assert_row(&c, 2, 0.0f, 0.0f, 1.0f);
+    TEST_ASSERT_EQUAL_UINT8(1, c.forward_ok);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    assert_orthonormal(&c);
+}
+
+static void test_forward_on_a_tilted_z_keeps_the_captured_up(void)
+{
+    const float ang = 20.0f * PI_F / 180.0f;
+    const float mean[3] = { sinf(ang), 0.0f, cosf(ang) };
+    fus_calib_t c; fus_calib_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, mean));
+    const float sum[3] = { 0.0f, 1.0f, 0.0f };         /* already perpendicular to z: nothing to project out */
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_set_forward(&c, sum));
+    assert_row(&c, 0, 0.0f, 1.0f, 0.0f);
+    assert_row(&c, 2, sinf(ang), 0.0f, cosf(ang));     /* the captured z row is untouched */
+    assert_orthonormal(&c);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    float v[3];
+    fus_rotate(c.r, mean, v);                          /* the capture gravity still lands on vehicle Z */
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[0]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 0.0f, v[1]);
+    TEST_ASSERT_FLOAT_WITHIN(VEC_TOL, 1.0f, v[2]);
+}
+
+static void test_forward_is_rejected_without_orientation_or_a_direction(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    fus_calib_t before; memcpy(&before, &c, sizeof before);
+    const float sum[3] = { 1.0f, 0.0f, 0.0f };
+    TEST_ASSERT_EQUAL_INT(-1, fus_orient_set_forward(&c, sum));   /* orient_ok = 0 */
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &c, sizeof c));
+
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, up));
+    memcpy(&before, &c, sizeof before);
+    const float vertical[3] = { 0.0f, 0.0f, 3.0f };    /* parallel to z: the projection is exactly zero */
+    TEST_ASSERT_EQUAL_INT(-1, fus_orient_set_forward(&c, vertical));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &c, sizeof c));
+    const float zero[3] = { 0.0f, 0.0f, 0.0f };
+    TEST_ASSERT_EQUAL_INT(-1, fus_orient_set_forward(&c, zero));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &c, sizeof c));
+    TEST_ASSERT_EQUAL_UINT8(0, c.forward_ok);
+}
+
+static void test_recapture_clears_forward_and_keeps_the_bias(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.gbias[0] = 11.0f; c.gbias[1] = -3.0f; c.gbias[2] = 0.5f;
+    c.gbias_temp_c100 = 2712; c.bias_ok = 1;
+    const float up[3] = { 0.0f, 0.0f, 1.0f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, up));
+    const float sum[3] = { 0.0f, -5.0f, 0.0f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_set_forward(&c, sum));
+    TEST_ASSERT_EQUAL_UINT8(1, c.forward_ok);
+
+    /* Re-capture on a 30° roll about body X: |mean| = 1 g, so it is accepted. */
+    const float tilt[3] = { 0.0f, 0.5f, 0.8660254f };
+    TEST_ASSERT_EQUAL_INT(0, fus_orient_from_gravity(&c, tilt));
+    assert_row(&c, 2, 0.0f, 0.5f, 0.8660254f);
+    TEST_ASSERT_EQUAL_UINT8(1, c.orient_ok);
+    TEST_ASSERT_EQUAL_UINT8(0, c.forward_ok);          /* the learned forward row no longer applies */
+    TEST_ASSERT_EQUAL_FLOAT(11.0f, c.gbias[0]);
+    TEST_ASSERT_EQUAL_FLOAT(-3.0f, c.gbias[1]);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, c.gbias[2]);
+    TEST_ASSERT_EQUAL_INT16(2712, c.gbias_temp_c100);
+    TEST_ASSERT_EQUAL_UINT8(1, c.bias_ok);
+    TEST_ASSERT_EQUAL_UINT8(FUS_CALIB_VERSION, c.version);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    assert_orthonormal(&c);
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_upright_capture_gives_the_identity_triad);
+    RUN_TEST(test_tilted_gravity_lands_entirely_on_vehicle_z);
+    RUN_TEST(test_imu_on_its_side_stays_right_handed);
+    RUN_TEST(test_gravity_outside_the_window_or_not_finite_is_rejected);
+    RUN_TEST(test_forward_from_a_horizontal_sum_gives_the_ninety_degree_mount);
+    RUN_TEST(test_forward_projects_out_the_vertical_component);
+    RUN_TEST(test_forward_on_a_tilted_z_keeps_the_captured_up);
+    RUN_TEST(test_forward_is_rejected_without_orientation_or_a_direction);
+    RUN_TEST(test_recapture_clears_forward_and_keeps_the_bias);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Run it — expected FAIL**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug >/dev/null && cmake --build test/build --target test_fus_orient 2>&1 | tail -4`
+Expected: a link failure, because `core/fus.h` declares both functions but nothing defines them yet:
+
+```
+Undefined symbols for architecture arm64:
+  "_fus_orient_from_gravity", referenced from:
+      _test_upright_capture_gives_the_identity_triad in test_fus_orient.c.o
+  ...
+ld: symbol(s) not found for architecture arm64
+```
+
+(On the Linux parity build the same failure reads `undefined reference to 'fus_orient_from_gravity'`.)
+
+- [ ] **Step 3: Write the implementation**
+
+`components/core/fusion/fus_orient.c`:
+
+```c
+#include "core/fus.h"
+#include <math.h>
+
+/* Orientation rows of the calibration matrix (spec §9.2 "Orientation").
+ *
+ * R's rows x, y, z are the vehicle axes (X forward, Y left, Z up) written in body coordinates, so
+ * vehicle = R · body and the triad is right-handed: y = z × x and x = y × z. This file owns the two
+ * ways a row is learned: z from a still upright gravity mean, x from the accumulated horizontal
+ * acceleration of a straight-line run. fus_rotate and fus_calib_valid live in fusion/fus.c. */
+
+/* Shortest horizontal accumulator (in the caller's units, g·samples) that still points somewhere.
+ * Below this the projection is float rounding noise, not a direction, so forward is refused. */
+static const float FUS_FWD_MIN_NORM = 1e-6f;
+
+static float v_dot(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static float v_norm(const float a[3])
+{
+    return sqrtf(v_dot(a, a));
+}
+
+static void v_cross(float out[3], const float a[3], const float b[3])
+{
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+/* out = a / |a|. Every caller has already checked that |a| is finite and far enough from zero. */
+static void v_normalize(float out[3], const float a[3])
+{
+    const float n = v_norm(a);
+    out[0] = a[0] / n;
+    out[1] = a[1] / n;
+    out[2] = a[2] / n;
+}
+
+/* Given a unit z and an x already perpendicular to it, build the right-handed completion:
+ * y = z × x, then x = y × z. Both crosses are renormalised because float rounding leaves them a few
+ * ulps off unit length and fus_calib_valid measures the rows against FUS_ORTHO_TOL. */
+static void complete_triad(float x[3], float y[3], const float z[3])
+{
+    float t[3];
+    v_cross(t, z, x);
+    v_normalize(y, t);
+    v_cross(t, y, z);
+    v_normalize(x, t);
+}
+
+/* Rows of R, row-major: r[0..2] = x, r[3..5] = y, r[6..8] = z. */
+static void set_rows(fus_calib_t *c, const float x[3], const float y[3], const float z[3])
+{
+    c->r[0] = x[0]; c->r[1] = x[1]; c->r[2] = x[2];
+    c->r[3] = y[0]; c->r[4] = y[1]; c->r[5] = y[2];
+    c->r[6] = z[0]; c->r[7] = z[1]; c->r[8] = z[2];
+}
+
+int fus_orient_from_gravity(fus_calib_t *c, const float mean_acc_g[3])
+{
+    /* A still, upright vehicle reads +1 g along vehicle up. A mean outside the window (or a
+     * non-finite one) came from a moving or broken capture, so nothing is written. */
+    const float m = v_norm(mean_acc_g);
+    if (!isfinite(m) || m < FUS_ORIENT_MIN_G || m > FUS_ORIENT_MAX_G) return -1;
+
+    float z[3];
+    v_normalize(z, mean_acc_g);
+
+    /* Provisional forward: the body axis least aligned with z, ties to the lowest index. Its
+     * projection has length sqrt(1 - z[k]^2) >= sqrt(2/3), so the normalise below is always safe. */
+    int k = 0;
+    for (int i = 1; i < 3; i++) {
+        if (fabsf(z[i]) < fabsf(z[k])) k = i;
+    }
+    float x0[3];
+    for (int i = 0; i < 3; i++) x0[i] = ((i == k) ? 1.0f : 0.0f) - z[k] * z[i];   /* e_k · z = z[k] */
+
+    float x[3], y[3];
+    v_normalize(x, x0);
+    complete_triad(x, y, z);
+
+    set_rows(c, x, y, z);
+    c->orient_ok = 1;
+    c->forward_ok = 0;   /* the old forward row means nothing against a new z (§9.2) */
+    return 0;
+}
+
+int fus_orient_set_forward(fus_calib_t *c, const float sum_ah[3])
+{
+    if (!c->orient_ok) return -1;                /* no z row: nothing to project against */
+
+    const float z[3] = { c->r[6], c->r[7], c->r[8] };
+    const float d = v_dot(sum_ah, z);
+    float h[3];
+    for (int i = 0; i < 3; i++) h[i] = sum_ah[i] - d * z[i];   /* drop whatever leaked onto vehicle up */
+
+    const float hn = v_norm(h);
+    if (!isfinite(hn) || hn < FUS_FWD_MIN_NORM) return -1;
+
+    float x[3], y[3];
+    v_normalize(x, h);
+    complete_triad(x, y, z);
+
+    set_rows(c, x, y, z);
+    c->forward_ok = 1;
+    return 0;
+}
+```
+
+- [ ] **Step 4: Run — expected PASS**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug 2>&1 | tail -1 && cmake --build test/build --parallel 2>&1 | grep -E "error|warning" | head; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: no `error`/`warning` line from the build, and
+
+```
+100% tests passed out of 22
+```
+
+(`test_fus_orient` is the 22nd executable; the new suite on its own prints `9 Tests 0 Failures 0 Ignored / OK`.)
+
+- [ ] **Step 5: Hygiene and commit**
+
+Run: `git diff --check`
+Expected: no output.
+
+```bash
+git add components/core/fusion/fus_orient.c test/test_fus_orient.c
+git commit -m "feat(core): orientation rows from gravity and learned forward axis (fusion)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+### Task 4: Forward-axis learning tracker (`components/core/fusion/fus_fwd.c`) [parallel group 2]
+
+**Files:**
+- Create: `components/core/fusion/fus_fwd.c`
+- Test: `test/test_fus_fwd.c`
+- Modify: nothing (`core` glob-compiles `components/core/**/*.c`; `test/CMakeLists.txt` globs
+  `test/test_*.c` from this session's Task 1, and `test_apps/core_selftest` globs the same files, so the
+  suite also runs on the ESP32)
+
+**Interfaces:**
+- Consumes: `core/fus.h` (this session's Task 1, verbatim — **not** edited here): `fus_fwd_t`,
+  `FUS_FWD_MIN_SAMPLES` (= `FWD_LEARN_MIN_S * FUSION_HZ` = 100); `core/consts.h`:
+  `FWD_LEARN_ACC_MPS2` (1.5), `FWD_LEARN_MAX_YAW_DPS` (2.0), `FWD_LEARN_WINDOWS` (3),
+  `FWD_LEARN_MIN_S` (1), `FUSION_HZ` (100). `<math.h>` (`fabsf`) and `<string.h>` (`memset`) only —
+  no IDF header, no allocation, no global state, because this file is compiled into the firmware.
+- Produces (the four `fus_fwd_*` symbols declared in `core/fus.h`):
+  `void fus_fwd_init(fus_fwd_t *w)`;
+  `void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps)`;
+  `int  fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3])`;
+  `bool fus_fwd_ready(const fus_fwd_t *w)`.
+- Out of scope: the calibration itself. This file never touches `fus_calib_t`. Task 5 wires
+  `fus_calib_forward_step` to call `fus_fwd_on_fix`/`fus_fwd_on_sample` and, on the single `1`,
+  finalises the forward row from `w.sum` through `fus_orient_set_forward`.
+
+**Model (binding, spec §9.2).** A *run* is a maximal stretch of fusion samples over which the fix
+condition holds. Per fix, `cond = (|yaw_dps| < FWD_LEARN_MAX_YAW_DPS) && (gps_acc_mps2 >
+FWD_LEARN_ACC_MPS2)` — both comparisons strict, so braking (negative `gps_acc_mps2`) never qualifies.
+When `cond` is false the current run ends (`run_samples = 0`, `run_sum = 0`, `counted = false`); when
+it stays true the run simply continues across fixes. Per sample with `cond`: `a_h = a - (a.z)z` (g,
+body frame, `z` the calibration's unit Z row), `run_samples++`. While the run is not yet `counted`,
+`a_h` lands in `run_sum`; on the sample where `run_samples == FUS_FWD_MIN_SAMPLES` the run is counted
+(`counted = true`, `sum += run_sum`, `run_sum = 0`, `windows++` saturating at 255) and the call
+returns 1 **iff** `windows == FWD_LEARN_WINDOWS`. Once counted, later samples of the same run add
+straight to `sum`. Because `windows` only ever grows, the 1 is returned exactly once per tracker
+lifetime: a fourth or later run is still counted and still accumulated, but reports 0. `fus_fwd_ready`
+is `windows >= FWD_LEARN_WINDOWS`. Consequence the tests pin down: **every** sample of a counted run
+contributes to `sum` (the ones before the count via `run_sum`, the ones after directly), and **no**
+sample of a run that ended short of `FUS_FWD_MIN_SAMPLES` contributes at all.
+
+- [ ] **Step 1: Write the failing test**
+
+`test/test_fus_fwd.c`:
+
+```c
+#include "unity.h"
+#include "core/fus.h"
+#include "core/consts.h"
+#include <math.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* Vehicle Z row for an upright, axis-aligned mount: a_h is then just the X/Y part of the accel. */
+static const float Z_UP[3] = { 0.0f, 0.0f, 1.0f };
+
+/* Pushes n identical samples; returns how many of them reported "forward learned". */
+static int push_n(fus_fwd_t *w, const float acc[3], const float z[3], int n)
+{
+    int ones = 0;
+    for (int i = 0; i < n; i++) ones += fus_fwd_on_sample(w, acc, z);
+    return ones;
+}
+
+/* One complete run of n qualifying samples, bracketed by the fixes that open and close it. */
+static void run_of(fus_fwd_t *w, const float acc[3], int n, int *ones)
+{
+    fus_fwd_on_fix(w, 2.0f, 0.0f);
+    *ones += push_n(w, acc, Z_UP, n);
+    fus_fwd_on_fix(w, 0.0f, 0.0f);
+}
+
+static void test_fix_condition_needs_straight_line_acceleration(void)
+{
+    /* The boundary cases below are only meaningful at the spec's thresholds. */
+    TEST_ASSERT_EQUAL_FLOAT(1.5f, FWD_LEARN_ACC_MPS2);
+    TEST_ASSERT_EQUAL_FLOAT(2.0f, FWD_LEARN_MAX_YAW_DPS);
+
+    fus_fwd_t w; fus_fwd_init(&w);
+    TEST_ASSERT_FALSE(w.cond);
+    fus_fwd_on_fix(&w, 1.6f, 1.9f);    TEST_ASSERT_TRUE(w.cond);    /* 1.6 > 1.5 and |1.9| < 2.0 */
+    fus_fwd_on_fix(&w, 1.5f, 0.0f);    TEST_ASSERT_FALSE(w.cond);   /* acceleration is a strict > */
+    fus_fwd_on_fix(&w, 1.6f, 2.0f);    TEST_ASSERT_FALSE(w.cond);   /* yaw rate is a strict < */
+    fus_fwd_on_fix(&w, 1.6f, -1.9f);   TEST_ASSERT_TRUE(w.cond);    /* the yaw test is on |yaw|, either way */
+    fus_fwd_on_fix(&w, -3.0f, 0.0f);   TEST_ASSERT_FALSE(w.cond);   /* braking: §9.2 learns from acceleration only */
+}
+
+static void test_samples_outside_the_condition_do_nothing(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.4f, 0.0f, 1.0f };
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, Z_UP, 500));      /* 5 s of acceleration with no qualifying fix */
+    TEST_ASSERT_EQUAL_UINT32(0, w.run_samples);
+    TEST_ASSERT_EQUAL_UINT8(0, w.windows);
+    TEST_ASSERT_FALSE(w.counted);
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[i]);
+        TEST_ASSERT_EQUAL_DOUBLE(0.0, w.run_sum[i]);
+    }
+    TEST_ASSERT_FALSE(fus_fwd_ready(&w));
+}
+
+static void test_a_run_shorter_than_the_minimum_is_discarded(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.2f, 0.0f, 1.0f };                 /* a·z = 1 g, so a_h = (0.2, 0, 0) g */
+    fus_fwd_on_fix(&w, 2.0f, 0.0f);
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, Z_UP, FUS_FWD_MIN_SAMPLES - 1));
+    TEST_ASSERT_EQUAL_UINT32(FUS_FWD_MIN_SAMPLES - 1, w.run_samples);
+    /* 99 × 0.2 g; 1e-6 covers 99 × (0.2f − 0.2) ≈ 3.0e-7 of float quantisation of the input */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 19.8, w.run_sum[0]);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, w.run_sum[1]);             /* exact: 0 − 1·0 */
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, w.run_sum[2]);             /* exact: 1 − 1·1 */
+    TEST_ASSERT_FALSE(w.counted);
+    TEST_ASSERT_EQUAL_UINT8(0, w.windows);
+    for (int i = 0; i < 3; i++) TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[i]);
+
+    fus_fwd_on_fix(&w, 0.0f, 0.0f);                          /* the condition drops: the run is thrown away */
+    TEST_ASSERT_EQUAL_UINT32(0, w.run_samples);
+    TEST_ASSERT_FALSE(w.counted);
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_DOUBLE(0.0, w.run_sum[i]);
+        TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[i]);
+    }
+}
+
+static void test_a_run_counts_on_its_minimum_sample_and_keeps_accumulating(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.2f, 0.0f, 1.0f };
+    fus_fwd_on_fix(&w, 1.6f, 0.5f);
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, Z_UP, FUS_FWD_MIN_SAMPLES - 1));
+    TEST_ASSERT_FALSE(w.counted);
+    TEST_ASSERT_EQUAL_INT(0, fus_fwd_on_sample(&w, a, Z_UP));   /* the 100th counts, but 1 < FWD_LEARN_WINDOWS */
+    TEST_ASSERT_TRUE(w.counted);
+    TEST_ASSERT_EQUAL_UINT8(1, w.windows);
+    TEST_ASSERT_FALSE(fus_fwd_ready(&w));
+    /* the whole run_sum moved into sum: 100 × 0.2 g, 1e-6 covers 100 × (0.2f − 0.2) ≈ 3.0e-7 */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 20.0, w.sum[0]);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[1]);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[2]);
+    for (int i = 0; i < 3; i++) TEST_ASSERT_EQUAL_DOUBLE(0.0, w.run_sum[i]);
+
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, Z_UP, 50));       /* samples 101..150 add straight to sum */
+    TEST_ASSERT_EQUAL_UINT32(150, w.run_samples);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 30.0, w.sum[0]);         /* 150 × 0.2 g; quantisation ≈ 4.5e-7 */
+    for (int i = 0; i < 3; i++) TEST_ASSERT_EQUAL_DOUBLE(0.0, w.run_sum[i]);
+    TEST_ASSERT_EQUAL_UINT8(1, w.windows);                   /* one run, counted once */
+}
+
+static void test_three_counted_runs_report_exactly_once(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.15f, -0.05f, 1.0f };              /* a_h = (0.15, −0.05, 0) g */
+    const int len[3] = { 120, 100, 250 };
+    int ones = 0;
+    for (int r = 0; r < 3; r++) {
+        fus_fwd_on_fix(&w, 1.8f, 0.2f);                      /* run r opens */
+        for (int i = 0; i < len[r]; i++) {
+            if (fus_fwd_on_sample(&w, a, Z_UP)) {
+                ones++;
+                TEST_ASSERT_EQUAL_INT(2, r);                             /* only the third run reports */
+                TEST_ASSERT_EQUAL_INT(FUS_FWD_MIN_SAMPLES, i + 1);       /* on its 100th sample */
+            }
+        }
+        fus_fwd_on_fix(&w, 0.0f, 0.0f);                      /* run r closes */
+    }
+    TEST_ASSERT_EQUAL_INT(1, ones);
+    TEST_ASSERT_EQUAL_UINT8(3, w.windows);
+    TEST_ASSERT_TRUE(fus_fwd_ready(&w));
+    /* Every sample of a counted run contributes, before and after the count: 120 + 100 + 250 = 470.
+     * A run that had ended before FUS_FWD_MIN_SAMPLES would have contributed none of its samples. */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-5, 470.0 * 0.15, w.sum[0]);   /* 1e-5 covers 470 × (0.15f − 0.15) = 2.8e-6 */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 470.0 * (double)a[0], w.sum[0]);  /* against the exact float input the sum is exact */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 470.0 * -0.05, w.sum[1]);  /* 470 × (0.05f − 0.05) = 3.5e-7 */
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[2]);                   /* exact: every a_h.z is 1 − 1·1 */
+}
+
+static void test_the_gravity_component_is_removed_for_a_tilted_z(void)
+{
+    /* Mount tilted 20° about body Y: z is the unit vehicle-up row, t a unit vector perpendicular to it. */
+    const double ang = 20.0 * 3.14159265358979 / 180.0;   /* M_PI is not C11 */
+    const float z[3] = { (float)sin(ang), 0.0f, (float)cos(ang) };
+    const float t[3] = { (float)cos(ang), 0.0f, (float)-sin(ang) };
+    const float a[3] = { z[0] + 0.2f * t[0], z[1] + 0.2f * t[1], z[2] + 0.2f * t[2] };   /* 1 g down + 0.2 g forward */
+
+    fus_fwd_t w; fus_fwd_init(&w);
+    fus_fwd_on_fix(&w, 2.5f, 0.0f);
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, z, FUS_FWD_MIN_SAMPLES));
+    TEST_ASSERT_EQUAL_UINT8(1, w.windows);
+    /* sum = 100 × 0.2 × t = 20 t: the 1 g along z is removed whatever the tilt.
+     * 1e-5 covers the measured 1.3e-6, which is 100 samples × ~1.3e-8 of float rounding in a·z and a − (a·z)z. */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-5, 20.0 * cos(ang), w.sum[0]);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[1]);                 /* exact: a.y and z.y are both 0 */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-5, -20.0 * sin(ang), w.sum[2]);
+    /* the residual along z is what "the vertical component is removed" means, to the same bound */
+    const double along_z = w.sum[0] * (double)z[0] + w.sum[1] * (double)z[1] + w.sum[2] * (double)z[2];
+    TEST_ASSERT_DOUBLE_WITHIN(1e-5, 0.0, along_z);
+    /* and the full 20 g·samples survive the projection: nothing but gravity was subtracted */
+    const double mag = sqrt(w.sum[0] * w.sum[0] + w.sum[1] * w.sum[1] + w.sum[2] * w.sum[2]);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-5, 20.0, mag);
+}
+
+static void test_a_fourth_run_counts_but_reports_nothing(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.25f, 0.0f, 1.0f };                /* 0.25 is exact in float: no quantisation error */
+    int ones = 0;
+    for (int r = 0; r < 3; r++) run_of(&w, a, FUS_FWD_MIN_SAMPLES, &ones);
+    TEST_ASSERT_EQUAL_INT(1, ones);
+    TEST_ASSERT_TRUE(fus_fwd_ready(&w));
+
+    run_of(&w, a, 200, &ones);
+    TEST_ASSERT_EQUAL_INT(1, ones);                          /* the fourth run reports nothing */
+    TEST_ASSERT_EQUAL_UINT8(4, w.windows);                   /* but it is counted and accumulated */
+    TEST_ASSERT_TRUE(fus_fwd_ready(&w));
+    TEST_ASSERT_EQUAL_DOUBLE(500.0 * 0.25, w.sum[0]);        /* 300 + 200 samples, all exactly representable */
+}
+
+static void test_an_interrupted_run_restarts_from_zero(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.3f, 0.0f, 1.0f };
+    fus_fwd_on_fix(&w, 2.0f, 0.0f);
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, Z_UP, 60));
+    fus_fwd_on_fix(&w, 1.0f, 0.0f);                          /* below FWD_LEARN_ACC_MPS2: the run ends */
+    TEST_ASSERT_EQUAL_UINT32(0, w.run_samples);
+    fus_fwd_on_fix(&w, 2.0f, 0.0f);                          /* a new run starts at 0, not at 60 */
+    TEST_ASSERT_EQUAL_INT(0, push_n(&w, a, Z_UP, 60));
+    TEST_ASSERT_EQUAL_UINT32(60, w.run_samples);
+    TEST_ASSERT_FALSE(w.counted);
+    TEST_ASSERT_EQUAL_UINT8(0, w.windows);                   /* 120 samples, neither run reached 100 */
+    for (int i = 0; i < 3; i++) TEST_ASSERT_EQUAL_DOUBLE(0.0, w.sum[i]);
+    /* only the live run is held; 1e-6 covers 60 × (0.3f − 0.3) ≈ 7.2e-7 */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-6, 60.0 * 0.3, w.run_sum[0]);
+}
+
+static void test_the_window_counter_saturates(void)
+{
+    fus_fwd_t w; fus_fwd_init(&w);
+    const float a[3] = { 0.5f, 0.0f, 1.0f };                 /* exact in float */
+    int ones = 0;
+    for (int r = 0; r < 300; r++) run_of(&w, a, FUS_FWD_MIN_SAMPLES, &ones);
+    TEST_ASSERT_EQUAL_INT(1, ones);                          /* still exactly one report, on run 3 */
+    TEST_ASSERT_EQUAL_UINT8(255, w.windows);                 /* uint8_t saturates instead of wrapping to 0 */
+    TEST_ASSERT_TRUE(fus_fwd_ready(&w));
+    TEST_ASSERT_EQUAL_DOUBLE(300.0 * FUS_FWD_MIN_SAMPLES * 0.5, w.sum[0]);   /* every counted sample is in */
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_fix_condition_needs_straight_line_acceleration);
+    RUN_TEST(test_samples_outside_the_condition_do_nothing);
+    RUN_TEST(test_a_run_shorter_than_the_minimum_is_discarded);
+    RUN_TEST(test_a_run_counts_on_its_minimum_sample_and_keeps_accumulating);
+    RUN_TEST(test_three_counted_runs_report_exactly_once);
+    RUN_TEST(test_the_gravity_component_is_removed_for_a_tilted_z);
+    RUN_TEST(test_a_fourth_run_counts_but_reports_nothing);
+    RUN_TEST(test_an_interrupted_run_restarts_from_zero);
+    RUN_TEST(test_the_window_counter_saturates);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug > /dev/null && cmake --build test/build --target test_fus_fwd 2>&1 | tail -5`
+Expected: a link failure, because the header declares the four functions and nothing defines them:
+
+```
+Undefined symbols for architecture arm64:
+  "_fus_fwd_init", referenced from:
+      _test_fix_condition_needs_straight_line_acceleration in test_fus_fwd.c.o
+ld: symbol(s) not found for architecture arm64
+```
+
+(`_fus_fwd_on_fix`, `_fus_fwd_on_sample` and `_fus_fwd_ready` are listed as well; on Linux the same
+failure reads `undefined reference to 'fus_fwd_init'`.)
+
+- [ ] **Step 3: Write the implementation**
+
+`components/core/fusion/fus_fwd.c`:
+
+```c
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+/* Forward-axis learning window tracker (spec §9.2).
+ *
+ * The pipeline calls fus_fwd_on_fix once per GPS fix with the fix-to-fix longitudinal acceleration and
+ * the yaw rate, and fus_fwd_on_sample once per fusion step while the Z row is known. A *run* is a maximal
+ * stretch of samples over which the fix condition holds; it counts as one learning window the moment it
+ * reaches FUS_FWD_MIN_SAMPLES (FWD_LEARN_MIN_S seconds at FUSION_HZ) and keeps accumulating until the
+ * condition drops. Only counted runs contribute to sum, so a short burst of acceleration that ends before
+ * FWD_LEARN_MIN_S is discarded instead of biasing the forward axis.
+ *
+ * All state is the caller's fus_fwd_t and there is no allocation: this file is built for the ESP32 too. */
+
+#define FUS_FWD_MAX_WINDOWS 255   /* fus_fwd_t.windows is uint8_t: the count saturates instead of wrapping */
+
+void fus_fwd_init(fus_fwd_t *w)
+{
+    memset(w, 0, sizeof *w);      /* a zeroed tracker is a valid initialised state (fus.h) */
+}
+
+/* Ends the current run: its samples are already in sum if it was counted, and are dropped otherwise. */
+static void run_reset(fus_fwd_t *w)
+{
+    w->run_samples = 0;
+    w->run_sum[0] = 0.0; w->run_sum[1] = 0.0; w->run_sum[2] = 0.0;
+    w->counted = false;
+}
+
+void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps)
+{
+    /* §9.2 learns only from near-straight acceleration, so that a_h points along the forward axis. Both
+     * comparisons are strict, and braking (gps_acc_mps2 <= 0) can never qualify. */
+    w->cond = (fabsf(yaw_dps) < FWD_LEARN_MAX_YAW_DPS) && (gps_acc_mps2 > FWD_LEARN_ACC_MPS2);
+    if (!w->cond) run_reset(w);
+}
+
+int fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3])
+{
+    if (!w->cond) return 0;
+
+    /* a_h = a − (a·z)z: the horizontal (gravity-free) part of the specific force, in g, body frame. */
+    const float az = acc_g[0] * z[0] + acc_g[1] * z[1] + acc_g[2] * z[2];
+    const float ah[3] = { acc_g[0] - az * z[0], acc_g[1] - az * z[1], acc_g[2] - az * z[2] };
+
+    w->run_samples++;
+    if (w->counted) {                       /* run already counted: later samples go straight to sum */
+        for (int i = 0; i < 3; i++) w->sum[i] += (double)ah[i];
+        return 0;
+    }
+    for (int i = 0; i < 3; i++) w->run_sum[i] += (double)ah[i];
+    if (w->run_samples != (uint32_t)FUS_FWD_MIN_SAMPLES) return 0;
+
+    w->counted = true;
+    for (int i = 0; i < 3; i++) { w->sum[i] += w->run_sum[i]; w->run_sum[i] = 0.0; }
+    if (w->windows < FUS_FWD_MAX_WINDOWS) w->windows = (uint8_t)(w->windows + 1);
+    /* windows only ever grows, so it equals FWD_LEARN_WINDOWS on exactly one call per tracker: later
+     * runs still count (and still accumulate) but report nothing. */
+    return (w->windows == FWD_LEARN_WINDOWS) ? 1 : 0;
+}
+
+bool fus_fwd_ready(const fus_fwd_t *w)
+{
+    return w->windows >= FWD_LEARN_WINDOWS;
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug 2>&1 | tail -1 && cmake --build test/build --parallel 2>&1 | grep -ciE "warning|error" ; ctest --test-dir test/build --output-on-failure 2>&1 | grep -E "test_fus_fwd|tests passed"`
+Expected: `0` warnings/errors, then
+
+```
+      Start  6: test_fus_fwd
+ 6/22 Test  #6: test_fus_fwd .....................   Passed    0.04 sec
+100% tests passed out of 22
+```
+
+`./test/build/test_fus_fwd` on its own prints `9 Tests 0 Failures 0 Ignored / OK`. The suite runs
+under ASan/UBSan (`-fno-sanitize-recover=undefined`), so a green run also means no undefined
+behaviour was executed — the saturation test alone makes 30 000 `fus_fwd_on_sample` calls.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add components/core/fusion/fus_fwd.c test/test_fus_fwd.c
+git commit -m "feat(core): forward-axis learning window tracker (fusion)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+### Task 5: Wire stillness, gyro bias, orientation capture and forward learning into `fus_step` (serial)
+
+**Files:**
+- Create: none.
+- Modify: `components/core/fusion/fus.c` (the block in Step 3 replaces Task 1's skeleton in full),
+  `test/test_fus.c` (Task 1's seven cases are kept byte-for-byte; five integration cases are
+  appended), `docs/superpowers/specs/2026-09-14-lap-timer-design.md` (§4.8, one table row).
+- No CMake edit: the host test list and the `test_apps/core_selftest` wrapper list are both globs
+  over `test/test_*.c` (Task 1 Step 5), so `test_fus.c` also has to keep compiling for the ESP32.
+  The appended cases therefore include nothing beyond the headers Task 1 already includes
+  (`unity.h`, `core/fus.h`, `<math.h>`, `<string.h>`), keep every helper `static`, use no host-only
+  header, allocate nothing, and put no array bigger than three floats on the stack.
+- No plan edit: this session's Task 1 introduces its `fus.c` block as "this session's Task 5 replaces
+  the four bottom functions and extends `fus_step`" and its `test_fus.c` block as the seven cases
+  this task appends to. The two blocks below are therefore the plan's byte-identical restatements of
+  those files from this commit on; Task 1's blocks stay as the record of what Task 1 landed.
+
+**Interfaces:**
+- Consumes (declared by Task 1 in `core/fus.h`, which this task MUST NOT change):
+  - Task 2 — `fus_still_t`; `void fus_still_init(fus_still_t *s)`;
+    `int fus_still_push(fus_still_t *s, const imu_raw_t *raw)`; the last-window fields
+    `still`, `mean_acc[3]`, `mean_graw[3]`.
+  - Task 3 — `int fus_orient_from_gravity(fus_calib_t *c, const float mean_acc_g[3])`;
+    `int fus_orient_set_forward(fus_calib_t *c, const float sum_ah[3])`.
+  - Task 4 — `fus_fwd_t`; `void fus_fwd_init(fus_fwd_t *w)`;
+    `void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps)`;
+    `int fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3])`;
+    `bool fus_fwd_ready(const fus_fwd_t *w)`; the fields `sum[3]` and `windows`.
+  - `core/consts.h` — `FUSION_HZ`, `G_MPS2`, `IMU_ACC_LSB_PER_G`, `IMU_GYR_LSB_PER_DPS`,
+    `FWD_LEARN_ACC_MPS2`, `FWD_LEARN_MAX_YAW_DPS`, `FWD_LEARN_WINDOWS`, `STILL_ACC_VAR`,
+    `STILL_GYRO_VAR`; `core/fus.h` — `FUS_STILL_WINDOW_N`, `FUS_FWD_MIN_SAMPLES`,
+    `FUS_CALIB_F_ORIENT`, `FUS_CALIB_F_FORWARD`.
+- Produces (bodies only; every signature already exists in `core/fus.h`):
+  - `int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out)` — extended with the stillness
+    push, the `FUS_STILL` flag and the forward-learning block.
+  - `bool fus_is_still(const fus_t *f)` — the last completed stillness window's verdict.
+  - `void fus_gyro_bias_update(fus_t *f)` — no-op unless still; otherwise `gbias` = that window's
+    mean raw gyro, stamped with the current temperature.
+  - `int fus_calib_orient_capture(fus_t *f)` — 0 / −1; on success also restarts forward learning.
+  - `int fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps)` — −1 before the upright
+    capture, 1 exactly once (the fix after `fus_step` set the forward row), 0 otherwise.
+
+**Design (binding; session rulings and spec §9.2, §9.3 step 8):**
+
+- `fus_step` calls `fus_still_push(&f->still, raw)` on every sample, right after the body vectors are
+  rotated, and sets `FUS_STILL` from `f->still.still` (the last completed window, so the flag is at
+  most one window behind, which the rulings accept).
+- Forward learning runs only while `calib.orient_ok && !calib.forward_ok`, and only after this
+  sample's outputs and flags are written: the sample stays consistent with the calibration it was
+  rotated with (sign-less `g_lon`, `FUS_ORIENT_OK` clear), and the newly learned rows take effect on
+  the next sample, 10 ms later at `FUSION_HZ`. `fus_fwd_on_sample(&f->fwd, a_b, z)` returning 1 means
+  the `FWD_LEARN_WINDOWS`-th run was just counted: the accumulated `f->fwd.sum` (double) is narrowed
+  into a `float sum[3]` and handed to `fus_orient_set_forward`. On 0 from that call the rows are set
+  and `f->fwd_learned_pending = true`; on −1 (a degenerate accumulation, e.g. every run cancelled
+  out) `fus_fwd_init(&f->fwd)` throws the accumulation away so learning starts over instead of
+  latching a bad row.
+- `fus_is_still` is `f->still.still`; everything else in this task goes through it, so "still" has
+  exactly one definition.
+- `fus_gyro_bias_update`: returns immediately unless `fus_is_still`; then `gbias[i] =
+  still.mean_graw[i]` (raw LSB, the unit `fus_step` subtracts in), `gbias_temp_c100 = temp_known ?
+  temp_c100 : 0`, `bias_ok = 1`, `bias_stale = false` (the bias was just taken at the current
+  temperature, whether or not that temperature is known).
+- `fus_calib_orient_capture`: −1 unless `fus_is_still`; otherwise the result of
+  `fus_orient_from_gravity(&f->calib, f->still.mean_acc)`. On 0 the forward row is gone (that
+  function clears `forward_ok`), so `fus_fwd_init(&f->fwd)` and `fwd_learned_pending = false` drop
+  every window accumulated against the old z.
+- `fus_calib_forward_step`: −1 unless `calib.orient_ok`; otherwise `fus_fwd_on_fix` sets the run
+  condition from this fix, and the pending flag set by `fus_step` is consumed and reported as 1
+  exactly once. Learning completes at 100 Hz inside `fus_step`; this 5–10 Hz call is only how the
+  pipeline hears about it (it persists the calibration and emits `EV_CALIB_DONE`).
+- Spec §4.8 gains one row for `fus_t` (Step 5). Everything else in `fus.c` — the calibration codec,
+  `fus_rotate`, `fus_init`, `fus_set_gps_speed`, `fus_set_temp`, the output formulas — is Task 1's
+  and is restated unchanged.
+
+**Drafting note.** Tasks 2–4 were drafted in parallel, so their files did not exist when this task
+was compile-checked. The check used stand-in implementations of `fus_still.c`, `fus_orient.c` and
+`fus_fwd.c` written to the same `core/fus.h` contracts (a real tumbling-window detector with
+`E[x²] − E[x]²` variances, gravity/forward rows built with cross products, the run tracker exactly as
+the header describes). The header contract is what this task codes against, so the integration cases
+below are meaningful against the real modules; the implementer runs them against Tasks 2–4 as merged.
+
+- [ ] **Step 1: Append the integration tests**
+
+`test/test_fus.c` (the first seven cases are Task 1's, unchanged; the helpers and five cases after
+the `/* ---- integration cases ... ---- */` banner are new, and `main` gains five `RUN_TEST` lines):
+
+```c
+#include "unity.h"
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* Raw sample helpers: accel in g and gyro in dps expressed as MPU-6050 LSB (types.h scales). */
+static imu_raw_t raw_g_dps(double ax_g, double ay_g, double az_g, double gx, double gy, double gz)
+{
+    imu_raw_t r;
+    r.mono_us = 1000000;
+    r.ax = (int16_t)lround(ax_g * IMU_ACC_LSB_PER_G);
+    r.ay = (int16_t)lround(ay_g * IMU_ACC_LSB_PER_G);
+    r.az = (int16_t)lround(az_g * IMU_ACC_LSB_PER_G);
+    r.gx = (int16_t)lround(gx * IMU_GYR_LSB_PER_DPS);
+    r.gy = (int16_t)lround(gy * IMU_GYR_LSB_PER_DPS);
+    r.gz = (int16_t)lround(gz * IMU_GYR_LSB_PER_DPS);
+    return r;
+}
+
+static void test_defaults_are_identity_and_valid(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    TEST_ASSERT_EQUAL_UINT8(FUS_CALIB_VERSION, c.version);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, c.r[0]); TEST_ASSERT_EQUAL_FLOAT(1.0f, c.r[4]); TEST_ASSERT_EQUAL_FLOAT(1.0f, c.r[8]);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, c.r[1]);
+    TEST_ASSERT_EQUAL_UINT8(0, c.orient_ok); TEST_ASSERT_EQUAL_UINT8(0, c.forward_ok); TEST_ASSERT_EQUAL_UINT8(0, c.bias_ok);
+}
+
+static void test_invalid_calibration_is_rejected_and_init_falls_back(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.version = 0;
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.r[0] = 2.0f;                       /* row x not unit length */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.r[3] = 1.0f;                       /* row y = (1,0,0) parallel to row x */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.forward_ok = 1;                    /* forward without orientation */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+    fus_calib_defaults(&c); c.gbias[1] = 40000.0f;               /* beyond the raw range */
+    TEST_ASSERT_FALSE(fus_calib_valid(&c));
+
+    fus_t f; c.version = 0;
+    fus_init(&f, &c, 1);
+    TEST_ASSERT_TRUE(fus_calib_valid(fus_calib(&f)));
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, fus_calib(&f)->r[0]);
+    fus_init(&f, NULL, 0);
+    TEST_ASSERT_TRUE(fus_calib_valid(fus_calib(&f)));
+    TEST_ASSERT_EQUAL_UINT8(0, f.moto);
+}
+
+static void test_identity_mount_gravity_bias_and_yaw_sign(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.gbias[0] = 5.0f * IMU_GYR_LSB_PER_DPS;                     /* 5 dps bias on X */
+    c.bias_ok = 1;
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o;
+    imu_raw_t r = raw_g_dps(0.0, 0.0, 1.0, 5.0, 0.0, 10.0);
+    TEST_ASSERT_EQUAL_INT(1, fus_step(&f, &r, &o));
+    TEST_ASSERT_EQUAL_INT64(1000000, o.mono_us);
+    /* orientation not learned: sign-less horizontal magnitude, no lateral, no lean, ORIENT_OK clear */
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, o.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, o.g_lat);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, o.lean_deg);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & (FUS_ORIENT_OK | FUS_LEAN_VALID));
+    /* yaw: +10 dps about body Z = left turn, bias-free because the bias is on X only */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 10.0f, o.yaw_dps);
+
+    c.orient_ok = 1; c.forward_ok = 1;                            /* identity mount fully known */
+    fus_init(&f, &c, 1);
+    r = raw_g_dps(0.3, 0.5, 1.0, 5.0, 0.0, 0.0);
+    fus_step(&f, &r, &o);
+    /* accel tolerance 1e-3 g: raw LSB quantisation is 1/2048 g ≈ 4.9e-4 g */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.3f, o.g_lon);              /* +X forward: accelerating */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, -0.5f, o.g_lat);             /* +Y is left, so lateral g is -a.y */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, sqrtf(0.34f), o.g_comb);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.yaw_dps);            /* 5 dps on X minus the 5 dps bias */
+    TEST_ASSERT_EQUAL_UINT8(FUS_ORIENT_OK, o.flags & FUS_ORIENT_OK);
+    TEST_ASSERT_EQUAL_UINT32(1, f.samples);
+}
+
+static void test_ninety_degree_mount_rotates_into_the_vehicle_frame(void)
+{
+    /* IMU mounted with body +X pointing left (vehicle +Y) and body +Y pointing backwards (vehicle -X);
+     * body +Z up. Rows are the vehicle axes in body coordinates: x = (0,-1,0), y = (1,0,0), z = (0,0,1). */
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float R[9] = { 0.0f, -1.0f, 0.0f,   1.0f, 0.0f, 0.0f,   0.0f, 0.0f, 1.0f };
+    memcpy(c.r, R, sizeof R);
+    c.orient_ok = 1; c.forward_ok = 1;
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o;
+    /* vehicle accelerating at 0.3 g forward appears on body -Y; a 10 dps left turn is body +Z */
+    imu_raw_t r = raw_g_dps(0.0, -0.3, 1.0, 0.0, 0.0, 10.0);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.3f, o.g_lon);              /* 1e-3 g: LSB quantisation */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 10.0f, o.yaw_dps);
+    /* a right-hand lateral specific force (vehicle -Y = body -X) reads as positive g_lat */
+    r = raw_g_dps(-0.4, 0.0, 1.0, 0.0, 0.0, 0.0);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.4f, o.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.g_lon);
+
+    float v[3]; const float b[3] = { 1.0f, 2.0f, 3.0f };
+    fus_rotate(R, b, v);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, -2.0f, v[0]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 1.0f, v[1]);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 3.0f, v[2]);
+}
+
+static void test_temperature_drift_marks_the_bias_stale(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    c.bias_ok = 1; c.gbias_temp_c100 = 2500;
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o; imu_raw_t r = raw_g_dps(0, 0, 1, 0, 0, 0);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);        /* temperature unknown: not stale */
+    fus_set_temp(&f, 3900);                                      /* 14 °C away: within BIAS_TEMP_STALE_C */
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);
+    fus_set_temp(&f, 4100);                                      /* 16 °C away */
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(FUS_BIAS_STALE, o.flags & FUS_BIAS_STALE);
+    fus_set_temp(&f, 900);                                       /* 16 °C the other way */
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(FUS_BIAS_STALE, o.flags & FUS_BIAS_STALE);
+    /* no bias captured: temperature can never make it stale */
+    fus_calib_defaults(&c); fus_init(&f, &c, 1); fus_set_temp(&f, 9000);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);
+}
+
+static void test_calibration_round_trips_through_the_calib_record(void)
+{
+    fus_calib_t c; fus_calib_defaults(&c);
+    const float ang = 30.0f * 3.14159265358979f / 180.0f;         /* rotation about Z by 30° (M_PI is not C11) */
+    const float R[9] = { cosf(ang), sinf(ang), 0.0f,  -sinf(ang), cosf(ang), 0.0f,  0.0f, 0.0f, 1.0f };
+    memcpy(c.r, R, sizeof R);
+    c.gbias[0] = 12.4f; c.gbias[1] = -7.6f; c.gbias[2] = 0.4f; c.gbias_temp_c100 = 2712;
+    c.orient_ok = 1; c.forward_ok = 1; c.bias_ok = 1;
+    TEST_ASSERT_TRUE(fus_calib_valid(&c));
+    ses_calib_t w; fus_calib_to_ses(&c, &w);
+    TEST_ASSERT_EQUAL_INT16(8660, w.r_e4[0]);                     /* cos 30° × 1e4 rounded */
+    TEST_ASSERT_EQUAL_INT16(5000, w.r_e4[1]);
+    TEST_ASSERT_EQUAL_INT16(12, w.gbias[0]); TEST_ASSERT_EQUAL_INT16(-8, w.gbias[1]); TEST_ASSERT_EQUAL_INT16(0, w.gbias[2]);
+    TEST_ASSERT_EQUAL_UINT8(0x07, w.calib_flags);
+    fus_calib_t d; fus_calib_from_ses(&w, &d);
+    for (int i = 0; i < 9; i++) TEST_ASSERT_FLOAT_WITHIN(1e-4f, c.r[i], d.r[i]);
+    TEST_ASSERT_TRUE(fus_calib_valid(&d));                        /* 1e-4 quantisation stays inside FUS_ORTHO_TOL */
+    TEST_ASSERT_EQUAL_FLOAT(12.0f, d.gbias[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, d.orient_ok); TEST_ASSERT_EQUAL_UINT8(1, d.forward_ok); TEST_ASSERT_EQUAL_UINT8(1, d.bias_ok);
+    TEST_ASSERT_EQUAL_UINT8(FUS_CALIB_VERSION, d.version);
+    TEST_ASSERT_EQUAL_INT16(0, d.gbias_temp_c100);                 /* not carried by the record */
+    /* a saturating bias clamps instead of wrapping */
+    c.gbias[2] = 40000.0f; fus_calib_to_ses(&c, &w);
+    TEST_ASSERT_EQUAL_INT16(32767, w.gbias[2]);
+}
+
+static void test_gps_speed_is_held_with_its_validity_and_time(void)
+{
+    fus_t f; fus_init(&f, NULL, 1);
+    fus_set_gps_speed(&f, 27.5f, 5000000, true);
+    TEST_ASSERT_EQUAL_FLOAT(27.5f, f.v_mps); TEST_ASSERT_EQUAL_INT64(5000000, f.v_mono_us); TEST_ASSERT_TRUE(f.v_valid);
+    fus_set_gps_speed(&f, 0.0f, 5200000, false);
+    TEST_ASSERT_FALSE(f.v_valid);
+}
+
+/* ---- integration cases: stillness, bias, orientation capture and forward learning (§22.1) ---- */
+
+#define BURST_SAMPLES   120                       /* 1.2 s of acceleration at FUSION_HZ */
+#define COAST_SAMPLES    50                       /* 0.5 s of coasting between bursts */
+#define FIX_EVERY        (FUSION_HZ / 5)          /* one GPS fix every 20 samples = 5 Hz */
+#define BURST_ACC_MPS2   2.0f                     /* > FWD_LEARN_ACC_MPS2, so the fix qualifies */
+#define BURST_YAW_DPS    0.5f                     /* < FWD_LEARN_MAX_YAW_DPS, so the fix qualifies */
+
+/* Deterministic LCG (Numerical Recipes constants): the noise sequence must be identical on every
+ * host and on the ESP32, so no rand() and no library state. */
+static uint32_t lcg_state;
+static void lcg_reset(void) { lcg_state = 22222u; }
+static float noise_pm(float amp)                  /* uniform in [-amp, +amp) */
+{
+    lcg_state = lcg_state * 1664525u + 1013904223u;
+    const float u = (float)(lcg_state >> 8) / 16777216.0f;   /* top 24 bits → [0,1) */
+    return amp * (2.0f * u - 1.0f);
+}
+
+/* Raw sample from accel in g and gyro in raw LSB (the gyro bias lives in LSB, §9.2). */
+static imu_raw_t raw_at(int64_t mono_us, const float a_g[3], const float g_lsb[3])
+{
+    imu_raw_t r;
+    r.mono_us = mono_us;
+    r.ax = (int16_t)lroundf(a_g[0] * IMU_ACC_LSB_PER_G);
+    r.ay = (int16_t)lroundf(a_g[1] * IMU_ACC_LSB_PER_G);
+    r.az = (int16_t)lroundf(a_g[2] * IMU_ACC_LSB_PER_G);
+    r.gx = (int16_t)lroundf(g_lsb[0]);
+    r.gy = (int16_t)lroundf(g_lsb[1]);
+    r.gz = (int16_t)lroundf(g_lsb[2]);
+    return r;
+}
+
+/* Feeds n samples at FUSION_HZ, each = (a_g, g_lsb) plus uniform noise, advancing *mono_us. */
+static void feed(fus_t *f, fused_sample_t *o, int n, const float a_g[3], const float g_lsb[3],
+                 float a_noise_g, float g_noise_lsb, int64_t *mono_us)
+{
+    for (int i = 0; i < n; i++) {
+        const float an[3] = { a_g[0] + noise_pm(a_noise_g), a_g[1] + noise_pm(a_noise_g), a_g[2] + noise_pm(a_noise_g) };
+        const float gn[3] = { g_lsb[0] + noise_pm(g_noise_lsb), g_lsb[1] + noise_pm(g_noise_lsb), g_lsb[2] + noise_pm(g_noise_lsb) };
+        imu_raw_t r = raw_at(*mono_us, an, gn);
+        fus_step(f, &r, o);
+        *mono_us += 1000000 / FUSION_HZ;
+    }
+}
+
+static const float ZERO3[3] = { 0.0f, 0.0f, 0.0f };
+static const float QUIET_ACC_NOISE_G = 0.005f;    /* var 8.3e-6 g² ≪ STILL_ACC_VAR = 4e-4 g² */
+static const float QUIET_GYR_NOISE_LSB = 0.5f;    /* var 3.1e-4 dps² ≪ STILL_GYRO_VAR = 4 dps² */
+static const float MOVING_GYR_NOISE_LSB = 5.0f * IMU_GYR_LSB_PER_DPS;  /* ±5 dps → var 8.3 dps² > 4 */
+
+static void test_still_detection_and_gyro_bias_update(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fus_set_temp(&f, 2500);                       /* the pipeline's ~1 Hz poll, before the capture */
+    fused_sample_t o; int64_t t = 1000000;
+    const float quiet_a[3] = { 0.0f, 0.0f, 1.0f };
+    const float bias_lsb[3] = { 20.0f, -8.0f, 3.0f };   /* the gyro bias the window must recover */
+
+    feed(&f, &o, FUS_STILL_WINDOW_N - 1, quiet_a, bias_lsb, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_FALSE(fus_is_still(&f));           /* 199 samples: no window has completed */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_STILL);
+    /* with no bias captured the 3 LSB on Z read as yaw: 3 / 16.4 = 0.183 dps. Tolerance 0.02 dps =
+     * 0.33 LSB, more than the ±0.5 LSB noise can survive the int16 rounding of the raw sample. */
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, 3.0f / IMU_GYR_LSB_PER_DPS, o.yaw_dps);
+
+    feed(&f, &o, 1, quiet_a, bias_lsb, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_TRUE(fus_is_still(&f));            /* the 200th sample closes the window */
+    TEST_ASSERT_EQUAL_UINT8(FUS_STILL, o.flags & FUS_STILL);
+    feed(&f, &o, 1, quiet_a, bias_lsb, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_EQUAL_UINT8(FUS_STILL, o.flags & FUS_STILL);   /* the verdict holds until the next window */
+
+    fus_gyro_bias_update(&f);
+    /* Tolerance 0.1 LSB: the ±0.5 LSB noise is zero-mean, so the mean of 200 samples has a standard
+     * error of 0.5/sqrt(3·200) ≈ 0.02 LSB, and the int16 rounding of the raw sample removes most of
+     * the noise before it is ever averaged. */
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 20.0f, fus_calib(&f)->gbias[0]);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, -8.0f, fus_calib(&f)->gbias[1]);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 3.0f, fus_calib(&f)->gbias[2]);
+    TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&f)->bias_ok);
+    TEST_ASSERT_EQUAL_INT16(2500, fus_calib(&f)->gbias_temp_c100);
+    TEST_ASSERT_FALSE(f.bias_stale);
+
+    feed(&f, &o, 1, quiet_a, bias_lsb, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 0.0f, o.yaw_dps);           /* 0.1 dps = 1.6 LSB of headroom */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_BIAS_STALE);      /* captured at the current temperature */
+
+    /* A moving window (±5 dps of gyro) is not still, so the bias must not move. */
+    const fus_calib_t before = *fus_calib(&f);
+    feed(&f, &o, FUS_STILL_WINDOW_N, quiet_a, bias_lsb, QUIET_ACC_NOISE_G, MOVING_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_FALSE(fus_is_still(&f));
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_STILL);
+    fus_gyro_bias_update(&f);
+    TEST_ASSERT_EQUAL_FLOAT(before.gbias[0], fus_calib(&f)->gbias[0]);
+    TEST_ASSERT_EQUAL_FLOAT(before.gbias[1], fus_calib(&f)->gbias[1]);
+    TEST_ASSERT_EQUAL_FLOAT(before.gbias[2], fus_calib(&f)->gbias[2]);
+}
+
+/* Gravity as read by an IMU pitched 30° about body Y: (sin 30°, 0, cos 30°) g. Body -Y stays
+ * perpendicular to that z (e_y · z = 0), so it can serve as the vehicle forward direction below. */
+static const float TILT_RAD = 30.0f * 3.14159265358979f / 180.0f;   /* M_PI is not C11 */
+static void tilted_gravity(float g[3])
+{
+    g[0] = sinf(TILT_RAD); g[1] = 0.0f; g[2] = cosf(TILT_RAD);
+}
+
+/* Fills one still window at the tilted attitude and captures the orientation. */
+static void capture_tilted_orientation(fus_t *f, fused_sample_t *o, int64_t *t, const float grav[3])
+{
+    feed(f, o, FUS_STILL_WINDOW_N, grav, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, t);
+    TEST_ASSERT_TRUE(fus_is_still(f));
+    TEST_ASSERT_EQUAL_INT(0, fus_calib_orient_capture(f));
+}
+
+static void test_orientation_capture_from_tilted_gravity(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fused_sample_t o; int64_t t = 1000000;
+    float grav[3]; tilted_gravity(grav);
+
+    /* Capture while moving is refused and leaves the calibration alone. */
+    feed(&f, &o, FUS_STILL_WINDOW_N, grav, ZERO3, QUIET_ACC_NOISE_G, MOVING_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_FALSE(fus_is_still(&f));
+    TEST_ASSERT_EQUAL_INT(-1, fus_calib_orient_capture(&f));
+    TEST_ASSERT_EQUAL_UINT8(0, fus_calib(&f)->orient_ok);
+
+    feed(&f, &o, FUS_STILL_WINDOW_N, grav, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_TRUE(fus_is_still(&f));
+    imu_raw_t clean = raw_at(t, grav, ZERO3);      /* noise-free sample, so only LSB rounding is left */
+    fus_step(&f, &clean, &o);
+    /* identity rows: the whole 30° tilt shows up as sign-less horizontal magnitude, sin 30° = 0.5 g.
+     * 1e-3 g covers the 1/2048 g = 4.9e-4 g raw quantisation. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.5f, o.g_lon);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_ORIENT_OK);
+
+    TEST_ASSERT_EQUAL_INT(0, fus_calib_orient_capture(&f));
+    TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&f)->orient_ok);
+    TEST_ASSERT_EQUAL_UINT8(0, fus_calib(&f)->forward_ok);
+    fus_step(&f, &clean, &o);                      /* the same sample through the captured rows */
+    /* gravity is the z row now, so nothing is left in the horizontal plane. 1e-3 g covers the raw
+     * quantisation (4.9e-4 g) plus the mean of the ±0.005 g window noise (0.005/sqrt(3·200) = 2e-4 g
+     * per axis), which is all the captured z can be off by. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, o.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, o.g_lat);            /* zero until forward is learned */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_ORIENT_OK);       /* forward row still unknown */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);      /* lean invalid before forward learned */
+}
+
+/* Three straight-line acceleration bursts along body -Y, with fus_calib_forward_step called at 5 Hz
+ * exactly as the pipeline calls it (once per GPS fix). Counts the calls that returned 1 and -1.
+ * The samples carry no noise: the forward row is then exact up to the raw quantisation. A constant
+ * acceleration has no variance, so the stillness detector also calls these windows still — that is
+ * inherent to a variance test and why the assertions below mask FUS_STILL out. */
+static int run_forward_bursts(fus_t *f, fused_sample_t *o, int64_t *t, const float grav[3], int *neg)
+{
+    const float fwd_g = BURST_ACC_MPS2 / (float)G_MPS2;        /* specific force of the burst, in g */
+    const float acc[3] = { grav[0], grav[1] - fwd_g, grav[2] };
+    int ones = 0;
+    for (int b = 0; b < FWD_LEARN_WINDOWS; b++) {
+        for (int i = 0; i < BURST_SAMPLES; i++) {
+            if (i % FIX_EVERY == 0) {
+                const int rc = fus_calib_forward_step(f, BURST_ACC_MPS2, BURST_YAW_DPS);
+                if (rc == 1) ones++;
+                if (rc < 0) (*neg)++;
+            }
+            feed(f, o, 1, acc, ZERO3, 0.0f, 0.0f, t);
+        }
+        for (int i = 0; i < COAST_SAMPLES; i++) {
+            if (i % FIX_EVERY == 0) {
+                const int rc = fus_calib_forward_step(f, 0.0f, 0.0f);   /* run ends: no acceleration */
+                if (rc == 1) ones++;
+                if (rc < 0) (*neg)++;
+            }
+            feed(f, o, 1, grav, ZERO3, 0.0f, 0.0f, t);
+        }
+    }
+    return ones;
+}
+
+static void test_forward_learning_from_straight_line_acceleration(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fused_sample_t o; int64_t t = 1000000;
+    float grav[3]; tilted_gravity(grav);
+
+    TEST_ASSERT_EQUAL_INT(-1, fus_calib_forward_step(&f, BURST_ACC_MPS2, 0.0f));   /* before any capture */
+    capture_tilted_orientation(&f, &o, &t, grav);
+
+    int neg = 0;
+    const int ones = run_forward_bursts(&f, &o, &t, grav, &neg);
+    TEST_ASSERT_EQUAL_INT(1, ones);                /* reported exactly once, during the third burst */
+    TEST_ASSERT_EQUAL_INT(0, neg);                 /* never -1 once the orientation is captured */
+    TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&f)->forward_ok);
+    TEST_ASSERT_TRUE(fus_fwd_ready(&f.fwd));
+
+    /* The learned forward row is body -Y, which is perpendicular to the tilted z, so the burst's
+     * specific force lands entirely on g_lon: 2 / 9.80665 = 0.2039 g. 2e-3 g covers the raw
+     * quantisation of the sample (4.9e-4 g) and of the samples the row was learned from. */
+    const float fwd_g = BURST_ACC_MPS2 / (float)G_MPS2;
+    const float acc[3] = { grav[0], grav[1] - fwd_g, grav[2] };
+    imu_raw_t r = raw_at(t, acc, ZERO3);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(FUS_ORIENT_OK, o.flags & FUS_ORIENT_OK);
+    TEST_ASSERT_FLOAT_WITHIN(2e-3f, 0.2039f, o.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(2e-3f, 0.0f, o.g_lat);
+
+    /* A left lateral specific force of 0.1 g: the body vector is 0.1 · y_row on top of gravity, and
+     * lateral g is + to the right, so the output is -0.1 g. */
+    const float *rows = fus_calib(&f)->r;
+    const float lat[3] = { grav[0] + 0.1f * rows[3], grav[1] + 0.1f * rows[4], grav[2] + 0.1f * rows[5] };
+    r = raw_at(t, lat, ZERO3);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(2e-3f, -0.1f, o.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(2e-3f, 0.0f, o.g_lon);
+}
+
+static void test_calibration_persists_through_the_calib_record_after_learning(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fused_sample_t o; int64_t t = 1000000;
+    float grav[3]; tilted_gravity(grav);
+    capture_tilted_orientation(&f, &o, &t, grav);
+    int neg = 0;
+    TEST_ASSERT_EQUAL_INT(1, run_forward_bursts(&f, &o, &t, grav, &neg));
+
+    ses_calib_t rec; fus_calib_to_ses(fus_calib(&f), &rec);
+    TEST_ASSERT_EQUAL_UINT8(FUS_CALIB_F_ORIENT | FUS_CALIB_F_FORWARD, rec.calib_flags);
+    fus_calib_t decoded; fus_calib_from_ses(&rec, &decoded);
+    TEST_ASSERT_TRUE(fus_calib_valid(&decoded));
+    fus_t g; fus_init(&g, &decoded, 1);
+    TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&g)->forward_ok);
+
+    const float fwd_g = BURST_ACC_MPS2 / (float)G_MPS2;
+    const float acc[3] = { grav[0], grav[1] - fwd_g, grav[2] };
+    imu_raw_t r = raw_at(t, acc, ZERO3);
+    fused_sample_t restored;
+    fus_step(&f, &r, &o);
+    fus_step(&g, &r, &restored);
+    /* 1e-3 g: the record stores each row entry as r × 1e4 rounded to int16, so a row entry moves by
+     * up to 5e-5 and a 1 g sample by up to ~1e-4 g; the tolerance keeps a comfortable margin. */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, o.g_lon, restored.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, o.g_lat, restored.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, o.g_comb, restored.g_comb);
+    TEST_ASSERT_EQUAL_UINT8(o.flags & FUS_ORIENT_OK, restored.flags & FUS_ORIENT_OK);
+}
+
+static void test_recapture_resets_forward_learning(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fused_sample_t o; int64_t t = 1000000;
+    float grav[3]; tilted_gravity(grav);
+    capture_tilted_orientation(&f, &o, &t, grav);
+    int neg = 0;
+    TEST_ASSERT_EQUAL_INT(1, run_forward_bursts(&f, &o, &t, grav, &neg));
+    TEST_ASSERT_EQUAL_UINT8(FWD_LEARN_WINDOWS, f.fwd.windows);
+
+    /* The vehicle is re-mounted upright and captured again: the new z row invalidates the forward
+     * row and every window accumulated against the old one. */
+    const float upright[3] = { 0.0f, 0.0f, 1.0f };
+    feed(&f, &o, FUS_STILL_WINDOW_N, upright, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_EQUAL_INT(0, fus_calib_orient_capture(&f));
+    TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&f)->orient_ok);
+    TEST_ASSERT_EQUAL_UINT8(0, fus_calib(&f)->forward_ok);
+    TEST_ASSERT_EQUAL_UINT8(0, f.fwd.windows);
+    TEST_ASSERT_FALSE(fus_fwd_ready(&f.fwd));
+    TEST_ASSERT_FALSE(f.fwd_learned_pending);
+    imu_raw_t r = raw_at(t, upright, ZERO3);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_ORIENT_OK);       /* forward must be learned again */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_defaults_are_identity_and_valid);
+    RUN_TEST(test_invalid_calibration_is_rejected_and_init_falls_back);
+    RUN_TEST(test_identity_mount_gravity_bias_and_yaw_sign);
+    RUN_TEST(test_ninety_degree_mount_rotates_into_the_vehicle_frame);
+    RUN_TEST(test_temperature_drift_marks_the_bias_stale);
+    RUN_TEST(test_calibration_round_trips_through_the_calib_record);
+    RUN_TEST(test_gps_speed_is_held_with_its_validity_and_time);
+    RUN_TEST(test_still_detection_and_gyro_bias_update);
+    RUN_TEST(test_orientation_capture_from_tilted_gravity);
+    RUN_TEST(test_forward_learning_from_straight_line_acceleration);
+    RUN_TEST(test_calibration_persists_through_the_calib_record_after_learning);
+    RUN_TEST(test_recapture_resets_forward_learning);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Run it — expected FAIL**
+
+Run: `cmake --build test/build --parallel && ./test/build/test_fus 2>&1 | tail -8`
+Expected: the seven Task 1 cases pass and the five new ones fail, because Task 1's stubs report
+"never still" and "no orientation":
+
+```
+test/test_fus.c:243:test_still_detection_and_gyro_bias_update:FAIL: Expected TRUE Was FALSE
+test/test_fus.c:304:test_orientation_capture_from_tilted_gravity:FAIL: Expected TRUE Was FALSE
+test/test_fus.c:286:test_forward_learning_from_straight_line_acceleration:FAIL: Expected TRUE Was FALSE
+test/test_fus.c:286:test_calibration_persists_through_the_calib_record_after_learning:FAIL: Expected TRUE Was FALSE
+test/test_fus.c:286:test_recapture_resets_forward_learning:FAIL: Expected TRUE Was FALSE
+
+-----------------------
+12 Tests 5 Failures 0 Ignored
+```
+
+(Line 243 is the `TEST_ASSERT_TRUE(fus_is_still(&f))` on the 200th quiet sample, line 286 the same
+assertion inside `capture_tilted_orientation`, line 304 the one before the tilted capture — the
+stub `fus_is_still` returns false, so every case that needs a still window stops there.)
+
+- [ ] **Step 3: Wire the modules into the fusion step**
+
+`components/core/fusion/fus.c` (complete file; everything above `fus_step` is Task 1's, unchanged):
+
+```c
+#include "core/fus.h"
+#include <math.h>
+#include <string.h>
+
+/* ---- calibration ---- */
+
+static float dot3(const float *a, const float *b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static bool all_finite(const float *v, int n)
+{
+    for (int i = 0; i < n; i++) if (!isfinite(v[i])) return false;
+    return true;
+}
+
+void fus_calib_defaults(fus_calib_t *c)
+{
+    memset(c, 0, sizeof *c);
+    c->r[0] = 1.0f; c->r[4] = 1.0f; c->r[8] = 1.0f;
+    c->version = FUS_CALIB_VERSION;
+}
+
+bool fus_calib_valid(const fus_calib_t *c)
+{
+    if (c->version != FUS_CALIB_VERSION) return false;
+    if (!all_finite(c->r, 9) || !all_finite(c->gbias, 3)) return false;
+    for (int i = 0; i < 3; i++) if (fabsf(c->gbias[i]) >= 32768.0f) return false;
+    if (c->forward_ok && !c->orient_ok) return false;
+    for (int i = 0; i < 3; i++) {
+        const float *ri = c->r + 3 * i;
+        if (fabsf(dot3(ri, ri) - 1.0f) > FUS_ORTHO_TOL) return false;
+        for (int j = i + 1; j < 3; j++)
+            if (fabsf(dot3(ri, c->r + 3 * j)) > FUS_ORTHO_TOL) return false;
+    }
+    return true;
+}
+
+static int16_t clamp_i16(float v)
+{
+    if (v >= 32767.0f) return 32767;
+    if (v <= -32768.0f) return -32768;
+    return (int16_t)lroundf(v);
+}
+
+void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out)
+{
+    memset(out, 0, sizeof *out);
+    for (int i = 0; i < 9; i++) out->r_e4[i] = clamp_i16(c->r[i] * 1e4f);
+    for (int i = 0; i < 3; i++) out->gbias[i] = clamp_i16(c->gbias[i]);
+    out->calib_flags = (uint8_t)((c->orient_ok ? FUS_CALIB_F_ORIENT : 0) |
+                                 (c->forward_ok ? FUS_CALIB_F_FORWARD : 0) |
+                                 (c->bias_ok ? FUS_CALIB_F_BIAS : 0));
+}
+
+void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out)
+{
+    fus_calib_defaults(out);
+    for (int i = 0; i < 9; i++) out->r[i] = (float)in->r_e4[i] * 1e-4f;
+    for (int i = 0; i < 3; i++) out->gbias[i] = (float)in->gbias[i];
+    out->orient_ok  = (in->calib_flags & FUS_CALIB_F_ORIENT) ? 1 : 0;
+    out->forward_ok = (in->calib_flags & FUS_CALIB_F_FORWARD) ? 1 : 0;
+    out->bias_ok    = (in->calib_flags & FUS_CALIB_F_BIAS) ? 1 : 0;
+}
+
+void fus_rotate(const float r[9], const float b[3], float v[3])
+{
+    for (int i = 0; i < 3; i++) v[i] = r[3 * i] * b[0] + r[3 * i + 1] * b[1] + r[3 * i + 2] * b[2];
+}
+
+/* ---- state ---- */
+
+void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto)
+{
+    memset(f, 0, sizeof *f);                 /* zeroed still/fwd trackers are initialised (fus.h) */
+    if (calib && fus_calib_valid(calib)) f->calib = *calib;
+    else fus_calib_defaults(&f->calib);
+    f->moto = variant_is_moto ? 1 : 0;
+}
+
+void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid)
+{
+    f->v_mps = v_mps; f->v_mono_us = mono_us; f->v_valid = valid;
+}
+
+static void update_bias_stale(fus_t *f)
+{
+    if (!f->calib.bias_ok || !f->temp_known) { f->bias_stale = false; return; }
+    int32_t d = (int32_t)f->temp_c100 - (int32_t)f->calib.gbias_temp_c100;
+    if (d < 0) d = -d;
+    f->bias_stale = d > (int32_t)BIAS_TEMP_STALE_C * 100;
+}
+
+void fus_set_temp(fus_t *f, int16_t temp_c100)
+{
+    f->temp_c100 = temp_c100; f->temp_known = true;
+    update_bias_stale(f);
+}
+
+int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out)
+{
+    const float a_b[3] = { (float)raw->ax / IMU_ACC_LSB_PER_G, (float)raw->ay / IMU_ACC_LSB_PER_G, (float)raw->az / IMU_ACC_LSB_PER_G };
+    const float w_b[3] = { ((float)raw->gx - f->calib.gbias[0]) / IMU_GYR_LSB_PER_DPS,
+                           ((float)raw->gy - f->calib.gbias[1]) / IMU_GYR_LSB_PER_DPS,
+                           ((float)raw->gz - f->calib.gbias[2]) / IMU_GYR_LSB_PER_DPS };
+    float a[3], w[3];
+    fus_rotate(f->calib.r, a_b, a);
+    fus_rotate(f->calib.r, w_b, w);
+
+    /* Stillness runs on every raw sample (§9.3 step 8); the flags below report the last completed
+     * tumbling window, which is what fus_is_still, the bias capture and drag arming all use. */
+    fus_still_push(&f->still, raw);
+
+    memset(out, 0, sizeof *out);
+    out->mono_us = raw->mono_us;
+    const bool oriented = f->calib.orient_ok && f->calib.forward_ok;
+    if (oriented) {
+        out->g_lon = a[0];                       /* specific force along forward, in g (§9.3 step 2) */
+        out->g_lat = -a[1];                      /* +Y is left; lateral g is + to the right (§9.3 step 5, car form) */
+    } else {
+        out->g_lon = sqrtf(a[0] * a[0] + a[1] * a[1]);   /* sign-less horizontal magnitude until forward is learned (§9.2) */
+        out->g_lat = 0.0f;
+    }
+    out->g_comb  = sqrtf(out->g_lon * out->g_lon + out->g_lat * out->g_lat);
+    out->lean_deg = 0.0f;                        /* lean filter arrives in session 2.3 */
+    out->yaw_dps  = w[2];                        /* session 2.3 applies the lean correction of §9.3 step 3 */
+    uint8_t flags = 0;
+    if (oriented) flags |= FUS_ORIENT_OK;
+    if (f->still.still) flags |= FUS_STILL;
+    if (f->bias_stale) flags |= FUS_BIAS_STALE;
+    out->flags = flags;
+
+    /* Forward-axis learning (§9.2): only between the upright capture and the forward row being known.
+     * The rows may change in this block, after this sample was already rotated with the old ones —
+     * that is deliberate and harmless: the sample stays consistent with the calibration it was
+     * computed from (sign-less g_lon, no FUS_ORIENT_OK) and the learned rows take effect from the
+     * next sample, 10 ms later at FUSION_HZ. */
+    if (f->calib.orient_ok && !f->calib.forward_ok) {
+        const float z[3] = { f->calib.r[6], f->calib.r[7], f->calib.r[8] };
+        if (fus_fwd_on_sample(&f->fwd, a_b, z) == 1) {
+            const float sum[3] = { (float)f->fwd.sum[0], (float)f->fwd.sum[1], (float)f->fwd.sum[2] };
+            if (fus_orient_set_forward(&f->calib, sum) == 0) {
+                f->fwd_learned_pending = true;   /* fus_calib_forward_step reports it on the next fix */
+            } else {
+                fus_fwd_init(&f->fwd);           /* degenerate accumulation: drop it and learn again */
+            }
+        }
+    }
+    f->samples++;
+    return 1;
+}
+
+const fus_calib_t *fus_calib(const fus_t *f)
+{
+    return &f->calib;
+}
+
+/* ---- stillness, bias and calibration entry points (wired to the modules above) ---- */
+
+bool fus_is_still(const fus_t *f)
+{
+    return f->still.still;                       /* last completed window; false until one completes */
+}
+
+void fus_gyro_bias_update(fus_t *f)
+{
+    if (!fus_is_still(f)) return;                /* §9.2: the bias is only meaningful over a still window */
+    for (int i = 0; i < 3; i++) f->calib.gbias[i] = f->still.mean_graw[i];
+    /* 0 when the temperature has never been polled: update_bias_stale ignores gbias_temp_c100 while
+     * temp_known is false, so a placeholder cannot make the bias look stale. */
+    f->calib.gbias_temp_c100 = f->temp_known ? f->temp_c100 : (int16_t)0;
+    f->calib.bias_ok = 1;
+    f->bias_stale = false;                       /* freshly captured at the current temperature */
+}
+
+int fus_calib_orient_capture(fus_t *f)
+{
+    if (!fus_is_still(f)) return -1;
+    const int rc = fus_orient_from_gravity(&f->calib, f->still.mean_acc);
+    if (rc == 0) {
+        /* A new z row invalidates the forward row (fus_orient_from_gravity cleared forward_ok), so
+         * everything accumulated against the old z is thrown away and learning starts again. */
+        fus_fwd_init(&f->fwd);
+        f->fwd_learned_pending = false;
+    }
+    return rc;
+}
+
+int fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps)
+{
+    if (!f->calib.orient_ok) return -1;          /* nothing to project against until z is captured */
+    fus_fwd_on_fix(&f->fwd, gps_acc_mps2, yaw_dps);
+    if (f->fwd_learned_pending) {                /* learning completes in fus_step; reported once here */
+        f->fwd_learned_pending = false;
+        return 1;
+    }
+    return 0;
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cmake --build test/build --parallel 2>&1 | grep -E "error|warning"; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: no `error` or `warning` line, and
+
+```
+100% tests passed out of 24
+```
+
+(21 executables after session 2.2 Task 1, plus `test_fus_still`, `test_fus_orient` and `test_fus_fwd`
+from Tasks 2–4. `test_fus` itself now reports `12 Tests 0 Failures 0 Ignored`.)
+
+Parity check (both compilers, strict flags with no `-Wno-error` relaxation, to confirm the explicit
+casts are complete):
+
+Run: `for CC in clang gcc-16; do $CC -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Icomponents/core/include -Itest/unity/src -c components/core/fusion/fus.c -o /dev/null && $CC -std=c11 -Wall -Wextra -Werror -Wshadow -Wconversion -Icomponents/core/include -Itest/unity/src -c test/test_fus.c -o /dev/null && echo "$CC ok"; done`
+Expected:
+
+```
+clang ok
+gcc-16 ok
+```
+
+- [ ] **Step 5: Spec write-back (§4.8)**
+
+In `docs/superpowers/specs/2026-09-14-lap-timer-design.md` §4.8, insert one row immediately after
+the `ses_reader_t` row:
+
+```
+| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | ~400 B |
+```
+
+so the two lines read:
+
+```
+| `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
+| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | ~400 B |
+```
+
+The figure carries the `~` the table allows for estimates: `sizeof(fus_t)` is 328 B today
+(56 B calibration + 152 B stillness window + 64 B forward tracker + 56 B of speed, temperature,
+flags and counters; the `double` accumulators align the same way on xtensa, so the host figure is
+the target figure), and session 2.3 adds the lean-filter state to the same struct.
+
+Verify: `grep -c "Fusion state \`fus_t\`" docs/superpowers/specs/2026-09-14-lap-timer-design.md`
+Expected: `1`.
+
+- [ ] **Step 6: Hygiene and commit**
+
+Run: `git diff --check`
+Expected: no output.
+
+```bash
+git add components/core/fusion/fus.c test/test_fus.c docs/superpowers/specs/2026-09-14-lap-timer-design.md
+git commit -m "feat(core): wire stillness, gyro bias, orientation and forward learning into fusion
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+**Header change needed:** none. `core/fus.h` as landed by session 2.2 Task 1 is used verbatim: every
+field this task reads (`still.still`, `still.mean_acc`, `still.mean_graw`, `fwd.sum`, `fwd.windows`,
+`fwd_learned_pending`) is already public, and the four stub signatures match what the wiring needs.
 
 ---
