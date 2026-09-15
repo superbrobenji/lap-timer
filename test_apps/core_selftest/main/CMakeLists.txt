@@ -1,5 +1,16 @@
-set(SUITES smoke bw ring geo tb ses_frame ses_records jw cfg trk exp_vbo exp_nmea_json)
 set(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../test")
+# One wrapper TU per host test file, discovered rather than listed, so a new test/test_*.c is picked
+# up without editing this file. The glob cannot use CONFIGURE_DEPENDS: ESP-IDF also evaluates
+# component CMakeLists.txt in script mode while expanding requirements, where that keyword is an
+# error. The directory property at the bottom does the same job -- adding or removing a file changes
+# the directory's timestamp, which re-runs configuration and so re-runs this glob.
+file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
+set(SUITES "")
+foreach(f ${TEST_SRCS})
+  get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
+  string(REGEX REPLACE "^test_" "" s "${base}")        # test_cfg       -> cfg
+  list(APPEND SUITES "${s}")
+endforeach()
 set(WRAP_DIR "${CMAKE_CURRENT_BINARY_DIR}/wrap")
 file(MAKE_DIRECTORY "${WRAP_DIR}")
 set(WRAPPERS "")

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include "unity.h"
 #include "esp_pthread.h"
 #include "esp_system.h"
@@ -25,6 +26,30 @@ static const suite_t suites[] = {
     SUITE(ses_records), SUITE(jw), SUITE(cfg), SUITE(trk), SUITE(exp_vbo), SUITE(exp_nmea_json),
 };
 
+/* The suites above run in app_main's 40 KB task, which says nothing about whether the core fits an
+ * ordinary app task. The two suites that drive the deepest core call chains (cfg walks a JSON tree,
+ * trk parses and re-serialises a venue) are rerun in a 6 KB task -- the stack size spec §4.3 budgets
+ * for the conn task -- and the remaining headroom is reported. */
+#define STACK6K_BYTES 6144
+static volatile int      stack6k_failed = -1;      /* -1 = not finished yet */
+static volatile unsigned stack6k_free_bytes;
+
+static void stack6k_task(void *arg)
+{
+    (void)arg;
+    int failed = 0;
+    for (size_t i = 0; i < sizeof suites / sizeof suites[0]; i++) {
+        if (strcmp(suites[i].name, "cfg") != 0 && strcmp(suites[i].name, "trk") != 0) continue;
+        cur_setup = suites[i].setup; cur_teardown = suites[i].teardown;
+        if (suites[i].run() != 0) failed++;
+    }
+    stack6k_free_bytes = (unsigned)uxTaskGetStackHighWaterMark(NULL);
+    printf("--- stack6k cfg+trk: %s --- (%u B stack, %u B never used)\n",
+           failed ? "FAIL" : "OK", (unsigned)STACK6K_BYTES, stack6k_free_bytes);
+    stack6k_failed = failed;
+    vTaskDelete(NULL);
+}
+
 void app_main(void)
 {
     esp_pthread_cfg_t pcfg = esp_pthread_get_default_config();
@@ -44,7 +69,16 @@ void app_main(void)
         if (r != 0) failed++;
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    printf("=== core_selftest RESULT: %s, %d failing suites, free heap %u, min free %u ===\n",
-           failed ? "FAIL" : "PASS", failed, (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
+
+    if (xTaskCreatePinnedToCore(stack6k_task, "stack6k", STACK6K_BYTES, NULL, 5, NULL, 1) != pdPASS) {
+        printf("--- stack6k cfg+trk: FAIL --- (task could not be created)\n");
+        stack6k_failed = 1;
+    }
+    while (stack6k_failed < 0) vTaskDelay(pdMS_TO_TICKS(50));
+
+    int bad = failed + (stack6k_failed != 0 ? 1 : 0);
+    printf("=== core_selftest RESULT: %s, %d failing suites, stack6k %s (%u B free), free heap %u, min free %u ===\n",
+           bad ? "FAIL" : "PASS", failed, stack6k_failed == 0 ? "OK" : "FAIL", stack6k_free_bytes,
+           (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
     for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
 }
