@@ -723,7 +723,7 @@ Without PPS:
 - Crystal drift over 30 s at 20 ppm is 0.6 ms, ignored.
 
 With PPS (M10):
-- ISR captures `mono_us` on the rising edge. The next NAV-PVT after the edge carries the `iTOW` of that second; `gps_us_top = floor(fix_gps_us / 1e6) * 1e6` of that fix. `offset_us = edge_mono_us − gps_us_top`. Quality 2. Verified against the min-filter estimate; disagreement > 50 ms logs `E_GPS_BAD_FIX` and falls back to the min-filter.
+- ISR captures `mono_us` on the rising edge. The next NAV-PVT after the edge carries the `iTOW` of that second; `gps_us_top = floor(fix_gps_us / 1e6) * 1e6` of that fix. `offset_us = edge_mono_us − gps_us_top`. Quality 2. A new edge is checked against the current PPS offset (or, when no PPS lock exists yet and the filter is locked, against the min-filter); disagreement > 50 ms rejects the edge, drops the lock, and logs `E_GPS_BAD_FIX`. A PPS lock also expires when no edge has arrived for 5 s (`TB_PPS_STALE_US`), so the mapping falls back to the min-filter rather than tracking a stale offset; the min-filter never demotes an active PPS lock.
 
 `tb_mono_to_gps(t, m) = m − offset_us`.
 
@@ -1228,13 +1228,13 @@ offset 3   payload[len]
 offset 3+len  crc  u16 LE  CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no xorout) over bytes 1..(2+len)
 ```
 
-Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc; verify; on mismatch advance one byte and rescan. A valid frame is never ambiguous with an in-payload `0xA5` because the CRC is checked before acceptance.
+Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc; verify; on mismatch advance one byte and rescan. A valid frame is never ambiguous with an in-payload `0xA5` because the CRC is checked before acceptance. A reader of a bounded input (a whole `.log` or `.sum` file) calls `ses_reader_flush` at EOF; a frame that can never complete is treated as bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync near the end is still recovered. The frame callback's payload pointer is valid only during the callback.
 
 ### 12.3 Record types
 
 | Type | Name | Payload (packed, LE) | Size |
 |------|------|----------------------|------|
-| 0x01 | `SESSION_HDR` | `ver u8=1, session_id char[10], mode u8, variant u8, venue_id u16, layout_id u16, fw char[16], hwid char[24], log_profile u8, fused_hz u8, gps_hz u8, start_gps_us i64 (0 if unknown), calib: r i16[9] (×1e-4), gbias i16[3], calib_flags u8` | 94 |
+| 0x01 | `SESSION_HDR` | `ver u8=1, reserved u8=0, session_id char[10], mode u8, variant u8, venue_id u16, layout_id u16, fw char[16], hwid char[24], log_profile u8, fused_hz u8, gps_hz u8, start_gps_us i64 (0 if unknown), calib: r i16[9] (×1e-4), gbias i16[3], calib_flags u8` | 94 |
 | 0x02 | `FIX_KEY` | `gps_us i64, lat_e7 i32, lon_e7 i32, alt_mm i32, gspeed_mms i32, head_e5 i32, hacc_mm u32, sacc_mms u16, pdop_e2 u16, fix_type u8, sats u8, flags u8` | 39 |
 | 0x03 | `FIX_DELTA` | `dt_ms u16, dlat_e7 i16, dlon_e7 i16, dalt_dm i16, gspeed_cms u16, head_e2 u16, hacc_dm u8, sats u8, flags u8` | 15 |
 | 0x04 | `FUSED` | `dt_ms u16, glat_e3 i16, glon_e3 i16, lean_cdeg i16, yaw_cdps i16, flags u8` | 11 |
@@ -2153,6 +2153,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `TB_WINDOW_S` | 30 | §6.2 |
 | `TB_LOCK_FIXES` | 10 | §6.2 |
 | `TB_PPS_DISAGREE_US` | 50000 | §6.2 |
+| `TB_PPS_STALE_US` | 5000000 | §6.2 |
 | `EARTH_R_M` | 6371008.8 | §6.3 |
 | `FIX_HACC_MAX_M` | 15 | §6.5 |
 | `FIX_MIN_SATS` | 5 | §6.5 |

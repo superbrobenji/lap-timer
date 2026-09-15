@@ -428,6 +428,7 @@ typedef struct {
 #define TB_WINDOW_S            30
 #define TB_LOCK_FIXES          10
 #define TB_PPS_DISAGREE_US     50000LL
+#define TB_PPS_STALE_US        5000000LL
 #define FIX_HACC_MAX_M         15
 #define FIX_MIN_SATS           5
 #define FIX_MAX_SPEED_MPS      139
@@ -1042,6 +1043,24 @@ static void test_pps_takes_precedence_and_falls_back_on_disagreement(void)
     TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
 }
 
+static void test_pps_expires_without_edges_but_survives_filter_glitch(void)
+{
+    tb_t t; tb_init(&t);
+    int64_t gps = 7000000000LL;
+    for (int i = 0; i < 20; i++) { tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); gps += 200000; }
+    tb_on_pps(&t, gps + 1000000, gps);
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* a glitched fix with an absurdly early arrival drags the min-filter 200 ms away; PPS must survive */
+    tb_on_fix(&t, gps, gps + 1000000 - 160000, 0);
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* edges keep coming for 4 s: still PPS */
+    for (int s = 1; s <= 4; s++) { gps += 1000000; tb_on_pps(&t, gps + 1000000, gps); tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); }
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* no edge for 5.2 s of fixes: PPS expires, filter takes over */
+    for (int i = 0; i < 26; i++) { gps += 200000; tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); }
+    TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1051,6 +1070,7 @@ int main(void)
     RUN_TEST(test_not_locked_before_ten_fixes);
     RUN_TEST(test_window_rollover_forgets_old_minimum);
     RUN_TEST(test_pps_takes_precedence_and_falls_back_on_disagreement);
+    RUN_TEST(test_pps_expires_without_edges_but_survives_filter_glitch);
     return UNITY_END();
 }
 ```
@@ -1079,6 +1099,7 @@ typedef struct {
     uint32_t fixes;
     int64_t  filt_offset_us;       /* min over valid halves */
     int64_t  pps_offset_us;
+    int64_t  pps_edge_mono_us;     /* mono time of the last accepted PPS edge */
     bool     pps_valid;
 } tb_t;
 
@@ -1086,7 +1107,7 @@ int64_t tb_days_from_civil(int y, unsigned m, unsigned d);
 int64_t tb_gps_us_from_utc(int y, unsigned m, unsigned d, unsigned hh, unsigned mm, unsigned ss, int32_t nano);
 
 void    tb_init(tb_t *t);
-/* serial_time_us = len*10/baud of the message just received; subtracted from the arrival stamp */
+/* serial_time_us = len*10/baud of the message just received; subtracted from the arrival stamp. Also expires a PPS lock whose last edge is older than TB_PPS_STALE_US. */
 void    tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t serial_time_us);
 void    tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us);
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us);
@@ -1149,21 +1170,20 @@ void tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t ser
     }
     t->fixes++;
     recompute(t);
-    /* PPS sanity: if the filter now disagrees strongly with a previously accepted PPS, drop PPS */
-    if (t->pps_valid && tb_locked(t)) {
-        int64_t diff = t->pps_offset_us - t->filt_offset_us;
-        if (diff > TB_PPS_DISAGREE_US || diff < -TB_PPS_DISAGREE_US) t->pps_valid = false;
-    }
+    /* PPS staleness: without edges the PPS offset cannot track crystal drift; fall back to the filter */
+    if (t->pps_valid && arrival_mono_us - t->pps_edge_mono_us > TB_PPS_STALE_US) t->pps_valid = false;
 }
 
 void tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us)
 {
     int64_t o = edge_mono_us - top_of_second_gps_us;
-    if (tb_locked(t)) {
-        int64_t diff = o - t->filt_offset_us;
+    int64_t ref = t->pps_valid ? t->pps_offset_us : t->filt_offset_us;
+    bool must_check = t->pps_valid || tb_locked(t);
+    if (must_check) {
+        int64_t diff = o - ref;
         if (diff > TB_PPS_DISAGREE_US || diff < -TB_PPS_DISAGREE_US) { t->pps_valid = false; return; }
     }
-    t->pps_offset_us = o; t->pps_valid = true;
+    t->pps_offset_us = o; t->pps_valid = true; t->pps_edge_mono_us = edge_mono_us;
 }
 
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us)
@@ -1201,7 +1221,7 @@ git commit -m "feat(core): time base — civil date math, min-filter mono→gps 
 - Modify: `test/CMakeLists.txt`
 
 **Interfaces:**
-- Produces (spec §12.2): `uint16_t ses_crc16(const uint8_t*, size_t)` (CRC-16/CCITT-FALSE); `int ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap)` → total bytes or −1; `ses_reader_t`, `ses_reader_init`, `ses_reader_feed(r, buf, n, cb, ctx)` with `typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)`; counters `frames_ok`, `frames_bad`.
+- Produces (spec §12.2): `uint16_t ses_crc16(const uint8_t*, size_t)` (CRC-16/CCITT-FALSE); `int ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap)` → total bytes or −1; `ses_reader_t`, `ses_reader_init`, `ses_reader_feed(r, buf, n, cb, ctx)`, `ses_reader_flush(r, cb, ctx)` with `typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)`; counters `frames_ok`, `frames_bad`.
 - Produces: the `SES_T_*` type enum (§12.3). Task 7 adds record codecs to the same header.
 
 - [ ] **Step 1: Write the failing test**
@@ -1298,6 +1318,37 @@ static void test_reader_rejects_oversize_len_without_stalling(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
+static void test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof(void)
+{
+    uint8_t stream[16]; int n = 0;
+    stream[n++] = SES_SYNC; stream[n++] = 0x99; stream[n++] = 200;    /* spurious header claiming 200 bytes */
+    uint8_t p[1] = { 42 };
+    n += ses_frame_encode(0x0B, p, 1, stream + n, sizeof stream - (size_t)n);
+    ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
+    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    TEST_ASSERT_EQUAL_INT(0, c.calls);                                  /* stuck waiting for 200 bytes */
+    ses_reader_flush(&r, cb, &c);
+    TEST_ASSERT_EQUAL_INT(1, c.calls);
+    TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
+    TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+}
+
+static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
+{
+    uint8_t payload[4] = { 1, 2, 3, 4 };
+    uint8_t frame[16]; int n = ses_frame_encode(0x03, payload, 4, frame, sizeof frame);
+    ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
+    ses_reader_feed(&r, frame, (size_t)(n - 2), cb, &c);               /* CRC bytes missing */
+    ses_reader_flush(&r, cb, &c);
+    TEST_ASSERT_EQUAL_INT(0, c.calls);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);
+    ses_reader_flush(&r, cb, &c);                                       /* no-op when idle */
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1307,6 +1358,8 @@ int main(void)
     RUN_TEST(test_reader_resyncs_after_corruption);
     RUN_TEST(test_reader_resync_finds_frame_starting_inside_bad_frame);
     RUN_TEST(test_reader_rejects_oversize_len_without_stalling);
+    RUN_TEST(test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof);
+    RUN_TEST(test_flush_on_truncated_frame_counts_bad_and_is_idempotent);
     return UNITY_END();
 }
 ```
@@ -1344,6 +1397,8 @@ uint16_t ses_crc16(const uint8_t *buf, size_t n);
 /* Writes sync|type|len|payload|crc16 into out. Returns bytes written, or -1 if cap is too small or len > SES_MAX_PAYLOAD. */
 int      ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
 
+/* Invoked once per valid frame. `payload` points into the reader's internal buffer and is valid
+ * only for the duration of the callback: copy what you need before returning. */
 typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx);
 
 typedef struct {
@@ -1351,7 +1406,7 @@ typedef struct {
     uint16_t idx;                             /* bytes collected into buf */
     uint16_t need;                            /* total bytes expected in buf once len is known */
     uint8_t  buf[2 + SES_MAX_PAYLOAD + 2];    /* type, len, payload, crc */
-    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];
+    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];    /* rescan buffer; proven bound is 2+247+2 bytes, kept at 2x for headroom */
     uint16_t replay_len, replay_pos;
     uint32_t frames_ok, frames_bad;
 } ses_reader_t;
@@ -1359,6 +1414,10 @@ typedef struct {
 void ses_reader_init(ses_reader_t *r);
 /* Feed any number of bytes; cb is invoked once per valid frame. Resynchronises after corruption. */
 void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);
+/* Call once at the end of a bounded input (a file). A frame that can never complete is treated as
+ * bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync
+ * near EOF is still recovered. Idempotent when the reader is idle. */
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
 
 /* Record codecs are declared in Task 7 below this line. */
 #endif
@@ -1449,7 +1508,18 @@ void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb
             on_bad(r);
         }
     }
-    if (r->replay_pos >= r->replay_len) { r->replay_pos = 0; r->replay_len = 0; }
+    /* The loop exits only once the replay is drained and the input consumed; reset for the next call. */
+    r->replay_pos = 0; r->replay_len = 0;
+}
+
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx)
+{
+    /* A partial frame at EOF can never complete: discard its sync byte and rescan the rest.
+     * Each round consumes at least one byte, so this terminates. */
+    while (r->state == 1) {
+        on_bad(r);
+        ses_reader_feed(r, NULL, 0, cb, ctx);
+    }
 }
 ```
 
@@ -1725,9 +1795,26 @@ static int64_t round_div(int64_t a, int64_t b)          /* round-to-nearest for 
     return (a >= 0) ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 
-static int16_t clamp_i16(int64_t v) { if (v > 32767) return 32767; if (v < -32768) return -32768; return (int16_t)v; }
-static uint16_t clamp_u16(int64_t v) { if (v < 0) return 0; if (v > 65535) return 65535; return (uint16_t)v; }
-static uint8_t clamp_u8(int64_t v) { if (v < 0) return 0; if (v > 255) return 255; return (uint8_t)v; }
+static int16_t clamp_i16(int64_t v)
+{
+    if (v > 32767) return 32767;
+    if (v < -32768) return -32768;
+    return (int16_t)v;
+}
+
+static uint16_t clamp_u16(int64_t v)
+{
+    if (v < 0) return 0;
+    if (v > 65535) return 65535;
+    return (uint16_t)v;
+}
+
+static uint8_t clamp_u8(int64_t v)
+{
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
 
 /* ---------------- fix ---------------- */
 
@@ -1817,7 +1904,8 @@ int ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *o
 {
     if (!st->have_ref) return -1;
     int64_t dt = round_div(fs->gps_us - st->ref_gps_us, 1000);
-    if (dt < 0) dt = 0; if (dt > 65535) dt = 65535;
+    if (dt < 0) dt = 0;
+    if (dt > 65535) dt = 65535;
     uint8_t p[11]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, (uint16_t)dt);
     bw_i16(&w, clamp_i16((int64_t)lroundf(fs->g_lat * 1000.0f)));
@@ -1974,6 +2062,7 @@ int ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap)
 {
     uint8_t p[94]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u8(&w, 1);                                   /* ver */
+    bw_u8(&w, 0);                                   /* reserved, keeps payload at the documented 94 bytes */
     bw_bytes(&w, h->session_id, 10); bw_u8(&w, h->mode); bw_u8(&w, h->variant);
     bw_u16(&w, h->venue_id); bw_u16(&w, h->layout_id); bw_bytes(&w, h->fw, 16); bw_bytes(&w, h->hwid, 24);
     bw_u8(&w, h->log_profile); bw_u8(&w, h->fused_hz); bw_u8(&w, h->gps_hz); bw_i64(&w, h->start_gps_us);
@@ -1989,6 +2078,7 @@ int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     if (br_u8(&r) != 1) return -1;
+    br_u8(&r);                                      /* reserved, currently unused */
     br_bytes(&r, out->session_id, 10); out->mode = br_u8(&r); out->variant = br_u8(&r);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r); br_bytes(&r, out->fw, 16); br_bytes(&r, out->hwid, 24);
     out->log_profile = br_u8(&r); out->fused_hz = br_u8(&r); out->gps_hz = br_u8(&r); out->start_gps_us = br_i64(&r);
