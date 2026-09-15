@@ -2044,6 +2044,7 @@ int ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap)
 {
     uint8_t p[94]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u8(&w, 1);                                   /* ver */
+    bw_u8(&w, 0);                                   /* reserved, keeps payload at the documented 94 bytes */
     bw_bytes(&w, h->session_id, 10); bw_u8(&w, h->mode); bw_u8(&w, h->variant);
     bw_u16(&w, h->venue_id); bw_u16(&w, h->layout_id); bw_bytes(&w, h->fw, 16); bw_bytes(&w, h->hwid, 24);
     bw_u8(&w, h->log_profile); bw_u8(&w, h->fused_hz); bw_u8(&w, h->gps_hz); bw_i64(&w, h->start_gps_us);
@@ -2059,6 +2060,7 @@ int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     if (br_u8(&r) != 1) return -1;
+    br_u8(&r);                                      /* reserved, currently unused */
     br_bytes(&r, out->session_id, 10); out->mode = br_u8(&r); out->variant = br_u8(&r);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r); br_bytes(&r, out->fw, 16); br_bytes(&r, out->hwid, 24);
     out->log_profile = br_u8(&r); out->fused_hz = br_u8(&r); out->gps_hz = br_u8(&r); out->start_gps_us = br_i64(&r);

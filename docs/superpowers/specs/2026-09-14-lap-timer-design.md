@@ -1234,7 +1234,7 @@ Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc;
 
 | Type | Name | Payload (packed, LE) | Size |
 |------|------|----------------------|------|
-| 0x01 | `SESSION_HDR` | `ver u8=1, session_id char[10], mode u8, variant u8, venue_id u16, layout_id u16, fw char[16], hwid char[24], log_profile u8, fused_hz u8, gps_hz u8, start_gps_us i64 (0 if unknown), calib: r i16[9] (×1e-4), gbias i16[3], calib_flags u8` | 94 |
+| 0x01 | `SESSION_HDR` | `ver u8=1, reserved u8=0, session_id char[10], mode u8, variant u8, venue_id u16, layout_id u16, fw char[16], hwid char[24], log_profile u8, fused_hz u8, gps_hz u8, start_gps_us i64 (0 if unknown), calib: r i16[9] (×1e-4), gbias i16[3], calib_flags u8` | 94 |
 | 0x02 | `FIX_KEY` | `gps_us i64, lat_e7 i32, lon_e7 i32, alt_mm i32, gspeed_mms i32, head_e5 i32, hacc_mm u32, sacc_mms u16, pdop_e2 u16, fix_type u8, sats u8, flags u8` | 39 |
 | 0x03 | `FIX_DELTA` | `dt_ms u16, dlat_e7 i16, dlon_e7 i16, dalt_dm i16, gspeed_cms u16, head_e2 u16, hacc_dm u8, sats u8, flags u8` | 15 |
 | 0x04 | `FUSED` | `dt_ms u16, glat_e3 i16, glon_e3 i16, lean_cdeg i16, yaw_cdps i16, flags u8` | 11 |
