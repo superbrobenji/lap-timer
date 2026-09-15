@@ -108,6 +108,10 @@ int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out)
     fus_rotate(f->calib.r, a_b, a);
     fus_rotate(f->calib.r, w_b, w);
 
+    /* Stillness runs on every raw sample (§9.3 step 8); the flags below report the last completed
+     * tumbling window, which is what fus_is_still, the bias capture and drag arming all use. */
+    fus_still_push(&f->still, raw);
+
     memset(out, 0, sizeof *out);
     out->mono_us = raw->mono_us;
     const bool oriented = f->calib.orient_ok && f->calib.forward_ok;
@@ -123,8 +127,26 @@ int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out)
     out->yaw_dps  = w[2];                        /* session 2.3 applies the lean correction of §9.3 step 3 */
     uint8_t flags = 0;
     if (oriented) flags |= FUS_ORIENT_OK;
+    if (f->still.still) flags |= FUS_STILL;
     if (f->bias_stale) flags |= FUS_BIAS_STALE;
     out->flags = flags;
+
+    /* Forward-axis learning (§9.2): only between the upright capture and the forward row being known.
+     * The rows may change in this block, after this sample was already rotated with the old ones —
+     * that is deliberate and harmless: the sample stays consistent with the calibration it was
+     * computed from (sign-less g_lon, no FUS_ORIENT_OK) and the learned rows take effect from the
+     * next sample, 10 ms later at FUSION_HZ. */
+    if (f->calib.orient_ok && !f->calib.forward_ok) {
+        const float z[3] = { f->calib.r[6], f->calib.r[7], f->calib.r[8] };
+        if (fus_fwd_on_sample(&f->fwd, a_b, z) == 1) {
+            const float sum[3] = { (float)f->fwd.sum[0], (float)f->fwd.sum[1], (float)f->fwd.sum[2] };
+            if (fus_orient_set_forward(&f->calib, sum) == 0) {
+                f->fwd_learned_pending = true;   /* fus_calib_forward_step reports it on the next fix */
+            } else {
+                fus_fwd_init(&f->fwd);           /* degenerate accumulation: drop it and learn again */
+            }
+        }
+    }
     f->samples++;
     return 1;
 }
@@ -134,27 +156,44 @@ const fus_calib_t *fus_calib(const fus_t *f)
     return &f->calib;
 }
 
-/* ---- wired to the still / orient / fwd modules in Task 5 ---- */
+/* ---- stillness, bias and calibration entry points (wired to the modules above) ---- */
 
 bool fus_is_still(const fus_t *f)
 {
-    (void)f;
-    return false;
+    return f->still.still;                       /* last completed window; false until one completes */
 }
 
 void fus_gyro_bias_update(fus_t *f)
 {
-    (void)f;
+    if (!fus_is_still(f)) return;                /* §9.2: the bias is only meaningful over a still window */
+    for (int i = 0; i < 3; i++) f->calib.gbias[i] = f->still.mean_graw[i];
+    /* 0 when the temperature has never been polled: update_bias_stale ignores gbias_temp_c100 while
+     * temp_known is false, so a placeholder cannot make the bias look stale. */
+    f->calib.gbias_temp_c100 = f->temp_known ? f->temp_c100 : (int16_t)0;
+    f->calib.bias_ok = 1;
+    f->bias_stale = false;                       /* freshly captured at the current temperature */
 }
 
 int fus_calib_orient_capture(fus_t *f)
 {
-    (void)f;
-    return -1;
+    if (!fus_is_still(f)) return -1;
+    const int rc = fus_orient_from_gravity(&f->calib, f->still.mean_acc);
+    if (rc == 0) {
+        /* A new z row invalidates the forward row (fus_orient_from_gravity cleared forward_ok), so
+         * everything accumulated against the old z is thrown away and learning starts again. */
+        fus_fwd_init(&f->fwd);
+        f->fwd_learned_pending = false;
+    }
+    return rc;
 }
 
 int fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps)
 {
-    (void)f; (void)gps_acc_mps2; (void)yaw_dps;
-    return -1;
+    if (!f->calib.orient_ok) return -1;          /* nothing to project against until z is captured */
+    fus_fwd_on_fix(&f->fwd, gps_acc_mps2, yaw_dps);
+    if (f->fwd_learned_pending) {                /* learning completes in fus_step; reported once here */
+        f->fwd_learned_pending = false;
+        return 1;
+    }
+    return 0;
 }
