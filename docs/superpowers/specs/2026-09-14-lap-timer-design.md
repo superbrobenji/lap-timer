@@ -679,6 +679,11 @@ int  exp_finish(exp_t *e);
 #### `core/cfg.h`
 
 ```c
+/* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
+ * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */
+typedef struct { bool display_live_clock; uint8_t log_fused_hz; const char *ble_name; } cfg_profile_t;
+int  cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
+
 int  cfg_defaults(cfg_t *c);
 int  cfg_validate(cfg_t *c);                         /* clamps out-of-range fields, returns count of corrections */
 int  cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);
@@ -1404,7 +1409,7 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 | JSON path | C field | Type | Range | Default | Notes |
 |-----------|---------|------|-------|---------|-------|
-| `version` | `version` | u8 | 1 | 1 | schema version |
+| `version` | `version` | u8 | 1 | 1 | schema version; owned by firmware — ignored on CONFIG_SET, forced by cfg_validate |
 | `units` | `units` | enum | `kmh`,`mph` | `kmh` | display + bench list selection |
 | `mode` | `mode` | enum | `lap`,`drag` | `lap` | persisted last mode |
 | `lap.min_lap_s` | `lap.min_lap_s` | u16 | 5–600 | 20 | |
@@ -1421,20 +1426,20 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 | `power.park_after_s` | `power.park_after_s` | u16 | 60–7200 | 600 | |
 | `power.shutdown_mv` | `power.shutdown_mv` | u16 | 3000–3600 | 3300 | |
 | `power.conn_idle_s` | `power.conn_idle_s` | u16 | 30–1800 | 300 | |
-| `display.live_clock` | `display.live_clock` | bool | | false (epaper) / true (oled) | |
+| `display.live_clock` | `display.live_clock` | bool | | false base; profile sets true for OLED (cfg_apply_profile) | |
 | `display.full_refresh_every` | `display.full_every` | u8 | 1–50 | 10 | partials between full refreshes |
 | `display.rotation` | `display.rotation` | u8 | 0,180 | 0 | |
 | `display.invert` | `display.invert` | bool | | false | |
 | `battery.cal` | `battery.cal[2]` | `{adc_mv:u16, true_mv:u16}`×2 | | identity | two-point |
-| `ble.name` | `ble.name[16]` | string | ≤ 15 chars | `LapTimer-XXXX` (last 2 MAC bytes) | |
+| `ble.name` | `ble.name[16]` | string | ≤ 15 chars | `"LapTimer"` base; profile sets `LapTimer-XXXX` (last 2 MAC bytes) | |
 | `ble.adv_s` | `ble.adv_s` | u16 | 15–600 | 60 | |
-| `log.fused_hz` | `log.fused_hz` | u8 | 5,10,25 | profile default | |
+| `log.fused_hz` | `log.fused_hz` | u8 | 5,10,25 | 10 base; profile sets 10 (internal) or 25 (sd) | |
 | `gps.dyn_model` | `gps.dyn_model` | u8 | 0–8 | 4 | |
-| `gps.rate_hz` | `gps.rate_hz` | u8 | 1–profile max | profile max | |
+| `gps.rate_hz` | `gps.rate_hz` | u8 | 0 = profile maximum, else 1–25 | profile max | |
 | `imu.mot_thr` | `imu.mot_thr` | u8 | 2–255 | 20 | motion wake threshold LSB |
 | `imu.mot_dur_ms` | `imu.mot_dur_ms` | u8 | 1–255 | 40 | |
 
-`cfg_validate` clamps every field into range and returns the number of corrections; the supervisor logs `E_SYS_CFG_RESET` with that count if > 0. Unknown JSON keys are ignored; missing keys keep current values (`CONFIG_SET` is a merge).
+`cfg_validate` clamps every field into range and returns the number of corrections; the supervisor logs `E_SYS_CFG_RESET` with that count if > 0. Unknown JSON keys are ignored; missing keys keep current values (`CONFIG_SET` is a merge). Arrays longer than their capacity are rejected with an error rather than truncated. At boot the app calls `cfg_apply_profile` (build-flag and MAC-derived values) after `cfg_defaults` and before applying the NVS blob, so stored user settings always win.
 
 ### 15.2 NVS layout
 

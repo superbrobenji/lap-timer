@@ -155,8 +155,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: No trailing whitespace or CRLF in tracked text files
-        run: git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin'
+      - name: No trailing whitespace or CRLF in tracked text files (vendored files exempt)
+        run: git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h'
       - name: No committed secrets or build output
         run: |
           ! git ls-files | grep -E '(^|/)(build|test/build)/|\.pem$' | grep -v 'laptimer_pub\.pem$'

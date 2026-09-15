@@ -10,7 +10,7 @@ dependencies.lock
 .vscode/
 .idea/
 .DS_Store
-test/build/
+test/build*/
 tools/replay/build/
 secure_boot_signing_key.pem
 *.pem
