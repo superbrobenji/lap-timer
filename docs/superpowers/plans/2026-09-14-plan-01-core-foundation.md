@@ -1795,9 +1795,26 @@ static int64_t round_div(int64_t a, int64_t b)          /* round-to-nearest for 
     return (a >= 0) ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 
-static int16_t clamp_i16(int64_t v) { if (v > 32767) return 32767; if (v < -32768) return -32768; return (int16_t)v; }
-static uint16_t clamp_u16(int64_t v) { if (v < 0) return 0; if (v > 65535) return 65535; return (uint16_t)v; }
-static uint8_t clamp_u8(int64_t v) { if (v < 0) return 0; if (v > 255) return 255; return (uint8_t)v; }
+static int16_t clamp_i16(int64_t v)
+{
+    if (v > 32767) return 32767;
+    if (v < -32768) return -32768;
+    return (int16_t)v;
+}
+
+static uint16_t clamp_u16(int64_t v)
+{
+    if (v < 0) return 0;
+    if (v > 65535) return 65535;
+    return (uint16_t)v;
+}
+
+static uint8_t clamp_u8(int64_t v)
+{
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
 
 /* ---------------- fix ---------------- */
 
@@ -1887,7 +1904,8 @@ int ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *o
 {
     if (!st->have_ref) return -1;
     int64_t dt = round_div(fs->gps_us - st->ref_gps_us, 1000);
-    if (dt < 0) dt = 0; if (dt > 65535) dt = 65535;
+    if (dt < 0) dt = 0;
+    if (dt > 65535) dt = 65535;
     uint8_t p[11]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, (uint16_t)dt);
     bw_i16(&w, clamp_i16((int64_t)lroundf(fs->g_lat * 1000.0f)));
