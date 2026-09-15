@@ -78,7 +78,7 @@ Task graph: **Task 1** (serial) → **Tasks 2, 3, 4** [parallel group 1] → **T
 Decisions fixed for the session (rulings, spec is the authority):
 
 - The polygon's corners are circular arcs (`corner_radius_m`, default 40 m) driven at constant `v_corner`, so lateral g, lean and yaw rate are finite and realistic for the fusion and drag sessions; straights carry a trapezoidal speed profile (accelerate / cruise / brake). Everything is closed-form; gate crossing times are computed by inverting the piecewise kinematics, never by numeric integration.
-- The run is a sequence of per-lap kinematic tables (`synth_lap_t`), one per S/F passage, so a per-lap `v_max` variation (`lap_var`) gives distinct lap times while every lap stays analytic.
+- The run is a sequence of kinematic tables (`synth_lap_t`), one per lap-frame period (s = 0 to `length_m`); tables switch at s = 0, where every table is at `v_corner`, so truth speed and acceleration are continuous across the switch. A per-table rider factor (`lap_var`) scales the accelerations and the cruise cap, giving distinct lap times while every lap stays analytic (the corner speed is constant, which also keeps the lateral-g signature identical lap to lap).
 - Gates (S/F and sector gates) are placed on straights only; a requested arc-length that falls in an arc or within 20 m of a straight's end is moved forward to the first admissible point (the truth file records the position actually used).
 - Fix timestamps: `gps_us = t0_gps_us + k·(1e6 / rate)` exactly (5 Hz → 200 000 µs steps); `mono_us = t0_mono_us + t_k·1e6 + latency + jitter`. Position error is a first-order Gauss–Markov process per ENU axis (σ = 1.5 m, τ = 20 s); speed noise is white (σ = 0.05 m/s); heading noise is white (σ = 0.5°). `fix.valid = 1` on every emitted fix (the device logs post-validation fixes; §6.5 invalid fixes are produced by the `gps_dropout` options, not by noise).
 - The synth writes FUSED records from truth (no noise), at `fused_hz` (default 10); it does not synthesise raw IMU samples in this session (session 2.3 adds an `--imu` CSV emitter once `fus_step` exists to consume it).
@@ -178,7 +178,7 @@ typedef struct {
     double   v_max_mps;         /* cruise cap; default 50 */
     double   a_acc_mps2;        /* default 3 */
     double   a_brk_mps2;        /* default 6 (magnitude) */
-    double   lap_var;           /* per-lap speed scale k = 1 + lap_var·U(-1,1) applied to v_corner and v_max; default 0.03 */
+    double   lap_var;           /* per-table rider factor k = 1 + lap_var·U(-1,1) applied to a_acc, a_brk and v_max (v_corner stays constant, so speed is continuous where tables meet); default 0.03 */
     int      laps;              /* full laps after the first S/F crossing; 1..SYNTH_MAX_LAPS; default 10 */
     double   start_before_m;    /* run starts this far before S/F (out-lap length); default 300 */
     double   stop_after_m;      /* run continues this far past the last S/F; default 200 */
@@ -203,12 +203,14 @@ typedef struct {
     double ce, cn, turn_rad;    /* arcs only: centre and signed turn over the piece (+ = left) */
 } synth_piece_t;
 
-typedef struct {                /* one lap's kinematic table, lap frame */
+typedef struct {                /* one lap-frame period's kinematic table (s = 0 .. length_m) */
     synth_piece_t pieces[SYNTH_MAX_PIECES];
     int    n_pieces;
-    double lap_time_s;          /* time from s = 0 to s = length_m */
-    double v_corner_mps;        /* this table's arc speed (cfg.v_corner_mps scaled by lap_var) */
-    double v_max_mps;           /* this table's cruise cap (cfg.v_max_mps scaled by the same factor) */
+    double lap_time_s;          /* time from s = 0 to s = length_m in this table */
+    double k;                   /* this table's rider factor 1 + lap_var·U(-1,1) */
+    double v_max_mps;           /* cfg.v_max_mps · k */
+    double a_acc_mps2;          /* cfg.a_acc_mps2 · k */
+    double a_brk_mps2;          /* cfg.a_brk_mps2 · k */
 } synth_lap_t;
 
 typedef struct {                /* truth at one instant */
@@ -265,7 +267,7 @@ double synth_run_sf_s_total(const synth_run_t *r, int n);
 /* Run times of a full lap's crossings: out[0] = S/F starting lap_no, out[1..n_gates-1] = sector gates
  * in driving order, out[n_gates] = the S/F ending the lap. lap_no = 1..cfg.laps. Returns n_gates + 1. */
 int    synth_run_lap_crossings(const synth_run_t *r, int lap_no, double *out, size_t out_cap);
-/* Lap time = out[n_gates] - out[0] of the above. */
+/* Lap time = out[n_gates] - out[0] of the above; negative if lap_no is out of range. */
 double synth_run_lap_time(const synth_run_t *r, int lap_no);
 /* Fills a venue that passes trk_validate_venue: id cfg.venue_id, name "Synthetic", centre = origin,
  * radius VENUE_RADIUS_DEFAULT_M, one layout {id 1, "Full", dir_sign +1, sf = gates[0].line,
