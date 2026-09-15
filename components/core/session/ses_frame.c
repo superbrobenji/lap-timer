@@ -1,4 +1,5 @@
 #include "core/ses.h"
+#include "core/core.h"
 #include <string.h>
 
 uint16_t ses_crc16(const uint8_t *buf, size_t n)
@@ -54,14 +55,20 @@ static void on_bad(ses_reader_t *r)
     /* Re-scan everything collected after the sync byte, plus whatever replay input was still pending. */
     uint16_t collected = r->idx;
     uint16_t pending = (uint16_t)(r->replay_len - r->replay_pos);
+    /* Reset the reader state first: whether or not the bounds guard below trips, a caller must be
+     * able to keep feeding bytes afterwards without the reader staying wedged mid-frame. */
+    r->frames_bad++;
+    r->state = 0; r->idx = 0; r->need = 0;
+    /* collected <= 2+SES_MAX_PAYLOAD+2 and pending is what is left of an equally bounded replay,
+     * so the sum fits the 2x-sized replay buffer. Checked rather than assumed: a corrupted reader
+     * struct must not turn into a memcpy past the end. */
+    CORE_ASSERT_VOID((size_t)collected + pending <= sizeof r->replay, 0x0A02);
     uint8_t tmp[sizeof r->replay];
     memcpy(tmp, r->buf, collected);
     memcpy(tmp + collected, r->replay + r->replay_pos, pending);
     r->replay_len = (uint16_t)(collected + pending);
     r->replay_pos = 0;
     memcpy(r->replay, tmp, r->replay_len);
-    r->frames_bad++;
-    r->state = 0; r->idx = 0; r->need = 0;
 }
 
 void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx)

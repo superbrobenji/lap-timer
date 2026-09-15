@@ -8,12 +8,13 @@ enum { EXP_VBO = 1, EXP_NMEA = 2, EXP_JSON = 3 };
 #define EXP_FULL 1
 #define EXP_WINDOW 1024
 
+/* char arrays carry one byte more than the matching wire field so the value is always NUL-terminated */
 typedef struct {
     char    session_id[11];
-    char    fw[16];
-    char    hwid[24];
-    char    venue[32];
-    char    layout[24];
+    char    fw[17];
+    char    hwid[25];
+    char    venue[33];
+    char    layout[25];
     int64_t created_gps_us;
     uint8_t has_sf;
     double  sf_lat1, sf_lon1, sf_lat2, sf_lon2;
@@ -36,7 +37,7 @@ typedef struct {
     uint8_t   json_stage;              /* 0 header pending, 1 in laps, 2 in runs */
     ses_hdr_t hdr;
     uint8_t   have_hdr;
-    char      venue_name[32];
+    char      venue_name[33];
     uint8_t   run_pending;
     uint8_t   run_gate_idx;            /* DRAG_RUN emission resumes after EXP_FULL */
 } exp_t;

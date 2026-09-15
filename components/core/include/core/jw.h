@@ -21,7 +21,8 @@ void   jw_uint(jw_t *w, uint64_t v);
 void   jw_bool(jw_t *w, bool v);
 void   jw_null(jw_t *w);
 void   jw_str(jw_t *w, const char *s);
-/* decimals clamped to 0..JW_MAX_DECIMALS; a value whose text exceeds 47 chars (|v| ≳ 1e29 at 17 decimals) sets overflow and writes nothing */
+/* decimals clamped to 0..JW_MAX_DECIMALS; a value whose text exceeds 47 chars sets overflow and writes
+ * nothing (|v| ≳ 1e29 at 17 decimals, ~1e28 for negative values, whose sign costs one more char) */
 void   jw_double(jw_t *w, double v, int decimals);
 size_t jw_len(const jw_t *w);
 bool   jw_overflow(const jw_t *w);

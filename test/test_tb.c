@@ -41,7 +41,7 @@ static void test_min_filter_rejects_one_sided_jitter(void)
     TEST_ASSERT_TRUE(tb_locked(&t));
     TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
     int64_t est = (gps + true_offset) - tb_mono_to_gps(&t, gps + true_offset);
-    TEST_ASSERT_INT64_WITHIN(12000, true_offset, est);   /* residual = smallest latency drawn above the serial time */
+    TEST_ASSERT_INT64_WITHIN(10000, true_offset, est);   /* residual = smallest latency drawn above the serial time */
 }
 
 static void test_not_locked_before_ten_fixes(void)

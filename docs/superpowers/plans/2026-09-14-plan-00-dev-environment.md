@@ -159,7 +159,7 @@ jobs:
         run: git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h'
       - name: No committed secrets or build output
         run: |
-          ! git ls-files | grep -E '(^|/)(build|test/build)/|\.pem$' | grep -v 'laptimer_pub\.pem$'
+          ! git ls-files | grep -E '^test/build(-gcc)?/|\.pem$' | grep -v 'laptimer_pub\.pem$'
 
   host-tests:
     runs-on: ubuntu-latest

@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "core/ses.h"
+#include <stdint.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -144,6 +145,250 @@ static void test_small_records_sizes(void)
     TEST_ASSERT_EQUAL_INT(9 + SES_FRAME_OVERHEAD, ses_encode_mark(1, 0, buf, sizeof buf));
 }
 
+static void test_negative_ground_speed_forces_a_keyframe(void)
+{
+    ses_fix_state_t enc; ses_fix_state_init(&enc);
+    ses_fix_state_t dec; ses_fix_state_init(&dec);
+    uint8_t buf[64]; gps_fix_t out;
+    gps_fix_t a = mk_fix(1000000, -338567000, 185170000, 45000, 1000, 9000000, 9, 1);
+    int n = ses_encode_fix(&enc, &a, buf, sizeof buf);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    TEST_ASSERT_EQUAL_HEX8(SES_T_FIX_KEY, buf[1]);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fix(&dec, buf[1], buf + 3, buf[2], &out));
+
+    /* a negative Doppler speed cannot be represented in the unsigned delta field */
+    gps_fix_t b = a; b.gps_us += 200000; b.gspeed_mms = -1500;
+    n = ses_encode_fix(&enc, &b, buf, sizeof buf);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    TEST_ASSERT_EQUAL_HEX8(SES_T_FIX_KEY, buf[1]);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fix(&dec, buf[1], buf + 3, buf[2], &out));
+    TEST_ASSERT_EQUAL_INT32(-1500, out.gspeed_mms);              /* decoded exactly */
+    TEST_ASSERT_EQUAL_INT32(enc.prev.gspeed_mms, out.gspeed_mms);   /* encoder and decoder agree */
+    TEST_ASSERT_EQUAL_INT64(b.gps_us, out.gps_us);
+    TEST_ASSERT_EQUAL_INT32(b.lat_e7, out.lat_e7);
+}
+
+static void test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated(void)
+{
+    ses_hdr_t h; memset(&h, 0, sizeof h);
+    memcpy(h.session_id, "S00042_001", 10);
+    memcpy(h.fw, "v0.3.1-abcdefghi", 16);          /* exactly 16 bytes, no NUL on the wire */
+    memcpy(h.hwid, "moto_neo6m_epaper_int_bl", 24);
+    h.venue_id = 6; h.layout_id = 1; h.gps_hz = 5; h.fused_hz = 10; h.start_gps_us = 1789640100000000LL;
+    uint8_t buf[128];
+    int w = ses_encode_hdr(&h, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(94 + SES_FRAME_OVERHEAD, w);            /* wire payload unchanged */
+    ses_hdr_t out;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_hdr(buf + 3, 94, &out));
+    TEST_ASSERT_EQUAL_STRING("S00042_001", out.session_id);
+    TEST_ASSERT_EQUAL_UINT(10, strlen(out.session_id));
+    TEST_ASSERT_EQUAL_INT('\0', out.session_id[10]);
+    TEST_ASSERT_EQUAL_STRING("v0.3.1-abcdefghi", out.fw);
+    TEST_ASSERT_EQUAL_UINT(16, strlen(out.fw));
+    TEST_ASSERT_EQUAL_STRING("moto_neo6m_epaper_int_bl", out.hwid);
+    TEST_ASSERT_EQUAL_UINT(24, strlen(out.hwid));
+    TEST_ASSERT_EQUAL_MEMORY(&h, &out, sizeof h);
+}
+
+static void test_small_record_round_trips(void)
+{
+    uint8_t buf[64];
+    int w;
+
+    w = ses_encode_sector(3, 1, 123456789LL, 32100, -210, buf, sizeof buf);
+    ses_sector_t sec;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_sector(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &sec));
+    TEST_ASSERT_EQUAL_UINT16(3, sec.lap_no); TEST_ASSERT_EQUAL_UINT8(1, sec.idx);
+    TEST_ASSERT_EQUAL_INT64(123456789LL, sec.gps_us); TEST_ASSERT_EQUAL_UINT32(32100, sec.split_ms);
+    TEST_ASSERT_EQUAL_INT32(-210, sec.delta_ms);
+
+    w = ses_encode_drag_gate(1, 2, 987654321LL, 5910, 2778, 9800, buf, sizeof buf);
+    ses_drag_gate_t dg;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_drag_gate(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &dg));
+    TEST_ASSERT_EQUAL_UINT16(1, dg.run_no); TEST_ASSERT_EQUAL_UINT8(2, dg.gate_id);
+    TEST_ASSERT_EQUAL_INT64(987654321LL, dg.gps_us); TEST_ASSERT_EQUAL_UINT32(5910, dg.time_ms);
+    TEST_ASSERT_EQUAL_UINT16(2778, dg.speed_cms); TEST_ASSERT_EQUAL_UINT32(9800, dg.dist_cm);
+
+    w = ses_encode_event(-5, 1789380900000000LL, 0x0101, 0xDEADBEEF, buf, sizeof buf);
+    ses_event_t ev;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_event(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &ev));
+    TEST_ASSERT_EQUAL_INT64(-5, ev.mono_us); TEST_ASSERT_EQUAL_INT64(1789380900000000LL, ev.gps_us);
+    TEST_ASSERT_EQUAL_HEX16(0x0101, ev.code); TEST_ASSERT_EQUAL_HEX32(0xDEADBEEF, ev.arg);
+
+    w = ses_encode_time_map(4242, 1789380900000000LL, 2, buf, sizeof buf);
+    ses_time_map_t tm;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_time_map(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &tm));
+    TEST_ASSERT_EQUAL_INT64(4242, tm.mono_us); TEST_ASSERT_EQUAL_INT64(1789380900000000LL, tm.gps_us);
+    TEST_ASSERT_EQUAL_UINT8(2, tm.quality);
+
+    w = ses_encode_venue(6, 1, "Killarney", buf, sizeof buf);
+    ses_venue_t vn;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &vn));
+    TEST_ASSERT_EQUAL_UINT16(6, vn.venue_id); TEST_ASSERT_EQUAL_UINT16(1, vn.layout_id);
+    TEST_ASSERT_EQUAL_STRING("Killarney", vn.name);
+    /* a name filling all 32 wire bytes still decodes NUL-terminated */
+    w = ses_encode_venue(9, 2, "0123456789012345678901234567890123", buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &vn));
+    TEST_ASSERT_EQUAL_UINT(31, strlen(vn.name));    /* encoder keeps a NUL inside the 32-byte field */
+
+    w = ses_encode_power(77, 3, 3900, buf, sizeof buf);
+    ses_power_t pw;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_power(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &pw));
+    TEST_ASSERT_EQUAL_INT64(77, pw.mono_us); TEST_ASSERT_EQUAL_UINT8(3, pw.state); TEST_ASSERT_EQUAL_UINT16(3900, pw.batt_mv);
+
+    w = ses_encode_end(1789380900000000LL, 2, buf, sizeof buf);
+    ses_end_t en;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_end(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &en));
+    TEST_ASSERT_EQUAL_INT64(1789380900000000LL, en.gps_us); TEST_ASSERT_EQUAL_UINT8(2, en.reason);
+
+    w = ses_encode_mark(1789380900000001LL, 1, buf, sizeof buf);
+    ses_mark_t mk;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_mark(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &mk));
+    TEST_ASSERT_EQUAL_INT64(1789380900000001LL, mk.gps_us); TEST_ASSERT_EQUAL_UINT8(1, mk.kind);
+}
+
+static void test_calib_round_trip(void)
+{
+    ses_calib_t c; memset(&c, 0, sizeof c);
+    for (int i = 0; i < 9; i++) c.r_e4[i] = (int16_t)(i * 1000 - 4000);
+    c.gbias[0] = -12; c.gbias[1] = 340; c.gbias[2] = 0;
+    c.calib_flags = 0x03;
+    uint8_t buf[64];
+    int w = ses_encode_calib(&c, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(25 + SES_FRAME_OVERHEAD, w);
+    TEST_ASSERT_EQUAL_HEX8(SES_T_CALIB, buf[1]);
+    ses_calib_t out; memset(&out, 0xAA, sizeof out);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_calib(buf + 3, 25, &out));
+    for (int i = 0; i < 9; i++) TEST_ASSERT_EQUAL_INT16(c.r_e4[i], out.r_e4[i]);
+    for (int i = 0; i < 3; i++) TEST_ASSERT_EQUAL_INT16(c.gbias[i], out.gbias[i]);
+    TEST_ASSERT_EQUAL_HEX8(c.calib_flags, out.calib_flags);
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(buf + 3, 24, &out));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(buf + 3, 26, &out));
+}
+
+static void test_decoders_reject_malformed_payloads(void)
+{
+    uint8_t p[256]; memset(p, 0, sizeof p);
+    gps_fix_t f; lap_result_t lap; drag_result_t run; ses_hdr_t hdr; fused_sample_t fs;
+    ses_fix_state_t fst; ses_fix_state_init(&fst);
+    ses_fused_state_t ust; ses_fused_state_init(&ust);
+
+    /* FIX_KEY / FIX_DELTA: exact lengths only */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 38, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 40, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_DELTA, p, 15, &f));   /* DELTA before any KEY */
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 39, &f));      /* now a reference exists */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_DELTA, p, 14, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_DELTA, p, 16, &f));
+    TEST_ASSERT_EQUAL_INT(0, ses_decode_fix(&fst, SES_T_LAP, p, 39, &f));          /* not a fix record */
+
+    /* FUSED: exact length and a reference */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fused(&ust, p, 11, &fs));                 /* no reference yet */
+    ses_fused_state_on_fix(&ust, 1000000);
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fused(&ust, p, 10, &fs));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fused(&ust, p, 12, &fs));
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fused(&ust, p, 11, &fs));
+
+    /* LAP: short header, declared sector count, declared-vs-actual length */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_lap(p, 29, &lap));
+    p[15] = LAP_MAX_SECTORS + 2;                                                   /* n_sectors field */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_lap(p, (uint8_t)(30 + 4 * (LAP_MAX_SECTORS + 2)), &lap));
+    p[15] = 3;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_lap(p, 30, &lap));                        /* length does not match n_sectors */
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_lap(p, 42, &lap));
+    p[15] = 0;
+
+    /* DRAG_RUN: short header, declared gate count, declared-vs-actual length */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_run(p, 13, &run));
+    p[13] = DRAG_MAX_GATES + 1;                                                    /* n_gates field */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_run(p, (uint8_t)(14 + 12 * 1), &run));
+    p[13] = 2;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_run(p, 14, &run));
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_drag_run(p, 38, &run));
+    p[13] = 0;
+
+    /* SESSION_HDR: exact length and version 1 */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 93, &hdr));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 95, &hdr));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 94, &hdr));                        /* version byte is 0 */
+    p[0] = 2;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 94, &hdr));
+    p[0] = 1;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_hdr(p, 94, &hdr));
+
+    /* encoders refuse counts they cannot frame */
+    uint8_t out[512];
+    memset(&lap, 0, sizeof lap); lap.n_sectors = LAP_MAX_SECTORS + 2;
+    TEST_ASSERT_EQUAL_INT(-1, ses_encode_lap(&lap, out, sizeof out));
+    lap.n_sectors = LAP_MAX_SECTORS + 1;
+    TEST_ASSERT_GREATER_THAN(0, ses_encode_lap(&lap, out, sizeof out));
+    memset(&run, 0, sizeof run); run.n_gates = DRAG_MAX_GATES + 1;
+    TEST_ASSERT_EQUAL_INT(-1, ses_encode_drag_run(&run, out, sizeof out));
+    run.n_gates = DRAG_MAX_GATES;
+    TEST_ASSERT_GREATER_THAN(0, ses_encode_drag_run(&run, out, sizeof out));
+
+    /* the small-record decoders all validate their length exactly */
+    ses_sector_t sec; ses_drag_gate_t dg; ses_event_t ev; ses_time_map_t tm;
+    ses_venue_t vn; ses_power_t pw; ses_end_t en; ses_mark_t mk; ses_calib_t cal;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_sector(p, 18, &sec));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_gate(p, 20, &dg));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_event(p, 21, &ev));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_time_map(p, 18, &tm));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_venue(p, 35, &vn));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_power(p, 12, &pw));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_end(p, 8, &en));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_mark(p, 10, &mk));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(p, 24, &cal));
+}
+
+/* deterministic LCG, same pattern as the other suites */
+static uint32_t lcg = 1664525u;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+static int32_t rnd_span(int32_t span) { return (int32_t)(rnd() % (uint32_t)(2 * span + 1)) - span; }
+
+typedef struct { ses_fix_state_t st; gps_fix_t last; int n; } walk_dec_t;
+static void walk_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)
+{
+    walk_dec_t *d = ctx;
+    if (ses_decode_fix(&d->st, type, payload, len, &d->last) == 1) d->n++;
+}
+
+static void test_fuzz_ten_thousand_fix_random_walk_round_trips(void)
+{
+    ses_fix_state_t enc; ses_fix_state_init(&enc);
+    walk_dec_t d; memset(&d, 0, sizeof d); ses_fix_state_init(&d.st);
+    ses_reader_t r; ses_reader_init(&r);
+
+    gps_fix_t f = mk_fix(1789380900LL * 1000000LL, -338567000, 185170000, 45000, 30000, 9012000, 9, 1);
+    for (int i = 0; i < 10000; i++) {
+        f.gps_us += (int64_t)(100 + rnd() % 200u) * 1000;       /* 100..299 ms, whole milliseconds */
+        f.lat_e7 += rnd_span(3000);
+        f.lon_e7 += rnd_span(3000);
+        f.alt_mm += rnd_span(2000);
+        f.gspeed_mms = (int32_t)(rnd() % 60001u);
+        f.head_e5 = (int32_t)(rnd() % 36000001u);
+        f.hacc_mm = 1000 + rnd() % 5000u;
+        f.sats = (uint8_t)(4 + rnd() % 16u);
+        f.valid = (uint8_t)((rnd() % 32u) != 0);                 /* the occasional invalid fix */
+        uint8_t frame[64];
+        int w = ses_encode_fix(&enc, &f, frame, sizeof frame);
+        TEST_ASSERT_GREATER_THAN(0, w);
+        int before = d.n;
+        ses_reader_feed(&r, frame, (size_t)w, walk_cb, &d);
+        TEST_ASSERT_EQUAL_INT(before + 1, d.n);
+        TEST_ASSERT_EQUAL_INT64(f.gps_us, d.last.gps_us);
+        TEST_ASSERT_EQUAL_INT32(f.lat_e7, d.last.lat_e7);
+        TEST_ASSERT_EQUAL_INT32(f.lon_e7, d.last.lon_e7);
+        TEST_ASSERT_EQUAL_UINT8(f.sats, d.last.sats);
+        TEST_ASSERT_EQUAL_UINT8(f.valid, d.last.valid);
+        TEST_ASSERT_INT32_WITHIN(50, f.alt_mm, d.last.alt_mm);          /* decimetre field */
+        TEST_ASSERT_INT32_WITHIN(5, f.gspeed_mms, d.last.gspeed_mms);   /* cm/s field */
+    }
+    TEST_ASSERT_EQUAL_INT(10000, d.n);
+    TEST_ASSERT_EQUAL_UINT32(10000, r.frames_ok);
+    TEST_ASSERT_EQUAL_UINT32(0, r.frames_bad);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -154,5 +399,11 @@ int main(void)
     RUN_TEST(test_drag_run_round_trip);
     RUN_TEST(test_hdr_round_trip_and_size);
     RUN_TEST(test_small_records_sizes);
+    RUN_TEST(test_negative_ground_speed_forces_a_keyframe);
+    RUN_TEST(test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated);
+    RUN_TEST(test_small_record_round_trips);
+    RUN_TEST(test_calib_round_trip);
+    RUN_TEST(test_decoders_reject_malformed_payloads);
+    RUN_TEST(test_fuzz_ten_thousand_fix_random_walk_round_trips);
     return UNITY_END();
 }

@@ -19,8 +19,10 @@ target_compile_options(core PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion 
 set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  target_compile_options(core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer -g)
-  target_link_options(core PUBLIC -fsanitize=address,undefined)
+  # -fno-sanitize-recover makes a UBSan finding abort the test run instead of printing and continuing,
+  # so a ctest pass really means no undefined behaviour was executed.
+  target_compile_options(core PUBLIC -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g)
+  target_link_options(core PUBLIC -fsanitize=address,undefined -fno-sanitize-recover=undefined)
 endif()
 
 add_library(unity STATIC unity/src/unity.c)

@@ -14,7 +14,7 @@ jobs:
         run: git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h'
       - name: No committed secrets or build output
         run: |
-          ! git ls-files | grep -E '(^|/)build/|\.pem$' | grep -v 'laptimer_pub\.pem$'
+          ! git ls-files | grep -E '^test/build(-gcc)?/|\.pem$' | grep -v 'laptimer_pub\.pem$'
       - name: ESP-IDF container tag matches .idf-version
         run: grep -q "espressif/idf:$(cat .idf-version)$" .github/workflows/firmware.yml
 

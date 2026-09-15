@@ -28,7 +28,7 @@
 ```
 components/core/
   CMakeLists.txt                     ESP-IDF component registration (used by plan 03)
-  include/core/core.h                core_version()
+  include/core/core.h                core_version(), CORE_ASSERT_RET / CORE_ASSERT_VOID
   include/core/consts.h              Appendix A constants used by core
   include/core/types.h               gps_fix_t, imu_raw_t, fused_sample_t, lap_stats_t, lap_result_t, drag_*_t
   include/core/bw.h                  byte writer / reader (header-only)
@@ -41,14 +41,13 @@ components/core/
   include/core/cfg.h  config/cfg.c  config/cfg_json.c
   include/core/trk.h  tracks/trk.c  tracks/trk_json.c  tracks/trk_bundled.c (generated)
   include/core/exp.h  export/exp.c  export/exp_vbo.c  export/exp_nmea.c  export/exp_json.c
-  util/core_version.c
+  util/core.c
 test/
   CMakeLists.txt
   unity/                              git submodule, tag v2.6.0
   test_smoke.c test_bw.c test_ring.c test_geo.c test_tb.c test_ses_frame.c test_ses_records.c
   test_jw.c test_cfg.c test_trk.c test_exp_vbo.c test_exp_nmea_json.c
 tools/tracks/gen_tracks.py  tools/tracks/killarney.json  tools/tracks/zwartkops.json
-.github/workflows/host-tests.yml
 test_apps/core_selftest/                on-target self-test project (Task 14)
 docs/hardware/bom.md                    prototype bill of materials (Task 15)
 ```
@@ -59,7 +58,7 @@ docs/hardware/bom.md                    prototype bill of materials (Task 15)
 
 **Files:**
 - Create: `test/CMakeLists.txt`, `test/test_smoke.c`
-- Create: `components/core/include/core/core.h`, `components/core/util/core_version.c`, `components/core/CMakeLists.txt`
+- Create: `components/core/include/core/core.h`, `components/core/util/core.c`, `components/core/CMakeLists.txt`
 - Create: `test/unity` (git submodule)
 - Modify: `.gitignore` (add `test/build/`)
 
@@ -81,6 +80,8 @@ git add .gitmodules test/unity
 ```c
 #include "unity.h"
 #include "core/core.h"
+#include <stddef.h>
+#include <stdint.h>
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -90,10 +91,49 @@ static void test_version_string(void)
     TEST_ASSERT_EQUAL_STRING("0.0.1", core_version());
 }
 
+/* ---- core assertions (spec §17.9) ---- */
+
+static uint16_t    seen_code;
+static const char *seen_file;
+static int         seen_line, seen_calls;
+static void record_hook(uint16_t code, const char *file, int line)
+{
+    seen_code = code; seen_file = file; seen_line = line; seen_calls++;
+}
+
+static int guarded_ret(int ok)   { CORE_ASSERT_RET(ok, 0x0A99, -7); return 0; }
+static int void_calls;
+static void guarded_void(int ok) { CORE_ASSERT_VOID(ok, 0x0A98); void_calls++; }
+
+static void test_assert_hook_records_the_code_on_a_forced_failure(void)
+{
+    seen_calls = 0; void_calls = 0;
+    core_set_assert_hook(record_hook);
+
+    TEST_ASSERT_EQUAL_INT(0, guarded_ret(1));            /* a passing check stays silent */
+    TEST_ASSERT_EQUAL_INT(0, seen_calls);
+
+    TEST_ASSERT_EQUAL_INT(-7, guarded_ret(0));           /* failing: reports and returns the value */
+    TEST_ASSERT_EQUAL_INT(1, seen_calls);
+    TEST_ASSERT_EQUAL_HEX16(0x0A99, seen_code);
+    TEST_ASSERT_NOT_NULL(seen_file);
+    TEST_ASSERT_GREATER_THAN(0, seen_line);
+
+    guarded_void(1); TEST_ASSERT_EQUAL_INT(1, void_calls);
+    guarded_void(0); TEST_ASSERT_EQUAL_INT(1, void_calls);   /* returned before the body */
+    TEST_ASSERT_EQUAL_INT(2, seen_calls);
+    TEST_ASSERT_EQUAL_HEX16(0x0A98, seen_code);
+
+    core_set_assert_hook(NULL);                          /* NULL = silent, never a null call */
+    TEST_ASSERT_EQUAL_INT(-7, guarded_ret(0));
+    TEST_ASSERT_EQUAL_INT(2, seen_calls);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_version_string);
+    RUN_TEST(test_assert_hook_records_the_code_on_a_forced_failure);
     return UNITY_END();
 }
 ```
@@ -123,8 +163,10 @@ target_compile_options(core PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion 
 set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  target_compile_options(core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer -g)
-  target_link_options(core PUBLIC -fsanitize=address,undefined)
+  # -fno-sanitize-recover makes a UBSan finding abort the test run instead of printing and continuing,
+  # so a ctest pass really means no undefined behaviour was executed.
+  target_compile_options(core PUBLIC -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g)
+  target_link_options(core PUBLIC -fsanitize=address,undefined -fno-sanitize-recover=undefined)
 endif()
 
 add_library(unity STATIC unity/src/unity.c)
@@ -154,14 +196,41 @@ Expected: FAIL — `No SOURCES given to target: core` or `core/core.h: No such f
 ```c
 #ifndef CORE_CORE_H
 #define CORE_CORE_H
+#include <stdint.h>
+
 const char *core_version(void);
+
+/* Core assertions (spec §17.9). A failing check reports `code` through the hook and returns an
+ * error to the caller; it never aborts on target. The app installs a hook that logs the code into
+ * the error ring; host tests install one that records it. NULL (the default) is silent. */
+typedef void (*core_assert_hook_t)(uint16_t code, const char *file, int line);
+void core_set_assert_hook(core_assert_hook_t hook);       /* NULL = silent */
+void core_assert_fail(uint16_t code, const char *file, int line);
+
+#define CORE_ASSERT_RET(cond, code, ret) do { if (!(cond)) { core_assert_fail((code), __FILE__, __LINE__); return (ret); } } while (0)
+#define CORE_ASSERT_VOID(cond, code)     do { if (!(cond)) { core_assert_fail((code), __FILE__, __LINE__); return; } } while (0)
 #endif
 ```
 
-`components/core/util/core_version.c`:
+`components/core/util/core.c`:
 ```c
 #include "core/core.h"
+#include <stddef.h>
+#include <stdatomic.h>
+
 const char *core_version(void) { return "0.0.1"; }
+
+/* _Atomic with explicit acquire/release (as ring.h already does for the SPSC ring) so installing
+ * the hook from core 0 while core 1 is mid-read of it is defined behaviour, not a data race. */
+static _Atomic core_assert_hook_t assert_hook;
+
+void core_set_assert_hook(core_assert_hook_t hook) { atomic_store_explicit(&assert_hook, hook, memory_order_release); }
+
+void core_assert_fail(uint16_t code, const char *file, int line)
+{
+    core_assert_hook_t hook = atomic_load_explicit(&assert_hook, memory_order_acquire);
+    if (hook) hook(code, file, line);
+}
 ```
 
 `components/core/CMakeLists.txt` (ESP-IDF component; unused by the host build but kept next to the sources):
@@ -462,7 +531,7 @@ typedef struct {
 #define SES_SYNC               0xA5
 #define SES_MAX_PAYLOAD        247
 #define TRK_MAX_LAYOUTS        8
-#define TRK_MAX_USER           16
+#define TRK_MAX_USER           4
 #define MOVING_SPEED_KMH       3
 #endif
 ```
@@ -576,6 +645,10 @@ static void *stress_consumer(void *p)
     return NULL;
 }
 
+/* The eviction race is a data race by the letter of C11 (§ring.h), so ThreadSanitizer cannot be used
+ * to police it: on a 2-slot ring TSan serialises the two threads enough that the window is never
+ * entered, and it would report the deliberate seqlock-style read as a bug. The invariant is guarded
+ * here instead: a non-zero drop count proves the producer really did evict under the consumer. */
 static void test_concurrent_overwrite_oldest_never_returns_torn_items(void)
 {
     static stress_item_t storage[2]; static ring_t r;
@@ -591,6 +664,7 @@ static void test_concurrent_overwrite_oldest_never_returns_torn_items(void)
     TEST_ASSERT_EQUAL_UINT64(0, cr.out_of_order);
     TEST_ASSERT_EQUAL_UINT64(N, cr.last_tag);
     TEST_ASSERT_EQUAL_UINT64(N, cr.received + ring_dropped(&r));   /* every item was delivered or counted dropped */
+    TEST_ASSERT_GREATER_THAN(0, ring_dropped(&r));                 /* the race window really was entered */
 }
 
 static void test_concurrent_drop_newest_delivers_everything_in_order(void)
@@ -816,6 +890,61 @@ static void test_interp_clamps_to_segment(void)
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, 0.0, geo_interp_time(-1.0, 20.0, 20.0, 0.2));
 }
 
+static void test_segment_cross_rejects_each_out_of_range_parameter(void)
+{
+    geo_enu_t p = { -10, 0 }, q = { 10, 0 };
+    double t = -99.0; int dir = -99;
+    /* t > 1: the gate line is reached only past the end of the motion segment */
+    geo_enu_t a1 = { 0, -10 }, b1 = { 0, -5 };
+    TEST_ASSERT_EQUAL_INT(0, geo_segment_cross(a1, b1, p, q, &t, &dir));
+    /* t < 0: the gate line was already behind the start of the motion segment */
+    geo_enu_t a2 = { 0, 5 }, b2 = { 0, 10 };
+    TEST_ASSERT_EQUAL_INT(0, geo_segment_cross(a2, b2, p, q, &t, &dir));
+    /* u < 0: the motion crosses the gate's line beyond its left end */
+    geo_enu_t a3 = { -20, -5 }, b3 = { -20, 5 };
+    TEST_ASSERT_EQUAL_INT(0, geo_segment_cross(a3, b3, p, q, &t, &dir));
+    /* u > 1: beyond the right end (also covered by the miss test above) */
+    geo_enu_t a4 = { 20, -5 }, b4 = { 20, 5 };
+    TEST_ASSERT_EQUAL_INT(0, geo_segment_cross(a4, b4, p, q, &t, &dir));
+    TEST_ASSERT_EQUAL_DOUBLE(-99.0, t);          /* outputs untouched on a rejection */
+    TEST_ASSERT_EQUAL_INT(-99, dir);
+    /* and the same geometry does cross when both parameters are in range */
+    geo_enu_t a5 = { 0, -5 }, b5 = { 0, 5 };
+    TEST_ASSERT_EQUAL_INT(1, geo_segment_cross(a5, b5, p, q, &t, &dir));
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 0.5, t);
+}
+
+static void test_dist_point_segment_degenerate_and_before_start(void)
+{
+    geo_enu_t degenerate = { 3, 4 };
+    geo_enu_t origin = { 0, 0 };
+    /* p == q: no direction to project onto, the distance is to the point itself */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 5.0, geo_dist_point_segment(origin, degenerate, degenerate));
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 0.0, geo_dist_point_segment(degenerate, degenerate, degenerate));
+    /* projection before p: the t < 0 clamp pins it to p */
+    geo_enu_t p = { 0, 0 }, q = { 10, 0 }, before = { -4, 3 };
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 5.0, geo_dist_point_segment(before, p, q));
+}
+
+static void test_interp_time_degenerate_speeds(void)
+{
+    /* v0 ≈ 0 and acc ≈ 0: the vehicle is not moving, so the distance is reached no sooner than the
+     * end of the interval; the fallback returns dt instead of dividing by zero (§6.4 step 4). */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.2, geo_interp_time(2.0, 0.0, 0.0, 0.2));
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.2, geo_interp_time(2.0, 1e-9, 1e-9, 0.2));
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.2, geo_interp_time(2.0, -1.0, -1.0, 0.2));   /* v0 not positive */
+    /* a distance the deceleration can never cover makes the discriminant negative; the guard keeps
+     * the result finite and clamped to dt rather than NaN */
+    double tau = geo_interp_time(30.0, 10.0, 8.0, 1.0);
+    TEST_ASSERT_TRUE(tau == tau);                                  /* not NaN */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.0, tau);
+    tau = geo_interp_time(1.0, 1.0, 0.0, 0.1);
+    TEST_ASSERT_TRUE(tau == tau);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.1, tau);
+    /* degenerate interval */
+    TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.0, geo_interp_time(2.0, 20.0, 20.0, 0.0));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -828,6 +957,9 @@ int main(void)
     RUN_TEST(test_interp_constant_speed_is_linear);
     RUN_TEST(test_interp_decelerating_matches_closed_form);
     RUN_TEST(test_interp_clamps_to_segment);
+    RUN_TEST(test_segment_cross_rejects_each_out_of_range_parameter);
+    RUN_TEST(test_dist_point_segment_degenerate_and_before_start);
+    RUN_TEST(test_interp_time_degenerate_speeds);
     return UNITY_END();
 }
 ```
@@ -1013,7 +1145,7 @@ static void test_min_filter_rejects_one_sided_jitter(void)
     TEST_ASSERT_TRUE(tb_locked(&t));
     TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
     int64_t est = (gps + true_offset) - tb_mono_to_gps(&t, gps + true_offset);
-    TEST_ASSERT_INT64_WITHIN(12000, true_offset, est);   /* residual = smallest latency drawn above the serial time */
+    TEST_ASSERT_INT64_WITHIN(10000, true_offset, est);   /* residual = smallest latency drawn above the serial time */
 }
 
 static void test_not_locked_before_ten_fixes(void)
@@ -1236,6 +1368,8 @@ git commit -m "feat(core): time base — civil date math, min-filter mono→gps 
 ```c
 #include "unity.h"
 #include "core/ses.h"
+#include "core/core.h"
+#include <stdint.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -1355,6 +1489,114 @@ static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
+static int      assert_calls;
+static uint16_t assert_code;
+static void record_assert(uint16_t code, const char *file, int line) { (void)file; (void)line; assert_calls++; assert_code = code; }
+
+static void test_on_bad_guard_resets_the_reader_before_returning(void)
+{
+    /* Force the internal bounds guard in on_bad(): collected + pending must exceed sizeof(r.replay),
+     * a combination normal traffic cannot reach (idx caps at 251; a prior on_bad's own output is
+     * itself bounded). ses_reader_t's fields are public precisely so a whitebox test can build this
+     * otherwise-unreachable state directly, the same way the surrounding "resync" tests read them. */
+    ses_reader_t r; ses_reader_init(&r);
+    r.state = 1;
+    r.buf[0] = 0x02;
+    r.buf[1] = SES_MAX_PAYLOAD;                                 /* len byte: claims the largest payload */
+    r.idx = (uint16_t)(2 + SES_MAX_PAYLOAD);                    /* type+len+payload already collected: 2 CRC bytes short */
+    r.need = (uint16_t)(2 + SES_MAX_PAYLOAD + 2);
+    uint16_t crc = ses_crc16(r.buf, (size_t)2 + SES_MAX_PAYLOAD);
+    r.replay[0] = (uint8_t)~crc; r.replay[1] = (uint8_t)(~(crc >> 8));   /* guaranteed CRC mismatch: bad frame */
+    r.replay_len = sizeof r.replay;                             /* pending alone already exceeds sizeof(replay) - idx: forces the guard */
+    r.replay_pos = 0;
+
+    assert_calls = 0;
+    core_set_assert_hook(record_assert);
+    cap_t c = { 0 };
+    ses_reader_feed(&r, NULL, 0, cb, &c);
+    core_set_assert_hook(NULL);
+
+    TEST_ASSERT_EQUAL_INT(1, assert_calls);
+    TEST_ASSERT_EQUAL_HEX16(0x0A02, assert_code);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);              /* the guard did not leave the reader mid-frame */
+    TEST_ASSERT_EQUAL_UINT16(0, r.idx);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+
+    /* the reader must still recognise a normal frame after the guard trips */
+    uint8_t stream[16]; uint8_t p[1] = { 42 };
+    int n = ses_frame_encode(0x0B, p, 1, stream, sizeof stream);
+    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    TEST_ASSERT_EQUAL_INT(1, c.calls);
+    TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
+    TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
+}
+
+/* deterministic LCG, same pattern as the other suites */
+static uint32_t lcg = 22695477u;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+
+#define FUZZ_MAX_FRAMES 6
+#define FUZZ_MAX_PAYLOAD 24
+typedef struct { uint8_t type, len, first, last; } frame_sig_t;
+typedef struct { int n; frame_sig_t sig[32]; } fuzz_cap_t;
+
+static void fuzz_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)
+{
+    fuzz_cap_t *c = ctx;
+    if (c->n < (int)(sizeof c->sig / sizeof c->sig[0])) {
+        c->sig[c->n].type = type; c->sig[c->n].len = len;
+        c->sig[c->n].first = len ? payload[0] : 0;
+        c->sig[c->n].last = len ? payload[len - 1] : 0;
+    }
+    c->n++;
+}
+
+static void test_fuzz_frames_buried_in_garbage_are_all_recovered(void)
+{
+    for (int it = 0; it < 1000; it++) {
+        uint8_t stream[512]; size_t sn = 0;
+        frame_sig_t want[FUZZ_MAX_FRAMES]; int nwant = 0;
+        int nframes = 1 + (int)(rnd() % FUZZ_MAX_FRAMES);
+        for (int f = 0; f < nframes; f++) {
+            int gap = (int)(rnd() % 13u);                       /* garbage before each frame */
+            for (int g = 0; g < gap; g++) stream[sn++] = (uint8_t)(rnd() % 256u);
+            uint8_t payload[FUZZ_MAX_PAYLOAD];
+            uint8_t len = (uint8_t)(rnd() % (FUZZ_MAX_PAYLOAD + 1u));
+            for (uint8_t i = 0; i < len; i++) payload[i] = (uint8_t)(rnd() % 256u);
+            uint8_t type = (uint8_t)(1u + rnd() % 0x7Fu);
+            int w = ses_frame_encode(type, payload, len, stream + sn, sizeof stream - sn);
+            TEST_ASSERT_GREATER_THAN(0, w);
+            sn += (size_t)w;
+            want[nwant].type = type; want[nwant].len = len;
+            want[nwant].first = len ? payload[0] : 0;
+            want[nwant].last = len ? payload[len - 1] : 0;
+            nwant++;
+        }
+        int tail = (int)(rnd() % 13u);                          /* trailing garbage */
+        for (int g = 0; g < tail; g++) stream[sn++] = (uint8_t)(rnd() % 256u);
+
+        ses_reader_t r; ses_reader_init(&r);
+        fuzz_cap_t c; memset(&c, 0, sizeof c);
+        size_t pos = 0;
+        while (pos < sn) {                                      /* random chunk sizes */
+            size_t chunk = 1u + rnd() % 17u;
+            if (pos + chunk > sn) chunk = sn - pos;
+            ses_reader_feed(&r, stream + pos, chunk, fuzz_cb, &c);
+            pos += chunk;
+        }
+        ses_reader_flush(&r, fuzz_cb, &c);
+        TEST_ASSERT_EQUAL_INT(nwant, c.n);
+        for (int i = 0; i < nwant; i++) {
+            TEST_ASSERT_EQUAL_HEX8(want[i].type, c.sig[i].type);
+            TEST_ASSERT_EQUAL_UINT8(want[i].len, c.sig[i].len);
+            TEST_ASSERT_EQUAL_HEX8(want[i].first, c.sig[i].first);
+            TEST_ASSERT_EQUAL_HEX8(want[i].last, c.sig[i].last);
+        }
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)nwant, r.frames_ok);
+        TEST_ASSERT_EQUAL_UINT8(0, r.state);                    /* flush always leaves the reader idle */
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1366,6 +1608,8 @@ int main(void)
     RUN_TEST(test_reader_rejects_oversize_len_without_stalling);
     RUN_TEST(test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof);
     RUN_TEST(test_flush_on_truncated_frame_counts_bad_and_is_idempotent);
+    RUN_TEST(test_on_bad_guard_resets_the_reader_before_returning);
+    RUN_TEST(test_fuzz_frames_buried_in_garbage_are_all_recovered);
     return UNITY_END();
 }
 ```
@@ -1432,6 +1676,7 @@ void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
 `components/core/session/ses_frame.c`:
 ```c
 #include "core/ses.h"
+#include "core/core.h"
 #include <string.h>
 
 uint16_t ses_crc16(const uint8_t *buf, size_t n)
@@ -1487,14 +1732,20 @@ static void on_bad(ses_reader_t *r)
     /* Re-scan everything collected after the sync byte, plus whatever replay input was still pending. */
     uint16_t collected = r->idx;
     uint16_t pending = (uint16_t)(r->replay_len - r->replay_pos);
+    /* Reset the reader state first: whether or not the bounds guard below trips, a caller must be
+     * able to keep feeding bytes afterwards without the reader staying wedged mid-frame. */
+    r->frames_bad++;
+    r->state = 0; r->idx = 0; r->need = 0;
+    /* collected <= 2+SES_MAX_PAYLOAD+2 and pending is what is left of an equally bounded replay,
+     * so the sum fits the 2x-sized replay buffer. Checked rather than assumed: a corrupted reader
+     * struct must not turn into a memcpy past the end. */
+    CORE_ASSERT_VOID((size_t)collected + pending <= sizeof r->replay, 0x0A02);
     uint8_t tmp[sizeof r->replay];
     memcpy(tmp, r->buf, collected);
     memcpy(tmp + collected, r->replay + r->replay_pos, pending);
     r->replay_len = (uint16_t)(collected + pending);
     r->replay_pos = 0;
     memcpy(r->replay, tmp, r->replay_len);
-    r->frames_bad++;
-    r->state = 0; r->idx = 0; r->need = 0;
 }
 
 void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx)
@@ -1561,6 +1812,7 @@ git commit -m "feat(core): session frame format with CRC-16 and resynchronising 
 ```c
 #include "unity.h"
 #include "core/ses.h"
+#include <stdint.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -1705,6 +1957,250 @@ static void test_small_records_sizes(void)
     TEST_ASSERT_EQUAL_INT(9 + SES_FRAME_OVERHEAD, ses_encode_mark(1, 0, buf, sizeof buf));
 }
 
+static void test_negative_ground_speed_forces_a_keyframe(void)
+{
+    ses_fix_state_t enc; ses_fix_state_init(&enc);
+    ses_fix_state_t dec; ses_fix_state_init(&dec);
+    uint8_t buf[64]; gps_fix_t out;
+    gps_fix_t a = mk_fix(1000000, -338567000, 185170000, 45000, 1000, 9000000, 9, 1);
+    int n = ses_encode_fix(&enc, &a, buf, sizeof buf);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    TEST_ASSERT_EQUAL_HEX8(SES_T_FIX_KEY, buf[1]);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fix(&dec, buf[1], buf + 3, buf[2], &out));
+
+    /* a negative Doppler speed cannot be represented in the unsigned delta field */
+    gps_fix_t b = a; b.gps_us += 200000; b.gspeed_mms = -1500;
+    n = ses_encode_fix(&enc, &b, buf, sizeof buf);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    TEST_ASSERT_EQUAL_HEX8(SES_T_FIX_KEY, buf[1]);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fix(&dec, buf[1], buf + 3, buf[2], &out));
+    TEST_ASSERT_EQUAL_INT32(-1500, out.gspeed_mms);              /* decoded exactly */
+    TEST_ASSERT_EQUAL_INT32(enc.prev.gspeed_mms, out.gspeed_mms);   /* encoder and decoder agree */
+    TEST_ASSERT_EQUAL_INT64(b.gps_us, out.gps_us);
+    TEST_ASSERT_EQUAL_INT32(b.lat_e7, out.lat_e7);
+}
+
+static void test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated(void)
+{
+    ses_hdr_t h; memset(&h, 0, sizeof h);
+    memcpy(h.session_id, "S00042_001", 10);
+    memcpy(h.fw, "v0.3.1-abcdefghi", 16);          /* exactly 16 bytes, no NUL on the wire */
+    memcpy(h.hwid, "moto_neo6m_epaper_int_bl", 24);
+    h.venue_id = 6; h.layout_id = 1; h.gps_hz = 5; h.fused_hz = 10; h.start_gps_us = 1789640100000000LL;
+    uint8_t buf[128];
+    int w = ses_encode_hdr(&h, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(94 + SES_FRAME_OVERHEAD, w);            /* wire payload unchanged */
+    ses_hdr_t out;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_hdr(buf + 3, 94, &out));
+    TEST_ASSERT_EQUAL_STRING("S00042_001", out.session_id);
+    TEST_ASSERT_EQUAL_UINT(10, strlen(out.session_id));
+    TEST_ASSERT_EQUAL_INT('\0', out.session_id[10]);
+    TEST_ASSERT_EQUAL_STRING("v0.3.1-abcdefghi", out.fw);
+    TEST_ASSERT_EQUAL_UINT(16, strlen(out.fw));
+    TEST_ASSERT_EQUAL_STRING("moto_neo6m_epaper_int_bl", out.hwid);
+    TEST_ASSERT_EQUAL_UINT(24, strlen(out.hwid));
+    TEST_ASSERT_EQUAL_MEMORY(&h, &out, sizeof h);
+}
+
+static void test_small_record_round_trips(void)
+{
+    uint8_t buf[64];
+    int w;
+
+    w = ses_encode_sector(3, 1, 123456789LL, 32100, -210, buf, sizeof buf);
+    ses_sector_t sec;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_sector(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &sec));
+    TEST_ASSERT_EQUAL_UINT16(3, sec.lap_no); TEST_ASSERT_EQUAL_UINT8(1, sec.idx);
+    TEST_ASSERT_EQUAL_INT64(123456789LL, sec.gps_us); TEST_ASSERT_EQUAL_UINT32(32100, sec.split_ms);
+    TEST_ASSERT_EQUAL_INT32(-210, sec.delta_ms);
+
+    w = ses_encode_drag_gate(1, 2, 987654321LL, 5910, 2778, 9800, buf, sizeof buf);
+    ses_drag_gate_t dg;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_drag_gate(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &dg));
+    TEST_ASSERT_EQUAL_UINT16(1, dg.run_no); TEST_ASSERT_EQUAL_UINT8(2, dg.gate_id);
+    TEST_ASSERT_EQUAL_INT64(987654321LL, dg.gps_us); TEST_ASSERT_EQUAL_UINT32(5910, dg.time_ms);
+    TEST_ASSERT_EQUAL_UINT16(2778, dg.speed_cms); TEST_ASSERT_EQUAL_UINT32(9800, dg.dist_cm);
+
+    w = ses_encode_event(-5, 1789380900000000LL, 0x0101, 0xDEADBEEF, buf, sizeof buf);
+    ses_event_t ev;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_event(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &ev));
+    TEST_ASSERT_EQUAL_INT64(-5, ev.mono_us); TEST_ASSERT_EQUAL_INT64(1789380900000000LL, ev.gps_us);
+    TEST_ASSERT_EQUAL_HEX16(0x0101, ev.code); TEST_ASSERT_EQUAL_HEX32(0xDEADBEEF, ev.arg);
+
+    w = ses_encode_time_map(4242, 1789380900000000LL, 2, buf, sizeof buf);
+    ses_time_map_t tm;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_time_map(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &tm));
+    TEST_ASSERT_EQUAL_INT64(4242, tm.mono_us); TEST_ASSERT_EQUAL_INT64(1789380900000000LL, tm.gps_us);
+    TEST_ASSERT_EQUAL_UINT8(2, tm.quality);
+
+    w = ses_encode_venue(6, 1, "Killarney", buf, sizeof buf);
+    ses_venue_t vn;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &vn));
+    TEST_ASSERT_EQUAL_UINT16(6, vn.venue_id); TEST_ASSERT_EQUAL_UINT16(1, vn.layout_id);
+    TEST_ASSERT_EQUAL_STRING("Killarney", vn.name);
+    /* a name filling all 32 wire bytes still decodes NUL-terminated */
+    w = ses_encode_venue(9, 2, "0123456789012345678901234567890123", buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &vn));
+    TEST_ASSERT_EQUAL_UINT(31, strlen(vn.name));    /* encoder keeps a NUL inside the 32-byte field */
+
+    w = ses_encode_power(77, 3, 3900, buf, sizeof buf);
+    ses_power_t pw;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_power(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &pw));
+    TEST_ASSERT_EQUAL_INT64(77, pw.mono_us); TEST_ASSERT_EQUAL_UINT8(3, pw.state); TEST_ASSERT_EQUAL_UINT16(3900, pw.batt_mv);
+
+    w = ses_encode_end(1789380900000000LL, 2, buf, sizeof buf);
+    ses_end_t en;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_end(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &en));
+    TEST_ASSERT_EQUAL_INT64(1789380900000000LL, en.gps_us); TEST_ASSERT_EQUAL_UINT8(2, en.reason);
+
+    w = ses_encode_mark(1789380900000001LL, 1, buf, sizeof buf);
+    ses_mark_t mk;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_mark(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &mk));
+    TEST_ASSERT_EQUAL_INT64(1789380900000001LL, mk.gps_us); TEST_ASSERT_EQUAL_UINT8(1, mk.kind);
+}
+
+static void test_calib_round_trip(void)
+{
+    ses_calib_t c; memset(&c, 0, sizeof c);
+    for (int i = 0; i < 9; i++) c.r_e4[i] = (int16_t)(i * 1000 - 4000);
+    c.gbias[0] = -12; c.gbias[1] = 340; c.gbias[2] = 0;
+    c.calib_flags = 0x03;
+    uint8_t buf[64];
+    int w = ses_encode_calib(&c, buf, sizeof buf);
+    TEST_ASSERT_EQUAL_INT(25 + SES_FRAME_OVERHEAD, w);
+    TEST_ASSERT_EQUAL_HEX8(SES_T_CALIB, buf[1]);
+    ses_calib_t out; memset(&out, 0xAA, sizeof out);
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_calib(buf + 3, 25, &out));
+    for (int i = 0; i < 9; i++) TEST_ASSERT_EQUAL_INT16(c.r_e4[i], out.r_e4[i]);
+    for (int i = 0; i < 3; i++) TEST_ASSERT_EQUAL_INT16(c.gbias[i], out.gbias[i]);
+    TEST_ASSERT_EQUAL_HEX8(c.calib_flags, out.calib_flags);
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(buf + 3, 24, &out));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(buf + 3, 26, &out));
+}
+
+static void test_decoders_reject_malformed_payloads(void)
+{
+    uint8_t p[256]; memset(p, 0, sizeof p);
+    gps_fix_t f; lap_result_t lap; drag_result_t run; ses_hdr_t hdr; fused_sample_t fs;
+    ses_fix_state_t fst; ses_fix_state_init(&fst);
+    ses_fused_state_t ust; ses_fused_state_init(&ust);
+
+    /* FIX_KEY / FIX_DELTA: exact lengths only */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 38, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 40, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_DELTA, p, 15, &f));   /* DELTA before any KEY */
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 39, &f));      /* now a reference exists */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_DELTA, p, 14, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_DELTA, p, 16, &f));
+    TEST_ASSERT_EQUAL_INT(0, ses_decode_fix(&fst, SES_T_LAP, p, 39, &f));          /* not a fix record */
+
+    /* FUSED: exact length and a reference */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fused(&ust, p, 11, &fs));                 /* no reference yet */
+    ses_fused_state_on_fix(&ust, 1000000);
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fused(&ust, p, 10, &fs));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fused(&ust, p, 12, &fs));
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_fused(&ust, p, 11, &fs));
+
+    /* LAP: short header, declared sector count, declared-vs-actual length */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_lap(p, 29, &lap));
+    p[15] = LAP_MAX_SECTORS + 2;                                                   /* n_sectors field */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_lap(p, (uint8_t)(30 + 4 * (LAP_MAX_SECTORS + 2)), &lap));
+    p[15] = 3;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_lap(p, 30, &lap));                        /* length does not match n_sectors */
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_lap(p, 42, &lap));
+    p[15] = 0;
+
+    /* DRAG_RUN: short header, declared gate count, declared-vs-actual length */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_run(p, 13, &run));
+    p[13] = DRAG_MAX_GATES + 1;                                                    /* n_gates field */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_run(p, (uint8_t)(14 + 12 * 1), &run));
+    p[13] = 2;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_run(p, 14, &run));
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_drag_run(p, 38, &run));
+    p[13] = 0;
+
+    /* SESSION_HDR: exact length and version 1 */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 93, &hdr));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 95, &hdr));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 94, &hdr));                        /* version byte is 0 */
+    p[0] = 2;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_hdr(p, 94, &hdr));
+    p[0] = 1;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_hdr(p, 94, &hdr));
+
+    /* encoders refuse counts they cannot frame */
+    uint8_t out[512];
+    memset(&lap, 0, sizeof lap); lap.n_sectors = LAP_MAX_SECTORS + 2;
+    TEST_ASSERT_EQUAL_INT(-1, ses_encode_lap(&lap, out, sizeof out));
+    lap.n_sectors = LAP_MAX_SECTORS + 1;
+    TEST_ASSERT_GREATER_THAN(0, ses_encode_lap(&lap, out, sizeof out));
+    memset(&run, 0, sizeof run); run.n_gates = DRAG_MAX_GATES + 1;
+    TEST_ASSERT_EQUAL_INT(-1, ses_encode_drag_run(&run, out, sizeof out));
+    run.n_gates = DRAG_MAX_GATES;
+    TEST_ASSERT_GREATER_THAN(0, ses_encode_drag_run(&run, out, sizeof out));
+
+    /* the small-record decoders all validate their length exactly */
+    ses_sector_t sec; ses_drag_gate_t dg; ses_event_t ev; ses_time_map_t tm;
+    ses_venue_t vn; ses_power_t pw; ses_end_t en; ses_mark_t mk; ses_calib_t cal;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_sector(p, 18, &sec));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_drag_gate(p, 20, &dg));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_event(p, 21, &ev));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_time_map(p, 18, &tm));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_venue(p, 35, &vn));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_power(p, 12, &pw));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_end(p, 8, &en));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_mark(p, 10, &mk));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(p, 24, &cal));
+}
+
+/* deterministic LCG, same pattern as the other suites */
+static uint32_t lcg = 1664525u;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+static int32_t rnd_span(int32_t span) { return (int32_t)(rnd() % (uint32_t)(2 * span + 1)) - span; }
+
+typedef struct { ses_fix_state_t st; gps_fix_t last; int n; } walk_dec_t;
+static void walk_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)
+{
+    walk_dec_t *d = ctx;
+    if (ses_decode_fix(&d->st, type, payload, len, &d->last) == 1) d->n++;
+}
+
+static void test_fuzz_ten_thousand_fix_random_walk_round_trips(void)
+{
+    ses_fix_state_t enc; ses_fix_state_init(&enc);
+    walk_dec_t d; memset(&d, 0, sizeof d); ses_fix_state_init(&d.st);
+    ses_reader_t r; ses_reader_init(&r);
+
+    gps_fix_t f = mk_fix(1789380900LL * 1000000LL, -338567000, 185170000, 45000, 30000, 9012000, 9, 1);
+    for (int i = 0; i < 10000; i++) {
+        f.gps_us += (int64_t)(100 + rnd() % 200u) * 1000;       /* 100..299 ms, whole milliseconds */
+        f.lat_e7 += rnd_span(3000);
+        f.lon_e7 += rnd_span(3000);
+        f.alt_mm += rnd_span(2000);
+        f.gspeed_mms = (int32_t)(rnd() % 60001u);
+        f.head_e5 = (int32_t)(rnd() % 36000001u);
+        f.hacc_mm = 1000 + rnd() % 5000u;
+        f.sats = (uint8_t)(4 + rnd() % 16u);
+        f.valid = (uint8_t)((rnd() % 32u) != 0);                 /* the occasional invalid fix */
+        uint8_t frame[64];
+        int w = ses_encode_fix(&enc, &f, frame, sizeof frame);
+        TEST_ASSERT_GREATER_THAN(0, w);
+        int before = d.n;
+        ses_reader_feed(&r, frame, (size_t)w, walk_cb, &d);
+        TEST_ASSERT_EQUAL_INT(before + 1, d.n);
+        TEST_ASSERT_EQUAL_INT64(f.gps_us, d.last.gps_us);
+        TEST_ASSERT_EQUAL_INT32(f.lat_e7, d.last.lat_e7);
+        TEST_ASSERT_EQUAL_INT32(f.lon_e7, d.last.lon_e7);
+        TEST_ASSERT_EQUAL_UINT8(f.sats, d.last.sats);
+        TEST_ASSERT_EQUAL_UINT8(f.valid, d.last.valid);
+        TEST_ASSERT_INT32_WITHIN(50, f.alt_mm, d.last.alt_mm);          /* decimetre field */
+        TEST_ASSERT_INT32_WITHIN(5, f.gspeed_mms, d.last.gspeed_mms);   /* cm/s field */
+    }
+    TEST_ASSERT_EQUAL_INT(10000, d.n);
+    TEST_ASSERT_EQUAL_UINT32(10000, r.frames_ok);
+    TEST_ASSERT_EQUAL_UINT32(0, r.frames_bad);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1715,6 +2211,12 @@ int main(void)
     RUN_TEST(test_drag_run_round_trip);
     RUN_TEST(test_hdr_round_trip_and_size);
     RUN_TEST(test_small_records_sizes);
+    RUN_TEST(test_negative_ground_speed_forces_a_keyframe);
+    RUN_TEST(test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated);
+    RUN_TEST(test_small_record_round_trips);
+    RUN_TEST(test_calib_round_trip);
+    RUN_TEST(test_decoders_reject_malformed_payloads);
+    RUN_TEST(test_fuzz_ten_thousand_fix_random_walk_round_trips);
     return UNITY_END();
 }
 ```
@@ -1752,23 +2254,47 @@ int  ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len
 
 int  ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
 int  ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out);
+
+/* Every decoder below validates `len` exactly and returns 1 on success, -1 on a malformed payload.
+ * The structs mirror the wire payloads of §12.3; char arrays carry one extra byte so the decoded
+ * value is always NUL-terminated (the wire size is unchanged). */
+typedef struct { uint16_t lap_no; uint8_t idx; int64_t gps_us; uint32_t split_ms; int32_t delta_ms; } ses_sector_t;
+typedef struct { uint16_t run_no; uint8_t gate_id; int64_t gps_us; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; } ses_drag_gate_t;
+typedef struct { int64_t mono_us, gps_us; uint16_t code; uint32_t arg; } ses_event_t;
+typedef struct { int64_t mono_us, gps_us; uint8_t quality; } ses_time_map_t;
+typedef struct { uint16_t venue_id, layout_id; char name[33]; } ses_venue_t;     /* name is char[32] on the wire */
+typedef struct { int64_t mono_us; uint8_t state; uint16_t batt_mv; } ses_power_t;
+typedef struct { int64_t gps_us; uint8_t reason; } ses_end_t;
+typedef struct { int64_t gps_us; uint8_t kind; } ses_mark_t;
+typedef struct { int16_t r_e4[9]; int16_t gbias[3]; uint8_t calib_flags; } ses_calib_t;   /* 25 B payload */
+
 int  ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap);
+int  ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out);
 int  ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap);
 int  ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out);
 int  ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap);
+int  ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out);
 int  ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap);
+int  ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out);
 int  ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap);
+int  ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out);
 int  ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap);
+int  ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out);
 int  ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap);
+int  ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out);
 int  ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap);
+int  ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out);
 int  ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap);
+int  ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out);
+int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
+int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
 
 typedef struct {
-    char     session_id[10];
+    char     session_id[11];      /* char[10] on the wire + NUL */
     uint8_t  mode, variant;
     uint16_t venue_id, layout_id;
-    char     fw[16];
-    char     hwid[24];
+    char     fw[17];              /* char[16] on the wire + NUL */
+    char     hwid[25];            /* char[24] on the wire + NUL */
     uint8_t  log_profile, fused_hz, gps_hz;
     int64_t  start_gps_us;
     int16_t  r_e4[9];             /* rotation matrix × 1e4, row-major */
@@ -1855,7 +2381,7 @@ int ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, size_t
     int64_t dalt = round_div((int64_t)f->alt_mm - st->prev.alt_mm, 100);
     int64_t v_cms = round_div(f->gspeed_mms, 10);
     if (dt < 0 || dt > 65535 || dlat > 32767 || dlat < -32768 || dlon > 32767 || dlon < -32768 ||
-        dalt > 32767 || dalt < -32768 || v_cms > 65535)
+        dalt > 32767 || dalt < -32768 || v_cms > 65535 || v_cms < 0)
         return encode_key(st, f, out, cap);
     uint8_t p[15]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, (uint16_t)dt); bw_i16(&w, (int16_t)dlat); bw_i16(&w, (int16_t)dlon); bw_i16(&w, (int16_t)dalt);
@@ -1910,6 +2436,10 @@ int ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *o
 {
     if (!st->have_ref) return -1;
     int64_t dt = round_div(fs->gps_us - st->ref_gps_us, 1000);
+    /* dt is unsigned on the wire (§12.3). A fused sample stamped before its reference (a fix that
+     * arrived late, or a time-base step) is clamped to 0 rather than dropped: the sample still
+     * carries usable lean/g values, and both sides advance ref_gps_us by the same clamped dt, so
+     * encoder and decoder stay in step. The cost is that such a sample is timed at the reference. */
     if (dt < 0) dt = 0;
     if (dt > 65535) dt = 65535;
     uint8_t p[11]; bw_t w; bw_init(&w, p, sizeof p);
@@ -1982,6 +2512,15 @@ int ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t spl
     return finish(SES_T_SECTOR, &w, out, cap);
 }
 
+int ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out)
+{
+    if (len != 19) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->lap_no = br_u16(&r); out->idx = br_u8(&r); out->gps_us = br_i64(&r);
+    out->split_ms = br_u32(&r); out->delta_ms = br_i32(&r);
+    return br_underflow(&r) ? -1 : 1;
+}
+
 /* ---------------- drag ---------------- */
 
 int ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap)
@@ -2017,6 +2556,15 @@ int ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint3
     return finish(SES_T_DRAG_GATE, &w, out, cap);
 }
 
+int ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out)
+{
+    if (len != 21) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->run_no = br_u16(&r); out->gate_id = br_u8(&r); out->gps_us = br_i64(&r);
+    out->time_ms = br_u32(&r); out->speed_cms = br_u16(&r); out->dist_cm = br_u32(&r);
+    return br_underflow(&r) ? -1 : 1;
+}
+
 /* ---------------- misc ---------------- */
 
 int ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap)
@@ -2026,11 +2574,27 @@ int ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t ar
     return finish(SES_T_EVENT, &w, out, cap);
 }
 
+int ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out)
+{
+    if (len != 22) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->mono_us = br_i64(&r); out->gps_us = br_i64(&r); out->code = br_u16(&r); out->arg = br_u32(&r);
+    return br_underflow(&r) ? -1 : 1;
+}
+
 int ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap)
 {
     uint8_t p[17]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, mono_us); bw_i64(&w, gps_us); bw_u8(&w, quality);
     return finish(SES_T_TIME_MAP, &w, out, cap);
+}
+
+int ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out)
+{
+    if (len != 17) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->mono_us = br_i64(&r); out->gps_us = br_i64(&r); out->quality = br_u8(&r);
+    return br_underflow(&r) ? -1 : 1;
 }
 
 int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap)
@@ -2041,11 +2605,29 @@ int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, ui
     return finish(SES_T_VENUE, &w, out, cap);
 }
 
+int ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out)
+{
+    if (len != 36) return -1;
+    br_t r; br_init(&r, payload, len);
+    memset(out, 0, sizeof *out);
+    out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
+    br_bytes(&r, out->name, 32); out->name[32] = '\0';
+    return br_underflow(&r) ? -1 : 1;
+}
+
 int ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap)
 {
     uint8_t p[11]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, mono_us); bw_u8(&w, state); bw_u16(&w, batt_mv);
     return finish(SES_T_POWER, &w, out, cap);
+}
+
+int ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out)
+{
+    if (len != 11) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->mono_us = br_i64(&r); out->state = br_u8(&r); out->batt_mv = br_u16(&r);
+    return br_underflow(&r) ? -1 : 1;
 }
 
 int ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap)
@@ -2055,11 +2637,48 @@ int ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap)
     return finish(SES_T_END, &w, out, cap);
 }
 
+int ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out)
+{
+    if (len != 9) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->gps_us = br_i64(&r); out->reason = br_u8(&r);
+    return br_underflow(&r) ? -1 : 1;
+}
+
 int ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap)
 {
     uint8_t p[9]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, gps_us); bw_u8(&w, kind);
     return finish(SES_T_MARK, &w, out, cap);
+}
+
+int ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out)
+{
+    if (len != 9) return -1;
+    br_t r; br_init(&r, payload, len);
+    out->gps_us = br_i64(&r); out->kind = br_u8(&r);
+    return br_underflow(&r) ? -1 : 1;
+}
+
+/* ---------------- calibration ---------------- */
+
+int ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap)
+{
+    uint8_t p[25]; bw_t w; bw_init(&w, p, sizeof p);
+    for (int i = 0; i < 9; i++) bw_i16(&w, c->r_e4[i]);
+    for (int i = 0; i < 3; i++) bw_i16(&w, c->gbias[i]);
+    bw_u8(&w, c->calib_flags);
+    return finish(SES_T_CALIB, &w, out, cap);
+}
+
+int ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out)
+{
+    if (len != 25) return -1;
+    br_t r; br_init(&r, payload, len);
+    for (int i = 0; i < 9; i++) out->r_e4[i] = br_i16(&r);
+    for (int i = 0; i < 3; i++) out->gbias[i] = br_i16(&r);
+    out->calib_flags = br_u8(&r);
+    return br_underflow(&r) ? -1 : 1;
 }
 
 /* ---------------- header ---------------- */
@@ -2085,8 +2704,10 @@ int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
     memset(out, 0, sizeof *out);
     if (br_u8(&r) != 1) return -1;
     br_u8(&r);                                      /* reserved, currently unused */
-    br_bytes(&r, out->session_id, 10); out->mode = br_u8(&r); out->variant = br_u8(&r);
-    out->venue_id = br_u16(&r); out->layout_id = br_u16(&r); br_bytes(&r, out->fw, 16); br_bytes(&r, out->hwid, 24);
+    br_bytes(&r, out->session_id, 10); out->session_id[10] = '\0'; out->mode = br_u8(&r); out->variant = br_u8(&r);
+    out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
+    br_bytes(&r, out->fw, 16); out->fw[16] = '\0';          /* the wire field may use all 16 bytes */
+    br_bytes(&r, out->hwid, 24); out->hwid[24] = '\0';
     out->log_profile = br_u8(&r); out->fused_hz = br_u8(&r); out->gps_hz = br_u8(&r); out->start_gps_us = br_i64(&r);
     for (int i = 0; i < 9; i++) out->r_e4[i] = br_i16(&r);
     for (int i = 0; i < 3; i++) out->gbias[i] = br_i16(&r);
@@ -2119,7 +2740,7 @@ git commit -m "feat(core): session record codecs — fix key/delta, fused, lap, 
 
 **Interfaces:**
 - Produces: `jw_t` writer: `jw_init(jw_t*, char *buf, size_t cap)`, `jw_obj_open/close`, `jw_arr_open/close`, `jw_key(const char*)`, `jw_int(int64_t)`, `jw_uint(uint64_t)`, `jw_bool(bool)`, `jw_null()`, `jw_str(const char*)` (escapes `"` `\` and control chars), `jw_double(double, int decimals)`, `jw_len()`, `jw_overflow()`. Output is always NUL-terminated while it fits.
-- Produces: `json.h` helpers over jsmn: `int json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max)` (returns token count or −1), `bool json_tok_eq(js, tok, "literal")`, `int json_skip(const jsmntok_t *toks, int i)` (index after the subtree), `bool json_tok_int(js, tok, int64_t *out)`, `bool json_tok_double(js, tok, double *out)`, `bool json_tok_bool(js, tok, bool *out)`, `size_t json_tok_str(js, tok, char *out, size_t cap)`, `int json_obj_get(js, toks, obj, "key")` (index of the value token or −1).
+- Produces: `json.h` helpers over jsmn: `int json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max)` (returns token count, or −1 on a jsmn error or nesting deeper than `JSON_MAX_DEPTH`), `bool json_tok_eq(js, tok, "literal")`, `int json_skip(const jsmntok_t *toks, int ntoks, int i)` (index after the subtree, iterative), `bool json_tok_int(js, tok, int64_t *out)`, `bool json_tok_double(js, tok, double *out)`, `bool json_tok_bool(js, tok, bool *out)`, `size_t json_tok_str(js, tok, char *out, size_t cap)`, `int json_obj_get(js, toks, ntoks, obj, "key")` (index of the value token or −1).
 
 - [ ] **Step 1: Vendor jsmn**
 
@@ -2137,6 +2758,7 @@ head -5 components/core/include/core/jsmn.h   # must show the MIT licence header
 #include "unity.h"
 #include "core/jw.h"
 #include "core/json.h"
+#include <stdint.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -2171,14 +2793,14 @@ static void test_tokenizer_helpers(void)
     jsmntok_t toks[32];
     int n = json_parse(js, strlen(js), toks, 32);
     TEST_ASSERT_GREATER_THAN(0, n);
-    int vn = json_obj_get(js, toks, 0, "n"); int64_t iv; TEST_ASSERT_TRUE(json_tok_int(js, &toks[vn], &iv)); TEST_ASSERT_EQUAL_INT64(-42, iv);
-    int vs = json_obj_get(js, toks, 0, "s"); char s[8]; json_tok_str(js, &toks[vs], s, sizeof s); TEST_ASSERT_EQUAL_STRING("hi", s);
-    int va = json_obj_get(js, toks, 0, "arr"); TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[va].type); TEST_ASSERT_EQUAL_INT(3, toks[va].size);
-    int after = json_skip(toks, va);
+    int vn = json_obj_get(js, toks, n, 0, "n"); int64_t iv; TEST_ASSERT_TRUE(json_tok_int(js, &toks[vn], &iv)); TEST_ASSERT_EQUAL_INT64(-42, iv);
+    int vs = json_obj_get(js, toks, n, 0, "s"); char s[8]; json_tok_str(js, &toks[vs], s, sizeof s); TEST_ASSERT_EQUAL_STRING("hi", s);
+    int va = json_obj_get(js, toks, n, 0, "arr"); TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[va].type); TEST_ASSERT_EQUAL_INT(3, toks[va].size);
+    int after = json_skip(toks, n, va);
     TEST_ASSERT_TRUE(json_tok_eq(js, &toks[after], "f"));
-    int vf = json_obj_get(js, toks, 0, "f"); double dv; TEST_ASSERT_TRUE(json_tok_double(js, &toks[vf], &dv)); TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.5, dv);
-    int vt = json_obj_get(js, toks, 0, "t"); bool bv; TEST_ASSERT_TRUE(json_tok_bool(js, &toks[vt], &bv)); TEST_ASSERT_TRUE(bv);
-    TEST_ASSERT_EQUAL_INT(-1, json_obj_get(js, toks, 0, "missing"));
+    int vf = json_obj_get(js, toks, n, 0, "f"); double dv; TEST_ASSERT_TRUE(json_tok_double(js, &toks[vf], &dv)); TEST_ASSERT_DOUBLE_WITHIN(1e-12, 1.5, dv);
+    int vt = json_obj_get(js, toks, n, 0, "t"); bool bv; TEST_ASSERT_TRUE(json_tok_bool(js, &toks[vt], &bv)); TEST_ASSERT_TRUE(bv);
+    TEST_ASSERT_EQUAL_INT(-1, json_obj_get(js, toks, n, 0, "missing"));
 }
 
 static void test_double_guard_clamps_decimals_and_flags_unfittable_values(void)
@@ -2198,10 +2820,75 @@ static void test_skip_over_nested_object_values(void)
     jsmntok_t toks[32];
     int n = json_parse(js, strlen(js), toks, 32);
     TEST_ASSERT_GREATER_THAN(0, n);
-    int vb = json_obj_get(js, toks, 0, "b"); int64_t v;
+    int vb = json_obj_get(js, toks, n, 0, "b"); int64_t v;
     TEST_ASSERT_TRUE(json_tok_int(js, &toks[vb], &v)); TEST_ASSERT_EQUAL_INT64(99, v);
-    int va = json_obj_get(js, toks, 0, "a");
-    TEST_ASSERT_EQUAL_INT(vb - 1, json_skip(toks, va));          /* skipping the array lands on key "b" */
+    int va = json_obj_get(js, toks, n, 0, "a");
+    TEST_ASSERT_EQUAL_INT(vb - 1, json_skip(toks, n, va));          /* skipping the array lands on key "b" */
+}
+
+static void test_skip_out_of_range_index_returns_ntoks_without_reading(void)
+{
+    const char *js = "{\"a\":1}";
+    jsmntok_t toks[4];
+    int n = json_parse(js, strlen(js), toks, 4);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    /* A truncated token array (a stale index past the real count) must not dereference toks[i]. */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, n));         /* i == ntoks */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, n + 100));   /* i far past ntoks: would be OOB on toks[4] */
+    TEST_ASSERT_EQUAL_INT(n, json_skip(toks, n, -1));        /* i < 0 */
+}
+
+static void test_parse_rejects_documents_deeper_than_the_cap(void)
+{
+    static char js[1024];
+    static jsmntok_t toks[1024];
+    int p = 0;
+    for (int i = 0; i < 460; i++) js[p++] = '[';
+    for (int i = 0; i < 460; i++) js[p++] = ']';
+    TEST_ASSERT_EQUAL_INT(-1, json_parse(js, (size_t)p, toks, 1024));   /* depth, not token count */
+
+    p = 0;                                                              /* 15 levels: still accepted */
+    for (int i = 0; i < 15; i++) js[p++] = '[';
+    js[p++] = '1';
+    for (int i = 0; i < 15; i++) js[p++] = ']';
+    int n = json_parse(js, (size_t)p, toks, 1024);
+    TEST_ASSERT_EQUAL_INT(16, n);
+    TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[0].type);
+    TEST_ASSERT_EQUAL_INT(JSMN_PRIMITIVE, toks[15].type);
+}
+
+static void test_tok_str_with_zero_capacity_writes_nothing(void)
+{
+    const char *js = "{\"s\":\"hi\"}";
+    jsmntok_t toks[8];
+    int n = json_parse(js, strlen(js), toks, 8);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    int vs = json_obj_get(js, toks, n, 0, "s");
+    char guard[4] = { 'A', 'B', 'C', 'D' };
+    TEST_ASSERT_EQUAL_UINT(0, json_tok_str(js, &toks[vs], guard, 0));
+    TEST_ASSERT_EQUAL_MEMORY("ABCD", guard, 4);
+}
+
+/* deterministic LCG, same pattern as the other suites */
+static uint32_t lcg = 2463534242u;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+
+static void test_fuzz_jw_str_always_emits_a_parsable_string(void)
+{
+    for (int it = 0; it < 2000; it++) {
+        char raw[33];
+        int len = 1 + (int)(rnd() % 32u);
+        for (int i = 0; i < len; i++) raw[i] = (char)(1u + rnd() % 255u);   /* any byte but NUL */
+        raw[len] = '\0';
+        char buf[512]; jw_t w; jw_init(&w, buf, sizeof buf);
+        jw_arr_open(&w); jw_str(&w, raw); jw_arr_close(&w);
+        TEST_ASSERT_FALSE(jw_overflow(&w));
+        jsmntok_t toks[8];
+        int n = json_parse(buf, jw_len(&w), toks, 8);
+        TEST_ASSERT_EQUAL_INT(2, n);                                        /* array + one string token */
+        TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[0].type);
+        TEST_ASSERT_EQUAL_INT(JSMN_STRING, toks[1].type);
+    }
 }
 
 int main(void)
@@ -2212,6 +2899,10 @@ int main(void)
     RUN_TEST(test_tokenizer_helpers);
     RUN_TEST(test_double_guard_clamps_decimals_and_flags_unfittable_values);
     RUN_TEST(test_skip_over_nested_object_values);
+    RUN_TEST(test_skip_out_of_range_index_returns_ntoks_without_reading);
+    RUN_TEST(test_parse_rejects_documents_deeper_than_the_cap);
+    RUN_TEST(test_tok_str_with_zero_capacity_writes_nothing);
+    RUN_TEST(test_fuzz_jw_str_always_emits_a_parsable_string);
     return UNITY_END();
 }
 ```
@@ -2250,7 +2941,8 @@ void   jw_uint(jw_t *w, uint64_t v);
 void   jw_bool(jw_t *w, bool v);
 void   jw_null(jw_t *w);
 void   jw_str(jw_t *w, const char *s);
-/* decimals clamped to 0..JW_MAX_DECIMALS; a value whose text exceeds 47 chars (|v| ≳ 1e29 at 17 decimals) sets overflow and writes nothing */
+/* decimals clamped to 0..JW_MAX_DECIMALS; a value whose text exceeds 47 chars sets overflow and writes
+ * nothing (|v| ≳ 1e29 at 17 decimals, ~1e28 for negative values, whose sign costs one more char) */
 void   jw_double(jw_t *w, double v, int decimals);
 size_t jw_len(const jw_t *w);
 bool   jw_overflow(const jw_t *w);
@@ -2355,16 +3047,23 @@ bool jw_overflow(const jw_t *w) { return w->overflow; }
 #define JSMN_PARENT_LINKS
 #include "core/jsmn.h"
 
+/* Maximum nesting depth accepted by json_parse: a token with more than JSON_MAX_DEPTH
+ * ancestors makes the whole document invalid. Config and track documents nest 6 deep. */
+#define JSON_MAX_DEPTH 16
+
+/* Parses and enforces JSON_MAX_DEPTH. Returns the token count, or -1 on a jsmn error or too deep. */
 int    json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks);   /* token count or -1 */
 bool   json_tok_eq(const char *js, const jsmntok_t *t, const char *s);
-/* Recursive in token nesting depth; intended for config/track-sized documents (depth < 16). */
-int    json_skip(const jsmntok_t *toks, int i);                                     /* index of the token after subtree i */
+/* Iterative (no recursion): the subtree of token i is the run of following tokens that start
+ * before toks[i].end, which JSMN_PARENT_LINKS guarantees is contiguous. Depth is capped by
+ * json_parse, so neither helper can be driven to unbounded stack use. */
+int    json_skip(const jsmntok_t *toks, int ntoks, int i);                          /* index of the token after subtree i */
 bool   json_tok_int(const char *js, const jsmntok_t *t, int64_t *out);
 bool   json_tok_double(const char *js, const jsmntok_t *t, double *out);
 bool   json_tok_bool(const char *js, const jsmntok_t *t, bool *out);
 /* Raw copy of the token's source bytes, NUL-terminated, truncated to cap-1; does NOT unescape JSON escapes. Suitable for the ASCII keys and short values this project exchanges (config, track names). Returns the copied length. */
 size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap);     /* copies, NUL-terminates, returns length */
-int    json_obj_get(const char *js, const jsmntok_t *toks, int obj, const char *key);   /* value token index or -1 */
+int    json_obj_get(const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *key);   /* value token index or -1 */
 #endif
 ```
 
@@ -2385,7 +3084,14 @@ int json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks)
 {
     jsmn_parser p; jsmn_init(&p);
     int r = jsmn_parse(&p, js, n, toks, max_toks);
-    return r < 0 ? -1 : r;
+    if (r < 0) return -1;
+    /* Depth from the parent links jsmn already maintains; bail out as soon as one chain is too long. */
+    for (int i = 0; i < r; i++) {
+        int d = 0;
+        for (int par = toks[i].parent; par >= 0; par = toks[par].parent)
+            if (++d > JSON_MAX_DEPTH) return -1;
+    }
+    return r;
 }
 
 bool json_tok_eq(const char *js, const jsmntok_t *t, const char *s)
@@ -2394,15 +3100,20 @@ bool json_tok_eq(const char *js, const jsmntok_t *t, const char *s)
     return t->type == JSMN_STRING && strlen(s) == len && memcmp(js + t->start, s, len) == 0;
 }
 
-int json_skip(const jsmntok_t *toks, int i)
+int json_skip(const jsmntok_t *toks, int ntoks, int i)
 {
+    /* Every descendant of i starts before i ends and jsmn emits them contiguously, so a forward
+     * scan finds the end of the subtree without recursion. Primitives and strings have no
+     * descendants and the loop exits on the first test. */
+    if (i < 0 || i >= ntoks) return ntoks;
     int j = i + 1;
-    for (int k = 0; k < toks[i].size; k++) j = json_skip(toks, j);
+    while (j < ntoks && toks[j].start < toks[i].end) j++;
     return j;
 }
 
 static size_t tok_copy(const char *js, const jsmntok_t *t, char *tmp, size_t cap)
 {
+    if (cap == 0) return 0;
     size_t len = (size_t)(t->end - t->start);
     if (len >= cap) len = cap - 1;
     memcpy(tmp, js + t->start, len); tmp[len] = '\0';
@@ -2441,13 +3152,13 @@ size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap)
     return tok_copy(js, t, out, cap);
 }
 
-int json_obj_get(const char *js, const jsmntok_t *toks, int obj, const char *key)
+int json_obj_get(const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *key)
 {
-    if (toks[obj].type != JSMN_OBJECT) return -1;
-    int i = obj + 1;
-    for (int k = 0; k < toks[obj].size; k++) {
+    if (obj < 0 || obj >= ntoks || toks[obj].type != JSMN_OBJECT) return -1;
+    int i = obj + 1;                            /* first key token */
+    for (int k = 0; k < toks[obj].size && i + 1 < ntoks; k++) {
         if (json_tok_eq(js, &toks[i], key)) return i + 1;
-        i = json_skip(toks, i);
+        i = json_skip(toks, ntoks, i + 1);      /* past this key's value subtree */
     }
     return -1;
 }
@@ -2483,9 +3194,18 @@ git commit -m "feat(core): minimal JSON writer and jsmn tokenizer helpers"
 ```c
 #include "unity.h"
 #include "core/cfg.h"
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
-void setUp(void) {}
+/* deterministic LCG, same pattern as the other suites; reseeded in setUp so a second run within the
+ * same process (the on-target 6 KB stack rerun in test_apps/core_selftest) replays the exact same
+ * fuzz sequence as the first. */
+static uint32_t lcg;
+static uint32_t rnd(void) { lcg = lcg * 1103515245u + 12345u; return lcg >> 8; }
+
+void setUp(void) { lcg = 987654321u; }
 void tearDown(void) {}
 
 static void test_defaults_are_valid(void)
@@ -2501,16 +3221,104 @@ static void test_defaults_are_valid(void)
     TEST_ASSERT_EQUAL_STRING("LapTimer", c.ble.name);
 }
 
+/* Every numeric clamp cfg_validate still performs, driven one field at a time. Bounds a uint8_t
+ * field cannot violate (0 low, 255 high) are not clamped by cfg_validate and are marked absent. */
+typedef struct { const char *name; size_t off; uint8_t width; long lo, hi; bool has_lo, has_hi; } clamp_case_t;
+#define CL(field, w, lo, hi, hl, hh) { #field, offsetof(cfg_t, field), (w), (lo), (hi), (hl), (hh) }
+static const clamp_case_t CLAMPS[] = {
+    CL(lap.min_lap_s,       2,    5,  600, true,  true),
+    CL(lap.max_lap_s,       2,   60, 3600, true,  true),
+    CL(lap.gate_rearm_m,    2,   10,  500, true,  true),
+    CL(lap.pit_speed_kmh,   1,    1,   30, true,  true),
+    CL(lap.pit_time_s,      1,    3,   60, true,  true),
+    CL(drag.benches_kmh[0], 2,   10,  400, true,  true),
+    CL(drag.benches_mph[0], 2,   10,  250, true,  true),
+    CL(drag.launch_g_e2,    1,    5,   50, true,  true),
+    CL(power.pit_after_s,   2,   10,  600, true,  true),
+    CL(power.park_after_s,  2,   60, 7200, true,  true),
+    CL(power.shutdown_mv,   2, 3000, 3600, true,  true),
+    CL(power.conn_idle_s,   2,   30, 1800, true,  true),
+    CL(display.full_every,  1,    1,   50, true,  true),
+    CL(ble.adv_s,           2,   15,  600, true,  true),
+    CL(gps.dyn_model,       1,    0,    8, false, true),
+    CL(gps.rate_hz,         1,    0,   25, false, true),
+    CL(imu.mot_thr,         1,    2,  255, true,  false),
+    CL(imu.mot_dur_ms,      1,    1,  255, true,  false),
+};
+
+static void clamp_set(cfg_t *c, const clamp_case_t *f, long v)
+{
+    if (f->width == 1) { uint8_t x = (uint8_t)v; memcpy((uint8_t *)c + f->off, &x, 1); }
+    else { uint16_t x = (uint16_t)v; memcpy((uint8_t *)c + f->off, &x, 2); }
+}
+static long clamp_get(const cfg_t *c, const clamp_case_t *f)
+{
+    if (f->width == 1) { uint8_t x; memcpy(&x, (const uint8_t *)c + f->off, 1); return x; }
+    uint16_t x; memcpy(&x, (const uint8_t *)c + f->off, 2); return x;
+}
+
 static void test_validate_clamps_each_out_of_range_field(void)
 {
+    char msg[96];
+    for (size_t i = 0; i < sizeof CLAMPS / sizeof CLAMPS[0]; i++) {
+        const clamp_case_t *f = &CLAMPS[i];
+        if (f->has_lo) {
+            cfg_t c; cfg_defaults(&c);
+            clamp_set(&c, f, f->lo - 1);
+            snprintf(msg, sizeof msg, "%s below %ld", f->name, f->lo);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(1, cfg_validate(&c), msg);
+            TEST_ASSERT_EQUAL_INT64_MESSAGE(f->lo, clamp_get(&c, f), msg);
+        }
+        if (f->has_hi) {
+            cfg_t c; cfg_defaults(&c);
+            clamp_set(&c, f, f->hi + 1);
+            snprintf(msg, sizeof msg, "%s above %ld", f->name, f->hi);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(1, cfg_validate(&c), msg);
+            TEST_ASSERT_EQUAL_INT64_MESSAGE(f->hi, clamp_get(&c, f), msg);
+        }
+    }
+    /* the non-clamp corrections: enums, rotation and the fused-rate whitelist */
     cfg_t c; cfg_defaults(&c);
-    c.lap.min_lap_s = 1; c.lap.max_lap_s = 9999; c.power.shutdown_mv = 100; c.display.full_every = 0; c.units = 9;
+    c.units = 9; c.mode = 9; c.display.rotation = 90; c.log.fused_hz = 7; c.ble.name[0] = '\0';
     TEST_ASSERT_EQUAL_INT(5, cfg_validate(&c));
-    TEST_ASSERT_EQUAL_UINT16(5, c.lap.min_lap_s);
-    TEST_ASSERT_EQUAL_UINT16(3600, c.lap.max_lap_s);
-    TEST_ASSERT_EQUAL_UINT16(3000, c.power.shutdown_mv);
-    TEST_ASSERT_EQUAL_UINT8(1, c.display.full_every);
     TEST_ASSERT_EQUAL_UINT8(CFG_UNITS_KMH, c.units);
+    TEST_ASSERT_EQUAL_UINT8(CFG_MODE_LAP, c.mode);
+    TEST_ASSERT_EQUAL_UINT8(0, c.display.rotation);
+    TEST_ASSERT_EQUAL_UINT8(10, c.log.fused_hz);
+    TEST_ASSERT_EQUAL_STRING("LapTimer", c.ble.name);
+}
+
+static void test_validate_resets_implausible_battery_calibration(void)
+{
+    const uint16_t D_ADC0 = 3000, D_TRUE0 = 3000, D_ADC1 = 4200, D_TRUE1 = 4200;
+    struct { const char *why; uint16_t a0, t0, a1, t1; } bad[] = {
+        { "adc points too close",   3000, 3000, 3050, 4200 },
+        { "adc points inverted",    4200, 3000, 3000, 4200 },
+        { "true points too close",  3000, 3000, 4200, 3099 },
+        { "true points inverted",   3000, 4200, 4200, 3000 },
+        { "adc_mv[0] below 1000",    900, 3000, 4200, 4200 },
+        { "adc_mv[1] above 5000",   3000, 3000, 5001, 4200 },
+        { "true_mv[0] below 1000",  3000,  900, 4200, 4200 },
+        { "true_mv[1] above 5000",  3000, 3000, 4200, 5001 },
+        { "all zero",                  0,    0,    0,    0 },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        cfg_t c; cfg_defaults(&c);
+        c.battery.adc_mv[0] = bad[i].a0; c.battery.true_mv[0] = bad[i].t0;
+        c.battery.adc_mv[1] = bad[i].a1; c.battery.true_mv[1] = bad[i].t1;
+        TEST_ASSERT_EQUAL_INT_MESSAGE(1, cfg_validate(&c), bad[i].why);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(D_ADC0, c.battery.adc_mv[0], bad[i].why);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(D_TRUE0, c.battery.true_mv[0], bad[i].why);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(D_ADC1, c.battery.adc_mv[1], bad[i].why);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(D_TRUE1, c.battery.true_mv[1], bad[i].why);
+    }
+    /* a legitimate calibration survives untouched */
+    cfg_t ok; cfg_defaults(&ok);
+    ok.battery.adc_mv[0] = 1500; ok.battery.true_mv[0] = 3510;
+    ok.battery.adc_mv[1] = 2000; ok.battery.true_mv[1] = 4180;
+    TEST_ASSERT_EQUAL_INT(0, cfg_validate(&ok));
+    TEST_ASSERT_EQUAL_UINT16(1500, ok.battery.adc_mv[0]);
+    TEST_ASSERT_EQUAL_UINT16(4180, ok.battery.true_mv[1]);
 }
 
 static void test_from_json_merges_only_given_keys_and_ignores_unknown(void)
@@ -2538,15 +3346,15 @@ static void test_from_json_rejects_malformed(void)
 
 static void test_json_round_trip_is_lossless(void)
 {
-    cfg_t a; cfg_defaults(&a);
+    static cfg_t a; cfg_defaults(&a);
     a.lap.min_lap_s = 33; a.drag.n_mph = 2; a.drag.benches_mph[0] = 60; a.drag.benches_mph[1] = 100;
     a.lap.n_default_layout = 1; a.lap.default_layout[0].venue = 6; a.lap.default_layout[0].layout = 2;
     a.battery.adc_mv[0] = 1500; a.battery.true_mv[0] = 3510; a.battery.adc_mv[1] = 2000; a.battery.true_mv[1] = 4180;
     strcpy(a.ble.name, "LapTimer-AB12"); a.display.live_clock = true;
-    char js[1024];
+    static char js[1024];
     int n = cfg_to_json(&a, js, sizeof js);
     TEST_ASSERT_GREATER_THAN(0, n);
-    cfg_t b; cfg_defaults(&b);
+    static cfg_t b; cfg_defaults(&b);
     char err[64];
     TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&b, js, (size_t)n, err, sizeof err));
     TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof a);
@@ -2592,6 +3400,73 @@ static void test_oversized_arrays_are_rejected(void)
     TEST_ASSERT_EQUAL_UINT16(100, c.drag.benches_kmh[0]);
 }
 
+static void test_err_buffer_is_optional(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    cfg_t before = c;
+    const char *bad_value = "{\"units\":\"furlongs\"}";
+    const char *bad_section = "{\"lap\":5}";
+    const char *malformed = "{\"lap\":";
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, bad_value, strlen(bad_value), NULL, 0));
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, bad_section, strlen(bad_section), NULL, 0));
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, malformed, strlen(malformed), NULL, 0));
+    char err[8];
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, bad_value, strlen(bad_value), err, 0));   /* zero capacity */
+    TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+}
+
+static void test_from_json_rejects_document_deeper_than_the_depth_cap(void)
+{
+    static char js[256]; int p = 0;
+    p += snprintf(js + p, sizeof js - (size_t)p, "{\"lap\":{\"min_lap_s\":30},\"z\":");
+    for (int i = 0; i < 40; i++) js[p++] = '[';
+    for (int i = 0; i < 40; i++) js[p++] = ']';
+    js[p++] = '}';
+    cfg_t c; cfg_defaults(&c); cfg_t before = c;
+    char err[64]; err[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, js, (size_t)p, err, sizeof err));
+    TEST_ASSERT_TRUE(strlen(err) > 0);
+    TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+}
+
+static void test_profile_with_bad_name_leaves_the_struct_untouched(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    cfg_t before = c;
+    cfg_profile_t bad = { true, 25, "this-name-is-way-too-long" };
+    TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &bad));
+    TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+}
+
+static void test_fuzz_mutated_documents_never_corrupt_the_struct(void)
+{
+    static cfg_t seed; cfg_defaults(&seed);
+    seed.lap.min_lap_s = 33; seed.drag.n_mph = 2; seed.drag.benches_mph[0] = 60; seed.drag.benches_mph[1] = 100;
+    seed.lap.n_default_layout = 1; seed.lap.default_layout[0].venue = 6; seed.lap.default_layout[0].layout = 2;
+    static char base[1024];
+    int n = cfg_to_json(&seed, base, sizeof base);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    int accepted = 0, rejected = 0;
+    for (int it = 0; it < 500; it++) {
+        static char js[1024]; memcpy(js, base, (size_t)n);
+        int muts = 1 + (int)(rnd() % 4u);
+        for (int m = 0; m < muts; m++) js[rnd() % (uint32_t)n] = (char)(rnd() % 256u);
+        cfg_t c; cfg_defaults(&c); cfg_t before = c;
+        char err[64]; err[0] = '\0';
+        int r = cfg_from_json(&c, js, (size_t)n, err, sizeof err);
+        if (r < 0) {
+            rejected++;
+            TEST_ASSERT_TRUE(strlen(err) > 0);
+            TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);   /* -1 must not have moved anything */
+        } else {
+            accepted++;
+            cfg_validate(&c);                                   /* whatever got through must still validate */
+        }
+    }
+    TEST_ASSERT_GREATER_THAN(0, rejected);
+    TEST_ASSERT_EQUAL_INT(500, accepted + rejected);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -2604,6 +3479,11 @@ int main(void)
     RUN_TEST(test_version_is_owned_by_firmware);
     RUN_TEST(test_profile_defaults_apply);
     RUN_TEST(test_oversized_arrays_are_rejected);
+    RUN_TEST(test_validate_resets_implausible_battery_calibration);
+    RUN_TEST(test_err_buffer_is_optional);
+    RUN_TEST(test_from_json_rejects_document_deeper_than_the_depth_cap);
+    RUN_TEST(test_profile_with_bad_name_leaves_the_struct_untouched);
+    RUN_TEST(test_fuzz_mutated_documents_never_corrupt_the_struct);
     return UNITY_END();
 }
 ```
@@ -2719,14 +3599,25 @@ int cfg_validate(cfg_t *c)
     CLAMP_U(c->power.conn_idle_s, 30, 1800);
     CLAMP_U(c->display.full_every, 1, 50);
     if (c->display.rotation != 0 && c->display.rotation != 180) { c->display.rotation = 0; n++; }
+    /* Two-point battery calibration: the two points must be ordered and far enough apart for the
+     * interpolation to be meaningful, and both in a plausible cell range. A pair that fails any of
+     * that is not clamped field by field (which could invent a worse curve) but reset wholesale. */
+    if (c->battery.adc_mv[1] < c->battery.adc_mv[0] + 100 || c->battery.true_mv[1] < c->battery.true_mv[0] + 100 ||
+        c->battery.adc_mv[0] < 1000 || c->battery.adc_mv[0] > 5000 || c->battery.adc_mv[1] < 1000 || c->battery.adc_mv[1] > 5000 ||
+        c->battery.true_mv[0] < 1000 || c->battery.true_mv[0] > 5000 || c->battery.true_mv[1] < 1000 || c->battery.true_mv[1] > 5000) {
+        c->battery.adc_mv[0] = 3000; c->battery.true_mv[0] = 3000;
+        c->battery.adc_mv[1] = 4200; c->battery.true_mv[1] = 4200;
+        n++;
+    }
     if (c->ble.name[0] == '\0') { strcpy(c->ble.name, "LapTimer"); n++; }
     if (c->ble.name[15] != '\0') { c->ble.name[15] = '\0'; n++; }
     CLAMP_U(c->ble.adv_s, 15, 600);
     if (c->log.fused_hz != 5 && c->log.fused_hz != 10 && c->log.fused_hz != 25) { c->log.fused_hz = 10; n++; }
-    CLAMP_U(c->gps.dyn_model, 0, 8);
-    CLAMP_U(c->gps.rate_hz, 0, 25);
-    CLAMP_U(c->imu.mot_thr, 2, 255);
-    CLAMP_U(c->imu.mot_dur_ms, 1, 255);
+    /* uint8_t fields: only the bounds a uint8_t can actually violate are checked. */
+    if (c->gps.dyn_model > 8) { c->gps.dyn_model = 8; n++; }
+    if (c->gps.rate_hz > 25) { c->gps.rate_hz = 25; n++; }
+    if (c->imu.mot_thr < 2) { c->imu.mot_thr = 2; n++; }
+    if (c->imu.mot_dur_ms < 1) { c->imu.mot_dur_ms = 1; n++; }
     return n;
 }
 
@@ -2738,12 +3629,11 @@ int cfg_migrate(cfg_t *c, uint8_t from_version)
 
 int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
 {
+    /* Validate before touching anything: a rejected profile must leave the config untouched. */
+    if (p->ble_name && strlen(p->ble_name) > 15) return -1;
     c->display.live_clock = p->display_live_clock;
     c->log.fused_hz = p->log_fused_hz;
-    if (p->ble_name) {
-        if (strlen(p->ble_name) > 15) return -1;
-        strcpy(c->ble.name, p->ble_name);
-    }
+    if (p->ble_name) strcpy(c->ble.name, p->ble_name);
     return 0;
 }
 ```
@@ -2760,13 +3650,14 @@ int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
 
 #define MAX_TOKS 192
 
+/* err is optional everywhere: a NULL or zero-capacity buffer just discards the message. */
 static int set_err(char *err, size_t cap, const char *msg) { if (err && cap) { strncpy(err, msg, cap - 1); err[cap - 1] = '\0'; } return -1; }
 
 static bool get_u16(const char *js, const jsmntok_t *t, uint16_t *out) { int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 65535) return false; *out = (uint16_t)v; return true; }
 static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out) { int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 255) return false; *out = (uint8_t)v; return true; }
 
 /* returns 0 ok, -1 type error */
-static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *path, int v)
+static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, const char *path, int v)
 {
     const jsmntok_t *t = &toks[v];
     if (!strcmp(path, "units")) {
@@ -2789,9 +3680,9 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
         if (t->size > CFG_MAX_DEFAULT_LAYOUTS) return -1;
         int i = v + 1; uint8_t n = 0;
         for (int k = 0; k < t->size; k++) {
-            int vv = json_obj_get(js, toks, i, "venue"), ll = json_obj_get(js, toks, i, "layout");
+            int vv = json_obj_get(js, toks, ntoks, i, "venue"), ll = json_obj_get(js, toks, ntoks, i, "layout");
             if (vv < 0 || ll < 0 || !get_u16(js, &toks[vv], &c->lap.default_layout[n].venue) || !get_u16(js, &toks[ll], &c->lap.default_layout[n].layout)) return -1;
-            n++; i = json_skip(toks, i);
+            n++; i = json_skip(toks, ntoks, i);
         }
         c->lap.n_default_layout = n; return 0;
     }
@@ -2818,9 +3709,9 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
         if (t->type != JSMN_ARRAY || t->size != 2) return -1;
         int i = v + 1;
         for (int k = 0; k < 2; k++) {
-            int a = json_obj_get(js, toks, i, "adc_mv"), b = json_obj_get(js, toks, i, "true_mv");
+            int a = json_obj_get(js, toks, ntoks, i, "adc_mv"), b = json_obj_get(js, toks, ntoks, i, "true_mv");
             if (a < 0 || b < 0 || !get_u16(js, &toks[a], &c->battery.adc_mv[k]) || !get_u16(js, &toks[b], &c->battery.true_mv[k])) return -1;
-            i = json_skip(toks, i);
+            i = json_skip(toks, ntoks, i);
         }
         return 0;
     }
@@ -2836,10 +3727,10 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
 
 static const char *const SECTIONS[] = { "lap", "drag", "power", "display", "battery", "ble", "log", "gps", "imu" };
 
-static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int obj, const char *prefix, char *err, size_t err_cap)
+static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *prefix, char *err, size_t err_cap)
 {
     int i = obj + 1;
-    for (int k = 0; k < toks[obj].size; k++) {
+    for (int k = 0; k < toks[obj].size && i + 1 < ntoks; k++) {
         char key[32], path[64];
         json_tok_str(js, &toks[i], key, sizeof key);
         int v = i + 1;
@@ -2847,12 +3738,16 @@ static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int obj, const 
         bool is_section = false;
         if (!prefix[0]) for (size_t s = 0; s < sizeof SECTIONS / sizeof SECTIONS[0]; s++) if (!strcmp(key, SECTIONS[s])) is_section = true;
         if (is_section) {
-            if (toks[v].type != JSMN_OBJECT) { snprintf(err, err_cap, "%s must be an object", key); return -1; }
-            if (walk(c, js, toks, v, key, err, err_cap) < 0) return -1;
-        } else if (apply(c, js, toks, path, v) < 0) {
-            snprintf(err, err_cap, "bad value for %s", path); return -1;
+            if (toks[v].type != JSMN_OBJECT) {
+                char msg[64]; snprintf(msg, sizeof msg, "%s must be an object", key);
+                return set_err(err, err_cap, msg);
+            }
+            if (walk(c, js, toks, ntoks, v, key, err, err_cap) < 0) return -1;
+        } else if (apply(c, js, toks, ntoks, path, v) < 0) {
+            char msg[96]; snprintf(msg, sizeof msg, "bad value for %s", path);
+            return set_err(err, err_cap, msg);
         }
-        i = json_skip(toks, i);
+        i = json_skip(toks, ntoks, i + 1);        /* i is the key; step past its value subtree */
     }
     return 0;
 }
@@ -2865,7 +3760,7 @@ int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_ca
     int cnt = json_parse(json, n, toks, MAX_TOKS);
     if (cnt < 1 || toks[0].type != JSMN_OBJECT) return set_err(err, err_cap, "malformed json");
     cfg_t tmp = *c;
-    if (walk(&tmp, json, toks, 0, "", err, err_cap) < 0) return -1;
+    if (walk(&tmp, json, toks, cnt, 0, "", err, err_cap) < 0) return -1;
     *c = tmp;
     return 0;
 }
@@ -2954,6 +3849,9 @@ git commit -m "feat(core): configuration struct, defaults, validation, JSON merg
 ```c
 #include "unity.h"
 #include "core/trk.h"
+#include "core/ses.h"
+#include "core/consts.h"
+#include <stdio.h>
 #include <string.h>
 
 void setUp(void) { trk_init(); }
@@ -2984,12 +3882,14 @@ static void test_nearest_inside_and_outside_radius(void)
 
 static void test_user_venue_wins_on_id_clash_and_persists(void)
 {
-    trk_venue_t u; memset(&u, 0, sizeof u);
+    static trk_venue_t u; memset(&u, 0, sizeof u);
     u.id = 6; strcpy(u.name, "Killarney (mine)"); u.lat = -33.8567; u.lon = 18.5170; u.radius_m = 2000; u.n_layouts = 1;
     u.layouts[0].id = 1; strcpy(u.layouts[0].name, "L1"); u.layouts[0].dir_sign = 1;
+    u.layouts[0].sf.p1.lat = -33.8567; u.layouts[0].sf.p1.lon = 18.5170;
+    u.layouts[0].sf.p2.lat = -33.8567; u.layouts[0].sf.p2.lon = 18.5173;    /* a real S/F line, not the degenerate default */
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u));
     TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
-    uint8_t blob[16384]; size_t n;
+    static uint8_t blob[16384]; size_t n;
     TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
     trk_init();
     TEST_ASSERT_EQUAL_STRING("Killarney", trk_get(6)->name);
@@ -3000,7 +3900,10 @@ static void test_user_venue_wins_on_id_clash_and_persists(void)
 
 static void test_user_store_is_bounded(void)
 {
-    trk_venue_t u; memset(&u, 0, sizeof u); u.radius_m = 100; u.n_layouts = 1; u.layouts[0].dir_sign = 1;
+    static trk_venue_t u; memset(&u, 0, sizeof u); u.radius_m = 100; u.n_layouts = 1;
+    u.layouts[0].id = 1; u.layouts[0].dir_sign = 1;
+    u.layouts[0].sf.p1.lat = -26.001; u.layouts[0].sf.p1.lon = 28.0;
+    u.layouts[0].sf.p2.lat = -26.001; u.layouts[0].sf.p2.lon = 28.0003;     /* a real S/F line, not the degenerate default */
     for (int i = 0; i < TRK_MAX_USER; i++) { u.id = (uint16_t)(1000 + i); TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u)); }
     u.id = 1000 + TRK_MAX_USER;
     TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&u));
@@ -3014,17 +3917,17 @@ static void test_json_round_trip_with_same_and_reverse_expansion(void)
         "{\"id\":1,\"name\":\"Full\",\"dir\":1,\"length_m\":2500,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],"
         "\"sectors\":[[[-26.002,28.001],[-26.002,28.0013]],[[-26.003,28.002],[-26.003,28.0023]]]},"
         "{\"id\":2,\"name\":\"Full Reverse\",\"dir\":-1,\"length_m\":2500,\"sf\":\"same\",\"sectors\":\"reverse\"}]}";
-    trk_venue_t v; char err[64];
+    static trk_venue_t v; char err[64];
     TEST_ASSERT_EQUAL_INT(0, trk_from_json(&v, js, strlen(js), err, sizeof err));
     TEST_ASSERT_EQUAL_UINT16(1001, v.id);
     TEST_ASSERT_FALSE(v.flags & TRK_F_UNVERIFIED);
     TEST_ASSERT_EQUAL_UINT8(2, v.n_layouts);
     TEST_ASSERT_EQUAL_DOUBLE(28.0003, v.layouts[1].sf.p2.lon);
     TEST_ASSERT_EQUAL_DOUBLE(-26.003, v.layouts[1].sectors[0].p1.lat);
-    char out[2048];
+    static char out[2048];
     int n = trk_to_json(&v, out, sizeof out);
     TEST_ASSERT_GREATER_THAN(0, n);
-    trk_venue_t v2;
+    static trk_venue_t v2;
     TEST_ASSERT_EQUAL_INT(0, trk_from_json(&v2, out, (size_t)n, err, sizeof err));
     TEST_ASSERT_EQUAL_MEMORY(&v, &v2, sizeof v);
 }
@@ -3032,8 +3935,192 @@ static void test_json_round_trip_with_same_and_reverse_expansion(void)
 static void test_json_rejects_bad_line(void)
 {
     const char *js = "{\"id\":1001,\"name\":\"T\",\"lat\":0,\"lon\":0,\"radius_m\":100,\"layouts\":[{\"id\":1,\"name\":\"L\",\"dir\":1,\"sf\":[[0,0]]}]}";
-    trk_venue_t v; char err[64];
+    static trk_venue_t v; char err[64];
     TEST_ASSERT_EQUAL_INT(-1, trk_from_json(&v, js, strlen(js), err, sizeof err));
+}
+
+/* a venue that passes trk_validate_venue; filled in place so the suite fits a 6 KB task stack */
+static void mk_venue(trk_venue_t *v, uint16_t id)
+{
+    memset(v, 0, sizeof *v);
+    v->id = id; strcpy(v->name, "User"); v->lat = -26.0; v->lon = 28.0; v->radius_m = 1500; v->n_layouts = 1;
+    v->layouts[0].id = 1; strcpy(v->layouts[0].name, "Full"); v->layouts[0].dir_sign = 1;
+    v->layouts[0].sf.p1.lat = -26.001; v->layouts[0].sf.p1.lon = 28.0;
+    v->layouts[0].sf.p2.lat = -26.001; v->layouts[0].sf.p2.lon = 28.0003;
+}
+
+static void test_user_add_rejects_invalid_venue(void)
+{
+    static trk_venue_t v;
+    mk_venue(&v, 1000);
+    v.layouts[0].id = 0;                                         /* layout id must be non-zero */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+    mk_venue(&v, 0);                                             /* venue id must be non-zero */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    mk_venue(&v, 1000); v.radius_m = 50;                         /* radius out of range */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    mk_venue(&v, 1000); v.n_layouts = TRK_MAX_LAYOUTS + 1;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    mk_venue(&v, 1000); memset(v.name, 'x', sizeof v.name);      /* name not NUL-terminated */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    mk_venue(&v, 1000); v.lat = 91.0;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    mk_venue(&v, 1000); v.layouts[0].dir_sign = 0;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    mk_venue(&v, 1000); v.layouts[0].n_sectors = LAP_MAX_SECTORS + 1;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&v));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());                  /* nothing was stored */
+    mk_venue(&v, 1000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+}
+
+static void test_user_blob_v2_rejects_bad_version_count_crc_and_venue(void)
+{
+    static trk_venue_t v;
+    mk_venue(&v, 1000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob[16384]; size_t n;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
+    TEST_ASSERT_EQUAL_UINT8(2, blob[0]);
+    TEST_ASSERT_EQUAL_UINT(2 + sizeof(trk_venue_t) + 2, n);      /* version, count, venue, crc16 */
+
+    static uint8_t copy[16384];
+    memcpy(copy, blob, n);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load(copy, n));            /* round trip */
+    TEST_ASSERT_EQUAL_INT(1, trk_user_count());
+
+    memcpy(copy, blob, n); copy[0] = 1;                          /* old version */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+
+    memcpy(copy, blob, n); copy[1] = TRK_MAX_USER + 1;           /* count over capacity */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    memcpy(copy, blob, n);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n - 1));       /* size mismatch */
+    memcpy(copy, blob, n); copy[40] ^= 0x01;                     /* one flipped payload bit */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    memcpy(copy, blob, n); copy[n - 1] ^= 0x80;                  /* flipped CRC byte */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+
+    /* a structurally impossible venue (bit rot that survives no CRC, so re-CRC it) */
+    static trk_venue_t bad; mk_venue(&bad, 1000); bad.n_layouts = 200;
+    memcpy(copy, blob, n);
+    memcpy(copy + 2, &bad, sizeof bad);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));           /* CRC catches it first */
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
+    memcpy(copy, blob, n); memcpy(copy + 2, &bad, sizeof bad);
+    uint16_t crc = ses_crc16(copy, n - 2);                        /* recompute so only validation can reject */
+    copy[n - 2] = (uint8_t)crc; copy[n - 1] = (uint8_t)(crc >> 8);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());                  /* store left empty */
+    TEST_ASSERT_NULL(trk_get(1000));
+}
+
+static void test_user_blob_rejects_sub_metre_gate_line(void)
+{
+    static trk_venue_t v;
+    mk_venue(&v, 1000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob[sizeof(trk_venue_t) + 16]; size_t n;    /* one venue's worth, not the 16 KB multi-venue headroom */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
+
+    /* structurally valid except the S/F line is under the 1 m gate rule (trk_from_json's rule,
+     * shared via trk_validate_venue -- the loader must enforce it too) */
+    static trk_venue_t degenerate;
+    mk_venue(&degenerate, 1000);
+    degenerate.layouts[0].sf.p2.lat = degenerate.layouts[0].sf.p1.lat;
+    degenerate.layouts[0].sf.p2.lon = degenerate.layouts[0].sf.p1.lon;
+    static uint8_t copy[sizeof(trk_venue_t) + 16];
+    memcpy(copy, blob, n);
+    memcpy(copy + 2, &degenerate, sizeof degenerate);
+    uint16_t crc = ses_crc16(copy, n - 2);                        /* recompute so only validation can reject */
+    copy[n - 2] = (uint8_t)crc; copy[n - 1] = (uint8_t)(crc >> 8);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+    TEST_ASSERT_NULL(trk_get(1000));
+}
+
+/* Same named fields as mk_venue, built on top of a struct pre-filled with `fill` so any byte the
+ * assignments below do not touch (compiler padding between fields) keeps the fill pattern instead
+ * of being zero, unlike mk_venue which memsets to 0 first. */
+static void mk_dirty_venue(trk_venue_t *v, uint16_t id, uint8_t fill)
+{
+    memset(v, (int)fill, sizeof *v);
+    v->id = id;
+    memset(v->name, 0, sizeof v->name); strcpy(v->name, "User");
+    v->lat = -26.0; v->lon = 28.0; v->radius_m = 1500; v->flags = 0; v->n_layouts = 1;
+    trk_layout_t *L = &v->layouts[0];
+    L->id = 1;
+    memset(L->name, 0, sizeof L->name); strcpy(L->name, "Full");
+    L->dir_sign = 1; L->n_sectors = 0; L->length_m = 0;
+    L->sf.p1.lat = -26.001; L->sf.p1.lon = 28.0;
+    L->sf.p2.lat = -26.001; L->sf.p2.lon = 28.0003;
+}
+
+static void test_save_produces_identical_blobs_regardless_of_padding_garbage(void)
+{
+    /* a and b are used one at a time (never simultaneously live), so one static struct -- sized and
+     * kept off the stack for the same 6 KB task-stack reason as the rest of this suite -- is reused
+     * for both fill patterns instead of allocating two. */
+    static trk_venue_t v;
+
+    trk_init();
+    mk_dirty_venue(&v, 1000, 0xAA);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));            /* struct assignment carries v's padding into the store */
+    static uint8_t blob_a[sizeof(trk_venue_t) + 16]; size_t n_a;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob_a, sizeof blob_a, &n_a));
+
+    trk_init();
+    mk_dirty_venue(&v, 1000, 0x55);                         /* same fields, different padding garbage */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+    static uint8_t blob_b[sizeof(trk_venue_t) + 16]; size_t n_b;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob_b, sizeof blob_b, &n_b));
+
+    TEST_ASSERT_EQUAL_UINT(n_a, n_b);
+    TEST_ASSERT_EQUAL_MEMORY(blob_a, blob_b, n_a);          /* including the CRC: identical bytes throughout */
+}
+
+static void test_json_rejects_degenerate_line_and_duplicate_layout_ids(void)
+{
+    static trk_venue_t v; char err[64];
+    /* the two S/F endpoints are the same point */
+    const char *same_pt =
+        "{\"id\":1001,\"name\":\"T\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+        "{\"id\":1,\"name\":\"F\",\"dir\":1,\"sf\":[[-26.0,28.0],[-26.0,28.0]]}]}";
+    err[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(-1, trk_from_json(&v, same_pt, strlen(same_pt), err, sizeof err));
+    TEST_ASSERT_TRUE(strlen(err) > 0);
+    /* 0.9 m apart: still under MIN_GATE_LEN_M */
+    const char *too_short =
+        "{\"id\":1001,\"name\":\"T\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+        "{\"id\":1,\"name\":\"F\",\"dir\":1,\"sf\":[[-26.0,28.0],[-26.0000081,28.0]]}]}";
+    TEST_ASSERT_EQUAL_INT(-1, trk_from_json(&v, too_short, strlen(too_short), err, sizeof err));
+    /* two layouts sharing an id */
+    const char *dup =
+        "{\"id\":1001,\"name\":\"T\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+        "{\"id\":1,\"name\":\"F\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]]},"
+        "{\"id\":1,\"name\":\"R\",\"dir\":-1,\"sf\":\"same\"}]}";
+    err[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(-1, trk_from_json(&v, dup, strlen(dup), err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("duplicate layout id", err);
+}
+
+static void test_json_rejects_document_deeper_than_the_depth_cap(void)
+{
+    static char js[512]; int p = 0;
+    p += snprintf(js + p, sizeof js - (size_t)p, "{\"z\":");
+    for (int i = 0; i < 40; i++) js[p++] = '[';
+    for (int i = 0; i < 40; i++) js[p++] = ']';
+    p += snprintf(js + p, sizeof js - (size_t)p, ",\"id\":1000,\"name\":\"X\",\"lat\":-26.0,\"lon\":28.0,"
+                  "\"radius_m\":1500,\"layouts\":[{\"id\":1,\"name\":\"F\",\"dir\":1,"
+                  "\"sf\":[[-26.001,28.0],[-26.001,28.0003]]}]}");
+    static trk_venue_t v; char err[64]; err[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(-1, trk_from_json(&v, js, (size_t)p, err, sizeof err));
+    TEST_ASSERT_TRUE(strlen(err) > 0);
 }
 
 int main(void)
@@ -3045,6 +4132,12 @@ int main(void)
     RUN_TEST(test_user_store_is_bounded);
     RUN_TEST(test_json_round_trip_with_same_and_reverse_expansion);
     RUN_TEST(test_json_rejects_bad_line);
+    RUN_TEST(test_user_add_rejects_invalid_venue);
+    RUN_TEST(test_user_blob_v2_rejects_bad_version_count_crc_and_venue);
+    RUN_TEST(test_user_blob_rejects_sub_metre_gate_line);
+    RUN_TEST(test_save_produces_identical_blobs_regardless_of_padding_garbage);
+    RUN_TEST(test_json_rejects_degenerate_line_and_duplicate_layout_ids);
+    RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
     return UNITY_END();
 }
 ```
@@ -3098,13 +4191,17 @@ typedef struct {
 extern const trk_venue_t trk_bundled[];
 extern const uint16_t    trk_bundled_count;
 
+/* The user store is module-static and not protected by a lock (see trk.c). */
 void               trk_init(void);                                   /* clears the user store */
+int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
 const trk_venue_t *trk_get(uint16_t venue_id);
-int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full */
+int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full or invalid */
 int                trk_user_count(void);
 uint16_t           trk_next_user_id(void);
-int                trk_user_load(const uint8_t *blob, size_t n);    /* format: u8 version(1) | u8 count | trk_venue_t[count] */
+/* Blob v2: u8 version(2) | u8 count | trk_venue_t[count] | u16 crc16 LE. Load rejects a wrong
+ * version, count, size or CRC and any venue failing trk_validate_venue, leaving the store empty. */
+int                trk_user_load(const uint8_t *blob, size_t n);
 int                trk_user_save(uint8_t *blob, size_t cap, size_t *n_out);
 int                trk_from_json(trk_venue_t *out, const char *json, size_t n, char *err, size_t err_cap);
 int                trk_to_json(const trk_venue_t *v, char *out, size_t cap);
@@ -3117,14 +4214,51 @@ int                trk_to_json(const trk_venue_t *v, char *out, size_t cap);
 ```c
 #include "core/trk.h"
 #include "core/geo.h"
+#include "core/ses.h"
+#include <math.h>
+#include <stddef.h>
 #include <string.h>
 
+/* Not reentrant: the user store below is module-static, shared by every trk_* entry point.
+ * Only the conn task adds/loads/saves venues and only the pipeline task reads them, and the two
+ * never overlap (an upload is applied between sessions), so no lock is taken. */
 static trk_venue_t user[TRK_MAX_USER];
 static uint8_t     user_n;
+
+#define BLOB_VERSION 2
 
 void trk_init(void) { user_n = 0; memset(user, 0, sizeof user); }
 
 int trk_user_count(void) { return user_n; }
+
+static bool pt_finite(const trk_pt_t *p) { return isfinite(p->lat) && isfinite(p->lon); }
+static bool line_finite(const trk_line_t *l) { return pt_finite(&l->p1) && pt_finite(&l->p2); }
+
+#define MIN_GATE_LEN_M 1.0        /* a line shorter than this cannot define a crossing direction (§6.4) */
+/* Shared by both entry points that can install a venue (trk_from_json, via the final
+ * trk_validate_venue() call, and trk_user_load()/trk_user_add(), via this function directly), so
+ * the two never disagree about what a valid gate line is. */
+static bool line_ok(const trk_line_t *l) { return geo_dist_m(l->p1.lat, l->p1.lon, l->p2.lat, l->p2.lon) >= MIN_GATE_LEN_M; }
+
+int trk_validate_venue(const trk_venue_t *v)
+{
+    if (v->id == 0) return -1;
+    if (v->radius_m < 100 || v->radius_m > 50000) return -1;
+    if (v->n_layouts < 1 || v->n_layouts > TRK_MAX_LAYOUTS) return -1;
+    if (v->name[sizeof v->name - 1] != '\0') return -1;
+    if (!isfinite(v->lat) || !isfinite(v->lon)) return -1;
+    if (v->lat < -90.0 || v->lat > 90.0 || v->lon < -180.0 || v->lon > 180.0) return -1;
+    for (uint8_t i = 0; i < v->n_layouts; i++) {
+        const trk_layout_t *L = &v->layouts[i];
+        if (L->id == 0) return -1;
+        if (L->dir_sign != 1 && L->dir_sign != -1) return -1;
+        if (L->n_sectors > LAP_MAX_SECTORS) return -1;
+        if (L->name[sizeof L->name - 1] != '\0') return -1;
+        if (!line_finite(&L->sf) || !line_ok(&L->sf)) return -1;
+        for (uint8_t s = 0; s < L->n_sectors; s++) if (!line_finite(&L->sectors[s]) || !line_ok(&L->sectors[s])) return -1;
+    }
+    return 0;
+}
 
 static const trk_venue_t *user_get(uint16_t id)
 {
@@ -3142,6 +4276,7 @@ const trk_venue_t *trk_get(uint16_t venue_id)
 
 int trk_user_add(const trk_venue_t *v)
 {
+    if (trk_validate_venue(v) != 0) return -1;
     for (uint8_t i = 0; i < user_n; i++) if (user[i].id == v->id) { user[i] = *v; return 0; }
     if (user_n >= TRK_MAX_USER) return -1;
     user[user_n++] = *v;
@@ -3157,7 +4292,8 @@ uint16_t trk_next_user_id(void)
 
 static void consider(const trk_venue_t *v, double lat, double lon, const trk_venue_t **best, double *best_d)
 {
-    if (user_get(v->id) && v != user_get(v->id)) return;      /* bundled entry shadowed by a user entry */
+    const trk_venue_t *u = user_get(v->id);
+    if (u && u != v) return;                                  /* bundled entry shadowed by a user entry */
     double d = geo_dist_m(lat, lon, v->lat, v->lon);
     if (d <= (double)v->radius_m && d < *best_d) { *best = v; *best_d = d; }
 }
@@ -3171,22 +4307,74 @@ const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out
     return best;
 }
 
+/* Blob v2: u8 version=2 | u8 count | trk_venue_t[count] | u16 crc16 (LE) over every preceding byte.
+ * The struct is copied raw, so the blob is only valid for this build; the CRC catches NVS bit rot
+ * and every venue is re-validated before it reaches the store. Any failure leaves the store empty. */
 int trk_user_load(const uint8_t *blob, size_t n)
 {
-    if (n < 2 || blob[0] != 1) return -1;
+    trk_init();
+    if (n < 4 || blob[0] != BLOB_VERSION) return -1;
     uint8_t cnt = blob[1];
-    if (cnt > TRK_MAX_USER || n != 2 + (size_t)cnt * sizeof(trk_venue_t)) return -1;
-    memcpy(user, blob + 2, (size_t)cnt * sizeof(trk_venue_t));
+    if (cnt > TRK_MAX_USER) return -1;
+    size_t need = 2 + (size_t)cnt * sizeof(trk_venue_t) + 2;
+    if (n != need) return -1;
+    uint16_t want = (uint16_t)(blob[need - 2] | ((uint16_t)blob[need - 1] << 8));
+    if (ses_crc16(blob, need - 2) != want) return -1;
+    for (uint8_t i = 0; i < cnt; i++) {
+        memcpy(&user[i], blob + 2 + (size_t)i * sizeof(trk_venue_t), sizeof(trk_venue_t));
+        if (trk_validate_venue(&user[i]) != 0) { trk_init(); return -1; }
+    }
     user_n = cnt;
     return 0;
 }
 
+#define PUT_FIELD(dst, T, f, src) memcpy((dst) + offsetof(T, f), &(src)->f, sizeof (src)->f)
+
+/* Field-by-field copy into an already-zeroed destination: struct assignment (or a raw memcpy of the
+ * whole struct) also copies the source's compiler-inserted padding bytes verbatim, which the
+ * language never promises are zero, so two structurally identical venues could otherwise CRC
+ * differently (§10.1's blob is declared build-specific but should still be deterministic within one
+ * build). dst points directly at the destination blob bytes (uint8_t *, possibly unaligned), so each
+ * field is written with memcpy at its offsetof rather than through a typed pointer; every named field
+ * is written explicitly, and nothing else touches dst, so the gaps between fields stay at the memset
+ * zero. */
+static void canon_venue(uint8_t *dst, const trk_venue_t *src)
+{
+    memset(dst, 0, sizeof *src);
+    PUT_FIELD(dst, trk_venue_t, id, src);
+    PUT_FIELD(dst, trk_venue_t, name, src);
+    PUT_FIELD(dst, trk_venue_t, lat, src);
+    PUT_FIELD(dst, trk_venue_t, lon, src);
+    PUT_FIELD(dst, trk_venue_t, radius_m, src);
+    PUT_FIELD(dst, trk_venue_t, flags, src);
+    PUT_FIELD(dst, trk_venue_t, n_layouts, src);
+    /* Only the active layouts/sectors (src has already passed trk_validate_venue, so n_layouts and
+     * every n_sectors are in range) are copied; slots beyond them are left at the memset zero rather
+     * than carrying through whatever unused array content src happened to hold. */
+    for (uint8_t i = 0; i < src->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
+        const trk_layout_t *sl = &src->layouts[i];
+        uint8_t *ld = dst + offsetof(trk_venue_t, layouts) + (size_t)i * sizeof(trk_layout_t);
+        PUT_FIELD(ld, trk_layout_t, id, sl);
+        PUT_FIELD(ld, trk_layout_t, name, sl);
+        PUT_FIELD(ld, trk_layout_t, sf, sl);                    /* trk_line_t is four packed doubles: no internal padding */
+        PUT_FIELD(ld, trk_layout_t, dir_sign, sl);
+        PUT_FIELD(ld, trk_layout_t, n_sectors, sl);
+        for (uint8_t s = 0; s < sl->n_sectors && s < LAP_MAX_SECTORS; s++) {
+            uint8_t *sd = ld + offsetof(trk_layout_t, sectors) + (size_t)s * sizeof(trk_line_t);
+            memcpy(sd, &sl->sectors[s], sizeof sl->sectors[s]);
+        }
+        PUT_FIELD(ld, trk_layout_t, length_m, sl);
+    }
+}
+
 int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
 {
-    size_t need = 2 + (size_t)user_n * sizeof(trk_venue_t);
+    size_t need = 2 + (size_t)user_n * sizeof(trk_venue_t) + 2;
     if (cap < need) return -1;
-    blob[0] = 1; blob[1] = user_n;
-    memcpy(blob + 2, user, (size_t)user_n * sizeof(trk_venue_t));
+    blob[0] = BLOB_VERSION; blob[1] = user_n;
+    for (uint8_t i = 0; i < user_n; i++) canon_venue(blob + 2 + (size_t)i * sizeof(trk_venue_t), &user[i]);
+    uint16_t crc = ses_crc16(blob, need - 2);
+    blob[need - 2] = (uint8_t)crc; blob[need - 1] = (uint8_t)(crc >> 8);
     *n_out = need;
     return 0;
 }
@@ -3208,18 +4396,21 @@ int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
 
 static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
 
-static bool get_pt(const char *js, const jsmntok_t *toks, int arr, trk_pt_t *out)
+static bool get_pt(const char *js, const jsmntok_t *toks, int ntoks, int arr, trk_pt_t *out)
 {
-    if (toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
+    if (arr < 0 || arr + 2 >= ntoks || toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
     return json_tok_double(js, &toks[arr + 1], &out->lat) && json_tok_double(js, &toks[arr + 2], &out->lon);
 }
-static bool get_line(const char *js, const jsmntok_t *toks, int arr, trk_line_t *out)
+static bool get_line(const char *js, const jsmntok_t *toks, int ntoks, int arr, trk_line_t *out)
 {
-    if (toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
-    int p1 = arr + 1, p2 = json_skip(toks, p1);
-    return get_pt(js, toks, p1, &out->p1) && get_pt(js, toks, p2, &out->p2);
+    if (arr < 0 || arr >= ntoks || toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
+    int p1 = arr + 1, p2 = json_skip(toks, ntoks, p1);
+    /* Degenerate/too-short lines (§6.4 needs a gate direction) are rejected once, by the shared
+     * trk_validate_venue() call trk_from_json makes at the end -- not duplicated here. */
+    return get_pt(js, toks, ntoks, p1, &out->p1) && get_pt(js, toks, ntoks, p2, &out->p2);
 }
 
+/* Not reentrant: static token array (single caller task). */
 int trk_from_json(trk_venue_t *v, const char *json, size_t n, char *err, size_t err_cap)
 {
     static jsmntok_t toks[MAX_TOKS];
@@ -3227,34 +4418,35 @@ int trk_from_json(trk_venue_t *v, const char *json, size_t n, char *err, size_t 
     if (cnt < 1 || toks[0].type != JSMN_OBJECT) return fail(err, err_cap, "malformed json");
     memset(v, 0, sizeof *v);
     int t; int64_t iv; bool bv;
-    if ((t = json_obj_get(json, toks, 0, "id")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 1 || iv > 65535) return fail(err, err_cap, "id");
+    if ((t = json_obj_get(json, toks, cnt, 0, "id")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 1 || iv > 65535) return fail(err, err_cap, "id");
     v->id = (uint16_t)iv;
-    if ((t = json_obj_get(json, toks, 0, "name")) < 0) return fail(err, err_cap, "name");
+    if ((t = json_obj_get(json, toks, cnt, 0, "name")) < 0) return fail(err, err_cap, "name");
     json_tok_str(json, &toks[t], v->name, sizeof v->name);
-    if ((t = json_obj_get(json, toks, 0, "lat")) < 0 || !json_tok_double(json, &toks[t], &v->lat)) return fail(err, err_cap, "lat");
-    if ((t = json_obj_get(json, toks, 0, "lon")) < 0 || !json_tok_double(json, &toks[t], &v->lon)) return fail(err, err_cap, "lon");
-    if ((t = json_obj_get(json, toks, 0, "radius_m")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 100 || iv > 50000) return fail(err, err_cap, "radius_m");
+    if ((t = json_obj_get(json, toks, cnt, 0, "lat")) < 0 || !json_tok_double(json, &toks[t], &v->lat)) return fail(err, err_cap, "lat");
+    if ((t = json_obj_get(json, toks, cnt, 0, "lon")) < 0 || !json_tok_double(json, &toks[t], &v->lon)) return fail(err, err_cap, "lon");
+    if ((t = json_obj_get(json, toks, cnt, 0, "radius_m")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 100 || iv > 50000) return fail(err, err_cap, "radius_m");
     v->radius_m = (uint32_t)iv;
     v->flags = TRK_F_UNVERIFIED;
-    if ((t = json_obj_get(json, toks, 0, "verified")) >= 0 && json_tok_bool(json, &toks[t], &bv) && bv) v->flags = 0;
-    int la = json_obj_get(json, toks, 0, "layouts");
+    if ((t = json_obj_get(json, toks, cnt, 0, "verified")) >= 0 && json_tok_bool(json, &toks[t], &bv) && bv) v->flags = 0;
+    int la = json_obj_get(json, toks, cnt, 0, "layouts");
     if (la < 0 || toks[la].type != JSMN_ARRAY || toks[la].size < 1 || toks[la].size > TRK_MAX_LAYOUTS) return fail(err, err_cap, "layouts");
     int li = la + 1;
     for (int k = 0; k < toks[la].size; k++) {
         trk_layout_t *L = &v->layouts[k];
         if (toks[li].type != JSMN_OBJECT) return fail(err, err_cap, "layout object");
-        if ((t = json_obj_get(json, toks, li, "id")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 1 || iv > 65535) return fail(err, err_cap, "layout id");
+        if ((t = json_obj_get(json, toks, cnt, li, "id")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 1 || iv > 65535) return fail(err, err_cap, "layout id");
+        for (int prev = 0; prev < k; prev++) if (v->layouts[prev].id == (uint16_t)iv) return fail(err, err_cap, "duplicate layout id");
         L->id = (uint16_t)iv;
-        if ((t = json_obj_get(json, toks, li, "name")) < 0) return fail(err, err_cap, "layout name");
+        if ((t = json_obj_get(json, toks, cnt, li, "name")) < 0) return fail(err, err_cap, "layout name");
         json_tok_str(json, &toks[t], L->name, sizeof L->name);
-        if ((t = json_obj_get(json, toks, li, "dir")) < 0 || !json_tok_int(json, &toks[t], &iv) || (iv != 1 && iv != -1)) return fail(err, err_cap, "dir");
+        if ((t = json_obj_get(json, toks, cnt, li, "dir")) < 0 || !json_tok_int(json, &toks[t], &iv) || (iv != 1 && iv != -1)) return fail(err, err_cap, "dir");
         L->dir_sign = (int8_t)iv;
-        if ((t = json_obj_get(json, toks, li, "length_m")) >= 0 && json_tok_int(json, &toks[t], &iv) && iv >= 0) L->length_m = (uint32_t)iv;
-        t = json_obj_get(json, toks, li, "sf");
+        if ((t = json_obj_get(json, toks, cnt, li, "length_m")) >= 0 && json_tok_int(json, &toks[t], &iv) && iv >= 0) L->length_m = (uint32_t)iv;
+        t = json_obj_get(json, toks, cnt, li, "sf");
         if (t < 0) return fail(err, err_cap, "sf");
         if (json_tok_eq(json, &toks[t], "same")) { if (k == 0) return fail(err, err_cap, "sf same on first"); L->sf = v->layouts[0].sf; }
-        else if (!get_line(json, toks, t, &L->sf)) return fail(err, err_cap, "sf line");
-        t = json_obj_get(json, toks, li, "sectors");
+        else if (!get_line(json, toks, cnt, t, &L->sf)) return fail(err, err_cap, "sf line");
+        t = json_obj_get(json, toks, cnt, li, "sectors");
         if (t < 0) { L->n_sectors = 0; }
         else if (json_tok_eq(json, &toks[t], "reverse")) {
             if (k == 0) return fail(err, err_cap, "sectors reverse on first");
@@ -3264,11 +4456,12 @@ int trk_from_json(trk_venue_t *v, const char *json, size_t n, char *err, size_t 
             if (toks[t].type != JSMN_ARRAY || toks[t].size > LAP_MAX_SECTORS) return fail(err, err_cap, "sectors");
             L->n_sectors = (uint8_t)toks[t].size;
             int si = t + 1;
-            for (uint8_t s = 0; s < L->n_sectors; s++) { if (!get_line(json, toks, si, &L->sectors[s])) return fail(err, err_cap, "sector line"); si = json_skip(toks, si); }
+            for (uint8_t s = 0; s < L->n_sectors; s++) { if (!get_line(json, toks, cnt, si, &L->sectors[s])) return fail(err, err_cap, "sector line"); si = json_skip(toks, cnt, si); }
         }
         v->n_layouts++;
-        li = json_skip(toks, li);
+        li = json_skip(toks, cnt, li);
     }
+    if (trk_validate_venue(v) != 0) { memset(v, 0, sizeof *v); return fail(err, err_cap, "invalid venue"); }
     return 0;
 }
 
@@ -3329,11 +4522,15 @@ def check_line(line, what, name):
     for p in line:
         assert isinstance(p, list) and len(p) == 2, f"{name}: {what} point"
     L = dist_m(line[0], line[1])
+    # a line whose endpoints coincide has no direction, so §6.4 can never detect a crossing
+    assert L >= 1.0, f"{name}: {what} endpoints only {L:.2f} m apart (degenerate line)"
     assert 10 <= L <= 60, f"{name}: {what} length {L:.1f} m outside 10–60 m"
 
 def expand(v):
     assert 1 <= v["id"] <= 999, f"{v['name']}: bundled id must be 1..999"
     assert 1 <= len(v["layouts"]) <= MAX_LAYOUTS
+    lids = [L["id"] for L in v["layouts"]]
+    assert len(lids) == len(set(lids)), f"{v['name']}: duplicate layout ids {lids}"
     first = v["layouts"][0]
     for k, L in enumerate(v["layouts"]):
         assert L["dir"] in (1, -1)
@@ -3467,6 +4664,7 @@ void tearDown(void) {}
 /* drain everything currently pullable into dst */
 static size_t drain(exp_t *e, char *dst, size_t cap, size_t at)
 {
+    (void)cap;
     uint8_t chunk[128]; size_t n;
     while (exp_pull(e, chunk, sizeof chunk, &n) == 0 && n > 0) { memcpy(dst + at, chunk, n); at += n; }
     dst[at] = '\0';
@@ -3572,12 +4770,13 @@ enum { EXP_VBO = 1, EXP_NMEA = 2, EXP_JSON = 3 };
 #define EXP_FULL 1
 #define EXP_WINDOW 1024
 
+/* char arrays carry one byte more than the matching wire field so the value is always NUL-terminated */
 typedef struct {
     char    session_id[11];
-    char    fw[16];
-    char    hwid[24];
-    char    venue[32];
-    char    layout[24];
+    char    fw[17];
+    char    hwid[25];
+    char    venue[33];
+    char    layout[25];
     int64_t created_gps_us;
     uint8_t has_sf;
     double  sf_lat1, sf_lon1, sf_lat2, sf_lon2;
@@ -3600,7 +4799,7 @@ typedef struct {
     uint8_t   json_stage;              /* 0 header pending, 1 in laps, 2 in runs */
     ses_hdr_t hdr;
     uint8_t   have_hdr;
-    char      venue_name[32];
+    char      venue_name[33];
     uint8_t   run_pending;
     uint8_t   run_gate_idx;            /* DRAG_RUN emission resumes after EXP_FULL */
 } exp_t;
@@ -3625,7 +4824,6 @@ int  exp_json_open(exp_t *e); int exp_json_feed(exp_t *e, uint8_t type, const ui
 `components/core/export/exp.c`:
 ```c
 #include "core/exp.h"
-#include "core/tb.h"
 #include <string.h>
 
 int exp_win_free(const exp_t *e) { return (int)(EXP_WINDOW - e->win_len); }
@@ -3886,13 +5084,13 @@ static void test_json_summary_structure(void)
     jsmntok_t toks[256];
     int cnt = json_parse(out, at, toks, 256);
     TEST_ASSERT_GREATER_THAN(0, cnt);
-    int laps = json_obj_get(out, toks, 0, "laps"); TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[laps].type); TEST_ASSERT_EQUAL_INT(2, toks[laps].size);
-    int runs = json_obj_get(out, toks, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
-    int hdr = json_obj_get(out, toks, 0, "hdr"); int venue = json_obj_get(out, toks, hdr, "venue");
+    int laps = json_obj_get(out, toks, cnt, 0, "laps"); TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[laps].type); TEST_ASSERT_EQUAL_INT(2, toks[laps].size);
+    int runs = json_obj_get(out, toks, cnt, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int hdr = json_obj_get(out, toks, cnt, 0, "hdr"); int venue = json_obj_get(out, toks, cnt, hdr, "venue");
     TEST_ASSERT_TRUE(json_tok_eq(out, &toks[venue], "Killarney"));
-    int lap1 = laps + 1; int ms = json_obj_get(out, toks, lap1, "ms"); int64_t v; json_tok_int(out, &toks[ms], &v); TEST_ASSERT_EQUAL_INT64(112341, v);
-    int sectors = json_obj_get(out, toks, lap1, "sectors"); TEST_ASSERT_EQUAL_INT(2, toks[sectors].size);
-    int valid = json_obj_get(out, toks, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
+    int lap1 = laps + 1; int ms = json_obj_get(out, toks, cnt, lap1, "ms"); int64_t v; json_tok_int(out, &toks[ms], &v); TEST_ASSERT_EQUAL_INT64(112341, v);
+    int sectors = json_obj_get(out, toks, cnt, lap1, "sectors"); TEST_ASSERT_EQUAL_INT(2, toks[sectors].size);
+    int valid = json_obj_get(out, toks, cnt, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
 }
 
 static void test_json_sixteen_gate_run_streams_across_pulls(void)
@@ -3918,11 +5116,74 @@ static void test_json_sixteen_gate_run_streams_across_pulls(void)
     jsmntok_t toks[512];
     int cnt = json_parse(out, at, toks, 512);
     TEST_ASSERT_GREATER_THAN(0, cnt);
-    int runs = json_obj_get(out, toks, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
-    int gates = json_obj_get(out, toks, runs + 1, "gates"); TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
-    int last = gates + 1; for (int i = 0; i < DRAG_MAX_GATES - 1; i++) last = json_skip(toks, last);
-    int dist = json_obj_get(out, toks, last, "dist_cm"); int64_t v; json_tok_int(out, &toks[dist], &v);
+    int runs = json_obj_get(out, toks, cnt, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int gates = json_obj_get(out, toks, cnt, runs + 1, "gates"); TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
+    int last = gates + 1; for (int i = 0; i < DRAG_MAX_GATES - 1; i++) last = json_skip(toks, cnt, last);
+    int dist = json_obj_get(out, toks, cnt, last, "dist_cm"); int64_t v; json_tok_int(out, &toks[dist], &v);
     TEST_ASSERT_EQUAL_INT64(2500 * DRAG_MAX_GATES, v);
+}
+
+static void test_json_header_strings_using_every_wire_byte_are_emitted_whole(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_001");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[4096]; size_t at = 0;
+    ses_hdr_t h; memset(&h, 0, sizeof h);
+    memcpy(h.session_id, "S00042_001", 10);
+    memcpy(h.fw, "v0.3.1-abcdefghi", 16);          /* exactly 16 bytes, no NUL on the wire */
+    memcpy(h.hwid, "moto_neo6m_epaper_int_bl", 24);
+    h.venue_id = 6; h.layout_id = 1; h.gps_hz = 5; h.fused_hz = 10; h.start_gps_us = 1789640100000000LL;
+    uint8_t fr[256]; int n = ses_encode_hdr(&h, fr, sizeof fr);
+    feed_frame(&e, out, &at, fr, n);
+    n = ses_encode_venue(6, 1, "0123456789012345678901234567890", fr, sizeof fr);   /* 31 chars + NUL */
+    feed_frame(&e, out, &at, fr, n);
+    int fin;
+    while ((fin = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, fin);
+    at = drain(&e, out, at);
+
+    jsmntok_t toks[128];
+    int cnt = json_parse(out, at, toks, 128);
+    TEST_ASSERT_GREATER_THAN(0, cnt);
+    int hdr = json_obj_get(out, toks, cnt, 0, "hdr");
+    int fw = json_obj_get(out, toks, cnt, hdr, "fw");
+    TEST_ASSERT_TRUE(json_tok_eq(out, &toks[fw], "v0.3.1-abcdefghi"));      /* no spill, no truncation */
+    int venue = json_obj_get(out, toks, cnt, hdr, "venue");
+    TEST_ASSERT_TRUE(json_tok_eq(out, &toks[venue], "0123456789012345678901234567890"));
+}
+
+static void test_finish_refuses_while_a_drag_run_is_mid_emission(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_003");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[8192]; size_t at = 0;
+    drag_result_t run; memset(&run, 0, sizeof run);
+    run.run_no = 4; run.n_gates = DRAG_MAX_GATES; run.trap_cms = 8472;
+    for (uint8_t i = 0; i < DRAG_MAX_GATES; i++)
+        run.gates[i] = (drag_gate_res_t){ (uint8_t)(i + 1), 1000u * (i + 1u), (uint16_t)(500u * (i + 1u)), 2500u * (i + 1u), 1 };
+    uint8_t fr[256]; int n = ses_encode_drag_run(&run, fr, sizeof fr);
+
+    /* the window fills part-way through the gate list: the frame is left half-emitted */
+    TEST_ASSERT_EQUAL_INT(EXP_FULL, exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD)));
+    TEST_ASSERT_EQUAL_UINT8(1, e.run_pending);
+    TEST_ASSERT_EQUAL_INT(-1, exp_finish(&e));           /* closing now would truncate the run */
+    TEST_ASSERT_EQUAL_UINT8(0, e.finished);              /* and the exporter is not marked finished */
+
+    /* re-feeding the same frame after a pull resumes it, and then finish succeeds */
+    int r;
+    while ((r = exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD))) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    TEST_ASSERT_EQUAL_UINT8(0, e.run_pending);
+    while ((r = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    at = drain(&e, out, at);
+    jsmntok_t toks[512];
+    int cnt = json_parse(out, at, toks, 512);
+    TEST_ASSERT_GREATER_THAN(0, cnt);
+    int runs = json_obj_get(out, toks, cnt, 0, "runs");
+    TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int gates = json_obj_get(out, toks, cnt, runs + 1, "gates");
+    TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
 }
 
 int main(void)
@@ -3931,6 +5192,8 @@ int main(void)
     RUN_TEST(test_nmea_sentences_and_checksums);
     RUN_TEST(test_json_summary_structure);
     RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);
+    RUN_TEST(test_json_header_strings_using_every_wire_byte_are_emitted_whole);
+    RUN_TEST(test_finish_refuses_while_a_drag_run_is_mid_emission);
     return UNITY_END();
 }
 ```
@@ -3960,8 +5223,8 @@ static void latlon_fields(int32_t lat_e7, int32_t lon_e7, char *lat, char *ns, c
     double la = fabs((double)lat_e7 / 1e7), lo = fabs((double)lon_e7 / 1e7);
     int lad = (int)la, lod = (int)lo;
     double lam = (la - lad) * 60.0, lom = (lo - lod) * 60.0;
-    sprintf(lat, "%02d%08.5f", lad, lam);
-    sprintf(lon, "%03d%08.5f", lod, lom);
+    snprintf(lat, 16, "%02d%08.5f", lad, lam);
+    snprintf(lon, 16, "%03d%08.5f", lod, lom);
     *ns = lat_e7 < 0 ? 'S' : 'N'; *ew = lon_e7 < 0 ? 'W' : 'E';
 }
 
@@ -4003,6 +5266,7 @@ int exp_nmea_finish(exp_t *e) { (void)e; return 0; }
 ```c
 #include "core/exp.h"
 #include "core/jw.h"
+#include "core/core.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -4038,7 +5302,11 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
     if (e->json_stage == 0) {
         if (type == SES_T_SESSION_HDR) { if (ses_decode_hdr(p, len, &e->hdr) == 1) e->have_hdr = 1; return 0; }
-        if (type == SES_T_VENUE) { if (len == 36) { memcpy(e->venue_name, p + 4, 32); e->venue_name[31] = '\0'; } return 0; }
+        if (type == SES_T_VENUE) {
+            ses_venue_t v;
+            if (ses_decode_venue(p, len, &v) == 1) memcpy(e->venue_name, v.name, sizeof e->venue_name);
+            return 0;
+        }
         if (type != SES_T_LAP && type != SES_T_DRAG_RUN && type != SES_T_END) return 0;
         if (exp_win_free(e) < 400) return EXP_FULL;
         if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1;
@@ -4049,7 +5317,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
         if (exp_win_free(e) < 400) return EXP_FULL;
         lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) return -1;
         char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
-        if (e->laps > 0) exp_win_puts(e, ",");
+        if (e->laps > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
         jw_obj_open(&w);
         jw_key(&w, "n"); jw_uint(&w, lap.lap_no);
         jw_key(&w, "ms"); jw_uint(&w, lap.time_ms);
@@ -4073,8 +5341,11 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
         drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) return -1;
         if (!e->run_pending) {
             if (exp_win_free(e) < 200) return EXP_FULL;
-            if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
-            if (e->runs > 0) exp_win_puts(e, ",");
+            if (e->json_stage == 1) {
+                CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
+                e->json_stage = 2;
+            }
+            if (e->runs > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
             char buf[200]; jw_t w; jw_init(&w, buf, sizeof buf);
             jw_obj_open(&w);
             jw_key(&w, "n"); jw_uint(&w, run.run_no);
@@ -4090,7 +5361,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
             if (exp_win_free(e) < 120) return EXP_FULL;
             const drag_gate_res_t *g = &run.gates[e->run_gate_idx];
             char buf[120]; jw_t w; jw_init(&w, buf, sizeof buf);
-            if (e->run_gate_idx > 0) exp_win_puts(e, ",");
+            if (e->run_gate_idx > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
             jw_obj_open(&w);
             jw_key(&w, "id"); jw_uint(&w, g->gate_id);
             jw_key(&w, "ms"); jw_uint(&w, g->time_ms);
@@ -4102,7 +5373,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
             e->run_gate_idx++;
         }
         if (exp_win_free(e) < 4) return EXP_FULL;
-        exp_win_puts(e, "]}");
+        CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
         e->run_pending = 0; e->runs++;
         return 0;
     }
@@ -4114,8 +5385,11 @@ int exp_json_finish(exp_t *e)
     if (e->run_pending) return -1;
     if (exp_win_free(e) < 400) return EXP_FULL;
     if (e->json_stage == 0) { if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1; }
-    if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
-    exp_win_puts(e, "]}");
+    if (e->json_stage == 1) {
+        CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
+        e->json_stage = 2;
+    }
+    CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
     return 0;
 }
 ```
@@ -4241,8 +5515,20 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function)
 
 `test_apps/core_selftest/main/CMakeLists.txt` — generates one wrapper TU per host test file at configure time:
 ```cmake
-set(SUITES smoke bw ring geo tb ses_frame ses_records jw cfg trk exp_vbo exp_nmea_json)
 set(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../test")
+# One wrapper TU per host test file, discovered rather than listed, so a new test/test_*.c is picked
+# up without editing this file. The glob cannot use CONFIGURE_DEPENDS: ESP-IDF also evaluates
+# component CMakeLists.txt in script mode while expanding requirements, where that keyword is an
+# error. The directory property at the bottom does the same job -- adding or removing a file changes
+# the directory's timestamp, which re-runs configuration and so re-runs this glob.
+file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
+set(SUITES "")
+foreach(f ${TEST_SRCS})
+  get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
+  string(REGEX REPLACE "^test_" "" s "${base}")        # test_cfg       -> cfg
+  list(APPEND SUITES "${s}")
+endforeach()
+list(SORT SUITES)
 set(WRAP_DIR "${CMAKE_CURRENT_BINARY_DIR}/wrap")
 file(MAKE_DIRECTORY "${WRAP_DIR}")
 set(WRAPPERS "")
@@ -4251,7 +5537,17 @@ foreach(s ${SUITES})
   file(WRITE "${w}" "#define main run_test_${s}\n#define setUp setUp_test_${s}\n#define tearDown tearDown_test_${s}\n#include \"${TEST_DIR}/test_${s}.c\"\n")
   list(APPEND WRAPPERS "${w}")
 endforeach()
+# suites_gen.h: one SUITE(name) line per globbed test, sorted, consumed twice as an X-macro by
+# main.c -- so a new test/test_*.c is always declared, built into the suite table and run; it
+# cannot be linked but silently skipped.
+set(SUITES_GEN "${CMAKE_CURRENT_BINARY_DIR}/suites_gen.h")
+set(SUITES_GEN_CONTENT "")
+foreach(s ${SUITES})
+  string(APPEND SUITES_GEN_CONTENT "SUITE(${s})\n")
+endforeach()
+file(WRITE "${SUITES_GEN}" "${SUITES_GEN_CONTENT}")
 idf_component_register(SRCS "main.c" ${WRAPPERS} INCLUDE_DIRS "." REQUIRES core unity_vendored pthread esp_timer)
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function -Wno-unused-parameter)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEST_DIR})
@@ -4261,6 +5557,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEST_DIR})
 ```c
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include "unity.h"
 #include "esp_pthread.h"
 #include "esp_system.h"
@@ -4275,16 +5572,43 @@ static hook_t cur_setup, cur_teardown;
 void setUp(void) { if (cur_setup) cur_setup(); }
 void tearDown(void) { if (cur_teardown) cur_teardown(); }
 
-#define SUITE_DECL(name) int run_test_##name(void); void setUp_test_##name(void); void tearDown_test_##name(void);
-SUITE_DECL(smoke) SUITE_DECL(bw) SUITE_DECL(ring) SUITE_DECL(geo) SUITE_DECL(tb) SUITE_DECL(ses_frame)
-SUITE_DECL(ses_records) SUITE_DECL(jw) SUITE_DECL(cfg) SUITE_DECL(trk) SUITE_DECL(exp_vbo) SUITE_DECL(exp_nmea_json)
+/* suites_gen.h is generated by CMakeLists.txt from the same test/test_*.c glob that builds the
+ * wrappers, one SUITE(name) line per file, so a new suite is always declared, built into the table
+ * below and run -- it cannot be linked but silently skipped. */
+#define SUITE(name) int run_test_##name(void); void setUp_test_##name(void); void tearDown_test_##name(void);
+#include "suites_gen.h"
+#undef SUITE
 
 typedef struct { const char *name; int (*run)(void); hook_t setup, teardown; } suite_t;
-#define SUITE(name) { #name, run_test_##name, setUp_test_##name, tearDown_test_##name }
+#define SUITE(name) { #name, run_test_##name, setUp_test_##name, tearDown_test_##name },
 static const suite_t suites[] = {
-    SUITE(smoke), SUITE(bw), SUITE(ring), SUITE(geo), SUITE(tb), SUITE(ses_frame),
-    SUITE(ses_records), SUITE(jw), SUITE(cfg), SUITE(trk), SUITE(exp_vbo), SUITE(exp_nmea_json),
+#include "suites_gen.h"
 };
+#undef SUITE
+
+/* The suites above run in app_main's 40 KB task, which says nothing about whether the core fits an
+ * ordinary app task. The two suites that drive the deepest core call chains (cfg walks a JSON tree,
+ * trk parses and re-serialises a venue) are rerun in a 6 KB task -- the stack size spec §4.3 budgets
+ * for the conn task -- and the remaining headroom is reported. */
+#define STACK6K_BYTES 6144
+static volatile int      stack6k_failed = -1;      /* -1 = not finished yet */
+static volatile unsigned stack6k_free_bytes;
+
+static void stack6k_task(void *arg)
+{
+    (void)arg;
+    int failed = 0;
+    for (size_t i = 0; i < sizeof suites / sizeof suites[0]; i++) {
+        if (strcmp(suites[i].name, "cfg") != 0 && strcmp(suites[i].name, "trk") != 0) continue;
+        cur_setup = suites[i].setup; cur_teardown = suites[i].teardown;
+        if (suites[i].run() != 0) failed++;
+    }
+    stack6k_free_bytes = (unsigned)uxTaskGetStackHighWaterMark(NULL);
+    printf("--- stack6k cfg+trk: %s --- (%u B stack, %u B never used)\n",
+           failed ? "FAIL" : "OK", (unsigned)STACK6K_BYTES, stack6k_free_bytes);
+    stack6k_failed = failed;
+    vTaskDelete(NULL);
+}
 
 void app_main(void)
 {
@@ -4305,8 +5629,17 @@ void app_main(void)
         if (r != 0) failed++;
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    printf("=== core_selftest RESULT: %s, %d failing suites, free heap %u, min free %u ===\n",
-           failed ? "FAIL" : "PASS", failed, (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
+
+    if (xTaskCreatePinnedToCore(stack6k_task, "stack6k", STACK6K_BYTES, NULL, 5, NULL, 1) != pdPASS) {
+        printf("--- stack6k cfg+trk: FAIL --- (task could not be created)\n");
+        stack6k_failed = 1;
+    }
+    while (stack6k_failed < 0) vTaskDelay(pdMS_TO_TICKS(50));
+
+    int bad = failed + (stack6k_failed != 0 ? 1 : 0);
+    printf("=== core_selftest RESULT: %s, %d failing suites, stack6k %s (%u B free), free heap %u, min free %u ===\n",
+           bad ? "FAIL" : "PASS", failed, stack6k_failed == 0 ? "OK" : "FAIL", stack6k_free_bytes,
+           (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
     for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
 }
 ```
@@ -4379,7 +5712,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 5 | 18650 INR 3000 mAh 15 A, flat top | 2 | battery pack, wired in parallel (1S2P) | §3.1 | ordered, ~21 Sep 2026 | Communica / local vape shops | R120 ea |
 | 6 | 2-slot 18650 holder | 1 | pack | §3.1 | ordered, ~21 Sep 2026 | Communica | R30 |
 | 7 | TP4056 charger module, 6-pad (DW01A + FS8205A protection) | 1 | charging + cell protection | §3.1, §3.2 | ordered, ~21 Sep 2026 (verify 6-pad) | Communica / Micro Robotics | R25 |
-| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≤ 60 µA quiescent | §3.1, §3.2 | to order | RS Components ZA / Mantech / AliExpress | R20 |
+| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≥ 600 mA output, ≤ 60 µA quiescent | §3.1, §3.2 | to order | RS Components ZA / Mantech / AliExpress | R20 |
 | 9 | 10 µF ceramic capacitor | 2 | regulator in/out | §3.1 | to order | Communica | R5 |
 | 10 | 470 µF electrolytic capacitor, 6.3 V+ | 1 | rail bulk for radio bursts | §3.1 | to order | Communica | R5 |
 | 11 | P-channel MOSFET AO3401A or SI2301 | 1 (+1 spare) | GPS power switch (PARK) | §3.1, §3.3 | to order | Mantech / RS / AliExpress | R10 |
@@ -4387,7 +5720,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 13 | 470 kΩ resistor | 2 | battery divider | §3.1 | to order | Communica | R5 |
 | 14 | 100 nF ceramic capacitor | 1 | divider filter | §3.1 | to order | Communica | R2 |
 | 15 | SS14 Schottky diode | 1 | optional: USB + battery co-existence | §3.2 | to order (optional) | Communica | R3 |
-| 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §16 | to order | Communica | R15 |
+| 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §3.2 | to order | Communica | R15 |
 
 ## Controls, wiring, enclosure
 
@@ -4399,7 +5732,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 20 | IP65 ABS enclosure ≈ 115×90×55 mm, clear lid | 1 | weatherproof housing; e-paper behind the lid | §2.3 C3 | to order | Communica / Mantech | R120 |
 | 21 | RAM-style ball mount or handlebar clamp | 1 | mounting on the bike | §2.3 C3 | to order | local motorcycle shop | R250 |
 | 22 | Cable gland PG7 | 1 | charge port / USB lead | — | to order | Communica | R10 |
-| 23 | Double-sided foam / vibration pads | 1 lot | IMU and board damping | §8 | to order | hardware store | R30 |
+| 23 | Double-sided foam / vibration pads | 1 lot | IMU and board damping | §2.3 C3 | to order | hardware store | R30 |
 
 ## Bench and tooling
 

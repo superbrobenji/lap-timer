@@ -1,5 +1,4 @@
 #include "core/exp.h"
-#include "core/tb.h"
 #include <string.h>
 
 int exp_win_free(const exp_t *e) { return (int)(EXP_WINDOW - e->win_len); }

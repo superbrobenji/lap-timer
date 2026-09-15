@@ -18,7 +18,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 5 | 18650 INR 3000 mAh 15 A, flat top | 2 | battery pack, wired in parallel (1S2P) | §3.1 | ordered, ~21 Sep 2026 | Communica / local vape shops | R120 ea |
 | 6 | 2-slot 18650 holder | 1 | pack | §3.1 | ordered, ~21 Sep 2026 | Communica | R30 |
 | 7 | TP4056 charger module, 6-pad (DW01A + FS8205A protection) | 1 | charging + cell protection | §3.1, §3.2 | ordered, ~21 Sep 2026 (verify 6-pad) | Communica / Micro Robotics | R25 |
-| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≤ 60 µA quiescent | §3.1, §3.2 | to order | RS Components ZA / Mantech / AliExpress | R20 |
+| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≥ 600 mA output, ≤ 60 µA quiescent | §3.1, §3.2 | to order | RS Components ZA / Mantech / AliExpress | R20 |
 | 9 | 10 µF ceramic capacitor | 2 | regulator in/out | §3.1 | to order | Communica | R5 |
 | 10 | 470 µF electrolytic capacitor, 6.3 V+ | 1 | rail bulk for radio bursts | §3.1 | to order | Communica | R5 |
 | 11 | P-channel MOSFET AO3401A or SI2301 | 1 (+1 spare) | GPS power switch (PARK) | §3.1, §3.3 | to order | Mantech / RS / AliExpress | R10 |
@@ -26,7 +26,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 13 | 470 kΩ resistor | 2 | battery divider | §3.1 | to order | Communica | R5 |
 | 14 | 100 nF ceramic capacitor | 1 | divider filter | §3.1 | to order | Communica | R2 |
 | 15 | SS14 Schottky diode | 1 | optional: USB + battery co-existence | §3.2 | to order (optional) | Communica | R3 |
-| 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §16 | to order | Communica | R15 |
+| 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §3.2 | to order | Communica | R15 |
 
 ## Controls, wiring, enclosure
 
@@ -38,7 +38,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 20 | IP65 ABS enclosure ≈ 115×90×55 mm, clear lid | 1 | weatherproof housing; e-paper behind the lid | §2.3 C3 | to order | Communica / Mantech | R120 |
 | 21 | RAM-style ball mount or handlebar clamp | 1 | mounting on the bike | §2.3 C3 | to order | local motorcycle shop | R250 |
 | 22 | Cable gland PG7 | 1 | charge port / USB lead | — | to order | Communica | R10 |
-| 23 | Double-sided foam / vibration pads | 1 lot | IMU and board damping | §8 | to order | hardware store | R30 |
+| 23 | Double-sided foam / vibration pads | 1 lot | IMU and board damping | §2.3 C3 | to order | hardware store | R30 |
 
 ## Bench and tooling
 

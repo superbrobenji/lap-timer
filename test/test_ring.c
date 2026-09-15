@@ -80,6 +80,10 @@ static void *stress_consumer(void *p)
     return NULL;
 }
 
+/* The eviction race is a data race by the letter of C11 (§ring.h), so ThreadSanitizer cannot be used
+ * to police it: on a 2-slot ring TSan serialises the two threads enough that the window is never
+ * entered, and it would report the deliberate seqlock-style read as a bug. The invariant is guarded
+ * here instead: a non-zero drop count proves the producer really did evict under the consumer. */
 static void test_concurrent_overwrite_oldest_never_returns_torn_items(void)
 {
     static stress_item_t storage[2]; static ring_t r;
@@ -95,6 +99,7 @@ static void test_concurrent_overwrite_oldest_never_returns_torn_items(void)
     TEST_ASSERT_EQUAL_UINT64(0, cr.out_of_order);
     TEST_ASSERT_EQUAL_UINT64(N, cr.last_tag);
     TEST_ASSERT_EQUAL_UINT64(N, cr.received + ring_dropped(&r));   /* every item was delivered or counted dropped */
+    TEST_ASSERT_GREATER_THAN(0, ring_dropped(&r));                 /* the race window really was entered */
 }
 
 static void test_concurrent_drop_newest_delivers_everything_in_order(void)
