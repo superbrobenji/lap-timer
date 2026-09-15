@@ -131,6 +131,7 @@ target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECIS
 enable_testing()
 function(add_core_test name)
   add_executable(${name} ${name}.c)
+  target_compile_options(${name} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
   target_link_libraries(${name} PRIVATE core unity m)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
