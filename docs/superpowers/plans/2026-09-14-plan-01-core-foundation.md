@@ -4216,6 +4216,7 @@ int                trk_to_json(const trk_venue_t *v, char *out, size_t cap);
 #include "core/geo.h"
 #include "core/ses.h"
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 /* Not reentrant: the user store below is module-static, shared by every trk_* entry point.
@@ -4327,33 +4328,42 @@ int trk_user_load(const uint8_t *blob, size_t n)
     return 0;
 }
 
-/* Field-by-field copy into an already-zeroed destination: struct assignment (or a raw memcpy) also
- * copies the source's compiler-inserted padding bytes verbatim, which the language never promises
- * are zero, so two structurally identical venues could otherwise CRC differently (§10.1's blob is
- * declared build-specific but should still be deterministic within one build). Every named field is
- * written explicitly; nothing else touches dst, so the gaps between fields stay at the memset zero. */
-static void canon_venue(trk_venue_t *dst, const trk_venue_t *src)
+#define PUT_FIELD(dst, T, f, src) memcpy((dst) + offsetof(T, f), &(src)->f, sizeof (src)->f)
+
+/* Field-by-field copy into an already-zeroed destination: struct assignment (or a raw memcpy of the
+ * whole struct) also copies the source's compiler-inserted padding bytes verbatim, which the
+ * language never promises are zero, so two structurally identical venues could otherwise CRC
+ * differently (§10.1's blob is declared build-specific but should still be deterministic within one
+ * build). dst points directly at the destination blob bytes (uint8_t *, possibly unaligned), so each
+ * field is written with memcpy at its offsetof rather than through a typed pointer; every named field
+ * is written explicitly, and nothing else touches dst, so the gaps between fields stay at the memset
+ * zero. */
+static void canon_venue(uint8_t *dst, const trk_venue_t *src)
 {
-    memset(dst, 0, sizeof *dst);
-    dst->id = src->id;
-    memcpy(dst->name, src->name, sizeof dst->name);
-    dst->lat = src->lat; dst->lon = src->lon;
-    dst->radius_m = src->radius_m;
-    dst->flags = src->flags;
-    dst->n_layouts = src->n_layouts;
+    memset(dst, 0, sizeof *src);
+    PUT_FIELD(dst, trk_venue_t, id, src);
+    PUT_FIELD(dst, trk_venue_t, name, src);
+    PUT_FIELD(dst, trk_venue_t, lat, src);
+    PUT_FIELD(dst, trk_venue_t, lon, src);
+    PUT_FIELD(dst, trk_venue_t, radius_m, src);
+    PUT_FIELD(dst, trk_venue_t, flags, src);
+    PUT_FIELD(dst, trk_venue_t, n_layouts, src);
     /* Only the active layouts/sectors (src has already passed trk_validate_venue, so n_layouts and
      * every n_sectors are in range) are copied; slots beyond them are left at the memset zero rather
      * than carrying through whatever unused array content src happened to hold. */
     for (uint8_t i = 0; i < src->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
         const trk_layout_t *sl = &src->layouts[i];
-        trk_layout_t       *dl = &dst->layouts[i];
-        dl->id = sl->id;
-        memcpy(dl->name, sl->name, sizeof dl->name);
-        dl->sf = sl->sf;                    /* trk_line_t is four packed doubles: no internal padding */
-        dl->dir_sign = sl->dir_sign;
-        dl->n_sectors = sl->n_sectors;
-        for (uint8_t s = 0; s < sl->n_sectors && s < LAP_MAX_SECTORS; s++) dl->sectors[s] = sl->sectors[s];
-        dl->length_m = sl->length_m;
+        uint8_t *ld = dst + offsetof(trk_venue_t, layouts) + (size_t)i * sizeof(trk_layout_t);
+        PUT_FIELD(ld, trk_layout_t, id, sl);
+        PUT_FIELD(ld, trk_layout_t, name, sl);
+        PUT_FIELD(ld, trk_layout_t, sf, sl);                    /* trk_line_t is four packed doubles: no internal padding */
+        PUT_FIELD(ld, trk_layout_t, dir_sign, sl);
+        PUT_FIELD(ld, trk_layout_t, n_sectors, sl);
+        for (uint8_t s = 0; s < sl->n_sectors && s < LAP_MAX_SECTORS; s++) {
+            uint8_t *sd = ld + offsetof(trk_layout_t, sectors) + (size_t)s * sizeof(trk_line_t);
+            memcpy(sd, &sl->sectors[s], sizeof sl->sectors[s]);
+        }
+        PUT_FIELD(ld, trk_layout_t, length_m, sl);
     }
 }
 
@@ -4362,14 +4372,7 @@ int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
     size_t need = 2 + (size_t)user_n * sizeof(trk_venue_t) + 2;
     if (cap < need) return -1;
     blob[0] = BLOB_VERSION; blob[1] = user_n;
-    /* static, not a stack local: this module is already non-reentrant (see the file-top comment),
-     * and a ~2.7 KB trk_venue_t on the stack here would eat into the conn task's budget for no
-     * reason. */
-    static trk_venue_t tmp;
-    for (uint8_t i = 0; i < user_n; i++) {
-        canon_venue(&tmp, &user[i]);
-        memcpy(blob + 2 + (size_t)i * sizeof(trk_venue_t), &tmp, sizeof tmp);
-    }
+    for (uint8_t i = 0; i < user_n; i++) canon_venue(blob + 2 + (size_t)i * sizeof(trk_venue_t), &user[i]);
     uint16_t crc = ses_crc16(blob, need - 2);
     blob[need - 2] = (uint8_t)crc; blob[need - 1] = (uint8_t)(crc >> 8);
     *n_out = need;
