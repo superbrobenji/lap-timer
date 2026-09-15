@@ -24,6 +24,7 @@ int cfg_defaults(cfg_t *c)
 int cfg_validate(cfg_t *c)
 {
     int n = 0;
+    if (c->version != CFG_VERSION) { c->version = CFG_VERSION; n++; }
     if (c->units > CFG_UNITS_MPH) { c->units = CFG_UNITS_KMH; n++; }
     if (c->mode > CFG_MODE_DRAG) { c->mode = CFG_MODE_LAP; n++; }
     CLAMP_U(c->lap.min_lap_s, 5, 600);
@@ -44,7 +45,7 @@ int cfg_validate(cfg_t *c)
     CLAMP_U(c->display.full_every, 1, 50);
     if (c->display.rotation != 0 && c->display.rotation != 180) { c->display.rotation = 0; n++; }
     if (c->ble.name[0] == '\0') { strcpy(c->ble.name, "LapTimer"); n++; }
-    c->ble.name[15] = '\0';
+    if (c->ble.name[15] != '\0') { c->ble.name[15] = '\0'; n++; }
     CLAMP_U(c->ble.adv_s, 15, 600);
     if (c->log.fused_hz != 5 && c->log.fused_hz != 10 && c->log.fused_hz != 25) { c->log.fused_hz = 10; n++; }
     CLAMP_U(c->gps.dyn_model, 0, 8);
@@ -58,4 +59,15 @@ int cfg_migrate(cfg_t *c, uint8_t from_version)
 {
     if (from_version == 1) { c->version = CFG_VERSION; return 0; }
     return -1;
+}
+
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
+{
+    c->display.live_clock = p->display_live_clock;
+    c->log.fused_hz = p->log_fused_hz;
+    if (p->ble_name) {
+        if (strlen(p->ble_name) > 15) return -1;
+        strcpy(c->ble.name, p->ble_name);
+    }
+    return 0;
 }

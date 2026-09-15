@@ -15,7 +15,6 @@ static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out) { int64_t v
 static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *path, int v)
 {
     const jsmntok_t *t = &toks[v];
-    if (!strcmp(path, "version")) return get_u8(js, t, &c->version) ? 0 : -1;
     if (!strcmp(path, "units")) {
         if (json_tok_eq(js, t, "kmh")) { c->units = CFG_UNITS_KMH; return 0; }
         if (json_tok_eq(js, t, "mph")) { c->units = CFG_UNITS_MPH; return 0; }
@@ -33,8 +32,9 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
     if (!strcmp(path, "lap.pit_time_s")) return get_u8(js, t, &c->lap.pit_time_s) ? 0 : -1;
     if (!strcmp(path, "lap.default_layout")) {
         if (t->type != JSMN_ARRAY) return -1;
+        if (t->size > CFG_MAX_DEFAULT_LAYOUTS) return -1;
         int i = v + 1; uint8_t n = 0;
-        for (int k = 0; k < t->size && n < CFG_MAX_DEFAULT_LAYOUTS; k++) {
+        for (int k = 0; k < t->size; k++) {
             int vv = json_obj_get(js, toks, i, "venue"), ll = json_obj_get(js, toks, i, "layout");
             if (vv < 0 || ll < 0 || !get_u16(js, &toks[vv], &c->lap.default_layout[n].venue) || !get_u16(js, &toks[ll], &c->lap.default_layout[n].layout)) return -1;
             n++; i = json_skip(toks, i);
@@ -43,9 +43,10 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
     }
     if (!strcmp(path, "drag.benches_kmh") || !strcmp(path, "drag.benches_mph")) {
         if (t->type != JSMN_ARRAY) return -1;
+        if (t->size > CFG_MAX_BENCHES) return -1;
         bool kmh = path[13] == 'k';
         uint16_t *dst = kmh ? c->drag.benches_kmh : c->drag.benches_mph; uint8_t n = 0;
-        for (int k = 0; k < t->size && n < CFG_MAX_BENCHES; k++) { if (!get_u16(js, &toks[v + 1 + k], &dst[n])) return -1; n++; }
+        for (int k = 0; k < t->size; k++) { if (!get_u16(js, &toks[v + 1 + k], &dst[n])) return -1; n++; }
         if (kmh) c->drag.n_kmh = n; else c->drag.n_mph = n;
         return 0;
     }
@@ -102,6 +103,7 @@ static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int obj, const 
     return 0;
 }
 
+/* Not reentrant: uses a static token array (called from the single conn task). */
 int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap)
 {
     static jsmntok_t toks[MAX_TOKS];

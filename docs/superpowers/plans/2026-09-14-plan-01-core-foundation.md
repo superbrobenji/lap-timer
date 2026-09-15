@@ -2469,7 +2469,7 @@ git commit -m "feat(core): minimal JSON writer and jsmn tokenizer helpers"
 
 **Interfaces:**
 - Consumes: `jw`, `json`.
-- Produces (spec §15.1, §5.2): `cfg_t` (fields below), `CFG_VERSION 1`, `int cfg_defaults(cfg_t*)`, `int cfg_validate(cfg_t*)` (returns count of clamped fields), `int cfg_from_json(cfg_t*, const char *json, size_t n, char *err, size_t err_cap)` (merge semantics; returns 0 or −1 with `err` filled), `int cfg_to_json(const cfg_t*, char *out, size_t cap)` (bytes or −1), `int cfg_migrate(cfg_t*, uint8_t from_version)`.
+- Produces (spec §15.1, §5.2): `cfg_t` (fields below), `CFG_VERSION 1`, `cfg_profile_t` (hardware-profile defaults), `int cfg_apply_profile(cfg_t*, const cfg_profile_t*)` (0 ok / −1 bad name length), `int cfg_defaults(cfg_t*)`, `int cfg_validate(cfg_t*)` (returns count of clamped fields, forces `version` to `CFG_VERSION`), `int cfg_from_json(cfg_t*, const char *json, size_t n, char *err, size_t err_cap)` (merge semantics; `version` ignored; oversized arrays rejected; returns 0 or −1 with `err` filled), `int cfg_to_json(const cfg_t*, char *out, size_t cap)` (bytes or −1), `int cfg_migrate(cfg_t*, uint8_t from_version)`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2553,6 +2553,39 @@ static void test_migrate_v1_is_noop(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_migrate(&c, 0));
 }
 
+static void test_version_is_owned_by_firmware(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    char err[64];
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&c, "{\"version\":7}", 13, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);
+    c.version = 200;
+    TEST_ASSERT_EQUAL_INT(1, cfg_validate(&c));
+    TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);
+}
+
+static void test_profile_defaults_apply(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    cfg_profile_t p = { true, 25, "LapTimer-AB12" };
+    TEST_ASSERT_EQUAL_INT(0, cfg_apply_profile(&c, &p));
+    TEST_ASSERT_TRUE(c.display.live_clock);
+    TEST_ASSERT_EQUAL_UINT8(25, c.log.fused_hz);
+    TEST_ASSERT_EQUAL_STRING("LapTimer-AB12", c.ble.name);
+    TEST_ASSERT_EQUAL_INT(0, cfg_validate(&c));
+    cfg_profile_t bad = { false, 10, "this-name-is-way-too-long" };
+    TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &bad));
+}
+
+static void test_oversized_arrays_are_rejected(void)
+{
+    cfg_t c; cfg_defaults(&c); char err[64];
+    const char *js = "{\"drag\":{\"benches_kmh\":[1,2,3,4,5]}}";
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, js, strlen(js), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(3, c.drag.n_kmh);
+    TEST_ASSERT_EQUAL_UINT16(100, c.drag.benches_kmh[0]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -2562,6 +2595,9 @@ int main(void)
     RUN_TEST(test_from_json_rejects_malformed);
     RUN_TEST(test_json_round_trip_is_lossless);
     RUN_TEST(test_migrate_v1_is_noop);
+    RUN_TEST(test_version_is_owned_by_firmware);
+    RUN_TEST(test_profile_defaults_apply);
+    RUN_TEST(test_oversized_arrays_are_rejected);
     return UNITY_END();
 }
 ```
@@ -2614,9 +2650,14 @@ typedef struct {
     struct { uint8_t mot_thr, mot_dur_ms; } imu;
 } cfg_t;
 
+/* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
+ * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */
+typedef struct { bool display_live_clock; uint8_t log_fused_hz; const char *ble_name; } cfg_profile_t;
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
+
 int cfg_defaults(cfg_t *c);
 int cfg_validate(cfg_t *c);                       /* clamps; returns number of corrected fields */
-int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; 0 ok / -1 error */
+int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; "version" is ignored (owned by firmware); arrays longer than capacity are rejected; 0 ok / -1 error with err */
 int cfg_to_json(const cfg_t *c, char *out, size_t cap);                             /* bytes written or -1 */
 int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version */
 #endif
@@ -2652,6 +2693,7 @@ int cfg_defaults(cfg_t *c)
 int cfg_validate(cfg_t *c)
 {
     int n = 0;
+    if (c->version != CFG_VERSION) { c->version = CFG_VERSION; n++; }
     if (c->units > CFG_UNITS_MPH) { c->units = CFG_UNITS_KMH; n++; }
     if (c->mode > CFG_MODE_DRAG) { c->mode = CFG_MODE_LAP; n++; }
     CLAMP_U(c->lap.min_lap_s, 5, 600);
@@ -2672,7 +2714,7 @@ int cfg_validate(cfg_t *c)
     CLAMP_U(c->display.full_every, 1, 50);
     if (c->display.rotation != 0 && c->display.rotation != 180) { c->display.rotation = 0; n++; }
     if (c->ble.name[0] == '\0') { strcpy(c->ble.name, "LapTimer"); n++; }
-    c->ble.name[15] = '\0';
+    if (c->ble.name[15] != '\0') { c->ble.name[15] = '\0'; n++; }
     CLAMP_U(c->ble.adv_s, 15, 600);
     if (c->log.fused_hz != 5 && c->log.fused_hz != 10 && c->log.fused_hz != 25) { c->log.fused_hz = 10; n++; }
     CLAMP_U(c->gps.dyn_model, 0, 8);
@@ -2686,6 +2728,17 @@ int cfg_migrate(cfg_t *c, uint8_t from_version)
 {
     if (from_version == 1) { c->version = CFG_VERSION; return 0; }
     return -1;
+}
+
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
+{
+    c->display.live_clock = p->display_live_clock;
+    c->log.fused_hz = p->log_fused_hz;
+    if (p->ble_name) {
+        if (strlen(p->ble_name) > 15) return -1;
+        strcpy(c->ble.name, p->ble_name);
+    }
+    return 0;
 }
 ```
 
@@ -2710,7 +2763,6 @@ static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out) { int64_t v
 static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *path, int v)
 {
     const jsmntok_t *t = &toks[v];
-    if (!strcmp(path, "version")) return get_u8(js, t, &c->version) ? 0 : -1;
     if (!strcmp(path, "units")) {
         if (json_tok_eq(js, t, "kmh")) { c->units = CFG_UNITS_KMH; return 0; }
         if (json_tok_eq(js, t, "mph")) { c->units = CFG_UNITS_MPH; return 0; }
@@ -2728,8 +2780,9 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
     if (!strcmp(path, "lap.pit_time_s")) return get_u8(js, t, &c->lap.pit_time_s) ? 0 : -1;
     if (!strcmp(path, "lap.default_layout")) {
         if (t->type != JSMN_ARRAY) return -1;
+        if (t->size > CFG_MAX_DEFAULT_LAYOUTS) return -1;
         int i = v + 1; uint8_t n = 0;
-        for (int k = 0; k < t->size && n < CFG_MAX_DEFAULT_LAYOUTS; k++) {
+        for (int k = 0; k < t->size; k++) {
             int vv = json_obj_get(js, toks, i, "venue"), ll = json_obj_get(js, toks, i, "layout");
             if (vv < 0 || ll < 0 || !get_u16(js, &toks[vv], &c->lap.default_layout[n].venue) || !get_u16(js, &toks[ll], &c->lap.default_layout[n].layout)) return -1;
             n++; i = json_skip(toks, i);
@@ -2738,9 +2791,10 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, const char *pa
     }
     if (!strcmp(path, "drag.benches_kmh") || !strcmp(path, "drag.benches_mph")) {
         if (t->type != JSMN_ARRAY) return -1;
+        if (t->size > CFG_MAX_BENCHES) return -1;
         bool kmh = path[13] == 'k';
         uint16_t *dst = kmh ? c->drag.benches_kmh : c->drag.benches_mph; uint8_t n = 0;
-        for (int k = 0; k < t->size && n < CFG_MAX_BENCHES; k++) { if (!get_u16(js, &toks[v + 1 + k], &dst[n])) return -1; n++; }
+        for (int k = 0; k < t->size; k++) { if (!get_u16(js, &toks[v + 1 + k], &dst[n])) return -1; n++; }
         if (kmh) c->drag.n_kmh = n; else c->drag.n_mph = n;
         return 0;
     }
@@ -2797,6 +2851,7 @@ static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int obj, const 
     return 0;
 }
 
+/* Not reentrant: uses a static token array (called from the single conn task). */
 int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap)
 {
     static jsmntok_t toks[MAX_TOKS];

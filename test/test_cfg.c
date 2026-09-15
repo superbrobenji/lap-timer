@@ -76,6 +76,39 @@ static void test_migrate_v1_is_noop(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_migrate(&c, 0));
 }
 
+static void test_version_is_owned_by_firmware(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    char err[64];
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&c, "{\"version\":7}", 13, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);
+    c.version = 200;
+    TEST_ASSERT_EQUAL_INT(1, cfg_validate(&c));
+    TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);
+}
+
+static void test_profile_defaults_apply(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    cfg_profile_t p = { true, 25, "LapTimer-AB12" };
+    TEST_ASSERT_EQUAL_INT(0, cfg_apply_profile(&c, &p));
+    TEST_ASSERT_TRUE(c.display.live_clock);
+    TEST_ASSERT_EQUAL_UINT8(25, c.log.fused_hz);
+    TEST_ASSERT_EQUAL_STRING("LapTimer-AB12", c.ble.name);
+    TEST_ASSERT_EQUAL_INT(0, cfg_validate(&c));
+    cfg_profile_t bad = { false, 10, "this-name-is-way-too-long" };
+    TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &bad));
+}
+
+static void test_oversized_arrays_are_rejected(void)
+{
+    cfg_t c; cfg_defaults(&c); char err[64];
+    const char *js = "{\"drag\":{\"benches_kmh\":[1,2,3,4,5]}}";
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, js, strlen(js), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(3, c.drag.n_kmh);
+    TEST_ASSERT_EQUAL_UINT16(100, c.drag.benches_kmh[0]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -85,5 +118,8 @@ int main(void)
     RUN_TEST(test_from_json_rejects_malformed);
     RUN_TEST(test_json_round_trip_is_lossless);
     RUN_TEST(test_migrate_v1_is_noop);
+    RUN_TEST(test_version_is_owned_by_firmware);
+    RUN_TEST(test_profile_defaults_apply);
+    RUN_TEST(test_oversized_arrays_are_rejected);
     return UNITY_END();
 }

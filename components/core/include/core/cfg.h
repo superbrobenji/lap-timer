@@ -35,9 +35,14 @@ typedef struct {
     struct { uint8_t mot_thr, mot_dur_ms; } imu;
 } cfg_t;
 
+/* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
+ * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */
+typedef struct { bool display_live_clock; uint8_t log_fused_hz; const char *ble_name; } cfg_profile_t;
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
+
 int cfg_defaults(cfg_t *c);
 int cfg_validate(cfg_t *c);                       /* clamps; returns number of corrected fields */
-int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; 0 ok / -1 error */
+int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; "version" is ignored (owned by firmware); arrays longer than capacity are rejected; 0 ok / -1 error with err */
 int cfg_to_json(const cfg_t *c, char *out, size_t cap);                             /* bytes written or -1 */
 int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version */
 #endif
