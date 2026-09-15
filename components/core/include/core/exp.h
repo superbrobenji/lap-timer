@@ -42,7 +42,7 @@ typedef struct {
 int  exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
 int  exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len);   /* 0 consumed, EXP_FULL retry after pull, -1 error */
 int  exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out);           /* 0 ok (n_out may be 0), -1 error */
-int  exp_finish(exp_t *e);
+int  exp_finish(exp_t *e);                                                   /* may return EXP_FULL: pull, then call again */
 
 /* helpers shared by format implementations (internal) */
 int  exp_win_free(const exp_t *e);
