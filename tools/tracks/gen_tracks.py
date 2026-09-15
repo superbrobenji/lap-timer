@@ -16,11 +16,15 @@ def check_line(line, what, name):
     for p in line:
         assert isinstance(p, list) and len(p) == 2, f"{name}: {what} point"
     L = dist_m(line[0], line[1])
+    # a line whose endpoints coincide has no direction, so §6.4 can never detect a crossing
+    assert L >= 1.0, f"{name}: {what} endpoints only {L:.2f} m apart (degenerate line)"
     assert 10 <= L <= 60, f"{name}: {what} length {L:.1f} m outside 10–60 m"
 
 def expand(v):
     assert 1 <= v["id"] <= 999, f"{v['name']}: bundled id must be 1..999"
     assert 1 <= len(v["layouts"]) <= MAX_LAYOUTS
+    lids = [L["id"] for L in v["layouts"]]
+    assert len(lids) == len(set(lids)), f"{v['name']}: duplicate layout ids {lids}"
     first = v["layouts"][0]
     for k, L in enumerate(v["layouts"]):
         assert L["dir"] in (1, -1)

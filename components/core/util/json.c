@@ -6,7 +6,14 @@ int json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks)
 {
     jsmn_parser p; jsmn_init(&p);
     int r = jsmn_parse(&p, js, n, toks, max_toks);
-    return r < 0 ? -1 : r;
+    if (r < 0) return -1;
+    /* Depth from the parent links jsmn already maintains; bail out as soon as one chain is too long. */
+    for (int i = 0; i < r; i++) {
+        int d = 0;
+        for (int par = toks[i].parent; par >= 0; par = toks[par].parent)
+            if (++d > JSON_MAX_DEPTH) return -1;
+    }
+    return r;
 }
 
 bool json_tok_eq(const char *js, const jsmntok_t *t, const char *s)
@@ -15,15 +22,19 @@ bool json_tok_eq(const char *js, const jsmntok_t *t, const char *s)
     return t->type == JSMN_STRING && strlen(s) == len && memcmp(js + t->start, s, len) == 0;
 }
 
-int json_skip(const jsmntok_t *toks, int i)
+int json_skip(const jsmntok_t *toks, int ntoks, int i)
 {
+    /* Every descendant of i starts before i ends and jsmn emits them contiguously, so a forward
+     * scan finds the end of the subtree without recursion. Primitives and strings have no
+     * descendants and the loop exits on the first test. */
     int j = i + 1;
-    for (int k = 0; k < toks[i].size; k++) j = json_skip(toks, j);
+    while (j < ntoks && toks[j].start < toks[i].end) j++;
     return j;
 }
 
 static size_t tok_copy(const char *js, const jsmntok_t *t, char *tmp, size_t cap)
 {
+    if (cap == 0) return 0;
     size_t len = (size_t)(t->end - t->start);
     if (len >= cap) len = cap - 1;
     memcpy(tmp, js + t->start, len); tmp[len] = '\0';
@@ -62,13 +73,13 @@ size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap)
     return tok_copy(js, t, out, cap);
 }
 
-int json_obj_get(const char *js, const jsmntok_t *toks, int obj, const char *key)
+int json_obj_get(const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *key)
 {
-    if (toks[obj].type != JSMN_OBJECT) return -1;
-    int i = obj + 1;
-    for (int k = 0; k < toks[obj].size; k++) {
+    if (obj < 0 || obj >= ntoks || toks[obj].type != JSMN_OBJECT) return -1;
+    int i = obj + 1;                            /* first key token */
+    for (int k = 0; k < toks[obj].size && i + 1 < ntoks; k++) {
         if (json_tok_eq(js, &toks[i], key)) return i + 1;
-        i = json_skip(toks, i);
+        i = json_skip(toks, ntoks, i + 1);      /* past this key's value subtree */
     }
     return -1;
 }

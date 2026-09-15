@@ -44,14 +44,25 @@ int cfg_validate(cfg_t *c)
     CLAMP_U(c->power.conn_idle_s, 30, 1800);
     CLAMP_U(c->display.full_every, 1, 50);
     if (c->display.rotation != 0 && c->display.rotation != 180) { c->display.rotation = 0; n++; }
+    /* Two-point battery calibration: the two points must be ordered and far enough apart for the
+     * interpolation to be meaningful, and both in a plausible cell range. A pair that fails any of
+     * that is not clamped field by field (which could invent a worse curve) but reset wholesale. */
+    if (c->battery.adc_mv[1] < c->battery.adc_mv[0] + 100 || c->battery.true_mv[1] < c->battery.true_mv[0] + 100 ||
+        c->battery.adc_mv[0] < 1000 || c->battery.adc_mv[0] > 5000 || c->battery.adc_mv[1] < 1000 || c->battery.adc_mv[1] > 5000 ||
+        c->battery.true_mv[0] < 1000 || c->battery.true_mv[0] > 5000 || c->battery.true_mv[1] < 1000 || c->battery.true_mv[1] > 5000) {
+        c->battery.adc_mv[0] = 3000; c->battery.true_mv[0] = 3000;
+        c->battery.adc_mv[1] = 4200; c->battery.true_mv[1] = 4200;
+        n++;
+    }
     if (c->ble.name[0] == '\0') { strcpy(c->ble.name, "LapTimer"); n++; }
     if (c->ble.name[15] != '\0') { c->ble.name[15] = '\0'; n++; }
     CLAMP_U(c->ble.adv_s, 15, 600);
     if (c->log.fused_hz != 5 && c->log.fused_hz != 10 && c->log.fused_hz != 25) { c->log.fused_hz = 10; n++; }
-    CLAMP_U(c->gps.dyn_model, 0, 8);
-    CLAMP_U(c->gps.rate_hz, 0, 25);
-    CLAMP_U(c->imu.mot_thr, 2, 255);
-    CLAMP_U(c->imu.mot_dur_ms, 1, 255);
+    /* uint8_t fields: only the bounds a uint8_t can actually violate are checked. */
+    if (c->gps.dyn_model > 8) { c->gps.dyn_model = 8; n++; }
+    if (c->gps.rate_hz > 25) { c->gps.rate_hz = 25; n++; }
+    if (c->imu.mot_thr < 2) { c->imu.mot_thr = 2; n++; }
+    if (c->imu.mot_dur_ms < 1) { c->imu.mot_dur_ms = 1; n++; }
     return n;
 }
 
@@ -63,11 +74,10 @@ int cfg_migrate(cfg_t *c, uint8_t from_version)
 
 int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
 {
+    /* Validate before touching anything: a rejected profile must leave the config untouched. */
+    if (p->ble_name && strlen(p->ble_name) > 15) return -1;
     c->display.live_clock = p->display_live_clock;
     c->log.fused_hz = p->log_fused_hz;
-    if (p->ble_name) {
-        if (strlen(p->ble_name) > 15) return -1;
-        strcpy(c->ble.name, p->ble_name);
-    }
+    if (p->ble_name) strcpy(c->ble.name, p->ble_name);
     return 0;
 }

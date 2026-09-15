@@ -71,13 +71,13 @@ static void test_json_summary_structure(void)
     jsmntok_t toks[256];
     int cnt = json_parse(out, at, toks, 256);
     TEST_ASSERT_GREATER_THAN(0, cnt);
-    int laps = json_obj_get(out, toks, 0, "laps"); TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[laps].type); TEST_ASSERT_EQUAL_INT(2, toks[laps].size);
-    int runs = json_obj_get(out, toks, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
-    int hdr = json_obj_get(out, toks, 0, "hdr"); int venue = json_obj_get(out, toks, hdr, "venue");
+    int laps = json_obj_get(out, toks, cnt, 0, "laps"); TEST_ASSERT_EQUAL_INT(JSMN_ARRAY, toks[laps].type); TEST_ASSERT_EQUAL_INT(2, toks[laps].size);
+    int runs = json_obj_get(out, toks, cnt, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int hdr = json_obj_get(out, toks, cnt, 0, "hdr"); int venue = json_obj_get(out, toks, cnt, hdr, "venue");
     TEST_ASSERT_TRUE(json_tok_eq(out, &toks[venue], "Killarney"));
-    int lap1 = laps + 1; int ms = json_obj_get(out, toks, lap1, "ms"); int64_t v; json_tok_int(out, &toks[ms], &v); TEST_ASSERT_EQUAL_INT64(112341, v);
-    int sectors = json_obj_get(out, toks, lap1, "sectors"); TEST_ASSERT_EQUAL_INT(2, toks[sectors].size);
-    int valid = json_obj_get(out, toks, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
+    int lap1 = laps + 1; int ms = json_obj_get(out, toks, cnt, lap1, "ms"); int64_t v; json_tok_int(out, &toks[ms], &v); TEST_ASSERT_EQUAL_INT64(112341, v);
+    int sectors = json_obj_get(out, toks, cnt, lap1, "sectors"); TEST_ASSERT_EQUAL_INT(2, toks[sectors].size);
+    int valid = json_obj_get(out, toks, cnt, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
 }
 
 static void test_json_sixteen_gate_run_streams_across_pulls(void)
@@ -103,11 +103,74 @@ static void test_json_sixteen_gate_run_streams_across_pulls(void)
     jsmntok_t toks[512];
     int cnt = json_parse(out, at, toks, 512);
     TEST_ASSERT_GREATER_THAN(0, cnt);
-    int runs = json_obj_get(out, toks, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
-    int gates = json_obj_get(out, toks, runs + 1, "gates"); TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
-    int last = gates + 1; for (int i = 0; i < DRAG_MAX_GATES - 1; i++) last = json_skip(toks, last);
-    int dist = json_obj_get(out, toks, last, "dist_cm"); int64_t v; json_tok_int(out, &toks[dist], &v);
+    int runs = json_obj_get(out, toks, cnt, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int gates = json_obj_get(out, toks, cnt, runs + 1, "gates"); TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
+    int last = gates + 1; for (int i = 0; i < DRAG_MAX_GATES - 1; i++) last = json_skip(toks, cnt, last);
+    int dist = json_obj_get(out, toks, cnt, last, "dist_cm"); int64_t v; json_tok_int(out, &toks[dist], &v);
     TEST_ASSERT_EQUAL_INT64(2500 * DRAG_MAX_GATES, v);
+}
+
+static void test_json_header_strings_using_every_wire_byte_are_emitted_whole(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_001");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[4096]; size_t at = 0;
+    ses_hdr_t h; memset(&h, 0, sizeof h);
+    memcpy(h.session_id, "S00042_001", 10);
+    memcpy(h.fw, "v0.3.1-abcdefghi", 16);          /* exactly 16 bytes, no NUL on the wire */
+    memcpy(h.hwid, "moto_neo6m_epaper_int_bl", 24);
+    h.venue_id = 6; h.layout_id = 1; h.gps_hz = 5; h.fused_hz = 10; h.start_gps_us = 1789640100000000LL;
+    uint8_t fr[256]; int n = ses_encode_hdr(&h, fr, sizeof fr);
+    feed_frame(&e, out, &at, fr, n);
+    n = ses_encode_venue(6, 1, "0123456789012345678901234567890", fr, sizeof fr);   /* 31 chars + NUL */
+    feed_frame(&e, out, &at, fr, n);
+    int fin;
+    while ((fin = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, fin);
+    at = drain(&e, out, at);
+
+    jsmntok_t toks[128];
+    int cnt = json_parse(out, at, toks, 128);
+    TEST_ASSERT_GREATER_THAN(0, cnt);
+    int hdr = json_obj_get(out, toks, cnt, 0, "hdr");
+    int fw = json_obj_get(out, toks, cnt, hdr, "fw");
+    TEST_ASSERT_TRUE(json_tok_eq(out, &toks[fw], "v0.3.1-abcdefghi"));      /* no spill, no truncation */
+    int venue = json_obj_get(out, toks, cnt, hdr, "venue");
+    TEST_ASSERT_TRUE(json_tok_eq(out, &toks[venue], "0123456789012345678901234567890"));
+}
+
+static void test_finish_refuses_while_a_drag_run_is_mid_emission(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_003");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[8192]; size_t at = 0;
+    drag_result_t run; memset(&run, 0, sizeof run);
+    run.run_no = 4; run.n_gates = DRAG_MAX_GATES; run.trap_cms = 8472;
+    for (uint8_t i = 0; i < DRAG_MAX_GATES; i++)
+        run.gates[i] = (drag_gate_res_t){ (uint8_t)(i + 1), 1000u * (i + 1u), (uint16_t)(500u * (i + 1u)), 2500u * (i + 1u), 1 };
+    uint8_t fr[256]; int n = ses_encode_drag_run(&run, fr, sizeof fr);
+
+    /* the window fills part-way through the gate list: the frame is left half-emitted */
+    TEST_ASSERT_EQUAL_INT(EXP_FULL, exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD)));
+    TEST_ASSERT_EQUAL_UINT8(1, e.run_pending);
+    TEST_ASSERT_EQUAL_INT(-1, exp_finish(&e));           /* closing now would truncate the run */
+    TEST_ASSERT_EQUAL_UINT8(0, e.finished);              /* and the exporter is not marked finished */
+
+    /* re-feeding the same frame after a pull resumes it, and then finish succeeds */
+    int r;
+    while ((r = exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD))) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    TEST_ASSERT_EQUAL_UINT8(0, e.run_pending);
+    while ((r = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    at = drain(&e, out, at);
+    jsmntok_t toks[512];
+    int cnt = json_parse(out, at, toks, 512);
+    TEST_ASSERT_GREATER_THAN(0, cnt);
+    int runs = json_obj_get(out, toks, cnt, 0, "runs");
+    TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int gates = json_obj_get(out, toks, cnt, runs + 1, "gates");
+    TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
 }
 
 int main(void)
@@ -116,5 +179,7 @@ int main(void)
     RUN_TEST(test_nmea_sentences_and_checksums);
     RUN_TEST(test_json_summary_structure);
     RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);
+    RUN_TEST(test_json_header_strings_using_every_wire_byte_are_emitted_whole);
+    RUN_TEST(test_finish_refuses_while_a_drag_run_is_mid_emission);
     return UNITY_END();
 }
