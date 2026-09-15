@@ -17,3 +17,6 @@ secure_boot_signing_key.pem
 !keys/laptimer_pub.pem
 .superpowers/
 tools/.venv/
+
+# agent worktrees
+.claude/worktrees/

@@ -9,12 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+# One strict flag set for core, tools and tests (spec §17.9, §21.4).
+set(LAPTIMER_STRICT_FLAGS -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+
 set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
 file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
 
 add_library(core STATIC ${CORE_SRCS})
 target_include_directories(core PUBLIC ${CORE_DIR}/include)
-target_compile_options(core PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+target_compile_options(core PRIVATE ${LAPTIMER_STRICT_FLAGS})
 # vendored third-party sources get relaxed warnings (file added in Task 8)
 set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
 
@@ -33,7 +36,7 @@ enable_testing()
 find_package(Threads REQUIRED)
 function(add_core_test name)
   add_executable(${name} ${name}.c)
-  target_compile_options(${name} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+  target_compile_options(${name} PRIVATE ${LAPTIMER_STRICT_FLAGS})
   target_link_libraries(${name} PRIVATE core unity m Threads::Threads)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -50,3 +53,6 @@ add_core_test(test_cfg)
 add_core_test(test_trk)
 add_core_test(test_exp_vbo)
 add_core_test(test_exp_nmea_json)
+
+# Host-only tools and their tests (spec §21.4, §22.2)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
