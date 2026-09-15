@@ -24,6 +24,8 @@ ESP32 GPS + IMU lap timer for track days and drag runs. Battery powered, fully o
 
 CI compiles with gcc; run the same with `CC=$(ls /opt/homebrew/bin/gcc-* | head -1)` and `-B test/build-gcc` before opening a PR (`brew install gcc` once).
 
+Run the hygiene check locally too: `git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h'` must print nothing.
+
 ## Firmware
 
 (`build.sh` arrives with plan 03; until then use the ESP-IDF hello-world flow in plan 00 task 7.)
