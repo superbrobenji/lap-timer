@@ -4170,6 +4170,254 @@ git tag plan-01-done && git push origin plan-01-done
 
 ---
 
+### Task 14: On-target self-test (`test_apps/core_selftest`)
+
+**Files:**
+- Create: `test_apps/core_selftest/CMakeLists.txt`, `test_apps/core_selftest/sdkconfig.defaults`, `test_apps/core_selftest/main/CMakeLists.txt`, `test_apps/core_selftest/main/main.c`, `test_apps/core_selftest/components/unity_vendored/CMakeLists.txt`
+- Modify: `test/test_ring.c` (stress iteration count becomes the macro `RING_STRESS_N`), `.github/workflows/firmware.yml` (build the self-test in CI), `docs/superpowers/plans/2026-09-14-plan-00-dev-environment.md` (mirror the workflow block), `docs/measurements.md` (create; bench results)
+
+**Interfaces:**
+- Consumes: every `test/test_*.c` suite unchanged (each defines `main`, `setUp`, `tearDown`); `components/core` as an ESP-IDF component; vendored Unity at `test/unity/src`.
+- Produces: an ESP-IDF project that links `core`, compiles each host test file into its own translation unit with `main`/`setUp`/`tearDown` renamed per suite, and runs all suites from `app_main`, printing one `--- <suite>: OK|FAIL (<ms>) ---` line per suite and a final `=== core_selftest RESULT: PASS|FAIL, <n> failing suites, free heap <b>, min free <b> ===` line. Exit criterion: `RESULT: PASS` observed on the board.
+
+Why: proves the pure-C core on the xtensa toolchain (packed-record alignment, `_Atomic` on xtensa, newlib `%lld`/`%f` formatting, float performance, stack use of the reader/exporter) before any firmware plan builds on it (spec §22.3).
+
+- [ ] **Step 1: Make the ring stress count overridable**
+
+In `test/test_ring.c`, after the `#include <pthread.h>` line add:
+```c
+#ifndef RING_STRESS_N
+#define RING_STRESS_N 2000000ULL          /* target build overrides with -DRING_STRESS_N=20000ULL */
+#endif
+```
+and replace both occurrences of `const uint64_t N = 2000000;` with `const uint64_t N = RING_STRESS_N;`. Mirror the same edit into Task 3 step 1's test block above. Rebuild host (clang and gcc) — 12/12 still green.
+
+- [ ] **Step 2: Create the IDF project**
+
+`test_apps/core_selftest/CMakeLists.txt`:
+```cmake
+cmake_minimum_required(VERSION 3.16)
+# components/core is the library under test; components/ holds the vendored Unity wrapper
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../components/core" "${CMAKE_CURRENT_LIST_DIR}/components")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(core_selftest)
+```
+
+`test_apps/core_selftest/sdkconfig.defaults`:
+```
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=40960
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
+CONFIG_ESP_TASK_WDT_EN=n
+CONFIG_ESP_INT_WDT=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=6144
+CONFIG_COMPILER_STACK_CHECK_MODE_STRONG=y
+CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
+```
+(The main task stack is 40 KB because `test_trk.c` keeps a 16 KB blob and several 2.75 KB venues on the stack; the task watchdog is off because suites block `app_main` for seconds.)
+
+`test_apps/core_selftest/components/unity_vendored/CMakeLists.txt`:
+```cmake
+idf_component_register(SRCS "${CMAKE_CURRENT_LIST_DIR}/../../../../test/unity/src/unity.c"
+                       INCLUDE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../../../test/unity/src")
+target_compile_definitions(${COMPONENT_LIB} PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function)
+```
+
+`test_apps/core_selftest/main/CMakeLists.txt` — generates one wrapper TU per host test file at configure time:
+```cmake
+set(SUITES smoke bw ring geo tb ses_frame ses_records jw cfg trk exp_vbo exp_nmea_json)
+set(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../test")
+set(WRAP_DIR "${CMAKE_CURRENT_BINARY_DIR}/wrap")
+file(MAKE_DIRECTORY "${WRAP_DIR}")
+set(WRAPPERS "")
+foreach(s ${SUITES})
+  set(w "${WRAP_DIR}/wrap_test_${s}.c")
+  file(WRITE "${w}" "#define main run_test_${s}\n#define setUp setUp_test_${s}\n#define tearDown tearDown_test_${s}\n#include \"${TEST_DIR}/test_${s}.c\"\n")
+  list(APPEND WRAPPERS "${w}")
+endforeach()
+idf_component_register(SRCS "main.c" ${WRAPPERS} INCLUDE_DIRS "." REQUIRES core unity_vendored pthread esp_timer)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function -Wno-unused-parameter)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEST_DIR})
+```
+
+`test_apps/core_selftest/main/main.c`:
+```c
+#include <stdio.h>
+#include <stdint.h>
+#include "unity.h"
+#include "esp_pthread.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+/* Each host test file is compiled with main/setUp/tearDown renamed per suite (see CMakeLists.txt).
+ * Unity calls the global setUp()/tearDown(); these dispatch to the suite currently running. */
+typedef void (*hook_t)(void);
+static hook_t cur_setup, cur_teardown;
+void setUp(void) { if (cur_setup) cur_setup(); }
+void tearDown(void) { if (cur_teardown) cur_teardown(); }
+
+#define SUITE_DECL(name) int run_test_##name(void); void setUp_test_##name(void); void tearDown_test_##name(void);
+SUITE_DECL(smoke) SUITE_DECL(bw) SUITE_DECL(ring) SUITE_DECL(geo) SUITE_DECL(tb) SUITE_DECL(ses_frame)
+SUITE_DECL(ses_records) SUITE_DECL(jw) SUITE_DECL(cfg) SUITE_DECL(trk) SUITE_DECL(exp_vbo) SUITE_DECL(exp_nmea_json)
+
+typedef struct { const char *name; int (*run)(void); hook_t setup, teardown; } suite_t;
+#define SUITE(name) { #name, run_test_##name, setUp_test_##name, tearDown_test_##name }
+static const suite_t suites[] = {
+    SUITE(smoke), SUITE(bw), SUITE(ring), SUITE(geo), SUITE(tb), SUITE(ses_frame),
+    SUITE(ses_records), SUITE(jw), SUITE(cfg), SUITE(trk), SUITE(exp_vbo), SUITE(exp_nmea_json),
+};
+
+void app_main(void)
+{
+    esp_pthread_cfg_t pcfg = esp_pthread_get_default_config();
+    pcfg.stack_size = 6144; pcfg.prio = 5;
+    esp_pthread_set_cfg(&pcfg);
+
+    const size_t n = sizeof suites / sizeof suites[0];
+    int failed = 0;
+    printf("\n=== core_selftest: %u suites, free heap %u ===\n", (unsigned)n, (unsigned)esp_get_free_heap_size());
+    for (size_t i = 0; i < n; i++) {
+        cur_setup = suites[i].setup; cur_teardown = suites[i].teardown;
+        printf("--- %s ---\n", suites[i].name);
+        int64_t t0 = esp_timer_get_time();
+        int r = suites[i].run();
+        printf("--- %s: %s (%lld ms) ---\n", suites[i].name, r == 0 ? "OK" : "FAIL", (long long)((esp_timer_get_time() - t0) / 1000));
+        if (r != 0) failed++;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    printf("=== core_selftest RESULT: %s, %d failing suites, free heap %u, min free %u ===\n",
+           failed ? "FAIL" : "PASS", failed, (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size());
+    for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+}
+```
+
+- [ ] **Step 3: Build for the ESP32**
+
+```bash
+source tools/idf-env.sh
+idf.py -C test_apps/core_selftest -B test_apps/core_selftest/build set-target esp32 build 2>&1 | tail -20
+```
+Expected: `Project build complete.` If the xtensa gcc reports warnings in `components/core` that the host compilers did not (e.g. `-Wconversion` notes, `_Atomic` or alignment diagnostics), record them verbatim; any `-Werror` failure in core is fixed with the minimal explicit cast, mirrored into the plan block that owns the file, and noted in the report. A failure inside a test file compiled through a wrapper (e.g. a `-Wunused` under the stricter set) is fixed in the wrapper's compile options, not in the test.
+
+- [ ] **Step 4: Flash and observe (controller step — user holds BOOT and says "ready")**
+
+Flash: `idf.py -C test_apps/core_selftest -B test_apps/core_selftest/build -p /dev/cu.usbserial-0001 flash`. Then capture the serial output at 115200 baud for up to 120 s (pyserial from `tools/.venv`, pulse RTS to reset, stop at the line containing `core_selftest RESULT`).
+
+Expected: every suite prints `OK`; the final line is `=== core_selftest RESULT: PASS, 0 failing suites, ... ===`. Record the per-suite times and the heap figures in `docs/measurements.md` under a "core_selftest on ESP32 (plan 01)" heading, with the date, IDF version, and commit SHA.
+
+- [ ] **Step 5: Build the self-test in CI**
+
+In `.github/workflows/firmware.yml`, job `build`, insert after the existing `Probe inputs` step:
+```yaml
+      - name: Probe core_selftest
+        id: probe_selftest
+        run: echo "present=$([ -f test_apps/core_selftest/CMakeLists.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Build core_selftest (ESP32)
+        if: steps.probe_selftest.outputs.present == 'true' && matrix.env == 'moto_neo6m'
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          idf.py -C test_apps/core_selftest -B test_apps/core_selftest/build set-target esp32 build
+```
+Keep the existing steps and their guards. Mirror the same insertion into plan 00 Task 2's `firmware.yml` block. The job and check names do not change, so branch protection needs no update.
+
+- [ ] **Step 6: Verify, commit, hygiene**
+
+Host: `cmake --build test/build && ctest --test-dir test/build --output-on-failure` and the gcc tree — 12/12. `git diff --check` clean; hygiene command prints nothing; `test_apps/core_selftest/build/` and `sdkconfig` are ignored (`build/` and `sdkconfig` patterns already in `.gitignore` — confirm with `git status --short`). Commit: subject `test: on-target core self-test app and CI build`, trailers.
+
+---
+
+### Task 15: Prototype bill of materials (`docs/hardware/bom.md`)
+
+**Files:**
+- Create: `docs/hardware/bom.md`
+- Modify: `README.md` (link the BOM under a "## Hardware" heading), `docs/superpowers/plans/2026-09-14-roadmap.md` (the "Still to order" table becomes a pointer to the BOM)
+
+**Interfaces:** none (documentation). Source of truth for parts stays spec §3.1/§3.3; the BOM adds quantities, status, and where to buy in South Africa.
+
+- [ ] **Step 1: Write `docs/hardware/bom.md`**
+
+```markdown
+# Prototype bill of materials
+
+Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superpowers/specs/2026-09-14-lap-timer-design.md`. Status: **owned** (in hand), **ordered** (with expected arrival), **to order**. Prices are approximate South African landed prices in September 2026 and are only there to size the order.
+
+## Core electronics
+
+| # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
+|---|------|-----|---------|------|--------|-----------|--------|
+| 1 | ESP32 DevKit V1 (ESP32-WROOM-32, CH340, 4 MB) | 1 | controller; verified ESP32-D0WD-V3 rev 3.1, 4 MB flash | §3.1, §3.3 | owned | — | — |
+| 2 | GY-NEO6M v2 GPS module | 1 | position, speed, time (5 Hz prototype) | §3.1, §7.3 | ordered, ~mid-Oct 2026 | Communica / Micro Robotics | R150 |
+| 3 | GY-521 (MPU6050) | 1 | lean angle, g-forces, motion wake | §3.1, §8 | ordered, ~mid-Oct 2026 | Communica / Micro Robotics | R60 |
+| 4 | Waveshare 2.9" e-Paper Module V2 (SSD1680, 296×128) | 1 | rider display | §3.1, §20.1 | to order | DIYElectronics / Micro Robotics | R450 |
+
+## Power
+
+| # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
+|---|------|-----|---------|------|--------|-----------|--------|
+| 5 | 18650 INR 3000 mAh 15 A, flat top | 2 | battery pack, wired in parallel (1S2P) | §3.1 | ordered, ~21 Sep 2026 | Communica / local vape shops | R120 ea |
+| 6 | 2-slot 18650 holder | 1 | pack | §3.1 | ordered, ~21 Sep 2026 | Communica | R30 |
+| 7 | TP4056 charger module, 6-pad (DW01A + FS8205A protection) | 1 | charging + cell protection | §3.1, §3.2 | ordered, ~21 Sep 2026 (verify 6-pad) | Communica / Micro Robotics | R25 |
+| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≤ 60 µA quiescent | §3.1, §3.2 | to order | RS Components ZA / Mantech / AliExpress | R20 |
+| 9 | 10 µF ceramic capacitor | 2 | regulator in/out | §3.1 | to order | Communica | R5 |
+| 10 | 470 µF electrolytic capacitor, 6.3 V+ | 1 | rail bulk for radio bursts | §3.1 | to order | Communica | R5 |
+| 11 | P-channel MOSFET AO3401A or SI2301 | 1 (+1 spare) | GPS power switch (PARK) | §3.1, §3.3 | to order | Mantech / RS / AliExpress | R10 |
+| 12 | 100 kΩ resistor | 5 | MOSFET gate pull-up, 3× button pull-downs, CHRG pull-up | §3.1, §3.3 | to order | Communica | R5 |
+| 13 | 470 kΩ resistor | 2 | battery divider | §3.1 | to order | Communica | R5 |
+| 14 | 100 nF ceramic capacitor | 1 | divider filter | §3.1 | to order | Communica | R2 |
+| 15 | SS14 Schottky diode | 1 | optional: USB + battery co-existence | §3.2 | to order (optional) | Communica | R3 |
+| 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §16 | to order | Communica | R15 |
+
+## Controls, wiring, enclosure
+
+| # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
+|---|------|-----|---------|------|--------|-----------|--------|
+| 17 | 12 mm momentary pushbutton, sealed, glove-friendly | 3 | MODE / UP / DOWN | §3.3, §20.8 | to order | Communica / AliExpress | R15 ea |
+| 18 | Silicone hook-up wire, 22–26 AWG, and Dupont leads | 1 lot | interconnect | §3.4 | to order | Communica | R60 |
+| 19 | Prototyping perfboard 5×7 cm | 1 | regulator, MOSFET, divider, pull-downs | §3.4 | to order | Communica | R20 |
+| 20 | IP65 ABS enclosure ≈ 115×90×55 mm, clear lid | 1 | weatherproof housing; e-paper behind the lid | §2.3 C3 | to order | Communica / Mantech | R120 |
+| 21 | RAM-style ball mount or handlebar clamp | 1 | mounting on the bike | §2.3 C3 | to order | local motorcycle shop | R250 |
+| 22 | Cable gland PG7 | 1 | charge port / USB lead | — | to order | Communica | R10 |
+| 23 | Double-sided foam / vibration pads | 1 lot | IMU and board damping | §8 | to order | hardware store | R30 |
+
+## Bench and tooling
+
+| # | Item | Purpose | Status |
+|---|------|---------|--------|
+| 24 | USB-A to micro-USB data cable | flashing, serial console | owned |
+| 25 | Multimeter | power-state current measurements (§16.5) | owned (verify) |
+| 26 | USB-UART adapter (CP2102/CH340) | `tools/gps_sim.py` replay into GPIO 16 before the GPS arrives; optional with the `gps_sim` driver | optional |
+| 27 | Bench power supply (variable) | brownout test (§22.3) | optional |
+
+## Upgrade path (not needed for the prototype)
+
+| Part | Replaces | Spec |
+|------|----------|------|
+| SEQURE M10-25Q (u-blox M10, 10 Hz, QMC5883L) | GY-NEO6M v2 | §3.5, O3 |
+| microSD SPI module | internal-only storage | §13.2, O4 |
+| Sharp memory LCD LS027B7DH01 or 2.42" SSD1309 OLED | e-paper (live delta variant) | O5 |
+| Battery-native ESP32 board (FireBeetle 2, FeatherS3) | DevKit + external regulator | §3.5 |
+
+## Order checklist (window B, before session 6.1)
+
+Items 8–16 and 17–23 above; the regulator (8) and MOSFET (11) gate the power work in plan 6. Confirm the TP4056 (7) is the 6-pad protected version on arrival; if not, order one before wiring the pack.
+```
+
+- [ ] **Step 2: Link it**
+
+`README.md`: add a section `## Hardware` after `## Firmware` with the line `Prototype parts, quantities, order status and South African sources: [docs/hardware/bom.md](docs/hardware/bom.md). Pin map and electrical details: spec §3.` In the roadmap, replace the "### Still to order" table body with the sentence `See [docs/hardware/bom.md](../hardware/bom.md) for the maintained list with quantities, status, and sources.` (keep the heading).
+
+- [ ] **Step 3: Verify and commit**
+
+`git diff --check` clean; hygiene command prints nothing. Commit: subject `docs: prototype bill of materials`, trailers.
+
 ## Self-review
 
 **Spec coverage (plan 1 scope = §4.1 layering, §5.2 core API subset, §6.1–6.4 math, §12, §14, §15.1, §10.1–10.2):**
