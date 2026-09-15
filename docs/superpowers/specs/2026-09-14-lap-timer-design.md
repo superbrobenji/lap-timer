@@ -388,7 +388,19 @@ Generated `build_config.h`:
 #define CFG_FUSED_LOG_HZ 10
 ```
 
-Named environments: `moto_neo6m` (= moto, neo6m, epaper, internal, ble), `moto_sim` (= moto, sim, sim, epaper_ssd1680, internal, ble; bench builds until sensors arrive), `moto_neo6m_wifi`, `moto_m10`, `moto_m10_sd`, `car_neo6m`, `car_m10`. `build.sh` maps names to flag sets and uses `-B build/<env>`.
+Named environments. Each tuple is `VARIANT, GPS, IMU, DISPLAY, STORAGE, CONN` in full enum values; every other flag keeps its default from the table above. `build.sh` maps names to flag sets and uses `-B build/<env>`.
+
+| Environment | VARIANT | GPS | IMU | DISPLAY | STORAGE | CONN |
+|-------------|---------|-----|-----|---------|---------|------|
+| `moto_neo6m` | `moto` | `neo6m` | `mpu6050` | `epaper_ssd1680` | `internal` | `ble` |
+| `moto_sim` | `moto` | `sim` | `sim` | `epaper_ssd1680` | `internal` | `ble` |
+| `moto_neo6m_wifi` | `moto` | `neo6m` | `mpu6050` | `epaper_ssd1680` | `internal` | `ble_wifi` |
+| `moto_m10` | `moto` | `m10` | `mpu6050` | `epaper_ssd1680` | `internal` | `ble` |
+| `moto_m10_sd` | `moto` | `m10` | `mpu6050` | `epaper_ssd1680` | `sd` | `ble` |
+| `car_neo6m` | `car` | `neo6m` | `mpu6050` | `oled_ssd1309` | `internal` | `ble` |
+| `car_m10` | `car` | `m10` | `mpu6050` | `oled_ssd1309` | `internal` | `ble` |
+
+`moto_sim` is the bench build used until the sensors arrive.
 
 ### 4.7 Boot sequence (`app_main`)
 
@@ -422,10 +434,19 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | Logger batch buffer | 4 KB |
 | UART RX ring | 2 KB |
 | LittleFS cache/lookahead | ~2 KB |
-| Export streaming window | 1 KB |
+| User track store, `TRK_MAX_USER` × `trk_venue_t` (2752 B each), `.bss` | 11,008 B |
+| `trk_from_json` token array, 512 × `jsmntok_t` (20 B), `.bss` | 10,240 B |
+| `cfg_from_json` token array, 192 × `jsmntok_t` (20 B), `.bss` | 3,840 B |
+| `exp_t` (holds the 1 KB export streaming window and the decoder state) | 1,488 B |
+| `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
 | Lap engine (venue + 8 layouts × 16 gates) | ~3 KB |
 | Predictive delta table (O5) | 2.4 KB |
-| Headroom | > 100 KB |
+| Headroom | > 90 KB |
+
+Sizes with a byte figure are measured with the ESP32 toolchain (`xtensa-esp32-elf-gcc`, 32-bit
+`size_t`), not estimated. The first four are permanently resident `.bss`; `exp_t` and `ses_reader_t`
+are owned by the connectivity task and exist only while an export runs. Bundled venues are `const`
+and live in flash, not DRAM, at ~2.75 KB each.
 
 Hard rule: `heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)` MUST stay above 40 KB during BLE transfer; supervisor logs `E_SYS_HEAP_LOW` below that and disables BLE below 20 KB.
 
@@ -565,43 +586,143 @@ int64_t conn_last_activity_mono_us(void);
 
 ### 5.2 Core API (pure C)
 
+The blocks below are the declarations as they exist in `components/core/include/core/`. Modules not
+yet implemented (`fus`, `lap`, `drag`) show the intended function list with their types marked as
+planned; everything else is copied from the headers.
+
+#### `core/core.h`
+
+```c
+const char *core_version(void);
+
+/* Core assertions (§17.9). A failing check reports `code` through the hook and returns an error to
+ * the caller; it never aborts on target. NULL (the default) is silent. */
+typedef void (*core_assert_hook_t)(uint16_t code, const char *file, int line);
+void core_set_assert_hook(core_assert_hook_t hook);       /* NULL = silent */
+void core_assert_fail(uint16_t code, const char *file, int line);
+#define CORE_ASSERT_RET(cond, code, ret) do { if (!(cond)) { core_assert_fail((code), __FILE__, __LINE__); return (ret); } } while (0)
+#define CORE_ASSERT_VOID(cond, code)     do { if (!(cond)) { core_assert_fail((code), __FILE__, __LINE__); return; } } while (0)
+```
+
 #### `core/tb.h` — timebase
 
 ```c
-typedef struct { int64_t offset_us; int64_t window_min_us; int64_t window_start_mono_us; uint8_t locked; uint8_t quality; } tb_t;
+typedef struct {
+    int64_t  half_min[2];          /* minimum offset seen in each half window */
+    int64_t  half_start_mono[2];   /* mono_us when each half started */
+    bool     half_valid[2];
+    int      cur;                  /* index of the half currently being filled */
+    uint32_t fixes;
+    int64_t  filt_offset_us;       /* min over valid halves */
+    int64_t  pps_offset_us;
+    int64_t  pps_edge_mono_us;     /* mono time of the last accepted PPS edge */
+    bool     pps_valid;
+} tb_t;
+
+int64_t tb_days_from_civil(int y, unsigned m, unsigned d);
+int64_t tb_gps_us_from_utc(int y, unsigned m, unsigned d, unsigned hh, unsigned mm, unsigned ss, int32_t nano);
+
 void    tb_init(tb_t *t);
-void    tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us);   /* min-filter update (§6.2) */
+/* serial_time_us = len*10/baud of the message just received; subtracted from the arrival stamp. Also expires a PPS lock whose last edge is older than TB_PPS_STALE_US. */
+void    tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t serial_time_us);
 void    tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us);
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us);
 bool    tb_locked(const tb_t *t);
+uint8_t tb_quality(const tb_t *t);     /* 0 unlocked, 1 min-filter, 2 PPS */
 ```
 
 #### `core/geo.h`
 
 ```c
-typedef struct { double x, y; } geo_enu_t;                  /* metres */
+#define GEO_PI        3.14159265358979323846
+#define GEO_EARTH_R_M EARTH_R_M
+
+typedef struct { double x, y; } geo_enu_t;                       /* metres east, north */
 typedef struct { double lat0_rad, lon0_rad, cos_lat0; } geo_origin_t;
-void    geo_origin_set(geo_origin_t *o, double lat_deg, double lon_deg);
+
+void      geo_origin_set(geo_origin_t *o, double lat_deg, double lon_deg);
 geo_enu_t geo_to_enu(const geo_origin_t *o, double lat_deg, double lon_deg);
-double  geo_dist_m(double lat1, double lon1, double lat2, double lon2);   /* haversine */
-/* segment intersection: returns 1 and fills t (fraction along AB) and side sign if AB crosses gate PQ properly */
-int     geo_segment_cross(geo_enu_t a, geo_enu_t b, geo_enu_t p, geo_enu_t q, double *t_out, int *dir_sign_out);
-double  geo_dist_point_segment(geo_enu_t x, geo_enu_t p, geo_enu_t q);
-/* constant-acceleration interpolation: distance d along a segment traversed from speed v0 to v1 over dt */
-double  geo_interp_time(double d, double v0, double v1, double dt);   /* returns τ in [0, dt] */
+double    geo_dist_m(double lat1_deg, double lon1_deg, double lat2_deg, double lon2_deg);
+/* Returns 1 if segment a→b properly crosses gate p→q. t_out = fraction along a→b (0..1).
+ * dir_sign_out = sign(cross(q−p, b−a)): +1 when p is the left end of the gate seen from the motion. */
+int       geo_segment_cross(geo_enu_t a, geo_enu_t b, geo_enu_t p, geo_enu_t q, double *t_out, int *dir_sign_out);
+double    geo_dist_point_segment(geo_enu_t x, geo_enu_t p, geo_enu_t q);
+/* Time τ (0..dt) to travel distance d along a segment entered at speed v0 and left at v1 after dt,
+ * assuming constant acceleration. (§6.4 step 4) */
+double    geo_interp_time(double d, double v0, double v1, double dt);
 ```
 
-#### `core/fus.h` — fusion
+#### `core/types.h` — shared record types
+
+```c
+#define LAP_MAX_SECTORS 8
+#define DRAG_MAX_GATES  16
+
+typedef struct {
+    int64_t  gps_us;      /* UTC microseconds since Unix epoch; 0 if time invalid */
+    int64_t  mono_us;     /* arrival time of the last byte of the message */
+    int32_t  lat_e7;      /* degrees * 1e7 */
+    int32_t  lon_e7;
+    int32_t  alt_mm;      /* height above MSL */
+    int32_t  gspeed_mms;  /* Doppler ground speed, mm/s */
+    int32_t  head_e5;     /* heading of motion, degrees * 1e5, 0..36e6 */
+    uint32_t hacc_mm;
+    uint32_t sacc_mms;
+    uint16_t pdop_e2;
+    uint8_t  fix_type;    /* 0 none, 2 2D, 3 3D */
+    uint8_t  sats;
+    uint8_t  flags;       /* GPS_FLAG_* */
+    uint8_t  valid;       /* set by the pipeline validity rule (§6.5) */
+} gps_fix_t;
+
+typedef struct {
+    int64_t mono_us;
+    int16_t ax, ay, az;   /* raw LSB, ±16 g  → 2048 LSB/g */
+    int16_t gx, gy, gz;   /* raw LSB, ±2000 dps → 16.4 LSB/dps */
+} imu_raw_t;
+
+typedef struct {
+    int64_t mono_us;
+    int64_t gps_us;       /* tb_mono_to_gps(mono_us) */
+    float   g_lon, g_lat, g_comb;   /* g; +lat = right */
+    float   lean_deg;               /* + = right */
+    float   yaw_dps;                /* earth frame, + = left turn */
+    uint8_t flags;                  /* FUS_* */
+} fused_sample_t;
+
+typedef struct {
+    uint16_t max_speed_cms, min_speed_cms;
+    int16_t  max_lean_l_cdeg, max_lean_r_cdeg;
+    int16_t  max_glat_e3, max_gacc_e3, max_gbrake_e3;
+} lap_stats_t;                       /* 14 bytes packed on the wire */
+
+typedef struct {
+    uint16_t    lap_no;
+    int64_t     start_gps_us;
+    uint32_t    time_ms;
+    uint8_t     flags;               /* LAP_F_* */
+    uint8_t     n_sectors;           /* number of splits = sector gates + 1 */
+    uint32_t    sector_ms[LAP_MAX_SECTORS + 1];
+    lap_stats_t stats;
+} lap_result_t;
+
+typedef struct { uint8_t gate_id; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; uint8_t hit; } drag_gate_res_t;
+typedef struct {
+    uint16_t        run_no;
+    int64_t         t0_gps_us;
+    uint8_t         flags;           /* DRAG_F_* */
+    uint8_t         n_gates;
+    uint16_t        trap_cms;
+    drag_gate_res_t gates[DRAG_MAX_GATES];
+} drag_result_t;
+```
+
+#### `core/fus.h` — fusion (planned, plan 02)
+
+`fused_sample_t` lives in `core/types.h` above. The remaining types and the function list:
 
 ```c
 typedef struct { float r[9]; float gbias[3]; int16_t gbias_temp_c100; uint8_t orient_ok; uint8_t forward_ok; uint8_t version; } fus_calib_t;
-typedef struct {
-    int64_t mono_us;
-    float   g_lon, g_lat, g_comb;   /* g, +lat = right */
-    float   lean_deg;               /* + = right */
-    float   yaw_dps;                /* earth-frame, + = left turn */
-    uint8_t flags;                  /* FUS_LEAN_VALID, FUS_ORIENT_OK, FUS_STILL, FUS_DISAGREE */
-} fused_sample_t;
 typedef struct { /* internal state */ float lean_rad; float still_acc_var, still_gyr_var; ... } fus_t;
 
 void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);
@@ -615,16 +736,11 @@ int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* l
 const fus_calib_t *fus_calib(const fus_t *f);
 ```
 
-#### `core/lap.h` — lap engine
+#### `core/lap.h` — lap engine (planned, plan 02)
+
+`lap_result_t`, `lap_stats_t` and the `trk_*` types live in `core/types.h` and `core/trk.h`. The function list:
 
 ```c
-typedef struct { double lat, lon; } trk_pt_t;
-typedef struct { trk_pt_t p1, p2; } trk_line_t;
-typedef struct { uint16_t id; char name[24]; trk_line_t sf; int8_t dir_sign; uint8_t n_sectors; trk_line_t sectors[LAP_MAX_SECTORS]; uint32_t length_m; } trk_layout_t;
-typedef struct { uint16_t id; char name[32]; double lat, lon; uint32_t radius_m; uint8_t n_layouts; trk_layout_t layouts[TRK_MAX_LAYOUTS]; } trk_venue_t;
-
-typedef struct { uint16_t lap_no; int64_t start_gps_us; uint32_t time_ms; uint8_t flags; uint8_t n_sectors; uint32_t sector_ms[LAP_MAX_SECTORS]; lap_stats_t stats; } lap_result_t;
-
 void lap_init(lap_t *L, const lap_cfg_t *cfg);
 void lap_set_venue(lap_t *L, const trk_venue_t *v);          /* enters VENUE_FOUND */
 void lap_force_layout(lap_t *L, uint16_t layout_id);
@@ -639,12 +755,10 @@ uint32_t lap_theoretical_best_ms(const lap_t *L);
 int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);  /* on-device creation */
 ```
 
-#### `core/drag.h`
+#### `core/drag.h` (planned, plan 02)
 
 ```c
 typedef struct { uint8_t id; uint8_t kind; /* DRAG_SPEED_FROM0, DRAG_SPEED_RANGE, DRAG_DIST, DRAG_BRAKE */ uint16_t a, b; /* km/h or cm */ } drag_gate_def_t;
-typedef struct { uint8_t gate_id; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; uint8_t hit; } drag_gate_res_t;
-typedef struct { uint16_t run_no; int64_t t0_gps_us; uint8_t flags; uint8_t n_gates; drag_gate_res_t gates[DRAG_MAX_GATES]; uint16_t trap_cms; } drag_result_t;
 
 void drag_init(drag_t *D, const drag_cfg_t *cfg);
 void drag_reset(drag_t *D);
@@ -658,24 +772,165 @@ const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id);
 #### `core/ses.h` — session records and framing
 
 ```c
-int  ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t out_cap);  /* returns bytes written */
-int  ses_frame_decode(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);   /* streaming, resyncs */
-int  ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *fix, uint8_t *out, size_t cap);          /* chooses KEY vs DELTA */
-int  ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *out, size_t cap);
-int  ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
-int  ses_encode_drag(const drag_result_t *run, uint8_t *out, size_t cap);
+/* Record types (spec §12.3) */
+enum {
+    SES_T_SESSION_HDR = 0x01, SES_T_FIX_KEY = 0x02, SES_T_FIX_DELTA = 0x03, SES_T_FUSED = 0x04,
+    SES_T_LAP = 0x05, SES_T_SECTOR = 0x06, SES_T_DRAG_RUN = 0x07, SES_T_DRAG_GATE = 0x08,
+    SES_T_EVENT = 0x09, SES_T_CALIB = 0x0A, SES_T_MARK = 0x0B, SES_T_TIME_MAP = 0x0C,
+    SES_T_VENUE = 0x0D, SES_T_POWER = 0x0E, SES_T_END = 0x7F
+};
+
+#define SES_FRAME_OVERHEAD 5      /* sync + type + len + crc16 */
+
 uint16_t ses_crc16(const uint8_t *buf, size_t n);
+/* Writes sync|type|len|payload|crc16 into out. Returns bytes written, or -1 if cap is too small or len > SES_MAX_PAYLOAD. */
+int      ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
+
+/* Invoked once per valid frame. `payload` points into the reader's internal buffer and is valid
+ * only for the duration of the callback: copy what you need before returning. */
+typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx);
+
+typedef struct {
+    uint8_t  state;                           /* 0 = hunting sync, 1 = collecting */
+    uint16_t idx;                             /* bytes collected into buf */
+    uint16_t need;                            /* total bytes expected in buf once len is known */
+    uint8_t  buf[2 + SES_MAX_PAYLOAD + 2];    /* type, len, payload, crc */
+    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];    /* rescan buffer; proven bound is 2+247+2 bytes, kept at 2x for headroom */
+    uint16_t replay_len, replay_pos;
+    uint32_t frames_ok, frames_bad;
+} ses_reader_t;
+
+void ses_reader_init(ses_reader_t *r);
+/* Feed any number of bytes; cb is invoked once per valid frame. Resynchronises after corruption. */
+void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);
+/* Call once at the end of a bounded input (a file). A frame that can never complete is treated as
+ * bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync
+ * near EOF is still recovered. Idempotent when the reader is idle. */
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
+
+/* ---- Record codecs (spec §12.3, §12.4) ---- */
+
+typedef struct {
+    bool      have_prev;
+    gps_fix_t prev;               /* reconstructed previous fix (what a decoder holds) */
+    int64_t   last_key_gps_us;
+    bool      prev_valid;
+} ses_fix_state_t;
+void ses_fix_state_init(ses_fix_state_t *st);
+/* Chooses FIX_KEY or FIX_DELTA. Returns frame length or -1. */
+int  ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *fix, uint8_t *out, size_t cap);
+/* Returns 1 and fills out for FIX_KEY/FIX_DELTA; 0 for other types; -1 on malformed. */
+int  ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, uint8_t len, gps_fix_t *out);
+
+typedef struct { int64_t ref_gps_us; bool have_ref; } ses_fused_state_t;
+void ses_fused_state_init(ses_fused_state_t *st);
+void ses_fused_state_on_fix(ses_fused_state_t *st, int64_t fix_gps_us);   /* call on both sides when a FIX_* passes */
+int  ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *out, size_t cap);
+int  ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len, fused_sample_t *out);
+
+int  ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
+int  ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out);
+
+/* Every decoder below validates `len` exactly and returns 1 on success, -1 on a malformed payload.
+ * The structs mirror the wire payloads of §12.3; char arrays carry one extra byte so the decoded
+ * value is always NUL-terminated (the wire size is unchanged). */
+typedef struct { uint16_t lap_no; uint8_t idx; int64_t gps_us; uint32_t split_ms; int32_t delta_ms; } ses_sector_t;
+typedef struct { uint16_t run_no; uint8_t gate_id; int64_t gps_us; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; } ses_drag_gate_t;
+typedef struct { int64_t mono_us, gps_us; uint16_t code; uint32_t arg; } ses_event_t;
+typedef struct { int64_t mono_us, gps_us; uint8_t quality; } ses_time_map_t;
+typedef struct { uint16_t venue_id, layout_id; char name[33]; } ses_venue_t;     /* name is char[32] on the wire */
+typedef struct { int64_t mono_us; uint8_t state; uint16_t batt_mv; } ses_power_t;
+typedef struct { int64_t gps_us; uint8_t reason; } ses_end_t;
+typedef struct { int64_t gps_us; uint8_t kind; } ses_mark_t;
+typedef struct { int16_t r_e4[9]; int16_t gbias[3]; uint8_t calib_flags; } ses_calib_t;   /* 25 B payload */
+
+int  ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap);
+int  ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out);
+int  ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap);
+int  ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out);
+int  ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap);
+int  ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out);
+int  ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap);
+int  ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out);
+int  ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap);
+int  ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out);
+int  ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap);
+int  ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out);
+int  ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap);
+int  ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out);
+int  ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap);
+int  ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out);
+int  ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap);
+int  ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out);
+int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
+int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
+
+typedef struct {
+    char     session_id[10];
+    uint8_t  mode, variant;
+    uint16_t venue_id, layout_id;
+    char     fw[17];              /* char[16] on the wire + NUL */
+    char     hwid[25];            /* char[24] on the wire + NUL */
+    uint8_t  log_profile, fused_hz, gps_hz;
+    int64_t  start_gps_us;
+    int16_t  r_e4[9];             /* rotation matrix × 1e4, row-major */
+    int16_t  gbias[3];
+    uint8_t  calib_flags;
+} ses_hdr_t;
+int  ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap);
+int  ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out);
 ```
 
 #### `core/exp.h` — exporters
 
 ```c
-typedef struct { /* opaque; holds decoder state, pending output, current row */ } exp_t;
-int  exp_open(exp_t *e, uint8_t format, const ses_session_meta_t *meta);
-/* feed decoded frames in; pull text out. Producer calls exp_feed until it returns EXP_FULL, then exp_pull until empty. */
-int  exp_feed(exp_t *e, uint8_t type, const void *payload, uint8_t len);
-int  exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out);
-int  exp_finish(exp_t *e);
+enum { EXP_VBO = 1, EXP_NMEA = 2, EXP_JSON = 3 };
+#define EXP_FULL 1
+#define EXP_WINDOW 1024
+
+/* char arrays carry one byte more than the matching wire field so the value is always NUL-terminated */
+typedef struct {
+    char    session_id[11];
+    char    fw[17];
+    char    hwid[25];
+    char    venue[33];
+    char    layout[25];
+    int64_t created_gps_us;
+    uint8_t has_sf;
+    double  sf_lat1, sf_lon1, sf_lat2, sf_lon2;
+} exp_meta_t;
+
+typedef struct { /* format, output window, decoder state, JSON summary state; see the header */ } exp_t;
+
+int  exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
+int  exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len);   /* 0 consumed, EXP_FULL retry after pull, -1 error */
+int  exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out);           /* 0 ok (n_out may be 0), -1 error */
+int  exp_finish(exp_t *e);                                                   /* may return EXP_FULL: pull, then call again. Returns 0 (no-op) if already finished, -1 if a DRAG_RUN frame is mid-emission (re-feed it first). */
+```
+
+`exp_feed` and `exp_finish` return `EXP_FULL` (1) when the 1 KB output window cannot take the next
+chunk: the caller drains it with `exp_pull` and repeats the same call. `exp_finish` returns −1 only
+when a `DRAG_RUN` frame is half-emitted — the caller must re-feed that frame to completion first —
+and the exporter is then *not* marked finished, so the sequence can be resumed.
+
+#### `core/json.h` — jsmn helpers
+
+```c
+/* Maximum nesting depth accepted by json_parse: a token with more than JSON_MAX_DEPTH
+ * ancestors makes the whole document invalid. Config and track documents nest 6 deep. */
+#define JSON_MAX_DEPTH 16
+
+/* Parses and enforces JSON_MAX_DEPTH. Returns the token count, or -1 on a jsmn error or too deep. */
+int    json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks);
+bool   json_tok_eq(const char *js, const jsmntok_t *t, const char *s);
+/* Iterative (no recursion): the subtree of token i is the run of following tokens that start
+ * before toks[i].end, which JSMN_PARENT_LINKS guarantees is contiguous. */
+int    json_skip(const jsmntok_t *toks, int ntoks, int i);
+bool   json_tok_int(const char *js, const jsmntok_t *t, int64_t *out);
+bool   json_tok_double(const char *js, const jsmntok_t *t, double *out);
+bool   json_tok_bool(const char *js, const jsmntok_t *t, bool *out);
+size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap);
+int    json_obj_get(const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *key);
 ```
 
 #### `core/cfg.h`
@@ -684,25 +939,67 @@ int  exp_finish(exp_t *e);
 /* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
  * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */
 typedef struct { bool display_live_clock; uint8_t log_fused_hz; const char *ble_name; } cfg_profile_t;
-int  cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
 
-int  cfg_defaults(cfg_t *c);
-int  cfg_validate(cfg_t *c);                         /* clamps out-of-range fields, returns count of corrections */
-int  cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);
-int  cfg_to_json(const cfg_t *c, char *out, size_t cap);
-int  cfg_migrate(cfg_t *c, uint8_t from_version);
+int cfg_defaults(cfg_t *c);
+int cfg_validate(cfg_t *c);                       /* clamps; returns number of corrected fields */
+int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; "version" is ignored (owned by firmware); arrays longer than capacity are rejected; 0 ok / -1 error with err */
+int cfg_to_json(const cfg_t *c, char *out, size_t cap);                             /* bytes written or -1 */
+int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version */
 ```
+
+`err` is optional throughout: `NULL` or a zero capacity discards the message. On `-1` the caller's
+`cfg_t` is left exactly as it was — the merge is applied to a copy and only swapped in on success.
+The full field table, ranges and defaults are in §15.1.
 
 #### `core/trk.h`
 
 ```c
-const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* bundled + user; NULL if none within radius */
-int  trk_user_add(const trk_venue_t *v);
-int  trk_user_load(const uint8_t *blob, size_t n);
-int  trk_user_save(uint8_t *blob, size_t cap, size_t *n_out);
-int  trk_from_json(trk_venue_t *out, const char *json, size_t n);
-int  trk_to_json(const trk_venue_t *v, char *out, size_t cap);
+#define TRK_F_UNVERIFIED 0x01
+#define TRK_USER_ID_BASE 1000
+
+typedef struct { double lat, lon; } trk_pt_t;
+typedef struct { trk_pt_t p1, p2; } trk_line_t;      /* p1 = left end, p2 = right end in driving direction */
+typedef struct {
+    uint16_t   id;
+    char       name[24];
+    trk_line_t sf;
+    int8_t     dir_sign;                             /* +1 / -1 (§6.4) */
+    uint8_t    n_sectors;                            /* sector gates, excluding S/F */
+    trk_line_t sectors[LAP_MAX_SECTORS];
+    uint32_t   length_m;
+} trk_layout_t;
+typedef struct {
+    uint16_t     id;                                 /* bundled 1..999, user 1000+ */
+    char         name[32];
+    double       lat, lon;
+    uint32_t     radius_m;
+    uint8_t      flags;                              /* TRK_F_* */
+    uint8_t      n_layouts;
+    trk_layout_t layouts[TRK_MAX_LAYOUTS];
+} trk_venue_t;
+
+extern const trk_venue_t trk_bundled[];
+extern const uint16_t    trk_bundled_count;
+
+/* The user store is module-static and not protected by a lock (see trk.c). */
+void               trk_init(void);                                   /* clears the user store */
+int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
+const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
+const trk_venue_t *trk_get(uint16_t venue_id);
+int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full or invalid */
+int                trk_user_count(void);
+uint16_t           trk_next_user_id(void);
+/* Blob v2: u8 version(2) | u8 count | trk_venue_t[count] | u16 crc16 LE. Load rejects a wrong
+ * version, count, size or CRC and any venue failing trk_validate_venue, leaving the store empty. */
+int                trk_user_load(const uint8_t *blob, size_t n);
+int                trk_user_save(uint8_t *blob, size_t cap, size_t *n_out);
+int                trk_from_json(trk_venue_t *out, const char *json, size_t n, char *err, size_t err_cap);
+int                trk_to_json(const trk_venue_t *v, char *out, size_t cap);
 ```
+
+`trk_from_json` and `cfg_from_json` each own a module-static jsmn token array and are therefore not
+reentrant; both are called only from the single connectivity task.
 
 ---
 
@@ -747,6 +1044,11 @@ Inputs: previous fix `A` (ENU `a`, speed `v0`, time `tA`), current fix `B` (`b`,
 2. Segment intersection: `r = b − a`, `s = q − p`, `den = r × s`. If `|den| < 1e-9` (parallel), no crossing. `t = ((p − a) × s) / den`, `u = ((p − a) × r) / den`. Crossing iff `0 ≤ t ≤ 1` and `0 ≤ u ≤ 1`.
 3. Direction: `side = sign(s × r)`. Crossing accepted iff `side == dir_sign`. (Reverse layouts are the same line with `dir_sign` negated.)
 4. Crossing time: `d = t · |r|`, `dt = tB − tA`, `acc = (v1 − v0)/dt`. If `|acc| < 0.01` m/s²: `τ = d / v0`. Else `τ = (−v0 + sqrt(v0² + 2·acc·d)) / acc`, clamped to `[0, dt]`. `t_cross = tA + τ`.
+   Two degenerate inputs are handled explicitly rather than producing a division by zero or a NaN:
+   when `|acc| < 0.01` **and** `v0 ≤ 1e-6` m/s the vehicle is not moving, so `τ = dt` — the crossing
+   is attributed to the end of the interval instead of to `d / 0`; and when the discriminant
+   `v0² + 2·acc·d` is negative (a deceleration that can never cover `d`) it is treated as zero, which
+   with the `[0, dt]` clamp also yields `τ = dt`. `dt ≤ 0` or `d ≤ 0` return `τ = 0`.
 5. Debounce: a gate that fired is disabled until `geo_dist_point_segment(current, P, Q) > GATE_REARM_DIST_M` **and** `now − t_cross > GATE_REARM_MIN_S`; the S/F gate additionally requires `now − t_cross > MIN_LAP_S`.
 6. Gate half-width: bundled and user gates are stored as two endpoints; on-device creation builds a 30 m line (`GATE_HALF_WIDTH_M` = 15 each side of the crossing point, perpendicular to heading).
 
@@ -1092,7 +1394,17 @@ typedef struct {
 
 Bundled venues are generated from `tools/tracks/*.json` (schema §10.2) by `gen_tracks.py` into `trk_bundled.c` as a `const` array in flash. Initial set (start/finish coordinates approximate until verified on site **[VERIFY]**): Kyalami (Full), Zwartkops (Full, Short), Red Star Raceway (Full, Short), Phakisa (Full), Aldo Scribante (Full), Killarney (Full, Full Reverse, Short, Short Reverse), Dezzi Raceway (Full), East London Grand Prix Circuit (Full), Midvaal (Full). Kart venues are added as data arrives.
 
-User venues: `/tracks/user.bin` = `u8 version | u8 count | trk_venue_t[count]` packed. Max 4 user venues (each venue struct is ~2.75 KB; the store is static RAM). Loaded at boot; lookup merges bundled and user, user wins on id clash.
+User venues: `/tracks/user.bin` blob version 2 = `u8 version = 2 | u8 count | trk_venue_t[count] | u16 crc16 (LE)`, where the CRC is `ses_crc16` (CRC-16/CCITT-FALSE, §12.2) over every preceding byte. The venue structs are copied raw, so a blob is only valid for the build that wrote it. Max `TRK_MAX_USER` = 4 user venues (each venue struct is 2752 B; the store is 11,008 B of static RAM). Loaded at boot; lookup merges bundled and user, user wins on id clash.
+
+`trk_user_load` rejects a blob whose version is not 2, whose count exceeds `TRK_MAX_USER`, whose size is not `2 + count·sizeof(trk_venue_t) + 2`, or whose CRC does not match, and additionally re-validates every venue it contains. The validation rule (`trk_validate_venue`, also applied by `trk_user_add` and by `trk_from_json` after parsing) requires:
+
+- `id != 0`; `radius_m` in 100..50000; `n_layouts` in 1..`TRK_MAX_LAYOUTS`
+- every layout: `id != 0`, `dir_sign ∈ {+1, −1}`, `n_sectors ≤ LAP_MAX_SECTORS`
+- every `name` array NUL-terminated (`name[sizeof - 1] == '\0'`)
+- venue `lat`/`lon` finite and within ±90 / ±180
+- both endpoints of every line (S/F and each sector) finite
+
+On any failure the store is left empty and `-1` returned, so corrupted NVS degrades to "no user venues" rather than to out-of-range loop bounds. `trk_from_json` additionally rejects a line whose two endpoints are closer than 1 m (no crossing direction can be derived from it) and two layouts in one venue sharing an `id`; `gen_tracks.py` enforces the same two rules on the bundled sources.
 
 ### 10.2 Track JSON schema (tools and upload)
 
@@ -1262,6 +1574,11 @@ Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc;
 
 `FIX_DELTA` flags: bit0 valid, bit1 gnssFixOK, bit2 3D. `FUSED` flags = `fused_sample_t.flags`. `LAP` flags: bit0 GPS_LOST, bit1 PIT, bit2 INCOMPLETE, bit3 OUT_LAP, bit4 INTERRUPTED, bit5 TOO_LONG, bit6 VALID.
 
+The `char[n]` fields above are exactly `n` bytes on the wire and are *not* required to be
+NUL-terminated there — a 16-character firmware version fills `fw char[16]` completely. The matching
+in-memory structs (`ses_hdr_t.fw`, `.hwid`, `ses_venue_t.name`, and the `exp_meta_t` strings) carry
+one extra byte for a NUL so a decoded value is always a valid C string; wire sizes are unchanged.
+
 ### 12.4 Delta encoding rules
 
 - `FIX_KEY` is written for the first fix, every `FIX_KEYFRAME_S` seconds, after any invalid fix, and whenever a delta field would overflow (`|dlat| > 32767`, `dt > 65535 ms`, speed > 655 m/s, alt delta > 3276 m).
@@ -1360,7 +1677,7 @@ Session S00042_001
 Venue Killarney / Full
 
 [laptiming]
-Start -1110.9000 -2031.4020 -1110.9180 -2031.4092
+Start -1110.90000 -2031.40200 -1110.91800 -2031.40920
 
 [column names]
 sats time lat long velocity heading height lat_g lon_g lean yaw
@@ -1435,7 +1752,7 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 | `display.full_refresh_every` | `display.full_every` | u8 | 1–50 | 10 | partials between full refreshes |
 | `display.rotation` | `display.rotation` | u8 | 0,180 | 0 | |
 | `display.invert` | `display.invert` | bool | | false | |
-| `battery.cal` | `battery.cal[2]` | `{adc_mv:u16, true_mv:u16}`×2 | | identity | two-point |
+| `battery.cal` | `battery.cal[2]` | `{adc_mv:u16, true_mv:u16}`×2 | each value 1000–5000 mV; `adc_mv[1] ≥ adc_mv[0] + 100` and `true_mv[1] ≥ true_mv[0] + 100` | 3000/3000 and 4200/4200 (identity) | two-point; a pair that breaks the rule is not clamped field by field but reset to both defaults, counting one correction |
 | `ble.name` | `ble.name[16]` | string | ≤ 15 chars | `"LapTimer"` base; profile sets `LapTimer-XXXX` (last 2 MAC bytes) | |
 | `ble.adv_s` | `ble.adv_s` | u16 | 15–600 | 60 | |
 | `log.fused_hz` | `log.fused_hz` | u8 | 5,10,25 | 10 base; profile sets 10 (internal) or 25 (sd) | |
@@ -1682,7 +1999,7 @@ Classic ESP32 disables the instruction cache during SPI flash erase/write; code 
 
 - C11, `-Wall -Wextra -Werror -Wshadow` plus `-Wconversion` as a non-fatal warning (core), `-Os` on target. Vendored third-party files (Unity, jsmn) are compiled with warnings relaxed.
 - No `malloc` after init; all buffers static or in task-owned structs. `CONFIG_COMPILER_STACK_CHECK_MODE_STRONG` in debug builds.
-- Core assertions: `CORE_ASSERT(cond, code)` logs `code` and returns an error; never aborts on target. Host tests map it to Unity `TEST_FAIL`.
+- Core assertions: `CORE_ASSERT_RET(cond, code, ret)` and `CORE_ASSERT_VOID(cond, code)` (`core/core.h`) report `code` through the hook installed with `core_set_assert_hook` and return `ret` / return, respectively; they never abort on target. The app installs a hook that logs the code into the error ring (§17.7); host tests install one that records it; the default `NULL` hook is silent.
 - All time int64 µs; no floating-point time.
 - All on-flash records versioned and CRC'd.
 - ISRs only set flags / push to queues from ISR-safe APIs; they are `IRAM_ATTR`.
@@ -1798,7 +2115,7 @@ storage,    data, spiffs,   0x2B0000, 0x150000,
 ### 19.2 Image signing
 
 - `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y`, `CONFIG_SECURE_SIGNED_APPS_ECDSA_SCHEME=y` (ESP32 Secure Boot V1 signature scheme, works on all ESP32 revisions), `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y`, `CONFIG_SECURE_BOOT_VERIFICATION_KEY="keys/laptimer_pub.pem"` (public key embedded in the app).
-- Key generation (once, offline): `espsecure.py generate_signing_key --version 1 keys/laptimer_priv.pem`; public key extracted with `espsecure.py extract_public_key --version 1 --keyfile keys/laptimer_priv.pem keys/laptimer_pub.pem`. The private key is stored outside the repository (`.gitignore` excludes `*.pem`; only `laptimer_pub.pem` is committed via `git add -f`).
+- Key generation (once, offline): `espsecure.py generate_signing_key --version 1 keys/laptimer_priv.pem`; public key extracted with `espsecure.py extract_public_key --version 1 --keyfile keys/laptimer_priv.pem keys/laptimer_pub.pem`. The private key is stored outside the repository (`.gitignore` excludes `*.pem` but carries a `!keys/laptimer_pub.pem` exception, so the public key is committed normally).
 - `tools/sign_release.sh <env>`: builds, signs (`espsecure.py sign_data --version 1 --keyfile ... build/<env>/laptimer.bin`), verifies (`espsecure.py verify_signature`), writes `dist/laptimer-<version>-<hwid>.bin` and `dist/laptimer-<version>-<hwid>.sha256`.
 - `esp_ota_end()` verifies the signature before the slot is marked bootable; the bootloader verifies again on boot. Unsigned or wrongly signed images fail with `E_OTA_SIG`.
 
@@ -2012,7 +2329,7 @@ CONFIG_LITTLEFS_MAX_PARTITIONS=1
 CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
 ```
 
-The three `CONFIG_SECURE_*` lines and `CONFIG_SECURE_BOOT_VERIFICATION_KEY` are added in roadmap session 5.5 together with the generated public key `keys/laptimer_pub.pem` (committed with `git add -f`; `.gitignore` carries a `!keys/laptimer_pub.pem` exception). Until then `sdkconfig.defaults` omits them so dev builds are unsigned.
+The three `CONFIG_SECURE_*` lines and `CONFIG_SECURE_BOOT_VERIFICATION_KEY` are added in roadmap session 5.5 together with the generated public key `keys/laptimer_pub.pem` (`.gitignore` carries a `!keys/laptimer_pub.pem` exception, so no `-f` is needed). Until then `sdkconfig.defaults` omits them so dev builds are unsigned.
 
 `sdkconfig.defaults.moto` / `.car` currently only differ in `CONFIG_LAPTIMER_VARIANT_*` Kconfig symbols used by `app/ui` (kept for menuconfig visibility; the authoritative switch is `build_config.h`).
 

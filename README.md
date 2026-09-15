@@ -18,7 +18,11 @@ ESP32 GPS + IMU lap timer for track days and drag runs. Battery powered, fully o
 
 ## Host tests
 
-(The `test/` tree arrives with plan 01.)
+Unity lives in `test/unity` as a submodule, so after cloning:
+
+    git submodule update --init --recursive
+
+Then:
 
     cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug && cmake --build test/build && ctest --test-dir test/build --output-on-failure
 

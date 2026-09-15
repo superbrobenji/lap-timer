@@ -23,6 +23,11 @@ Bench results recorded per the spec (§22.4) and roadmap session exit criteria. 
 | exp_vbo | 2 | OK | 12 ms |
 | exp_nmea_json | 3 | OK | 21 ms |
 
+The suite times are dominated by one test: the two-thread ring stress runs 10,049 ms of the
+10,446 ms total, ~96 % of the whole on-target run. Every other suite together is under 0.4 s, so
+this table says almost nothing about the cost of the rest of the core — read it as "the ring stress
+still passes on hardware", not as a profile.
+
 Notes learned on the way (all fixed before this result):
 1. ESP-IDF builds its own `unity` component by default; it linked ahead of the vendored Unity and its ABI differs (no 64-bit support), which corrupted assert arguments and crashed. `EXCLUDE_COMPONENTS "unity" "cmock"` in the self-test project fixes it.
 2. Unity auto-enables 64-bit asserts only on 64-bit hosts; `UNITY_SUPPORT_64` must be defined on the target (now in the shared Unity config).
