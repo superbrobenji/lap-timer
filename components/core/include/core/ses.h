@@ -42,5 +42,51 @@ void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb
  * near EOF is still recovered. Idempotent when the reader is idle. */
 void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
 
-/* Record codecs are declared in Task 7 below this line. */
+/* ---- Record codecs (spec §12.3, §12.4) ---- */
+
+typedef struct {
+    bool      have_prev;
+    gps_fix_t prev;               /* reconstructed previous fix (what a decoder holds) */
+    int64_t   last_key_gps_us;
+    bool      prev_valid;
+} ses_fix_state_t;
+void ses_fix_state_init(ses_fix_state_t *st);
+/* Chooses FIX_KEY or FIX_DELTA. Returns frame length or -1. */
+int  ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *fix, uint8_t *out, size_t cap);
+/* Returns 1 and fills out for FIX_KEY/FIX_DELTA; 0 for other types; -1 on malformed. */
+int  ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, uint8_t len, gps_fix_t *out);
+
+typedef struct { int64_t ref_gps_us; bool have_ref; } ses_fused_state_t;
+void ses_fused_state_init(ses_fused_state_t *st);
+void ses_fused_state_on_fix(ses_fused_state_t *st, int64_t fix_gps_us);   /* call on both sides when a FIX_* passes */
+int  ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *out, size_t cap);
+int  ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len, fused_sample_t *out);
+
+int  ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
+int  ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out);
+int  ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap);
+int  ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap);
+int  ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out);
+int  ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap);
+int  ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap);
+int  ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap);
+int  ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap);
+int  ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap);
+int  ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap);
+int  ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap);
+
+typedef struct {
+    char     session_id[10];
+    uint8_t  mode, variant;
+    uint16_t venue_id, layout_id;
+    char     fw[16];
+    char     hwid[24];
+    uint8_t  log_profile, fused_hz, gps_hz;
+    int64_t  start_gps_us;
+    int16_t  r_e4[9];             /* rotation matrix × 1e4, row-major */
+    int16_t  gbias[3];
+    uint8_t  calib_flags;
+} ses_hdr_t;
+int  ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap);
+int  ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out);
 #endif
