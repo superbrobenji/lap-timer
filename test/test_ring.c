@@ -2,6 +2,10 @@
 #include "core/ring.h"
 #include <pthread.h>
 
+#ifndef RING_STRESS_N
+#define RING_STRESS_N 2000000ULL          /* target build overrides with -DRING_STRESS_N=20000ULL */
+#endif
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -80,7 +84,7 @@ static void test_concurrent_overwrite_oldest_never_returns_torn_items(void)
 {
     static stress_item_t storage[2]; static ring_t r;
     ring_init(&r, storage, sizeof(stress_item_t), 2, true);
-    const uint64_t N = 2000000;
+    const uint64_t N = RING_STRESS_N;
     stress_arg_t pa = { &r, N };
     stress_res_t cr = { &r, 0, 0, 0, 0, N };
     pthread_t pt, ct;
@@ -97,7 +101,7 @@ static void test_concurrent_drop_newest_delivers_everything_in_order(void)
 {
     static stress_item_t storage[4]; static ring_t r;
     ring_init(&r, storage, sizeof(stress_item_t), 4, false);
-    const uint64_t N = 2000000;
+    const uint64_t N = RING_STRESS_N;
     stress_arg_t pa = { &r, N };
     stress_res_t cr = { &r, 0, 0, 0, 0, N };
     pthread_t pt, ct;
