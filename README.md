@@ -30,3 +30,5 @@ Disconnect the battery pack before connecting USB (spec §3.2).
 ## Branching
 
 `main` is always releasable. One branch per roadmap session, named `s<plan>.<day>-<topic>`, merged by squash PR once CI is green. Tags `pNN-dD` mark finished sessions, `plan-NN-done` finished plans, `vX.Y.Z` releases.
+
+Branch protection is not enforced (private repository on a free plan); the PR-and-CI protocol above is followed by convention.
