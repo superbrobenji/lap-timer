@@ -45,11 +45,36 @@ static void test_tokenizer_helpers(void)
     TEST_ASSERT_EQUAL_INT(-1, json_obj_get(js, toks, 0, "missing"));
 }
 
+static void test_double_guard_clamps_decimals_and_flags_unfittable_values(void)
+{
+    char buf[128]; jw_t w; jw_init(&w, buf, sizeof buf);
+    jw_arr_open(&w); jw_double(&w, 1.0, 100); jw_arr_close(&w);
+    TEST_ASSERT_FALSE(jw_overflow(&w));
+    TEST_ASSERT_EQUAL_STRING("[1.00000000000000000]", buf);      /* 17 decimals */
+    jw_init(&w, buf, sizeof buf);
+    jw_arr_open(&w); jw_double(&w, 1e300, 3); jw_arr_close(&w);
+    TEST_ASSERT_TRUE(jw_overflow(&w));
+}
+
+static void test_skip_over_nested_object_values(void)
+{
+    const char *js = "{\"a\":[1,{\"x\":[1,2,3],\"y\":{\"z\":1}},2,3],\"b\":99}";
+    jsmntok_t toks[32];
+    int n = json_parse(js, strlen(js), toks, 32);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    int vb = json_obj_get(js, toks, 0, "b"); int64_t v;
+    TEST_ASSERT_TRUE(json_tok_int(js, &toks[vb], &v)); TEST_ASSERT_EQUAL_INT64(99, v);
+    int va = json_obj_get(js, toks, 0, "a");
+    TEST_ASSERT_EQUAL_INT(vb - 1, json_skip(toks, va));          /* skipping the array lands on key "b" */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_writer_produces_expected_document);
     RUN_TEST(test_writer_overflow_is_flagged_and_terminated);
     RUN_TEST(test_tokenizer_helpers);
+    RUN_TEST(test_double_guard_clamps_decimals_and_flags_unfittable_values);
+    RUN_TEST(test_skip_over_nested_object_values);
     return UNITY_END();
 }

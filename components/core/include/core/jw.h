@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #define JW_MAX_DEPTH 12
+#define JW_MAX_DECIMALS 17
 
 typedef struct {
     char   *buf; size_t cap; size_t len; bool overflow;
@@ -20,6 +21,7 @@ void   jw_uint(jw_t *w, uint64_t v);
 void   jw_bool(jw_t *w, bool v);
 void   jw_null(jw_t *w);
 void   jw_str(jw_t *w, const char *s);
+/* decimals clamped to 0..JW_MAX_DECIMALS; a value whose text exceeds 47 chars (|v| ≳ 1e29 at 17 decimals) sets overflow and writes nothing */
 void   jw_double(jw_t *w, double v, int decimals);
 size_t jw_len(const jw_t *w);
 bool   jw_overflow(const jw_t *w);

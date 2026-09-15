@@ -2175,12 +2175,37 @@ static void test_tokenizer_helpers(void)
     TEST_ASSERT_EQUAL_INT(-1, json_obj_get(js, toks, 0, "missing"));
 }
 
+static void test_double_guard_clamps_decimals_and_flags_unfittable_values(void)
+{
+    char buf[128]; jw_t w; jw_init(&w, buf, sizeof buf);
+    jw_arr_open(&w); jw_double(&w, 1.0, 100); jw_arr_close(&w);
+    TEST_ASSERT_FALSE(jw_overflow(&w));
+    TEST_ASSERT_EQUAL_STRING("[1.00000000000000000]", buf);      /* 17 decimals */
+    jw_init(&w, buf, sizeof buf);
+    jw_arr_open(&w); jw_double(&w, 1e300, 3); jw_arr_close(&w);
+    TEST_ASSERT_TRUE(jw_overflow(&w));
+}
+
+static void test_skip_over_nested_object_values(void)
+{
+    const char *js = "{\"a\":[1,{\"x\":[1,2,3],\"y\":{\"z\":1}},2,3],\"b\":99}";
+    jsmntok_t toks[32];
+    int n = json_parse(js, strlen(js), toks, 32);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    int vb = json_obj_get(js, toks, 0, "b"); int64_t v;
+    TEST_ASSERT_TRUE(json_tok_int(js, &toks[vb], &v)); TEST_ASSERT_EQUAL_INT64(99, v);
+    int va = json_obj_get(js, toks, 0, "a");
+    TEST_ASSERT_EQUAL_INT(vb - 1, json_skip(toks, va));          /* skipping the array lands on key "b" */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_writer_produces_expected_document);
     RUN_TEST(test_writer_overflow_is_flagged_and_terminated);
     RUN_TEST(test_tokenizer_helpers);
+    RUN_TEST(test_double_guard_clamps_decimals_and_flags_unfittable_values);
+    RUN_TEST(test_skip_over_nested_object_values);
     return UNITY_END();
 }
 ```
@@ -2203,6 +2228,7 @@ Expected: FAIL — `core/jw.h: No such file`.
 #include <stdbool.h>
 
 #define JW_MAX_DEPTH 12
+#define JW_MAX_DECIMALS 17
 
 typedef struct {
     char   *buf; size_t cap; size_t len; bool overflow;
@@ -2218,6 +2244,7 @@ void   jw_uint(jw_t *w, uint64_t v);
 void   jw_bool(jw_t *w, bool v);
 void   jw_null(jw_t *w);
 void   jw_str(jw_t *w, const char *s);
+/* decimals clamped to 0..JW_MAX_DECIMALS; a value whose text exceeds 47 chars (|v| ≳ 1e29 at 17 decimals) sets overflow and writes nothing */
 void   jw_double(jw_t *w, double v, int decimals);
 size_t jw_len(const jw_t *w);
 bool   jw_overflow(const jw_t *w);
@@ -2286,13 +2313,23 @@ void jw_str(jw_t *w, const char *s)
 
 void jw_key(jw_t *w, const char *key) { jw_str(w, key); putc_(w, ':'); w->after_key = true; }
 
-void jw_int(jw_t *w, int64_t v) { char t[24]; int n = snprintf(t, sizeof t, "%lld", (long long)v); sep(w); put(w, t, (size_t)n); }
-void jw_uint(jw_t *w, uint64_t v) { char t[24]; int n = snprintf(t, sizeof t, "%llu", (unsigned long long)v); sep(w); put(w, t, (size_t)n); }
+/* Formats into a scratch buffer; a value that does not fit is treated as overflow (nothing written). */
+static void put_fmt(jw_t *w, const char *t, int n, size_t cap)
+{
+    if (n < 0 || (size_t)n >= cap) { w->overflow = true; if (w->cap) w->buf[w->len] = '\0'; return; }
+    sep(w); put(w, t, (size_t)n);
+}
+
+void jw_int(jw_t *w, int64_t v) { char t[24]; int n = snprintf(t, sizeof t, "%lld", (long long)v); put_fmt(w, t, n, sizeof t); }
+void jw_uint(jw_t *w, uint64_t v) { char t[24]; int n = snprintf(t, sizeof t, "%llu", (unsigned long long)v); put_fmt(w, t, n, sizeof t); }
 void jw_bool(jw_t *w, bool v) { sep(w); if (v) put(w, "true", 4); else put(w, "false", 5); }
 void jw_null(jw_t *w) { sep(w); put(w, "null", 4); }
 void jw_double(jw_t *w, double v, int decimals)
 {
-    char t[48]; int n = snprintf(t, sizeof t, "%.*f", decimals, v); sep(w); put(w, t, (size_t)n);
+    if (decimals < 0) decimals = 0;
+    if (decimals > JW_MAX_DECIMALS) decimals = JW_MAX_DECIMALS;
+    char t[48]; int n = snprintf(t, sizeof t, "%.*f", decimals, v);
+    put_fmt(w, t, n, sizeof t);
 }
 size_t jw_len(const jw_t *w) { return w->len; }
 bool jw_overflow(const jw_t *w) { return w->overflow; }
@@ -2314,10 +2351,12 @@ bool jw_overflow(const jw_t *w) { return w->overflow; }
 
 int    json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks);   /* token count or -1 */
 bool   json_tok_eq(const char *js, const jsmntok_t *t, const char *s);
+/* Recursive in token nesting depth; intended for config/track-sized documents (depth < 16). */
 int    json_skip(const jsmntok_t *toks, int i);                                     /* index of the token after subtree i */
 bool   json_tok_int(const char *js, const jsmntok_t *t, int64_t *out);
 bool   json_tok_double(const char *js, const jsmntok_t *t, double *out);
 bool   json_tok_bool(const char *js, const jsmntok_t *t, bool *out);
+/* Raw copy of the token's source bytes, NUL-terminated, truncated to cap-1; does NOT unescape JSON escapes. Suitable for the ASCII keys and short values this project exchanges (config, track names). Returns the copied length. */
 size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap);     /* copies, NUL-terminates, returns length */
 int    json_obj_get(const char *js, const jsmntok_t *toks, int obj, const char *key);   /* value token index or -1 */
 #endif
