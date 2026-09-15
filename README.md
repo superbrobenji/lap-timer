@@ -41,4 +41,4 @@ Session 0.1 complete.
 
 ## License
 
-Source-available under the [PolyForm Strict License 1.0.0](LICENSE): noncommercial use only, no distribution of modified versions. Copyright (c) 2026 Bennie Swanepoel.
+Source-available under the [PolyForm Strict License 1.0.0](LICENSE): noncommercial use only, no distribution. Copyright (c) 2026 Bennie Swanepoel.
