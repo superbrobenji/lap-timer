@@ -723,7 +723,7 @@ Without PPS:
 - Crystal drift over 30 s at 20 ppm is 0.6 ms, ignored.
 
 With PPS (M10):
-- ISR captures `mono_us` on the rising edge. The next NAV-PVT after the edge carries the `iTOW` of that second; `gps_us_top = floor(fix_gps_us / 1e6) * 1e6` of that fix. `offset_us = edge_mono_us − gps_us_top`. Quality 2. Verified against the min-filter estimate; disagreement > 50 ms logs `E_GPS_BAD_FIX` and falls back to the min-filter.
+- ISR captures `mono_us` on the rising edge. The next NAV-PVT after the edge carries the `iTOW` of that second; `gps_us_top = floor(fix_gps_us / 1e6) * 1e6` of that fix. `offset_us = edge_mono_us − gps_us_top`. Quality 2. A new edge is checked against the current PPS offset (or, when no PPS lock exists yet and the filter is locked, against the min-filter); disagreement > 50 ms rejects the edge, drops the lock, and logs `E_GPS_BAD_FIX`. A PPS lock also expires when no edge has arrived for 5 s (`TB_PPS_STALE_US`), so the mapping falls back to the min-filter rather than tracking a stale offset; the min-filter never demotes an active PPS lock.
 
 `tb_mono_to_gps(t, m) = m − offset_us`.
 
@@ -2153,6 +2153,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `TB_WINDOW_S` | 30 | §6.2 |
 | `TB_LOCK_FIXES` | 10 | §6.2 |
 | `TB_PPS_DISAGREE_US` | 50000 | §6.2 |
+| `TB_PPS_STALE_US` | 5000000 | §6.2 |
 | `EARTH_R_M` | 6371008.8 | §6.3 |
 | `FIX_HACC_MAX_M` | 15 | §6.5 |
 | `FIX_MIN_SATS` | 5 | §6.5 |

@@ -19,6 +19,7 @@
 #define TB_WINDOW_S            30
 #define TB_LOCK_FIXES          10
 #define TB_PPS_DISAGREE_US     50000LL
+#define TB_PPS_STALE_US        5000000LL
 #define FIX_HACC_MAX_M         15
 #define FIX_MIN_SATS           5
 #define FIX_MAX_SPEED_MPS      139

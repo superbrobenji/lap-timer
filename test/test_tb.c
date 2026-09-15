@@ -77,6 +77,24 @@ static void test_pps_takes_precedence_and_falls_back_on_disagreement(void)
     TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
 }
 
+static void test_pps_expires_without_edges_but_survives_filter_glitch(void)
+{
+    tb_t t; tb_init(&t);
+    int64_t gps = 7000000000LL;
+    for (int i = 0; i < 20; i++) { tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); gps += 200000; }
+    tb_on_pps(&t, gps + 1000000, gps);
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* a glitched fix with an absurdly early arrival drags the min-filter 200 ms away; PPS must survive */
+    tb_on_fix(&t, gps, gps + 1000000 - 160000, 0);
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* edges keep coming for 4 s: still PPS */
+    for (int s = 1; s <= 4; s++) { gps += 1000000; tb_on_pps(&t, gps + 1000000, gps); tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); }
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* no edge for 5.2 s of fixes: PPS expires, filter takes over */
+    for (int i = 0; i < 26; i++) { gps += 200000; tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); }
+    TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -86,5 +104,6 @@ int main(void)
     RUN_TEST(test_not_locked_before_ten_fixes);
     RUN_TEST(test_window_rollover_forgets_old_minimum);
     RUN_TEST(test_pps_takes_precedence_and_falls_back_on_disagreement);
+    RUN_TEST(test_pps_expires_without_edges_but_survives_filter_glitch);
     return UNITY_END();
 }

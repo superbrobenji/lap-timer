@@ -428,6 +428,7 @@ typedef struct {
 #define TB_WINDOW_S            30
 #define TB_LOCK_FIXES          10
 #define TB_PPS_DISAGREE_US     50000LL
+#define TB_PPS_STALE_US        5000000LL
 #define FIX_HACC_MAX_M         15
 #define FIX_MIN_SATS           5
 #define FIX_MAX_SPEED_MPS      139
@@ -1042,6 +1043,24 @@ static void test_pps_takes_precedence_and_falls_back_on_disagreement(void)
     TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
 }
 
+static void test_pps_expires_without_edges_but_survives_filter_glitch(void)
+{
+    tb_t t; tb_init(&t);
+    int64_t gps = 7000000000LL;
+    for (int i = 0; i < 20; i++) { tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); gps += 200000; }
+    tb_on_pps(&t, gps + 1000000, gps);
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* a glitched fix with an absurdly early arrival drags the min-filter 200 ms away; PPS must survive */
+    tb_on_fix(&t, gps, gps + 1000000 - 160000, 0);
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* edges keep coming for 4 s: still PPS */
+    for (int s = 1; s <= 4; s++) { gps += 1000000; tb_on_pps(&t, gps + 1000000, gps); tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); }
+    TEST_ASSERT_EQUAL_UINT8(2, tb_quality(&t));
+    /* no edge for 5.2 s of fixes: PPS expires, filter takes over */
+    for (int i = 0; i < 26; i++) { gps += 200000; tb_on_fix(&t, gps, gps + 1000000 + 40000, 0); }
+    TEST_ASSERT_EQUAL_UINT8(1, tb_quality(&t));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1051,6 +1070,7 @@ int main(void)
     RUN_TEST(test_not_locked_before_ten_fixes);
     RUN_TEST(test_window_rollover_forgets_old_minimum);
     RUN_TEST(test_pps_takes_precedence_and_falls_back_on_disagreement);
+    RUN_TEST(test_pps_expires_without_edges_but_survives_filter_glitch);
     return UNITY_END();
 }
 ```
@@ -1079,6 +1099,7 @@ typedef struct {
     uint32_t fixes;
     int64_t  filt_offset_us;       /* min over valid halves */
     int64_t  pps_offset_us;
+    int64_t  pps_edge_mono_us;     /* mono time of the last accepted PPS edge */
     bool     pps_valid;
 } tb_t;
 
@@ -1086,7 +1107,7 @@ int64_t tb_days_from_civil(int y, unsigned m, unsigned d);
 int64_t tb_gps_us_from_utc(int y, unsigned m, unsigned d, unsigned hh, unsigned mm, unsigned ss, int32_t nano);
 
 void    tb_init(tb_t *t);
-/* serial_time_us = len*10/baud of the message just received; subtracted from the arrival stamp */
+/* serial_time_us = len*10/baud of the message just received; subtracted from the arrival stamp. Also expires a PPS lock whose last edge is older than TB_PPS_STALE_US. */
 void    tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t serial_time_us);
 void    tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us);
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us);
@@ -1149,21 +1170,20 @@ void tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t ser
     }
     t->fixes++;
     recompute(t);
-    /* PPS sanity: if the filter now disagrees strongly with a previously accepted PPS, drop PPS */
-    if (t->pps_valid && tb_locked(t)) {
-        int64_t diff = t->pps_offset_us - t->filt_offset_us;
-        if (diff > TB_PPS_DISAGREE_US || diff < -TB_PPS_DISAGREE_US) t->pps_valid = false;
-    }
+    /* PPS staleness: without edges the PPS offset cannot track crystal drift; fall back to the filter */
+    if (t->pps_valid && arrival_mono_us - t->pps_edge_mono_us > TB_PPS_STALE_US) t->pps_valid = false;
 }
 
 void tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us)
 {
     int64_t o = edge_mono_us - top_of_second_gps_us;
-    if (tb_locked(t)) {
-        int64_t diff = o - t->filt_offset_us;
+    int64_t ref = t->pps_valid ? t->pps_offset_us : t->filt_offset_us;
+    bool must_check = t->pps_valid || tb_locked(t);
+    if (must_check) {
+        int64_t diff = o - ref;
         if (diff > TB_PPS_DISAGREE_US || diff < -TB_PPS_DISAGREE_US) { t->pps_valid = false; return; }
     }
-    t->pps_offset_us = o; t->pps_valid = true;
+    t->pps_offset_us = o; t->pps_valid = true; t->pps_edge_mono_us = edge_mono_us;
 }
 
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us)

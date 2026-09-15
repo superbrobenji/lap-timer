@@ -50,21 +50,20 @@ void tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t ser
     }
     t->fixes++;
     recompute(t);
-    /* PPS sanity: if the filter now disagrees strongly with a previously accepted PPS, drop PPS */
-    if (t->pps_valid && tb_locked(t)) {
-        int64_t diff = t->pps_offset_us - t->filt_offset_us;
-        if (diff > TB_PPS_DISAGREE_US || diff < -TB_PPS_DISAGREE_US) t->pps_valid = false;
-    }
+    /* PPS staleness: without edges the PPS offset cannot track crystal drift; fall back to the filter */
+    if (t->pps_valid && arrival_mono_us - t->pps_edge_mono_us > TB_PPS_STALE_US) t->pps_valid = false;
 }
 
 void tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us)
 {
     int64_t o = edge_mono_us - top_of_second_gps_us;
-    if (tb_locked(t)) {
-        int64_t diff = o - t->filt_offset_us;
+    int64_t ref = t->pps_valid ? t->pps_offset_us : t->filt_offset_us;
+    bool must_check = t->pps_valid || tb_locked(t);
+    if (must_check) {
+        int64_t diff = o - ref;
         if (diff > TB_PPS_DISAGREE_US || diff < -TB_PPS_DISAGREE_US) { t->pps_valid = false; return; }
     }
-    t->pps_offset_us = o; t->pps_valid = true;
+    t->pps_offset_us = o; t->pps_valid = true; t->pps_edge_mono_us = edge_mono_us;
 }
 
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us)
