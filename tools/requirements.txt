@@ -1,0 +1,4 @@
+# created with /usr/bin/python3 3.9.6
+pyserial==3.5
+Pillow==10.4.0
+esptool==4.8.1
