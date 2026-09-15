@@ -1228,7 +1228,7 @@ offset 3   payload[len]
 offset 3+len  crc  u16 LE  CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no xorout) over bytes 1..(2+len)
 ```
 
-Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc; verify; on mismatch advance one byte and rescan. A valid frame is never ambiguous with an in-payload `0xA5` because the CRC is checked before acceptance.
+Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc; verify; on mismatch advance one byte and rescan. A valid frame is never ambiguous with an in-payload `0xA5` because the CRC is checked before acceptance. A reader of a bounded input (a whole `.log` or `.sum` file) calls `ses_reader_flush` at EOF; a frame that can never complete is treated as bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync near the end is still recovered. The frame callback's payload pointer is valid only during the callback.
 
 ### 12.3 Record types
 

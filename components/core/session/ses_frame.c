@@ -81,5 +81,16 @@ void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb
             on_bad(r);
         }
     }
-    if (r->replay_pos >= r->replay_len) { r->replay_pos = 0; r->replay_len = 0; }
+    /* The loop exits only once the replay is drained and the input consumed; reset for the next call. */
+    r->replay_pos = 0; r->replay_len = 0;
+}
+
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx)
+{
+    /* A partial frame at EOF can never complete: discard its sync byte and rescan the rest.
+     * Each round consumes at least one byte, so this terminates. */
+    while (r->state == 1) {
+        on_bad(r);
+        ses_reader_feed(r, NULL, 0, cb, ctx);
+    }
 }

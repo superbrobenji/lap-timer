@@ -88,6 +88,37 @@ static void test_reader_rejects_oversize_len_without_stalling(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
+static void test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof(void)
+{
+    uint8_t stream[16]; int n = 0;
+    stream[n++] = SES_SYNC; stream[n++] = 0x99; stream[n++] = 200;    /* spurious header claiming 200 bytes */
+    uint8_t p[1] = { 42 };
+    n += ses_frame_encode(0x0B, p, 1, stream + n, sizeof stream - (size_t)n);
+    ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
+    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    TEST_ASSERT_EQUAL_INT(0, c.calls);                                  /* stuck waiting for 200 bytes */
+    ses_reader_flush(&r, cb, &c);
+    TEST_ASSERT_EQUAL_INT(1, c.calls);
+    TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
+    TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+}
+
+static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
+{
+    uint8_t payload[4] = { 1, 2, 3, 4 };
+    uint8_t frame[16]; int n = ses_frame_encode(0x03, payload, 4, frame, sizeof frame);
+    ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
+    ses_reader_feed(&r, frame, (size_t)(n - 2), cb, &c);               /* CRC bytes missing */
+    ses_reader_flush(&r, cb, &c);
+    TEST_ASSERT_EQUAL_INT(0, c.calls);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);
+    ses_reader_flush(&r, cb, &c);                                       /* no-op when idle */
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -97,5 +128,7 @@ int main(void)
     RUN_TEST(test_reader_resyncs_after_corruption);
     RUN_TEST(test_reader_resync_finds_frame_starting_inside_bad_frame);
     RUN_TEST(test_reader_rejects_oversize_len_without_stalling);
+    RUN_TEST(test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof);
+    RUN_TEST(test_flush_on_truncated_frame_counts_bad_and_is_idempotent);
     return UNITY_END();
 }

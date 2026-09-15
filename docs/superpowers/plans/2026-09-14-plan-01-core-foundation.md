@@ -1221,7 +1221,7 @@ git commit -m "feat(core): time base — civil date math, min-filter mono→gps 
 - Modify: `test/CMakeLists.txt`
 
 **Interfaces:**
-- Produces (spec §12.2): `uint16_t ses_crc16(const uint8_t*, size_t)` (CRC-16/CCITT-FALSE); `int ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap)` → total bytes or −1; `ses_reader_t`, `ses_reader_init`, `ses_reader_feed(r, buf, n, cb, ctx)` with `typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)`; counters `frames_ok`, `frames_bad`.
+- Produces (spec §12.2): `uint16_t ses_crc16(const uint8_t*, size_t)` (CRC-16/CCITT-FALSE); `int ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap)` → total bytes or −1; `ses_reader_t`, `ses_reader_init`, `ses_reader_feed(r, buf, n, cb, ctx)`, `ses_reader_flush(r, cb, ctx)` with `typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)`; counters `frames_ok`, `frames_bad`.
 - Produces: the `SES_T_*` type enum (§12.3). Task 7 adds record codecs to the same header.
 
 - [ ] **Step 1: Write the failing test**
@@ -1318,6 +1318,37 @@ static void test_reader_rejects_oversize_len_without_stalling(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
+static void test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof(void)
+{
+    uint8_t stream[16]; int n = 0;
+    stream[n++] = SES_SYNC; stream[n++] = 0x99; stream[n++] = 200;    /* spurious header claiming 200 bytes */
+    uint8_t p[1] = { 42 };
+    n += ses_frame_encode(0x0B, p, 1, stream + n, sizeof stream - (size_t)n);
+    ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
+    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    TEST_ASSERT_EQUAL_INT(0, c.calls);                                  /* stuck waiting for 200 bytes */
+    ses_reader_flush(&r, cb, &c);
+    TEST_ASSERT_EQUAL_INT(1, c.calls);
+    TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
+    TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+}
+
+static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
+{
+    uint8_t payload[4] = { 1, 2, 3, 4 };
+    uint8_t frame[16]; int n = ses_frame_encode(0x03, payload, 4, frame, sizeof frame);
+    ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
+    ses_reader_feed(&r, frame, (size_t)(n - 2), cb, &c);               /* CRC bytes missing */
+    ses_reader_flush(&r, cb, &c);
+    TEST_ASSERT_EQUAL_INT(0, c.calls);
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+    TEST_ASSERT_EQUAL_UINT8(0, r.state);
+    ses_reader_flush(&r, cb, &c);                                       /* no-op when idle */
+    TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1327,6 +1358,8 @@ int main(void)
     RUN_TEST(test_reader_resyncs_after_corruption);
     RUN_TEST(test_reader_resync_finds_frame_starting_inside_bad_frame);
     RUN_TEST(test_reader_rejects_oversize_len_without_stalling);
+    RUN_TEST(test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof);
+    RUN_TEST(test_flush_on_truncated_frame_counts_bad_and_is_idempotent);
     return UNITY_END();
 }
 ```
@@ -1364,6 +1397,8 @@ uint16_t ses_crc16(const uint8_t *buf, size_t n);
 /* Writes sync|type|len|payload|crc16 into out. Returns bytes written, or -1 if cap is too small or len > SES_MAX_PAYLOAD. */
 int      ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
 
+/* Invoked once per valid frame. `payload` points into the reader's internal buffer and is valid
+ * only for the duration of the callback: copy what you need before returning. */
 typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx);
 
 typedef struct {
@@ -1371,7 +1406,7 @@ typedef struct {
     uint16_t idx;                             /* bytes collected into buf */
     uint16_t need;                            /* total bytes expected in buf once len is known */
     uint8_t  buf[2 + SES_MAX_PAYLOAD + 2];    /* type, len, payload, crc */
-    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];
+    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];    /* rescan buffer; proven bound is 2+247+2 bytes, kept at 2x for headroom */
     uint16_t replay_len, replay_pos;
     uint32_t frames_ok, frames_bad;
 } ses_reader_t;
@@ -1379,6 +1414,10 @@ typedef struct {
 void ses_reader_init(ses_reader_t *r);
 /* Feed any number of bytes; cb is invoked once per valid frame. Resynchronises after corruption. */
 void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);
+/* Call once at the end of a bounded input (a file). A frame that can never complete is treated as
+ * bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync
+ * near EOF is still recovered. Idempotent when the reader is idle. */
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
 
 /* Record codecs are declared in Task 7 below this line. */
 #endif
@@ -1469,7 +1508,18 @@ void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb
             on_bad(r);
         }
     }
-    if (r->replay_pos >= r->replay_len) { r->replay_pos = 0; r->replay_len = 0; }
+    /* The loop exits only once the replay is drained and the input consumed; reset for the next call. */
+    r->replay_pos = 0; r->replay_len = 0;
+}
+
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx)
+{
+    /* A partial frame at EOF can never complete: discard its sync byte and rescan the rest.
+     * Each round consumes at least one byte, so this terminates. */
+    while (r->state == 1) {
+        on_bad(r);
+        ses_reader_feed(r, NULL, 0, cb, ctx);
+    }
 }
 ```
 

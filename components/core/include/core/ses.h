@@ -20,6 +20,8 @@ uint16_t ses_crc16(const uint8_t *buf, size_t n);
 /* Writes sync|type|len|payload|crc16 into out. Returns bytes written, or -1 if cap is too small or len > SES_MAX_PAYLOAD. */
 int      ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
 
+/* Invoked once per valid frame. `payload` points into the reader's internal buffer and is valid
+ * only for the duration of the callback: copy what you need before returning. */
 typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx);
 
 typedef struct {
@@ -27,7 +29,7 @@ typedef struct {
     uint16_t idx;                             /* bytes collected into buf */
     uint16_t need;                            /* total bytes expected in buf once len is known */
     uint8_t  buf[2 + SES_MAX_PAYLOAD + 2];    /* type, len, payload, crc */
-    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];
+    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];    /* rescan buffer; proven bound is 2+247+2 bytes, kept at 2x for headroom */
     uint16_t replay_len, replay_pos;
     uint32_t frames_ok, frames_bad;
 } ses_reader_t;
@@ -35,6 +37,10 @@ typedef struct {
 void ses_reader_init(ses_reader_t *r);
 /* Feed any number of bytes; cb is invoked once per valid frame. Resynchronises after corruption. */
 void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);
+/* Call once at the end of a bounded input (a file). A frame that can never complete is treated as
+ * bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync
+ * near EOF is still recovered. Idempotent when the reader is idle. */
+void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
 
 /* Record codecs are declared in Task 7 below this line. */
 #endif
