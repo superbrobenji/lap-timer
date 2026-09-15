@@ -27,10 +27,11 @@ target_include_directories(unity PUBLIC unity/src)
 target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12)
 
 enable_testing()
+find_package(Threads REQUIRED)
 function(add_core_test name)
   add_executable(${name} ${name}.c)
   target_compile_options(${name} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
-  target_link_libraries(${name} PRIVATE core unity m)
+  target_link_libraries(${name} PRIVATE core unity m Threads::Threads)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 

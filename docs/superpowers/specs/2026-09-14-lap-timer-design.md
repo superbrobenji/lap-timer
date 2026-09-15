@@ -318,7 +318,7 @@ Priorities are FreeRTOS numeric (higher = more urgent). `configMAX_PRIORITIES` =
 | `hb[]` | volatile uint32 array | every task → supervisor | 6 | heartbeat counters |
 | `sys_flags` | atomic uint32 | supervisor, drivers → all | — | fault flags (§17.4) |
 
-SPSC rings are implemented in `core/util/ring.h` as a header-only lock-free ring with `head`/`tail` `_Atomic uint32_t`, power-of-two capacity, overwrite-oldest policy for `fused_ring` (sample loss is tolerable) and drop-newest with a counter for `fix_ring` (fix loss is logged).
+SPSC rings are implemented in `components/core/include/core/ring.h` as a header-only lock-free ring with `head`/`tail` `_Atomic uint32_t`, power-of-two capacity, overwrite-oldest policy for `fused_ring` (sample loss is tolerable) and drop-newest with a counter for `fix_ring` (fix loss is logged); the consumer publishes its pop with a compare-and-swap on `tail` so an eviction that races a read is detected and retried, never returned torn.
 
 ### 4.5 Events and commands
 

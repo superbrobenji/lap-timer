@@ -129,10 +129,11 @@ target_include_directories(unity PUBLIC unity/src)
 target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECISION=1e-12)
 
 enable_testing()
+find_package(Threads REQUIRED)
 function(add_core_test name)
   add_executable(${name} ${name}.c)
   target_compile_options(${name} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
-  target_link_libraries(${name} PRIVATE core unity m)
+  target_link_libraries(${name} PRIVATE core unity m Threads::Threads)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -491,6 +492,7 @@ git commit -m "feat(core): shared types, constants, byte writer/reader"
 ```c
 #include "unity.h"
 #include "core/ring.h"
+#include <pthread.h>
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -536,12 +538,77 @@ static void test_overwrite_oldest_policy_keeps_newest(void)
     ring_pop(&r, &out); TEST_ASSERT_EQUAL_INT(3, out.a);
 }
 
+typedef struct { uint64_t tag; uint64_t check; } stress_item_t;   /* invariant: check == ~tag */
+typedef struct { ring_t *r; uint64_t n; } stress_arg_t;
+
+static void *stress_producer(void *p)
+{
+    stress_arg_t *a = p;
+    for (uint64_t i = 1; i <= a->n; i++) {
+        stress_item_t it = { i, ~i };
+        while (!ring_push(a->r, &it)) { /* drop-newest: spin until there is room */ }
+    }
+    return NULL;
+}
+
+/* Pops until it has seen the final tag; counts torn items and order violations. */
+typedef struct { ring_t *r; uint64_t last_tag; uint64_t torn; uint64_t out_of_order; uint64_t received; uint64_t last_expected; } stress_res_t;
+static void *stress_consumer(void *p)
+{
+    stress_res_t *res = p;
+    stress_item_t it;
+    for (;;) {
+        if (!ring_pop(res->r, &it)) continue;
+        res->received++;
+        if (it.check != ~it.tag) res->torn++;
+        if (it.tag <= res->last_tag) res->out_of_order++;
+        res->last_tag = it.tag;
+        if (it.tag == res->last_expected) break;
+    }
+    return NULL;
+}
+
+static void test_concurrent_overwrite_oldest_never_returns_torn_items(void)
+{
+    static stress_item_t storage[2]; static ring_t r;
+    ring_init(&r, storage, sizeof(stress_item_t), 2, true);
+    const uint64_t N = 2000000;
+    stress_arg_t pa = { &r, N };
+    stress_res_t cr = { &r, 0, 0, 0, 0, N };
+    pthread_t pt, ct;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&ct, NULL, stress_consumer, &cr));
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&pt, NULL, stress_producer, &pa));
+    pthread_join(pt, NULL); pthread_join(ct, NULL);
+    TEST_ASSERT_EQUAL_UINT64(0, cr.torn);
+    TEST_ASSERT_EQUAL_UINT64(0, cr.out_of_order);
+    TEST_ASSERT_EQUAL_UINT64(N, cr.last_tag);
+    TEST_ASSERT_EQUAL_UINT64(N, cr.received + ring_dropped(&r));   /* every item was delivered or counted dropped */
+}
+
+static void test_concurrent_drop_newest_delivers_everything_in_order(void)
+{
+    static stress_item_t storage[4]; static ring_t r;
+    ring_init(&r, storage, sizeof(stress_item_t), 4, false);
+    const uint64_t N = 2000000;
+    stress_arg_t pa = { &r, N };
+    stress_res_t cr = { &r, 0, 0, 0, 0, N };
+    pthread_t pt, ct;
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&ct, NULL, stress_consumer, &cr));
+    TEST_ASSERT_EQUAL_INT(0, pthread_create(&pt, NULL, stress_producer, &pa));
+    pthread_join(pt, NULL); pthread_join(ct, NULL);
+    TEST_ASSERT_EQUAL_UINT64(0, cr.torn);
+    TEST_ASSERT_EQUAL_UINT64(0, cr.out_of_order);
+    TEST_ASSERT_EQUAL_UINT64(N, cr.received);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_fifo_order_and_wraparound);
     RUN_TEST(test_drop_newest_policy_counts_drops);
     RUN_TEST(test_overwrite_oldest_policy_keeps_newest);
+    RUN_TEST(test_concurrent_overwrite_oldest_never_returns_torn_items);
+    RUN_TEST(test_concurrent_drop_newest_delivers_everything_in_order);
     return UNITY_END();
 }
 ```
@@ -565,13 +632,22 @@ Expected: FAIL — `core/ring.h: No such file`.
 #include <string.h>
 
 /* Single-producer single-consumer ring. Capacity must be a power of two.
- * Indices grow monotonically; the mask maps them to slots. */
+ * Indices grow monotonically; the mask maps them to slots.
+ *
+ * Policies: drop-newest (push returns false when full) or overwrite-oldest
+ * (push evicts the oldest item). With overwrite-oldest the producer may evict
+ * the very slot the consumer is copying; the consumer detects that by publishing
+ * its consumption with a compare-and-swap on tail and retries when it lost the
+ * race, so a torn copy is never returned.
+ *
+ * A ring_t must not be copied or moved once either side has started using it.
+ * ring_count() and ring_dropped() are approximate snapshots for diagnostics. */
 typedef struct {
     uint8_t         *buf;
     uint32_t         item_size;
     uint32_t         mask;
     _Atomic uint32_t head;      /* next write index (producer) */
-    _Atomic uint32_t tail;      /* next read index (consumer) */
+    _Atomic uint32_t tail;      /* next read index (consumer; producer advances it on eviction) */
     bool             overwrite;
     _Atomic uint32_t dropped;
 } ring_t;
@@ -595,11 +671,12 @@ static inline bool ring_push(ring_t *r, const void *item)
     uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
     uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
     if (h - t > r->mask) {                              /* full */
-        atomic_fetch_add(&r->dropped, 1u);
-        if (!r->overwrite) return false;
-        /* advance tail by one; if the consumer moved it concurrently, there is room anyway */
+        if (!r->overwrite) { atomic_fetch_add(&r->dropped, 1u); return false; }
         uint32_t expected = t;
-        atomic_compare_exchange_strong(&r->tail, &expected, t + 1u);
+        /* Evict the oldest slot. If the consumer publishes its pop of that slot first,
+         * our CAS fails, the item was delivered (not dropped), and the slot is free anyway. */
+        if (atomic_compare_exchange_strong_explicit(&r->tail, &expected, t + 1u, memory_order_acq_rel, memory_order_acquire))
+            atomic_fetch_add(&r->dropped, 1u);
     }
     memcpy(r->buf + (size_t)(h & r->mask) * r->item_size, item, r->item_size);
     atomic_store_explicit(&r->head, h + 1u, memory_order_release);
@@ -608,12 +685,16 @@ static inline bool ring_push(ring_t *r, const void *item)
 
 static inline bool ring_pop(ring_t *r, void *out)
 {
-    uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
-    uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
-    if (t == h) return false;
-    memcpy(out, r->buf + (size_t)(t & r->mask) * r->item_size, r->item_size);
-    atomic_store_explicit(&r->tail, t + 1u, memory_order_release);
-    return true;
+    for (;;) {
+        uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+        uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+        if (t == h) return false;
+        memcpy(out, r->buf + (size_t)(t & r->mask) * r->item_size, r->item_size);
+        /* Publish only if the producer did not evict this slot while we copied it. */
+        if (atomic_compare_exchange_strong_explicit(&r->tail, &t, t + 1u, memory_order_acq_rel, memory_order_acquire))
+            return true;
+        /* Lost the race: the copy may be torn. Retry from the new tail. */
+    }
 }
 #endif
 ```
@@ -621,7 +702,7 @@ static inline bool ring_pop(ring_t *r, void *out)
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cmake --build test/build && ctest --test-dir test/build --output-on-failure`
-Expected: `100% tests passed` (3 tests).
+Expected: `100% tests passed` (5 tests).
 
 - [ ] **Step 5: Commit**
 
