@@ -51,6 +51,6 @@
 #define SES_SYNC               0xA5
 #define SES_MAX_PAYLOAD        247
 #define TRK_MAX_LAYOUTS        8
-#define TRK_MAX_USER           16
+#define TRK_MAX_USER           4
 #define MOVING_SPEED_KMH       3
 #endif

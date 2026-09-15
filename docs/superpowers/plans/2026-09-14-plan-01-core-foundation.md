@@ -2985,7 +2985,7 @@ static void test_user_venue_wins_on_id_clash_and_persists(void)
     u.layouts[0].id = 1; strcpy(u.layouts[0].name, "L1"); u.layouts[0].dir_sign = 1;
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u));
     TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
-    uint8_t blob[8192]; size_t n;
+    uint8_t blob[16384]; size_t n;
     TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
     trk_init();
     TEST_ASSERT_EQUAL_STRING("Killarney", trk_get(6)->name);
@@ -3597,12 +3597,14 @@ typedef struct {
     ses_hdr_t hdr;
     uint8_t   have_hdr;
     char      venue_name[32];
+    uint8_t   run_pending;
+    uint8_t   run_gate_idx;            /* DRAG_RUN emission resumes after EXP_FULL */
 } exp_t;
 
 int  exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
 int  exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len);   /* 0 consumed, EXP_FULL retry after pull, -1 error */
 int  exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out);           /* 0 ok (n_out may be 0), -1 error */
-int  exp_finish(exp_t *e);
+int  exp_finish(exp_t *e);                                                   /* may return EXP_FULL: pull, then call again. Returns 0 (no-op) if already finished, -1 if a DRAG_RUN frame is mid-emission (re-feed it first). */
 
 /* helpers shared by format implementations (internal) */
 int  exp_win_free(const exp_t *e);
@@ -3693,6 +3695,7 @@ int exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out)
 
 int exp_finish(exp_t *e)
 {
+    if (e->finished) return 0;
     int r;
     switch (e->fmt) {
     case EXP_VBO:  r = exp_vbo_finish(e); break;
@@ -3800,7 +3803,7 @@ git commit -m "feat(core): streaming exporter core and Racelogic VBO format"
 
 **Interfaces:**
 - Consumes: `exp_t` hooks from Task 11, `ses_decode_lap`, `ses_decode_drag_run`, `ses_decode_hdr`, `jw`.
-- Produces (spec §14.2, §14.3): NMEA `GPRMC` + `GPGGA` per fix; JSON summary object `{"id":..,"hdr":{...},"laps":[...],"runs":[...]}` streamed incrementally.
+- Produces (spec §14.2, §14.3): NMEA `GPRMC` + `GPGGA` per fix; JSON summary object `{"id":..,"hdr":{...},"laps":[...],"runs":[...]}` streamed incrementally. Each `DRAG_RUN` record (up to `DRAG_MAX_GATES` = 16 gates) is itself emitted incrementally, one gate object per step, resuming across `EXP_FULL`/pull/re-feed cycles via `exp_t.run_pending`/`run_gate_idx` — this keeps any single record within the 1024-byte window regardless of gate count. `exp_finish` is idempotent (returns 0 once already finished) and returns -1 if called while a `DRAG_RUN` frame is mid-emission (the caller must finish feeding that frame first).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3870,7 +3873,11 @@ static void test_json_summary_structure(void)
     }
     drag_result_t run; memset(&run, 0, sizeof run); run.run_no = 1; run.n_gates = 1; run.gates[0] = (drag_gate_res_t){ 2, 5910, 2778, 9800, 1 }; run.trap_cms = 0;
     n = ses_encode_drag_run(&run, fr, sizeof fr); feed_frame(&e, out, &at, fr, n);
-    TEST_ASSERT_EQUAL_INT(0, exp_finish(&e)); at = drain(&e, out, at);
+    /* exp_finish may return EXP_FULL when the window is nearly full (see core/exp.h): pull and retry */
+    int fin;
+    while ((fin = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, fin);
+    at = drain(&e, out, at);
 
     jsmntok_t toks[256];
     int cnt = json_parse(out, at, toks, 256);
@@ -3884,11 +3891,42 @@ static void test_json_summary_structure(void)
     int valid = json_obj_get(out, toks, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
 }
 
+static void test_json_sixteen_gate_run_streams_across_pulls(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_002");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[8192]; size_t at = 0;
+    uint8_t fr[256]; int n;
+    drag_result_t run; memset(&run, 0, sizeof run); run.run_no = 3; run.n_gates = DRAG_MAX_GATES; run.trap_cms = 8472; run.flags = DRAG_F_QUARTER;
+    for (uint8_t i = 0; i < DRAG_MAX_GATES; i++) run.gates[i] = (drag_gate_res_t){ (uint8_t)(i + 1), 1000u * (i + 1u), (uint16_t)(500u * (i + 1u)), 2500u * (i + 1u), 1 };
+    n = ses_encode_drag_run(&run, fr, sizeof fr);
+    /* small pulls force several EXP_FULL/resume cycles inside the run */
+    int r;
+    while ((r = exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD))) == EXP_FULL) {
+        uint8_t chunk[64]; size_t got; exp_pull(&e, chunk, sizeof chunk, &got); memcpy(out + at, chunk, got); at += got;
+    }
+    TEST_ASSERT_EQUAL_INT(0, r);
+    while ((r = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, r);
+    at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, exp_finish(&e));                       /* idempotent */
+    TEST_ASSERT_EQUAL_UINT(at, drain(&e, out, at));                  /* nothing more emitted */
+    jsmntok_t toks[512];
+    int cnt = json_parse(out, at, toks, 512);
+    TEST_ASSERT_GREATER_THAN(0, cnt);
+    int runs = json_obj_get(out, toks, 0, "runs"); TEST_ASSERT_EQUAL_INT(1, toks[runs].size);
+    int gates = json_obj_get(out, toks, runs + 1, "gates"); TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
+    int last = gates + 1; for (int i = 0; i < DRAG_MAX_GATES - 1; i++) last = json_skip(toks, last);
+    int dist = json_obj_get(out, toks, last, "dist_cm"); int64_t v; json_tok_int(out, &toks[dist], &v);
+    TEST_ASSERT_EQUAL_INT64(2500 * DRAG_MAX_GATES, v);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_nmea_sentences_and_checksums);
     RUN_TEST(test_json_summary_structure);
+    RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);
     return UNITY_END();
 }
 ```
@@ -3990,7 +4028,7 @@ static int open_hdr(exp_t *e, const ses_hdr_t *h, const char *venue_name)
     return emit(e, &w);
 }
 
-int exp_json_open(exp_t *e) { e->json_stage = 0; e->have_hdr = 0; e->venue_name[0] = '\0'; return 0; }
+int exp_json_open(exp_t *e) { e->json_stage = 0; e->have_hdr = 0; e->venue_name[0] = '\0'; e->run_pending = 0; e->run_gate_idx = 0; return 0; }
 
 int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
@@ -4004,9 +4042,9 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     }
     if (type == SES_T_LAP) {
         if (e->json_stage != 1) return 0;                     /* laps after runs began: ignore (log order guarantees this never happens) */
-        if (exp_win_free(e) < 300) return EXP_FULL;
+        if (exp_win_free(e) < 400) return EXP_FULL;
         lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) return -1;
-        char buf[300]; jw_t w; jw_init(&w, buf, sizeof buf);
+        char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
         if (e->laps > 0) exp_win_puts(e, ",");
         jw_obj_open(&w);
         jw_key(&w, "n"); jw_uint(&w, lap.lap_no);
@@ -4028,36 +4066,48 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
         return emit(e, &w);
     }
     if (type == SES_T_DRAG_RUN) {
-        if (exp_win_free(e) < 500) return EXP_FULL;
-        if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
         drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) return -1;
-        char buf[500]; jw_t w; jw_init(&w, buf, sizeof buf);
-        if (e->runs > 0) exp_win_puts(e, ",");
-        jw_obj_open(&w);
-        jw_key(&w, "n"); jw_uint(&w, run.run_no);
-        jw_key(&w, "t0_utc_us"); jw_int(&w, run.t0_gps_us);
-        jw_key(&w, "rollout"); jw_bool(&w, (run.flags & DRAG_F_ROLLOUT) != 0);
-        jw_key(&w, "trap_cms"); jw_uint(&w, run.trap_cms);
-        jw_key(&w, "gates"); jw_arr_open(&w);
-        for (uint8_t i = 0; i < run.n_gates; i++) {
+        if (!e->run_pending) {
+            if (exp_win_free(e) < 200) return EXP_FULL;
+            if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
+            if (e->runs > 0) exp_win_puts(e, ",");
+            char buf[200]; jw_t w; jw_init(&w, buf, sizeof buf);
             jw_obj_open(&w);
-            jw_key(&w, "id"); jw_uint(&w, run.gates[i].gate_id);
-            jw_key(&w, "ms"); jw_uint(&w, run.gates[i].time_ms);
-            jw_key(&w, "speed_cms"); jw_uint(&w, run.gates[i].speed_cms);
-            jw_key(&w, "dist_cm"); jw_uint(&w, run.gates[i].dist_cm);
-            jw_key(&w, "hit"); jw_bool(&w, run.gates[i].hit != 0);
-            jw_obj_close(&w);
+            jw_key(&w, "n"); jw_uint(&w, run.run_no);
+            jw_key(&w, "t0_utc_us"); jw_int(&w, run.t0_gps_us);
+            jw_key(&w, "rollout"); jw_bool(&w, (run.flags & DRAG_F_ROLLOUT) != 0);
+            jw_key(&w, "trap_cms"); jw_uint(&w, run.trap_cms);
+            jw_key(&w, "gates"); jw_arr_open(&w);
+            if (emit(e, &w) < 0) return -1;
+            e->run_pending = 1; e->run_gate_idx = 0;
         }
-        jw_arr_close(&w);
-        jw_obj_close(&w);
-        e->runs++;
-        return emit(e, &w);
+        /* one gate object per step; after EXP_FULL the caller pulls and re-feeds the same frame, and we resume here */
+        while (e->run_gate_idx < run.n_gates) {
+            if (exp_win_free(e) < 120) return EXP_FULL;
+            const drag_gate_res_t *g = &run.gates[e->run_gate_idx];
+            char buf[120]; jw_t w; jw_init(&w, buf, sizeof buf);
+            if (e->run_gate_idx > 0) exp_win_puts(e, ",");
+            jw_obj_open(&w);
+            jw_key(&w, "id"); jw_uint(&w, g->gate_id);
+            jw_key(&w, "ms"); jw_uint(&w, g->time_ms);
+            jw_key(&w, "speed_cms"); jw_uint(&w, g->speed_cms);
+            jw_key(&w, "dist_cm"); jw_uint(&w, g->dist_cm);
+            jw_key(&w, "hit"); jw_bool(&w, g->hit != 0);
+            jw_obj_close(&w);
+            if (emit(e, &w) < 0) return -1;
+            e->run_gate_idx++;
+        }
+        if (exp_win_free(e) < 4) return EXP_FULL;
+        exp_win_puts(e, "]}");
+        e->run_pending = 0; e->runs++;
+        return 0;
     }
     return 0;
 }
 
 int exp_json_finish(exp_t *e)
 {
+    if (e->run_pending) return -1;
     if (exp_win_free(e) < 400) return EXP_FULL;
     if (e->json_stage == 0) { if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1; }
     if (e->json_stage == 1) { exp_win_puts(e, "],\"runs\":["); e->json_stage = 2; }
@@ -4066,7 +4116,7 @@ int exp_json_finish(exp_t *e)
 }
 ```
 
-Design note: `open_hdr` leaves the `laps` array open in the emitted text by building the prefix with `jw` and simply not closing it; subsequent lap objects are appended with explicit commas. The window free-space checks (`400`, `300`, `500`) exceed the largest object each branch can produce, so `EXP_FULL` is returned before anything partial is written. `exp_json_finish` may itself return `EXP_FULL`; the caller pulls and calls it again (document this in `exp.h`: "exp_finish may return EXP_FULL; pull and retry").
+Design note: `open_hdr` leaves the `laps` array open in the emitted text by building the prefix with `jw` and simply not closing it; subsequent lap objects are appended with explicit commas. The window free-space checks exceed the largest single write each branch can produce, so `EXP_FULL` is returned before anything partial is written. `DRAG_RUN` records are themselves streamed incrementally — the run's fixed fields and the open `"gates":[` are written once (guarded by `exp_t.run_pending`), then one gate object is appended per resumption of `exp_json_feed` for that same frame (`exp_t.run_gate_idx` tracks progress), so a run with any of the spec's up to `DRAG_MAX_GATES` (16) gates fits the 1024-byte window regardless of how many `EXP_FULL`/pull/re-feed cycles it takes; the caller must re-feed the identical `SES_T_DRAG_RUN` frame after each `EXP_FULL` until it gets `0` back. `exp_json_finish` may itself return `EXP_FULL`, and returns `-1` if a `DRAG_RUN` frame is still mid-emission (`run_pending`) — the caller pulls and calls it again, or finishes feeding the frame first (document this in `exp.h`: "exp_finish may return EXP_FULL: pull, then call again. Returns 0 (no-op) if already finished, -1 if a DRAG_RUN frame is mid-emission (re-feed it first)."). `exp_finish` itself is idempotent at the `exp.c` level: it returns `0` immediately if `e->finished` is already set.
 
 Add to `exp.h` next to `exp_finish`: `/* may return EXP_FULL: pull, then call again */`.
 
