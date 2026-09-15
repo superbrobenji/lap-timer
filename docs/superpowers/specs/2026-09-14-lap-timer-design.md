@@ -1084,6 +1084,7 @@ typedef struct {
     char       name[32];
     double     lat, lon;           /* centre */
     uint32_t   radius_m;           /* detection radius, default 2000 */
+    uint8_t    flags;              /* TRK_F_UNVERIFIED = 0x01: S/F not yet confirmed on site; UI appends "?" */
     uint8_t    n_layouts;
     trk_layout_t layouts[TRK_MAX_LAYOUTS];
 } trk_venue_t;
@@ -1091,7 +1092,7 @@ typedef struct {
 
 Bundled venues are generated from `tools/tracks/*.json` (schema §10.2) by `gen_tracks.py` into `trk_bundled.c` as a `const` array in flash. Initial set (start/finish coordinates approximate until verified on site **[VERIFY]**): Kyalami (Full), Zwartkops (Full, Short), Red Star Raceway (Full, Short), Phakisa (Full), Aldo Scribante (Full), Killarney (Full, Full Reverse, Short, Short Reverse), Dezzi Raceway (Full), East London Grand Prix Circuit (Full), Midvaal (Full). Kart venues are added as data arrives.
 
-User venues: `/tracks/user.bin` = `u8 version | u8 count | trk_venue_t[count]` packed. Max 16 user venues. Loaded at boot; lookup merges bundled and user, user wins on id clash.
+User venues: `/tracks/user.bin` = `u8 version | u8 count | trk_venue_t[count]` packed. Max 4 user venues (each venue struct is ~2.75 KB; the store is static RAM). Loaded at boot; lookup merges bundled and user, user wins on id clash.
 
 ### 10.2 Track JSON schema (tools and upload)
 
@@ -1112,6 +1113,8 @@ User venues: `/tracks/user.bin` = `u8 version | u8 count | trk_venue_t[count]` p
 Line endpoint convention: `p1` is the **left** end and `p2` the **right** end of the line as seen in the driving direction of the layout; with that convention `dir` is `+1`. A reverse layout keeps the same endpoints and sets `dir` to `-1`. Formally `dir = sign(cross(p2 − p1, motion))` in ENU, the same expression the engine evaluates at every crossing and that on-device creation uses to set `dir_sign`.
 
 `"sf": "same"` copies the S/F line of the first layout; `"sectors": "reverse"` reverses the sector order of the first layout. The generator expands these before emitting C.
+
+`"verified": false` marks a venue whose lines were placed from map data; the generator sets `TRK_F_UNVERIFIED` and the UI shows the venue name with a trailing "?".
 
 ### 10.3 Lap engine state machine
 
@@ -2222,7 +2225,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `RTC_MAGIC` | 0x4C505452 | §15.3 |
 | `SES_SYNC` | 0xA5 | §12.2 |
 | `SES_MAX_PAYLOAD` | 247 | §12.2 |
-| `TRK_MAX_LAYOUTS` / `LAP_MAX_SECTORS` / `TRK_MAX_USER` | 8 / 8 / 16 | §10.1 |
+| `TRK_MAX_LAYOUTS` / `LAP_MAX_SECTORS` / `TRK_MAX_USER` | 8 / 8 / 4 | §10.1 |
 
 ## Appendix B. Glossary
 

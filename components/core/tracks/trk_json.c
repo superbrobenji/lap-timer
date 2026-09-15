@@ -1,0 +1,105 @@
+#include "core/trk.h"
+#include "core/json.h"
+#include "core/jw.h"
+#include <string.h>
+#include <stdio.h>
+
+#define MAX_TOKS 512
+
+static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
+
+static bool get_pt(const char *js, const jsmntok_t *toks, int arr, trk_pt_t *out)
+{
+    if (toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
+    return json_tok_double(js, &toks[arr + 1], &out->lat) && json_tok_double(js, &toks[arr + 2], &out->lon);
+}
+static bool get_line(const char *js, const jsmntok_t *toks, int arr, trk_line_t *out)
+{
+    if (toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
+    int p1 = arr + 1, p2 = json_skip(toks, p1);
+    return get_pt(js, toks, p1, &out->p1) && get_pt(js, toks, p2, &out->p2);
+}
+
+int trk_from_json(trk_venue_t *v, const char *json, size_t n, char *err, size_t err_cap)
+{
+    static jsmntok_t toks[MAX_TOKS];
+    int cnt = json_parse(json, n, toks, MAX_TOKS);
+    if (cnt < 1 || toks[0].type != JSMN_OBJECT) return fail(err, err_cap, "malformed json");
+    memset(v, 0, sizeof *v);
+    int t; int64_t iv; bool bv;
+    if ((t = json_obj_get(json, toks, 0, "id")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 1 || iv > 65535) return fail(err, err_cap, "id");
+    v->id = (uint16_t)iv;
+    if ((t = json_obj_get(json, toks, 0, "name")) < 0) return fail(err, err_cap, "name");
+    json_tok_str(json, &toks[t], v->name, sizeof v->name);
+    if ((t = json_obj_get(json, toks, 0, "lat")) < 0 || !json_tok_double(json, &toks[t], &v->lat)) return fail(err, err_cap, "lat");
+    if ((t = json_obj_get(json, toks, 0, "lon")) < 0 || !json_tok_double(json, &toks[t], &v->lon)) return fail(err, err_cap, "lon");
+    if ((t = json_obj_get(json, toks, 0, "radius_m")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 100 || iv > 50000) return fail(err, err_cap, "radius_m");
+    v->radius_m = (uint32_t)iv;
+    v->flags = TRK_F_UNVERIFIED;
+    if ((t = json_obj_get(json, toks, 0, "verified")) >= 0 && json_tok_bool(json, &toks[t], &bv) && bv) v->flags = 0;
+    int la = json_obj_get(json, toks, 0, "layouts");
+    if (la < 0 || toks[la].type != JSMN_ARRAY || toks[la].size < 1 || toks[la].size > TRK_MAX_LAYOUTS) return fail(err, err_cap, "layouts");
+    int li = la + 1;
+    for (int k = 0; k < toks[la].size; k++) {
+        trk_layout_t *L = &v->layouts[k];
+        if (toks[li].type != JSMN_OBJECT) return fail(err, err_cap, "layout object");
+        if ((t = json_obj_get(json, toks, li, "id")) < 0 || !json_tok_int(json, &toks[t], &iv) || iv < 1 || iv > 65535) return fail(err, err_cap, "layout id");
+        L->id = (uint16_t)iv;
+        if ((t = json_obj_get(json, toks, li, "name")) < 0) return fail(err, err_cap, "layout name");
+        json_tok_str(json, &toks[t], L->name, sizeof L->name);
+        if ((t = json_obj_get(json, toks, li, "dir")) < 0 || !json_tok_int(json, &toks[t], &iv) || (iv != 1 && iv != -1)) return fail(err, err_cap, "dir");
+        L->dir_sign = (int8_t)iv;
+        if ((t = json_obj_get(json, toks, li, "length_m")) >= 0 && json_tok_int(json, &toks[t], &iv) && iv >= 0) L->length_m = (uint32_t)iv;
+        t = json_obj_get(json, toks, li, "sf");
+        if (t < 0) return fail(err, err_cap, "sf");
+        if (json_tok_eq(json, &toks[t], "same")) { if (k == 0) return fail(err, err_cap, "sf same on first"); L->sf = v->layouts[0].sf; }
+        else if (!get_line(json, toks, t, &L->sf)) return fail(err, err_cap, "sf line");
+        t = json_obj_get(json, toks, li, "sectors");
+        if (t < 0) { L->n_sectors = 0; }
+        else if (json_tok_eq(json, &toks[t], "reverse")) {
+            if (k == 0) return fail(err, err_cap, "sectors reverse on first");
+            L->n_sectors = v->layouts[0].n_sectors;
+            for (uint8_t s = 0; s < L->n_sectors; s++) L->sectors[s] = v->layouts[0].sectors[L->n_sectors - 1 - s];
+        } else {
+            if (toks[t].type != JSMN_ARRAY || toks[t].size > LAP_MAX_SECTORS) return fail(err, err_cap, "sectors");
+            L->n_sectors = (uint8_t)toks[t].size;
+            int si = t + 1;
+            for (uint8_t s = 0; s < L->n_sectors; s++) { if (!get_line(json, toks, si, &L->sectors[s])) return fail(err, err_cap, "sector line"); si = json_skip(toks, si); }
+        }
+        v->n_layouts++;
+        li = json_skip(toks, li);
+    }
+    return 0;
+}
+
+static void put_pt(jw_t *w, const trk_pt_t *p) { jw_arr_open(w); jw_double(w, p->lat, 7); jw_double(w, p->lon, 7); jw_arr_close(w); }
+static void put_line(jw_t *w, const trk_line_t *l) { jw_arr_open(w); put_pt(w, &l->p1); put_pt(w, &l->p2); jw_arr_close(w); }
+
+int trk_to_json(const trk_venue_t *v, char *out, size_t cap)
+{
+    jw_t w; jw_init(&w, out, cap);
+    jw_obj_open(&w);
+    jw_key(&w, "id"); jw_uint(&w, v->id);
+    jw_key(&w, "name"); jw_str(&w, v->name);
+    jw_key(&w, "lat"); jw_double(&w, v->lat, 7);
+    jw_key(&w, "lon"); jw_double(&w, v->lon, 7);
+    jw_key(&w, "radius_m"); jw_uint(&w, v->radius_m);
+    jw_key(&w, "verified"); jw_bool(&w, !(v->flags & TRK_F_UNVERIFIED));
+    jw_key(&w, "layouts"); jw_arr_open(&w);
+    for (uint8_t k = 0; k < v->n_layouts; k++) {
+        const trk_layout_t *L = &v->layouts[k];
+        jw_obj_open(&w);
+        jw_key(&w, "id"); jw_uint(&w, L->id);
+        jw_key(&w, "name"); jw_str(&w, L->name);
+        jw_key(&w, "dir"); jw_int(&w, L->dir_sign);
+        jw_key(&w, "length_m"); jw_uint(&w, L->length_m);
+        jw_key(&w, "sf"); put_line(&w, &L->sf);
+        jw_key(&w, "sectors"); jw_arr_open(&w);
+        for (uint8_t s = 0; s < L->n_sectors; s++) put_line(&w, &L->sectors[s]);
+        jw_arr_close(&w);
+        jw_obj_close(&w);
+    }
+    jw_arr_close(&w);
+    jw_obj_close(&w);
+    return jw_overflow(&w) ? -1 : (int)jw_len(&w);
+}

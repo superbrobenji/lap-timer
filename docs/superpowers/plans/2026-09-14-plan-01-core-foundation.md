@@ -2985,7 +2985,7 @@ static void test_user_venue_wins_on_id_clash_and_persists(void)
     u.layouts[0].id = 1; strcpy(u.layouts[0].name, "L1"); u.layouts[0].dir_sign = 1;
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&u));
     TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
-    uint8_t blob[8192]; size_t n;
+    uint8_t blob[16384]; size_t n;
     TEST_ASSERT_EQUAL_INT(0, trk_user_save(blob, sizeof blob, &n));
     trk_init();
     TEST_ASSERT_EQUAL_STRING("Killarney", trk_get(6)->name);
