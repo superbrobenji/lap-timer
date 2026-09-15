@@ -108,6 +108,8 @@ A self-contained, battery-powered GPS + IMU lap timer for track days and drag ru
 
 ### 3.1 Prototype bill of materials
 
+The maintained purchase list with quantities, status, and South African sources is `docs/hardware/bom.md` (created at the end of plan 01).
+
 | Item | Part | Interface | Notes |
 |------|------|-----------|-------|
 | MCU | ESP32 DevKit V1 (ESP32-WROOM-32, CH340) | — | Flash 4 MB, verified 2026-09-15 with esptool flash_id (ESP32-D0WD-V3 rev 3.1, 40 MHz crystal, VRef calibration in eFuse). Dual core 240 MHz, 520 KB SRAM, 8 KB slow RTC RAM. |
@@ -2074,6 +2076,8 @@ Coverage target: ≥ 90 % lines in `core/` (gcov in CI).
 | BLE export | web page on Android | 200 KB session ≤ 15 s, CRC OK, RaceChrono imports |
 | OTA | good image; corrupted image; wrong hwid; image with `dbg crash` in `app_main` | applied / `E_OTA_SIG` / `E_OTA_HWID` / rolled back |
 | E-paper | 50 partials, temp 5 °C and 40 °C | legible, full refresh clears ghosting |
+
+From plan 01 onward, `test_apps/core_selftest` also runs the host unit-test files unchanged on the ESP32 (vendored Unity as an IDF component; stress-test iteration counts reduced under `ESP_PLATFORM`), so every core change is proven on the target toolchain (xtensa alignment of packed records, `_Atomic` support, newlib formatting, float performance) before firmware plans build on it.
 
 ### 22.4 Resource measurement
 After Phase 1: `uxTaskGetStackHighWaterMark` per task, pipeline worst-case iteration time (GPIO toggle + scope, or `esp_timer` delta logged), heap min-free after 1 h with BLE cycling. Values recorded in `docs/measurements.md` and stack sizes updated to high-water + 25 %.

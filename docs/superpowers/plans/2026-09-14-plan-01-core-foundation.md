@@ -49,6 +49,8 @@ test/
   test_jw.c test_cfg.c test_trk.c test_exp_vbo.c test_exp_nmea_json.c
 tools/tracks/gen_tracks.py  tools/tracks/killarney.json  tools/tracks/zwartkops.json
 .github/workflows/host-tests.yml
+test_apps/core_selftest/                on-target self-test project (Task 14)
+docs/hardware/bom.md                    prototype bill of materials (Task 15)
 ```
 
 ---
@@ -4136,4 +4138,4 @@ git tag plan-01-done && git push origin plan-01-done
 
 **Type consistency:** `gps_fix_t` fields (`lat_e7`, `gspeed_mms`, `head_e5`, `hacc_mm`) used identically in Tasks 7, 11, 12; `ses_hdr_t` field names match between Task 7 codec and Task 12 JSON; `exp_meta_t.session_id[11]` holds the 10-char id plus NUL; `trk_venue_t.flags` added in Task 10 header and used by the generator and JSON codec; `EXP_FULL` semantics identical in `exp_feed` and `exp_finish`.
 
-**Known follow-ups for plan 2:** `test/data/` fixtures and the synthetic generator, `fus_`/`lap_`/`drag_` engines, `replay` CLI.
+**Known follow-ups for plan 2:** `test/data/` fixtures and the synthetic generator, `fus_`/`lap_`/`drag_` engines, `replay` CLI. Tasks 14–15 (target self-test, BOM) are written at the start of session 1.5.
