@@ -446,6 +446,7 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
 | Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 328 B |
 | Lap engine `lap_t` (venue + candidates + sector/union gates + best/prev) | ~5.3 KB |
+| Drag engine `drag_t` (gate table, 1 s fused-sample history ring, current + composite-best results) | ~3.3 KB, caller-provided (drag mode) |
 | Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB, caller-provided (OLED/O5 only; none on the e-paper build) |
 | Headroom | > 90 KB |
 
@@ -815,19 +816,34 @@ completion (§10.4), pit detection (§10.6), sector gates and splits, layout dis
 sector/lap deltas (§10.7), theoretical best (§10.8), on-device creation (§10.9), RTC continuity
 (§10.10) and predictive delta (§10.11).
 
-#### `core/drag.h` (planned, plan 02)
+#### `core/drag.h` — drag engine (plan 02)
+
+`drag_result_t`, `drag_gate_res_t` and `DRAG_F_*` live in `core/types.h`; the event a run emits is
+`event_t` in `core/event.h`. All state is caller-owned in `drag_t` (no allocation, ~3.3 KB — the 1 s
+fused-sample history ring dominates). Gate kinds: `DRAG_SPEED_FROM0`, `DRAG_SPEED_RANGE`, `DRAG_DIST`,
+`DRAG_BRAKE`. States: `DRAG_ST_IDLE`, `DRAG_ST_ARMED`, `DRAG_ST_LAUNCHED`, `DRAG_ST_DONE`. The gate
+table, benches (`{100,200,300}` km/h default), a rollout flag (default OFF for GPS timing) and the
+display units live in `drag_cfg_t`, filled by `drag_cfg_defaults` with the §11.1 eleven gates.
 
 ```c
-typedef struct { uint8_t id; uint8_t kind; /* DRAG_SPEED_FROM0, DRAG_SPEED_RANGE, DRAG_DIST, DRAG_BRAKE */ uint16_t a, b; /* km/h or cm */ } drag_gate_def_t;
+typedef struct { uint8_t id; uint8_t kind; /* DRAG_SPEED_FROM0/RANGE, DRAG_DIST, DRAG_BRAKE */ uint16_t a, b; /* km/h or cm */ } drag_gate_def_t;
+typedef void (*drag_evt_cb_t)(const event_t *ev, void *ctx);
 
+void drag_cfg_defaults(drag_cfg_t *c);
 void drag_init(drag_t *D, const drag_cfg_t *cfg);
 void drag_reset(drag_t *D);
 void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx);   /* 100 Hz */
 void drag_on_fix(drag_t *D, const gps_fix_t *fix);                                       /* re-anchors speed */
 uint8_t drag_state(const drag_t *D);
 const drag_result_t *drag_current(const drag_t *D);
-const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id);
+const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id);   /* composite best per gate; NULL if that gate was never hit */
 ```
+
+The 1/4 (trap) gate is the DIST gate with the largest distance; its `trap_cms` is the §6.6 trap-window
+mean of `v_est` (see §11.3). Session 2.6 implements the whole engine: §6.6 integration and the Doppler
+re-anchor, the IDLE→ARMED→LAUNCHED→DONE machine, launch with t0 back-dating and optional rollout, gate
+evaluation with §6.6 interpolation, the trap, the false-start abort, the braking gate that may complete
+after DONE, and the best-per-gate.
 
 #### `core/ses.h` — session records and framing
 
