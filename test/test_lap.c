@@ -678,6 +678,125 @@ static void test_create_cancel(void)
     TEST_ASSERT_EQUAL_INT(0, trk_user_count());                    /* nothing saved */
 }
 
+/* ---------------------------------------------------- session 2.5 RTC continuity (§10.10) */
+
+/* §10.10: export mid-lap, restore into a fresh engine → LAP_RUNNING + LAP_F_INTERRUPTED with the
+ * running time and best/prev preserved; the resumed lap completes carrying LAP_F_INTERRUPTED. */
+static void test_rtc_restore_mid_lap_interrupted(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    const double northings[2] = { 100.0, 200.0 };
+    trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));                    /* import resolves the venue via trk_get */
+    const trk_venue_t *vs = trk_get(TRK_USER_ID_BASE);
+
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, vs);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
+    clean_sector_leg(&L, lat0, lon0, 48000000, NULL, NULL);        /* out-lap completes; lap 1 runs */
+    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL, NULL);   /* lap 1 completes → best */
+    TEST_ASSERT_NOT_NULL(lap_best(&L));
+    uint32_t best_ms = lap_best(&L)->time_ms;
+
+    feed(&L, lat0, lon0, 0.0, 140.0, 102000000, SPD_MMS, true, NULL, NULL); /* lap 2: cross sector 1 */
+    lap_rtc_t rtc; lap_export_rtc(&L, &rtc);
+    uint32_t elapsed_before = lap_current_elapsed_ms(&L, 105000000);
+    TEST_ASSERT_TRUE(elapsed_before > 0);
+    TEST_ASSERT_EQUAL_UINT16(2, rtc.lap_no);
+    TEST_ASSERT_EQUAL_UINT16(1, rtc.layout_id);
+
+    lap_t L2; lap_init(&L2, NULL);                                 /* simulate a reboot */
+    TEST_ASSERT_EQUAL_INT(0, lap_import_rtc(&L2, &rtc));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L2));
+    TEST_ASSERT_EQUAL_UINT32(elapsed_before, lap_current_elapsed_ms(&L2, 105000000));   /* running time */
+    TEST_ASSERT_NOT_NULL(lap_best(&L2));
+    TEST_ASSERT_EQUAL_UINT32(best_ms, lap_best(&L2)->time_ms);     /* best preserved */
+    TEST_ASSERT_EQUAL_UINT16(2, L2.lap_no);
+
+    /* resume: establish a segment origin, cross sector 2, loop, cross S/F to complete the lap. */
+    feed(&L2, lat0, lon0,   0.0, 150.0, 106000000, SPD_MMS, true, NULL, NULL);
+    feed(&L2, lat0, lon0,   0.0, 260.0, 110000000, SPD_MMS, true, NULL, NULL);   /* sector 2 */
+    feed(&L2, lat0, lon0, 400.0, 260.0, 130000000, SPD_MMS, true, NULL, NULL);
+    feed(&L2, lat0, lon0, 400.0, -40.0, 140000000, SPD_MMS, true, NULL, NULL);
+    feed(&L2, lat0, lon0,   0.0, -40.0, 148000000, SPD_MMS, true, NULL, NULL);
+    feed(&L2, lat0, lon0,   0.0,  40.0, 150000000, SPD_MMS, true, NULL, NULL);   /* S/F completes lap 2 */
+    const lap_result_t *p = lap_prev(&L2);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT16(2, p->lap_no);
+    TEST_ASSERT_TRUE(p->flags & LAP_F_INTERRUPTED);                /* §10.10 */
+    TEST_ASSERT_TRUE(p->time_ms > 0);
+}
+
+/* import of an unknown venue id fails without disturbing the engine. */
+static void test_rtc_import_unknown_venue_fails(void)
+{
+    lap_rtc_t rtc; memset(&rtc, 0, sizeof rtc);
+    rtc.venue_id = 55555;                                          /* not in the store */
+    lap_t L; lap_init(&L, NULL);
+    TEST_ASSERT_EQUAL_INT(-1, lap_import_rtc(&L, &rtc));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+}
+
+/* ---------------------------------------------------- session 2.5 predictive delta (§10.11) */
+
+/* §10.11: with a recorded best lap, lap_live_delta_ms(dist) = elapsed - t_ref(dist). At a distance the
+ * reference table holds, t_ref is exact, so the delta tracks the elapsed offset; outside the range no
+ * delta is produced. */
+static void test_predictive_delta(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    const double northings[2] = { 100.0, 200.0 };
+    trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
+    clean_sector_leg(&L, lat0, lon0, 48000000, NULL, NULL);        /* out-lap completes; lap 1 runs */
+    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL, NULL);   /* lap 1 → best + predictive ref */
+    TEST_ASSERT_NOT_NULL(lap_best(&L));
+    TEST_ASSERT_TRUE(L.pred_best_n >= 2);
+
+    feed(&L, lat0, lon0, 0.0, 140.0, 102000000, SPD_MMS, true, NULL, NULL); /* lap 2 running */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+
+    uint16_t dq   = L.pred_best_dist_m[1];       /* a distance the reference holds exactly */
+    uint32_t tref = L.pred_best_t_ms[1];
+    bool have;
+    int64_t now = L.lap_start_gps_us + (int64_t)(tref + 3000) * 1000;   /* elapsed = t_ref + 3000 ms */
+    int32_t d = lap_live_delta_ms(&L, now, (double)dq, &have);
+    TEST_ASSERT_TRUE(have);
+    TEST_ASSERT_INT32_WITHIN(2, 3000, d);                          /* delta = elapsed - t_ref = 3000 ms */
+
+    lap_live_delta_ms(&L, now, 1.0e9, &have);                      /* beyond the table: no delta */
+    TEST_ASSERT_FALSE(have);
+    lap_live_delta_ms(&L, now, -10.0, &have);
+    TEST_ASSERT_FALSE(have);
+}
+
+/* §10.11 table cap: a lap with far more than PRED_TABLE_MAX fixes stays within the fixed table. */
+static void test_predictive_table_cap(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);                 /* no sector gates */
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+
+    int64_t t = 2000000;
+    for (int i = 0; i < 700; i++) {                                /* bounce north of the S/F, dist grows */
+        t += 200000;
+        double n = 100.0 + ((i & 1) ? 40.0 : 0.0);
+        double e = ((i & 1) ? 30.0 : 0.0);
+        feed(&L, lat0, lon0, e, n, t, SPD_MMS, true, NULL, NULL);
+    }
+    TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
+    TEST_ASSERT_TRUE(L.pred_rec_n > 0);
+    TEST_ASSERT_TRUE(L.pred_rec_n <= PRED_TABLE_MAX);              /* never overflows the fixed table */
+}
+
 #ifndef ESP_PLATFORM
 /* Exit criterion (§22.2, roadmap): drive the engine off the synthetic circuit and confirm every
  * flying lap time matches the closed-form truth, and (2.5) that sectors are populated and sum to the
@@ -874,6 +993,10 @@ int main(void)
     RUN_TEST(test_disambiguation_locks_short_layout);
     RUN_TEST(test_create_track_saves_valid_venue);
     RUN_TEST(test_create_cancel);
+    RUN_TEST(test_rtc_restore_mid_lap_interrupted);
+    RUN_TEST(test_rtc_import_unknown_venue_fails);
+    RUN_TEST(test_predictive_delta);
+    RUN_TEST(test_predictive_table_cap);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);

@@ -445,8 +445,8 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | `exp_t` (holds the 1 KB export streaming window and the decoder state) | 1,488 B |
 | `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
 | Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 328 B |
-| Lap engine (venue + 8 layouts × 16 gates) | ~3 KB |
-| Predictive delta table (O5) | 2.4 KB |
+| Lap engine `lap_t` (venue + candidates + sector/union gates + best/prev) | ~5.3 KB |
+| Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB |
 | Headroom | > 90 KB |
 
 Sizes with a byte figure are measured with the ESP32 toolchain (`xtensa-esp32-elf-gcc`, 32-bit

@@ -230,25 +230,125 @@ int lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t
     return 0;
 }
 
-/* ---- §10.10 RTC continuity / §10.11 predictive delta (bodies: session 2.5 Task 4) ---- */
+static void project_locked_sectors(lap_t *L);
+
+/* ---- §10.10 RTC continuity ---- */
 
 void lap_export_rtc(const lap_t *L, lap_rtc_t *out)
 {
-    (void)L;
     memset(out, 0, sizeof *out);
+    out->venue_id         = L->venue ? L->venue->id : 0;
+    out->layout_id        = L->locked ? L->locked_layout->id : 0;
+    out->lap_no           = L->lap_no;
+    out->sector_idx       = (uint8_t)(L->sec_next - 1);   /* sector gates crossed so far this lap */
+    out->mode             = L->mode;
+    out->lap_start_gps_us = L->lap_start_gps_us;
+    memcpy(out->gate_times, L->gate_times, sizeof out->gate_times);
+    out->best             = L->best;
+    out->prev             = L->prev;
 }
 
+/* Restore the mirrored state into LAP_RUNNING with LAP_F_INTERRUPTED (§10.10). Unconditional: the
+ * CRC32/version container and the RTC_RESUME_MAX_S freshness gate are the pipeline's job (plan 03).
+ * Returns -1 only if the venue id is unknown to the track store. */
 int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
 {
-    (void)L; (void)s;
-    return -1;
+    const trk_venue_t *v = trk_get(s->venue_id);
+    if (!v) return -1;
+
+    L->venue = v;
+    geo_origin_set(&L->origin, v->lat, v->lon);
+    L->forced_layout_id = s->layout_id;
+    arm_candidates(L);                       /* arm the S/F of the (forced) layout(s) */
+
+    L->locked = false;
+    L->locked_layout = NULL;
+    L->n_sec = 0;
+    L->best_sector_count = 0;
+    if (s->layout_id != 0) {
+        for (uint8_t i = 0; i < L->n_cand; i++)
+            if (L->cand[i].layout->id == s->layout_id) {
+                L->locked = true;
+                L->locked_layout = L->cand[i].layout;
+                L->cand[0] = L->cand[i];
+                L->n_cand = 1;
+                project_locked_sectors(L);
+                break;
+            }
+    }
+
+    L->state = LAP_ST_RUNNING;
+    L->mode = LAP_MODE_NORMAL;
+    L->lap_no = s->lap_no;
+    L->lap_start_gps_us = s->lap_start_gps_us;
+    L->lap_flags = LAP_F_INTERRUPTED;        /* §10.10 / §10.4 step 3 */
+    L->lap_dist_m = 0.0;
+    memcpy(L->gate_times, s->gate_times, sizeof L->gate_times);
+    L->sec_next = (uint8_t)(s->sector_idx + 1);
+    L->best = s->best;
+    L->have_best = (s->best.flags & LAP_F_VALID) != 0;
+    L->prev = s->prev;
+    L->have_prev_result = (s->prev.flags != 0);
+
+    L->have_prev_fix = false;                /* the next fix re-establishes the segment origin */
+    L->pit_slow = false;
+    L->pit_since_us = 0;
+    L->leaving = false;
+    L->leave_since_us = 0;
+    L->n_ugate = 0;
+    L->pred_rec_n = 0;
+    L->pred_rec_fixes = 0;
+    return 0;
+}
+
+/* ---- §10.11 predictive delta (O5) ---- */
+
+/* Append the current (distance, elapsed) sample of the lap in progress to the recording table. Beyond
+ * PRED_TABLE_MAX entries the table is halved in place and recording continues at half density ("every
+ * 2nd fix"), so it always holds <= PRED_TABLE_MAX monotonic-distance samples spanning the whole lap. */
+static void pred_record(lap_t *L, int64_t now)
+{
+    if (now <= L->lap_start_gps_us) return;
+    uint32_t t_ms = (uint32_t)((now - L->lap_start_gps_us + 500) / 1000);
+    double d = L->lap_dist_m;
+    if (d < 0.0) d = 0.0; else if (d > 65535.0) d = 65535.0;
+    uint16_t d16 = (uint16_t)llround(d);
+    L->pred_rec_fixes++;
+
+    if (L->pred_rec_n >= PRED_TABLE_MAX) {              /* full: keep every 2nd entry, then continue */
+        uint16_t m = 0;
+        for (uint16_t i = 0; i < L->pred_rec_n; i += 2) {
+            L->pred_rec_dist_m[m] = L->pred_rec_dist_m[i];
+            L->pred_rec_t_ms[m]   = L->pred_rec_t_ms[i];
+            m++;
+        }
+        L->pred_rec_n = m;
+    }
+    if (L->pred_rec_n > 0 && d16 <= L->pred_rec_dist_m[L->pred_rec_n - 1]) return;   /* keep monotone */
+    L->pred_rec_dist_m[L->pred_rec_n] = d16;
+    L->pred_rec_t_ms[L->pred_rec_n]   = t_ms;
+    L->pred_rec_n++;
 }
 
 int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have)
 {
-    (void)L; (void)now_gps_us; (void)dist_m;
     if (have) *have = false;
-    return 0;
+    if (L->state != LAP_ST_RUNNING || L->pred_best_n < 2) return 0;
+    if (dist_m < (double)L->pred_best_dist_m[0] ||
+        dist_m > (double)L->pred_best_dist_m[L->pred_best_n - 1]) return 0;   /* outside the reference */
+
+    uint16_t lo = 0, hi = (uint16_t)(L->pred_best_n - 1);
+    while (hi - lo > 1) {                               /* binary search the bracketing interval */
+        uint16_t mid = (uint16_t)((lo + hi) / 2);
+        if ((double)L->pred_best_dist_m[mid] <= dist_m) lo = mid; else hi = mid;
+    }
+    double d0 = L->pred_best_dist_m[lo],  d1 = L->pred_best_dist_m[hi];
+    double t0 = L->pred_best_t_ms[lo],    t1 = L->pred_best_t_ms[hi];
+    double t_ref = (d1 > d0) ? t0 + (t1 - t0) * (dist_m - d0) / (d1 - d0) : t0;   /* linear interp */
+    uint32_t elapsed = (now_gps_us > L->lap_start_gps_us)
+                     ? (uint32_t)((now_gps_us - L->lap_start_gps_us + 500) / 1000) : 0;
+    if (have) *have = true;
+    return (int32_t)((double)elapsed - t_ref);
 }
 
 /* ---- geometry and sector helpers ---- */
@@ -607,6 +707,11 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
     if (valid && (!L->have_best || r.time_ms < L->best.time_ms)) { /* §10.4 step 6: best from valid laps */
         L->best = r;
         L->have_best = true;
+        /* §10.11: this lap is the new best, so its recorded trace becomes the predictive reference
+         * (open_lap has not yet reset pred_rec for the next lap). */
+        memcpy(L->pred_best_dist_m, L->pred_rec_dist_m, sizeof(uint16_t) * L->pred_rec_n);
+        memcpy(L->pred_best_t_ms,   L->pred_rec_t_ms,   sizeof(uint32_t) * L->pred_rec_n);
+        L->pred_best_n = L->pred_rec_n;
     }
     if (valid && L->locked) {                                      /* §10.8 best per-sector, any valid lap */
         for (uint8_t i = 0; i < n_splits && i <= LAP_MAX_SECTORS; i++)
@@ -801,6 +906,7 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
             if (seg_dt > 0.0)
                 L->lap_dist_m += 0.5 * (L->prev_speed_mps + v1) * seg_dt;
         }
+        pred_record(L, now);                                      /* §10.11 record the lap in progress */
     }
 
     /* Remember this valid fix as the start of the next segment (§6.4 needs two valid fixes). */
