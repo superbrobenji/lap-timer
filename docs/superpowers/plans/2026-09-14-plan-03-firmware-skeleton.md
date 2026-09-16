@@ -2208,3 +2208,1253 @@ Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED
 ```
 
 ---
+
+## Session 3.3 — storage_internal (LittleFS) and the logger task
+
+Roadmap exit: a power-cut during logging leaves `.sum` intact and `.log` decodable; tag `p03-d3`. Serial (3 tasks). LittleFS via `joltwallet/littlefs` (pinned 1.16.5, the ecosystem-standard component — IDF has no built-in LittleFS; `dependencies.lock` committed, `managed_components/` gitignored). Rulings: (1) §13.1 geometry via `CONFIG_LITTLEFS_*` (block_size is hard-coded 4096 in the component); (2) HAL paths are backend-relative, the driver prepends `/lfs`; (3) the driver is app-agnostic (`sto_mount` 0/1/-N), boot step 7 owns SYS_STORAGE_DEAD; (4) **evt_q→record fidelity: `event_t` lacks the full `lap_result_t`/sectors, so 3.3 logs generic EVENT records + a minimal LAP/DRAG_RUN for the `.sum`; sector/stats-populated LAP records and the real VENUE record need the pipeline's engine structs — deferred to session 3.4** (the pipeline must hand the full `lap_result_t`/`drag_result_t` to the logger, per §10.4 step 8, not just the `event_t`); (5) ring-notify = FreeRTOS task notification + 1000 ms timeout (fully static, §17.9). `components/core` stays pure C11.
+
+### Task 1: `storage_internal` (LittleFS) + `hal/storage.h` + mount at boot
+
+
+**Files:**
+- Create: `components/lt_hal/include/hal/storage.h`, `components/drivers/storage_internal/{CMakeLists.txt, idf_component.yml, storage_internal.c}`
+- Edit: top-level `CMakeLists.txt` (append the 3.3 storage dir to `EXTRA_COMPONENT_DIRS` + its comment), `main/CMakeLists.txt` (REQUIRES `storage_internal`), `components/app/include/app/lt_err.h` (the `E_STO_*` subset), `sdkconfig.defaults` (the §13.1 LittleFS geometry), `.gitignore` (commit `dependencies.lock`), `main/app_main.c` (boot step 7: mount + probe)
+
+**Interfaces:**
+- Produces: the `hal/storage.h` contract (§5.1) the logger (T2) and the 3.5 cmd console call; the concrete `sto_*` implementation over LittleFS that `main` links; a committed `dependencies.lock`.
+- Consumes: `joltwallet/littlefs` (managed component, pinned); `esp_littlefs` + POSIX VFS; `components/app` shared state only from `main` (the driver itself is app-agnostic).
+
+**Rulings (spec is the authority; the ESP-IDF v5.3.2 / esp_littlefs reality is noted):**
+1. **`joltwallet/littlefs` is pulled via the IDF component manager, pinned `==1.16.5`.** LittleFS is not in ESP-IDF core; joltwallet/littlefs is the ecosystem-standard component, so an `idf_component.yml` (in `storage_internal`) requiring a PINNED version is *using the standard*, not reinventing it (consistent with the "prefer IDF/standard components" directive). The resolved tree is captured in the repo-root `dependencies.lock`, which is **committed** (reproducible builds); the fetched `managed_components/` is **gitignored**. The manager fetches on first configure (allowed).
+2. **The §13.1 geometry lives in `sdkconfig.defaults`, not the conf struct.** esp_littlefs builds its `lfs_config` from `CONFIG_LITTLEFS_*` Kconfig, not the `esp_vfs_littlefs_conf_t` struct (verified in the fetched `src/esp_littlefs.c`): `read_size←CONFIG_LITTLEFS_READ_SIZE`, `prog_size←CONFIG_LITTLEFS_WRITE_SIZE`, `cache_size←…CACHE_SIZE`, `lookahead_size←…LOOKAHEAD_SIZE`, `block_cycles←…BLOCK_CYCLES`; **`block_size` is hard-`#define`d 4096** in the component ("ESP32 can only operate at 4kb") and `block_count` is auto-derived from the partition. So the §13.1 values (read/prog 128, cache 512, lookahead 128, block_cycles 512, block 4096) are set through `sdkconfig.defaults`; only `format_if_mount_failed=false` is a struct field (the ladder decides). These CONFIG_ defaults already match §13.1, but they are pinned explicitly so the spec, not a component default, is authoritative.
+3. **HAL paths are backend-relative; the driver maps them onto its mount point.** §5.1 says paths are `/sessions/<id>.log` etc. and §13.1 mounts at `/lfs` — the driver prepends `/lfs`, so app code (`/sessions/…`) is backend-agnostic and `storage_sd` will resolve the same paths on the card (§5.1 SD note). Mount base is a single `#define LFS_BASE "/lfs"`.
+4. **The driver stays app-agnostic; the boot sequence owns the ladder's side-effects.** `storage_internal` depends only on `lt_hal` + `joltwallet__littlefs` (no `components/app`), exactly like `board_devkit_v1`. `sto_mount` runs the §13.1 ladder and reports the result: **`0`** clean mount, **`1`** mounted only after a reformat, **`<0`** dead. Boot step 7 (in `app_main`) then owns `SYS_STORAGE_DEAD`, the `E_STO_MOUNT`/`E_STO_FORMAT` ring entries, and the `LT_CTR_STO_FORMAT` counter. `main` REQUIRES `storage_internal` so the plain `sto_*` symbols link app-wide (the §4.1 swappable interface-name registration is a 3.4 concern, per draft32 T1 ruling 5).
+5. **`STO_*` open-flag values are defined in `storage.h`.** §5.1 names the flags (`STO_RD`, `STO_WR|STO_APPEND|STO_CREATE`) but leaves their values to the header; they are stable HAL-abstract bits the driver maps to POSIX `open()`. `STO_CREATE` without `STO_APPEND` adds `O_TRUNC` (the `.sum.tmp` rewrite path starts fresh).
+6. **`E_STO_*` subset added to `lt_err.h` now** (`E_STO_WRITE/MOUNT/FORMAT/FULL/EVICT`, §17.7); the full code table still lands with the 3.5 console (draft32 pattern). `E_STO_SD_DEGRADED` is SD-only, deferred.
+
+
+- [ ] **Step 1: `components/lt_hal/include/hal/storage.h`** (§5.1 verbatim + guard/includes + `STO_*`).
+
+```c
+/* hal/storage.h -- storage HAL contract (spec §5.1, called from logger and cmd).
+ *
+ * The declarations below are the §5.1 storage.h slice verbatim; the include guard, the
+ * <stdint.h>/<stddef.h> includes (size_t, fixed-width types) and the STO_* open-flag values
+ * are added here so this is a self-contained, compilable header. The §5.1 excerpt names the
+ * flags (STO_RD, STO_WR|STO_APPEND|STO_CREATE) but leaves their values to the header; they are
+ * stable HAL-abstract bits the driver maps onto POSIX open() flags. All functions return int
+ * (0 = OK, negative = -errno-style) unless noted; each is called from one task only (logger,
+ * plus cmd for read-only listing/export in 3.5) and is not reentrant. The concrete backend is
+ * components/drivers/storage_${STORAGE} (storage_internal = LittleFS, §13.1).
+ *
+ * Paths are backend-relative: "/sessions/<id>.log", "/sessions/<id>.sum", "/tracks/user.bin".
+ * The driver maps them onto its mount point (storage_internal -> /lfs/...). Callers never embed
+ * the mount base, so app code is backend-agnostic (storage_sd resolves the same paths on SD).
+ */
+#ifndef HAL_STORAGE_H
+#define HAL_STORAGE_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+/* open() flag bits for sto_open (HAL-abstract; the driver maps them to O_* flags). */
+enum {
+    STO_RD     = 0x01,   /* read */
+    STO_WR     = 0x02,   /* write */
+    STO_APPEND = 0x04,   /* append; without it, STO_CREATE truncates an existing file */
+    STO_CREATE = 0x08,   /* create if absent */
+};
+
+typedef struct { uint32_t total_kb, free_kb; uint8_t degraded; } sto_info_t;
+typedef int sto_file_t;
+
+int  sto_mount(void);                 /* ladder inside driver: mount -> retry -> format (internal) / degrade (sd) */
+int  sto_info(sto_info_t *out);
+int  sto_open(const char *path, int flags, sto_file_t *out);   /* flags: STO_RD, STO_WR|STO_APPEND|STO_CREATE */
+int  sto_write(sto_file_t f, const void *buf, size_t n);
+int  sto_read(sto_file_t f, void *buf, size_t n, size_t *n_read);
+int  sto_seek(sto_file_t f, uint32_t offset);
+int  sto_sync(sto_file_t f);
+int  sto_close(sto_file_t f);
+int  sto_rename(const char *from, const char *to);              /* atomic on LittleFS */
+int  sto_unlink(const char *path);
+int  sto_list(const char *dir, void (*cb)(const char *name, uint32_t size, void *ctx), void *ctx);
+int  sto_probe(void);                 /* self-test: write+read+unlink probe file */
+
+#endif /* HAL_STORAGE_H */
+```
+
+- [ ] **Step 2: `components/drivers/storage_internal/idf_component.yml`** (pin the managed component).
+
+```yaml
+## storage_internal pulls the ecosystem-standard LittleFS component (joltwallet/littlefs)
+## via the IDF component manager, pinned to an exact version for reproducible builds
+## (spec §13.1; global constraint: prefer IDF/standard components). The resolved tree is
+## captured in the repo-root dependencies.lock (committed); managed_components/ is gitignored.
+dependencies:
+  joltwallet/littlefs:
+    version: "==1.16.5"
+```
+
+- [ ] **Step 3: `components/drivers/storage_internal/CMakeLists.txt`** (private dep on `joltwallet__littlefs`; strict flags).
+
+```cmake
+# storage_internal -- hal/storage.h implemented over LittleFS (spec §13.1).
+#
+# LittleFS is not in ESP-IDF core; joltwallet/littlefs is the ecosystem-standard component,
+# pulled (pinned) via idf_component.yml by the IDF component manager -- using the standard, not
+# reinventing it. The dependency is private: hal/storage.h exposes no esp_littlefs type, so a
+# consumer of this driver never sees the managed component.
+idf_component_register(
+    SRCS "storage_internal.c"
+    REQUIRES lt_hal
+    PRIV_REQUIRES joltwallet__littlefs)
+
+# Same strictness as components/core (§17.9): -Werror, conversion warnings non-fatal so IDF /
+# esp_littlefs macros and inline helpers do not break the build.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wall -Wextra -Werror -Wshadow -Wconversion
+    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+```
+
+- [ ] **Step 4: `components/drivers/storage_internal/storage_internal.c`** (the §13.1 mount ladder, atomic rename, fsync, dir creation, probe/list/info).
+
+```c
+/* storage_internal.c -- hal/storage.h over LittleFS (spec §13.1).
+ *
+ * Backs the §5.1 storage contract with the joltwallet/littlefs managed component mounted at
+ * /lfs on the `storage` partition (partitions.csv: data/spiffs subtype id 0x82, which LittleFS
+ * reuses). The §13.1 LittleFS geometry (read/prog 128, cache 512, lookahead 128, block_cycles
+ * 512; block_size 4096 is fixed by the component for the ESP32) is set through the CONFIG_
+ * LITTLEFS_* options in sdkconfig.defaults, so it is not repeated in the conf struct here;
+ * only format_if_mount_failed is a struct field, and it is false because the mount ladder --
+ * not the component -- decides when to format.
+ *
+ * Layering: the driver reports the ladder result through sto_mount's return value and never
+ * touches sys_flags or the NVS counters (no dependency on components/app). The caller (boot
+ * step 7 in app_main) owns SYS_STORAGE_DEAD / the E_STO_* error-ring entries / LT_CTR_STO_FORMAT.
+ * Symbols are the plain sto_* names the app links against; main REQUIRES this component (the
+ * §4.1 swappable interface-name registration is a 3.4 concern, exactly as for board_devkit_v1).
+ */
+#include "hal/storage.h"
+
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "esp_littlefs.h"
+#include "esp_log.h"
+
+static const char *TAG = "sto";
+
+#define LFS_BASE   "/lfs"
+#define LFS_PART   "storage"           /* partitions.csv label */
+#define STO_PATHMAX 128
+
+static const esp_vfs_littlefs_conf_t s_conf = {
+    .base_path = LFS_BASE,
+    .partition_label = LFS_PART,
+    .partition = NULL,
+    .format_if_mount_failed = false,   /* the ladder decides (§13.1) */
+    .read_only = false,
+    .dont_mount = false,
+    .grow_on_mount = false,
+};
+
+/* Map a backend-relative path ("/sessions/x.log") onto the mount point ("/lfs/sessions/x.log"). */
+static int full_path(const char *path, char *out, size_t cap)
+{
+    if (!path) return -1;
+    int n = snprintf(out, cap, "%s%s", LFS_BASE, path);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    return 0;
+}
+
+int sto_mount(void)
+{
+    esp_err_t e = esp_vfs_littlefs_register(&s_conf);          /* attempt 1 */
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "mount failed (%s); retrying", esp_err_to_name(e));
+        e = esp_vfs_littlefs_register(&s_conf);                /* attempt 2 (retry) */
+    }
+    int formatted = 0;
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "mount failed again (%s); formatting", esp_err_to_name(e));
+        esp_err_t fe = esp_littlefs_format(LFS_PART);
+        if (fe == ESP_OK) {
+            e = esp_vfs_littlefs_register(&s_conf);            /* attempt 3 (post-format) */
+            formatted = 1;
+        } else {
+            ESP_LOGE(TAG, "format failed (%s)", esp_err_to_name(fe));
+        }
+    }
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "storage DEAD (%s)", esp_err_to_name(e));
+        return -1;                                             /* caller -> SYS_STORAGE_DEAD */
+    }
+
+    /* §13.1: create the session/track directories at mount if missing (EEXIST is fine). */
+    if (mkdir(LFS_BASE "/sessions", 0777) != 0 && errno != EEXIST)
+        ESP_LOGW(TAG, "mkdir sessions: %s", strerror(errno));
+    if (mkdir(LFS_BASE "/tracks", 0777) != 0 && errno != EEXIST)
+        ESP_LOGW(TAG, "mkdir tracks: %s", strerror(errno));
+
+    size_t total = 0, used = 0;
+    esp_littlefs_info(LFS_PART, &total, &used);
+    ESP_LOGI(TAG, "mounted %s at %s: %u KB total, %u KB free%s", LFS_PART, LFS_BASE,
+             (unsigned)(total / 1024u), (unsigned)((total - used) / 1024u),
+             formatted ? " (formatted)" : "");
+    return formatted ? 1 : 0;                                  /* 1 => caller logs E_STO_FORMAT + counter */
+}
+
+int sto_info(sto_info_t *out)
+{
+    if (!out) return -1;
+    size_t total = 0, used = 0;
+    esp_err_t e = esp_littlefs_info(LFS_PART, &total, &used);
+    if (e != ESP_OK) return -1;
+    out->total_kb = (uint32_t)(total / 1024u);
+    out->free_kb  = (uint32_t)((total - used) / 1024u);
+    out->degraded = 0;                          /* internal LittleFS is never "degraded" (an SD concept) */
+    return 0;
+}
+
+int sto_open(const char *path, int flags, sto_file_t *out)
+{
+    if (!out) return -1;
+    char full[STO_PATHMAX];
+    if (full_path(path, full, sizeof full) != 0) return -1;
+
+    int of;
+    if ((flags & STO_WR) && (flags & STO_RD)) of = O_RDWR;
+    else if (flags & STO_WR)                  of = O_WRONLY;
+    else                                       of = O_RDONLY;
+    if (flags & STO_CREATE) of |= O_CREAT;
+    if (flags & STO_APPEND) of |= O_APPEND;
+    /* create-without-append means "start fresh" (the .sum.tmp rewrite path) -> truncate. */
+    if ((flags & STO_CREATE) && !(flags & STO_APPEND)) of |= O_TRUNC;
+
+    int fd = open(full, of, 0644);
+    if (fd < 0) { ESP_LOGE(TAG, "open %s: %s", full, strerror(errno)); return -1; }
+    *out = fd;
+    return 0;
+}
+
+int sto_write(sto_file_t f, const void *buf, size_t n)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(f, p + off, n - off);
+        if (w < 0) { ESP_LOGE(TAG, "write: %s", strerror(errno)); return -1; }
+        off += (size_t)w;
+    }
+    return 0;
+}
+
+int sto_read(sto_file_t f, void *buf, size_t n, size_t *n_read)
+{
+    ssize_t r = read(f, buf, n);
+    if (r < 0) { if (n_read) *n_read = 0; return -1; }
+    if (n_read) *n_read = (size_t)r;            /* 0 => EOF */
+    return 0;
+}
+
+int sto_seek(sto_file_t f, uint32_t offset)
+{
+    off_t r = lseek(f, (off_t)offset, SEEK_SET);
+    return (r < 0) ? -1 : 0;
+}
+
+int sto_sync(sto_file_t f)
+{
+    return (fsync(f) != 0) ? -1 : 0;            /* §13.1: sto_sync maps to fsync */
+}
+
+int sto_close(sto_file_t f)
+{
+    return (close(f) != 0) ? -1 : 0;
+}
+
+int sto_rename(const char *from, const char *to)
+{
+    char f_full[STO_PATHMAX], t_full[STO_PATHMAX];
+    if (full_path(from, f_full, sizeof f_full) != 0) return -1;
+    if (full_path(to, t_full, sizeof t_full) != 0) return -1;
+    if (rename(f_full, t_full) != 0) {          /* atomic on LittleFS (§13.1) */
+        ESP_LOGE(TAG, "rename %s -> %s: %s", f_full, t_full, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int sto_unlink(const char *path)
+{
+    char full[STO_PATHMAX];
+    if (full_path(path, full, sizeof full) != 0) return -1;
+    if (unlink(full) != 0) { if (errno == ENOENT) return 0; return -1; }
+    return 0;
+}
+
+int sto_list(const char *dir, void (*cb)(const char *name, uint32_t size, void *ctx), void *ctx)
+{
+    char full[STO_PATHMAX];
+    if (full_path(dir, full, sizeof full) != 0) return -1;
+    DIR *d = opendir(full);
+    if (!d) return -1;
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.' &&
+            (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
+            continue;                            /* skip "." and ".." */
+        uint32_t sz = 0;
+        if (cb) {
+            char item[STO_PATHMAX];
+            int m = snprintf(item, sizeof item, "%s/%s", full, ent->d_name);
+            struct stat st;
+            if (m > 0 && (size_t)m < sizeof item && stat(item, &st) == 0)
+                sz = (uint32_t)st.st_size;
+            cb(ent->d_name, sz, ctx);
+        }
+        count++;
+    }
+    closedir(d);
+    return count;
+}
+
+int sto_probe(void)
+{
+    static const char *PROBE = "/.probe";       /* -> /lfs/.probe */
+    uint8_t wr[256], rd[256];
+    for (size_t i = 0; i < sizeof wr; i++) wr[i] = (uint8_t)(i * 7u + 1u);
+
+    sto_file_t f;
+    if (sto_open(PROBE, STO_WR | STO_CREATE, &f) != 0) return -1;
+    int rc = sto_write(f, wr, sizeof wr);
+    if (rc == 0) rc = sto_sync(f);
+    sto_close(f);
+    if (rc != 0) { sto_unlink(PROBE); return -1; }
+
+    if (sto_open(PROBE, STO_RD, &f) != 0) { sto_unlink(PROBE); return -1; }
+    size_t got = 0;
+    rc = sto_read(f, rd, sizeof rd, &got);
+    sto_close(f);
+    sto_unlink(PROBE);
+    if (rc != 0 || got != sizeof rd || memcmp(wr, rd, sizeof wr) != 0) return -1;
+    return 0;
+}
+```
+
+- [ ] **Step 5: `sdkconfig.defaults`** — append the §13.1 LittleFS geometry after the existing `CONFIG_LITTLEFS_MAX_PARTITIONS=1` line.
+
+```
+CONFIG_LITTLEFS_MAX_PARTITIONS=1
+# LittleFS geometry per spec §13.1 (block_size 4096 is fixed by the component for the ESP32).
+CONFIG_LITTLEFS_READ_SIZE=128
+CONFIG_LITTLEFS_WRITE_SIZE=128
+CONFIG_LITTLEFS_CACHE_SIZE=512
+CONFIG_LITTLEFS_LOOKAHEAD_SIZE=128
+CONFIG_LITTLEFS_BLOCK_CYCLES=512
+```
+
+- [ ] **Step 6: `.gitignore`** — keep `managed_components/` ignored, but STOP ignoring `dependencies.lock` so it is committed (reproducible builds). Replace the `dependencies.lock` line with a comment:
+
+```
+managed_components/
+# dependencies.lock IS committed (reproducible builds); only the fetched sources are ignored.
+```
+
+- [ ] **Step 7: wire the CMake search path + `main` REQUIRES.**
+
+Top-level `CMakeLists.txt` — append the 3.3 storage dir and update the 3.3 comment:
+```cmake
+#   3.3  components/drivers/storage_internal (LittleFS via joltwallet/littlefs;
+#        the STORAGE=sd variant's storage_sd lands with the SD hardware).
+...
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal)
+```
+
+`main/CMakeLists.txt` — add `storage_internal` to REQUIRES:
+```cmake
+    REQUIRES core esp_system app lt_hal nvs_flash esp_timer esp_hw_support board_devkit_v1 storage_internal)
+```
+
+- [ ] **Step 8: `components/app/include/app/lt_err.h`** — add the storage codes above the `E_SYS_*` block:
+```c
+    /* storage (§17.7); the full code table lands with the 3.5 console. */
+    E_STO_WRITE       = 0x0401,
+    E_STO_MOUNT       = 0x0402,
+    E_STO_FORMAT      = 0x0403,
+    E_STO_FULL        = 0x0404,
+    E_STO_EVICT       = 0x0405,
+```
+
+- [ ] **Step 9: `main/app_main.c`** — `#include "hal/storage.h"`, and add boot step 7 right after `board_init(); board_gps_power(true);`:
+```c
+    /* §4.7 step 7 (internal storage): mount LittleFS; the mount ladder (mount -> retry ->
+     * format -> dead) lives in the driver. The driver stays app-agnostic, so the boot sequence
+     * owns the sys_flags / error-ring / counter effects of the ladder result (§13.1). */
+    int mrc = sto_mount();
+    if (mrc < 0) {
+        sys_flags_set(SYS_STORAGE_DEAD);
+        errlog_add(E_STO_MOUNT, 0);
+        ESP_LOGE(TAG, "storage DEAD (summaries fall back to RTC/NVS best-effort, 3.5)");
+    } else {
+        if (mrc == 1) {                        /* mounted only after a reformat */
+            lt_counters_inc(LT_CTR_STO_FORMAT, true);
+            errlog_add(E_STO_FORMAT, 0);
+        }
+        if (sto_probe() != 0) ESP_LOGW(TAG, "storage probe failed");   /* §17.6 self-test */
+        sto_info_t si;
+        if (sto_info(&si) == 0)
+            ESP_LOGI(TAG, "storage: %u/%u KB free", (unsigned)si.free_kb, (unsigned)si.total_kb);
+    }
+```
+
+**Task 1 verification:** `joltwallet/littlefs 1.16.5` fetched on first configure; `dependencies.lock` written + committed, `managed_components/` gitignored. `./build.sh moto_neo6m build` + `size` pass (app image 327,632 → **363,632 B**, LittleFS adds ~36 KB), `./build.sh moto_sim build` passes; no warnings from new code. Mount ladder / probe / directory creation are on-board checks for the orchestrator.
+
+
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED
+```
+
+---
+
+### Task 2: ring/queue set (§4.4) + logger task (§13.3)
+
+
+**Files:**
+- Create: `components/app/include/app/lt_ipc.h`, `components/app/include/app/logger.h`, `components/app/sys/lt_ipc.c`, `components/app/logger/logger.c`
+- Edit: `main/app_main.c` (boot step 11: `lt_ipc_init()`; step 12: `logger_start()`)
+
+**Interfaces:**
+- Produces: the §4.4 channels `g_fix_ring`/`g_fused_ring`/`g_evt_q`/`g_log_req_q` + `log_request_t`/`LOGGER_*`; the logger task and `logger_notify()`. The pipeline (3.4) is the producer/broadcaster; 3.3 creates the channels and the logger consumes.
+- Consumes: `core/ring.h` (unchanged), `core/ses.h` codecs, `hal/storage.h` (T1), `app/lt_sup.h` (hb/sys_flags/`sup_register_task`), `app/lt_nvs.h` (boot counter, counters, `errlog_add`), `build_config.h` (CFG_*).
+
+**Rulings (spec is the authority):**
+1. **`core/ring.h` already supports both §4.4 policies — no change needed.** It is the plan-01 lock-free SPSC ring with an `overwrite` flag: `overwrite=false` gives drop-newest **with** a `dropped` counter (fix loss, logged/inspectable), `overwrite=true` gives overwrite-oldest with the CAS-on-`tail` seqlock so a torn copy is never returned. `lt_ipc_init` sets `fix_ring` `overwrite=false` (32×`gps_fix_t`) and `fused_ring` `overwrite=true` (64×`fused_sample_t`) — exactly §4.4. Rings are static storage; the FreeRTOS queues are `xQueueCreateStatic` (§17.9, no malloc).
+2. **`log_request_t` is 16 B (`_Static_assert`).** `{u8 type, u8 mode, u8 reason, u8 _pad, u16 venue_id, u16 layout_id, i64 gps_us}` = 16 B, covering the §4.4 open/close/rebuild/evict set (`LOGGER_OPEN_SESSION/CLOSE_SESSION/REBUILD_SUMMARY/EVICT`). OPEN carries the session mode + venue/layout for the `.sum` header; CLOSE carries the `END` reason + gps_us.
+3. **Ring-notify = a task notification with a 1000 ms timeout — fully static, no queue-set object.** §4.3 says "ring notify or 1000 ms". The logger blocks on `ulTaskNotifyTake(pdTRUE, 1000 ms)`; `logger_notify()` (`xTaskNotifyGive`) is called by any producer after a ring push or after enqueuing a request. This keeps the wait built into the static task (a `xQueueCreateSet` allocates from the heap), honouring §17.9's static-only rule while giving the sub-1000 ms latency the spec wants. Requests are drained non-blocking each loop, so the 1000 ms timeout is the backstop.
+4. **Event→record fidelity in 3.3 (documented gap the pipeline closes in 3.4).** §13.3 maps drained events to records, but `evt_q` carries only `event_t` — not the full `lap_result_t`/`drag_result_t` (with sectors/stats/gates) that `ses_encode_lap`/`_drag_run` need, and `EV_SECTOR` carries no lap_no. With no pipeline/lapengine yet, the logger encodes **every** drained event as a generic `EVENT` record (type 0x09 = `{mono,gps,code,arg}`, which represents any event verbatim), and **additionally** emits a *minimal* `LAP` (from `EV_LAP_COMPLETE`: lap_no/time_ms/flags, `n_sectors=0`) and `DRAG_RUN` (from `EV_DRAG_DONE`: run_no) so the `.sum` carries them and sets the rebuild flag. The sector-/stats-populated `LAP`, the `SECTOR`/`DRAG_GATE` records, and the real `VENUE` name come from the engine result structs the pipeline owns (3.4). This is sufficient for the roadmap exit criterion (LAP present in an intact `.sum`; a decodable `.log`).
+5. **`.sum` accumulators are sized so the assembly always fits the 4 KB buffer.** §12.5 = HDR + VENUE + every LAP + every DRAG_RUN [+ END], built in a 4 KB buffer, `.sum.tmp` → fsync → atomic rename. The logger keeps two accumulators (`s_lap_acc` 3072 B, `s_drag_acc` 512 B) of encoded frames; with HDR(99)+VENUE(41)+END(14) that is ≤ 3738 B < 4096. §12.5's "laps beyond the first 100 are summarised only in the `.log`" is realized by the accumulator cap: overflow frames stay in the `.log` and are dropped from the `.sum` accumulator only.
+6. **The logger does not auto-open a session at boot** (no producer exists in 3.3; the power task commands OPEN in 3.4). It starts idle and opens on `LOGGER_OPEN_SESSION`. It writes `SESSION_HDR` to the `.log` and an initial `.sum` (HDR+VENUE) at open, flushing the HDR immediately so a cut right after open still yields a valid `.log` start. Session id `S%05u_%03u` = boot counter (u16, `lt_nvs_boot_get()`) + a per-boot sequence.
+7. **The logger registers with the supervisor** (`sup_register_task(HB_LOGGER, self, 10 s)`) and bumps `g_hb[HB_LOGGER]` every loop, so a stalled logger is caught by the §17.2 heartbeat watch.
+
+
+- [ ] **Step 1: `components/app/include/app/lt_ipc.h`** (the §4.4 channels + `log_request_t`).
+
+```c
+/* app/lt_ipc.h -- pipeline<->logger channels (spec §4.4).
+ *
+ * The §4.4 sample rings and the logger's control/event queues. The pipeline (3.4) is the single
+ * producer for the rings and the broadcaster for the event queue; the logger (3.3) is the single
+ * consumer. Objects are defined in lt_ipc.c with static storage (no malloc, §17.9) and created at
+ * boot step 11 by lt_ipc_init(). The rings are the core/ring.h lock-free SPSC ring.
+ */
+#ifndef APP_LT_IPC_H
+#define APP_LT_IPC_H
+
+#include <stdint.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
+#include "core/event.h"
+#include "core/ring.h"
+#include "core/types.h"
+
+/* §4.4 sample rings, pipeline -> logger:
+ *   fix_ring   32 x gps_fix_t      drop-newest + counter (fix loss is logged)
+ *   fused_ring 64 x fused_sample_t overwrite-oldest    (sample loss is tolerable) */
+#define FIX_RING_CAP   32u
+#define FUSED_RING_CAP 64u
+extern ring_t g_fix_ring;
+extern ring_t g_fused_ring;
+
+/* §4.4 evt_q -- the LOGGER's copy of the event broadcast (depth 16, event_t). The pipeline
+ * xQueueSends each event to the ui/logger/power queues separately; this is the logger's. */
+#define EVT_Q_DEPTH 16
+extern QueueHandle_t g_evt_q;
+
+/* §4.4 log_req_q -- power/conn -> logger control channel (depth 4, log_request_t 16 B). */
+#define LOG_REQ_Q_DEPTH 4
+
+typedef enum {
+    LOGGER_OPEN_SESSION    = 0,   /* open .log + start .sum; id = boot_cnt + per-boot seq (§12.1) */
+    LOGGER_CLOSE_SESSION   = 1,   /* write END, finalise .sum, close .log */
+    LOGGER_REBUILD_SUMMARY = 2,   /* force a .sum rewrite now */
+    LOGGER_EVICT           = 3,   /* run the §12.7 eviction check now */
+} log_req_type_t;
+
+typedef struct {
+    uint8_t  type;        /* log_req_type_t */
+    uint8_t  mode;        /* OPEN: session mode (§12.1) */
+    uint8_t  reason;      /* CLOSE: END.reason (§12.3) */
+    uint8_t  _pad;
+    uint16_t venue_id;    /* OPEN: venue id for the .sum HDR/VENUE frame */
+    uint16_t layout_id;   /* OPEN: layout id */
+    int64_t  gps_us;      /* OPEN: start_gps_us; CLOSE: END gps_us (0 if unknown) */
+} log_request_t;
+_Static_assert(sizeof(log_request_t) == 16, "log_request_t must be 16 B (§4.4)");
+
+extern QueueHandle_t g_log_req_q;
+
+/* Create the rings + queues. Idempotent; call once at boot step 11 (§4.7). */
+void lt_ipc_init(void);
+
+#endif /* APP_LT_IPC_H */
+```
+
+- [ ] **Step 2: `components/app/sys/lt_ipc.c`** (static storage + `lt_ipc_init`).
+
+```c
+/* lt_ipc.c -- definitions + static storage for the §4.4 pipeline<->logger channels. */
+#include "app/lt_ipc.h"
+
+ring_t g_fix_ring;
+ring_t g_fused_ring;
+static gps_fix_t      s_fix_store[FIX_RING_CAP];
+static fused_sample_t s_fused_store[FUSED_RING_CAP];
+
+QueueHandle_t g_evt_q;
+QueueHandle_t g_log_req_q;
+static StaticQueue_t s_evt_ctrl;
+static uint8_t       s_evt_store[EVT_Q_DEPTH * sizeof(event_t)];
+static StaticQueue_t s_logreq_ctrl;
+static uint8_t       s_logreq_store[LOG_REQ_Q_DEPTH * sizeof(log_request_t)];
+
+void lt_ipc_init(void)
+{
+    /* Rings: fix_ring drop-newest (overwrite=false), fused_ring overwrite-oldest (overwrite=true). */
+    ring_init(&g_fix_ring, s_fix_store, sizeof(gps_fix_t), FIX_RING_CAP, false);
+    ring_init(&g_fused_ring, s_fused_store, sizeof(fused_sample_t), FUSED_RING_CAP, true);
+
+    if (!g_evt_q)
+        g_evt_q = xQueueCreateStatic(EVT_Q_DEPTH, sizeof(event_t), s_evt_store, &s_evt_ctrl);
+    if (!g_log_req_q)
+        g_log_req_q = xQueueCreateStatic(LOG_REQ_Q_DEPTH, sizeof(log_request_t),
+                                         s_logreq_store, &s_logreq_ctrl);
+}
+```
+
+- [ ] **Step 3: `components/app/include/app/logger.h`**.
+
+```c
+/* app/logger.h -- logger task (spec §4.3, §13.3).
+ *
+ * Core 0, prio 8, stack 4096, static. Drains the §4.4 fix/fused rings and the logger's event
+ * queue into 4 KB .log batches through core/ses, rebuilds the .sum atomically on LAP/DRAG_RUN,
+ * fsyncs every 2 s, and evicts every 60 s (§12.5-12.7). Session open/close is commanded over
+ * log_req_q. The producer (pipeline, 3.4) calls logger_notify() after pushing to a ring so the
+ * logger wakes before its 1000 ms timeout ("ring notify or 1000 ms").
+ */
+#ifndef APP_LOGGER_H
+#define APP_LOGGER_H
+
+void logger_start(void);    /* create + start the task (boot step 12) */
+void logger_notify(void);   /* wake the logger (task notification); safe from any task */
+
+#endif /* APP_LOGGER_H */
+```
+
+- [ ] **Step 4: `components/app/logger/logger.c`** (the §13.3 loop; open/close; batch/sum/evict).
+
+```c
+/* logger.c -- logger task (spec §4.3 core 0/prio 8/stack 4096; loop §13.3; files §12.1/§12.5-12.7).
+ *
+ * Consumes the §4.4 fix/fused rings and the logger's event queue, encoding through core/ses into
+ * a 4 KB .log batch; rebuilds the .sum (HDR + VENUE + every LAP + every DRAG_RUN [+ END]) via
+ * tmp+fsync+atomic-rename on LAP/DRAG_RUN and at close; fsyncs the .log every 2 s; evicts every
+ * 60 s. Session open/close arrives over log_req_q. The task is static; the only dynamic wait is
+ * a task notification (ring-notify) with a 1000 ms timeout -- no heap, no queue-set object.
+ *
+ * Session record fidelity in 3.3: with no pipeline yet, the logger encodes each drained event as
+ * a generic EVENT record (§12.3 0x09 = {mono,gps,code,arg}, which represents any event verbatim),
+ * and additionally emits a minimal LAP (from EV_LAP_COMPLETE) / DRAG_RUN (from EV_DRAG_DONE) built
+ * from the event payload so the .sum carries them. The sector-/stats-populated LAP, the SECTOR and
+ * DRAG_GATE records, and the real VENUE name need the lapengine/dragengine result structs the
+ * pipeline owns; those are wired in 3.4. This is enough to exercise the power-cut exit criterion
+ * (.sum intact via atomic rename; .log decodable with a resync-past-bad truncated tail).
+ */
+#include "app/logger.h"
+#include "app/lt_ipc.h"
+#include "app/lt_sup.h"
+#include "app/lt_nvs.h"
+#include "app/lt_err.h"
+#include "hal/storage.h"
+
+#include "core/event.h"
+#include "core/ses.h"
+#include "core/types.h"
+
+#include "build_config.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#include <string.h>
+#include <stdio.h>
+
+static const char *TAG = "log";
+
+/* §4.3 task */
+#define LOG_CORE         0
+#define LOG_PRIO         8
+#define LOG_STACK_BYTES  4096
+#define LOG_STACK_WORDS  (LOG_STACK_BYTES / sizeof(StackType_t))
+#define LOG_STALL_S      10            /* supervisor heartbeat-stall window (§17.2) */
+
+/* §13.3 cadence + buffers */
+#define BATCH_CAP        4096
+#define BATCH_FLUSH_B    3584          /* write when the batch reaches this */
+#define WRITE_INTERVAL_MS 1000
+#define SYNC_INTERVAL_MS  2000
+#define EVICT_INTERVAL_MS 60000
+#define LOOP_TIMEOUT_MS   1000
+#define FRAME_TMP_CAP    256           /* >= max framed record (247 payload + 5) */
+
+/* §12.5 .sum assembly (sized so HDR+VENUE+laps+drags+END always fit BATCH_CAP). */
+#define SUM_BUILD_CAP    4096
+#define LAP_ACC_CAP      3072
+#define DRAG_ACC_CAP     512
+
+static StaticTask_t s_tcb;
+static StackType_t  s_stack[LOG_STACK_WORDS];
+static TaskHandle_t s_task;
+
+/* open session */
+static sto_file_t s_log_fd;
+static bool       s_open;
+static char       s_id[11];            /* "S%05u_%03u" + NUL */
+static uint8_t    s_seq;               /* per-boot session sequence (§12.1) */
+static ses_hdr_t  s_hdr;
+static uint16_t   s_venue_id, s_layout_id;
+static char       s_venue_name[33];
+
+/* codecs + batch */
+static ses_fix_state_t   s_fix_st;
+static ses_fused_state_t s_fused_st;
+static uint8_t s_batch[BATCH_CAP];
+static size_t  s_batch_len;
+
+/* .sum accumulators (encoded LAP / DRAG_RUN frames, in emission order) */
+static uint8_t s_lap_acc[LAP_ACC_CAP];   static size_t s_lap_len;
+static uint8_t s_drag_acc[DRAG_ACC_CAP]; static size_t s_drag_len;
+static bool    s_sum_dirty;
+
+/* timing + state */
+static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms;
+static bool     s_samples_full;        /* SYS_STORAGE_FULL: sample logging paused, summaries continue */
+
+static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+static void log_path(char *out, size_t cap, const char *id, const char *ext)
+{
+    (void)snprintf(out, cap, "/sessions/%s%s", id, ext);
+}
+
+/* Write the accumulated batch to the open .log. */
+static void do_write(void)
+{
+    if (!s_open || s_batch_len == 0) return;
+    if (sto_write(s_log_fd, s_batch, s_batch_len) != 0) errlog_add(E_STO_WRITE, (uint32_t)s_batch_len);
+    s_batch_len = 0;
+    s_last_write_ms = now_ms();
+}
+
+/* Append one framed record to the batch, flushing first if it would not fit. */
+static void batch_append(const uint8_t *frame, int n)
+{
+    if (n <= 0) return;
+    if (s_batch_len + (size_t)n > BATCH_CAP) do_write();
+    memcpy(s_batch + s_batch_len, frame, (size_t)n);
+    s_batch_len += (size_t)n;
+}
+
+static void acc_append(uint8_t *acc, size_t *len, size_t cap, const uint8_t *frame, int n)
+{
+    if (n <= 0 || *len + (size_t)n > cap) return;   /* beyond cap: kept in .log only (§12.5) */
+    memcpy(acc + *len, frame, (size_t)n);
+    *len += (size_t)n;
+}
+
+/* §12.5: rebuild .sum = HDR + VENUE + every LAP + every DRAG_RUN [+ END] via tmp+sync+rename. */
+static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
+{
+    if (s_id[0] == 0) return;
+    static uint8_t buf[SUM_BUILD_CAP];
+    size_t off = 0;
+    int n;
+
+    n = ses_encode_hdr(&s_hdr, buf + off, SUM_BUILD_CAP - off);
+    if (n < 0) return;
+    off += (size_t)n;
+    n = ses_encode_venue(s_venue_id, s_layout_id, s_venue_name, buf + off, SUM_BUILD_CAP - off);
+    if (n > 0) off += (size_t)n;
+    if (off + s_lap_len <= SUM_BUILD_CAP)  { memcpy(buf + off, s_lap_acc, s_lap_len);   off += s_lap_len; }
+    if (off + s_drag_len <= SUM_BUILD_CAP) { memcpy(buf + off, s_drag_acc, s_drag_len); off += s_drag_len; }
+    if (closing) {
+        n = ses_encode_end(end_gps_us, end_reason, buf + off, SUM_BUILD_CAP - off);
+        if (n > 0) off += (size_t)n;
+    }
+
+    char tmp_path[40], sum_path[40];
+    log_path(tmp_path, sizeof tmp_path, s_id, ".sum.tmp");
+    log_path(sum_path, sizeof sum_path, s_id, ".sum");
+    sto_file_t f;
+    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) return;
+    int rc = sto_write(f, buf, off);
+    if (rc == 0) rc = sto_sync(f);
+    sto_close(f);
+    if (rc == 0) sto_rename(tmp_path, sum_path);   /* atomic (§13.1) */
+}
+
+static void open_session(const log_request_t *req)
+{
+    if (s_open) return;                            /* one open .log at a time */
+    if (s_seq < 0xFF) s_seq++;
+    (void)snprintf(s_id, sizeof s_id, "S%05u_%03u",
+                   (unsigned)(lt_nvs_boot_get() & 0xFFFFu), (unsigned)s_seq);
+
+    memset(&s_hdr, 0, sizeof s_hdr);
+    (void)snprintf(s_hdr.session_id, sizeof s_hdr.session_id, "%s", s_id);
+    s_hdr.mode      = req->mode;
+    s_hdr.variant   = (uint8_t)(CFG_VARIANT_MOTO ? 0 : 1);
+    s_hdr.venue_id  = req->venue_id;
+    s_hdr.layout_id = req->layout_id;
+    (void)snprintf(s_hdr.fw,   sizeof s_hdr.fw,   "%s", CFG_FW_VERSION);
+    (void)snprintf(s_hdr.hwid, sizeof s_hdr.hwid, "%s", CFG_HWID);
+    s_hdr.log_profile  = 0;
+    s_hdr.fused_hz     = (uint8_t)CFG_FUSED_LOG_HZ;
+    s_hdr.gps_hz       = 0;                         /* real rate filled by the pipeline (3.4) */
+    s_hdr.start_gps_us = req->gps_us;               /* calib block left zero until 3.4 */
+
+    s_venue_id = req->venue_id;
+    s_layout_id = req->layout_id;
+    s_venue_name[0] = 0;
+
+    ses_fix_state_init(&s_fix_st);
+    ses_fused_state_init(&s_fused_st);
+    s_batch_len = 0;
+    s_lap_len = 0;
+    s_drag_len = 0;
+    s_sum_dirty = false;
+    s_samples_full = false;
+
+    char path[40];
+    log_path(path, sizeof path, s_id, ".log");
+    if (sto_open(path, STO_WR | STO_APPEND | STO_CREATE, &s_log_fd) != 0) {
+        errlog_add(E_STO_WRITE, 0);
+        s_id[0] = 0;
+        return;
+    }
+    s_open = true;
+    s_last_write_ms = s_last_sync_ms = now_ms();
+
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_hdr(&s_hdr, tmp, sizeof tmp);
+    batch_append(tmp, n);
+    do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
+    rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
+    ESP_LOGI(TAG, "session %s open", s_id);
+}
+
+static void close_session(const log_request_t *req)
+{
+    if (!s_open) return;
+    do_write();
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_end(req->gps_us, req->reason, tmp, sizeof tmp);
+    batch_append(tmp, n);
+    do_write();
+    sto_sync(s_log_fd);
+    sto_close(s_log_fd);
+    s_open = false;
+    rebuild_sum(true, req->gps_us, req->reason);     /* finalise .sum with END */
+    ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
+}
+
+static void handle_request(const log_request_t *req)
+{
+    switch (req->type) {
+    case LOGGER_OPEN_SESSION:    open_session(req); break;
+    case LOGGER_CLOSE_SESSION:   close_session(req); break;
+    case LOGGER_REBUILD_SUMMARY: if (s_open) rebuild_sum(false, 0, 0); break;
+    case LOGGER_EVICT:           s_last_evict_ms = 0; break;   /* force an eviction pass this loop */
+    default: break;
+    }
+}
+
+static void handle_event(const event_t *ev)
+{
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n;
+    if (ev->type == EV_LAP_COMPLETE) {
+        lap_result_t lap;
+        memset(&lap, 0, sizeof lap);
+        lap.lap_no       = ev->arg16;
+        lap.time_ms      = ev->arg32;
+        lap.flags        = ev->flags;
+        lap.start_gps_us = ev->gps_us;
+        lap.n_sectors    = 0;                        /* sectors/stats added by the pipeline (3.4) */
+        n = ses_encode_lap(&lap, tmp, sizeof tmp);
+        batch_append(tmp, n);
+        acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n);
+        s_sum_dirty = true;
+    } else if (ev->type == EV_DRAG_DONE) {
+        drag_result_t run;
+        memset(&run, 0, sizeof run);
+        run.run_no  = ev->arg16;
+        run.n_gates = 0;
+        n = ses_encode_drag_run(&run, tmp, sizeof tmp);
+        batch_append(tmp, n);
+        acc_append(s_drag_acc, &s_drag_len, DRAG_ACC_CAP, tmp, n);
+        s_sum_dirty = true;
+    } else {
+        n = ses_encode_event(ev->mono_us, ev->gps_us, ev->type, ev->arg32, tmp, sizeof tmp);
+        batch_append(tmp, n);
+    }
+}
+
+static void drain_rings(void)
+{
+    gps_fix_t fix;
+    while (ring_pop(&g_fix_ring, &fix)) {
+        if (s_open && !s_samples_full) {
+            uint8_t tmp[FRAME_TMP_CAP];
+            int n = ses_encode_fix(&s_fix_st, &fix, tmp, sizeof tmp);
+            batch_append(tmp, n);
+        }
+        ses_fused_state_on_fix(&s_fused_st, fix.gps_us);   /* keep fused deltas referenced to fixes */
+    }
+    fused_sample_t fs;
+    while (ring_pop(&g_fused_ring, &fs)) {
+        if (s_open && !s_samples_full) {
+            uint8_t tmp[FRAME_TMP_CAP];
+            int n = ses_encode_fused(&s_fused_st, &fs, tmp, sizeof tmp);
+            batch_append(tmp, n);
+        }
+    }
+}
+
+static void drain_events(void)
+{
+    event_t ev;
+    while (xQueueReceive(g_evt_q, &ev, 0) == pdTRUE) {
+        if (s_open) handle_event(&ev);
+    }
+}
+
+typedef struct { char oldest[24]; char curlog[24]; } evict_ctx_t;
+static void evict_cb(const char *name, uint32_t size, void *ctx)
+{
+    (void)size;
+    evict_ctx_t *e = (evict_ctx_t *)ctx;
+    size_t len = strlen(name);
+    if (len < 4 || strcmp(name + len - 4, ".log") != 0) return;   /* only .log (never .sum) */
+    if (strcmp(name, e->curlog) == 0) return;                     /* never the current session */
+    if (e->oldest[0] == 0 || strcmp(name, e->oldest) < 0)
+        (void)snprintf(e->oldest, sizeof e->oldest, "%s", name);  /* smallest id == oldest (§12.7) */
+}
+
+static void eviction_check(void)
+{
+    sto_info_t si;
+    if (sto_info(&si) != 0 || si.total_kb == 0) return;
+    if (si.free_kb >= si.total_kb / 10u) {
+        if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
+        return;
+    }
+    /* free < 10 %: delete the oldest .log that is not the current session. */
+    evict_ctx_t e;
+    memset(&e, 0, sizeof e);
+    if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
+    sto_list("/sessions", evict_cb, &e);
+    if (e.oldest[0]) {
+        char p[40];
+        (void)snprintf(p, sizeof p, "/sessions/%s", e.oldest);
+        sto_unlink(p);
+        errlog_add(E_STO_EVICT, 0);
+        ESP_LOGW(TAG, "evicted %s (free %u/%u KB)", e.oldest, (unsigned)si.free_kb, (unsigned)si.total_kb);
+    } else if (si.free_kb < si.total_kb / 20u) {    /* nothing to delete and < 5 %: pause samples */
+        if (!s_samples_full) { s_samples_full = true; sys_flags_set(SYS_STORAGE_FULL); errlog_add(E_STO_FULL, 0); }
+    }
+}
+
+static void logger_task(void *arg)
+{
+    (void)arg;
+    sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
+    s_last_evict_ms = now_ms();
+    ESP_LOGI(TAG, "logger up (core %d prio %d)", LOG_CORE, LOG_PRIO);
+
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOOP_TIMEOUT_MS));   /* ring-notify or 1000 ms */
+
+        log_request_t req;
+        while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) handle_request(&req);
+
+        drain_rings();
+        drain_events();
+
+        uint32_t now = now_ms();
+        if (s_open && s_batch_len &&
+            (s_batch_len >= BATCH_FLUSH_B || (now - s_last_write_ms) >= WRITE_INTERVAL_MS))
+            do_write();
+        if (s_open && (now - s_last_sync_ms) >= SYNC_INTERVAL_MS) {
+            sto_sync(s_log_fd);
+            s_last_sync_ms = now;
+        }
+        if (s_sum_dirty && s_open) { rebuild_sum(false, 0, 0); s_sum_dirty = false; }
+        if ((now - s_last_evict_ms) >= EVICT_INTERVAL_MS) { eviction_check(); s_last_evict_ms = now_ms(); }
+
+        g_hb[HB_LOGGER]++;
+    }
+}
+
+void logger_start(void)
+{
+    if (s_task) return;
+    s_task = xTaskCreateStaticPinnedToCore(logger_task, "logger", LOG_STACK_WORDS, NULL,
+                                           LOG_PRIO, s_stack, &s_tcb, LOG_CORE);
+}
+
+void logger_notify(void)
+{
+    if (s_task) xTaskNotifyGive(s_task);
+}
+```
+
+- [ ] **Step 5: `main/app_main.c`** — `#include "app/logger.h"` and `#include "app/lt_ipc.h"`, and after `lt_queues_init();`:
+```c
+    /* §4.7 step 11 (cont): the §4.4 pipeline<->logger rings + the logger's event/control
+     * queues. The pipeline producer lands in 3.4; 3.3 creates them and the logger consumes. */
+    lt_ipc_init();
+
+    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). It idles until a
+     * LOGGER_OPEN_SESSION request arrives (from the power task in 3.4, or `dbg logtest` now);
+     * with storage dead it stays idle (open fails gracefully). */
+    logger_start();
+```
+
+**Task 2 verification:** `./build.sh moto_neo6m build` + `size` pass (app image **370,128 B**), `./build.sh moto_sim build` passes; no warnings from new code; `_Static_assert(sizeof(log_request_t)==16)` holds. End-to-end drain/write/rebuild is exercised by the T3 `dbg` verbs and confirmed on-board by the orchestrator.
+
+
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED
+```
+
+---
+
+### Task 3: `dbg` verbs (`logtest`/`fs`/`sum`/`logck`) for the power-cut exit test
+
+
+**Files:**
+- Edit: `components/app/sys/dbg_console.c` (extend the 3.2 `dbg` command)
+
+**Interfaces:**
+- Produces: the on-device verbs that exercise the logger end-to-end (write and read-back) so the roadmap power-cut exit test is possible before the 3.4 pipeline exists.
+- Consumes: `app/lt_ipc.h` (rings/queues), `app/logger.h` (`logger_notify`), `hal/storage.h`, `core/ses.h` reader/decoders, `core/{types,event}.h`.
+
+**Rulings (spec is the authority):**
+1. **The verbs extend the single `dbg` command dispatch** (the 3.2 `esp_console` REPL pattern): `status` (kept) | `logtest [n]` | `fs` | `sum <id>` | `logck <id>`. Kept minimal; the full §18.4 export console (`list/open/get/export/...`) replaces this REPL in 3.5.
+2. **`dbg logtest [n]` backpressures the drop-newest `fix_ring`** so all `n` fixes actually flow through (on full, it `logger_notify()`s and yields, then retries) — this keeps the logger writing continuously, widening the window in which a power cut lands mid-`.log`-write. It opens a session, queues the **2 LAP events first** (so the `.sum` is rebuilt with laps early, before the long sample tail), then streams `n` synthetic fixes, and **does NOT close** — so there is no `END` and the cut lands mid-session. Default `n=1000`, clamped `[1,100000]`.
+3. **`sum`/`logck` read the file back on-device through a `core/ses` reader** (a file-scope `static ses_reader_t`, ~0.8 KB kept off the console stack). `sum` reports HDR ok (+fw/hwid), VENUE (+ids), LAP/DRAG_RUN counts, END present (expected *no* mid-session), and the reader's ok/bad frame counts — proving the atomically-renamed `.sum` is intact. `logck` reports good/bad frame counts + a per-type tally; a truncated/torn tail shows as `bad≥1` that the reader **resyncs past**, proving the `.log` stays decodable.
+4. **REPL task stack 4096 → 6144** for the `sum`/`logck` file readers + `printf` (the reader struct itself is static/off-stack).
+
+
+- [ ] **Step 1: `components/app/sys/dbg_console.c`** (full rewrite of the 3.2 file — adds the verbs, keeps `dbg status`).
+
+```c
+/* dbg_console.c -- diagnostics console (spec §18.4; 3.2 exit `dbg status` + 3.3 storage/logger verbs).
+ *
+ * IDF esp_console REPL on UART0. 3.2 registered `dbg status`; 3.3 adds the verbs that exercise the
+ * logger end-to-end so the roadmap power-cut exit test is possible before the 3.4 pipeline exists:
+ *
+ *   dbg logtest [n]  open a session, push n synthetic FIX records into fix_ring + 2 LAP events into
+ *                    the logger's evt_q, and let the logger drain/write/rebuild-.sum. Does NOT close,
+ *                    so a power cut lands mid-session (mid-.log-write).
+ *   dbg fs           mount state, total/free KB, degraded, sys storage flags, and `/sessions` listing.
+ *   dbg sum <id>     read <id>.sum back through a core/ses reader: HDR ok, VENUE, LAP count, END present.
+ *   dbg logck <id>   read <id>.log back: good-/bad-frame counts (a truncated tail shows as one bad
+ *                    frame the reader resyncs past -> proves the .log stays decodable) + per-type tally.
+ *
+ * The full §18.4 export console (status/list/open/get/... and export) replaces this in 3.5.
+ */
+#include "app/dbg_console.h"
+#include "app/logger.h"
+#include "app/lt_ipc.h"
+#include "app/lt_nvs.h"
+#include "app/lt_sup.h"
+#include "hal/storage.h"
+
+#include "core/event.h"
+#include "core/ses.h"
+#include "core/types.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+#include "esp_console.h"
+#include "esp_timer.h"
+#include "linenoise/linenoise.h"
+
+static int s_reset_reason;
+
+/* ---------------- dbg status (kept from 3.2) ---------------- */
+static int cmd_status(void)
+{
+    const lt_counters_t *c = lt_counters();
+    long long up = esp_timer_get_time() / 1000000;
+    printf("boot count : %u\n", (unsigned)lt_nvs_boot_get());
+    printf("reset      : %s (%d)\n", lt_reset_reason_str(s_reset_reason), s_reset_reason);
+    printf("uptime     : %lld s\n", up);
+    printf("counters   : boots=%u crashes=%u wdt=%u brownout=%u sto_format=%u\n",
+           (unsigned)c->boots, (unsigned)c->crashes, (unsigned)c->wdt, (unsigned)c->brownout,
+           (unsigned)c->sto_format);
+    printf("sys_flags  : 0x%08x%s\n", (unsigned)sys_flags_get(),
+           (sys_flags_get() & (1u << SYS_SAFE_MODE)) ? " [SAFE_MODE]" : "");
+    for (int i = 0; i < HB_COUNT; i++) printf("hb[%d]      : %u\n", i, (unsigned)g_hb[i]);
+    return 0;
+}
+
+/* ---------------- dbg logtest [n] ---------------- */
+static void synth_fix(gps_fix_t *f, uint32_t i)
+{
+    memset(f, 0, sizeof *f);
+    f->gps_us     = (int64_t)1700000000000000LL + (int64_t)i * 200000;   /* 5 Hz */
+    f->mono_us    = (int64_t)esp_timer_get_time();
+    f->lat_e7     = -338900000 + (int32_t)(i % 2000);                     /* ~ -33.89 deg, wandering */
+    f->lon_e7     =  184000000 + (int32_t)(i % 2000);                     /* ~ 18.40 deg */
+    f->alt_mm     = 45000 + (int32_t)(i % 50);
+    f->gspeed_mms = 20000 + (int32_t)(i % 1000);
+    f->head_e5    = (int32_t)((i * 137) % 36000000);
+    f->hacc_mm    = 2000;
+    f->sacc_mms   = 300;
+    f->pdop_e2    = 120;
+    f->fix_type   = 3;
+    f->sats       = 10;
+    f->flags      = GPS_FLAG_FIXOK | GPS_FLAG_TIME | GPS_FLAG_DATE;
+    f->valid      = 1;
+}
+
+static int cmd_logtest(int argc, char **argv)
+{
+    long n = (argc >= 3) ? strtol(argv[2], NULL, 10) : 1000;
+    if (n < 1) n = 1;
+    if (n > 100000) n = 100000;
+
+    /* open a session */
+    log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = 1, .venue_id = 1, .layout_id = 1,
+                          .gps_us = (int64_t)1700000000000000LL };
+    xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100));
+    logger_notify();
+    vTaskDelay(pdMS_TO_TICKS(30));      /* let the logger open + write the HDR + initial .sum */
+
+    /* two LAP events (rebuild .sum with laps early, before the long .log tail) */
+    for (uint16_t lap = 1; lap <= 2; lap++) {
+        event_t ev = { .type = EV_LAP_COMPLETE, .flags = LAP_F_VALID, .arg16 = lap,
+                       .arg32 = 92000u + lap * 137u, .gps_us = req.gps_us + (int64_t)lap * 92000000 };
+        xQueueSend(g_evt_q, &ev, pdMS_TO_TICKS(100));
+    }
+    logger_notify();
+
+    /* stream n synthetic fixes with backpressure (drop-newest ring) */
+    long pushed = 0;
+    for (long i = 0; i < n; i++) {
+        gps_fix_t f;
+        synth_fix(&f, (uint32_t)i);
+        int spins = 0;
+        while (!ring_push(&g_fix_ring, &f)) {   /* full: wake the logger and yield */
+            logger_notify();
+            vTaskDelay(1);
+            if (++spins > 1000) break;          /* logger stuck (e.g. storage dead): give up */
+        }
+        pushed++;
+        if ((i & 0x1F) == 0x1F) logger_notify(); /* nudge every 32 */
+    }
+    logger_notify();
+    printf("logtest: opened a session, queued 2 laps, pushed %ld/%ld fixes; NOT closed.\n", pushed, n);
+    printf("  -> watch for \"session Sxxxxx_yyy open\", then pull power to test the cut.\n");
+    printf("  -> after reboot: dbg fs ; dbg sum <id> ; dbg logck <id>\n");
+    return 0;
+}
+
+/* ---------------- dbg fs ---------------- */
+static void fs_list_cb(const char *name, uint32_t size, void *ctx)
+{
+    (void)ctx;
+    printf("  %-24s %8u B\n", name, (unsigned)size);
+}
+
+static int cmd_fs(void)
+{
+    uint32_t sf = sys_flags_get();
+    printf("storage flags: %s%s%s\n",
+           (sf & (1u << SYS_STORAGE_DEAD))     ? "DEAD " : "",
+           (sf & (1u << SYS_STORAGE_FULL))     ? "FULL " : "",
+           (sf & (1u << SYS_STORAGE_DEGRADED)) ? "DEGRADED " : "");
+    sto_info_t si;
+    if (sto_info(&si) == 0)
+        printf("mount ok    : total=%u KB free=%u KB degraded=%u\n",
+               (unsigned)si.total_kb, (unsigned)si.free_kb, (unsigned)si.degraded);
+    else
+        printf("mount       : NOT mounted (sto_info failed)\n");
+    printf("fix_ring drop: %u   fused_ring drop: %u\n",
+           (unsigned)ring_dropped(&g_fix_ring), (unsigned)ring_dropped(&g_fused_ring));
+    printf("/sessions:\n");
+    int cnt = sto_list("/sessions", fs_list_cb, NULL);
+    if (cnt < 0) printf("  (cannot list)\n");
+    else if (cnt == 0) printf("  (empty)\n");
+    return 0;
+}
+
+/* ---------------- ses reader tally (shared by sum + logck) ---------------- */
+typedef struct {
+    int hdr, venue, end;
+    int laps, drags, fixes, fused, events, sectors, gates, others;
+    ses_hdr_t   h;
+    ses_venue_t v;
+} tally_t;
+
+static void tally_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx)
+{
+    tally_t *t = (tally_t *)ctx;
+    switch (type) {
+    case SES_T_SESSION_HDR: if (ses_decode_hdr(payload, len, &t->h) == 1) t->hdr++; break;
+    case SES_T_VENUE:       if (ses_decode_venue(payload, len, &t->v) == 1) t->venue++; break;
+    case SES_T_LAP:         t->laps++; break;
+    case SES_T_DRAG_RUN:    t->drags++; break;
+    case SES_T_FIX_KEY:     /* fallthrough */
+    case SES_T_FIX_DELTA:   t->fixes++; break;
+    case SES_T_FUSED:       t->fused++; break;
+    case SES_T_EVENT:       t->events++; break;
+    case SES_T_SECTOR:      t->sectors++; break;
+    case SES_T_DRAG_GATE:   t->gates++; break;
+    case SES_T_END:         t->end++; break;
+    default:                t->others++; break;
+    }
+}
+
+static ses_reader_t s_rdr;   /* static: the reader struct is ~0.8 KB, kept off the console stack */
+
+static int read_through_ses(const char *id, const char *ext, tally_t *out)
+{
+    char path[40];
+    (void)snprintf(path, sizeof path, "/sessions/%s%s", id, ext);
+    sto_file_t f;
+    if (sto_open(path, STO_RD, &f) != 0) { printf("cannot open %s\n", path); return -1; }
+    memset(out, 0, sizeof *out);
+    ses_reader_init(&s_rdr);
+    uint8_t buf[256];
+    size_t got;
+    for (;;) {
+        if (sto_read(f, buf, sizeof buf, &got) != 0) break;
+        if (got == 0) break;
+        ses_reader_feed(&s_rdr, buf, got, tally_cb, out);
+    }
+    ses_reader_flush(&s_rdr, tally_cb, out);
+    sto_close(f);
+    return 0;
+}
+
+static int cmd_sum(int argc, char **argv)
+{
+    if (argc < 3) { printf("usage: dbg sum <id>   (e.g. S00001_001)\n"); return 1; }
+    tally_t t;
+    if (read_through_ses(argv[2], ".sum", &t) != 0) return 1;
+    printf(".sum %s: HDR %s", argv[2], t.hdr ? "ok" : "MISSING");
+    if (t.hdr) printf(" (fw=%s hwid=%s)", t.h.fw, t.h.hwid);
+    printf("\n  VENUE %s", t.venue ? "ok" : "missing");
+    if (t.venue) printf(" (venue_id=%u layout_id=%u)", (unsigned)t.v.venue_id, (unsigned)t.v.layout_id);
+    printf("\n  LAP count = %d   DRAG_RUN count = %d\n", t.laps, t.drags);
+    printf("  END present = %s\n", t.end ? "yes" : "no (session still open -- expected mid-session)");
+    printf("  frames: ok=%u bad=%u\n", (unsigned)s_rdr.frames_ok, (unsigned)s_rdr.frames_bad);
+    return 0;
+}
+
+static int cmd_logck(int argc, char **argv)
+{
+    if (argc < 3) { printf("usage: dbg logck <id>   (e.g. S00001_001)\n"); return 1; }
+    tally_t t;
+    if (read_through_ses(argv[2], ".log", &t) != 0) return 1;
+    printf(".log %s: frames ok=%u bad=%u\n", argv[2],
+           (unsigned)s_rdr.frames_ok, (unsigned)s_rdr.frames_bad);
+    printf("  HDR=%d FIX=%d FUSED=%d LAP=%d SECTOR=%d DRAG_RUN=%d DRAG_GATE=%d EVENT=%d END=%d other=%d\n",
+           t.hdr, t.fixes, t.fused, t.laps, t.sectors, t.drags, t.gates, t.events, t.end, t.others);
+    if (s_rdr.frames_bad > 0)
+        printf("  (bad>0: a truncated/torn tail -- the reader resynced past it, .log stays decodable)\n");
+    return 0;
+}
+
+static int cmd_dbg(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "status") == 0)  return cmd_status();
+    if (argc >= 2 && strcmp(argv[1], "logtest") == 0) return cmd_logtest(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "fs") == 0)      return cmd_fs();
+    if (argc >= 2 && strcmp(argv[1], "sum") == 0)     return cmd_sum(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "logck") == 0)   return cmd_logck(argc, argv);
+    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id>\n");
+    return 1;
+}
+
+void dbg_console_start(int reset_reason)
+{
+    s_reset_reason = reset_reason;
+
+    esp_console_repl_t *repl = NULL;
+    esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    repl_cfg.prompt = "laptimer>";
+    repl_cfg.task_priority = 2;
+    repl_cfg.task_stack_size = 6144;   /* headroom for the sum/logck file readers + printf (3.2 used 4096) */
+    repl_cfg.max_cmdline_length = 128;
+    esp_console_dev_uart_config_t uart_cfg = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+    if (esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &repl) != ESP_OK) return;
+
+    linenoiseSetDumbMode(1);   /* §18.4: line editing disabled (plain serial terminal) */
+
+    const esp_console_cmd_t cmd = {
+        .command = "dbg",
+        .help = "diagnostics: status | logtest [n] | fs | sum <id> | logck <id>",
+        .hint = NULL,
+        .func = cmd_dbg,
+    };
+    esp_console_cmd_register(&cmd);
+    esp_console_start_repl(repl);
+}
+```
+
+**Task 3 verification (build):** `./build.sh moto_neo6m build` + `size` pass (app image **373,728 B**; clean rebuild shows zero warnings from new code — only the pre-existing relaxed-`jsmn.h` `-Wsign-conversion` notes, §17.9), `./build.sh moto_sim build` passes.
+
+**Hardware-only checks (orchestrator, on the board — the exit criterion):**
+1. Flash `moto_neo6m`; at the console run `dbg logtest 2000`; watch for `session Sxxxxx_yyy open`.
+2. **Pull power mid-write**, then reboot.
+3. `dbg fs` → mount ok, sane `free_kb`, no `SYS_STORAGE_*`, `/sessions` lists the `.log`+`.sum`.
+4. `dbg sum <id>` → `HDR ok`, `VENUE ok`, `LAP count = 2`, `END present = no`, `frames ok≥2 bad=0` (the atomic `.sum` is intact).
+5. `dbg logck <id>` → `frames ok>0`; `bad` is 0 or 1 (a torn tail the reader resyncs past); per-type shows `HDR=1` + many `FIX` → the `.log` is decodable.
+6. `dbg status` → `hb[HB_LOGGER]` (index 2) is incrementing; `counters` shows `sto_format` (first boot on a blank/corrupt `storage` partition triggers the ladder's format path).
+7. Sanity: a second `dbg logtest` without reboot opens `S…_002` (per-boot sequence increments); `dbg logtest` while `SYS_STORAGE_DEAD` is a no-op (open fails gracefully).
+
+
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED
+```
+
+---
