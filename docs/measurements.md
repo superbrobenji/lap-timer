@@ -2,6 +2,11 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## core_selftest on ESP32 (plan 02, session 2.3)
+
+- Date: 2026-09-16. Commit: 6cd4693 (branch s2.3-fusion). ESP-IDF v5.3.2. Same board and port. Same 16 suites as session 2.2; the `fus` suite grew from 13 to 21 cases (the §9.3 lean filter, yaw, lateral g and GPS cross-check). App binary 0x56170 bytes (66 % of the factory partition free).
+- Result: `=== core_selftest RESULT: PASS, 0 failing suites, stack6k OK (3532 B free), free heap 132852, min free 119732 ===`. `fus` 278 ms, `ses_records` 1091 ms, `ring` 10,049 ms (unchanged two-thread stress); all others under 0.35 s.
+
 ## core_selftest on ESP32 (plan 02, session 2.2)
 
 - Date: 2026-09-16. Commit: c913034 (branch s2.2-fusion). ESP-IDF v5.3.2. Same board and port as earlier runs.
