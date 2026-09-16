@@ -989,6 +989,8 @@ void lt_queues_init(void)
 
 - [ ] **Step 6: wire the top-level and `main` CMake.** Append the three dirs to `EXTRA_COMPONENT_DIRS` (keep the per-session-growth comment, updated for the rename and the early `app`) and give `main` its new REQUIRES.
 
+> **Plan block drift (applied during Task 1 execution):** `components/drivers/board_devkit_v1` does not exist until Task 2. ESP-IDF v5.3.2's `project.cmake` raises a `FATAL_ERROR` at configure time when an `EXTRA_COMPONENT_DIRS` entry names a directory that does not exist (this is stricter than a missing `REQUIRES`, which resolves lazily and only fails if something actually needs it). Listing `components/drivers/board_devkit_v1` in `EXTRA_COMPONENT_DIRS` and in `main`'s `REQUIRES` — exactly as drafted below — makes `./build.sh moto_neo6m build` fail to configure. The minimal fix actually committed: omit `components/drivers/board_devkit_v1` from both `EXTRA_COMPONENT_DIRS` and `main`'s `REQUIRES` in Task 1 (a code comment marks the omission at both sites); Task 2 adds the directory and appends it back in both places once it exists. `main/CMakeLists.txt` and the top-level `CMakeLists.txt` blocks below are left as originally drafted for the record — the repo state after Task 1 differs from them only by that one component name in each.
+
 `main/CMakeLists.txt`:
 ```cmake
 idf_component_register(
@@ -1018,7 +1020,7 @@ Top-level `CMakeLists.txt` (the `EXTRA_COMPONENT_DIRS` line and its comment):
 set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1)
 ```
 
-**Task 1 verification:** `lt_hal` + `app` (with only `lt_sys.c`) compile and link; IDF's built-in `hal` is retained (the rename resolves the override). `main` still runs the 3.1 banner (it calls nothing from `app` yet), so the tree builds green. Verified as part of the integrated build (below) — all components compile with no warnings from new code.
+**Task 1 verification:** `lt_hal` + `app` (with only `lt_sys.c`) compile and link; IDF's built-in `hal` is retained (the rename resolves the override). `main` still runs the 3.1 banner (it calls nothing from `app` yet), so the tree builds green. Verified as part of the integrated build (below) — all components compile with no warnings from new code. **As executed (see drift note above), the build was verified with `board_devkit_v1` omitted from both CMake sites; Task 2 must add it back to both before its own driver can be exercised.**
 
 Commit block:
 ```

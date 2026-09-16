@@ -247,7 +247,11 @@ lap-timer/
       config/cfg.c  cfg_json.c (jsmn vendored in include/core/jsmn.h; jw.c minimal JSON writer)
       util/ring.h  util/jw.c  util/bw.h (byte writer/reader for packed records)
       ui/render.c  ui/fonts.c (generated)  ui/screens_moto.c  ui/screens_car.c  ui/model.h   pure-C framebuffer renderer and screens; host tests snapshot to PBM
-    hal/
+    lt_hal/                      named lt_hal, not hal -- ESP-IDF v5.3.2 ships a built-in
+                                  component literally named `hal`; a same-named project
+                                  component silently overrides it and breaks the build.
+                                  The include prefix is unchanged (drivers/app still
+                                  #include "hal/board.h").
       CMakeLists.txt             INTERFACE component
       include/hal/gps.h imu.h display.h storage.h board.h conn.h
     drivers/
@@ -265,7 +269,11 @@ lap-timer/
       conn_ble_rc/
       export_serial/
       board_devkit_v1/
-    app/
+    app/                         introduced in roadmap session 3.2 (sys/lt_sys.c -- hb[]/
+                                  sys_flags/btn_q -- plus the nvs/rtc/supervisor/dbg_console
+                                  headers), not 3.4 as this list's ordering implies: the boot
+                                  sequence and supervisor built in 3.2 need it. The remaining
+                                  subdirectories below land as those subsystems are built.
       pipeline/pipeline.c
       logger/logger.c
       ui/ui.c ui_buttons.c        task, event handling, display glue (renderer and screens live in core/ui)
