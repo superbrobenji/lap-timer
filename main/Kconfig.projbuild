@@ -1,0 +1,20 @@
+menu "LapTimer"
+
+    choice LAPTIMER_VARIANT
+        prompt "Vehicle variant"
+        default LAPTIMER_VARIANT_MOTO
+        help
+            Vehicle variant. Selected by build.sh via -D VARIANT=<moto|car>
+            (through the per-variant sdkconfig fragment) and kept here for
+            menuconfig visibility only. The authoritative compile-time switch
+            is build_config.h (CFG_VARIANT_*), generated from the build flags
+            (spec §21.2).
+
+        config LAPTIMER_VARIANT_MOTO
+            bool "moto (motorcycle)"
+
+        config LAPTIMER_VARIANT_CAR
+            bool "car"
+    endchoice
+
+endmenu

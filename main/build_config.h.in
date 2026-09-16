@@ -1,0 +1,27 @@
+/* build_config.h -- generated from main/build_config.h.in by the top-level
+ * CMakeLists.txt (spec §4.6). Do not edit; edit the build flags instead.
+ * This is the authoritative compile-time configuration for the firmware. */
+#ifndef BUILD_CONFIG_H
+#define BUILD_CONFIG_H
+
+#define CFG_VARIANT_MOTO   @CFG_VARIANT_MOTO@
+#define CFG_VARIANT_CAR    @CFG_VARIANT_CAR@
+
+#define CFG_GPS_NAME       "@GPS@"
+#define CFG_DISPLAY_NAME   "@DISPLAY@"
+
+#define CFG_PANEL_WS213V4  @CFG_PANEL_WS213V4@
+#define CFG_PANEL_WS29V2   @CFG_PANEL_WS29V2@
+
+#define CFG_HWID           "@CFG_HWID@"
+#define CFG_FW_VERSION     "@CFG_FW_VERSION@"
+
+#define CFG_HAS_PPS        @CFG_HAS_PPS@
+#define CFG_HAS_SD         @CFG_HAS_SD@
+#define CFG_HAS_WIFI       @CFG_HAS_WIFI@
+#define CFG_HAS_BLE        @CFG_HAS_BLE@
+#define CFG_HAS_BLE_RC     @CFG_HAS_BLE_RC@
+
+#define CFG_FUSED_LOG_HZ   @CFG_FUSED_LOG_HZ@
+
+#endif /* BUILD_CONFIG_H */
