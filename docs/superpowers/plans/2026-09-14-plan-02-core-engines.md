@@ -17482,6 +17482,7 @@ range; and the table stays within `PRED_TABLE_MAX` after 700 fixes.
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Lap engine tests (spec §10, §22.1). Pure C11 so this file also builds and runs on the ESP32
  * (core_selftest). Geometry is expressed in ENU metres about the venue centre and converted to the
@@ -18218,24 +18219,22 @@ static void test_rtc_import_unknown_venue_fails(void)
 
 /* ---------------------------------------------------- session 2.5 predictive delta (§10.11) */
 
-/* §10.11 predictive tables are caller-provided (issue #23); these are the buffers for the tests below
- * that exercise it. File scope so they aren't on the stack (each is PRED_TABLE_MAX entries). */
-static uint16_t g_pred_best_dist[PRED_TABLE_MAX];
-static uint32_t g_pred_best_t[PRED_TABLE_MAX];
-static uint16_t g_pred_rec_dist[PRED_TABLE_MAX];
-static uint32_t g_pred_rec_t[PRED_TABLE_MAX];
-
 /* §10.11: with a recorded best lap, lap_live_delta_ms(dist) = elapsed - t_ref(dist). At a distance the
  * reference table holds, t_ref is exact, so the delta tracks the elapsed offset; outside the range no
  * delta is produced. */
 static void test_predictive_delta(void)
 {
+    uint16_t *pbd = malloc(PRED_TABLE_MAX * sizeof *pbd);
+    uint32_t *pbt = malloc(PRED_TABLE_MAX * sizeof *pbt);
+    uint16_t *prd = malloc(PRED_TABLE_MAX * sizeof *prd);
+    uint32_t *prt = malloc(PRED_TABLE_MAX * sizeof *prt);
+    TEST_ASSERT_NOT_NULL(pbd); TEST_ASSERT_NOT_NULL(pbt); TEST_ASSERT_NOT_NULL(prd); TEST_ASSERT_NOT_NULL(prt);
+
     const double lat0 = -45.0, lon0 = 170.0;
     const double northings[2] = { 100.0, 200.0 };
     trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
     lap_t L; lap_init(&L, NULL);
-    lap_set_predictive(&L, g_pred_best_dist, g_pred_best_t, g_pred_rec_dist, g_pred_rec_t,
-                       PRED_TABLE_MAX);
+    lap_set_predictive(&L, pbd, pbt, prd, prt, PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
     arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
     clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
@@ -18259,16 +18258,23 @@ static void test_predictive_delta(void)
     TEST_ASSERT_FALSE(have);
     lap_live_delta_ms(&L, now, -10.0, &have);
     TEST_ASSERT_FALSE(have);
+
+    free(pbd); free(pbt); free(prd); free(prt);
 }
 
 /* §10.11 table cap: a lap with far more than PRED_TABLE_MAX fixes stays within the fixed table. */
 static void test_predictive_table_cap(void)
 {
+    uint16_t *pbd = malloc(PRED_TABLE_MAX * sizeof *pbd);
+    uint32_t *pbt = malloc(PRED_TABLE_MAX * sizeof *pbt);
+    uint16_t *prd = malloc(PRED_TABLE_MAX * sizeof *prd);
+    uint32_t *prt = malloc(PRED_TABLE_MAX * sizeof *prt);
+    TEST_ASSERT_NOT_NULL(pbd); TEST_ASSERT_NOT_NULL(pbt); TEST_ASSERT_NOT_NULL(prd); TEST_ASSERT_NOT_NULL(prt);
+
     const double lat0 = -45.0, lon0 = 170.0;
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);                 /* no sector gates */
     lap_t L; lap_init(&L, NULL);
-    lap_set_predictive(&L, g_pred_best_dist, g_pred_best_t, g_pred_rec_dist, g_pred_rec_t,
-                       PRED_TABLE_MAX);
+    lap_set_predictive(&L, pbd, pbt, prd, prt, PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
     arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
     feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
@@ -18284,6 +18290,8 @@ static void test_predictive_table_cap(void)
     TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
     TEST_ASSERT_TRUE(L.pred_rec_n > 0);
     TEST_ASSERT_TRUE(L.pred_rec_n <= PRED_TABLE_MAX);              /* never overflows the fixed table */
+
+    free(pbd); free(pbt); free(prd); free(prt);
 }
 
 /* §10.11 with predictive left disabled (no lap_set_predictive call, the lap_init default: pred_cap ==
