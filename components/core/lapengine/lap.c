@@ -1,8 +1,11 @@
 #include "core/lap.h"
+#include <math.h>
 #include <string.h>
 
-/* Lap engine (spec §10). Session 2.4 part 1: venue detection, arming and leave-venue. The S/F
- * crossing and lap completion are added in Task 2, pit detection and Doppler distance in Task 3. */
+/* Lap engine (spec §10). Session 2.4: venue detection and arming (part 1) plus S/F crossing and lap
+ * completion (part 2). Pit detection and Doppler distance integration are added in Task 3; sectors,
+ * layout disambiguation, deltas, theoretical best, on-device creation, RTC and predictive delta are
+ * session 2.5. */
 
 /* ---- configuration and lifecycle ---- */
 
@@ -156,6 +159,65 @@ static bool update_leave_venue(lap_t *L, double lat, double lon, int64_t now)
     return false;
 }
 
+/* Complete the current lap at t_cross (§10.4) and advance to the next. */
+static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_t cb, void *ctx)
+{
+    int64_t elapsed = t_cross - L->lap_start_gps_us;
+    if (elapsed < 0) elapsed = 0;
+    uint32_t time_ms = (uint32_t)((elapsed + 500) / 1000);          /* nearest ms (§10.4 step 1) */
+
+    const bool is_out = (L->lap_no == 0);
+
+    /* §10.4 step 2 debounce guard: a sub-MIN_LAP_S flying lap can only be a re-fire (the §6.4 step 5
+     * re-arm already forbids it), so ignore the crossing without completing or advancing. */
+    if (!is_out && time_ms < (uint32_t)MIN_LAP_S * 1000) return;
+
+    uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT accumulated in-lap */
+    if (is_out) flags |= LAP_F_OUT_LAP;
+    if (time_ms > (uint32_t)MAX_LAP_S * 1000) flags |= LAP_F_TOO_LONG;
+    const bool valid = !(flags & (LAP_F_GPS_LOST | LAP_F_PIT | LAP_F_INCOMPLETE |
+                                  LAP_F_OUT_LAP | LAP_F_TOO_LONG));
+    if (valid) flags |= LAP_F_VALID;
+
+    lap_result_t r;
+    memset(&r, 0, sizeof r);
+    r.lap_no       = L->lap_no;
+    r.start_gps_us = L->lap_start_gps_us;
+    r.time_ms      = is_out ? 0u : time_ms;                        /* out-lap reports no time (§10.4 step 3) */
+    r.flags        = flags;
+    r.n_sectors    = 0;                                            /* sectors are session 2.5 */
+
+    L->prev = r;                                                   /* §10.4 step 7: prev = this */
+    L->have_prev_result = true;
+    if (valid && (!L->have_best || r.time_ms < L->best.time_ms)) { /* §10.4 step 6: best from valid laps */
+        L->best = r;
+        L->have_best = true;
+    }
+    emit(cb, ctx, EV_LAP_COMPLETE, flags, L->lap_no, t_cross, mono_us, r.time_ms, 0);
+
+    /* Advance to the next lap (§10.4 step 7). */
+    L->lap_start_gps_us = t_cross;
+    L->lap_no++;
+    L->lap_flags = 0;
+    L->lap_dist_m = 0.0;
+    L->pit_slow = false;
+    L->pit_since_us = 0;
+}
+
+/* Re-arm every fired S/F gate that is clear of its line and past the debounce window (§6.4 step 5). */
+static void rearm_gates(lap_t *L, geo_enu_t cur, int64_t now)
+{
+    for (uint8_t i = 0; i < L->n_cand; i++) {
+        lap_cand_t *c = &L->cand[i];
+        if (c->sf_armed) continue;
+        double d = geo_dist_point_segment(cur, c->sf_p, c->sf_q);
+        if (d > GATE_REARM_DIST_M &&
+            now - c->sf_last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000 &&
+            now - c->sf_last_cross_us > (int64_t)MIN_LAP_S * 1000000)     /* S/F needs MIN_LAP_S too */
+            c->sf_armed = true;
+    }
+}
+
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx)
 {
     (void)fs;                                    /* fused stats feed sectors/§9.4 stats in later sessions */
@@ -202,9 +264,57 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
 
     const geo_enu_t cur = geo_to_enu(&L->origin, lat, lon);
 
-    /* ---- S/F crossing and lap completion (ARMED → LAP_RUNNING → completions) are added in Task 2,
-     * with pit detection and Doppler-integrated distance in Task 3. This part still only detects the
-     * venue, arms the S/F gates and watches for leaving. ---- */
+    /* S/F crossing (§6.4) over the previous→current segment, for ARMED and LAP_RUNNING. */
+    if ((L->state == LAP_ST_ARMED || L->state == LAP_ST_RUNNING) && L->have_prev_fix) {
+        rearm_gates(L, cur, now);
+
+        bool   matched[TRK_MAX_LAYOUTS];
+        bool   hit = false;
+        double t_earliest = 2.0;
+        for (uint8_t i = 0; i < L->n_cand; i++) {
+            matched[i] = false;
+            lap_cand_t *c = &L->cand[i];
+            if (!c->sf_armed) continue;
+            double t = 0.0;
+            int    dir = 0;
+            if (!geo_segment_cross(L->prev_enu, cur, c->sf_p, c->sf_q, &t, &dir)) continue;
+            if (dir != c->layout->dir_sign) continue;    /* only the layout's own crossing direction */
+            matched[i] = true;
+            hit = true;
+            if (t < t_earliest) t_earliest = t;
+        }
+
+        if (hit) {
+            /* Crossing time by constant-acceleration interpolation over the segment (§6.4 step 4). */
+            const double dt_s = (double)(now - L->prev_gps_us) / 1e6;
+            const double v1   = (double)fix->gspeed_mms / 1000.0;
+            const double rlen = hypot(cur.x - L->prev_enu.x, cur.y - L->prev_enu.y);
+            const double tau  = geo_interp_time(t_earliest * rlen, L->prev_speed_mps, v1, dt_s);
+            const int64_t t_cross = L->prev_gps_us + (int64_t)llround(tau * 1e6);
+
+            /* Disarm every gate that fired and stamp it for the re-arm timer. */
+            for (uint8_t i = 0; i < L->n_cand; i++) {
+                if (!matched[i]) continue;
+                L->cand[i].sf_armed = false;
+                L->cand[i].sf_last_cross_us = t_cross;
+            }
+
+            if (L->state == LAP_ST_ARMED) {
+                /* First accepted crossing opens the out-lap and narrows candidates (§10.3). */
+                uint8_t k = 0;
+                for (uint8_t i = 0; i < L->n_cand; i++)
+                    if (matched[i]) L->cand[k++] = L->cand[i];
+                L->n_cand = k;
+                L->state = LAP_ST_RUNNING;
+                L->lap_no = 0;
+                L->lap_flags = 0;
+                L->lap_start_gps_us = t_cross;
+                L->lap_dist_m = 0.0;
+            } else {
+                complete_lap(L, t_cross, fix->mono_us, cb, ctx);
+            }
+        }
+    }
 
     /* Remember this valid fix as the start of the next segment (§6.4 needs two valid fixes). */
     L->prev_enu = cur;
