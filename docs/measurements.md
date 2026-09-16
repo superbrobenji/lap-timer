@@ -2,6 +2,18 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_neo6m firmware banner on ESP32 (plan 03, session 3.1)
+
+- Date: 2026-09-16. Branch s3.1-fw-scaffold. ESP-IDF v5.3.2. Board ESP32 DevKit V1, /dev/cu.usbserial-0001. `./build.sh moto_neo6m flash`.
+- App image 218,608 bytes (0x355f0), 83 % of the 1.25 MB app partition free. Boots to `app_main` in ~0.4 s (`I (391) main_task: Calling app_main()`), no reset loop.
+- Console: `CONFIG_ESP_CONSOLE_UART_BAUDRATE` lowered 921600 → 115200 (spec §21.2 reconciled); the board's CP2102 adapter is unreliable at 921600 here, and 115200 matches the proven core_selftest tooling. Fast-baud coredump dumps are a minor loss for the prototype.
+- Banner (verbatim):
+```
+I (392) laptimer: LapTimer 41c7f21-dirty (moto_neo6m_epaper)
+I (398) laptimer: core 0.0.1 | GPS neo6m | display epaper_ssd1680 | fused-log 10 Hz
+I (407) laptimer: reset reason: power-on (1)
+```
+
 ## core_selftest on ESP32 (plan 02, session 2.6)
 
 - Date: 2026-09-16. Commit: 832e7ab (branch s2.6-drag). ESP-IDF v5.3.2. Same board and port. 19 suites (`drag` added; its analytic fused/GPS streams need no synth). App binary 396,736 bytes.

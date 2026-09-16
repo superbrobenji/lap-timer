@@ -2189,7 +2189,7 @@ Platform notes displayed on the page: Android Chrome and desktop Chrome/Edge sup
 
 ### 18.4 Serial fallback (`export_serial`)
 
-- UART0, 921600 baud (CH340 supports up to 2 Mbaud), IDF `esp_console` REPL with line editing disabled (`CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600`).
+- UART0, 921600 baud (CH340 supports up to 2 Mbaud), IDF `esp_console` REPL with line editing disabled (`CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200`).
 - Commands (text): `status`, `list`, `open <id> <vbo|nmea|json|log|sum>`, `read <offset>`, `close`, `delete <id>`, `config get`, `config set <json>`, `tracks get`, `tracks put <json>`, `errlog`, `errlog clear`, `diag`, `coredump`, `dbg <hang|crash|gps raw on|gps raw off|imu raw on|imu raw off|power <active|pit|park|shutdown>|sim on|sim off>`.
 - File output framing: `---BEGIN <name> <size>---\r\n` … raw text … `---END <crc32 hex>---\r\n`. Binary formats (log/sum/coredump) are Base64-encoded between the markers.
 - ESP-IDF logging is redirected to level `ERROR` for the duration of an `open` transfer, restored at `close`/END.
@@ -2433,7 +2433,7 @@ CONFIG_SECURE_BOOT_VERIFICATION_KEY="keys/laptimer_pub.pem"
 CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
 CONFIG_SPI_MASTER_ISR_IN_IRAM=y
-CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 CONFIG_BT_ENABLED=y
