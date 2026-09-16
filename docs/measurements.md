@@ -2,6 +2,19 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_neo6m firmware on ESP32 (plan 03, session 3.2 — board, NVS, boot, supervisor)
+
+- Date: 2026-09-17. Branch s3.2-board-boot (5254894). ESP-IDF v5.3.2. Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. App image 327,632 bytes (74 % of the 1.25 MB app partition free).
+- Boots to `app_main` and completes boot in ~721 ms (`boot #1 complete in 721 ms (safe_mode=0)`), well under the ≤1.5 s target. No reset loop, no stack overflow.
+- `dbg status` (exit criterion) over two boots — the NVS boot counter persists and increments, config persists (E_SYS_CFG_RESET only on the first blank-NVS boot), heartbeats tick, no spurious faults:
+```
+boot count : 2
+reset      : power-on (1)
+counters   : boots=2 crashes=0 wdt=0 brownout=0
+sys_flags  : 0x00000000
+hb[1]      : 5     (supervisor, ~1/s; other task slots 0 until their tasks exist)
+```
+
 ## moto_neo6m firmware banner on ESP32 (plan 03, session 3.1)
 
 - Date: 2026-09-16. Branch s3.1-fw-scaffold. ESP-IDF v5.3.2. Board ESP32 DevKit V1, /dev/cu.usbserial-0001. `./build.sh moto_neo6m flash`.

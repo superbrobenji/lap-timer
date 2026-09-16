@@ -132,14 +132,17 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 # ---- component search path (§21.1) ----
 # 3.1 references only the components that exist now. §21.1's full set is appended
 # by the session that creates each one:
-#   3.2  components/hal   components/drivers/board_devkit_v1
+#   3.2  components/lt_hal (HAL interface; named lt_hal because ESP-IDF ships a built-in
+#        component literally named `hal` that a same-named project component would override),
+#        components/app (NVS/RTC/supervisor/dbg -- brought in here, one session earlier than
+#        §4.2's "3.4", because the boot sequence and supervisor need it), and
+#        components/drivers/board_devkit_v1.
 #   3.3  components/drivers/storage_${STORAGE}
-#   3.4  components/app   components/drivers/gps_ubx_common   components/drivers/gps_${GPS}
+#   3.4  components/drivers/gps_ubx_common   components/drivers/gps_${GPS}
 #        components/drivers/imu_${IMU}   components/drivers/display_${DISPLAY}
 #        + conn_ble / conn_wifi (per CONN), conn_ble_rc (if CONN_BLE_RC),
 #          export_serial (if EXPORT_SERIAL)  -- gated exactly as in §21.1.
-# The version-banner build links no drivers.
-set(EXTRA_COMPONENT_DIRS components/core)
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1)
 
 # keep each named environment's generated sdkconfig inside its own build/<env>/
 # tree, so switching -D flags between envs never cross-contaminates (each build dir

@@ -1,50 +1,145 @@
-/* app_main.c -- LapTimer firmware entry point.
+/* app_main.c -- LapTimer firmware entry point and boot sequence (§4.7).
  *
- * Session 3.1 is the first bootable firmware: it prints the version banner and
- * idles. The full boot sequence (§4.7) -- NVS, crash-loop check, RTC resume,
- * config, board bring-up, storage, display, self-test, task WDT, queues/rings,
- * and the pipeline/logger/ui/power/conn tasks -- lands across sessions 3.2-3.5.
+ * Session 3.2 implements boot steps 1-5 (reset reason + crash counters, NVS init, boot
+ * counter + crash-loop check, RTC-state validate, config load), step 6 in part (board
+ * bring-up + GPS power, needed for the battery reading in `dbg status`), and steps 10-11
+ * (task WDT + supervisor, hb[]/sys_flags, static queues). Steps 7-9 (storage, display,
+ * self-test) and 12-15 (pipeline/logger/ui/power/conn/OTA) land in 3.3-3.5.
  */
 #include "build_config.h"
+
+#include <stdio.h>
+
+#include "core/cfg.h"
 #include "core/core.h"
+
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_system.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "esp_timer.h"
+#include "nvs_flash.h"
+
+#include "hal/board.h"
+
+#include "app/dbg_console.h"
+#include "app/lt_err.h"
+#include "app/lt_nvs.h"
+#include "app/lt_rtc.h"
+#include "app/lt_sup.h"
 
 static const char *TAG = "laptimer";
 
-static const char *reset_reason_str(esp_reset_reason_t r)
+/* Build the profile the app applies after cfg_defaults and before the NVS blob (§15.1), so
+ * stored user settings always win. BLE name is MAC-derived ("LapTimer-XXXX"). */
+static void make_profile(cfg_profile_t *p, char *name, size_t name_cap)
 {
-    switch (r) {
-    case ESP_RST_POWERON:   return "power-on";
-    case ESP_RST_EXT:       return "external";
-    case ESP_RST_SW:        return "software";
-    case ESP_RST_PANIC:     return "panic";
-    case ESP_RST_INT_WDT:   return "interrupt-WDT";
-    case ESP_RST_TASK_WDT:  return "task-WDT";
-    case ESP_RST_WDT:       return "other-WDT";
-    case ESP_RST_DEEPSLEEP: return "deep-sleep";
-    case ESP_RST_BROWNOUT:  return "brownout";
-    case ESP_RST_SDIO:      return "SDIO";
-    default:                return "unknown";
-    }
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(name, name_cap, "LapTimer-%02X%02X", mac[4], mac[5]);
+    p->display_live_clock = (CFG_VARIANT_CAR != 0);   /* profile sets true for the OLED (car) */
+    p->log_fused_hz = CFG_FUSED_LOG_HZ;
+    p->ble_name = name;
 }
 
 void app_main(void)
 {
-    /* §4.7 step 1: record the reset reason (NVS counters land in 3.2). */
+    int64_t t_boot = esp_timer_get_time();
+
+    /* §4.7 step 1: reset reason (crash counters recorded below, after NVS is up). */
     esp_reset_reason_t reason = esp_reset_reason();
 
-    /* §4.7 step 8: the version banner. */
+    /* §4.7 step 8 banner (kept from 3.1). */
     ESP_LOGI(TAG, "LapTimer %s (%s)", CFG_FW_VERSION, CFG_HWID);
     ESP_LOGI(TAG, "core %s | GPS %s | display %s | fused-log %d Hz",
              core_version(), CFG_GPS_NAME, CFG_DISPLAY_NAME, CFG_FUSED_LOG_HZ);
-    ESP_LOGI(TAG, "reset reason: %s (%d)", reset_reason_str(reason), (int)reason);
+    ESP_LOGI(TAG, "reset reason: %s (%d)", lt_reset_reason_str((int)reason), (int)reason);
 
-    /* No drivers, tasks, queues or rings yet: idle and let the idle task feed
-     * the (not-yet-armed) watchdog. */
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    /* §4.7 step 2: NVS init, erase + re-init on a version/space fault (log E_SYS_CFG_RESET). */
+    esp_err_t nerr = nvs_flash_init();
+    bool nvs_erased = false;
+    if (nerr == ESP_ERR_NVS_NO_FREE_PAGES || nerr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+        nvs_erased = true;
+    } else {
+        ESP_ERROR_CHECK(nerr);
     }
+    if (lt_nvs_init() != 0) ESP_LOGE(TAG, "lt_nvs_init failed");
+    sup_install_assert_hook();                 /* core asserts -> error ring (§17.9) */
+    if (nvs_erased) errlog_add(E_SYS_CFG_RESET, 0);
+
+    /* §4.7 step 1 (cont): count + log + crash-log the reset reason; prev-boot uptime comes
+     * from the RTC uptime cell the supervisor maintained last boot. */
+    uint32_t prev_uptime_s = lt_rtc_uptime_prev_s();
+    lt_boot_record_reset((int)reason, prev_uptime_s);
+
+    /* §4.7 step 3: boot counter + crash-loop check (§17.5). 3.2 only detects + flags safe
+     * mode; the safe-mode behaviour tree is 3.5. */
+    uint32_t boot_cnt = lt_nvs_boot_inc();
+    lt_counters_inc(LT_CTR_BOOTS, false);      /* batched with the rest */
+    bool safe = false;
+    if (lt_crashlog_is_loop()) {
+        lt_safe_until_set(boot_cnt + 1);
+        safe = true;
+        ESP_LOGE(TAG, "crash loop: 3 abnormal resets < 60 s -> SAFE MODE");
+    } else if (boot_cnt <= lt_safe_until_get()) {
+        safe = true;                           /* still inside a prior safe-mode window */
+    }
+    if (safe) {
+        sys_flags_set(SYS_SAFE_MODE);
+        errlog_add(E_SYS_SAFE_MODE, boot_cnt);
+    }
+
+    /* §4.7 step 4: RTC memory validate/clear. Full resume is 3.5; here invalid/absent are
+     * cleared and only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
+    switch (lt_rtc_validate(NULL)) {
+    case RTC_INVALID:
+        errlog_add(E_SYS_RTC_INVALID, 0);
+        lt_rtc_clear();
+        break;
+    case RTC_ABSENT:
+        lt_rtc_clear();
+        break;
+    case RTC_VALID:
+        break;                                 /* left in place; 3.5 resumes from it */
+    }
+
+    /* §4.7 step 5: config load. defaults -> profile -> NVS blob (stored settings win, §15.1);
+    *  defaults + a fresh save on absent/corrupt; log corrections. */
+    static cfg_t cfg;
+    char ble_name[16];
+    cfg_profile_t prof;
+    cfg_defaults(&cfg);
+    make_profile(&prof, ble_name, sizeof(ble_name));
+    cfg_apply_profile(&cfg, &prof);
+    int corr = lt_cfg_load(&cfg);
+    if (corr < 0) {
+        lt_cfg_save(&cfg);                     /* no valid blob -> persist the profile defaults */
+        errlog_add(E_SYS_CFG_RESET, 0);
+    } else if (corr > 0) {
+        errlog_add(E_SYS_CFG_RESET, (uint32_t)corr);
+        lt_cfg_save(&cfg);                     /* persist the clamped config */
+    }
+
+    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`). */
+    board_init();
+    board_gps_power(true);
+
+    /* §4.7 step 10: the task WDT is already enabled via sdkconfig; hb[]/sys_flags exist
+     * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */
+    sup_start();
+
+    /* §4.7 step 11: static queues the supervisor + button ISR need (btn_q). The pipeline
+     * rings arrive in 3.4. */
+    lt_queues_init();
+
+    /* Minimal diagnostics console -- the 3.2 exit criterion (`dbg status`). Replaced by the
+     * full §18.4 console in 3.5. */
+    dbg_console_start((int)reason);
+
+    ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%d)", (unsigned)boot_cnt,
+             (long long)((esp_timer_get_time() - t_boot) / 1000), (int)safe);
+
+    /* The main task returns: the supervisor and console tasks run on, and the idle tasks on
+     * both cores feed the task WDT. Pipeline/logger/ui/power start here in 3.4. */
 }
