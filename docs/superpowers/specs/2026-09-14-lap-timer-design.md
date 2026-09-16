@@ -443,7 +443,7 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | `cfg_from_json` token array, 192 × `jsmntok_t` (20 B), `.bss` | 3,840 B |
 | `exp_t` (holds the 1 KB export streaming window and the decoder state) | 1,488 B |
 | `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
-| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | ~400 B |
+| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 328 B |
 | Lap engine (venue + 8 layouts × 16 gates) | ~3 KB |
 | Predictive delta table (O5) | 2.4 KB |
 | Headroom | > 90 KB |

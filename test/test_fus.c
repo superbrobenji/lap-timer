@@ -210,8 +210,12 @@ static void feed(fus_t *f, fused_sample_t *o, int n, const float a_g[3], const f
                  float a_noise_g, float g_noise_lsb, int64_t *mono_us)
 {
     for (int i = 0; i < n; i++) {
-        const float an[3] = { a_g[0] + noise_pm(a_noise_g), a_g[1] + noise_pm(a_noise_g), a_g[2] + noise_pm(a_noise_g) };
-        const float gn[3] = { g_lsb[0] + noise_pm(g_noise_lsb), g_lsb[1] + noise_pm(g_noise_lsb), g_lsb[2] + noise_pm(g_noise_lsb) };
+        /* Sequential declarations are sequenced (unlike the three noise_pm() calls in one brace
+         * initializer would be), so each axis draws its LCG value in a fixed, portable order. */
+        const float na0 = noise_pm(a_noise_g), na1 = noise_pm(a_noise_g), na2 = noise_pm(a_noise_g);
+        const float an[3] = { a_g[0] + na0, a_g[1] + na1, a_g[2] + na2 };
+        const float ng0 = noise_pm(g_noise_lsb), ng1 = noise_pm(g_noise_lsb), ng2 = noise_pm(g_noise_lsb);
+        const float gn[3] = { g_lsb[0] + ng0, g_lsb[1] + ng1, g_lsb[2] + ng2 };
         imu_raw_t r = raw_at(*mono_us, an, gn);
         fus_step(f, &r, o);
         *mono_us += 1000000 / FUSION_HZ;
@@ -449,6 +453,73 @@ static void test_recapture_resets_forward_learning(void)
     TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);
 }
 
+/* Degenerate accumulation (§9.2, fus_orient.c's FUS_FWD_MIN_NORM guard): when the accumulated
+ * horizontal sum collapses to ~zero, fus_orient_set_forward refuses to learn a row and fus_step
+ * restarts the tracker (fus_fwd_init) instead of leaving stale state behind. Two runs of exactly
+ * opposite specific force are built as bit-exact int16 negations of each other, so ah(-a) = -ah(a)
+ * to full float precision and the accumulated sum returns to exactly zero, not merely close to it.
+ * FWD_LEARN_WINDOWS = 3 needs a third counted run; it alternates sign every sample (an even count),
+ * which cancels to exactly zero by the time it is counted too, so the sum stays exactly zero right
+ * through the trigger and the test is deterministic on every host. */
+static void test_degenerate_forward_sum_restarts_the_tracker(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fused_sample_t o; int64_t t = 1000000;
+    float grav[3]; tilted_gravity(grav);
+    capture_tilted_orientation(&f, &o, &t, grav);
+
+    const float fwd_g = BURST_ACC_MPS2 / (float)G_MPS2;
+    const float acc_pos[3] = { grav[0], grav[1] - fwd_g, grav[2] };
+    const imu_raw_t r_pos = raw_at(t, acc_pos, ZERO3);
+    imu_raw_t r_neg = r_pos;
+    r_neg.ax = (int16_t)(-(int)r_pos.ax);
+    r_neg.ay = (int16_t)(-(int)r_pos.ay);
+    r_neg.az = (int16_t)(-(int)r_pos.az);
+
+    int ones = 0, neg = 0;
+    for (int b = 0; b < FWD_LEARN_WINDOWS; b++) {
+        const int n = (b < 2) ? BURST_SAMPLES : FUS_FWD_MIN_SAMPLES;
+        for (int i = 0; i < n; i++) {
+            if (i % FIX_EVERY == 0) {
+                const int rc = fus_calib_forward_step(&f, BURST_ACC_MPS2, BURST_YAW_DPS);
+                if (rc == 1) ones++;
+                if (rc < 0) neg++;
+            }
+            imu_raw_t r;
+            if (b == 0) r = r_pos;                     /* run 0: +X in the body plane */
+            else if (b == 1) r = r_neg;                 /* run 1: -X, cancelling run 0 exactly */
+            else r = (i % 2 == 0) ? r_pos : r_neg;      /* run 2: alternates, cancelling within itself */
+            r.mono_us = t;
+            fus_step(&f, &r, &o);
+            t += 1000000 / FUSION_HZ;
+        }
+        for (int i = 0; i < COAST_SAMPLES; i++) {
+            if (i % FIX_EVERY == 0) {
+                const int rc = fus_calib_forward_step(&f, 0.0f, 0.0f);   /* run ends: no acceleration */
+                if (rc == 1) ones++;
+                if (rc < 0) neg++;
+            }
+            feed(&f, &o, 1, grav, ZERO3, 0.0f, 0.0f, &t);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(0, ones);              /* the degenerate sum never reports a learned row */
+    TEST_ASSERT_EQUAL_INT(0, neg);               /* orientation stays captured the whole time */
+    TEST_ASSERT_EQUAL_UINT8(0, fus_calib(&f)->forward_ok);
+    TEST_ASSERT_EQUAL_UINT8(0, f.fwd.windows);   /* fus_orient_set_forward's -1 restarted the tracker */
+    TEST_ASSERT_FALSE(fus_fwd_ready(&f.fwd));
+
+    imu_raw_t clean = raw_at(t, grav, ZERO3);
+    fus_step(&f, &clean, &o);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_ORIENT_OK);   /* forward still unlearned */
+
+    /* A subsequent clean run still learns the forward row normally. */
+    int neg2 = 0;
+    TEST_ASSERT_EQUAL_INT(1, run_forward_bursts(&f, &o, &t, grav, &neg2));
+    TEST_ASSERT_EQUAL_INT(0, neg2);
+    TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&f)->forward_ok);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -464,5 +535,6 @@ int main(void)
     RUN_TEST(test_forward_learning_from_straight_line_acceleration);
     RUN_TEST(test_calibration_persists_through_the_calib_record_after_learning);
     RUN_TEST(test_recapture_resets_forward_learning);
+    RUN_TEST(test_degenerate_forward_sum_restarts_the_tracker);
     return UNITY_END();
 }

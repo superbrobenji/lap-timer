@@ -167,8 +167,9 @@ void fus_gyro_bias_update(fus_t *f)
 {
     if (!fus_is_still(f)) return;                /* §9.2: the bias is only meaningful over a still window */
     for (int i = 0; i < 3; i++) f->calib.gbias[i] = f->still.mean_graw[i];
-    /* 0 when the temperature has never been polled: update_bias_stale ignores gbias_temp_c100 while
-     * temp_known is false, so a placeholder cannot make the bias look stale. */
+    /* 0 marks an unknown capture temperature; the bias reads stale once a temperature is known,
+     * which is the conservative answer (it only prompts a recapture) and matches the same
+     * convention fus_calib_from_ses uses for a restored bias. */
     f->calib.gbias_temp_c100 = f->temp_known ? f->temp_c100 : (int16_t)0;
     f->calib.bias_ok = 1;
     f->bias_stale = false;                       /* freshly captured at the current temperature */
