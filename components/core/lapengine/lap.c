@@ -7,6 +7,10 @@
  * sector gates and splits, §10.5 layout disambiguation, §10.7 sector delta, §10.8 theoretical best,
  * §10.9 on-device creation, §10.10 RTC continuity and §10.11 predictive delta. */
 
+/* Two candidates' gate lines project to the same physical gate when their ENU endpoints agree to
+ * within this many metres (§10.5 union deduplication and lock re-derivation). */
+#define UGATE_SAME_M 2.0
+
 /* ---- configuration and lifecycle ---- */
 
 void lap_cfg_defaults(lap_cfg_t *c)
@@ -15,7 +19,7 @@ void lap_cfg_defaults(lap_cfg_t *c)
 }
 
 /* Clear the per-lap sector accumulation (§10.4 step 5): gate crossing times and the next-expected
- * sector index. Called whenever a lap opens. */
+ * sector index; re-arm every sector gate of the locked layout. Called whenever a lap opens. */
 static void reset_lap_sectors(lap_t *L)
 {
     L->sec_next = 1;
@@ -86,6 +90,8 @@ static void arm_candidates(lap_t *L)
         c->sf_q = geo_to_enu(&L->origin, ly->sf.p2.lat, ly->sf.p2.lon);
         c->sf_armed = true;
         c->sf_last_cross_us = 0;
+        c->hits_matching = 0;
+        c->hits_foreign = 0;
     }
 }
 
@@ -162,7 +168,7 @@ uint32_t lap_theoretical_best_ms(const lap_t *L)
     return sum;
 }
 
-/* ---- §10.9 on-device track creation (bodies in the creation section below) ---- */
+/* ---- §10.9 on-device track creation (bodies: session 2.5 Task 3) ---- */
 
 void lap_create_begin(lap_t *L)
 {
@@ -204,6 +210,275 @@ int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, boo
     return 0;
 }
 
+/* ---- geometry and sector helpers ---- */
+
+static geo_enu_t pt_enu(const lap_t *L, trk_pt_t p)
+{
+    return geo_to_enu(&L->origin, p.lat, p.lon);
+}
+
+static bool enu_near(geo_enu_t a, geo_enu_t b)
+{
+    return hypot(a.x - b.x, a.y - b.y) < UGATE_SAME_M;
+}
+
+/* Crossing time by constant-acceleration interpolation over the previous->current segment (§6.4
+ * step 4), given the crossing's fraction t_frac along the segment and the current speed v1. */
+static int64_t cross_time(const lap_t *L, geo_enu_t cur, double v1, double t_frac, int64_t now)
+{
+    const double dt_s = (double)(now - L->prev_gps_us) / 1e6;
+    const double rlen = hypot(cur.x - L->prev_enu.x, cur.y - L->prev_enu.y);
+    const double tau  = geo_interp_time(t_frac * rlen, L->prev_speed_mps, v1, dt_s);
+    return L->prev_gps_us + (int64_t)llround(tau * 1e6);
+}
+
+/* Project the locked layout's sector gates into ENU and arm them; set the split count (§10.5). */
+static void project_locked_sectors(lap_t *L)
+{
+    const trk_layout_t *ly = L->locked_layout;
+    L->n_sec = ly->n_sectors;
+    for (uint8_t j = 0; j < ly->n_sectors && j < LAP_MAX_SECTORS; j++) {
+        L->sec_p[j] = pt_enu(L, ly->sectors[j].p1);
+        L->sec_q[j] = pt_enu(L, ly->sectors[j].p2);
+        L->sec_armed[j] = true;
+        L->sec_last_cross_us[j] = 0;
+    }
+    L->best_sector_count = (uint8_t)(L->n_sec + 1);
+}
+
+static void emit(lap_evt_cb_t cb, void *ctx, uint8_t type, uint8_t flags, uint16_t arg16,
+                 int64_t gps_us, int64_t mono_us, uint32_t arg32, uint32_t arg32b);
+
+/* Lock the layout at candidate index idx (§10.5): narrow candidates to it, project and arm its sector
+ * gates, and announce EV_LAYOUT_LOCKED. */
+static void lock_layout(lap_t *L, uint8_t idx, int64_t t, int64_t mono, lap_evt_cb_t cb, void *ctx)
+{
+    L->locked = true;
+    L->locked_layout = L->cand[idx].layout;
+    L->cand[0] = L->cand[idx];
+    L->n_cand = 1;
+    project_locked_sectors(L);
+    emit(cb, ctx, EV_LAYOUT_LOCKED, 0, L->locked_layout->id, t, mono, 0, 0);
+}
+
+/* Find the union gate whose endpoints match (p, q), or -1. */
+static int ugate_find(const lap_t *L, geo_enu_t p, geo_enu_t q)
+{
+    for (uint8_t gi = 0; gi < L->n_ugate; gi++)
+        if (enu_near(L->ugate[gi].p, p) && enu_near(L->ugate[gi].q, q)) return (int)gi;
+    return -1;
+}
+
+/* Build the deduplicated union of every candidate's sector gates, tagged by candidate (§10.5). */
+static void build_union(lap_t *L)
+{
+    L->n_ugate = 0;
+    for (uint8_t i = 0; i < L->n_cand; i++) {
+        const trk_layout_t *ly = L->cand[i].layout;
+        for (uint8_t s = 0; s < ly->n_sectors && s < LAP_MAX_SECTORS; s++) {
+            geo_enu_t p = pt_enu(L, ly->sectors[s].p1);
+            geo_enu_t q = pt_enu(L, ly->sectors[s].p2);
+            int gi = ugate_find(L, p, q);
+            if (gi < 0) {
+                if (L->n_ugate >= LAP_MAX_UGATES) continue;
+                gi = (int)L->n_ugate++;
+                lap_ugate_t *g = &L->ugate[gi];
+                g->p = p; g->q = q;
+                g->dir_sign = ly->dir_sign;
+                g->armed = true;
+                g->cross_us = 0;
+                g->last_cross_us = 0;
+                g->in_layout = 0;
+            }
+            L->ugate[gi].in_layout |= (uint8_t)(1u << i);
+        }
+    }
+}
+
+/* Re-arm S/F candidate gates clear of their line and past the debounce window (§6.4 step 5). */
+static void rearm_sf(lap_t *L, geo_enu_t cur, int64_t now)
+{
+    for (uint8_t i = 0; i < L->n_cand; i++) {
+        lap_cand_t *c = &L->cand[i];
+        if (c->sf_armed) continue;
+        double d = geo_dist_point_segment(cur, c->sf_p, c->sf_q);
+        if (d > GATE_REARM_DIST_M &&
+            now - c->sf_last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000 &&
+            now - c->sf_last_cross_us > (int64_t)MIN_LAP_S * 1000000)     /* S/F needs MIN_LAP_S too */
+            c->sf_armed = true;
+    }
+}
+
+/* Re-arm sector gates (§6.4 step 5); sectors need only GATE_REARM_DIST_M / GATE_REARM_MIN_S. */
+static void rearm_sectors(lap_t *L, geo_enu_t cur, int64_t now)
+{
+    for (uint8_t j = 0; j < L->n_sec; j++) {
+        if (L->sec_armed[j]) continue;
+        double d = geo_dist_point_segment(cur, L->sec_p[j], L->sec_q[j]);
+        if (d > GATE_REARM_DIST_M && now - L->sec_last_cross_us[j] > (int64_t)GATE_REARM_MIN_S * 1000000)
+            L->sec_armed[j] = true;
+    }
+}
+
+static void rearm_ugates(lap_t *L, geo_enu_t cur, int64_t now)
+{
+    for (uint8_t gi = 0; gi < L->n_ugate; gi++) {
+        lap_ugate_t *g = &L->ugate[gi];
+        if (g->armed) continue;
+        double d = geo_dist_point_segment(cur, g->p, g->q);
+        if (d > GATE_REARM_DIST_M && now - g->last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000)
+            g->armed = true;
+    }
+}
+
+/* Record a sector gate crossing at t_cross (§10.4 step 5, §10.7). k is the 1-based sector gate number
+ * in the locked layout. Out-of-order or skipped gates set LAP_F_INCOMPLETE and resync to k. */
+static void handle_sector_cross(lap_t *L, uint8_t k, int64_t t_cross, int64_t mono,
+                                lap_evt_cb_t cb, void *ctx)
+{
+    if (k < L->sec_next) return;                 /* already recorded this lap */
+    if (k > L->sec_next) L->lap_flags |= LAP_F_INCOMPLETE;   /* a sector was skipped */
+    L->gate_times[k] = t_cross;
+
+    uint8_t prev = (uint8_t)(k - 1);             /* last recorded boundary before k (0 = lap start) */
+    while (prev > 0 && L->gate_times[prev] == 0) prev--;
+    uint32_t split_ms = (uint32_t)llround((double)(t_cross - L->gate_times[prev]) / 1000.0);
+
+    uint8_t idx = (uint8_t)(k - 1);              /* split index this crossing closes */
+    int32_t delta = 0;
+    if (L->have_best && idx < L->best.n_sectors)
+        delta = (int32_t)split_ms - (int32_t)L->best.sector_ms[idx];
+    emit(cb, ctx, EV_SECTOR, 0, idx, t_cross, mono, split_ms, (uint32_t)delta);
+
+    L->sec_next = (uint8_t)(k + 1);
+}
+
+typedef struct { uint8_t k; int64_t t; } sec_fire_t;   /* a sector gate that fired in one segment */
+
+/* Evaluate the locked layout's sector gates over the previous->current segment. */
+static void evaluate_locked_sectors(lap_t *L, geo_enu_t cur, const gps_fix_t *fix,
+                                    lap_evt_cb_t cb, void *ctx)
+{
+    const int64_t now = fix->gps_us;
+    const double  v1  = (double)fix->gspeed_mms / 1000.0;
+    rearm_sectors(L, cur, now);
+
+    sec_fire_t fired[LAP_MAX_SECTORS];
+    uint8_t nf = 0;
+    for (uint8_t j = 0; j < L->n_sec; j++) {
+        if (!L->sec_armed[j]) continue;
+        double t; int dir;
+        if (!geo_segment_cross(L->prev_enu, cur, L->sec_p[j], L->sec_q[j], &t, &dir)) continue;
+        if (dir != L->locked_layout->dir_sign) continue;
+        fired[nf].k = (uint8_t)(j + 1);
+        fired[nf].t = cross_time(L, cur, v1, t, now);
+        nf++;
+    }
+    /* Process in crossing-time order (§6.4: two gates may fall in one segment). */
+    for (uint8_t a = 1; a < nf; a++)
+        for (uint8_t b = a; b > 0 && fired[b - 1].t > fired[b].t; b--) {
+            sec_fire_t tmp = fired[b - 1];
+            fired[b - 1] = fired[b];
+            fired[b] = tmp;
+        }
+    for (uint8_t f = 0; f < nf; f++) {
+        uint8_t j = (uint8_t)(fired[f].k - 1);
+        L->sec_armed[j] = false;
+        L->sec_last_cross_us[j] = fired[f].t;
+        handle_sector_cross(L, fired[f].k, fired[f].t, fix->mono_us, cb, ctx);
+    }
+}
+
+/* Evaluate the disambiguation union over the segment: record each gate's crossing time and update
+ * every candidate's matching/foreign score (§10.5). No EV_SECTOR while the layout is unknown. */
+static void evaluate_union(lap_t *L, geo_enu_t cur, const gps_fix_t *fix)
+{
+    const int64_t now = fix->gps_us;
+    const double  v1  = (double)fix->gspeed_mms / 1000.0;
+    rearm_ugates(L, cur, now);
+
+    for (uint8_t gi = 0; gi < L->n_ugate; gi++) {
+        lap_ugate_t *g = &L->ugate[gi];
+        if (!g->armed) continue;
+        double t; int dir;
+        if (!geo_segment_cross(L->prev_enu, cur, g->p, g->q, &t, &dir)) continue;
+        if (dir != g->dir_sign) continue;
+        int64_t tc = cross_time(L, cur, v1, t, now);
+        g->armed = false;
+        g->last_cross_us = tc;
+        if (g->cross_us == 0) g->cross_us = tc;
+        for (uint8_t i = 0; i < L->n_cand; i++) {
+            if (g->in_layout & (uint8_t)(1u << i)) L->cand[i].hits_matching++;
+            else                                   L->cand[i].hits_foreign++;
+        }
+    }
+}
+
+/* §10.5 tie-break: the venue's default layout wins, else the lowest layout id. */
+static bool tiebreak_better(const lap_t *L, const trk_layout_t *a, const trk_layout_t *b)
+{
+    uint16_t def = L->cfg.default_layout_id;
+    bool ad = (a->id == def), bd = (b->id == def);
+    if (ad != bd) return ad;
+    return a->id < b->id;
+}
+
+/* At the out-lap's closing S/F crossing, score the candidates and lock the winner (§10.5), then map
+ * the recorded union crossing times onto the locked layout's sector gates so the out-lap result
+ * carries splits. */
+static void disambiguate_and_lock(lap_t *L, int64_t t_cross, int64_t mono, lap_evt_cb_t cb, void *ctx)
+{
+    uint8_t best_i = 0;
+    int     best_score = -1000000;
+    for (uint8_t i = 0; i < L->n_cand; i++) {
+        int score = L->cand[i].hits_matching - L->cand[i].hits_foreign;
+        double len = (double)L->cand[i].layout->length_m;
+        if (len > 0.0 && fabs(L->lap_dist_m - len) < LAYOUT_LEN_TOL * len) score += 1;   /* §10.5 */
+        if (score > best_score ||
+            (score == best_score && tiebreak_better(L, L->cand[i].layout, L->cand[best_i].layout))) {
+            best_score = score;
+            best_i = i;
+        }
+    }
+    lock_layout(L, best_i, t_cross, mono, cb, ctx);
+
+    /* Re-derive the out-lap's sector times from the union (§10.5: splits recorded per gate). */
+    for (uint8_t j = 0; j < L->n_sec; j++) {
+        int u = ugate_find(L, L->sec_p[j], L->sec_q[j]);
+        if (u >= 0 && L->ugate[u].cross_us != 0) L->gate_times[(uint8_t)(j + 1)] = L->ugate[u].cross_us;
+    }
+    L->n_ugate = 0;
+}
+
+/* Fill sector_ms[] for the completing lap from gate_times and the S/F crossing t_cross. For a complete
+ * lap the splits are rounded cumulatively, so they sum exactly to the lap time (§10.4 step 5). */
+static void compute_sectors(const lap_t *L, int64_t t_cross, uint32_t *sector_ms,
+                            uint8_t *n_out, bool *incomplete)
+{
+    if (!L->locked) { *n_out = 0; *incomplete = false; return; }
+    uint8_t n = L->n_sec;
+    int64_t b[LAP_MAX_SECTORS + 2];
+    b[0] = L->lap_start_gps_us;
+    bool inc = false;
+    for (uint8_t j = 1; j <= n; j++) { b[j] = L->gate_times[j]; if (b[j] == 0) inc = true; }
+    b[n + 1] = t_cross;
+
+    if (!inc) {
+        uint32_t prev_cum = 0;
+        for (uint8_t i = 0; i <= n; i++) {
+            uint32_t cum = (uint32_t)llround((double)(b[i + 1] - b[0]) / 1000.0);
+            sector_ms[i] = cum - prev_cum;
+            prev_cum = cum;
+        }
+    } else {
+        for (uint8_t i = 0; i <= n; i++)
+            sector_ms[i] = (b[i] != 0 && b[i + 1] != 0)
+                         ? (uint32_t)llround((double)(b[i + 1] - b[i]) / 1000.0) : 0u;
+    }
+    *n_out = (uint8_t)(n + 1);
+    *incomplete = inc;
+}
+
 /* ---- fix processing ---- */
 
 static void emit(lap_evt_cb_t cb, void *ctx, uint8_t type, uint8_t flags, uint16_t arg16,
@@ -232,6 +507,23 @@ static bool update_leave_venue(lap_t *L, double lat, double lon, int64_t now)
     return false;
 }
 
+/* Open a new lap at t_cross: reset per-lap accumulation and re-arm the locked layout's sector gates. */
+static void open_lap(lap_t *L, uint16_t lap_no, int64_t t_cross)
+{
+    L->lap_no = lap_no;
+    L->lap_flags = 0;
+    L->lap_start_gps_us = t_cross;
+    L->lap_dist_m = 0.0;
+    L->pit_slow = false;
+    L->pit_since_us = 0;
+    L->sec_next = 1;
+    memset(L->gate_times, 0, sizeof L->gate_times);
+    L->gate_times[0] = t_cross;
+    for (uint8_t j = 0; j < LAP_MAX_SECTORS; j++) L->sec_armed[j] = true;
+    L->pred_rec_n = 0;
+    L->pred_rec_fixes = 0;
+}
+
 /* Complete the current lap at t_cross (§10.4) and advance to the next. */
 static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_t cb, void *ctx)
 {
@@ -241,18 +533,24 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
 
     const bool is_out = (L->lap_no == 0);
 
-    /* §10.4 step 2 debounce guard: a sub-MIN_LAP_S flying lap can only be a re-fire (the §6.4 step 5
-     * re-arm already forbids it), so ignore the crossing without completing or advancing. The !is_out
-     * qualifier is safe because the §6.4 step 5 re-arm already guarantees the out-lap itself exceeds
-     * MIN_LAP_S, so this guard only ever fires on a genuine sub-min-lap jitter double-fire. */
+    /* §10.4 step 2 debounce guard (should not fire after §6.4 step 5 on the S/F). */
     if (!is_out && time_ms < (uint32_t)MIN_LAP_S * 1000) return;
 
-    uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT accumulated in-lap */
+    uint32_t sector_ms[LAP_MAX_SECTORS + 1];
+    uint8_t  n_splits;
+    bool     inc;
+    compute_sectors(L, t_cross, sector_ms, &n_splits, &inc);
+
+    uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT / INCOMPLETE in-lap */
     if (is_out) flags |= LAP_F_OUT_LAP;
     if (time_ms > (uint32_t)MAX_LAP_S * 1000) flags |= LAP_F_TOO_LONG;
+    if (inc) flags |= LAP_F_INCOMPLETE;                            /* a locked sector went unrecorded */
     const bool valid = !(flags & (LAP_F_GPS_LOST | LAP_F_PIT | LAP_F_INCOMPLETE |
                                   LAP_F_OUT_LAP | LAP_F_TOO_LONG));
     if (valid) flags |= LAP_F_VALID;
+
+    int32_t lap_delta = 0;                                         /* §10.7 lap delta vs best-before */
+    if (L->have_best && !is_out) lap_delta = (int32_t)time_ms - (int32_t)L->best.time_ms;
 
     lap_result_t r;
     memset(&r, 0, sizeof r);
@@ -260,7 +558,8 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
     r.start_gps_us = L->lap_start_gps_us;
     r.time_ms      = is_out ? 0u : time_ms;                        /* out-lap reports no time (§10.4 step 3) */
     r.flags        = flags;
-    r.n_sectors    = 0;                                            /* sectors are session 2.5 */
+    r.n_sectors    = n_splits;
+    for (uint8_t i = 0; i < n_splits && i <= LAP_MAX_SECTORS; i++) r.sector_ms[i] = sector_ms[i];
 
     L->prev = r;                                                   /* §10.4 step 7: prev = this */
     L->have_prev_result = true;
@@ -268,34 +567,22 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
         L->best = r;
         L->have_best = true;
     }
-    emit(cb, ctx, EV_LAP_COMPLETE, flags, L->lap_no, t_cross, mono_us, r.time_ms, 0);
-
-    /* Advance to the next lap (§10.4 step 7). */
-    L->lap_start_gps_us = t_cross;
-    L->lap_no++;
-    L->lap_flags = 0;
-    L->lap_dist_m = 0.0;
-    L->pit_slow = false;
-    L->pit_since_us = 0;
-}
-
-/* Re-arm every fired S/F gate that is clear of its line and past the debounce window (§6.4 step 5). */
-static void rearm_gates(lap_t *L, geo_enu_t cur, int64_t now)
-{
-    for (uint8_t i = 0; i < L->n_cand; i++) {
-        lap_cand_t *c = &L->cand[i];
-        if (c->sf_armed) continue;
-        double d = geo_dist_point_segment(cur, c->sf_p, c->sf_q);
-        if (d > GATE_REARM_DIST_M &&
-            now - c->sf_last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000 &&
-            now - c->sf_last_cross_us > (int64_t)MIN_LAP_S * 1000000)     /* S/F needs MIN_LAP_S too */
-            c->sf_armed = true;
+    if (valid && L->locked) {                                      /* §10.8 best per-sector, any valid lap */
+        for (uint8_t i = 0; i < n_splits && i <= LAP_MAX_SECTORS; i++)
+            if (!L->have_best_sector[i] || sector_ms[i] < L->best_sector_ms[i]) {
+                L->best_sector_ms[i] = sector_ms[i];
+                L->have_best_sector[i] = true;
+            }
+        L->best_sector_count = n_splits;
     }
+    emit(cb, ctx, EV_LAP_COMPLETE, flags, L->lap_no, t_cross, mono_us, r.time_ms, (uint32_t)lap_delta);
+
+    open_lap(L, (uint16_t)(L->lap_no + 1), t_cross);               /* §10.4 step 7 */
 }
 
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx)
 {
-    (void)fs;                                    /* fused stats feed sectors/§9.4 stats in later sessions */
+    (void)fs;                                    /* fused stats feed sector stats in a later session */
     if (!fix) return;
     const bool    valid = fix->valid != 0;
     const int64_t now   = fix->gps_us;
@@ -338,15 +625,23 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
     }
 
     const geo_enu_t cur = geo_to_enu(&L->origin, lat, lon);
+    const double    v1  = (double)fix->gspeed_mms / 1000.0;
 
-    /* S/F crossing (§6.4) over the previous→current segment, for ARMED and LAP_RUNNING. */
     if ((L->state == LAP_ST_ARMED || L->state == LAP_ST_RUNNING) && L->have_prev_fix) {
-        rearm_gates(L, cur, now);
+        rearm_sf(L, cur, now);
 
+        /* Sectors are evaluated before the S/F so a sector crossing lands in the lap it belongs to
+         * (§6.4: crossings in a segment are processed in t_cross order; a sector gate precedes the
+         * S/F that ends the lap for any realistic gate spacing). */
+        if (L->state == LAP_ST_RUNNING) {
+            if (L->locked)            evaluate_locked_sectors(L, cur, fix, cb, ctx);
+            else if (L->n_ugate != 0) evaluate_union(L, cur, fix);
+        }
+
+        /* S/F crossing (§6.4) over the previous→current segment. */
         bool   matched[TRK_MAX_LAYOUTS];
         bool   hit = false;
-        double t_earliest = 2.0;    /* sentinel "no crossing yet": any value > 1.0 works, since
-                                      * geo_segment_cross's t is in [0,1]. */
+        double t_earliest = 2.0;    /* sentinel > 1.0; geo_segment_cross's t is in [0,1] */
         for (uint8_t i = 0; i < L->n_cand; i++) {
             matched[i] = false;
             lap_cand_t *c = &L->cand[i];
@@ -361,14 +656,8 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
         }
 
         if (hit) {
-            /* Crossing time by constant-acceleration interpolation over the segment (§6.4 step 4). */
-            const double dt_s = (double)(now - L->prev_gps_us) / 1e6;
-            const double v1   = (double)fix->gspeed_mms / 1000.0;
-            const double rlen = hypot(cur.x - L->prev_enu.x, cur.y - L->prev_enu.y);
-            const double tau  = geo_interp_time(t_earliest * rlen, L->prev_speed_mps, v1, dt_s);
-            const int64_t t_cross = L->prev_gps_us + (int64_t)llround(tau * 1e6);
+            const int64_t t_cross = cross_time(L, cur, v1, t_earliest, now);
 
-            /* Disarm every gate that fired and stamp it for the re-arm timer. */
             for (uint8_t i = 0; i < L->n_cand; i++) {
                 if (!matched[i]) continue;
                 L->cand[i].sf_armed = false;
@@ -382,20 +671,26 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
                     if (matched[i]) L->cand[k++] = L->cand[i];
                 L->n_cand = k;
                 L->state = LAP_ST_RUNNING;
-                L->lap_no = 0;
-                L->lap_flags = 0;
-                L->lap_start_gps_us = t_cross;
-                L->lap_dist_m = 0.0;
-                L->pit_slow = false;
-                L->pit_since_us = 0;
+                open_lap(L, 0, t_cross);
+                if (L->n_cand == 1) {
+                    lock_layout(L, 0, t_cross, fix->mono_us, cb, ctx);   /* single/forced layout */
+                } else {
+                    L->locked = false;
+                    for (uint8_t i = 0; i < L->n_cand; i++) {
+                        L->cand[i].hits_matching = 0;
+                        L->cand[i].hits_foreign = 0;
+                    }
+                    build_union(L);
+                }
             } else {
+                if (L->lap_no == 0 && !L->locked)
+                    disambiguate_and_lock(L, t_cross, fix->mono_us, cb, ctx);   /* §10.5 */
                 complete_lap(L, t_cross, fix->mono_us, cb, ctx);
             }
         }
     }
 
-    /* While a lap is in progress: pit detection (§10.6) and Doppler-integrated lap distance (§10.5
-     * input; consumed by disambiguation and length measurement in session 2.5). */
+    /* While a lap is in progress: pit detection (§10.6) and Doppler-integrated lap distance (§10.5). */
     if (L->state == LAP_ST_RUNNING) {
         const double kmh = (double)fix->gspeed_mms * 0.0036;      /* mm/s → km/h */
         if (kmh < (double)PIT_SPEED_KMH) {
@@ -411,13 +706,13 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
         if (L->have_prev_fix) {
             const double seg_dt = (double)(now - L->prev_gps_us) / 1e6;
             if (seg_dt > 0.0)
-                L->lap_dist_m += 0.5 * (L->prev_speed_mps + (double)fix->gspeed_mms / 1000.0) * seg_dt;
+                L->lap_dist_m += 0.5 * (L->prev_speed_mps + v1) * seg_dt;
         }
     }
 
     /* Remember this valid fix as the start of the next segment (§6.4 needs two valid fixes). */
     L->prev_enu = cur;
     L->prev_gps_us = now;
-    L->prev_speed_mps = (double)fix->gspeed_mms / 1000.0;
+    L->prev_speed_mps = v1;
     L->have_prev_fix = true;
 }
