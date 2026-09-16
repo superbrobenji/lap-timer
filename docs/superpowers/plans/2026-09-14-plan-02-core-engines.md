@@ -12589,6 +12589,11 @@ static double drive_synth_and_check(int rate, double tol_ms)
     return worst;
 }
 
+/* The synth's Gauss-Markov τ = 20 s (§22.2) is deliberately more pessimistic than §6.7's
+ * minutes-scale position-bias correlation, which is why the realistic-noise test below sees lap
+ * error on the order of ~100 ms rather than the noise-free tests' sub-millisecond figure — that
+ * gap is the simulated receiver being harsher than a real one, not an engine defect. */
+
 /* 5 Hz: the roadmap/§22.2 bound is 30 ms. */
 static void test_ten_synth_laps_within_30ms_at_5hz(void)
 {
@@ -12598,6 +12603,72 @@ static void test_ten_synth_laps_within_30ms_at_5hz(void)
 static void test_ten_synth_laps_within_15ms_at_10hz(void)
 {
     drive_synth_and_check(10, 15.0);
+}
+
+/* Realistic-noise exit criterion: the same 11-lap synth run and 5 Hz sampling as the noise-free
+ * test above, but with synth_gps_cfg_t left at its defaults instead of zeroing pos_sigma_m — σ =
+ * 1.5 m, τ = 20 s position noise, plus default speed/heading/latency/jitter (latency and jitter
+ * touch only mono_us, not the gps_us the engine interpolates crossings from, so they don't affect
+ * lap timing). A lap time is the difference of two S/F crossings ~114 s apart; at that gap the
+ * Gauss-Markov position error is near-independent between the two crossings, contributing roughly
+ * 50 ms of along-track timing error each (~70 ms RSS combined), with a tail up to ~150 ms over 10
+ * laps. That is a GPS-receiver limit per §6.7 (NEO-6M 5 Hz: ±0.03-0.05 s absolute), not an engine
+ * one — the noise-free tests above already prove the engine's own crossing interpolation to a
+ * fraction of a millisecond. Bound: 200 ms. The RNG is seeded deterministically (synth_gps_cfg_t's
+ * default seed = 1), so a re-run reproduces the same worst value printed below; if 200 ms ever
+ * proves marginal, replace it with the newly measured worst plus margin and update this comment —
+ * never loosen the bound silently. */
+static void test_ten_synth_laps_realistic_noise_within_200ms_at_5hz(void)
+{
+    synth_cfg_t cfg;
+    synth_cfg_defaults(&cfg);
+    cfg.laps = 11;   /* out-lap plus 10 flying laps, as in drive_synth_and_check above */
+
+    synth_run_t *run = (synth_run_t *)malloc(sizeof *run);   /* ~2.7 MB: heap, never the stack */
+    trk_venue_t *v   = (trk_venue_t *)malloc(sizeof *v);
+    TEST_ASSERT_NOT_NULL(run);
+    TEST_ASSERT_NOT_NULL(v);
+    char err[128];
+    TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &cfg, err, sizeof err));
+    synth_run_venue(run, v);
+
+    synth_gps_cfg_t gcfg;
+    synth_gps_cfg_defaults(&gcfg);
+    gcfg.rate_hz = 5;   /* everything else stays default: pos_sigma_m 1.5 m, pos_tau_s 20 s, seed 1 */
+    synth_gps_t gps;
+    synth_gps_init(&gps, &gcfg);
+
+    lap_t L;
+    lap_init(&L, NULL);
+    lap_set_venue(&L, v);
+    lap_force_layout(&L, 1);        /* the synthetic venue's single layout */
+
+    laplog_t log;
+    memset(&log, 0, sizeof log);
+    gps_fix_t fix;
+    int rc;
+    while ((rc = synth_gps_next(&gps, run, &fix, NULL)) >= 0)
+        if (rc == 1) lap_on_fix(&L, &fix, NULL, lap_cb, &log);
+
+    TEST_ASSERT_EQUAL_INT(11, log.n);                        /* out-lap + 10 flying laps */
+    TEST_ASSERT_EQUAL_UINT16(0, log.lap_no[0]);
+    TEST_ASSERT_TRUE(log.flags[0] & LAP_F_OUT_LAP);
+
+    const double tol_ms = 200.0;
+    double worst = 0.0;
+    for (int k = 1; k <= 10; k++) {
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)k, log.lap_no[k]);
+        TEST_ASSERT_TRUE(log.flags[k] & LAP_F_VALID);
+        TEST_ASSERT_FALSE(log.flags[k] & (LAP_F_TOO_LONG | LAP_F_GPS_LOST | LAP_F_PIT | LAP_F_OUT_LAP));
+        /* engine lap k spans S/F passages k → k+1, which is synth_run_lap_time(k + 1) (§10.3). */
+        double truth_ms = synth_run_lap_time(run, k + 1) * 1000.0;
+        double e = fabs((double)log.time_ms[k] - truth_ms);
+        if (e > worst) worst = e;
+        TEST_ASSERT_TRUE(e <= tol_ms);
+    }
+    printf("[synth 5 Hz realistic noise] worst lap-time error = %.1f ms (tol %.0f)\n", worst, tol_ms);
+    free(run);
+    free(v);
 }
 #endif /* ESP_PLATFORM */
 
@@ -12618,6 +12689,7 @@ int main(void)
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);
+    RUN_TEST(test_ten_synth_laps_realistic_noise_within_200ms_at_5hz);
 #endif
     return UNITY_END();
 }
@@ -12801,7 +12873,9 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
     const bool is_out = (L->lap_no == 0);
 
     /* §10.4 step 2 debounce guard: a sub-MIN_LAP_S flying lap can only be a re-fire (the §6.4 step 5
-     * re-arm already forbids it), so ignore the crossing without completing or advancing. */
+     * re-arm already forbids it), so ignore the crossing without completing or advancing. The !is_out
+     * qualifier is safe because the §6.4 step 5 re-arm already guarantees the out-lap itself exceeds
+     * MIN_LAP_S, so this guard only ever fires on a genuine sub-min-lap jitter double-fire. */
     if (!is_out && time_ms < (uint32_t)MIN_LAP_S * 1000) return;
 
     uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT accumulated in-lap */
@@ -12902,7 +12976,8 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
 
         bool   matched[TRK_MAX_LAYOUTS];
         bool   hit = false;
-        double t_earliest = 2.0;
+        double t_earliest = 2.0;    /* sentinel "no crossing yet": any value > 1.0 works, since
+                                      * geo_segment_cross's t is in [0,1]. */
         for (uint8_t i = 0; i < L->n_cand; i++) {
             matched[i] = false;
             lap_cand_t *c = &L->cand[i];

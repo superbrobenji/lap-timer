@@ -169,7 +169,9 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
     const bool is_out = (L->lap_no == 0);
 
     /* §10.4 step 2 debounce guard: a sub-MIN_LAP_S flying lap can only be a re-fire (the §6.4 step 5
-     * re-arm already forbids it), so ignore the crossing without completing or advancing. */
+     * re-arm already forbids it), so ignore the crossing without completing or advancing. The !is_out
+     * qualifier is safe because the §6.4 step 5 re-arm already guarantees the out-lap itself exceeds
+     * MIN_LAP_S, so this guard only ever fires on a genuine sub-min-lap jitter double-fire. */
     if (!is_out && time_ms < (uint32_t)MIN_LAP_S * 1000) return;
 
     uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT accumulated in-lap */
@@ -270,7 +272,8 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
 
         bool   matched[TRK_MAX_LAYOUTS];
         bool   hit = false;
-        double t_earliest = 2.0;
+        double t_earliest = 2.0;    /* sentinel "no crossing yet": any value > 1.0 works, since
+                                      * geo_segment_cross's t is in [0,1]. */
         for (uint8_t i = 0; i < L->n_cand; i++) {
             matched[i] = false;
             lap_cand_t *c = &L->cand[i];
