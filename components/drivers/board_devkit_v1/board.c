@@ -16,7 +16,7 @@
 #include "build_config.h"
 
 #include <errno.h>
-#include <string.h>
+#include <stdlib.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -96,6 +96,11 @@ static void IRAM_ATTR pps_isr(void *arg)
 int board_init(void)
 {
     if (s_inited) return 0;
+
+    /* --- release any RTC GPIO hold left latched by board_prepare_deep_sleep from a prior
+     *     sleep cycle: classic ESP32 RTC holds survive the deep-sleep reset, so without this
+     *     the level set below and later board_gps_power() calls would be latched out --- */
+    rtc_gpio_hold_dis(PIN_GPS_PWR);
 
     /* --- GPS power MOSFET gate on RTC GPIO 26: output, start OFF (driven high) --- */
     ESP_ERROR_CHECK(rtc_gpio_init(PIN_GPS_PWR));

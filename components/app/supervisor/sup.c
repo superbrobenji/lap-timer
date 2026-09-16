@@ -49,7 +49,7 @@ static void check_stalls(void)
 {
     for (int i = 0; i < HB_COUNT; i++) {
         watch_t *w = &s_watch[i];
-        if (!w->used) continue;
+        if (!w->used || w->stall_s == 0) continue;
         uint32_t cur = g_hb[w->hb_id];
         if (cur != w->last_hb) {                 /* progressing */
             w->last_hb = cur;

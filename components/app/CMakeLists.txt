@@ -1,7 +1,13 @@
 # app -- IDF-dependent glue (spec §4.1): NVS layer (§15.2), RTC state (§15.3), supervisor
 # (§4.3/§17.2), shared runtime state (hb[]/sys_flags, §4.4/§17.4), and the minimal dbg console.
 # No collision with an IDF built-in (there is no IDF component named `app`).
-file(GLOB_RECURSE APP_SRCS ${CMAKE_CURRENT_LIST_DIR}/*.c)
+if(CMAKE_BUILD_EARLY_EXPANSION)
+    # CONFIGURE_DEPENDS is invalid in the script-mode early-expansion pass IDF uses to pull
+    # each component's REQUIRES (§ build-system "early expansion"); SRCS is unused there anyway.
+    file(GLOB_RECURSE APP_SRCS ${CMAKE_CURRENT_LIST_DIR}/*.c)
+else()
+    file(GLOB_RECURSE APP_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/*.c)
+endif()
 idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS include
