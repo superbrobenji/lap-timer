@@ -62,6 +62,43 @@ static gps_fix_t gfix(int64_t gps_us, int32_t gspeed_mms, bool valid)
 }
 
 #define DT_US        (1000000 / FUSION_HZ)    /* 10 000 us = one fused sample */
+#define ARM_LAST_K   200                      /* still samples 0..200: arms at t = 2.00 s */
+#define LAUNCH_K     201                      /* first launch sample; its time is the back-dated t0 */
+#define T_LAUNCH_US  ((int64_t)LAUNCH_K * DT_US)   /* 2.01 s */
+
+/* Drive still+slow fused samples until the engine arms (t = 2.00 s). */
+static void arm_engine(drag_evt_cb_t cb, void *ctx)
+{
+    for (int k = 0; k <= ARM_LAST_K; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, cb, ctx);
+    }
+}
+
+/* From the armed state, feed a constant longitudinal g at 100 Hz with a 5 Hz Doppler GPS re-anchor
+ * (gSpeed = a·(t − t0), the exact speed), until DONE or max_k. */
+static void run_const_g(double g, int max_k, drag_evt_cb_t cb, void *ctx)
+{
+    double a = g * G_MPS2;
+    for (int k = LAUNCH_K; k <= max_k; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, (float)g, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) {                          /* 5 Hz fixes */
+            double tl = (double)(t - T_LAUNCH_US) / 1e6;
+            if (tl < 0.0) tl = 0.0;
+            gps_fix_t f = gfix(t, (int32_t)(a * tl * 1000.0), true);
+            drag_on_fix(&D, &f);
+        }
+        if (drag_state(&D) == DRAG_ST_DONE) break;
+    }
+}
+
+static const drag_gate_res_t *gate_by_id(const drag_result_t *r, uint8_t id)
+{
+    for (int i = 0; i < r->n_gates; i++) if (r->gates[i].gate_id == id) return &r->gates[i];
+    return NULL;
+}
 
 /* ------------------------------------------------------------ Task 1 tests */
 
@@ -147,6 +184,106 @@ static void test_arm_requires_continuous_stillness(void)
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
 }
 
+/* ------------------------------------------------------------ Task 2 tests */
+
+/* §22.1: a synthetic constant 0.5 g run (fused 100 Hz, Doppler 5 Hz) hits 0-100 at 5.66 s and the
+ * 1/4 (402.34 m) at 12.81 s, both within ±20 ms; the interpolation actually lands them within ±5 ms.
+ * Launch back-dates t0 to the first g-spike sample, the launch/gate/done events fire, and the run
+ * finishes DONE with DRAG_F_QUARTER. */
+static void test_run_0p5g_zero_to_hundred_and_quarter(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_const_g(0.5, 1700, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_DONE));
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT64(T_LAUNCH_US, D.t0_gps_us);      /* t0 = the first g-spike sample */
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+
+    const drag_gate_res_t *g100 = gate_by_id(r, 2);
+    const drag_gate_res_t *gq   = gate_by_id(r, 10);
+    TEST_ASSERT_NOT_NULL(g100);  TEST_ASSERT_NOT_NULL(gq);
+    TEST_ASSERT_TRUE(g100->hit); TEST_ASSERT_TRUE(gq->hit);
+    /* 0-100 at 5.665 s, 1/4 at 12.810 s — both within ±5 ms of analytic (well inside §22.1's ±20 ms) */
+    TEST_ASSERT_INT_WITHIN(5, 5665, (int)g100->time_ms);
+    TEST_ASSERT_INT_WITHIN(5, 12810, (int)gq->time_ms);
+    TEST_ASSERT_TRUE(ev_count(EV_DRAG_GATE) >= 2);
+}
+
+/* §22.1 trap. NOTE — a real spec conflict, ruled here: §6.6 defines the trap as the mean v_est over
+ * the samples with dist ∈ [D − TRAP_DIST_M, D] (the 66 ft speed trap). For this run that mean is
+ * 223.3 km/h. §22.1's "trap ≈ 226 km/h" is the *instantaneous* speed at the 1/4 line (a·t_quarter),
+ * a different quantity. We implement §6.6 (the physically-correct trap) and additionally assert the
+ * line speed so both numbers are pinned. */
+static void test_run_0p5g_trap_and_line_speed(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    double trap_kmh = (double)r->trap_cms * 0.036;                 /* cm/s → km/h */
+    TEST_ASSERT_DOUBLE_WITHIN(2.0, 223.3, trap_kmh);               /* §6.6 trap-window mean */
+
+    const drag_gate_res_t *gq = gate_by_id(r, 10);
+    double line_kmh = (double)gq->speed_cms * 0.036;
+    TEST_ASSERT_DOUBLE_WITHIN(2.0, 226.1, line_kmh);               /* §22.1's "226" = the line speed */
+}
+
+/* §11.1: the SPEED_RANGE 100-200 gate records the interval between the 100 km/h and 200 km/h
+ * crossings. For a constant 0.5 g run that interval equals the 0-100 time, 5.665 s. */
+static void test_run_0p5g_speed_range_100_200(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_gate_res_t *g = gate_by_id(drag_current(&D), 5);
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_TRUE(g->hit);
+    TEST_ASSERT_INT_WITHIN(20, 5665, (int)g->time_ms);            /* (200−100) km/h at 0.5 g */
+}
+
+/* §6.6: linear interpolation gives ≤ ±5 ms timing resolution. Checked on the 60 ft distance gate
+ * (18.29 m, crossing at 2.731 s) and the 0-100 speed gate: both land within 5 ms of analytic even
+ * though the true crossing falls between two 10 ms samples. */
+static void test_interpolation_resolution_5ms(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    double a = 0.5 * G_MPS2;
+    int t60  = (int)(sqrt(2.0 * (1829.0 / 100.0) / a) * 1000.0 + 0.5);   /* 2731 ms */
+    int t100 = (int)((100.0 / 3.6) / a * 1000.0 + 0.5);                   /* 5665 ms */
+    TEST_ASSERT_INT_WITHIN(5, t60,  (int)gate_by_id(r, 6)->time_ms);
+    TEST_ASSERT_INT_WITHIN(5, t100, (int)gate_by_id(r, 2)->time_ms);
+}
+
+/* §11.2 rollout: with rollout enabled, t0 moves to where dist reaches DRAG_ROLLOUT_M (1 ft) and dist
+ * is re-zeroed there. From rest at 0.5 g that is 0.353 s after the launch instant, and DRAG_F_ROLLOUT
+ * is set. (Default is rollout OFF, verified by the run above whose t0 stays at the launch instant.) */
+static void test_rollout_shifts_t0(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.rollout = true;
+    drag_init(&D, &c);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_ROLLOUT);
+    double a = 0.5 * G_MPS2;
+    double expect_s = (double)T_LAUNCH_US / 1e6 + sqrt(2.0 * (double)DRAG_ROLLOUT_M / a);
+    TEST_ASSERT_DOUBLE_WITHIN(0.02, expect_s, (double)D.t0_gps_us / 1e6);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);                  /* the run still completes */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -154,5 +291,10 @@ int main(void)
     RUN_TEST(test_gps_reanchor_resets_v_est);
     RUN_TEST(test_arm_after_still_dwell);
     RUN_TEST(test_arm_requires_continuous_stillness);
+    RUN_TEST(test_run_0p5g_zero_to_hundred_and_quarter);
+    RUN_TEST(test_run_0p5g_trap_and_line_speed);
+    RUN_TEST(test_run_0p5g_speed_range_100_200);
+    RUN_TEST(test_interpolation_resolution_5ms);
+    RUN_TEST(test_rollout_shifts_t0);
     return UNITY_END();
 }
