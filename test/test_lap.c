@@ -604,6 +604,80 @@ static void test_disambiguation_locks_short_layout(void)
     TEST_ASSERT_EQUAL_UINT16(2, last_locked_id(&log));         /* Short wins */
 }
 
+/* ---------------------------------------------------- session 2.5 on-device creation (§10.9) */
+
+/* A fix at ENU (e, n) about (lat0, lon0) with an explicit compass heading of motion. */
+static void feed_hdg(lap_t *L, double lat0, double lon0, double e, double n, int64_t t,
+                     double hdg_deg, lap_evt_cb_t cb, void *ctx)
+{
+    gps_fix_t f = fix_ll(lat_of(lat0, n), lon_of(lon0, lat0, e), t, SPD_MMS, true);
+    f.head_e5 = (int32_t)lround(hdg_deg * 1e5);
+    lap_on_fix(L, &f, NULL, cb, ctx);
+}
+
+/* §10.9: begin creation, mark S/F + two sector gates while moving north, drive a loop, and cross the
+ * S/F to save. The result is a valid user venue with a forward layout and an auto reverse layout. */
+static void test_create_track_saves_valid_venue(void)
+{
+    const double lat0 = -34.0, lon0 = 18.7;
+    lap_t L; lap_init(&L, NULL);
+    lap_create_begin(&L);
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+
+    /* S/F press at the origin, moving north (heading 0). */
+    gps_fix_t sf = fix_ll(lat_of(lat0, 0.0), lon_of(lon0, lat0, 0.0), 1000000, SPD_MMS, true);
+    sf.head_e5 = 0;
+    trk_layout_t built;
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 0, &sf, &built));
+    TEST_ASSERT_EQUAL_INT8(1, built.dir_sign);
+    /* the S/F line is ~30 m wide */
+    double w = geo_dist_m(built.sf.p1.lat, built.sf.p1.lon, built.sf.p2.lat, built.sf.p2.lon);
+    TEST_ASSERT_DOUBLE_WITHIN(0.1, 2.0 * GATE_HALF_WIDTH_M, w);
+
+    /* two sector presses further along (positions arbitrary; not crossed to finalise). */
+    gps_fix_t s1 = fix_ll(lat_of(lat0, 100.0), lon_of(lon0, lat0, 0.0), 3000000, SPD_MMS, true); s1.head_e5 = 0;
+    gps_fix_t s2 = fix_ll(lat_of(lat0, 200.0), lon_of(lon0, lat0, 0.0), 5000000, SPD_MMS, true); s2.head_e5 = 0;
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 1, &s1, NULL));
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 2, &s2, NULL));
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 9, &s2, NULL));   /* out-of-order rejected */
+
+    /* drive a loop; distance integrates, and the S/F crossing after MIN_LAP_S finalises. */
+    evlog_t log; memset(&log, 0, sizeof log);
+    feed_hdg(&L, lat0, lon0,   0.0, 300.0,  8000000,  0.0,   NULL, NULL);
+    feed_hdg(&L, lat0, lon0, 400.0, 300.0,  15000000, 90.0,  NULL, NULL);
+    feed_hdg(&L, lat0, lon0, 400.0,-100.0,  25000000, 180.0, NULL, NULL);   /* > MIN_LAP_S now */
+    feed_hdg(&L, lat0, lon0,   0.0,-100.0,  30000000, 270.0, NULL, NULL);
+    feed_hdg(&L, lat0, lon0,   0.0,  50.0,  35000000, 0.0,   ev_cb, &log);  /* S/F crossing → save */
+
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_VENUE_FOUND, lap_state(&L));
+    TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_VENUE_FOUND));
+
+    const trk_venue_t *v = trk_get(TRK_USER_ID_BASE);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_INT(0, trk_validate_venue(v));               /* structurally valid */
+    TEST_ASSERT_EQUAL_UINT8(2, v->n_layouts);                      /* forward + reverse */
+    TEST_ASSERT_EQUAL_UINT8(2, v->layouts[0].n_sectors);
+    TEST_ASSERT_EQUAL_INT8(1, v->layouts[0].dir_sign);
+    TEST_ASSERT_EQUAL_INT8(-1, v->layouts[1].dir_sign);            /* auto reverse layout */
+    TEST_ASSERT_EQUAL_UINT8(2, v->layouts[1].n_sectors);
+    TEST_ASSERT_TRUE(v->layouts[0].length_m > 0);
+}
+
+/* §10.9 step 5: a long MODE press cancels creation and returns to NO_VENUE with nothing saved. */
+static void test_create_cancel(void)
+{
+    const double lat0 = -34.0, lon0 = 18.7;
+    lap_t L; lap_init(&L, NULL);
+    lap_create_begin(&L);
+    gps_fix_t sf = fix_ll(lat_of(lat0, 0.0), lon_of(lon0, lat0, 0.0), 1000000, SPD_MMS, true);
+    sf.head_e5 = 0;
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 0, &sf, NULL));
+    lap_create_cancel(&L);
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 0, &sf, NULL));     /* no longer in CREATE */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());                    /* nothing saved */
+}
+
 #ifndef ESP_PLATFORM
 /* Exit criterion (§22.2, roadmap): drive the engine off the synthetic circuit and confirm every
  * flying lap time matches the closed-form truth, and (2.5) that sectors are populated and sum to the
@@ -798,6 +872,8 @@ int main(void)
     RUN_TEST(test_sector_delta_vs_best);
     RUN_TEST(test_disambiguation_locks_full_layout);
     RUN_TEST(test_disambiguation_locks_short_layout);
+    RUN_TEST(test_create_track_saves_valid_venue);
+    RUN_TEST(test_create_cancel);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);

@@ -1,6 +1,8 @@
 #include "core/lap.h"
+#include "core/exp.h"      /* exp_utc_parts: gps_us -> Y/M/D for the Track_YYYYMMDD name (§10.9) */
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 /* Lap engine (spec §10). Session 2.4: venue detection and arming (part 1), S/F crossing and lap
  * completion (part 2), pit detection and Doppler distance integration (part 3). Session 2.5 layers on
@@ -183,10 +185,49 @@ void lap_create_cancel(lap_t *L)
     if (L->mode == LAP_MODE_CREATE) reset_to_no_venue(L);
 }
 
+/* §10.9: add a gate at the current fix while in CREATE mode. gate_idx 0 builds the S/F line and the
+ * venue skeleton; gate_idx n (added in order) appends sector gate n. The gate line is perpendicular to
+ * the fix heading (lap_gate_line), so dir_sign +1 accepts the current motion. Returns 0, or -1 if not
+ * creating, the fix is invalid or not moving, or the gate index is out of order / full. */
 int lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout)
 {
-    (void)L; (void)gate_idx; (void)fix; (void)out_layout;
-    return -1;                                   /* real body: session 2.5 Task 3 */
+    if (L->mode != LAP_MODE_CREATE) return -1;
+    if (!fix || fix->valid == 0 || fix->gspeed_mms <= 0) return -1;   /* need a heading of motion */
+
+    const double lat = (double)fix->lat_e7 / 1e7;
+    const double lon = (double)fix->lon_e7 / 1e7;
+    const double heading_deg = (double)fix->head_e5 / 1e5;
+    const trk_line_t line = lap_gate_line(lat, lon, heading_deg);
+
+    if (gate_idx == 0) {
+        memset(&L->create_layout, 0, sizeof L->create_layout);
+        L->create_layout.id = 1;
+        snprintf(L->create_layout.name, sizeof L->create_layout.name, "Layout 1");
+        L->create_layout.dir_sign = 1;
+        L->create_layout.sf = line;
+        L->create_layout.n_sectors = 0;
+        L->create_venue_id = trk_next_user_id();
+        L->create_lat = lat;
+        L->create_lon = lon;
+        L->create_gps_us = fix->gps_us;
+        geo_origin_set(&L->origin, lat, lon);
+        L->create_sf_p = geo_to_enu(&L->origin, line.p1.lat, line.p1.lon);
+        L->create_sf_q = geo_to_enu(&L->origin, line.p2.lat, line.p2.lon);
+        L->create_have_sf = true;
+        L->lap_dist_m = 0.0;
+        L->prev_enu = geo_to_enu(&L->origin, lat, lon);   /* integrate distance from the S/F press */
+        L->prev_gps_us = fix->gps_us;
+        L->prev_speed_mps = (double)fix->gspeed_mms / 1000.0;
+        L->have_prev_fix = true;
+    } else {
+        if (!L->create_have_sf) return -1;
+        if (gate_idx != (uint8_t)(L->create_layout.n_sectors + 1)) return -1;   /* in order only */
+        if (L->create_layout.n_sectors >= LAP_MAX_SECTORS) return -1;
+        L->create_layout.sectors[L->create_layout.n_sectors] = line;
+        L->create_layout.n_sectors++;
+    }
+    if (out_layout) *out_layout = L->create_layout;
+    return 0;
 }
 
 /* ---- §10.10 RTC continuity / §10.11 predictive delta (bodies: session 2.5 Task 4) ---- */
@@ -580,6 +621,34 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
     open_lap(L, (uint16_t)(L->lap_no + 1), t_cross);               /* §10.4 step 7 */
 }
 
+/* §10.9 step 3: close creation at the S/F crossing. Length comes from the integrated distance, the
+ * venue is saved (with an auto reverse layout), and the engine enters VENUE_FOUND on it. */
+static void finalize_create(lap_t *L, int64_t t_cross, int64_t mono, lap_evt_cb_t cb, void *ctx)
+{
+    L->create_layout.length_m = (uint32_t)llround(L->lap_dist_m);
+
+    trk_venue_t nv;
+    memset(&nv, 0, sizeof nv);
+    nv.id = L->create_venue_id;
+    int y; unsigned mo, d, hh, mm, ss, cs;
+    exp_utc_parts(L->create_gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
+    snprintf(nv.name, sizeof nv.name, "Track_%04d%02u%02u", y, mo, d);
+    nv.lat = L->create_lat;
+    nv.lon = L->create_lon;
+    nv.radius_m = VENUE_RADIUS_DEFAULT_M;
+    nv.flags = TRK_F_UNVERIFIED;                 /* built from live fixes, not surveyed (§10.1) */
+    nv.n_layouts = 2;
+    nv.layouts[0] = L->create_layout;                          /* id 1, "Layout 1" */
+    lap_layout_reverse(&L->create_layout, &nv.layouts[1]);     /* id 2, "Layout 1 Reverse" (§10.9 step 4) */
+
+    if (trk_user_add(&nv) != 0) {                /* store full or invalid: abort creation */
+        reset_to_no_venue(L);
+        return;
+    }
+    lap_set_venue(L, trk_get(nv.id));            /* → VENUE_FOUND on the saved venue (mode = NORMAL) */
+    emit(cb, ctx, EV_VENUE_FOUND, 0, nv.id, t_cross, mono, 0, 0);
+}
+
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx)
 {
     (void)fs;                                    /* fused stats feed sector stats in a later session */
@@ -588,6 +657,31 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
     const int64_t now   = fix->gps_us;
     const double  lat   = (double)fix->lat_e7 / 1e7;
     const double  lon   = (double)fix->lon_e7 / 1e7;
+    const double  v1    = (double)fix->gspeed_mms / 1000.0;
+
+    /* §10.9 CREATE sub-mode: no venue scan; integrate distance and watch for the S/F crossing that
+     * closes creation. The MIN_LAP_S guard rejects the spurious crossing right after the S/F press. */
+    if (L->mode == LAP_MODE_CREATE) {
+        if (!valid || !L->create_have_sf) return;
+        const geo_enu_t cur = geo_to_enu(&L->origin, lat, lon);
+        if (L->have_prev_fix) {
+            const double seg_dt = (double)(now - L->prev_gps_us) / 1e6;
+            if (seg_dt > 0.0) L->lap_dist_m += 0.5 * (L->prev_speed_mps + v1) * seg_dt;
+            double t; int dir;
+            if (now - L->create_gps_us >= (int64_t)MIN_LAP_S * 1000000 &&
+                geo_segment_cross(L->prev_enu, cur, L->create_sf_p, L->create_sf_q, &t, &dir) &&
+                dir == L->create_layout.dir_sign) {
+                int64_t t_cross = cross_time(L, cur, v1, t, now);
+                finalize_create(L, t_cross, fix->mono_us, cb, ctx);
+                return;
+            }
+        }
+        L->prev_enu = cur;
+        L->prev_gps_us = now;
+        L->prev_speed_mps = v1;
+        L->have_prev_fix = true;
+        return;
+    }
 
     /* NO_VENUE: scan for a venue every VENUE_SCAN_S (§10.3). */
     if (L->state == LAP_ST_NO_VENUE) {
@@ -625,7 +719,6 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
     }
 
     const geo_enu_t cur = geo_to_enu(&L->origin, lat, lon);
-    const double    v1  = (double)fix->gspeed_mms / 1000.0;
 
     if ((L->state == LAP_ST_ARMED || L->state == LAP_ST_RUNNING) && L->have_prev_fix) {
         rearm_sf(L, cur, now);
