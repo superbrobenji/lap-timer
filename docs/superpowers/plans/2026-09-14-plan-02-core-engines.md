@@ -9179,7 +9179,7 @@ const fus_calib_t *fus_calib(const fus_t *f);
 #endif
 ```
 
-- [ ] **Step 3: Update `components/core/fusion/fus.c`** to the full content below (the `course_delta_deg` and `fus_yaw_rate_gps_dps` helpers, the widened setter that rolls the previous course and recomputes `yaw_gps_dps`, and the `fus_init` sentinels; `fus_step` is unchanged in this task). 
+- [ ] **Step 3: Update `components/core/fusion/fus.c`** to the full content below (the `course_delta_deg` and `fus_yaw_rate_gps_dps` helpers, the widened setter that rolls the previous course and recomputes `yaw_gps_dps`, and the `fus_init` sentinels; `fus_step` is unchanged in this task).
 
 `components/core/fusion/fus.c`:
 
