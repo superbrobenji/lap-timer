@@ -742,6 +742,13 @@ static void test_rtc_import_unknown_venue_fails(void)
 
 /* ---------------------------------------------------- session 2.5 predictive delta (§10.11) */
 
+/* §10.11 predictive tables are caller-provided (issue #23); these are the buffers for the tests below
+ * that exercise it. File scope so they aren't on the stack (each is PRED_TABLE_MAX entries). */
+static uint16_t g_pred_best_dist[PRED_TABLE_MAX];
+static uint32_t g_pred_best_t[PRED_TABLE_MAX];
+static uint16_t g_pred_rec_dist[PRED_TABLE_MAX];
+static uint32_t g_pred_rec_t[PRED_TABLE_MAX];
+
 /* §10.11: with a recorded best lap, lap_live_delta_ms(dist) = elapsed - t_ref(dist). At a distance the
  * reference table holds, t_ref is exact, so the delta tracks the elapsed offset; outside the range no
  * delta is produced. */
@@ -751,6 +758,8 @@ static void test_predictive_delta(void)
     const double northings[2] = { 100.0, 200.0 };
     trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
     lap_t L; lap_init(&L, NULL);
+    lap_set_predictive(&L, g_pred_best_dist, g_pred_best_t, g_pred_rec_dist, g_pred_rec_t,
+                       PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
     arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
     clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
@@ -782,6 +791,8 @@ static void test_predictive_table_cap(void)
     const double lat0 = -45.0, lon0 = 170.0;
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);                 /* no sector gates */
     lap_t L; lap_init(&L, NULL);
+    lap_set_predictive(&L, g_pred_best_dist, g_pred_best_t, g_pred_rec_dist, g_pred_rec_t,
+                       PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
     arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
     feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
@@ -797,6 +808,26 @@ static void test_predictive_table_cap(void)
     TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
     TEST_ASSERT_TRUE(L.pred_rec_n > 0);
     TEST_ASSERT_TRUE(L.pred_rec_n <= PRED_TABLE_MAX);              /* never overflows the fixed table */
+}
+
+/* §10.11 with predictive left disabled (no lap_set_predictive call, the lap_init default: pred_cap ==
+ * 0, all four buffer pointers NULL), lap_live_delta_ms must not dereference them — it returns the "no
+ * delta" sentinel (0, *have == false) instead of crashing. This is the common case for every other test
+ * in this file, which run a plain stack lap_t. */
+static void test_predictive_disabled_returns_no_delta(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+
+    bool have = true;
+    int32_t d = lap_live_delta_ms(&L, 3000000, 50.0, &have);
+    TEST_ASSERT_FALSE(have);
+    TEST_ASSERT_EQUAL_INT32(0, d);
 }
 
 #ifndef ESP_PLATFORM
@@ -999,6 +1030,7 @@ int main(void)
     RUN_TEST(test_rtc_import_unknown_venue_fails);
     RUN_TEST(test_predictive_delta);
     RUN_TEST(test_predictive_table_cap);
+    RUN_TEST(test_predictive_disabled_returns_no_delta);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);

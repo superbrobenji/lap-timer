@@ -446,7 +446,7 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
 | Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 328 B |
 | Lap engine `lap_t` (venue + candidates + sector/union gates + best/prev) | ~5.3 KB |
-| Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB |
+| Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB, caller-provided (OLED/O5 only; none on the e-paper build) |
 | Headroom | > 90 KB |
 
 Sizes with a byte figure are measured with the ESP32 toolchain (`xtensa-esp32-elf-gcc`, 32-bit
@@ -805,6 +805,8 @@ int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_
 void lap_create_cancel(lap_t *L);
 void lap_export_rtc(const lap_t *L, lap_rtc_t *out);         /* §10.10 */
 int  lap_import_rtc(lap_t *L, const lap_rtc_t *s);           /* restore → LAP_RUNNING | LAP_F_INTERRUPTED */
+void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
+                        uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap);  /* §10.11, NULL/0 disables */
 int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have);  /* §10.11 */
 ```
 
@@ -1583,8 +1585,10 @@ The pipeline mirrors `{ venue_id, layout_id (0 if not locked), lap_no, lap_start
 
 When a best lap exists, the engine records the best lap as a table `(dist_m u16, t_ms u32)` at every fix (max 600 entries; beyond that every 2nd fix). During the current lap, `dist` (integrated Doppler distance since S/F) is looked up by binary search + linear interpolation to give `t_ref(dist)`; `delta_live = elapsed − t_ref`. Exposed via `lap_live_delta_ms()`. The e-paper UI ignores it; OLED UIs render it at 10 Hz. The table is
 6 B/entry (`dist_m u16` + `t_ms u32`) × 600 ≈ 3.6 KB, double-buffered (a reference table for lookup plus
-a recording buffer for the lap in progress) for ≈ 7.2 KB resident, matching the §4.8 row. Issue #23
-tracks making this caller-provided so the e-paper build carries none.
+a recording buffer for the lap in progress) for ≈ 7.2 KB resident, matching the §4.8 row. The table is
+caller-provided via `lap_set_predictive()` (issue #23): the pipeline passes two `PRED_TABLE_MAX`-entry
+buffers, and NULL/cap 0 disables predictive delta (`lap_t` itself carries no array, only pointers),
+which is what the e-paper build does since its UI ignores it.
 
 ---
 

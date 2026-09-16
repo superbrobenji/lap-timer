@@ -160,16 +160,16 @@ typedef struct {
     geo_enu_t          create_sf_p, create_sf_q;
     bool               create_have_sf;
 
-    /* §10.11 predictive delta O5. Double-buffered: pred_best_* is the reference (the best lap) that
-     * lookups read; pred_rec_* records the lap in progress and is promoted to pred_best_* when that
-     * lap completes as the new best. (dist_m u16, t_ms u32) per entry. */
-    uint16_t           pred_best_dist_m[PRED_TABLE_MAX];
-    uint32_t           pred_best_t_ms[PRED_TABLE_MAX];
+    /* §10.11 predictive delta (O5), caller-provided so the e-paper build carries none (issue #23).
+     * The pipeline passes two PRED_TABLE_MAX-entry buffers via lap_set_predictive; NULL/cap 0 = disabled. */
+    uint16_t          *pred_best_dist_m;   /* reference (best lap) — lookups read this */
+    uint32_t          *pred_best_t_ms;
     uint16_t           pred_best_n;
-    uint16_t           pred_rec_dist_m[PRED_TABLE_MAX];
-    uint32_t           pred_rec_t_ms[PRED_TABLE_MAX];
+    uint16_t          *pred_rec_dist_m;    /* records the lap in progress; promoted to best on a new best */
+    uint32_t          *pred_rec_t_ms;
     uint16_t           pred_rec_n;
-    uint32_t           pred_rec_fixes;       /* fixes seen this lap (drives the >PRED_TABLE_MAX decimation) */
+    uint32_t           pred_rec_fixes;
+    uint16_t           pred_cap;           /* entries each buffer holds; 0 = predictive disabled */
 } lap_t;
 
 void     lap_init(lap_t *L, const lap_cfg_t *cfg);           /* cfg NULL -> defaults; clears best/prev */
@@ -198,6 +198,12 @@ void     lap_create_cancel(lap_t *L);
  * LAP_RUNNING with LAP_F_INTERRUPTED and returns 0, or -1 if the venue id is unknown. */
 void     lap_export_rtc(const lap_t *L, lap_rtc_t *out);
 int      lap_import_rtc(lap_t *L, const lap_rtc_t *s);
+
+/* Enable §10.11 predictive delta by giving the engine two cap-entry buffers (reference + recording).
+ * Both dist buffers are uint16_t[cap], both t buffers uint32_t[cap]. Pass NULLs / cap 0 to disable
+ * (the default after lap_init). The buffers are caller-owned and must outlive the lap_t. */
+void     lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
+                            uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap);
 
 /* §10.11 predictive delta O5: elapsed - t_ref(dist_m) against the best lap, in ms. Returns 0 when no
  * best-lap table exists, the engine is not running, or dist is outside the recorded range. *have (if

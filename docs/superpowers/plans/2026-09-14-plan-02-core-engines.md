@@ -13367,16 +13367,16 @@ typedef struct {
     geo_enu_t          create_sf_p, create_sf_q;
     bool               create_have_sf;
 
-    /* §10.11 predictive delta O5. Double-buffered: pred_best_* is the reference (the best lap) that
-     * lookups read; pred_rec_* records the lap in progress and is promoted to pred_best_* when that
-     * lap completes as the new best. (dist_m u16, t_ms u32) per entry. */
-    uint16_t           pred_best_dist_m[PRED_TABLE_MAX];
-    uint32_t           pred_best_t_ms[PRED_TABLE_MAX];
+    /* §10.11 predictive delta (O5), caller-provided so the e-paper build carries none (issue #23).
+     * The pipeline passes two PRED_TABLE_MAX-entry buffers via lap_set_predictive; NULL/cap 0 = disabled. */
+    uint16_t          *pred_best_dist_m;   /* reference (best lap) — lookups read this */
+    uint32_t          *pred_best_t_ms;
     uint16_t           pred_best_n;
-    uint16_t           pred_rec_dist_m[PRED_TABLE_MAX];
-    uint32_t           pred_rec_t_ms[PRED_TABLE_MAX];
+    uint16_t          *pred_rec_dist_m;    /* records the lap in progress; promoted to best on a new best */
+    uint32_t          *pred_rec_t_ms;
     uint16_t           pred_rec_n;
-    uint32_t           pred_rec_fixes;       /* fixes seen this lap (drives the >PRED_TABLE_MAX decimation) */
+    uint32_t           pred_rec_fixes;
+    uint16_t           pred_cap;           /* entries each buffer holds; 0 = predictive disabled */
 } lap_t;
 
 void     lap_init(lap_t *L, const lap_cfg_t *cfg);           /* cfg NULL -> defaults; clears best/prev */
@@ -13405,6 +13405,12 @@ void     lap_create_cancel(lap_t *L);
  * LAP_RUNNING with LAP_F_INTERRUPTED and returns 0, or -1 if the venue id is unknown. */
 void     lap_export_rtc(const lap_t *L, lap_rtc_t *out);
 int      lap_import_rtc(lap_t *L, const lap_rtc_t *s);
+
+/* Enable §10.11 predictive delta by giving the engine two cap-entry buffers (reference + recording).
+ * Both dist buffers are uint16_t[cap], both t buffers uint32_t[cap]. Pass NULLs / cap 0 to disable
+ * (the default after lap_init). The buffers are caller-owned and must outlive the lap_t. */
+void     lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
+                            uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap);
 
 /* §10.11 predictive delta O5: elapsed - t_ref(dist_m) against the best lap, in ms. Returns 0 when no
  * best-lap table exists, the engine is not running, or dist is outside the recorded range. *have (if
@@ -18212,6 +18218,13 @@ static void test_rtc_import_unknown_venue_fails(void)
 
 /* ---------------------------------------------------- session 2.5 predictive delta (§10.11) */
 
+/* §10.11 predictive tables are caller-provided (issue #23); these are the buffers for the tests below
+ * that exercise it. File scope so they aren't on the stack (each is PRED_TABLE_MAX entries). */
+static uint16_t g_pred_best_dist[PRED_TABLE_MAX];
+static uint32_t g_pred_best_t[PRED_TABLE_MAX];
+static uint16_t g_pred_rec_dist[PRED_TABLE_MAX];
+static uint32_t g_pred_rec_t[PRED_TABLE_MAX];
+
 /* §10.11: with a recorded best lap, lap_live_delta_ms(dist) = elapsed - t_ref(dist). At a distance the
  * reference table holds, t_ref is exact, so the delta tracks the elapsed offset; outside the range no
  * delta is produced. */
@@ -18221,6 +18234,8 @@ static void test_predictive_delta(void)
     const double northings[2] = { 100.0, 200.0 };
     trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
     lap_t L; lap_init(&L, NULL);
+    lap_set_predictive(&L, g_pred_best_dist, g_pred_best_t, g_pred_rec_dist, g_pred_rec_t,
+                       PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
     arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
     clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
@@ -18252,6 +18267,8 @@ static void test_predictive_table_cap(void)
     const double lat0 = -45.0, lon0 = 170.0;
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);                 /* no sector gates */
     lap_t L; lap_init(&L, NULL);
+    lap_set_predictive(&L, g_pred_best_dist, g_pred_best_t, g_pred_rec_dist, g_pred_rec_t,
+                       PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
     arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
     feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
@@ -18267,6 +18284,26 @@ static void test_predictive_table_cap(void)
     TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
     TEST_ASSERT_TRUE(L.pred_rec_n > 0);
     TEST_ASSERT_TRUE(L.pred_rec_n <= PRED_TABLE_MAX);              /* never overflows the fixed table */
+}
+
+/* §10.11 with predictive left disabled (no lap_set_predictive call, the lap_init default: pred_cap ==
+ * 0, all four buffer pointers NULL), lap_live_delta_ms must not dereference them — it returns the "no
+ * delta" sentinel (0, *have == false) instead of crashing. This is the common case for every other test
+ * in this file, which run a plain stack lap_t. */
+static void test_predictive_disabled_returns_no_delta(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+
+    bool have = true;
+    int32_t d = lap_live_delta_ms(&L, 3000000, 50.0, &have);
+    TEST_ASSERT_FALSE(have);
+    TEST_ASSERT_EQUAL_INT32(0, d);
 }
 
 #ifndef ESP_PLATFORM
@@ -18469,6 +18506,7 @@ int main(void)
     RUN_TEST(test_rtc_import_unknown_venue_fails);
     RUN_TEST(test_predictive_delta);
     RUN_TEST(test_predictive_table_cap);
+    RUN_TEST(test_predictive_disabled_returns_no_delta);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);
@@ -18790,11 +18828,25 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
 
 /* ---- §10.11 predictive delta (O5) ---- */
 
+void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
+                        uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap)
+{
+    L->pred_best_dist_m = best_dist;
+    L->pred_best_t_ms   = best_t;
+    L->pred_rec_dist_m  = rec_dist;
+    L->pred_rec_t_ms    = rec_t;
+    L->pred_cap         = cap;
+    L->pred_best_n      = 0;
+    L->pred_rec_n       = 0;
+    L->pred_rec_fixes   = 0;
+}
+
 /* Append the current (distance, elapsed) sample of the lap in progress to the recording table. Beyond
  * PRED_TABLE_MAX entries the table is halved in place and recording continues at half density ("every
  * 2nd fix"), so it always holds <= PRED_TABLE_MAX monotonic-distance samples spanning the whole lap. */
 static void pred_record(lap_t *L, int64_t now)
 {
+    if (L->pred_cap == 0) return;                        /* predictive disabled: no buffers to fill */
     if (now <= L->lap_start_gps_us) return;
     uint32_t t_ms = (uint32_t)((now - L->lap_start_gps_us + 500) / 1000);
     double d = L->lap_dist_m;
@@ -18802,7 +18854,7 @@ static void pred_record(lap_t *L, int64_t now)
     uint16_t d16 = (uint16_t)llround(d);
     L->pred_rec_fixes++;
 
-    if (L->pred_rec_n >= PRED_TABLE_MAX) {              /* full: keep every 2nd entry, then continue */
+    if (L->pred_rec_n >= L->pred_cap) {                  /* full: keep every 2nd entry, then continue */
         uint16_t m = 0;
         for (uint16_t i = 0; i < L->pred_rec_n; i += 2) {
             L->pred_rec_dist_m[m] = L->pred_rec_dist_m[i];
@@ -18820,6 +18872,7 @@ static void pred_record(lap_t *L, int64_t now)
 int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have)
 {
     if (have) *have = false;
+    if (L->pred_cap == 0) return 0;                       /* predictive disabled */
     if (L->state != LAP_ST_RUNNING || L->pred_best_n < 2) return 0;
     if (dist_m < (double)L->pred_best_dist_m[0] ||
         dist_m > (double)L->pred_best_dist_m[L->pred_best_n - 1]) return 0;   /* outside the reference */
@@ -19196,10 +19249,13 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
         L->best = r;
         L->have_best = true;
         /* §10.11: this lap is the new best, so its recorded trace becomes the predictive reference
-         * (open_lap has not yet reset pred_rec for the next lap). */
-        memcpy(L->pred_best_dist_m, L->pred_rec_dist_m, sizeof(uint16_t) * L->pred_rec_n);
-        memcpy(L->pred_best_t_ms,   L->pred_rec_t_ms,   sizeof(uint32_t) * L->pred_rec_n);
-        L->pred_best_n = L->pred_rec_n;
+         * (open_lap has not yet reset pred_rec for the next lap). Contents-copy, not a pointer swap,
+         * since the buffers are caller-owned fixed storage; a no-op when predictive is disabled. */
+        if (L->pred_cap) {
+            memcpy(L->pred_best_dist_m, L->pred_rec_dist_m, sizeof(uint16_t) * L->pred_rec_n);
+            memcpy(L->pred_best_t_ms,   L->pred_rec_t_ms,   sizeof(uint32_t) * L->pred_rec_n);
+            L->pred_best_n = L->pred_rec_n;
+        }
     }
     if (valid && L->locked) {                                      /* §10.8 best per-sector, any valid lap */
         for (uint8_t i = 0; i < n_splits && i <= LAP_MAX_SECTORS; i++)

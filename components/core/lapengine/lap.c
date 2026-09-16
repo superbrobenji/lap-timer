@@ -303,11 +303,25 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
 
 /* ---- §10.11 predictive delta (O5) ---- */
 
+void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
+                        uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap)
+{
+    L->pred_best_dist_m = best_dist;
+    L->pred_best_t_ms   = best_t;
+    L->pred_rec_dist_m  = rec_dist;
+    L->pred_rec_t_ms    = rec_t;
+    L->pred_cap         = cap;
+    L->pred_best_n      = 0;
+    L->pred_rec_n       = 0;
+    L->pred_rec_fixes   = 0;
+}
+
 /* Append the current (distance, elapsed) sample of the lap in progress to the recording table. Beyond
  * PRED_TABLE_MAX entries the table is halved in place and recording continues at half density ("every
  * 2nd fix"), so it always holds <= PRED_TABLE_MAX monotonic-distance samples spanning the whole lap. */
 static void pred_record(lap_t *L, int64_t now)
 {
+    if (L->pred_cap == 0) return;                        /* predictive disabled: no buffers to fill */
     if (now <= L->lap_start_gps_us) return;
     uint32_t t_ms = (uint32_t)((now - L->lap_start_gps_us + 500) / 1000);
     double d = L->lap_dist_m;
@@ -315,7 +329,7 @@ static void pred_record(lap_t *L, int64_t now)
     uint16_t d16 = (uint16_t)llround(d);
     L->pred_rec_fixes++;
 
-    if (L->pred_rec_n >= PRED_TABLE_MAX) {              /* full: keep every 2nd entry, then continue */
+    if (L->pred_rec_n >= L->pred_cap) {                  /* full: keep every 2nd entry, then continue */
         uint16_t m = 0;
         for (uint16_t i = 0; i < L->pred_rec_n; i += 2) {
             L->pred_rec_dist_m[m] = L->pred_rec_dist_m[i];
@@ -333,6 +347,7 @@ static void pred_record(lap_t *L, int64_t now)
 int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have)
 {
     if (have) *have = false;
+    if (L->pred_cap == 0) return 0;                       /* predictive disabled */
     if (L->state != LAP_ST_RUNNING || L->pred_best_n < 2) return 0;
     if (dist_m < (double)L->pred_best_dist_m[0] ||
         dist_m > (double)L->pred_best_dist_m[L->pred_best_n - 1]) return 0;   /* outside the reference */
@@ -709,10 +724,13 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, lap_evt_cb_
         L->best = r;
         L->have_best = true;
         /* §10.11: this lap is the new best, so its recorded trace becomes the predictive reference
-         * (open_lap has not yet reset pred_rec for the next lap). */
-        memcpy(L->pred_best_dist_m, L->pred_rec_dist_m, sizeof(uint16_t) * L->pred_rec_n);
-        memcpy(L->pred_best_t_ms,   L->pred_rec_t_ms,   sizeof(uint32_t) * L->pred_rec_n);
-        L->pred_best_n = L->pred_rec_n;
+         * (open_lap has not yet reset pred_rec for the next lap). Contents-copy, not a pointer swap,
+         * since the buffers are caller-owned fixed storage; a no-op when predictive is disabled. */
+        if (L->pred_cap) {
+            memcpy(L->pred_best_dist_m, L->pred_rec_dist_m, sizeof(uint16_t) * L->pred_rec_n);
+            memcpy(L->pred_best_t_ms,   L->pred_rec_t_ms,   sizeof(uint32_t) * L->pred_rec_n);
+            L->pred_best_n = L->pred_rec_n;
+        }
     }
     if (valid && L->locked) {                                      /* §10.8 best per-sector, any valid lap */
         for (uint8_t i = 0; i < n_splits && i <= LAP_MAX_SECTORS; i++)
