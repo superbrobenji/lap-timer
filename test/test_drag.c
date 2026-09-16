@@ -391,6 +391,25 @@ static void test_false_start_abort(void)
     TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
 }
 
+/* §11.2/§6.6 false-start guard regression: a sustained ~0.2 g launch is itself below
+ * DRAG_FALSE_START_KMH for the first ~140 ms after t0 (v_est is still climbing from 0), which is not
+ * a stall — the abort requires v_peak to have already cleared the threshold before a drop-below
+ * counts as a false start. Without that guard this legitimate low-g launch gets discarded and
+ * re-armed the instant it enters LAUNCHED, emitting a duplicate EV_DRAG_LAUNCH; the fixed engine
+ * launches exactly once and runs its gates through to the 1/4. */
+static void test_low_g_launch_no_false_start(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_const_g(0.2, 2800, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+}
+
 /* §11.2: the braking gate may complete after DONE. A 0.5 g run ends DONE at the 1/4, then braking
  * from ~226 km/h through 100 records the 100-0 gate after the DONE event. */
 static void test_done_then_brake(void)
@@ -498,6 +517,7 @@ int main(void)
     RUN_TEST(test_rollout_shifts_t0);
     RUN_TEST(test_braking_distance_100_to_0);
     RUN_TEST(test_false_start_abort);
+    RUN_TEST(test_low_g_launch_no_false_start);
     RUN_TEST(test_done_then_brake);
     RUN_TEST(test_bench_visibility_180_vs_320);
     RUN_TEST(test_bench_drop_lowest_when_over_four);

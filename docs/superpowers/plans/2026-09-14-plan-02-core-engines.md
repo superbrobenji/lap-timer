@@ -21386,6 +21386,25 @@ static void test_false_start_abort(void)
     TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
 }
 
+/* §11.2/§6.6 false-start guard regression: a sustained ~0.2 g launch is itself below
+ * DRAG_FALSE_START_KMH for the first ~140 ms after t0 (v_est is still climbing from 0), which is not
+ * a stall — the abort requires v_peak to have already cleared the threshold before a drop-below
+ * counts as a false start. Without that guard this legitimate low-g launch gets discarded and
+ * re-armed the instant it enters LAUNCHED, emitting a duplicate EV_DRAG_LAUNCH; the fixed engine
+ * launches exactly once and runs its gates through to the 1/4. */
+static void test_low_g_launch_no_false_start(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_const_g(0.2, 2800, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+}
+
 /* §11.2: the braking gate may complete after DONE. A 0.5 g run ends DONE at the 1/4, then braking
  * from ~226 km/h through 100 records the 100-0 gate after the DONE event. */
 static void test_done_then_brake(void)
@@ -21493,6 +21512,7 @@ int main(void)
     RUN_TEST(test_rollout_shifts_t0);
     RUN_TEST(test_braking_distance_100_to_0);
     RUN_TEST(test_false_start_abort);
+    RUN_TEST(test_low_g_launch_no_false_start);
     RUN_TEST(test_done_then_brake);
     RUN_TEST(test_bench_visibility_180_vs_320);
     RUN_TEST(test_bench_drop_lowest_when_over_four);
@@ -21828,7 +21848,7 @@ static bool brake_step(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t now, int6
     }
 
     D->brake_dist_m += d_inc;
-    if (D->v_est < kmh_to_mps(0.5)) {                      /* §6.6: braking ends below 0.5 km/h */
+    if (D->v_est < kmh_to_mps((double)DRAG_BRAKE_STOP_KMH)) {  /* §6.6: braking ends below 0.5 km/h */
         drag_gate_res_t *g = &D->cur.gates[bi];
         int64_t rel = now - D->brake_start_gps_us;
         if (rel < 0) rel = 0;
@@ -21936,7 +21956,7 @@ static bool brake_pending(const drag_t *D)
     for (uint8_t i = 0; i < D->cfg.n_gates; i++)
         if (D->cfg.gates[i].kind == DRAG_BRAKE && !D->cur.gates[i].hit) { has_gate = true; break; }
     if (!has_gate) return false;
-    return D->brake_active || D->v_est > kmh_to_mps(1.0);
+    return D->brake_active || D->v_est > kmh_to_mps((double)DRAG_FALSE_START_KMH);
 }
 
 /* ---- one fused sample (100 Hz) ---- */
@@ -22004,9 +22024,13 @@ void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *
         gate_step(D, cb, ctx, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
         brake_step(D, cb, ctx, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
 
-        /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm. */
+        /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm.
+         * Guarded on v_peak having already cleared the threshold once: a sustained low-g launch is
+         * itself briefly under 1 km/h just after t0 (v_est is still climbing from 0), and that is not
+         * a stall — only a drop-below after the run has actually moved past the threshold counts. */
         if (now - D->t0_gps_us <= (int64_t)DRAG_FALSE_START_S * 1000000 &&
-            D->v_est < kmh_to_mps(1.0)) {
+            D->v_peak > kmh_to_mps((double)DRAG_FALSE_START_KMH) &&
+            D->v_est < kmh_to_mps((double)DRAG_FALSE_START_KMH)) {
             abort_to_armed(D);
             break;
         }
@@ -22030,7 +22054,8 @@ void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *
         /* Braking may still complete after DONE (§11.2); update the session best if it does. Settle
          * back to IDLE 5 s after DONE once braking has resolved, keeping the frozen result. */
         if (brake_step(D, cb, ctx, now, fs->mono_us, d_inc)) update_best(D);
-        if (now - D->done_gps_us >= 5 * 1000000 && !brake_pending(D)) go_idle_keep_result(D);
+        if (now - D->done_gps_us >= (int64_t)DRAG_DONE_SETTLE_S * 1000000 && !brake_pending(D))
+            go_idle_keep_result(D);
         break;
     default:
         break;

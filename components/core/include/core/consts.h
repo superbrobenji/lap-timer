@@ -47,6 +47,9 @@
 #define DRAG_ROLLOUT_M         0.3048
 #define DRAG_TIMEOUT_S         60
 #define DRAG_FALSE_START_S     2
+#define DRAG_BRAKE_STOP_KMH    0.5f
+#define DRAG_FALSE_START_KMH   1.0f
+#define DRAG_DONE_SETTLE_S     5
 #define TRAP_DIST_M            20.117
 #define FIX_KEYFRAME_S         5
 #define SES_SYNC               0xA5
