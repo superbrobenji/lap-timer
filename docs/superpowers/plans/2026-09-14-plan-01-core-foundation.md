@@ -1700,9 +1700,9 @@ uint16_t ses_crc16(const uint8_t *buf, size_t n)
 {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < n; i++) {
-        crc ^= (uint16_t)((uint16_t)buf[i] << 8);
+        crc = (uint16_t)(crc ^ ((uint16_t)buf[i] << 8));      /* explicit: `^=` widens to int, gcc -Wconversion */
         for (int b = 0; b < 8; b++)
-            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+            crc = (uint16_t)((crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1));   /* ?: promotes both arms to int */
     }
     return crc;
 }
