@@ -779,7 +779,7 @@ int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* p
 const fus_calib_t *fus_calib(const fus_t *f);
 ```
 
-#### `core/lap.h` — lap engine (plan 02, part 1)
+#### `core/lap.h` — lap engine (plan 02, parts 1 and 2)
 
 `lap_result_t`, `lap_stats_t` and the `trk_*` types live in `core/types.h` and `core/trk.h`; the event
 a lap emits is `event_t` in `core/event.h`. All state is caller-owned in `lap_t` (no allocation). Lap
@@ -799,14 +799,19 @@ uint8_t lap_state(const lap_t *L);
 const lap_result_t *lap_best(const lap_t *L);
 const lap_result_t *lap_prev(const lap_t *L);
 uint32_t lap_current_elapsed_ms(const lap_t *L, int64_t now_gps_us);
-uint32_t lap_theoretical_best_ms(const lap_t *L);            /* 0 until sectors land (session 2.5) */
-int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);  /* -1 until 2.5 */
+uint32_t lap_theoretical_best_ms(const lap_t *L);            /* Sigma best_sector_ms; 0 until every split has one */
+void lap_create_begin(lap_t *L);                             /* §10.9 CREATE sub-mode */
+int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
+void lap_create_cancel(lap_t *L);
+void lap_export_rtc(const lap_t *L, lap_rtc_t *out);         /* §10.10 */
+int  lap_import_rtc(lap_t *L, const lap_rtc_t *s);           /* restore → LAP_RUNNING | LAP_F_INTERRUPTED */
+int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have);  /* §10.11 */
 ```
 
-Part 1 (session 2.4) implements the NO_VENUE → VENUE_FOUND → ARMED → LAP_RUNNING machine, S/F
-crossing, lap completion (§10.4), pit detection (§10.6) and Doppler-integrated distance. Sectors,
-layout disambiguation (§10.5), sector/lap deltas (§10.7), theoretical best (§10.8), on-device creation
-(§10.9), RTC continuity (§10.10) and predictive delta (§10.11) arrive in session 2.5.
+Parts 1–2 (sessions 2.4–2.5) implement the full engine: the state machine, S/F crossing and lap
+completion (§10.4), pit detection (§10.6), sector gates and splits, layout disambiguation (§10.5),
+sector/lap deltas (§10.7), theoretical best (§10.8), on-device creation (§10.9), RTC continuity
+(§10.10) and predictive delta (§10.11).
 
 #### `core/drag.h` (planned, plan 02)
 

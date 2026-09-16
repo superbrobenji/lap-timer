@@ -3,9 +3,9 @@
 #include <string.h>
 
 /* Lap engine (spec §10). Session 2.4: venue detection and arming (part 1), S/F crossing and lap
- * completion (part 2), pit detection and Doppler distance integration (part 3). Sectors, layout
- * disambiguation, deltas, theoretical best, on-device creation, RTC and predictive delta are
- * session 2.5. */
+ * completion (part 2), pit detection and Doppler distance integration (part 3). Session 2.5 layers on
+ * sector gates and splits, §10.5 layout disambiguation, §10.7 sector delta, §10.8 theoretical best,
+ * §10.9 on-device creation, §10.10 RTC continuity and §10.11 predictive delta. */
 
 /* ---- configuration and lifecycle ---- */
 
@@ -14,10 +14,21 @@ void lap_cfg_defaults(lap_cfg_t *c)
     c->default_layout_id = 0;
 }
 
+/* Clear the per-lap sector accumulation (§10.4 step 5): gate crossing times and the next-expected
+ * sector index. Called whenever a lap opens. */
+static void reset_lap_sectors(lap_t *L)
+{
+    L->sec_next = 1;
+    memset(L->gate_times, 0, sizeof L->gate_times);
+    for (uint8_t i = 0; i < LAP_MAX_SECTORS; i++) L->sec_armed[i] = true;
+    memset(L->sec_last_cross_us, 0, sizeof L->sec_last_cross_us);
+}
+
 static void reset_to_no_venue(lap_t *L)
 {
     L->venue = NULL;
     L->state = LAP_ST_NO_VENUE;
+    L->mode = LAP_MODE_NORMAL;
     L->n_cand = 0;
     L->forced_layout_id = 0;
     L->have_scan = false;
@@ -26,6 +37,13 @@ static void reset_to_no_venue(lap_t *L)
     L->lap_flags = 0;
     L->lap_start_gps_us = 0;
     L->lap_dist_m = 0.0;
+    L->locked = false;
+    L->locked_layout = NULL;
+    L->n_sec = 0;
+    L->n_ugate = 0;
+    L->best_sector_count = 0;
+    L->sec_next = 1;
+    memset(L->gate_times, 0, sizeof L->gate_times);
     L->have_prev_fix = false;
     L->prev_gps_us = 0;
     L->prev_speed_mps = 0.0;
@@ -33,7 +51,11 @@ static void reset_to_no_venue(lap_t *L)
     L->pit_since_us = 0;
     L->leaving = false;
     L->leave_since_us = 0;
-    /* best/prev results and cfg are preserved across a reset (§10.3). */
+    L->create_have_sf = false;
+    L->pred_rec_n = 0;
+    L->pred_rec_fixes = 0;
+    /* best/prev results, best_sector table, the predictive reference table and cfg are preserved
+     * across a reset (§10.3). */
 }
 
 void lap_init(lap_t *L, const lap_cfg_t *cfg)
@@ -76,15 +98,24 @@ void lap_set_venue(lap_t *L, const trk_venue_t *v)
     }
     geo_origin_set(&L->origin, v->lat, v->lon);
     L->state = LAP_ST_VENUE_FOUND;
+    L->mode = LAP_MODE_NORMAL;
     L->lap_no = 0;
     L->lap_flags = 0;
     L->lap_start_gps_us = 0;
     L->lap_dist_m = 0.0;
+    L->locked = false;
+    L->locked_layout = NULL;
+    L->n_sec = 0;
+    L->n_ugate = 0;
+    reset_lap_sectors(L);
     L->have_prev_fix = false;
     L->pit_slow = false;
     L->pit_since_us = 0;
     L->leaving = false;
     L->leave_since_us = 0;
+    L->create_have_sf = false;
+    L->pred_rec_n = 0;
+    L->pred_rec_fixes = 0;
     arm_candidates(L);
 }
 
@@ -121,14 +152,56 @@ uint32_t lap_current_elapsed_ms(const lap_t *L, int64_t now_gps_us)
 
 uint32_t lap_theoretical_best_ms(const lap_t *L)
 {
-    (void)L;
-    return 0;                                    /* Σ best sector ms — session 2.5 */
+    /* Sigma best_sector_ms[i] over every split, only when each split has a value (§10.8). */
+    if (L->best_sector_count == 0) return 0;
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < L->best_sector_count; i++) {
+        if (!L->have_best_sector[i]) return 0;
+        sum += L->best_sector_ms[i];
+    }
+    return sum;
+}
+
+/* ---- §10.9 on-device track creation (bodies in the creation section below) ---- */
+
+void lap_create_begin(lap_t *L)
+{
+    reset_to_no_venue(L);
+    L->mode = LAP_MODE_CREATE;
+    memset(&L->create_layout, 0, sizeof L->create_layout);
+    L->create_have_sf = false;
+}
+
+void lap_create_cancel(lap_t *L)
+{
+    if (L->mode == LAP_MODE_CREATE) reset_to_no_venue(L);
 }
 
 int lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout)
 {
     (void)L; (void)gate_idx; (void)fix; (void)out_layout;
-    return -1;                                   /* on-device creation — session 2.5 */
+    return -1;                                   /* real body: session 2.5 Task 3 */
+}
+
+/* ---- §10.10 RTC continuity / §10.11 predictive delta (bodies: session 2.5 Task 4) ---- */
+
+void lap_export_rtc(const lap_t *L, lap_rtc_t *out)
+{
+    (void)L;
+    memset(out, 0, sizeof *out);
+}
+
+int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
+{
+    (void)L; (void)s;
+    return -1;
+}
+
+int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have)
+{
+    (void)L; (void)now_gps_us; (void)dist_m;
+    if (have) *have = false;
+    return 0;
 }
 
 /* ---- fix processing ---- */
