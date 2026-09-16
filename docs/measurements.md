@@ -2,6 +2,12 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## core_selftest on ESP32 (plan 02, session 2.5)
+
+- Date: 2026-09-16. Commit: e55d1eb (branch s2.5-lap2). ESP-IDF v5.3.2. Same board and port. 18 suites (`lap_gate` added; `lap` now covers sectors, disambiguation, on-device creation, RTC, predictive). App binary 382,992 bytes.
+- Two on-hardware crashes were found and fixed before this PASS: (1) `lap_t` had grown to 12.5 KB (embedded predictive table) and overflowed the 24 KB main task stack — fixed by making the predictive table caller-provided (issue #23), `lap_t` → 5,360 B; (2) the predictive test's four `PRED_TABLE_MAX` buffers were file-scope `static` (+7.2 KB .bss) and broke boot-time idle-task allocation — fixed by mallocing them in the tests (.bss back to 123,918).
+- Result: `=== core_selftest RESULT: PASS, 0 failing suites, stack6k OK (3532 B free), free heap 132852, min free 115744 ===`. `lap` 271 ms, `lap_gate` 17 ms on target.
+
 ## core_selftest on ESP32 (plan 02, session 2.4)
 
 - Date: 2026-09-16. Commit: aa975bf (branch s2.4-lap). ESP-IDF v5.3.2. Same board and port. 17 suites now (`lap` added; its synth-driven exit test is host-only and excluded on target). App binary 363,392 bytes (65 % of the factory partition free).
