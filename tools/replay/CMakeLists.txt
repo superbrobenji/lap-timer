@@ -23,6 +23,12 @@ foreach(src ${REPLAY_TEST_SRCS})
   add_test(NAME ${name} COMMAND ${name})
 endforeach()
 
+# test_replay_fixtures reads the committed fixtures under test/data (spec §22.2).
+if(TARGET test_replay_fixtures)
+  target_compile_definitions(test_replay_fixtures PRIVATE
+    REPLAY_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../test/data")
+endif()
+
 if(TARGET synth AND TARGET replay)
   add_test(NAME synth_smoke COMMAND synth --out ${CMAKE_CURRENT_BINARY_DIR}/synth_smoke --laps 2 --quiet)
   add_test(NAME replay_smoke COMMAND replay ${CMAKE_CURRENT_BINARY_DIR}/synth_smoke.log --json)

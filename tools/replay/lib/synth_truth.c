@@ -401,6 +401,8 @@ int synth_parse_args(int argc, char **argv, synth_cfg_t *cfg, synth_gps_cfg_t *g
         }
         if (strcmp(a, "--dropout") == 0)   { if (parse_dropout(v, gps) != 0) return -1; continue; }
         if (strcmp(a, "--start-utc") == 0) { if (parse_utc(v, &gps->t0_gps_us) != 0) return -1; continue; }
+        /* --profile selects the generator; only "circuit" reaches here (drag is dispatched in main). */
+        if (strcmp(a, "--profile") == 0)   { if (strcmp(v, "circuit") != 0) return -1; continue; }
         size_t t = 0;
         while (t < n_tab && strcmp(a, tab[t].name) != 0) t++;
         if (t == n_tab) return -1;

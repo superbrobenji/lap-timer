@@ -276,8 +276,8 @@ lap-timer/
   tools/
     web/export.html
     replay/CMakeLists.txt        host-only tools, built by test/CMakeLists.txt (§21.4, §22.2)
-    replay/include/replay/*.h    synth.h synth_gps.h logio.h replay.h synth_truth.h
-    replay/lib/*.c               synth_track.c synth_gps.c synth_truth.c logio.c replay_summary.c replay_version.c
+    replay/include/replay/*.h    synth.h synth_gps.h logio.h replay.h synth_truth.h synth_drag.h
+    replay/lib/*.c               synth_track.c synth_gps.c synth_truth.c synth_drag.c logio.c replay_summary.c replay_run.c replay_version.c
     replay/synth_main.c replay/replay_main.c
     replay/test/test_*.c         Unity tests for the tools (host only; not compiled into core_selftest)
     tracks/*.json  tracks/gen_tracks.py
