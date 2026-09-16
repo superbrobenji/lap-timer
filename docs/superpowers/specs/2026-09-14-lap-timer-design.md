@@ -235,7 +235,7 @@ lap-timer/
   components/
     core/
       CMakeLists.txt             idf_component_register(SRCS ... INCLUDE_DIRS include)
-      include/core/*.h           public API (§5.2); core/types.h holds gps_fix_t, imu_raw_t, fused_sample_t, lap_result_t, drag_result_t (HAL headers include it)
+      include/core/*.h           public API (§5.2); core/types.h holds gps_fix_t, imu_raw_t, fused_sample_t, lap_result_t, drag_result_t (HAL headers include it); core/event.h holds the runtime event_t (§4.5)
       timebase/tb.c
       geo/geo.c
       fusion/fus.c  fusion/fus_calib.c
@@ -329,6 +329,7 @@ SPSC rings are implemented in `components/core/include/core/ring.h` as a header-
 ### 4.5 Events and commands
 
 `event_t { uint8_t type; uint8_t flags; uint16_t arg16; int64_t gps_us; int64_t mono_us; uint32_t arg32; uint32_t arg32b; }`
+Defined in `core/event.h` with the stable `EV_*` codes (logged verbatim in the EVENT record, §12.3).
 
 | Event | Payload | Emitter |
 |-------|---------|---------|
@@ -725,6 +726,25 @@ typedef struct {
 } drag_result_t;
 ```
 
+#### `core/event.h` — engine events (plan 02)
+
+The runtime event passed to engine callbacks (`lap_evt_cb_t`, and the drag/fusion equivalents). `type`
+is a stable `EV_*` code — logged in the EVENT record (§12.3), so the values never change. `flags`,
+`arg16`, `arg32` and `arg32b` are per-event payloads (§4.5).
+
+```c
+typedef struct {
+    uint8_t  type;      /* EV_* */
+    uint8_t  flags;     /* event-specific (e.g. lap flags on EV_LAP_COMPLETE) */
+    uint16_t arg16;     /* venue/layout/lap no, sector idx, gate id, ... */
+    int64_t  gps_us, mono_us;
+    uint32_t arg32, arg32b;
+} event_t;
+enum { EV_NONE = 0, EV_VENUE_FOUND, EV_LAYOUT_LOCKED, EV_ARMED, EV_SECTOR, EV_LAP_COMPLETE,
+       EV_FIX_LOST, EV_FIX_OK, EV_DRAG_ARMED, EV_DRAG_LAUNCH, EV_DRAG_GATE, EV_DRAG_DONE,
+       EV_MOTION, EV_STILL, EV_CALIB_DONE, EV_FAULT };
+```
+
 #### `core/fus.h` — fusion (plan 02)
 
 `fused_sample_t` lives in `core/types.h` above. Calibration and the public entry points (excerpt; the
@@ -759,11 +779,16 @@ int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* p
 const fus_calib_t *fus_calib(const fus_t *f);
 ```
 
-#### `core/lap.h` — lap engine (planned, plan 02)
+#### `core/lap.h` — lap engine (plan 02, part 1)
 
-`lap_result_t`, `lap_stats_t` and the `trk_*` types live in `core/types.h` and `core/trk.h`. The function list:
+`lap_result_t`, `lap_stats_t` and the `trk_*` types live in `core/types.h` and `core/trk.h`; the event
+a lap emits is `event_t` in `core/event.h`. All state is caller-owned in `lap_t` (no allocation). Lap
+states: `LAP_ST_NO_VENUE`, `LAP_ST_VENUE_FOUND`, `LAP_ST_ARMED`, `LAP_ST_RUNNING`. The function list:
 
 ```c
+typedef void (*lap_evt_cb_t)(const event_t *ev, void *ctx);
+
+void lap_cfg_defaults(lap_cfg_t *c);
 void lap_init(lap_t *L, const lap_cfg_t *cfg);
 void lap_set_venue(lap_t *L, const trk_venue_t *v);          /* enters VENUE_FOUND */
 void lap_force_layout(lap_t *L, uint16_t layout_id);
@@ -774,9 +799,14 @@ uint8_t lap_state(const lap_t *L);
 const lap_result_t *lap_best(const lap_t *L);
 const lap_result_t *lap_prev(const lap_t *L);
 uint32_t lap_current_elapsed_ms(const lap_t *L, int64_t now_gps_us);
-uint32_t lap_theoretical_best_ms(const lap_t *L);
-int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);  /* on-device creation */
+uint32_t lap_theoretical_best_ms(const lap_t *L);            /* 0 until sectors land (session 2.5) */
+int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);  /* -1 until 2.5 */
 ```
+
+Part 1 (session 2.4) implements the NO_VENUE → VENUE_FOUND → ARMED → LAP_RUNNING machine, S/F
+crossing, lap completion (§10.4), pit detection (§10.6) and Doppler-integrated distance. Sectors,
+layout disambiguation (§10.5), sector/lap deltas (§10.7), theoretical best (§10.8), on-device creation
+(§10.9), RTC continuity (§10.10) and predictive delta (§10.11) arrive in session 2.5.
 
 #### `core/drag.h` (planned, plan 02)
 

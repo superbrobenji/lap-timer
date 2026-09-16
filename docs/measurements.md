@@ -2,6 +2,11 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## core_selftest on ESP32 (plan 02, session 2.4)
+
+- Date: 2026-09-16. Commit: aa975bf (branch s2.4-lap). ESP-IDF v5.3.2. Same board and port. 17 suites now (`lap` added; its synth-driven exit test is host-only and excluded on target). App binary 363,392 bytes (65 % of the factory partition free).
+- Result: `=== core_selftest RESULT: PASS, 0 failing suites, stack6k OK (3532 B free), free heap 132852, min free 119732 ===`. `lap` 75 ms on target (venue detect, S/F crossing, completion, pit — the 10-lap synth replay runs on host only).
+
 ## core_selftest on ESP32 (plan 02, session 2.3)
 
 - Date: 2026-09-16. Commit: 6cd4693 (branch s2.3-fusion). ESP-IDF v5.3.2. Same board and port. Same 16 suites as session 2.2; the `fus` suite grew from 13 to 21 cases (the §9.3 lean filter, yaw, lateral g and GPS cross-check). App binary 0x56170 bytes (66 % of the factory partition free).

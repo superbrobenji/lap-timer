@@ -41,12 +41,24 @@ function(add_core_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-# One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no edit here)
+# One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no
+# edit here). test_lap is held back: its exit-criterion case drives the host-only synth fixture, so it
+# links the replay library instead of core/unity/m directly (replaylib already carries those).
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
-  add_core_test(${name})
+  if(NOT name STREQUAL "test_lap")
+    add_core_test(${name})
+  endif()
 endforeach()
 
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
+
+# test_lap links replaylib (which brings in core and libm), plus unity. The synth-driven case is guarded
+# by #ifndef ESP_PLATFORM, so the same file still builds and runs on the ESP32 (core_selftest), where
+# the replay tools do not exist.
+add_executable(test_lap test_lap.c)
+target_compile_options(test_lap PRIVATE ${LAPTIMER_STRICT_FLAGS})
+target_link_libraries(test_lap PRIVATE replaylib unity Threads::Threads)
+add_test(NAME test_lap COMMAND test_lap)
