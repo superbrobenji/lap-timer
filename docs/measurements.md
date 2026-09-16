@@ -2,6 +2,32 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## core_selftest on ESP32 (plan 02, session 2.2)
+
+- Date: 2026-09-16. Commit: c913034 (branch s2.2-fusion). ESP-IDF v5.3.2. Same board and port as earlier runs.
+- Build: app binary 0x53660 bytes (67 % of the 1 MB factory partition free). Now 16 suites (the four fusion suites `fus`, `fus_still`, `fus_orient`, `fus_fwd` added).
+- Main task stack reduced 40 KB -> 24 KB: the added fusion suites' static test `.bss` shrank the largest contiguous internal-DRAM region below 40 KB, so the 40 KB main task could not be created (`xTaskCreate` assert, boot loop). The 6 KB probe task shows the suites need ~2.6 KB, so 24 KB keeps wide margin and fits.
+- Result: `=== core_selftest RESULT: PASS, 0 failing suites, stack6k OK (3532 B free), free heap 132852, min free 119732 ===` (heap before the run 134,576 bytes).
+
+| Suite | Result | Time on target |
+|-------|--------|----------------|
+| smoke | OK | 9 ms |
+| bw | OK | 19 ms |
+| ring | OK | 10,049 ms (two-thread stress, core 1) |
+| geo | OK | 81 ms |
+| tb | OK | 48 ms |
+| ses_frame | OK | 238 ms |
+| ses_records | OK | 872 ms |
+| jw | OK | 150 ms |
+| cfg | OK | 386 ms |
+| trk | OK | 102 ms |
+| exp_vbo | OK | 12 ms |
+| exp_nmea_json | OK | 40 ms |
+| fus | OK | 157 ms |
+| fus_still | OK | 96 ms |
+| fus_orient | OK | 74 ms |
+| fus_fwd | OK | 128 ms |
+
 ## core_selftest on ESP32 (plan 01, session 1.6 fix wave)
 
 - Date: 2026-09-15. Commit: 8a9fcaf (branch s1.6-plan01-fixes). ESP-IDF v5.3.2. Same board and port as the session 1.5 run below.

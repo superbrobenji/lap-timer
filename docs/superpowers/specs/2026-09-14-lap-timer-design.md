@@ -443,6 +443,7 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | `cfg_from_json` token array, 192 × `jsmntok_t` (20 B), `.bss` | 3,840 B |
 | `exp_t` (holds the 1 KB export streaming window and the decoder state) | 1,488 B |
 | `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
+| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 328 B |
 | Lap engine (venue + 8 layouts × 16 gates) | ~3 KB |
 | Predictive delta table (O5) | 2.4 KB |
 | Headroom | > 90 KB |
@@ -724,22 +725,36 @@ typedef struct {
 } drag_result_t;
 ```
 
-#### `core/fus.h` — fusion (planned, plan 02)
+#### `core/fus.h` — fusion (plan 02)
 
-`fused_sample_t` lives in `core/types.h` above. The remaining types and the function list:
+`fused_sample_t` lives in `core/types.h` above. Calibration and the public entry points (excerpt; the
+internal stillness and forward-learning trackers `fus_still_t` / `fus_fwd_t` are documented in the
+header):
 
 ```c
-typedef struct { float r[9]; float gbias[3]; int16_t gbias_temp_c100; uint8_t orient_ok; uint8_t forward_ok; uint8_t version; } fus_calib_t;
-typedef struct { /* internal state */ float lean_rad; float still_acc_var, still_gyr_var; ... } fus_t;
+#define FUS_CALIB_VERSION 1
+typedef struct {
+    float   r[9];             /* rows x, y, z (row-major): vehicle axes in body coordinates, vehicle = R · body */
+    float   gbias[3];         /* gyro bias, raw LSB */
+    int16_t gbias_temp_c100;  /* IMU temperature when gbias was captured */
+    uint8_t bias_ok;          /* gbias captured at least once */
+    uint8_t orient_ok;        /* z row captured */
+    uint8_t forward_ok;       /* x and y rows learned (implies orient_ok) */
+    uint8_t version;          /* FUS_CALIB_VERSION */
+} fus_calib_t;
+void fus_calib_defaults(fus_calib_t *c);
+bool fus_calib_valid(const fus_calib_t *c);           /* version, finite, R orthonormal within 1e-3 */
+void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out);      /* CALIB record (§12.3) */
+void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out);
 
-void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);
+void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);   /* NULL/invalid calib → defaults */
 void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid);
-/* process one raw sample; out is filled; returns 1 if a sample was produced */
-int  fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);
+void fus_set_temp(fus_t *f, int16_t temp_c100);       /* IMU temperature, ~1 Hz; drives FUS_BIAS_STALE */
+int  fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);   /* one raw sample → one fused sample */
 bool fus_is_still(const fus_t *f);
-void fus_gyro_bias_update(fus_t *f);                 /* call when still ≥ 2 s; updates calib */
-int  fus_calib_orient_capture(fus_t *f);             /* upright capture; fills r[] Z row */
-int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* learns X row */
+void fus_gyro_bias_update(fus_t *f);                  /* call when still; updates calib */
+int  fus_calib_orient_capture(fus_t *f);              /* upright capture; fills the Z row */
+int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* per fix; 1 when the X row is learned */
 const fus_calib_t *fus_calib(const fus_t *f);
 ```
 
@@ -1358,6 +1373,24 @@ The pipeline never blocks on the display, storage, or radio. Its worst-case loop
 - Forward learning (automatic): condition `|yaw_dps| < 2` and GPS longitudinal acceleration (`Δv/Δt` from consecutive fixes) > 1.5 m/s² for ≥ 1 s. During such windows accumulate `a_h = a − (a·z)z` (horizontal component of accel, bias-removed). After ≥ 3 windows, `x = normalize(Σ a_h)`. `y = z × x`, re-orthogonalise `x = y × z`. `forward_ok = 1`. Saved to NVS. `EV_CALIB_DONE` emitted.
 - Rotation: `v = R · b` where `R` rows are `x, y, z`. Vehicle frame: X forward, Y left, Z up.
 - Until `forward_ok`, lean and lateral g are flagged invalid (`FUS_LEAN_VALID = 0`); longitudinal g uses `a·z`-removed magnitude sign-less (flagged).
+
+**Temperature.** The pipeline polls `imu_read_temp_c100` (~1 Hz) and passes it to `fus_set_temp`;
+`FUS_BIAS_STALE` is derived from it and `gbias_temp_c100`, and only once a bias has been captured
+(`bias_ok`).
+
+**Stillness windows.** The detector uses tumbling windows of `STILL_WINDOW_S · FUSION_HZ` samples;
+`fus_is_still` and the `FUS_STILL` flag reflect the last completed window, so stillness is reported
+with at most one window of latency.
+
+**Forward-learning windows.** `fus_calib_forward_step` is called once per GPS fix with `Δv/Δt` and
+the current yaw rate; while the condition holds, every fusion step accumulates `a_h`. A run counts as
+one window the moment it has lasted `FWD_LEARN_MIN_S` and keeps accumulating until it ends; when the
+`FWD_LEARN_WINDOWS`-th run is counted the forward row is set and the call returns 1 (the pipeline
+persists the calibration and emits `EV_CALIB_DONE`).
+
+**Flags.** `FUS_ORIENT_OK` on a sample means both the Z row and the forward row are known; until
+then `g_lon` is the sign-less horizontal specific-force magnitude, `g_lat` is 0 and `FUS_LEAN_VALID`
+is clear. `FUS_STILL` mirrors `fus_is_still`; `FUS_BIAS_STALE` is described above.
 
 ### 9.3 Fusion math (100 Hz)
 
@@ -2511,6 +2544,10 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `STILL_WINDOW_S` | 2 | §9.2 |
 | `BIAS_TEMP_STALE_C` | 15 | §9.2 |
 | `FWD_LEARN_ACC_MPS2` / `FWD_LEARN_MIN_S` / `FWD_LEARN_WINDOWS` | 1.5 / 1 / 3 | §9.2 |
+| `FWD_LEARN_MAX_YAW_DPS` | 2 | §9.2 |
+| `FUS_ORIENT_MIN_G` / `FUS_ORIENT_MAX_G` | 0.5 / 1.5 | §9.2 |
+| `FUS_REF_MAX_AGE_US` | 1000000 | §9.3 |
+| `IMU_ACC_LSB_PER_G` / `IMU_GYR_LSB_PER_DPS` | 2048 / 16.4 | §8.2 |
 | `TB_WINDOW_S` | 30 | §6.2 |
 | `TB_LOCK_FIXES` | 10 | §6.2 |
 | `TB_PPS_DISAGREE_US` | 50000 | §6.2 |

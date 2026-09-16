@@ -53,4 +53,10 @@
 #define TRK_MAX_LAYOUTS        8
 #define TRK_MAX_USER           4
 #define MOVING_SPEED_KMH       3
+#define IMU_ACC_LSB_PER_G      2048.0f
+#define IMU_GYR_LSB_PER_DPS    16.4f
+#define FWD_LEARN_MAX_YAW_DPS  2.0f
+#define FUS_ORIENT_MIN_G       0.5f
+#define FUS_ORIENT_MAX_G       1.5f
+#define FUS_REF_MAX_AGE_US     1000000LL
 #endif
