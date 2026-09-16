@@ -25,7 +25,9 @@ enum {
     EV_VENUE_FOUND   = 1,   /* arg16 = venue id                                   (lapengine) */
     EV_LAYOUT_LOCKED = 2,   /* arg16 = layout id                                  (lapengine, 2.5) */
     EV_ARMED         = 3,   /* —                                                  (lapengine/dragengine) */
-    EV_SECTOR        = 4,   /* arg16 = sector idx, arg32 = split ms, arg32b delta (lapengine, 2.5) */
+    EV_SECTOR        = 4,   /* arg16 = sector idx, arg32 = split ms, arg32b delta (lapengine, 2.5).
+                              * arg32b is 0 both for a genuine zero delta and for "no best lap yet"
+                              * (§10.7 else-no-delta case) — a consumer cannot tell the two apart. */
     EV_LAP_COMPLETE  = 5,   /* arg16 = lap no, arg32 = lap ms, flags = lap flags  (lapengine) */
     EV_FIX_LOST      = 6,   /* —                                                  (pipeline) */
     EV_FIX_OK        = 7,   /* —                                                  (pipeline) */

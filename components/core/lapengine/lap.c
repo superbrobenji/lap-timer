@@ -311,7 +311,7 @@ static void pred_record(lap_t *L, int64_t now)
     if (now <= L->lap_start_gps_us) return;
     uint32_t t_ms = (uint32_t)((now - L->lap_start_gps_us + 500) / 1000);
     double d = L->lap_dist_m;
-    if (d < 0.0) d = 0.0; else if (d > 65535.0) d = 65535.0;
+    if (d < 0.0) d = 0.0; else if (d > (double)UINT16_MAX) d = (double)UINT16_MAX;
     uint16_t d16 = (uint16_t)llround(d);
     L->pred_rec_fixes++;
 
@@ -486,7 +486,8 @@ static void handle_sector_cross(lap_t *L, uint8_t k, int64_t t_cross, int64_t mo
     uint32_t split_ms = (uint32_t)llround((double)(t_cross - L->gate_times[prev]) / 1000.0);
 
     uint8_t idx = (uint8_t)(k - 1);              /* split index this crossing closes */
-    int32_t delta = 0;
+    int32_t delta = 0;                           /* §10.7: 0 when no best lap exists yet (else-no-delta
+                                                   * case), same wire value as a genuine zero delta */
     if (L->have_best && idx < L->best.n_sectors)
         delta = (int32_t)split_ms - (int32_t)L->best.sector_ms[idx];
     emit(cb, ctx, EV_SECTOR, 0, idx, t_cross, mono, split_ms, (uint32_t)delta);
@@ -741,7 +742,8 @@ static void finalize_create(lap_t *L, int64_t t_cross, int64_t mono, lap_evt_cb_
     nv.lat = L->create_lat;
     nv.lon = L->create_lon;
     nv.radius_m = VENUE_RADIUS_DEFAULT_M;
-    nv.flags = TRK_F_UNVERIFIED;                 /* built from live fixes, not surveyed (§10.1) */
+    nv.flags = 0;                                /* on-device creation is the most-confirmed case, not
+                                                   * TRK_F_UNVERIFIED (§10.1/§10.9) */
     nv.n_layouts = 2;
     nv.layouts[0] = L->create_layout;                          /* id 1, "Layout 1" */
     lap_layout_reverse(&L->create_layout, &nv.layouts[1]);     /* id 2, "Layout 1 Reverse" (§10.9 step 4) */

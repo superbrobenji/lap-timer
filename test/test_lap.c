@@ -655,6 +655,8 @@ static void test_create_track_saves_valid_venue(void)
     const trk_venue_t *v = trk_get(TRK_USER_ID_BASE);
     TEST_ASSERT_NOT_NULL(v);
     TEST_ASSERT_EQUAL_INT(0, trk_validate_venue(v));               /* structurally valid */
+    TEST_ASSERT_EQUAL_UINT8(0, v->flags);                          /* created on-device: not
+                                                                     * TRK_F_UNVERIFIED (§10.1/§10.9) */
     TEST_ASSERT_EQUAL_UINT8(2, v->n_layouts);                      /* forward + reverse */
     TEST_ASSERT_EQUAL_UINT8(2, v->layouts[0].n_sectors);
     TEST_ASSERT_EQUAL_INT8(1, v->layouts[0].dir_sign);

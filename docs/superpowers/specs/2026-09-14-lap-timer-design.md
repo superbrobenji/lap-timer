@@ -1581,7 +1581,10 @@ The pipeline mirrors `{ venue_id, layout_id (0 if not locked), lap_no, lap_start
 
 ### 10.11 Predictive delta (O5)
 
-When a best lap exists, the engine records the best lap as a table `(dist_m u16, t_ms u32)` at every fix (max 600 entries; beyond that every 2nd fix). During the current lap, `dist` (integrated Doppler distance since S/F) is looked up by binary search + linear interpolation to give `t_ref(dist)`; `delta_live = elapsed − t_ref`. Exposed via `lap_live_delta_ms()`. The e-paper UI ignores it; OLED UIs render it at 10 Hz. Table memory 2.4 KB.
+When a best lap exists, the engine records the best lap as a table `(dist_m u16, t_ms u32)` at every fix (max 600 entries; beyond that every 2nd fix). During the current lap, `dist` (integrated Doppler distance since S/F) is looked up by binary search + linear interpolation to give `t_ref(dist)`; `delta_live = elapsed − t_ref`. Exposed via `lap_live_delta_ms()`. The e-paper UI ignores it; OLED UIs render it at 10 Hz. The table is
+6 B/entry (`dist_m u16` + `t_ms u32`) × 600 ≈ 3.6 KB, double-buffered (a reference table for lookup plus
+a recording buffer for the lap in progress) for ≈ 7.2 KB resident, matching the §4.8 row. Issue #23
+tracks making this caller-provided so the e-paper build carries none.
 
 ---
 
