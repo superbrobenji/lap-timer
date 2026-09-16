@@ -1351,7 +1351,7 @@ The pipeline never blocks on the display, storage, or radio. Its worst-case loop
 `on_fix(fix)`:
 1. Validity (§6.5) → `fix.valid`.
 2. `tb_on_fix` if valid.
-3. `fus_set_gps_speed(v, mono, valid)`.
+3. `fus_set_gps_speed(v, course, mono, valid)`.
 4. Active engine: `lap_on_fix` or `drag_on_fix`.
 5. Motion state: `moving = valid && gspeed > MOVING_SPEED_KMH`; edge → `EV_MOTION` / `EV_STILL`.
 6. Push to `fix_ring`.
@@ -1406,9 +1406,9 @@ Inputs per step: `a_b` (m/s², bias-free accel, body), `ω_b` (rad/s, bias-remov
    - `φ = α·φ_gyro + (1−α)·φ_ref`, `α = LEAN_ALPHA = 0.98` (τ ≈ 0.5 s).
    - Clamp `|φ| ≤ LEAN_MAX_DEG`; clamping sets `FUS_CLAMPED`.
    - Cross-check: `ψ̇_gps` = derivative of `headMot` across fixes; if `|ψ̇ − ψ̇_gps| > 10 °/s` for 5 s set `FUS_DISAGREE`, log `E_FUSION_DISAGREE` once per session.
-5. **Lateral g**: moto `g_lat = −v·ψ̇ / 9.80665` (positive = right). Car `g_lat = −a.y / 9.80665`.
+5. **Lateral g**: moto `g_lat = −v·ψ̇ / 9.80665` (positive = right) while a GPS speed/course reference qualifies (the same freshness and `v > LEAN_REF_MIN_SPEED_MPS` gate as `φ_ref`); with no reference the moto falls back to the specific-force form `g_lat = −a.y / 9.80665`, so lateral g is defined even before the first fix. Car always `g_lat = −a.y / 9.80665`. Both `g_lon` and `g_lat` are clamped to ±`G_MAX`, and clamping sets `FUS_CLAMPED`.
 6. **Combined**: `g_comb = sqrt(g_lat² + g_lon²)`.
-7. **Yaw rate out**: `yaw_dps = ψ̇ · 180/π`.
+7. **Yaw rate out**: `yaw_dps = ψ̇ · 180/π`, emitted on every step; when orientation is not yet learned (or on the car, `φ ≡ 0`) `ψ̇` reduces to the earth-frame `ω.z`.
 8. **Stillness** updated for bias calibration and drag arming.
 
 All float32. No trig tables needed; `sinf/cosf/atan2f` at 100 Hz cost < 1 % CPU.

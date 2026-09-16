@@ -500,6 +500,7 @@ typedef struct {
 #define LEAN_DISAGREE_DPS      10.0f
 #define LEAN_DISAGREE_S        5
 #define LEAN_REF_MIN_SPEED_MPS 3.0f
+#define LEAN_REF_TIMEOUT_S     5
 #define STILL_ACC_VAR          (0.02f * 0.02f)
 #define STILL_GYRO_VAR         (2.0f * 2.0f)
 #define STILL_WINDOW_S         2

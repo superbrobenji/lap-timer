@@ -555,6 +555,222 @@ static void test_degenerate_forward_sum_restarts_the_tracker(void)
     TEST_ASSERT_EQUAL_UINT8(1, fus_calib(&f)->forward_ok);
 }
 
+/* ---- §9.3 fusion math: lean complementary filter, earth-frame yaw, lateral g, GPS cross-check ---- */
+
+/* Body-Z rate for a steady turn: -383 LSB / 16.4 = -23.35 dps. With the cos(phi) projection of
+ * §9.3 step 3, the fused earth-frame rate settles at psi-dot = omega.z * cos(phi*) = -0.3 rad/s once
+ * the lean reaches its fixed point phi* = atan(v*0.3/g) = 42.5 deg (yaw ~ -17.2 dps, g_lat ~ 0.918). */
+static const int16_t GZ_RIGHT = -383;      /* right turn: yaw < 0 */
+static const int16_t GZ_LEFT  =  383;      /* left turn:  yaw > 0 */
+
+/* Raw sample at a given time from accel (g) and gyro (dps). */
+static imu_raw_t raw_tg(int64_t mono_us, float ax_g, float ay_g, float az_g,
+                        float gx_dps, float gy_dps, float gz_dps)
+{
+    imu_raw_t r;
+    r.mono_us = mono_us;
+    r.ax = (int16_t)lroundf(ax_g * IMU_ACC_LSB_PER_G);
+    r.ay = (int16_t)lroundf(ay_g * IMU_ACC_LSB_PER_G);
+    r.az = (int16_t)lroundf(az_g * IMU_ACC_LSB_PER_G);
+    r.gx = (int16_t)lroundf(gx_dps * IMU_GYR_LSB_PER_DPS);
+    r.gy = (int16_t)lroundf(gy_dps * IMU_GYR_LSB_PER_DPS);
+    r.gz = (int16_t)lroundf(gz_dps * IMU_GYR_LSB_PER_DPS);
+    return r;
+}
+
+/* One steady-turn raw sample: constant body-Z gyro (identity mount, zero pitch, so body Z is the
+ * earth yaw axis), upright 1 g on Z, no lateral or forward specific force. */
+static imu_raw_t raw_turn(int64_t mono_us, int16_t gz_lsb)
+{
+    imu_raw_t r;
+    r.mono_us = mono_us;
+    r.ax = 0; r.ay = 0; r.az = (int16_t)lroundf(IMU_ACC_LSB_PER_G);
+    r.gx = 0; r.gy = 0; r.gz = gz_lsb;
+    return r;
+}
+
+/* Fully-calibrated identity mount: identity rotation, forward learned, zero gyro bias known. Lets the
+ * §9.3 cases drive fus_step directly without replaying the 2.2 capture choreography. */
+static void calibrated_identity(fus_calib_t *c)
+{
+    fus_calib_defaults(c);
+    c->orient_ok = 1; c->forward_ok = 1; c->bias_ok = 1;
+}
+
+/* Drives the moto steady turn: nsamp fus_step samples at FUSION_HZ, feeding a GPS fix at the start of
+ * every FIX_EVERY-sample block (a continuous 5 Hz cadence tracked by *phase). Each fix first advances
+ * the course by course_step_deg, so the GPS turn rate reads -course_step_deg / 0.2 s. *t carries the
+ * running mono time; *course the running compass heading. */
+static void drive_turn(fus_t *f, fused_sample_t *o, int nsamp, int16_t gz_lsb, float v_mps,
+                       float course_step_deg, int64_t *t, float *course, int *phase)
+{
+    for (int i = 0; i < nsamp; i++) {
+        if (*phase % FIX_EVERY == 0) {
+            *course += course_step_deg;
+            if (*course >= 360.0f) *course -= 360.0f;
+            else if (*course < 0.0f) *course += 360.0f;
+            fus_set_gps_speed(f, v_mps, *course, *t, true);
+        }
+        imu_raw_t r = raw_turn(*t, gz_lsb);
+        fus_step(f, &r, o);
+        *t += 1000000 / FUSION_HZ;
+        (*phase)++;
+    }
+}
+
+static void test_moto_steady_right_turn_converges(void)
+{
+    /* Roadmap exit criterion. Steady right turn at 30 m/s, GZ_RIGHT chosen so the fused psi-dot
+     * settles at -0.3 rad/s (fixed point 42.56 deg). omega.x = 0, so the gyro roll is flat and the
+     * complementary filter is pulled from lean_rad = 0 to phi_ref = atan2(-v*psi-dot, g). tau =
+     * dt/(1-alpha) = 0.5 s; the atan2 nonlinearity converges slightly faster, reaching ~41.9 deg at
+     * 1.5 s (150 samples), inside +-1 deg. Courses advance +3.438 deg/fix (GPS yaw -17.19 dps), so
+     * the cross-check agrees and never trips. */
+    fus_calib_t c; calibrated_identity(&c);
+    fus_t f; fus_init(&f, &c, 1);                          /* moto */
+    fused_sample_t o; int64_t t = 1000000; float course = 90.0f; int phase = 0;
+    drive_turn(&f, &o, 150, GZ_RIGHT, 30.0f, 3.4382f, &t, &course, &phase);   /* 1.5 s */
+
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 42.5f, o.lean_deg);     /* roadmap: within +-1 deg in 1.5 s */
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.917f, o.g_lat);      /* -v*psi-dot/g > 0 (right); tol per task */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, -17.19f, o.yaw_dps);    /* -0.3 rad/s; 0.5 dps covers 1.5 s residual */
+    TEST_ASSERT_EQUAL_UINT8(FUS_LEAN_VALID, o.flags & FUS_LEAN_VALID);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_DISAGREE);    /* GPS turn rate agrees */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_CLAMPED);
+}
+
+static void test_moto_steady_left_turn_converges(void)
+{
+    /* Mirror of the right turn: GZ_LEFT gives psi-dot = +0.3 rad/s, lean -42.5 deg, g_lat < 0 (left),
+     * yaw +17.19 dps. Courses advance -3.438 deg/fix (GPS yaw +17.19 dps), so they agree. */
+    fus_calib_t c; calibrated_identity(&c);
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o; int64_t t = 1000000; float course = 90.0f; int phase = 0;
+    drive_turn(&f, &o, 150, GZ_LEFT, 30.0f, -3.4382f, &t, &course, &phase);
+
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, -42.5f, o.lean_deg);
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, -0.917f, o.g_lat);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 17.19f, o.yaw_dps);
+    TEST_ASSERT_EQUAL_UINT8(FUS_LEAN_VALID, o.flags & FUS_LEAN_VALID);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_DISAGREE);
+}
+
+static void test_moto_pure_gyro_and_lean_valid_timeout(void)
+{
+    fus_calib_t c; calibrated_identity(&c);
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o; int64_t t = 1000000;
+
+    /* Pure gyro: with no GPS reference, alpha is effectively 1 and the lean is the gyro integral.
+     * omega.x = 20 dps for 0.5 s (50 samples) integrates to 20 * 0.5 = 10 deg, exact up to the LSB
+     * rounding of the raw sample. FUS_LEAN_VALID stays clear: no reference has ever been applied. */
+    for (int i = 0; i < 50; i++) {
+        imu_raw_t r = raw_tg(t, 0.0f, 0.0f, 1.0f, 20.0f, 0.0f, 0.0f);
+        fus_step(&f, &r, &o);
+        t += 1000000 / FUSION_HZ;
+    }
+    TEST_ASSERT_FLOAT_WITHIN(0.05f, 10.0f, o.lean_deg);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);
+
+    /* One fresh, fast, valid fix applies a reference and raises FUS_LEAN_VALID. */
+    fus_set_gps_speed(&f, 30.0f, 90.0f, t, true);
+    imu_raw_t r = raw_tg(t, 0.0f, 0.0f, 1.0f, 20.0f, 0.0f, 0.0f);
+    fus_step(&f, &r, &o);
+    const int64_t t_ref = t;
+    t += 1000000 / FUSION_HZ;
+    TEST_ASSERT_EQUAL_UINT8(FUS_LEAN_VALID, o.flags & FUS_LEAN_VALID);
+
+    /* GPS goes invalid; drive upright (omega.x = 0) with no fresh reference for 7 s. FUS_LEAN_VALID
+     * holds for LEAN_REF_TIMEOUT_S after the last reference, then clears. */
+    fus_set_gps_speed(&f, 0.0f, 0.0f, t, false);
+    uint8_t flags_at_3s = 0xFF;
+    for (int i = 0; i < 700; i++) {
+        imu_raw_t s = raw_tg(t, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+        fus_step(&f, &s, &o);
+        if (t - t_ref >= 3000000 && flags_at_3s == 0xFF) flags_at_3s = o.flags;   /* first sample past 3 s */
+        t += 1000000 / FUSION_HZ;
+    }
+    TEST_ASSERT_EQUAL_UINT8(FUS_LEAN_VALID, flags_at_3s & FUS_LEAN_VALID);   /* < 5 s: still valid */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);                    /* ~7 s: cleared */
+}
+
+static void test_lean_and_g_are_clamped(void)
+{
+    /* Lean clamp: 200 dps of roll for 0.5 s would integrate to 100 deg (no reference, pure
+     * integrator), clamped to LEAN_MAX_DEG = 70 with FUS_CLAMPED set. */
+    fus_calib_t c; calibrated_identity(&c);
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o; int64_t t = 1000000;
+    for (int i = 0; i < 50; i++) {
+        imu_raw_t r = raw_tg(t, 0.0f, 0.0f, 1.0f, 200.0f, 0.0f, 0.0f);
+        fus_step(&f, &r, &o);
+        t += 1000000 / FUSION_HZ;
+    }
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 70.0f, o.lean_deg);
+    TEST_ASSERT_EQUAL_UINT8(FUS_CLAMPED, o.flags & FUS_CLAMPED);
+
+    /* g clamp: 4 g of forward specific force is clamped to G_MAX = 3.0, and g_comb is formed from the
+     * clamped components, so it is 3.0 too. */
+    fus_t f2; fus_init(&f2, &c, 1);
+    imu_raw_t r = raw_tg(t, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+    fus_step(&f2, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 3.0f, o.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 3.0f, o.g_comb);
+    TEST_ASSERT_EQUAL_UINT8(FUS_CLAMPED, o.flags & FUS_CLAMPED);
+}
+
+static void test_gps_cross_check_disagrees_and_latches(void)
+{
+    /* Steady right turn (fused yaw ~ -17 dps) but the GPS courses run the wrong way, implying a
+     * +5 dps left turn: |-17 - 5| = 22 > LEAN_DISAGREE_DPS. Under LEAN_DISAGREE_S the flag stays
+     * clear; once the disagreement has held past it, FUS_DISAGREE sets and disagree_latched latches.
+     * course_step = -1 deg/fix -> GPS yaw = -(-1)/0.2 = +5 dps. The disagreement starts at the 2nd
+     * fix (sample 20, t0 + 0.2 s), so FUS_DISAGREE sets 5 s later, at sample 520. */
+    fus_calib_t c; calibrated_identity(&c);
+    fus_t f; fus_init(&f, &c, 1);
+    fused_sample_t o; int64_t t = 1000000; float course = 90.0f; int phase = 0;
+
+    drive_turn(&f, &o, 300, GZ_RIGHT, 30.0f, -1.0f, &t, &course, &phase);    /* ~2.8 s past onset */
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_DISAGREE);      /* < LEAN_DISAGREE_S: no flag yet */
+    TEST_ASSERT_FALSE(f.disagree_latched);
+
+    drive_turn(&f, &o, 240, GZ_RIGHT, 30.0f, -1.0f, &t, &course, &phase);    /* to ~5.2 s past onset */
+    TEST_ASSERT_EQUAL_UINT8(FUS_DISAGREE, o.flags & FUS_DISAGREE);
+    TEST_ASSERT_TRUE(f.disagree_latched);
+
+    /* Return the GPS course to agreement (+3.438 deg/fix -> -17.19 dps). The flag clears on the
+     * sample, but disagree_latched stays set for the session (the pipeline logs it once). */
+    drive_turn(&f, &o, 100, GZ_RIGHT, 30.0f, 3.4382f, &t, &course, &phase);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_DISAGREE);
+    TEST_ASSERT_TRUE(f.disagree_latched);
+}
+
+static void test_car_variant_lateral_g_and_yaw(void)
+{
+    fus_calib_t c; calibrated_identity(&c);
+    fus_t f; fus_init(&f, &c, 0);                          /* car */
+    fused_sample_t o; int64_t t = 1000000;
+
+    /* A right-hand lateral specific force (vehicle -Y) reads as +g_lat directly from -a.y, not from
+     * v*psi-dot. Lean is not meaningful for a car: lean_deg stays 0 and FUS_LEAN_VALID never sets,
+     * even with a fresh fast GPS fix. */
+    fus_set_gps_speed(&f, 30.0f, 90.0f, t, true);
+    imu_raw_t r = raw_tg(t, 0.0f, -0.4f, 1.0f, 0.0f, 0.0f, 0.0f);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.4f, o.g_lat);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, o.lean_deg);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);
+    t += 1000000 / FUSION_HZ;
+
+    /* Yaw uses phi == 0, so psi-dot = omega.z: a +10 dps body-Z rate reads as +10 dps (left). */
+    fus_set_gps_speed(&f, 30.0f, 90.0f, t, true);
+    r = raw_tg(t, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 10.0f);
+    fus_step(&f, &r, &o);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 10.0f, o.yaw_dps);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, o.lean_deg);
+    TEST_ASSERT_EQUAL_UINT8(0, o.flags & FUS_LEAN_VALID);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -573,5 +789,11 @@ int main(void)
     RUN_TEST(test_calibration_persists_through_the_calib_record_after_learning);
     RUN_TEST(test_recapture_resets_forward_learning);
     RUN_TEST(test_degenerate_forward_sum_restarts_the_tracker);
+    RUN_TEST(test_moto_steady_right_turn_converges);
+    RUN_TEST(test_moto_steady_left_turn_converges);
+    RUN_TEST(test_moto_pure_gyro_and_lean_valid_timeout);
+    RUN_TEST(test_lean_and_g_are_clamped);
+    RUN_TEST(test_gps_cross_check_disagrees_and_latches);
+    RUN_TEST(test_car_variant_lateral_g_and_yaw);
     return UNITY_END();
 }
