@@ -2,6 +2,11 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## core_selftest on ESP32 (plan 02, session 2.6)
+
+- Date: 2026-09-16. Commit: 832e7ab (branch s2.6-drag). ESP-IDF v5.3.2. Same board and port. 19 suites (`drag` added; its analytic fused/GPS streams need no synth). App binary 396,736 bytes.
+- Result: `=== core_selftest RESULT: PASS, 0 failing suites, stack6k OK (3532 B free), free heap 128192, min free 114992 ===`. `drag` 1159 ms on target (the 0.5 g run, gates, trap, braking, false-start, benches). All others under 0.4 s except the ring stress (10,049 ms).
+
 ## core_selftest on ESP32 (plan 02, session 2.5)
 
 - Date: 2026-09-16. Commit: e55d1eb (branch s2.5-lap2). ESP-IDF v5.3.2. Same board and port. 18 suites (`lap_gate` added; `lap` now covers sectors, disambiguation, on-device creation, RTC, predictive). App binary 382,992 bytes.

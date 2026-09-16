@@ -43,7 +43,7 @@ components/core/
   include/core/fus.h    fusion/fus.c  fusion/fus_still.c  fusion/fus_orient.c  fusion/fus_fwd.c   (session 2.2; 2.3 extends fus.h/fus.c for the lean filter and GPS cross-check)
   include/core/event.h                                             (session 2.4; shared event_t + EV_* codes)
   include/core/lap.h    lapengine/lap.c  lapengine/lap_gate.c      (2.4 part 1; 2.5 adds sectors/§10.5/§10.7–11 in lap.c and the gate helper lap_gate.c)
-  include/core/drag.h   dragengine/drag.c                          (session 2.6)
+  include/core/drag.h   dragengine/drag.c                          (session 2.6; test/test_drag.c, analytic — no synth dependency)
 test/
   test_fus.c  test_fus_still.c  test_fus_orient.c  test_fus_fwd.c    (session 2.2)
   test_lap.c  test_drag.c                                          (sessions 2.4–2.6)
@@ -19503,5 +19503,2593 @@ git commit -m "plan 02 session 2.5 t4: RTC continuity and predictive delta (O5)
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
 ```
+
+---
+
+## Session 2.6 — drag engine: arm, launch back-dating, dead-reckoned speed/distance, gates, trap, braking, benches, false start
+
+Roadmap exit criterion: an analytic 0.5 g run's gates land within ±20 ms; tag `p02-d6`. Serial (three tasks): the drag state machine is one coupled block in `drag_on_fused`. Ruling: §6.6's strip trap (mean v over the last TRAP_DIST_M) is the physically-correct drag-strip trap ≈223 km/h; §22.1's "226" was the instantaneous 1/4-line speed, recorded separately on the 1/4 gate's `speed_cms`. §22.1 reconciled to state both. The drag tests build the fused and GPS streams analytically (no synth/replaylib) and run on the ESP32 self-test.
+
+### Task 1: `drag.h` contract, §6.6 integration, GPS re-anchor, arm and history ring (serial)
+
+Session 2.6 is the drag engine (spec §11, §6.6). It is three serial tasks because `drag_on_fused` is one
+coupled state machine. **Task 1 lands the whole session contract in `core/drag.h`** — `drag_gate_def_t`,
+the gate-kind and state enums, `drag_cfg_t` (gate table up to `DRAG_MAX_GATES`, `benches_kmh` default
+`{100,200,300}`, a rollout-enable bool defaulting OFF for GPS timing, km/h units), `drag_cfg_defaults`
+filling the §11.1 eleven-gate list, the `drag_evt_cb_t` typedef, the fused-sample history ring sized for
+≥1 s at `FUSION_HZ`, and the caller-owned `drag_t` (no allocation) — plus the §5.2 function list
+verbatim. It implements the §6.6 `v_est`/`dist` integration, the `drag_on_fix` Doppler re-anchor, the
+IDLE→ARMED transition and the history ring. Launch detection, t0 back-dating, gate evaluation, the trap,
+DONE, braking, the false-start abort and the best-per-gate are documented no-op stubs here: Task 2 adds
+launch/gates/trap/DONE and Task 3 adds braking, the false-start abort and the session best. **Tasks 2
+and 3 MUST NOT change `core/drag.h`.**
+
+`sizeof(drag_t)` is ~3.3 KB (3312 B measured); the 1 s history ring (128 × `drag_hist_t` = 2048 B)
+dominates. The ring stores only the two fields the launch back-scan and dist re-base need (`gps_us`,
+`g_lon`), not the whole `fused_sample_t`, keeping the struct modest.
+
+**Files:**
+- Create: `components/core/include/core/drag.h`, `components/core/dragengine/drag.c`, `test/test_drag.c`
+- Modify: `docs/superpowers/specs/2026-09-14-lap-timer-design.md` (§5.2; §4.8; §4.2 already lists `dragengine/drag.c` and `test_drag.c`)
+
+`test/CMakeLists.txt` is not touched: `test_drag.c` is picked up by the `test_*.c` glob and links
+`core`/`unity`/`m` (it needs no synth/replay library — the fused and GPS streams are built analytically,
+so the same file also builds and runs on the ESP32 `core_selftest`).
+
+**Interfaces:**
+- Consumes: `core/types.h` (`fused_sample_t`, `gps_fix_t`, `drag_result_t`, `drag_gate_res_t`, `DRAG_F_ROLLOUT`, `DRAG_F_QUARTER`, `DRAG_MAX_GATES`, `FUS_STILL`, `GPS_FLAG_*`), `core/consts.h` (`G_MPS2`, `FUSION_HZ`, `DRAG_ARM_SPEED_KMH`, `DRAG_ARM_STILL_S`, `DRAG_LAUNCH_G`, `DRAG_LAUNCH_HOLD_MS`, `DRAG_LAUNCH_SCAN_G`, `DRAG_ROLLOUT_M`, `DRAG_TIMEOUT_S`, `DRAG_FALSE_START_S`, `TRAP_DIST_M`), `core/event.h` (`event_t`, `EV_DRAG_ARMED/LAUNCH/GATE/DONE`).
+- Produces: `core/drag.h` below, verbatim — the contract for the whole session. `dragengine/drag.c` implements the §6.6 integration, `drag_on_fix`, arming and the history ring; launch, gates, trap, DONE, braking, false-start and best are documented stubs Tasks 2–3 fill.
+
+- [ ] **Step 1: Write the tests**
+
+`test/test_drag.c` (Task 2 and Task 3 restate this file, adding cases). Four cases: the §6.6 constant-`a`
+integration (`v_est = a·t`, `dist = ½·a·t²`), the GPS re-anchor resetting `v_est` to Doppler `gSpeed`
+(including a lagging, later-arriving fix, and an invalid fix that must not re-anchor), the arm condition
+(`v_est < DRAG_ARM_SPEED_KMH` and `FUS_STILL` for `DRAG_ARM_STILL_S` → `DRAG_ST_ARMED`, `EV_DRAG_ARMED`),
+and that a broken still spell restarts the dwell. `drag_t` is a file-scope `static` (it is multi-KB — a
+stack instance would overflow the 24 KB self-test task stack).
+
+```c
+#include "unity.h"
+#include "core/drag.h"
+#include "core/consts.h"
+#include "core/types.h"
+#include <math.h>
+#include <string.h>
+
+/* Drag engine tests (spec §11, §6.6, §22.1). Pure C11 so this file also builds and runs on the ESP32
+ * (core_selftest): the fused and GPS streams are built analytically, with no synth/replay library and
+ * no host-only headers. drag_t is multi-KB (its history ring), so the engine is a file-scope `static`,
+ * never a big stack local — a stack drag_t would overflow the 24 KB self-test task stack. */
+
+static drag_t D;                    /* shared, re-init per test — off the stack */
+
+/* ---- event capture ---- */
+typedef struct { int n; uint8_t type[128]; uint16_t arg16[128]; uint32_t arg32[128], arg32b[128]; } evlog_t;
+static evlog_t EV;
+static void ev_cb(const event_t *ev, void *ctx)
+{
+    (void)ctx;
+    if (EV.n < 128) {
+        EV.type[EV.n]   = ev->type;
+        EV.arg16[EV.n]  = ev->arg16;
+        EV.arg32[EV.n]  = ev->arg32;
+        EV.arg32b[EV.n] = ev->arg32b;
+    }
+    EV.n++;
+}
+static int ev_count(uint8_t type)
+{
+    int c = 0;
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == type) c++;
+    return c;
+}
+
+void setUp(void)    { memset(&EV, 0, sizeof EV); }
+void tearDown(void) {}
+
+/* ---- stream helpers ---- */
+static fused_sample_t fused(int64_t gps_us, float g_lon, uint8_t flags)
+{
+    fused_sample_t fs;
+    memset(&fs, 0, sizeof fs);
+    fs.gps_us  = gps_us;
+    fs.mono_us = gps_us;
+    fs.g_lon   = g_lon;
+    fs.flags   = flags;
+    return fs;
+}
+static gps_fix_t gfix(int64_t gps_us, int32_t gspeed_mms, bool valid)
+{
+    gps_fix_t f;
+    memset(&f, 0, sizeof f);
+    f.gps_us     = gps_us;
+    f.mono_us    = gps_us;
+    f.gspeed_mms = gspeed_mms;
+    f.fix_type   = 3;
+    f.sats       = 9;
+    f.flags      = GPS_FLAG_FIXOK;
+    f.valid      = valid ? 1 : 0;
+    return f;
+}
+
+#define DT_US        (1000000 / FUSION_HZ)    /* 10 000 us = one fused sample */
+
+/* ------------------------------------------------------------ Task 1 tests */
+
+/* §6.6: a constant a_lon gives v_est = a·t and dist = ½·a·t². The trapezoid is exact for a linear v,
+ * so the only error is floating point. Runs in IDLE (never armed: g_lon > 0 keeps v_est above the arm
+ * speed and no FUS_STILL is set), so the integrators run freely from the first sample. */
+static void test_integration_constant_accel(void)
+{
+    drag_init(&D, NULL);
+    const double a = 0.30 * G_MPS2;             /* g_lon = 0.30 → a ≈ 2.942 m/s² */
+    for (int k = 0; k <= 300; k++) {            /* 3 s at 100 Hz */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.30f, 0);
+        drag_on_fused(&D, &fs, NULL, NULL);
+        if (k == 100 || k == 200 || k == 300) {
+            double t = (double)k * 0.01;
+            TEST_ASSERT_DOUBLE_WITHIN(1e-6, a * t, D.v_est);
+            TEST_ASSERT_DOUBLE_WITHIN(1e-4, 0.5 * a * t * t, D.dist_m);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));   /* never armed */
+}
+
+/* §6.6: every valid fix resets v_est to the Doppler gSpeed (no blend), the IMU only bridges between
+ * fixes. A lagging fix that arrives after some integration re-anchors again. An invalid fix does not. */
+static void test_gps_reanchor_resets_v_est(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 50; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    TEST_ASSERT_DOUBLE_WITHIN(1e-3, 0.20 * G_MPS2 * 0.5, D.v_est);
+
+    gps_fix_t f1 = gfix(50 * DT_US, 5000, true);           /* Doppler says 5.000 m/s */
+    drag_on_fix(&D, &f1);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 5.0, D.v_est);
+
+    for (int k = 51; k <= 70; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    TEST_ASSERT_DOUBLE_WITHIN(2e-3, 5.0 + 0.20 * G_MPS2 * 0.2, D.v_est);
+
+    double before = D.v_est;
+    gps_fix_t bad = gfix(71 * DT_US, 1000, false);         /* invalid: must not re-anchor */
+    drag_on_fix(&D, &bad);
+    TEST_ASSERT_EQUAL_DOUBLE(before, D.v_est);
+
+    gps_fix_t f2 = gfix(72 * DT_US, 3000, true);           /* lagging valid fix: re-anchors again */
+    drag_on_fix(&D, &f2);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3.0, D.v_est);
+}
+
+/* §11.2: v_est < DRAG_ARM_SPEED_KMH and FUS_STILL held for DRAG_ARM_STILL_S enters ARMED and emits
+ * EV_DRAG_ARMED once. Before the dwell elapses the engine is still IDLE. */
+static void test_arm_after_still_dwell(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 199; k++) {            /* t = 0 .. 1.99 s: not yet armed */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
+
+    fused_sample_t fs = fused((int64_t)200 * DT_US, 0.0f, FUS_STILL);   /* t = 2.00 s: arms */
+    drag_on_fused(&D, &fs, ev_cb, &EV);
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_ARMED));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, D.v_est);     /* arming zeroes v_est and dist (§11.2) */
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, D.dist_m);
+}
+
+/* Motion (no FUS_STILL) never arms, and a broken still spell restarts the dwell. */
+static void test_arm_requires_continuous_stillness(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 150; k++) {            /* 1.5 s still */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    fused_sample_t bump = fused((int64_t)151 * DT_US, 0.0f, 0);   /* stillness lost: timer restarts */
+    drag_on_fused(&D, &bump, ev_cb, &EV);
+    for (int k = 152; k <= 300; k++) {          /* another 1.49 s still — still short of 2 s */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_integration_constant_accel);
+    RUN_TEST(test_gps_reanchor_resets_v_est);
+    RUN_TEST(test_arm_after_still_dwell);
+    RUN_TEST(test_arm_requires_continuous_stillness);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Write `core/drag.h`**
+
+The full contract for the session. Pure C11, no IDF, no allocation.
+
+```c
+#ifndef CORE_DRAG_H
+#define CORE_DRAG_H
+#include <stdint.h>
+#include <stdbool.h>
+#include "core/types.h"
+#include "core/consts.h"
+#include "core/event.h"
+
+/* Drag engine (spec §11, §6.6). Pure C11, no IDF, no allocation; all state lives in caller-owned
+ * drag_t. Vehicle-agnostic (moto/car): it consumes only fused samples (100 Hz) and GPS fixes.
+ *
+ * Speed/distance (§6.6): v_est integrates a_lon (= g_lon·G_MPS2) per fused sample by trapezoid and is
+ * re-anchored to the Doppler gSpeed at every valid fix (drag_on_fix; Doppler is authoritative, the IMU
+ * only bridges the 100–200 ms between fixes). dist is the trapezoid integral of v_est from t0. Both are
+ * integrated continuously; arming zeroes them and launch re-bases dist to t0 (see §11.2).
+ *
+ * State machine (§11.2): IDLE → ARMED → LAUNCHED → DONE.
+ *   IDLE     — nothing; watches for the arm condition.
+ *   ARMED    — v_est < DRAG_ARM_SPEED_KMH and FUS_STILL held for DRAG_ARM_STILL_S. Emits EV_DRAG_ARMED;
+ *              zeroes dist and v_est; the 1 s fused-sample history ring keeps rolling for the launch
+ *              back-scan.
+ *   LAUNCHED — g_lon > DRAG_LAUNCH_G held for DRAG_LAUNCH_HOLD_MS. t0 is back-dated to the first sample
+ *              of the contiguous g_lon > DRAG_LAUNCH_SCAN_G run ending at detection (scanned out of the
+ *              history ring); with rollout enabled t0 is moved to where dist reaches DRAG_ROLLOUT_M and
+ *              dist re-zeroed there (DRAG_F_ROLLOUT). Emits EV_DRAG_LAUNCH. Gates are evaluated every
+ *              sample with the §6.6 linear interpolation for the crossing time.
+ *   DONE     — the 1/4-mile gate is hit (DRAG_F_QUARTER); or v_est < 0.5·v_peak with no gate for
+ *              DRAG_TIMEOUT_S after a peak; or v_est < DRAG_ARM_SPEED_KMH. The result is frozen and
+ *              EV_DRAG_DONE emitted; the braking (100-0) gate may still complete after DONE.
+ * Abort (§11.2): v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns to
+ * ARMED (false start, e.g. a clutch-dump stall).
+ *
+ * Gate kinds (§11.1): SPEED_FROM0 (0→a km/h), SPEED_RANGE (a→b km/h), DIST (a cm), BRAKE (a→b km/h, the
+ * 100-0 stopping distance). The 1/4 gate — the trap gate — is the DIST gate with the largest distance
+ * a; hitting it ends the run and its trap_cms is the mean v_est over dist ∈ [D − TRAP_DIST_M, D] (§6.6).
+ *
+ * Units and signs: gate a/b are km/h (SPEED_*) or cm (DIST); g_lon is + when accelerating (core/types.h).
+ * All engine times are int64 gps microseconds; result times are uint32 ms rounded to nearest. cfg.units
+ * selects only the display/bench list, not the wire values. Default gate list is the §11.1 eleven. */
+
+/* One default gate (spec §5.2). id is stable and logged (DRAG_GATE/DRAG_RUN, §12.3). */
+typedef struct { uint8_t id; uint8_t kind; uint16_t a, b; /* km/h (SPEED_*) or cm (DIST) */ } drag_gate_def_t;
+
+enum {                              /* drag_gate_def_t.kind */
+    DRAG_SPEED_FROM0 = 0,           /* 0 → a km/h */
+    DRAG_SPEED_RANGE = 1,           /* a → b km/h */
+    DRAG_DIST        = 2,           /* a cm from t0 */
+    DRAG_BRAKE       = 3            /* a → b km/h (100-0 stopping distance) */
+};
+
+enum {                              /* drag_state() values (§11.2) */
+    DRAG_ST_IDLE     = 0,
+    DRAG_ST_ARMED    = 1,
+    DRAG_ST_LAUNCHED = 2,
+    DRAG_ST_DONE     = 3
+};
+
+enum { DRAG_UNITS_KMH = 0, DRAG_UNITS_MPH = 1 };   /* cfg.units: display + bench-list selection only */
+
+/* ≥ 1 s of fused samples at FUSION_HZ for the launch back-scan (§11.2). Rounded up past FUSION_HZ so a
+ * full second of samples always fits with headroom; the newest DRAG_HIST_N entries are retained. */
+#define DRAG_HIST_N (FUSION_HZ + 28)     /* 128 entries = 1.28 s at 100 Hz */
+
+typedef struct {
+    int64_t gps_us;                 /* fused-sample time */
+    float   g_lon;                  /* longitudinal g at that sample */
+} drag_hist_t;                      /* only the two fields the back-scan and dist re-base need */
+
+typedef struct {
+    drag_gate_def_t gates[DRAG_MAX_GATES];
+    uint8_t  n_gates;
+    uint16_t benches_kmh[4];        /* headline benches (§11.4); SPEED_FROM0 gates whose a is listed */
+    uint8_t  n_benches;
+    bool     rollout;               /* default OFF: for GPS timing the 1 ft rollout adds error, so the
+                                     * timer starts at the launch instant, not after 1 ft (§11.2, §15.1) */
+    uint8_t  units;                 /* DRAG_UNITS_* — display/bench selection only */
+} drag_cfg_t;
+
+void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {100,200,300}, rollout off, km/h */
+
+typedef void (*drag_evt_cb_t)(const event_t *ev, void *ctx);
+
+typedef struct {
+    drag_cfg_t cfg;
+    uint8_t    state;               /* DRAG_ST_* */
+    uint16_t   run_no;              /* increments on each launch */
+
+    /* §6.6 speed/distance integration (SI: m/s, m, s from gps_us) */
+    double  v_est;                  /* dead-reckoned speed, m/s */
+    double  dist_m;                 /* integral of v_est from t0, m */
+    double  a_prev;                 /* previous sample a_lon, m/s^2 (trapezoid) */
+    double  v_prev;                 /* previous sample v_est, m/s */
+    double  dist_prev;              /* previous sample dist, m */
+    int64_t prev_gps_us;            /* previous fused-sample time */
+    bool    have_prev;
+    int64_t t0_gps_us;              /* launch instant (back-dated), 0 until launched */
+    double  v_peak;                 /* peak v_est since launch, m/s */
+    int64_t last_gate_gps_us;       /* time of the last gate hit (DONE timeout, §11.2) */
+
+    /* arm / launch / false-start / done timers */
+    bool    still_run;              /* a slow+still spell is in progress */
+    int64_t still_since_us;
+    bool    launch_run;             /* a g_lon>DRAG_LAUNCH_G spell is in progress */
+    int64_t launch_since_us;
+    int64_t done_gps_us;            /* time DONE was entered (DONE→IDLE after 5 s) */
+    bool    rollout_done;
+
+    /* braking (100-0) gate accumulation */
+    bool    brake_active;
+    bool    brake_done;
+    int64_t brake_start_gps_us;
+    double  brake_dist_m;
+
+    /* trap accumulation for the 1/4 (max-distance DIST) gate */
+    double   trap_sum;              /* Σ v_est over the trap window, m/s */
+    uint32_t trap_n;
+    uint8_t  quarter_idx;           /* index of the 1/4 gate in cfg.gates, or DRAG_NO_GATE */
+    double   quarter_dist_m;
+
+    /* SPEED_RANGE bookkeeping, parallel to cfg.gates */
+    bool    range_started[DRAG_MAX_GATES];
+    int64_t range_a_gps_us[DRAG_MAX_GATES];
+    double  range_a_dist_m[DRAG_MAX_GATES];
+
+    /* fused-sample history ring for the launch back-scan (§11.2) */
+    drag_hist_t hist[DRAG_HIST_N];
+    uint16_t    hist_head;          /* next write slot */
+    uint16_t    hist_count;         /* valid entries, ≤ DRAG_HIST_N */
+
+    /* results (§11.3). cur is the run in progress / last frozen run. best is a composite whose gates[]
+     * carry the best-per-gate value across the session (see drag_best). */
+    drag_result_t cur;
+    drag_result_t best;
+    bool          have_best;
+} drag_t;
+
+#define DRAG_NO_GATE 0xFF
+
+void     drag_init(drag_t *D, const drag_cfg_t *cfg);   /* cfg NULL → defaults; clears results */
+void     drag_reset(drag_t *D);                         /* back to IDLE; keeps cfg and session best */
+void     drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx);   /* 100 Hz */
+void     drag_on_fix(drag_t *D, const gps_fix_t *fix);  /* re-anchors v_est to Doppler gSpeed */
+uint8_t  drag_state(const drag_t *D);
+const drag_result_t *drag_current(const drag_t *D);     /* run in progress or last frozen; NULL if none */
+/* Best per gate across the session (§11.3): lowest time_ms among hit gates (BRAKE = shortest dist_cm).
+ * Returns a composite drag_result_t* whose gates[] slot for gate_id carries that best value, or NULL if
+ * gate_id was never hit in any completed run. */
+const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id);
+#endif
+```
+
+- [ ] **Step 3: Write `dragengine/drag.c` (part 1)**
+
+The §6.6 `v_est`/`dist` trapezoid integration, the `drag_on_fix` Doppler re-anchor, `drag_init`/
+`drag_reset`/`drag_state`/`drag_current`, the IDLE→ARMED arm detection and the history ring. Launch,
+gates, trap, DONE, braking, false-start and `drag_best` are documented stubs.
+
+```c
+#include "core/drag.h"
+#include <string.h>
+
+/* Drag engine (spec §11, §6.6). Session 2.6 part 1 (Task 1): the §6.6 v_est/dist integration and the
+ * drag_on_fix Doppler re-anchor, the IDLE → ARMED transition and the fused-sample history ring.
+ * Launch detection, t0 back-dating, gate evaluation, the trap, DONE, braking, false-start and the
+ * best-per-gate result are documented no-op stubs here; Task 2 adds launch/gates/trap/DONE and Task 3
+ * adds braking, the false-start abort and the session best. */
+
+/* ---- unit helpers ---- */
+static double kmh_to_mps(double kmh) { return kmh / 3.6; }
+
+/* ---- configuration ---- */
+
+void drag_cfg_defaults(drag_cfg_t *c)
+{
+    memset(c, 0, sizeof *c);
+    /* §11.1 default gate list (km/h for SPEED_*, cm for DIST). ids are stable and logged. */
+    static const drag_gate_def_t def[] = {
+        { 1,  DRAG_SPEED_FROM0,  60,   0 },
+        { 2,  DRAG_SPEED_FROM0,  100,  0 },
+        { 3,  DRAG_SPEED_FROM0,  200,  0 },
+        { 4,  DRAG_SPEED_FROM0,  300,  0 },
+        { 5,  DRAG_SPEED_RANGE,  100,  200 },
+        { 6,  DRAG_DIST,         1829, 0 },      /* 60 ft */
+        { 7,  DRAG_DIST,         10058, 0 },     /* 330 ft */
+        { 8,  DRAG_DIST,         20117, 0 },     /* 1/8 mile */
+        { 9,  DRAG_DIST,         30480, 0 },     /* 1000 ft */
+        { 10, DRAG_DIST,         40234, 0 },     /* 1/4 mile (trap) */
+        { 11, DRAG_BRAKE,        100,  0 },      /* 100-0 */
+    };
+    c->n_gates = (uint8_t)(sizeof def / sizeof def[0]);
+    for (uint8_t i = 0; i < c->n_gates; i++) c->gates[i] = def[i];
+    c->benches_kmh[0] = 100;
+    c->benches_kmh[1] = 200;
+    c->benches_kmh[2] = 300;
+    c->n_benches = 3;
+    c->rollout = false;
+    c->units   = DRAG_UNITS_KMH;
+}
+
+/* The 1/4 (trap) gate is the DIST gate with the largest distance a (§11.1 lists it as gate 10). */
+static void find_quarter(drag_t *D)
+{
+    D->quarter_idx    = DRAG_NO_GATE;
+    D->quarter_dist_m = 0.0;
+    uint16_t best_a = 0;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
+        if (D->cfg.gates[i].kind == DRAG_DIST && D->cfg.gates[i].a >= best_a) {
+            best_a = D->cfg.gates[i].a;
+            D->quarter_idx    = i;
+            D->quarter_dist_m = (double)D->cfg.gates[i].a / 100.0;
+        }
+    }
+}
+
+/* Lay out cur.gates[] to mirror cfg.gates order, all unhit; clears the run accumulators. */
+static void reset_run(drag_t *D)
+{
+    memset(&D->cur, 0, sizeof D->cur);
+    D->cur.n_gates = D->cfg.n_gates;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) D->cur.gates[i].gate_id = D->cfg.gates[i].id;
+    D->v_peak = 0.0;
+    D->last_gate_gps_us = 0;
+    D->rollout_done = false;
+    D->brake_active = false;
+    D->brake_done   = false;
+    D->brake_start_gps_us = 0;
+    D->brake_dist_m = 0.0;
+    D->trap_sum = 0.0;
+    D->trap_n   = 0;
+    memset(D->range_started, 0, sizeof D->range_started);
+}
+
+static void reset_to_idle(drag_t *D)
+{
+    D->state = DRAG_ST_IDLE;            /* run_no is left untouched: it persists across resets */
+    D->v_est = D->dist_m = 0.0;
+    D->a_prev = D->v_prev = D->dist_prev = 0.0;
+    D->prev_gps_us = 0;
+    D->have_prev = false;
+    D->t0_gps_us = 0;
+    D->still_run = false;
+    D->still_since_us = 0;
+    D->launch_run = false;
+    D->launch_since_us = 0;
+    D->done_gps_us = 0;
+    D->hist_head = 0;
+    D->hist_count = 0;
+    reset_run(D);
+}
+
+void drag_init(drag_t *D, const drag_cfg_t *cfg)
+{
+    memset(D, 0, sizeof *D);
+    if (cfg) D->cfg = *cfg;
+    else drag_cfg_defaults(&D->cfg);
+    find_quarter(D);
+    D->run_no = 0;
+    reset_to_idle(D);
+    D->have_best = false;
+    memset(&D->best, 0, sizeof D->best);
+}
+
+void drag_reset(drag_t *D)
+{
+    reset_to_idle(D);                   /* keeps cfg, run_no and the session best (§11.3) */
+}
+
+/* ---- queries ---- */
+
+uint8_t drag_state(const drag_t *D) { return D->state; }
+
+const drag_result_t *drag_current(const drag_t *D)
+{
+    return (D->run_no > 0 || D->state != DRAG_ST_IDLE) ? &D->cur : NULL;
+}
+
+const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id)
+{
+    (void)D; (void)gate_id;
+    return NULL;                        /* session best — Task 3 */
+}
+
+/* ---- events ---- */
+
+static void emit(drag_evt_cb_t cb, void *ctx, uint8_t type, uint16_t arg16,
+                 int64_t gps_us, int64_t mono_us, uint32_t arg32, uint32_t arg32b)
+{
+    if (!cb) return;
+    event_t ev = { type, 0, arg16, gps_us, mono_us, arg32, arg32b };
+    cb(&ev, ctx);
+}
+
+/* ---- history ring ---- */
+
+static void hist_push(drag_t *D, int64_t gps_us, float g_lon)
+{
+    D->hist[D->hist_head].gps_us = gps_us;
+    D->hist[D->hist_head].g_lon  = g_lon;
+    D->hist_head = (uint16_t)((D->hist_head + 1) % DRAG_HIST_N);
+    if (D->hist_count < DRAG_HIST_N) D->hist_count++;
+}
+
+/* ---- fix re-anchor (§6.6): reset v_est to the Doppler gSpeed at every valid fix ---- */
+
+void drag_on_fix(drag_t *D, const gps_fix_t *fix)
+{
+    if (!fix || !fix->valid) return;
+    double v = (double)fix->gspeed_mms / 1000.0;    /* mm/s → m/s */
+    if (v < 0.0) v = 0.0;
+    D->v_est  = v;
+    D->v_prev = v;                                  /* the next fused step integrates from here */
+    if (D->state == DRAG_ST_LAUNCHED && v > D->v_peak) D->v_peak = v;
+}
+
+/* ---- arm detection (IDLE → ARMED, §11.2) ---- */
+
+static void enter_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+{
+    D->state = DRAG_ST_ARMED;
+    D->v_est = D->dist_m = 0.0;          /* §11.2: dist = 0, v_est = 0 */
+    D->v_prev = D->dist_prev = 0.0;
+    D->launch_run = false;
+    reset_run(D);
+    emit(cb, ctx, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
+}
+
+/* ---- one fused sample (100 Hz) ---- */
+
+void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx)
+{
+    if (!fs) return;
+    const int64_t now = fs->gps_us;
+    const double  a_cur = (double)fs->g_lon * G_MPS2;
+
+    /* §6.6 integration: v_est by trapezoid on a_lon, dist by trapezoid on v_est. Both run continuously;
+     * arming zeroes them and (Task 2) launch re-bases dist to t0. */
+    if (D->have_prev) {
+        double dt = (double)(now - D->prev_gps_us) / 1e6;
+        if (dt <= 0.0) dt = 1.0 / (double)FUSION_HZ;         /* out-of-order / duplicate guard */
+        D->v_est += 0.5 * (D->a_prev + a_cur) * dt;
+        if (D->v_est < 0.0) D->v_est = 0.0;
+        D->dist_m += 0.5 * (D->v_prev + D->v_est) * dt;
+    }
+
+    hist_push(D, now, fs->g_lon);
+
+    switch (D->state) {
+    case DRAG_ST_IDLE: {
+        /* Arm when slow (v_est < DRAG_ARM_SPEED_KMH) and still (FUS_STILL) for DRAG_ARM_STILL_S. */
+        bool slow  = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+        bool still = (fs->flags & FUS_STILL) != 0;
+        if (slow && still) {
+            if (!D->still_run) { D->still_run = true; D->still_since_us = now; }
+            else if (now - D->still_since_us >= (int64_t)DRAG_ARM_STILL_S * 1000000) {
+                enter_armed(D, cb, ctx, now, fs->mono_us);
+            }
+        } else {
+            D->still_run = false;
+        }
+        break;
+    }
+    case DRAG_ST_ARMED:
+        /* Launch detection, t0 back-dating and the LAUNCHED machine are added in Task 2. The history
+         * ring above keeps rolling so the back-scan has ≥ 1 s of samples ready. */
+        break;
+    case DRAG_ST_LAUNCHED:
+    case DRAG_ST_DONE:
+        break;                          /* Task 2 / Task 3 */
+    default:
+        break;
+    }
+
+    D->a_prev = a_cur;
+    D->v_prev = D->v_est;
+    D->dist_prev = D->dist_m;
+    D->prev_gps_us = now;
+    D->have_prev = true;
+}
+```
+
+- [ ] **Step 4: Build and run**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug 2>&1 | tail -1 && cmake --build test/build --parallel 2>&1 | grep -E "error|warning" | head; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: no `error`/`warning` lines; `100% tests passed out of 27` (`test_drag` added: 4 cases). Verified warning-free under ASan/UBSan (clang) and gcc-16.
+
+- [ ] **Step 5: Spec write-backs**
+
+In `docs/superpowers/specs/2026-09-14-lap-timer-design.md`:
+
+(a) §4.2: `dragengine/drag.c` and `test_drag.c` already appear in the planned layout — verify with
+`grep -n "dragengine/drag.c" docs/superpowers/specs/2026-09-14-lap-timer-design.md`; no edit needed.
+
+(b) §5.2: replace the `#### \`core/drag.h\` (planned, plan 02)` block (heading through the closing
+fence after `drag_best`) with:
+
+````
+#### `core/drag.h` — drag engine (plan 02)
+
+`drag_result_t`, `drag_gate_res_t` and `DRAG_F_*` live in `core/types.h`; the event a run emits is
+`event_t` in `core/event.h`. All state is caller-owned in `drag_t` (no allocation, ~3.3 KB — the 1 s
+fused-sample history ring dominates). Gate kinds: `DRAG_SPEED_FROM0`, `DRAG_SPEED_RANGE`, `DRAG_DIST`,
+`DRAG_BRAKE`. States: `DRAG_ST_IDLE`, `DRAG_ST_ARMED`, `DRAG_ST_LAUNCHED`, `DRAG_ST_DONE`. The gate
+table, benches (`{100,200,300}` km/h default), a rollout flag (default OFF for GPS timing) and the
+display units live in `drag_cfg_t`, filled by `drag_cfg_defaults` with the §11.1 eleven gates.
+
+```c
+typedef struct { uint8_t id; uint8_t kind; /* DRAG_SPEED_FROM0/RANGE, DRAG_DIST, DRAG_BRAKE */ uint16_t a, b; /* km/h or cm */ } drag_gate_def_t;
+typedef void (*drag_evt_cb_t)(const event_t *ev, void *ctx);
+
+void drag_cfg_defaults(drag_cfg_t *c);
+void drag_init(drag_t *D, const drag_cfg_t *cfg);
+void drag_reset(drag_t *D);
+void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx);   /* 100 Hz */
+void drag_on_fix(drag_t *D, const gps_fix_t *fix);                                       /* re-anchors speed */
+uint8_t drag_state(const drag_t *D);
+const drag_result_t *drag_current(const drag_t *D);
+const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id);   /* composite best per gate; NULL if that gate was never hit */
+```
+
+The 1/4 (trap) gate is the DIST gate with the largest distance; its `trap_cms` is the §6.6 trap-window
+mean of `v_est` (see §11.3). Session 2.6 implements the whole engine: §6.6 integration and the Doppler
+re-anchor, the IDLE→ARMED→LAUNCHED→DONE machine, launch with t0 back-dating and optional rollout, gate
+evaluation with §6.6 interpolation, the trap, the false-start abort, the braking gate that may complete
+after DONE, and the best-per-gate.
+````
+
+(c) §4.8: after the `Lap engine \`lap_t\`` row add:
+
+```
+| Drag engine `drag_t` (gate table, 1 s fused-sample history ring, current + composite-best results) | ~3.3 KB, caller-provided (drag mode) |
+```
+
+Verify: `grep -c "drag engine (plan 02)" docs/superpowers/specs/2026-09-14-lap-timer-design.md` prints 1;
+`grep -c "Drag engine .drag_t" docs/superpowers/specs/2026-09-14-lap-timer-design.md` prints 1.
+
+- [ ] **Step 6: Hygiene and commit**
+
+Run: `git diff --check` — expect no output.
+
+```bash
+git add components/core/include/core/drag.h components/core/dragengine/drag.c test/test_drag.c \
+        docs/superpowers/specs/2026-09-14-lap-timer-design.md \
+        docs/superpowers/plans/2026-09-14-plan-02-core-engines.md
+git commit -m "plan 02 session 2.6 t1: drag.h contract, §6.6 integration, GPS re-anchor, arm, history ring
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+---
+
+### Task 2: launch detection, t0 back-dating, rollout, gate evaluation, trap and DONE (serial)
+
+Task 2 extends `dragengine/drag.c` with the launched half of the state machine. Launch fires when
+`g_lon > DRAG_LAUNCH_G` is held for `DRAG_LAUNCH_HOLD_MS`; `t0` is back-dated to the first sample of the
+contiguous `g_lon > DRAG_LAUNCH_SCAN_G` run ending at detection, scanned out of the history ring, and
+`v_est`/`dist` are reconstructed from that instant (`v = 0` at t0). With rollout enabled, `t0` moves to
+where `dist` reaches `DRAG_ROLLOUT_M` and `dist` is re-zeroed (`DRAG_F_ROLLOUT`). Gates are evaluated
+every sample with the §6.6 linear interpolation: SPEED_FROM0 (0→a), SPEED_RANGE (a→b interval), DIST
+(a cm). The 1/4 gate (the DIST gate with the largest distance) ends the run (`DRAG_F_QUARTER`, DONE) and
+carries the trap — the mean `v_est` over `dist ∈ [D − TRAP_DIST_M, D]`. `EV_DRAG_LAUNCH/GATE/DONE` fire.
+Braking, the false-start abort and the session best are still stubs (Task 3). It restates `drag.c` and
+`test_drag.c` cumulatively; `core/drag.h` is unchanged.
+
+**Files:**
+- Modify: `components/core/dragengine/drag.c`, `test/test_drag.c`
+
+**Interfaces:**
+- Consumes: the `core/drag.h` contract from Task 1 (unchanged), the §6.6 constants and `EV_DRAG_*`.
+- Produces: `drag.c` with the LAUNCHED machine, launch/t0/rollout/gates/trap/DONE; `test_drag.c` with the §22.1 launched-run cases added.
+
+- [ ] **Step 1: Restate the tests**
+
+`test/test_drag.c` — the four Task 1 cases plus five: the synthetic constant 0.5 g run (fused 100 Hz,
+Doppler 5 Hz) hitting 0-100 at 5.665 s and the 1/4 (402.34 m) at 12.810 s (within ±5 ms, well inside
+§22.1's ±20 ms); the trap and line speed (see the ruling in Step 3); the SPEED_RANGE 100-200 gate; the
+§6.6 ±5 ms interpolation resolution (60 ft and 0-100 gates); and rollout shifting t0 by 0.353 s with
+`DRAG_F_ROLLOUT`. `drag_t` stays a file-scope `static`; the fused/GPS streams are built analytically.
+
+```c
+#include "unity.h"
+#include "core/drag.h"
+#include "core/consts.h"
+#include "core/types.h"
+#include <math.h>
+#include <string.h>
+
+/* Drag engine tests (spec §11, §6.6, §22.1). Pure C11 so this file also builds and runs on the ESP32
+ * (core_selftest): the fused and GPS streams are built analytically, with no synth/replay library and
+ * no host-only headers. drag_t is multi-KB (its history ring), so the engine is a file-scope `static`,
+ * never a big stack local — a stack drag_t would overflow the 24 KB self-test task stack. */
+
+static drag_t D;                    /* shared, re-init per test — off the stack */
+
+/* ---- event capture ---- */
+typedef struct { int n; uint8_t type[128]; uint16_t arg16[128]; uint32_t arg32[128], arg32b[128]; } evlog_t;
+static evlog_t EV;
+static void ev_cb(const event_t *ev, void *ctx)
+{
+    (void)ctx;
+    if (EV.n < 128) {
+        EV.type[EV.n]   = ev->type;
+        EV.arg16[EV.n]  = ev->arg16;
+        EV.arg32[EV.n]  = ev->arg32;
+        EV.arg32b[EV.n] = ev->arg32b;
+    }
+    EV.n++;
+}
+static int ev_count(uint8_t type)
+{
+    int c = 0;
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == type) c++;
+    return c;
+}
+
+void setUp(void)    { memset(&EV, 0, sizeof EV); }
+void tearDown(void) {}
+
+/* ---- stream helpers ---- */
+static fused_sample_t fused(int64_t gps_us, float g_lon, uint8_t flags)
+{
+    fused_sample_t fs;
+    memset(&fs, 0, sizeof fs);
+    fs.gps_us  = gps_us;
+    fs.mono_us = gps_us;
+    fs.g_lon   = g_lon;
+    fs.flags   = flags;
+    return fs;
+}
+static gps_fix_t gfix(int64_t gps_us, int32_t gspeed_mms, bool valid)
+{
+    gps_fix_t f;
+    memset(&f, 0, sizeof f);
+    f.gps_us     = gps_us;
+    f.mono_us    = gps_us;
+    f.gspeed_mms = gspeed_mms;
+    f.fix_type   = 3;
+    f.sats       = 9;
+    f.flags      = GPS_FLAG_FIXOK;
+    f.valid      = valid ? 1 : 0;
+    return f;
+}
+
+#define DT_US        (1000000 / FUSION_HZ)    /* 10 000 us = one fused sample */
+#define ARM_LAST_K   200                      /* still samples 0..200: arms at t = 2.00 s */
+#define LAUNCH_K     201                      /* first launch sample; its time is the back-dated t0 */
+#define T_LAUNCH_US  ((int64_t)LAUNCH_K * DT_US)   /* 2.01 s */
+
+/* Drive still+slow fused samples until the engine arms (t = 2.00 s). */
+static void arm_engine(drag_evt_cb_t cb, void *ctx)
+{
+    for (int k = 0; k <= ARM_LAST_K; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, cb, ctx);
+    }
+}
+
+/* From the armed state, feed a constant longitudinal g at 100 Hz with a 5 Hz Doppler GPS re-anchor
+ * (gSpeed = a·(t − t0), the exact speed), until DONE or max_k. */
+static void run_const_g(double g, int max_k, drag_evt_cb_t cb, void *ctx)
+{
+    double a = g * G_MPS2;
+    for (int k = LAUNCH_K; k <= max_k; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, (float)g, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) {                          /* 5 Hz fixes */
+            double tl = (double)(t - T_LAUNCH_US) / 1e6;
+            if (tl < 0.0) tl = 0.0;
+            gps_fix_t f = gfix(t, (int32_t)(a * tl * 1000.0), true);
+            drag_on_fix(&D, &f);
+        }
+        if (drag_state(&D) == DRAG_ST_DONE) break;
+    }
+}
+
+static const drag_gate_res_t *gate_by_id(const drag_result_t *r, uint8_t id)
+{
+    for (int i = 0; i < r->n_gates; i++) if (r->gates[i].gate_id == id) return &r->gates[i];
+    return NULL;
+}
+
+/* ------------------------------------------------------------ Task 1 tests */
+
+/* §6.6: a constant a_lon gives v_est = a·t and dist = ½·a·t². The trapezoid is exact for a linear v,
+ * so the only error is floating point. Runs in IDLE (never armed: g_lon > 0 keeps v_est above the arm
+ * speed and no FUS_STILL is set), so the integrators run freely from the first sample. */
+static void test_integration_constant_accel(void)
+{
+    drag_init(&D, NULL);
+    const double a = 0.30 * G_MPS2;             /* g_lon = 0.30 → a ≈ 2.942 m/s² */
+    for (int k = 0; k <= 300; k++) {            /* 3 s at 100 Hz */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.30f, 0);
+        drag_on_fused(&D, &fs, NULL, NULL);
+        if (k == 100 || k == 200 || k == 300) {
+            double t = (double)k * 0.01;
+            TEST_ASSERT_DOUBLE_WITHIN(1e-6, a * t, D.v_est);
+            TEST_ASSERT_DOUBLE_WITHIN(1e-4, 0.5 * a * t * t, D.dist_m);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));   /* never armed */
+}
+
+/* §6.6: every valid fix resets v_est to the Doppler gSpeed (no blend), the IMU only bridges between
+ * fixes. A lagging fix that arrives after some integration re-anchors again. An invalid fix does not. */
+static void test_gps_reanchor_resets_v_est(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 50; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    TEST_ASSERT_DOUBLE_WITHIN(1e-3, 0.20 * G_MPS2 * 0.5, D.v_est);
+
+    gps_fix_t f1 = gfix(50 * DT_US, 5000, true);           /* Doppler says 5.000 m/s */
+    drag_on_fix(&D, &f1);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 5.0, D.v_est);
+
+    for (int k = 51; k <= 70; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    TEST_ASSERT_DOUBLE_WITHIN(2e-3, 5.0 + 0.20 * G_MPS2 * 0.2, D.v_est);
+
+    double before = D.v_est;
+    gps_fix_t bad = gfix(71 * DT_US, 1000, false);         /* invalid: must not re-anchor */
+    drag_on_fix(&D, &bad);
+    TEST_ASSERT_EQUAL_DOUBLE(before, D.v_est);
+
+    gps_fix_t f2 = gfix(72 * DT_US, 3000, true);           /* lagging valid fix: re-anchors again */
+    drag_on_fix(&D, &f2);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3.0, D.v_est);
+}
+
+/* §11.2: v_est < DRAG_ARM_SPEED_KMH and FUS_STILL held for DRAG_ARM_STILL_S enters ARMED and emits
+ * EV_DRAG_ARMED once. Before the dwell elapses the engine is still IDLE. */
+static void test_arm_after_still_dwell(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 199; k++) {            /* t = 0 .. 1.99 s: not yet armed */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
+
+    fused_sample_t fs = fused((int64_t)200 * DT_US, 0.0f, FUS_STILL);   /* t = 2.00 s: arms */
+    drag_on_fused(&D, &fs, ev_cb, &EV);
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_ARMED));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, D.v_est);     /* arming zeroes v_est and dist (§11.2) */
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, D.dist_m);
+}
+
+/* Motion (no FUS_STILL) never arms, and a broken still spell restarts the dwell. */
+static void test_arm_requires_continuous_stillness(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 150; k++) {            /* 1.5 s still */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    fused_sample_t bump = fused((int64_t)151 * DT_US, 0.0f, 0);   /* stillness lost: timer restarts */
+    drag_on_fused(&D, &bump, ev_cb, &EV);
+    for (int k = 152; k <= 300; k++) {          /* another 1.49 s still — still short of 2 s */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
+}
+
+/* ------------------------------------------------------------ Task 2 tests */
+
+/* §22.1: a synthetic constant 0.5 g run (fused 100 Hz, Doppler 5 Hz) hits 0-100 at 5.66 s and the
+ * 1/4 (402.34 m) at 12.81 s, both within ±20 ms; the interpolation actually lands them within ±5 ms.
+ * Launch back-dates t0 to the first g-spike sample, the launch/gate/done events fire, and the run
+ * finishes DONE with DRAG_F_QUARTER. */
+static void test_run_0p5g_zero_to_hundred_and_quarter(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_const_g(0.5, 1700, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_DONE));
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT64(T_LAUNCH_US, D.t0_gps_us);      /* t0 = the first g-spike sample */
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+
+    const drag_gate_res_t *g100 = gate_by_id(r, 2);
+    const drag_gate_res_t *gq   = gate_by_id(r, 10);
+    TEST_ASSERT_NOT_NULL(g100);  TEST_ASSERT_NOT_NULL(gq);
+    TEST_ASSERT_TRUE(g100->hit); TEST_ASSERT_TRUE(gq->hit);
+    /* 0-100 at 5.665 s, 1/4 at 12.810 s — both within ±5 ms of analytic (well inside §22.1's ±20 ms) */
+    TEST_ASSERT_INT_WITHIN(5, 5665, (int)g100->time_ms);
+    TEST_ASSERT_INT_WITHIN(5, 12810, (int)gq->time_ms);
+    TEST_ASSERT_TRUE(ev_count(EV_DRAG_GATE) >= 2);
+}
+
+/* §22.1 trap. NOTE — a real spec conflict, ruled here: §6.6 defines the trap as the mean v_est over
+ * the samples with dist ∈ [D − TRAP_DIST_M, D] (the 66 ft speed trap). For this run that mean is
+ * 223.3 km/h. §22.1's "trap ≈ 226 km/h" is the *instantaneous* speed at the 1/4 line (a·t_quarter),
+ * a different quantity. We implement §6.6 (the physically-correct trap) and additionally assert the
+ * line speed so both numbers are pinned. */
+static void test_run_0p5g_trap_and_line_speed(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    double trap_kmh = (double)r->trap_cms * 0.036;                 /* cm/s → km/h */
+    TEST_ASSERT_DOUBLE_WITHIN(2.0, 223.3, trap_kmh);               /* §6.6 trap-window mean */
+
+    const drag_gate_res_t *gq = gate_by_id(r, 10);
+    double line_kmh = (double)gq->speed_cms * 0.036;
+    TEST_ASSERT_DOUBLE_WITHIN(2.0, 226.1, line_kmh);               /* §22.1's "226" = the line speed */
+}
+
+/* §11.1: the SPEED_RANGE 100-200 gate records the interval between the 100 km/h and 200 km/h
+ * crossings. For a constant 0.5 g run that interval equals the 0-100 time, 5.665 s. */
+static void test_run_0p5g_speed_range_100_200(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_gate_res_t *g = gate_by_id(drag_current(&D), 5);
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_TRUE(g->hit);
+    TEST_ASSERT_INT_WITHIN(20, 5665, (int)g->time_ms);            /* (200−100) km/h at 0.5 g */
+}
+
+/* §6.6: linear interpolation gives ≤ ±5 ms timing resolution. Checked on the 60 ft distance gate
+ * (18.29 m, crossing at 2.731 s) and the 0-100 speed gate: both land within 5 ms of analytic even
+ * though the true crossing falls between two 10 ms samples. */
+static void test_interpolation_resolution_5ms(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    double a = 0.5 * G_MPS2;
+    int t60  = (int)(sqrt(2.0 * (1829.0 / 100.0) / a) * 1000.0 + 0.5);   /* 2731 ms */
+    int t100 = (int)((100.0 / 3.6) / a * 1000.0 + 0.5);                   /* 5665 ms */
+    TEST_ASSERT_INT_WITHIN(5, t60,  (int)gate_by_id(r, 6)->time_ms);
+    TEST_ASSERT_INT_WITHIN(5, t100, (int)gate_by_id(r, 2)->time_ms);
+}
+
+/* §11.2 rollout: with rollout enabled, t0 moves to where dist reaches DRAG_ROLLOUT_M (1 ft) and dist
+ * is re-zeroed there. From rest at 0.5 g that is 0.353 s after the launch instant, and DRAG_F_ROLLOUT
+ * is set. (Default is rollout OFF, verified by the run above whose t0 stays at the launch instant.) */
+static void test_rollout_shifts_t0(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.rollout = true;
+    drag_init(&D, &c);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_ROLLOUT);
+    double a = 0.5 * G_MPS2;
+    double expect_s = (double)T_LAUNCH_US / 1e6 + sqrt(2.0 * (double)DRAG_ROLLOUT_M / a);
+    TEST_ASSERT_DOUBLE_WITHIN(0.02, expect_s, (double)D.t0_gps_us / 1e6);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);                  /* the run still completes */
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_integration_constant_accel);
+    RUN_TEST(test_gps_reanchor_resets_v_est);
+    RUN_TEST(test_arm_after_still_dwell);
+    RUN_TEST(test_arm_requires_continuous_stillness);
+    RUN_TEST(test_run_0p5g_zero_to_hundred_and_quarter);
+    RUN_TEST(test_run_0p5g_trap_and_line_speed);
+    RUN_TEST(test_run_0p5g_speed_range_100_200);
+    RUN_TEST(test_interpolation_resolution_5ms);
+    RUN_TEST(test_rollout_shifts_t0);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Restate `dragengine/drag.c`**
+
+Adds launch detection, `do_launch` (history back-scan + reconstruction), the rollout, `gate_step`
+(SPEED_FROM0/SPEED_RANGE/DIST with §6.6 interpolation), the trap accumulation and `finalize_trap`, and
+the DONE conditions, with `EV_DRAG_LAUNCH/GATE/DONE`. Braking, false-start and `drag_best` remain stubs.
+
+```c
+#include "core/drag.h"
+#include <string.h>
+
+/* Drag engine (spec §11, §6.6). Session 2.6 through Task 2: the §6.6 v_est/dist integration and the
+ * drag_on_fix Doppler re-anchor, the full IDLE → ARMED → LAUNCHED → DONE state machine, launch
+ * detection with t0 back-dating out of the history ring, the optional rollout, gate evaluation
+ * (SPEED_FROM0 / SPEED_RANGE / DIST) with §6.6 interpolation, the trap and DONE, plus EV_DRAG_ARMED/
+ * LAUNCH/GATE/DONE. The braking (100-0) gate, the false-start abort and the session best-per-gate are
+ * documented stubs here and added in Task 3. */
+
+/* ---- unit helpers ---- */
+static double kmh_to_mps(double kmh) { return kmh / 3.6; }
+
+/* ---- configuration ---- */
+
+void drag_cfg_defaults(drag_cfg_t *c)
+{
+    memset(c, 0, sizeof *c);
+    /* §11.1 default gate list (km/h for SPEED_*, cm for DIST). ids are stable and logged. */
+    static const drag_gate_def_t def[] = {
+        { 1,  DRAG_SPEED_FROM0,  60,   0 },
+        { 2,  DRAG_SPEED_FROM0,  100,  0 },
+        { 3,  DRAG_SPEED_FROM0,  200,  0 },
+        { 4,  DRAG_SPEED_FROM0,  300,  0 },
+        { 5,  DRAG_SPEED_RANGE,  100,  200 },
+        { 6,  DRAG_DIST,         1829, 0 },      /* 60 ft */
+        { 7,  DRAG_DIST,         10058, 0 },     /* 330 ft */
+        { 8,  DRAG_DIST,         20117, 0 },     /* 1/8 mile */
+        { 9,  DRAG_DIST,         30480, 0 },     /* 1000 ft */
+        { 10, DRAG_DIST,         40234, 0 },     /* 1/4 mile (trap) */
+        { 11, DRAG_BRAKE,        100,  0 },      /* 100-0 */
+    };
+    c->n_gates = (uint8_t)(sizeof def / sizeof def[0]);
+    for (uint8_t i = 0; i < c->n_gates; i++) c->gates[i] = def[i];
+    c->benches_kmh[0] = 100;
+    c->benches_kmh[1] = 200;
+    c->benches_kmh[2] = 300;
+    c->n_benches = 3;
+    c->rollout = false;
+    c->units   = DRAG_UNITS_KMH;
+}
+
+/* The 1/4 (trap) gate is the DIST gate with the largest distance a (§11.1 lists it as gate 10). */
+static void find_quarter(drag_t *D)
+{
+    D->quarter_idx    = DRAG_NO_GATE;
+    D->quarter_dist_m = 0.0;
+    uint16_t best_a = 0;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
+        if (D->cfg.gates[i].kind == DRAG_DIST && D->cfg.gates[i].a >= best_a) {
+            best_a = D->cfg.gates[i].a;
+            D->quarter_idx    = i;
+            D->quarter_dist_m = (double)D->cfg.gates[i].a / 100.0;
+        }
+    }
+}
+
+/* Lay out cur.gates[] to mirror cfg.gates order, all unhit; clears the run accumulators. */
+static void reset_run(drag_t *D)
+{
+    memset(&D->cur, 0, sizeof D->cur);
+    D->cur.n_gates = D->cfg.n_gates;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) D->cur.gates[i].gate_id = D->cfg.gates[i].id;
+    D->v_peak = 0.0;
+    D->last_gate_gps_us = 0;
+    D->rollout_done = false;
+    D->brake_active = false;
+    D->brake_done   = false;
+    D->brake_start_gps_us = 0;
+    D->brake_dist_m = 0.0;
+    D->trap_sum = 0.0;
+    D->trap_n   = 0;
+    memset(D->range_started, 0, sizeof D->range_started);
+}
+
+/* Light reset: back to IDLE, integration/timers cleared, but the frozen result (cur), run_no and the
+ * session best are preserved (used for the auto DONE→IDLE settle). */
+static void go_idle_keep_result(drag_t *D)
+{
+    D->state = DRAG_ST_IDLE;
+    D->v_est = D->dist_m = 0.0;
+    D->a_prev = D->v_prev = D->dist_prev = 0.0;
+    D->prev_gps_us = 0;
+    D->have_prev = false;
+    D->t0_gps_us = 0;
+    D->still_run = false;
+    D->still_since_us = 0;
+    D->launch_run = false;
+    D->launch_since_us = 0;
+    D->done_gps_us = 0;
+    D->hist_head = 0;
+    D->hist_count = 0;
+}
+
+static void reset_to_idle(drag_t *D)
+{
+    go_idle_keep_result(D);
+    reset_run(D);                       /* also clears the current result */
+}
+
+void drag_init(drag_t *D, const drag_cfg_t *cfg)
+{
+    memset(D, 0, sizeof *D);
+    if (cfg) D->cfg = *cfg;
+    else drag_cfg_defaults(&D->cfg);
+    find_quarter(D);
+    D->run_no = 0;
+    reset_to_idle(D);
+    D->have_best = false;
+    memset(&D->best, 0, sizeof D->best);
+}
+
+void drag_reset(drag_t *D)
+{
+    reset_to_idle(D);                   /* keeps cfg, run_no and the session best (§11.3) */
+}
+
+/* ---- queries ---- */
+
+uint8_t drag_state(const drag_t *D) { return D->state; }
+
+const drag_result_t *drag_current(const drag_t *D)
+{
+    return (D->run_no > 0 || D->state != DRAG_ST_IDLE) ? &D->cur : NULL;
+}
+
+const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id)
+{
+    (void)D; (void)gate_id;
+    return NULL;                        /* session best — Task 3 */
+}
+
+/* ---- events ---- */
+
+static void emit(drag_evt_cb_t cb, void *ctx, uint8_t type, uint16_t arg16,
+                 int64_t gps_us, int64_t mono_us, uint32_t arg32, uint32_t arg32b)
+{
+    if (!cb) return;
+    event_t ev = { type, 0, arg16, gps_us, mono_us, arg32, arg32b };
+    cb(&ev, ctx);
+}
+
+/* ---- history ring ---- */
+
+static void hist_push(drag_t *D, int64_t gps_us, float g_lon)
+{
+    D->hist[D->hist_head].gps_us = gps_us;
+    D->hist[D->hist_head].g_lon  = g_lon;
+    D->hist_head = (uint16_t)((D->hist_head + 1) % DRAG_HIST_N);
+    if (D->hist_count < DRAG_HIST_N) D->hist_count++;
+}
+
+/* ---- fix re-anchor (§6.6): reset v_est to the Doppler gSpeed at every valid fix ---- */
+
+void drag_on_fix(drag_t *D, const gps_fix_t *fix)
+{
+    if (!fix || !fix->valid) return;
+    double v = (double)fix->gspeed_mms / 1000.0;    /* mm/s → m/s */
+    if (v < 0.0) v = 0.0;
+    D->v_est  = v;
+    D->v_prev = v;                                  /* the next fused step integrates from here */
+    if (D->state == DRAG_ST_LAUNCHED && v > D->v_peak) D->v_peak = v;
+}
+
+/* ---- gate crossing / trap for one integration step (§6.6 linear interpolation) ----
+ * (tp,vp,dp) is the previous sample, (tc,vc,dc) the current one. Records any SPEED_FROM0/SPEED_RANGE/
+ * DIST gate crossed in the interval and accumulates the trap window for the 1/4 gate. */
+
+static void record_gate(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t idx,
+                        int64_t t_cross, double v_cross_mps, double dist_cross_m)
+{
+    drag_gate_res_t *g = &D->cur.gates[idx];
+    if (g->hit) return;
+    int64_t rel = t_cross - D->t0_gps_us;
+    if (rel < 0) rel = 0;
+    g->hit       = 1;
+    g->time_ms   = (uint32_t)((rel + 500) / 1000);
+    g->speed_cms = (uint16_t)(v_cross_mps * 100.0 + 0.5);
+    g->dist_cm   = (uint32_t)(dist_cross_m * 100.0 + 0.5);
+    D->last_gate_gps_us = t_cross;
+    emit(cb, ctx, EV_DRAG_GATE, D->cfg.gates[idx].id, t_cross, t_cross, g->time_ms, g->speed_cms);
+}
+
+static void gate_step(drag_t *D, drag_evt_cb_t cb, void *ctx,
+                      int64_t tp, double vp, double dp, int64_t tc, double vc, double dc)
+{
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
+        const drag_gate_def_t *def = &D->cfg.gates[i];
+        switch (def->kind) {
+        case DRAG_SPEED_FROM0: {
+            if (D->cur.gates[i].hit) break;
+            double V = kmh_to_mps((double)def->a);
+            if (vp < V && vc >= V && vc > vp) {
+                double frac = (V - vp) / (vc - vp);
+                int64_t t_cross = tp + (int64_t)(frac * (double)(tc - tp));
+                double d_cross = dp + frac * (dc - dp);
+                record_gate(D, cb, ctx, i, t_cross, V, d_cross);
+            }
+            break;
+        }
+        case DRAG_DIST: {
+            if (D->cur.gates[i].hit) break;
+            double Dm = (double)def->a / 100.0;
+            if (dp < Dm && dc >= Dm && dc > dp) {
+                double frac = (Dm - dp) / (dc - dp);
+                int64_t t_cross = tp + (int64_t)(frac * (double)(tc - tp));
+                double v_cross = vp + frac * (vc - vp);
+                record_gate(D, cb, ctx, i, t_cross, v_cross, Dm);
+            }
+            break;
+        }
+        case DRAG_SPEED_RANGE: {
+            double Va = kmh_to_mps((double)def->a);
+            double Vb = kmh_to_mps((double)def->b);
+            if (!D->range_started[i]) {
+                if (vp < Va && vc >= Va && vc > vp) {
+                    double frac = (Va - vp) / (vc - vp);
+                    D->range_a_gps_us[i] = tp + (int64_t)(frac * (double)(tc - tp));
+                    D->range_a_dist_m[i] = dp + frac * (dc - dp);
+                    D->range_started[i]  = true;
+                }
+            }
+            if (D->range_started[i] && !D->cur.gates[i].hit) {
+                if (vp < Vb && vc >= Vb && vc > vp) {
+                    double frac = (Vb - vp) / (vc - vp);
+                    int64_t t_b = tp + (int64_t)(frac * (double)(tc - tp));
+                    double d_b = dp + frac * (dc - dp);
+                    drag_gate_res_t *g = &D->cur.gates[i];
+                    int64_t rel = t_b - D->range_a_gps_us[i];
+                    if (rel < 0) rel = 0;
+                    g->hit       = 1;
+                    g->time_ms   = (uint32_t)((rel + 500) / 1000);
+                    g->speed_cms = (uint16_t)(Vb * 100.0 + 0.5);
+                    double d_int = d_b - D->range_a_dist_m[i];
+                    if (d_int < 0) d_int = 0;
+                    g->dist_cm   = (uint32_t)(d_int * 100.0 + 0.5);
+                    D->last_gate_gps_us = t_b;
+                    emit(cb, ctx, EV_DRAG_GATE, def->id, t_b, t_b, g->time_ms, g->speed_cms);
+                }
+            }
+            break;
+        }
+        case DRAG_BRAKE:
+        default:
+            break;                      /* braking gate — Task 3 */
+        }
+    }
+
+    /* Trap window for the 1/4 gate: mean v_est over samples with dist ∈ [D − TRAP_DIST_M, D] (§6.6). */
+    if (D->quarter_idx != DRAG_NO_GATE) {
+        double lo = D->quarter_dist_m - (double)TRAP_DIST_M;
+        if (dc >= lo && dc <= D->quarter_dist_m) {
+            D->trap_sum += vc;
+            D->trap_n++;
+        }
+    }
+}
+
+static void finalize_trap(drag_t *D)
+{
+    if (D->trap_n > 0)
+        D->cur.trap_cms = (uint16_t)((D->trap_sum / (double)D->trap_n) * 100.0 + 0.5);
+}
+
+/* ---- state transitions ---- */
+
+static void enter_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+{
+    D->state = DRAG_ST_ARMED;
+    D->v_est = D->dist_m = 0.0;          /* §11.2: dist = 0, v_est = 0 */
+    D->v_prev = D->dist_prev = 0.0;
+    D->launch_run = false;
+    reset_run(D);
+    emit(cb, ctx, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
+}
+
+static void enter_done(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+{
+    D->state = DRAG_ST_DONE;
+    D->done_gps_us = gps_us;
+    emit(cb, ctx, EV_DRAG_DONE, D->run_no, gps_us, mono_us, 0, 0);
+}
+
+/* Launch: back-date t0 to the first sample of the contiguous g_lon > DRAG_LAUNCH_SCAN_G run ending at
+ * detection (scanned out of the history ring), reconstruct v_est/dist from t0 = 0-state, then enter
+ * LAUNCHED. Gates are evaluated over the reconstructed samples too (harmless: no default gate can be
+ * crossed in the sub-second launch window). Rollout is applied later on the first live sample whose
+ * dist crosses DRAG_ROLLOUT_M. */
+static void do_launch(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t mono_us)
+{
+    if (D->hist_count == 0) return;
+    uint16_t newest = (uint16_t)((D->hist_head + DRAG_HIST_N - 1) % DRAG_HIST_N);
+    uint16_t idx = newest, t0idx = newest;
+    for (uint16_t i = 0; i < D->hist_count; i++) {
+        if (D->hist[idx].g_lon > (float)DRAG_LAUNCH_SCAN_G) {
+            t0idx = idx;
+            if (i + 1 < D->hist_count) idx = (uint16_t)((idx + DRAG_HIST_N - 1) % DRAG_HIST_N);
+            else break;
+        } else {
+            break;
+        }
+    }
+
+    D->run_no++;
+    reset_run(D);
+    D->t0_gps_us      = D->hist[t0idx].gps_us;
+    D->cur.run_no     = D->run_no;
+    D->cur.t0_gps_us  = D->t0_gps_us;
+
+    /* reconstruct v_est/dist from the launch instant (v = 0 at t0) forward to the newest sample */
+    double v = 0.0, dist = 0.0;
+    uint16_t cur = t0idx;
+    double a_p = (double)D->hist[cur].g_lon * G_MPS2, v_p = 0.0, d_p = 0.0;
+    int64_t t_p = D->hist[cur].gps_us;
+    while (cur != newest) {
+        uint16_t nxt = (uint16_t)((cur + 1) % DRAG_HIST_N);
+        int64_t tc = D->hist[nxt].gps_us;
+        double a_c = (double)D->hist[nxt].g_lon * G_MPS2;
+        double dt = (double)(tc - t_p) / 1e6;
+        if (dt <= 0.0) dt = 1.0 / (double)FUSION_HZ;
+        v += 0.5 * (a_p + a_c) * dt;
+        if (v < 0.0) v = 0.0;
+        dist += 0.5 * (v_p + v) * dt;
+        gate_step(D, cb, ctx, t_p, v_p, d_p, tc, v, dist);
+        a_p = a_c; v_p = v; d_p = dist; t_p = tc;
+        cur = nxt;
+    }
+    D->v_est = v;
+    D->dist_m = dist;
+    D->v_peak = v;
+    D->state = DRAG_ST_LAUNCHED;
+    emit(cb, ctx, EV_DRAG_LAUNCH, 0, D->t0_gps_us, mono_us, 0, 0);
+}
+
+/* ---- one fused sample (100 Hz) ---- */
+
+void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx)
+{
+    if (!fs) return;
+    const int64_t now = fs->gps_us;
+    const double  a_cur = (double)fs->g_lon * G_MPS2;
+
+    /* §6.6 integration: v_est by trapezoid on a_lon, dist by trapezoid on v_est. */
+    if (D->have_prev) {
+        double dt = (double)(now - D->prev_gps_us) / 1e6;
+        if (dt <= 0.0) dt = 1.0 / (double)FUSION_HZ;
+        D->v_est += 0.5 * (D->a_prev + a_cur) * dt;
+        if (D->v_est < 0.0) D->v_est = 0.0;
+        D->dist_m += 0.5 * (D->v_prev + D->v_est) * dt;
+    }
+
+    hist_push(D, now, fs->g_lon);
+
+    switch (D->state) {
+    case DRAG_ST_IDLE: {
+        bool slow  = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+        bool still = (fs->flags & FUS_STILL) != 0;
+        if (slow && still) {
+            if (!D->still_run) { D->still_run = true; D->still_since_us = now; }
+            else if (now - D->still_since_us >= (int64_t)DRAG_ARM_STILL_S * 1000000) {
+                enter_armed(D, cb, ctx, now, fs->mono_us);
+            }
+        } else {
+            D->still_run = false;
+        }
+        break;
+    }
+    case DRAG_ST_ARMED:
+        /* Launch when g_lon > DRAG_LAUNCH_G continuously for DRAG_LAUNCH_HOLD_MS (§11.2). */
+        if (fs->g_lon > (float)DRAG_LAUNCH_G) {
+            if (!D->launch_run) { D->launch_run = true; D->launch_since_us = now; }
+            else if (now - D->launch_since_us >= (int64_t)DRAG_LAUNCH_HOLD_MS * 1000) {
+                do_launch(D, cb, ctx, fs->mono_us);
+            }
+        } else {
+            D->launch_run = false;
+        }
+        break;
+    case DRAG_ST_LAUNCHED: {
+        /* Rollout (once): move t0 to where dist reaches DRAG_ROLLOUT_M and re-zero dist there. */
+        if (D->cfg.rollout && !D->rollout_done && D->dist_m >= (double)DRAG_ROLLOUT_M) {
+            double dp = D->dist_prev, dc = D->dist_m;
+            double frac = (dc > dp) ? ((double)DRAG_ROLLOUT_M - dp) / (dc - dp) : 0.0;
+            if (frac < 0.0) frac = 0.0;
+            if (frac > 1.0) frac = 1.0;
+            D->t0_gps_us     = D->prev_gps_us + (int64_t)(frac * (double)(now - D->prev_gps_us));
+            D->cur.t0_gps_us = D->t0_gps_us;
+            D->dist_m = 0.0;
+            D->dist_prev = 0.0;
+            D->rollout_done = true;
+            D->cur.flags |= DRAG_F_ROLLOUT;
+        }
+        if (D->v_est > D->v_peak) D->v_peak = D->v_est;
+        gate_step(D, cb, ctx, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
+
+        /* DONE (§11.2): the 1/4 gate is hit; a full stop; or v below half-peak with no gate for the
+         * timeout. The braking gate and false-start abort are added in Task 3. */
+        bool quarter = (D->quarter_idx != DRAG_NO_GATE && D->cur.gates[D->quarter_idx].hit);
+        bool stopped = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+        bool faded   = D->v_peak > 0.0 && D->v_est < 0.5 * D->v_peak &&
+                       D->last_gate_gps_us != 0 &&
+                       now - D->last_gate_gps_us >= (int64_t)DRAG_TIMEOUT_S * 1000000;
+        if (quarter) {
+            D->cur.flags |= DRAG_F_QUARTER;
+            finalize_trap(D);
+            enter_done(D, cb, ctx, now, fs->mono_us);
+        } else if (stopped || faded) {
+            finalize_trap(D);
+            enter_done(D, cb, ctx, now, fs->mono_us);
+        }
+        break;
+    }
+    case DRAG_ST_DONE:
+        /* Braking may still complete after DONE (Task 3). Settle back to IDLE 5 s after DONE, keeping
+         * the frozen result for the display. */
+        if (now - D->done_gps_us >= 5 * 1000000) go_idle_keep_result(D);
+        break;
+    default:
+        break;
+    }
+
+    D->a_prev = a_cur;
+    D->v_prev = D->v_est;
+    D->dist_prev = D->dist_m;
+    D->prev_gps_us = now;
+    D->have_prev = true;
+}
+```
+
+- [ ] **Step 3: Build and run**
+
+Run: `cmake --build test/build --parallel 2>&1 | grep -E "error|warning" | head; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: no `error`/`warning` lines; `100% tests passed out of 27` (`test_drag` now 9 cases). Warning-free under ASan/UBSan (clang) and gcc-16.
+
+Measured (clang, ASan/UBSan): 0-100 = 5665 ms (analytic 5665.1), 1/4 = 12811 ms (analytic 12810.5),
+100-200 = 5665 ms, 60 ft = 2731 ms (analytic 2731.3), rollout t0 = 2.36263 s (analytic 2.36260).
+
+**Ruling — trap speed (§6.6 vs §22.1).** §6.6 defines the trap as the mean `v_est` over the samples with
+`dist ∈ [D − TRAP_DIST_M, D]` (the 66 ft speed trap). For the 0.5 g run that mean is **223.3 km/h**
+(`trap_cms = 6203`). §22.1's "trap ≈ 226 km/h" is the *instantaneous* line speed at the 1/4 (`a·t_quarter`
+= 226.1 km/h) — a different quantity. This engine implements the §6.6 definition (the physically-correct
+strip trap) and the test additionally asserts the 226 km/h line speed via the 1/4 gate's `speed_cms`, so
+both figures are pinned. §22.1's acceptance text is left unchanged; the ruling lives in the test comment.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add components/core/dragengine/drag.c test/test_drag.c \
+        docs/superpowers/plans/2026-09-14-plan-02-core-engines.md
+git commit -m "plan 02 session 2.6 t2: launch + t0 back-dating, rollout, gates, trap, DONE
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
+
+---
+
+### Task 3: braking gate, false-start abort, benches, best-per-gate, DONE-then-brake (serial)
+
+Task 3 completes `dragengine/drag.c`. The braking (100-0) gate starts when `v_est` falls through its
+high speed after a peak above it and ends below 0.5 km/h, recording the distance travelled between — it
+may complete before or after DONE (§11.2 DONE-then-brake), and the run stays in DONE until braking
+resolves. The false-start abort discards the run and re-arms when `v_est < 1 km/h` within
+`DRAG_FALSE_START_S` of launch. `drag_best` returns the composite session best (lowest `time_ms` per
+gate, shortest `dist_cm` for BRAKE, `NULL` if a gate was never hit), assembled at DONE and after a
+post-DONE brake. The §11.4 screen-bench rule is a display concern verified test-side over the recorded
+per-gate hits. It restates `drag.c` and `test_drag.c` cumulatively; `core/drag.h` is unchanged.
+
+**Files:**
+- Modify: `components/core/dragengine/drag.c`, `test/test_drag.c`
+
+**Interfaces:**
+- Consumes: the `core/drag.h` contract from Task 1 (unchanged), `DRAG_FALSE_START_S`, the BRAKE gate def.
+- Produces: `drag.c` complete (braking, false-start, best-per-gate, DONE-then-brake); `test_drag.c` with the §22.1 braking/false-start/bench/best cases added.
+
+- [ ] **Step 1: Restate the tests**
+
+`test/test_drag.c` — the nine earlier cases plus six: braking distance from 100 km/h at −1 g = 39.3 m
+(±0.5); the false-start abort (v_est < 1 km/h within 2 s of launch → discard → ARMED, no DONE); the
+DONE-then-brake ordering (the 100-0 gate's `EV_DRAG_GATE` after `EV_DRAG_DONE`); bench visibility for a
+peak-180 vs a peak-320 km/h run (§11.4 rows, ascending, capped at 4 incl. the 1/4); the §11.4 drop-lowest
+rule with four benches configured; and best-per-gate across a 0.5 g and a faster 0.6 g run (with an
+unreached gate returning NULL). `drag_t` stays a file-scope `static`.
+
+```c
+#include "unity.h"
+#include "core/drag.h"
+#include "core/consts.h"
+#include "core/types.h"
+#include <math.h>
+#include <string.h>
+
+/* Drag engine tests (spec §11, §6.6, §22.1). Pure C11 so this file also builds and runs on the ESP32
+ * (core_selftest): the fused and GPS streams are built analytically, with no synth/replay library and
+ * no host-only headers. drag_t is multi-KB (its history ring), so the engine is a file-scope `static`,
+ * never a big stack local — a stack drag_t would overflow the 24 KB self-test task stack. */
+
+static drag_t D;                    /* shared, re-init per test — off the stack */
+
+/* ---- event capture ---- */
+typedef struct { int n; uint8_t type[128]; uint16_t arg16[128]; uint32_t arg32[128], arg32b[128]; } evlog_t;
+static evlog_t EV;
+static void ev_cb(const event_t *ev, void *ctx)
+{
+    (void)ctx;
+    if (EV.n < 128) {
+        EV.type[EV.n]   = ev->type;
+        EV.arg16[EV.n]  = ev->arg16;
+        EV.arg32[EV.n]  = ev->arg32;
+        EV.arg32b[EV.n] = ev->arg32b;
+    }
+    EV.n++;
+}
+static int ev_count(uint8_t type)
+{
+    int c = 0;
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == type) c++;
+    return c;
+}
+static int ev_first(uint8_t type)
+{
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == type) return i;
+    return -1;
+}
+static int ev_gate_index(uint16_t gate_id)
+{
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == EV_DRAG_GATE && EV.arg16[i] == gate_id) return i;
+    return -1;
+}
+
+void setUp(void)    { memset(&EV, 0, sizeof EV); }
+void tearDown(void) {}
+
+/* ---- stream helpers ---- */
+static fused_sample_t fused(int64_t gps_us, float g_lon, uint8_t flags)
+{
+    fused_sample_t fs;
+    memset(&fs, 0, sizeof fs);
+    fs.gps_us  = gps_us;
+    fs.mono_us = gps_us;
+    fs.g_lon   = g_lon;
+    fs.flags   = flags;
+    return fs;
+}
+static gps_fix_t gfix(int64_t gps_us, int32_t gspeed_mms, bool valid)
+{
+    gps_fix_t f;
+    memset(&f, 0, sizeof f);
+    f.gps_us     = gps_us;
+    f.mono_us    = gps_us;
+    f.gspeed_mms = gspeed_mms;
+    f.fix_type   = 3;
+    f.sats       = 9;
+    f.flags      = GPS_FLAG_FIXOK;
+    f.valid      = valid ? 1 : 0;
+    return f;
+}
+
+#define DT_US        (1000000 / FUSION_HZ)    /* 10 000 us = one fused sample */
+#define ARM_LAST_K   200                      /* still samples 0..200: arms at t = 2.00 s */
+#define LAUNCH_K     201                      /* first launch sample; its time is the back-dated t0 */
+#define T_LAUNCH_US  ((int64_t)LAUNCH_K * DT_US)   /* 2.01 s */
+
+/* Drive still+slow fused samples until the engine arms (t = 2.00 s). */
+static void arm_engine(drag_evt_cb_t cb, void *ctx)
+{
+    for (int k = 0; k <= ARM_LAST_K; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, cb, ctx);
+    }
+}
+
+/* From the armed state, feed a constant longitudinal g at 100 Hz with a 5 Hz Doppler GPS re-anchor
+ * (gSpeed = a·(t − t0), the exact speed), until DONE or max_k. */
+static void run_const_g(double g, int max_k, drag_evt_cb_t cb, void *ctx)
+{
+    double a = g * G_MPS2;
+    for (int k = LAUNCH_K; k <= max_k; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, (float)g, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) {                          /* 5 Hz fixes */
+            double tl = (double)(t - T_LAUNCH_US) / 1e6;
+            if (tl < 0.0) tl = 0.0;
+            gps_fix_t f = gfix(t, (int32_t)(a * tl * 1000.0), true);
+            drag_on_fix(&D, &f);
+        }
+        if (drag_state(&D) == DRAG_ST_DONE) break;
+    }
+}
+
+/* Accelerate at 0.5 g to peak_kmh, then brake at −1 g to a stop (5 Hz Doppler follows the profile).
+ * Used for the braking-distance and peak-180 bench cases. */
+static void run_accel_then_brake(double peak_kmh, drag_evt_cb_t cb, void *ctx)
+{
+    double a = 0.5 * G_MPS2, ab = 1.0 * G_MPS2, vpk = peak_kmh / 3.6;
+    int nacc = (int)(vpk / a / 0.01 + 0.5);
+    int64_t tpk = T_LAUNCH_US + (int64_t)nacc * DT_US;
+    for (int k = LAUNCH_K; k <= LAUNCH_K + nacc + 1200; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        double gl, v;
+        if (k < LAUNCH_K + nacc) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); }
+        else                     { gl = -1.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
+        fused_sample_t fs = fused(t, (float)gl, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
+        if (D.brake_done) break;
+        if (drag_state(&D) == DRAG_ST_IDLE) break;
+    }
+}
+
+/* Accelerate at 0.5 g until the 1/4 gate ends the run (DONE), then brake at −1 g to a stop — so the
+ * braking gate completes *after* DONE (§11.2 DONE-then-brake). */
+static void run_quarter_then_brake(drag_evt_cb_t cb, void *ctx)
+{
+    double a = 0.5 * G_MPS2, ab = 1.0 * G_MPS2, vpk = 0.0;
+    int64_t tpk = 0;
+    for (int k = LAUNCH_K; k <= 3000; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        double gl, v;
+        if (drag_state(&D) != DRAG_ST_DONE) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); vpk = v; tpk = t; }
+        else                                { gl = -1.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
+        fused_sample_t fs = fused(t, (float)gl, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
+        if (D.brake_done) break;
+    }
+}
+
+static const drag_gate_res_t *gate_by_id(const drag_result_t *r, uint8_t id)
+{
+    for (int i = 0; i < r->n_gates; i++) if (r->gates[i].gate_id == id) return &r->gates[i];
+    return NULL;
+}
+
+/* §11.4 screen benches (test-side, since the engine records only per-gate hits): the SPEED_FROM0 gates
+ * whose speed is in cfg.benches_kmh and were hit, ascending, then the 1/4 row (0 sentinel). Max `max`
+ * rows; if more than max−1 benches were hit the lowest are dropped first. */
+static int bench_rows(const drag_cfg_t *c, const drag_result_t *r, uint16_t *out, int max)
+{
+    uint16_t hit[8]; int nh = 0;
+    for (int b = 0; b < c->n_benches; b++) {
+        uint16_t bs = c->benches_kmh[b];
+        for (int i = 0; i < c->n_gates; i++)
+            if (c->gates[i].kind == DRAG_SPEED_FROM0 && c->gates[i].a == bs && r->gates[i].hit) { hit[nh++] = bs; break; }
+    }
+    int start = 0;
+    while (nh - start > max - 1) start++;           /* reserve one row for the 1/4 */
+    int n = 0;
+    for (int i = start; i < nh; i++) out[n++] = hit[i];
+    out[n++] = 0;                                   /* the 1/4 row, always present */
+    return n;
+}
+
+/* ------------------------------------------------------------ Task 1 tests */
+
+/* §6.6: a constant a_lon gives v_est = a·t and dist = ½·a·t². The trapezoid is exact for a linear v,
+ * so the only error is floating point. Runs in IDLE (never armed: g_lon > 0 keeps v_est above the arm
+ * speed and no FUS_STILL is set), so the integrators run freely from the first sample. */
+static void test_integration_constant_accel(void)
+{
+    drag_init(&D, NULL);
+    const double a = 0.30 * G_MPS2;             /* g_lon = 0.30 → a ≈ 2.942 m/s² */
+    for (int k = 0; k <= 300; k++) {            /* 3 s at 100 Hz */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.30f, 0);
+        drag_on_fused(&D, &fs, NULL, NULL);
+        if (k == 100 || k == 200 || k == 300) {
+            double t = (double)k * 0.01;
+            TEST_ASSERT_DOUBLE_WITHIN(1e-6, a * t, D.v_est);
+            TEST_ASSERT_DOUBLE_WITHIN(1e-4, 0.5 * a * t * t, D.dist_m);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));   /* never armed */
+}
+
+/* §6.6: every valid fix resets v_est to the Doppler gSpeed (no blend), the IMU only bridges between
+ * fixes. A lagging fix that arrives after some integration re-anchors again. An invalid fix does not. */
+static void test_gps_reanchor_resets_v_est(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 50; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    TEST_ASSERT_DOUBLE_WITHIN(1e-3, 0.20 * G_MPS2 * 0.5, D.v_est);
+
+    gps_fix_t f1 = gfix(50 * DT_US, 5000, true);           /* Doppler says 5.000 m/s */
+    drag_on_fix(&D, &f1);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 5.0, D.v_est);
+
+    for (int k = 51; k <= 70; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    TEST_ASSERT_DOUBLE_WITHIN(2e-3, 5.0 + 0.20 * G_MPS2 * 0.2, D.v_est);
+
+    double before = D.v_est;
+    gps_fix_t bad = gfix(71 * DT_US, 1000, false);         /* invalid: must not re-anchor */
+    drag_on_fix(&D, &bad);
+    TEST_ASSERT_EQUAL_DOUBLE(before, D.v_est);
+
+    gps_fix_t f2 = gfix(72 * DT_US, 3000, true);           /* lagging valid fix: re-anchors again */
+    drag_on_fix(&D, &f2);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 3.0, D.v_est);
+}
+
+/* §11.2: v_est < DRAG_ARM_SPEED_KMH and FUS_STILL held for DRAG_ARM_STILL_S enters ARMED and emits
+ * EV_DRAG_ARMED once. Before the dwell elapses the engine is still IDLE. */
+static void test_arm_after_still_dwell(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 199; k++) {            /* t = 0 .. 1.99 s: not yet armed */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
+
+    fused_sample_t fs = fused((int64_t)200 * DT_US, 0.0f, FUS_STILL);   /* t = 2.00 s: arms */
+    drag_on_fused(&D, &fs, ev_cb, &EV);
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_ARMED));
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, D.v_est);     /* arming zeroes v_est and dist (§11.2) */
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, D.dist_m);
+}
+
+/* Motion (no FUS_STILL) never arms, and a broken still spell restarts the dwell. */
+static void test_arm_requires_continuous_stillness(void)
+{
+    drag_init(&D, NULL);
+    for (int k = 0; k <= 150; k++) {            /* 1.5 s still */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    fused_sample_t bump = fused((int64_t)151 * DT_US, 0.0f, 0);   /* stillness lost: timer restarts */
+    drag_on_fused(&D, &bump, ev_cb, &EV);
+    for (int k = 152; k <= 300; k++) {          /* another 1.49 s still — still short of 2 s */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
+}
+
+/* ------------------------------------------------------------ Task 2 tests */
+
+/* §22.1: a synthetic constant 0.5 g run (fused 100 Hz, Doppler 5 Hz) hits 0-100 at 5.66 s and the
+ * 1/4 (402.34 m) at 12.81 s, both within ±20 ms; the interpolation actually lands them within ±5 ms.
+ * Launch back-dates t0 to the first g-spike sample, the launch/gate/done events fire, and the run
+ * finishes DONE with DRAG_F_QUARTER. */
+static void test_run_0p5g_zero_to_hundred_and_quarter(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_const_g(0.5, 1700, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_DONE));
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_INT64(T_LAUNCH_US, D.t0_gps_us);      /* t0 = the first g-spike sample */
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+
+    const drag_gate_res_t *g100 = gate_by_id(r, 2);
+    const drag_gate_res_t *gq   = gate_by_id(r, 10);
+    TEST_ASSERT_NOT_NULL(g100);  TEST_ASSERT_NOT_NULL(gq);
+    TEST_ASSERT_TRUE(g100->hit); TEST_ASSERT_TRUE(gq->hit);
+    /* 0-100 at 5.665 s, 1/4 at 12.810 s — both within ±5 ms of analytic (well inside §22.1's ±20 ms) */
+    TEST_ASSERT_INT_WITHIN(5, 5665, (int)g100->time_ms);
+    TEST_ASSERT_INT_WITHIN(5, 12810, (int)gq->time_ms);
+    TEST_ASSERT_TRUE(ev_count(EV_DRAG_GATE) >= 2);
+}
+
+/* §22.1 trap. NOTE — a real spec conflict, ruled here: §6.6 defines the trap as the mean v_est over
+ * the samples with dist ∈ [D − TRAP_DIST_M, D] (the 66 ft speed trap). For this run that mean is
+ * 223.3 km/h. §22.1's "trap ≈ 226 km/h" is the *instantaneous* speed at the 1/4 line (a·t_quarter),
+ * a different quantity. We implement §6.6 (the physically-correct trap) and additionally assert the
+ * line speed so both numbers are pinned. */
+static void test_run_0p5g_trap_and_line_speed(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    double trap_kmh = (double)r->trap_cms * 0.036;                 /* cm/s → km/h */
+    TEST_ASSERT_DOUBLE_WITHIN(2.0, 223.3, trap_kmh);               /* §6.6 trap-window mean */
+
+    const drag_gate_res_t *gq = gate_by_id(r, 10);
+    double line_kmh = (double)gq->speed_cms * 0.036;
+    TEST_ASSERT_DOUBLE_WITHIN(2.0, 226.1, line_kmh);               /* §22.1's "226" = the line speed */
+}
+
+/* §11.1: the SPEED_RANGE 100-200 gate records the interval between the 100 km/h and 200 km/h
+ * crossings. For a constant 0.5 g run that interval equals the 0-100 time, 5.665 s. */
+static void test_run_0p5g_speed_range_100_200(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_gate_res_t *g = gate_by_id(drag_current(&D), 5);
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_TRUE(g->hit);
+    TEST_ASSERT_INT_WITHIN(20, 5665, (int)g->time_ms);            /* (200−100) km/h at 0.5 g */
+}
+
+/* §6.6: linear interpolation gives ≤ ±5 ms timing resolution. Checked on the 60 ft distance gate
+ * (18.29 m, crossing at 2.731 s) and the 0-100 speed gate: both land within 5 ms of analytic even
+ * though the true crossing falls between two 10 ms samples. */
+static void test_interpolation_resolution_5ms(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    double a = 0.5 * G_MPS2;
+    int t60  = (int)(sqrt(2.0 * (1829.0 / 100.0) / a) * 1000.0 + 0.5);   /* 2731 ms */
+    int t100 = (int)((100.0 / 3.6) / a * 1000.0 + 0.5);                   /* 5665 ms */
+    TEST_ASSERT_INT_WITHIN(5, t60,  (int)gate_by_id(r, 6)->time_ms);
+    TEST_ASSERT_INT_WITHIN(5, t100, (int)gate_by_id(r, 2)->time_ms);
+}
+
+/* §11.2 rollout: with rollout enabled, t0 moves to where dist reaches DRAG_ROLLOUT_M (1 ft) and dist
+ * is re-zeroed there. From rest at 0.5 g that is 0.353 s after the launch instant, and DRAG_F_ROLLOUT
+ * is set. (Default is rollout OFF, verified by the run above whose t0 stays at the launch instant.) */
+static void test_rollout_shifts_t0(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.rollout = true;
+    drag_init(&D, &c);
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);
+
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_ROLLOUT);
+    double a = 0.5 * G_MPS2;
+    double expect_s = (double)T_LAUNCH_US / 1e6 + sqrt(2.0 * (double)DRAG_ROLLOUT_M / a);
+    TEST_ASSERT_DOUBLE_WITHIN(0.02, expect_s, (double)D.t0_gps_us / 1e6);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);                  /* the run still completes */
+}
+
+/* ------------------------------------------------------------ Task 3 tests */
+
+/* §22.1: braking distance from 100 km/h at −1 g = 39.3 m ± 0.5. The run peaks just above 100 km/h,
+ * then brakes; the 100-0 gate accumulates dist from the 100 km/h crossing to the stop (< 0.5 km/h). */
+static void test_braking_distance_100_to_0(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_accel_then_brake(105.0, ev_cb, &EV);
+
+    const drag_gate_res_t *gb = gate_by_id(drag_current(&D), 11);
+    TEST_ASSERT_NOT_NULL(gb);
+    TEST_ASSERT_TRUE(gb->hit);
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 39.3, (double)gb->dist_cm / 100.0);
+}
+
+/* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns
+ * to ARMED. A short g-spike launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires
+ * and the discarded run leaves no gate hits. */
+static void test_false_start_abort(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    for (int k = LAUNCH_K; k <= 215; k++) {                       /* g-spike: launches at ~k=211 */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.3f, 0);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    fused_sample_t s216 = fused((int64_t)216 * DT_US, 0.0f, 0);
+    drag_on_fused(&D, &s216, ev_cb, &EV);
+    gps_fix_t stall = gfix((int64_t)216 * DT_US, 0, true);        /* Doppler: stopped */
+    drag_on_fix(&D, &stall);
+    fused_sample_t s217 = fused((int64_t)217 * DT_US, 0.0f, 0);   /* v_est ≈ 0 within 2 s of launch */
+    drag_on_fused(&D, &s217, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));       /* re-armed, run discarded */
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));
+    TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
+}
+
+/* §11.2/§6.6 false-start guard regression: a sustained ~0.2 g launch is itself below
+ * DRAG_FALSE_START_KMH for the first ~140 ms after t0 (v_est is still climbing from 0), which is not
+ * a stall — the abort requires v_peak to have already cleared the threshold before a drop-below
+ * counts as a false start. Without that guard this legitimate low-g launch gets discarded and
+ * re-armed the instant it enters LAUNCHED, emitting a duplicate EV_DRAG_LAUNCH; the fixed engine
+ * launches exactly once and runs its gates through to the 1/4. */
+static void test_low_g_launch_no_false_start(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_const_g(0.2, 2800, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    const drag_result_t *r = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+}
+
+/* §11.2: the braking gate may complete after DONE. A 0.5 g run ends DONE at the 1/4, then braking
+ * from ~226 km/h through 100 records the 100-0 gate after the DONE event. */
+static void test_done_then_brake(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_quarter_then_brake(ev_cb, &EV);
+
+    const drag_gate_res_t *gb = gate_by_id(drag_current(&D), 11);
+    TEST_ASSERT_TRUE(gb->hit);
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 39.3, (double)gb->dist_cm / 100.0);
+    /* the braking gate's EV_DRAG_GATE fired after EV_DRAG_DONE */
+    int done_i  = ev_first(EV_DRAG_DONE);
+    int brake_i = ev_gate_index(11);
+    TEST_ASSERT_TRUE(done_i >= 0 && brake_i >= 0);
+    TEST_ASSERT_TRUE(brake_i > done_i);
+}
+
+/* §11.4 bench visibility: a peak-180 run hits only the 100 bench (rows = {100, 1/4}); a peak-320 run
+ * hits all three default benches (rows = {100, 200, 300, 1/4}), ascending, capped at 4 rows. */
+static void test_bench_visibility_180_vs_320(void)
+{
+    uint16_t rows[8]; int n;
+
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_accel_then_brake(180.0, NULL, NULL);        /* peaks at 180, brakes to a stop → DONE */
+    const drag_result_t *r180 = drag_current(&D);
+    TEST_ASSERT_TRUE(gate_by_id(r180, 2)->hit);     /* 0-100 hit */
+    TEST_ASSERT_FALSE(gate_by_id(r180, 3)->hit);    /* 0-200 not */
+    TEST_ASSERT_FALSE(gate_by_id(r180, 4)->hit);    /* 0-300 not */
+    TEST_ASSERT_FALSE(gate_by_id(r180, 10)->hit);   /* 1/4 not */
+    n = bench_rows(&D.cfg, r180, rows, 4);
+    TEST_ASSERT_EQUAL_INT(2, n);
+    TEST_ASSERT_EQUAL_UINT16(100, rows[0]);
+    TEST_ASSERT_EQUAL_UINT16(0,   rows[1]);         /* the 1/4 row */
+
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(1.0, 1300, NULL, NULL);             /* 1 g reaches the 1/4 at ~320 km/h */
+    const drag_result_t *r320 = drag_current(&D);
+    TEST_ASSERT_TRUE(gate_by_id(r320, 2)->hit && gate_by_id(r320, 3)->hit &&
+                     gate_by_id(r320, 4)->hit && gate_by_id(r320, 10)->hit);
+    n = bench_rows(&D.cfg, r320, rows, 4);
+    TEST_ASSERT_EQUAL_INT(4, n);
+    TEST_ASSERT_EQUAL_UINT16(100, rows[0]);
+    TEST_ASSERT_EQUAL_UINT16(200, rows[1]);
+    TEST_ASSERT_EQUAL_UINT16(300, rows[2]);
+    TEST_ASSERT_EQUAL_UINT16(0,   rows[3]);
+}
+
+/* §11.4 drop rule: with four benches configured {60,100,200,300}, a 1 g run hits all four, so the
+ * lowest (60) is dropped to keep the four-row cap: rows = {100, 200, 300, 1/4}. */
+static void test_bench_drop_lowest_when_over_four(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.benches_kmh[0] = 60; c.benches_kmh[1] = 100; c.benches_kmh[2] = 200; c.benches_kmh[3] = 300;
+    c.n_benches = 4;
+    drag_init(&D, &c);
+    arm_engine(NULL, NULL);
+    run_const_g(1.0, 1300, NULL, NULL);
+
+    uint16_t rows[8];
+    int n = bench_rows(&D.cfg, drag_current(&D), rows, 4);
+    TEST_ASSERT_EQUAL_INT(4, n);
+    TEST_ASSERT_EQUAL_UINT16(100, rows[0]);         /* 60 dropped */
+    TEST_ASSERT_EQUAL_UINT16(200, rows[1]);
+    TEST_ASSERT_EQUAL_UINT16(300, rows[2]);
+    TEST_ASSERT_EQUAL_UINT16(0,   rows[3]);
+}
+
+/* §11.3 best per gate: across a 0.5 g run and a faster 0.6 g run, drag_best returns the lower time_ms
+ * for each gate. A gate never hit in any run (0-300, unreached by either) returns NULL. */
+static void test_best_per_gate_two_runs(void)
+{
+    drag_init(&D, NULL);
+    TEST_ASSERT_NULL(drag_best(&D, 2));             /* nothing completed yet */
+
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);             /* 0-100 = 5665 ms, 1/4 = 12810 ms */
+    drag_reset(&D);                                 /* keeps the session best */
+    arm_engine(NULL, NULL);
+    run_const_g(0.6, 1500, NULL, NULL);             /* 0-100 = 4721 ms, 1/4 = 11694 ms (faster) */
+
+    const drag_result_t *b100 = drag_best(&D, 2);
+    const drag_result_t *bq   = drag_best(&D, 10);
+    TEST_ASSERT_NOT_NULL(b100);
+    TEST_ASSERT_NOT_NULL(bq);
+    TEST_ASSERT_INT_WITHIN(20, 4721, (int)gate_by_id(b100, 2)->time_ms);
+    TEST_ASSERT_INT_WITHIN(20, 11694, (int)gate_by_id(bq, 10)->time_ms);
+    TEST_ASSERT_NULL(drag_best(&D, 4));             /* 0-300 unreached by either run */
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_integration_constant_accel);
+    RUN_TEST(test_gps_reanchor_resets_v_est);
+    RUN_TEST(test_arm_after_still_dwell);
+    RUN_TEST(test_arm_requires_continuous_stillness);
+    RUN_TEST(test_run_0p5g_zero_to_hundred_and_quarter);
+    RUN_TEST(test_run_0p5g_trap_and_line_speed);
+    RUN_TEST(test_run_0p5g_speed_range_100_200);
+    RUN_TEST(test_interpolation_resolution_5ms);
+    RUN_TEST(test_rollout_shifts_t0);
+    RUN_TEST(test_braking_distance_100_to_0);
+    RUN_TEST(test_false_start_abort);
+    RUN_TEST(test_low_g_launch_no_false_start);
+    RUN_TEST(test_done_then_brake);
+    RUN_TEST(test_bench_visibility_180_vs_320);
+    RUN_TEST(test_bench_drop_lowest_when_over_four);
+    RUN_TEST(test_best_per_gate_two_runs);
+    return UNITY_END();
+}
+```
+
+- [ ] **Step 2: Restate `dragengine/drag.c`**
+
+Adds `brake_step` (the 100-0 gate, before/after DONE), `abort_to_armed` (false start), `update_best`/
+`init_best` and the composite `drag_best`, the DONE-then-brake settle guard (`brake_pending`), and
+`enter_done` freezing the trap and best. Complete engine.
+
+```c
+#include "core/drag.h"
+#include <string.h>
+
+/* Drag engine (spec §11, §6.6). Session 2.6, complete. §6.6 v_est/dist integration with the
+ * drag_on_fix Doppler re-anchor; the IDLE → ARMED → LAUNCHED → DONE state machine with launch
+ * detection, t0 back-dating out of the history ring and the optional rollout; gate evaluation
+ * (SPEED_FROM0 / SPEED_RANGE / DIST / BRAKE) with §6.6 interpolation; the trap; the false-start
+ * abort; the braking (100-0) gate that may complete after DONE; the full run result and the
+ * best-per-gate across the session; EV_DRAG_ARMED/LAUNCH/GATE/DONE. */
+
+/* ---- unit helpers ---- */
+static double kmh_to_mps(double kmh) { return kmh / 3.6; }
+
+/* ---- configuration ---- */
+
+void drag_cfg_defaults(drag_cfg_t *c)
+{
+    memset(c, 0, sizeof *c);
+    /* §11.1 default gate list (km/h for SPEED_*, cm for DIST). ids are stable and logged. */
+    static const drag_gate_def_t def[] = {
+        { 1,  DRAG_SPEED_FROM0,  60,   0 },
+        { 2,  DRAG_SPEED_FROM0,  100,  0 },
+        { 3,  DRAG_SPEED_FROM0,  200,  0 },
+        { 4,  DRAG_SPEED_FROM0,  300,  0 },
+        { 5,  DRAG_SPEED_RANGE,  100,  200 },
+        { 6,  DRAG_DIST,         1829, 0 },      /* 60 ft */
+        { 7,  DRAG_DIST,         10058, 0 },     /* 330 ft */
+        { 8,  DRAG_DIST,         20117, 0 },     /* 1/8 mile */
+        { 9,  DRAG_DIST,         30480, 0 },     /* 1000 ft */
+        { 10, DRAG_DIST,         40234, 0 },     /* 1/4 mile (trap) */
+        { 11, DRAG_BRAKE,        100,  0 },      /* 100-0 */
+    };
+    c->n_gates = (uint8_t)(sizeof def / sizeof def[0]);
+    for (uint8_t i = 0; i < c->n_gates; i++) c->gates[i] = def[i];
+    c->benches_kmh[0] = 100;
+    c->benches_kmh[1] = 200;
+    c->benches_kmh[2] = 300;
+    c->n_benches = 3;
+    c->rollout = false;
+    c->units   = DRAG_UNITS_KMH;
+}
+
+/* The 1/4 (trap) gate is the DIST gate with the largest distance a (§11.1 lists it as gate 10). */
+static void find_quarter(drag_t *D)
+{
+    D->quarter_idx    = DRAG_NO_GATE;
+    D->quarter_dist_m = 0.0;
+    uint16_t best_a = 0;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
+        if (D->cfg.gates[i].kind == DRAG_DIST && D->cfg.gates[i].a >= best_a) {
+            best_a = D->cfg.gates[i].a;
+            D->quarter_idx    = i;
+            D->quarter_dist_m = (double)D->cfg.gates[i].a / 100.0;
+        }
+    }
+}
+
+/* Lay out cur.gates[] to mirror cfg.gates order, all unhit; clears the run accumulators. */
+static void reset_run(drag_t *D)
+{
+    memset(&D->cur, 0, sizeof D->cur);
+    D->cur.n_gates = D->cfg.n_gates;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) D->cur.gates[i].gate_id = D->cfg.gates[i].id;
+    D->v_peak = 0.0;
+    D->last_gate_gps_us = 0;
+    D->rollout_done = false;
+    D->brake_active = false;
+    D->brake_done   = false;
+    D->brake_start_gps_us = 0;
+    D->brake_dist_m = 0.0;
+    D->trap_sum = 0.0;
+    D->trap_n   = 0;
+    memset(D->range_started, 0, sizeof D->range_started);
+}
+
+/* Light reset: back to IDLE, integration/timers cleared, but the frozen result (cur), run_no and the
+ * session best are preserved (used for the auto DONE→IDLE settle). */
+static void go_idle_keep_result(drag_t *D)
+{
+    D->state = DRAG_ST_IDLE;
+    D->v_est = D->dist_m = 0.0;
+    D->a_prev = D->v_prev = D->dist_prev = 0.0;
+    D->prev_gps_us = 0;
+    D->have_prev = false;
+    D->t0_gps_us = 0;
+    D->still_run = false;
+    D->still_since_us = 0;
+    D->launch_run = false;
+    D->launch_since_us = 0;
+    D->done_gps_us = 0;
+    D->hist_head = 0;
+    D->hist_count = 0;
+}
+
+static void reset_to_idle(drag_t *D)
+{
+    go_idle_keep_result(D);
+    reset_run(D);                       /* also clears the current result */
+}
+
+/* The session best (§11.3) is a composite: best.gates[i] carries the best value seen for that gate id
+ * across completed runs. Its slots are laid out (ids, all unhit) up front so drag_best can index it. */
+static void init_best(drag_t *D)
+{
+    memset(&D->best, 0, sizeof D->best);
+    D->best.n_gates = D->cfg.n_gates;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) D->best.gates[i].gate_id = D->cfg.gates[i].id;
+    D->have_best = false;
+}
+
+void drag_init(drag_t *D, const drag_cfg_t *cfg)
+{
+    memset(D, 0, sizeof *D);
+    if (cfg) D->cfg = *cfg;
+    else drag_cfg_defaults(&D->cfg);
+    find_quarter(D);
+    D->run_no = 0;
+    reset_to_idle(D);
+    init_best(D);
+}
+
+void drag_reset(drag_t *D)
+{
+    reset_to_idle(D);                   /* keeps cfg, run_no and the session best (§11.3) */
+}
+
+/* ---- queries ---- */
+
+uint8_t drag_state(const drag_t *D) { return D->state; }
+
+const drag_result_t *drag_current(const drag_t *D)
+{
+    return (D->run_no > 0 || D->state != DRAG_ST_IDLE) ? &D->cur : NULL;
+}
+
+const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id)
+{
+    if (!D->have_best) return NULL;
+    for (uint8_t i = 0; i < D->best.n_gates; i++)
+        if (D->best.gates[i].gate_id == gate_id) return D->best.gates[i].hit ? &D->best : NULL;
+    return NULL;
+}
+
+/* ---- events ---- */
+
+static void emit(drag_evt_cb_t cb, void *ctx, uint8_t type, uint16_t arg16,
+                 int64_t gps_us, int64_t mono_us, uint32_t arg32, uint32_t arg32b)
+{
+    if (!cb) return;
+    event_t ev = { type, 0, arg16, gps_us, mono_us, arg32, arg32b };
+    cb(&ev, ctx);
+}
+
+/* ---- history ring ---- */
+
+static void hist_push(drag_t *D, int64_t gps_us, float g_lon)
+{
+    D->hist[D->hist_head].gps_us = gps_us;
+    D->hist[D->hist_head].g_lon  = g_lon;
+    D->hist_head = (uint16_t)((D->hist_head + 1) % DRAG_HIST_N);
+    if (D->hist_count < DRAG_HIST_N) D->hist_count++;
+}
+
+/* ---- fix re-anchor (§6.6): reset v_est to the Doppler gSpeed at every valid fix ---- */
+
+void drag_on_fix(drag_t *D, const gps_fix_t *fix)
+{
+    if (!fix || !fix->valid) return;
+    double v = (double)fix->gspeed_mms / 1000.0;    /* mm/s → m/s */
+    if (v < 0.0) v = 0.0;
+    D->v_est  = v;
+    D->v_prev = v;                                  /* the next fused step integrates from here */
+    if (D->state == DRAG_ST_LAUNCHED && v > D->v_peak) D->v_peak = v;
+}
+
+/* ---- session best (§11.3): lowest time_ms per gate, shortest dist_cm for BRAKE ---- */
+
+static void update_best(drag_t *D)
+{
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
+        const drag_gate_res_t *cg = &D->cur.gates[i];
+        if (!cg->hit) continue;
+        drag_gate_res_t *bg = &D->best.gates[i];
+        bool better = !bg->hit ||
+                      (D->cfg.gates[i].kind == DRAG_BRAKE ? cg->dist_cm < bg->dist_cm
+                                                          : cg->time_ms < bg->time_ms);
+        if (better) *bg = *cg;
+    }
+    if (D->cur.trap_cms > D->best.trap_cms) D->best.trap_cms = D->cur.trap_cms;
+    if (D->cur.flags & DRAG_F_QUARTER)      D->best.flags |= DRAG_F_QUARTER;
+    D->best.run_no = D->cur.run_no;         /* most recent contributor */
+    D->have_best = true;
+}
+
+/* ---- gate crossing / trap for one integration step (§6.6 linear interpolation) ----
+ * (tp,vp,dp) is the previous sample, (tc,vc,dc) the current one. Records any SPEED_FROM0/SPEED_RANGE/
+ * DIST gate crossed in the interval and accumulates the trap window for the 1/4 gate. */
+
+static void record_gate(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t idx,
+                        int64_t t_cross, double v_cross_mps, double dist_cross_m)
+{
+    drag_gate_res_t *g = &D->cur.gates[idx];
+    if (g->hit) return;
+    int64_t rel = t_cross - D->t0_gps_us;
+    if (rel < 0) rel = 0;
+    g->hit       = 1;
+    g->time_ms   = (uint32_t)((rel + 500) / 1000);
+    g->speed_cms = (uint16_t)(v_cross_mps * 100.0 + 0.5);
+    g->dist_cm   = (uint32_t)(dist_cross_m * 100.0 + 0.5);
+    D->last_gate_gps_us = t_cross;
+    emit(cb, ctx, EV_DRAG_GATE, D->cfg.gates[idx].id, t_cross, t_cross, g->time_ms, g->speed_cms);
+}
+
+static void gate_step(drag_t *D, drag_evt_cb_t cb, void *ctx,
+                      int64_t tp, double vp, double dp, int64_t tc, double vc, double dc)
+{
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
+        const drag_gate_def_t *def = &D->cfg.gates[i];
+        switch (def->kind) {
+        case DRAG_SPEED_FROM0: {
+            if (D->cur.gates[i].hit) break;
+            double V = kmh_to_mps((double)def->a);
+            if (vp < V && vc >= V && vc > vp) {
+                double frac = (V - vp) / (vc - vp);
+                int64_t t_cross = tp + (int64_t)(frac * (double)(tc - tp));
+                double d_cross = dp + frac * (dc - dp);
+                record_gate(D, cb, ctx, i, t_cross, V, d_cross);
+            }
+            break;
+        }
+        case DRAG_DIST: {
+            if (D->cur.gates[i].hit) break;
+            double Dm = (double)def->a / 100.0;
+            if (dp < Dm && dc >= Dm && dc > dp) {
+                double frac = (Dm - dp) / (dc - dp);
+                int64_t t_cross = tp + (int64_t)(frac * (double)(tc - tp));
+                double v_cross = vp + frac * (vc - vp);
+                record_gate(D, cb, ctx, i, t_cross, v_cross, Dm);
+            }
+            break;
+        }
+        case DRAG_SPEED_RANGE: {
+            double Va = kmh_to_mps((double)def->a);
+            double Vb = kmh_to_mps((double)def->b);
+            if (!D->range_started[i]) {
+                if (vp < Va && vc >= Va && vc > vp) {
+                    double frac = (Va - vp) / (vc - vp);
+                    D->range_a_gps_us[i] = tp + (int64_t)(frac * (double)(tc - tp));
+                    D->range_a_dist_m[i] = dp + frac * (dc - dp);
+                    D->range_started[i]  = true;
+                }
+            }
+            if (D->range_started[i] && !D->cur.gates[i].hit) {
+                if (vp < Vb && vc >= Vb && vc > vp) {
+                    double frac = (Vb - vp) / (vc - vp);
+                    int64_t t_b = tp + (int64_t)(frac * (double)(tc - tp));
+                    double d_b = dp + frac * (dc - dp);
+                    drag_gate_res_t *g = &D->cur.gates[i];
+                    int64_t rel = t_b - D->range_a_gps_us[i];
+                    if (rel < 0) rel = 0;
+                    g->hit       = 1;
+                    g->time_ms   = (uint32_t)((rel + 500) / 1000);
+                    g->speed_cms = (uint16_t)(Vb * 100.0 + 0.5);
+                    double d_int = d_b - D->range_a_dist_m[i];
+                    if (d_int < 0) d_int = 0;
+                    g->dist_cm   = (uint32_t)(d_int * 100.0 + 0.5);
+                    D->last_gate_gps_us = t_b;
+                    emit(cb, ctx, EV_DRAG_GATE, def->id, t_b, t_b, g->time_ms, g->speed_cms);
+                }
+            }
+            break;
+        }
+        case DRAG_BRAKE:
+        default:
+            break;                      /* braking gate handled in brake_step */
+        }
+    }
+
+    /* Trap window for the 1/4 gate: mean v_est over samples with dist ∈ [D − TRAP_DIST_M, D] (§6.6). */
+    if (D->quarter_idx != DRAG_NO_GATE) {
+        double lo = D->quarter_dist_m - (double)TRAP_DIST_M;
+        if (dc >= lo && dc <= D->quarter_dist_m) {
+            D->trap_sum += vc;
+            D->trap_n++;
+        }
+    }
+}
+
+static void finalize_trap(drag_t *D)
+{
+    if (D->trap_n > 0)
+        D->cur.trap_cms = (uint16_t)((D->trap_sum / (double)D->trap_n) * 100.0 + 0.5);
+}
+
+/* ---- braking (100-0) gate (§6.6, §11.2) ----
+ * Starts when v_est falls through the gate's high speed (100 km/h) after a run peak above it, and ends
+ * when v_est < 0.5 km/h; the result is the distance accumulated in between. d_inc is this sample's
+ * distance increment. May run before or after DONE. Returns true if the gate completed on this call. */
+static bool brake_step(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t now, int64_t mono, double d_inc)
+{
+    uint8_t bi = DRAG_NO_GATE;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++)
+        if (D->cfg.gates[i].kind == DRAG_BRAKE && !D->cur.gates[i].hit) { bi = i; break; }
+    if (bi == DRAG_NO_GATE || D->brake_done) return false;
+
+    double Vhi = kmh_to_mps((double)D->cfg.gates[bi].a);   /* 100 km/h */
+    if (!D->brake_active) {
+        if (D->v_peak > Vhi && D->v_prev >= Vhi && D->v_est < Vhi) {
+            double span = D->v_prev - D->v_est;
+            double fb = span > 0.0 ? (D->v_prev - Vhi) / span : 0.0;   /* fraction before the crossing */
+            if (fb < 0.0) fb = 0.0;
+            if (fb > 1.0) fb = 1.0;
+            D->brake_active = true;
+            D->brake_start_gps_us = D->prev_gps_us + (int64_t)(fb * (double)(now - D->prev_gps_us));
+            D->brake_dist_m = d_inc * (1.0 - fb);          /* distance travelled after the crossing */
+        }
+        return false;
+    }
+
+    D->brake_dist_m += d_inc;
+    if (D->v_est < kmh_to_mps((double)DRAG_BRAKE_STOP_KMH)) {  /* §6.6: braking ends below 0.5 km/h */
+        drag_gate_res_t *g = &D->cur.gates[bi];
+        int64_t rel = now - D->brake_start_gps_us;
+        if (rel < 0) rel = 0;
+        g->hit       = 1;
+        g->time_ms   = (uint32_t)((rel + 500) / 1000);
+        g->speed_cms = 0;                                  /* stopped */
+        g->dist_cm   = (uint32_t)(D->brake_dist_m * 100.0 + 0.5);
+        D->brake_active = false;
+        D->brake_done   = true;
+        D->last_gate_gps_us = now;
+        emit(cb, ctx, EV_DRAG_GATE, D->cfg.gates[bi].id, now, mono, g->time_ms, 0);
+        return true;
+    }
+    return false;
+}
+
+/* ---- state transitions ---- */
+
+static void enter_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+{
+    D->state = DRAG_ST_ARMED;
+    D->v_est = D->dist_m = 0.0;          /* §11.2: dist = 0, v_est = 0 */
+    D->v_prev = D->dist_prev = 0.0;
+    D->launch_run = false;
+    reset_run(D);
+    emit(cb, ctx, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
+}
+
+/* §11.2 false start: discard the run and return to ARMED (no event, no run_no consumed). */
+static void abort_to_armed(drag_t *D)
+{
+    if (D->run_no > 0) D->run_no--;      /* the discarded launch does not consume a run number */
+    D->state = DRAG_ST_ARMED;
+    D->v_est = D->dist_m = 0.0;
+    D->v_prev = D->dist_prev = 0.0;
+    D->t0_gps_us = 0;
+    D->launch_run = false;
+    reset_run(D);
+}
+
+static void enter_done(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+{
+    D->state = DRAG_ST_DONE;
+    D->done_gps_us = gps_us;
+    finalize_trap(D);
+    update_best(D);                      /* freeze the result into the session best */
+    emit(cb, ctx, EV_DRAG_DONE, D->run_no, gps_us, mono_us, 0, 0);
+}
+
+/* Launch: back-date t0 to the first sample of the contiguous g_lon > DRAG_LAUNCH_SCAN_G run ending at
+ * detection (scanned out of the history ring), reconstruct v_est/dist from t0 = 0-state, then enter
+ * LAUNCHED. Gates are evaluated over the reconstructed samples too (harmless: no default gate can be
+ * crossed in the sub-second launch window). Rollout is applied later on the first live sample whose
+ * dist crosses DRAG_ROLLOUT_M. */
+static void do_launch(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t mono_us)
+{
+    if (D->hist_count == 0) return;
+    uint16_t newest = (uint16_t)((D->hist_head + DRAG_HIST_N - 1) % DRAG_HIST_N);
+    uint16_t idx = newest, t0idx = newest;
+    for (uint16_t i = 0; i < D->hist_count; i++) {
+        if (D->hist[idx].g_lon > (float)DRAG_LAUNCH_SCAN_G) {
+            t0idx = idx;
+            if (i + 1 < D->hist_count) idx = (uint16_t)((idx + DRAG_HIST_N - 1) % DRAG_HIST_N);
+            else break;
+        } else {
+            break;
+        }
+    }
+
+    D->run_no++;
+    reset_run(D);
+    D->t0_gps_us      = D->hist[t0idx].gps_us;
+    D->cur.run_no     = D->run_no;
+    D->cur.t0_gps_us  = D->t0_gps_us;
+
+    /* reconstruct v_est/dist from the launch instant (v = 0 at t0) forward to the newest sample */
+    double v = 0.0, dist = 0.0;
+    uint16_t cur = t0idx;
+    double a_p = (double)D->hist[cur].g_lon * G_MPS2, v_p = 0.0, d_p = 0.0;
+    int64_t t_p = D->hist[cur].gps_us;
+    while (cur != newest) {
+        uint16_t nxt = (uint16_t)((cur + 1) % DRAG_HIST_N);
+        int64_t tc = D->hist[nxt].gps_us;
+        double a_c = (double)D->hist[nxt].g_lon * G_MPS2;
+        double dt = (double)(tc - t_p) / 1e6;
+        if (dt <= 0.0) dt = 1.0 / (double)FUSION_HZ;
+        v += 0.5 * (a_p + a_c) * dt;
+        if (v < 0.0) v = 0.0;
+        dist += 0.5 * (v_p + v) * dt;
+        gate_step(D, cb, ctx, t_p, v_p, d_p, tc, v, dist);
+        a_p = a_c; v_p = v; d_p = dist; t_p = tc;
+        cur = nxt;
+    }
+    D->v_est = v;
+    D->dist_m = dist;
+    D->v_peak = v;
+    D->state = DRAG_ST_LAUNCHED;
+    emit(cb, ctx, EV_DRAG_LAUNCH, 0, D->t0_gps_us, mono_us, 0, 0);
+}
+
+/* Is a braking result still expected? (keeps the run in DONE until braking resolves.) */
+static bool brake_pending(const drag_t *D)
+{
+    bool has_gate = false;
+    for (uint8_t i = 0; i < D->cfg.n_gates; i++)
+        if (D->cfg.gates[i].kind == DRAG_BRAKE && !D->cur.gates[i].hit) { has_gate = true; break; }
+    if (!has_gate) return false;
+    return D->brake_active || D->v_est > kmh_to_mps((double)DRAG_FALSE_START_KMH);
+}
+
+/* ---- one fused sample (100 Hz) ---- */
+
+void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx)
+{
+    if (!fs) return;
+    const int64_t now = fs->gps_us;
+    const double  a_cur = (double)fs->g_lon * G_MPS2;
+
+    /* §6.6 integration: v_est by trapezoid on a_lon, dist by trapezoid on v_est. d_inc is this
+     * sample's distance increment (used by the braking gate). */
+    double d_inc = 0.0;
+    if (D->have_prev) {
+        double dt = (double)(now - D->prev_gps_us) / 1e6;
+        if (dt <= 0.0) dt = 1.0 / (double)FUSION_HZ;
+        D->v_est += 0.5 * (D->a_prev + a_cur) * dt;
+        if (D->v_est < 0.0) D->v_est = 0.0;
+        d_inc = 0.5 * (D->v_prev + D->v_est) * dt;
+        D->dist_m += d_inc;
+    }
+
+    hist_push(D, now, fs->g_lon);
+
+    switch (D->state) {
+    case DRAG_ST_IDLE: {
+        bool slow  = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+        bool still = (fs->flags & FUS_STILL) != 0;
+        if (slow && still) {
+            if (!D->still_run) { D->still_run = true; D->still_since_us = now; }
+            else if (now - D->still_since_us >= (int64_t)DRAG_ARM_STILL_S * 1000000) {
+                enter_armed(D, cb, ctx, now, fs->mono_us);
+            }
+        } else {
+            D->still_run = false;
+        }
+        break;
+    }
+    case DRAG_ST_ARMED:
+        /* Launch when g_lon > DRAG_LAUNCH_G continuously for DRAG_LAUNCH_HOLD_MS (§11.2). */
+        if (fs->g_lon > (float)DRAG_LAUNCH_G) {
+            if (!D->launch_run) { D->launch_run = true; D->launch_since_us = now; }
+            else if (now - D->launch_since_us >= (int64_t)DRAG_LAUNCH_HOLD_MS * 1000) {
+                do_launch(D, cb, ctx, fs->mono_us);
+            }
+        } else {
+            D->launch_run = false;
+        }
+        break;
+    case DRAG_ST_LAUNCHED: {
+        /* Rollout (once): move t0 to where dist reaches DRAG_ROLLOUT_M and re-zero dist there. */
+        if (D->cfg.rollout && !D->rollout_done && D->dist_m >= (double)DRAG_ROLLOUT_M) {
+            double dp = D->dist_prev, dc = D->dist_m;
+            double frac = (dc > dp) ? ((double)DRAG_ROLLOUT_M - dp) / (dc - dp) : 0.0;
+            if (frac < 0.0) frac = 0.0;
+            if (frac > 1.0) frac = 1.0;
+            D->t0_gps_us     = D->prev_gps_us + (int64_t)(frac * (double)(now - D->prev_gps_us));
+            D->cur.t0_gps_us = D->t0_gps_us;
+            D->dist_m = 0.0;
+            D->dist_prev = 0.0;
+            D->rollout_done = true;
+            D->cur.flags |= DRAG_F_ROLLOUT;
+        }
+        if (D->v_est > D->v_peak) D->v_peak = D->v_est;
+        gate_step(D, cb, ctx, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
+        brake_step(D, cb, ctx, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
+
+        /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm.
+         * Guarded on v_peak having already cleared the threshold once: a sustained low-g launch is
+         * itself briefly under 1 km/h just after t0 (v_est is still climbing from 0), and that is not
+         * a stall — only a drop-below after the run has actually moved past the threshold counts. */
+        if (now - D->t0_gps_us <= (int64_t)DRAG_FALSE_START_S * 1000000 &&
+            D->v_peak > kmh_to_mps((double)DRAG_FALSE_START_KMH) &&
+            D->v_est < kmh_to_mps((double)DRAG_FALSE_START_KMH)) {
+            abort_to_armed(D);
+            break;
+        }
+
+        /* DONE (§11.2): the 1/4 gate is hit; a full stop; or v below half-peak with no gate for the
+         * timeout. */
+        bool quarter = (D->quarter_idx != DRAG_NO_GATE && D->cur.gates[D->quarter_idx].hit);
+        bool stopped = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+        bool faded   = D->v_peak > 0.0 && D->v_est < 0.5 * D->v_peak &&
+                       D->last_gate_gps_us != 0 &&
+                       now - D->last_gate_gps_us >= (int64_t)DRAG_TIMEOUT_S * 1000000;
+        if (quarter) {
+            D->cur.flags |= DRAG_F_QUARTER;
+            enter_done(D, cb, ctx, now, fs->mono_us);
+        } else if (stopped || faded) {
+            enter_done(D, cb, ctx, now, fs->mono_us);
+        }
+        break;
+    }
+    case DRAG_ST_DONE:
+        /* Braking may still complete after DONE (§11.2); update the session best if it does. Settle
+         * back to IDLE 5 s after DONE once braking has resolved, keeping the frozen result. */
+        if (brake_step(D, cb, ctx, now, fs->mono_us, d_inc)) update_best(D);
+        if (now - D->done_gps_us >= (int64_t)DRAG_DONE_SETTLE_S * 1000000 && !brake_pending(D))
+            go_idle_keep_result(D);
+        break;
+    default:
+        break;
+    }
+
+    D->a_prev = a_cur;
+    D->v_prev = D->v_est;
+    D->dist_prev = D->dist_m;
+    D->prev_gps_us = now;
+    D->have_prev = true;
+}
+```
+
+- [ ] **Step 3: Build and run**
+
+Run: `cmake --build test/build --parallel 2>&1 | grep -E "error|warning" | head; ctest --test-dir test/build --output-on-failure 2>&1 | tail -3`
+Expected: no `error`/`warning` lines; `100% tests passed out of 27` (`test_drag` now 15 cases). Warning-free under ASan/UBSan (clang) and gcc-16.
+
+Measured (clang, ASan/UBSan): braking 100→0 at −1 g = 39.340 m (analytic 39.341); false start → ARMED
+with the run discarded; DONE-then-brake records the 100-0 gate at 39.340 m after the DONE event;
+peak-320 (1 g) hits all three default benches at 319.9 km/h; best-per-gate over 0.5 g / 0.6 g runs =
+4721 ms (0-100) and 11694 ms (1/4), both from the faster run.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add components/core/dragengine/drag.c test/test_drag.c \
+        docs/superpowers/plans/2026-09-14-plan-02-core-engines.md
+git commit -m "plan 02 session 2.6 t3: braking gate, false-start abort, benches, best-per-gate
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED"
+```
+
+---
 
 ---
