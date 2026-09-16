@@ -1,10 +1,10 @@
 /* app_main.c -- LapTimer firmware entry point and boot sequence (§4.7).
  *
- * Session 3.2 Task 3 implements boot steps 1-5: reset reason + crash counters, NVS init, boot
- * counter + crash-loop check, RTC-state validate/clear, and config load. Board bring-up
- * (step 6), the task WDT + supervisor (steps 10-11) and the console land in Task 4, which
- * appends to this file; until then app_main ends in a temporary idle loop. Steps 7-9 (storage,
- * display, self-test) and 12-15 (pipeline/logger/ui/power/conn/OTA) land in 3.3-3.5.
+ * Session 3.2 implements boot steps 1-5 (reset reason + crash counters, NVS init, boot
+ * counter + crash-loop check, RTC-state validate, config load), step 6 in part (board
+ * bring-up + GPS power, needed for the battery reading in `dbg status`), and steps 10-11
+ * (task WDT + supervisor, hb[]/sys_flags, static queues). Steps 7-9 (storage, display,
+ * self-test) and 12-15 (pipeline/logger/ui/power/conn/OTA) land in 3.3-3.5.
  */
 #include "build_config.h"
 
@@ -19,32 +19,15 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "hal/board.h"
 
+#include "app/dbg_console.h"
 #include "app/lt_err.h"
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
 
 static const char *TAG = "laptimer";
-
-/* Task 3 build-gate shim: `sup_install_assert_hook` (declared in app/lt_sup.h) is really
- * implemented by Task 4's components/app/supervisor/sup_errlog.c, which is out of scope here.
- * Step 2 below already calls it (byte-for-byte from the plan block), so a standalone Task 3
- * link needs a definition; this one does the real §17.9 job. Task 4 replaces this whole file
- * wholesale (its app_main.c is a full rewrite, not a diff), so this shim is superseded, not
- * duplicated, once sup_errlog.c lands. Plan block drift -- see the Task 3 report. */
-static void assert_hook_shim(uint16_t code, const char *file, int line)
-{
-    ESP_LOGE(TAG, "core assert 0x%04x at %s:%d", code, file ? file : "?", line);
-    errlog_add(code, (uint32_t)line);
-}
-
-void sup_install_assert_hook(void)
-{
-    core_set_assert_hook(assert_hook_shim);
-}
 
 /* Build the profile the app applies after cfg_defaults and before the NVS blob (§15.1), so
  * stored user settings always win. BLE name is MAC-derived ("LapTimer-XXXX"). */
@@ -85,43 +68,78 @@ void app_main(void)
     sup_install_assert_hook();                 /* core asserts -> error ring (§17.9) */
     if (nvs_erased) errlog_add(E_SYS_CFG_RESET, 0);
 
-    /* §4.7 step 1 (cont): count + log + crash-log the reset reason. */
+    /* §4.7 step 1 (cont): count + log + crash-log the reset reason; prev-boot uptime comes
+     * from the RTC uptime cell the supervisor maintained last boot. */
     uint32_t prev_uptime_s = lt_rtc_uptime_prev_s();
     lt_boot_record_reset((int)reason, prev_uptime_s);
 
-    /* §4.7 step 3: boot counter + crash-loop check (§17.5); 3.2 detects + flags only. */
+    /* §4.7 step 3: boot counter + crash-loop check (§17.5). 3.2 only detects + flags safe
+     * mode; the safe-mode behaviour tree is 3.5. */
     uint32_t boot_cnt = lt_nvs_boot_inc();
-    lt_counters_inc(LT_CTR_BOOTS, false);
+    lt_counters_inc(LT_CTR_BOOTS, false);      /* batched with the rest */
     bool safe = false;
     if (lt_crashlog_is_loop()) {
         lt_safe_until_set(boot_cnt + 1);
         safe = true;
+        ESP_LOGE(TAG, "crash loop: 3 abnormal resets < 60 s -> SAFE MODE");
     } else if (boot_cnt <= lt_safe_until_get()) {
-        safe = true;
+        safe = true;                           /* still inside a prior safe-mode window */
     }
-    if (safe) { sys_flags_set(SYS_SAFE_MODE); errlog_add(E_SYS_SAFE_MODE, boot_cnt); }
+    if (safe) {
+        sys_flags_set(SYS_SAFE_MODE);
+        errlog_add(E_SYS_SAFE_MODE, boot_cnt);
+    }
 
-    /* §4.7 step 4: RTC memory validate/clear (full resume is 3.5). */
+    /* §4.7 step 4: RTC memory validate/clear. Full resume is 3.5; here invalid/absent are
+     * cleared and only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
     switch (lt_rtc_validate(NULL)) {
-    case RTC_INVALID: errlog_add(E_SYS_RTC_INVALID, 0); lt_rtc_clear(); break;
-    case RTC_ABSENT:  lt_rtc_clear(); break;
-    case RTC_VALID:   break;
+    case RTC_INVALID:
+        errlog_add(E_SYS_RTC_INVALID, 0);
+        lt_rtc_clear();
+        break;
+    case RTC_ABSENT:
+        lt_rtc_clear();
+        break;
+    case RTC_VALID:
+        break;                                 /* left in place; 3.5 resumes from it */
     }
 
-    /* §4.7 step 5: config load (defaults -> profile -> NVS blob; stored settings win). */
+    /* §4.7 step 5: config load. defaults -> profile -> NVS blob (stored settings win, §15.1);
+    *  defaults + a fresh save on absent/corrupt; log corrections. */
     static cfg_t cfg;
     char ble_name[16];
     cfg_profile_t prof;
     cfg_defaults(&cfg);
-    make_profile(&prof, ble_name, sizeof(ble_name));   /* MAC-derived BLE name */
+    make_profile(&prof, ble_name, sizeof(ble_name));
     cfg_apply_profile(&cfg, &prof);
     int corr = lt_cfg_load(&cfg);
-    if (corr < 0) { lt_cfg_save(&cfg); errlog_add(E_SYS_CFG_RESET, 0); }
-    else if (corr > 0) { errlog_add(E_SYS_CFG_RESET, (uint32_t)corr); lt_cfg_save(&cfg); }
-
-    /* Task 4 appends step 6 board bring-up, steps 10-11 (task WDT + supervisor, static
-     * queues) and starts the console. For a standalone Task 3 build gate: idle. */
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    if (corr < 0) {
+        lt_cfg_save(&cfg);                     /* no valid blob -> persist the profile defaults */
+        errlog_add(E_SYS_CFG_RESET, 0);
+    } else if (corr > 0) {
+        errlog_add(E_SYS_CFG_RESET, (uint32_t)corr);
+        lt_cfg_save(&cfg);                     /* persist the clamped config */
     }
+
+    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`). */
+    board_init();
+    board_gps_power(true);
+
+    /* §4.7 step 10: the task WDT is already enabled via sdkconfig; hb[]/sys_flags exist
+     * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */
+    sup_start();
+
+    /* §4.7 step 11: static queues the supervisor + button ISR need (btn_q). The pipeline
+     * rings arrive in 3.4. */
+    lt_queues_init();
+
+    /* Minimal diagnostics console -- the 3.2 exit criterion (`dbg status`). Replaced by the
+     * full §18.4 console in 3.5. */
+    dbg_console_start((int)reason);
+
+    ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%d)", (unsigned)boot_cnt,
+             (long long)((esp_timer_get_time() - t_boot) / 1000), (int)safe);
+
+    /* The main task returns: the supervisor and console tasks run on, and the idle tasks on
+     * both cores feed the task WDT. Pipeline/logger/ui/power start here in 3.4. */
 }
