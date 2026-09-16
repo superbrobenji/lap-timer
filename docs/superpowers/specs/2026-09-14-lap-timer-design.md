@@ -748,7 +748,8 @@ void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out);      /* CALIB rec
 void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out);
 
 void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);   /* NULL/invalid calib → defaults */
-void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid);
+void fus_set_gps_speed(fus_t *f, float v_mps, float course_deg, int64_t mono_us, bool valid);   /* speed + course from one fix */
+float fus_yaw_rate_gps_dps(float prev_course_deg, int64_t prev_mono_us, float cur_course_deg, int64_t cur_mono_us);   /* earth-frame turn rate from two GPS courses, + = left */
 void fus_set_temp(fus_t *f, int16_t temp_c100);       /* IMU temperature, ~1 Hz; drives FUS_BIAS_STALE */
 int  fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);   /* one raw sample → one fused sample */
 bool fus_is_still(const fus_t *f);

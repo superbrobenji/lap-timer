@@ -101,14 +101,30 @@ typedef struct {
     bool        temp_known;
     bool        bias_stale;          /* |temp − gbias_temp| > BIAS_TEMP_STALE_C since the last bias update */
     bool        fwd_learned_pending; /* set by fus_step when the forward row was just learned; consumed by fus_calib_forward_step */
-    float       lean_rad;            /* session 2.3: lean filter state */
-    int64_t     last_ref_mono_us;    /* session 2.3: last time a lean reference was applied */
+    float       v_course_deg;        /* latest GPS course over ground (compass degrees) */
+    float       lean_rad;            /* complementary-filter lean estimate (rad, + = right) */
+    int64_t     last_ref_mono_us;    /* mono time a lean reference (phi_ref) was last applied; <0 = never */
+    bool        have_prev_course;    /* a previous valid course is stored for the turn-rate derivative */
+    float       prev_course_deg;     /* course of the previous valid fix */
+    int64_t     prev_course_mono_us; /* arrival time of the previous valid fix */
+    float       yaw_gps_dps;         /* last earth-frame turn rate from GPS courses (+ = left); NAN if none */
+    int64_t     yaw_gps_mono_us;     /* arrival time the above was computed at; <0 = none */
+    int64_t     disagree_since_mono_us; /* mono time the fused/GPS yaw disagreement began; <0 = agreeing */
+    bool        disagree_latched;    /* FUS_DISAGREE has been raised at least once this session (log once) */
     uint32_t    samples;             /* fus_step calls since init */
 } fus_t;
 
 /* calib NULL or invalid → defaults. */
 void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);
-void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid);
+/* Latest GPS-derived motion, from one NAV-PVT fix: ground speed (m/s), course over ground
+ * (compass degrees, 0 = north, clockwise positive), the fix arrival time and its validity. On a
+ * valid fix that follows another valid fix, the earth-frame turn rate yaw_gps_dps is recomputed
+ * from the two courses (fus_yaw_rate_gps_dps) for the §9.3 cross-check. */
+void fus_set_gps_speed(fus_t *f, float v_mps, float course_deg, int64_t mono_us, bool valid);
+/* Earth-frame turn rate implied by two consecutive GPS courses, in degrees/second, + = left turn
+ * (compass heading increases clockwise, so a left turn lowers it): -wrap(cur - prev)/dt, the course
+ * difference wrapped to (-180, 180]. Returns 0 when dt <= 0. */
+float fus_yaw_rate_gps_dps(float prev_course_deg, int64_t prev_mono_us, float cur_course_deg, int64_t cur_mono_us);
 /* IMU temperature (~1 Hz from the pipeline). Sets bias_stale when a captured bias is more than
  * BIAS_TEMP_STALE_C away from its capture temperature. */
 void fus_set_temp(fus_t *f, int16_t temp_c100);

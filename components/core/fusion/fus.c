@@ -77,11 +77,40 @@ void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto)
     if (calib && fus_calib_valid(calib)) f->calib = *calib;
     else fus_calib_defaults(&f->calib);
     f->moto = variant_is_moto ? 1 : 0;
+    /* sentinels the zero from memset does not express (fus.h) */
+    f->last_ref_mono_us = -1;
+    f->yaw_gps_dps = NAN;
+    f->yaw_gps_mono_us = -1;
+    f->disagree_since_mono_us = -1;
 }
 
-void fus_set_gps_speed(fus_t *f, float v_mps, int64_t mono_us, bool valid)
+/* Smallest signed compass difference cur - prev, wrapped to (-180, 180]. */
+static float course_delta_deg(float cur_deg, float prev_deg)
 {
-    f->v_mps = v_mps; f->v_mono_us = mono_us; f->v_valid = valid;
+    float d = fmodf(cur_deg - prev_deg, 360.0f);
+    if (d > 180.0f) d -= 360.0f;
+    else if (d <= -180.0f) d += 360.0f;
+    return d;
+}
+
+float fus_yaw_rate_gps_dps(float prev_course_deg, int64_t prev_mono_us, float cur_course_deg, int64_t cur_mono_us)
+{
+    const double dt_s = (double)(cur_mono_us - prev_mono_us) / 1e6;
+    if (dt_s <= 0.0) return 0.0f;
+    /* compass heading rises clockwise (a right turn), the vehicle yaw is + to the left, so negate */
+    return (float)(-(double)course_delta_deg(cur_course_deg, prev_course_deg) / dt_s);
+}
+
+void fus_set_gps_speed(fus_t *f, float v_mps, float course_deg, int64_t mono_us, bool valid)
+{
+    if (valid) {
+        if (f->have_prev_course && mono_us > f->prev_course_mono_us) {
+            f->yaw_gps_dps = fus_yaw_rate_gps_dps(f->prev_course_deg, f->prev_course_mono_us, course_deg, mono_us);
+            f->yaw_gps_mono_us = mono_us;
+        }
+        f->prev_course_deg = course_deg; f->prev_course_mono_us = mono_us; f->have_prev_course = true;
+    }
+    f->v_mps = v_mps; f->v_course_deg = course_deg; f->v_mono_us = mono_us; f->v_valid = valid;
 }
 
 static void update_bias_stale(fus_t *f)

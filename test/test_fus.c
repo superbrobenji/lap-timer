@@ -163,13 +163,48 @@ static void test_calibration_round_trips_through_the_calib_record(void)
     TEST_ASSERT_EQUAL_INT16(32767, w.gbias[2]);
 }
 
-static void test_gps_speed_is_held_with_its_validity_and_time(void)
+static void test_gps_speed_and_course_are_held_with_validity_and_time(void)
 {
     fus_t f; fus_init(&f, NULL, 1);
-    fus_set_gps_speed(&f, 27.5f, 5000000, true);
-    TEST_ASSERT_EQUAL_FLOAT(27.5f, f.v_mps); TEST_ASSERT_EQUAL_INT64(5000000, f.v_mono_us); TEST_ASSERT_TRUE(f.v_valid);
-    fus_set_gps_speed(&f, 0.0f, 5200000, false);
+    fus_set_gps_speed(&f, 27.5f, 91.0f, 5000000, true);
+    TEST_ASSERT_EQUAL_FLOAT(27.5f, f.v_mps); TEST_ASSERT_EQUAL_FLOAT(91.0f, f.v_course_deg);
+    TEST_ASSERT_EQUAL_INT64(5000000, f.v_mono_us); TEST_ASSERT_TRUE(f.v_valid);
+    fus_set_gps_speed(&f, 0.0f, 0.0f, 5200000, false);
     TEST_ASSERT_FALSE(f.v_valid);
+}
+
+static void test_gps_yaw_rate_helper_signs_and_wrap(void)
+{
+    /* straight: no course change */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, fus_yaw_rate_gps_dps(90.0f, 0, 90.0f, 1000000));
+    /* right turn: compass rises 10->20 over 1 s -> yaw negative (right) */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, -10.0f, fus_yaw_rate_gps_dps(10.0f, 0, 20.0f, 1000000));
+    /* left turn: compass falls 20->10 -> yaw positive (left) */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 10.0f, fus_yaw_rate_gps_dps(20.0f, 0, 10.0f, 1000000));
+    /* wrap, right turn across north: 350 -> 10 is +20 deg clockwise */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, -20.0f, fus_yaw_rate_gps_dps(350.0f, 0, 10.0f, 1000000));
+    /* wrap, left turn across north: 10 -> 350 is -20 deg */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, 20.0f, fus_yaw_rate_gps_dps(10.0f, 0, 350.0f, 1000000));
+    /* half a second doubles the rate */
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, -20.0f, fus_yaw_rate_gps_dps(10.0f, 0, 20.0f, 500000));
+    /* non-positive dt -> 0 */
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, fus_yaw_rate_gps_dps(10.0f, 1000000, 20.0f, 1000000));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, fus_yaw_rate_gps_dps(10.0f, 2000000, 20.0f, 1000000));
+}
+
+static void test_gps_course_history_feeds_the_turn_rate(void)
+{
+    fus_t f; fus_init(&f, NULL, 1);
+    TEST_ASSERT_FALSE(isfinite(f.yaw_gps_dps));            /* NAN until two valid fixes */
+    fus_set_gps_speed(&f, 30.0f, 100.0f, 1000000, true);
+    TEST_ASSERT_FALSE(isfinite(f.yaw_gps_dps));            /* one fix: still none */
+    fus_set_gps_speed(&f, 30.0f, 106.0f, 1200000, true);  /* +6 deg in 0.2 s -> -30 dps (right) */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, -30.0f, f.yaw_gps_dps);
+    TEST_ASSERT_EQUAL_INT64(1200000, f.yaw_gps_mono_us);
+    fus_set_gps_speed(&f, 30.0f, 999.0f, 1300000, false); /* invalid: does not update prev or the rate */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, -30.0f, f.yaw_gps_dps);
+    fus_set_gps_speed(&f, 30.0f, 100.0f, 1400000, true);  /* -6 deg from 106 over 0.2 s -> +30 dps (left) */
+    TEST_ASSERT_FLOAT_WITHIN(1e-3f, 30.0f, f.yaw_gps_dps);
 }
 
 /* ---- integration cases: stillness, bias, orientation capture and forward learning (§22.1) ---- */
@@ -529,7 +564,9 @@ int main(void)
     RUN_TEST(test_ninety_degree_mount_rotates_into_the_vehicle_frame);
     RUN_TEST(test_temperature_drift_marks_the_bias_stale);
     RUN_TEST(test_calibration_round_trips_through_the_calib_record);
-    RUN_TEST(test_gps_speed_is_held_with_its_validity_and_time);
+    RUN_TEST(test_gps_speed_and_course_are_held_with_validity_and_time);
+    RUN_TEST(test_gps_yaw_rate_helper_signs_and_wrap);
+    RUN_TEST(test_gps_course_history_feeds_the_turn_rate);
     RUN_TEST(test_still_detection_and_gyro_bias_update);
     RUN_TEST(test_orientation_capture_from_tilted_gravity);
     RUN_TEST(test_forward_learning_from_straight_line_acceleration);
