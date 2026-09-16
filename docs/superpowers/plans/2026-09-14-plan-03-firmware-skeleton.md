@@ -1721,6 +1721,8 @@ void lt_rtc_uptime_update_s(uint32_t uptime_s)
 }
 ```
 
+> **Plan block drift (applied during Task 3 execution):** the steps-1–5 body below calls `sup_install_assert_hook()` (step 2, "core asserts -> error ring"), but that symbol's only implementation is Task 4's `components/app/supervisor/sup_errlog.c`, which is out of Task 3's file list. Transcribed as drafted, `main/app_main.c` fails to *link* standalone (all symbols from `lt_nvs.c`/`lt_rtc.c` resolve; only `sup_install_assert_hook` is undefined) — consistent with this block's own "(verified in the integrated build below)" caveat on the verification line, but the orchestrator's Task 3 gate requires a standalone `./build.sh moto_neo6m build` to succeed. The minimal fix actually committed: `main/app_main.c` gains a temporary `assert_hook_shim` + `sup_install_assert_hook` definition (identical in behavior to Task 4's planned `sup_errlog.c`: `core_set_assert_hook` wired to log into the NVS error ring) placed directly in `app_main.c`, clearly commented as a Task-3-only shim. This does not collide with Task 4: Task 4's own Step 4 replaces `main/app_main.c` wholesale (it is a full rewrite, not a diff), so the shim is superseded rather than duplicated once `sup_errlog.c` lands — Task 4 must not also define `sup_install_assert_hook` anywhere the shim still exists. The `app_main.c` block below is left as originally drafted for the record; the repo state after Task 3 differs from it only by that shim (and the closing idle loop already called out above).
+
 - [ ] **Step 3: `main/app_main.c` boot steps 1–5.** The boot sequence's reset-reason/NVS/crash-loop/RTC/config portion. (T4 appends step 6 board bring-up and steps 10–11 + console; the final `app_main.c` is shown in T4. For a standalone T3 gate, end `app_main` after step 5 with a temporary `for(;;) vTaskDelay(...)` idle.) The steps-1–5 body is:
 
 ```c
@@ -1784,7 +1786,7 @@ void lt_rtc_uptime_update_s(uint32_t uptime_s)
     else if (corr > 0) { errlog_add(E_SYS_CFG_RESET, (uint32_t)corr); lt_cfg_save(&cfg); }
 ```
 
-**Task 3 verification:** `lt_nvs.c` + `lt_rtc.c` compile clean under `-Werror`; blob sizes are the §15.2 values (12/385/15 B, packed). Boot steps 1–5 build and link (verified in the integrated build below). **Hardware-only checks:** the crash counters advancing across a real panic/WDT/brownout, and RTC-cell survival across those resets.
+**Task 3 verification:** `lt_nvs.c` + `lt_rtc.c` compile clean under `-Werror`; blob sizes are the §15.2 values (12/385/15 B, packed). Boot steps 1–5 build and link. **As executed (see drift note above), `main/app_main.c` also carries a temporary `assert_hook_shim` so the standalone Task 3 tree links**: `./build.sh moto_neo6m build` succeeds (app image `0x3b240` B), `./build.sh moto_neo6m size` passes (`242240 B` within the `1245184 B` limit), `./build.sh moto_sim build` succeeds (same `0x3b240` B image). The only warning from new code is the expected `t_boot` unused-variable warning in `main/app_main.c` (that variable is consumed by Task 4's boot-complete log line; `main` is not built with `-Werror`). **Hardware-only checks:** the crash counters advancing across a real panic/WDT/brownout, and RTC-cell survival across those resets.
 
 Commit block:
 ```
