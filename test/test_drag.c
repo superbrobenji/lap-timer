@@ -32,6 +32,16 @@ static int ev_count(uint8_t type)
     for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == type) c++;
     return c;
 }
+static int ev_first(uint8_t type)
+{
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == type) return i;
+    return -1;
+}
+static int ev_gate_index(uint16_t gate_id)
+{
+    for (int i = 0; i < EV.n && i < 128; i++) if (EV.type[i] == EV_DRAG_GATE && EV.arg16[i] == gate_id) return i;
+    return -1;
+}
 
 void setUp(void)    { memset(&EV, 0, sizeof EV); }
 void tearDown(void) {}
@@ -94,10 +104,67 @@ static void run_const_g(double g, int max_k, drag_evt_cb_t cb, void *ctx)
     }
 }
 
+/* Accelerate at 0.5 g to peak_kmh, then brake at −1 g to a stop (5 Hz Doppler follows the profile).
+ * Used for the braking-distance and peak-180 bench cases. */
+static void run_accel_then_brake(double peak_kmh, drag_evt_cb_t cb, void *ctx)
+{
+    double a = 0.5 * G_MPS2, ab = 1.0 * G_MPS2, vpk = peak_kmh / 3.6;
+    int nacc = (int)(vpk / a / 0.01 + 0.5);
+    int64_t tpk = T_LAUNCH_US + (int64_t)nacc * DT_US;
+    for (int k = LAUNCH_K; k <= LAUNCH_K + nacc + 1200; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        double gl, v;
+        if (k < LAUNCH_K + nacc) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); }
+        else                     { gl = -1.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
+        fused_sample_t fs = fused(t, (float)gl, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
+        if (D.brake_done) break;
+        if (drag_state(&D) == DRAG_ST_IDLE) break;
+    }
+}
+
+/* Accelerate at 0.5 g until the 1/4 gate ends the run (DONE), then brake at −1 g to a stop — so the
+ * braking gate completes *after* DONE (§11.2 DONE-then-brake). */
+static void run_quarter_then_brake(drag_evt_cb_t cb, void *ctx)
+{
+    double a = 0.5 * G_MPS2, ab = 1.0 * G_MPS2, vpk = 0.0;
+    int64_t tpk = 0;
+    for (int k = LAUNCH_K; k <= 3000; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        double gl, v;
+        if (drag_state(&D) != DRAG_ST_DONE) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); vpk = v; tpk = t; }
+        else                                { gl = -1.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
+        fused_sample_t fs = fused(t, (float)gl, 0);
+        drag_on_fused(&D, &fs, cb, ctx);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
+        if (D.brake_done) break;
+    }
+}
+
 static const drag_gate_res_t *gate_by_id(const drag_result_t *r, uint8_t id)
 {
     for (int i = 0; i < r->n_gates; i++) if (r->gates[i].gate_id == id) return &r->gates[i];
     return NULL;
+}
+
+/* §11.4 screen benches (test-side, since the engine records only per-gate hits): the SPEED_FROM0 gates
+ * whose speed is in cfg.benches_kmh and were hit, ascending, then the 1/4 row (0 sentinel). Max `max`
+ * rows; if more than max−1 benches were hit the lowest are dropped first. */
+static int bench_rows(const drag_cfg_t *c, const drag_result_t *r, uint16_t *out, int max)
+{
+    uint16_t hit[8]; int nh = 0;
+    for (int b = 0; b < c->n_benches; b++) {
+        uint16_t bs = c->benches_kmh[b];
+        for (int i = 0; i < c->n_gates; i++)
+            if (c->gates[i].kind == DRAG_SPEED_FROM0 && c->gates[i].a == bs && r->gates[i].hit) { hit[nh++] = bs; break; }
+    }
+    int start = 0;
+    while (nh - start > max - 1) start++;           /* reserve one row for the 1/4 */
+    int n = 0;
+    for (int i = start; i < nh; i++) out[n++] = hit[i];
+    out[n++] = 0;                                   /* the 1/4 row, always present */
+    return n;
 }
 
 /* ------------------------------------------------------------ Task 1 tests */
@@ -284,6 +351,139 @@ static void test_rollout_shifts_t0(void)
     TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);                  /* the run still completes */
 }
 
+/* ------------------------------------------------------------ Task 3 tests */
+
+/* §22.1: braking distance from 100 km/h at −1 g = 39.3 m ± 0.5. The run peaks just above 100 km/h,
+ * then brakes; the 100-0 gate accumulates dist from the 100 km/h crossing to the stop (< 0.5 km/h). */
+static void test_braking_distance_100_to_0(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_accel_then_brake(105.0, ev_cb, &EV);
+
+    const drag_gate_res_t *gb = gate_by_id(drag_current(&D), 11);
+    TEST_ASSERT_NOT_NULL(gb);
+    TEST_ASSERT_TRUE(gb->hit);
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 39.3, (double)gb->dist_cm / 100.0);
+}
+
+/* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns
+ * to ARMED. A short g-spike launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires
+ * and the discarded run leaves no gate hits. */
+static void test_false_start_abort(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    for (int k = LAUNCH_K; k <= 215; k++) {                       /* g-spike: launches at ~k=211 */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.3f, 0);
+        drag_on_fused(&D, &fs, ev_cb, &EV);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    fused_sample_t s216 = fused((int64_t)216 * DT_US, 0.0f, 0);
+    drag_on_fused(&D, &s216, ev_cb, &EV);
+    gps_fix_t stall = gfix((int64_t)216 * DT_US, 0, true);        /* Doppler: stopped */
+    drag_on_fix(&D, &stall);
+    fused_sample_t s217 = fused((int64_t)217 * DT_US, 0.0f, 0);   /* v_est ≈ 0 within 2 s of launch */
+    drag_on_fused(&D, &s217, ev_cb, &EV);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));       /* re-armed, run discarded */
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));
+    TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
+}
+
+/* §11.2: the braking gate may complete after DONE. A 0.5 g run ends DONE at the 1/4, then braking
+ * from ~226 km/h through 100 records the 100-0 gate after the DONE event. */
+static void test_done_then_brake(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(ev_cb, &EV);
+    run_quarter_then_brake(ev_cb, &EV);
+
+    const drag_gate_res_t *gb = gate_by_id(drag_current(&D), 11);
+    TEST_ASSERT_TRUE(gb->hit);
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 39.3, (double)gb->dist_cm / 100.0);
+    /* the braking gate's EV_DRAG_GATE fired after EV_DRAG_DONE */
+    int done_i  = ev_first(EV_DRAG_DONE);
+    int brake_i = ev_gate_index(11);
+    TEST_ASSERT_TRUE(done_i >= 0 && brake_i >= 0);
+    TEST_ASSERT_TRUE(brake_i > done_i);
+}
+
+/* §11.4 bench visibility: a peak-180 run hits only the 100 bench (rows = {100, 1/4}); a peak-320 run
+ * hits all three default benches (rows = {100, 200, 300, 1/4}), ascending, capped at 4 rows. */
+static void test_bench_visibility_180_vs_320(void)
+{
+    uint16_t rows[8]; int n;
+
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_accel_then_brake(180.0, NULL, NULL);        /* peaks at 180, brakes to a stop → DONE */
+    const drag_result_t *r180 = drag_current(&D);
+    TEST_ASSERT_TRUE(gate_by_id(r180, 2)->hit);     /* 0-100 hit */
+    TEST_ASSERT_FALSE(gate_by_id(r180, 3)->hit);    /* 0-200 not */
+    TEST_ASSERT_FALSE(gate_by_id(r180, 4)->hit);    /* 0-300 not */
+    TEST_ASSERT_FALSE(gate_by_id(r180, 10)->hit);   /* 1/4 not */
+    n = bench_rows(&D.cfg, r180, rows, 4);
+    TEST_ASSERT_EQUAL_INT(2, n);
+    TEST_ASSERT_EQUAL_UINT16(100, rows[0]);
+    TEST_ASSERT_EQUAL_UINT16(0,   rows[1]);         /* the 1/4 row */
+
+    drag_init(&D, NULL);
+    arm_engine(NULL, NULL);
+    run_const_g(1.0, 1300, NULL, NULL);             /* 1 g reaches the 1/4 at ~320 km/h */
+    const drag_result_t *r320 = drag_current(&D);
+    TEST_ASSERT_TRUE(gate_by_id(r320, 2)->hit && gate_by_id(r320, 3)->hit &&
+                     gate_by_id(r320, 4)->hit && gate_by_id(r320, 10)->hit);
+    n = bench_rows(&D.cfg, r320, rows, 4);
+    TEST_ASSERT_EQUAL_INT(4, n);
+    TEST_ASSERT_EQUAL_UINT16(100, rows[0]);
+    TEST_ASSERT_EQUAL_UINT16(200, rows[1]);
+    TEST_ASSERT_EQUAL_UINT16(300, rows[2]);
+    TEST_ASSERT_EQUAL_UINT16(0,   rows[3]);
+}
+
+/* §11.4 drop rule: with four benches configured {60,100,200,300}, a 1 g run hits all four, so the
+ * lowest (60) is dropped to keep the four-row cap: rows = {100, 200, 300, 1/4}. */
+static void test_bench_drop_lowest_when_over_four(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.benches_kmh[0] = 60; c.benches_kmh[1] = 100; c.benches_kmh[2] = 200; c.benches_kmh[3] = 300;
+    c.n_benches = 4;
+    drag_init(&D, &c);
+    arm_engine(NULL, NULL);
+    run_const_g(1.0, 1300, NULL, NULL);
+
+    uint16_t rows[8];
+    int n = bench_rows(&D.cfg, drag_current(&D), rows, 4);
+    TEST_ASSERT_EQUAL_INT(4, n);
+    TEST_ASSERT_EQUAL_UINT16(100, rows[0]);         /* 60 dropped */
+    TEST_ASSERT_EQUAL_UINT16(200, rows[1]);
+    TEST_ASSERT_EQUAL_UINT16(300, rows[2]);
+    TEST_ASSERT_EQUAL_UINT16(0,   rows[3]);
+}
+
+/* §11.3 best per gate: across a 0.5 g run and a faster 0.6 g run, drag_best returns the lower time_ms
+ * for each gate. A gate never hit in any run (0-300, unreached by either) returns NULL. */
+static void test_best_per_gate_two_runs(void)
+{
+    drag_init(&D, NULL);
+    TEST_ASSERT_NULL(drag_best(&D, 2));             /* nothing completed yet */
+
+    arm_engine(NULL, NULL);
+    run_const_g(0.5, 1700, NULL, NULL);             /* 0-100 = 5665 ms, 1/4 = 12810 ms */
+    drag_reset(&D);                                 /* keeps the session best */
+    arm_engine(NULL, NULL);
+    run_const_g(0.6, 1500, NULL, NULL);             /* 0-100 = 4721 ms, 1/4 = 11694 ms (faster) */
+
+    const drag_result_t *b100 = drag_best(&D, 2);
+    const drag_result_t *bq   = drag_best(&D, 10);
+    TEST_ASSERT_NOT_NULL(b100);
+    TEST_ASSERT_NOT_NULL(bq);
+    TEST_ASSERT_INT_WITHIN(20, 4721, (int)gate_by_id(b100, 2)->time_ms);
+    TEST_ASSERT_INT_WITHIN(20, 11694, (int)gate_by_id(bq, 10)->time_ms);
+    TEST_ASSERT_NULL(drag_best(&D, 4));             /* 0-300 unreached by either run */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -296,5 +496,11 @@ int main(void)
     RUN_TEST(test_run_0p5g_speed_range_100_200);
     RUN_TEST(test_interpolation_resolution_5ms);
     RUN_TEST(test_rollout_shifts_t0);
+    RUN_TEST(test_braking_distance_100_to_0);
+    RUN_TEST(test_false_start_abort);
+    RUN_TEST(test_done_then_brake);
+    RUN_TEST(test_bench_visibility_180_vs_320);
+    RUN_TEST(test_bench_drop_lowest_when_over_four);
+    RUN_TEST(test_best_per_gate_two_runs);
     return UNITY_END();
 }
