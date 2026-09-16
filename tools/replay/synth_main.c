@@ -1,7 +1,9 @@
 #include "replay/synth_truth.h"
+#include "replay/synth_drag.h"
 #include "replay/replay.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define PREFIX_CAP 480
 #define PATH_CAP   512           /* PREFIX_CAP plus the longest suffix, ".truth.json" */
@@ -13,6 +15,7 @@ static void usage(FILE *f)
         "usage: synth --out PREFIX [options]\n"
         "Writes PREFIX.log, PREFIX.truth.json and PREFIX.venue.json (spec 22.2).\n"
         "\n"
+        "  --profile circuit|drag  generator; drag has its own options (--help --profile drag)  (circuit)\n"
         "circuit:\n"
         "  --vertices N          polygon vertices                       (12)\n"
         "  --length M            lap length along the driven path, m    (2500)\n"
@@ -50,6 +53,13 @@ static void usage(FILE *f)
 
 int main(int argc, char **argv)
 {
+    /* `--profile drag` hands the whole run to the straight-line drag generator (§11); the default
+     * circuit profile falls through to the closed-form polygon model below. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc && strcmp(argv[i + 1], "drag") == 0)
+            return synth_drag_main(argc, argv);
+    }
+
     synth_cfg_t cfg;
     synth_gps_cfg_t gcfg;
     int fused_hz = 0;
