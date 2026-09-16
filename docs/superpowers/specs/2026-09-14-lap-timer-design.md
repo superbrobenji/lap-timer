@@ -444,7 +444,7 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | `cfg_from_json` token array, 192 × `jsmntok_t` (20 B), `.bss` | 3,840 B |
 | `exp_t` (holds the 1 KB export streaming window and the decoder state) | 1,488 B |
 | `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
-| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 328 B |
+| Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 368 B |
 | Lap engine `lap_t` (venue + candidates + sector/union gates + best/prev) | ~5.3 KB |
 | Drag engine `drag_t` (gate table, 1 s fused-sample history ring, current + composite-best results) | ~3.3 KB, caller-provided (drag mode) |
 | Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB, caller-provided (OLED/O5 only; none on the e-paper build) |
@@ -1414,7 +1414,7 @@ The pipeline never blocks on the display, storage, or radio. Its worst-case loop
 2. `fused.gps_us = tb_mono_to_gps(mono)`.
 3. If drag mode: `drag_on_fused`.
 4. Every `FUSION_HZ / FUSED_RING_HZ` samples (4): push to `fused_ring`.
-5. Lap stats accumulate max/min per lap (done inside `lap_on_fix` using the latest fused sample; the pipeline keeps a running per-lap maxima struct updated at 100 Hz and passes it to the lap engine).
+5. Per-lap statistics (§9.4) are accumulated by the pipeline at 100 Hz in `on_raw` (max lean/g/speed etc.), reset at each S/F crossing, and written into the `lap_result_t.stats` of the completing lap. The lap engine (`lap_on_fix`) takes the latest fused sample only for gate timing; it does not compute `stats` — the field is zero until the pipeline fills it (plan 03).
 
 ### 9.2 Calibration
 
@@ -1468,7 +1468,7 @@ All float32. No trig tables needed; `sinf/cosf/atan2f` at 100 Hz cost < 1 % CPU.
 
 ### 9.4 Per-lap statistics
 
-Maintained by the pipeline at 100 Hz, reset at each S/F crossing, passed to the lap engine at lap completion:
+Maintained by the pipeline at 100 Hz (plan 03, in `on_raw`), reset at each S/F crossing, and written into the completing lap's `lap_result_t.stats` (the plan-02 lap engine leaves that field zero):
 
 `lap_stats_t { uint16_t max_speed_cms, min_speed_cms; int16_t max_lean_l_cdeg, max_lean_r_cdeg; int16_t max_glat_e3, max_gacc_e3, max_gbrake_e3; }`
 
