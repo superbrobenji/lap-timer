@@ -142,11 +142,7 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 #        components/drivers/imu_${IMU}   components/drivers/display_${DISPLAY}
 #        + conn_ble / conn_wifi (per CONN), conn_ble_rc (if CONN_BLE_RC),
 #          export_serial (if EXPORT_SERIAL)  -- gated exactly as in §21.1.
-# NOTE (Task 1 drift): components/drivers/board_devkit_v1 is listed in the 3.2 plan block above
-# but is added to EXTRA_COMPONENT_DIRS only once its directory exists (ESP-IDF's project.cmake
-# fails configure with a FATAL_ERROR on a missing EXTRA_COMPONENT_DIRS entry, unlike a REQUIRES
-# miss). Task 2 creates the directory and appends it here.
-set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app)
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1)
 
 # keep each named environment's generated sdkconfig inside its own build/<env>/
 # tree, so switching -D flags between envs never cross-contaminates (each build dir

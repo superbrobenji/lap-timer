@@ -155,7 +155,7 @@ Stock DevKit deep-sleep draw is 5–15 mA (AMS1117 quiescent ~5 mA, power LED ~2
 | Button MODE | 32 | in | active-high, 100 kΩ pull-down | RTC GPIO, EXT1 wake |
 | Button UP | 33 | in | active-high, 100 kΩ pull-down | RTC GPIO, EXT1 wake |
 | Button DOWN | 25 | in | active-high, 100 kΩ pull-down | RTC GPIO, EXT1 wake |
-| Battery ADC | 34 | analog | 0–2.1 V at tap | `ADC1_CHANNEL_6`, 11 dB attenuation. ADC2 is unusable with WiFi. |
+| Battery ADC | 34 | analog | 0–2.1 V at tap | `ADC1_CHANNEL_6`, 12 dB attenuation (`ADC_ATTEN_DB_12`; ESP-IDF v5.3.2 deprecates and aliases `ADC_ATTEN_DB_11` to the identical range, so `-Werror` builds use `ADC_ATTEN_DB_12`). ADC2 is unusable with WiFi. |
 | Charger CHRG (optional) | 39 | in | open-drain active-low | EXT0 wake on low. 100 kΩ pull-up. |
 | Console / serial export | 1 (TX), 3 (RX) | | | `UART_NUM_0` via CH340 |
 
@@ -1983,8 +1983,8 @@ UART wake from light sleep is not used (classic ESP32 loses the first bytes). In
 
 ### 16.4 Battery measurement
 
-- `adc1_config_width(ADC_WIDTH_BIT_12)`, `adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11)`, `esp_adc_cal_characterize` with eFuse Vref/Two-Point when present. This board has VRef calibration in eFuse (verified 2026-09-15).
-- Read: 64 samples, discard 8 highest and 8 lowest, mean → `esp_adc_cal_raw_to_voltage` → `v_tap_mv`. `batt_mv = v_tap_mv · 2` then two-point correction `batt_mv = a·batt_mv + b` from `battery.cal`.
+- New-API drivers only (no deprecated legacy driver, §17.9): `adc_oneshot_new_unit`/`adc_oneshot_config_channel` (`ADC_UNIT_1`, `ADC_CHANNEL_6`, `ADC_ATTEN_DB_12`, `ADC_BITWIDTH_12`), `adc_cali_create_scheme_line_fitting` with eFuse Vref when present (this board has VRef calibration in eFuse, verified 2026-09-15). `esp_adc_cal_characterize`/`adc1_config_*` are the deprecated legacy driver and are not used.
+- Read: 64 samples, discard 8 highest and 8 lowest, mean → `adc_cali_raw_to_voltage` → `v_tap_mv`. `batt_mv = v_tap_mv · 2` then two-point correction `batt_mv = a·batt_mv + b` from `battery.cal`.
 - Filtering: EMA α = 0.2 at 1 Hz. Shutdown decision on the filtered value.
 - SoC: piecewise-linear OCV table for INR cells `{4200:100, 4100:90, 4000:78, 3900:64, 3800:48, 3700:30, 3600:16, 3500:8, 3400:3, 3300:0}` (mV → %). Under load (ACTIVE) add +60 mV IR compensation before lookup.
 - `POWER` records logged every 60 s and on state change.
