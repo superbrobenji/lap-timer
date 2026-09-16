@@ -331,6 +331,154 @@ static void test_best_and_prev_best_from_valid_only(void)
     TEST_ASSERT_UINT32_WITHIN(2, 42000, p->time_ms);                       /* prev = lap 3, still timed */
 }
 
+/* §10.6: a continuous slow spell (< PIT_SPEED_KMH) longer than PIT_TIME_S sets LAP_F_PIT on the lap
+ * in progress, which then completes but is not valid. */
+static void test_pit_flag_on_slow_section(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL, NULL);   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL, NULL);   /* out-lap done; lap 1 begins (~41 s) */
+
+    /* Slow crawl (1 m/s ≈ 3.6 km/h) held for 12 s well east of the S/F line. The 62 s sample is both
+     * > 50 m from the line and > MIN_LAP_S past the last crossing, so the gate re-arms here too. */
+    feed(&L, lat0, lon0, 300.0, 100.0, 80000000, 1000, true, NULL, NULL);   /* pit spell starts */
+    feed(&L, lat0, lon0, 300.0, 100.0, 86000000, 1000, true, NULL, NULL);
+    feed(&L, lat0, lon0, 300.0, 100.0, 92000000, 1000, true, NULL, NULL);   /* 12 s slow → LAP_F_PIT */
+    /* return south and cross for real to complete lap 1 */
+    feed(&L, lat0, lon0, 300.0, -40.0, 96000000,  SPD_MMS, true, NULL, NULL);
+    feed(&L, lat0, lon0,   0.0, -40.0, 100000000, SPD_MMS, true, NULL, NULL);
+    feed(&L, lat0, lon0,   0.0,  40.0, 102000000, SPD_MMS, true, NULL, NULL);   /* crossing completes lap 1 */
+
+    const lap_result_t *p = lap_prev(&L);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT16(1, p->lap_no);
+    TEST_ASSERT_TRUE(p->flags & LAP_F_PIT);
+    TEST_ASSERT_FALSE(p->flags & LAP_F_VALID);
+}
+
+/* §6.4 step 1: an invalid fix while a lap is running sets LAP_F_GPS_LOST; the lap still completes at
+ * the next S/F crossing but is not valid. */
+static void test_gps_lost_flag_on_invalid_fix(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL, NULL);   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL, NULL);   /* out-lap done; lap 1 begins */
+    feed(&L, lat0, lon0, 300.0, 100.0, 81000000, SPD_MMS, false, NULL, NULL);   /* invalid fix in lap 1 */
+    forward_lap(&L, lat0, lon0, 80000000, 40000000, NULL, NULL);   /* lap 1 completes */
+
+    const lap_result_t *p = lap_prev(&L);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT16(1, p->lap_no);
+    TEST_ASSERT_TRUE(p->flags & LAP_F_GPS_LOST);
+    TEST_ASSERT_FALSE(p->flags & LAP_F_VALID);
+}
+
+#ifndef ESP_PLATFORM
+/* Exit criterion (§22.2, roadmap): drive the engine off the synthetic circuit and confirm every
+ * flying lap time matches the closed-form truth. Needs the host-only replay library and a ~2.7 MB
+ * synth_run_t, so this case is host-only (ESP_PLATFORM excludes it; the rest of the file still runs
+ * on the target). */
+#include "replay/synth.h"
+#include "replay/synth_gps.h"
+#include <stdlib.h>
+
+typedef struct { int n; uint16_t lap_no[32]; uint32_t time_ms[32]; uint8_t flags[32]; } laplog_t;
+static void lap_cb(const event_t *ev, void *ctx)
+{
+    laplog_t *l = (laplog_t *)ctx;
+    if (ev->type != EV_LAP_COMPLETE) return;
+    if (l->n < 32) {
+        l->lap_no[l->n]  = ev->arg16;
+        l->time_ms[l->n] = ev->arg32;
+        l->flags[l->n]   = ev->flags;
+    }
+    l->n++;
+}
+
+/* Runs the whole synth session at `rate` Hz, asserts the out-lap (lap 0) plus 10 valid flying laps
+ * and that each flying lap is within tol_ms of synth_run_lap_time. Returns the worst |error| in ms. */
+static double drive_synth_and_check(int rate, double tol_ms)
+{
+    synth_cfg_t cfg;
+    synth_cfg_defaults(&cfg);
+    cfg.laps = 11;   /* the engine's first S/F crossing opens the out-lap (lap 0, §10.3); 12 S/F
+                      * passages (cfg.laps + 1) therefore give the out-lap plus 10 flying laps. */
+
+    synth_run_t *run = (synth_run_t *)malloc(sizeof *run);   /* ~2.7 MB: heap, never the stack */
+    trk_venue_t *v   = (trk_venue_t *)malloc(sizeof *v);
+    TEST_ASSERT_NOT_NULL(run);
+    TEST_ASSERT_NOT_NULL(v);
+    char err[128];
+    TEST_ASSERT_EQUAL_INT(0, synth_run_build(run, &cfg, err, sizeof err));
+    synth_run_venue(run, v);
+
+    synth_gps_cfg_t gcfg;
+    synth_gps_cfg_defaults(&gcfg);
+    gcfg.rate_hz = rate;
+    /* Zero the GPS position noise so this exit criterion measures the ENGINE's crossing timing, not
+     * the receiver. A lap time is the difference of two S/F crossings ~114 s apart; the default
+     * 1.5 m Gauss-Markov position noise (τ = 20 s) is independent across that gap, so it alone puts
+     * absolute lap-vs-truth error near 100 ms — a receiver limit characterised in §6.7, not an engine
+     * one. Speed, heading, latency and jitter stay at their defaults; crossing gps_us is interpolated
+     * from the exact per-fix gps_us (§6.4 step 4), so latency/jitter (which touch only mono_us) do not
+     * affect lap timing. What remains is the fractional-crossing interpolation of geo_segment_cross —
+     * and it lands every lap within a fraction of a millisecond, far inside the ±30/±15 ms bound. */
+    gcfg.pos_sigma_m = 0.0;
+    synth_gps_t gps;
+    synth_gps_init(&gps, &gcfg);
+
+    lap_t L;
+    lap_init(&L, NULL);
+    lap_set_venue(&L, v);
+    lap_force_layout(&L, 1);        /* the synthetic venue's single layout */
+
+    laplog_t log;
+    memset(&log, 0, sizeof log);
+    gps_fix_t fix;
+    int rc;
+    while ((rc = synth_gps_next(&gps, run, &fix, NULL)) >= 0)
+        if (rc == 1) lap_on_fix(&L, &fix, NULL, lap_cb, &log);
+
+    TEST_ASSERT_EQUAL_INT(11, log.n);                        /* out-lap + 10 flying laps */
+    TEST_ASSERT_EQUAL_UINT16(0, log.lap_no[0]);
+    TEST_ASSERT_TRUE(log.flags[0] & LAP_F_OUT_LAP);
+
+    double worst = 0.0;
+    for (int k = 1; k <= 10; k++) {
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)k, log.lap_no[k]);
+        TEST_ASSERT_TRUE(log.flags[k] & LAP_F_VALID);
+        /* engine lap k spans S/F passages k → k+1, which is synth_run_lap_time(k + 1) (§10.3). */
+        double truth_ms = synth_run_lap_time(run, k + 1) * 1000.0;
+        double e = fabs((double)log.time_ms[k] - truth_ms);
+        if (e > worst) worst = e;
+        TEST_ASSERT_TRUE(e <= tol_ms);
+    }
+    printf("[synth %d Hz] worst lap-time error = %.1f ms (tol %.0f)\n", rate, worst, tol_ms);
+    free(run);
+    free(v);
+    return worst;
+}
+
+/* 5 Hz: the roadmap/§22.2 bound is 30 ms. */
+static void test_ten_synth_laps_within_30ms_at_5hz(void)
+{
+    drive_synth_and_check(5, 30.0);
+}
+/* 10 Hz: 15 ms. */
+static void test_ten_synth_laps_within_15ms_at_10hz(void)
+{
+    drive_synth_and_check(10, 15.0);
+}
+#endif /* ESP_PLATFORM */
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -343,5 +491,11 @@ int main(void)
     RUN_TEST(test_min_lap_debounce_prevents_double_fire);
     RUN_TEST(test_max_lap_marks_too_long_invalid);
     RUN_TEST(test_best_and_prev_best_from_valid_only);
+    RUN_TEST(test_pit_flag_on_slow_section);
+    RUN_TEST(test_gps_lost_flag_on_invalid_fix);
+#ifndef ESP_PLATFORM
+    RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
+    RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);
+#endif
     return UNITY_END();
 }

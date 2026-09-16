@@ -2,9 +2,9 @@
 #include <math.h>
 #include <string.h>
 
-/* Lap engine (spec §10). Session 2.4: venue detection and arming (part 1) plus S/F crossing and lap
- * completion (part 2). Pit detection and Doppler distance integration are added in Task 3; sectors,
- * layout disambiguation, deltas, theoretical best, on-device creation, RTC and predictive delta are
+/* Lap engine (spec §10). Session 2.4: venue detection and arming (part 1), S/F crossing and lap
+ * completion (part 2), pit detection and Doppler distance integration (part 3). Sectors, layout
+ * disambiguation, deltas, theoretical best, on-device creation, RTC and predictive delta are
  * session 2.5. */
 
 /* ---- configuration and lifecycle ---- */
@@ -310,9 +310,32 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
                 L->lap_flags = 0;
                 L->lap_start_gps_us = t_cross;
                 L->lap_dist_m = 0.0;
+                L->pit_slow = false;
+                L->pit_since_us = 0;
             } else {
                 complete_lap(L, t_cross, fix->mono_us, cb, ctx);
             }
+        }
+    }
+
+    /* While a lap is in progress: pit detection (§10.6) and Doppler-integrated lap distance (§10.5
+     * input; consumed by disambiguation and length measurement in session 2.5). */
+    if (L->state == LAP_ST_RUNNING) {
+        const double kmh = (double)fix->gspeed_mms * 0.0036;      /* mm/s → km/h */
+        if (kmh < (double)PIT_SPEED_KMH) {
+            if (!L->pit_slow) {
+                L->pit_slow = true;
+                L->pit_since_us = now;
+            } else if (now - L->pit_since_us >= (int64_t)PIT_TIME_S * 1000000) {
+                L->lap_flags |= LAP_F_PIT;
+            }
+        } else {
+            L->pit_slow = false;
+        }
+        if (L->have_prev_fix) {
+            const double seg_dt = (double)(now - L->prev_gps_us) / 1e6;
+            if (seg_dt > 0.0)
+                L->lap_dist_m += 0.5 * (L->prev_speed_mps + (double)fix->gspeed_mms / 1000.0) * seg_dt;
         }
     }
 
