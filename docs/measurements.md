@@ -2,6 +2,23 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_sim on-device lap replay on ESP32 (plan 03, session 3.4 — sim drivers + pipeline, #27)
+
+- Date: 2026-09-17. Branch s3.4-sim-pipeline (036954f). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. App image 452,512 bytes (65 % of the 1.25 MB app partition free).
+- Toolchain note: built locally on ESP-IDF v5.5.1 because this session's `install.sh` drifted the pinned 5.3.2 Python venv (its dependency checker now misfires — see #33). The committed `dependencies.lock` stays pinned at 5.3.2 and CI `firmware.yml` builds moto_sim + moto_neo6m on 5.3.2 as the authoritative pinned-toolchain gate. The lap engine is version-agnostic pure-C `components/core`.
+- Boot clean: `boot #6 complete in 1039 ms (safe_mode=0)`, no reset loop, no panic (`crashes=0 wdt=0 brownout=0`). Storage mounted 1320/1344 KB free; pipeline up (core 1 prio 20); session S00006_001 opened.
+- **Exit criterion — on-device laps vs `replay` reference (`test/data/sim_capture.expected.json`), tolerance ±30 ms:**
+
+| Lap | flags | Device (`dbg laps`) | Expected | Δ |
+|-----|-------|---------------------|----------|---|
+| 0 (out-lap) | 0x08 | 0.000 s | out-lap | — |
+| 1 | 0x40 VALID | 28.071 s | 28071 ms | 0 ms |
+| 2 | 0x40 VALID | 28.044 s | 28044 ms | 0 ms |
+| 3 | 0x40 VALID | 28.028 s | 28028 ms | 0 ms |
+
+  Exact match (0 ms error), far inside the ±30 ms gate. The on_fix path reproduces `replay`'s double-precision geo crossing math bit-for-bit.
+- **Per-lap stats (§9.4, closes #27):** `dbg laps` shows populated sectors (lap 1 splits [9357 9357 9357] ms) and stats per lap (e.g. lap 1 vmax=3306 vmin=1991 cm/s); lean/g fields 0 (the sim feeds GPS-derived speed and synthesized IMU with no lean/accel content — expected). Full `lap_result_t` reaches the logger (resolves the 3.3 handoff deferral).
+
 ## moto_neo6m storage + logger power-cut test on ESP32 (plan 03, session 3.3)
 
 - Date: 2026-09-17. Branch s3.3-storage-logger (d73396e). ESP-IDF v5.3.2. Board ESP32 DevKit V1. App image 373,872 bytes (71 % free). LittleFS via joltwallet/littlefs 1.16.5.
