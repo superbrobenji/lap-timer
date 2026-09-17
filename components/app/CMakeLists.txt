@@ -1,5 +1,6 @@
 # app -- IDF-dependent glue (spec §4.1): NVS layer (§15.2), RTC state (§15.3), supervisor
-# (§4.3/§17.2), shared runtime state (hb[]/sys_flags, §4.4/§17.4), and the minimal dbg console.
+# (§4.3/§17.2), shared runtime state (hb[]/sys_flags, §4.4/§17.4), the pipeline (§9), logger (§13),
+# and app/cmd (§18.1). The serial console itself lives in components/drivers/export_serial.
 # No collision with an IDF built-in (there is no IDF component named `app`).
 if(CMAKE_BUILD_EARLY_EXPANSION)
     # CONFIGURE_DEPENDS is invalid in the script-mode early-expansion pass IDF uses to pull
