@@ -59,7 +59,14 @@ The retrofit changes *how* code is written, never *what it does*. The existing h
 
 ## 7. Delivery approach (detailed sessions come from the writing-plans step)
 
-Serial, roughly: (1) standards + tooling + CI report-only + the deviation register + the `LT_ASSERT_*` app macro; (2–4) retrofit by component — `components/core` first (highest value, closest today), then `components/app`, then `components/drivers` + `main`, each an independently reviewed, test-green, behavior-preserving session; (5) flip CI to blocking, wire the rules into the SDD reviewer prompts and the writing-plans checklist, flash to confirm, tag `plan-4.5-done`. Each retrofit session is scoped so a fresh reviewer can gate it.
+Serial, and **rule 9 (the function-pointer rework) is done last** — it is the largest and riskiest re-engineering (it changes `core`'s event/stream interfaces and their consumers), so it happens only after everything else is compliant, the full test net is green, and the analysers are wired. Roughly:
+
+1. **Standards + tooling + CI (report-only) + register + `LT_ASSERT_*`.** Write the deviation register skeleton and the app-layer `LT_ASSERT_*` macro; wire `clang-tidy` + `cppcheck` + the custom linter into CI in report-only mode. The linter's "no unregistered function pointer" gate is present but **inert until the rule-9 session** (existing function pointers are tolerated meanwhile); every other check (length, assertion density, no-heap, preprocessor, return values) is active report-only.
+2–4. **Retrofit rules 1–8 and 10 by component** — `components/core` first, then `components/app`, then `components/drivers` + `main`. Each session: split over-length functions (rule 4), raise assertion density to the average (rule 5), bound loops (rule 2), check returns + validate params (rules 7), tighten scope + preprocessor + control flow (rules 6/8/1), and drive its analyser reports to clean. Function pointers are **left in place** for now. Each is independently reviewed, test-green, behavior-preserving, and flashes if firmware.
+5. **Rule 9 — function-pointer rework (last).** Under the §2 burden of proof, rework the codebase's own callbacks to comply (engine event emit → caller-drained output buffer; `exp`/`ses`/`sto` per-item callbacks → iterators/buffers; the assert hook → a link-time `extern` call), touching `core` and its consumers together; register only the IDF/FreeRTOS boundary and any survivor. Behavior-preserving; full test/golden/flash gate. May span more than one session given its reach.
+6. **Flip CI to blocking + wire the process.** Enable every analyser (now including the rule-9 gate) as a required check, add the Power-of-10 checklist to the SDD reviewer prompts and the writing-plans template, flash to confirm, tag `plan-4.5-done`.
+
+Each retrofit session is scoped so a fresh reviewer can gate it.
 
 ## 8. Process integration (staying compliant)
 
