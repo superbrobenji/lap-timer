@@ -47,6 +47,7 @@
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"          /* esp_get_free_heap_size / esp_get_minimum_free_heap_size */
+#include "esp_task_wdt.h"       /* dbg hang: subscribe the calling task so the task WDT fires deterministically */
 #include "esp_timer.h"
 #include "linenoise/linenoise.h"
 
@@ -646,8 +647,8 @@ static int dbg_rtc(void)
 /* ---- dbg mem (new: §22.4 resource measurement) ---- */
 static int dbg_mem(void)
 {
-    /* Per-task stack headroom (uxTaskGetStackHighWaterMark is the minimum-ever free stack in words;
-     * *4 = bytes on this port) plus the heap. Pipeline/logger/supervisor come from their supervisor
+    /* Per-task stack headroom (uxTaskGetStackHighWaterMark is the minimum-ever free stack in
+     * StackType_t units; on ESP-IDF Xtensa StackType_t is 1 byte, so the count is already bytes) plus the heap. Pipeline/logger/supervisor come from their supervisor
      * registration; the console REPL task is the one running this command. */
     static const struct { const char *name; uint8_t hb; } tasks[] = {
         { "pipeline",   HB_PIPELINE },
@@ -660,10 +661,10 @@ static int dbg_mem(void)
         TaskHandle_t h = sup_task_handle(tasks[i].hb);
         if (!h) { printf("stack %-11s: (not running)\n", tasks[i].name); continue; }
         printf("stack %-11s: %u B free\n", tasks[i].name,
-               (unsigned)(uxTaskGetStackHighWaterMark(h) * 4u));
+               (unsigned)(uxTaskGetStackHighWaterMark(h) * (unsigned)sizeof(StackType_t)));
     }
     printf("stack %-11s: %u B free\n", "console",
-           (unsigned)(uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle()) * 4u));
+           (unsigned)(uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle()) * (unsigned)sizeof(StackType_t)));
     return 0;
 }
 
@@ -686,9 +687,10 @@ static int cmd_dbg(int argc, char **argv)
             abort();                    /* never returns */
         }
         if (strcmp(s, "hang") == 0) {
-            printf("dbg: busy-looping (no WDT reset) to trip the task WDT...\n");
+            printf("dbg: subscribing to the task WDT then busy-looping -> task WDT fires in ~5s...\n");
             fflush(stdout);
-            for (;;) { }                /* starve the idle task -> task WDT fires */
+            (void)esp_task_wdt_add(NULL);   /* a subscribed task that never resets trips the WDT deterministically (an unpinned busy-loop only migrates and never starves either idle for 5s) */
+            for (;;) { }
         }
         if (strcmp(s, "gps") == 0 || strcmp(s, "imu") == 0 ||
             strcmp(s, "power") == 0 || strcmp(s, "sim") == 0) {
