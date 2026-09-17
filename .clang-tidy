@@ -1,0 +1,96 @@
+# .clang-tidy -- Power of 10 (Holzmann/JPL) static-analysis check set for the on-device C.
+#
+# Design authority: docs/superpowers/specs/2026-09-17-power-of-10-compliance-design.md §5
+# (enforcement) and §1 (scope/exempt paths).
+# Plan: docs/superpowers/plans/2026-09-17-plan-4.5-power-of-10.md, Session 4.5.1 Task 2.
+#
+# REPORT-ONLY this session: WarningsAsErrors is empty, so clang-tidy prints findings to the CI
+# job log but the `static-analysis` job step running it is `continue-on-error: true` and never
+# fails the build. The blocking flip to a required check is plan Session 4.5.6.
+#
+# Rule -> check mapping (design §3 "Rule-by-rule interpretation", §5 "Enforcement"):
+#   rule 1  simple control flow, no recursion      -> misc-no-recursion
+#   rule 4  function length <= 60 code lines        -> readability-function-size
+#                                                       (LineThreshold: 60, see CheckOptions below;
+#                                                       the project's own tools/lint/power_of_10.py
+#                                                       RULE-4 is the primary gate -- this is the
+#                                                       second analyser, design §5 "multiple
+#                                                       analysers")
+#   rule 6  smallest-scope data                     -> readability-* (e.g.
+#                                                       readability-non-const-parameter,
+#                                                       readability-redundant-declaration) plus
+#                                                       general bugprone-* scope/lifetime checks
+#   rule 7  check every return value; validate      -> bugprone-unused-return-value,
+#           parameters                                 cert-err33-c (POSIX/library return-value
+#                                                       checks), folded into bugprone-*/cert-*
+#                                                       below
+#   rule 9  restricted pointers; no function        -> readability-* pointer-hygiene checks (e.g.
+#           pointers                                   readability-non-const-parameter). The
+#                                                       "no unregistered function pointer" gate
+#                                                       itself is tools/lint/power_of_10.py's
+#                                                       RULE-9 (reads docs/power-of-10-deviations.md)
+#                                                       -- it stays the source of truth for that
+#                                                       rule and is INERT (--enforce-fnptr not
+#                                                       passed) until plan Session 4.5.5; clang-tidy
+#                                                       has no reliable "flag every function
+#                                                       pointer" check of its own, so it is not
+#                                                       asked to duplicate that gate.
+#   rule 10 zero warnings, multiple analysers        -> bugprone-* and cert-* enabled broadly,
+#                                                       alongside cppcheck and the project linter
+#                                                       (see .github/workflows/ci.yml
+#                                                       `static-analysis` job)
+#
+# Checks irrelevant to embedded C11, or that fight the codebase's existing style, are turned off
+# below with a reason on each line (rule 10 "zero warnings" only ever applies to intentional
+# findings, not analyser noise): llvmlibc-*/fuchsia-*/android-*/darwin-*/objc-*/zircon-*/mpi-*/
+# linuxkernel-*/altera-*/abseil-*/boost-* target other platforms or libraries we do not use;
+# modernize-*/hicpp-*/cppcoreguidelines-*/google-* assume C++ (this is C11, not C++, so their
+# "use auto"/"use nullptr"/RAII-shaped advice does not apply); readability-magic-numbers,
+# readability-identifier-length, readability-uppercase-literal-suffix and
+# readability-isolate-declaration fight this codebase's existing, deliberate embedded-C style
+# (short identifiers, numeric hardware constants, C89-ish multi-declaration lines).
+Checks: >
+  -*,
+  clang-diagnostic-*,
+  bugprone-*,
+  cert-*,
+  misc-no-recursion,
+  readability-*,
+  -llvmlibc-*,
+  -fuchsia-*,
+  -android-*,
+  -darwin-*,
+  -objc-*,
+  -zircon-*,
+  -mpi-*,
+  -linuxkernel-*,
+  -altera-*,
+  -abseil-*,
+  -boost-*,
+  -modernize-*,
+  -hicpp-*,
+  -cppcoreguidelines-*,
+  -google-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-uppercase-literal-suffix,
+  -readability-isolate-declaration
+
+WarningsAsErrors: ''
+
+# Only our own shipped headers (design §1 scope): components/{core,app,drivers} and main/.
+# Vendored/managed/IDF headers (test/unity, the jsmn.h vendored parser under
+# components/core/include/core, managed_components/, $IDF_PATH) are not covered by clang-tidy's
+# own regex negative-lookahead-free matching here; in practice this is a minor gap (jsmn.c itself
+# is never passed to clang-tidy -- see the `static-analysis` CI job's file list -- so jsmn.h only
+# surfaces if transitively included by an analysed .c file, and any such finding is report-only
+# and informational this session, never blocking).
+HeaderFilterRegex: '.*/components/(core|app|drivers)/.*\.h$|(^|/)main/.*\.h$'
+
+FormatStyle: none
+
+CheckOptions:
+  # rule 4: function length <= 60 code lines (matches tools/lint/power_of_10.py's own threshold
+  # and the plan's Global Constraints).
+  - key: readability-function-size.LineThreshold
+    value: '60'
