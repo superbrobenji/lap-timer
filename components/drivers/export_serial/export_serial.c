@@ -46,6 +46,7 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
+#include "esp_system.h"          /* esp_get_free_heap_size / esp_get_minimum_free_heap_size */
 #include "esp_timer.h"
 #include "linenoise/linenoise.h"
 
@@ -642,6 +643,30 @@ static int dbg_rtc(void)
     return 0;
 }
 
+/* ---- dbg mem (new: §22.4 resource measurement) ---- */
+static int dbg_mem(void)
+{
+    /* Per-task stack headroom (uxTaskGetStackHighWaterMark is the minimum-ever free stack in words;
+     * *4 = bytes on this port) plus the heap. Pipeline/logger/supervisor come from their supervisor
+     * registration; the console REPL task is the one running this command. */
+    static const struct { const char *name; uint8_t hb; } tasks[] = {
+        { "pipeline",   HB_PIPELINE },
+        { "logger",     HB_LOGGER },
+        { "supervisor", HB_SUPERVISOR },
+    };
+    printf("heap free    : %u B\n", (unsigned)esp_get_free_heap_size());
+    printf("heap min free: %u B\n", (unsigned)esp_get_minimum_free_heap_size());
+    for (size_t i = 0; i < sizeof tasks / sizeof tasks[0]; i++) {
+        TaskHandle_t h = sup_task_handle(tasks[i].hb);
+        if (!h) { printf("stack %-11s: (not running)\n", tasks[i].name); continue; }
+        printf("stack %-11s: %u B free\n", tasks[i].name,
+               (unsigned)(uxTaskGetStackHighWaterMark(h) * 4u));
+    }
+    printf("stack %-11s: %u B free\n", "console",
+           (unsigned)(uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle()) * 4u));
+    return 0;
+}
+
 /* ---- dbg dispatch ---- */
 static int cmd_dbg(int argc, char **argv)
 {
@@ -654,6 +679,7 @@ static int cmd_dbg(int argc, char **argv)
         if (strcmp(s, "logck")   == 0) return dbg_logck(argc, argv);
         if (strcmp(s, "laps")    == 0) return dbg_laps();
         if (strcmp(s, "rtc")     == 0) return dbg_rtc();
+        if (strcmp(s, "mem")     == 0) return dbg_mem();
         if (strcmp(s, "crash")   == 0) {
             printf("dbg: forcing a panic (abort) -> ESP_RST_PANIC\n");
             fflush(stdout);
@@ -670,7 +696,7 @@ static int cmd_dbg(int argc, char **argv)
             return 0;
         }
     }
-    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | crash | hang\n");
+    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | crash | hang\n");
     printf("       dbg gps raw <on|off> | imu raw <on|off> | power <..> | sim <on|off>  (not in plan 03)\n");
     return 1;
 }
@@ -708,7 +734,7 @@ void export_serial_start(int reset_reason)
     register_cmd("diag",   "diagnostics JSON (§17.10)", cmd_diag_c);
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
-    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|crash|hang", cmd_dbg);
+    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|crash|hang", cmd_dbg);
 
     esp_console_start_repl(repl);
 }

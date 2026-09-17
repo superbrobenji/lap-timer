@@ -414,6 +414,14 @@ void logger_notify(void)
     if (s_task) xTaskNotifyGive(s_task);
 }
 
+const char *logger_open_session_id(void)
+{
+    /* F5: the id the logger currently holds open for writing, or NULL if none. Read cross-task by
+     * the console's DELETE guard -- a benign race (the id only changes on open/close), enough to
+     * refuse unlinking a live session's .log/.sum. */
+    return s_open ? s_id : NULL;
+}
+
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily
  * full queue drops the result (the .log still carries the EVENT record). Safe from the pipeline. */
 static void submit(const log_result_t *r)

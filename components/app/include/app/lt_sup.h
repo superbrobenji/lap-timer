@@ -39,6 +39,9 @@ void lt_queues_init(void);
 void sup_start(void);
 /* Register a task for heartbeat-stall watch (§17.2). stall_s = HB_STALL_S for that task. */
 int  sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s);
+/* The FreeRTOS handle a task registered for its heartbeat slot (NULL if unused). Used by
+ * `dbg mem` to sample each task's stack high-water mark (§22.4). */
+TaskHandle_t sup_task_handle(uint8_t hb_id);
 
 /* Install the core assertion hook (§17.9): core asserts -> NVS error ring. Call once at boot. */
 void sup_install_assert_hook(void);

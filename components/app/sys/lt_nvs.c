@@ -17,6 +17,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"   /* error-ring serialisation (F1): static mutex, no ISR use */
+
 static const char *TAG = "lt_nvs";
 
 /* ---- on-flash blob layouts (§15.2). Packed so sizes are exact. ---- */
@@ -51,6 +54,7 @@ typedef struct __attribute__((packed)) {
 #define K_RING  "ring"
 #define K_CTR   "ctr"
 #define K_CFG   "cfg"
+#define K_STALL "stall_rst"                     /* §17.2/§17.5: supervisor stall-restart marker */
 
 #define COUNTER_FLUSH_US (60 * 1000000LL)       /* >=60 s batching (§15.2) */
 
@@ -64,6 +68,16 @@ static int64_t        s_counters_last_us;
 static err_ring_t     s_ring;
 static crash_entry_t  s_crash[CRASH_LOG_LEN];
 
+/* F1: serialise the shared error-ring RAM mirror (s_ring) + its NVS write. errlog_add is called
+ * from the logger/supervisor/console (core 0) AND the pipeline via the core assert hook (core 1),
+ * so the read-modify-write of s_ring races without this. Static allocation (no malloc after init),
+ * task-context only (the assert hook runs in task context, never an ISR). */
+static SemaphoreHandle_t s_ring_lock;
+static StaticSemaphore_t s_ring_lock_buf;
+
+static inline void ring_lock(void)   { if (s_ring_lock) xSemaphoreTake(s_ring_lock, portMAX_DELAY); }
+static inline void ring_unlock(void) { if (s_ring_lock) xSemaphoreGive(s_ring_lock); }
+
 static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
 static int load_blob(nvs_handle_t h, const char *key, void *dst, size_t expect)
@@ -76,6 +90,7 @@ static int load_blob(nvs_handle_t h, const char *key, void *dst, size_t expect)
 int lt_nvs_init(void)
 {
     if (s_ready) return 0;
+    if (!s_ring_lock) s_ring_lock = xSemaphoreCreateMutexStatic(&s_ring_lock_buf);   /* F1 */
     if (nvs_open(NS_SYS, NVS_READWRITE, &s_h_sys) != ESP_OK) return -1;
     if (nvs_open(NS_ERR, NVS_READWRITE, &s_h_err) != ESP_OK) return -1;
     if (nvs_open(NS_CFG, NVS_READWRITE, &s_h_cfg) != ESP_OK) return -1;
@@ -124,6 +139,7 @@ const lt_counters_t *lt_counters(void) { return &s_counters; }
 
 int errlog_add(uint16_t code, uint32_t arg)
 {
+    ring_lock();                                /* F1: RMW of s_ring + its NVS write is not atomic */
     err_entry_t *e = &s_ring.entry[s_ring.head];
     e->code = code;
     e->uptime_s = uptime_s_now();
@@ -131,6 +147,7 @@ int errlog_add(uint16_t code, uint32_t arg)
     e->arg = arg;
     s_ring.head = (uint8_t)((s_ring.head + 1) % ERR_RING_LEN);
     if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) nvs_commit(s_h_err);
+    ring_unlock();
     ESP_LOGW(TAG, "errlog 0x%04x arg=%u", code, (unsigned)arg);
     return 0;
 }
@@ -141,6 +158,7 @@ int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
     /* head is the next write slot, so slot `head` is the oldest surviving entry once the ring has
      * wrapped; before wrap those slots are still zero. Walking head..head+LEN-1 (mod LEN) yields
      * oldest->newest; a zero `code` marks an untouched slot (real codes are >= 0x0101, §17.7). */
+    ring_lock();                                /* F1: consistent copy vs. a concurrent errlog_add */
     int n = 0;
     for (int i = 0; i < ERR_RING_LEN && n < cap; i++) {
         const err_entry_t *e = &s_ring.entry[(s_ring.head + i) % ERR_RING_LEN];
@@ -151,13 +169,16 @@ int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
         out[n].boot     = e->boot;
         n++;
     }
+    ring_unlock();
     return n;
 }
 
 void lt_errlog_clear(void)
 {
+    ring_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
     if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) nvs_commit(s_h_err);
+    ring_unlock();
 }
 
 void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
@@ -177,6 +198,7 @@ bool lt_reset_is_abnormal(int r)
     case ESP_RST_INT_WDT:
     case ESP_RST_WDT:
     case ESP_RST_BROWNOUT:
+    case LT_RST_STALL:      /* F3: a supervisor-forced pipeline-stall restart counts as abnormal */
         return true;
     default:
         return false;
@@ -213,6 +235,23 @@ void lt_safe_clear(void)
     (void)lt_safe_until_set(0);
 }
 
+void lt_stall_flag_set(void)
+{
+    /* F3: the supervisor sets this immediately before esp_restart() on a wedged pipeline. Its HW
+     * reset reason is ESP_RST_SW (§17.5 normal), so without this marker the crash-loop detector
+     * would never escalate a chronically stalled pipeline to safe mode. Persist now -- it must
+     * survive the restart it precedes. */
+    if (nvs_set_u8(s_h_sys, K_STALL, 1) == ESP_OK) nvs_commit(s_h_sys);
+}
+
+bool lt_stall_flag_take(void)
+{
+    uint8_t v = 0;
+    if (nvs_get_u8(s_h_sys, K_STALL, &v) != ESP_OK || v == 0) return false;
+    if (nvs_set_u8(s_h_sys, K_STALL, 0) == ESP_OK) nvs_commit(s_h_sys);   /* consume once */
+    return true;
+}
+
 const char *lt_reset_reason_str(int r)
 {
     switch (r) {
@@ -226,6 +265,7 @@ const char *lt_reset_reason_str(int r)
     case ESP_RST_DEEPSLEEP: return "deep-sleep";
     case ESP_RST_BROWNOUT:  return "brownout";
     case ESP_RST_SDIO:      return "SDIO";
+    case LT_RST_STALL:      return "pipeline-stall";
     default:                return "unknown";
     }
 }

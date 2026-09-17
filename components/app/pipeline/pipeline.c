@@ -79,6 +79,8 @@ static rtc_state_t s_resume;               /* VALID snapshot read at init, consu
 static bool        s_resume_pending;       /* armed at init; import (or drop) on the first valid fix */
 static bool        s_rtc_save_due;         /* an S/F or sector event fired this fix -> save after on_fix */
 static char        s_session_id[10];       /* identity stored in the RTC snapshot (diagnostic) */
+static bool        s_resume_active;         /* F2: a resumed lap is running; guard it against a rewound clock */
+static int64_t     s_resumed_lap_start_us;  /* F2: resumed lap start; a later fix below it = rewind */
 
 #if CFG_GPS_SIM
 static trk_venue_t s_venue;                /* the sim capture's venue (from gps_sim's JSON) */
@@ -108,9 +110,12 @@ static lap_stats_t s_stats;
 static int32_t     s_cur_speed_cms;        /* latest valid GPS speed */
 static bool        s_stats_gps_lost;       /* current fix invalid (min_speed ignores these) */
 
-/* completed laps for `dbg laps` (ring, newest last) */
+/* completed laps for `dbg laps` (ring, newest last). F4: the pipeline task (core 1) writes s_laps[]
+ * / s_lap_total while the console task (core 0) reads them in pipeline_laps_snapshot -- a seqlock
+ * (s_laps_seq, odd while writing) gives the reader a torn-free, ordered copy without a spinlock. */
 static lap_result_t   s_laps[PIPE_LAPS_KEEP];
 static volatile uint32_t s_lap_total;
+static uint32_t          s_laps_seq;       /* even = stable, odd = writer mid-update (F4 seqlock) */
 
 /* ---------------- helpers ---------------- */
 
@@ -153,8 +158,14 @@ static void on_lap_complete(int64_t end_gps_us)
     lap_result_t lr = *p;
     stats_finalise(&lr.stats);
 
+    /* F4 seqlock write: bump to odd, publish the slot + total, bump to even. The ACQ_REL RMWs
+     * fence the plain stores between them so the reader never sees a torn lap_result_t. */
+    __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* enter: seq -> odd */
     s_laps[s_lap_total % PIPE_LAPS_KEEP] = lr;
     s_lap_total++;
+    __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* leave: seq -> even */
+
+    s_resume_active = false;               /* F2: the resumed lap (if any) has completed; guard done */
 
     logger_submit_lap(&lr);
 
@@ -246,7 +257,13 @@ static void on_fix(gps_fix_t *fix)
      * continues and completes normally. Runs once, lap mode only. */
     if (s_mode == MODE_LAP && s_resume_pending && valid) {
         s_resume_pending = false;
-        if (fix->gps_us - s_resume.saved_gps_us < (int64_t)RTC_RESUME_MAX_S * 1000000) {
+        /* F2 (issue #35): the freshness test must be two-sided. `age <= 0` means this fix PREDATES
+         * the saved snapshot (a rewound clock, or a sim replay restarting the capture from t0) --
+         * resuming then restores lap_start_gps_us into the future relative to incoming fixes and the
+         * engine emits a wrapped-negative split. Require the fix to be strictly after the save and
+         * within the window; otherwise clear the snapshot and cold-start. */
+        int64_t age = fix->gps_us - s_resume.saved_gps_us;
+        if (age > 0 && age < (int64_t)RTC_RESUME_MAX_S * 1000000) {
             lap_rtc_t lr = {
                 .venue_id         = s_resume.venue_id,
                 .layout_id        = s_resume.layout_id,
@@ -259,6 +276,8 @@ static void on_fix(gps_fix_t *fix)
             };
             memcpy(lr.gate_times, s_resume.gate_times, sizeof lr.gate_times);
             if (lap_import_rtc(&s_lap, &lr) == 0) {
+                s_resume_active = true;                /* F2: guard this lap against a later rewind */
+                s_resumed_lap_start_us = s_resume.lap_start_gps_us;
                 ESP_LOGI(TAG, "rtc resume: lap %u venue %u continued (interrupted)",
                          (unsigned)lr.lap_no, (unsigned)lr.venue_id);
             } else {
@@ -268,11 +287,23 @@ static void on_fix(gps_fix_t *fix)
             }
         } else {
             lt_rtc_clear();
-            ESP_LOGI(TAG, "rtc resume: snapshot stale, cleared");
+            ESP_LOGI(TAG, "rtc resume: snapshot not fresh (age %lld us), cleared", (long long)age);
         }
     }
 
     if (s_mode == MODE_LAP) {
+        /* F2 (issue #35): while a resumed lap is running, a valid fix whose gps_us predates the
+         * resumed lap's start means the clock rewound (e.g. GPS week rollover) -- feeding it to the
+         * engine would produce a wrapped-negative split. Reset the resumed lap and drop the stale
+         * snapshot instead; the engine re-arms and starts a clean lap on the next S/F crossing. */
+        if (s_resume_active && valid && fix->gps_us < s_resumed_lap_start_us) {
+            ESP_LOGW(TAG, "rtc resume: fix %lld predates resumed lap start %lld -> reset",
+                     (long long)fix->gps_us, (long long)s_resumed_lap_start_us);
+            lap_reset(&s_lap);
+            stats_reset();
+            s_resume_active = false;
+            lt_rtc_clear();
+        }
         lap_on_fix(&s_lap, fix, s_have_fused ? &s_latest_fused : NULL, engine_cb, NULL);
         /* §15.3 save-on-gate: if this fix crossed an S/F or sector line, snapshot the engine's
          * (now-updated) resumable state so the most-recent gate becomes the resume point after any
@@ -497,10 +528,21 @@ void pipeline_start(void)
 int pipeline_laps_snapshot(lap_result_t *out, int max)
 {
     if (!out || max <= 0) return 0;
-    uint32_t total = s_lap_total;
-    int n = (total < (uint32_t)PIPE_LAPS_KEEP) ? (int)total : PIPE_LAPS_KEEP;
-    if (n > max) n = max;
-    uint32_t start = (total > (uint32_t)n) ? total - (uint32_t)n : 0u;
-    for (int i = 0; i < n; i++) out[i] = s_laps[(start + (uint32_t)i) % PIPE_LAPS_KEEP];
+    /* F4 seqlock read: copy under an even, unchanged sequence; retry if the writer was mid-update
+     * (odd) or ran during the copy. The writer's section is a single struct copy, so this converges
+     * immediately; diagnostic-only, so an unbounded retry is acceptable. */
+    int n = 0;
+    uint32_t seq0 = 0, seq1 = 0;
+    do {
+        seq0 = __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE);
+        if (seq0 & 1u) continue;                     /* writer mid-update */
+        uint32_t total = s_lap_total;
+        n = (total < (uint32_t)PIPE_LAPS_KEEP) ? (int)total : PIPE_LAPS_KEEP;
+        if (n > max) n = max;
+        uint32_t start = (total > (uint32_t)n) ? total - (uint32_t)n : 0u;
+        for (int i = 0; i < n; i++) out[i] = s_laps[(start + (uint32_t)i) % PIPE_LAPS_KEEP];
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);     /* copy above happens-before re-reading seq */
+        seq1 = __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE);
+    } while ((seq0 & 1u) || seq0 != seq1);
     return n;
 }

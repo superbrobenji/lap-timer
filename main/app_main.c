@@ -30,7 +30,9 @@
 #include "app/lt_sup.h"
 #include "app/pipeline.h"
 
+#if CFG_HAS_EXPORT_SERIAL
 #include "export_serial.h"
+#endif
 
 static const char *TAG = "laptimer";
 
@@ -74,9 +76,17 @@ void app_main(void)
     if (nvs_erased) errlog_add(E_SYS_CFG_RESET, 0);
 
     /* §4.7 step 1 (cont): count + log + crash-log the reset reason; prev-boot uptime comes
-     * from the RTC uptime cell the supervisor maintained last boot. */
+     * from the RTC uptime cell the supervisor maintained last boot. F3: if the previous boot was
+     * a supervisor-forced pipeline-stall restart (marker in NVS), its HW reason is ESP_RST_SW
+     * (§17.5 normal) -- fold it in as the abnormal LT_RST_STALL so consecutive stalls trip the
+     * crash-loop -> safe mode below. Consume the marker either way. */
+    int record_reason = (int)reason;
+    if (lt_stall_flag_take()) {
+        record_reason = LT_RST_STALL;
+        ESP_LOGW(TAG, "previous boot ended in a pipeline-stall restart (counted abnormal)");
+    }
     uint32_t prev_uptime_s = lt_rtc_uptime_prev_s();
-    lt_boot_record_reset((int)reason, prev_uptime_s);
+    lt_boot_record_reset(record_reason, prev_uptime_s);
 
     /* §4.7 step 3: boot counter + crash-loop check (§17.5). 3.2 only detects + flags safe
      * mode; the safe-mode behaviour tree is 3.5. */
@@ -174,8 +184,10 @@ void app_main(void)
 
     /* §4.7 step 12 (console): the §18.4 serial export console -- STATUS/CONFIG/ERRLOG/DIAG/
      * DELETE/CLOSE wired through app/cmd, plus the migrated `dbg` diagnostics verbs. Spawns its
-     * own REPL task on UART0 (gated by the EXPORT_SERIAL build flag). */
+     * own REPL task on UART0 (gated by the EXPORT_SERIAL build flag / CFG_HAS_EXPORT_SERIAL). */
+#if CFG_HAS_EXPORT_SERIAL
     export_serial_start((int)reason);
+#endif
 
     ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%d)", (unsigned)boot_cnt,
              (long long)((esp_timer_get_time() - t_boot) / 1000), (int)safe);

@@ -104,6 +104,14 @@ if(CONN_BLE_RC)
 else()
     set(CFG_HAS_BLE_RC 0)
 endif()
+# §18.4 serial console: gated on both sides by the EXPORT_SERIAL flag. app_main wraps the include
+# + start call in CFG_HAS_EXPORT_SERIAL so -DEXPORT_SERIAL=OFF links (the component is then neither
+# compiled nor required). Mirrors CFG_HAS_SD etc. (F6a).
+if(EXPORT_SERIAL)
+    set(CFG_HAS_EXPORT_SERIAL 1)
+else()
+    set(CFG_HAS_EXPORT_SERIAL 0)
+endif()
 
 # fused-sample logging rate: 10 Hz to internal flash, 25 Hz to SD (Appendix A)
 if(STORAGE STREQUAL "sd")

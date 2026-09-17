@@ -16,6 +16,10 @@
 void logger_start(void);    /* create + start the task (boot step 12) */
 void logger_notify(void);   /* wake the logger (task notification); safe from any task */
 
+/* The session id the logger currently has open for writing, or NULL when idle. Used by the console
+ * DELETE op to refuse unlinking a live session (§18.1). Safe from any task (benign read race). */
+const char *logger_open_session_id(void);
+
 /* Pipeline -> logger, full engine results (3.4, resolving the 3.3 deferral). Each copies the result
  * onto result_q (cross-core safe) and wakes the logger; the logger writes the complete LAP (+ SECTOR)
  * / DRAG_RUN (+ DRAG_GATE) records (§12.3) and the real VENUE record. Safe from the pipeline task;

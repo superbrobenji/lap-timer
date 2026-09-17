@@ -12,6 +12,7 @@
 
 #include "build_config.h"          /* CFG_FW_VERSION, CFG_HWID */
 
+#include "app/logger.h"           /* logger_open_session_id -- DELETE must skip the open session */
 #include "app/lt_err.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
@@ -222,6 +223,12 @@ static int op_delete(const uint8_t *payload, size_t len,
     memcpy(id, payload, idl);
     id[idl] = '\0';
     id[strcspn(id, " ")] = '\0';   /* drop any padding/trailing space */
+
+    /* F5: never unlink the session the logger currently has open for writing -- the fd would be
+     * orphaned and the in-flight session's data lost. Refuse it instead of racing the logger. */
+    const char *open_id = logger_open_session_id();
+    if (open_id && strcmp(open_id, id) == 0)
+        return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "session is open; close it first");
 
     char path[48];
     (void)snprintf(path, sizeof path, "/sessions/%s.log", id);

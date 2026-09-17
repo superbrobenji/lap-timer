@@ -47,6 +47,14 @@ int sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s)
     return 0;
 }
 
+TaskHandle_t sup_task_handle(uint8_t hb_id)
+{
+    /* The handle a task registered for its heartbeat slot (NULL if none). Lets `dbg mem` sample
+     * the pipeline/logger/supervisor stacks without each exposing its own accessor (§22.4). */
+    if (hb_id >= HB_COUNT || !s_watch[hb_id].used) return NULL;
+    return s_watch[hb_id].task;
+}
+
 static void check_stalls(void)
 {
     for (int i = 0; i < HB_COUNT; i++) {
@@ -64,8 +72,12 @@ static void check_stalls(void)
             errlog_add(E_SYS_TASK_STALL, w->hb_id);
             w->stalled_s = 0;
             if (w->hb_id == HB_PIPELINE) {
-                /* §17.2: a stalled pipeline restarts (RTC snapshot save lands in 3.5). */
+                /* §17.2: a stalled pipeline restarts (RTC snapshot save lands in 3.5). F3: the HW
+                 * reset reason will be ESP_RST_SW (§17.5 normal), so leave a marker the next boot
+                 * folds in as abnormal -- three consecutive stall-restarts within the window then
+                 * trip the crash-loop -> SYS_SAFE_MODE instead of rebooting forever. */
                 lt_counters_flush(true);
+                lt_stall_flag_set();
                 esp_restart();
             }
         }
