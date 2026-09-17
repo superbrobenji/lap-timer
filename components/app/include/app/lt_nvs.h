@@ -66,6 +66,17 @@ int      lt_safe_until_set(uint32_t boot_cnt);
  * safe mode by it. Used by the supervisor's uptime-based auto-clear (§17.5). */
 void     lt_safe_clear(void);
 
+/* Synthetic reset reason (§17.2/§17.5): a supervisor-forced restart after a pipeline stall reports
+ * ESP_RST_SW, which §17.5 treats as normal. The supervisor leaves a marker (lt_stall_flag_set) and
+ * the boot path folds it in as this ABNORMAL reason so N consecutive stall-restarts trip the
+ * crash-loop -> safe mode. Value is outside the esp_reset_reason_t range and fits the crash-log u8. */
+#define LT_RST_STALL 0x51
+
+/* Stall-restart marker (lt_sys/stall_rst). set: persist before esp_restart() (supervisor).
+ * take: read + clear at boot, returns whether the previous boot was a stall-restart (app_main). */
+void lt_stall_flag_set(void);
+bool lt_stall_flag_take(void);
+
 /* cfg blob (lt_cfg/cfg): load validates version+CRC16 then cfg_validate (returns corrections,
  * <0 => absent/corrupt so the caller keeps its defaults). save packs + CRC16 + writes. */
 int  lt_cfg_load(cfg_t *c);

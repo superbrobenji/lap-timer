@@ -4541,3 +4541,24 @@ fi
 - [ ] **Step 2** — verify all four cases: `source tools/idf-env.sh` (bash and zsh) exports and prints the version; `./tools/idf-env.sh` (shebang→bash) refuses; `zsh tools/idf-env.sh` now refuses. Commit (`fix(tools): idf-env.sh refuses 'zsh idf-env.sh' via ZSH_EVAL_CONTEXT (closes #6)`).
 
 ---
+
+
+## Session 3.6 — bench day, whole-plan review, and plan-03 close
+
+Roadmap exit: run every §22.3 bench procedure achievable without the real sensors, record results in `docs/measurements.md`, fix what fails; tag `p03-d6` = `plan-03-done` and cut the first `v0.1.0`. Spec §22.3 (bench tests), §22.4 (resource measurement). This is the plan-closing session: per the deferred-minor policy it runs a whole-plan opus review + one fix wave closing plan-03's parked issues before the tag.
+
+**Bench scope ruling.** §22.3 lists twelve target tests; only the sensor-free / driver-present subset is runnable in plan 03 (no power, IMU-I2C, real-GPS, BLE, OTA, or e-paper driver yet — those arrive plans 04-08). Runnable now: **WDT path** (`dbg hang`), **crash path** (`dbg crash` ×3 → safe mode), **storage truncation** (power-cut during logging, several trials), **GPS-sim laps** (moto_sim, already p03-d4), and a **serial-export smoke** (`list`/`open`/`read` over the §18.4 console — the plan-03 stand-in for the deferred BLE-export row, and the on-HW confirmation of Task-5's reassembled-file CRC). Plus **§22.4 resource measurement** (per-task stack high-water + heap). The remaining rows (power/sleep/I2C/GPS-power-cycle/brownout/BLE/OTA/e-paper) are recorded as "deferred to plan NN (driver not present)".
+
+**Tasks.**
+- **Task 1 — whole-plan opus review.** A cross-cutting integration review of the assembled plan-03 firmware (base `plan-02-done` 41c7f21 → HEAD), not a per-task re-review (each task was already gated): shared-state concurrency (sys_flags/hb[]/rings/RTC across the pipeline/logger/supervisor/console tasks), the §4.7 boot sequence as assembled, whole-firmware spec compliance, and the two parked issues. Findings feed the single fix wave.
+- **Task 2 — one fix wave** (closes the plan-03 issues + review findings):
+  - **#32** — `pipeline_laps_snapshot` reads `s_laps[]`/`s_lap_total` unsynchronised against the pipeline task's writes. Add a seqcount (or a brief critical section) so `dbg laps` never reads a torn `lap_result_t`.
+  - **#35** — after an RTC resume, guard against a fix whose `gps_us` predates the resumed lap's `lap_start_gps_us` (rewound clock / GPS week rollover): invalidate/restart the lap instead of emitting a wrapped-negative split. Keep the resume freshness gate lenient enough that the sim replay still demonstrates resume.
+  - **`dbg mem`** — add a console command dumping `uxTaskGetStackHighWaterMark` for pipeline/logger/supervisor/console + free & min-free heap (§22.4 inputs). This is the only new firmware surface the bench needs.
+  - Any Critical/Important review findings; Minors adjudicated (fix or park with a ruling).
+- **Task 3 — bench day (on hardware).** Flash moto_sim; run WDT, crash/safe, storage-truncation trials, sim-lap re-confirm, serial-export smoke, and the §22.4 resource measurement; record every result (pass + measured numbers) in `docs/measurements.md`. Then update each task's stack size to high-water + 25 % (§22.4) and rebuild.
+- **Task 4 — version + close.** Tag `v0.1.0` (the first `v*` tag; `git describe` then feeds `CFG_FW_VERSION`/`esp_app_desc_t.version` instead of the fallback hash), verify a build stamps `0.1.0`, then `p03-d6` = `plan-03-done`. Delete the plan's SDD workspace.
+
+Exit criterion: `docs/measurements.md` carries the bench-day results; both envs build green on ESP-IDF 5.3.2; the plan-03 issues (#32, #35) are closed; tags `v0.1.0` and `p03-d6`/`plan-03-done` pushed.
+
+---
