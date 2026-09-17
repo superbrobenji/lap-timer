@@ -46,17 +46,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* RTC resume freshness window (spec §15.3 / Appendix A = 14400 s). Session 3.5 Task 1 relocates this
- * constant into app/lt_consts.h; auto-include it when present and fall back to the spec value until
- * that lands, so this task builds standalone and picks up the shared constant after integration. */
-#if defined(__has_include)
-#  if __has_include("app/lt_consts.h")
-#    include "app/lt_consts.h"
-#  endif
-#endif
-#ifndef RTC_RESUME_MAX_S
-#define RTC_RESUME_MAX_S 14400
-#endif
+#include "app/lt_consts.h"   /* RTC_RESUME_MAX_S (§15.3 / Appendix A) */
 
 static const char *TAG = "pipe";
 
@@ -407,6 +397,7 @@ static void pipeline_init(void)
      * only -- not consumed by the resume path), then arm resume. app_main leaves a VALID snapshot
      * in place at boot step 4; if one is present, keep it and import on the first valid fix.
      * Anything else -> start clean. */
+    trk_init();   /* clear the user track store before the sim venue is registered (§15.3 resume needs trk_get) */
     (void)snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
     if (lt_rtc_validate(&s_resume) == RTC_VALID) {
         s_resume_pending = true;
@@ -427,6 +418,7 @@ static void pipeline_init(void)
         const char *vj = gps_sim_venue_json();
         if (vj && trk_from_json(&s_venue, vj, strlen(vj), err, sizeof err) == 0) {
             lap_set_venue(&s_lap, &s_venue);
+            (void)trk_user_add(&s_venue);   /* §15.3: make trk_get(venue_id) resolve so a resumed lap can rebuild this venue */
             uint16_t layout_id = (s_venue.n_layouts > 0) ? s_venue.layouts[0].id : 0;
             /* open a logging session for the run + write the real VENUE record. */
             log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = MODE_LAP,
