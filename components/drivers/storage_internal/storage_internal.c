@@ -82,7 +82,8 @@ int sto_mount(void)
         ESP_LOGW(TAG, "mkdir tracks: %s", strerror(errno));
 
     size_t total = 0, used = 0;
-    esp_littlefs_info(LFS_PART, &total, &used);
+    esp_err_t ie = esp_littlefs_info(LFS_PART, &total, &used);
+    if (ie != ESP_OK) ESP_LOGW(TAG, "esp_littlefs_info: %s", esp_err_to_name(ie));
     ESP_LOGI(TAG, "mounted %s at %s: %u KB total, %u KB free%s", LFS_PART, LFS_BASE,
              (unsigned)(total / 1024u), (unsigned)((total - used) / 1024u),
              formatted ? " (formatted)" : "");

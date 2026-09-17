@@ -946,12 +946,13 @@ void     lt_rtc_uptime_update_s(uint32_t uptime_s);
 `app/dbg_console.h` — the minimal console entry point (implemented in T4).
 
 ```c
-/* app/dbg_console.h -- minimal diagnostics console for session 3.2.
+/* app/dbg_console.h -- diagnostics console entry point (spec §18.4; 3.2 status, 3.3 storage/logger verbs).
  *
- * Starts an IDF esp_console REPL on UART0 and registers a single `dbg status` command
- * (boot count, reset reason, uptime, crash counters, sys_flags, heartbeats). This is the
- * 3.2 roadmap exit command; the full §18.4 console (status/list/open/... and the other dbg
- * verbs) replaces it in session 3.5 on the same REPL. */
+ * Starts an IDF esp_console REPL on UART0 and registers a single `dbg` command with the verbs
+ * `status` (boot count, reset reason, uptime, crash counters, sys_flags, heartbeats), `logtest [n]`
+ * (drive the logger end-to-end for the power-cut exit test), `fs` (mount/free/eviction state),
+ * `sum <id>` and `logck <id>` (read a session's `.sum`/`.log` back through a `core/ses` reader). The
+ * full §18.4 export console (status/list/open/get/... and export) replaces this in session 3.5. */
 #ifndef APP_DBG_CONSOLE_H
 #define APP_DBG_CONSOLE_H
 
@@ -2404,7 +2405,8 @@ int sto_mount(void)
         ESP_LOGW(TAG, "mkdir tracks: %s", strerror(errno));
 
     size_t total = 0, used = 0;
-    esp_littlefs_info(LFS_PART, &total, &used);
+    esp_err_t ie = esp_littlefs_info(LFS_PART, &total, &used);
+    if (ie != ESP_OK) ESP_LOGW(TAG, "esp_littlefs_info: %s", esp_err_to_name(ie));
     ESP_LOGI(TAG, "mounted %s at %s: %u KB total, %u KB free%s", LFS_PART, LFS_BASE,
              (unsigned)(total / 1024u), (unsigned)((total - used) / 1024u),
              formatted ? " (formatted)" : "");
@@ -2812,7 +2814,7 @@ static const char *TAG = "log";
 #define LOG_PRIO         8
 #define LOG_STACK_BYTES  4096
 #define LOG_STACK_WORDS  (LOG_STACK_BYTES / sizeof(StackType_t))
-#define LOG_STALL_S      10            /* supervisor heartbeat-stall window (§17.2) */
+#define LOG_STALL_S      5             /* supervisor heartbeat-stall window (§17.2) */
 
 /* §13.3 cadence + buffers */
 #define BATCH_CAP        4096
@@ -2912,12 +2914,18 @@ static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
     log_path(tmp_path, sizeof tmp_path, s_id, ".sum.tmp");
     log_path(sum_path, sizeof sum_path, s_id, ".sum");
     sto_file_t f;
-    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) return;
+    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) { errlog_add(E_STO_WRITE, 0); return; }
     int rc = sto_write(f, buf, off);
-    if (rc == 0) rc = sto_sync(f);
+    if (rc != 0) errlog_add(E_STO_WRITE, (uint32_t)off);
+    if (rc == 0) {
+        rc = sto_sync(f);
+        if (rc != 0) errlog_add(E_STO_WRITE, 0);
+    }
     sto_close(f);
-    if (rc == 0) sto_rename(tmp_path, sum_path);   /* atomic (§13.1) */
+    if (rc == 0 && sto_rename(tmp_path, sum_path) != 0) errlog_add(E_STO_WRITE, 0);   /* atomic (§13.1) */
 }
+
+static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
 
 static void open_session(const log_request_t *req)
 {
@@ -2965,7 +2973,9 @@ static void open_session(const log_request_t *req)
     int n = ses_encode_hdr(&s_hdr, tmp, sizeof tmp);
     batch_append(tmp, n);
     do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
+    sto_sync(s_log_fd);                              /* and sync it: a cut right after open must not lose the .log HDR either */
     rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
+    eviction_check();                                /* §12.7: eviction runs at session start, not only every 60 s */
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
@@ -2990,7 +3000,7 @@ static void handle_request(const log_request_t *req)
     case LOGGER_OPEN_SESSION:    open_session(req); break;
     case LOGGER_CLOSE_SESSION:   close_session(req); break;
     case LOGGER_REBUILD_SUMMARY: if (s_open) rebuild_sum(false, 0, 0); break;
-    case LOGGER_EVICT:           s_last_evict_ms = 0; break;   /* force an eviction pass this loop */
+    case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; break;   /* force an eviction pass this loop */
     default: break;
     }
 }
@@ -3281,12 +3291,13 @@ static int cmd_logtest(int argc, char **argv)
         gps_fix_t f;
         synth_fix(&f, (uint32_t)i);
         int spins = 0;
+        bool ok = true;
         while (!ring_push(&g_fix_ring, &f)) {   /* full: wake the logger and yield */
             logger_notify();
             vTaskDelay(1);
-            if (++spins > 1000) break;          /* logger stuck (e.g. storage dead): give up */
+            if (++spins > 1000) { ok = false; break; }  /* logger stuck (e.g. storage dead): give up */
         }
-        pushed++;
+        if (ok) pushed++;
         if ((i & 0x1F) == 0x1F) logger_notify(); /* nudge every 32 */
     }
     logger_notify();

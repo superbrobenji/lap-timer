@@ -44,7 +44,7 @@ static const char *TAG = "log";
 #define LOG_PRIO         8
 #define LOG_STACK_BYTES  4096
 #define LOG_STACK_WORDS  (LOG_STACK_BYTES / sizeof(StackType_t))
-#define LOG_STALL_S      10            /* supervisor heartbeat-stall window (§17.2) */
+#define LOG_STALL_S      5             /* supervisor heartbeat-stall window (§17.2) */
 
 /* §13.3 cadence + buffers */
 #define BATCH_CAP        4096
@@ -144,12 +144,18 @@ static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
     log_path(tmp_path, sizeof tmp_path, s_id, ".sum.tmp");
     log_path(sum_path, sizeof sum_path, s_id, ".sum");
     sto_file_t f;
-    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) return;
+    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) { errlog_add(E_STO_WRITE, 0); return; }
     int rc = sto_write(f, buf, off);
-    if (rc == 0) rc = sto_sync(f);
+    if (rc != 0) errlog_add(E_STO_WRITE, (uint32_t)off);
+    if (rc == 0) {
+        rc = sto_sync(f);
+        if (rc != 0) errlog_add(E_STO_WRITE, 0);
+    }
     sto_close(f);
-    if (rc == 0) sto_rename(tmp_path, sum_path);   /* atomic (§13.1) */
+    if (rc == 0 && sto_rename(tmp_path, sum_path) != 0) errlog_add(E_STO_WRITE, 0);   /* atomic (§13.1) */
 }
+
+static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
 
 static void open_session(const log_request_t *req)
 {
@@ -197,7 +203,9 @@ static void open_session(const log_request_t *req)
     int n = ses_encode_hdr(&s_hdr, tmp, sizeof tmp);
     batch_append(tmp, n);
     do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
+    sto_sync(s_log_fd);                              /* and sync it: a cut right after open must not lose the .log HDR either */
     rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
+    eviction_check();                                /* §12.7: eviction runs at session start, not only every 60 s */
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
@@ -222,7 +230,7 @@ static void handle_request(const log_request_t *req)
     case LOGGER_OPEN_SESSION:    open_session(req); break;
     case LOGGER_CLOSE_SESSION:   close_session(req); break;
     case LOGGER_REBUILD_SUMMARY: if (s_open) rebuild_sum(false, 0, 0); break;
-    case LOGGER_EVICT:           s_last_evict_ms = 0; break;   /* force an eviction pass this loop */
+    case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; break;   /* force an eviction pass this loop */
     default: break;
     }
 }

@@ -102,12 +102,13 @@ static int cmd_logtest(int argc, char **argv)
         gps_fix_t f;
         synth_fix(&f, (uint32_t)i);
         int spins = 0;
+        bool ok = true;
         while (!ring_push(&g_fix_ring, &f)) {   /* full: wake the logger and yield */
             logger_notify();
             vTaskDelay(1);
-            if (++spins > 1000) break;          /* logger stuck (e.g. storage dead): give up */
+            if (++spins > 1000) { ok = false; break; }  /* logger stuck (e.g. storage dead): give up */
         }
-        pushed++;
+        if (ok) pushed++;
         if ((i & 0x1F) == 0x1F) logger_notify(); /* nudge every 32 */
     }
     logger_notify();
