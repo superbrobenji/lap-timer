@@ -5,6 +5,7 @@
  * Blob layouts are fixed on-flash formats: packed structs so their byte size matches §15.2.
  */
 #include "app/lt_nvs.h"
+#include "app/lt_consts.h"
 #include "app/lt_err.h"
 
 #include <string.h>
@@ -21,6 +22,7 @@ static const char *TAG = "lt_nvs";
 /* ---- on-flash blob layouts (§15.2). Packed so sizes are exact. ---- */
 #define ERR_RING_LEN   32
 #define CRASH_LOG_LEN  3
+_Static_assert(CRASH_LOG_LEN == CRASH_LOOP_N, "crash-log length must match the §17.5 crash-loop count");
 
 typedef struct __attribute__((packed)) {
     uint16_t code;
@@ -160,7 +162,7 @@ bool lt_crashlog_is_loop(void)
 {
     for (int i = 0; i < CRASH_LOG_LEN; i++) {
         if (!lt_reset_is_abnormal(s_crash[i].reset_reason)) return false;
-        if (s_crash[i].uptime_s >= 60) return false;      /* uptime < 60 s each (§17.5) */
+        if (s_crash[i].uptime_s >= CRASH_LOOP_WINDOW_S) return false;   /* uptime < window each (§17.5) */
     }
     return true;
 }
@@ -177,6 +179,13 @@ int lt_safe_until_set(uint32_t boot_cnt)
     if (nvs_set_u32(s_h_sys, K_SAFE, boot_cnt) != ESP_OK) return -1;
     nvs_commit(s_h_sys);
     return 0;
+}
+
+void lt_safe_clear(void)
+{
+    /* §17.5 uptime-based auto-clear: zero the gate so `boot_cnt <= lt_safe_until_get()` is false
+     * on every later boot (boot_cnt is >=1 from the first boot onward). */
+    (void)lt_safe_until_set(0);
 }
 
 const char *lt_reset_reason_str(int r)

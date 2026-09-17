@@ -47,6 +47,9 @@ bool lt_crashlog_is_loop(void);
 /* Safe-mode gate (lt_sys/safe_until): boot counter through which safe mode applies (§17.5). */
 uint32_t lt_safe_until_get(void);
 int      lt_safe_until_set(uint32_t boot_cnt);
+/* Clears the persisted safe-mode gate (lt_sys/safe_until := 0) so a later boot is never held in
+ * safe mode by it. Used by the supervisor's uptime-based auto-clear (§17.5). */
+void     lt_safe_clear(void);
 
 /* cfg blob (lt_cfg/cfg): load validates version+CRC16 then cfg_validate (returns corrections,
  * <0 => absent/corrupt so the caller keeps its defaults). save packs + CRC16 + writes. */
