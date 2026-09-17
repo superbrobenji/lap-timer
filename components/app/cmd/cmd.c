@@ -398,8 +398,36 @@ static int read_sum_scan(const char *id, sumscan_t *out)
     return 0;
 }
 
+/* Two-pass memo (§18.4 serial framing runs cmd_dispatch twice -- a measuring pass then a printing
+ * pass -- because `---BEGIN <size>---` needs the size first). To keep both passes byte-identical
+ * even if the underlying file/sessions change between them, the first pass records what it produced
+ * and the second reuses it: for OPEN/READ the input byte length (`limit`) so the second pass reads
+ * the same range; for LIST the cached session table. Established on the first of a matching pair,
+ * consumed on the second. Streaming is synchronous, so the two passes always run back to back. */
+enum { MEMO_FILE = 0xFF };   /* s_memo.op value for an OPEN/READ file stream */
+static struct {
+    bool     valid;
+    uint8_t  op;         /* CMD_LIST, or MEMO_FILE for OPEN/READ */
+    uint8_t  fmt;        /* OPEN fmt 0..4 (file streams) */
+    char     id[11];
+    uint32_t offset;
+    uint32_t limit;      /* OPEN/READ: input bytes the measuring pass read */
+} s_memo;
+
 /* ---- LIST (0x02): enumerate /sessions, emit the §14.3 JSON array (may span chunks) ---- */
-typedef struct { char id[11]; uint32_t log_kb, sum_kb; bool has_log, has_sum; } sess_ent_t;
+typedef struct {
+    char     id[11];
+    uint32_t log_kb, sum_kb;
+    bool     has_log, has_sum;
+    /* cached .sum scan (measuring pass fills it; printing pass renders from it) */
+    int64_t  start_utc;
+    bool     mode_drag;
+    char     venue[33];
+    uint16_t venue_id, layout_id;
+    int      laps;
+    uint32_t best_ms;
+    bool     have_best;
+} sess_ent_t;
 enum { LIST_MAX_SESSIONS = 64 };
 static sess_ent_t s_sess[LIST_MAX_SESSIONS];
 static int        s_nsess;
@@ -449,10 +477,31 @@ static void json_escape(char *dst, size_t cap, const char *src)
 
 static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
-    cw_init(&s_cw, emit, ctx, tag, 0, /*tail*/false);
-    s_nsess = 0;
-    (void)sto_list("/sessions", list_scan_cb, NULL);
+    bool second = s_memo.valid && s_memo.op == CMD_LIST;   /* printing pass: reuse the table */
+    s_memo.valid = false;
 
+    if (!second) {                                         /* measuring pass: enumerate + scan once */
+        s_nsess = 0;
+        (void)sto_list("/sessions", list_scan_cb, NULL);
+        for (int i = 0; i < s_nsess; i++) {
+            if (!s_sess[i].has_sum) continue;
+            memset(&s_ss, 0, sizeof s_ss);
+            (void)read_sum_scan(s_sess[i].id, &s_ss);
+            s_sess[i].start_utc  = s_ss.have_hdr ? s_ss.hdr.start_gps_us / 1000000 : 0;
+            s_sess[i].mode_drag  = s_ss.have_hdr && s_ss.hdr.mode == 1;
+            memcpy(s_sess[i].venue, s_ss.have_venue ? s_ss.venue : "", sizeof s_sess[i].venue);
+            if (!s_ss.have_venue) s_sess[i].venue[0] = '\0';
+            s_sess[i].venue_id   = s_ss.have_venue ? s_ss.venue_id
+                                                   : (s_ss.have_hdr ? s_ss.hdr.venue_id : 0);
+            s_sess[i].layout_id  = s_ss.have_venue ? s_ss.layout_id
+                                                   : (s_ss.have_hdr ? s_ss.hdr.layout_id : 0);
+            s_sess[i].laps       = s_ss.laps;
+            s_sess[i].best_ms    = s_ss.best_ms;
+            s_sess[i].have_best  = s_ss.have_best;
+        }
+    }
+
+    cw_init(&s_cw, emit, ctx, tag, 0, /*tail*/false);
     static const char PRE[]  = "{\"proto\":1,\"sessions\":[";
     static const char POST[] = "]}";
     if (cw_write(&s_cw, (const uint8_t *)PRE, sizeof PRE - 1) != 0) return -1;
@@ -460,25 +509,17 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
     int emitted = 0;
     for (int i = 0; i < s_nsess; i++) {
         if (!s_sess[i].has_sum) continue;             /* need a .sum to describe the session */
-        memset(&s_ss, 0, sizeof s_ss);
-        (void)read_sum_scan(s_sess[i].id, &s_ss);
-
         char venue_esc[200];
-        json_escape(venue_esc, sizeof venue_esc, s_ss.have_venue ? s_ss.venue : "");
-
-        int64_t     start_utc = s_ss.have_hdr ? s_ss.hdr.start_gps_us / 1000000 : 0;
-        const char *mode      = (s_ss.have_hdr && s_ss.hdr.mode == 1) ? "drag" : "lap";
-        unsigned    venue_id  = s_ss.have_venue ? s_ss.venue_id
-                                                : (s_ss.have_hdr ? s_ss.hdr.venue_id : 0);
-        unsigned    layout_id = s_ss.have_venue ? s_ss.layout_id
-                                                : (s_ss.have_hdr ? s_ss.hdr.layout_id : 0);
+        json_escape(venue_esc, sizeof venue_esc, s_sess[i].venue);
         char obj[400];
         int w = snprintf(obj, sizeof obj,
             "%s{\"id\":\"%s\",\"start_utc\":%lld,\"mode\":\"%s\",\"venue\":\"%s\","
             "\"venue_id\":%u,\"layout_id\":%u,\"laps\":%d,\"best_ms\":%u,"
             "\"log_kb\":%u,\"sum_kb\":%u,\"has_log\":%s}",
-            emitted ? "," : "", s_sess[i].id, (long long)start_utc, mode, venue_esc,
-            venue_id, layout_id, s_ss.laps, (unsigned)(s_ss.have_best ? s_ss.best_ms : 0),
+            emitted ? "," : "", s_sess[i].id, (long long)s_sess[i].start_utc,
+            s_sess[i].mode_drag ? "drag" : "lap", venue_esc,
+            (unsigned)s_sess[i].venue_id, (unsigned)s_sess[i].layout_id, s_sess[i].laps,
+            (unsigned)(s_sess[i].have_best ? s_sess[i].best_ms : 0),
             (unsigned)s_sess[i].log_kb, (unsigned)s_sess[i].sum_kb,
             s_sess[i].has_log ? "true" : "false");
         if (w > 0) {
@@ -489,12 +530,18 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
         emitted++;
     }
     if (cw_write(&s_cw, (const uint8_t *)POST, sizeof POST - 1) != 0) return -1;
-    return cw_finish(&s_cw);
+
+    int rc = cw_finish(&s_cw);
+    if (!second && rc == 0) { s_memo.valid = true; s_memo.op = CMD_LIST; }   /* arm for pass 2 */
+    return rc;
 }
 
 /* ---- OPEN/READ raw formats (3 log, 4 sum): stream the file bytes verbatim ---- */
-static int stream_raw(const char *id, const char *ext, uint32_t offset,
-                      cmd_emit_fn emit, void *ctx, uint8_t tag)
+/* Reads at most `limit` bytes (UINT32_MAX = unclamped); on success sets *nread to the bytes read
+ * so the caller can pin the printing pass to the same range (a growing file never overruns the
+ * announced size, and the CRC covers exactly [0, limit)). *nread is left untouched on error. */
+static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t limit,
+                      uint32_t *nread, cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
     char path[48];
     (void)snprintf(path, sizeof path, "/sessions/%s%s", id, ext);
@@ -504,19 +551,26 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset,
         return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "open: no such file");
     }
     cw_init(&s_cw, emit, ctx, tag, offset, /*tail*/true);
-    size_t got;
-    while (sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+    uint32_t done = 0;
+    size_t   got;
+    while (done < limit && sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+        if ((uint32_t)got > limit - done) got = (size_t)(limit - done);   /* clamp to snapshot */
         if (cw_write(&s_cw, s_io, got) != 0) { sto_close(f); return -1; }
+        done += (uint32_t)got;
     }
     sto_close(f);
+    *nread = done;
     return cw_finish(&s_cw);
 }
 
 /* ---- OPEN/READ export formats (0 json, 1 vbo, 2 nmea): stream .log through core/exp ---- */
 static exp_meta_t s_meta;
 
-static int stream_export(const char *id, uint8_t expfmt, uint32_t offset,
-                         cmd_emit_fn emit, void *ctx, uint8_t tag)
+/* Reads at most `limit` bytes of the .log (UINT32_MAX = unclamped); on success sets *nread to the
+ * input bytes fed so the printing pass feeds the identical range -> identical output + CRC. *nread
+ * is left untouched on any error path. */
+static int stream_export(const char *id, uint8_t expfmt, uint32_t offset, uint32_t limit,
+                         uint32_t *nread, cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
     uint16_t seq = 0;
 
@@ -548,9 +602,12 @@ static int stream_export(const char *id, uint8_t expfmt, uint32_t offset,
     (void)drain_exp(&s_exp, &s_cw);              /* emit the format header written at exp_open */
 
     ses_reader_init(&s_sr);
-    size_t got;
-    while (sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+    uint32_t done = 0;
+    size_t   got;
+    while (done < limit && sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+        if ((uint32_t)got > limit - done) got = (size_t)(limit - done);   /* clamp to snapshot */
         ses_reader_feed(&s_sr, s_io, got, exp_frame_cb, &pump);
+        done += (uint32_t)got;
         if (pump.err || s_cw.err) break;
     }
     if (!pump.err && !s_cw.err) ses_reader_flush(&s_sr, exp_frame_cb, &pump);
@@ -558,10 +615,15 @@ static int stream_export(const char *id, uint8_t expfmt, uint32_t offset,
 
     if (!s_cw.err && !pump.err) {                /* finish the exporter (may need EXP_FULL retry) */
         int r;
-        while ((r = exp_finish(&s_exp)) == EXP_FULL) if (drain_exp(&s_exp, &s_cw) != 0) break;
-        (void)drain_exp(&s_exp, &s_cw);
+        while ((r = exp_finish(&s_exp)) == EXP_FULL)
+            if (drain_exp(&s_exp, &s_cw) != 0) { s_cw.err = -1; break; }
+        if (r < 0) pump.err = 1;                 /* propagate a finish error like the feed path */
+        else if (!s_cw.err) (void)drain_exp(&s_exp, &s_cw);
     }
-    if (s_cw.err) return -1;
+    if (s_cw.err) return -1;                      /* transport failed */
+    if (pump.err)                                 /* undecodable/truncated export: signal, not fake OK */
+        return emit_error(emit, ctx, tag, &s_cw.seq, E_CONN_PROTO, "export: decode error");
+    *nread = done;
     return cw_finish(&s_cw);                      /* LAST + CRC32 tail over the whole export */
 }
 
@@ -573,14 +635,34 @@ static struct { bool active; uint8_t fmt; char id[11]; } s_open;
 static int stream_by_fmt(const char *id, uint8_t fmt, uint32_t offset,
                          cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    if (fmt > 4) { uint16_t seq = 0; return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "bad fmt"); }
+
+    /* Printing pass? Reuse the measuring pass's byte length so both stream the same range. */
+    bool second = s_memo.valid && s_memo.op == MEMO_FILE && s_memo.fmt == fmt &&
+                  s_memo.offset == offset && strncmp(s_memo.id, id, sizeof s_memo.id) == 0;
+    uint32_t limit = second ? s_memo.limit : UINT32_MAX;
+    s_memo.valid = false;                       /* consume / reset before running the pass */
+
+    uint32_t nread = UINT32_MAX;                /* stays UINT32_MAX on error -> not memoised */
+    int rc;
     switch (fmt) {
-    case 0: return stream_export(id, EXP_JSON, offset, emit, ctx, tag);
-    case 1: return stream_export(id, EXP_VBO,  offset, emit, ctx, tag);
-    case 2: return stream_export(id, EXP_NMEA, offset, emit, ctx, tag);
-    case 3: return stream_raw(id, ".log", offset, emit, ctx, tag);
-    case 4: return stream_raw(id, ".sum", offset, emit, ctx, tag);
-    default: { uint16_t seq = 0; return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "bad fmt"); }
+    case 0: rc = stream_export(id, EXP_JSON, offset, limit, &nread, emit, ctx, tag); break;
+    case 1: rc = stream_export(id, EXP_VBO,  offset, limit, &nread, emit, ctx, tag); break;
+    case 2: rc = stream_export(id, EXP_NMEA, offset, limit, &nread, emit, ctx, tag); break;
+    case 3: rc = stream_raw(id, ".log", offset, limit, &nread, emit, ctx, tag); break;
+    default: rc = stream_raw(id, ".sum", offset, limit, &nread, emit, ctx, tag); break;
     }
+
+    /* Measuring pass that actually streamed: memoise its length for the printing pass. */
+    if (!second && rc == 0 && nread != UINT32_MAX) {
+        s_memo.valid  = true;
+        s_memo.op     = MEMO_FILE;
+        s_memo.fmt    = fmt;
+        s_memo.offset = offset;
+        (void)snprintf(s_memo.id, sizeof s_memo.id, "%s", id);
+        s_memo.limit  = nread;
+    }
+    return rc;
 }
 
 /* OPEN (0x03): id char[10], fmt u8 -> stream from offset 0. */

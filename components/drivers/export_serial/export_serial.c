@@ -271,6 +271,16 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     sframe_t pr; sframe_init(&pr, /*print*/true, binary, has_tail);
     (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &pr);
 
+    if (pr.err) {
+        /* The op succeeded while measuring but failed while printing (e.g. the file was deleted
+         * or storage degraded between the two passes). Abort the frame with an error line rather
+         * than closing a body-less "success" with a bogus ---END. */
+        printf("\r\nERR 0x%04x: %s\r\n", (unsigned)pr.err_code, pr.errmsg);
+        fflush(stdout);
+        esp_log_level_set("*", saved);
+        return;
+    }
+
     uint32_t crc = has_tail ? (pr.have_tail_crc ? pr.tail_crc : 0) : pr.crc;
     printf("\r\n---END %08x---\r\n", (unsigned)crc);
     fflush(stdout);
