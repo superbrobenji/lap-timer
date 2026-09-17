@@ -10,10 +10,15 @@
  * prints an `ERR 0x<code>: <msg>` line instead. IDF logging is dropped to ERROR for the duration
  * of a transfer and restored after (§18.4).
  *
+ * `list`/`open`/`read` stream session files: LIST emits the §14.3 JSON, OPEN/READ stream a file
+ * through the same framing (Base64 body for the binary `log`/`sum` formats, raw text for
+ * vbo/nmea/json). Because BEGIN carries the size, these ops run cmd_dispatch twice (a measuring
+ * pass then a printing pass); both are read-only so the double run is side-effect free.
+ *
  * `dbg` carries the diagnostics verbs migrated from the 3.2-3.4 console (status/logtest/fs/sum/
  * logck/laps) plus `rtc` (dump the validated RTC snapshot), `crash` (force a panic) and `hang`
  * (busy-loop to trip the task WDT). `gps raw`/`imu raw`/`power`/`sim` are stubbed until their
- * drivers land. `list`/`open`/`read` (file streaming) are registered in Task 5.
+ * drivers land.
  */
 #include "export_serial.h"
 
@@ -47,6 +52,57 @@
 static int s_reset_reason;
 
 /* ================================================================== *
+ *  Base64 (§18.4: binary formats are Base64-encoded between the markers)
+ *
+ * A tiny streaming encoder (no malloc): push bytes, carrying 1-2 leftover bytes across chunk
+ * boundaries, then flush to pad the final quantum. `print` decides fwrite vs count-only, so the
+ * same code drives both the size-measuring pass and the printing pass.
+ * ================================================================== */
+static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+typedef struct { uint8_t carry[3]; int ncarry; bool print; size_t out; } b64_t;
+
+static void b64_reset(b64_t *s, bool print) { s->ncarry = 0; s->print = print; s->out = 0; }
+
+static void b64_quantum(b64_t *s, const uint8_t *t, int rem)
+{
+    uint32_t v = (uint32_t)t[0] << 16;
+    if (rem > 1) v |= (uint32_t)t[1] << 8;
+    if (rem > 2) v |= (uint32_t)t[2];
+    char q[4];
+    q[0] = B64[(v >> 18) & 63];
+    q[1] = B64[(v >> 12) & 63];
+    q[2] = (rem > 1) ? B64[(v >> 6) & 63] : '=';
+    q[3] = (rem > 2) ? B64[v & 63]        : '=';
+    if (s->print) fwrite(q, 1, 4, stdout);
+    s->out += 4;
+}
+
+static void b64_push(b64_t *s, const uint8_t *p, size_t n)
+{
+    size_t i = 0;
+    while (s->ncarry > 0 && s->ncarry < 3 && i < n) s->carry[s->ncarry++] = p[i++];
+    if (s->ncarry == 3) { b64_quantum(s, s->carry, 3); s->ncarry = 0; }
+    for (; i + 3 <= n; i += 3) b64_quantum(s, p + i, 3);
+    while (i < n) s->carry[s->ncarry++] = p[i++];
+}
+
+static void b64_flush(b64_t *s)
+{
+    if (s->ncarry > 0) { b64_quantum(s, s->carry, s->ncarry); s->ncarry = 0; }
+}
+
+/* One-shot Base64 of a whole buffer to stdout (buffered ops); returns encoded byte count. */
+static size_t b64_write_all(const uint8_t *src, size_t n)
+{
+    b64_t s; b64_reset(&s, true);
+    b64_push(&s, src, n);
+    b64_flush(&s);
+    return s.out;
+}
+
+/* ================================================================== *
  *  §18.1 command ops -> framed serial output (§18.4)
  * ================================================================== */
 
@@ -58,6 +114,7 @@ typedef struct {
     uint8_t     buf[SER_ASM_MAX];
     size_t      len;
     bool        error;
+    bool        binary;            /* Base64-encode the body between the markers (§18.4) */
     uint16_t    err_code;
 } ser_ctx_t;
 
@@ -70,9 +127,14 @@ static void ser_flush(ser_ctx_t *c)
         fflush(stdout);
         return;
     }
-    uint32_t crc = esp_rom_crc32_le(0, c->buf, c->len);
-    printf("---BEGIN %s %u---\r\n", c->name ? c->name : "data", (unsigned)c->len);
-    if (c->len) fwrite(c->buf, 1, c->len, stdout);
+    /* CRC32 is over the raw payload (the client Base64-decodes first, then verifies). */
+    uint32_t crc  = esp_rom_crc32_le(0, c->buf, c->len);
+    size_t   size = c->binary ? (4 * ((c->len + 2) / 3)) : c->len;
+    printf("---BEGIN %s %u---\r\n", c->name ? c->name : "data", (unsigned)size);
+    if (c->len) {
+        if (c->binary) (void)b64_write_all(c->buf, c->len);
+        else           fwrite(c->buf, 1, c->len, stdout);
+    }
     printf("\r\n---END %08x---\r\n", (unsigned)crc);
     fflush(stdout);
 }
@@ -101,8 +163,9 @@ static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
     return 0;
 }
 
-/* Run one op through cmd_dispatch with logging quiesced, then framed by ser_emit. */
-static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t len)
+/* Run one op through cmd_dispatch with logging quiesced, then framed by ser_emit. `binary` routes
+ * the assembled body through Base64 at flush (§18.4: STATUS record and other binary payloads). */
+static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t len, bool binary)
 {
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs during a framed transfer */
@@ -110,24 +173,179 @@ static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t
     s_ser.name = name;
     s_ser.len = 0;
     s_ser.error = false;
+    s_ser.binary = binary;
     s_ser.err_code = 0;
     (void)cmd_dispatch(op, /*tag*/1, payload, len, ser_emit, &s_ser);
 
     esp_log_level_set("*", saved);
 }
 
+/* ================================================================== *
+ *  streamed framing for large / file ops -- list / open / read (§18.4)
+ *
+ * OPEN/READ can stream a whole session file, which must not be buffered (496 B chunk cap, 6 KB
+ * REPL stack). So the frame is emitted incrementally: because `---BEGIN <name> <size>---` needs
+ * the size first, cmd_dispatch is run twice -- a measuring pass counts the body bytes, then a
+ * printing pass writes them. Both ops are read-only (no side effects), so the double run is safe.
+ * cmd_dispatch appends the §18.1 CRC32 in the final chunk's tail for OPEN/READ; this layer lifts
+ * that value into `---END <crc32 hex>---` (it already covers the whole file, so a resumed READ
+ * reports the correct whole-file CRC). LIST carries no tail, so its CRC is computed over the body.
+ * ================================================================== */
+typedef struct {
+    bool     print;         /* print to stdout vs. count only (measuring pass) */
+    bool     binary;        /* Base64-encode the body (log/sum) */
+    bool     has_tail;      /* final chunk ends with the 4-byte §18.1 CRC32 (OPEN/READ) */
+    b64_t    b64;
+    size_t   out;           /* body bytes produced (Base64 chars, or raw bytes) */
+    uint32_t crc;           /* CRC over the body -- used only when !has_tail (LIST) */
+    bool     have_tail_crc;
+    uint32_t tail_crc;      /* CRC lifted from the final chunk's tail (OPEN/READ) */
+    int      err;
+    uint16_t err_code;
+    char     errmsg[96];
+} sframe_t;
+
+static void sframe_init(sframe_t *s, bool print, bool binary, bool has_tail)
+{
+    memset(s, 0, sizeof *s);
+    s->print = print; s->binary = binary; s->has_tail = has_tail;
+    b64_reset(&s->b64, print);
+}
+
+static int sframe_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
+                       const uint8_t *p, size_t n)
+{
+    (void)tag; (void)seq;
+    sframe_t *s = (sframe_t *)vctx;
+
+    if (flags & CMD_FLAG_ERROR) {
+        s->err = 1;
+        s->err_code = (n >= 2) ? (uint16_t)(p[0] | (p[1] << 8)) : 0;
+        size_t mlen = (n > 2) ? n - 2 : 0;
+        if (mlen > sizeof s->errmsg - 1) mlen = sizeof s->errmsg - 1;
+        if (mlen) memcpy(s->errmsg, p + 2, mlen);
+        s->errmsg[mlen] = '\0';
+        return 0;
+    }
+
+    size_t bodyn = n;
+    if ((flags & CMD_FLAG_LAST) && s->has_tail) {   /* final chunk: last 4 bytes are the CRC32 */
+        if (n >= 4) {
+            s->tail_crc = (uint32_t)p[n - 4] | ((uint32_t)p[n - 3] << 8) |
+                          ((uint32_t)p[n - 2] << 16) | ((uint32_t)p[n - 1] << 24);
+            s->have_tail_crc = true;
+            bodyn = n - 4;
+        } else {
+            bodyn = 0;
+        }
+    }
+    if (bodyn) {
+        if (!s->has_tail) s->crc = esp_rom_crc32_le(s->crc, p, (uint32_t)bodyn);
+        if (s->binary) b64_push(&s->b64, p, bodyn);
+        else { if (s->print) fwrite(p, 1, bodyn, stdout); s->out += bodyn; }
+    }
+    if (flags & CMD_FLAG_LAST) {
+        if (s->binary) { b64_flush(&s->b64); s->out = s->b64.out; }
+    }
+    return 0;
+}
+
+static void run_stream(uint8_t op, const char *name, const uint8_t *payload, size_t len,
+                       bool binary, bool has_tail)
+{
+    esp_log_level_t saved = esp_log_level_get("*");
+    esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
+
+    sframe_t m; sframe_init(&m, /*print*/false, binary, has_tail);
+    (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &m);
+    if (m.err) {
+        printf("ERR 0x%04x: %s\r\n", (unsigned)m.err_code, m.errmsg);
+        fflush(stdout);
+        esp_log_level_set("*", saved);
+        return;
+    }
+
+    printf("---BEGIN %s %u---\r\n", name ? name : "data", (unsigned)m.out);
+    fflush(stdout);
+
+    sframe_t pr; sframe_init(&pr, /*print*/true, binary, has_tail);
+    (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &pr);
+
+    uint32_t crc = has_tail ? (pr.have_tail_crc ? pr.tail_crc : 0) : pr.crc;
+    printf("\r\n---END %08x---\r\n", (unsigned)crc);
+    fflush(stdout);
+
+    esp_log_level_set("*", saved);
+}
+
+/* Map the `open` format word to the §18.1 fmt code, file extension and body encoding. */
+static int fmt_from_str(const char *s, uint8_t *fmt, const char **ext, bool *binary)
+{
+    if (strcmp(s, "json") == 0) { *fmt = 0; *ext = "json"; *binary = false; return 0; }
+    if (strcmp(s, "vbo")  == 0) { *fmt = 1; *ext = "vbo";  *binary = false; return 0; }
+    if (strcmp(s, "nmea") == 0) { *fmt = 2; *ext = "nmea"; *binary = false; return 0; }
+    if (strcmp(s, "log")  == 0) { *fmt = 3; *ext = "log";  *binary = true;  return 0; }
+    if (strcmp(s, "sum")  == 0) { *fmt = 4; *ext = "sum";  *binary = true;  return 0; }
+    return -1;
+}
+
+static uint8_t s_open_payload[11];   /* id char[10] | fmt u8 (§18.1 OPEN) */
+static uint8_t s_read_payload[4];    /* offset u32 LE (§18.1 READ) */
+static uint8_t s_last_fmt;
+static char    s_last_name[24];      /* "<id>.<ext>" carried into the READ frame */
+
+static int cmd_list_c(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    run_stream(CMD_LIST, "sessions", NULL, 0, /*binary*/false, /*has_tail*/false);
+    return 0;
+}
+
+static int cmd_open_c(int argc, char **argv)
+{
+    if (argc < 3) { printf("usage: open <id> <vbo|nmea|json|log|sum>\n"); return 1; }
+    uint8_t fmt; const char *ext; bool binary;
+    if (fmt_from_str(argv[2], &fmt, &ext, &binary) != 0) {
+        printf("open: bad format '%s' (want vbo|nmea|json|log|sum)\n", argv[2]);
+        return 1;
+    }
+    memset(s_open_payload, 0, sizeof s_open_payload);
+    size_t idl = strlen(argv[1]);
+    if (idl > 10) idl = 10;
+    memcpy(s_open_payload, argv[1], idl);
+    s_open_payload[10] = fmt;
+    s_last_fmt = fmt;
+    (void)snprintf(s_last_name, sizeof s_last_name, "%.10s.%s", argv[1], ext);
+    run_stream(CMD_OPEN, s_last_name, s_open_payload, sizeof s_open_payload, binary, /*has_tail*/true);
+    return 0;
+}
+
+static int cmd_read_c(int argc, char **argv)
+{
+    if (argc < 2) { printf("usage: read <offset>   (resume the last open transfer)\n"); return 1; }
+    unsigned long off = strtoul(argv[1], NULL, 0);
+    s_read_payload[0] = (uint8_t)off;
+    s_read_payload[1] = (uint8_t)(off >> 8);
+    s_read_payload[2] = (uint8_t)(off >> 16);
+    s_read_payload[3] = (uint8_t)(off >> 24);
+    bool binary = (s_last_fmt == 3 || s_last_fmt == 4);
+    run_stream(CMD_READ, s_last_name[0] ? s_last_name : "data",
+               s_read_payload, sizeof s_read_payload, binary, /*has_tail*/true);
+    return 0;
+}
+
 /* ---- text commands (§18.4) ---- */
 static int cmd_status_c(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    run_cmd(CMD_STATUS, "status", NULL, 0);
+    run_cmd(CMD_STATUS, "status", NULL, 0, true);
     return 0;
 }
 
 static char s_setbuf[1024];   /* `config set <json>` reassembly */
 static int cmd_config_c(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_cmd(CMD_CONFIG_GET, "config", NULL, 0); return 0; }
+    if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_cmd(CMD_CONFIG_GET, "config", NULL, 0, false); return 0; }
     if (argc >= 3 && strcmp(argv[1], "set") == 0) {
         /* rejoin argv[2..] so a JSON body split on spaces is reassembled (quotes must be escaped
          * on the command line, e.g. config set {\"units\":1} -- esp_console strips bare quotes). */
@@ -140,7 +358,7 @@ static int cmd_config_c(int argc, char **argv)
             w += al;
         }
         s_setbuf[w] = '\0';
-        run_cmd(CMD_CONFIG_SET, "config", (const uint8_t *)s_setbuf, w);
+        run_cmd(CMD_CONFIG_SET, "config", (const uint8_t *)s_setbuf, w, false);
         return 0;
     }
     printf("usage: config get | config set <json>\n");
@@ -149,29 +367,29 @@ static int cmd_config_c(int argc, char **argv)
 
 static int cmd_errlog_c(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "clear") == 0) { run_cmd(CMD_ERRLOG_CLEAR, "errlog", NULL, 0); return 0; }
-    run_cmd(CMD_ERRLOG_GET, "errlog", NULL, 0);
+    if (argc >= 2 && strcmp(argv[1], "clear") == 0) { run_cmd(CMD_ERRLOG_CLEAR, "errlog", NULL, 0, false); return 0; }
+    run_cmd(CMD_ERRLOG_GET, "errlog", NULL, 0, false);
     return 0;
 }
 
 static int cmd_diag_c(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    run_cmd(CMD_DIAG_GET, "diag", NULL, 0);
+    run_cmd(CMD_DIAG_GET, "diag", NULL, 0, false);
     return 0;
 }
 
 static int cmd_delete_c(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: delete <id>\n"); return 1; }
-    run_cmd(CMD_DELETE, "delete", (const uint8_t *)argv[1], strlen(argv[1]));
+    run_cmd(CMD_DELETE, "delete", (const uint8_t *)argv[1], strlen(argv[1]), false);
     return 0;
 }
 
 static int cmd_close_c(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    run_cmd(CMD_CLOSE, "close", NULL, 0);
+    run_cmd(CMD_CLOSE, "close", NULL, 0, false);
     return 0;
 }
 
@@ -472,13 +690,15 @@ void export_serial_start(int reset_reason)
     linenoiseSetDumbMode(1);            /* §18.4: line editing disabled (plain serial terminal) */
 
     register_cmd("status", "device status (§18.2, 20-byte record)", cmd_status_c);
+    register_cmd("list",   "session list JSON (§14.3)", cmd_list_c);
+    register_cmd("open",   "open <id> <vbo|nmea|json|log|sum>  (stream a session file)", cmd_open_c);
+    register_cmd("read",   "read <offset>  (resume the last open transfer)", cmd_read_c);
     register_cmd("config", "config get | config set <json>", cmd_config_c);
     register_cmd("errlog", "error ring dump | errlog clear", cmd_errlog_c);
     register_cmd("diag",   "diagnostics JSON (§17.10)", cmd_diag_c);
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
     register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|crash|hang", cmd_dbg);
-    /* list/open/read (file streaming, §18.1) are registered in Task 5. */
 
     esp_console_start_repl(repl);
 }
