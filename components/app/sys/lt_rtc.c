@@ -13,11 +13,16 @@
 #include "esp_attr.h"
 #include "esp_rom_crc.h"
 
-static RTC_DATA_ATTR rtc_state_t s_rtc;
+/* RTC_NOINIT_ATTR, not RTC_DATA_ATTR: RTC_DATA_ATTR is re-initialised from the image on a
+ * software/panic/WDT reset (it only survives DEEP SLEEP), which would wipe the snapshot exactly
+ * when we need it -- after a crash. RTC_NOINIT is never auto-initialised, so it persists across
+ * every reset until power-off; lt_rtc_validate gates it on magic+version+CRC, so uninitialised
+ * garbage on the first-ever power-on reads as ABSENT/INVALID. */
+static RTC_NOINIT_ATTR rtc_state_t s_rtc;
 
 #define UPTIME_MAGIC 0x5054494Du   /* 'PTIM' */
-static RTC_DATA_ATTR uint32_t s_uptime_magic;
-static RTC_DATA_ATTR uint32_t s_uptime_s;
+static RTC_NOINIT_ATTR uint32_t s_uptime_magic;
+static RTC_NOINIT_ATTR uint32_t s_uptime_s;
 
 static uint32_t rtc_crc(const rtc_state_t *s)
 {

@@ -4,7 +4,7 @@
  * boot (§4.7 step 4); 3.5 adds the save path and pipeline resume. lt_rtc_save() populates and
  * CRC's the snapshot from the lap engine's resumable state (lap_rtc_t) plus session identity;
  * the pipeline calls it on every S/F and sector event so the most-recent gate is the resume
- * point after any reset. Separately, a tiny RTC_DATA_ATTR uptime cell is kept so the boot-time
+ * point after any reset. Separately, a tiny RTC_NOINIT_ATTR uptime cell is kept so the boot-time
  * crash-loop check (§17.5) can learn how long the *previous* boot ran (esp_timer resets on every
  * reset; RTC slow memory survives WDT/panic and, usually, sleep).
  */
@@ -45,7 +45,7 @@ rtc_validity_t lt_rtc_validate(rtc_state_t *out);
 void           lt_rtc_clear(void);   /* zero the snapshot (magic cleared) */
 
 /* Populate and CRC the RTC state from the current lap-engine snapshot + session identity, then
- * store it in RTC_DATA_ATTR memory (survives reset/deep-sleep). Called by the pipeline on every
+ * store it in RTC_NOINIT_ATTR memory (survives panic/WDT reset and deep sleep). Called by the pipeline on every
  * S/F and sector event and before a supervised restart. mode is the operating mode (MODE_LAP/
  * MODE_DRAG), power_state has no owner in plan 03 (pass 0). session_epoch_mono_us is preserved
  * across saves. session_id is a bounded copy into the 10-byte field (may truncate). */
