@@ -1,8 +1,8 @@
 /* ui.c -- the app-side UI task, menu navigation and button debounce (spec §4.3, §20.3, §20.7-20.8).
  *
- * The ui task (core 0, prio 6, stack 6144) owns a static screen_model_t and a static 296x128 1-bpp
+ * The ui task (core 0, prio 6, stack 6144 on real builds / 2560 on moto_sim) owns a static screen_model_t and a static 296x128 1-bpp
  * framebuffer. It coalesces (§20.3): each wake it drains the button queue and the pipeline event
- * queue (g_evt_q), updates the model, and -- only when something changed -- renders ONCE via the
+ * queue (g_ui_evt_q, the pipeline's fan-out copy for the ui), updates the model, and -- only when something changed -- renders ONCE via the
  * pure core/ui screens_render(). Plan 04 ships no display driver, so instead of refreshing a panel
  * it logs the dirty box; the real disp_refresh() glue lands with the e-paper driver in a later plan.
  *
@@ -18,12 +18,9 @@
  * Layout/Calibrate via commands) are wired; items that need later subsystems (Export, Live,
  * Diagnostics export, Sessions, New track, Sleep now) render + are selectable but only log.
  *
- * NOTE (design, flagged for review): g_evt_q is the LOGGER's copy of the event broadcast; the spec
- * §4.4 design is a per-consumer event queue that the pipeline fans out to (ui, logger, power). That
- * fan-out is not wired yet (a pipeline change, out of this task's scope), so this task drains
- * g_evt_q directly -- harmless on moto_neo6m (no events until the GPS driver lands) but it competes
- * with the logger on moto_sim. We deliberately do NOT use a queue set on g_evt_q: the logger reads
- * g_evt_q directly (not through a set), and mixing a set with direct reads desyncs the set.
+ * Events (§4.4): the pipeline fans each event out to BOTH g_evt_q (logger) and g_ui_evt_q (this
+ * task), so the two never steal each other's events; this task drains g_ui_evt_q (drop-newest on
+ * full). No queue set -- both consumers read their own queue directly.
  */
 #include "build_config.h"
 
@@ -59,7 +56,8 @@ static const char *TAG = "ui";
  * for a full 6144-byte ui stack alongside the 4.7 KB framebuffer. On the sim the ui task does no
  * display work (no panel in plan 04 -- it only renders into the framebuffer and logs), and its real
  * high-water is well under the supervisor's own 3072-byte stack (which also runs NVS + logging), so
- * the sim uses 3072. Restore 6144 here once the sim capture moves to flash / the display driver
+ * the sim uses 2560 (high-water not yet measured on target -- see the plan-04 review). Note the
+ * sim DRAM margin is thin (~1 KB). Restore 6144 here once the sim capture moves to flash / the display driver
  * (which needs the extra margin for its refresh line buffer) lands. */
 #if CFG_GPS_SIM
 #define UI_STACK_BYTES 2560
@@ -597,7 +595,7 @@ static void ui_task(void *arg)
 
         /* Coalesce (§20.3): drain the whole event queue before rendering once. */
         event_t e;
-        while (g_evt_q != NULL && xQueueReceive(g_evt_q, &e, 0) == pdTRUE) {
+        while (g_ui_evt_q != NULL && xQueueReceive(g_ui_evt_q, &e, 0) == pdTRUE) {
             handle_event(&e, now);
         }
 

@@ -142,6 +142,7 @@ static int16_t clamp_i16(int32_t v)
 static void emit_event(const event_t *ev)
 {
     if (g_evt_q) { (void)xQueueSend(g_evt_q, ev, 0); logger_notify(); }
+    if (g_ui_evt_q) (void)xQueueSend(g_ui_evt_q, ev, 0);   /* fan-out to the ui task (drop-newest on full) */
 }
 
 static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)

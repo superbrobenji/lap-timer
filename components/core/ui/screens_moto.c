@@ -375,6 +375,8 @@ static const char DRAG_EMPTY_TIME[] = "--";
  * blank-cell gaps described above. */
 static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
 {
+    /* is_distance (the 100-0 braking gate, metres) reaches the layout only via pages 1/2's gate
+     * grid, not the page-0 benches; the branch below is defensive and covered by the drag_p1/p2 goldens. */
     fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, y, r->label);
 
     if (!r->present) {

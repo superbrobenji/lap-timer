@@ -1,6 +1,6 @@
 /* app/ui.h -- the app-side UI task + buttons (spec §4.3, §20.3, §20.7-20.8).
  *
- * The ui task (core 0, prio 6, stack 6144) owns a static screen_model_t and a static framebuffer,
+ * The ui task (core 0, prio 6, stack 6144 real / 2560 moto_sim) owns a static screen_model_t and a static framebuffer,
  * drains the pipeline event queue (g_evt_q) and the button queue, updates the model, renders once
  * per change via core/ui screens_render() and -- since no display panel exists yet (plan 04 has no
  * driver) -- logs the dirty box instead of refreshing a panel. Menu navigation, the button debounce
