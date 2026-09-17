@@ -29,6 +29,7 @@
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
+#include "app/pipeline.h"
 
 static const char *TAG = "laptimer";
 
@@ -160,9 +161,15 @@ void app_main(void)
     lt_ipc_init();
 
     /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). It idles until a
-     * LOGGER_OPEN_SESSION request arrives (from the power task in 3.4, or `dbg logtest` now);
-     * with storage dead it stays idle (open fails gracefully). */
+     * LOGGER_OPEN_SESSION request arrives (from the pipeline below on the sim build, the power
+     * task later, or `dbg logtest`); with storage dead it stays idle (open fails gracefully). */
     logger_start();
+
+    /* §4.7 step 12 (pipeline): start the pipeline task (core 1, prio 20). It brings up the GPS/IMU
+     * drivers, runs tb + fusion + lap/drag + per-lap stats (§9.1/§9.4), and on the moto_sim bench
+     * build opens a session, arms the sim venue, and streams the committed capture into laps. On the
+     * real GPS variant it idles until the sensor driver (plan 08) delivers fixes. */
+    pipeline_start();
 
     /* Minimal diagnostics console -- the 3.2 exit criterion (`dbg status`). Replaced by the
      * full §18.4 console in 3.5. */

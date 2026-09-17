@@ -10,6 +10,10 @@
 #define CFG_GPS_NAME       "@GPS@"
 #define CFG_DISPLAY_NAME   "@DISPLAY@"
 
+/* 1 on the bench build whose GPS driver is gps_sim (replays the committed synthetic capture); the
+ * pipeline reads the sim venue from gps_sim only when this is set (§4.6, 3.4). */
+#define CFG_GPS_SIM        @CFG_GPS_SIM@
+
 #define CFG_PANEL_WS213V4  @CFG_PANEL_WS213V4@
 #define CFG_PANEL_WS29V2   @CFG_PANEL_WS29V2@
 
