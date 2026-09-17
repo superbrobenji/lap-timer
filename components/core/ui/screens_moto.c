@@ -1,8 +1,10 @@
 /* Moto riding screens: LAP pages 0/1/2 and DRAG pages 0/1/2 (spec §20.4-20.5) + the §11.4 benches
- * rule + the shared fault-icon strip (§20.5 + §17.4). Pure C11, no malloc/float/libm — every
- * layout position is a compile-time constant and every value is formatted with plain integer
- * arithmetic, so screens_moto_render() is a pure function of its screen_model_t and the PBM
- * goldens in test/snapshots/{lap,drag}_*.pbm are byte-identical across clang and gcc-16.
+ * rule + the shared fault-icon strip (§20.5 + §17.4); plus the one-shot screens (§20.6) and the
+ * menu list (§20.7) and the top-level screens_render() dispatch (session 4.3). Pure C11, no
+ * malloc/float/libm — every layout position is a compile-time constant and every value is
+ * formatted with plain integer arithmetic, so every render function here is a pure function of its
+ * screen_model_t and the PBM goldens in test/snapshots/ are byte-identical across clang and
+ * gcc-16.
  */
 #include "core/ui/model.h"
 
@@ -351,9 +353,16 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
  */
 static const char DRAG_EMPTY_TIME[] = "--";
 
-/* Draws one DRAG row: `label` FONT_SMALL at DRAG_LABEL_X, `t_ms` (or "--" if !present) FONT_MED
- * right-aligned at DRAG_TIME_RIGHT_X, and — only when has_trap — "@ <trap_kmh>" FONT_SMALL at
- * DRAG_TRAP_X (spec's own example: "@ 305").
+/* Draws one DRAG row: `label` FONT_SMALL at DRAG_LABEL_X, a value right-aligned at
+ * DRAG_TIME_RIGHT_X, and — only when has_trap — "@ <trap_kmh>" FONT_SMALL at DRAG_TRAP_X (spec's
+ * own example: "@ 305").
+ *
+ * The value is `t_ms` formatted as a time (FONT_MED) for a normal gate, "<dist_m> m" (FONT_SMALL)
+ * for a distance gate (#40: the 100-0 braking gate, DRAG_BRAKE in core/drag.h, is a stopping
+ * DISTANCE in metres, not an elapsed time), or "--" (FONT_MED) if the gate was not hit this run.
+ * The distance value uses FONT_SMALL rather than FONT_MED for the same reason the label does:
+ * FONT_MED's glyph set ("0-9 : . - + A-Z", fonts.c FONT_MED_MAP) has no lowercase 'm', so a
+ * literal "<dist_m> m" in FONT_MED would draw the unit as a blank cell.
  *
  * The label is drawn in FONT_SMALL rather than the spec text's literal "four rows of FONT_MED"
  * reading: FONT_MED's glyph set is "0-9 : . - + A-Z" (fonts.c FONT_MED_MAP, 40 glyphs) — no '/'
@@ -368,12 +377,20 @@ static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
 {
     fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, y, r->label);
 
-    char buf[TIME_BUF_LEN];
-    if (r->present) {
+    if (!r->present) {
+        fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, DRAG_EMPTY_TIME);
+    } else if (r->is_distance) {
+        char  dbuf[16];
+        char *p = dbuf;
+        p = put_uint(p, r->dist_m);
+        p = put_char(p, ' ');
+        p = put_char(p, 'm');
+        *p = '\0';
+        fb_text_right(fb, &FONT_SMALL, DRAG_TIME_RIGHT_X, y, dbuf);
+    } else {
+        char buf[TIME_BUF_LEN];
         fmt_time_ms(buf, r->t_ms);
         fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, buf);
-    } else {
-        fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, DRAG_EMPTY_TIME);
     }
 
     if (r->has_trap) {
@@ -444,15 +461,22 @@ static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char 
         int y = DRAG12_ROW_Y0 + row * DRAG12_ROW_H;
 
         char  tbuf[TIME_BUF_LEN];
-        char  sbuf[40]; /* label (<=7 chars) + ' ' + time (<=~8 chars) + NUL, generous */
+        char  sbuf[40]; /* label (<=7 chars) + ' ' + value (<=~8 chars) + NUL, generous */
         char *p = sbuf;
         p = put_str(p, m->drag[i].label);
         p = put_char(p, ' ');
-        if (m->drag[i].present) {
+        if (!m->drag[i].present) {
+            p = put_str(p, DRAG_EMPTY_TIME);
+        } else if (m->drag[i].is_distance) {
+            /* #40: the 100-0 braking gate is a distance, not a time -- see render_drag_row's
+             * comment above for the same distinction (this grid is already all-FONT_SMALL, so no
+             * font-fallback concern for the lowercase 'm' unit here). */
+            p = put_uint(p, m->drag[i].dist_m);
+            p = put_char(p, ' ');
+            p = put_char(p, 'm');
+        } else {
             fmt_time_ms(tbuf, m->drag[i].t_ms);
             p = put_str(p, tbuf);
-        } else {
-            p = put_str(p, DRAG_EMPTY_TIME);
         }
         *p = '\0';
         fb_text(fb, &FONT_SMALL, x, y, sbuf);
@@ -507,6 +531,275 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
         }
         break;
     default:
+        break;
+    }
+}
+
+/* ---- one-shot screens (spec §20.6) ---- */
+
+/* Horizontal centering helper shared by the one-shot screens: the left x that centers `s` set in
+ * font `f` within the framebuffer's width. Pure integer arithmetic; a string wider than the frame
+ * (should not happen for the short one-shot captions used here) clamps to x=0 rather than going
+ * negative -- fb_text clips off-frame draws safely either way, but a negative x would left-crop
+ * the string instead of just running off the right edge. */
+static int center_x(const fb_t *fb, const font_t *f, const char *s)
+{
+    int w = (int)strlen(s) * (int)f->w;
+    int x = ((int)fb->w - w) / 2;
+    return x < 0 ? 0 : x;
+}
+
+static const char ONESHOT_VENUE_LABEL[]     = "VENUE";
+static const char ONESHOT_LAYOUT_LABEL[]    = "LAYOUT";
+static const char ONESHOT_SAFE_TEXT[]       = "SAFE MODE";
+static const char ONESHOT_LOWBATT_TITLE[]   = "LOW BATT";
+static const char ONESHOT_OTA_TITLE[]       = "UPDATING";
+static const char ONESHOT_OTAFAIL_LINE1[]   = "UPDATE FAILED";
+static const char ONESHOT_OTAFAIL_LINE2[]   = "REVERTED";
+static const char ONESHOT_CALIBRATE_TITLE[] = "CALIBRATE";
+static const char ONESHOT_CALIBRATE_SUB[]   = "Hold upright, press MODE";
+static const char ONESHOT_NEWTRACK_TITLE[]  = "NEW TRACK";
+static const char ONESHOT_NEWTRACK_SUB[]    = "Cross S/F, press MODE";
+
+#define BOOT_NAME_Y    6
+#define BOOT_VER_Y     34
+#define BOOT_LINE_Y0   56
+#define BOOT_LINE_H    16
+#define BOOT_MAX_LINES 4
+
+/* BOOT (§20.6, §17.6): name + version banner, then up to 4 pre-formatted self-test lines
+ * ("<check>  OK"/"FAIL", caller's job to pad/format -- boot_line is plain text, not a table). */
+static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
+{
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, m->boot_name), BOOT_NAME_Y, m->boot_name);
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, m->boot_ver), BOOT_VER_Y, m->boot_ver);
+
+    uint8_t n = m->boot_n_lines > BOOT_MAX_LINES ? (uint8_t)BOOT_MAX_LINES : m->boot_n_lines;
+    for (uint8_t i = 0; i < n; i++) {
+        fb_text(fb, &FONT_SMALL, LAP_LABEL_X, BOOT_LINE_Y0 + (int)i * BOOT_LINE_H, m->boot_line[i]);
+    }
+}
+
+#define VENUE_LABEL_Y 40
+#define VENUE_VALUE_Y 62
+
+/* VENUE (§20.6): "venue name big, then layout name" -- the ui task (session 4.3 Task 2) shows
+ * this one-shot twice, once on EV_VENUE_FOUND and again on EV_LAYOUT_LOCKED, each a pure render of
+ * a model with only the relevant field populated. The caller sets which phase this render is by
+ * whether layout_name is populated: non-empty means "layout locked" (show layout_name), empty
+ * means "venue found" (show venue_name). */
+static void render_oneshot_venue(fb_t *fb, const screen_model_t *m)
+{
+    const char *label = ONESHOT_VENUE_LABEL;
+    const char *value = m->venue_name;
+    if (m->layout_name[0] != '\0') {
+        label = ONESHOT_LAYOUT_LABEL;
+        value = m->layout_name;
+    }
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, label), VENUE_LABEL_Y, label);
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, value), VENUE_VALUE_Y, value);
+}
+
+#define SAFE_TEXT_Y 52
+
+static void render_oneshot_safe(fb_t *fb, const screen_model_t *m)
+{
+    (void)m;
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_SAFE_TEXT), SAFE_TEXT_Y,
+             ONESHOT_SAFE_TEXT);
+}
+
+#define LOWBATT_TITLE_Y 32
+#define LOWBATT_PCT_Y   68
+
+static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
+{
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_LOWBATT_TITLE), LOWBATT_TITLE_Y,
+             ONESHOT_LOWBATT_TITLE);
+
+    char     buf[8];
+    char    *p = buf;
+    uint8_t  pct = m->batt_pct > 100u ? 100u : m->batt_pct;
+    p = put_uint(p, pct);
+    p = put_char(p, '%');
+    *p = '\0';
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), LOWBATT_PCT_Y, buf);
+}
+
+#define OTA_TITLE_Y 16
+#define OTA_BAR_X   48
+#define OTA_BAR_Y   56
+#define OTA_BAR_W   200
+#define OTA_BAR_H   20
+#define OTA_PCT_Y   84
+
+static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
+{
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_OTA_TITLE), OTA_TITLE_Y,
+             ONESHOT_OTA_TITLE);
+
+    uint8_t pct = m->ota_pct > 100u ? 100u : m->ota_pct;
+    fb_bar(fb, OTA_BAR_X, OTA_BAR_Y, OTA_BAR_W, OTA_BAR_H, pct);
+
+    char  buf[8];
+    char *p = buf;
+    p = put_uint(p, pct);
+    p = put_char(p, '%');
+    *p = '\0';
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), OTA_PCT_Y, buf);
+}
+
+#define OTAFAIL_LINE1_Y 36
+#define OTAFAIL_LINE2_Y 68
+
+static void render_oneshot_ota_fail(fb_t *fb, const screen_model_t *m)
+{
+    (void)m;
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_OTAFAIL_LINE1), OTAFAIL_LINE1_Y,
+             ONESHOT_OTAFAIL_LINE1);
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_OTAFAIL_LINE2), OTAFAIL_LINE2_Y,
+             ONESHOT_OTAFAIL_LINE2);
+}
+
+#define CALIBRATE_TITLE_Y 28
+#define CALIBRATE_SUB_Y   68
+
+static void render_oneshot_calibrate(fb_t *fb, const screen_model_t *m)
+{
+    (void)m;
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_CALIBRATE_TITLE), CALIBRATE_TITLE_Y,
+             ONESHOT_CALIBRATE_TITLE);
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, ONESHOT_CALIBRATE_SUB), CALIBRATE_SUB_Y,
+             ONESHOT_CALIBRATE_SUB);
+}
+
+#define NEWTRACK_TITLE_Y 28
+#define NEWTRACK_SUB_Y   68
+
+static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
+{
+    (void)m;
+    fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_NEWTRACK_TITLE), NEWTRACK_TITLE_Y,
+             ONESHOT_NEWTRACK_TITLE);
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, ONESHOT_NEWTRACK_SUB), NEWTRACK_SUB_Y,
+             ONESHOT_NEWTRACK_SUB);
+}
+
+static void render_oneshot(fb_t *fb, const screen_model_t *m)
+{
+    fb_clear(fb, 0);
+
+    switch (m->oneshot) {
+    case ONESHOT_BOOT:
+        render_oneshot_boot(fb, m);
+        break;
+    case ONESHOT_VENUE:
+        render_oneshot_venue(fb, m);
+        break;
+    case ONESHOT_SAFE:
+        render_oneshot_safe(fb, m);
+        break;
+    case ONESHOT_LOWBATT:
+        render_oneshot_lowbatt(fb, m);
+        break;
+    case ONESHOT_OTA:
+        render_oneshot_ota(fb, m);
+        break;
+    case ONESHOT_OTA_FAIL:
+        render_oneshot_ota_fail(fb, m);
+        break;
+    case ONESHOT_CALIBRATE:
+        render_oneshot_calibrate(fb, m);
+        break;
+    case ONESHOT_NEWTRACK:
+        render_oneshot_newtrack(fb, m);
+        break;
+    default:
+        break;
+    }
+}
+
+/* ---- menu (spec §20.7) ---- */
+
+#define MENU_TITLE_Y      2
+#define MENU_SEP_Y        26
+#define MENU_LIST_Y0      30
+#define MENU_ROW_H        24
+#define MENU_VISIBLE_ROWS 4
+#define MENU_MARKER_X     4
+#define MENU_ITEM_X       18
+#define MENU_ITEM_MAX     12
+
+/* True when every character of `s` has a glyph in FONT_MED (a space is also accepted: unmapped
+ * chars -- including space -- draw a blank cell in any font, per render.h, so a space "fits" any
+ * font visually even though it has no glyph index). A menu caption with '/' or lowercase (most of
+ * §20.7's own item list, e.g. "Mode: Lap / Drag") fails this and falls back to FONT_SMALL -- same
+ * missing-glyph reasoning as the DRAG row label above (render_drag_row). */
+static bool item_fits_font_med(const char *s)
+{
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p == ' ') {
+            continue;
+        }
+        if (font_glyph_index(&FONT_MED, *p) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Titled, scrolled list of m->menu_items[0..menu_n): the selected row (menu_sel) is marked with a
+ * ">" in a fixed-width gutter (FONT_SMALL, so the marker itself never depends on the item's own
+ * font choice); menu_top is the caller-driven first visible row (the ui task, session 4.3 Task 2,
+ * keeps it scrolled so menu_sel is always visible -- this renderer trusts menu_top as given,
+ * mirroring how every other screen here trusts its model rather than re-deriving it). Each row's
+ * item text uses FONT_MED when it fits (item_fits_font_med), else FONT_SMALL, vertically centered
+ * within the MENU_ROW_H slot either way. */
+static void render_menu(fb_t *fb, const screen_model_t *m)
+{
+    fb_clear(fb, 0);
+
+    fb_text(fb, &FONT_MED, LAP_LABEL_X, MENU_TITLE_Y, "MENU");
+    fb_hline(fb, 0, MENU_SEP_Y, (int)fb->w, 1);
+
+    uint8_t n = m->menu_n > MENU_ITEM_MAX ? (uint8_t)MENU_ITEM_MAX : m->menu_n;
+    for (uint8_t row = 0; row < MENU_VISIBLE_ROWS; row++) {
+        uint8_t idx = (uint8_t)(m->menu_top + row);
+        if (idx >= n) {
+            break;
+        }
+        const char *item = m->menu_items[idx];
+        if (item == NULL) {
+            continue;
+        }
+        int y = MENU_LIST_Y0 + (int)row * MENU_ROW_H;
+
+        if (idx == m->menu_sel) {
+            fb_text(fb, &FONT_SMALL, MENU_MARKER_X, y + (MENU_ROW_H - FONT_SMALL.h) / 2, ">");
+        }
+
+        if (item_fits_font_med(item)) {
+            fb_text(fb, &FONT_MED, MENU_ITEM_X, y, item);
+        } else {
+            fb_text(fb, &FONT_SMALL, MENU_ITEM_X, y + (MENU_ROW_H - FONT_SMALL.h) / 2, item);
+        }
+    }
+}
+
+/* ---- top-level dispatch (spec §20.6-20.7) ---- */
+
+void screens_render(fb_t *fb, const screen_model_t *m)
+{
+    switch (m->screen) {
+    case SCR_MENU:
+        render_menu(fb, m);
+        break;
+    case SCR_ONESHOT:
+        render_oneshot(fb, m);
+        break;
+    case SCR_RIDING:
+    default:
+        screens_moto_render(fb, m);
         break;
     }
 }

@@ -180,11 +180,11 @@ static void test_drag_p1_gates(void)
     /* All seven §6.6 gates hit on one run, in the spec's own listed order (60ft, 330ft, 1/8,
      * 1000ft, 1/4, 100-200, 100-0). Same constant-0.5g run as the page-0 case (60ft/330ft/1/8/
      * 1000ft/1/4 times derived from t = sqrt(2d / (0.5 * 9.81)); 100-200 is the time between the
-     * v=100 and v=200 km/h crossings under the same acceleration; 100-0 is a braking-gate elapsed
-     * time, not distance -- drag_row_t (model.h) carries only t_ms, and drag_gate_res_t's wire
-     * encoding (§12, frame 0x07/0x08) does carry a time_ms for every gate including BRAKE, so this
-     * reads it as the braking manoeuvre's duration; the real per-gate value (time vs. distance)
-     * is a session-4.3 ui-task decision, not this renderer's). */
+     * v=100 and v=200 km/h crossings under the same acceleration. #40: 100-0 (DRAG_BRAKE,
+     * core/drag.h) is a stopping DISTANCE in metres, not an elapsed time -- .is_distance/.dist_m
+     * now carry that (~39 m at 0.5g from 100 km/h, matching the §22.1 bench measurement recorded
+     * in docs/measurements.md), replacing the earlier placeholder .t_ms reading that this comment
+     * used to describe. */
     screen_model_t m = {0};
     m.mode = SCR_MODE_DRAG;
     m.page = 1;
@@ -196,7 +196,7 @@ static void test_drag_p1_gates(void)
     m.drag[4] = (drag_row_t){
         .label = "1/4", .t_ms = 12810, .present = true, .trap_kmh = 223, .has_trap = true};
     m.drag[5] = (drag_row_t){.label = "100-200", .t_ms = 5664, .present = true};
-    m.drag[6] = (drag_row_t){.label = "100-0", .t_ms = 2833, .present = true};
+    m.drag[6] = (drag_row_t){.label = "100-0", .present = true, .dist_m = 39, .is_distance = true};
     m.flags = 0;
     m.batt_pct = 87;
 
@@ -210,7 +210,9 @@ static void test_drag_p2_best(void)
 {
     /* Same seven-gate row set as page 1, but the session-best value per gate (spec: "best per
      * gate this session") -- a little faster than the single run in test_drag_p1_gates, as a
-     * multi-run session's best-of would be. */
+     * multi-run session's best-of would be. #40: 100-0 is again a distance (a shorter session-best
+     * stopping distance, 37 m vs. p1's 39 m -- shorter is better for braking, same direction as
+     * every other gate here being a little quicker). */
     screen_model_t m = {0};
     m.mode = SCR_MODE_DRAG;
     m.page = 2;
@@ -222,12 +224,160 @@ static void test_drag_p2_best(void)
     m.drag[4] = (drag_row_t){
         .label = "1/4", .t_ms = 12750, .present = true, .trap_kmh = 225, .has_trap = true};
     m.drag[5] = (drag_row_t){.label = "100-200", .t_ms = 5600, .present = true};
-    m.drag[6] = (drag_row_t){.label = "100-0", .t_ms = 2800, .present = true};
+    m.drag[6] = (drag_row_t){.label = "100-0", .present = true, .dist_m = 37, .is_distance = true};
     m.flags = 0;
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_best.pbm"), &s_fb));
+}
+
+/* ---- one-shot screens (§20.6) ---- */
+
+static void test_oneshot_boot(void)
+{
+    /* Name/version banner + 4 pre-formatted self-test lines (§17.6); a mix of OK and FAIL to
+     * exercise both on the one committed BOOT golden. */
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_BOOT;
+    strcpy(m.boot_name, "LAPTIMER");
+    strcpy(m.boot_ver, "v0.1.0-98b28b5");
+    strcpy(m.boot_line[0], "IMU      OK");
+    strcpy(m.boot_line[1], "GPS      OK");
+    strcpy(m.boot_line[2], "DISPLAY  FAIL");
+    strcpy(m.boot_line[3], "STORAGE  OK");
+    m.boot_n_lines = 4;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot.pbm"), &s_fb));
+}
+
+static void test_oneshot_venue(void)
+{
+    /* §20.6's own example ("KILLARNEY"). layout_name left empty: this is the "venue found" phase,
+     * not the later "layout locked" phase (render_oneshot_venue, screens_moto.c). */
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_VENUE;
+    strcpy(m.venue_name, "KILLARNEY");
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("venue.pbm"), &s_fb));
+}
+
+static void test_oneshot_safe(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_SAFE;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("safe.pbm"), &s_fb));
+}
+
+static void test_oneshot_lowbatt(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_LOWBATT;
+    m.batt_pct = 14;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lowbatt.pbm"), &s_fb));
+}
+
+static void test_oneshot_ota(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_OTA;
+    m.ota_pct = 63;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota.pbm"), &s_fb));
+}
+
+static void test_oneshot_ota_fail(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_OTA_FAIL;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("otafail.pbm"), &s_fb));
+}
+
+static void test_oneshot_calibrate(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_CALIBRATE;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("calibrate.pbm"), &s_fb));
+}
+
+static void test_oneshot_newtrack(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack.pbm"), &s_fb));
+}
+
+/* ---- menu (§20.7) ---- */
+
+/* All-caps, no '/' captions: every character has a FONT_MED glyph, so this golden exercises the
+ * item_fits_font_med(true) path (screens_moto.c render_menu). */
+static const char *const MENU_ITEMS_CAPS[] = {
+    "MODE",     "LAYOUT",      "NEW TRACK", "CALIBRATE", "UNITS",   "EXPORT",
+    "LIVE",     "DIAGNOSTICS", "SESSIONS",  "DISPLAY",   "SLEEP NOW",
+};
+
+static void test_menu_top(void)
+{
+    /* Top of the list, item 0 ("MODE") selected: exercises the marker on the first visible row
+     * and the un-scrolled (menu_top == 0) case. */
+    screen_model_t m = {0};
+    m.screen = SCR_MENU;
+    m.menu_n = (uint8_t)(sizeof(MENU_ITEMS_CAPS) / sizeof(MENU_ITEMS_CAPS[0]));
+    for (uint8_t i = 0; i < m.menu_n; i++) {
+        m.menu_items[i] = MENU_ITEMS_CAPS[i];
+    }
+    m.menu_sel = 0;
+    m.menu_top = 0;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_top.pbm"), &s_fb));
+}
+
+/* §20.7's own item list verbatim: lowercase and '/' throughout, so every row exercises the
+ * item_fits_font_med(false) / FONT_SMALL fallback path. */
+static const char *const MENU_ITEMS_FULL[] = {
+    "Mode: Lap / Drag", "Layout: Auto", "New track",     "Calibrate", "Units: km/h / mph",
+    "Export (BLE)",     "Live to phone", "Diagnostics",  "Sessions",  "Display",
+    "Sleep now",
+};
+
+static void test_menu_scrolled(void)
+{
+    /* A lower item ("Diagnostics", index 7) selected with the list scrolled so it is visible
+     * (menu_top = 6 -> visible rows are indices 6..9): exercises scrolling + the marker on a
+     * non-first visible row together. */
+    screen_model_t m = {0};
+    m.screen = SCR_MENU;
+    m.menu_n = (uint8_t)(sizeof(MENU_ITEMS_FULL) / sizeof(MENU_ITEMS_FULL[0]));
+    for (uint8_t i = 0; i < m.menu_n; i++) {
+        m.menu_items[i] = MENU_ITEMS_FULL[i];
+    }
+    m.menu_sel = 7;
+    m.menu_top = 6;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_scrolled.pbm"), &s_fb));
 }
 
 int main(void)
@@ -241,5 +391,15 @@ int main(void)
     RUN_TEST(test_drag_p0_benches);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
+    RUN_TEST(test_oneshot_boot);
+    RUN_TEST(test_oneshot_venue);
+    RUN_TEST(test_oneshot_safe);
+    RUN_TEST(test_oneshot_lowbatt);
+    RUN_TEST(test_oneshot_ota);
+    RUN_TEST(test_oneshot_ota_fail);
+    RUN_TEST(test_oneshot_calibrate);
+    RUN_TEST(test_oneshot_newtrack);
+    RUN_TEST(test_menu_top);
+    RUN_TEST(test_menu_scrolled);
     return UNITY_END();
 }
