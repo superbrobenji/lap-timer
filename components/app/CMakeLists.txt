@@ -11,7 +11,15 @@ endif()
 idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS include
-    REQUIRES core lt_hal nvs_flash esp_timer esp_system console)
+    REQUIRES core lt_hal nvs_flash esp_timer esp_system console
+             gps_$ENV{LT_GPS} imu_$ENV{LT_IMU})
+# The pipeline (globbed into `app`) calls the GPS/IMU HAL (hal/gps.h, hal/imu.h), so the selected
+# gps_${GPS}/imu_${IMU} driver is a real dependency of `app`: declaring it here places the driver
+# archive after `app` in the link so the pipeline's calls resolve regardless of how deep the
+# dependency graph makes `app` (the 3.5 export_serial console adds a main -> export_serial -> app
+# edge). LT_GPS/LT_IMU are exported into the environment by the top-level CMakeLists (a flag-derived
+# component name cannot be read from the cache during IDF's early-expansion pass, but the
+# environment is inherited); main also requires them so the driver is pulled into the image.
 
 # build_config.h (CFG_HAS_PPS etc.) from the build tree (§21.1).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

@@ -153,6 +153,13 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 #        components/app (globbed by the app component), so no separate dir is needed for it.
 set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal components/drivers/gps_${GPS} components/drivers/imu_${IMU})
 
+# 3.5  components/drivers/export_serial (§18.4 serial console), gated by the EXPORT_SERIAL flag
+# (§4.6). Appended like the gps_${GPS}/imu_${IMU} dirs above; the flag is exported into the
+# environment too so main's REQUIRES can pull the component in during IDF's early-expansion pass.
+if(EXPORT_SERIAL)
+    list(APPEND EXTRA_COMPONENT_DIRS components/drivers/export_serial)
+endif()
+
 # The selected driver names must reach main's REQUIRES so the driver is pulled into the link (the
 # pipeline in components/app calls the GPS/IMU HAL). A build-flag-derived name cannot be read from
 # the cache during IDF's early-expansion pass; exporting it into the environment here -- before
@@ -160,6 +167,7 @@ set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app compon
 # cmake -P inherits the environment). Works for both build.sh and a bare idf.py -D invocation.
 set(ENV{LT_GPS} "${GPS}")
 set(ENV{LT_IMU} "${IMU}")
+set(ENV{LT_EXPORT_SERIAL} "${EXPORT_SERIAL}")
 
 # keep each named environment's generated sdkconfig inside its own build/<env>/
 # tree, so switching -D flags between envs never cross-contaminates (each build dir

@@ -135,6 +135,31 @@ int errlog_add(uint16_t code, uint32_t arg)
     return 0;
 }
 
+int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
+{
+    if (!out || cap <= 0) return 0;
+    /* head is the next write slot, so slot `head` is the oldest surviving entry once the ring has
+     * wrapped; before wrap those slots are still zero. Walking head..head+LEN-1 (mod LEN) yields
+     * oldest->newest; a zero `code` marks an untouched slot (real codes are >= 0x0101, §17.7). */
+    int n = 0;
+    for (int i = 0; i < ERR_RING_LEN && n < cap; i++) {
+        const err_entry_t *e = &s_ring.entry[(s_ring.head + i) % ERR_RING_LEN];
+        if (e->code == 0) continue;
+        out[n].code     = e->code;
+        out[n].arg      = e->arg;
+        out[n].uptime_s = e->uptime_s;
+        out[n].boot     = e->boot;
+        n++;
+    }
+    return n;
+}
+
+void lt_errlog_clear(void)
+{
+    memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
+    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) nvs_commit(s_h_err);
+}
+
 void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
 {
     s_crash[2] = s_crash[1];
