@@ -28,7 +28,12 @@ extern ring_t g_fused_ring;
 /* §4.4 evt_q -- the LOGGER's copy of the event broadcast (depth 16, event_t). The pipeline
  * xQueueSends each event to the ui/logger/power queues separately; this is the logger's. */
 #define EVT_Q_DEPTH 16
+#define UI_EVT_Q_DEPTH 16
 extern QueueHandle_t g_evt_q;
+/* §4.4 ui_evt_q -- pipeline fans events out to a SECOND queue for the ui task, so the ui and the
+ * logger each get the full event stream (a single-consumer g_evt_q would let them steal events).
+ * Drop-newest on full (ui rendering is best-effort). */
+extern QueueHandle_t g_ui_evt_q;
 
 /* §4.4 log_req_q -- power/conn -> logger control channel (depth 4, log_request_t 16 B). */
 #define LOG_REQ_Q_DEPTH 4

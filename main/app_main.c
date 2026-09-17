@@ -29,6 +29,7 @@
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
 #include "app/pipeline.h"
+#include "app/ui.h"
 
 #if CFG_HAS_EXPORT_SERIAL
 #include "export_serial.h"
@@ -181,6 +182,12 @@ void app_main(void)
      * build opens a session, arms the sim venue, and streams the committed capture into laps. On the
      * real GPS variant it idles until the sensor driver (plan 08) delivers fixes. */
     pipeline_start();
+
+    /* §4.7 step 13 (ui): start the ui task (core 0, prio 6). It renders the BOOT one-shot, then
+     * drains the pipeline event queue + the button queue, updates a screen_model_t, and renders via
+     * core/ui screens_render(). Plan 04 ships no display driver, so it logs the dirty box instead of
+     * refreshing a panel; the menu (§20.7) + buttons (§20.8) are live. */
+    ui_start();
 
     /* §4.7 step 12 (console): the §18.4 serial export console -- STATUS/CONFIG/ERRLOG/DIAG/
      * DELETE/CLOSE wired through app/cmd, plus the migrated `dbg` diagnostics verbs. Spawns its

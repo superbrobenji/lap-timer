@@ -654,6 +654,7 @@ static int dbg_mem(void)
         { "pipeline",   HB_PIPELINE },
         { "logger",     HB_LOGGER },
         { "supervisor", HB_SUPERVISOR },
+        { "ui",         HB_UI },
     };
     printf("heap free    : %u B\n", (unsigned)esp_get_free_heap_size());
     printf("heap min free: %u B\n", (unsigned)esp_get_minimum_free_heap_size());
