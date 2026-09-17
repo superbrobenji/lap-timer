@@ -5,6 +5,13 @@
 #define APP_LT_ERR_H
 
 enum {
+    /* storage (§17.7); the full code table lands with the 3.5 console. */
+    E_STO_WRITE       = 0x0401,
+    E_STO_MOUNT       = 0x0402,
+    E_STO_FORMAT      = 0x0403,
+    E_STO_FULL        = 0x0404,
+    E_STO_EVICT       = 0x0405,
+
     E_SYS_WDT_RESET   = 0x0501,
     E_SYS_PANIC       = 0x0502,
     E_SYS_BROWNOUT    = 0x0503,

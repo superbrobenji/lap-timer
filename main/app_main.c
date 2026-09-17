@@ -20,9 +20,12 @@
 #include "nvs_flash.h"
 
 #include "hal/board.h"
+#include "hal/storage.h"
 
 #include "app/dbg_console.h"
+#include "app/logger.h"
 #include "app/lt_err.h"
+#include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
@@ -125,6 +128,25 @@ void app_main(void)
     board_init();
     board_gps_power(true);
 
+    /* §4.7 step 7 (internal storage): mount LittleFS; the mount ladder (mount -> retry ->
+     * format -> dead) lives in the driver. The driver stays app-agnostic, so the boot sequence
+     * owns the sys_flags / error-ring / counter effects of the ladder result (§13.1). */
+    int mrc = sto_mount();
+    if (mrc < 0) {
+        sys_flags_set(SYS_STORAGE_DEAD);
+        errlog_add(E_STO_MOUNT, 0);
+        ESP_LOGE(TAG, "storage DEAD (summaries fall back to RTC/NVS best-effort, 3.5)");
+    } else {
+        if (mrc == 1) {                        /* mounted only after a reformat */
+            lt_counters_inc(LT_CTR_STO_FORMAT, true);
+            errlog_add(E_STO_FORMAT, 0);
+        }
+        if (sto_probe() != 0) ESP_LOGW(TAG, "storage probe failed");   /* §17.6 self-test */
+        sto_info_t si;
+        if (sto_info(&si) == 0)
+            ESP_LOGI(TAG, "storage: %u/%u KB free", (unsigned)si.free_kb, (unsigned)si.total_kb);
+    }
+
     /* §4.7 step 10: the task WDT is already enabled via sdkconfig; hb[]/sys_flags exist
      * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */
     sup_start();
@@ -132,6 +154,15 @@ void app_main(void)
     /* §4.7 step 11: static queues the supervisor + button ISR need (btn_q). The pipeline
      * rings arrive in 3.4. */
     lt_queues_init();
+
+    /* §4.7 step 11 (cont): the §4.4 pipeline<->logger rings + the logger's event/control
+     * queues. The pipeline producer lands in 3.4; 3.3 creates them and the logger consumes. */
+    lt_ipc_init();
+
+    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). It idles until a
+     * LOGGER_OPEN_SESSION request arrives (from the power task in 3.4, or `dbg logtest` now);
+     * with storage dead it stays idle (open fails gracefully). */
+    logger_start();
 
     /* Minimal diagnostics console -- the 3.2 exit criterion (`dbg status`). Replaced by the
      * full §18.4 console in 3.5. */

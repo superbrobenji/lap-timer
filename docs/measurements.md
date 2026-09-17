@@ -2,6 +2,16 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_neo6m storage + logger power-cut test on ESP32 (plan 03, session 3.3)
+
+- Date: 2026-09-17. Branch s3.3-storage-logger (d73396e). ESP-IDF v5.3.2. Board ESP32 DevKit V1. App image 373,872 bytes (71 % free). LittleFS via joltwallet/littlefs 1.16.5.
+- **Mount ladder (§13.1):** a genuinely corrupted filesystem (`Corrupted dir pair at {0x0,0x1}`, from an aborted write) was recovered by the ladder — mount fail → retry fail → `esp_littlefs_format` → mount OK (1320/1344 KB free).
+- **Power-cut exit test:** `dbg logtest 6000` (opens session, writes+syncs the SESSION_HDR, streams FIX into the ring, 2 LAP → `.sum` rebuild), then a hard reset mid-write, reboot:
+  - LittleFS remounted cleanly (no corruption, no format).
+  - `dbg sum S00004_001`: HDR ok, VENUE ok, **LAP count = 2**, END absent (session still open — correct), frames ok=4 bad=0 → the atomic `.sum` rewrite is intact.
+  - `dbg logck S00004_001`: `.log` ok=1 bad=0 (the fsynced HDR survived; the unsynced batch tail was cleanly lost) → decodable/resyncable.
+- Exit criterion met: a power-cut during logging leaves `.sum` intact and `.log` decodable.
+
 ## moto_neo6m firmware on ESP32 (plan 03, session 3.2 — board, NVS, boot, supervisor)
 
 - Date: 2026-09-17. Branch s3.2-board-boot (5254894). ESP-IDF v5.3.2. Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. App image 327,632 bytes (74 % of the 1.25 MB app partition free).
