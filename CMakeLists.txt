@@ -137,12 +137,13 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 #        components/app (NVS/RTC/supervisor/dbg -- brought in here, one session earlier than
 #        §4.2's "3.4", because the boot sequence and supervisor need it), and
 #        components/drivers/board_devkit_v1.
-#   3.3  components/drivers/storage_${STORAGE}
+#   3.3  components/drivers/storage_internal (LittleFS via joltwallet/littlefs;
+#        the STORAGE=sd variant's storage_sd lands with the SD hardware).
 #   3.4  components/drivers/gps_ubx_common   components/drivers/gps_${GPS}
 #        components/drivers/imu_${IMU}   components/drivers/display_${DISPLAY}
 #        + conn_ble / conn_wifi (per CONN), conn_ble_rc (if CONN_BLE_RC),
 #          export_serial (if EXPORT_SERIAL)  -- gated exactly as in §21.1.
-set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1)
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal)
 
 # keep each named environment's generated sdkconfig inside its own build/<env>/
 # tree, so switching -D flags between envs never cross-contaminates (each build dir

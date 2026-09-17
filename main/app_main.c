@@ -20,6 +20,7 @@
 #include "nvs_flash.h"
 
 #include "hal/board.h"
+#include "hal/storage.h"
 
 #include "app/dbg_console.h"
 #include "app/lt_err.h"
@@ -124,6 +125,25 @@ void app_main(void)
     /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`). */
     board_init();
     board_gps_power(true);
+
+    /* §4.7 step 7 (internal storage): mount LittleFS; the mount ladder (mount -> retry ->
+     * format -> dead) lives in the driver. The driver stays app-agnostic, so the boot sequence
+     * owns the sys_flags / error-ring / counter effects of the ladder result (§13.1). */
+    int mrc = sto_mount();
+    if (mrc < 0) {
+        sys_flags_set(SYS_STORAGE_DEAD);
+        errlog_add(E_STO_MOUNT, 0);
+        ESP_LOGE(TAG, "storage DEAD (summaries fall back to RTC/NVS best-effort, 3.5)");
+    } else {
+        if (mrc == 1) {                        /* mounted only after a reformat */
+            lt_counters_inc(LT_CTR_STO_FORMAT, true);
+            errlog_add(E_STO_FORMAT, 0);
+        }
+        if (sto_probe() != 0) ESP_LOGW(TAG, "storage probe failed");   /* §17.6 self-test */
+        sto_info_t si;
+        if (sto_info(&si) == 0)
+            ESP_LOGI(TAG, "storage: %u/%u KB free", (unsigned)si.free_kb, (unsigned)si.total_kb);
+    }
 
     /* §4.7 step 10: the task WDT is already enabled via sdkconfig; hb[]/sys_flags exist
      * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */

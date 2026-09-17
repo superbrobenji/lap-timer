@@ -1,0 +1,7 @@
+## storage_internal pulls the ecosystem-standard LittleFS component (joltwallet/littlefs)
+## via the IDF component manager, pinned to an exact version for reproducible builds
+## (spec §13.1; global constraint: prefer IDF/standard components). The resolved tree is
+## captured in the repo-root dependencies.lock (committed); managed_components/ is gitignored.
+dependencies:
+  joltwallet/littlefs:
+    version: "==1.16.5"
