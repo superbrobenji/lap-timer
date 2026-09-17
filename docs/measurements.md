@@ -2,6 +2,15 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_sim serial console + RTC continuity + crash-loop safe mode on ESP32 (plan 03, session 3.5)
+
+- Date: 2026-09-17. Branch s3.5-console-safemode (b2f0aba). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. Built on the pinned ESP-IDF v5.3.2 via `source tools/idf-env.sh` (Homebrew Python, sidesteps the #33 venv drift; `dependencies.lock` stays 5.3.2). App image 471,456 bytes (62 % of the 1.25 MB app partition free). NVS erased before the run (`esptool write_flash --erase-all`) for a clean baseline.
+- **Crash-loop safe mode (§17.5) — exit criterion met.** Three forced panics (`dbg crash` → `abort()` → `reset reason: panic (4)`), each boot running <60 s. The boot after the third logged `crash loop: 3 abnormal resets < 60 s -> SAFE MODE`, came up `safe_mode=1`, and `dbg status` showed `sys_flags 0x00000200 [SAFE_MODE]`, `crashes=3`.
+- **RTC continuity — interrupted-lap resume (§15.3) — exit criterion met (mechanism).** `dbg crash` mid-lap (lap 1, after the sector-1 crossing); on reboot: `dbg rtc` → `VALID` (session S00001, venue_id 1000/layout 1, lap_no 1, sector_idx 1, lap_start/saved gps_us populated) and the pipeline logged `rtc resume: lap 1 venue 1000 continued (interrupted)`. The RTC snapshot survived the panic reset and `lap_import_rtc` restored the lap in the RUNNING state carrying `LAP_F_INTERRUPTED`.
+- **Bug found and fixed on hardware:** the first attempt reported `rtc: ABSENT` after the panic and cold-started. Cause: the RTC state used `RTC_DATA_ATTR`, which ESP32 re-initialises on a software/panic/WDT reset (it only persists across deep sleep). Changed to `RTC_NOINIT_ATTR` (validated by magic/version/CRC) — commit b2f0aba — after which resume fired on every reboot.
+- **Sim limitation (not a firmware defect):** the resumed lap does not *complete* with a sensible time on moto_sim because gps_sim replays the capture from t0 each boot, so post-resume fixes predate the resumed lap's start (observed a wrapped `sector 1 split 4294948580 ms`, `dbg laps: none completed yet`). On real hardware GPS time is monotonic, so the resumed lap completes forward-in-time flagged interrupted. Real-GPS robustness guard tracked in #35 (plan 08 / whole-plan review).
+- Also this session: the §18.4 serial export console (`status`/`config`/`errlog`/`diag`/`delete`/`list`/`open`/`read` + `dbg`) replaced the minimal debug REPL; `tools/idf-env.sh` now refuses `zsh idf-env.sh` (closes #6).
+
 ## moto_sim on-device lap replay on ESP32 (plan 03, session 3.4 — sim drivers + pipeline, #27)
 
 - Date: 2026-09-17. Branch s3.4-sim-pipeline (036954f). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. App image 452,512 bytes (65 % of the 1.25 MB app partition free).
