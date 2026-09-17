@@ -3469,3 +3469,927 @@ Claude-Session: https://claude.ai/code/session_014KyGHgU5MeENuESPYuKjED
 ```
 
 ---
+
+## Session 3.4 — sim drivers and the pipeline task (closes #27)
+
+Roadmap exit: laps from simulated data on the console within ±30 ms of `replay`; closes #27; tag `p03-d4`. Serial (2 tasks). Rulings: (1) `gps_sim` replays an embedded synthetic capture (`sim_capture.h`, generated offline by `synth` via `tools/sim/gen_sim_capture.sh` + a new `replay` gensim tool) DIRECTLY from `gps_poll` at real-time rate — NOT through UBX/UART (that is `gps_neo6m`'s path, plan 08); (2) `gps_neo6m`/`imu_mpu6050` are plan-03 build stubs so `moto_neo6m` links until the sensors arrive (plan 08); (3) the root CMake exports `LT_GPS`/`LT_IMU` into the environment so `main`'s REQUIRES can name the driver through IDF's early-expansion pass (a build-flag name isn't readable from the cache there); (4) per-lap stats (§9.4) are accumulated in `on_raw` and written into the completing lap, closing #27; the pipeline hands the full `lap_result_t`/`drag_result_t` and venue to the logger, resolving the 3.3 deferral. `test/data/sim_capture.expected.json` holds `replay`'s reference: out-lap + 3 valid laps 28071/28044/28028 ms. `components/core` stays pure C11.
+
+### Task 1: sim GPS/IMU drivers, HAL contracts, capture generator + CMake wiring
+
+**PARALLEL/SERIAL:** Task 1 and Task 2 are independent (drivers/tools/HAL/CMake vs logger/IPC) and may run in PARALLEL; Task 3 (pipeline) is SERIAL after both. Implement 1 before 3 (gps_sim embeds the capture; the pipeline calls the HAL).
+
+**Files:**
+- Create: `components/lt_hal/include/hal/gps.h`, `components/lt_hal/include/hal/imu.h`
+- Create: `components/drivers/gps_sim/{gps_sim.c, CMakeLists.txt, sim_capture.h}` (`sim_capture.h` is GENERATED + committed)
+- Create: `components/drivers/imu_sim/{imu_sim.c, CMakeLists.txt}`
+- Create: `components/drivers/gps_neo6m/{gps_neo6m.c, CMakeLists.txt}` (plan-03 stub), `components/drivers/imu_mpu6050/{imu_mpu6050.c, CMakeLists.txt}` (plan-03 stub)
+- Create: `tools/replay/gensim_main.c`, `tools/sim/gen_sim_capture.sh`; commit `test/data/sim_capture.expected.json`
+- Edit: top `CMakeLists.txt` (driver dirs + `LT_GPS`/`LT_IMU` env export + `CFG_GPS_SIM`), `main/CMakeLists.txt` (REQUIRES the selected driver), `main/build_config.h.in` (`CFG_GPS_SIM`), `tools/replay/CMakeLists.txt` (build `gensim`)
+
+**Interfaces:**
+- Produces: the `hal/gps.h`/`hal/imu.h` contracts (§5.1) the pipeline (T3) calls; `gps_sim`/`imu_sim` HAL implementations; `gps_sim_venue_json()` (the sim venue, consumed by T3); the committed capture + expected lap times.
+- Consumes: `core/types.h` (shared `gps_fix_t`/`imu_raw_t`), `esp_timer`, the host `replay`/`synth`/`replaylib` (generator only).
+
+**Rulings (spec is the authority; ESP-IDF v5.3.2 reality noted):**
+1. **`gps_sim` replays fixes DIRECTLY, not through UBX.** It returns a committed `gps_fix_t` capture from `gps_poll` when the sim clock reaches each fix's schedule (real-time rate off `esp_timer`); it does NOT parse UBX / feed `gps_feed_bytes` / touch a UART (that path is the real `gps_neo6m`, plan 08, and the §22.3 `gps_sim.py` byte injector). Every other `hal/gps.h` function is a no-op/stub sufficient for the pipeline. There is no `/sim/gps.ubx` file path in 3.4 (no upload path until 3.5); the embedded capture is the only source.
+2. **The capture is generated OFFLINE and committed as a C header.** `tools/sim/gen_sim_capture.sh` runs `synth --pos-sigma 0` (no position noise, so the on-device core lap engine reproduces `replay` exactly) then the new host tool `gensim`, which (a) decodes the synth `.log` the way `replay` does (`logio` `on_fix` = the reconstructed absolute fix) into a compact `sim_fix_t[]`, and (b) replays the SAME `.log`+venue through the core lap engine (`replay_run`) to emit `test/data/sim_capture.expected.json`. Device and `replay` therefore feed the identical fixes through the identical engine → laps match to the millisecond (±30 ms is slack for float/Xtensa rounding). Exact synth command: 3 valid laps, 5 Hz, seed 7, 2 sectors, a 6-vertex 700 m circuit (601 fixes / ~120 s / ~64 KB header). Committed expected: lap 0=0 ms, lap 1=28071 ms, lap 2=28044 ms, lap 3=28028 ms (lap 0 is the out-lap, flags OUT_LAP, time 0).
+3. **The venue travels as a JSON string, not a C struct.** `gensim` embeds `SIM_VENUE_JSON` (the synth `.venue.json`) in the header; the pipeline parses it with `trk_from_json` — the SAME code path `replay --venue-json` uses — so the device venue == the replay venue by construction (no fragile hand-generated `trk_venue_t` initialiser; the §4.8-budgeted jsmn token buffer is only linked on the sim build). `gps_sim_venue_json()` exposes it to the pipeline.
+4. **moto_neo6m builds via plan-03 stub drivers.** moto_neo6m uses GPS=neo6m/IMU=mpu6050, whose real drivers land with the sensors (plan 08). Since the pipeline (in the globbed `app` component) now calls the GPS+IMU HAL, both symbols must resolve on moto_neo6m too. Ruling: provide minimal `gps_neo6m`/`imu_mpu6050` stubs (advertise the profile, pass self-test, return no fix / no FIFO samples) so the pipeline starts and idles on that variant and the REQUIRED `build (moto_neo6m)` check stays green. The exit criterion runs on moto_sim. (Chosen over CMake-gating the pipeline: keeps app_main + the pipeline uniform across variants and exercises the task on the real target.)
+5. **The selected driver reaches `main`'s REQUIRES via an environment variable.** A build-flag-derived component name (`gps_${GPS}`) cannot be read from the CMake cache during IDF's early-expansion REQUIRES pass (verified: both `${GPS}` and `$CACHE{GPS}` expand empty → `Failed to resolve component 'gps_'`). The top-level CMake exports `LT_GPS`/`LT_IMU` into the environment *before* `project.cmake` runs the early expansion; the child `cmake -P` inherits it, so `main` REQUIRES `gps_$ENV{LT_GPS} imu_$ENV{LT_IMU}`. Works for `build.sh` and a bare `idf.py -D` alike. The driver dirs are added to `EXTRA_COMPONENT_DIRS` as `components/drivers/gps_${GPS}`/`imu_${IMU}` (cache var is fine in the root's own scope). The pipeline lives in `components/app` (globbed), so no separate component dir is needed for it.
+6. **`imu_sim` is deliberately simple.** Lap timing is a function of GPS only (the lap engine ignores its fused argument), so the sim IMU only keeps fusion + the stats accumulator running: upright/still (+1 g on Z, zero gyro), 100 Hz, real device mono stamps. A truth-derived lean/g stream (`synth_fused_at`) is possible but unnecessary for the exit criterion.
+
+- [ ] **Step 1: `components/lt_hal/include/hal/gps.h`** (§5.1 verbatim + guard/includes + `GPS_PM_*`).
+
+```c
+/* hal/gps.h -- GPS HAL contract (spec §5.1, called from the pipeline task).
+ *
+ * The declarations below are the §5.1 gps.h slice verbatim; the include guard, the
+ * <stdint.h>/<stddef.h> includes (size_t, fixed-width types), the GPS_PM_* power-mode values
+ * and the GPS_FLAG_* fix-flag bits (mirrored from core/types.h so a driver that only sees this
+ * header can still set them) are added here so this is a self-contained, compilable header.
+ * gps_fix_t / gps_profile_t are the §5.1 structs; gps_fix_t is re-used from core/types.h so the
+ * engines and the driver share one definition. All functions return int (0 = OK, negative =
+ * -errno-style) unless noted; each is called from one task only (the pipeline) and is not
+ * reentrant. The concrete implementation is components/drivers/gps_${GPS} (gps_sim replays a
+ * committed synthetic capture; gps_neo6m/gps_m10 parse UBX from the real receiver).
+ */
+#ifndef HAL_GPS_H
+#define HAL_GPS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "core/types.h"   /* gps_fix_t + GPS_FLAG_* (one shared definition) */
+
+/* gps_set_power_mode values (§5.1, §7.5 fault ladder). */
+enum {
+    GPS_PM_FULL       = 0,   /* continuous navigation */
+    GPS_PM_CYCLIC_1HZ = 1,   /* 1 Hz cyclic tracking (power save) */
+    GPS_PM_BACKUP     = 2,   /* receiver in backup; gps_wake() resumes */
+};
+
+/* GPS receiver profile advertised by gps_init (§5.1). */
+typedef struct {
+    uint8_t  max_rate_hz;      /* 5 for NEO-6M, 10 for M10 */
+    uint32_t baud;             /* 38400 / 115200 */
+    uint8_t  has_pps;
+    const char *name;
+} gps_profile_t;
+
+int  gps_init(const gps_profile_t **out_profile);   /* UART setup, no config push */
+int  gps_configure(uint8_t rate_hz);                 /* push full config (§7.3 / §7.4); blocks <= 2 s */
+int  gps_poll(gps_fix_t *out);                       /* non-blocking; 1 if a new fix was assembled, 0 if none, <0 error */
+int  gps_feed_bytes(const uint8_t *buf, size_t n);   /* pipeline pushes UART bytes; parser runs here */
+int  gps_set_power_mode(uint8_t mode);               /* GPS_PM_* */
+int  gps_wake(void);                                 /* from BACKUP */
+int  gps_get_version(char *buf, size_t n);           /* UBX-MON-VER swVersion; used by self-test */
+int  gps_reinit_uart(uint32_t baud);                 /* ladder step */
+uint32_t gps_stats_frames_ok(void);
+uint32_t gps_stats_frames_bad(void);
+int64_t  gps_last_frame_mono_us(void);
+
+#endif /* HAL_GPS_H */
+```
+
+- [ ] **Step 2: `components/lt_hal/include/hal/imu.h`** (§5.1 verbatim + guard/includes + `IMU_*`).
+
+```c
+/* hal/imu.h -- IMU HAL contract (spec §5.1, called from the pipeline task).
+ *
+ * The declarations below are the §5.1 imu.h slice verbatim; the include guard, the
+ * <stdint.h>/<stddef.h> includes (size_t, fixed-width types) and the IMU_* mode values are
+ * added here so this is a self-contained, compilable header. imu_raw_t is re-used from
+ * core/types.h so the fusion engine and the driver share one definition. All functions return
+ * int (0 = OK, negative = -errno-style) unless noted; each is called from one task only (the
+ * pipeline) and is not reentrant. The concrete implementation is components/drivers/imu_${IMU}
+ * (imu_sim synthesises a deterministic 100 Hz stream; imu_mpu6050 drives the real MPU-6050).
+ */
+#ifndef HAL_IMU_H
+#define HAL_IMU_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "core/types.h"   /* imu_raw_t (one shared definition) */
+
+/* imu_set_mode values (§5.1, §8). */
+enum {
+    IMU_FULL     = 0,   /* 100 Hz FIFO stream */
+    IMU_LOWPOWER = 1,   /* 40 Hz accel, motion interrupt */
+};
+
+int  imu_init(void);                                  /* bus + WHO_AM_I + register config (§8.3) */
+int  imu_self_test(uint8_t *pass_mask);               /* §8.5; bit per axis */
+int  imu_read_fifo(imu_raw_t *out, size_t max, size_t *n_read, int64_t read_mono_us);
+int  imu_read_temp_c100(int16_t *out);                /* deg C * 100 */
+int  imu_set_mode(uint8_t mode);                      /* IMU_FULL / IMU_LOWPOWER */
+int  imu_set_motion_threshold(uint8_t thr_lsb, uint8_t dur_ms);
+int  imu_recover(void);                               /* bus recovery + reinit; ladder step */
+int  imu_int_pending(void);                           /* reads INT_STATUS; clears */
+
+#endif /* HAL_IMU_H */
+```
+
+- [ ] **Step 3: `components/drivers/gps_sim/gps_sim.c`** (direct capture replay at real-time rate).
+
+```c
+/* gps_sim.c -- hal/gps.h over a committed synthetic capture (spec §4.6 GPS=sim, §22.3).
+ *
+ * A bench driver so the whole firmware runs before the real GPS arrives. It does NOT parse UBX or
+ * touch a UART (that is gps_neo6m/gps_m10, plans 07-08, and the §22.3 gps_sim.py byte injector):
+ * it replays the committed SIM_FIXES[] (sim_capture.h) DIRECTLY, one gps_fix_t at a time, pacing
+ * them at the capture's real-time rate off esp_timer. The capture was generated by synth with
+ * --pos-sigma 0, so the fixes carry no position noise and the on-device lap engine reproduces the
+ * committed replay lap times (test/data/sim_capture.expected.json) within the +/-30 ms exit gate.
+ *
+ * The driver assigns each delivered fix a fresh mono_us (real device time at delivery) and leaves
+ * valid = 0 for the pipeline to fill via the §6.5 rule -- exactly as a real driver hands over a
+ * freshly assembled fix. gps_sim_venue_json() hands the pipeline the capture's synthetic venue
+ * (same JSON string replay used for --venue-json), so device and replay share one venue.
+ */
+#include "hal/gps.h"
+#include "sim_capture.h"
+
+#include "esp_timer.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static const gps_profile_t s_profile = {
+    .max_rate_hz = SIM_FIX_RATE_HZ,
+    .baud        = 38400,
+    .has_pps     = 0,
+    .name        = "sim",
+};
+
+static uint32_t s_idx;            /* next capture fix to deliver */
+static bool     s_started;        /* the playback clock has been anchored */
+static int64_t  s_t0_mono_us;     /* device mono time mapped to SIM_FIXES[0].gps_us */
+static int64_t  s_last_frame_us;  /* mono time of the last delivered fix */
+static uint32_t s_frames_ok;
+
+int gps_init(const gps_profile_t **out_profile)
+{
+    s_idx = 0;
+    s_started = false;
+    s_last_frame_us = 0;
+    s_frames_ok = 0;
+    if (out_profile) *out_profile = &s_profile;
+    return 0;
+}
+
+int gps_configure(uint8_t rate_hz)
+{
+    (void)rate_hz;                /* the capture rate is fixed; nothing to push to a receiver */
+    s_idx = 0;
+    s_started = false;
+    return 0;
+}
+
+int gps_poll(gps_fix_t *out)
+{
+    if (!out) return -1;
+    if (s_idx >= SIM_FIX_COUNT) return 0;                 /* capture exhausted: idle */
+
+    int64_t now = esp_timer_get_time();
+    if (!s_started) { s_started = true; s_t0_mono_us = now; }
+
+    /* Fix s_idx is due once real elapsed time has reached its offset from the first fix. */
+    int64_t due_us = SIM_FIXES[s_idx].gps_us - SIM_FIXES[0].gps_us;
+    if (now - s_t0_mono_us < due_us) return 0;
+
+    const sim_fix_t *s = &SIM_FIXES[s_idx];
+    memset(out, 0, sizeof *out);
+    out->gps_us     = s->gps_us;
+    out->mono_us    = now;                                /* real arrival time on this board */
+    out->lat_e7     = s->lat_e7;
+    out->lon_e7     = s->lon_e7;
+    out->alt_mm     = s->alt_mm;
+    out->gspeed_mms = s->gspeed_mms;
+    out->head_e5    = s->head_e5;
+    out->hacc_mm    = s->hacc_mm;
+    out->sacc_mms   = s->sacc_mms;
+    out->pdop_e2    = s->pdop_e2;
+    out->fix_type   = s->fix_type;
+    out->sats       = s->sats;
+    out->flags      = s->flags;
+    out->valid      = 0;                                  /* pipeline applies the §6.5 rule */
+
+    s_last_frame_us = now;
+    s_idx++;
+    s_frames_ok++;
+    return 1;
+}
+
+/* The sim path never ingests UART bytes; these are no-ops sufficient for the pipeline. */
+int gps_feed_bytes(const uint8_t *buf, size_t n) { (void)buf; (void)n; return 0; }
+int gps_set_power_mode(uint8_t mode)             { (void)mode; return 0; }
+int gps_wake(void)                               { return 0; }
+int gps_reinit_uart(uint32_t baud)               { (void)baud; return 0; }
+
+int gps_get_version(char *buf, size_t n)
+{
+    if (!buf || n == 0) return -1;
+    (void)snprintf(buf, n, "sim");
+    return 0;
+}
+
+uint32_t gps_stats_frames_ok(void)  { return s_frames_ok; }
+uint32_t gps_stats_frames_bad(void) { return 0; }
+int64_t  gps_last_frame_mono_us(void) { return s_last_frame_us; }
+
+/* The synthetic venue the capture was built around, as a JSON string. The pipeline parses it with
+ * trk_from_json -- the same code path replay used for --venue-json -- so both share one venue. */
+const char *gps_sim_venue_json(void) { return SIM_VENUE_JSON; }
+```
+
+- [ ] **Step 4: `components/drivers/gps_sim/CMakeLists.txt`.**
+
+```cmake
+# gps_sim -- hal/gps.h implemented by replaying a committed synthetic capture (spec §4.6 GPS=sim).
+# Bench driver, never in a release build. sim_capture.h is generated by tools/sim/gen_sim_capture.sh.
+idf_component_register(
+    SRCS "gps_sim.c"
+    INCLUDE_DIRS "."
+    REQUIRES lt_hal core esp_timer)
+
+# build_config.h (CFG_* flags) from the build tree (§21.1).
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
+
+# Same strictness as components/core (§17.9); conversion warnings non-fatal for IDF macros.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wall -Wextra -Werror -Wshadow -Wconversion
+    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+```
+
+- [ ] **Step 5: `components/drivers/imu_sim/imu_sim.c` + `CMakeLists.txt`.**
+
+```c
+/* imu_sim.c -- hal/imu.h synthesising a deterministic 100 Hz stream (spec §4.6 IMU=sim, §22.3).
+ *
+ * Lap TIMING is a function of GPS only (the lap engine ignores its fused argument, §9.1/§9.4), so
+ * the sim IMU exists purely to keep fusion and the per-lap-stats accumulator running at 100 Hz. A
+ * deliberately simple model is used: the board sits upright and still -- specific force +1 g on the
+ * vehicle Z axis (2048 LSB at the 16 g / 2048-LSB-per-g scale of imu_raw_t), zero on X/Y, zero gyro.
+ * That yields well-formed fused samples (lean ~ 0, g ~ 0) without pretending to model cornering; a
+ * truth-derived lean/g stream is possible (synth_fused_at) but is not needed for the exit criterion.
+ *
+ * imu_read_fifo returns the samples that fell due since the previous read (10 ms spacing), stamped
+ * with real device mono time so tb_mono_to_gps maps them onto the same GPS timeline as the fixes.
+ */
+#include "hal/imu.h"
+
+#include <string.h>
+
+#define IMU_SIM_PERIOD_US 10000        /* 100 Hz */
+#define IMU_SIM_1G_LSB    2048         /* +/-16 g range => 2048 LSB/g (imu_raw_t) */
+
+static int64_t s_last_us;              /* mono time of the last generated sample */
+static bool    s_have_last;
+
+int imu_init(void)
+{
+    s_have_last = false;
+    s_last_us = 0;
+    return 0;
+}
+
+int imu_self_test(uint8_t *pass_mask)
+{
+    if (pass_mask) *pass_mask = 0x3F;   /* all six axes pass */
+    return 0;
+}
+
+int imu_read_fifo(imu_raw_t *out, size_t max, size_t *n_read, int64_t read_mono_us)
+{
+    size_t n = 0;
+    if (!out || !n_read) return -1;
+
+    if (!s_have_last) {                 /* anchor one period back so the first read yields a sample */
+        s_have_last = true;
+        s_last_us = read_mono_us - IMU_SIM_PERIOD_US;
+    }
+
+    while (n < max && s_last_us + IMU_SIM_PERIOD_US <= read_mono_us) {
+        s_last_us += IMU_SIM_PERIOD_US;
+        imu_raw_t *r = &out[n++];
+        r->mono_us = s_last_us;
+        r->ax = 0;
+        r->ay = 0;
+        r->az = IMU_SIM_1G_LSB;         /* upright: gravity on +Z */
+        r->gx = 0;
+        r->gy = 0;
+        r->gz = 0;
+    }
+    *n_read = n;
+    return 0;
+}
+
+int imu_read_temp_c100(int16_t *out)
+{
+    if (out) *out = 2500;               /* a constant 25.00 C */
+    return 0;
+}
+
+/* Mode / threshold / recovery / interrupt: no-ops sufficient for the pipeline. */
+int imu_set_mode(uint8_t mode)                          { (void)mode; return 0; }
+int imu_set_motion_threshold(uint8_t thr_lsb, uint8_t dur_ms) { (void)thr_lsb; (void)dur_ms; return 0; }
+int imu_recover(void)                                   { s_have_last = false; return 0; }
+int imu_int_pending(void)                               { return 0; }
+```
+
+```cmake
+# imu_sim -- hal/imu.h synthesising a deterministic 100 Hz stream (spec §4.6 IMU=sim). Bench driver.
+idf_component_register(
+    SRCS "imu_sim.c"
+    REQUIRES lt_hal core)
+
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wall -Wextra -Werror -Wshadow -Wconversion
+    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+```
+
+- [ ] **Step 6: plan-03 stubs `components/drivers/gps_neo6m/gps_neo6m.c` + `imu_mpu6050/imu_mpu6050.c` (+ their `CMakeLists.txt`, identical shape to the sim ones).**
+
+```c
+/* gps_neo6m.c -- PLAN-03 STUB of hal/gps.h for the NEO-6M (spec §4.6 GPS=neo6m, §7.3).
+ *
+ * The real UBX driver (UART setup, config push, gps_ubx_common parser, fault ladder) lands with the
+ * physical sensor in plan 08. Plan 03 only needs moto_neo6m to BUILD green (a REQUIRED CI check) now
+ * that the pipeline calls the GPS HAL: this stub satisfies every hal/gps.h symbol, advertises the
+ * NEO-6M profile, and simply never produces a fix (gps_poll returns 0), so the pipeline task starts
+ * and idles on that variant. The moto_sim bench build (gps_sim) is the one that runs real laps.
+ */
+#include "hal/gps.h"
+
+#include <stdio.h>
+
+static const gps_profile_t s_profile = {
+    .max_rate_hz = 5,
+    .baud        = 38400,
+    .has_pps     = 0,
+    .name        = "neo6m",
+};
+
+int gps_init(const gps_profile_t **out_profile)
+{
+    if (out_profile) *out_profile = &s_profile;
+    return 0;
+}
+
+int gps_configure(uint8_t rate_hz) { (void)rate_hz; return 0; }
+int gps_poll(gps_fix_t *out)       { (void)out; return 0; }          /* no receiver yet (plan 08) */
+int gps_feed_bytes(const uint8_t *buf, size_t n) { (void)buf; (void)n; return 0; }
+int gps_set_power_mode(uint8_t mode) { (void)mode; return 0; }
+int gps_wake(void)                 { return 0; }
+int gps_reinit_uart(uint32_t baud) { (void)baud; return 0; }
+
+int gps_get_version(char *buf, size_t n)
+{
+    if (!buf || n == 0) return -1;
+    (void)snprintf(buf, n, "neo6m-stub");
+    return 0;
+}
+
+uint32_t gps_stats_frames_ok(void)    { return 0; }
+uint32_t gps_stats_frames_bad(void)   { return 0; }
+int64_t  gps_last_frame_mono_us(void) { return 0; }
+```
+
+```c
+/* imu_mpu6050.c -- PLAN-03 STUB of hal/imu.h for the MPU-6050 (spec §4.6 IMU=mpu6050, §8).
+ *
+ * The real I2C driver (WHO_AM_I, register config, FIFO, self-test, motion INT) lands with the
+ * physical sensor. Plan 03 only needs moto_neo6m (IMU=mpu6050) to BUILD green now that the pipeline
+ * calls the IMU HAL: this stub satisfies every hal/imu.h symbol, passes self-test, and returns no
+ * FIFO samples, so the pipeline starts and idles on that variant. moto_sim (imu_sim) runs fusion.
+ */
+#include "hal/imu.h"
+
+int imu_init(void) { return 0; }
+
+int imu_self_test(uint8_t *pass_mask)
+{
+    if (pass_mask) *pass_mask = 0x3F;   /* all six axes pass */
+    return 0;
+}
+
+int imu_read_fifo(imu_raw_t *out, size_t max, size_t *n_read, int64_t read_mono_us)
+{
+    (void)out; (void)max; (void)read_mono_us;
+    if (!n_read) return -1;
+    *n_read = 0;                        /* no sensor yet */
+    return 0;
+}
+
+int imu_read_temp_c100(int16_t *out) { if (out) *out = 2500; return 0; }
+int imu_set_mode(uint8_t mode) { (void)mode; return 0; }
+int imu_set_motion_threshold(uint8_t thr_lsb, uint8_t dur_ms) { (void)thr_lsb; (void)dur_ms; return 0; }
+int imu_recover(void)   { return 0; }
+int imu_int_pending(void) { return 0; }
+```
+
+- [ ] **Step 7: host generator `tools/replay/gensim_main.c`** (decode .log fixes + replay for expected).
+
+```c
+/* gensim -- generate the committed gps_sim capture header + its replay-expected lap times.
+ *
+ * usage: gensim <in.log> <in.venue.json> <out sim_capture.h> <out expected.json>
+ *
+ * Reads a synthetic session .log (produced by `synth --pos-sigma 0`, so the fixes carry no
+ * position noise and the on-device lap engine reproduces `replay` exactly) plus its venue side-car.
+ * It emits two committed artifacts:
+ *
+ *   sim_capture.h       the FIX records decoded byte-for-byte the way `replay` decodes them
+ *                       (logio on_fix = the reconstructed absolute fix), as a compact sim_fix_t[]
+ *                       the gps_sim driver replays at real time, plus the venue JSON string the
+ *                       pipeline feeds to trk_from_json (identical code path to replay's
+ *                       --venue-json, so the device venue == the replay venue by construction).
+ *   expected.json       `replay --mode lap` over the SAME .log + venue: the reference lap times
+ *                       the orchestrator compares the on-device console laps against (+/-30 ms).
+ *
+ * Deterministic: same synth seed + same build => identical bytes. The device feeds the SAME
+ * decoded fixes and the SAME venue through the SAME core engine, so device laps == replay laps.
+ */
+#include "replay/replay.h"
+#include "replay/logio.h"
+#include "core/trk.h"
+#include "core/types.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_FIX 8192
+
+static gps_fix_t g_fix[MAX_FIX];
+static uint32_t  g_nfix;
+
+static void on_fix(const gps_fix_t *fix, void *ctx)
+{
+    (void)ctx;
+    if (g_nfix < MAX_FIX) g_fix[g_nfix++] = *fix;
+}
+
+/* Read a whole text file into a heap buffer (NUL-terminated). */
+static char *slurp(const char *path, size_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) { fclose(f); return NULL; }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = '\0';
+    if (len_out) *len_out = got;
+    return buf;
+}
+
+/* Emit `s` as a C string literal, minifying JSON whitespace so the embedded venue is compact. */
+static void emit_json_string(FILE *h, const char *s)
+{
+    int in_str = 0;
+    fputc('"', h);
+    for (const char *p = s; *p; p++) {
+        char c = *p;
+        if (!in_str && (c == ' ' || c == '\n' || c == '\r' || c == '\t')) continue;
+        if (c == '"') { in_str = !in_str; fputs("\\\"", h); continue; }
+        if (c == '\\') { fputs("\\\\", h); continue; }
+        fputc(c, h);
+    }
+    fputc('"', h);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 5) {
+        fprintf(stderr, "usage: %s <in.log> <in.venue.json> <out.h> <out.expected.json>\n", argv[0]);
+        return 2;
+    }
+    const char *log_path = argv[1], *venue_path = argv[2], *h_path = argv[3], *exp_path = argv[4];
+
+    /* venue: parse exactly as replay does (trk_from_json), and keep the raw JSON to embed. */
+    size_t vlen = 0;
+    char *vjson = slurp(venue_path, &vlen);
+    if (!vjson) { fprintf(stderr, "gensim: cannot read %s\n", venue_path); return 1; }
+    trk_venue_t venue;
+    char verr[160] = {0};
+    if (trk_from_json(&venue, vjson, vlen, verr, sizeof verr) != 0) {
+        fprintf(stderr, "gensim: bad venue json: %s\n", verr);
+        free(vjson);
+        return 1;
+    }
+
+    /* fixes: decode the .log exactly as replay does (reconstructed absolute fixes). */
+    g_nfix = 0;
+    static const logr_cb_t cb = { .on_fix = on_fix };   /* all other members NULL */
+    logr_t r;
+    logr_init(&r, &cb, NULL);
+    if (logr_read_file(&r, log_path) != 0) {
+        fprintf(stderr, "gensim: cannot read %s\n", log_path);
+        free(vjson);
+        return 1;
+    }
+    if (g_nfix < 2) { fprintf(stderr, "gensim: %s has too few fixes\n", log_path); free(vjson); return 1; }
+
+    /* fix rate from the median-ish first spacing (uniform for a synth capture). */
+    int64_t dt_us = g_fix[1].gps_us - g_fix[0].gps_us;
+    int rate_hz = (dt_us > 0) ? (int)((1000000 + dt_us / 2) / dt_us) : 5;
+
+    /* expected lap times: replay the SAME .log + venue through the core lap engine. */
+    replay_run_t *rr = (replay_run_t *)malloc(sizeof *rr);
+    if (!rr) { free(vjson); return 1; }
+    if (replay_run(log_path, REPLAY_MODE_LAP, &venue, rr) != 0) {
+        fprintf(stderr, "gensim: replay_run failed\n");
+        free(rr); free(vjson);
+        return 1;
+    }
+    FILE *ef = fopen(exp_path, "w");
+    if (!ef) { fprintf(stderr, "gensim: cannot write %s\n", exp_path); free(rr); free(vjson); return 1; }
+    replay_print_run_json(rr, ef);
+    fclose(ef);
+
+    /* header */
+    FILE *h = fopen(h_path, "w");
+    if (!h) { fprintf(stderr, "gensim: cannot write %s\n", h_path); free(rr); free(vjson); return 1; }
+    fprintf(h,
+        "/* sim_capture.h -- GENERATED, DO NOT EDIT. Committed synthetic GPS capture for gps_sim.\n"
+        " *\n"
+        " * Regenerate with tools/sim/gen_sim_capture.sh (see that script for the exact synth\n"
+        " * command and seed). %u fixes decoded byte-for-byte from the synth .log the way replay\n"
+        " * decodes them; the pipeline feeds SIM_VENUE_JSON to trk_from_json (identical to replay's\n"
+        " * --venue-json path), so the on-device laps reproduce test/data/sim_capture.expected.json.\n"
+        " */\n"
+        "#ifndef GPS_SIM_CAPTURE_H\n"
+        "#define GPS_SIM_CAPTURE_H\n"
+        "#include <stdint.h>\n\n"
+        "#define SIM_FIX_COUNT   %uu\n"
+        "#define SIM_FIX_RATE_HZ %d\n\n"
+        "/* Compact fix: everything the pipeline validity rule (§6.5) and the engines read. mono_us is\n"
+        " * assigned by the driver at delivery (real device time), so it is not stored here. */\n"
+        "typedef struct {\n"
+        "    int64_t  gps_us;\n"
+        "    int32_t  lat_e7, lon_e7, alt_mm, gspeed_mms, head_e5;\n"
+        "    uint32_t hacc_mm, sacc_mms;\n"
+        "    uint16_t pdop_e2;\n"
+        "    uint8_t  fix_type, sats, flags;\n"
+        "} sim_fix_t;\n\n"
+        "static const sim_fix_t SIM_FIXES[SIM_FIX_COUNT] = {\n",
+        g_nfix, g_nfix, rate_hz);
+
+    for (uint32_t i = 0; i < g_nfix; i++) {
+        const gps_fix_t *f = &g_fix[i];
+        fprintf(h,
+            "    { %lldLL, %d, %d, %d, %d, %d, %uu, %uu, %uu, %u, %u, 0x%02Xu },\n",
+            (long long)f->gps_us, f->lat_e7, f->lon_e7, f->alt_mm, f->gspeed_mms, f->head_e5,
+            f->hacc_mm, f->sacc_mms, (unsigned)f->pdop_e2, (unsigned)f->fix_type,
+            (unsigned)f->sats, (unsigned)f->flags);
+    }
+    fputs("};\n\n", h);
+
+    fputs("/* Venue as JSON; the pipeline parses it with trk_from_json (same as replay --venue-json). */\n", h);
+    fputs("static const char SIM_VENUE_JSON[] =\n    ", h);
+    emit_json_string(h, vjson);
+    fputs(";\n\n#endif /* GPS_SIM_CAPTURE_H */\n", h);
+    fclose(h);
+
+    printf("gensim: wrote %s (%u fixes) and %s\n", h_path, g_nfix, exp_path);
+    free(rr);
+    free(vjson);
+    return 0;
+}
+```
+
+- [ ] **Step 8: `tools/replay/CMakeLists.txt`** — add `gensim` to the tool loop:
+
+```cmake
+foreach(tool synth replay gensim)
+```
+
+- [ ] **Step 9: `tools/sim/gen_sim_capture.sh`** (frozen synth command; regenerates both committed artifacts).
+
+```bash
+#!/usr/bin/env bash
+# Regenerate the committed gps_sim capture + its replay-expected lap times (spec §4.6, §22.2/§22.3).
+#
+# usage: gen_sim_capture.sh [synth] [replay-build-dir]
+#   synth             path to the built synth binary   (default build/tools/replay/synth)
+#   gensim            path to the built gensim binary  (default build/tools/replay/gensim)
+#
+# This is a MANUAL maintenance action, not a CI step (same as tools/replay/gen_fixtures.sh). The
+# committed artifacts are the on-device exit-criterion baseline:
+#   components/drivers/gps_sim/sim_capture.h   the fixes gps_sim replays + the venue JSON
+#   test/data/sim_capture.expected.json        the replay lap times to compare against (+/-30 ms)
+#
+# The capture is deliberately small: a 6-vertex circuit, 3 valid laps at 5 Hz, --pos-sigma 0 so the
+# fixes carry NO position noise and the on-device core lap engine reproduces `replay` exactly.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$ROOT"
+
+SYNTH="${1:-build/tools/replay/synth}"
+GENSIM="${2:-build/tools/replay/gensim}"
+[ -x "$SYNTH" ]  || { echo "synth not found at $SYNTH  (build the host tools first)"  >&2; exit 1; }
+[ -x "$GENSIM" ] || { echo "gensim not found at $GENSIM (build the host tools first)" >&2; exit 1; }
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# The exact, frozen capture definition. Change it here and rerun to regenerate both artifacts.
+"$SYNTH" --out "$TMP/sim" \
+    --laps 4 --rate 5 --pos-sigma 0 --seed 7 --sectors 2 \
+    --length 700 --v-corner 20 --v-max 45 --a-acc 6 --a-brk 10 \
+    --vertices 6 --radius 22 --start-before 120 --stop-after 80 --quiet
+
+"$GENSIM" "$TMP/sim.log" "$TMP/sim.venue.json" \
+    "$ROOT/components/drivers/gps_sim/sim_capture.h" \
+    "$ROOT/test/data/sim_capture.expected.json"
+
+echo "regenerated:"
+echo "  components/drivers/gps_sim/sim_capture.h"
+echo "  test/data/sim_capture.expected.json"
+```
+
+- [ ] **Step 10: generate + commit `components/drivers/gps_sim/sim_capture.h`** (GENERATED — run `tools/sim/gen_sim_capture.sh` after building the host tools; do not hand-edit). Head:
+
+```c
+/* sim_capture.h -- GENERATED, DO NOT EDIT. Committed synthetic GPS capture for gps_sim.
+ *
+ * Regenerate with tools/sim/gen_sim_capture.sh (see that script for the exact synth
+ * command and seed). 601 fixes decoded byte-for-byte from the synth .log the way replay
+ * decodes them; the pipeline feeds SIM_VENUE_JSON to trk_from_json (identical to replay's
+ * --venue-json path), so the on-device laps reproduce test/data/sim_capture.expected.json.
+ */
+#ifndef GPS_SIM_CAPTURE_H
+#define GPS_SIM_CAPTURE_H
+#include <stdint.h>
+
+#define SIM_FIX_COUNT   601u
+#define SIM_FIX_RATE_HZ 5
+
+/* Compact fix: everything the pipeline validity rule (§6.5) and the engines read. mono_us is
+ * assigned by the driver at delivery (real device time), so it is not stored here. */
+typedef struct {
+    int64_t  gps_us;
+    int32_t  lat_e7, lon_e7, alt_mm, gspeed_mms, head_e5;
+    uint32_t hacc_mm, sacc_mms;
+    uint16_t pdop_e2;
+    uint8_t  fix_type, sats, flags;
+} sim_fix_t;
+
+static const sim_fix_t SIM_FIXES[SIM_FIX_COUNT] = {
+    { 1789466400000000LL, -340292915, 187292435, 100000, 26750, 5981219, 1500u, 50u, 180u, 3, 9, 0x07u },
+    /* ... 601 SIM_FIXES rows ... */
+};
+
+static const char SIM_VENUE_JSON[] =
+    "{\"id\":1000,\"name\":\"Synthetic\", ... ,\"layouts\":[{...\"sf\":[...],\"sectors\":[...]}]}";
+#endif /* GPS_SIM_CAPTURE_H */
+```
+
+- [ ] **Step 11: top-level `CMakeLists.txt`** — derive `CFG_GPS_SIM`, append the driver dirs, export the env vars:
+
+```cmake
+# gps_sim bench build marker: the pipeline pulls its venue from gps_sim only here (§4.6, 3.4).
+if(GPS STREQUAL "sim")
+    set(CFG_GPS_SIM 1)
+else()
+    set(CFG_GPS_SIM 0)
+endif()
+# ... EXTRA_COMPONENT_DIRS gains: components/drivers/gps_${GPS} components/drivers/imu_${IMU}
+set(ENV{LT_GPS} "${GPS}")
+set(ENV{LT_IMU} "${IMU}")
+```
+
+- [ ] **Step 12: `main/CMakeLists.txt`** REQUIRES `... gps_$ENV{LT_GPS} imu_$ENV{LT_IMU}`; **`main/build_config.h.in`** adds `#define CFG_GPS_SIM @CFG_GPS_SIM@`.
+
+**Verify (all in `SCRATCH/draft34`, IDF v5.3.2):**
+- Host tools: `cmake --build test/build-host --target synth replay gensim` → OK; `bash tools/sim/gen_sim_capture.sh …` regenerates `sim_capture.h` + `sim_capture.expected.json` BYTE-IDENTICAL (deterministic).
+- `./build.sh moto_sim build` → green; `./build.sh moto_neo6m build` → green (stub drivers).
+- Committed expected lap times (from `replay`): .
+
+---
+
+### Task 2: full lap/drag results to the logger (resolves the 3.3 deferral) + IPC channels
+
+**PARALLEL/SERIAL:** Independent of Task 1 → PARALLEL. Task 3 (pipeline) is SERIAL after this (it is the producer for `result_q`/`cmd_q` and calls the new logger API).
+
+**Files:**
+- Edit: `components/app/include/app/lt_ipc.h` (`result_q` + `cmd_q` + `command_t`), `components/app/sys/lt_ipc.c` (create both queues)
+- Edit: `components/app/include/app/logger.h` (submit API), `components/app/logger/logger.c` (result path + drop minimal-LAP synthesis)
+
+**Interfaces:**
+- Produces: `logger_submit_lap`/`logger_submit_drag`/`logger_set_venue`; the `g_result_q`/`g_cmd_q` channels + `command_t` (§4.5). Consumed by the pipeline (T3).
+- Consumes: `core/ses` codecs (`ses_encode_lap/sector/drag_run/drag_gate/venue`), `hal/storage.h`, `core/types.h`.
+
+**Rulings:**
+1. **A queue, not `log_request_t`.** `log_request_t` is frozen at 16 B (`_Static_assert`); a full `lap_result_t`/`drag_result_t` cannot ride it. The pipeline (core 1) → logger (core 0) hand-off uses a new depth-4 FreeRTOS queue `result_q` of a tagged `log_result_t` (copy-by-value, cross-core safe, static storage). One queue with a `{LAP|DRAG|VENUE}` union keeps it small (~234 B/slot).
+2. **Full records come from `result_q`; events stay verbatim.** `handle_event` no longer synthesises a minimal LAP/DRAG_RUN from `EV_LAP_COMPLETE`/`EV_DRAG_DONE` — every event (those included) is logged as a generic EVENT record (§12.3). The authoritative LAP (sectors + per-lap stats §9.4) and DRAG_RUN (gates) arrive over `result_q`; the logger additionally writes a SECTOR record per gate (crossing gps_us reconstructed from the cumulative splits — exact, since the splits ARE the crossing differences; delta left 0) and a DRAG_GATE per hit gate. `.sum` stays HDR + VENUE + every LAP + every DRAG_RUN [+ END] (§12.5); SECTOR/DRAG_GATE are .log-only. The 3.3 power-cut exit path (atomic `.sum` rename; resync-past-truncated `.log`) is unchanged.
+3. **Real VENUE record.** `logger_set_venue(id, layout, name)` (a third `result_q` kind) fills `s_venue_name`/id/layout and marks `.sum` dirty, so the pipeline's venue name lands in the VENUE record instead of the empty string 3.3 left.
+4. **`cmd_q` + `command_t` created here, drained by the pipeline (T3).** The §4.5 `command_t` and `CMD_*`/`MODE_*` enums live in `lt_ipc.h` (the IPC-channel header); the full command protocol/transport is `components/app/cmd` (3.5). The channel exists before its producer (ui/conn/power, later).
+
+- [ ] **Step 1: `components/app/include/app/lt_ipc.h`** — add after `g_log_req_q`:
+
+```c
+/* result_q -- pipeline -> logger, full engine results (depth 4). The 3.3 logger could only build a
+ * minimal LAP/DRAG_RUN from the EV_LAP_COMPLETE/EV_DRAG_DONE payload (§4.5); 3.4 hands it the whole
+ * lap_result_t / drag_result_t (sectors + per-lap stats §9.4, gates) plus the real venue for the
+ * VENUE record, so the logger writes complete LAP/SECTOR and DRAG_RUN/DRAG_GATE records (§12.3). A
+ * queue (copy-by-value, cross-core safe) rather than log_request_t, which is frozen at 16 B. */
+#define RESULT_Q_DEPTH 4
+
+typedef enum {
+    LOG_RES_LAP   = 0,   /* u.lap  -> LAP (+ SECTOR) records */
+    LOG_RES_DRAG  = 1,   /* u.drag -> DRAG_RUN (+ DRAG_GATE) records */
+    LOG_RES_VENUE = 2,   /* u.venue -> the .sum VENUE record's id/layout/name */
+} log_result_kind_t;
+
+typedef struct {
+    uint8_t kind;        /* log_result_kind_t */
+    union {
+        lap_result_t  lap;
+        drag_result_t drag;
+        struct { uint16_t venue_id, layout_id; char name[24]; } venue;
+    } u;
+} log_result_t;
+
+extern QueueHandle_t g_result_q;
+
+/* §4.4 cmd_q -- ui/conn/power -> pipeline (depth 8, command_t 24 B). The producers (ui/conn/power)
+ * land in later sessions; 3.4 creates the queue and the pipeline drains it (CMD_SET_MODE /
+ * CMD_SET_LAYOUT / CMD_RESET_ENGINE at least). command_t is the §4.5 struct; the full command
+ * protocol + transport is components/app/cmd (3.5). */
+#define CMD_Q_DEPTH 8
+
+typedef struct {
+    uint8_t type;        /* command_type_t */
+    uint8_t arg8;
+    uint16_t arg16;
+    int32_t arg32;
+    double  lat;
+    double  lon;
+} command_t;
+
+typedef enum {
+    CMD_SET_MODE      = 0,   /* arg8 = MODE_LAP / MODE_DRAG */
+    CMD_SET_LAYOUT    = 1,   /* arg16 = layout id */
+    CMD_MARK_GATE     = 2,   /* arg8 = 0 S/F, n sector n */
+    CMD_CALIB_ORIENT  = 3,
+    CMD_RESET_ENGINE  = 4,
+    CMD_CONFIG_RELOAD = 5,
+    CMD_GPS_POWER     = 6,   /* arg8 = 0/1 */
+    CMD_IMU_MODE      = 7,   /* arg8 = IMU_FULL / IMU_LOWPOWER */
+} command_type_t;
+
+enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_MODE_*) */
+
+extern QueueHandle_t g_cmd_q;
+
+/* Create the rings + queues. Idempotent; call once at boot step 11 (§4.7). */
+void lt_ipc_init(void);
+```
+
+- [ ] **Step 2: `components/app/sys/lt_ipc.c`** — define + create the two queues (static storage), e.g.:
+
+```c
+QueueHandle_t g_result_q;
+static StaticQueue_t s_result_ctrl;
+static uint8_t       s_result_store[RESULT_Q_DEPTH * sizeof(log_result_t)];
+QueueHandle_t g_cmd_q;
+static StaticQueue_t s_cmd_ctrl;
+static uint8_t       s_cmd_store[CMD_Q_DEPTH * sizeof(command_t)];
+/* in lt_ipc_init(): */
+    if (!g_result_q)
+        g_result_q = xQueueCreateStatic(RESULT_Q_DEPTH, sizeof(log_result_t), s_result_store, &s_result_ctrl);
+    if (!g_cmd_q)
+        g_cmd_q = xQueueCreateStatic(CMD_Q_DEPTH, sizeof(command_t), s_cmd_store, &s_cmd_ctrl);
+```
+
+- [ ] **Step 3: `components/app/include/app/logger.h`** — the submit API:
+
+```c
+/* Pipeline -> logger, full engine results (3.4, resolving the 3.3 deferral). Each copies the result
+ * onto result_q (cross-core safe) and wakes the logger; the logger writes the complete LAP (+ SECTOR)
+ * / DRAG_RUN (+ DRAG_GATE) records (§12.3) and the real VENUE record. Safe from the pipeline task;
+ * drop silently if the queue is momentarily full (the .log keeps the EVENT record either way). */
+void logger_submit_lap(const lap_result_t *lap);
+void logger_submit_drag(const drag_result_t *run);
+void logger_set_venue(uint16_t venue_id, uint16_t layout_id, const char *name);
+```
+
+- [ ] **Step 4: `components/app/logger/logger.c`** — replace `handle_event`'s LAP/DRAG synthesis with a generic EVENT record, and add `handle_result` + `drain_results` (called in the loop after `drain_events`):
+
+```c
+static void handle_event(const event_t *ev)
+{
+    /* Every event -- EV_LAP_COMPLETE / EV_DRAG_DONE included -- is logged verbatim as a generic
+     * EVENT record (§12.3). The authoritative full LAP / DRAG_RUN records now arrive over result_q
+     * (handle_result), so the logger no longer synthesises a minimal one from the event payload. */
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_event(ev->mono_us, ev->gps_us, ev->type, ev->arg32, tmp, sizeof tmp);
+    batch_append(tmp, n);
+}
+
+/* §12.3 SECTOR / DRAG_GATE / real VENUE from the pipeline's full engine result (result_q). */
+static void handle_result(const log_result_t *res)
+{
+    if (!s_open) return;                             /* nothing to write without an open .log */
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n;
+
+    if (res->kind == LOG_RES_LAP) {
+        const lap_result_t *lap = &res->u.lap;
+        n = ses_encode_lap(lap, tmp, sizeof tmp);    /* full record: sectors + per-lap stats §9.4 */
+        batch_append(tmp, n);
+        acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n);   /* .sum carries every LAP (§12.5) */
+        /* One SECTOR record per sector gate: crossing gps_us reconstructed from the cumulative
+         * splits (exact -- the splits are the crossing differences), delta left 0. */
+        int64_t cum_us = lap->start_gps_us;
+        uint8_t gates = (lap->n_sectors > 0) ? (uint8_t)(lap->n_sectors - 1u) : 0u;
+        for (uint8_t j = 0; j < gates && j < LAP_MAX_SECTORS; j++) {
+            cum_us += (int64_t)lap->sector_ms[j] * 1000;
+            n = ses_encode_sector(lap->lap_no, (uint8_t)(j + 1u), cum_us, lap->sector_ms[j], 0,
+                                  tmp, sizeof tmp);
+            batch_append(tmp, n);                    /* SECTOR is .log-only */
+        }
+        s_sum_dirty = true;
+    } else if (res->kind == LOG_RES_DRAG) {
+        const drag_result_t *run = &res->u.drag;
+        n = ses_encode_drag_run(run, tmp, sizeof tmp);
+        batch_append(tmp, n);
+        acc_append(s_drag_acc, &s_drag_len, DRAG_ACC_CAP, tmp, n);
+        for (uint8_t i = 0; i < run->n_gates && i < DRAG_MAX_GATES; i++) {
+            const drag_gate_res_t *g = &run->gates[i];
+            if (!g->hit) continue;
+            int64_t g_gps_us = run->t0_gps_us + (int64_t)g->time_ms * 1000;
+            n = ses_encode_drag_gate(run->run_no, g->gate_id, g_gps_us, g->time_ms,
+                                     g->speed_cms, g->dist_cm, tmp, sizeof tmp);
+            batch_append(tmp, n);                    /* DRAG_GATE is .log-only */
+        }
+        s_sum_dirty = true;
+    } else if (res->kind == LOG_RES_VENUE) {
+        s_venue_id  = res->u.venue.venue_id;
+        s_layout_id = res->u.venue.layout_id;
+        (void)snprintf(s_venue_name, sizeof s_venue_name, "%s", res->u.venue.name);
+        s_hdr.venue_id  = s_venue_id;                /* keep the .sum HDR consistent */
+        s_hdr.layout_id = s_layout_id;
+        s_sum_dirty = true;                          /* rebuild .sum with the real VENUE record */
+    }
+}
+
+static void drain_results(void)
+    log_result_t res;
+    while (xQueueReceive(g_result_q, &res, 0) == pdTRUE) handle_result(&res);
+}
+```
+
+- [ ] **Step 5: `components/app/logger/logger.c`** — the submit functions (near `logger_notify`):
+
+```c
+static void submit(const log_result_t *r)
+{
+    if (!g_result_q) return;
+    if (xQueueSend(g_result_q, r, 0) == pdTRUE) logger_notify();
+}
+void logger_submit_lap(const lap_result_t *lap)
+{
+    if (!lap) return;
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_LAP;
+    r.u.lap = *lap;
+    submit(&r);
+}
+void logger_submit_drag(const drag_result_t *run)
+{
+    if (!run) return;
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_DRAG;
+    r.u.drag = *run;
+    submit(&r);
+}
+void logger_set_venue(uint16_t venue_id, uint16_t layout_id, const char *name)
+{
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_VENUE;
+    r.u.venue.venue_id = venue_id;
+    r.u.venue.layout_id = layout_id;
+    if (name) (void)snprintf(r.u.venue.name, sizeof r.u.venue.name, "%s", name);
+    submit(&r);
+}
+```
+
+Also: in `logger_task`'s loop add `drain_results();` right after `drain_events();`. The `dbg logtest` verb is updated in Task 3 (alongside `dbg laps`) to push a full `lap_result_t` via `logger_submit_lap` + `logger_set_venue` so `.sum` still carries real LAP/VENUE records.
+
+**Verify:** `./build.sh moto_sim build` and `./build.sh moto_neo6m build` green (logger changes are variant-independent).
+
+---
