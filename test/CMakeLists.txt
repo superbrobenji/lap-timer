@@ -46,22 +46,26 @@ function(add_core_test name)
 endfunction()
 
 # One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no
-# edit here). test_lap and test_ui are held back from the generic loop and added explicitly below:
-# test_lap's exit-criterion case drives the host-only synth fixture, so it links the replay library
-# instead of core/unity/m directly (replaylib already carries those); test_ui links pbm.c (§20.2's
-# PBM snapshot writer/comparator, test/pbm.h) alongside core/unity/m.
+# edit here). test_lap, test_ui and test_screens are held back from the generic loop and added
+# explicitly below: test_lap's exit-criterion case drives the host-only synth fixture, so it links
+# the replay library instead of core/unity/m directly (replaylib already carries those); test_ui
+# and test_screens (session 4.2, moto LAP screens, §20.4-20.5) both link pbm.c (§20.2's PBM
+# snapshot writer/comparator, test/pbm.h) alongside core/unity/m.
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
-  if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui")
+  if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens")
     add_core_test(${name})
   endif()
 endforeach()
 
-# test_ui compares rendered framebuffers against PBM goldens in test/snapshots/ by absolute path
-# (TEST_DIR), since CTest runs a test's working directory from the build tree, not this source dir.
+# test_ui and test_screens compare rendered framebuffers against PBM goldens in test/snapshots/ by
+# absolute path (TEST_DIR), since CTest runs a test's working directory from the build tree, not
+# this source dir.
 add_core_test(test_ui pbm.c)
 target_compile_definitions(test_ui PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_core_test(test_screens pbm.c)
+target_compile_definitions(test_screens PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
