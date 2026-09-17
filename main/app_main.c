@@ -23,7 +23,9 @@
 #include "hal/storage.h"
 
 #include "app/dbg_console.h"
+#include "app/logger.h"
 #include "app/lt_err.h"
+#include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
@@ -152,6 +154,15 @@ void app_main(void)
     /* §4.7 step 11: static queues the supervisor + button ISR need (btn_q). The pipeline
      * rings arrive in 3.4. */
     lt_queues_init();
+
+    /* §4.7 step 11 (cont): the §4.4 pipeline<->logger rings + the logger's event/control
+     * queues. The pipeline producer lands in 3.4; 3.3 creates them and the logger consumes. */
+    lt_ipc_init();
+
+    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). It idles until a
+     * LOGGER_OPEN_SESSION request arrives (from the power task in 3.4, or `dbg logtest` now);
+     * with storage dead it stays idle (open fails gracefully). */
+    logger_start();
 
     /* Minimal diagnostics console -- the 3.2 exit criterion (`dbg status`). Replaced by the
      * full §18.4 console in 3.5. */

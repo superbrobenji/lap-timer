@@ -1,0 +1,367 @@
+/* logger.c -- logger task (spec §4.3 core 0/prio 8/stack 4096; loop §13.3; files §12.1/§12.5-12.7).
+ *
+ * Consumes the §4.4 fix/fused rings and the logger's event queue, encoding through core/ses into
+ * a 4 KB .log batch; rebuilds the .sum (HDR + VENUE + every LAP + every DRAG_RUN [+ END]) via
+ * tmp+fsync+atomic-rename on LAP/DRAG_RUN and at close; fsyncs the .log every 2 s; evicts every
+ * 60 s. Session open/close arrives over log_req_q. The task is static; the only dynamic wait is
+ * a task notification (ring-notify) with a 1000 ms timeout -- no heap, no queue-set object.
+ *
+ * Session record fidelity in 3.3: with no pipeline yet, the logger encodes each drained event as
+ * a generic EVENT record (§12.3 0x09 = {mono,gps,code,arg}, which represents any event verbatim),
+ * and additionally emits a minimal LAP (from EV_LAP_COMPLETE) / DRAG_RUN (from EV_DRAG_DONE) built
+ * from the event payload so the .sum carries them. The sector-/stats-populated LAP, the SECTOR and
+ * DRAG_GATE records, and the real VENUE name need the lapengine/dragengine result structs the
+ * pipeline owns; those are wired in 3.4. This is enough to exercise the power-cut exit criterion
+ * (.sum intact via atomic rename; .log decodable with a resync-past-bad truncated tail).
+ */
+#include "app/logger.h"
+#include "app/lt_ipc.h"
+#include "app/lt_sup.h"
+#include "app/lt_nvs.h"
+#include "app/lt_err.h"
+#include "hal/storage.h"
+
+#include "core/event.h"
+#include "core/ses.h"
+#include "core/types.h"
+
+#include "build_config.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#include <string.h>
+#include <stdio.h>
+
+static const char *TAG = "log";
+
+/* §4.3 task */
+#define LOG_CORE         0
+#define LOG_PRIO         8
+#define LOG_STACK_BYTES  4096
+#define LOG_STACK_WORDS  (LOG_STACK_BYTES / sizeof(StackType_t))
+#define LOG_STALL_S      10            /* supervisor heartbeat-stall window (§17.2) */
+
+/* §13.3 cadence + buffers */
+#define BATCH_CAP        4096
+#define BATCH_FLUSH_B    3584          /* write when the batch reaches this */
+#define WRITE_INTERVAL_MS 1000
+#define SYNC_INTERVAL_MS  2000
+#define EVICT_INTERVAL_MS 60000
+#define LOOP_TIMEOUT_MS   1000
+#define FRAME_TMP_CAP    256           /* >= max framed record (247 payload + 5) */
+
+/* §12.5 .sum assembly (sized so HDR+VENUE+laps+drags+END always fit BATCH_CAP). */
+#define SUM_BUILD_CAP    4096
+#define LAP_ACC_CAP      3072
+#define DRAG_ACC_CAP     512
+
+static StaticTask_t s_tcb;
+static StackType_t  s_stack[LOG_STACK_WORDS];
+static TaskHandle_t s_task;
+
+/* open session */
+static sto_file_t s_log_fd;
+static bool       s_open;
+static char       s_id[11];            /* "S%05u_%03u" + NUL */
+static uint8_t    s_seq;               /* per-boot session sequence (§12.1) */
+static ses_hdr_t  s_hdr;
+static uint16_t   s_venue_id, s_layout_id;
+static char       s_venue_name[33];
+
+/* codecs + batch */
+static ses_fix_state_t   s_fix_st;
+static ses_fused_state_t s_fused_st;
+static uint8_t s_batch[BATCH_CAP];
+static size_t  s_batch_len;
+
+/* .sum accumulators (encoded LAP / DRAG_RUN frames, in emission order) */
+static uint8_t s_lap_acc[LAP_ACC_CAP];   static size_t s_lap_len;
+static uint8_t s_drag_acc[DRAG_ACC_CAP]; static size_t s_drag_len;
+static bool    s_sum_dirty;
+
+/* timing + state */
+static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms;
+static bool     s_samples_full;        /* SYS_STORAGE_FULL: sample logging paused, summaries continue */
+
+static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+static void log_path(char *out, size_t cap, const char *id, const char *ext)
+{
+    (void)snprintf(out, cap, "/sessions/%s%s", id, ext);
+}
+
+/* Write the accumulated batch to the open .log. */
+static void do_write(void)
+{
+    if (!s_open || s_batch_len == 0) return;
+    if (sto_write(s_log_fd, s_batch, s_batch_len) != 0) errlog_add(E_STO_WRITE, (uint32_t)s_batch_len);
+    s_batch_len = 0;
+    s_last_write_ms = now_ms();
+}
+
+/* Append one framed record to the batch, flushing first if it would not fit. */
+static void batch_append(const uint8_t *frame, int n)
+{
+    if (n <= 0) return;
+    if (s_batch_len + (size_t)n > BATCH_CAP) do_write();
+    memcpy(s_batch + s_batch_len, frame, (size_t)n);
+    s_batch_len += (size_t)n;
+}
+
+static void acc_append(uint8_t *acc, size_t *len, size_t cap, const uint8_t *frame, int n)
+{
+    if (n <= 0 || *len + (size_t)n > cap) return;   /* beyond cap: kept in .log only (§12.5) */
+    memcpy(acc + *len, frame, (size_t)n);
+    *len += (size_t)n;
+}
+
+/* §12.5: rebuild .sum = HDR + VENUE + every LAP + every DRAG_RUN [+ END] via tmp+sync+rename. */
+static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
+{
+    if (s_id[0] == 0) return;
+    static uint8_t buf[SUM_BUILD_CAP];
+    size_t off = 0;
+    int n;
+
+    n = ses_encode_hdr(&s_hdr, buf + off, SUM_BUILD_CAP - off);
+    if (n < 0) return;
+    off += (size_t)n;
+    n = ses_encode_venue(s_venue_id, s_layout_id, s_venue_name, buf + off, SUM_BUILD_CAP - off);
+    if (n > 0) off += (size_t)n;
+    if (off + s_lap_len <= SUM_BUILD_CAP)  { memcpy(buf + off, s_lap_acc, s_lap_len);   off += s_lap_len; }
+    if (off + s_drag_len <= SUM_BUILD_CAP) { memcpy(buf + off, s_drag_acc, s_drag_len); off += s_drag_len; }
+    if (closing) {
+        n = ses_encode_end(end_gps_us, end_reason, buf + off, SUM_BUILD_CAP - off);
+        if (n > 0) off += (size_t)n;
+    }
+
+    char tmp_path[40], sum_path[40];
+    log_path(tmp_path, sizeof tmp_path, s_id, ".sum.tmp");
+    log_path(sum_path, sizeof sum_path, s_id, ".sum");
+    sto_file_t f;
+    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) return;
+    int rc = sto_write(f, buf, off);
+    if (rc == 0) rc = sto_sync(f);
+    sto_close(f);
+    if (rc == 0) sto_rename(tmp_path, sum_path);   /* atomic (§13.1) */
+}
+
+static void open_session(const log_request_t *req)
+{
+    if (s_open) return;                            /* one open .log at a time */
+    if (s_seq < 0xFF) s_seq++;
+    (void)snprintf(s_id, sizeof s_id, "S%05u_%03u",
+                   (unsigned)(lt_nvs_boot_get() & 0xFFFFu), (unsigned)s_seq);
+
+    memset(&s_hdr, 0, sizeof s_hdr);
+    (void)snprintf(s_hdr.session_id, sizeof s_hdr.session_id, "%s", s_id);
+    s_hdr.mode      = req->mode;
+    s_hdr.variant   = (uint8_t)(CFG_VARIANT_MOTO ? 0 : 1);
+    s_hdr.venue_id  = req->venue_id;
+    s_hdr.layout_id = req->layout_id;
+    (void)snprintf(s_hdr.fw,   sizeof s_hdr.fw,   "%s", CFG_FW_VERSION);
+    (void)snprintf(s_hdr.hwid, sizeof s_hdr.hwid, "%s", CFG_HWID);
+    s_hdr.log_profile  = 0;
+    s_hdr.fused_hz     = (uint8_t)CFG_FUSED_LOG_HZ;
+    s_hdr.gps_hz       = 0;                         /* real rate filled by the pipeline (3.4) */
+    s_hdr.start_gps_us = req->gps_us;               /* calib block left zero until 3.4 */
+
+    s_venue_id = req->venue_id;
+    s_layout_id = req->layout_id;
+    s_venue_name[0] = 0;
+
+    ses_fix_state_init(&s_fix_st);
+    ses_fused_state_init(&s_fused_st);
+    s_batch_len = 0;
+    s_lap_len = 0;
+    s_drag_len = 0;
+    s_sum_dirty = false;
+    s_samples_full = false;
+
+    char path[40];
+    log_path(path, sizeof path, s_id, ".log");
+    if (sto_open(path, STO_WR | STO_APPEND | STO_CREATE, &s_log_fd) != 0) {
+        errlog_add(E_STO_WRITE, 0);
+        s_id[0] = 0;
+        return;
+    }
+    s_open = true;
+    s_last_write_ms = s_last_sync_ms = now_ms();
+
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_hdr(&s_hdr, tmp, sizeof tmp);
+    batch_append(tmp, n);
+    do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
+    rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
+    ESP_LOGI(TAG, "session %s open", s_id);
+}
+
+static void close_session(const log_request_t *req)
+{
+    if (!s_open) return;
+    do_write();
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_end(req->gps_us, req->reason, tmp, sizeof tmp);
+    batch_append(tmp, n);
+    do_write();
+    sto_sync(s_log_fd);
+    sto_close(s_log_fd);
+    s_open = false;
+    rebuild_sum(true, req->gps_us, req->reason);     /* finalise .sum with END */
+    ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
+}
+
+static void handle_request(const log_request_t *req)
+{
+    switch (req->type) {
+    case LOGGER_OPEN_SESSION:    open_session(req); break;
+    case LOGGER_CLOSE_SESSION:   close_session(req); break;
+    case LOGGER_REBUILD_SUMMARY: if (s_open) rebuild_sum(false, 0, 0); break;
+    case LOGGER_EVICT:           s_last_evict_ms = 0; break;   /* force an eviction pass this loop */
+    default: break;
+    }
+}
+
+static void handle_event(const event_t *ev)
+{
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n;
+    if (ev->type == EV_LAP_COMPLETE) {
+        lap_result_t lap;
+        memset(&lap, 0, sizeof lap);
+        lap.lap_no       = ev->arg16;
+        lap.time_ms      = ev->arg32;
+        lap.flags        = ev->flags;
+        lap.start_gps_us = ev->gps_us;
+        lap.n_sectors    = 0;                        /* sectors/stats added by the pipeline (3.4) */
+        n = ses_encode_lap(&lap, tmp, sizeof tmp);
+        batch_append(tmp, n);
+        acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n);
+        s_sum_dirty = true;
+    } else if (ev->type == EV_DRAG_DONE) {
+        drag_result_t run;
+        memset(&run, 0, sizeof run);
+        run.run_no  = ev->arg16;
+        run.n_gates = 0;
+        n = ses_encode_drag_run(&run, tmp, sizeof tmp);
+        batch_append(tmp, n);
+        acc_append(s_drag_acc, &s_drag_len, DRAG_ACC_CAP, tmp, n);
+        s_sum_dirty = true;
+    } else {
+        n = ses_encode_event(ev->mono_us, ev->gps_us, ev->type, ev->arg32, tmp, sizeof tmp);
+        batch_append(tmp, n);
+    }
+}
+
+static void drain_rings(void)
+{
+    gps_fix_t fix;
+    while (ring_pop(&g_fix_ring, &fix)) {
+        if (s_open && !s_samples_full) {
+            uint8_t tmp[FRAME_TMP_CAP];
+            int n = ses_encode_fix(&s_fix_st, &fix, tmp, sizeof tmp);
+            batch_append(tmp, n);
+        }
+        ses_fused_state_on_fix(&s_fused_st, fix.gps_us);   /* keep fused deltas referenced to fixes */
+    }
+    fused_sample_t fs;
+    while (ring_pop(&g_fused_ring, &fs)) {
+        if (s_open && !s_samples_full) {
+            uint8_t tmp[FRAME_TMP_CAP];
+            int n = ses_encode_fused(&s_fused_st, &fs, tmp, sizeof tmp);
+            batch_append(tmp, n);
+        }
+    }
+}
+
+static void drain_events(void)
+{
+    event_t ev;
+    while (xQueueReceive(g_evt_q, &ev, 0) == pdTRUE) {
+        if (s_open) handle_event(&ev);
+    }
+}
+
+typedef struct { char oldest[24]; char curlog[24]; } evict_ctx_t;
+static void evict_cb(const char *name, uint32_t size, void *ctx)
+{
+    (void)size;
+    evict_ctx_t *e = (evict_ctx_t *)ctx;
+    size_t len = strlen(name);
+    if (len < 4 || strcmp(name + len - 4, ".log") != 0) return;   /* only .log (never .sum) */
+    if (strcmp(name, e->curlog) == 0) return;                     /* never the current session */
+    if (e->oldest[0] == 0 || strcmp(name, e->oldest) < 0)
+        (void)snprintf(e->oldest, sizeof e->oldest, "%s", name);  /* smallest id == oldest (§12.7) */
+}
+
+static void eviction_check(void)
+{
+    sto_info_t si;
+    if (sto_info(&si) != 0 || si.total_kb == 0) return;
+    if (si.free_kb >= si.total_kb / 10u) {
+        if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
+        return;
+    }
+    /* free < 10 %: delete the oldest .log that is not the current session. */
+    evict_ctx_t e;
+    memset(&e, 0, sizeof e);
+    if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
+    sto_list("/sessions", evict_cb, &e);
+    if (e.oldest[0]) {
+        char p[40];
+        (void)snprintf(p, sizeof p, "/sessions/%s", e.oldest);
+        sto_unlink(p);
+        errlog_add(E_STO_EVICT, 0);
+        ESP_LOGW(TAG, "evicted %s (free %u/%u KB)", e.oldest, (unsigned)si.free_kb, (unsigned)si.total_kb);
+    } else if (si.free_kb < si.total_kb / 20u) {    /* nothing to delete and < 5 %: pause samples */
+        if (!s_samples_full) { s_samples_full = true; sys_flags_set(SYS_STORAGE_FULL); errlog_add(E_STO_FULL, 0); }
+    }
+}
+
+static void logger_task(void *arg)
+{
+    (void)arg;
+    sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
+    s_last_evict_ms = now_ms();
+    ESP_LOGI(TAG, "logger up (core %d prio %d)", LOG_CORE, LOG_PRIO);
+
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOOP_TIMEOUT_MS));   /* ring-notify or 1000 ms */
+
+        log_request_t req;
+        while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) handle_request(&req);
+
+        drain_rings();
+        drain_events();
+
+        uint32_t now = now_ms();
+        if (s_open && s_batch_len &&
+            (s_batch_len >= BATCH_FLUSH_B || (now - s_last_write_ms) >= WRITE_INTERVAL_MS))
+            do_write();
+        if (s_open && (now - s_last_sync_ms) >= SYNC_INTERVAL_MS) {
+            sto_sync(s_log_fd);
+            s_last_sync_ms = now;
+        }
+        if (s_sum_dirty && s_open) { rebuild_sum(false, 0, 0); s_sum_dirty = false; }
+        if ((now - s_last_evict_ms) >= EVICT_INTERVAL_MS) { eviction_check(); s_last_evict_ms = now_ms(); }
+
+        g_hb[HB_LOGGER]++;
+    }
+}
+
+void logger_start(void)
+{
+    if (s_task) return;
+    s_task = xTaskCreateStaticPinnedToCore(logger_task, "logger", LOG_STACK_WORDS, NULL,
+                                           LOG_PRIO, s_stack, &s_tcb, LOG_CORE);
+}
+
+void logger_notify(void)
+{
+    if (s_task) xTaskNotifyGive(s_task);
+}
