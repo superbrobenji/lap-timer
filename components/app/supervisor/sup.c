@@ -10,6 +10,7 @@
 #include "app/lt_nvs.h"
 #include "app/lt_err.h"
 #include "app/lt_rtc.h"
+#include "app/lt_consts.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -36,6 +37,7 @@ typedef struct {
 static watch_t      s_watch[HB_COUNT];
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[SUP_STACK_WORDS];
+static bool         s_safe_mode_cleared;   /* guards the §17.5 uptime auto-clear to fire once */
 
 int sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s)
 {
@@ -80,8 +82,19 @@ static void sup_task(void *arg)
     for (;;) {
         check_stalls();
         esp_task_wdt_reset();
-        lt_rtc_uptime_update_s((uint32_t)(esp_timer_get_time() / 1000000));   /* crash-loop tracker */
+        uint32_t uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+        lt_rtc_uptime_update_s(uptime_s);          /* crash-loop tracker */
         lt_counters_flush(false);                 /* persist if dirty and >=60 s (§15.2) */
+
+        /* §17.5: once safe mode has been up for SAFE_MODE_CLEAR_S, clear the persisted gate and
+         * the runtime flag so the next -- and this -- boot run normally. Fires once per boot. */
+        if (!s_safe_mode_cleared && (sys_flags_get() & (1u << SYS_SAFE_MODE)) &&
+            uptime_s >= SAFE_MODE_CLEAR_S) {
+            lt_safe_clear();
+            sys_flags_clear(SYS_SAFE_MODE);
+            errlog_add(E_SYS_SAFE_MODE, 0);
+            s_safe_mode_cleared = true;
+        }
 
         /* Ladders (GPS §7.5 / IMU §8.7 / storage §13) and heap/stack/temp/OTA checks: their
          * subsystems arrive in 3.3/3.4; wired here then. */

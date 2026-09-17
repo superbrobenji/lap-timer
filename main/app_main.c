@@ -22,7 +22,6 @@
 #include "hal/board.h"
 #include "hal/storage.h"
 
-#include "app/dbg_console.h"
 #include "app/logger.h"
 #include "app/lt_err.h"
 #include "app/lt_ipc.h"
@@ -30,6 +29,8 @@
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
 #include "app/pipeline.h"
+
+#include "export_serial.h"
 
 static const char *TAG = "laptimer";
 
@@ -171,9 +172,10 @@ void app_main(void)
      * real GPS variant it idles until the sensor driver (plan 08) delivers fixes. */
     pipeline_start();
 
-    /* Minimal diagnostics console -- the 3.2 exit criterion (`dbg status`). Replaced by the
-     * full §18.4 console in 3.5. */
-    dbg_console_start((int)reason);
+    /* §4.7 step 12 (console): the §18.4 serial export console -- STATUS/CONFIG/ERRLOG/DIAG/
+     * DELETE/CLOSE wired through app/cmd, plus the migrated `dbg` diagnostics verbs. Spawns its
+     * own REPL task on UART0 (gated by the EXPORT_SERIAL build flag). */
+    export_serial_start((int)reason);
 
     ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%d)", (unsigned)boot_cnt,
              (long long)((esp_timer_get_time() - t_boot) / 1000), (int)safe);

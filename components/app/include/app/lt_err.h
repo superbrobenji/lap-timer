@@ -21,6 +21,11 @@ enum {
     E_SYS_RTC_INVALID = 0x0507,
     E_SYS_CFG_RESET   = 0x0508,
     E_SYS_STACK_LOW   = 0x0509,
+
+    /* connectivity / command protocol (§17.7, §18.1); land with the 3.5 serial console. */
+    E_CONN_BLE_INIT   = 0x0701,
+    E_CONN_XFER_ABORT = 0x0702,
+    E_CONN_PROTO      = 0x0703,   /* unknown op / malformed payload / not-yet-implemented op */
 };
 
 #endif /* APP_LT_ERR_H */

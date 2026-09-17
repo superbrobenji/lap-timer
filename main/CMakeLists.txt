@@ -1,7 +1,17 @@
+# The §18.4 serial console (components/drivers/export_serial) is gated by the EXPORT_SERIAL flag
+# (§4.6). The top-level CMakeLists appends its dir to EXTRA_COMPONENT_DIRS and exports the flag
+# into the environment (a flag-derived name cannot be read from the cache during IDF's early
+# expansion, but the environment is inherited); require it here unless it is explicitly OFF so
+# app_main's export_serial_start() resolves.
+set(LT_MAIN_REQUIRES core esp_system app lt_hal nvs_flash esp_timer esp_hw_support
+    board_devkit_v1 storage_internal gps_$ENV{LT_GPS} imu_$ENV{LT_IMU})
+if(NOT "$ENV{LT_EXPORT_SERIAL}" STREQUAL "OFF")
+    list(APPEND LT_MAIN_REQUIRES export_serial)
+endif()
 idf_component_register(
     SRCS "app_main.c"
     INCLUDE_DIRS "."
-    REQUIRES core esp_system app lt_hal nvs_flash esp_timer esp_hw_support board_devkit_v1 storage_internal gps_$ENV{LT_GPS} imu_$ENV{LT_IMU})
+    REQUIRES ${LT_MAIN_REQUIRES})
 # gps_$ENV{LT_GPS}/imu_$ENV{LT_IMU}: the top-level CMakeLists adds the driver dirs to
 # EXTRA_COMPONENT_DIRS and exports LT_GPS/LT_IMU into the environment (a flag-derived component name
 # cannot be read from the cache during IDF's early-expansion pass, but the environment is inherited).

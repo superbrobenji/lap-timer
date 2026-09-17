@@ -5,6 +5,7 @@
  * Blob layouts are fixed on-flash formats: packed structs so their byte size matches §15.2.
  */
 #include "app/lt_nvs.h"
+#include "app/lt_consts.h"
 #include "app/lt_err.h"
 
 #include <string.h>
@@ -21,6 +22,7 @@ static const char *TAG = "lt_nvs";
 /* ---- on-flash blob layouts (§15.2). Packed so sizes are exact. ---- */
 #define ERR_RING_LEN   32
 #define CRASH_LOG_LEN  3
+_Static_assert(CRASH_LOG_LEN == CRASH_LOOP_N, "crash-log length must match the §17.5 crash-loop count");
 
 typedef struct __attribute__((packed)) {
     uint16_t code;
@@ -133,6 +135,31 @@ int errlog_add(uint16_t code, uint32_t arg)
     return 0;
 }
 
+int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
+{
+    if (!out || cap <= 0) return 0;
+    /* head is the next write slot, so slot `head` is the oldest surviving entry once the ring has
+     * wrapped; before wrap those slots are still zero. Walking head..head+LEN-1 (mod LEN) yields
+     * oldest->newest; a zero `code` marks an untouched slot (real codes are >= 0x0101, §17.7). */
+    int n = 0;
+    for (int i = 0; i < ERR_RING_LEN && n < cap; i++) {
+        const err_entry_t *e = &s_ring.entry[(s_ring.head + i) % ERR_RING_LEN];
+        if (e->code == 0) continue;
+        out[n].code     = e->code;
+        out[n].arg      = e->arg;
+        out[n].uptime_s = e->uptime_s;
+        out[n].boot     = e->boot;
+        n++;
+    }
+    return n;
+}
+
+void lt_errlog_clear(void)
+{
+    memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
+    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) nvs_commit(s_h_err);
+}
+
 void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
 {
     s_crash[2] = s_crash[1];
@@ -160,7 +187,7 @@ bool lt_crashlog_is_loop(void)
 {
     for (int i = 0; i < CRASH_LOG_LEN; i++) {
         if (!lt_reset_is_abnormal(s_crash[i].reset_reason)) return false;
-        if (s_crash[i].uptime_s >= 60) return false;      /* uptime < 60 s each (§17.5) */
+        if (s_crash[i].uptime_s >= CRASH_LOOP_WINDOW_S) return false;   /* uptime < window each (§17.5) */
     }
     return true;
 }
@@ -177,6 +204,13 @@ int lt_safe_until_set(uint32_t boot_cnt)
     if (nvs_set_u32(s_h_sys, K_SAFE, boot_cnt) != ESP_OK) return -1;
     nvs_commit(s_h_sys);
     return 0;
+}
+
+void lt_safe_clear(void)
+{
+    /* §17.5 uptime-based auto-clear: zero the gate so `boot_cnt <= lt_safe_until_get()` is false
+     * on every later boot (boot_cnt is >=1 from the first boot onward). */
+    (void)lt_safe_until_set(0);
 }
 
 const char *lt_reset_reason_str(int r)

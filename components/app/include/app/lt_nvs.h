@@ -39,6 +39,21 @@ const lt_counters_t *lt_counters(void);
 /* Error ring (lt_err/ring): append {code, uptime_s, boot, arg}; persists immediately. */
 int  errlog_add(uint16_t code, uint32_t arg);
 
+/* Public shape of one error-ring entry (§17.7); a copy of the private on-flash record, so the
+ * on-flash layout (err_entry_t in lt_nvs.c) stays private and unchanged. */
+typedef struct {
+    uint16_t code;       /* E_* code (§17.7) */
+    uint32_t arg;        /* code-specific argument */
+    uint32_t uptime_s;   /* uptime when logged */
+    uint16_t boot;       /* boot counter (low 16 bits) when logged */
+} lt_err_entry_t;
+
+/* Copy the error ring oldest->newest into `out` (up to `cap` entries, empty slots skipped);
+ * returns the number copied. Used by ERRLOG_GET / DIAG_GET (§18.1, §17.10). */
+int  lt_errlog_snapshot(lt_err_entry_t *out, int cap);
+/* Clear the error ring (RAM + NVS). On-flash layout is unchanged; the ring is zeroed. */
+void lt_errlog_clear(void);
+
 /* Crash log (lt_sys/crash_log): shift in {reset_reason, prev_uptime_s} at boot (§17.5). */
 void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s);
 /* True when the last 3 logged resets are all abnormal with uptime < 60 s (§17.5). */
@@ -47,6 +62,9 @@ bool lt_crashlog_is_loop(void);
 /* Safe-mode gate (lt_sys/safe_until): boot counter through which safe mode applies (§17.5). */
 uint32_t lt_safe_until_get(void);
 int      lt_safe_until_set(uint32_t boot_cnt);
+/* Clears the persisted safe-mode gate (lt_sys/safe_until := 0) so a later boot is never held in
+ * safe mode by it. Used by the supervisor's uptime-based auto-clear (§17.5). */
+void     lt_safe_clear(void);
 
 /* cfg blob (lt_cfg/cfg): load validates version+CRC16 then cfg_validate (returns corrections,
  * <0 => absent/corrupt so the caller keeps its defaults). save packs + CRC16 + writes. */

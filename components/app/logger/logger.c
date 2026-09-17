@@ -301,9 +301,15 @@ static void drain_results(void)
 
 static void drain_rings(void)
 {
+    /* §17.5 safe mode: FIX/FUSED sample records are dropped (still popped off the ring so it
+     * does not back up) while SESSION_HDR/VENUE/LAP/DRAG_RUN/END keep flowing (handle_result,
+     * open_session, close_session) so summaries and the .sum still form. Same gate as the
+     * SYS_STORAGE_FULL sample pause below. */
+    bool suppress = s_samples_full || (sys_flags_get() & (1u << SYS_SAFE_MODE)) != 0;
+
     gps_fix_t fix;
     while (ring_pop(&g_fix_ring, &fix)) {
-        if (s_open && !s_samples_full) {
+        if (s_open && !suppress) {
             uint8_t tmp[FRAME_TMP_CAP];
             int n = ses_encode_fix(&s_fix_st, &fix, tmp, sizeof tmp);
             batch_append(tmp, n);
@@ -312,7 +318,7 @@ static void drain_rings(void)
     }
     fused_sample_t fs;
     while (ring_pop(&g_fused_ring, &fs)) {
-        if (s_open && !s_samples_full) {
+        if (s_open && !suppress) {
             uint8_t tmp[FRAME_TMP_CAP];
             int n = ses_encode_fused(&s_fused_st, &fs, tmp, sizeof tmp);
             batch_append(tmp, n);
