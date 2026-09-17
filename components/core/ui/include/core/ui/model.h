@@ -16,7 +16,12 @@ enum { SCR_MODE_LAP = 0, SCR_MODE_DRAG = 1 };
 
 /* One row of a DRAG screen (benches on page 0, all/best gates on pages 1/2). */
 typedef struct {
-    char     label[6];   /* "0-100" / "1/4" / "60ft" / "100-0" ... */
+    /* Sized for the longest §6.6 gate name, "100-200" (the SPEED_RANGE gate), which is 7 chars +
+     * NUL = 8 bytes; "1000ft" (6 chars + NUL = 7) is the next longest. The plan's original char[6]
+     * (sized to the shorter "0-100"/"1/4"/"60ft"/"100-0" examples in this same comment) is one byte
+     * too small even for "1000ft" and two short for "100-200" -- extended here by Task 2, the first
+     * DRAG-screen renderer to actually populate every §6.6 gate label. */
+    char     label[8];   /* "0-100" / "1/4" / "60ft" / "100-0" / "100-200" / "1000ft" ... */
     uint32_t t_ms;        /* elapsed for the gate; 0 + !present => "--" */
     bool     present;     /* gate hit this run */
     uint16_t trap_kmh;    /* trap speed for the 1/4 row (0 = none) */
@@ -86,9 +91,9 @@ enum {
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct);
 
 /* Single render entry point: dispatches on m->mode + m->page, clears the fb, draws the screen and
- * leaves fb->dirty as the changed region (the whole frame for a full screen render). A DRAG-mode
- * call renders nothing until Task 2 implements it (a clear seam: see the SCR_MODE_DRAG case in
- * screens_moto.c). */
+ * leaves fb->dirty as the changed region (the whole frame for a full screen render). SCR_MODE_DRAG
+ * renders pages 0 (benches, §11.4)/1 (all gates of the last run)/2 (best per gate this session);
+ * see the SCR_MODE_DRAG case in screens_moto.c. */
 void screens_moto_render(fb_t *fb, const screen_model_t *m);
 
 #endif

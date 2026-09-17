@@ -1,11 +1,8 @@
-/* Moto riding screens: LAP pages 0/1/2 (spec §20.4-20.5) + the shared fault-icon strip
- * (§20.5 + §17.4). Pure C11, no malloc/float/libm — every layout position is a compile-time
- * constant and every value is formatted with plain integer arithmetic, so screens_moto_render()
- * is a pure function of its screen_model_t and the PBM goldens in test/snapshots/lap_*.pbm are
- * byte-identical across clang and gcc-16.
- *
- * DRAG (mode SCR_MODE_DRAG, §20.5's DRAG pages + the §11.4 benches rule) is Task 2's seam: see
- * screens_moto_render()'s switch below.
+/* Moto riding screens: LAP pages 0/1/2 and DRAG pages 0/1/2 (spec §20.4-20.5) + the §11.4 benches
+ * rule + the shared fault-icon strip (§20.5 + §17.4). Pure C11, no malloc/float/libm — every
+ * layout position is a compile-time constant and every value is formatted with plain integer
+ * arithmetic, so screens_moto_render() is a pure function of its screen_model_t and the PBM
+ * goldens in test/snapshots/{lap,drag}_*.pbm are byte-identical across clang and gcc-16.
  */
 #include "core/ui/model.h"
 
@@ -334,6 +331,144 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP2_ROW_Y(4), buf);
 }
 
+/* ---- DRAG page 0 (spec §20.5 + §11.4 benches rule): up to 4 rows of benches + the 1/4 row ---- */
+
+#define DRAG_LABEL_X       4
+#define DRAG_TIME_RIGHT_X  180
+#define DRAG_TRAP_X        190
+#define DRAG0_ROW_Y0       8
+#define DRAG0_ROW_H        24
+#define DRAG0_MAX_ROWS     4
+#define DRAG_ARMED_RIGHT_X 296
+#define DRAG_ARMED_Y       4
+
+/* A row with no time yet (a bench not hit, or the 1/4 row before it is crossed) shows a literal
+ * "--" -- spec §11.4's own worked example is "1/4 --" -- rather than the LAP screens' wider
+ * "-:--.--" placeholder. Unlike LAP_TIME_RIGHT_X (200, close enough to LAP_LABEL_X's "BEST"/"PREV"
+ * labels that an oversized placeholder visibly clobbered them, per EMPTY_TIME's comment above), a
+ * DRAG row's label (x=4) and value (right-aligned x=180) are far enough apart that this is a
+ * stylistic match to the spec text rather than a clobbering concern.
+ */
+static const char DRAG_EMPTY_TIME[] = "--";
+
+/* Draws one DRAG row: `label` FONT_SMALL at DRAG_LABEL_X, `t_ms` (or "--" if !present) FONT_MED
+ * right-aligned at DRAG_TIME_RIGHT_X, and — only when has_trap — "@ <trap_kmh>" FONT_SMALL at
+ * DRAG_TRAP_X (spec's own example: "@ 305").
+ *
+ * The label is drawn in FONT_SMALL rather than the spec text's literal "four rows of FONT_MED"
+ * reading: FONT_MED's glyph set is "0-9 : . - + A-Z" (fonts.c FONT_MED_MAP, 40 glyphs) — no '/'
+ * and no lowercase — so a FONT_MED "1/4" would render as "1", a blank cell, "4" (the '/' glyph is
+ * unmapped, which fb_text draws as blank, per render.h) and a FONT_MED "60ft" would lose both
+ * lowercase letters. FONT_SMALL is ASCII 32-126 (every gate-name character is present) and is the
+ * same font LAP page 0 already uses for its row labels (LAP_LABEL_X) — this is the same kind of
+ * evidence-based call as that screen's dS-row font override, just for missing glyphs rather than
+ * vertical overflow. Confirmed by eyeballing: a FONT_MED render of "1/4"/"60ft" actually drew the
+ * blank-cell gaps described above. */
+static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
+{
+    fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, y, r->label);
+
+    char buf[TIME_BUF_LEN];
+    if (r->present) {
+        fmt_time_ms(buf, r->t_ms);
+        fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, buf);
+    } else {
+        fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, DRAG_EMPTY_TIME);
+    }
+
+    if (r->has_trap) {
+        char  tbuf[8];
+        char *p = tbuf;
+        p = put_char(p, '@');
+        p = put_char(p, ' ');
+        p = put_uint(p, r->trap_kmh);
+        *p = '\0';
+        fb_text(fb, &FONT_SMALL, DRAG_TRAP_X, y, tbuf);
+    }
+}
+
+static void render_drag_page0(fb_t *fb, const screen_model_t *m)
+{
+    /* §11.4: rows are the SPEED_FROM0 benches that were hit, ascending by target, then the 1/4
+     * row; max 4 rows, dropping the lowest (frontmost, since ascending) bench first if more than
+     * 3 benches were hit. The caller (the ui task, session 4.3) fills m->drag[]/drag_n in that
+     * order already — this renderer only applies the trim, identifying "the 1/4 row" by its label
+     * (matching that ordering contract) rather than assuming a fixed slot, so it stays correct
+     * (and does not underflow drag_n - 1) even for a model with zero rows. */
+    uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
+    uint8_t quarter = (n > 0 && strcmp(m->drag[n - 1].label, "1/4") == 0) ? 1u : 0u;
+    uint8_t bench_n = (uint8_t)(n - quarter);
+    uint8_t start = 0;
+    while (bench_n > 3u) {
+        start++;
+        bench_n--;
+    }
+
+    int row = 0;
+    for (uint8_t i = start; i < n && row < DRAG0_MAX_ROWS; i++, row++) {
+        render_drag_row(fb, &m->drag[i], DRAG0_ROW_Y0 + row * DRAG0_ROW_H);
+    }
+
+    if (m->drag_armed) {
+        fb_text_right(fb, &FONT_SMALL, DRAG_ARMED_RIGHT_X, DRAG_ARMED_Y, "ARMED");
+    }
+
+    /* Mirrors LAP page 0 (the other primary in-ride screen): only the page-0 riding view shows the
+     * fault strip, not the pages-1/2 review grids below. */
+    fault_strip(fb, m->flags, m->batt_pct);
+}
+
+/* ---- DRAG pages 1/2 (spec §20.5): all seven gates of the last run / best-per-gate this session
+ * — same row set (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0), just different values, so one
+ * grid layout serves both; they differ only in the title drawn and in which values the caller
+ * populated m->drag[] with. Laid out as a 2-column grid (7 rows do not fit one FONT_MED/FONT_SMALL
+ * column within 128px; §20.5 leaves the exact grid unspecified beyond "FONT_MED/SMALL rows"),
+ * echoing LAP page 1's sector grid: each cell is one "<label> <value>" FONT_SMALL string. ---- */
+
+#define DRAG12_TITLE_Y 4
+#define DRAG12_COLS    2
+#define DRAG12_COL_X0  4
+#define DRAG12_COL_W   148
+#define DRAG12_ROW_Y0  20
+#define DRAG12_ROW_H   16
+
+static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char *title)
+{
+    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, DRAG12_TITLE_Y, title);
+
+    uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
+    for (uint8_t i = 0; i < n; i++) {
+        int col = i % DRAG12_COLS;
+        int row = i / DRAG12_COLS;
+        int x = DRAG12_COL_X0 + col * DRAG12_COL_W;
+        int y = DRAG12_ROW_Y0 + row * DRAG12_ROW_H;
+
+        char  tbuf[TIME_BUF_LEN];
+        char  sbuf[40]; /* label (<=7 chars) + ' ' + time (<=~8 chars) + NUL, generous */
+        char *p = sbuf;
+        p = put_str(p, m->drag[i].label);
+        p = put_char(p, ' ');
+        if (m->drag[i].present) {
+            fmt_time_ms(tbuf, m->drag[i].t_ms);
+            p = put_str(p, tbuf);
+        } else {
+            p = put_str(p, DRAG_EMPTY_TIME);
+        }
+        *p = '\0';
+        fb_text(fb, &FONT_SMALL, x, y, sbuf);
+    }
+}
+
+static void render_drag_page1(fb_t *fb, const screen_model_t *m)
+{
+    render_drag_gate_grid(fb, m, "LAST RUN");
+}
+
+static void render_drag_page2(fb_t *fb, const screen_model_t *m)
+{
+    render_drag_gate_grid(fb, m, "SESSION BEST");
+}
+
 /* ---- dispatch ---- */
 
 void screens_moto_render(fb_t *fb, const screen_model_t *m)
@@ -357,9 +492,19 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
         }
         break;
     case SCR_MODE_DRAG:
-        /* Task 2 seam: DRAG pages 0 (benches, §11.4)/1 (all gates)/2 (best per gate) land here as
-         * render_drag_page0/1/2(fb, m), reusing fault_strip()/fmt_time_ms() above. Until then, a
-         * DRAG-mode call renders an empty (cleared) frame. */
+        switch (m->page) {
+        case 0:
+            render_drag_page0(fb, m);
+            break;
+        case 1:
+            render_drag_page1(fb, m);
+            break;
+        case 2:
+            render_drag_page2(fb, m);
+            break;
+        default:
+            break;
+        }
         break;
     default:
         break;
