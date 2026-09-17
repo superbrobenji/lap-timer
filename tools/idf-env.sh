@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # usage: source tools/idf-env.sh   (bash or zsh, any working directory; do not execute)
-(return 0 2>/dev/null) || { echo "source this file: source tools/idf-env.sh"; exit 1; }
+# Refuse direct execution in bash (return fails outside a sourced file) OR zsh (ZSH_EVAL_CONTEXT ends
+# in :file only when the file is sourced; `zsh idf-env.sh` runs it as :toplevel, where zsh's top-level
+# `return` succeeds and would slip past a bash-style guard -- issue #6).
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case "${ZSH_EVAL_CONTEXT:-}" in
+    *:file) ;;
+    *) echo "source this file: source tools/idf-env.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+  esac
+else
+  (return 0 2>/dev/null) || { echo "source this file: source tools/idf-env.sh" >&2; exit 1; }
+fi
 if [ -n "${ZSH_VERSION:-}" ]; then
   _idf_env_self="${(%):-%x}"
 else
