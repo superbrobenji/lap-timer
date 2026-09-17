@@ -2,6 +2,32 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_sim bench day + whole-plan review (plan 03, session 3.6 — plan-closing)
+
+- Date: 2026-09-17. Branch s3.6-bench (a3ff70e). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. Built on pinned ESP-IDF v5.3.2 via `tools/idf-env.sh`; app image 472,896 bytes. NVS erased before the run. Whole-plan opus review found 6 cross-cutting items (all fixed in one wave, commit 0c4c462; re-review clean); two more defects were caught on the bench and fixed (a3ff70e).
+- **§22.3 bench tests (sensor-free subset — pass):**
+
+| Test | Result |
+|------|--------|
+| GPS-sim laps | LAP 0 out-lap (0x08), LAP 1 28.071 s (0x40) — matches the p03-d4 replay reference |
+| WDT path (`dbg hang`) | task WDT fired, reboot reason `task-WDT (6)`, `wdt` counter → 1, `E_SYS_WDT_RESET` (0x0501) logged |
+| Crash path (`dbg crash` ×3) | boot after the 3rd came up `safe_mode=1`, `sys_flags 0x00000200 [SAFE_MODE]`, `crashes=3` |
+| Storage truncation (×3, mid-write reset) | LittleFS remounted clean every time (`degraded=0`, no format) |
+| Serial export (§18.4 stand-in for BLE) | `list` + `open <id> sum/json/log` all framed `---BEGIN <name> <size>--- … ---END <crc32>---` on-device |
+
+  Remaining §22.3 rows (power-per-state, sleep/wake, I2C recovery, GPS power-cycle, brownout, BLE export, OTA, e-paper) need drivers/hardware not present in plan 03; deferred to plans 04–08.
+- **§22.4 resource measurement** (`dbg mem`, sim path): heap free 184,988 B, min-free 180,840 B. Per-task stack free (high-water):
+
+| Task | Stack | Free (high-water) | Headroom |
+|------|-------|-------------------|----------|
+| pipeline | 8192 B | 5740 B | 70 % |
+| logger | 4096 B | 1520 B | 37 % |
+| supervisor | 3072 B | 1207 B | 39 % |
+| console REPL | 6144 B | 3900 B | 63 % |
+
+  All tasks retain ≥ 25 % headroom, so the §22.4 stack sizes already satisfy "high-water + 25 %" on the sim path; sizes are left as-is pending the real-sensor path (real IMU FIFO/calibration + display rendering exercise more), which is measured in plan 08.
+- **Bugs found on the bench and fixed (a3ff70e):** (1) `dbg mem` multiplied the high-water by 4, but ESP-IDF Xtensa `StackType_t` is 1 byte so the count is already in bytes — every task read 4× high (fixed with `sizeof(StackType_t)`); (2) `dbg hang` busy-looped the console task, which is unpinned and not WDT-subscribed, so on two cores it migrated and never starved either idle for a continuous 5 s (board ran 14 s+) — fixed by subscribing the calling task to the task WDT before the loop, so it now fires deterministically in ~5 s.
+
 ## moto_sim serial console + RTC continuity + crash-loop safe mode on ESP32 (plan 03, session 3.5)
 
 - Date: 2026-09-17. Branch s3.5-console-safemode (b2f0aba). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. Built on the pinned ESP-IDF v5.3.2 via `source tools/idf-env.sh` (Homebrew Python, sidesteps the #33 venv drift; `dependencies.lock` stays 5.3.2). App image 471,456 bytes (62 % of the 1.25 MB app partition free). NVS erased before the run (`esptool write_flash --erase-all`) for a clean baseline.
