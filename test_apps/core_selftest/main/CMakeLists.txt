@@ -5,9 +5,10 @@ set(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../test")
 # error. The directory property at the bottom does the same job -- adding or removing a file changes
 # the directory's timestamp, which re-runs configuration and so re-runs this glob.
 file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
-# test_ui is host-only: it renders PBM snapshots to the host filesystem (TEST_DIR/snapshots) and
-# compares byte-exact, which cannot run on the ESP32. It is exercised by the host `test/` build only.
-list(FILTER TEST_SRCS EXCLUDE REGEX "/test_ui\\.c$")
+# test_ui and test_screens are host-only: they render PBM snapshots to the host filesystem
+# (TEST_DIR/snapshots) and compare byte-exact, which cannot run on the ESP32. They are exercised
+# by the host `test/` build only.
+list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens)\\.c$")
 set(SUITES "")
 foreach(f ${TEST_SRCS})
   get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
