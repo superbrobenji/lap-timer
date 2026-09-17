@@ -1,11 +1,11 @@
 /* hal/gps.h -- GPS HAL contract (spec §5.1, called from the pipeline task).
  *
  * The declarations below are the §5.1 gps.h slice verbatim; the include guard, the
- * <stdint.h>/<stddef.h> includes (size_t, fixed-width types), the GPS_PM_* power-mode values
- * and the GPS_FLAG_* fix-flag bits (mirrored from core/types.h so a driver that only sees this
- * header can still set them) are added here so this is a self-contained, compilable header.
- * gps_fix_t / gps_profile_t are the §5.1 structs; gps_fix_t is re-used from core/types.h so the
- * engines and the driver share one definition. All functions return int (0 = OK, negative =
+ * <stdint.h>/<stddef.h> includes (size_t, fixed-width types) and the GPS_PM_* power-mode values
+ * are added here so this is a self-contained, compilable header. gps_fix_t and the GPS_FLAG_*
+ * fix-flag bits come transitively from core/types.h (included below), so the engines and the
+ * driver share one definition. gps_fix_t / gps_profile_t are the §5.1 structs.
+ * All functions return int (0 = OK, negative =
  * -errno-style) unless noted; each is called from one task only (the pipeline) and is not
  * reentrant. The concrete implementation is components/drivers/gps_${GPS} (gps_sim replays a
  * committed synthetic capture; gps_neo6m/gps_m10 parse UBX from the real receiver).

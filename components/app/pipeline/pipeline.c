@@ -56,6 +56,7 @@ static const char *TAG = "pipe";
 #define FUSED_DECIM      (FUSION_HZ / CFG_FUSED_LOG_HZ)       /* push every Nth fused sample (§9.1) */
 #define TEMP_POLL_US     1000000                             /* ~1 Hz imu temperature (§9.2) */
 #define PIPE_LAPS_KEEP   24
+#define MMS_TO_KMH       0.0036                              /* mm/s -> km/h; mirrors tools/replay MMS_TO_KMH */
 
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[PIPE_STACK_WORDS];
@@ -242,7 +243,7 @@ static void on_fix(gps_fix_t *fix)
     }
 
     /* §9.1 motion edge (speed-based). */
-    bool moving = valid && ((double)fix->gspeed_mms * 0.0036) > (double)MOVING_SPEED_KMH;
+    bool moving = valid && ((double)fix->gspeed_mms * MMS_TO_KMH) > (double)MOVING_SPEED_KMH;
     if (!s_have_moving || moving != s_moving) {
         s_have_moving = true;
         s_moving = moving;
@@ -257,12 +258,11 @@ static void on_fix(gps_fix_t *fix)
 /* §9.4 per-lap stats accumulation at 100 Hz. */
 static void stats_step(const fused_sample_t *fs)
 {
-    if (s_cur_speed_cms > 0) {
-        if ((uint32_t)s_cur_speed_cms > s_stats.max_speed_cms)
-            s_stats.max_speed_cms = (uint16_t)(s_cur_speed_cms > 0xFFFF ? 0xFFFF : s_cur_speed_cms);
-        if (!s_stats_gps_lost && s_cur_speed_cms < (int32_t)s_stats.min_speed_cms)
-            s_stats.min_speed_cms = (uint16_t)s_cur_speed_cms;
-    }
+    /* §9.4: max ignores non-positive samples; min ignores only LAP_GPS_LOST (a true 0 counts). */
+    if (s_cur_speed_cms > 0 && (uint32_t)s_cur_speed_cms > s_stats.max_speed_cms)
+        s_stats.max_speed_cms = (uint16_t)(s_cur_speed_cms > 0xFFFF ? 0xFFFF : s_cur_speed_cms);
+    if (!s_stats_gps_lost && s_cur_speed_cms >= 0 && (uint32_t)s_cur_speed_cms < s_stats.min_speed_cms)
+        s_stats.min_speed_cms = (uint16_t)s_cur_speed_cms;
     if (fs->flags & FUS_LEAN_VALID) {
         int32_t lean_cdeg = (int32_t)(fs->lean_deg * 100.0f);
         if (lean_cdeg >= 0) { if (lean_cdeg > s_stats.max_lean_r_cdeg) s_stats.max_lean_r_cdeg = clamp_i16(lean_cdeg); }
