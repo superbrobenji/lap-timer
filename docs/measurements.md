@@ -2,6 +2,13 @@
 
 Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
 
+## moto_neo6m UI task boot on ESP32 (plan 04, session 4.3 — host UI + ui task)
+
+- Date: 2026-09-17. Branch s4.3-ui-menu-task (c849c97). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. Built on pinned ESP-IDF v5.3.2 via `tools/idf-env.sh`. App image 457,328 bytes (65 % of the app partition free).
+- **Exit criterion — the `ui` task compiles into and boots on `moto_neo6m`:** boot clean (`boot #... complete in 1075 ms, safe_mode=0`), and the ui task renders and logs its dirty box: `ui: refresh scr=2 pg=0 dirty 0,0..296,128` (BOOT one-shot), then `ui: refresh scr=0 pg=0 dirty 0,0..296,128` (transition to the riding screen). `hb[3]` (HB_UI) ticks ~10/s (100 ms loop), so the task is registered, WDT-subscribed, and healthy. No display driver in plan 04, so the ui logs the dirty box instead of refreshing a panel; moto_neo6m has no GPS driver yet (plan 08), so no events flow and the model stays at its boot state.
+- §22.4 note: `dbg mem` did not list the ui task at flash time (its task table predated 4.3; extended in c849c97 to include HB_UI, effective on the next flash). Reported at flash: heap free 184,976 B / min 180,828 B; pipeline 5908 B free, logger 1912, supervisor 1215, console 3792 (all ≥ 25 % headroom). The moto_sim ui stack is a reduced 2560 B (DRAM-bound bench build); its high-water is unmeasured — a documented watch.
+- The host UI itself (renderer, fonts, screens, menu, one-shots) is verified by the committed byte-exact PBM goldens under `test/snapshots/` (18 `test_screens` states + the `test_ui` renderer suite), passing on clang and gcc-16.
+
 ## moto_sim bench day + whole-plan review (plan 03, session 3.6 — plan-closing)
 
 - Date: 2026-09-17. Branch s3.6-bench (a3ff70e). Board ESP32 DevKit V1, /dev/cu.usbserial-0001, console 115200. Built on pinned ESP-IDF v5.3.2 via `tools/idf-env.sh`; app image 472,896 bytes. NVS erased before the run. Whole-plan opus review found 6 cross-cutting items (all fixed in one wave, commit 0c4c462; re-review clean); two more defects were caught on the bench and fixed (a3ff70e).
