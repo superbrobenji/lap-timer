@@ -16,7 +16,9 @@ set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
 file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
 
 add_library(core STATIC ${CORE_SRCS})
-target_include_directories(core PUBLIC ${CORE_DIR}/include)
+# ui/ headers live under their own include/ root (components/core/ui/include/core/ui/*.h),
+# mirroring the ESP-IDF component's INCLUDE_DIRS (components/core/CMakeLists.txt).
+target_include_directories(core PUBLIC ${CORE_DIR}/include ${CORE_DIR}/ui/include)
 target_compile_options(core PRIVATE ${LAPTIMER_STRICT_FLAGS})
 # vendored third-party sources get relaxed warnings (file added in Task 8)
 set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
