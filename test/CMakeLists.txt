@@ -16,7 +16,9 @@ set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
 file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
 
 add_library(core STATIC ${CORE_SRCS})
-target_include_directories(core PUBLIC ${CORE_DIR}/include)
+# ui/ headers live under their own include/ root (components/core/ui/include/core/ui/*.h),
+# mirroring the ESP-IDF component's INCLUDE_DIRS (components/core/CMakeLists.txt).
+target_include_directories(core PUBLIC ${CORE_DIR}/include ${CORE_DIR}/ui/include)
 target_compile_options(core PRIVATE ${LAPTIMER_STRICT_FLAGS})
 # vendored third-party sources get relaxed warnings (file added in Task 8)
 set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
@@ -35,22 +37,31 @@ target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE UNITY_DOUBLE_PRECIS
 enable_testing()
 find_package(Threads REQUIRED)
 function(add_core_test name)
-  add_executable(${name} ${name}.c)
+  # Extra ARGN sources let one test link a host-only helper that isn't itself a test_*.c (so the
+  # glob below doesn't pick it up as its own suite) — e.g. test_ui + pbm.c.
+  add_executable(${name} ${name}.c ${ARGN})
   target_compile_options(${name} PRIVATE ${LAPTIMER_STRICT_FLAGS})
   target_link_libraries(${name} PRIVATE core unity m Threads::Threads)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
 # One executable per test/test_*.c (CONFIGURE_DEPENDS re-globs on every build, so a new suite needs no
-# edit here). test_lap is held back: its exit-criterion case drives the host-only synth fixture, so it
-# links the replay library instead of core/unity/m directly (replaylib already carries those).
+# edit here). test_lap and test_ui are held back from the generic loop and added explicitly below:
+# test_lap's exit-criterion case drives the host-only synth fixture, so it links the replay library
+# instead of core/unity/m directly (replaylib already carries those); test_ui links pbm.c (§20.2's
+# PBM snapshot writer/comparator, test/pbm.h) alongside core/unity/m.
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
-  if(NOT name STREQUAL "test_lap")
+  if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui")
     add_core_test(${name})
   endif()
 endforeach()
+
+# test_ui compares rendered framebuffers against PBM goldens in test/snapshots/ by absolute path
+# (TEST_DIR), since CTest runs a test's working directory from the build tree, not this source dir.
+add_core_test(test_ui pbm.c)
+target_compile_definitions(test_ui PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)

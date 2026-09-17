@@ -91,6 +91,17 @@ static bool     s_samples_full;        /* SYS_STORAGE_FULL: sample logging pause
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
+/* Bounded copy into a fixed on-wire header field (§12): copies at most cap-1 bytes and always
+ * NUL-terminates. Truncation of an over-long value (e.g. a git-describe dev version longer than the
+ * 16-byte fw field) is intentional and expressed without tripping -Werror=format-truncation. */
+static void hdr_set(char *dst, size_t cap, const char *src)
+{
+    size_t n = strlen(src);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
 static void log_path(char *out, size_t cap, const char *id, const char *ext)
 {
     (void)snprintf(out, cap, "/sessions/%s%s", id, ext);
@@ -166,13 +177,13 @@ static void open_session(const log_request_t *req)
                    (unsigned)(lt_nvs_boot_get() & 0xFFFFu), (unsigned)s_seq);
 
     memset(&s_hdr, 0, sizeof s_hdr);
-    (void)snprintf(s_hdr.session_id, sizeof s_hdr.session_id, "%s", s_id);
+    hdr_set(s_hdr.session_id, sizeof s_hdr.session_id, s_id);
     s_hdr.mode      = req->mode;
     s_hdr.variant   = (uint8_t)(CFG_VARIANT_MOTO ? 0 : 1);
     s_hdr.venue_id  = req->venue_id;
     s_hdr.layout_id = req->layout_id;
-    (void)snprintf(s_hdr.fw,   sizeof s_hdr.fw,   "%s", CFG_FW_VERSION);
-    (void)snprintf(s_hdr.hwid, sizeof s_hdr.hwid, "%s", CFG_HWID);
+    hdr_set(s_hdr.fw,   sizeof s_hdr.fw,   CFG_FW_VERSION);
+    hdr_set(s_hdr.hwid, sizeof s_hdr.hwid, CFG_HWID);
     s_hdr.log_profile  = 0;
     s_hdr.fused_hz     = (uint8_t)CFG_FUSED_LOG_HZ;
     s_hdr.gps_hz       = 0;                         /* real rate filled by the pipeline (3.4) */
