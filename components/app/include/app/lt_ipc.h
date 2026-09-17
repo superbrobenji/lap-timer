@@ -53,6 +53,60 @@ _Static_assert(sizeof(log_request_t) == 16, "log_request_t must be 16 B (§4.4)"
 
 extern QueueHandle_t g_log_req_q;
 
+/* result_q -- pipeline -> logger, full engine results (depth 4). The 3.3 logger could only build a
+ * minimal LAP/DRAG_RUN from the EV_LAP_COMPLETE/EV_DRAG_DONE payload (§4.5); 3.4 hands it the whole
+ * lap_result_t / drag_result_t (sectors + per-lap stats §9.4, gates) plus the real venue for the
+ * VENUE record, so the logger writes complete LAP/SECTOR and DRAG_RUN/DRAG_GATE records (§12.3). A
+ * queue (copy-by-value, cross-core safe) rather than log_request_t, which is frozen at 16 B. */
+#define RESULT_Q_DEPTH 4
+
+typedef enum {
+    LOG_RES_LAP   = 0,   /* u.lap  -> LAP (+ SECTOR) records */
+    LOG_RES_DRAG  = 1,   /* u.drag -> DRAG_RUN (+ DRAG_GATE) records */
+    LOG_RES_VENUE = 2,   /* u.venue -> the .sum VENUE record's id/layout/name */
+} log_result_kind_t;
+
+typedef struct {
+    uint8_t kind;        /* log_result_kind_t */
+    union {
+        lap_result_t  lap;
+        drag_result_t drag;
+        struct { uint16_t venue_id, layout_id; char name[24]; } venue;
+    } u;
+} log_result_t;
+
+extern QueueHandle_t g_result_q;
+
+/* §4.4 cmd_q -- ui/conn/power -> pipeline (depth 8, command_t 24 B). The producers (ui/conn/power)
+ * land in later sessions; 3.4 creates the queue and the pipeline drains it (CMD_SET_MODE /
+ * CMD_SET_LAYOUT / CMD_RESET_ENGINE at least). command_t is the §4.5 struct; the full command
+ * protocol + transport is components/app/cmd (3.5). */
+#define CMD_Q_DEPTH 8
+
+typedef struct {
+    uint8_t type;        /* command_type_t */
+    uint8_t arg8;
+    uint16_t arg16;
+    int32_t arg32;
+    double  lat;
+    double  lon;
+} command_t;
+
+typedef enum {
+    CMD_SET_MODE      = 0,   /* arg8 = MODE_LAP / MODE_DRAG */
+    CMD_SET_LAYOUT    = 1,   /* arg16 = layout id */
+    CMD_MARK_GATE     = 2,   /* arg8 = 0 S/F, n sector n */
+    CMD_CALIB_ORIENT  = 3,
+    CMD_RESET_ENGINE  = 4,
+    CMD_CONFIG_RELOAD = 5,
+    CMD_GPS_POWER     = 6,   /* arg8 = 0/1 */
+    CMD_IMU_MODE      = 7,   /* arg8 = IMU_FULL / IMU_LOWPOWER */
+} command_type_t;
+
+enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_MODE_*) */
+
+extern QueueHandle_t g_cmd_q;
+
 /* Create the rings + queues. Idempotent; call once at boot step 11 (§4.7). */
 void lt_ipc_init(void);
 

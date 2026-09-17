@@ -6,13 +6,14 @@
  * 60 s. Session open/close arrives over log_req_q. The task is static; the only dynamic wait is
  * a task notification (ring-notify) with a 1000 ms timeout -- no heap, no queue-set object.
  *
- * Session record fidelity in 3.3: with no pipeline yet, the logger encodes each drained event as
- * a generic EVENT record (§12.3 0x09 = {mono,gps,code,arg}, which represents any event verbatim),
- * and additionally emits a minimal LAP (from EV_LAP_COMPLETE) / DRAG_RUN (from EV_DRAG_DONE) built
- * from the event payload so the .sum carries them. The sector-/stats-populated LAP, the SECTOR and
- * DRAG_GATE records, and the real VENUE name need the lapengine/dragengine result structs the
- * pipeline owns; those are wired in 3.4. This is enough to exercise the power-cut exit criterion
- * (.sum intact via atomic rename; .log decodable with a resync-past-bad truncated tail).
+ * Session record fidelity: events drained from evt_q are encoded as generic EVENT records (§12.3
+ * 0x09 = {mono,gps,code,arg}, which represents any event verbatim, EV_LAP_COMPLETE/EV_DRAG_DONE
+ * included). The authoritative, complete records come from the pipeline over result_q (3.4,
+ * resolving the 3.3 deferral): logger_submit_lap writes the full LAP (sectors + per-lap stats §9.4)
+ * plus a SECTOR record per gate; logger_submit_drag writes the full DRAG_RUN plus a DRAG_GATE per
+ * hit gate; logger_set_venue writes the real VENUE name. .sum stays HDR + VENUE + every LAP + every
+ * DRAG_RUN [+ END] (§12.5); SECTOR/DRAG_GATE are .log-only. The 3.3 power-cut exit criterion is
+ * unaffected (.sum intact via atomic rename; .log decodable with a resync-past-bad truncated tail).
  */
 #include "app/logger.h"
 #include "app/lt_ipc.h"
@@ -237,33 +238,65 @@ static void handle_request(const log_request_t *req)
 
 static void handle_event(const event_t *ev)
 {
+    /* Every event -- EV_LAP_COMPLETE / EV_DRAG_DONE included -- is logged verbatim as a generic
+     * EVENT record (§12.3). The authoritative full LAP / DRAG_RUN records now arrive over result_q
+     * (handle_result), so the logger no longer synthesises a minimal one from the event payload. */
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_event(ev->mono_us, ev->gps_us, ev->type, ev->arg32, tmp, sizeof tmp);
+    batch_append(tmp, n);
+}
+
+/* §12.3 SECTOR / DRAG_GATE / real VENUE from the pipeline's full engine result (result_q). */
+static void handle_result(const log_result_t *res)
+{
+    if (!s_open) return;                             /* nothing to write without an open .log */
     uint8_t tmp[FRAME_TMP_CAP];
     int n;
-    if (ev->type == EV_LAP_COMPLETE) {
-        lap_result_t lap;
-        memset(&lap, 0, sizeof lap);
-        lap.lap_no       = ev->arg16;
-        lap.time_ms      = ev->arg32;
-        lap.flags        = ev->flags;
-        lap.start_gps_us = ev->gps_us;
-        lap.n_sectors    = 0;                        /* sectors/stats added by the pipeline (3.4) */
-        n = ses_encode_lap(&lap, tmp, sizeof tmp);
+
+    if (res->kind == LOG_RES_LAP) {
+        const lap_result_t *lap = &res->u.lap;
+        n = ses_encode_lap(lap, tmp, sizeof tmp);    /* full record: sectors + per-lap stats §9.4 */
         batch_append(tmp, n);
-        acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n);
+        acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n);   /* .sum carries every LAP (§12.5) */
+        /* One SECTOR record per sector gate: crossing gps_us reconstructed from the cumulative
+         * splits (exact -- the splits are the crossing differences), delta left 0. */
+        int64_t cum_us = lap->start_gps_us;
+        uint8_t gates = (lap->n_sectors > 0) ? (uint8_t)(lap->n_sectors - 1u) : 0u;
+        for (uint8_t j = 0; j < gates && j < LAP_MAX_SECTORS; j++) {
+            cum_us += (int64_t)lap->sector_ms[j] * 1000;
+            n = ses_encode_sector(lap->lap_no, (uint8_t)(j + 1u), cum_us, lap->sector_ms[j], 0,
+                                  tmp, sizeof tmp);
+            batch_append(tmp, n);                    /* SECTOR is .log-only */
+        }
         s_sum_dirty = true;
-    } else if (ev->type == EV_DRAG_DONE) {
-        drag_result_t run;
-        memset(&run, 0, sizeof run);
-        run.run_no  = ev->arg16;
-        run.n_gates = 0;
-        n = ses_encode_drag_run(&run, tmp, sizeof tmp);
+    } else if (res->kind == LOG_RES_DRAG) {
+        const drag_result_t *run = &res->u.drag;
+        n = ses_encode_drag_run(run, tmp, sizeof tmp);
         batch_append(tmp, n);
         acc_append(s_drag_acc, &s_drag_len, DRAG_ACC_CAP, tmp, n);
+        for (uint8_t i = 0; i < run->n_gates && i < DRAG_MAX_GATES; i++) {
+            const drag_gate_res_t *g = &run->gates[i];
+            if (!g->hit) continue;
+            int64_t g_gps_us = run->t0_gps_us + (int64_t)g->time_ms * 1000;
+            n = ses_encode_drag_gate(run->run_no, g->gate_id, g_gps_us, g->time_ms,
+                                     g->speed_cms, g->dist_cm, tmp, sizeof tmp);
+            batch_append(tmp, n);                    /* DRAG_GATE is .log-only */
+        }
         s_sum_dirty = true;
-    } else {
-        n = ses_encode_event(ev->mono_us, ev->gps_us, ev->type, ev->arg32, tmp, sizeof tmp);
-        batch_append(tmp, n);
+    } else if (res->kind == LOG_RES_VENUE) {
+        s_venue_id  = res->u.venue.venue_id;
+        s_layout_id = res->u.venue.layout_id;
+        (void)snprintf(s_venue_name, sizeof s_venue_name, "%s", res->u.venue.name);
+        s_hdr.venue_id  = s_venue_id;                /* keep the .sum HDR consistent */
+        s_hdr.layout_id = s_layout_id;
+        s_sum_dirty = true;                          /* rebuild .sum with the real VENUE record */
     }
+}
+
+static void drain_results(void)
+{
+    log_result_t res;
+    while (xQueueReceive(g_result_q, &res, 0) == pdTRUE) handle_result(&res);
 }
 
 static void drain_rings(void)
@@ -346,6 +379,7 @@ static void logger_task(void *arg)
 
         drain_rings();
         drain_events();
+        drain_results();
 
         uint32_t now = now_ms();
         if (s_open && s_batch_len &&
@@ -372,4 +406,43 @@ void logger_start(void)
 void logger_notify(void)
 {
     if (s_task) xTaskNotifyGive(s_task);
+}
+
+/* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily
+ * full queue drops the result (the .log still carries the EVENT record). Safe from the pipeline. */
+static void submit(const log_result_t *r)
+{
+    if (!g_result_q) return;
+    if (xQueueSend(g_result_q, r, 0) == pdTRUE) logger_notify();
+}
+
+void logger_submit_lap(const lap_result_t *lap)
+{
+    if (!lap) return;
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_LAP;
+    r.u.lap = *lap;
+    submit(&r);
+}
+
+void logger_submit_drag(const drag_result_t *run)
+{
+    if (!run) return;
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_DRAG;
+    r.u.drag = *run;
+    submit(&r);
+}
+
+void logger_set_venue(uint16_t venue_id, uint16_t layout_id, const char *name)
+{
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_VENUE;
+    r.u.venue.venue_id = venue_id;
+    r.u.venue.layout_id = layout_id;
+    if (name) (void)snprintf(r.u.venue.name, sizeof r.u.venue.name, "%s", name);
+    submit(&r);
 }

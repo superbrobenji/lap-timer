@@ -18,6 +18,7 @@
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
+#include "app/pipeline.h"
 #include "hal/storage.h"
 
 #include "core/event.h"
@@ -88,11 +89,21 @@ static int cmd_logtest(int argc, char **argv)
     logger_notify();
     vTaskDelay(pdMS_TO_TICKS(30));      /* let the logger open + write the HDR + initial .sum */
 
-    /* two LAP events (rebuild .sum with laps early, before the long .log tail) */
+    /* real VENUE + two full LAP records via the 3.4 result path (rebuild .sum with laps early,
+     * before the long .log tail). Mirrors what the pipeline hands the logger. */
+    logger_set_venue(1, 1, "logtest");
     for (uint16_t lap = 1; lap <= 2; lap++) {
-        event_t ev = { .type = EV_LAP_COMPLETE, .flags = LAP_F_VALID, .arg16 = lap,
-                       .arg32 = 92000u + lap * 137u, .gps_us = req.gps_us + (int64_t)lap * 92000000 };
-        xQueueSend(g_evt_q, &ev, pdMS_TO_TICKS(100));
+        lap_result_t lr;
+        memset(&lr, 0, sizeof lr);
+        lr.lap_no       = lap;
+        lr.time_ms      = 92000u + lap * 137u;
+        lr.flags        = LAP_F_VALID;
+        lr.start_gps_us = req.gps_us + (int64_t)lap * 92000000;
+        lr.n_sectors    = 3;
+        lr.sector_ms[0] = 30000u; lr.sector_ms[1] = 31000u; lr.sector_ms[2] = 31000u + lap * 137u;
+        lr.stats.max_speed_cms = 5000; lr.stats.min_speed_cms = 1200;
+        lr.stats.max_lean_r_cdeg = 3500; lr.stats.max_gacc_e3 = 900;
+        logger_submit_lap(&lr);
     }
     logger_notify();
 
@@ -225,6 +236,28 @@ static int cmd_logck(int argc, char **argv)
     return 0;
 }
 
+/* ---------------- dbg laps ---------------- */
+static int cmd_laps(void)
+{
+    static lap_result_t laps[24];
+    int n = pipeline_laps_snapshot(laps, (int)(sizeof laps / sizeof laps[0]));
+    if (n == 0) { printf("laps: none completed yet\n"); return 0; }
+    printf("laps: %d completed\n", n);
+    for (int i = 0; i < n; i++) {
+        const lap_result_t *l = &laps[i];
+        printf("  lap %-3u %lu.%03lu s  flags=0x%02x  splits[",
+               (unsigned)l->lap_no, (unsigned long)(l->time_ms / 1000u),
+               (unsigned long)(l->time_ms % 1000u), (unsigned)l->flags);
+        for (uint8_t k = 0; k < l->n_sectors; k++)
+            printf("%s%lu", k ? " " : "", (unsigned long)l->sector_ms[k]);
+        printf("]  vmax=%u vmin=%u cm/s leanL=%d leanR=%d cdeg gacc=%d gbrake=%d glat=%d e-3\n",
+               (unsigned)l->stats.max_speed_cms, (unsigned)l->stats.min_speed_cms,
+               (int)l->stats.max_lean_l_cdeg, (int)l->stats.max_lean_r_cdeg,
+               (int)l->stats.max_gacc_e3, (int)l->stats.max_gbrake_e3, (int)l->stats.max_glat_e3);
+    }
+    return 0;
+}
+
 static int cmd_dbg(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "status") == 0)  return cmd_status();
@@ -232,7 +265,8 @@ static int cmd_dbg(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "fs") == 0)      return cmd_fs();
     if (argc >= 2 && strcmp(argv[1], "sum") == 0)     return cmd_sum(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "logck") == 0)   return cmd_logck(argc, argv);
-    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id>\n");
+    if (argc >= 2 && strcmp(argv[1], "laps") == 0)    return cmd_laps();
+    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps\n");
     return 1;
 }
 
@@ -253,7 +287,7 @@ void dbg_console_start(int reset_reason)
 
     const esp_console_cmd_t cmd = {
         .command = "dbg",
-        .help = "diagnostics: status | logtest [n] | fs | sum <id> | logck <id>",
+        .help = "diagnostics: status | logtest [n] | fs | sum <id> | logck <id> | laps",
         .hint = NULL,
         .func = cmd_dbg,
     };

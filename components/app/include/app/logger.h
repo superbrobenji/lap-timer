@@ -9,7 +9,19 @@
 #ifndef APP_LOGGER_H
 #define APP_LOGGER_H
 
+#include <stdint.h>
+
+#include "core/types.h"
+
 void logger_start(void);    /* create + start the task (boot step 12) */
 void logger_notify(void);   /* wake the logger (task notification); safe from any task */
+
+/* Pipeline -> logger, full engine results (3.4, resolving the 3.3 deferral). Each copies the result
+ * onto result_q (cross-core safe) and wakes the logger; the logger writes the complete LAP (+ SECTOR)
+ * / DRAG_RUN (+ DRAG_GATE) records (§12.3) and the real VENUE record. Safe from the pipeline task;
+ * drop silently if the queue is momentarily full (the .log keeps the EVENT record either way). */
+void logger_submit_lap(const lap_result_t *lap);
+void logger_submit_drag(const drag_result_t *run);
+void logger_set_venue(uint16_t venue_id, uint16_t layout_id, const char *name);
 
 #endif /* APP_LOGGER_H */
