@@ -18,6 +18,8 @@
 #include "app/lt_ipc.h"
 #include "app/logger.h"
 #include "app/lt_sup.h"
+#include "app/lt_rtc.h"
+#include "app/lt_nvs.h"
 
 #include "hal/gps.h"
 #include "hal/imu.h"
@@ -41,7 +43,20 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include <stdio.h>
 #include <string.h>
+
+/* RTC resume freshness window (spec §15.3 / Appendix A = 14400 s). Session 3.5 Task 1 relocates this
+ * constant into app/lt_consts.h; auto-include it when present and fall back to the spec value until
+ * that lands, so this task builds standalone and picks up the shared constant after integration. */
+#if defined(__has_include)
+#  if __has_include("app/lt_consts.h")
+#    include "app/lt_consts.h"
+#  endif
+#endif
+#ifndef RTC_RESUME_MAX_S
+#define RTC_RESUME_MAX_S 14400
+#endif
 
 static const char *TAG = "pipe";
 
@@ -68,6 +83,12 @@ static fus_t  s_fus;
 static lap_t  s_lap;
 static drag_t s_drag;
 static uint8_t s_mode;                     /* MODE_LAP / MODE_DRAG */
+
+/* §15.3 RTC continuity: resume the interrupted lap after a reset, and save on every gate. */
+static rtc_state_t s_resume;               /* VALID snapshot read at init, consumed on first fix */
+static bool        s_resume_pending;       /* armed at init; import (or drop) on the first valid fix */
+static bool        s_rtc_save_due;         /* an S/F or sector event fired this fix -> save after on_fix */
+static char        s_session_id[10];       /* identity stored in the RTC snapshot (diagnostic) */
 
 #if CFG_GPS_SIM
 static trk_venue_t s_venue;                /* the sim capture's venue (from gps_sim's JSON) */
@@ -173,10 +194,14 @@ static void engine_cb(const event_t *ev, void *ctx)
     (void)ctx;
     emit_event(ev);
     switch (ev->type) {
-    case EV_LAP_COMPLETE: on_lap_complete(ev->gps_us); break;
+    case EV_LAP_COMPLETE:
+        on_lap_complete(ev->gps_us);
+        s_rtc_save_due = true;     /* §15.3: save after on_fix, once open_lap has opened the new lap */
+        break;
     case EV_SECTOR:
         ESP_LOGI(TAG, "  sector %u  split %lu ms  delta %ld ms", (unsigned)ev->arg16,
                  (unsigned long)ev->arg32, (long)(int32_t)ev->arg32b);
+        s_rtc_save_due = true;     /* §15.3: the crossed sector is now the resume point */
         break;
     case EV_DRAG_DONE:    on_drag_done(); break;
     default: break;
@@ -226,10 +251,53 @@ static void on_fix(gps_fix_t *fix)
     fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
                       (float)fix->head_e5 / 1e5f, fix->mono_us, valid);
 
-    if (s_mode == MODE_LAP)
+    /* §15.3 resume: on the first valid fix, if a fresh RTC snapshot is armed, restore the interrupted
+     * lap into LAP_RUNNING (carrying LAP_F_INTERRUPTED) before the engine sees this fix, so it
+     * continues and completes normally. Runs once, lap mode only. */
+    if (s_mode == MODE_LAP && s_resume_pending && valid) {
+        s_resume_pending = false;
+        if (fix->gps_us - s_resume.saved_gps_us < (int64_t)RTC_RESUME_MAX_S * 1000000) {
+            lap_rtc_t lr = {
+                .venue_id         = s_resume.venue_id,
+                .layout_id        = s_resume.layout_id,
+                .lap_no           = s_resume.lap_no,
+                .sector_idx       = s_resume.sector_idx,
+                .mode             = LAP_MODE_NORMAL,   /* a resumed lap is always a normal lap */
+                .lap_start_gps_us = s_resume.lap_start_gps_us,
+                .best             = s_resume.best,
+                .prev             = s_resume.prev,
+            };
+            memcpy(lr.gate_times, s_resume.gate_times, sizeof lr.gate_times);
+            if (lap_import_rtc(&s_lap, &lr) == 0) {
+                ESP_LOGI(TAG, "rtc resume: lap %u venue %u continued (interrupted)",
+                         (unsigned)lr.lap_no, (unsigned)lr.venue_id);
+            } else {
+                /* Unknown venue: keep the cold engine state (sim already set the venue at init; on
+                 * real hardware the engine keeps scanning for it). */
+                ESP_LOGW(TAG, "rtc resume: venue %u unknown, cold start", (unsigned)lr.venue_id);
+            }
+        } else {
+            lt_rtc_clear();
+            ESP_LOGI(TAG, "rtc resume: snapshot stale, cleared");
+        }
+    }
+
+    if (s_mode == MODE_LAP) {
         lap_on_fix(&s_lap, fix, s_have_fused ? &s_latest_fused : NULL, engine_cb, NULL);
-    else
+        /* §15.3 save-on-gate: if this fix crossed an S/F or sector line, snapshot the engine's
+         * (now-updated) resumable state so the most-recent gate becomes the resume point after any
+         * reset. On EV_LAP_COMPLETE the engine has already opened the next lap, so the export
+         * captures that freshly-opened lap -- exactly the state to resume into. */
+        if (s_rtc_save_due) {
+            s_rtc_save_due = false;
+            lap_rtc_t lr;
+            lap_export_rtc(&s_lap, &lr);
+            lt_rtc_save(&lr, s_session_id, fix->gps_us, s_mode,
+                        0 /* power_state: no owner in plan 03 */, 0 /* partial_count */);
+        }
+    } else {
         drag_on_fix(&s_drag, fix);
+    }
 
     /* §6.5 fix-lost edge: three consecutive invalid fixes -> EV_FIX_LOST; next valid -> EV_FIX_OK. */
     if (valid) {
@@ -334,6 +402,21 @@ static void pipeline_init(void)
     s_mode = MODE_LAP;
     stats_reset();
     s_last_temp_us = esp_timer_get_time();
+
+    /* §15.3 RTC continuity: derive a boot-scoped session identity for the snapshots (diagnostic
+     * only -- not consumed by the resume path), then arm resume. app_main leaves a VALID snapshot
+     * in place at boot step 4; if one is present, keep it and import on the first valid fix.
+     * Anything else -> start clean. */
+    (void)snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
+    if (lt_rtc_validate(&s_resume) == RTC_VALID) {
+        s_resume_pending = true;
+        ESP_LOGI(TAG, "rtc resume armed: lap %u venue %u saved@%lld us",
+                 (unsigned)s_resume.lap_no, (unsigned)s_resume.venue_id,
+                 (long long)s_resume.saved_gps_us);
+    } else {
+        lt_rtc_clear();
+        s_resume_pending = false;
+    }
 
 #if CFG_GPS_SIM
     /* Set the venue exactly as replay does: parse the sim capture's venue JSON with trk_from_json,
