@@ -4393,3 +4393,151 @@ Also: in `logger_task`'s loop add `drain_results();` right after `drain_events()
 **Verify:** `./build.sh moto_sim build` and `./build.sh moto_neo6m build` green (logger changes are variant-independent).
 
 ---
+
+## Session 3.5 — serial export console, RTC continuity, crash-loop safe mode (closes #6)
+
+Roadmap exit: `dbg crash` mid-lap → the lap resumes flagged interrupted; three abnormal resets within 60 s → safe mode; tag `p03-d5`. Spec §18.4 (serial fallback), §18.1 (command protocol / `app/cmd`), §15.3 (RTC memory), §17.5 (crash-loop safe mode), §4.7 steps 3-4, §17.4 sys_flags. Closes #6.
+
+**Recon ruling (what already exists — 3.5 is plumbing, not new mechanism).** The engine and NVS layers already carry most of the mechanism; 3.5 wires them up:
+- `core/lap.h` has full resume support (`lap_rtc_t`, `lap_export_rtc`/`lap_import_rtc`, `LAP_F_INTERRUPTED`), added and unit-tested in session 2.5 (`test/test_lap.c:686-730`). Nothing calls it yet. `lap_import_rtc` sets `state=RUNNING`, `flags=LAP_F_INTERRUPTED`, restores lap_no/lap_start/gate_times/best/prev, and returns -1 iff the venue id is unknown.
+- `lt_rtc.c` defines `rtc_state_t` matching §15.3 field-for-field with CRC32 implemented, but has **no writer** (only `lt_rtc_validate`/`lt_rtc_clear`); constant is named `RTC_STATE_MAGIC` (= spec `RTC_MAGIC`, 0x4C505452).
+- `lt_nvs.c` already implements crash-loop detection (`lt_crashlog_push`, `lt_crashlog_is_loop` — abnormal×3 within a hardcoded 60 s) and a one-shot safe gate (`lt_safe_until_get/set`); `app_main.c` already sets `SYS_SAFE_MODE` (bit 9) at boot. Missing: named constants, an uptime-based auto-clear, and any runtime safe-mode behavior.
+- `dbg_console.c` is a single flat `dbg` command (verbs `status/logtest/fs/sum/logck/laps`, argv dispatch). The §18.4 export console and `components/app/cmd` do not exist. The `EXPORT_SERIAL` CMake flag exists (default ON) but no component consumes it.
+- Core JSON/export codecs exist and are pure C11: `core/cfg.h` (`cfg_to_json`/`cfg_from_json`), `core/exp.h` (`exp_json_*`/`exp_vbo_*`/`exp_nmea_*` streaming from decoded `ses` frames), `core/ses` reader, `core/json.h`.
+
+**Freshness-gate ruling (§15.3 / §4.7 step 4).** `saved_gps_us` is a GPS-domain timestamp and `mono_us` resets to 0 on every reset, so the "younger than `RTC_RESUME_MAX_S`" test cannot run at boot (no clock yet). The pipeline defers it: at init it loads the validated pending `rtc_state_t`; on the **first valid fix** it resumes iff `fix.gps_us − saved_gps_us < RTC_RESUME_MAX_S·1e6`, else clears. This matches the `lap.c:252` comment ("the RTC_RESUME_MAX_S freshness gate is the pipeline's job").
+
+**Safe-mode behavior ruling (§17.5).** In safe mode the pipeline and both engines still run and summaries are still written; only **sample logging is suppressed** (the logger drops FIX/FUSED sample records but keeps SESSION_HDR, VENUE, LAP, DRAG_RUN, END). BLE/WiFi and the "SAFE MODE" e-paper render are later plans (no radio/display component exists yet) — noted, not built here. `dbg status` already surfaces the `SAFE` tag.
+
+**Auto-clear ruling (§17.5).** Keep the existing boot-gate that carries safe mode into the crash-loop-triggered boot, and add the spec's uptime clear: once this boot reaches `SAFE_MODE_CLEAR_S` of uptime, the supervisor clears the persisted safe gate and `SYS_SAFE_MODE` so the next boot is normal.
+
+**Execution structure (PARALLEL).** Serial scaffold → parallel disjoint-file wave in worktrees → serial integration:
+- **Task 1 (serial scaffold):** `lt_consts.h` — the four Appendix-A firmware policy constants. Tiny; unblocks the rest.
+- **Parallel wave (worktrees), disjoint file sets:** **Task 2** RTC continuity (`lt_rtc.*`, `pipeline.c`) · **Task 3** safe-mode behavior (`lt_nvs.*`, `sup.c`, `logger.c`) · **Task 6** idf-env.sh guard (`tools/idf-env.sh`).
+- **Serial integration:** **Task 4** console core + `dbg crash` (`components/app/cmd/**`, `components/drivers/export_serial/**`, `app_main.c`, CMake) then **Task 5** console file streaming (`open/read/list` over `core/exp` + `ses`). Task 4 removes `dbg_console.c`; it runs after the parallel wave integrates, so it never races Task 2/3.
+
+The on-hardware exit test needs Task 4's `dbg crash` + `dbg status`; the file-streaming console (Task 5) is roadmap scope verified over serial with `tools/serial_export.py`.
+
+### Task 1: firmware policy constants (`lt_consts.h`)
+
+**Files:** Create `components/app/include/app/lt_consts.h`. Modify nothing else (Task 3 swaps the `lt_nvs.c` literals).
+
+**Interfaces produced:** the four constants, consumed by Tasks 2 (RTC_RESUME_MAX_S) and 3 (crash-loop trio).
+
+- [ ] **Step 1** — create the header (values from spec Appendix A, §15.3/§17.5):
+
+```c
+/* lt_consts.h -- firmware policy constants (spec Appendix A). Engine/geometry constants stay in
+ * core/consts.h; these are app/firmware policy (RTC resume freshness, crash-loop, safe mode). */
+#ifndef APP_LT_CONSTS_H
+#define APP_LT_CONSTS_H
+
+#define RTC_RESUME_MAX_S     14400   /* §15.3: resume an interrupted session only if the first fix is
+                                        within this many seconds of the saved gps time */
+#define CRASH_LOOP_N         3       /* §17.5: this many consecutive abnormal resets ... */
+#define CRASH_LOOP_WINDOW_S  60      /*        ... each with uptime below this -> safe mode */
+#define SAFE_MODE_CLEAR_S    600     /* §17.5: uptime in safe mode after which the supervisor clears it */
+
+#endif /* APP_LT_CONSTS_H */
+```
+
+- [ ] **Step 2** — `git commit` (`feat(fw): lt_consts.h firmware policy constants (§Appendix A)`). No build change to verify beyond a header-only compile; the scaffold is verified when a consumer builds in Task 2/3.
+
+### Task 2: RTC continuity — save on every gate, resume the interrupted lap (§15.3)
+
+**Files:** Modify `components/app/sys/lt_rtc.c`, `components/app/include/app/lt_rtc.h`, `components/app/pipeline/pipeline.c`. (Disjoint from Tasks 3/6.)
+
+**Interfaces consumed:** `RTC_RESUME_MAX_S` (Task 1); `lap_export_rtc`/`lap_import_rtc`/`lap_rtc_t`/`LAP_F_INTERRUPTED` (core/lap.h, existing); `lt_rtc_validate`/`rtc_state_t`/`RTC_STATE_MAGIC` (lt_rtc.h, existing).
+
+**Interfaces produced (add to `lt_rtc.h`):**
+```c
+/* Populate and CRC the RTC state from the current lap-engine snapshot + session identity, then
+ * store it in RTC_DATA_ATTR memory (survives reset/deep-sleep). Called by the pipeline on every
+ * S/F and sector event and before a supervised restart. */
+void lt_rtc_save(const lap_rtc_t *lr, const char *session_id, int64_t saved_gps_us,
+                 uint8_t mode, uint8_t power_state, uint32_t partial_count);
+```
+(`lt_rtc.h` must include `core/lap.h` for `lap_rtc_t`, or forward-declare + include in the .c — pick include, it is already an app-layer header.)
+
+- [ ] **Step 1** — write the failing host-adjacent reasoning into a target test is not practical here (RTC_DATA_ATTR + pipeline are on-target); the acceptance is the on-hardware exit test. Instead, add `lt_rtc_save` and verify the round-trip **structurally**: `lt_rtc_save(...)` then `lt_rtc_validate(&out)` returns `RTC_VALID` and `out` fields equal what was saved (CRC passes). Prove this in `dbg` (Task 4 adds `dbg rtc`) — for Task 2 the reviewer checks the save populates every field the resume path reads.
+- [ ] **Step 2** — implement `lt_rtc_save`: memcpy the `lap_rtc_t` fields (venue_id, layout_id, lap_no, sector_idx, mode, lap_start_gps_us, gate_times[], best, prev) into `s_rtc`; set `magic=RTC_STATE_MAGIC`, `version=RTC_STATE_VERSION`, `session_id` (bounded copy, 10 bytes), `saved_gps_us`, `session_epoch_mono_us` (keep existing if set), `power_state`, `partial_count`, `_pad*=0`; compute `crc32` over all bytes except `crc32` (reuse the file's `rtc_crc()`).
+- [ ] **Step 3** — pipeline init resume-arm: include `app/lt_rtc.h` + `app/lt_consts.h`. In `pipeline_start`/task init, after `lt_rtc_validate(&s_resume)`: if `RTC_VALID`, keep `s_resume` and set `s_resume_pending=true`; else `lt_rtc_clear()` and `s_resume_pending=false`. Do **not** import yet (no clock).
+- [ ] **Step 4** — pipeline resume-on-first-fix: in `on_fix`, when the fix is valid and `s_resume_pending`, gate on freshness `fix->gps_us - s_resume.saved_gps_us < (int64_t)RTC_RESUME_MAX_S * 1000000`; if fresh, build a `lap_rtc_t` from `s_resume` and call `lap_import_rtc(&s_lap, &lr)` (on -1, i.e. unknown venue, fall back to the cold `lap_set_venue` path already there); emit `EV_LAP_COMPLETE`? no — emit nothing; the resumed lap continues and completes normally later carrying `LAP_F_INTERRUPTED`. Clear `s_resume_pending` either way; if stale, `lt_rtc_clear()`. Guard so this runs once and only in lap mode.
+- [ ] **Step 5** — pipeline save-on-gate: on `EV_LAP_COMPLETE` and `EV_SECTOR` (and when a new lap opens at S/F), call `lap_export_rtc(&s_lap, &lr)` then `lt_rtc_save(&lr, s_session_id, fix->gps_us, mode, power_state_placeholder, 0)`. `power_state` has no owner yet (power task is a later plan) — pass a fixed `0` and note it. This makes the most-recent gate the resume point after any reset.
+- [ ] **Step 6** — build `moto_sim` and `moto_neo6m`; both green, size within `0x130000`. Commit (`feat(fw): RTC continuity -- save engine state per gate, resume interrupted lap (§15.3)`).
+
+### Task 3: crash-loop safe mode — named constants, behavior, uptime auto-clear (§17.5)
+
+**Files:** Modify `components/app/sys/lt_nvs.c`, `components/app/include/app/lt_nvs.h`, `components/app/supervisor/sup.c`, `components/app/logger/logger.c`. (Disjoint from Tasks 2/6.)
+
+**Interfaces consumed:** `CRASH_LOOP_N`/`CRASH_LOOP_WINDOW_S`/`SAFE_MODE_CLEAR_S` (Task 1); `sys_flags_get/clear`, `SYS_SAFE_MODE` (lt_sup.h); `lt_crashlog_is_loop`, `lt_safe_until_get/set` (lt_nvs, existing); `errlog_add` (existing).
+
+**Interfaces produced:** `void lt_safe_clear(void);` in `lt_nvs.h` (clears the persisted safe gate; NVS `lt_sys/safe_until` set so `boot_cnt <= get()` is false next boot).
+
+- [ ] **Step 1** — `lt_nvs.c`: replace the hardcoded `3` (crash-log length is `CRASH_LOG_LEN`, leave that) and the `60` in `lt_crashlog_is_loop` with `CRASH_LOOP_WINDOW_S`, and assert/comment that `CRASH_LOG_LEN == CRASH_LOOP_N` (both 3). Include `app/lt_consts.h`.
+- [ ] **Step 2** — `lt_nvs.c`: add `lt_safe_clear()` (erase or zero `lt_sys/safe_until`).
+- [ ] **Step 3** — supervisor auto-clear: in `sup_task`, after the uptime update, if `sys_flags_get(SYS_SAFE_MODE)` and current uptime `>= SAFE_MODE_CLEAR_S`, call `lt_safe_clear()`, `sys_flags_clear(SYS_SAFE_MODE)`, `errlog_add(E_SYS_SAFE_MODE, 0)` once (guard with a static bool so it fires a single time). Uptime source: reuse the supervisor's existing seconds counter feeding `lt_rtc_uptime_update_s`.
+- [ ] **Step 4** — logger safe-mode suppression: in the logger's record path, when `sys_flags_get(SYS_SAFE_MODE)` is set, skip writing FIX and FUSED sample records (drop them, still advance/ack the ring) but continue writing SESSION_HDR, VENUE, LAP, DRAG_RUN and END. Verify the `.sum` and summaries still form.
+- [ ] **Step 5** — build both envs green, size gate. Commit (`feat(fw): crash-loop safe mode -- constants, logger suppression, uptime auto-clear (§17.5)`).
+
+### Task 4: `app/cmd` dispatch + `export_serial` console core + `dbg` (§18.4/§18.1)
+
+**Files:** Create `components/app/cmd/{cmd.c,CMakeLists.txt}` and `components/app/include/app/cmd.h`; create `components/drivers/export_serial/{export_serial.c,CMakeLists.txt}` and its `include/`; modify `main/app_main.c` (swap `dbg_console_start` → `export_serial_start`), `CMakeLists.txt` (append `components/drivers/export_serial` to `EXTRA_COMPONENT_DIRS` when `EXPORT_SERIAL` is ON), `main/CMakeLists.txt` (REQUIRES export_serial when present), and **remove** `components/app/sys/dbg_console.c` + its header (its debug verbs migrate into `export_serial`'s `dbg` command). (Runs after the parallel wave integrates.)
+
+**Interfaces produced (`app/cmd.h`):**
+```c
+/* Transport-agnostic command dispatch (§18.1). The transport (serial now, BLE/WiFi later) supplies an
+ * emit callback; cmd_dispatch runs one op and streams its output through emit as (tag, seq, flags,
+ * payload) chunks. flags bit0 LAST, bit1 ERROR (payload = code u16 | utf8). Returns 0, or -1 on a
+ * transport/emit error; protocol errors are reported through an ERROR chunk (E_CONN_PROTO). */
+typedef int (*cmd_emit_fn)(void *ctx, uint8_t tag, uint16_t seq, uint8_t flags,
+                           const uint8_t *payload, size_t len);
+enum { CMD_STATUS=0x01, CMD_LIST=0x02, CMD_OPEN=0x03, CMD_READ=0x04, CMD_CLOSE=0x05, CMD_DELETE=0x06,
+       CMD_CONFIG_GET=0x10, CMD_CONFIG_SET=0x11, CMD_ERRLOG_GET=0x14, CMD_ERRLOG_CLEAR=0x15,
+       CMD_DIAG_GET=0x16 };
+int cmd_dispatch(uint8_t op, uint8_t tag, const uint8_t *payload, size_t len,
+                 cmd_emit_fn emit, void *ctx);
+```
+Task 4 implements the non-file ops (STATUS, CONFIG_GET/SET, ERRLOG_GET/CLEAR, DIAG_GET, DELETE, CLOSE); Task 5 fills LIST/OPEN/READ. A not-yet-implemented op returns an ERROR chunk with `E_CONN_PROTO` until Task 5.
+
+**export_serial** (`export_serial.h`: `void export_serial_start(int reset_reason);`):
+- `esp_console` REPL (reuse the 3.2 setup: prompt `laptimer>`, dumb mode, UART0; console baud stays `CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200` per §21.2). Register per-verb commands via `esp_console_cmd_register`: `status`, `config` (`get`|`set <json>`), `errlog` (dump | `clear`), `diag`, `delete <id>`, `close`, and `dbg`. (`list`/`open`/`read` are registered in Task 5.)
+- Each text command builds the request and calls `cmd_dispatch` with an emit callback that prints chunk payloads to the console. JSON/text ops print between the §18.4 framing `---BEGIN <name> <size>---\r\n` … `---END <crc32 hex>---\r\n`.
+- `dbg <sub>`: implement `hang` (busy-loop to trip the task WDT), `crash` (`abort()` / null-deref to force `ESP_RST_PANIC`), and migrate the existing debug verbs `status`(engine)/`logtest [n]`/`fs`/`sum <id>`/`logck <id>`/`laps`/`rtc` (new: dump the validated `rtc_state_t`). `gps raw`/`imu raw`/`power`/`sim` per §18.4 are stubbed with a "not in plan 03" line (drivers/power land later).
+
+- [ ] **Step 1** — `app/cmd`: implement STATUS (build the §18.2 20-byte status: proto_ver=1, state, sys_flags low16, batt_pct/mv placeholder 0, storage_free_kb from `sto_*`, session_count from the sessions dir, fw = `CFG_FW_VERSION`). CONFIG_GET/SET via `cfg_to_json`/`cfg_from_json` over the loaded `cfg_t` (+ `lt_cfg_save` on set, ERROR chunk with the validate message on failure). ERRLOG_GET (JSON of the error ring), ERRLOG_CLEAR, DIAG_GET (§17.10 counters + states as JSON), DELETE (`sto_*` unlink), CLOSE (ack).
+- [ ] **Step 2** — `export_serial`: REPL + the verbs above wired to `cmd_dispatch`; framing + CRC32; redirect `esp_log_level_set("*", ESP_LOG_ERROR)` for the duration of a framed transfer, restore after.
+- [ ] **Step 3** — `dbg crash`/`dbg hang` + migrate the 3.2/3.3/3.4 debug verbs; `dbg rtc`.
+- [ ] **Step 4** — remove `dbg_console.c`/`.h`; swap `app_main.c` to `export_serial_start(reason)`; CMake gate on `EXPORT_SERIAL`; `main/CMakeLists.txt` REQUIRES `export_serial`.
+- [ ] **Step 5** — build both envs green, size gate. Commit (`feat(fw): app/cmd dispatch + export_serial console (§18.4) + dbg crash/hang`).
+
+### Task 5: `export_serial` file streaming — list / open / read (§18.4)
+
+**Files:** Modify `components/app/cmd/cmd.c` (+ `cmd.h` if needed), `components/drivers/export_serial/export_serial.c`. (Serial, after Task 4.)
+
+**Interfaces consumed:** `cmd_dispatch` (Task 4); `core/exp.h` (`exp_json_*`/`exp_vbo_*`/`exp_nmea_*`), the `core/ses` reader, `core/json.h`, `sto_*` listing/read.
+
+- [ ] **Step 1** — `app/cmd` LIST: enumerate `/lfs/sessions`, for each read the `.sum` header via the `ses` reader and emit the §14.3 JSON array (id, start time, venue/layout, laps, best, log_kb), chunked.
+- [ ] **Step 2** — `app/cmd` OPEN `id,fmt` / READ `offset`: for fmt json/vbo/nmea, stream the `.log` through `exp_open`/`exp_feed`(decoded ses frames)/`exp_pull` producing the export format, `LAST` on the final chunk followed by the 4-byte CRC32; for fmt log/sum, stream the raw file bytes. Keep the open stream resumable via READ `offset`.
+- [ ] **Step 3** — `export_serial` `open <id> <vbo|nmea|json|log|sum>` / `read <offset>` / `list`: call `cmd_dispatch`, emit through the §18.4 framing; Base64-encode the payload for the binary formats (log/sum), raw text for vbo/nmea/json.
+- [ ] **Step 4** — build both envs green, size gate; a quick `tools/serial_export.py <port> list` / `open` smoke check is part of the on-hardware session close. Commit (`feat(fw): export_serial file streaming -- list/open/read via core/exp (§18.4)`).
+
+### Task 6: fix `tools/idf-env.sh` source-only guard under zsh (closes #6)
+
+**Files:** Modify `tools/idf-env.sh`. (Fully disjoint — parallel with Tasks 2/3.)
+
+- [ ] **Step 1** — replace the guard so it also refuses `zsh tools/idf-env.sh`. Keep the bash path working; add a zsh-sourced test. The guard must pass only when sourced in either shell:
+
+```sh
+# refuse direct execution in bash (return fails outside a sourced file) OR zsh (ZSH_EVAL_CONTEXT
+# ends in :file only when the file is sourced; a directly-run script ends in :toplevel).
+if [ -n "${ZSH_VERSION:-}" ]; then
+  case "${ZSH_EVAL_CONTEXT:-}" in *:file) ;; *) echo "source this file: source tools/idf-env.sh" >&2; return 1 2>/dev/null || exit 1 ;; esac
+else
+  (return 0 2>/dev/null) || { echo "source this file: source tools/idf-env.sh" >&2; exit 1; }
+fi
+```
+
+- [ ] **Step 2** — verify all four cases: `source tools/idf-env.sh` (bash and zsh) exports and prints the version; `./tools/idf-env.sh` (shebang→bash) refuses; `zsh tools/idf-env.sh` now refuses. Commit (`fix(tools): idf-env.sh refuses 'zsh idf-env.sh' via ZSH_EVAL_CONTEXT (closes #6)`).
+
+---
