@@ -40,6 +40,64 @@ jobs:
         if: steps.probe.outputs.present != 'true'
         run: echo "test/CMakeLists.txt not present yet"
 
+  static-analysis:
+    # Power of 10 (Holzmann/JPL) static analysis -- design §5, plan Session 4.5.1 Task 2.
+    # REPORT-ONLY: every analyser step below is `continue-on-error: true`, so this job can never
+    # fail the build this session (findings are printed to the job log as information). It is
+    # deliberately NOT added to the branch-protection required checks yet -- that flip, plus
+    # `--enforce-fnptr`/`--fail-on-violation` on the linter, is plan Session 4.5.6, once the
+    # rules 1-8/10 retrofit (Sessions 4.5.2-4.5.4) and the rule 9 function-pointer rework
+    # (Session 4.5.5) are both complete.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install cppcheck + clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y cppcheck clang-tidy
+      - name: power_of_10.py linter (project-specific rules 3/4/5/8/9; rule 9 inert until 4.5.5)
+        continue-on-error: true
+        run: python3 tools/lint/power_of_10.py
+      - name: cppcheck (warning+style+portability; design §5 second analyser, rule 10)
+        continue-on-error: true
+        run: |
+          cppcheck --enable=warning,style,portability --std=c11 --error-exitcode=0 --quiet \
+            -I components/core/include -I components/core/ui/include \
+            -I components/app/include -I components/lt_hal/include \
+            -I components/drivers/export_serial/include \
+            --suppress=missingInclude \
+            --suppress='*:components/core/util/jsmn.c' \
+            --suppress='*:test/unity/*' \
+            components/core components/app components/drivers main
+      - name: Probe host compile database inputs
+        id: probe
+        run: echo "present=$([ -f test/CMakeLists.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Configure host compile database (test/build; the same tree host-tests builds)
+        if: steps.probe.outputs.present == 'true'
+        run: cmake -S test -B test/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      # clang-tidy needs a compile database. The host CMake DB above covers components/core (it
+      # links every components/core/*.c into libcore -- see test/CMakeLists.txt); a full
+      # components/app + components/drivers + main compile DB only exists from an ESP-IDF build
+      # (idf.py build emits build/<env>/compile_commands.json in firmware.yml's container).
+      # Wiring an IDF container build into this report-only job just to get a second, larger
+      # compile database is disproportionate for this session -- cppcheck and the linter above
+      # already run over components/app, components/drivers and main report-only. So: clang-tidy
+      # runs over components/core (host DB) only, for now.
+      # TODO(4.5.x): add clang-tidy over components/app, components/drivers and main via the IDF
+      # compile database once an IDF-container step exists in this job (or firmware.yml uploads
+      # its compile_commands.json for this job to consume) -- likely alongside the rule 9
+      # (Session 4.5.5) or blocking-flip (Session 4.5.6) work.
+      - name: clang-tidy over components/core (host compile DB; report-only)
+        if: steps.probe.outputs.present == 'true'
+        continue-on-error: true
+        run: |
+          # Only .c files: each is its own translation unit in the compile DB and pulls in its
+          # own headers, so clang-tidy still sees + reports (per HeaderFilterRegex) the in-scope
+          # headers without needing a compile-command entry for a .h on its own. jsmn.c is
+          # vendored (design §1) and excluded.
+          find components/core -name '*.c' -not -path 'components/core/util/jsmn.c' -print0 \
+            | xargs -0 clang-tidy -p test/build --quiet
+
   tracks-generated:
     runs-on: ubuntu-latest
     steps:
