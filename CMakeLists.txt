@@ -112,6 +112,13 @@ else()
     set(CFG_FUSED_LOG_HZ 10)
 endif()
 
+# gps_sim bench build marker: the pipeline pulls its venue from gps_sim only here (§4.6, 3.4).
+if(GPS STREQUAL "sim")
+    set(CFG_GPS_SIM 1)
+else()
+    set(CFG_GPS_SIM 0)
+endif()
+
 # ---- firmware version from git, with a fallback when no v* tag exists yet (§21.5) ----
 execute_process(
     COMMAND git describe --tags --match "v*" --dirty --always
@@ -139,11 +146,20 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 #        components/drivers/board_devkit_v1.
 #   3.3  components/drivers/storage_internal (LittleFS via joltwallet/littlefs;
 #        the STORAGE=sd variant's storage_sd lands with the SD hardware).
-#   3.4  components/drivers/gps_ubx_common   components/drivers/gps_${GPS}
-#        components/drivers/imu_${IMU}   components/drivers/display_${DISPLAY}
-#        + conn_ble / conn_wifi (per CONN), conn_ble_rc (if CONN_BLE_RC),
-#          export_serial (if EXPORT_SERIAL)  -- gated exactly as in §21.1.
-set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal)
+#   3.4  components/drivers/gps_${GPS}   components/drivers/imu_${IMU}
+#        (sim drivers now; the real gps_neo6m/imu_mpu6050 replace their plan-03 stubs with the
+#        sensors, plan 08. gps_ubx_common / display_${DISPLAY} / conn_* / export_serial land in
+#        the sessions that create them, gated exactly as in §21.1.) The pipeline lives in
+#        components/app (globbed by the app component), so no separate dir is needed for it.
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal components/drivers/gps_${GPS} components/drivers/imu_${IMU})
+
+# The selected driver names must reach main's REQUIRES so the driver is pulled into the link (the
+# pipeline in components/app calls the GPS/IMU HAL). A build-flag-derived name cannot be read from
+# the cache during IDF's early-expansion pass; exporting it into the environment here -- before
+# project.cmake runs the early expansion -- lets main reference it as gps_$ENV{LT_GPS} (the child
+# cmake -P inherits the environment). Works for both build.sh and a bare idf.py -D invocation.
+set(ENV{LT_GPS} "${GPS}")
+set(ENV{LT_IMU} "${IMU}")
 
 # keep each named environment's generated sdkconfig inside its own build/<env>/
 # tree, so switching -D flags between envs never cross-contaminates (each build dir

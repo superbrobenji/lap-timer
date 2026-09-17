@@ -6,7 +6,7 @@ target_include_directories(replaylib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(replaylib PUBLIC core m)
 target_compile_options(replaylib PRIVATE ${LAPTIMER_STRICT_FLAGS})
 
-foreach(tool synth replay)
+foreach(tool synth replay gensim)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${tool}_main.c)
     add_executable(${tool} ${tool}_main.c)
     target_link_libraries(${tool} PRIVATE replaylib)
