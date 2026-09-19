@@ -516,10 +516,19 @@ static int dbg_logtest(int argc, char **argv)
 }
 
 /* ---- dbg fs (from 3.3) ---- */
-static void fs_list_cb(const char *name, uint32_t size, void *ctx)
+/* Streams and prints every /sessions entry via the O(1)-RAM sto_list iterator. */
+static void print_sessions(void)
 {
-    (void)ctx;
-    printf("  %-24s %8u B\n", name, (unsigned)size);
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") != 0) { printf("  (cannot list)\n"); return; }
+    sto_entry_t ent;
+    int n = 0;
+    while (sto_list_next(&it, &ent) == 1) {
+        printf("  %-24s %8u B\n", ent.name, (unsigned)ent.size);
+        n++;
+    }
+    sto_list_close(&it);
+    if (n == 0) printf("  (empty)\n");
 }
 
 static int dbg_fs(void)
@@ -538,9 +547,7 @@ static int dbg_fs(void)
     printf("fix_ring drop: %u   fused_ring drop: %u\n",
            (unsigned)ring_dropped(&g_fix_ring), (unsigned)ring_dropped(&g_fused_ring));
     printf("/sessions:\n");
-    int cnt = sto_list("/sessions", fs_list_cb, NULL);
-    if (cnt < 0) printf("  (cannot list)\n");
-    else if (cnt == 0) printf("  (empty)\n");
+    print_sessions();
     return 0;
 }
 

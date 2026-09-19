@@ -114,18 +114,18 @@ static uint32_t storage_free_kb(void)
 }
 
 /* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
-static void count_sum_cb(const char *name, uint32_t size, void *ctx)
-{
-    LT_ASSERT_VOID(name != NULL, CMD_ASSERT_CODE);
-    LT_ASSERT_VOID(ctx != NULL, CMD_ASSERT_CODE);
-    (void)size;
-    const char *dot = strrchr(name, '.');
-    if (dot && strcmp(dot, ".sum") == 0) (*(int *)ctx)++;
-}
 static uint16_t session_count(void)
 {
     int c = 0;
-    (void)sto_list("/sessions", count_sum_cb, &c);
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") == 0) {
+        sto_entry_t e;
+        while (sto_list_next(&it, &e) == 1) {
+            const char *dot = strrchr(e.name, '.');
+            if (dot && strcmp(dot, ".sum") == 0) c++;
+        }
+        sto_list_close(&it);
+    }
     return (c > 0xFFFF) ? 0xFFFF : (uint16_t)c;
 }
 
@@ -517,11 +517,12 @@ enum { LIST_MAX_SESSIONS = 64 };
 static sess_ent_t s_sess[LIST_MAX_SESSIONS];
 static int        s_nsess;
 
-static void list_scan_cb(const char *name, uint32_t size, void *ctx)
+/* Dedup/merge one /sessions dirent (name, size) into s_sess[] by session-id prefix (the part of
+ * name before ".log"/".sum"). Called once per entry from op_list's measuring-pass loop below. */
+static void scan_one_entry(const char *name, uint32_t size)
 {
     LT_ASSERT_VOID(name != NULL, CMD_ASSERT_CODE);
     LT_ASSERT_VOID(s_nsess >= 0 && s_nsess <= LIST_MAX_SESSIONS, CMD_ASSERT_CODE);   /* within s_sess[] */
-    (void)ctx;
     const char *dot = strrchr(name, '.');
     if (!dot) return;
     bool is_log = strcmp(dot, ".log") == 0;
@@ -573,7 +574,13 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
 
     if (!second) {                                         /* measuring pass: enumerate + scan once */
         s_nsess = 0;
-        (void)sto_list("/sessions", list_scan_cb, NULL);
+        sto_iter_t it;
+        if (sto_list_open(&it, "/sessions") == 0) {
+            sto_entry_t e;
+            while (sto_list_next(&it, &e) == 1)
+                scan_one_entry(e.name, e.size);
+            sto_list_close(&it);
+        }
         LT_ASSERT_RET(s_nsess >= 0 && s_nsess <= LIST_MAX_SESSIONS, CMD_ASSERT_CODE, -1);   /* within s_sess[] */
         for (int i = 0; i < s_nsess; i++) {
             if (!s_sess[i].has_sum) continue;
