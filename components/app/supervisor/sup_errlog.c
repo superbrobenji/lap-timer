@@ -13,8 +13,13 @@ static const char *TAG = "assert";
 
 static void app_assert_hook(uint16_t code, const char *file, int line)
 {
+    /* This is the installed core_assert_hook_t: it MUST NOT call an LT_ASSERT_ or CORE_ASSERT_
+     * macro itself (a failing assertion in here would recurse back into this same hook via
+     * core_assert_fail). */
+    /* It also must accept every (code, file, line) a failing assertion anywhere in the codebase
+     * can produce -- there is no invalid input to reject. */
     ESP_LOGE(TAG, "core assert 0x%04x at %s:%d", code, file ? file : "?", line);
-    errlog_add(code, (uint32_t)line);
+    (void)errlog_add(code, (uint32_t)line);
 }
 
 void sup_install_assert_hook(void)
