@@ -30,6 +30,8 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #define BOARD_ASSERT_CODE 0x0C10   /* Power of 10 rule 5 (core/core.h); board.c's own code */
 
@@ -62,14 +64,11 @@ static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t         s_adc_cali;      /* NULL if eFuse calibration unavailable */
 static bool                      s_inited;
 
-/* button ISR -> caller cb (§4.4 button ISR -> ui). Debounced in the ISR; cb runs in ISR
- * context and MUST be ISR-safe / IRAM_ATTR (§17.9: ISRs only push to queues via *FromISR). */
-static void (*s_btn_cb)(uint8_t mask, int64_t mono_us);
+/* button ISR -> ui queue (§4.4 button ISR -> ui). Debounced in the ISR, which posts a btn_raw_t
+ * straight onto s_btn_q (rule 9: no function-pointer callback) -- IRAM_ATTR, *FromISR only
+ * (§17.9). s_btn_q is set once by board_buttons_enable_isr(); NULL until then. */
+static QueueHandle_t s_btn_q;
 static volatile int64_t s_btn_last_us;
-
-#if CFG_HAS_PPS
-static void (*s_pps_cb)(int64_t mono_us);
-#endif
 
 static uint8_t read_button_mask(void)
 {
@@ -86,16 +85,13 @@ static void IRAM_ATTR btn_isr(void *arg)
     int64_t now = esp_timer_get_time();
     if (now - s_btn_last_us < BTN_DEBOUNCE_US) return;   /* debounce */
     s_btn_last_us = now;
-    if (s_btn_cb) s_btn_cb(read_button_mask(), now);
+    if (s_btn_q != NULL) {
+        btn_raw_t ev = { .mask = read_button_mask(), .mono_us = now };
+        BaseType_t hpw = pdFALSE;
+        (void)xQueueSendFromISR(s_btn_q, &ev, &hpw);   /* drop-on-full: a stale edge is harmless */
+        portYIELD_FROM_ISR(hpw);
+    }
 }
-
-#if CFG_HAS_PPS
-static void IRAM_ATTR pps_isr(void *arg)
-{
-    (void)arg;
-    if (s_pps_cb) s_pps_cb(esp_timer_get_time());
-}
-#endif
 
 /* Battery ADC bring-up (ADC1_CH6/GPIO34): 12-bit, 12 dB atten, eFuse line-fit calibration.
  * Spec §3.3 says "11 dB"; ADC_ATTEN_DB_11 is deprecated in v5.3.2 and aliased to
@@ -266,9 +262,9 @@ int board_buttons_read(uint8_t *mask)
     return 0;
 }
 
-int board_buttons_enable_isr(void (*cb)(uint8_t mask, int64_t mono_us))
+int board_buttons_enable_isr(QueueHandle_t evt_q)
 {
-    s_btn_cb = cb;
+    s_btn_q = evt_q;
     esp_err_t e = gpio_install_isr_service(0);
     if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return -EIO;   /* INVALID_STATE = already installed */
     const gpio_num_t pins[] = { PIN_BTN_MODE, PIN_BTN_UP, PIN_BTN_DOWN };
@@ -299,27 +295,10 @@ int board_prepare_deep_sleep(void)
     return 0;
 }
 
-int board_pps_enable(void (*cb)(int64_t mono_us))
-{
-#if CFG_HAS_PPS
-    s_pps_cb = cb;
-    gpio_config_t io = {
-        .pin_bit_mask = (1ULL << PIN_PPS),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_POSEDGE,            /* TIMEPULSE rising edge */
-    };
-    ESP_ERROR_CHECK(gpio_config(&io));
-    esp_err_t e = gpio_install_isr_service(0);
-    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return -EIO;
-    ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_PPS, pps_isr, NULL));
-    return 0;
-#else
-    (void)cb;
-    return 0;   /* no usable PPS on this build (NEO-6M v2 / sim) */
-#endif
-}
+/* board_pps_enable() removed (session 4.5.5 rule-9 cleanup): s_pps_cb/pps_isr/board_pps_enable
+ * had zero callers anywhere (dead code behind #if CFG_HAS_PPS). M10 PPS support will re-add a
+ * queue-based enable (no function pointer), mirroring board_buttons_enable_isr above, in its own
+ * future plan. PIN_PPS (§3.3 pin map) is left defined for that future wiring. */
 
 const char *board_name(void)
 {

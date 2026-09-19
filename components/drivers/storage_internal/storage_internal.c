@@ -34,8 +34,7 @@ static const char *TAG = "sto";
 #define STO_ASSERT_CODE 0x0C70   /* Power of 10 rule 5 (core/core.h); storage_internal.c's own code */
 
 #define LFS_BASE   "/lfs"
-#define LFS_PART   "storage"           /* partitions.csv label */
-#define STO_PATHMAX 128
+#define LFS_PART   "storage"           /* partitions.csv label; STO_PATHMAX lives in hal/storage.h */
 
 /* rule 2: sto_list's readdir scan is capped at a fixed, generous bound -- far more than any
  * realistic /sessions directory holds (cmd.c's LIST_MAX_SESSIONS=64 tracked ids -> at most ~128
@@ -197,37 +196,52 @@ int sto_unlink(const char *path)
     return 0;
 }
 
-int sto_list(const char *dir, void (*cb)(const char *name, uint32_t size, void *ctx), void *ctx)
+/* rule 9: pull iterator instead of a per-entry callback -- O(1) RAM (one sto_iter_t, no scratch
+ * array) rather than array-fill's O(entries) buffer. sto_list_open resolves dir once; each
+ * sto_list_next call reads exactly one more dirent. */
+int sto_list_open(sto_iter_t *it, const char *dir)
 {
+    CORE_ASSERT_RET(it != NULL, STO_ASSERT_CODE, -1);
     CORE_ASSERT_RET(dir != NULL, STO_ASSERT_CODE, -1);
-    char full[STO_PATHMAX];
-    if (full_path(dir, full, sizeof full) != 0) return -1;
-    DIR *d = opendir(full);
-    if (!d) return -1;
-    int count = 0;
+    it->d = NULL;
+    it->iters = 0;
+    if (full_path(dir, it->full, sizeof it->full) != 0) return -1;
+    it->d = opendir(it->full);
+    return it->d ? 0 : -1;
+}
+
+/* rule 2: bounded by STO_LIST_MAX_ENTRIES instead of running until readdir() is exhausted by
+ * (possibly corrupted) filesystem state -- see the constant's rationale above. */
+int sto_list_next(sto_iter_t *it, sto_entry_t *out)
+{
+    CORE_ASSERT_RET(it != NULL, STO_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, STO_ASSERT_CODE, -1);
+    if (!it->d) return -1;
     struct dirent *ent;
-    int iters = 0;
-    /* rule 2: bounded by STO_LIST_MAX_ENTRIES instead of running until readdir() returns NULL --
-     * on reaching the cap, stop scanning (a caller's fixed-size table, e.g. cmd.c's s_sess[], is
-     * already full long before this many dirents are seen). */
-    while (iters++ < STO_LIST_MAX_ENTRIES && (ent = readdir(d)) != NULL) {
+    while (it->iters++ < STO_LIST_MAX_ENTRIES && (ent = readdir(it->d)) != NULL) {
         if (ent->d_name[0] == '.' &&
             (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
             continue;                            /* skip "." and ".." */
         uint32_t sz = 0;
-        if (cb) {
-            char item[STO_PATHMAX];
-            int m = snprintf(item, sizeof item, "%s/%s", full, ent->d_name);
-            struct stat st;
-            if (m > 0 && (size_t)m < sizeof item && stat(item, &st) == 0)
-                sz = (uint32_t)st.st_size;
-            cb(ent->d_name, sz, ctx);
-        }
-        count++;
+        char item[STO_PATHMAX];
+        int m = snprintf(item, sizeof item, "%s/%s", it->full, ent->d_name);
+        struct stat st;
+        if (m > 0 && (size_t)m < sizeof item && stat(item, &st) == 0)
+            sz = (uint32_t)st.st_size;
+        /* explicit precision caps the copy to name[]'s capacity so -Wformat-truncation can see it
+         * fits (real session names are far shorter; truncate-to-fit matches the old cb, which
+         * received the same name a caller would have copied into its own bounded field). */
+        (void)snprintf(out->name, sizeof out->name, "%.*s",
+                       (int)(sizeof out->name - 1), ent->d_name);
+        out->size = sz;
+        return 1;
     }
-    closedir(d);
-    CORE_ASSERT_RET(count <= STO_LIST_MAX_ENTRIES, STO_ASSERT_CODE, -1);   /* postcondition: the cap above holds */
-    return count;
+    return 0;                                    /* directory exhausted, or rule-2 cap hit */
+}
+
+void sto_list_close(sto_iter_t *it)
+{
+    if (it && it->d) { closedir(it->d); it->d = NULL; }
 }
 
 int sto_probe(void)

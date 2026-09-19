@@ -218,9 +218,8 @@ static void on_drag_done(void)
 
 /* Engine callback (lap_on_fix / drag_on_fused). Forward every event to evt_q, and on completion
  * hand the logger the full result. */
-static void engine_cb(const event_t *ev, void *ctx)
+static void engine_cb(const event_t *ev)
 {
-    (void)ctx;
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
     LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* stable §4.5 code, drives the switch */
     emit_event(ev);
@@ -342,7 +341,10 @@ static void on_fix_run_engine(const gps_fix_t *fix, bool valid)
             s_resume_active = false;
             lt_rtc_clear();
         }
-        lap_on_fix(&s_lap, fix, s_have_fused ? &s_latest_fused : NULL, engine_cb, NULL);
+        event_t evs[LAP_EVT_MAX];
+        int nev = 0;
+        lap_on_fix(&s_lap, fix, s_have_fused ? &s_latest_fused : NULL, evs, LAP_EVT_MAX, &nev);
+        for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
         /* §15.3 save-on-gate: if this fix crossed an S/F or sector line, snapshot the engine's
          * (now-updated) resumable state so the most-recent gate becomes the resume point after any
          * reset. On EV_LAP_COMPLETE the engine has already opened the next lap, so the export
@@ -441,7 +443,12 @@ static void on_raw(const imu_raw_t *raw)
     s_latest_fused = fused;
     s_have_fused = true;
 
-    if (s_mode == MODE_DRAG) drag_on_fused(&s_drag, &fused, engine_cb, NULL);
+    if (s_mode == MODE_DRAG) {
+        event_t evs[DRAG_EVT_MAX];
+        int nev = 0;
+        drag_on_fused(&s_drag, &fused, evs, DRAG_EVT_MAX, &nev);
+        for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
+    }
 
     stats_step(&fused);
 

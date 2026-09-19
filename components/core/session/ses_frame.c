@@ -79,51 +79,54 @@ static void on_bad(ses_reader_t *r)
     memcpy(r->replay, tmp, r->replay_len);
 }
 
-void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx)
+void ses_reader_push(ses_reader_t *r, const uint8_t *buf, size_t n)
 {
     CORE_ASSERT_VOID(r != NULL, SES_ASSERT_CODE);
-    CORE_ASSERT_VOID(buf != NULL || n == 0, SES_ASSERT_CODE);      /* NULL is only ever valid with n==0 (see ses_reader_flush) */
-    CORE_ASSERT_VOID(cb != NULL, SES_ASSERT_CODE);
-    size_t in_pos = 0;
-    /* Rule 2: explicit static bound. Each pass through this loop consumes exactly one byte from
-     * the replay queue or from `buf`; on_bad() can only re-queue bytes that this same budget has
-     * already accounted for (it re-scans a bounded, already-fed window, never invents new bytes),
-     * and the replay queue is itself capped at sizeof(r->replay) (< 64KiB, uint16_t-indexed). So
-     * the number of iterations this call can ever take is bounded by n plus a fixed constant that
-     * generously covers all possible resync churn -- never by an unbounded quantity. */
-    const size_t FEED_MAX_STEPS = n + (size_t)UINT16_MAX + 16u;
+    CORE_ASSERT_VOID(buf != NULL || n == 0, SES_ASSERT_CODE);      /* NULL is only ever valid with n==0 */
+    r->in = buf; r->in_len = n; r->in_pos = 0;
+    r->finishing = 0;                                              /* a fresh push is not at EOF */
+}
+
+int ses_reader_next(ses_reader_t *r, uint8_t *type, const uint8_t **payload, uint8_t *len)
+{
+    CORE_ASSERT_RET(r != NULL, SES_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(type != NULL && payload != NULL && len != NULL, SES_ASSERT_CODE, 0);
+    /* Rule 2: explicit bound for this resume. Each pass consumes exactly one byte from the replay
+     * queue or from the staged input; on_bad() only re-queues bytes this budget has already
+     * accounted for (a bounded, already-staged window -- never invented bytes), and the replay
+     * queue is capped at sizeof(r->replay) (< 64KiB, uint16_t-indexed). The whole EOF drain
+     * (finish's rounds) is likewise bounded: each round permanently discards a sync byte, so the
+     * total rescan work is well under UINT16_MAX. So one next() call is bounded by the input still
+     * to consume plus a fixed constant that generously covers all resync/finish churn. Across a
+     * push's several next() calls the staged input advances monotonically, so the total stays
+     * bounded too -- never by an unbounded quantity. */
+    const size_t NEXT_MAX_STEPS = (r->in_len - r->in_pos) + (size_t)UINT16_MAX + 16u;
     size_t steps = 0;
     for (;;) {
-        CORE_ASSERT_VOID(steps++ < FEED_MAX_STEPS, SES_ASSERT_CODE);
+        CORE_ASSERT_RET(steps++ < NEXT_MAX_STEPS, SES_ASSERT_CODE, 0);
         uint8_t b;
         if (r->replay_pos < r->replay_len) b = r->replay[r->replay_pos++];
-        else if (in_pos < n) b = buf[in_pos++];
-        else break;
+        else if (r->in_pos < r->in_len) b = r->in[r->in_pos++];
+        else if (r->finishing && r->state == 1) { on_bad(r); continue; }   /* EOF: rescan trailing partial */
+        else { r->replay_pos = 0; r->replay_len = 0; return 0; }            /* staged input exhausted */
         int st = step(r, b);
         if (st == 1) {
             r->frames_ok++;
-            cb(r->buf[0], r->buf + 2, r->buf[1], ctx);
+            *type = r->buf[0]; *payload = r->buf + 2; *len = r->buf[1];
             r->state = 0; r->idx = 0; r->need = 0;
+            return 1;                                             /* resume from here on the next call */
         } else if (st == 2) {
             on_bad(r);
         }
     }
-    /* The loop exits only once the replay is drained and the input consumed; reset for the next call. */
-    r->replay_pos = 0; r->replay_len = 0;
 }
 
-void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx)
+void ses_reader_finish(ses_reader_t *r)
 {
     CORE_ASSERT_VOID(r != NULL, SES_ASSERT_CODE);
-    CORE_ASSERT_VOID(cb != NULL, SES_ASSERT_CODE);
-    /* A partial frame at EOF can never complete: discard its sync byte and rescan the rest. Each
-     * round consumes at least one byte, so this terminates; sizeof(r->replay) is an explicit,
-     * generous bound (rule 2) since a round can only ever re-queue already-buffered bytes. */
-    size_t rounds = 0;
-    const size_t FLUSH_MAX_ROUNDS = sizeof(r->replay) + 4u;
-    while (r->state == 1) {
-        CORE_ASSERT_VOID(rounds++ < FLUSH_MAX_ROUNDS, SES_ASSERT_CODE);
-        on_bad(r);
-        ses_reader_feed(r, NULL, 0, cb, ctx);
-    }
+    /* Mark EOF. A partial frame that can never complete is drained by the trailing next() calls:
+     * next() discards its sync byte and rescans the rest, once per round. Each round consumes at
+     * least one byte and permanently drops a sync, so the drain terminates (bounded in next() by
+     * NEXT_MAX_STEPS, matching the old flush's sizeof(replay)-round guarantee). */
+    r->finishing = 1;
 }

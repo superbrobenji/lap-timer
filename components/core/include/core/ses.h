@@ -20,10 +20,6 @@ uint16_t ses_crc16(const uint8_t *buf, size_t n);
 /* Writes sync|type|len|payload|crc16 into out. Returns bytes written, or -1 if cap is too small or len > SES_MAX_PAYLOAD. */
 int      ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
 
-/* Invoked once per valid frame. `payload` points into the reader's internal buffer and is valid
- * only for the duration of the callback: copy what you need before returning. */
-typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx);
-
 typedef struct {
     uint8_t  state;                           /* 0 = hunting sync, 1 = collecting */
     uint16_t idx;                             /* bytes collected into buf */
@@ -31,16 +27,29 @@ typedef struct {
     uint8_t  buf[2 + SES_MAX_PAYLOAD + 2];    /* type, len, payload, crc */
     uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];    /* rescan buffer; proven bound is 2+247+2 bytes, kept at 2x for headroom */
     uint16_t replay_len, replay_pos;
+    const uint8_t *in;                        /* staged input for the current push (aliases caller's buffer) */
+    size_t   in_len, in_pos;                  /* staged length and consume cursor */
+    uint8_t  finishing;                       /* set by ses_reader_finish: drain a trailing partial frame at EOF */
     uint32_t frames_ok, frames_bad;
 } ses_reader_t;
 
 void ses_reader_init(ses_reader_t *r);
-/* Feed any number of bytes; cb is invoked once per valid frame. Resynchronises after corruption. */
-void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);
-/* Call once at the end of a bounded input (a file). A frame that can never complete is treated as
- * bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync
- * near EOF is still recovered. Idempotent when the reader is idle. */
-void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
+/* Stage n bytes for pulling. Call ses_reader_next() until it returns 0 before the next push;
+ * `buf` must stay valid while it is being pulled (its bytes are read, not copied). */
+void ses_reader_push(ses_reader_t *r, const uint8_t *buf, size_t n);
+/* Pull the next decoded frame from the staged input, resynchronising past corruption. Returns
+ * 1 = a frame is ready: *type, *len are set and *payload points at the reader's internal buffer,
+ *     valid ONLY until the next push/next/finish call -- copy what you need before calling again;
+ * 0 = the staged input (and any pending rescan) is exhausted: push more, or call finish() at EOF.
+ * A corrupt/incomplete frame is skipped internally (counted in frames_bad) and never surfaces as a
+ * distinct return, so the standard drain loop is `while (ses_reader_next(...) == 1) { ... }`. The
+ * -1 return is reserved for a future hard-error surface; this resync policy does not produce it. */
+int  ses_reader_next(ses_reader_t *r, uint8_t *type, const uint8_t **payload, uint8_t *len);
+/* Call once at the end of a bounded input (a file), then drain with next(). A frame that can never
+ * complete is treated as bad and the bytes after its sync are rescanned, so a valid frame hidden
+ * behind a spurious sync near EOF is still recovered by the trailing next() calls. Idempotent when
+ * the reader is idle; after the post-finish drain, next() returns 0. */
+void ses_reader_finish(ses_reader_t *r);
 
 /* ---- Record codecs (spec §12.3, §12.4) ---- */
 

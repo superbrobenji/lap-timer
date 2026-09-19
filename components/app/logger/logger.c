@@ -394,19 +394,7 @@ static void drain_events(void)
     }
 }
 
-typedef struct { char oldest[24]; char curlog[24]; } evict_ctx_t;
-static void evict_cb(const char *name, uint32_t size, void *ctx)
-{
-    LT_ASSERT_VOID(name != NULL, LOG_ASSERT_CODE);
-    LT_ASSERT_VOID(ctx != NULL, LOG_ASSERT_CODE);
-    (void)size;
-    evict_ctx_t *e = (evict_ctx_t *)ctx;
-    size_t len = strlen(name);
-    if (len < 4 || strcmp(name + len - 4, ".log") != 0) return;   /* only .log (never .sum) */
-    if (strcmp(name, e->curlog) == 0) return;                     /* never the current session */
-    if (e->oldest[0] == 0 || strcmp(name, e->oldest) < 0)
-        (void)snprintf(e->oldest, sizeof e->oldest, "%s", name);  /* smallest id == oldest (§12.7) */
-}
+typedef struct { char oldest[STO_NAME_MAX]; char curlog[STO_NAME_MAX]; } evict_ctx_t;
 
 static void eviction_check(void)
 {
@@ -422,9 +410,21 @@ static void eviction_check(void)
     evict_ctx_t e;
     memset(&e, 0, sizeof e);
     if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
-    (void)sto_list("/sessions", evict_cb, &e);
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") == 0) {
+        sto_entry_t ent;
+        while (sto_list_next(&it, &ent) == 1) {
+            const char *name = ent.name;
+            size_t len = strlen(name);
+            if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
+            if (strcmp(name, e.curlog) == 0) continue;                      /* never the current session */
+            if (e.oldest[0] == 0 || strcmp(name, e.oldest) < 0)
+                (void)snprintf(e.oldest, sizeof e.oldest, "%s", name);      /* smallest id == oldest (§12.7) */
+        }
+        sto_list_close(&it);
+    }
     if (e.oldest[0]) {
-        char p[40];
+        char p[STO_NAME_MAX + 12];   /* "/sessions/" (10) + a full oldest name + NUL */
         (void)snprintf(p, sizeof p, "/sessions/%s", e.oldest);
         (void)sto_unlink(p);
         (void)errlog_add(E_STO_EVICT, 0);

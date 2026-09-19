@@ -78,7 +78,9 @@ typedef struct {
 
 void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {100,200,300}, rollout off, km/h */
 
-typedef void (*drag_evt_cb_t)(const event_t *ev, void *ctx);
+/* Upper bound on the events drag_on_fused can append in a single call: at most one ARMED or LAUNCH or
+ * DONE plus a full sweep of gates (DRAG_MAX_GATES) with headroom. Callers pass a buffer this large. */
+#define DRAG_EVT_MAX (DRAG_MAX_GATES + 3)
 
 typedef struct {
     drag_cfg_t cfg;
@@ -138,7 +140,9 @@ typedef struct {
 
 void     drag_init(drag_t *D, const drag_cfg_t *cfg);   /* cfg NULL → defaults; clears results */
 void     drag_reset(drag_t *D);                         /* back to IDLE; keeps cfg and session best */
-void     drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx);   /* 100 Hz */
+/* 100 Hz. Events for this sample are appended to out[] (a caller-owned buffer of at least DRAG_EVT_MAX
+ * entries), in emission order; *n_out is set to 0 on entry and left holding the count. Caller drains. */
+void     drag_on_fused(drag_t *D, const fused_sample_t *fs, event_t *out, int cap, int *n_out);
 void     drag_on_fix(drag_t *D, const gps_fix_t *fix);  /* re-anchors v_est to Doppler gSpeed */
 uint8_t  drag_state(const drag_t *D);
 const drag_result_t *drag_current(const drag_t *D);     /* run in progress or last frozen; NULL if none */

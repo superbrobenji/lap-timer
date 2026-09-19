@@ -4,8 +4,8 @@
  *
  * These mirror core/core.h's CORE_ASSERT_RET/CORE_ASSERT_VOID exactly, for app/driver/main
  * code, and call the SAME reporter: on failure they report `code` through
- * core_assert_fail()/the installed core_assert_hook_t (core_set_assert_hook, §17.9) -- the app
- * installs a hook (sup_install_assert_hook) that logs the code into the §17.7 error ring -- and
+ * core_assert_fail() -> core_assert_report() (§17.9) -- the app links a strong core_assert_report
+ * (sup_errlog.c) that logs the code into the §17.7 error ring -- and
  * then return a safe value to the caller. They NEVER abort/panic on target: a failing
  * LT_ASSERT_* is a reported, recovered anomaly, not a crash. Assertions must be side-effect-free
  * (the condition is only ever evaluated, never relied on to run code).

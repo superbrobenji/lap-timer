@@ -516,10 +516,19 @@ static int dbg_logtest(int argc, char **argv)
 }
 
 /* ---- dbg fs (from 3.3) ---- */
-static void fs_list_cb(const char *name, uint32_t size, void *ctx)
+/* Streams and prints every /sessions entry via the O(1)-RAM sto_list iterator. */
+static void print_sessions(void)
 {
-    (void)ctx;
-    printf("  %-24s %8u B\n", name, (unsigned)size);
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") != 0) { printf("  (cannot list)\n"); return; }
+    sto_entry_t ent;
+    int n = 0;
+    while (sto_list_next(&it, &ent) == 1) {
+        printf("  %-24s %8u B\n", ent.name, (unsigned)ent.size);
+        n++;
+    }
+    sto_list_close(&it);
+    if (n == 0) printf("  (empty)\n");
 }
 
 static int dbg_fs(void)
@@ -538,9 +547,7 @@ static int dbg_fs(void)
     printf("fix_ring drop: %u   fused_ring drop: %u\n",
            (unsigned)ring_dropped(&g_fix_ring), (unsigned)ring_dropped(&g_fused_ring));
     printf("/sessions:\n");
-    int cnt = sto_list("/sessions", fs_list_cb, NULL);
-    if (cnt < 0) printf("  (cannot list)\n");
-    else if (cnt == 0) printf("  (empty)\n");
+    print_sessions();
     return 0;
 }
 
@@ -583,12 +590,15 @@ static int read_through_ses(const char *id, const char *ext, tally_t *out)
     ses_reader_init(&s_rdr);
     uint8_t buf[256];
     size_t got;
+    uint8_t ft, fl; const uint8_t *fp;
     for (;;) {
         if (sto_read(f, buf, sizeof buf, &got) != 0) break;
         if (got == 0) break;
-        ses_reader_feed(&s_rdr, buf, got, tally_cb, out);
+        ses_reader_push(&s_rdr, buf, got);
+        while (ses_reader_next(&s_rdr, &ft, &fp, &fl) == 1) tally_cb(ft, fp, fl, out);
     }
-    ses_reader_flush(&s_rdr, tally_cb, out);
+    ses_reader_finish(&s_rdr);
+    while (ses_reader_next(&s_rdr, &ft, &fp, &fl) == 1) tally_cb(ft, fp, fl, out);
     sto_close(f);
     return 0;
 }

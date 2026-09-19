@@ -69,6 +69,6 @@ typedef struct {
 
 void logr_init(logr_t *r, const logr_cb_t *cb, void *ctx);
 void logr_feed(logr_t *r, const uint8_t *buf, size_t n);
-void logr_finish(logr_t *r);                                  /* ses_reader_flush at EOF */
+void logr_finish(logr_t *r);                                  /* ses_reader_finish + drain at EOF */
 int  logr_read_file(logr_t *r, const char *path);             /* feed in 4096-byte chunks then finish; 0 / -1 on open or read error */
 #endif

@@ -30,7 +30,9 @@
  * p2-right line crossed forward). All engine times are int64 gps microseconds; result times are
  * uint32 milliseconds rounded to nearest. */
 
-typedef void (*lap_evt_cb_t)(const event_t *ev, void *ctx);
+/* Upper bound on the events lap_on_fix can append in a single call: at most one ARMED/VENUE_FOUND,
+ * one LAYOUT_LOCKED, LAP_MAX_SECTORS SECTORs, and one LAP_COMPLETE. Callers pass a buffer this large. */
+#define LAP_EVT_MAX (LAP_MAX_SECTORS + 3)
 
 enum {                              /* lap_state() values */
     LAP_ST_NO_VENUE    = 0,
@@ -176,9 +178,12 @@ void     lap_init(lap_t *L, const lap_cfg_t *cfg);           /* cfg NULL -> defa
 void     lap_set_venue(lap_t *L, const trk_venue_t *v);      /* enters VENUE_FOUND, arms candidates */
 void     lap_force_layout(lap_t *L, uint16_t layout_id);     /* restrict candidates to this layout id */
 void     lap_reset(lap_t *L);                                /* back to NO_VENUE; keeps best/prev (§10.3) */
-/* Feed one fix (valid or not) and the current fused stats; may emit events via cb (NULL to ignore).
- * An invalid fix inside LAP_RUNNING sets LAP_F_GPS_LOST on the current lap and is otherwise skipped. */
-void     lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx);
+/* Feed one fix (valid or not) and the current fused stats. Events for this fix are appended to out[]
+ * (a caller-owned buffer of at least LAP_EVT_MAX entries); *n_out is set to 0 on entry and left holding
+ * the number appended, in emission order (§6.4/§10.x). The caller drains out[0..*n_out). An invalid fix
+ * inside LAP_RUNNING sets LAP_F_GPS_LOST on the current lap and is otherwise skipped. */
+void     lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs,
+                    event_t *out, int cap, int *n_out);
 uint8_t  lap_state(const lap_t *L);
 const lap_result_t *lap_best(const lap_t *L);                /* NULL until a valid lap completes */
 const lap_result_t *lap_prev(const lap_t *L);                /* NULL until any lap completes */

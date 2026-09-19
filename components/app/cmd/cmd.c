@@ -114,18 +114,18 @@ static uint32_t storage_free_kb(void)
 }
 
 /* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
-static void count_sum_cb(const char *name, uint32_t size, void *ctx)
-{
-    LT_ASSERT_VOID(name != NULL, CMD_ASSERT_CODE);
-    LT_ASSERT_VOID(ctx != NULL, CMD_ASSERT_CODE);
-    (void)size;
-    const char *dot = strrchr(name, '.');
-    if (dot && strcmp(dot, ".sum") == 0) (*(int *)ctx)++;
-}
 static uint16_t session_count(void)
 {
     int c = 0;
-    (void)sto_list("/sessions", count_sum_cb, &c);
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") == 0) {
+        sto_entry_t e;
+        while (sto_list_next(&it, &e) == 1) {
+            const char *dot = strrchr(e.name, '.');
+            if (dot && strcmp(dot, ".sum") == 0) c++;
+        }
+        sto_list_close(&it);
+    }
     return (c > 0xFFFF) ? 0xFFFF : (uint16_t)c;
 }
 
@@ -473,12 +473,15 @@ static int read_sum_scan(const char *id, sumscan_t *out)
     if (sto_open(path, STO_RD, &f) != 0) return -1;
     ses_reader_init(&s_sr);
     size_t got;
+    uint8_t ft, fl; const uint8_t *fp;
     int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
     while (sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
         LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
-        ses_reader_feed(&s_sr, s_io, got, sum_scan_cb, out);
+        ses_reader_push(&s_sr, s_io, got);
+        while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) sum_scan_cb(ft, fp, fl, out);
     }
-    ses_reader_flush(&s_sr, sum_scan_cb, out);
+    ses_reader_finish(&s_sr);
+    while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) sum_scan_cb(ft, fp, fl, out);
     (void)sto_close(f);
     return 0;
 }
@@ -517,11 +520,12 @@ enum { LIST_MAX_SESSIONS = 64 };
 static sess_ent_t s_sess[LIST_MAX_SESSIONS];
 static int        s_nsess;
 
-static void list_scan_cb(const char *name, uint32_t size, void *ctx)
+/* Dedup/merge one /sessions dirent (name, size) into s_sess[] by session-id prefix (the part of
+ * name before ".log"/".sum"). Called once per entry from op_list's measuring-pass loop below. */
+static void scan_one_entry(const char *name, uint32_t size)
 {
     LT_ASSERT_VOID(name != NULL, CMD_ASSERT_CODE);
     LT_ASSERT_VOID(s_nsess >= 0 && s_nsess <= LIST_MAX_SESSIONS, CMD_ASSERT_CODE);   /* within s_sess[] */
-    (void)ctx;
     const char *dot = strrchr(name, '.');
     if (!dot) return;
     bool is_log = strcmp(dot, ".log") == 0;
@@ -573,7 +577,13 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
 
     if (!second) {                                         /* measuring pass: enumerate + scan once */
         s_nsess = 0;
-        (void)sto_list("/sessions", list_scan_cb, NULL);
+        sto_iter_t it;
+        if (sto_list_open(&it, "/sessions") == 0) {
+            sto_entry_t e;
+            while (sto_list_next(&it, &e) == 1)
+                scan_one_entry(e.name, e.size);
+            sto_list_close(&it);
+        }
         LT_ASSERT_RET(s_nsess >= 0 && s_nsess <= LIST_MAX_SESSIONS, CMD_ASSERT_CODE, -1);   /* within s_sess[] */
         for (int i = 0; i < s_nsess; i++) {
             if (!s_sess[i].has_sum) continue;
@@ -705,15 +715,20 @@ static int stream_export(const char *id, uint8_t expfmt, uint32_t offset, uint32
     ses_reader_init(&s_sr);
     uint32_t done = 0;
     size_t   got;
+    uint8_t  ft, fl; const uint8_t *fp;
     int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
     while (done < limit && sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
         LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
         if ((uint32_t)got > limit - done) got = (size_t)(limit - done);   /* clamp to snapshot */
-        ses_reader_feed(&s_sr, s_io, got, exp_frame_cb, &pump);
+        ses_reader_push(&s_sr, s_io, got);
+        while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) exp_frame_cb(ft, fp, fl, &pump);
         done += (uint32_t)got;
         if (pump.err || s_cw.err) break;
     }
-    if (!pump.err && !s_cw.err) ses_reader_flush(&s_sr, exp_frame_cb, &pump);
+    if (!pump.err && !s_cw.err) {
+        ses_reader_finish(&s_sr);
+        while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) exp_frame_cb(ft, fp, fl, &pump);
+    }
     (void)sto_close(f);
 
     if (!s_cw.err && !pump.err) {                /* finish the exporter (may need EXP_FULL retry) */

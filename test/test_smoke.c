@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "core/core.h"
+#include "assert_support.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -13,46 +14,40 @@ static void test_version_string(void)
 
 /* ---- core assertions (spec §17.9) ---- */
 
-static uint16_t    seen_code;
-static const char *seen_file;
-static int         seen_line, seen_calls;
-static void record_hook(uint16_t code, const char *file, int line)
-{
-    seen_code = code; seen_file = file; seen_line = line; seen_calls++;
-}
-
 static int guarded_ret(int ok)   { CORE_ASSERT_RET(ok, 0x0A99, -7); return 0; }
 static int void_calls;
 static void guarded_void(int ok) { CORE_ASSERT_VOID(ok, 0x0A98); void_calls++; }
 
-static void test_assert_hook_records_the_code_on_a_forced_failure(void)
+static void test_assert_reporter_records_the_code_on_a_forced_failure(void)
 {
-    seen_calls = 0; void_calls = 0;
-    core_set_assert_hook(record_hook);
+    void_calls = 0;
+    lt_test_assert_reset();
 
-    TEST_ASSERT_EQUAL_INT(0, guarded_ret(1));            /* a passing check stays silent */
-    TEST_ASSERT_EQUAL_INT(0, seen_calls);
+    TEST_ASSERT_EQUAL_INT(0, guarded_ret(1));            /* a passing check never reports */
+    TEST_ASSERT_EQUAL_UINT(0, lt_test_assert_count());
 
     TEST_ASSERT_EQUAL_INT(-7, guarded_ret(0));           /* failing: reports and returns the value */
-    TEST_ASSERT_EQUAL_INT(1, seen_calls);
-    TEST_ASSERT_EQUAL_HEX16(0x0A99, seen_code);
-    TEST_ASSERT_NOT_NULL(seen_file);
-    TEST_ASSERT_GREATER_THAN(0, seen_line);
+    TEST_ASSERT_EQUAL_UINT(1, lt_test_assert_count());
+    TEST_ASSERT_EQUAL_HEX16(0x0A99, lt_test_assert_last_code());
+    TEST_ASSERT_NOT_NULL(lt_test_assert_last_file());
+    TEST_ASSERT_GREATER_THAN(0, lt_test_assert_last_line());
 
     guarded_void(1); TEST_ASSERT_EQUAL_INT(1, void_calls);
     guarded_void(0); TEST_ASSERT_EQUAL_INT(1, void_calls);   /* returned before the body */
-    TEST_ASSERT_EQUAL_INT(2, seen_calls);
-    TEST_ASSERT_EQUAL_HEX16(0x0A98, seen_code);
+    TEST_ASSERT_EQUAL_UINT(2, lt_test_assert_count());
+    TEST_ASSERT_EQUAL_HEX16(0x0A98, lt_test_assert_last_code());
 
-    core_set_assert_hook(NULL);                          /* NULL = silent, never a null call */
+    /* Another failure still returns the safe value and is still reported: the reporter is a
+     * link-time function with no runtime "off" state (the silent path is now core.c's weak
+     * default, exercised only by a core-only link that supplies no override). */
     TEST_ASSERT_EQUAL_INT(-7, guarded_ret(0));
-    TEST_ASSERT_EQUAL_INT(2, seen_calls);
+    TEST_ASSERT_EQUAL_UINT(3, lt_test_assert_count());
 }
 
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_version_string);
-    RUN_TEST(test_assert_hook_records_the_code_on_a_forced_failure);
+    RUN_TEST(test_assert_reporter_records_the_code_on_a_forced_failure);
     return UNITY_END();
 }

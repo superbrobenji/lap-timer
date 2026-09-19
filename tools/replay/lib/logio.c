@@ -283,12 +283,16 @@ void logr_init(logr_t *r, const logr_cb_t *cb, void *ctx)
 
 void logr_feed(logr_t *r, const uint8_t *buf, size_t n)
 {
-    ses_reader_feed(&r->rd, buf, n, logr_frame_cb, r);
+    uint8_t t, l; const uint8_t *p;
+    ses_reader_push(&r->rd, buf, n);
+    while (ses_reader_next(&r->rd, &t, &p, &l) == 1) logr_frame_cb(t, p, l, r);
 }
 
 void logr_finish(logr_t *r)
 {
-    ses_reader_flush(&r->rd, logr_frame_cb, r);
+    uint8_t t, l; const uint8_t *p;
+    ses_reader_finish(&r->rd);
+    while (ses_reader_next(&r->rd, &t, &p, &l) == 1) logr_frame_cb(t, p, l, r);
 }
 
 int logr_read_file(logr_t *r, const char *path)

@@ -177,6 +177,21 @@ int errlog_add(uint16_t code, uint32_t arg)
     return 0;
 }
 
+/* The STRONG core_assert_report (Power of 10 rule 9, spec §17.9): overrides core.c's weak no-op
+ * default so a failing CORE_ASSERT_ or LT_ASSERT_ anywhere in the firmware -- which never aborts
+ * on target -- is recorded into the §17.7 error ring. It lives HERE, next to errlog_add and in a
+ * TU the firmware always links (errlog_add is referenced from boot), so the strong definition
+ * reliably wins over the weak default: a strong def parked in a TU nothing else references would
+ * not be pulled from the component archive, silently leaving the no-op default in the image.
+ * It MUST NOT call a CORE_ASSERT_/LT_ASSERT_ macro itself (that would recurse back through
+ * core_assert_fail); errlog_add's own asserts only fire on a zero code or a corrupt ring head,
+ * neither of which a real assertion report produces. */
+void core_assert_report(uint16_t code, const char *file, int line)
+{
+    ESP_LOGE(TAG, "core assert 0x%04x at %s:%d", code, file ? file : "?", line);
+    (void)errlog_add(code, (uint32_t)line);
+}
+
 int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
 {
     /* Every real caller (cmd.c ERRLOG_GET/DIAG_GET) passes its own fixed local array and its
