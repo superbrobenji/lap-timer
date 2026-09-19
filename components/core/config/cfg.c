@@ -23,7 +23,21 @@ int cfg_defaults(cfg_t *c)
     return 0;
 }
 
-#define CLAMP_U(field, lo, hi) do { if ((field) < (lo)) { (field) = (lo); n++; } else if ((field) > (hi)) { (field) = (hi); n++; } } while (0)
+/* Clamp *v into [lo, hi]; returns 1 if it moved (caller adds that into its violation counter n),
+ * 0 if it was already in range. Two width-specific helpers rather than one generic macro/function
+ * because the cfg_t fields being clamped are a mix of uint16_t and uint8_t. */
+static int clamp_u16(uint16_t *v, uint16_t lo, uint16_t hi)
+{
+    if (*v < lo) { *v = lo; return 1; }
+    if (*v > hi) { *v = hi; return 1; }
+    return 0;
+}
+static int clamp_u8(uint8_t *v, uint8_t lo, uint8_t hi)
+{
+    if (*v < lo) { *v = lo; return 1; }
+    if (*v > hi) { *v = hi; return 1; }
+    return 0;
+}
 
 int cfg_validate(cfg_t *c)
 {
@@ -32,11 +46,11 @@ int cfg_validate(cfg_t *c)
     if (c->version != CFG_VERSION) { c->version = CFG_VERSION; n++; }
     if (c->units > CFG_UNITS_MPH) { c->units = CFG_UNITS_KMH; n++; }
     if (c->mode > CFG_MODE_DRAG) { c->mode = CFG_MODE_LAP; n++; }
-    CLAMP_U(c->lap.min_lap_s, 5, 600);
-    CLAMP_U(c->lap.max_lap_s, 60, 3600);
-    CLAMP_U(c->lap.gate_rearm_m, 10, 500);
-    CLAMP_U(c->lap.pit_speed_kmh, 1, 30);
-    CLAMP_U(c->lap.pit_time_s, 3, 60);
+    n += clamp_u16(&c->lap.min_lap_s, 5, 600);
+    n += clamp_u16(&c->lap.max_lap_s, 60, 3600);
+    n += clamp_u16(&c->lap.gate_rearm_m, 10, 500);
+    n += clamp_u8(&c->lap.pit_speed_kmh, 1, 30);
+    n += clamp_u8(&c->lap.pit_time_s, 3, 60);
     if (c->lap.n_default_layout > CFG_MAX_DEFAULT_LAYOUTS) { c->lap.n_default_layout = CFG_MAX_DEFAULT_LAYOUTS; n++; }
     if (c->drag.n_kmh > CFG_MAX_BENCHES) { c->drag.n_kmh = CFG_MAX_BENCHES; n++; }
     if (c->drag.n_mph > CFG_MAX_BENCHES) { c->drag.n_mph = CFG_MAX_BENCHES; n++; }
@@ -44,14 +58,14 @@ int cfg_validate(cfg_t *c)
      * counts within the array capacity before the loops below index benches_kmh[]/benches_mph[]. */
     CORE_ASSERT_RET(c->drag.n_kmh <= CFG_MAX_BENCHES, CFG_ASSERT_CODE, n);
     CORE_ASSERT_RET(c->drag.n_mph <= CFG_MAX_BENCHES, CFG_ASSERT_CODE, n);
-    for (int i = 0; i < c->drag.n_kmh; i++) CLAMP_U(c->drag.benches_kmh[i], 10, 400);
-    for (int i = 0; i < c->drag.n_mph; i++) CLAMP_U(c->drag.benches_mph[i], 10, 250);
-    CLAMP_U(c->drag.launch_g_e2, 5, 50);
-    CLAMP_U(c->power.pit_after_s, 10, 600);
-    CLAMP_U(c->power.park_after_s, 60, 7200);
-    CLAMP_U(c->power.shutdown_mv, 3000, 3600);
-    CLAMP_U(c->power.conn_idle_s, 30, 1800);
-    CLAMP_U(c->display.full_every, 1, 50);
+    for (int i = 0; i < c->drag.n_kmh; i++) n += clamp_u16(&c->drag.benches_kmh[i], 10, 400);
+    for (int i = 0; i < c->drag.n_mph; i++) n += clamp_u16(&c->drag.benches_mph[i], 10, 250);
+    n += clamp_u8(&c->drag.launch_g_e2, 5, 50);
+    n += clamp_u16(&c->power.pit_after_s, 10, 600);
+    n += clamp_u16(&c->power.park_after_s, 60, 7200);
+    n += clamp_u16(&c->power.shutdown_mv, 3000, 3600);
+    n += clamp_u16(&c->power.conn_idle_s, 30, 1800);
+    n += clamp_u8(&c->display.full_every, 1, 50);
     if (c->display.rotation != 0 && c->display.rotation != 180) { c->display.rotation = 0; n++; }
     /* Two-point battery calibration: the two points must be ordered and far enough apart for the
      * interpolation to be meaningful, and both in a plausible cell range. A pair that fails any of
@@ -65,7 +79,7 @@ int cfg_validate(cfg_t *c)
     }
     if (c->ble.name[0] == '\0') { strcpy(c->ble.name, "LapTimer"); n++; }
     if (c->ble.name[15] != '\0') { c->ble.name[15] = '\0'; n++; }
-    CLAMP_U(c->ble.adv_s, 15, 600);
+    n += clamp_u16(&c->ble.adv_s, 15, 600);
     if (c->log.fused_hz != 5 && c->log.fused_hz != 10 && c->log.fused_hz != 25) { c->log.fused_hz = 10; n++; }
     /* uint8_t fields: only the bounds a uint8_t can actually violate are checked. */
     if (c->gps.dyn_model > 8) { c->gps.dyn_model = 8; n++; }

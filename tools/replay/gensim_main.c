@@ -160,7 +160,14 @@ int main(int argc, char **argv)
     fputs("/* Venue as JSON; the pipeline parses it with trk_from_json (same as replay --venue-json). */\n", h);
     fputs("static const char SIM_VENUE_JSON[] =\n    ", h);
     emit_json_string(h, vjson);
-    fputs(";\n\n#endif /* GPS_SIM_CAPTURE_H */\n", h);
+    fputs(";\n\n", h);
+    fputs(
+        "/* Defined in gps_sim.c (returns SIM_VENUE_JSON above); declared here -- the one header\n"
+        " * gps_sim.c and its cross-component caller (pipeline.c) can both see -- so the definition\n"
+        " * has a visible prototype (rule 6: -Wmissing-prototypes). Not file-local: pipeline.c calls\n"
+        " * it when CFG_GPS_SIM. */\n"
+        "const char *gps_sim_venue_json(void);\n\n"
+        "#endif /* GPS_SIM_CAPTURE_H */\n", h);
     fclose(h);
 
     printf("gensim: wrote %s (%u fixes) and %s\n", h_path, g_nfix, exp_path);

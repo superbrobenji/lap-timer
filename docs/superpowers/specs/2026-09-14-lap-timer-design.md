@@ -2125,9 +2125,11 @@ Classic ESP32 disables the instruction cache during SPI flash erase/write; code 
 
 ### 17.9 Code rules
 
-- C11, `-Wall -Wextra -Werror -Wshadow` plus `-Wconversion` as a non-fatal warning (core), `-Os` on target. Vendored third-party files (Unity, jsmn) are compiled with warnings relaxed.
+**Authority:** the shipped on-device C (`components/core`/`app`/`drivers`, `main`) follows the ten Power-of-10 rules (Holzmann/JPL, refined form). `docs/superpowers/specs/2026-09-17-power-of-10-compliance-design.md` is the authoritative interpretation, scope, deviation model, and enforcement for those rules; `docs/power-of-10-deviations.md` is the deviation register and `docs/power-of-10-checklist.md` the reviewer checklist. From `plan-4.5-done`, the rules are enforced by blocking CI (the custom linter `tools/lint/power_of_10.py`, `clang-tidy`, `cppcheck`) plus the pedantic compiler warnings below; new code is born compliant. The bullets below summarise the rules this section historically mandated.
+
+- C11, `-Wall -Wextra -Werror -Wshadow` plus `-Wconversion` as a non-fatal warning, and `-Wmissing-prototypes`/`-Wmissing-declarations` (rule 6 linkage), applied to every in-scope component and `main`; `-Os` on target. Vendored third-party files (Unity, jsmn) are compiled with warnings relaxed.
 - No `malloc` after init; all buffers static or in task-owned structs. `CONFIG_COMPILER_STACK_CHECK_MODE_STRONG` in debug builds.
-- Core assertions: `CORE_ASSERT_RET(cond, code, ret)` and `CORE_ASSERT_VOID(cond, code)` (`core/core.h`) report `code` through the hook installed with `core_set_assert_hook` and return `ret` / return, respectively; they never abort on target. The app installs a hook that logs the code into the error ring (§17.7); host tests install one that records it; the default `NULL` hook is silent.
+- Core assertions: `CORE_ASSERT_RET(cond, code, ret)` and `CORE_ASSERT_VOID(cond, code)` (`core/core.h`) report `code` through the link-time function `core_assert_report` and return `ret` / return, respectively; they never abort on target. The firmware defines a strong `core_assert_report` that logs the code into the error ring (§17.7); host tests define one that records it; `core.c`'s weak default is silent (a core-only link — e.g. the replay tool — reports nothing). Every function of more than ~20 code lines carries ≥2 meaningful assertions (refined rule 5).
 - All time int64 µs; no floating-point time.
 - All on-flash records versioned and CRC'd.
 - ISRs only set flags / push to queues from ISR-safe APIs; they are `IRAM_ATTR`.

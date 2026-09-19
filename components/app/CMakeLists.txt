@@ -27,5 +27,5 @@ target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
 
 # Same strictness as components/core (§17.9).
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wall -Wextra -Werror -Wshadow -Wconversion
+    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations
     -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)

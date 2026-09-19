@@ -630,4 +630,10 @@ static const sim_fix_t SIM_FIXES[SIM_FIX_COUNT] = {
 static const char SIM_VENUE_JSON[] =
     "{\"id\":1000,\"name\":\"Synthetic\",\"lat\":-34.0300000,\"lon\":18.7300000,\"radius_m\":2000,\"verified\":false,\"layouts\":[{\"id\":1,\"name\":\"Full\",\"dir\":1,\"length_m\":700,\"sf\":[[-34.0290010,18.7304749],[-34.0292346,18.7303121]],\"sectors\":[[[-34.0308403,18.7308065],[-34.0306067,18.7306438]],[[-34.0301587,18.7287186],[-34.0301587,18.7290441]]]}]}";
 
+/* Defined in gps_sim.c (returns SIM_VENUE_JSON above); declared here -- the one header
+ * gps_sim.c and its cross-component caller (pipeline.c) can both see -- so the definition
+ * has a visible prototype (rule 6: -Wmissing-prototypes). Not file-local: pipeline.c calls
+ * it when CFG_GPS_SIM. */
+const char *gps_sim_venue_json(void);
+
 #endif /* GPS_SIM_CAPTURE_H */

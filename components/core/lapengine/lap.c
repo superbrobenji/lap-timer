@@ -68,7 +68,9 @@ static void reset_to_no_venue(lap_t *L)
     L->pred_rec_n = 0;
     L->pred_rec_fixes = 0;
     /* best/prev results, best_sector table, the predictive reference table and cfg are preserved
-     * across a reset (§10.3). */
+     * across a reset (§10.3); best_sector_count must still be within the best_sector_ms[]/
+     * have_best_sector[] arrays it indexes elsewhere, or a later read would run past them. */
+    CORE_ASSERT_VOID(L->best_sector_count <= LAP_MAX_SECTORS + 1, LAP_ASSERT_CODE);
 }
 
 void lap_init(lap_t *L, const lap_cfg_t *cfg)

@@ -151,7 +151,14 @@ int trk_user_load(const uint8_t *blob, size_t n)
     return 0;
 }
 
-#define PUT_FIELD(dst, T, f, src) memcpy((dst) + offsetof(T, f), &(src)->f, sizeof (src)->f)
+/* Copies `len` bytes from `src` to `dst + off`. A thin, type-erased wrapper around memcpy so each
+ * call site below can express "write this field at its offsetof" without a logic-bearing macro;
+ * the offset/pointer/length are computed at the call site (offsetof(T, f), &(src)->f, sizeof
+ * (src)->f), so this helper needs no knowledge of the surrounding struct types. */
+static inline void put_field(uint8_t *dst, size_t off, const void *src, size_t len)
+{
+    memcpy(dst + off, src, len);
+}
 
 /* Field-by-field copy into an already-zeroed destination: struct assignment (or a raw memcpy of the
  * whole struct) also copies the source's compiler-inserted padding bytes verbatim, which the
@@ -167,30 +174,30 @@ static void canon_venue(uint8_t *dst, const trk_venue_t *src)
     CORE_ASSERT_VOID(src != NULL, TRK_ASSERT_CODE);
     CORE_ASSERT_VOID(src->n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE); /* every stored venue was already trk_validate_venue()-checked */
     memset(dst, 0, sizeof *src);
-    PUT_FIELD(dst, trk_venue_t, id, src);
-    PUT_FIELD(dst, trk_venue_t, name, src);
-    PUT_FIELD(dst, trk_venue_t, lat, src);
-    PUT_FIELD(dst, trk_venue_t, lon, src);
-    PUT_FIELD(dst, trk_venue_t, radius_m, src);
-    PUT_FIELD(dst, trk_venue_t, flags, src);
-    PUT_FIELD(dst, trk_venue_t, n_layouts, src);
+    put_field(dst, offsetof(trk_venue_t, id), &src->id, sizeof src->id);
+    put_field(dst, offsetof(trk_venue_t, name), &src->name, sizeof src->name);
+    put_field(dst, offsetof(trk_venue_t, lat), &src->lat, sizeof src->lat);
+    put_field(dst, offsetof(trk_venue_t, lon), &src->lon, sizeof src->lon);
+    put_field(dst, offsetof(trk_venue_t, radius_m), &src->radius_m, sizeof src->radius_m);
+    put_field(dst, offsetof(trk_venue_t, flags), &src->flags, sizeof src->flags);
+    put_field(dst, offsetof(trk_venue_t, n_layouts), &src->n_layouts, sizeof src->n_layouts);
     /* Only the active layouts/sectors (src has already passed trk_validate_venue, so n_layouts and
      * every n_sectors are in range) are copied; slots beyond them are left at the memset zero rather
      * than carrying through whatever unused array content src happened to hold. */
     for (uint8_t i = 0; i < src->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
         const trk_layout_t *sl = &src->layouts[i];
         uint8_t *ld = dst + offsetof(trk_venue_t, layouts) + (size_t)i * sizeof(trk_layout_t);
-        PUT_FIELD(ld, trk_layout_t, id, sl);
-        PUT_FIELD(ld, trk_layout_t, name, sl);
-        PUT_FIELD(ld, trk_layout_t, sf, sl);                    /* trk_line_t is four packed doubles: no internal padding */
-        PUT_FIELD(ld, trk_layout_t, dir_sign, sl);
-        PUT_FIELD(ld, trk_layout_t, n_sectors, sl);
+        put_field(ld, offsetof(trk_layout_t, id), &sl->id, sizeof sl->id);
+        put_field(ld, offsetof(trk_layout_t, name), &sl->name, sizeof sl->name);
+        put_field(ld, offsetof(trk_layout_t, sf), &sl->sf, sizeof sl->sf);   /* trk_line_t is four packed doubles: no internal padding */
+        put_field(ld, offsetof(trk_layout_t, dir_sign), &sl->dir_sign, sizeof sl->dir_sign);
+        put_field(ld, offsetof(trk_layout_t, n_sectors), &sl->n_sectors, sizeof sl->n_sectors);
         CORE_ASSERT_VOID(sl->n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE); /* the sectors[] array's own bound */
         for (uint8_t s = 0; s < sl->n_sectors && s < LAP_MAX_SECTORS; s++) {
             uint8_t *sd = ld + offsetof(trk_layout_t, sectors) + (size_t)s * sizeof(trk_line_t);
             memcpy(sd, &sl->sectors[s], sizeof sl->sectors[s]);
         }
-        PUT_FIELD(ld, trk_layout_t, length_m, sl);
+        put_field(ld, offsetof(trk_layout_t, length_m), &sl->length_m, sizeof sl->length_m);
     }
 }
 

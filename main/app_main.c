@@ -207,6 +207,10 @@ static void boot_subsystems(void)
     ui_start();
 }
 
+/* ESP-IDF calls app_main() as the framework entry point; it has no project header to declare it
+ * in (rule 6: -Wmissing-prototypes needs a prototype in scope at the definition). */
+void app_main(void);
+
 void app_main(void)
 {
     int64_t t_boot = esp_timer_get_time();

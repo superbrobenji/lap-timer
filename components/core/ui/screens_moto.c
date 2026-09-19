@@ -313,7 +313,7 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
 /* ---- LAP page 2 (spec §20.5): session stats ---- */
 
 #define LAP2_ROW_H 24
-#define LAP2_ROW_Y(n) (8 + (n) * LAP2_ROW_H)
+static inline int lap2_row_y(int n) { return 8 + n * LAP2_ROW_H; }
 
 static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 {
@@ -326,7 +326,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     p = put_str(p, "MAX SPD ");
     p = put_uint(p, m->max_speed_kmh);
     *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP2_ROW_Y(0), buf);
+    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(0), buf);
 
     p = buf;
     p = put_str(p, "LEAN L ");
@@ -334,13 +334,13 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     p = put_str(p, " R ");
     p = put_uint(p, m->lean_r_deg);
     *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP2_ROW_Y(1), buf);
+    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(1), buf);
 
     p = buf;
     p = put_str(p, "LAT G ");
     p = put_g_e2(p, m->lat_g_e2);
     *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP2_ROW_Y(2), buf);
+    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(2), buf);
 
     p = buf;
     p = put_str(p, "ACC ");
@@ -348,7 +348,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     p = put_str(p, " BRK ");
     p = put_g_e2(p, m->brk_g_e2);
     *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP2_ROW_Y(3), buf);
+    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(3), buf);
 
     p = buf;
     p = put_str(p, "LAPS ");
@@ -357,7 +357,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     p = put_uint(p, m->laps_valid);
     p = put_str(p, " valid)");
     *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP2_ROW_Y(4), buf);
+    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(4), buf);
 }
 
 /* ---- DRAG page 0 (spec §20.5 + §11.4 benches rule): up to 4 rows of benches + the 1/4 row ---- */
@@ -538,6 +538,43 @@ static void render_drag_page2(fb_t *fb, const screen_model_t *m)
 
 /* ---- dispatch ---- */
 
+/* Page dispatch for SCR_MODE_LAP, pulled out of screens_moto_render's switch (rule 4-compound:
+ * keeps each switch body <= 30 code lines) -- pure code motion, byte-identical rendering. */
+static void render_lap_dispatch(fb_t *fb, const screen_model_t *m)
+{
+    switch (m->page) {
+    case 0:
+        render_lap_page0(fb, m);
+        break;
+    case 1:
+        render_lap_page1(fb, m);
+        break;
+    case 2:
+        render_lap_page2(fb, m);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Page dispatch for SCR_MODE_DRAG; see render_lap_dispatch's comment above. */
+static void render_drag_dispatch(fb_t *fb, const screen_model_t *m)
+{
+    switch (m->page) {
+    case 0:
+        render_drag_page0(fb, m);
+        break;
+    case 1:
+        render_drag_page1(fb, m);
+        break;
+    case 2:
+        render_drag_page2(fb, m);
+        break;
+    default:
+        break;
+    }
+}
+
 void screens_moto_render(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -546,34 +583,10 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
 
     switch (m->mode) {
     case SCR_MODE_LAP:
-        switch (m->page) {
-        case 0:
-            render_lap_page0(fb, m);
-            break;
-        case 1:
-            render_lap_page1(fb, m);
-            break;
-        case 2:
-            render_lap_page2(fb, m);
-            break;
-        default:
-            break;
-        }
+        render_lap_dispatch(fb, m);
         break;
     case SCR_MODE_DRAG:
-        switch (m->page) {
-        case 0:
-            render_drag_page0(fb, m);
-            break;
-        case 1:
-            render_drag_page1(fb, m);
-            break;
-        case 2:
-            render_drag_page2(fb, m);
-            break;
-        default:
-            break;
-        }
+        render_drag_dispatch(fb, m);
         break;
     default:
         break;

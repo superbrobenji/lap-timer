@@ -49,6 +49,16 @@
 # readability-identifier-length, readability-uppercase-literal-suffix and
 # readability-isolate-declaration fight this codebase's existing, deliberate embedded-C style
 # (short identifiers, numeric hardware constants, C89-ish multi-declaration lines).
+#
+# Session 4.5.6 (the blocking flip) additionally drops the pure-STYLE checks that map to no
+# Power-of-10 rule, so making clang-tidy a required check gates real rule violations rather than
+# formatting opinions: readability-braces-around-statements, readability-else-after-return,
+# readability-math-missing-parentheses, readability-named-parameter (all style), and
+# readability-function-cognitive-complexity + bugprone-easily-swappable-parameters (heuristics
+# with no P10 mapping — rule 4 is enforced by readability-function-size + the custom linter, not a
+# cognitive-complexity metric). The rule-mapped checks (misc-no-recursion r1,
+# readability-function-size r4, bugprone-unused-return-value/cert-err33-c r7, the pointer/scope
+# readability-* r6, bugprone-*/cert-* r10) remain.
 Checks: >
   -*,
   clang-diagnostic-*,
@@ -74,7 +84,13 @@ Checks: >
   -readability-magic-numbers,
   -readability-identifier-length,
   -readability-uppercase-literal-suffix,
-  -readability-isolate-declaration
+  -readability-isolate-declaration,
+  -readability-braces-around-statements,
+  -readability-else-after-return,
+  -readability-function-cognitive-complexity,
+  -readability-math-missing-parentheses,
+  -readability-named-parameter,
+  -bugprone-easily-swappable-parameters
 
 WarningsAsErrors: ''
 

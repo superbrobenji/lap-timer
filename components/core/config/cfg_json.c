@@ -30,6 +30,10 @@ static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out)
 static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, const char *path, int v)
 {
     CORE_ASSERT_RET(c != NULL && js != NULL && toks != NULL && path != NULL, CFG_ASSERT_CODE, -1);
+    /* v indexes toks[] below (&toks[v]) and again as i = v + 1 in the array-value branches; walk()'s
+     * own loop guard (i + 1 < ntoks) keeps this true at every real call site, but apply() takes
+     * ntoks as a parameter precisely so it can check its own input rather than trust the caller. */
+    CORE_ASSERT_RET(v >= 0 && v < ntoks, CFG_ASSERT_CODE, -1);
     const jsmntok_t *t = &toks[v];
     if (!strcmp(path, "units")) {
         if (json_tok_eq(js, t, "kmh")) { c->units = CFG_UNITS_KMH; return 0; }
