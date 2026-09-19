@@ -11,6 +11,7 @@
 #include "app/lt_err.h"
 #include "app/lt_rtc.h"
 #include "app/lt_consts.h"
+#include "app/lt_assert.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -18,6 +19,8 @@
 #include "esp_timer.h"
 
 static const char *TAG = "sup";
+
+#define SUP_ASSERT_CODE 0x0B30
 
 #define SUP_PERIOD_MS   1000
 #define SUP_PRIO        22
@@ -41,7 +44,11 @@ static bool         s_safe_mode_cleared;   /* guards the §17.5 uptime auto-clea
 
 int sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s)
 {
-    if (hb_id >= HB_COUNT) return -1;
+    /* hb_id is a task-registration index into s_watch[HB_COUNT]; task is the caller's own
+     * xTaskGetCurrentTaskHandle(), never NULL from task context (§4.3 callers). Both anomalies
+     * are programmer errors (a bad HB_* constant, or calling from an ISR), not runtime input. */
+    LT_ASSERT_RET(hb_id < HB_COUNT, SUP_ASSERT_CODE, -1);
+    LT_ASSERT_RET(task != NULL, SUP_ASSERT_CODE, -1);
     s_watch[hb_id] = (watch_t){ .task = task, .hb_id = hb_id, .stall_s = stall_s,
                                 .last_hb = g_hb[hb_id], .stalled_s = 0, .used = true };
     return 0;
@@ -50,8 +57,15 @@ int sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s)
 TaskHandle_t sup_task_handle(uint8_t hb_id)
 {
     /* The handle a task registered for its heartbeat slot (NULL if none). Lets `dbg mem` sample
-     * the pipeline/logger/supervisor stacks without each exposing its own accessor (§22.4). */
-    if (hb_id >= HB_COUNT || !s_watch[hb_id].used) return NULL;
+     * the pipeline/logger/supervisor stacks without each exposing its own accessor (§22.4). An
+     * out-of-range hb_id is a caller bug (assert); an in-range but never-registered slot is a
+     * normal state (plain NULL return, not an anomaly). */
+    LT_ASSERT_RET(hb_id < HB_COUNT, SUP_ASSERT_CODE, NULL);
+    if (!s_watch[hb_id].used) return NULL;
+    /* Invariant from sup_register_task (the only writer of .task/.used): a used slot always has a
+     * non-NULL task. The fallback on failure is the same value the plain return below would give
+     * either way, so this is free to assert even though it can never fire under correct operation. */
+    LT_ASSERT_RET(s_watch[hb_id].task != NULL, SUP_ASSERT_CODE, s_watch[hb_id].task);
     return s_watch[hb_id].task;
 }
 
@@ -60,6 +74,10 @@ static void check_stalls(void)
     for (int i = 0; i < HB_COUNT; i++) {
         watch_t *w = &s_watch[i];
         if (!w->used || w->stall_s == 0) continue;
+        /* w->hb_id is stored state (set once at registration, §sup_register_task already bounds
+         * it there); re-checking it here before it indexes g_hb[] guards against future slot
+         * corruption -- an internal index overflow would otherwise read past g_hb[HB_COUNT]. */
+        LT_ASSERT_VOID(w->hb_id < HB_COUNT, SUP_ASSERT_CODE);
         uint32_t cur = g_hb[w->hb_id];
         if (cur != w->last_hb) {                 /* progressing */
             w->last_hb = cur;
@@ -69,14 +87,14 @@ static void check_stalls(void)
         w->stalled_s += SUP_PERIOD_MS / 1000;
         if (w->stalled_s >= w->stall_s) {
             ESP_LOGE(TAG, "task %d stalled %us", w->hb_id, (unsigned)w->stalled_s);
-            errlog_add(E_SYS_TASK_STALL, w->hb_id);
+            (void)errlog_add(E_SYS_TASK_STALL, w->hb_id);
             w->stalled_s = 0;
             if (w->hb_id == HB_PIPELINE) {
                 /* §17.2: a stalled pipeline restarts (RTC snapshot save lands in 3.5). F3: the HW
                  * reset reason will be ESP_RST_SW (§17.5 normal), so leave a marker the next boot
                  * folds in as abnormal -- three consecutive stall-restarts within the window then
                  * trip the crash-loop -> SYS_SAFE_MODE instead of rebooting forever. */
-                lt_counters_flush(true);
+                (void)lt_counters_flush(true);
                 lt_stall_flag_set();
                 esp_restart();
             }
@@ -87,16 +105,19 @@ static void check_stalls(void)
 static void sup_task(void *arg)
 {
     (void)arg;
-    esp_task_wdt_add(NULL);                       /* §17.1: supervisor subscribes to the task WDT */
-    sup_register_task(HB_SUPERVISOR, xTaskGetCurrentTaskHandle(), 0);   /* self: WDT covers a stuck sup */
+    (void)esp_task_wdt_add(NULL);                 /* §17.1: supervisor subscribes to the task WDT */
+    (void)sup_register_task(HB_SUPERVISOR, xTaskGetCurrentTaskHandle(), 0);   /* self: WDT covers a stuck sup */
     ESP_LOGI(TAG, "supervisor up (core %d prio %d)", SUP_CORE, SUP_PRIO);
 
+    /* Never assert()-early-return from a FreeRTOS task entry: returning from this function would
+     * return from the task itself, which is undefined behaviour. Every genuine anomaly this loop
+     * could hit is instead asserted inside the (non-task-entry) helper it calls. */
     for (;;) {
         check_stalls();
-        esp_task_wdt_reset();
+        (void)esp_task_wdt_reset();
         uint32_t uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
         lt_rtc_uptime_update_s(uptime_s);          /* crash-loop tracker */
-        lt_counters_flush(false);                 /* persist if dirty and >=60 s (§15.2) */
+        (void)lt_counters_flush(false);           /* persist if dirty and >=60 s (§15.2) */
 
         /* §17.5: once safe mode has been up for SAFE_MODE_CLEAR_S, clear the persisted gate and
          * the runtime flag so the next -- and this -- boot run normally. Fires once per boot. */
@@ -104,7 +125,7 @@ static void sup_task(void *arg)
             uptime_s >= SAFE_MODE_CLEAR_S) {
             lt_safe_clear();
             sys_flags_clear(SYS_SAFE_MODE);
-            errlog_add(E_SYS_SAFE_MODE, 0);
+            (void)errlog_add(E_SYS_SAFE_MODE, 0);
             s_safe_mode_cleared = true;
         }
 
@@ -118,6 +139,10 @@ static void sup_task(void *arg)
 
 void sup_start(void)
 {
-    xTaskCreateStaticPinnedToCore(sup_task, "sup", SUP_STACK_WORDS, NULL, SUP_PRIO,
-                                  s_stack, &s_tcb, SUP_CORE);
+    TaskHandle_t h = xTaskCreateStaticPinnedToCore(sup_task, "sup", SUP_STACK_WORDS, NULL, SUP_PRIO,
+                                                   s_stack, &s_tcb, SUP_CORE);
+    /* Postcondition: static task creation over our own fixed-size s_stack/s_tcb must succeed --
+     * a NULL handle here would mean the supervisor (and its WDT coverage of every other task)
+     * never started. */
+    LT_ASSERT_VOID(h != NULL, SUP_ASSERT_CODE);
 }

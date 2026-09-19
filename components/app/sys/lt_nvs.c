@@ -7,6 +7,7 @@
 #include "app/lt_nvs.h"
 #include "app/lt_consts.h"
 #include "app/lt_err.h"
+#include "app/lt_assert.h"
 
 #include <string.h>
 
@@ -22,6 +23,8 @@
 
 static const char *TAG = "lt_nvs";
 
+#define NVS_ASSERT_CODE 0x0B60
+
 /* ---- on-flash blob layouts (§15.2). Packed so sizes are exact. ---- */
 #define ERR_RING_LEN   32
 #define CRASH_LOG_LEN  3
@@ -32,17 +35,17 @@ typedef struct __attribute__((packed)) {
     uint32_t uptime_s;
     uint16_t boot;
     uint32_t arg;
-} err_entry_t;                                  /* 12 B -> ring = 384 B (§15.2) */
+} err_entry_t;                                   /* 12 B -> ring = 384 B (§15.2) */
 
 typedef struct __attribute__((packed)) {
     err_entry_t entry[ERR_RING_LEN];
     uint8_t     head;                           /* next write slot */
-} err_ring_t;                                   /* 385 B */
+} err_ring_t;                                    /* 385 B */
 
 typedef struct __attribute__((packed)) {
     uint8_t  reset_reason;
     uint32_t uptime_s;
-} crash_entry_t;                                /* 5 B -> log = 15 B (§15.2) */
+} crash_entry_t;                                 /* 5 B -> log = 15 B (§15.2) */
 
 /* ---- namespaces / keys (§15.2) ---- */
 #define NS_SYS  "lt_sys"
@@ -82,6 +85,13 @@ static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 10
 
 static int load_blob(nvs_handle_t h, const char *key, void *dst, size_t expect)
 {
+    /* Parameter validity: key/dst are the caller's own literals/RAM mirrors, never NULL, and
+     * expect is always a genuine sizeof(...) > 0. Whether the STORED blob's size matches `expect`
+     * is a separate, untrusted-on-flash-data question handled below by the plain `sz != expect`
+     * return -- that one stays a return, not an assertion. */
+    LT_ASSERT_RET(key != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(dst != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(expect > 0, NVS_ASSERT_CODE, -1);
     size_t sz = 0;
     if (nvs_get_blob(h, key, NULL, &sz) != ESP_OK || sz != expect) return -1;
     return nvs_get_blob(h, key, dst, &sz) == ESP_OK ? 0 : -1;
@@ -91,6 +101,10 @@ int lt_nvs_init(void)
 {
     if (s_ready) return 0;
     if (!s_ring_lock) s_ring_lock = xSemaphoreCreateMutexStatic(&s_ring_lock_buf);   /* F1 */
+    /* Postcondition: mutex creation over our own static s_ring_lock_buf must succeed -- without
+     * it, ring_lock()/ring_unlock() silently no-op (their own `if (s_ring_lock)` guard) and the
+     * F1 serialisation the error ring depends on would be silently absent. */
+    LT_ASSERT_RET(s_ring_lock != NULL, NVS_ASSERT_CODE, -1);
     if (nvs_open(NS_SYS, NVS_READWRITE, &s_h_sys) != ESP_OK) return -1;
     if (nvs_open(NS_ERR, NVS_READWRITE, &s_h_err) != ESP_OK) return -1;
     if (nvs_open(NS_CFG, NVS_READWRITE, &s_h_cfg) != ESP_OK) return -1;
@@ -108,7 +122,7 @@ int lt_nvs_init(void)
 uint32_t lt_nvs_boot_inc(void)
 {
     s_boot_cnt++;
-    if (nvs_set_u32(s_h_sys, K_BOOT, s_boot_cnt) == ESP_OK) nvs_commit(s_h_sys);
+    if (nvs_set_u32(s_h_sys, K_BOOT, s_boot_cnt) == ESP_OK) (void)nvs_commit(s_h_sys);
     return s_boot_cnt;
 }
 
@@ -116,14 +130,17 @@ uint32_t lt_nvs_boot_get(void) { return s_boot_cnt; }
 
 static void persist_counters(void)
 {
-    if (nvs_set_blob(s_h_err, K_CTR, &s_counters, sizeof(s_counters)) == ESP_OK) nvs_commit(s_h_err);
+    if (nvs_set_blob(s_h_err, K_CTR, &s_counters, sizeof(s_counters)) == ESP_OK) (void)nvs_commit(s_h_err);
     s_counters_dirty = false;
     s_counters_last_us = esp_timer_get_time();
 }
 
 void lt_counters_inc(lt_counter_id_t id, bool persist)
 {
-    ((uint32_t *)&s_counters)[id]++;   /* lt_counters_t is 9 contiguous u32 in enum order */
+    /* id is a raw pointer-cast index into s_counters (lt_counters_t is 9 contiguous u32 in enum
+     * order, LT_CTR_BOOTS..LT_CTR_OTA_ROLLBACK) -- an out-of-range id would write past it. */
+    LT_ASSERT_VOID(id <= LT_CTR_OTA_ROLLBACK, NVS_ASSERT_CODE);
+    ((uint32_t *)&s_counters)[id]++;
     s_counters_dirty = true;
     if (persist) persist_counters();
 }
@@ -139,6 +156,14 @@ const lt_counters_t *lt_counters(void) { return &s_counters; }
 
 int errlog_add(uint16_t code, uint32_t arg)
 {
+    /* code must be non-zero: 0 is the sentinel lt_errlog_snapshot uses to mean "untouched slot"
+     * (§17.7 real codes are >= 0x0101), so a zero code here would create an entry indistinguishable
+     * from empty. s_ring.head is internal state that indexes s_ring.entry[]; re-checking its bound
+     * here (rather than trusting the mod-ERR_RING_LEN wrap below) guards against future corruption.
+     * Neither check depends on lt_nvs_init() having succeeded -- the RAM ring update below must
+     * still happen (best-effort, NVS-persistence-optional) even if NVS itself never came up. */
+    LT_ASSERT_RET(code != 0, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(s_ring.head < ERR_RING_LEN, NVS_ASSERT_CODE, -1);
     ring_lock();                                /* F1: RMW of s_ring + its NVS write is not atomic */
     err_entry_t *e = &s_ring.entry[s_ring.head];
     e->code = code;
@@ -146,7 +171,7 @@ int errlog_add(uint16_t code, uint32_t arg)
     e->boot = (uint16_t)s_boot_cnt;
     e->arg = arg;
     s_ring.head = (uint8_t)((s_ring.head + 1) % ERR_RING_LEN);
-    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) nvs_commit(s_h_err);
+    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
     ring_unlock();
     ESP_LOGW(TAG, "errlog 0x%04x arg=%u", code, (unsigned)arg);
     return 0;
@@ -154,7 +179,10 @@ int errlog_add(uint16_t code, uint32_t arg)
 
 int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
 {
-    if (!out || cap <= 0) return 0;
+    /* Every real caller (cmd.c ERRLOG_GET/DIAG_GET) passes its own fixed local array and its
+     * compile-time sizeof -- out==NULL or cap<=0 here would be a caller bug, not routine input. */
+    LT_ASSERT_RET(out != NULL, NVS_ASSERT_CODE, 0);
+    LT_ASSERT_RET(cap > 0, NVS_ASSERT_CODE, 0);
     /* head is the next write slot, so slot `head` is the oldest surviving entry once the ring has
      * wrapped; before wrap those slots are still zero. Walking head..head+LEN-1 (mod LEN) yields
      * oldest->newest; a zero `code` marks an untouched slot (real codes are >= 0x0101, §17.7). */
@@ -177,7 +205,7 @@ void lt_errlog_clear(void)
 {
     ring_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
-    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) nvs_commit(s_h_err);
+    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
     ring_unlock();
 }
 
@@ -187,7 +215,7 @@ void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
     s_crash[1] = s_crash[0];
     s_crash[0].reset_reason = reset_reason;
     s_crash[0].uptime_s = prev_uptime_s;
-    if (nvs_set_blob(s_h_sys, K_CRASH, s_crash, sizeof(s_crash)) == ESP_OK) nvs_commit(s_h_sys);
+    if (nvs_set_blob(s_h_sys, K_CRASH, s_crash, sizeof(s_crash)) == ESP_OK) (void)nvs_commit(s_h_sys);
 }
 
 bool lt_reset_is_abnormal(int r)
@@ -217,14 +245,14 @@ bool lt_crashlog_is_loop(void)
 uint32_t lt_safe_until_get(void)
 {
     uint32_t v = 0;
-    nvs_get_u32(s_h_sys, K_SAFE, &v);
+    (void)nvs_get_u32(s_h_sys, K_SAFE, &v);
     return v;
 }
 
 int lt_safe_until_set(uint32_t boot_cnt)
 {
     if (nvs_set_u32(s_h_sys, K_SAFE, boot_cnt) != ESP_OK) return -1;
-    nvs_commit(s_h_sys);
+    (void)nvs_commit(s_h_sys);
     return 0;
 }
 
@@ -241,14 +269,14 @@ void lt_stall_flag_set(void)
      * reset reason is ESP_RST_SW (§17.5 normal), so without this marker the crash-loop detector
      * would never escalate a chronically stalled pipeline to safe mode. Persist now -- it must
      * survive the restart it precedes. */
-    if (nvs_set_u8(s_h_sys, K_STALL, 1) == ESP_OK) nvs_commit(s_h_sys);
+    if (nvs_set_u8(s_h_sys, K_STALL, 1) == ESP_OK) (void)nvs_commit(s_h_sys);
 }
 
 bool lt_stall_flag_take(void)
 {
     uint8_t v = 0;
     if (nvs_get_u8(s_h_sys, K_STALL, &v) != ESP_OK || v == 0) return false;
-    if (nvs_set_u8(s_h_sys, K_STALL, 0) == ESP_OK) nvs_commit(s_h_sys);   /* consume once */
+    if (nvs_set_u8(s_h_sys, K_STALL, 0) == ESP_OK) (void)nvs_commit(s_h_sys);   /* consume once */
     return true;
 }
 
@@ -278,17 +306,17 @@ void lt_boot_record_reset(int reset_reason, uint32_t prev_uptime_s)
     switch (reset_reason) {
     case ESP_RST_PANIC:
         lt_counters_inc(LT_CTR_CRASHES, true);
-        errlog_add(E_SYS_PANIC, 0);
+        (void)errlog_add(E_SYS_PANIC, 0);
         break;
     case ESP_RST_TASK_WDT:
     case ESP_RST_INT_WDT:
     case ESP_RST_WDT:
         lt_counters_inc(LT_CTR_WDT, true);
-        errlog_add(E_SYS_WDT_RESET, (uint32_t)reset_reason);
+        (void)errlog_add(E_SYS_WDT_RESET, (uint32_t)reset_reason);
         break;
     case ESP_RST_BROWNOUT:
         lt_counters_inc(LT_CTR_BROWNOUT, true);
-        errlog_add(E_SYS_BROWNOUT, 0);
+        (void)errlog_add(E_SYS_BROWNOUT, 0);
         break;
     default:
         break;
@@ -298,6 +326,10 @@ void lt_boot_record_reset(int reset_reason, uint32_t prev_uptime_s)
 /* ---- cfg blob (lt_cfg/cfg): packed cfg_t (leading version, §15.1) + trailing CRC16 (§15.2) ---- */
 int lt_cfg_load(cfg_t *c)
 {
+    /* c is the caller's own cfg_t (ui.c/cmd.c/app_main.c each pass &local_var) -- always non-NULL
+     * before we memcpy into it. The size/CRC/version checks below validate the STORED blob, which
+     * is untrusted on-flash data the caller-visible cfg_t is not: those stay plain returns. */
+    LT_ASSERT_RET(c != NULL, NVS_ASSERT_CODE, -1);
     uint8_t buf[sizeof(cfg_t) + 2];
     size_t sz = 0;
     if (nvs_get_blob(s_h_cfg, K_CFG, NULL, &sz) != ESP_OK || sz != sizeof(buf)) return -1;
@@ -314,12 +346,14 @@ int lt_cfg_load(cfg_t *c)
 
 int lt_cfg_save(const cfg_t *c)
 {
+    /* c is the caller's own cfg_t -- memcpy'd from unconditionally below, so NULL would crash. */
+    LT_ASSERT_RET(c != NULL, NVS_ASSERT_CODE, -1);
     uint8_t buf[sizeof(cfg_t) + 2];
     memcpy(buf, c, sizeof(cfg_t));
     uint16_t crc = ses_crc16(buf, sizeof(cfg_t));
     buf[sizeof(cfg_t)]     = (uint8_t)(crc & 0xFF);
     buf[sizeof(cfg_t) + 1] = (uint8_t)(crc >> 8);
     if (nvs_set_blob(s_h_cfg, K_CFG, buf, sizeof(buf)) != ESP_OK) return -1;
-    nvs_commit(s_h_cfg);
+    (void)nvs_commit(s_h_cfg);
     return 0;
 }

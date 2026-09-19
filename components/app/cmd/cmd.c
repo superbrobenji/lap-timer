@@ -13,6 +13,7 @@
 #include "build_config.h"          /* CFG_FW_VERSION, CFG_HWID */
 
 #include "app/logger.h"           /* logger_open_session_id -- DELETE must skip the open session */
+#include "app/lt_assert.h"
 #include "app/lt_err.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
@@ -29,6 +30,14 @@
 #include <stdio.h>
 #include <string.h>
 
+#define CMD_ASSERT_CODE 0x0B40   /* Power of 10 rule 5 (app/lt_assert.h); cmd.c's own code */
+
+/* Rule 2: a fixed, generous static bound for the file-read/streaming loops below. The `storage`
+ * partition (partitions.csv) is 0x150000 B (~1.34 MiB); at 256 B per sto_read() chunk (sizeof
+ * s_io) that is <= 5376 chunks for the ENTIRE filesystem, so no single file's read loop can ever
+ * take more than that many iterations. 8192 is a generous round number above that ceiling. */
+enum { CMD_STREAM_MAX_CHUNKS = 8192 };
+
 /* ------------------------------------------------------------------ *
  *  static assembly state (one request in flight, §18.1)
  * ------------------------------------------------------------------ */
@@ -39,9 +48,14 @@ static lt_err_entry_t s_err[32];      /* error-ring snapshot (ERR_RING_LEN, §15
 /* ------------------------------------------------------------------ *
  *  chunked emit helpers (§18.1)
  * ------------------------------------------------------------------ */
-static void put_u16le(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void put_u16le(uint8_t *p, uint16_t v)
+{
+    LT_ASSERT_VOID(p != NULL, CMD_ASSERT_CODE);
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+}
 static void put_u32le(uint8_t *p, uint32_t v)
 {
+    LT_ASSERT_VOID(p != NULL, CMD_ASSERT_CODE);
     p[0] = (uint8_t)v;         p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
@@ -51,11 +65,19 @@ static void put_u32le(uint8_t *p, uint32_t v)
 static int emit_bytes(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq,
                       const uint8_t *data, size_t len, bool last)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(data != NULL || len == 0, CMD_ASSERT_CODE, -1);
     if (len == 0)
         return emit(ctx, tag, (*seq)++, last ? CMD_FLAG_LAST : 0, NULL, 0);
 
     size_t off = 0;
+    /* Rule 2: off advances by >= 1 B every iteration (CMD_CHUNK_MAX > 0), so len + 2 always
+     * suffices -- a generous, statically-evident bound tied to this call's own `len`. */
+    const size_t EMIT_MAX_STEPS = len + 2;
+    size_t steps = 0;
     while (off < len) {
+        LT_ASSERT_RET(steps++ < EMIT_MAX_STEPS, CMD_ASSERT_CODE, -1);
         size_t n = len - off;
         if (n > CMD_CHUNK_MAX) n = CMD_CHUNK_MAX;
         bool is_last = last && (off + n >= len);
@@ -69,6 +91,8 @@ static int emit_bytes(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq,
 static int emit_error(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq,
                       uint16_t code, const char *msg)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     uint8_t buf[2 + 128];
     put_u16le(buf, code);
     size_t mlen = 0;
@@ -92,6 +116,8 @@ static uint32_t storage_free_kb(void)
 /* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
 static void count_sum_cb(const char *name, uint32_t size, void *ctx)
 {
+    LT_ASSERT_VOID(name != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(ctx != NULL, CMD_ASSERT_CODE);
     (void)size;
     const char *dot = strrchr(name, '.');
     if (dot && strcmp(dot, ".sum") == 0) (*(int *)ctx)++;
@@ -99,13 +125,15 @@ static void count_sum_cb(const char *name, uint32_t size, void *ctx)
 static uint16_t session_count(void)
 {
     int c = 0;
-    sto_list("/sessions", count_sum_cb, &c);
+    (void)sto_list("/sessions", count_sum_cb, &c);
     return (c > 0xFFFF) ? 0xFFFF : (uint16_t)c;
 }
 
 /* fw char[7]: the git version trimmed of a leading 'v', truncated to fit 7 bytes incl. NUL. */
 static void fw_short(char *dst, size_t cap)
 {
+    LT_ASSERT_VOID(dst != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(cap > 0, CMD_ASSERT_CODE);   /* dst[i] = '\0' below would write out of bounds at cap == 0 */
     const char *v = CFG_FW_VERSION;
     if (*v == 'v' || *v == 'V') v++;
     size_t i = 0;
@@ -127,6 +155,8 @@ static void load_cfg(void)
 /* STATUS (0x01) -> the 20-byte §18.2 status record (little-endian). */
 static int op_status(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     uint8_t st[20];
     memset(st, 0, sizeof st);
     st[0] = 1;                                              /* proto_ver = 1 */
@@ -143,6 +173,8 @@ static int op_status(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 /* CONFIG_GET (0x10) -> cfg_to_json of the loaded config. */
 static int op_config_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     load_cfg();
     int n = cfg_to_json(&s_cfg, s_json, sizeof s_json);
     if (n < 0) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "config encode failed");
@@ -153,6 +185,9 @@ static int op_config_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq
 static int op_config_set(const uint8_t *payload, size_t len,
                          cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(payload != NULL || len == 0, CMD_ASSERT_CODE, -1);
     load_cfg();
     char err[96];
     err[0] = '\0';
@@ -167,6 +202,8 @@ static int op_config_set(const uint8_t *payload, size_t len,
 /* ERRLOG_GET (0x14) -> JSON array of the error ring, oldest first. */
 static int op_errlog_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     int n = lt_errlog_snapshot(s_err, (int)(sizeof s_err / sizeof s_err[0]));
     int w = 0;
     w += snprintf(s_json + w, sizeof s_json - (size_t)w, "[");
@@ -184,6 +221,8 @@ static int op_errlog_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq
 /* ERRLOG_CLEAR (0x15) -> clear the ring; ack. */
 static int op_errlog_clear(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     lt_errlog_clear();
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
 }
@@ -192,6 +231,8 @@ static int op_errlog_clear(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *s
  * sys_flags, and the last 5 error codes. */
 static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     const lt_counters_t *c = lt_counters();
     uint32_t up      = (uint32_t)(esp_timer_get_time() / 1000000);
     uint32_t heapmin = (uint32_t)esp_get_minimum_free_heap_size();
@@ -218,6 +259,9 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 static int op_delete(const uint8_t *payload, size_t len,
                      cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(payload != NULL || len == 0, CMD_ASSERT_CODE, -1);
     char id[11];
     size_t idl = (len < 10) ? len : 10;
     memcpy(id, payload, idl);
@@ -268,12 +312,16 @@ static cw_t s_cw;
 
 static void cw_init(cw_t *w, cmd_emit_fn emit, void *ctx, uint8_t tag, uint32_t skip, bool tail)
 {
+    LT_ASSERT_VOID(w != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(emit != NULL, CMD_ASSERT_CODE);
     w->emit = emit; w->ctx = ctx; w->tag = tag; w->seq = 0;
     w->len = 0; w->crc = 0; w->skip = skip; w->tail = tail; w->err = 0;
 }
 
 static int cw_flush(cw_t *w, bool last)
 {
+    LT_ASSERT_RET(w != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(w->len <= CMD_CHUNK_MAX, CMD_ASSERT_CODE, -1);   /* chunk buffer capacity before the emit */
     if (w->err) return -1;
     if (w->emit(w->ctx, w->tag, w->seq++, last ? CMD_FLAG_LAST : 0, w->buf, w->len) != 0) {
         w->err = -1; return -1;
@@ -284,6 +332,8 @@ static int cw_flush(cw_t *w, bool last)
 
 static int cw_write(cw_t *w, const uint8_t *p, size_t n)
 {
+    LT_ASSERT_RET(w != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(p != NULL || n == 0, CMD_ASSERT_CODE, -1);
     if (w->err) return -1;
     w->crc = esp_rom_crc32_le(w->crc, p, (uint32_t)n);   /* whole payload, even skipped bytes */
     size_t off = 0;
@@ -292,7 +342,12 @@ static int cw_write(cw_t *w, const uint8_t *p, size_t n)
         w->skip -= (uint32_t)s;
         off = s;
     }
+    /* Rule 2: each iteration either advances off by >= 1 B, or (when the chunk buffer is exactly
+     * full) flushes and frees CMD_CHUNK_MAX B of room, so n + 2 always suffices. */
+    const size_t CW_MAX_STEPS = n + 2;
+    size_t steps = 0;
     while (off < n) {
+        LT_ASSERT_RET(steps++ < CW_MAX_STEPS, CMD_ASSERT_CODE, -1);
         size_t room = CMD_CHUNK_MAX - w->len;
         size_t take = n - off;
         if (take > room) take = room;
@@ -306,11 +361,13 @@ static int cw_write(cw_t *w, const uint8_t *p, size_t n)
 
 static int cw_finish(cw_t *w)
 {
+    LT_ASSERT_RET(w != NULL, CMD_ASSERT_CODE, -1);
     if (w->err) return -1;
     if (w->tail) {
         uint8_t t[4];
         put_u32le(t, w->crc);                            /* CRC of the payload (tail excluded) */
         if (w->len + 4 > CMD_CHUNK_MAX && cw_flush(w, false) != 0) return -1;
+        LT_ASSERT_RET(w->len + 4 <= CMD_CHUNK_MAX, CMD_ASSERT_CODE, -1);   /* chunk buffer capacity before this memcpy */
         memcpy(w->buf + w->len, t, 4);
         w->len += 4;
     }
@@ -327,9 +384,16 @@ typedef struct { exp_t *e; cw_t *w; int err; } exp_pump_t;
 /* Drain everything currently in the exporter window into the chunk writer. */
 static int drain_exp(exp_t *e, cw_t *w)
 {
+    LT_ASSERT_RET(e != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(w != NULL, CMD_ASSERT_CODE, -1);
     uint8_t out[128];
     size_t  got;
+    /* Rule 2: each round either drains >= 1 B out of the exporter's EXP_WINDOW-sized window or
+     * returns, so EXP_WINDOW + 4 (pessimistically assuming 1 B/pull) is a generous static bound. */
+    const int DRAIN_EXP_MAX_STEPS = EXP_WINDOW + 4;
+    int steps = 0;
     for (;;) {
+        LT_ASSERT_RET(steps++ < DRAIN_EXP_MAX_STEPS, CMD_ASSERT_CODE, -1);
         if (exp_pull(e, out, sizeof out, &got) != 0) return -1;
         if (got == 0) return 0;
         if (cw_write(w, out, got) != 0) return -1;
@@ -340,10 +404,17 @@ static int drain_exp(exp_t *e, cw_t *w)
  * (on EXP_FULL pull the window empty, then re-feed the same frame). */
 static void exp_frame_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *vctx)
 {
+    LT_ASSERT_VOID(payload != NULL || len == 0, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(vctx != NULL, CMD_ASSERT_CODE);
     exp_pump_t *pp = (exp_pump_t *)vctx;
     if (pp->err || pp->w->err) return;
     int r;
+    /* Rule 2: EXP_WINDOW (1024 B) is well above the largest single encoded frame (SES_MAX_PAYLOAD
+     * bytes), so a single drain always frees enough room to re-feed; 16 retries is generous. */
+    enum { EXP_FEED_MAX_RETRIES = 16 };
+    int retries = 0;
     while ((r = exp_feed(pp->e, type, payload, len)) == EXP_FULL) {
+        LT_ASSERT_VOID(retries++ < EXP_FEED_MAX_RETRIES, CMD_ASSERT_CODE);
         if (drain_exp(pp->e, pp->w) != 0) { pp->err = 1; return; }
     }
     if (r < 0) { pp->err = 1; return; }
@@ -362,6 +433,8 @@ static sumscan_t s_ss;
 
 static void sum_scan_cb(uint8_t type, const uint8_t *p, uint8_t len, void *vctx)
 {
+    LT_ASSERT_VOID(p != NULL || len == 0, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(vctx != NULL, CMD_ASSERT_CODE);
     sumscan_t *s = (sumscan_t *)vctx;
     switch (type) {
     case SES_T_SESSION_HDR:
@@ -392,16 +465,21 @@ static void sum_scan_cb(uint8_t type, const uint8_t *p, uint8_t len, void *vctx)
 /* Read `/sessions/<id>.sum` through the ses reader into *out (caller zeroes it). 0 ok, -1 open. */
 static int read_sum_scan(const char *id, sumscan_t *out)
 {
+    LT_ASSERT_RET(id != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(out != NULL, CMD_ASSERT_CODE, -1);
     char path[48];
     (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
     sto_file_t f;
     if (sto_open(path, STO_RD, &f) != 0) return -1;
     ses_reader_init(&s_sr);
     size_t got;
-    while (sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0)
+    int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
+    while (sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+        LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
         ses_reader_feed(&s_sr, s_io, got, sum_scan_cb, out);
+    }
     ses_reader_flush(&s_sr, sum_scan_cb, out);
-    sto_close(f);
+    (void)sto_close(f);
     return 0;
 }
 
@@ -441,6 +519,8 @@ static int        s_nsess;
 
 static void list_scan_cb(const char *name, uint32_t size, void *ctx)
 {
+    LT_ASSERT_VOID(name != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(s_nsess >= 0 && s_nsess <= LIST_MAX_SESSIONS, CMD_ASSERT_CODE);   /* within s_sess[] */
     (void)ctx;
     const char *dot = strrchr(name, '.');
     if (!dot) return;
@@ -469,6 +549,9 @@ static void list_scan_cb(const char *name, uint32_t size, void *ctx)
  * control bytes escaped. dst is always NUL-terminated; output is truncated to fit cap. */
 static void json_escape(char *dst, size_t cap, const char *src)
 {
+    LT_ASSERT_VOID(dst != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(src != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(cap > 0, CMD_ASSERT_CODE);   /* dst[w] = '\0' below would write out of bounds at cap == 0 */
     size_t w = 0;
     for (size_t i = 0; src[i] && w + 7 < cap; i++) {
         unsigned char c = (unsigned char)src[i];
@@ -484,12 +567,14 @@ static void json_escape(char *dst, size_t cap, const char *src)
 
 static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     bool second = s_memo.valid && s_memo.op == CMD_LIST;   /* printing pass: reuse the table */
     s_memo.valid = false;
 
     if (!second) {                                         /* measuring pass: enumerate + scan once */
         s_nsess = 0;
         (void)sto_list("/sessions", list_scan_cb, NULL);
+        LT_ASSERT_RET(s_nsess >= 0 && s_nsess <= LIST_MAX_SESSIONS, CMD_ASSERT_CODE, -1);   /* within s_sess[] */
         for (int i = 0; i < s_nsess; i++) {
             if (!s_sess[i].has_sum) continue;
             memset(&s_ss, 0, sizeof s_ss);
@@ -550,6 +635,10 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
 static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t limit,
                       uint32_t *nread, cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    LT_ASSERT_RET(id != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(ext != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(nread != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     char path[48];
     (void)snprintf(path, sizeof path, "/sessions/%s%s", id, ext);
     sto_file_t f;
@@ -560,12 +649,14 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t
     cw_init(&s_cw, emit, ctx, tag, offset, /*tail*/true);
     uint32_t done = 0;
     size_t   got;
+    int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
     while (done < limit && sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+        LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
         if ((uint32_t)got > limit - done) got = (size_t)(limit - done);   /* clamp to snapshot */
-        if (cw_write(&s_cw, s_io, got) != 0) { sto_close(f); return -1; }
+        if (cw_write(&s_cw, s_io, got) != 0) { (void)sto_close(f); return -1; }
         done += (uint32_t)got;
     }
-    sto_close(f);
+    (void)sto_close(f);
     *nread = done;
     return cw_finish(&s_cw);
 }
@@ -579,6 +670,9 @@ static exp_meta_t s_meta;
 static int stream_export(const char *id, uint8_t expfmt, uint32_t offset, uint32_t limit,
                          uint32_t *nread, cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    LT_ASSERT_RET(id != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(nread != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     uint16_t seq = 0;
 
     /* Build the export header meta from the .sum (small): fw/hwid/venue/created time.
@@ -611,19 +705,26 @@ static int stream_export(const char *id, uint8_t expfmt, uint32_t offset, uint32
     ses_reader_init(&s_sr);
     uint32_t done = 0;
     size_t   got;
+    int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
     while (done < limit && sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
+        LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
         if ((uint32_t)got > limit - done) got = (size_t)(limit - done);   /* clamp to snapshot */
         ses_reader_feed(&s_sr, s_io, got, exp_frame_cb, &pump);
         done += (uint32_t)got;
         if (pump.err || s_cw.err) break;
     }
     if (!pump.err && !s_cw.err) ses_reader_flush(&s_sr, exp_frame_cb, &pump);
-    sto_close(f);
+    (void)sto_close(f);
 
     if (!s_cw.err && !pump.err) {                /* finish the exporter (may need EXP_FULL retry) */
         int r;
-        while ((r = exp_finish(&s_exp)) == EXP_FULL)
+        /* Rule 2: same generous bound as exp_frame_cb's own EXP_FULL retry loop. */
+        enum { EXP_FINISH_MAX_RETRIES = 16 };
+        int retries = 0;
+        while ((r = exp_finish(&s_exp)) == EXP_FULL) {
+            LT_ASSERT_RET(retries++ < EXP_FINISH_MAX_RETRIES, CMD_ASSERT_CODE, -1);
             if (drain_exp(&s_exp, &s_cw) != 0) { s_cw.err = -1; break; }
+        }
         if (r < 0) pump.err = 1;                 /* propagate a finish error like the feed path */
         else if (!s_cw.err) (void)drain_exp(&s_exp, &s_cw);
     }
@@ -642,6 +743,8 @@ static struct { bool active; uint8_t fmt; char id[11]; } s_open;
 static int stream_by_fmt(const char *id, uint8_t fmt, uint32_t offset,
                          cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    LT_ASSERT_RET(id != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     if (fmt > 4) { uint16_t seq = 0; return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "bad fmt"); }
 
     /* Printing pass? Reuse the measuring pass's byte length so both stream the same range. */
@@ -675,6 +778,8 @@ static int stream_by_fmt(const char *id, uint8_t fmt, uint32_t offset,
 /* OPEN (0x03): id char[10], fmt u8 -> stream from offset 0. */
 static int op_open(const uint8_t *payload, size_t len, cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(payload != NULL || len == 0, CMD_ASSERT_CODE, -1);
     uint16_t seq = 0;
     if (len < 11) return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "open: short payload");
     char id[11];
@@ -693,6 +798,8 @@ static int op_open(const uint8_t *payload, size_t len, cmd_emit_fn emit, void *c
 /* READ (0x04): offset u32 -> resume the open stream from that byte offset. */
 static int op_read(const uint8_t *payload, size_t len, cmd_emit_fn emit, void *ctx, uint8_t tag)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(payload != NULL || len == 0, CMD_ASSERT_CODE, -1);
     uint16_t seq = 0;
     if (!s_open.active) return emit_error(emit, ctx, tag, &seq, E_CONN_XFER_ABORT, "read: no open stream");
     uint32_t offset = 0;
@@ -705,6 +812,8 @@ static int op_read(const uint8_t *payload, size_t len, cmd_emit_fn emit, void *c
 /* CLOSE (0x05): drop the open-stream state, then ack (empty LAST). */
 static int op_close(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
     s_open.active = false;
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
 }
@@ -714,7 +823,11 @@ int cmd_dispatch(uint8_t op, uint8_t tag, const uint8_t *payload, size_t len,
                  cmd_emit_fn emit, void *ctx)
 {
     uint16_t seq = 0;
-    if (!emit) return -1;
+    /* A NULL emit fn is a caller/transport bug, not a client protocol error (contrast the
+     * unknown-op/malformed-payload cases below, which the client can legitimately trigger and
+     * which stay plain error returns): report it as a genuine anomaly. */
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(payload != NULL || len == 0, CMD_ASSERT_CODE, -1);
 
     switch (op) {
     case CMD_STATUS:       return op_status(emit, ctx, tag, &seq);

@@ -8,11 +8,22 @@ Scans the in-scope on-device C (default: components/core components/app componen
 main) for the project-specific gates that generic analysers (clang-tidy/cppcheck) do not cover
 well:
 
-  RULE-4  function length > 60 code lines (blank/comment-only/brace-only lines excluded).
-  RULE-5  per-component (per top-level scanned dir) average assertions/function < 2, counting
-          CORE_ASSERT_RET/CORE_ASSERT_VOID/LT_ASSERT_RET/LT_ASSERT_VOID invocations.
+  RULE-4  function length > 60 code lines (blank/comment-only/brace-only lines excluded), plus
+          RULE-4-COMPOUND: a compound-statement body (if/else/for/while/switch/do) nested inside
+          a function that is itself > 30 code lines (MAX_COMPOUND_LINES) -- Holzmann's refined
+          rule 4 pins a separate, stricter figure for individual compound-statement bodies.
+  RULE-5  Holzmann's REFINED per-function form (N=2, M=20): a function of > 20 code lines must
+          contain >= 2 assertions (CORE_ASSERT_RET/CORE_ASSERT_VOID/LT_ASSERT_RET/LT_ASSERT_VOID
+          invocations); functions of <= 20 code lines are exempt regardless of assertion count.
+          The per-component average assertions/function is still computed and printed, but only
+          as an informational health metric -- it is no longer itself a violation.
   RULE-3  any malloc/calloc/realloc/free/strdup/aligned_alloc call (no dynamic memory after init).
-  RULE-8  '##' token-paste, or '#' stringisation-as-logic, in shipped code.
+  RULE-8  '##' token-paste, '#' stringisation-as-logic, '#undef' (rule 8b -- not permitted in
+          shipped code), or a function-like macro `#define NAME(` defined in a .c file (rule 8c
+          -- logic-bearing macros belong in headers; object-like constant #defines in .c are
+          still permitted). RULE-8a (informational only, never a violation): the count of
+          non-include-guard conditional-compilation directives (#ifdef/#ifndef/#if defined/
+          #elif defined) versus the number of in-scope header files, printed as one summary line.
   RULE-9  (only with --enforce-fnptr) a function-pointer typedef/param/variable whose
           file:symbol is not listed in the deviation register. INERT by default -- the design
           (§3 rule 9) has this gate land last, in session 4.5.5; until then existing function
@@ -22,8 +33,9 @@ well:
 Pure Python 3 standard library only, no third-party dependencies.
 
 Default mode is REPORT-ONLY: findings are printed and the process always exits 0. Pass
---fail-on-violation to exit 1 when an unregistered RULE-4 or RULE-9 finding exists (NOT used by
-CI/the task runner until the retrofit is complete -- see plan Session 4.5.6).
+--fail-on-violation to exit 1 when an unregistered RULE-4, RULE-4-COMPOUND, RULE-5, RULE-8, or
+RULE-9 finding exists (NOT used by CI/the task runner until the retrofit is complete -- see plan
+Session 4.5.6).
 """
 import argparse
 import json
@@ -52,9 +64,12 @@ SCANNED_EXTENSIONS = (".c", ".h")
 
 
 def is_exempt_jsmn(relpath):
-    """components/core/util/jsmn* (design §1) -- the vendored JSON tokenizer."""
+    """The vendored jsmn JSON tokenizer (design §1), fully exempt. It is split across two
+    locations: the implementation `components/core/util/jsmn.c` and the header
+    `components/core/include/core/jsmn.h` -- both must be exempt."""
     d, base = os.path.split(relpath)
-    return d.replace(os.sep, "/").endswith("core/util") and base.startswith("jsmn")
+    d = d.replace(os.sep, "/")
+    return base.startswith("jsmn") and (d.endswith("core/util") or d.endswith("core/include/core"))
 
 
 # Generated / pure-data files: no hand-written logic to assert about, so exempt from the rules
@@ -197,6 +212,11 @@ class LineIndex:
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {"if", "for", "while", "switch", "do", "else", "return"}
+# GCC/Clang attribute keywords whose own '(( ... ))' argument list can sit between a
+# function's ')' and its '{' (e.g. `void f(void) __attribute__((cold)) {`) or after a
+# struct/union/enum body (`struct __attribute__((packed)) { ... }`). Without skipping them,
+# the '))' immediately before the '{' reads as a bogus "__attribute__" function definition.
+_ATTRIBUTE_KEYWORDS = {"__attribute__", "__declspec"}
 
 
 def _name_before_paren(stripped, close_paren_idx):
@@ -250,10 +270,24 @@ def find_top_level_functions(stripped):
                 while j >= 0 and stripped[j] in " \t\r\n":
                     j -= 1
                 if j >= 0 and stripped[j] == ")":
-                    name, name_start, param_open = _name_before_paren(stripped, j)
+                    close_paren = j
+                    name, name_start, param_open = _name_before_paren(stripped, close_paren)
+                    # Skip any attribute list(s) between the ')' and the '{'. If the token
+                    # before the attribute is another ')' we have found the real parameter
+                    # list; otherwise (a struct/union/enum tag, a type keyword) this brace
+                    # opens a data aggregate, not a function body.
+                    while name in _ATTRIBUTE_KEYWORDS:
+                        k = name_start - 1
+                        while k >= 0 and stripped[k] in " \t\r\n":
+                            k -= 1
+                        if k >= 0 and stripped[k] == ")":
+                            close_paren = k
+                            name, name_start, param_open = _name_before_paren(stripped, close_paren)
+                        else:
+                            name, name_start, param_open = None, None, None
                     if name is not None:
                         is_func = True
-                        param_close = j
+                        param_close = close_paren
             stack.append({"is_func": is_func, "name": name, "name_start": name_start, "open": i,
                           "param_open": param_open, "param_close": param_close})
             depth += 1
@@ -278,6 +312,15 @@ def _enclosing_function_name(funcs, pos):
     return None
 
 
+def _enclosing_function_by_body(funcs, pos):
+    """Return the name of the top-level function whose body span (open_idx..close_idx) contains
+    `pos`, or None if none does (used to attribute a RULE-4-COMPOUND block to its function)."""
+    for name, _name_start, open_idx, close_idx, _param_open, _param_close in funcs:
+        if open_idx < pos < close_idx:
+            return name
+    return None
+
+
 _BRACE_ONLY_RE = re.compile(r"^[{};\s]*$")
 
 
@@ -294,6 +337,86 @@ def count_code_lines(stripped_lines, line_start, line_end):
             continue
         count += 1
     return count
+
+
+# --------------------------------------------------------------------------------------------
+# Compound-statement bodies (RULE-4-COMPOUND, Holzmann's refined rule 4): a '{' at brace-depth
+# > 0 (nested inside a function body, not the function body itself -- that is depth 0 and
+# already covered by RULE-4) whose opening '{' is immediately preceded (skipping whitespace) by
+# the keyword 'else'/'do', or by a ')' that itself closes an if/for/while/switch controlling
+# expression. Brace-matched via a stack, exactly like find_top_level_functions, so nested
+# qualifying blocks are each found and checked independently.
+# --------------------------------------------------------------------------------------------
+
+_CONTROL_KEYWORDS_PAREN = {"if", "for", "while", "switch"}
+
+
+def _ident_before(stripped, pos):
+    """Return (ident, ident_start) of the identifier/keyword ending at `pos` (exclusive of
+    `pos`), skipping whitespace immediately before `pos`; (None, None) if there is none."""
+    j = pos - 1
+    while j >= 0 and stripped[j] in " \t\r\n":
+        j -= 1
+    end = j + 1
+    while j >= 0 and (stripped[j].isalnum() or stripped[j] == "_"):
+        j -= 1
+    start = j + 1
+    if end <= start:
+        return None, None
+    return stripped[start:end], start
+
+
+def _compound_kind(stripped, open_brace_idx):
+    """Return the compound-statement kind this '{' opens -- one of 'if'/'else'/'for'/'while'/
+    'switch'/'do' -- or None if it does not qualify (a struct/array initializer, a compound
+    literal, an enum/union body, or a function body)."""
+    ident, _ident_start = _ident_before(stripped, open_brace_idx)
+    if ident in ("else", "do"):
+        return ident
+    j = open_brace_idx - 1
+    while j >= 0 and stripped[j] in " \t\r\n":
+        j -= 1
+    if j >= 0 and stripped[j] == ")":
+        depth = 1
+        k = j - 1
+        n = len(stripped)
+        while k >= 0 and depth > 0:
+            if stripped[k] == ")":
+                depth += 1
+            elif stripped[k] == "(":
+                depth -= 1
+            k -= 1
+        open_paren_idx = k + 1
+        if 0 <= open_paren_idx <= n:
+            kw, _kw_start = _ident_before(stripped, open_paren_idx)
+            if kw in _CONTROL_KEYWORDS_PAREN:
+                return kw
+    return None
+
+
+def find_compound_blocks(stripped):
+    """Returns a list of (kind, open_idx, close_idx) for every compound-statement body whose
+    opening '{' sits at brace-depth > 0."""
+    blocks = []
+    stack = []  # entries: (open_idx, kind)
+    depth = 0
+    n = len(stripped)
+    i = 0
+    while i < n:
+        c = stripped[i]
+        if c == "{":
+            kind = _compound_kind(stripped, i) if depth > 0 else None
+            stack.append((i, kind))
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if stack:
+                open_idx, kind = stack.pop()
+                if kind is not None:
+                    blocks.append((kind, open_idx, i))
+        i += 1
+    blocks.sort(key=lambda b: b[1])
+    return blocks
 
 
 # --------------------------------------------------------------------------------------------
@@ -365,6 +488,105 @@ def check_rule4_length(stripped, relpath, lidx, register, funcs, max_lines=60):
     return findings, len(funcs)
 
 
+MAX_COMPOUND_LINES = 30
+
+
+def check_rule4_compound(stripped, relpath, lidx, register, funcs, max_lines=MAX_COMPOUND_LINES):
+    """RULE-4-COMPOUND (Holzmann's refined rule 4): an if/else/for/while/switch/do body nested
+    inside a function that itself exceeds `max_lines` code lines. Shares RULE-4's register
+    namespace -- a compound-statement deviation registers under rule 4."""
+    findings = []
+    stripped_lines = stripped.split("\n")
+    for kind, open_idx, close_idx in find_compound_blocks(stripped):
+        line_open = lidx.line_of(open_idx)
+        line_close = lidx.line_of(close_idx)
+        n_lines = count_code_lines(stripped_lines, line_open, line_close)
+        if n_lines > max_lines:
+            symbol = _enclosing_function_name(funcs, open_idx)
+            if symbol is None:
+                symbol = _enclosing_function_by_body(funcs, open_idx)
+            if register.is_registered(4, relpath, symbol):
+                continue
+            findings.append({"file": relpath, "line": line_open, "rule": "RULE-4-COMPOUND",
+                              "symbol": symbol,
+                              "message": "compound statement (%s) body is %d code lines (> %d)" % (
+                                  kind, n_lines, max_lines)})
+    return findings
+
+
+RULE5_MIN_LINES = 20
+RULE5_MIN_ASSERTS = 2
+
+
+def check_rule5_assertions(stripped, relpath, lidx, register, funcs,
+                            min_lines=RULE5_MIN_LINES, min_asserts=RULE5_MIN_ASSERTS):
+    """RULE-5, Holzmann's refined per-function form (N=2, M=20): a function of > `min_lines` code
+    lines must contain >= `min_asserts` assertions; a function at or under `min_lines` is exempt
+    regardless of assertion count."""
+    findings = []
+    stripped_lines = stripped.split("\n")
+    for name, name_start, open_idx, close_idx, _param_open, _param_close in funcs:
+        line_open = lidx.line_of(open_idx)
+        line_close = lidx.line_of(close_idx)
+        n_lines = count_code_lines(stripped_lines, line_open, line_close)
+        if n_lines <= min_lines:
+            continue
+        body = stripped[open_idx:close_idx]
+        n_asserts = len(ASSERT_RE.findall(body))
+        if n_asserts < min_asserts:
+            name_line = lidx.line_of(name_start) if name_start is not None else line_open
+            if register.is_registered(5, relpath, name):
+                continue
+            findings.append({"file": relpath, "line": name_line, "rule": "RULE-5", "symbol": name,
+                              "message": "function '%s' has %d assertion(s) in %d code lines "
+                                         "(>%d lines requires >=%d)" % (
+                                             name, n_asserts, n_lines, min_lines, min_asserts)})
+    return findings
+
+
+_UNDEF_RE = re.compile(r"^\s*#\s*undef\b", re.MULTILINE)
+_FUNCLIKE_MACRO_RE = re.compile(r"^\s*#\s*define\s+[A-Za-z_][A-Za-z0-9_]*\(", re.MULTILINE)
+
+
+def check_rule8b_undef(stripped, relpath, lidx, findings):
+    """RULE-8b: '#undef' is not permitted in shipped code."""
+    for m in _UNDEF_RE.finditer(stripped):
+        line = lidx.line_of(m.start())
+        findings.append({"file": relpath, "line": line, "rule": "RULE-8",
+                          "message": "'#undef' in shipped code (rule 8: #undef not permitted)"})
+
+
+def check_rule8c_funclike_macro(stripped, relpath, lidx, findings):
+    """RULE-8c: a function-like macro `#define NAME(` defined in a .c file (logic-bearing macros
+    belong in headers). Object-like constant #defines in .c ('#define NAME value', with a space
+    before any '(') are explicitly permitted and never flagged. Caller restricts this to .c."""
+    for m in _FUNCLIKE_MACRO_RE.finditer(stripped):
+        line = lidx.line_of(m.start())
+        findings.append({"file": relpath, "line": line, "rule": "RULE-8",
+                          "message": "function-like macro in .c (rule 8: macros belong in headers)"})
+
+
+_IFNDEF_RE = re.compile(r"^\s*#\s*ifndef\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+_IFDEF_RE = re.compile(r"^\s*#\s*ifdef\b", re.MULTILINE)
+_IF_DEFINED_RE = re.compile(r"^\s*#\s*if\s+defined\b", re.MULTILINE)
+_ELIF_DEFINED_RE = re.compile(r"^\s*#\s*elif\s+defined\b", re.MULTILINE)
+
+
+def count_rule8a_conditionals(stripped):
+    """RULE-8a (informational only, never a violation): count of non-include-guard conditional-
+    compilation directives (#ifdef/#ifndef/#if defined/#elif defined) in this file, excluding
+    '#ifndef IDENT_H'-style include guards."""
+    count = 0
+    for m in _IFNDEF_RE.finditer(stripped):
+        if m.group(1).endswith("_H"):
+            continue  # include guard, not a project conditional
+        count += 1
+    count += len(_IFDEF_RE.findall(stripped))
+    count += len(_IF_DEFINED_RE.findall(stripped))
+    count += len(_ELIF_DEFINED_RE.findall(stripped))
+    return count
+
+
 # --------------------------------------------------------------------------------------------
 # The deviation register (design §4): a markdown table
 #   | id | rule | file:symbol | compliant alternative considered | why rejected | benefit | reviewer |
@@ -423,14 +645,20 @@ def run(paths, register_path, enforce_fnptr, base_dir):
 
     all_findings = []
     per_component = {}  # component -> {"functions":N, "assertions":N, "files":N,
-    #                                    "rule3":N, "rule4":N, "rule8":N, "rule9":N}
+    #                                    "rule3":N, "rule4":N, "rule4_compound":N, "rule5":N,
+    #                                    "rule8":N, "rule9":N}
+    rule8a_directives = 0
+    rule8a_headers = 0
 
     for component, filepath, relpath in files:
         comp = per_component.setdefault(component, {
             "functions": 0, "assertions": 0, "files": 0,
-            "rule3": 0, "rule4": 0, "rule8": 0, "rule9": 0,
+            "rule3": 0, "rule4": 0, "rule4_compound": 0, "rule5": 0, "rule8": 0, "rule9": 0,
         })
         comp["files"] += 1
+        posix_relpath = relpath.replace(os.sep, "/")
+        if posix_relpath.endswith(".h"):
+            rule8a_headers += 1
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
         stripped = strip_comments_and_literals(text)
@@ -442,7 +670,15 @@ def run(paths, register_path, enforce_fnptr, base_dir):
         comp["rule4"] += len(rule4_findings)
         all_findings.extend(rule4_findings)
 
+        rule4c_findings = check_rule4_compound(stripped, relpath, lidx, register, funcs)
+        comp["rule4_compound"] += len(rule4c_findings)
+        all_findings.extend(rule4c_findings)
+
         comp["assertions"] += len(ASSERT_RE.findall(stripped))
+
+        rule5_findings = check_rule5_assertions(stripped, relpath, lidx, register, funcs)
+        comp["rule5"] += len(rule5_findings)
+        all_findings.extend(rule5_findings)
 
         rule3_findings = []
         check_rule3_heap(stripped, relpath, lidx, rule3_findings)
@@ -451,8 +687,13 @@ def run(paths, register_path, enforce_fnptr, base_dir):
 
         rule8_findings = []
         check_rule8_preprocessor(stripped, relpath, lidx, rule8_findings)
+        check_rule8b_undef(stripped, relpath, lidx, rule8_findings)
+        if posix_relpath.endswith(".c"):
+            check_rule8c_funclike_macro(stripped, relpath, lidx, rule8_findings)
         comp["rule8"] += len(rule8_findings)
         all_findings.extend(rule8_findings)
+
+        rule8a_directives += count_rule8a_conditionals(stripped)
 
         if enforce_fnptr:
             rule9_findings = []
@@ -467,36 +708,45 @@ def run(paths, register_path, enforce_fnptr, base_dir):
         avg = (comp["assertions"] / comp["functions"]) if comp["functions"] else 0.0
         summary[component] = dict(comp)
         summary[component]["avg_assertions_per_function"] = round(avg, 3)
-        summary[component]["rule5_below_2"] = comp["functions"] > 0 and avg < 2.0
 
-    return all_findings, summary, register
+    rule8a = {"directives": rule8a_directives, "headers": rule8a_headers}
+
+    return all_findings, summary, register, rule8a
 
 
-def render_text(findings, summary, enforce_fnptr):
+def render_text(findings, summary, enforce_fnptr, rule8a):
     lines = []
     for f in findings:
         lines.append("%s:%d: %s: %s" % (f["file"], f["line"], f["rule"], f["message"]))
 
     lines.append("")
     lines.append("-- power_of_10.py summary (report-only) --")
-    header = "%-28s %9s %11s %8s %10s %10s %10s" % (
-        "component", "functions", "assertions", "avg/fn", "rule4>60", "rule3-heap", "rule8-pp")
+    header = "%-28s %9s %11s %8s %10s %11s %9s %10s %10s" % (
+        "component", "functions", "assertions", "avg/fn", "rule4>60", "rule4cmpd", "rule5<2",
+        "rule3-heap", "rule8-pp")
     lines.append(header)
     for component in sorted(summary):
         s = summary[component]
-        flag = " *" if s["rule5_below_2"] else ""
-        lines.append("%-28s %9d %11d %8.2f%s %10d %10d %10d" % (
-            component, s["functions"], s["assertions"], s["avg_assertions_per_function"], flag,
-            s["rule4"], s["rule3"], s["rule8"]))
-    lines.append("(* = RULE-5: component average assertions/function < 2.0)")
+        lines.append("%-28s %9d %11d %8.2f %10d %11d %9d %10d %10d" % (
+            component, s["functions"], s["assertions"], s["avg_assertions_per_function"],
+            s["rule4"], s["rule4_compound"], s["rule5"], s["rule3"], s["rule8"]))
+    lines.append("(avg/fn is informational only, not a violation; rule5<2 = RULE-5 per-function "
+                 "violations: >20-code-line functions with <2 assertions; rule4cmpd = "
+                 "RULE-4-COMPOUND: if/else/for/while/switch/do bodies > 30 code lines)")
 
     total_rule3 = sum(s["rule3"] for s in summary.values())
     total_rule4 = sum(s["rule4"] for s in summary.values())
+    total_rule4_compound = sum(s["rule4_compound"] for s in summary.values())
+    total_rule5 = sum(s["rule5"] for s in summary.values())
     total_rule8 = sum(s["rule8"] for s in summary.values())
     total_rule9 = sum(s["rule9"] for s in summary.values())
     lines.append("")
-    lines.append("totals: rule3(heap)=%d rule4(over-60)=%d rule8(preprocessor)=%d rule9(fnptr)=%s" % (
-        total_rule3, total_rule4, total_rule8, (str(total_rule9) if enforce_fnptr else "inert (pass --enforce-fnptr)")))
+    lines.append("totals: rule3(heap)=%d rule4(over-60)=%d rule4-compound(over-30)=%d "
+                 "rule5(per-fn<2)=%d rule8(preprocessor)=%d rule9(fnptr)=%s" % (
+        total_rule3, total_rule4, total_rule4_compound, total_rule5, total_rule8,
+        (str(total_rule9) if enforce_fnptr else "inert (pass --enforce-fnptr)")))
+    lines.append("rule8a: %d conditional directives vs %d header files (<= is good; informational, "
+                 "not a violation)" % (rule8a["directives"], rule8a["headers"]))
     return "\n".join(lines)
 
 
@@ -510,13 +760,13 @@ def main(argv=None):
                      help="Enable RULE-9 (no unregistered function pointer). INERT unless passed; "
                           "not used before plan Session 4.5.5.")
     ap.add_argument("--fail-on-violation", action="store_true",
-                     help="Exit 1 if any unregistered RULE-4/RULE-9 finding exists. NOT used before "
-                          "plan Session 4.5.6 (report-only rollout).")
+                     help="Exit 1 if any unregistered RULE-4/RULE-4-COMPOUND/RULE-5/RULE-8/RULE-9 "
+                          "finding exists. NOT used before plan Session 4.5.6 (report-only rollout).")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     args = ap.parse_args(argv)
 
     base_dir = os.getcwd()
-    findings, summary, register = run(args.paths, args.register, args.enforce_fnptr, base_dir)
+    findings, summary, register, rule8a = run(args.paths, args.register, args.enforce_fnptr, base_dir)
 
     if args.json:
         print(json.dumps({
@@ -524,14 +774,16 @@ def main(argv=None):
             "summary": summary,
             "register_rows": len(register.rows),
             "enforce_fnptr": args.enforce_fnptr,
+            "rule8a": rule8a,
         }, indent=2, sort_keys=True))
     else:
-        print(render_text(findings, summary, args.enforce_fnptr))
+        print(render_text(findings, summary, args.enforce_fnptr, rule8a))
         print("\nregister: %d row(s) loaded from %s" % (len(register.rows), args.register))
         print("mode: %s" % ("fail-on-violation" if args.fail_on_violation else "report-only (always exit 0 unless --fail-on-violation)"))
 
     if args.fail_on_violation:
-        blocking = [f for f in findings if f["rule"] in ("RULE-4", "RULE-9")]
+        blocking_rules = ("RULE-4", "RULE-4-COMPOUND", "RULE-5", "RULE-8", "RULE-9")
+        blocking = [f for f in findings if f["rule"] in blocking_rules]
         if blocking:
             return 1
     return 0

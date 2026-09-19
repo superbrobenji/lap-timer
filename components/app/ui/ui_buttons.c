@@ -11,12 +11,16 @@
  *
  * The cb runs in ISR context (§17.9: ISRs are IRAM_ATTR and touch queues only via *FromISR).
  */
+#include "app/lt_assert.h"
 #include "app/ui.h"
 
 #include "hal/board.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+
+/* Same per-module rule 5 code as ui.c (design §3): the button glue is part of the ui module. */
+#define UI_APP_ASSERT_CODE 0x0B50
 
 #define BTN_Q_DEPTH 8 /* §4.4 btn_q depth 8 */
 
@@ -41,6 +45,8 @@ void ui_buttons_init(void)
     if (s_btn_q == NULL) {
         s_btn_q = xQueueCreateStatic(BTN_Q_DEPTH, sizeof(btn_raw_t), s_btn_q_store, &s_btn_q_ctrl);
     }
+    /* Static creation with a real store never returns NULL; the ISR cb drops edges until it is set. */
+    LT_ASSERT_VOID(s_btn_q != NULL, UI_APP_ASSERT_CODE);
     (void)board_buttons_enable_isr(btn_isr_cb);
 }
 

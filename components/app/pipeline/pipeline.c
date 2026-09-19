@@ -20,6 +20,7 @@
 #include "app/lt_sup.h"
 #include "app/lt_rtc.h"
 #include "app/lt_nvs.h"
+#include "app/lt_assert.h"
 
 #include "hal/gps.h"
 #include "hal/imu.h"
@@ -43,12 +44,17 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "app/lt_consts.h"   /* RTC_RESUME_MAX_S (§15.3 / Appendix A) */
 
 static const char *TAG = "pipe";
+
+/* Power-of-10 rule 5 assertion code for the pipeline module (design §3): the app assert hook
+ * records this code plus __FILE__/__LINE__, pinning the exact failing check. */
+#define PIPE_ASSERT_CODE 0x0B10
 
 /* §4.3 task */
 #define PIPE_CORE        1
@@ -62,6 +68,14 @@ static const char *TAG = "pipe";
 #define TEMP_POLL_US     1000000                             /* ~1 Hz imu temperature (§9.2) */
 #define PIPE_LAPS_KEEP   24
 #define MMS_TO_KMH       0.0036                              /* mm/s -> km/h; mirrors tools/replay MMS_TO_KMH */
+
+/* Rule 2 explicit static loop bounds: drains that were textually unbounded while(...) loops backed
+ * by a "the queue/driver is finite" argument in a comment only. Each cap is far above the worst
+ * real backlog (cmd/btn queue depths are single digits; GPS is <= ~10 fixes/s at a 50 ms period),
+ * so the cap is never reached in normal operation -- it only bounds a pathological runaway. */
+#define PIPE_CMD_DRAIN_MAX  64
+#define PIPE_FIX_DRAIN_MAX  64
+#define PIPE_LAPS_SNAP_RETRY_MAX 1024   /* seqlock reader retries; single writer converges in ~1 */
 
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[PIPE_STACK_WORDS];
@@ -127,8 +141,10 @@ static void stats_reset(void)
 
 static void stats_finalise(lap_stats_t *out)
 {
+    LT_ASSERT_VOID(out != NULL, PIPE_ASSERT_CODE);
     *out = s_stats;
     if (out->min_speed_cms == 0xFFFFu) out->min_speed_cms = 0;   /* never sampled -> 0 */
+    LT_ASSERT_VOID(out->min_speed_cms != 0xFFFFu, PIPE_ASSERT_CODE);   /* sentinel resolved */
 }
 
 static int16_t clamp_i16(int32_t v)
@@ -141,12 +157,16 @@ static int16_t clamp_i16(int32_t v)
 /* Broadcast one event to the logger's evt_q (§4.4; ui/power copies land with those tasks). */
 static void emit_event(const event_t *ev)
 {
+    LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* copied into the queues by value */
+    LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* only stable §4.5 codes are broadcast */
     if (g_evt_q) { (void)xQueueSend(g_evt_q, ev, 0); logger_notify(); }
     if (g_ui_evt_q) (void)xQueueSend(g_ui_evt_q, ev, 0);   /* fan-out to the ui task (drop-newest on full) */
 }
 
 static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)
 {
+    LT_ASSERT_VOID(type != EV_NONE && type <= EV_FAULT, PIPE_ASSERT_CODE);   /* a real §4.5 event code */
+    LT_ASSERT_VOID(gps_us >= 0 && mono_us >= 0, PIPE_ASSERT_CODE);           /* epoch/mono timestamps */
     event_t ev = { type, 0, 0, gps_us, mono_us, 0, 0 };
     emit_event(&ev);
 }
@@ -159,12 +179,17 @@ static void on_lap_complete(int64_t end_gps_us)
     lap_result_t lr = *p;
     stats_finalise(&lr.stats);
 
+    /* F4 seqlock write invariant: only the pipeline task writes s_laps_seq, so it must be even
+     * (no writer in flight) on entry -- an odd value here would mean a torn/re-entrant write. */
+    LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE);
+
     /* F4 seqlock write: bump to odd, publish the slot + total, bump to even. The ACQ_REL RMWs
      * fence the plain stores between them so the reader never sees a torn lap_result_t. */
     __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* enter: seq -> odd */
     s_laps[s_lap_total % PIPE_LAPS_KEEP] = lr;
     s_lap_total++;
     __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* leave: seq -> even */
+    LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE); /* left cleanly */
 
     s_resume_active = false;               /* F2: the resumed lap (if any) has completed; guard done */
 
@@ -184,6 +209,8 @@ static void on_drag_done(void)
 {
     const drag_result_t *cur = drag_current(&s_drag);
     if (!cur) return;
+    LT_ASSERT_VOID(cur->n_gates <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);   /* fits gates[]/the log record */
+    LT_ASSERT_VOID(cur->t0_gps_us >= 0, PIPE_ASSERT_CODE);             /* launch instant is a valid epoch us */
     logger_submit_drag(cur);
     ESP_LOGI(TAG, "DRAG run %u  gates=%u trap=%u cm/s", (unsigned)cur->run_no,
              (unsigned)cur->n_gates, (unsigned)cur->trap_cms);
@@ -194,6 +221,8 @@ static void on_drag_done(void)
 static void engine_cb(const event_t *ev, void *ctx)
 {
     (void)ctx;
+    LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
+    LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* stable §4.5 code, drives the switch */
     emit_event(ev);
     switch (ev->type) {
     case EV_LAP_COMPLETE:
@@ -201,6 +230,7 @@ static void engine_cb(const event_t *ev, void *ctx)
         s_rtc_save_due = true;     /* §15.3: save after on_fix, once open_lap has opened the new lap */
         break;
     case EV_SECTOR:
+        LT_ASSERT_VOID(ev->arg16 <= LAP_MAX_SECTORS, PIPE_ASSERT_CODE);   /* engine sector idx in range */
         ESP_LOGI(TAG, "  sector %u  split %lu ms  delta %ld ms", (unsigned)ev->arg16,
                  (unsigned long)ev->arg32, (long)(int32_t)ev->arg32b);
         s_rtc_save_due = true;     /* §15.3: the crossed sector is now the resume point */
@@ -213,6 +243,7 @@ static void engine_cb(const event_t *ev, void *ctx)
 /* §6.5 fix validity rule, identical to replay_run.c compute_validity. Updates last-valid state. */
 static bool compute_validity(const gps_fix_t *fix)
 {
+    LT_ASSERT_RET(fix != NULL, PIPE_ASSERT_CODE, false);   /* the §6.5 rule dereferences it throughout */
     bool ok = fix->fix_type == 3
            && (fix->flags & GPS_FLAG_FIXOK)
            && (fix->flags & GPS_FLAG_TIME)
@@ -228,10 +259,14 @@ static bool compute_validity(const gps_fix_t *fix)
             double lat = (double)fix->lat_e7 / 1e7, lon = (double)fix->lon_e7 / 1e7;
             double dt_s = (double)(fix->gps_us - s_last_valid_gps_us) / 1e6;
             double d = geo_dist_m(s_last_valid_lat, s_last_valid_lon, lat, lon);
+            LT_ASSERT_RET(d >= 0.0, PIPE_ASSERT_CODE, false);   /* a distance is never negative */
             if (d > (double)FIX_MAX_JUMP_MPS * dt_s + 20.0) ok = false;
         }
     }
     if (ok) {
+        /* §6.5 monotonicity: a still-valid fix with a prior valid fix must be strictly newer (the
+         * gps_us <= last check above forced ok=false otherwise) -- guards the last-valid update. */
+        LT_ASSERT_RET(!s_have_last_valid || fix->gps_us > s_last_valid_gps_us, PIPE_ASSERT_CODE, ok);
         s_have_last_valid = true;
         s_last_valid_gps_us = fix->gps_us;
         s_last_valid_lat = (double)fix->lat_e7 / 1e7;
@@ -240,24 +275,19 @@ static bool compute_validity(const gps_fix_t *fix)
     return ok;
 }
 
-/* §9.1 on_fix. */
-static void on_fix(gps_fix_t *fix)
+/* §15.3 resume: on the first valid fix, if a fresh RTC snapshot is armed, restore the interrupted
+ * lap into LAP_RUNNING (carrying LAP_F_INTERRUPTED) before the engine sees this fix, so it
+ * continues and completes normally. Runs once, lap mode only. (Split verbatim out of on_fix for
+ * rule 4; the RTC resume semantics are unchanged -- only a non-NULL param precondition is added.) */
+static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
 {
-    bool valid = compute_validity(fix);
-    fix->valid = valid ? 1u : 0u;
-
-    if (valid) {
-        tb_on_fix(&s_tb, fix->gps_us, fix->mono_us, 0);   /* sim: no serial transmit time */
-        s_cur_speed_cms = fix->gspeed_mms / 10;
-    }
-    fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
-                      (float)fix->head_e5 / 1e5f, fix->mono_us, valid);
-
-    /* §15.3 resume: on the first valid fix, if a fresh RTC snapshot is armed, restore the interrupted
-     * lap into LAP_RUNNING (carrying LAP_F_INTERRUPTED) before the engine sees this fix, so it
-     * continues and completes normally. Runs once, lap mode only. */
+    LT_ASSERT_VOID(fix != NULL, PIPE_ASSERT_CODE);
     if (s_mode == MODE_LAP && s_resume_pending && valid) {
         s_resume_pending = false;
+        /* An armed resume snapshot was validated (magic+version+CRC) at init and every save writes
+         * a valid fix's gps_us (> 0, §6.5), so a zero save-stamp here is a corrupt/foreign snapshot,
+         * not a real resume point -- the two-sided freshness test below would misread it. */
+        LT_ASSERT_VOID(s_resume.saved_gps_us != 0, PIPE_ASSERT_CODE);
         /* F2 (issue #35): the freshness test must be two-sided. `age <= 0` means this fix PREDATES
          * the saved snapshot (a rewound clock, or a sim replay restarting the capture from t0) --
          * resuming then restores lap_start_gps_us into the future relative to incoming fixes and the
@@ -291,7 +321,14 @@ static void on_fix(gps_fix_t *fix)
             ESP_LOGI(TAG, "rtc resume: snapshot not fresh (age %lld us), cleared", (long long)age);
         }
     }
+}
 
+/* Feed the fix to the active engine in the exact §9.1 order, with the §15.3 rewind guard and
+ * save-on-gate around the lap engine. (Split verbatim out of on_fix for rule 4.) */
+static void on_fix_run_engine(const gps_fix_t *fix, bool valid)
+{
+    LT_ASSERT_VOID(fix != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);   /* valid engine mode */
     if (s_mode == MODE_LAP) {
         /* F2 (issue #35): while a resumed lap is running, a valid fix whose gps_us predates the
          * resumed lap's start means the clock rewound (e.g. GPS week rollover) -- feeding it to the
@@ -320,6 +357,25 @@ static void on_fix(gps_fix_t *fix)
     } else {
         drag_on_fix(&s_drag, fix);
     }
+}
+
+/* §9.1 on_fix. */
+static void on_fix(gps_fix_t *fix)
+{
+    LT_ASSERT_VOID(fix != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);   /* valid engine mode */
+    bool valid = compute_validity(fix);
+    fix->valid = valid ? 1u : 0u;
+
+    if (valid) {
+        tb_on_fix(&s_tb, fix->gps_us, fix->mono_us, 0);   /* sim: no serial transmit time */
+        s_cur_speed_cms = fix->gspeed_mms / 10;
+    }
+    fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
+                      (float)fix->head_e5 / 1e5f, fix->mono_us, valid);
+
+    on_fix_try_resume(fix, valid);
+    on_fix_run_engine(fix, valid);
 
     /* §6.5 fix-lost edge: three consecutive invalid fixes -> EV_FIX_LOST; next valid -> EV_FIX_OK. */
     if (valid) {
@@ -348,6 +404,12 @@ static void on_fix(gps_fix_t *fix)
 /* §9.4 per-lap stats accumulation at 100 Hz. */
 static void stats_step(const fused_sample_t *fs)
 {
+    LT_ASSERT_VOID(fs != NULL, PIPE_ASSERT_CODE);   /* every field below is read from *fs */
+    /* Fusion output is clamped finite (§9.3 G_MAX / lean clamp); the int32 conversions below would
+     * be undefined on a NaN/inf, so a non-finite sample here is a fusion bug, not valid data. */
+    LT_ASSERT_VOID(isfinite(fs->lean_deg), PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(isfinite(fs->g_lat), PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(isfinite(fs->g_lon), PIPE_ASSERT_CODE);
     /* §9.4: max ignores non-positive samples; min ignores only LAP_GPS_LOST (a true 0 counts). */
     if (s_cur_speed_cms > 0 && (uint32_t)s_cur_speed_cms > s_stats.max_speed_cms)
         s_stats.max_speed_cms = (uint16_t)(s_cur_speed_cms > 0xFFFF ? 0xFFFF : s_cur_speed_cms);
@@ -369,6 +431,9 @@ static void stats_step(const fused_sample_t *fs)
 /* §9.1 on_raw. */
 static void on_raw(const imu_raw_t *raw)
 {
+    LT_ASSERT_VOID(raw != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(raw->mono_us >= 0, PIPE_ASSERT_CODE);   /* esp_timer sample stamp is monotonic (§9.1) */
+    LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);   /* valid engine mode */
     fused_sample_t fused;
     fus_step(&s_fus, raw, &fused);
     fused.gps_us = tb_mono_to_gps(&s_tb, fused.mono_us);
@@ -385,10 +450,13 @@ static void on_raw(const imu_raw_t *raw)
         (void)ring_push(&g_fused_ring, &fused);     /* overwrite-oldest */
         logger_notify();
     }
+    LT_ASSERT_VOID(s_fused_ctr < (uint32_t)FUSED_DECIM, PIPE_ASSERT_CODE);   /* decimation counter wrapped */
 }
 
 static void handle_cmd(const command_t *cmd)
 {
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(cmd->type <= CMD_IMU_MODE, PIPE_ASSERT_CODE);   /* valid §4.4 command type */
     switch (cmd->type) {
     case CMD_SET_MODE:
         s_mode = (cmd->arg8 == MODE_DRAG) ? MODE_DRAG : MODE_LAP;
@@ -424,13 +492,15 @@ static void pipeline_init(void)
     s_mode = MODE_LAP;
     stats_reset();
     s_last_temp_us = esp_timer_get_time();
+    LT_ASSERT_VOID(s_last_temp_us >= 0, PIPE_ASSERT_CODE);   /* esp_timer base is monotonic/non-negative */
 
     /* §15.3 RTC continuity: derive a boot-scoped session identity for the snapshots (diagnostic
      * only -- not consumed by the resume path), then arm resume. app_main leaves a VALID snapshot
      * in place at boot step 4; if one is present, keep it and import on the first valid fix.
      * Anything else -> start clean. */
     trk_init();   /* clear the user track store before the sim venue is registered (§15.3 resume needs trk_get) */
-    (void)snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
+    int id_len = snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
+    LT_ASSERT_VOID(id_len > 0 && (size_t)id_len < sizeof s_session_id, PIPE_ASSERT_CODE);   /* fit, not truncated */
     if (lt_rtc_validate(&s_resume) == RTC_VALID) {
         s_resume_pending = true;
         ESP_LOGI(TAG, "rtc resume armed: lap %u venue %u saved@%lld us",
@@ -449,6 +519,7 @@ static void pipeline_init(void)
         char err[96];
         const char *vj = gps_sim_venue_json();
         if (vj && trk_from_json(&s_venue, vj, strlen(vj), err, sizeof err) == 0) {
+            LT_ASSERT_VOID(s_venue.n_layouts <= TRK_MAX_LAYOUTS, PIPE_ASSERT_CODE);   /* indexes layouts[] */
             lap_set_venue(&s_lap, &s_venue);
             (void)trk_user_add(&s_venue);   /* §15.3: make trk_get(venue_id) resolve so a resumed lap can rebuild this venue */
             uint16_t layout_id = (s_venue.n_layouts > 0) ? s_venue.layouts[0].id : 0;
@@ -485,6 +556,7 @@ static void pipeline_task(void *arg)
     (void)arg;
     sup_register_task(HB_PIPELINE, xTaskGetCurrentTaskHandle(), PIPE_STALL_S);
     pipeline_init();
+    LT_ASSERT_VOID(g_cmd_q != NULL, PIPE_ASSERT_CODE);   /* §4.7 lt_ipc_init must precede the task */
     ESP_LOGI(TAG, "pipeline up (core %d prio %d)", PIPE_CORE, PIPE_PRIO);
 
     static imu_raw_t raw[IMU_BATCH];       /* off-stack: 16 * 20 B */
@@ -494,19 +566,23 @@ static void pipeline_task(void *arg)
         command_t cmd;
         if (xQueueReceive(g_cmd_q, &cmd, pdMS_TO_TICKS(PIPE_PERIOD_MS)) == pdTRUE) {
             handle_cmd(&cmd);
-            while (xQueueReceive(g_cmd_q, &cmd, 0) == pdTRUE) handle_cmd(&cmd);
+            /* rule 2: bounded drain of the rest (queue depth is single digits << the cap). */
+            for (int i = 0; i < PIPE_CMD_DRAIN_MAX && xQueueReceive(g_cmd_q, &cmd, 0) == pdTRUE; i++)
+                handle_cmd(&cmd);
         }
 
-        /* GPS: drain every fix due, run on_fix. */
+        /* GPS: drain every fix due, run on_fix (rule 2: bounded; ~1 fix/period << the cap). */
         gps_fix_t fix;
-        int r;
-        while ((r = gps_poll(&fix)) == 1) on_fix(&fix);
+        for (int i = 0; i < PIPE_FIX_DRAIN_MAX && gps_poll(&fix) == 1; i++) on_fix(&fix);
 
         /* IMU: read the samples due since the last read, run on_raw for each. */
         int64_t now = esp_timer_get_time();
+        LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);   /* esp_timer is monotonic; drives temp cadence */
         size_t n_read = 0;
-        if (imu_read_fifo(raw, IMU_BATCH, &n_read, now) == 0)
+        if (imu_read_fifo(raw, IMU_BATCH, &n_read, now) == 0) {
+            LT_ASSERT_VOID(n_read <= IMU_BATCH, PIPE_ASSERT_CODE);   /* driver must fit raw[IMU_BATCH] */
             for (size_t i = 0; i < n_read; i++) on_raw(&raw[i]);
+        }
 
         /* ~1 Hz IMU temperature into fusion (§9.2). */
         if (now - s_last_temp_us >= TEMP_POLL_US) {
@@ -524,6 +600,7 @@ void pipeline_start(void)
     if (s_task) return;
     s_task = xTaskCreateStaticPinnedToCore(pipeline_task, "pipeline", PIPE_STACK_WORDS, NULL,
                                            PIPE_PRIO, s_stack, &s_tcb, PIPE_CORE);
+    LT_ASSERT_VOID(s_task != NULL, PIPE_ASSERT_CODE);   /* static creation only fails on bad params */
 }
 
 int pipeline_laps_snapshot(lap_result_t *out, int max)
@@ -531,10 +608,12 @@ int pipeline_laps_snapshot(lap_result_t *out, int max)
     if (!out || max <= 0) return 0;
     /* F4 seqlock read: copy under an even, unchanged sequence; retry if the writer was mid-update
      * (odd) or ran during the copy. The writer's section is a single struct copy, so this converges
-     * immediately; diagnostic-only, so an unbounded retry is acceptable. */
+     * in ~1 iteration. Rule 2: the retry is explicitly capped (a stable read is reached long before
+     * the cap; it only bounds a pathological writer storm). */
     int n = 0;
     uint32_t seq0 = 0, seq1 = 0;
-    do {
+    bool stable = false;
+    for (int attempt = 0; attempt < PIPE_LAPS_SNAP_RETRY_MAX && !stable; attempt++) {
         seq0 = __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE);
         if (seq0 & 1u) continue;                     /* writer mid-update */
         uint32_t total = s_lap_total;
@@ -544,6 +623,8 @@ int pipeline_laps_snapshot(lap_result_t *out, int max)
         for (int i = 0; i < n; i++) out[i] = s_laps[(start + (uint32_t)i) % PIPE_LAPS_KEEP];
         __atomic_thread_fence(__ATOMIC_ACQUIRE);     /* copy above happens-before re-reading seq */
         seq1 = __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE);
-    } while ((seq0 & 1u) || seq0 != seq1);
+        stable = !((seq0 & 1u) || seq0 != seq1);
+    }
+    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, n);   /* the retry cap is never reached in practice */
     return n;
 }
