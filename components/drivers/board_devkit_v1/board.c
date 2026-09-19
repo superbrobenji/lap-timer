@@ -15,6 +15,8 @@
 #include "hal/board.h"
 #include "build_config.h"
 
+#include "core/core.h"
+
 #include <errno.h>
 #include <stdlib.h>
 
@@ -28,6 +30,8 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+
+#define BOARD_ASSERT_CODE 0x0C10   /* Power of 10 rule 5 (core/core.h); board.c's own code */
 
 static const char *TAG = "board";
 
@@ -154,6 +158,7 @@ int board_init(void)
         .flags = { .enable_internal_pullup = true },
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &s_i2c_bus));
+    CORE_ASSERT_RET(s_i2c_bus != NULL, BOARD_ASSERT_CODE, -EIO);   /* ESP_OK must imply a usable bus handle */
 
     /* --- VSPI (SPI3) bus: SCK 18, MOSI 23, MISO 19. Devices (e-paper/SD) attach in 3.3/3.4. --- */
     spi_bus_config_t spi_cfg = {
@@ -171,6 +176,7 @@ int board_init(void)
      *     ADC_ATTEN_DB_12 (identical ~150-2450 mV range), so DB_12 is used. --- */
     adc_oneshot_unit_init_cfg_t unit_cfg = { .unit_id = ADC_UNIT_1 };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
+    CORE_ASSERT_RET(s_adc != NULL, BOARD_ASSERT_CODE, -EIO);   /* ESP_OK must imply a usable ADC unit handle */
     adc_oneshot_chan_cfg_t chan_cfg = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_12 };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, ADC_BATT_CHANNEL, &chan_cfg));
     adc_cali_line_fitting_config_t cali_cfg = {
@@ -203,8 +209,11 @@ static int cmp_int(const void *a, const void *b)
 
 int board_battery_read_mv(uint16_t *mv)
 {
-    if (!mv) return -EINVAL;
+    CORE_ASSERT_RET(mv != NULL, BOARD_ASSERT_CODE, -EINVAL);
     if (!s_adc) return -EIO;
+    /* the mean-of-middle-samples math below divides by (BATT_SAMPLES - 2*BATT_TRIM); guard
+     * that divisor here so a future §16.4 tuning of these constants can't introduce a div-by-0 */
+    CORE_ASSERT_RET(BATT_SAMPLES > 2 * BATT_TRIM, BOARD_ASSERT_CODE, -EIO);
 
     int s[BATT_SAMPLES];
     for (int i = 0; i < BATT_SAMPLES; i++) {

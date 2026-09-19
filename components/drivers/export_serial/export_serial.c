@@ -31,6 +31,7 @@
 #include "app/pipeline.h"
 #include "hal/storage.h"
 
+#include "core/core.h"
 #include "core/event.h"
 #include "core/ses.h"
 #include "core/types.h"
@@ -50,6 +51,8 @@
 #include "esp_task_wdt.h"       /* dbg hang: subscribe the calling task so the task WDT fires deterministically */
 #include "esp_timer.h"
 #include "linenoise/linenoise.h"
+
+#define EXP_SERIAL_ASSERT_CODE 0x0C20   /* Power of 10 rule 5 (core/core.h); export_serial.c's own code */
 
 static int s_reset_reason;
 
@@ -218,6 +221,8 @@ static int sframe_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
                        const uint8_t *p, size_t n)
 {
     (void)tag; (void)seq;
+    CORE_ASSERT_RET(vctx != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(n == 0 || p != NULL, EXP_SERIAL_ASSERT_CODE, -1);   /* every memcpy/crc/fwrite below needs a real buffer whenever n > 0 */
     sframe_t *s = (sframe_t *)vctx;
 
     if (flags & CMD_FLAG_ERROR) {
@@ -255,6 +260,7 @@ static int sframe_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
 static void run_stream(uint8_t op, const char *name, const uint8_t *payload, size_t len,
                        bool binary, bool has_tail)
 {
+    CORE_ASSERT_VOID(payload != NULL || len == 0, EXP_SERIAL_ASSERT_CODE);   /* a non-empty payload needs a real buffer */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
 
@@ -288,6 +294,10 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     fflush(stdout);
 
     esp_log_level_set("*", saved);
+    /* postcondition (checked after the log level is already restored, so a trip here changes
+     * nothing further): a has_tail op that produced a body must have lifted a real tail CRC --
+     * cmd_dispatch's OPEN/READ contract always appends one to the final chunk. */
+    CORE_ASSERT_VOID(!has_tail || pr.have_tail_crc || pr.out == 0, EXP_SERIAL_ASSERT_CODE);
 }
 
 /* Map the `open` format word to the §18.1 fmt code, file extension and body encoding. */
@@ -448,12 +458,14 @@ static void synth_fix(gps_fix_t *f, uint32_t i)
 
 static int dbg_logtest(int argc, char **argv)
 {
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
     long n = (argc >= 3) ? strtol(argv[2], NULL, 10) : 1000;
     if (n < 1) n = 1;
     if (n > 100000) n = 100000;
 
     log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = 1, .venue_id = 1, .layout_id = 1,
                           .gps_us = (int64_t)1700000000000000LL };
+    CORE_ASSERT_RET(g_log_req_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);   /* xQueueSend needs a real queue handle */
     xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100));
     logger_notify();
     vTaskDelay(pdMS_TO_TICKS(30));      /* let the logger open + write the HDR + initial .sum */
@@ -480,10 +492,18 @@ static int dbg_logtest(int argc, char **argv)
         synth_fix(&f, (uint32_t)i);
         int spins = 0;
         bool ok = true;
+        /* rule 2: bounded retry -- FIX_RING_CAP (32) fixes, drained continuously by the logger
+         * task woken via logger_notify() each spin, so 1000 spins (>>30x the ring depth) is far
+         * more yielding than the logger could ever need to catch up under any normal load. On
+         * exhaustion this fix is dropped (logged) rather than spinning forever. */
         while (!ring_push(&g_fix_ring, &f)) {   /* full: wake the logger and yield */
             logger_notify();
             vTaskDelay(1);
-            if (++spins > 1000) { ok = false; break; }
+            if (++spins > 1000) {
+                printf("logtest: fix %ld dropped (ring stayed full for %d spins)\n", i, spins);
+                ok = false;
+                break;
+            }
         }
         if (ok) pushed++;
         if ((i & 0x1F) == 0x1F) logger_notify();
@@ -672,8 +692,10 @@ static int dbg_mem(void)
 /* ---- dbg dispatch ---- */
 static int cmd_dbg(int argc, char **argv)
 {
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
     if (argc >= 2) {
         const char *s = argv[1];
+        CORE_ASSERT_RET(s != NULL, EXP_SERIAL_ASSERT_CODE, 1);
         if (strcmp(s, "status")  == 0) return dbg_status();
         if (strcmp(s, "logtest") == 0) return dbg_logtest(argc, argv);
         if (strcmp(s, "fs")      == 0) return dbg_fs();
@@ -723,8 +745,12 @@ void export_serial_start(int reset_reason)
     repl_cfg.task_priority = 2;
     repl_cfg.task_stack_size = 6144;    /* headroom for the sum/logck readers + JSON/printf */
     repl_cfg.max_cmdline_length = 256;  /* room for `config set <json>` */
+    /* the `config set <json>` reassembly buffer must stay bigger than a whole command line, or
+     * a max-length line could overflow the copy loop's own bound in cmd_config_c. */
+    CORE_ASSERT_VOID(sizeof(s_setbuf) > repl_cfg.max_cmdline_length, EXP_SERIAL_ASSERT_CODE);
     esp_console_dev_uart_config_t uart_cfg = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     if (esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &repl) != ESP_OK) return;
+    CORE_ASSERT_VOID(repl != NULL, EXP_SERIAL_ASSERT_CODE);   /* ESP_OK must imply a usable REPL/UART handle */
 
     linenoiseSetDumbMode(1);            /* §18.4: line editing disabled (plain serial terminal) */
 
