@@ -1,7 +1,11 @@
 #include "core/lap.h"
+#include "core/core.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Power of 10 rule 5: shared lapengine assertion code; file:line at the hook pins the exact check. */
+#define LAP_ASSERT_CODE 0x0A20
 
 /* Pure gate geometry for on-device track creation (§10.9) and the auto reverse layout (§10.2). No
  * state, no allocation. Kept separate from lap.c so the state machine and the geometry test each build
@@ -19,6 +23,9 @@
  * inverts, so the engine's ENU crossing test is exact. */
 trk_line_t lap_gate_line(double lat_deg, double lon_deg, double heading_deg)
 {
+    CORE_ASSERT_RET(lat_deg >= -90.0 && lat_deg <= 90.0, LAP_ASSERT_CODE, (trk_line_t){0});
+    CORE_ASSERT_RET(lon_deg >= -180.0 && lon_deg <= 180.0, LAP_ASSERT_CODE, (trk_line_t){0});
+    CORE_ASSERT_RET(heading_deg >= 0.0 && heading_deg <= 360.0, LAP_ASSERT_CODE, (trk_line_t){0});
     const double h  = heading_deg * DEG2RAD;
     const double lx = -cos(h);      /* left-normal east component (unit) */
     const double ly = sin(h);       /* left-normal north component (unit) */
@@ -39,6 +46,9 @@ trk_line_t lap_gate_line(double lat_deg, double lon_deg, double heading_deg)
  * negated and the §6.4 test still accepts it), id = fwd->id + 1, name "<fwd name> Reverse". */
 void lap_layout_reverse(const trk_layout_t *fwd, trk_layout_t *rev)
 {
+    CORE_ASSERT_VOID(fwd != NULL, LAP_ASSERT_CODE);
+    CORE_ASSERT_VOID(rev != NULL, LAP_ASSERT_CODE);
+    CORE_ASSERT_VOID(fwd->n_sectors <= LAP_MAX_SECTORS, LAP_ASSERT_CODE);   /* sector reverse loop bound */
     *rev = *fwd;
     rev->id       = (uint16_t)(fwd->id + 1);
     rev->dir_sign = (int8_t)(-fwd->dir_sign);

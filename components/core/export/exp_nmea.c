@@ -1,12 +1,19 @@
 #include "core/exp.h"
+#include "core/core.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+
+#define EXP_ASSERT_CODE 0x0A60
 
 int exp_nmea_open(exp_t *e) { (void)e; return 0; }
 
 static void latlon_fields(int32_t lat_e7, int32_t lon_e7, char *lat, char *ns, char *lon, char *ew)
 {
+    CORE_ASSERT_VOID(lat != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(ns != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(lon != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(ew != NULL, EXP_ASSERT_CODE);
     double la = fabs((double)lat_e7 / 1e7), lo = fabs((double)lon_e7 / 1e7);
     int lad = (int)la, lod = (int)lo;
     double lam = (la - lad) * 60.0, lom = (lo - lod) * 60.0;
@@ -17,6 +24,8 @@ static void latlon_fields(int32_t lat_e7, int32_t lon_e7, char *lat, char *ns, c
 
 static int put_sentence(exp_t *e, const char *body)      /* body excludes '$' and '*hh' */
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(body != NULL, EXP_ASSERT_CODE, -1);
     uint8_t x = 0; for (const char *s = body; *s; s++) x ^= (uint8_t)*s;
     char line[128];
     snprintf(line, sizeof line, "$%s*%02X\r\n", body, x);
@@ -25,6 +34,8 @@ static int put_sentence(exp_t *e, const char *body)      /* body excludes '$' an
 
 int exp_nmea_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (type != SES_T_FIX_KEY && type != SES_T_FIX_DELTA) return 0;
     if (exp_win_free(e) < 200) return EXP_FULL;
     gps_fix_t f;

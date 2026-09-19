@@ -3,8 +3,17 @@
  * plain integer arithmetic so the PBM snapshots in test/snapshots/ are byte-identical across
  * compilers. */
 #include "core/ui/render.h"
+#include "core/core.h"
 
 #include <string.h>
+
+/* Power of 10 rule 5 (spec §17.9, design doc §3): this module's assertions report UI_ASSERT_CODE.
+ * They guard genuine anomalies -- NULL params, a framebuffer dimension that breaks the `w` % 8 == 0
+ * contract, a post-clip region that somehow still falls outside the frame -- never the ordinary
+ * per-pixel clipping every primitive here already performs, which is this module's whole job and
+ * is exercised by the byte-exact PBM goldens on every draw, on- or off-frame alike; converting that
+ * clipping into an assertion would fire the fault hook on routine, correct rendering. */
+#define UI_ASSERT_CODE 0x0AA0
 
 /* Sets one pixel to ink (black, nonzero `black`) or background (white, black == 0). Out-of-bounds
  * (x,y) is a silent no-op — this is the hard backstop against OOB writes; every caller in this
@@ -12,6 +21,7 @@
  * makes fb_set_px safe to call unconditionally. */
 static void fb_set_px(fb_t *fb, int x, int y, uint8_t black)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     if (x < 0 || y < 0 || x >= (int)fb->w || y >= (int)fb->h) {
         return;
     }
@@ -28,6 +38,7 @@ static void fb_set_px(fb_t *fb, int x, int y, uint8_t black)
  * region (nothing actually drawn) leaves dirty untouched. */
 static void fb_extend_dirty(fb_t *fb, int x0, int y0, int x1, int y1)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     if (x1 <= x0 || y1 <= y0) {
         return;
     }
@@ -49,6 +60,11 @@ static void fb_extend_dirty(fb_t *fb, int x0, int y0, int x1, int y1)
 
 void fb_init(fb_t *fb, uint8_t *bits, uint16_t w, uint16_t h)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(bits != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(w > 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(h > 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(w % 8 == 0, UI_ASSERT_CODE); /* render.h contract: w must be a multiple of 8 */
     fb->bits = bits;
     fb->w = w;
     fb->h = h;
@@ -62,6 +78,8 @@ void fb_init(fb_t *fb, uint8_t *bits, uint16_t w, uint16_t h)
 
 void fb_clear(fb_t *fb, uint8_t black)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(fb->bits != NULL, UI_ASSERT_CODE);
     memset(fb->bits, black ? 0x00 : 0xFF, (size_t)fb->stride * (size_t)fb->h);
     fb->dirty.x0 = 0;
     fb->dirty.y0 = 0;
@@ -72,6 +90,7 @@ void fb_clear(fb_t *fb, uint8_t black)
 
 void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     if (w <= 0 || h <= 0) {
         return;
     }
@@ -84,6 +103,11 @@ void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill)
     if (cx1 <= cx0 || cy1 <= cy0) {
         return;
     }
+    /* postcondition of the clip above: the fill/outline loops below never touch an out-of-frame pixel */
+    CORE_ASSERT_VOID(cx0 >= 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cx1 <= (int)fb->w, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cy0 >= 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cy1 <= (int)fb->h, UI_ASSERT_CODE);
 
     if (fill) {
         for (int yy = cy0; yy < cy1; yy++) {
@@ -112,6 +136,7 @@ void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill)
 
 void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     if (w <= 0 || y < 0 || y >= (int)fb->h) {
         return;
     }
@@ -121,6 +146,8 @@ void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
     if (cx1 <= cx0) {
         return;
     }
+    CORE_ASSERT_VOID(cx0 >= 0, UI_ASSERT_CODE);        /* postcondition of the clip above */
+    CORE_ASSERT_VOID(cx1 <= (int)fb->w, UI_ASSERT_CODE);
     for (int xx = cx0; xx < cx1; xx++) {
         fb_set_px(fb, xx, y, black);
     }
@@ -133,6 +160,7 @@ void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
  * the framebuffer bounds and extends dirty by the clipped bounding box. */
 static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, const uint8_t *bitmap)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     int cx0 = x < 0 ? 0 : x;
     int cy0 = y < 0 ? 0 : y;
     int cx1 = x + cw;
@@ -142,6 +170,12 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
     if (cx1 <= cx0 || cy1 <= cy0) {
         return;
     }
+    /* postcondition of the clip above: the blit loop below never touches an out-of-frame pixel.
+     * `bitmap` is intentionally not asserted non-NULL -- NULL is the documented "no glyph" cell. */
+    CORE_ASSERT_VOID(cx0 >= 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cx1 <= (int)fb->w, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cy0 >= 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cy1 <= (int)fb->h, UI_ASSERT_CODE);
 
     for (int iy = cy0; iy < cy1; iy++) {
         int row = iy - y;
@@ -163,6 +197,8 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
  * string's right edge lands at x_right). Returns the pen x after the last character. */
 static int fb_text_draw(fb_t *fb, const font_t *font, int x, int y, const char *s)
 {
+    CORE_ASSERT_RET(font != NULL, UI_ASSERT_CODE, x);
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x);
     int pen = x;
     for (const char *p = s; *p != '\0'; p++) {
         int            idx = font_glyph_index(font, *p);
@@ -178,11 +214,15 @@ static int fb_text_draw(fb_t *fb, const font_t *font, int x, int y, const char *
 
 int fb_text(fb_t *fb, const font_t *f, int x, int y, const char *s)
 {
+    CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, x);
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x);
     return fb_text_draw(fb, f, x, y, s);
 }
 
 int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s)
 {
+    CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, x_right);
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x_right);
     int x = x_right - (int)(strlen(s) * f->w);
     fb_text_draw(fb, f, x, y, s);
     return x;
@@ -190,6 +230,7 @@ int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s)
 
 void fb_icon(fb_t *fb, uint8_t icon_id, int x, int y)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     if (icon_id >= ICON_COUNT) {
         return;
     }
@@ -198,6 +239,7 @@ void fb_icon(fb_t *fb, uint8_t icon_id, int x, int y)
 
 void fb_bar(fb_t *fb, int x, int y, int w, int h, uint8_t pct)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     fb_rect(fb, x, y, w, h, 1, false); /* 1px ink outline; also handles the too-small/off-frame no-op */
     if (w < 3 || h < 3) {
         return; /* no room for an interior */

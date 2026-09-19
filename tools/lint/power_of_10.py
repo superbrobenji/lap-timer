@@ -57,11 +57,22 @@ def is_exempt_jsmn(relpath):
     return d.replace(os.sep, "/").endswith("core/util") and base.startswith("jsmn")
 
 
+# Generated / pure-data files: no hand-written logic to assert about, so exempt from the rules
+# (their source is a generator/tool). fonts.c is emitted by tools/fonts/gen_fonts.py; icons.c is
+# hand-authored 1bpp bitmap tables.
+EXEMPT_GENERATED_FILES = (
+    "components/core/ui/fonts.c",
+    "components/core/ui/icons.c",
+)
+
+
 def is_exempt(relpath, idf_path_real):
     rp = relpath.replace(os.sep, "/")
     for frag in EXEMPT_PATH_FRAGMENTS:
         if frag in ("/" + rp) or rp.startswith(frag):
             return True
+    if rp in EXEMPT_GENERATED_FILES or rp.lstrip("./") in EXEMPT_GENERATED_FILES:
+        return True
     if is_exempt_jsmn(rp):
         return True
     if idf_path_real:

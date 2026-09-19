@@ -1,6 +1,10 @@
 #include "core/fus.h"
+#include "core/core.h"
 #include <math.h>
 #include <string.h>
+
+/* Power-of-10 rule 5 assertion code for the fusion module (design §3). */
+#define FUS_ASSERT_CODE 0x0A10
 
 /* Stillness detector (spec §9.2): tumbling windows of FUS_STILL_WINDOW_N samples
  * (STILL_WINDOW_S · FUSION_HZ = 200 at 100 Hz). A window is still when the variance of the accel
@@ -19,6 +23,7 @@
 
 static void window_restart(fus_still_t *s)
 {
+    CORE_ASSERT_VOID(s != NULL, FUS_ASSERT_CODE);
     s->sum_amag = 0.0;
     s->sum_amag2 = 0.0;
     memset(s->sum_g, 0, sizeof s->sum_g);
@@ -30,12 +35,17 @@ static void window_restart(fus_still_t *s)
 
 void fus_still_init(fus_still_t *s)
 {
+    CORE_ASSERT_VOID(s != NULL, FUS_ASSERT_CODE);
     memset(s, 0, sizeof *s);   /* a zeroed struct is the initialised state (fus.h) */
 }
 
 /* Closes the current window: computes the two statistics, latches the means, restarts the sums. */
 static void window_close(fus_still_t *s)
 {
+    CORE_ASSERT_VOID(s != NULL, FUS_ASSERT_CODE);
+    /* Called only when a window has filled; the statistics below divide by the constant window
+     * size, so a short window would skew every mean/variance. */
+    CORE_ASSERT_VOID(s->n == FUS_STILL_WINDOW_N, FUS_ASSERT_CODE);
     const double n = (double)FUS_STILL_WINDOW_N;
     const double mean_amag = s->sum_amag / n;
     double acc_var = s->sum_amag2 / n - mean_amag * mean_amag;
@@ -58,6 +68,8 @@ static void window_close(fus_still_t *s)
 
 int fus_still_push(fus_still_t *s, const imu_raw_t *raw)
 {
+    CORE_ASSERT_RET(s != NULL, FUS_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(raw != NULL, FUS_ASSERT_CODE, 0);
     /* One conversion per sample: accel LSB → g, gyro LSB → dps (the bias is not removed here — the
      * mean raw gyro of a still window is what becomes the bias, §9.2). */
     const double ax = (double)raw->ax / (double)IMU_ACC_LSB_PER_G;

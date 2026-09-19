@@ -1,8 +1,17 @@
 #include "core/trk.h"
 #include "core/json.h"
 #include "core/jw.h"
+#include "core/core.h"
 #include <string.h>
 #include <stdio.h>
+
+/* Power of 10 rule 5 (spec §17.9, design doc §3): this module's assertions report TRK_ASSERT_CODE
+ * (shared with trk.c: components/core/tracks is one assertion "module" for the retrofit). They
+ * guard genuine anomalies -- NULL params, an internal count exceeding its TRK_MAX_ or LAP_MAX_
+ * bound -- never the rejection of a malformed/untrusted track document, which stays the existing
+ * plain `fail(...)` return (that path is routine, exercised by real uploads, and must not fire the
+ * fault hook). */
+#define TRK_ASSERT_CODE 0x0A80
 
 #define MAX_TOKS 512
 
@@ -10,11 +19,19 @@ static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncp
 
 static bool get_pt(const char *js, const jsmntok_t *toks, int ntoks, int arr, trk_pt_t *out)
 {
+    CORE_ASSERT_RET(js != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(toks != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(out != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(ntoks >= 0, TRK_ASSERT_CODE, false);
     if (arr < 0 || arr + 2 >= ntoks || toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
     return json_tok_double(js, &toks[arr + 1], &out->lat) && json_tok_double(js, &toks[arr + 2], &out->lon);
 }
 static bool get_line(const char *js, const jsmntok_t *toks, int ntoks, int arr, trk_line_t *out)
 {
+    CORE_ASSERT_RET(js != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(toks != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(out != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(ntoks >= 0, TRK_ASSERT_CODE, false);
     if (arr < 0 || arr >= ntoks || toks[arr].type != JSMN_ARRAY || toks[arr].size != 2) return false;
     int p1 = arr + 1, p2 = json_skip(toks, ntoks, p1);
     /* Degenerate/too-short lines (§6.4 needs a gate direction) are rejected once, by the shared
@@ -25,6 +42,9 @@ static bool get_line(const char *js, const jsmntok_t *toks, int ntoks, int arr, 
 /* Not reentrant: static token array (single caller task). */
 int trk_from_json(trk_venue_t *v, const char *json, size_t n, char *err, size_t err_cap)
 {
+    CORE_ASSERT_RET(v != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(json != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(n > 0, TRK_ASSERT_CODE, fail(err, err_cap, "malformed json"));
     static jsmntok_t toks[MAX_TOKS];
     int cnt = json_parse(json, n, toks, MAX_TOKS);
     if (cnt < 1 || toks[0].type != JSMN_OBJECT) return fail(err, err_cap, "malformed json");
@@ -73,15 +93,29 @@ int trk_from_json(trk_venue_t *v, const char *json, size_t n, char *err, size_t 
         v->n_layouts++;
         li = json_skip(toks, cnt, li);
     }
+    CORE_ASSERT_RET(v->n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE, -1); /* the layouts[] array's own bound */
     if (trk_validate_venue(v) != 0) { memset(v, 0, sizeof *v); return fail(err, err_cap, "invalid venue"); }
     return 0;
 }
 
-static void put_pt(jw_t *w, const trk_pt_t *p) { jw_arr_open(w); jw_double(w, p->lat, 7); jw_double(w, p->lon, 7); jw_arr_close(w); }
-static void put_line(jw_t *w, const trk_line_t *l) { jw_arr_open(w); put_pt(w, &l->p1); put_pt(w, &l->p2); jw_arr_close(w); }
+static void put_pt(jw_t *w, const trk_pt_t *p)
+{
+    CORE_ASSERT_VOID(w != NULL, TRK_ASSERT_CODE);
+    CORE_ASSERT_VOID(p != NULL, TRK_ASSERT_CODE);
+    jw_arr_open(w); jw_double(w, p->lat, 7); jw_double(w, p->lon, 7); jw_arr_close(w);
+}
+static void put_line(jw_t *w, const trk_line_t *l)
+{
+    CORE_ASSERT_VOID(w != NULL, TRK_ASSERT_CODE);
+    CORE_ASSERT_VOID(l != NULL, TRK_ASSERT_CODE);
+    jw_arr_open(w); put_pt(w, &l->p1); put_pt(w, &l->p2); jw_arr_close(w);
+}
 
 int trk_to_json(const trk_venue_t *v, char *out, size_t cap)
 {
+    CORE_ASSERT_RET(v != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(v->n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE, -1); /* the layouts[] array's own bound */
     jw_t w; jw_init(&w, out, cap);
     jw_obj_open(&w);
     jw_key(&w, "id"); jw_uint(&w, v->id);
@@ -93,6 +127,7 @@ int trk_to_json(const trk_venue_t *v, char *out, size_t cap)
     jw_key(&w, "layouts"); jw_arr_open(&w);
     for (uint8_t k = 0; k < v->n_layouts; k++) {
         const trk_layout_t *L = &v->layouts[k];
+        CORE_ASSERT_RET(L->n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE, -1); /* the sectors[] array's own bound */
         jw_obj_open(&w);
         jw_key(&w, "id"); jw_uint(&w, L->id);
         jw_key(&w, "name"); jw_str(&w, L->name);

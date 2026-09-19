@@ -1,6 +1,10 @@
 #include "core/fus.h"
+#include "core/core.h"
 #include <math.h>
 #include <string.h>
+
+/* Power-of-10 rule 5 assertion code for the fusion module (design §3). */
+#define FUS_ASSERT_CODE 0x0A10
 
 /* Forward-axis learning window tracker (spec §9.2).
  *
@@ -17,12 +21,14 @@
 
 void fus_fwd_init(fus_fwd_t *w)
 {
+    CORE_ASSERT_VOID(w != NULL, FUS_ASSERT_CODE);
     memset(w, 0, sizeof *w);      /* a zeroed tracker is a valid initialised state (fus.h) */
 }
 
 /* Ends the current run: its samples are already in sum if it was counted, and are dropped otherwise. */
 static void run_reset(fus_fwd_t *w)
 {
+    CORE_ASSERT_VOID(w != NULL, FUS_ASSERT_CODE);
     w->run_samples = 0;
     w->run_sum[0] = 0.0; w->run_sum[1] = 0.0; w->run_sum[2] = 0.0;
     w->counted = false;
@@ -30,6 +36,9 @@ static void run_reset(fus_fwd_t *w)
 
 void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps)
 {
+    CORE_ASSERT_VOID(w != NULL, FUS_ASSERT_CODE);
+    CORE_ASSERT_VOID(isfinite(gps_acc_mps2), FUS_ASSERT_CODE);   /* both feed the threshold gate below */
+    CORE_ASSERT_VOID(isfinite(yaw_dps), FUS_ASSERT_CODE);
     /* §9.2 learns only from near-straight acceleration, so that a_h points along the forward axis. Both
      * comparisons are strict, and braking (gps_acc_mps2 <= 0) can never qualify. */
     w->cond = (fabsf(yaw_dps) < FWD_LEARN_MAX_YAW_DPS) && (gps_acc_mps2 > FWD_LEARN_ACC_MPS2);
@@ -38,6 +47,9 @@ void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps)
 
 int fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3])
 {
+    CORE_ASSERT_RET(w != NULL, FUS_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(acc_g != NULL, FUS_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(z != NULL, FUS_ASSERT_CODE, 0);
     if (!w->cond) return 0;
 
     /* a_h = a − (a·z)z: the horizontal (gravity-free) part of the specific force, in g, body frame. */
@@ -62,5 +74,6 @@ int fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3])
 
 bool fus_fwd_ready(const fus_fwd_t *w)
 {
+    CORE_ASSERT_RET(w != NULL, FUS_ASSERT_CODE, false);
     return w->windows >= FWD_LEARN_WINDOWS;
 }
