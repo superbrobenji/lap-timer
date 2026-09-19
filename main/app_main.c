@@ -35,6 +35,8 @@
 #include "export_serial.h"
 #endif
 
+#define MAIN_ASSERT_CODE 0x0C80
+
 static const char *TAG = "laptimer";
 
 /* Build the profile the app applies after cfg_defaults and before the NVS blob (§15.1), so
@@ -49,20 +51,18 @@ static void make_profile(cfg_profile_t *p, char *name, size_t name_cap)
     p->ble_name = name;
 }
 
-void app_main(void)
+/* §4.7 step 8 banner (kept from 3.1). */
+static void boot_banner(esp_reset_reason_t reason)
 {
-    int64_t t_boot = esp_timer_get_time();
-
-    /* §4.7 step 1: reset reason (crash counters recorded below, after NVS is up). */
-    esp_reset_reason_t reason = esp_reset_reason();
-
-    /* §4.7 step 8 banner (kept from 3.1). */
     ESP_LOGI(TAG, "LapTimer %s (%s)", CFG_FW_VERSION, CFG_HWID);
     ESP_LOGI(TAG, "core %s | GPS %s | display %s | fused-log %d Hz",
              core_version(), CFG_GPS_NAME, CFG_DISPLAY_NAME, CFG_FUSED_LOG_HZ);
     ESP_LOGI(TAG, "reset reason: %s (%d)", lt_reset_reason_str((int)reason), (int)reason);
+}
 
-    /* §4.7 step 2: NVS init, erase + re-init on a version/space fault (log E_SYS_CFG_RESET). */
+/* §4.7 step 2: NVS init, erase + re-init on a version/space fault (log E_SYS_CFG_RESET). */
+static void boot_nvs(void)
+{
     esp_err_t nerr = nvs_flash_init();
     bool nvs_erased = false;
     if (nerr == ESP_ERR_NVS_NO_FREE_PAGES || nerr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -75,12 +75,15 @@ void app_main(void)
     if (lt_nvs_init() != 0) ESP_LOGE(TAG, "lt_nvs_init failed");
     sup_install_assert_hook();                 /* core asserts -> error ring (§17.9) */
     if (nvs_erased) errlog_add(E_SYS_CFG_RESET, 0);
+}
 
-    /* §4.7 step 1 (cont): count + log + crash-log the reset reason; prev-boot uptime comes
-     * from the RTC uptime cell the supervisor maintained last boot. F3: if the previous boot was
-     * a supervisor-forced pipeline-stall restart (marker in NVS), its HW reason is ESP_RST_SW
-     * (§17.5 normal) -- fold it in as the abnormal LT_RST_STALL so consecutive stalls trip the
-     * crash-loop -> safe mode below. Consume the marker either way. */
+/* §4.7 step 1 (cont): count + log + crash-log the reset reason; prev-boot uptime comes
+ * from the RTC uptime cell the supervisor maintained last boot. F3: if the previous boot was
+ * a supervisor-forced pipeline-stall restart (marker in NVS), its HW reason is ESP_RST_SW
+ * (§17.5 normal) -- fold it in as the abnormal LT_RST_STALL so consecutive stalls trip the
+ * crash-loop -> safe mode below. Consume the marker either way. */
+static void boot_reset_record(esp_reset_reason_t reason)
+{
     int record_reason = (int)reason;
     if (lt_stall_flag_take()) {
         record_reason = LT_RST_STALL;
@@ -88,9 +91,12 @@ void app_main(void)
     }
     uint32_t prev_uptime_s = lt_rtc_uptime_prev_s();
     lt_boot_record_reset(record_reason, prev_uptime_s);
+}
 
-    /* §4.7 step 3: boot counter + crash-loop check (§17.5). 3.2 only detects + flags safe
-     * mode; the safe-mode behaviour tree is 3.5. */
+/* §4.7 step 3: boot counter + crash-loop check (§17.5). 3.2 only detects + flags safe
+ * mode; the safe-mode behaviour tree is 3.5. */
+static uint32_t boot_safe_mode(bool *safe_out)
+{
     uint32_t boot_cnt = lt_nvs_boot_inc();
     lt_counters_inc(LT_CTR_BOOTS, false);      /* batched with the rest */
     bool safe = false;
@@ -105,9 +111,14 @@ void app_main(void)
         sys_flags_set(SYS_SAFE_MODE);
         errlog_add(E_SYS_SAFE_MODE, boot_cnt);
     }
+    *safe_out = safe;
+    return boot_cnt;
+}
 
-    /* §4.7 step 4: RTC memory validate/clear. Full resume is 3.5; here invalid/absent are
-     * cleared and only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
+/* §4.7 step 4: RTC memory validate/clear. Full resume is 3.5; here invalid/absent are
+ * cleared and only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
+static void boot_rtc_validate(void)
+{
     switch (lt_rtc_validate(NULL)) {
     case RTC_INVALID:
         errlog_add(E_SYS_RTC_INVALID, 0);
@@ -119,9 +130,12 @@ void app_main(void)
     case RTC_VALID:
         break;                                 /* left in place; 3.5 resumes from it */
     }
+}
 
-    /* §4.7 step 5: config load. defaults -> profile -> NVS blob (stored settings win, §15.1);
-    *  defaults + a fresh save on absent/corrupt; log corrections. */
+/* §4.7 step 5: config load. defaults -> profile -> NVS blob (stored settings win, §15.1);
+*  defaults + a fresh save on absent/corrupt; log corrections. */
+static void boot_config(void)
+{
     static cfg_t cfg;
     char ble_name[16];
     cfg_profile_t prof;
@@ -136,14 +150,13 @@ void app_main(void)
         errlog_add(E_SYS_CFG_RESET, (uint32_t)corr);
         lt_cfg_save(&cfg);                     /* persist the clamped config */
     }
+}
 
-    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`). */
-    board_init();
-    board_gps_power(true);
-
-    /* §4.7 step 7 (internal storage): mount LittleFS; the mount ladder (mount -> retry ->
-     * format -> dead) lives in the driver. The driver stays app-agnostic, so the boot sequence
-     * owns the sys_flags / error-ring / counter effects of the ladder result (§13.1). */
+/* §4.7 step 7 (internal storage): mount LittleFS; the mount ladder (mount -> retry ->
+ * format -> dead) lives in the driver. The driver stays app-agnostic, so the boot sequence
+ * owns the sys_flags / error-ring / counter effects of the ladder result (§13.1). */
+static void boot_storage(void)
+{
     int mrc = sto_mount();
     if (mrc < 0) {
         sys_flags_set(SYS_STORAGE_DEAD);
@@ -159,7 +172,11 @@ void app_main(void)
         if (sto_info(&si) == 0)
             ESP_LOGI(TAG, "storage: %u/%u KB free", (unsigned)si.free_kb, (unsigned)si.total_kb);
     }
+}
 
+/* §4.7 steps 10-13: supervisor, static queues, IPC rings, and the logger/pipeline/ui tasks. */
+static void boot_subsystems(void)
+{
     /* §4.7 step 10: the task WDT is already enabled via sdkconfig; hb[]/sys_flags exist
      * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */
     sup_start();
@@ -188,6 +205,33 @@ void app_main(void)
      * core/ui screens_render(). Plan 04 ships no display driver, so it logs the dirty box instead of
      * refreshing a panel; the menu (§20.7) + buttons (§20.8) are live. */
     ui_start();
+}
+
+void app_main(void)
+{
+    int64_t t_boot = esp_timer_get_time();
+    CORE_ASSERT_VOID(t_boot > 0, MAIN_ASSERT_CODE);   /* monotonic boot timer already running */
+
+    /* §4.7 step 1: reset reason (crash counters recorded below, after NVS is up). */
+    esp_reset_reason_t reason = esp_reset_reason();
+
+    boot_banner(reason);
+    boot_nvs();
+    boot_reset_record(reason);
+
+    bool safe = false;
+    uint32_t boot_cnt = boot_safe_mode(&safe);
+    CORE_ASSERT_VOID(boot_cnt >= 1, MAIN_ASSERT_CODE);   /* boot counter was just incremented */
+
+    boot_rtc_validate();
+    boot_config();
+
+    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`). */
+    board_init();
+    board_gps_power(true);
+
+    boot_storage();
+    boot_subsystems();
 
     /* §4.7 step 12 (console): the §18.4 serial export console -- STATUS/CONFIG/ERRLOG/DIAG/
      * DELETE/CLOSE wired through app/cmd, plus the migrated `dbg` diagnostics verbs. Spawns its
