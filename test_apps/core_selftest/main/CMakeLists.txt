@@ -33,7 +33,12 @@ foreach(s ${SUITES})
   string(APPEND SUITES_GEN_CONTENT "SUITE(${s})\n")
 endforeach()
 file(WRITE "${SUITES_GEN}" "${SUITES_GEN_CONTENT}")
-idf_component_register(SRCS "main.c" ${WRAPPERS} INCLUDE_DIRS "." REQUIRES core unity_vendored pthread esp_timer)
+# assert_support.c is the shared STRONG core_assert_report recorder + lt_test_assert_* helpers
+# (test/assert_support.h) that test_smoke/test_ses_frame call. It is not a test_*.c suite, so the
+# glob above skips it; compile it directly so the on-target link resolves lt_test_assert_* and the
+# strong recorder overrides core.c's weak core_assert_report default.
+idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" ${WRAPPERS}
+                       INCLUDE_DIRS "." "${TEST_DIR}" REQUIRES core unity_vendored pthread esp_timer)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function -Wno-unused-parameter)
