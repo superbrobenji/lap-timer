@@ -1,6 +1,9 @@
 #include "core/exp.h"
+#include "core/core.h"
 #include <stdio.h>
 #include <string.h>
+
+#define EXP_ASSERT_CODE 0x0A60
 
 static const char *HEADER_PART1 =
     "\r\n[header]\r\nsatellites\r\ntime\r\nlatitude\r\nlongitude\r\nvelocity kmh\r\nheading\r\nheight\r\nlat_g\r\nlon_g\r\nlean\r\nyaw\r\n"
@@ -8,6 +11,7 @@ static const char *HEADER_PART1 =
 
 int exp_vbo_open(exp_t *e)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     char line[160];
     int y; unsigned mo, d, hh, mm, ss, cs;
     exp_utc_parts(e->meta.created_gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
@@ -27,6 +31,8 @@ int exp_vbo_open(exp_t *e)
 
 int exp_vbo_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (type == SES_T_FUSED) {
         fused_sample_t s;
         if (ses_decode_fused(&e->fus_st, p, len, &s) == 1) { e->held = s; e->have_held = 1; }

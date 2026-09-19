@@ -1,20 +1,35 @@
 #include "core/cfg.h"
 #include "core/jw.h"
 #include "core/json.h"
+#include "core/core.h"
 #include <string.h>
 #include <stdio.h>
 
 #define MAX_TOKS 192
+#define CFG_ASSERT_CODE 0x0A70
 
 /* err is optional everywhere: a NULL or zero-capacity buffer just discards the message. */
-static int set_err(char *err, size_t cap, const char *msg) { if (err && cap) { strncpy(err, msg, cap - 1); err[cap - 1] = '\0'; } return -1; }
+static int set_err(char *err, size_t cap, const char *msg) { CORE_ASSERT_RET(msg != NULL, CFG_ASSERT_CODE, -1); if (err && cap) { strncpy(err, msg, cap - 1); err[cap - 1] = '\0'; } return -1; }
 
-static bool get_u16(const char *js, const jsmntok_t *t, uint16_t *out) { int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 65535) return false; *out = (uint16_t)v; return true; }
-static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out) { int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 255) return false; *out = (uint8_t)v; return true; }
+static bool get_u16(const char *js, const jsmntok_t *t, uint16_t *out)
+{
+    CORE_ASSERT_RET(js != NULL, CFG_ASSERT_CODE, false);
+    CORE_ASSERT_RET(t != NULL, CFG_ASSERT_CODE, false);
+    CORE_ASSERT_RET(out != NULL, CFG_ASSERT_CODE, false);
+    int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 65535) return false; *out = (uint16_t)v; return true;
+}
+static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out)
+{
+    CORE_ASSERT_RET(js != NULL, CFG_ASSERT_CODE, false);
+    CORE_ASSERT_RET(t != NULL, CFG_ASSERT_CODE, false);
+    CORE_ASSERT_RET(out != NULL, CFG_ASSERT_CODE, false);
+    int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 255) return false; *out = (uint8_t)v; return true;
+}
 
 /* returns 0 ok, -1 type error */
 static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, const char *path, int v)
 {
+    CORE_ASSERT_RET(c != NULL && js != NULL && toks != NULL && path != NULL, CFG_ASSERT_CODE, -1);
     const jsmntok_t *t = &toks[v];
     if (!strcmp(path, "units")) {
         if (json_tok_eq(js, t, "kmh")) { c->units = CFG_UNITS_KMH; return 0; }
@@ -85,6 +100,10 @@ static const char *const SECTIONS[] = { "lap", "drag", "power", "display", "batt
 
 static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *prefix, char *err, size_t err_cap)
 {
+    CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(js != NULL, CFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(toks != NULL, CFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(prefix != NULL, CFG_ASSERT_CODE, -1);   /* err is optional: checked by set_err(), not here */
     int i = obj + 1;
     for (int k = 0; k < toks[obj].size && i + 1 < ntoks; k++) {
         char key[32], path[64];
@@ -111,6 +130,8 @@ static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, int 
 /* Not reentrant: uses a static token array (called from the single conn task). */
 int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap)
 {
+    CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(json != NULL || n == 0, CFG_ASSERT_CODE, -1);   /* err is optional: checked by set_err(), not here */
     static jsmntok_t toks[MAX_TOKS];
     if (err && err_cap) err[0] = '\0';
     int cnt = json_parse(json, n, toks, MAX_TOKS);
@@ -123,6 +144,8 @@ int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_ca
 
 int cfg_to_json(const cfg_t *c, char *out, size_t cap)
 {
+    CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, CFG_ASSERT_CODE, -1);
     jw_t w; jw_init(&w, out, cap);
     jw_obj_open(&w);
     jw_key(&w, "version"); jw_uint(&w, c->version);

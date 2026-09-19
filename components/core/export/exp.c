@@ -1,18 +1,32 @@
 #include "core/exp.h"
+#include "core/core.h"
 #include <string.h>
 
-int exp_win_free(const exp_t *e) { return (int)(EXP_WINDOW - e->win_len); }
+#define EXP_ASSERT_CODE 0x0A60
+
+int exp_win_free(const exp_t *e)
+{
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, 0);
+    return (int)(EXP_WINDOW - e->win_len);
+}
 
 int exp_win_puts(exp_t *e, const char *s)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(s != NULL, EXP_ASSERT_CODE, -1);
     size_t n = strlen(s);
-    if (e->win_len + n > EXP_WINDOW) return -1;
+    /* Buffer/window capacity before a write: every caller pre-checks exp_win_free() against its
+     * own worst-case write size before calling this, so this should never trip in practice. */
+    CORE_ASSERT_RET(e->win_len + n <= EXP_WINDOW, EXP_ASSERT_CODE, -1);
     memcpy(e->win + e->win_len, s, n); e->win_len += n;
     return 0;
 }
 
 void exp_civil_from_days(int64_t z, int *y, unsigned *m, unsigned *d)
 {
+    CORE_ASSERT_VOID(y != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(d != NULL, EXP_ASSERT_CODE);
     z += 719468;
     const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
     const unsigned doe = (unsigned)(z - era * 146097);
@@ -27,6 +41,13 @@ void exp_civil_from_days(int64_t z, int *y, unsigned *m, unsigned *d)
 
 void exp_utc_parts(int64_t gps_us, int *y, unsigned *mo, unsigned *d, unsigned *hh, unsigned *mm, unsigned *ss, unsigned *cs)
 {
+    CORE_ASSERT_VOID(y != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(mo != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(d != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(hh != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(mm != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(ss != NULL, EXP_ASSERT_CODE);
+    CORE_ASSERT_VOID(cs != NULL, EXP_ASSERT_CODE);
     int64_t total_cs = (gps_us + 5000) / 10000;           /* round to centiseconds */
     int64_t secs = total_cs / 100;
     *cs = (unsigned)(total_cs % 100);
@@ -37,6 +58,9 @@ void exp_utc_parts(int64_t gps_us, int *y, unsigned *mo, unsigned *d, unsigned *
 
 int exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(meta != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(fmt == EXP_VBO || fmt == EXP_NMEA || fmt == EXP_JSON, EXP_ASSERT_CODE, -1);
     memset(e, 0, sizeof *e);
     e->fmt = fmt; e->meta = *meta;
     ses_fix_state_init(&e->fix_st); ses_fused_state_init(&e->fus_st);
@@ -50,6 +74,8 @@ int exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta)
 
 int exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(payload != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (e->finished) return -1;
     switch (e->fmt) {
     case EXP_VBO:  return exp_vbo_feed(e, type, payload, len);
@@ -61,6 +87,9 @@ int exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len)
 
 int exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL || cap == 0, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(n_out != NULL, EXP_ASSERT_CODE, -1);
     size_t avail = e->win_len - e->win_pos;
     size_t n = avail < cap ? avail : cap;
     memcpy(out, e->win + e->win_pos, n);
@@ -72,6 +101,7 @@ int exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out)
 
 int exp_finish(exp_t *e)
 {
+    CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     if (e->finished) return 0;
     int r;
     switch (e->fmt) {

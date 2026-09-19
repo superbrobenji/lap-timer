@@ -1,18 +1,23 @@
 #include "core/ses.h"
 #include "core/bw.h"
+#include "core/core.h"
 #include <string.h>
 #include <math.h>
 
 #define KEYFRAME_US ((int64_t)FIX_KEYFRAME_S * 1000000LL)
+#define SES_ASSERT_CODE 0x0A50   /* shared with ses_frame.c; new assertions in this module use it too */
 
 static int finish(uint8_t type, bw_t *w, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(w != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     if (bw_overflow(w)) return -1;
     return ses_frame_encode(type, w->p, (uint8_t)bw_len(w), out, cap);
 }
 
 static int64_t round_div(int64_t a, int64_t b)          /* round-to-nearest for positive b */
 {
+    CORE_ASSERT_RET(b != 0, SES_ASSERT_CODE, 0);
     return (a >= 0) ? (a + b / 2) / b : -((-a + b / 2) / b);
 }
 
@@ -39,10 +44,11 @@ static uint8_t clamp_u8(int64_t v)
 
 /* ---------------- fix ---------------- */
 
-void ses_fix_state_init(ses_fix_state_t *st) { memset(st, 0, sizeof *st); }
+void ses_fix_state_init(ses_fix_state_t *st) { CORE_ASSERT_VOID(st != NULL, SES_ASSERT_CODE); memset(st, 0, sizeof *st); }
 
 static uint8_t fix_flags(const gps_fix_t *f)
 {
+    CORE_ASSERT_RET(f != NULL, SES_ASSERT_CODE, 0);
     uint8_t fl = 0;
     if (f->valid) fl |= 0x01;
     if (f->flags & GPS_FLAG_FIXOK) fl |= 0x02;
@@ -52,6 +58,9 @@ static uint8_t fix_flags(const gps_fix_t *f)
 
 static int encode_key(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(st != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(f != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[39]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, f->gps_us); bw_i32(&w, f->lat_e7); bw_i32(&w, f->lon_e7); bw_i32(&w, f->alt_mm);
     bw_i32(&w, f->gspeed_mms); bw_i32(&w, f->head_e5); bw_u32(&w, f->hacc_mm); bw_u16(&w, clamp_u16(f->sacc_mms));
@@ -62,6 +71,9 @@ static int encode_key(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, siz
 
 int ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(st != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(f != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     if (!st->have_prev || !st->prev_valid || f->gps_us - st->last_key_gps_us >= KEYFRAME_US)
         return encode_key(st, f, out, cap);
     int64_t dt = round_div(f->gps_us - st->prev.gps_us, 1000);
@@ -87,9 +99,12 @@ int ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, size_t
 
 int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, uint8_t len, gps_fix_t *out)
 {
+    CORE_ASSERT_RET(st != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     if (type == SES_T_FIX_KEY) {
-        if (len != 39) return -1;
+        CORE_ASSERT_RET(len == 39, SES_ASSERT_CODE, -1);
         memset(out, 0, sizeof *out);
         out->gps_us = br_i64(&r); out->lat_e7 = br_i32(&r); out->lon_e7 = br_i32(&r); out->alt_mm = br_i32(&r);
         out->gspeed_mms = br_i32(&r); out->head_e5 = br_i32(&r); out->hacc_mm = br_u32(&r); out->sacc_mms = br_u16(&r);
@@ -100,7 +115,8 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         return 1;
     }
     if (type == SES_T_FIX_DELTA) {
-        if (len != 15 || !st->have_prev) return -1;
+        CORE_ASSERT_RET(len == 15, SES_ASSERT_CODE, -1);
+        CORE_ASSERT_RET(st->have_prev, SES_ASSERT_CODE, -1);
         uint16_t dt = br_u16(&r); int16_t dlat = br_i16(&r); int16_t dlon = br_i16(&r); int16_t dalt = br_i16(&r);
         uint16_t v = br_u16(&r); uint16_t head = br_u16(&r); uint8_t hacc = br_u8(&r); uint8_t sats = br_u8(&r); uint8_t fl = br_u8(&r);
         gps_fix_t *p = &st->prev;
@@ -118,11 +134,14 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
 
 /* ---------------- fused ---------------- */
 
-void ses_fused_state_init(ses_fused_state_t *st) { memset(st, 0, sizeof *st); }
-void ses_fused_state_on_fix(ses_fused_state_t *st, int64_t fix_gps_us) { st->ref_gps_us = fix_gps_us; st->have_ref = true; }
+void ses_fused_state_init(ses_fused_state_t *st) { CORE_ASSERT_VOID(st != NULL, SES_ASSERT_CODE); memset(st, 0, sizeof *st); }
+void ses_fused_state_on_fix(ses_fused_state_t *st, int64_t fix_gps_us) { CORE_ASSERT_VOID(st != NULL, SES_ASSERT_CODE); st->ref_gps_us = fix_gps_us; st->have_ref = true; }
 
 int ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(st != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(fs != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     if (!st->have_ref) return -1;
     int64_t dt = round_div(fs->gps_us - st->ref_gps_us, 1000);
     /* dt is unsigned on the wire (§12.3). A fused sample stamped before its reference (a fix that
@@ -144,7 +163,11 @@ int ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *o
 
 int ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len, fused_sample_t *out)
 {
-    if (len != 11 || !st->have_ref) return -1;
+    CORE_ASSERT_RET(st != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 11, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(st->have_ref, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     uint16_t dt = br_u16(&r);
     memset(out, 0, sizeof *out);
@@ -163,17 +186,23 @@ int ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len,
 
 static void put_stats(bw_t *w, const lap_stats_t *s)
 {
+    CORE_ASSERT_VOID(w != NULL, SES_ASSERT_CODE);
+    CORE_ASSERT_VOID(s != NULL, SES_ASSERT_CODE);
     bw_u16(w, s->max_speed_cms); bw_u16(w, s->min_speed_cms); bw_i16(w, s->max_lean_l_cdeg); bw_i16(w, s->max_lean_r_cdeg);
     bw_i16(w, s->max_glat_e3); bw_i16(w, s->max_gacc_e3); bw_i16(w, s->max_gbrake_e3);
 }
 static void get_stats(br_t *r, lap_stats_t *s)
 {
+    CORE_ASSERT_VOID(r != NULL, SES_ASSERT_CODE);
+    CORE_ASSERT_VOID(s != NULL, SES_ASSERT_CODE);
     s->max_speed_cms = br_u16(r); s->min_speed_cms = br_u16(r); s->max_lean_l_cdeg = br_i16(r); s->max_lean_r_cdeg = br_i16(r);
     s->max_glat_e3 = br_i16(r); s->max_gacc_e3 = br_i16(r); s->max_gbrake_e3 = br_i16(r);
 }
 
 int ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(lap != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     if (lap->n_sectors > LAP_MAX_SECTORS + 1) return -1;
     uint8_t p[30 + 4 * (LAP_MAX_SECTORS + 1)]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, lap->lap_no); bw_i64(&w, lap->start_gps_us); bw_u32(&w, lap->time_ms); bw_u8(&w, lap->flags); bw_u8(&w, lap->n_sectors);
@@ -184,11 +213,14 @@ int ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap)
 
 int ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out)
 {
-    if (len < 30) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len >= 30, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     out->lap_no = br_u16(&r); out->start_gps_us = br_i64(&r); out->time_ms = br_u32(&r); out->flags = br_u8(&r); out->n_sectors = br_u8(&r);
-    if (out->n_sectors > LAP_MAX_SECTORS + 1 || len != 30 + 4 * out->n_sectors) return -1;
+    CORE_ASSERT_RET(out->n_sectors <= LAP_MAX_SECTORS + 1, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 30 + 4 * out->n_sectors, SES_ASSERT_CODE, -1);
     for (uint8_t i = 0; i < out->n_sectors; i++) out->sector_ms[i] = br_u32(&r);
     get_stats(&r, &out->stats);
     return br_underflow(&r) ? -1 : 1;
@@ -196,6 +228,7 @@ int ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out)
 
 int ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[19]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, lap_no); bw_u8(&w, idx); bw_i64(&w, gps_us); bw_u32(&w, split_ms); bw_i32(&w, delta_ms);
     return finish(SES_T_SECTOR, &w, out, cap);
@@ -203,7 +236,9 @@ int ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t spl
 
 int ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out)
 {
-    if (len != 19) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 19, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->lap_no = br_u16(&r); out->idx = br_u8(&r); out->gps_us = br_i64(&r);
     out->split_ms = br_u32(&r); out->delta_ms = br_i32(&r);
@@ -214,6 +249,8 @@ int ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out)
 
 int ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(run != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     if (run->n_gates > DRAG_MAX_GATES) return -1;
     uint8_t p[14 + 12 * DRAG_MAX_GATES]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, run->run_no); bw_i64(&w, run->t0_gps_us); bw_u8(&w, run->flags); bw_u16(&w, run->trap_cms); bw_u8(&w, run->n_gates);
@@ -226,11 +263,14 @@ int ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap)
 
 int ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out)
 {
-    if (len < 14) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len >= 14, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     out->run_no = br_u16(&r); out->t0_gps_us = br_i64(&r); out->flags = br_u8(&r); out->trap_cms = br_u16(&r); out->n_gates = br_u8(&r);
-    if (out->n_gates > DRAG_MAX_GATES || len != 14 + 12 * out->n_gates) return -1;
+    CORE_ASSERT_RET(out->n_gates <= DRAG_MAX_GATES, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 14 + 12 * out->n_gates, SES_ASSERT_CODE, -1);
     for (uint8_t i = 0; i < out->n_gates; i++) {
         drag_gate_res_t *g = &out->gates[i];
         g->gate_id = br_u8(&r); g->time_ms = br_u32(&r); g->speed_cms = br_u16(&r); g->dist_cm = br_u32(&r); g->hit = br_u8(&r);
@@ -240,6 +280,7 @@ int ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out)
 
 int ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[21]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u16(&w, run_no); bw_u8(&w, gate_id); bw_i64(&w, gps_us); bw_u32(&w, time_ms); bw_u16(&w, speed_cms); bw_u32(&w, dist_cm);
     return finish(SES_T_DRAG_GATE, &w, out, cap);
@@ -247,7 +288,9 @@ int ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint3
 
 int ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out)
 {
-    if (len != 21) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 21, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->run_no = br_u16(&r); out->gate_id = br_u8(&r); out->gps_us = br_i64(&r);
     out->time_ms = br_u32(&r); out->speed_cms = br_u16(&r); out->dist_cm = br_u32(&r);
@@ -258,6 +301,7 @@ int ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *o
 
 int ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[22]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, mono_us); bw_i64(&w, gps_us); bw_u16(&w, code); bw_u32(&w, arg);
     return finish(SES_T_EVENT, &w, out, cap);
@@ -265,7 +309,9 @@ int ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t ar
 
 int ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out)
 {
-    if (len != 22) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 22, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->mono_us = br_i64(&r); out->gps_us = br_i64(&r); out->code = br_u16(&r); out->arg = br_u32(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -273,6 +319,7 @@ int ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out)
 
 int ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[17]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, mono_us); bw_i64(&w, gps_us); bw_u8(&w, quality);
     return finish(SES_T_TIME_MAP, &w, out, cap);
@@ -280,7 +327,9 @@ int ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_
 
 int ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out)
 {
-    if (len != 17) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 17, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->mono_us = br_i64(&r); out->gps_us = br_i64(&r); out->quality = br_u8(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -288,6 +337,8 @@ int ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out
 
 int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(name != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[36]; bw_t w; bw_init(&w, p, sizeof p);
     char nm[32]; memset(nm, 0, sizeof nm); strncpy(nm, name, sizeof nm - 1);
     bw_u16(&w, venue_id); bw_u16(&w, layout_id); bw_bytes(&w, nm, sizeof nm);
@@ -296,7 +347,9 @@ int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, ui
 
 int ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out)
 {
-    if (len != 36) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 36, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
@@ -306,6 +359,7 @@ int ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out)
 
 int ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[11]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, mono_us); bw_u8(&w, state); bw_u16(&w, batt_mv);
     return finish(SES_T_POWER, &w, out, cap);
@@ -313,7 +367,9 @@ int ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *
 
 int ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out)
 {
-    if (len != 11) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 11, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->mono_us = br_i64(&r); out->state = br_u8(&r); out->batt_mv = br_u16(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -321,6 +377,7 @@ int ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out)
 
 int ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[9]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, gps_us); bw_u8(&w, reason);
     return finish(SES_T_END, &w, out, cap);
@@ -328,7 +385,9 @@ int ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap)
 
 int ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out)
 {
-    if (len != 9) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 9, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->gps_us = br_i64(&r); out->reason = br_u8(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -336,6 +395,7 @@ int ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out)
 
 int ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[9]; bw_t w; bw_init(&w, p, sizeof p);
     bw_i64(&w, gps_us); bw_u8(&w, kind);
     return finish(SES_T_MARK, &w, out, cap);
@@ -343,7 +403,9 @@ int ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap)
 
 int ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out)
 {
-    if (len != 9) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 9, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     out->gps_us = br_i64(&r); out->kind = br_u8(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -353,6 +415,8 @@ int ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out)
 
 int ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(c != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[25]; bw_t w; bw_init(&w, p, sizeof p);
     for (int i = 0; i < 9; i++) bw_i16(&w, c->r_e4[i]);
     for (int i = 0; i < 3; i++) bw_i16(&w, c->gbias[i]);
@@ -362,7 +426,9 @@ int ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap)
 
 int ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out)
 {
-    if (len != 25) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 25, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     for (int i = 0; i < 9; i++) out->r_e4[i] = br_i16(&r);
     for (int i = 0; i < 3; i++) out->gbias[i] = br_i16(&r);
@@ -374,6 +440,8 @@ int ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out)
 
 int ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap)
 {
+    CORE_ASSERT_RET(h != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[94]; bw_t w; bw_init(&w, p, sizeof p);
     bw_u8(&w, 1);                                   /* ver */
     bw_u8(&w, 0);                                   /* reserved, keeps payload at the documented 94 bytes */
@@ -388,10 +456,12 @@ int ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap)
 
 int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
 {
-    if (len != 94) return -1;
+    CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len == 94, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
-    if (br_u8(&r) != 1) return -1;
+    CORE_ASSERT_RET(br_u8(&r) == 1, SES_ASSERT_CODE, -1);
     br_u8(&r);                                      /* reserved, currently unused */
     br_bytes(&r, out->session_id, 10); out->session_id[10] = '\0'; out->mode = br_u8(&r); out->variant = br_u8(&r);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
