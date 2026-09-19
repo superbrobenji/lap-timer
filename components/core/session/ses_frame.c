@@ -45,7 +45,7 @@ static int step(ses_reader_t *r, uint8_t b)
     r->buf[r->idx++] = b;
     if (r->idx == 2) {
         uint8_t len = r->buf[1];
-        CORE_ASSERT_RET(len <= SES_MAX_PAYLOAD, SES_ASSERT_CODE, 2);
+        if (len > SES_MAX_PAYLOAD) return 2;
         r->need = (uint16_t)(2 + len + 2);
     }
     if (r->need && r->idx == r->need) {

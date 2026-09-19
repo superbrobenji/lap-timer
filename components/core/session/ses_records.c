@@ -104,7 +104,7 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     br_t r; br_init(&r, payload, len);
     if (type == SES_T_FIX_KEY) {
-        CORE_ASSERT_RET(len == 39, SES_ASSERT_CODE, -1);
+        if (len != 39) return -1;
         memset(out, 0, sizeof *out);
         out->gps_us = br_i64(&r); out->lat_e7 = br_i32(&r); out->lon_e7 = br_i32(&r); out->alt_mm = br_i32(&r);
         out->gspeed_mms = br_i32(&r); out->head_e5 = br_i32(&r); out->hacc_mm = br_u32(&r); out->sacc_mms = br_u16(&r);
@@ -115,8 +115,8 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         return 1;
     }
     if (type == SES_T_FIX_DELTA) {
-        CORE_ASSERT_RET(len == 15, SES_ASSERT_CODE, -1);
-        CORE_ASSERT_RET(st->have_prev, SES_ASSERT_CODE, -1);
+        if (len != 15) return -1;
+        if (!st->have_prev) return -1;
         uint16_t dt = br_u16(&r); int16_t dlat = br_i16(&r); int16_t dlon = br_i16(&r); int16_t dalt = br_i16(&r);
         uint16_t v = br_u16(&r); uint16_t head = br_u16(&r); uint8_t hacc = br_u8(&r); uint8_t sats = br_u8(&r); uint8_t fl = br_u8(&r);
         gps_fix_t *p = &st->prev;
@@ -166,8 +166,8 @@ int ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len,
     CORE_ASSERT_RET(st != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 11, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(st->have_ref, SES_ASSERT_CODE, -1);
+    if (len != 11) return -1;
+    if (!st->have_ref) return -1;
     br_t r; br_init(&r, payload, len);
     uint16_t dt = br_u16(&r);
     memset(out, 0, sizeof *out);
@@ -215,12 +215,12 @@ int ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len >= 30, SES_ASSERT_CODE, -1);
+    if (len < 30) return -1;
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     out->lap_no = br_u16(&r); out->start_gps_us = br_i64(&r); out->time_ms = br_u32(&r); out->flags = br_u8(&r); out->n_sectors = br_u8(&r);
-    CORE_ASSERT_RET(out->n_sectors <= LAP_MAX_SECTORS + 1, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 30 + 4 * out->n_sectors, SES_ASSERT_CODE, -1);
+    if (out->n_sectors > LAP_MAX_SECTORS + 1) return -1;
+    if (len != 30 + 4 * out->n_sectors) return -1;
     for (uint8_t i = 0; i < out->n_sectors; i++) out->sector_ms[i] = br_u32(&r);
     get_stats(&r, &out->stats);
     return br_underflow(&r) ? -1 : 1;
@@ -369,7 +369,7 @@ int ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 11, SES_ASSERT_CODE, -1);
+    if (len != 11) return -1;
     br_t r; br_init(&r, payload, len);
     out->mono_us = br_i64(&r); out->state = br_u8(&r); out->batt_mv = br_u16(&r);
     return br_underflow(&r) ? -1 : 1;
