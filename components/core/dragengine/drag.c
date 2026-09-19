@@ -1,5 +1,6 @@
 #include "core/drag.h"
 #include "core/core.h"
+#include <math.h>
 #include <string.h>
 
 /* Drag engine (spec §11, §6.6). Session 2.6, complete. §6.6 v_est/dist integration with the
@@ -255,6 +256,7 @@ static void gate_step_range(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t i,
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(i < DRAG_MAX_GATES, DRAG_ASSERT_CODE);   /* indexes range_*[i], cur.gates[i] */
     const drag_gate_def_t *def = &D->cfg.gates[i];
+    CORE_ASSERT_VOID(def->kind == DRAG_SPEED_RANGE, DRAG_ASSERT_CODE);   /* def->b is only meaningful for a range gate */
     double Va = kmh_to_mps((double)def->a);
     double Vb = kmh_to_mps((double)def->b);
     if (!D->range_started[i]) {
@@ -503,6 +505,7 @@ static void step_idle(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(D->state == DRAG_ST_IDLE, DRAG_ASSERT_CODE);
+    CORE_ASSERT_VOID(D->v_est >= 0.0, DRAG_ASSERT_CODE);   /* module invariant: re-anchor/integration keep it non-negative */
     bool slow  = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
     bool still = (fs->flags & FUS_STILL) != 0;
     if (slow && still) {
@@ -602,6 +605,7 @@ void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     if (!fs) return;
+    CORE_ASSERT_VOID(isfinite(fs->g_lon), DRAG_ASSERT_CODE);   /* accumulated into v_est/dist_m: a NaN would corrupt them permanently */
     const int64_t now = fs->gps_us;
     const double  a_cur = (double)fs->g_lon * G_MPS2;
     CORE_ASSERT_VOID(D->state <= DRAG_ST_DONE, DRAG_ASSERT_CODE);   /* valid state enum */

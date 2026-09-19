@@ -199,6 +199,8 @@ static float fus_step_yaw_rate(const fus_t *f, const float w[3], bool oriented)
 {
     CORE_ASSERT_RET(f != NULL, FUS_ASSERT_CODE, 0.0f);
     CORE_ASSERT_RET(w != NULL, FUS_ASSERT_CODE, 0.0f);
+    CORE_ASSERT_RET(isfinite(w[1]) && isfinite(w[2]), FUS_ASSERT_CODE, 0.0f);   /* wy/wz feed the trig below */
+    CORE_ASSERT_RET(isfinite(f->lean_rad), FUS_ASSERT_CODE, 0.0f);   /* persistent state fed to cosf/sinf */
     const float phi_prev = (f->moto && oriented) ? f->lean_rad : 0.0f;
     const float wy = w[1] * RAD_PER_DEG;
     const float wz = w[2] * RAD_PER_DEG;
@@ -310,6 +312,7 @@ static void fus_step_learn_forward(fus_t *f, const float a_b[3])
 {
     CORE_ASSERT_VOID(f != NULL, FUS_ASSERT_CODE);
     CORE_ASSERT_VOID(a_b != NULL, FUS_ASSERT_CODE);
+    CORE_ASSERT_VOID(isfinite(a_b[0]) && isfinite(a_b[1]) && isfinite(a_b[2]), FUS_ASSERT_CODE);   /* accumulated into fwd.sum: a NaN would corrupt it permanently */
     if (f->calib.orient_ok && !f->calib.forward_ok) {
         const float z[3] = { f->calib.r[6], f->calib.r[7], f->calib.r[8] };
         if (fus_fwd_on_sample(&f->fwd, a_b, z) == 1) {

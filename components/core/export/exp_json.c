@@ -19,6 +19,7 @@ static int emit(exp_t *e, jw_t *w)
 static int open_hdr(exp_t *e, const ses_hdr_t *h, const char *venue_name)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);      /* h/venue_name are legitimately NULL: no header/venue seen yet */
+    CORE_ASSERT_RET(e->json_stage == 0, EXP_ASSERT_CODE, -1);   /* opens the header exactly once, stage 0->1 */
     char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
     jw_obj_open(&w);
     jw_key(&w, "id"); jw_str(&w, e->meta.session_id);
@@ -52,6 +53,7 @@ int exp_json_open(exp_t *e)
 static int feed_stage0(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len, int *ret)
 {
     CORE_ASSERT_RET(ret != NULL, EXP_ASSERT_CODE, 1);   /* *ret is written below: must have somewhere to go */
+    CORE_ASSERT_RET(e->json_stage == 0, EXP_ASSERT_CODE, 1);   /* only called while stage 0 (header pending) */
     if (type == SES_T_SESSION_HDR) {
         if (ses_decode_hdr(p, len, &e->hdr) == 1) e->have_hdr = 1;
         *ret = 0; return 1;
@@ -170,6 +172,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(e->json_stage <= 2, EXP_ASSERT_CODE, -1);   /* valid stage enum (0/1/2) */
     if (e->json_stage == 0) {
         int ret;
         if (feed_stage0(e, type, p, len, &ret)) return ret;
@@ -182,6 +185,7 @@ int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
 int exp_json_finish(exp_t *e)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(e->json_stage <= 2, EXP_ASSERT_CODE, -1);   /* valid stage enum (0/1/2) */
     if (e->run_pending) return -1;
     if (exp_win_free(e) < 400) return EXP_FULL;
     if (e->json_stage == 0) { if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1; }

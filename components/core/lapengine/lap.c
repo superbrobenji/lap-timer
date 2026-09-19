@@ -261,6 +261,7 @@ void lap_export_rtc(const lap_t *L, lap_rtc_t *out)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(out != NULL, LAP_ASSERT_CODE);
+    CORE_ASSERT_VOID(!L->locked || L->locked_layout != NULL, LAP_ASSERT_CODE);   /* locked implies a layout to read */
     memset(out, 0, sizeof *out);
     out->venue_id         = L->venue ? L->venue->id : 0;
     out->layout_id        = L->locked ? L->locked_layout->id : 0;
@@ -287,6 +288,7 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
     geo_origin_set(&L->origin, v->lat, v->lon);
     L->forced_layout_id = s->layout_id;
     arm_candidates(L);                       /* arm the S/F of the (forced) layout(s) */
+    CORE_ASSERT_RET(L->n_cand <= TRK_MAX_LAYOUTS, LAP_ASSERT_CODE, -1);   /* loop bound below */
 
     L->locked = false;
     L->locked_layout = NULL;
@@ -383,6 +385,7 @@ int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, boo
     if (L->state != LAP_ST_RUNNING || L->pred_best_n < 2) return 0;
     CORE_ASSERT_RET(L->pred_best_dist_m != NULL, LAP_ASSERT_CODE, 0);   /* populated reference */
     CORE_ASSERT_RET(L->pred_best_t_ms != NULL, LAP_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(L->pred_best_n <= L->pred_cap, LAP_ASSERT_CODE, 0);   /* indexes pred_best_*[pred_best_n - 1] below */
     if (dist_m < (double)L->pred_best_dist_m[0] ||
         dist_m > (double)L->pred_best_dist_m[L->pred_best_n - 1]) return 0;   /* outside the reference */
 
@@ -871,6 +874,7 @@ static void handle_create_mode(lap_t *L, const gps_fix_t *fix, lap_evt_cb_t cb, 
     const double  lon   = (double)fix->lon_e7 / 1e7;
     const double  v1    = (double)fix->gspeed_mms / 1000.0;
     if (!valid || !L->create_have_sf) return;
+    CORE_ASSERT_VOID(v1 >= 0.0, LAP_ASSERT_CODE);   /* ground speed non-negative (feeds lap_dist_m below) */
     const geo_enu_t cur = geo_to_enu(&L->origin, lat, lon);
     if (L->have_prev_fix) {
         const double seg_dt = (double)(now - L->prev_gps_us) / 1e6;
@@ -1053,6 +1057,7 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_ev
         if (L->state == LAP_ST_RUNNING) L->lap_flags |= LAP_F_GPS_LOST;
         return;
     }
+    CORE_ASSERT_VOID(v1 >= 0.0, LAP_ASSERT_CODE);   /* ground speed non-negative (stored into prev_speed_mps below) */
 
     /* Leave-venue watch runs in every venue-bound state (§10.3). */
     if (update_leave_venue(L, lat, lon, now)) {
