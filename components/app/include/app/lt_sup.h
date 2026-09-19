@@ -43,7 +43,4 @@ int  sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s);
  * `dbg mem` to sample each task's stack high-water mark (§22.4). */
 TaskHandle_t sup_task_handle(uint8_t hb_id);
 
-/* Install the core assertion hook (§17.9): core asserts -> NVS error ring. Call once at boot. */
-void sup_install_assert_hook(void);
-
 #endif /* APP_LT_SUP_H */

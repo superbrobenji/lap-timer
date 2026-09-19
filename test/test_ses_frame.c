@@ -1,6 +1,7 @@
 #include "unity.h"
 #include "core/ses.h"
 #include "core/core.h"
+#include "assert_support.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -121,10 +122,6 @@ static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
-static int      assert_calls;
-static uint16_t assert_code;
-static void record_assert(uint16_t code, const char *file, int line) { (void)file; (void)line; assert_calls++; assert_code = code; }
-
 static void test_on_bad_guard_resets_the_reader_before_returning(void)
 {
     /* Force the internal bounds guard in on_bad(): collected + pending must exceed sizeof(r.replay),
@@ -142,14 +139,12 @@ static void test_on_bad_guard_resets_the_reader_before_returning(void)
     r.replay_len = sizeof r.replay;                             /* pending alone already exceeds sizeof(replay) - idx: forces the guard */
     r.replay_pos = 0;
 
-    assert_calls = 0;
-    core_set_assert_hook(record_assert);
+    lt_test_assert_reset();
     cap_t c = { 0 };
     ses_reader_feed(&r, NULL, 0, cb, &c);
-    core_set_assert_hook(NULL);
 
-    TEST_ASSERT_EQUAL_INT(1, assert_calls);
-    TEST_ASSERT_EQUAL_HEX16(0x0A02, assert_code);
+    TEST_ASSERT_EQUAL_UINT(1, lt_test_assert_count());
+    TEST_ASSERT_EQUAL_HEX16(0x0A02, lt_test_assert_last_code());
     TEST_ASSERT_EQUAL_UINT8(0, r.state);              /* the guard did not leave the reader mid-frame */
     TEST_ASSERT_EQUAL_UINT16(0, r.idx);
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);

@@ -73,7 +73,7 @@ static void boot_nvs(void)
         ESP_ERROR_CHECK(nerr);
     }
     if (lt_nvs_init() != 0) ESP_LOGE(TAG, "lt_nvs_init failed");
-    sup_install_assert_hook();                 /* core asserts -> error ring (§17.9) */
+    /* core asserts -> error ring via the linked core_assert_report (§17.9) */
     if (nvs_erased) errlog_add(E_SYS_CFG_RESET, 0);
 }
 
