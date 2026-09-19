@@ -6,7 +6,7 @@
 # consumer of this driver never sees the managed component.
 idf_component_register(
     SRCS "storage_internal.c"
-    REQUIRES lt_hal
+    REQUIRES lt_hal core
     PRIV_REQUIRES joltwallet__littlefs)
 
 # Same strictness as components/core (§17.9): -Werror, conversion warnings non-fatal so IDF /

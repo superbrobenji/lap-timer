@@ -16,6 +16,8 @@
  */
 #include "hal/storage.h"
 
+#include "core/core.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -29,9 +31,17 @@
 
 static const char *TAG = "sto";
 
+#define STO_ASSERT_CODE 0x0C70   /* Power of 10 rule 5 (core/core.h); storage_internal.c's own code */
+
 #define LFS_BASE   "/lfs"
 #define LFS_PART   "storage"           /* partitions.csv label */
 #define STO_PATHMAX 128
+
+/* rule 2: sto_list's readdir scan is capped at a fixed, generous bound -- far more than any
+ * realistic /sessions directory holds (cmd.c's LIST_MAX_SESSIONS=64 tracked ids -> at most ~128
+ * .log/.sum dirents) -- so the loop is provably bounded rather than running until readdir() is
+ * exhausted by (possibly corrupted) filesystem state. */
+#define STO_LIST_MAX_ENTRIES 4096
 
 static const esp_vfs_littlefs_conf_t s_conf = {
     .base_path = LFS_BASE,
@@ -54,6 +64,11 @@ static int full_path(const char *path, char *out, size_t cap)
 
 int sto_mount(void)
 {
+    /* full_path() joins LFS_BASE onto every caller path within STO_PATHMAX; guard here that the
+     * fixed mount-point prefix alone can never consume the whole budget (a real invariant on the
+     * two macros' relative sizes, not on any runtime path). */
+    CORE_ASSERT_RET(sizeof(LFS_BASE) - 1 < STO_PATHMAX, STO_ASSERT_CODE, -1);
+
     esp_err_t e = esp_vfs_littlefs_register(&s_conf);          /* attempt 1 */
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "mount failed (%s); retrying", esp_err_to_name(e));
@@ -84,6 +99,9 @@ int sto_mount(void)
     size_t total = 0, used = 0;
     esp_err_t ie = esp_littlefs_info(LFS_PART, &total, &used);
     if (ie != ESP_OK) ESP_LOGW(TAG, "esp_littlefs_info: %s", esp_err_to_name(ie));
+    /* a successful info query on a just-mounted fs must report used <= total; otherwise the
+     * (total - used) below underflows (both size_t) into a bogus multi-terabyte "free" figure */
+    CORE_ASSERT_RET(ie != ESP_OK || used <= total, STO_ASSERT_CODE, -1);
     ESP_LOGI(TAG, "mounted %s at %s: %u KB total, %u KB free%s", LFS_PART, LFS_BASE,
              (unsigned)(total / 1024u), (unsigned)((total - used) / 1024u),
              formatted ? " (formatted)" : "");
@@ -181,13 +199,18 @@ int sto_unlink(const char *path)
 
 int sto_list(const char *dir, void (*cb)(const char *name, uint32_t size, void *ctx), void *ctx)
 {
+    CORE_ASSERT_RET(dir != NULL, STO_ASSERT_CODE, -1);
     char full[STO_PATHMAX];
     if (full_path(dir, full, sizeof full) != 0) return -1;
     DIR *d = opendir(full);
     if (!d) return -1;
     int count = 0;
     struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
+    int iters = 0;
+    /* rule 2: bounded by STO_LIST_MAX_ENTRIES instead of running until readdir() returns NULL --
+     * on reaching the cap, stop scanning (a caller's fixed-size table, e.g. cmd.c's s_sess[], is
+     * already full long before this many dirents are seen). */
+    while (iters++ < STO_LIST_MAX_ENTRIES && (ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.' &&
             (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
             continue;                            /* skip "." and ".." */
@@ -203,6 +226,7 @@ int sto_list(const char *dir, void (*cb)(const char *name, uint32_t size, void *
         count++;
     }
     closedir(d);
+    CORE_ASSERT_RET(count <= STO_LIST_MAX_ENTRIES, STO_ASSERT_CODE, -1);   /* postcondition: the cap above holds */
     return count;
 }
 
