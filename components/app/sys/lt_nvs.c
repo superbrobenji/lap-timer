@@ -30,27 +30,22 @@ static const char *TAG = "lt_nvs";
 #define CRASH_LOG_LEN  3
 _Static_assert(CRASH_LOG_LEN == CRASH_LOOP_N, "crash-log length must match the §17.5 crash-loop count");
 
-/* __attribute__((packed)) is placed after the closing brace (rather than right after `struct`,
- * which is equally valid GCC/Clang syntax and applies to the exact same type either way) so a
- * `) {` never precedes the struct body -- that token sequence is how tools/lint/power_of_10.py's
- * lightweight function scanner recognises a function definition, and misreads the earlier form as
- * a bogus 0-line "__attribute__" function. Purely a source-text reordering: identical layout/size. */
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint16_t code;
     uint32_t uptime_s;
     uint16_t boot;
     uint32_t arg;
-} __attribute__((packed)) err_entry_t;          /* 12 B -> ring = 384 B (§15.2) */
+} err_entry_t;                                   /* 12 B -> ring = 384 B (§15.2) */
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     err_entry_t entry[ERR_RING_LEN];
     uint8_t     head;                           /* next write slot */
-} __attribute__((packed)) err_ring_t;           /* 385 B */
+} err_ring_t;                                    /* 385 B */
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint8_t  reset_reason;
     uint32_t uptime_s;
-} __attribute__((packed)) crash_entry_t;        /* 5 B -> log = 15 B (§15.2) */
+} crash_entry_t;                                 /* 5 B -> log = 15 B (§15.2) */
 
 /* ---- namespaces / keys (§15.2) ---- */
 #define NS_SYS  "lt_sys"
