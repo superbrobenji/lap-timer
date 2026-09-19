@@ -7,8 +7,12 @@
  * and idles on that variant. The moto_sim bench build (gps_sim) is the one that runs real laps.
  */
 #include "hal/gps.h"
+#include "core/core.h"
 
 #include <stdio.h>
+
+/* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
+#define GPS_NEO_ASSERT_CODE 0x0C30
 
 static const gps_profile_t s_profile = {
     .max_rate_hz = 5,
@@ -32,7 +36,8 @@ int gps_reinit_uart(uint32_t baud) { (void)baud; return 0; }
 
 int gps_get_version(char *buf, size_t n)
 {
-    if (!buf || n == 0) return -1;
+    CORE_ASSERT_RET(buf != NULL, GPS_NEO_ASSERT_CODE, -1);   /* written by snprintf below */
+    CORE_ASSERT_RET(n > 0, GPS_NEO_ASSERT_CODE, -1);         /* destination has room */
     (void)snprintf(buf, n, "neo6m-stub");
     return 0;
 }

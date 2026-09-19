@@ -11,8 +11,12 @@
  * with real device mono time so tb_mono_to_gps maps them onto the same GPS timeline as the fixes.
  */
 #include "hal/imu.h"
+#include "core/core.h"
 
 #include <string.h>
+
+/* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
+#define IMU_SIM_ASSERT_CODE 0x0C60
 
 #define IMU_SIM_PERIOD_US 10000        /* 100 Hz */
 #define IMU_SIM_1G_LSB    2048         /* +/-16 g range => 2048 LSB/g (imu_raw_t) */
@@ -36,7 +40,8 @@ int imu_self_test(uint8_t *pass_mask)
 int imu_read_fifo(imu_raw_t *out, size_t max, size_t *n_read, int64_t read_mono_us)
 {
     size_t n = 0;
-    if (!out || !n_read) return -1;
+    CORE_ASSERT_RET(out != NULL, IMU_SIM_ASSERT_CODE, -1);      /* written by the loop below */
+    CORE_ASSERT_RET(n_read != NULL, IMU_SIM_ASSERT_CODE, -1);   /* written on every path out */
 
     if (!s_have_last) {                 /* anchor one period back so the first read yields a sample */
         s_have_last = true;
