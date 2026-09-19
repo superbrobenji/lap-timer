@@ -590,12 +590,15 @@ static int read_through_ses(const char *id, const char *ext, tally_t *out)
     ses_reader_init(&s_rdr);
     uint8_t buf[256];
     size_t got;
+    uint8_t ft, fl; const uint8_t *fp;
     for (;;) {
         if (sto_read(f, buf, sizeof buf, &got) != 0) break;
         if (got == 0) break;
-        ses_reader_feed(&s_rdr, buf, got, tally_cb, out);
+        ses_reader_push(&s_rdr, buf, got);
+        while (ses_reader_next(&s_rdr, &ft, &fp, &fl) == 1) tally_cb(ft, fp, fl, out);
     }
-    ses_reader_flush(&s_rdr, tally_cb, out);
+    ses_reader_finish(&s_rdr);
+    while (ses_reader_next(&s_rdr, &ft, &fp, &fl) == 1) tally_cb(ft, fp, fl, out);
     sto_close(f);
     return 0;
 }

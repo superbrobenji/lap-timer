@@ -473,12 +473,15 @@ static int read_sum_scan(const char *id, sumscan_t *out)
     if (sto_open(path, STO_RD, &f) != 0) return -1;
     ses_reader_init(&s_sr);
     size_t got;
+    uint8_t ft, fl; const uint8_t *fp;
     int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
     while (sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
         LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
-        ses_reader_feed(&s_sr, s_io, got, sum_scan_cb, out);
+        ses_reader_push(&s_sr, s_io, got);
+        while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) sum_scan_cb(ft, fp, fl, out);
     }
-    ses_reader_flush(&s_sr, sum_scan_cb, out);
+    ses_reader_finish(&s_sr);
+    while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) sum_scan_cb(ft, fp, fl, out);
     (void)sto_close(f);
     return 0;
 }
@@ -712,15 +715,20 @@ static int stream_export(const char *id, uint8_t expfmt, uint32_t offset, uint32
     ses_reader_init(&s_sr);
     uint32_t done = 0;
     size_t   got;
+    uint8_t  ft, fl; const uint8_t *fp;
     int chunks = 0;   /* rule 2: bounded by CMD_STREAM_MAX_CHUNKS (storage-partition-sized cap) */
     while (done < limit && sto_read(f, s_io, sizeof s_io, &got) == 0 && got > 0) {
         LT_ASSERT_RET(chunks++ < CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
         if ((uint32_t)got > limit - done) got = (size_t)(limit - done);   /* clamp to snapshot */
-        ses_reader_feed(&s_sr, s_io, got, exp_frame_cb, &pump);
+        ses_reader_push(&s_sr, s_io, got);
+        while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) exp_frame_cb(ft, fp, fl, &pump);
         done += (uint32_t)got;
         if (pump.err || s_cw.err) break;
     }
-    if (!pump.err && !s_cw.err) ses_reader_flush(&s_sr, exp_frame_cb, &pump);
+    if (!pump.err && !s_cw.err) {
+        ses_reader_finish(&s_sr);
+        while (ses_reader_next(&s_sr, &ft, &fp, &fl) == 1) exp_frame_cb(ft, fp, fl, &pump);
+    }
     (void)sto_close(f);
 
     if (!s_cw.err && !pump.err) {                /* finish the exporter (may need EXP_FULL retry) */

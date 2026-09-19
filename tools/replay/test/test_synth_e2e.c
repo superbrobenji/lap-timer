@@ -294,8 +294,11 @@ static void test_dropout_window_is_empty_and_resumes_with_a_keyframe(void)
     sc.hi = hi;
     ses_reader_t rd;
     ses_reader_init(&rd);
-    ses_reader_feed(&rd, g_buf2, len1, scan_cb, &sc);
-    ses_reader_flush(&rd, scan_cb, &sc);
+    uint8_t st, sl; const uint8_t *sp;
+    ses_reader_push(&rd, g_buf2, len1);
+    while (ses_reader_next(&rd, &st, &sp, &sl) == 1) scan_cb(st, sp, sl, &sc);
+    ses_reader_finish(&rd);
+    while (ses_reader_next(&rd, &st, &sp, &sl) == 1) scan_cb(st, sp, sl, &sc);
     TEST_ASSERT_EQUAL_UINT8(SES_T_FIX_KEY, sc.first_type);
     TEST_ASSERT_EQUAL_INT64(hi, sc.first_us);
 }

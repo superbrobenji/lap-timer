@@ -35,7 +35,9 @@ static void test_fix_key_then_deltas_then_key_after_5s(void)
     }
     dec_t d; memset(&d, 0, sizeof d); ses_fix_state_init(&d.st);
     ses_reader_t r; ses_reader_init(&r);
-    ses_reader_feed(&r, stream, n, dec_cb, &d);
+    uint8_t ft, fl; const uint8_t *fp;
+    ses_reader_push(&r, stream, n);
+    while (ses_reader_next(&r, &ft, &fp, &fl) == 1) dec_cb(ft, fp, fl, &d);
     TEST_ASSERT_EQUAL_INT(27, d.n);
     TEST_ASSERT_EQUAL_HEX8(SES_T_FIX_KEY, d.types[0]);
     TEST_ASSERT_EQUAL_HEX8(SES_T_FIX_DELTA, d.types[1]);
@@ -374,7 +376,9 @@ static void test_fuzz_ten_thousand_fix_random_walk_round_trips(void)
         int w = ses_encode_fix(&enc, &f, frame, sizeof frame);
         TEST_ASSERT_GREATER_THAN(0, w);
         int before = d.n;
-        ses_reader_feed(&r, frame, (size_t)w, walk_cb, &d);
+        uint8_t ft, fl; const uint8_t *fp;
+        ses_reader_push(&r, frame, (size_t)w);
+        while (ses_reader_next(&r, &ft, &fp, &fl) == 1) walk_cb(ft, fp, fl, &d);
         TEST_ASSERT_EQUAL_INT(before + 1, d.n);
         TEST_ASSERT_EQUAL_INT64(f.gps_us, d.last.gps_us);
         TEST_ASSERT_EQUAL_INT32(f.lat_e7, d.last.lat_e7);

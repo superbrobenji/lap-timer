@@ -42,7 +42,11 @@ static void test_reader_decodes_two_frames_fed_byte_by_byte(void)
     n += ses_frame_encode(0x02, p1, 2, stream + n, sizeof stream - (size_t)n);
     n += ses_frame_encode(0x04, p2, 1, stream + n, sizeof stream - (size_t)n);
     ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
-    for (int i = 0; i < n; i++) ses_reader_feed(&r, stream + i, 1, cb, &c);
+    uint8_t t, l; const uint8_t *p;
+    for (int i = 0; i < n; i++) {
+        ses_reader_push(&r, stream + i, 1);
+        while (ses_reader_next(&r, &t, &p, &l) == 1) cb(t, p, l, &c);
+    }
     TEST_ASSERT_EQUAL_INT(2, c.calls);
     TEST_ASSERT_EQUAL_HEX8(0x02, c.types[0]); TEST_ASSERT_EQUAL_UINT8(2, c.lens[0]);
     TEST_ASSERT_EQUAL_HEX8(0x04, c.types[1]); TEST_ASSERT_EQUAL_UINT8(1, c.lens[1]);
@@ -59,7 +63,9 @@ static void test_reader_resyncs_after_corruption(void)
     n += ses_frame_encode(0x05, p2, 1, stream + n, sizeof stream - (size_t)n);
     stream[4] ^= 0xFF;                                  /* corrupt a payload byte of frame 1 */
     ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
-    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    uint8_t t, l; const uint8_t *p;
+    ses_reader_push(&r, stream, (size_t)n);
+    while (ses_reader_next(&r, &t, &p, &l) == 1) cb(t, p, l, &c);
     TEST_ASSERT_EQUAL_INT(1, c.calls);
     TEST_ASSERT_EQUAL_HEX8(0x05, c.types[0]);
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
@@ -76,7 +82,9 @@ static void test_reader_resync_finds_frame_starting_inside_bad_frame(void)
     /* pad so the bogus frame "completes" with wrong CRC */
     while (n < 3 + 40 + 2) stream[n++] = 0;
     ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
-    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    uint8_t ft, fl; const uint8_t *fp;
+    ses_reader_push(&r, stream, (size_t)n);
+    while (ses_reader_next(&r, &ft, &fp, &fl) == 1) cb(ft, fp, fl, &c);
     TEST_ASSERT_EQUAL_INT(1, c.calls);
     TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
     TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
@@ -86,7 +94,9 @@ static void test_reader_rejects_oversize_len_without_stalling(void)
 {
     uint8_t stream[8] = { SES_SYNC, 0x02, 255, 0, 0, 0, 0, 0 };
     ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
-    ses_reader_feed(&r, stream, sizeof stream, cb, &c);
+    uint8_t t, l; const uint8_t *p;
+    ses_reader_push(&r, stream, sizeof stream);
+    while (ses_reader_next(&r, &t, &p, &l) == 1) cb(t, p, l, &c);
     TEST_ASSERT_EQUAL_INT(0, c.calls);
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
@@ -98,9 +108,12 @@ static void test_flush_recovers_frame_hidden_behind_spurious_sync_at_eof(void)
     uint8_t p[1] = { 42 };
     n += ses_frame_encode(0x0B, p, 1, stream + n, sizeof stream - (size_t)n);
     ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
-    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    uint8_t ft, fl; const uint8_t *fp;
+    ses_reader_push(&r, stream, (size_t)n);
+    while (ses_reader_next(&r, &ft, &fp, &fl) == 1) cb(ft, fp, fl, &c);
     TEST_ASSERT_EQUAL_INT(0, c.calls);                                  /* stuck waiting for 200 bytes */
-    ses_reader_flush(&r, cb, &c);
+    ses_reader_finish(&r);
+    while (ses_reader_next(&r, &ft, &fp, &fl) == 1) cb(ft, fp, fl, &c);
     TEST_ASSERT_EQUAL_INT(1, c.calls);
     TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
     TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
@@ -113,12 +126,16 @@ static void test_flush_on_truncated_frame_counts_bad_and_is_idempotent(void)
     uint8_t payload[4] = { 1, 2, 3, 4 };
     uint8_t frame[16]; int n = ses_frame_encode(0x03, payload, 4, frame, sizeof frame);
     ses_reader_t r; ses_reader_init(&r); cap_t c = { 0 };
-    ses_reader_feed(&r, frame, (size_t)(n - 2), cb, &c);               /* CRC bytes missing */
-    ses_reader_flush(&r, cb, &c);
+    uint8_t t, l; const uint8_t *p;
+    ses_reader_push(&r, frame, (size_t)(n - 2));                       /* CRC bytes missing */
+    while (ses_reader_next(&r, &t, &p, &l) == 1) cb(t, p, l, &c);
+    ses_reader_finish(&r);
+    while (ses_reader_next(&r, &t, &p, &l) == 1) cb(t, p, l, &c);
     TEST_ASSERT_EQUAL_INT(0, c.calls);
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
     TEST_ASSERT_EQUAL_UINT8(0, r.state);
-    ses_reader_flush(&r, cb, &c);                                       /* no-op when idle */
+    ses_reader_finish(&r);                                             /* no-op when idle */
+    while (ses_reader_next(&r, &t, &p, &l) == 1) cb(t, p, l, &c);
     TEST_ASSERT_EQUAL_UINT32(1, r.frames_bad);
 }
 
@@ -141,7 +158,9 @@ static void test_on_bad_guard_resets_the_reader_before_returning(void)
 
     lt_test_assert_reset();
     cap_t c = { 0 };
-    ses_reader_feed(&r, NULL, 0, cb, &c);
+    uint8_t ot, ol; const uint8_t *op;
+    ses_reader_push(&r, NULL, 0);
+    while (ses_reader_next(&r, &ot, &op, &ol) == 1) cb(ot, op, ol, &c);
 
     TEST_ASSERT_EQUAL_UINT(1, lt_test_assert_count());
     TEST_ASSERT_EQUAL_HEX16(0x0A02, lt_test_assert_last_code());
@@ -152,7 +171,8 @@ static void test_on_bad_guard_resets_the_reader_before_returning(void)
     /* the reader must still recognise a normal frame after the guard trips */
     uint8_t stream[16]; uint8_t p[1] = { 42 };
     int n = ses_frame_encode(0x0B, p, 1, stream, sizeof stream);
-    ses_reader_feed(&r, stream, (size_t)n, cb, &c);
+    ses_reader_push(&r, stream, (size_t)n);
+    while (ses_reader_next(&r, &ot, &op, &ol) == 1) cb(ot, op, ol, &c);
     TEST_ASSERT_EQUAL_INT(1, c.calls);
     TEST_ASSERT_EQUAL_HEX8(0x0B, c.types[0]);
     TEST_ASSERT_EQUAL_UINT8(42, c.last_payload[0]);
@@ -204,14 +224,17 @@ static void test_fuzz_frames_buried_in_garbage_are_all_recovered(void)
 
         ses_reader_t r; ses_reader_init(&r);
         fuzz_cap_t c; memset(&c, 0, sizeof c);
+        uint8_t ft, fl; const uint8_t *fp;
         size_t pos = 0;
         while (pos < sn) {                                      /* random chunk sizes */
             size_t chunk = 1u + rnd() % 17u;
             if (pos + chunk > sn) chunk = sn - pos;
-            ses_reader_feed(&r, stream + pos, chunk, fuzz_cb, &c);
+            ses_reader_push(&r, stream + pos, chunk);
+            while (ses_reader_next(&r, &ft, &fp, &fl) == 1) fuzz_cb(ft, fp, fl, &c);
             pos += chunk;
         }
-        ses_reader_flush(&r, fuzz_cb, &c);
+        ses_reader_finish(&r);
+        while (ses_reader_next(&r, &ft, &fp, &fl) == 1) fuzz_cb(ft, fp, fl, &c);
         TEST_ASSERT_EQUAL_INT(nwant, c.n);
         for (int i = 0; i < nwant; i++) {
             TEST_ASSERT_EQUAL_HEX8(want[i].type, c.sig[i].type);
