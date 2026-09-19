@@ -49,6 +49,15 @@ static int count_type(const evlog_t *e, uint8_t type)
     return c;
 }
 
+/* Feed one pre-built fix and drain the caller-returned events into log (NULL to discard). */
+static void drive_fix(lap_t *L, const gps_fix_t *f, evlog_t *log)
+{
+    event_t evs[LAP_EVT_MAX];
+    int nev = 0;
+    lap_on_fix(L, f, NULL, evs, LAP_EVT_MAX, &nev);
+    for (int i = 0; i < nev; i++) if (log) ev_cb(&evs[i], log);
+}
+
 /* ---- geometry helpers (ENU metres about a venue centre) ---- */
 static double lat_of(double lat0, double n_m)             /* latitude n_m metres north of lat0 */
 {
@@ -78,10 +87,10 @@ static gps_fix_t fix_ll(double lat, double lon, int64_t gps_us, int32_t gspeed_m
 
 /* Feed one fix at ENU (e, n) metres about (lat0, lon0). */
 static void feed(lap_t *L, double lat0, double lon0, double e, double n, int64_t t_us,
-                 int32_t spd, bool valid, lap_evt_cb_t cb, void *ctx)
+                 int32_t spd, bool valid, evlog_t *log)
 {
     gps_fix_t f = fix_ll(lat_of(lat0, n), lon_of(lon0, lat0, e), t_us, spd, valid);
-    lap_on_fix(L, &f, NULL, cb, ctx);
+    drive_fix(L, &f, log);
 }
 
 /* An east-west gate line spanning ±GATE_HALF_WIDTH_M about ENU (e_c, n_m): p1 = west (left for a
@@ -124,9 +133,9 @@ static void build_venue_sec(trk_venue_t *v, double lat0, double lon0, uint8_t n_
 }
 
 /* Place the vehicle 40 m south of the S/F line and let the engine arm (VENUE_FOUND → ARMED). */
-static void arm_at_start(lap_t *L, double lat0, double lon0, int64_t t, lap_evt_cb_t cb, void *ctx)
+static void arm_at_start(lap_t *L, double lat0, double lon0, int64_t t, evlog_t *log)
 {
-    feed(L, lat0, lon0, 0.0, -40.0, t, SPD_MMS, true, cb, ctx);
+    feed(L, lat0, lon0, 0.0, -40.0, t, SPD_MMS, true, log);
 }
 
 /* One northbound S/F crossing (dir_sign +1) plus a return loop east of the gate that never re-crosses
@@ -135,12 +144,12 @@ static void arm_at_start(lap_t *L, double lat0, double lon0, int64_t t, lap_evt_
  * corner at t0 + 30 s is > 50 m from the line and > MIN_LAP_S past the crossing, so the gate re-arms
  * (§6.4 step 5) in time for the next lap. */
 static void forward_lap(lap_t *L, double lat0, double lon0, int64_t t0, int64_t lap_us,
-                        lap_evt_cb_t cb, void *ctx)
+                        evlog_t *log)
 {
-    feed(L, lat0, lon0,   0.0,  40.0, t0 + 2000000,  SPD_MMS, true, cb, ctx);   /* CROSS north */
-    feed(L, lat0, lon0, 300.0,  40.0, t0 + 30000000, SPD_MMS, true, cb, ctx);   /* clear line + re-arm */
-    feed(L, lat0, lon0, 300.0, -40.0, t0 + 35000000, SPD_MMS, true, cb, ctx);
-    feed(L, lat0, lon0,   0.0, -40.0, t0 + lap_us,    SPD_MMS, true, cb, ctx);   /* back to start */
+    feed(L, lat0, lon0,   0.0,  40.0, t0 + 2000000,  SPD_MMS, true, log);   /* CROSS north */
+    feed(L, lat0, lon0, 300.0,  40.0, t0 + 30000000, SPD_MMS, true, log);   /* clear line + re-arm */
+    feed(L, lat0, lon0, 300.0, -40.0, t0 + 35000000, SPD_MMS, true, log);
+    feed(L, lat0, lon0,   0.0, -40.0, t0 + lap_us,    SPD_MMS, true, log);   /* back to start */
 }
 
 /* ------------------------------------------------------------------ tests */
@@ -154,12 +163,12 @@ static void test_venue_found_within_radius_not_beyond(void)
 
     lap_t L; lap_init(&L, NULL);
     gps_fix_t f = fix_ll(lat_of(lat0, 1900.0), lon0, 1000000, 0, true);
-    lap_on_fix(&L, &f, NULL, NULL, NULL);
+    drive_fix(&L, &f, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));      /* found → armed on the same fix (§10.3) */
 
     lap_init(&L, NULL);
     gps_fix_t f2 = fix_ll(lat_of(lat0, 2100.0), lon0, 1000000, 0, true);
-    lap_on_fix(&L, &f2, NULL, NULL, NULL);
+    drive_fix(&L, &f2, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
 }
 
@@ -173,7 +182,7 @@ static void test_venue_found_then_armed_emits_events(void)
     lap_t L; lap_init(&L, NULL);
     evlog_t log; memset(&log, 0, sizeof log);
     gps_fix_t f = fix_ll(lat_of(lat0, -500.0), lon0, 1000000, 0, true);   /* 500 m south of centre */
-    lap_on_fix(&L, &f, NULL, ev_cb, &log);
+    drive_fix(&L, &f, &log);
 
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
     TEST_ASSERT_EQUAL_INT(2, log.n);
@@ -193,20 +202,20 @@ static void test_leave_venue_after_factor_radius_for_timeout(void)
     double lat_s = lat_of(lat0, -300.0);                          /* 300 m south of the S/F line */
 
     gps_fix_t f0 = fix_ll(lat_s, lon_of(lon0, lat0, -500.0), 1000000, 20000, true);
-    lap_on_fix(&L, &f0, NULL, NULL, NULL);
+    drive_fix(&L, &f0, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
 
     double lon_far = lon_of(lon0, lat0, -4000.0);                 /* ~4.0 km from centre (> 3 km) */
     gps_fix_t f1 = fix_ll(lat_s, lon_far, 1000000 + 1000000, 20000, true);            /* t = 2 s: timer starts */
-    lap_on_fix(&L, &f1, NULL, NULL, NULL);
+    drive_fix(&L, &f1, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
 
     gps_fix_t f2 = fix_ll(lat_s, lon_far, 1000000 + 1000000 + 59000000, 0, true);      /* +59 s: not yet */
-    lap_on_fix(&L, &f2, NULL, NULL, NULL);
+    drive_fix(&L, &f2, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
 
     gps_fix_t f3 = fix_ll(lat_s, lon_far, 1000000 + 1000000 + 61000000, 0, true);      /* +61 s: leave */
-    lap_on_fix(&L, &f3, NULL, NULL, NULL);
+    drive_fix(&L, &f3, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
 }
 
@@ -219,11 +228,11 @@ static void test_forward_crossing_accepted_reverse_rejected(void)
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
 
-    feed(&L, lat0, lon0, 0.0,  40.0, 0,       SPD_MMS, true, NULL, NULL);   /* arm, north of line */
+    feed(&L, lat0, lon0, 0.0,  40.0, 0,       SPD_MMS, true, NULL);   /* arm, north of line */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
-    feed(&L, lat0, lon0, 0.0, -40.0, 2000000, SPD_MMS, true, NULL, NULL);   /* southbound: rejected */
+    feed(&L, lat0, lon0, 0.0, -40.0, 2000000, SPD_MMS, true, NULL);   /* southbound: rejected */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
-    feed(&L, lat0, lon0, 0.0,  40.0, 4000000, SPD_MMS, true, NULL, NULL);   /* northbound: accepted */
+    feed(&L, lat0, lon0, 0.0,  40.0, 4000000, SPD_MMS, true, NULL);   /* northbound: accepted */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));                 /* out-lap open (lap 0) */
 }
 
@@ -235,11 +244,11 @@ static void test_reverse_layout_accepts_reverse_rejects_forward(void)
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
 
-    feed(&L, lat0, lon0, 0.0, -40.0, 0,       SPD_MMS, true, NULL, NULL);   /* arm, south of line */
+    feed(&L, lat0, lon0, 0.0, -40.0, 0,       SPD_MMS, true, NULL);   /* arm, south of line */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
-    feed(&L, lat0, lon0, 0.0,  40.0, 2000000, SPD_MMS, true, NULL, NULL);   /* northbound: rejected */
+    feed(&L, lat0, lon0, 0.0,  40.0, 2000000, SPD_MMS, true, NULL);   /* northbound: rejected */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
-    feed(&L, lat0, lon0, 0.0, -40.0, 4000000, SPD_MMS, true, NULL, NULL);   /* southbound: accepted */
+    feed(&L, lat0, lon0, 0.0, -40.0, 4000000, SPD_MMS, true, NULL);   /* southbound: accepted */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
 }
 
@@ -252,10 +261,10 @@ static void test_out_lap_has_no_time(void)
     lap_t L; lap_init(&L, NULL);
     evlog_t log; memset(&log, 0, sizeof log);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, ev_cb, &log);
-    forward_lap(&L, lat0, lon0, 0,        40000000, ev_cb, &log);   /* crossing #1: out-lap opens */
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* crossing #1: out-lap opens */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
-    forward_lap(&L, lat0, lon0, 40000000, 40000000, ev_cb, &log);   /* crossing #2: out-lap completes */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* crossing #2: out-lap completes */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -277,18 +286,18 @@ static void test_min_lap_debounce_prevents_double_fire(void)
     lap_t L; lap_init(&L, NULL);
     evlog_t log; memset(&log, 0, sizeof log);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, ev_cb, &log);
+    arm_at_start(&L, lat0, lon0, 0, &log);
 
-    feed(&L, lat0, lon0, 0.0,  40.0, 2000000, SPD_MMS, true, ev_cb, &log);   /* crossing #1: out-lap opens */
+    feed(&L, lat0, lon0, 0.0,  40.0, 2000000, SPD_MMS, true, &log);   /* crossing #1: out-lap opens */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
-    feed(&L, lat0, lon0, 0.0, -40.0, 4000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0, 0.0,  40.0, 6000000, SPD_MMS, true, ev_cb, &log);
+    feed(&L, lat0, lon0, 0.0, -40.0, 4000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0, 0.0,  40.0, 6000000, SPD_MMS, true, &log);
     TEST_ASSERT_EQUAL_INT(0, count_type(&log, EV_LAP_COMPLETE));
 
-    feed(&L, lat0, lon0, 300.0,  40.0, 30000000, SPD_MMS, true, ev_cb, &log);   /* re-arm */
-    feed(&L, lat0, lon0, 300.0, -40.0, 35000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0, -40.0, 40000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0,  40.0, 42000000, SPD_MMS, true, ev_cb, &log);   /* crossing #2 */
+    feed(&L, lat0, lon0, 300.0,  40.0, 30000000, SPD_MMS, true, &log);   /* re-arm */
+    feed(&L, lat0, lon0, 300.0, -40.0, 35000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0, -40.0, 40000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 42000000, SPD_MMS, true, &log);   /* crossing #2 */
     TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_LAP_COMPLETE));
     TEST_ASSERT_EQUAL_UINT16(0, lap_prev(&L)->lap_no);                          /* the out-lap */
 }
@@ -300,10 +309,10 @@ static void test_max_lap_marks_too_long_invalid(void)
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    forward_lap(&L, lat0, lon0, 0,                     40000000,   NULL, NULL);  /* #1 open out-lap */
-    forward_lap(&L, lat0, lon0, 40000000,             1801000000, NULL, NULL);  /* #2 out-lap done; lap 1 = 1801 s */
-    forward_lap(&L, lat0, lon0, 40000000 + 1801000000, 40000000,  NULL, NULL);  /* #3 lap 1 completes */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    forward_lap(&L, lat0, lon0, 0,                     40000000,   NULL);  /* #1 open out-lap */
+    forward_lap(&L, lat0, lon0, 40000000,             1801000000, NULL);  /* #2 out-lap done; lap 1 = 1801 s */
+    forward_lap(&L, lat0, lon0, 40000000 + 1801000000, 40000000,  NULL);  /* #3 lap 1 completes */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -320,20 +329,20 @@ static void test_best_and_prev_best_from_valid_only(void)
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
 
     int64_t t = 0;
-    forward_lap(&L, lat0, lon0, t, 40000000, NULL, NULL); t += 40000000;   /* #1: out-lap opens */
-    forward_lap(&L, lat0, lon0, t, 50000000, NULL, NULL); t += 50000000;   /* #2: out-lap done; lap 1 = 50 s */
-    forward_lap(&L, lat0, lon0, t, 45000000, NULL, NULL); t += 45000000;   /* #3: lap 1 completes; lap 2 = 45 s */
+    forward_lap(&L, lat0, lon0, t, 40000000, NULL); t += 40000000;   /* #1: out-lap opens */
+    forward_lap(&L, lat0, lon0, t, 50000000, NULL); t += 50000000;   /* #2: out-lap done; lap 1 = 50 s */
+    forward_lap(&L, lat0, lon0, t, 45000000, NULL); t += 45000000;   /* #3: lap 1 completes; lap 2 = 45 s */
     TEST_ASSERT_NOT_NULL(lap_best(&L));
     TEST_ASSERT_UINT32_WITHIN(2, 50000, lap_best(&L)->time_ms);            /* best = lap 1 so far */
 
-    forward_lap(&L, lat0, lon0, t, 42000000, NULL, NULL); t += 42000000;   /* #4: lap 2 (45 s) completes */
+    forward_lap(&L, lat0, lon0, t, 42000000, NULL); t += 42000000;   /* #4: lap 2 (45 s) completes */
     TEST_ASSERT_UINT32_WITHIN(2, 45000, lap_best(&L)->time_ms);            /* best updated to the faster valid lap */
 
-    feed(&L, lat0, lon0, 0.0, -40.0, t + 1000000, 0, false, NULL, NULL);   /* invalid fix inside lap 3 */
-    forward_lap(&L, lat0, lon0, t, 42000000, NULL, NULL); t += 42000000;   /* #5: lap 3 completes, invalid */
+    feed(&L, lat0, lon0, 0.0, -40.0, t + 1000000, 0, false, NULL);   /* invalid fix inside lap 3 */
+    forward_lap(&L, lat0, lon0, t, 42000000, NULL); t += 42000000;   /* #5: lap 3 completes, invalid */
 
     TEST_ASSERT_UINT32_WITHIN(2, 45000, lap_best(&L)->time_ms);            /* best NOT taken by the invalid lap */
     const lap_result_t *p = lap_prev(&L);
@@ -350,16 +359,16 @@ static void test_pit_flag_on_slow_section(void)
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    forward_lap(&L, lat0, lon0, 0,        40000000, NULL, NULL);   /* out-lap opens */
-    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL, NULL);   /* out-lap done; lap 1 begins (~41 s) */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL);   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL);   /* out-lap done; lap 1 begins (~41 s) */
 
-    feed(&L, lat0, lon0, 300.0, 100.0, 80000000, 1000, true, NULL, NULL);   /* pit spell starts */
-    feed(&L, lat0, lon0, 300.0, 100.0, 86000000, 1000, true, NULL, NULL);
-    feed(&L, lat0, lon0, 300.0, 100.0, 92000000, 1000, true, NULL, NULL);   /* 12 s slow → LAP_F_PIT */
-    feed(&L, lat0, lon0, 300.0, -40.0, 96000000,  SPD_MMS, true, NULL, NULL);
-    feed(&L, lat0, lon0,   0.0, -40.0, 100000000, SPD_MMS, true, NULL, NULL);
-    feed(&L, lat0, lon0,   0.0,  40.0, 102000000, SPD_MMS, true, NULL, NULL);   /* crossing completes lap 1 */
+    feed(&L, lat0, lon0, 300.0, 100.0, 80000000, 1000, true, NULL);   /* pit spell starts */
+    feed(&L, lat0, lon0, 300.0, 100.0, 86000000, 1000, true, NULL);
+    feed(&L, lat0, lon0, 300.0, 100.0, 92000000, 1000, true, NULL);   /* 12 s slow → LAP_F_PIT */
+    feed(&L, lat0, lon0, 300.0, -40.0, 96000000,  SPD_MMS, true, NULL);
+    feed(&L, lat0, lon0,   0.0, -40.0, 100000000, SPD_MMS, true, NULL);
+    feed(&L, lat0, lon0,   0.0,  40.0, 102000000, SPD_MMS, true, NULL);   /* crossing completes lap 1 */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -375,11 +384,11 @@ static void test_gps_lost_flag_on_invalid_fix(void)
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    forward_lap(&L, lat0, lon0, 0,        40000000, NULL, NULL);   /* out-lap opens */
-    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL, NULL);   /* out-lap done; lap 1 begins */
-    feed(&L, lat0, lon0, 300.0, 100.0, 81000000, SPD_MMS, false, NULL, NULL);   /* invalid fix in lap 1 */
-    forward_lap(&L, lat0, lon0, 80000000, 40000000, NULL, NULL);   /* lap 1 completes */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL);   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL);   /* out-lap done; lap 1 begins */
+    feed(&L, lat0, lon0, 300.0, 100.0, 81000000, SPD_MMS, false, NULL);   /* invalid fix in lap 1 */
+    forward_lap(&L, lat0, lon0, 80000000, 40000000, NULL);   /* lap 1 completes */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -393,14 +402,14 @@ static void test_gps_lost_flag_on_invalid_fix(void)
 /* Drive one clean flying lap of a 2-sector venue (sectors at n = 100, 200): cross S/F, sector 1,
  * sector 2 in order, loop back east of the gates, cross S/F again. Legs are >= dt_us apart. Returns
  * with the vehicle at (0, -40); the caller crosses S/F next to complete the lap. */
-static void clean_sector_leg(lap_t *L, double lat0, double lon0, int64_t t0, lap_evt_cb_t cb, void *ctx)
+static void clean_sector_leg(lap_t *L, double lat0, double lon0, int64_t t0, evlog_t *log)
 {
-    feed(L, lat0, lon0,   0.0,  40.0, t0 + 2000000,  SPD_MMS, true, cb, ctx);   /* cross S/F north */
-    feed(L, lat0, lon0,   0.0, 140.0, t0 + 5000000,  SPD_MMS, true, cb, ctx);   /* cross sector 1 (n=100) */
-    feed(L, lat0, lon0,   0.0, 240.0, t0 + 8000000,  SPD_MMS, true, cb, ctx);   /* cross sector 2 (n=200) */
-    feed(L, lat0, lon0, 400.0, 240.0, t0 + 30000000, SPD_MMS, true, cb, ctx);   /* east, clear + re-arm */
-    feed(L, lat0, lon0, 400.0, -40.0, t0 + 40000000, SPD_MMS, true, cb, ctx);   /* south */
-    feed(L, lat0, lon0,   0.0, -40.0, t0 + 48000000, SPD_MMS, true, cb, ctx);   /* back to start */
+    feed(L, lat0, lon0,   0.0,  40.0, t0 + 2000000,  SPD_MMS, true, log);   /* cross S/F north */
+    feed(L, lat0, lon0,   0.0, 140.0, t0 + 5000000,  SPD_MMS, true, log);   /* cross sector 1 (n=100) */
+    feed(L, lat0, lon0,   0.0, 240.0, t0 + 8000000,  SPD_MMS, true, log);   /* cross sector 2 (n=200) */
+    feed(L, lat0, lon0, 400.0, 240.0, t0 + 30000000, SPD_MMS, true, log);   /* east, clear + re-arm */
+    feed(L, lat0, lon0, 400.0, -40.0, t0 + 40000000, SPD_MMS, true, log);   /* south */
+    feed(L, lat0, lon0,   0.0, -40.0, t0 + 48000000, SPD_MMS, true, log);   /* back to start */
 }
 
 /* §10.4 step 5 / §10.8: a clean two-sector lap reports n_sectors = 3 and its splits sum to the lap
@@ -412,11 +421,11 @@ static void test_sector_splits_sum_to_lap_time(void)
     trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
 
-    clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);   /* out-lap opens, sectors crossed */
-    clean_sector_leg(&L, lat0, lon0, 48000000, NULL, NULL);   /* out-lap completes; lap 1 runs */
-    clean_sector_leg(&L, lat0, lon0, 96000000, NULL, NULL);   /* lap 1 completes */
+    clean_sector_leg(&L, lat0, lon0, 0,        NULL);   /* out-lap opens, sectors crossed */
+    clean_sector_leg(&L, lat0, lon0, 48000000, NULL);   /* out-lap completes; lap 1 runs */
+    clean_sector_leg(&L, lat0, lon0, 96000000, NULL);   /* lap 1 completes */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -436,16 +445,16 @@ static void test_incomplete_flag_when_sector_skipped(void)
     trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    clean_sector_leg(&L, lat0, lon0, 0, NULL, NULL);          /* out-lap opens */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    clean_sector_leg(&L, lat0, lon0, 0, NULL);          /* out-lap opens */
 
     /* lap 1: cross S/F, cross sector 1 only, detour past sector 2, cross S/F. */
-    feed(&L, lat0, lon0,   0.0,  40.0, 50000000, SPD_MMS, true, NULL, NULL);   /* S/F -> lap 1 */
-    feed(&L, lat0, lon0,   0.0, 150.0, 53000000, SPD_MMS, true, NULL, NULL);   /* sector 1 (n=100) */
-    feed(&L, lat0, lon0, 400.0, 150.0, 56000000, SPD_MMS, true, NULL, NULL);   /* east, skips sector 2 */
-    feed(&L, lat0, lon0, 400.0, -40.0, 80000000, SPD_MMS, true, NULL, NULL);   /* south, re-arm */
-    feed(&L, lat0, lon0,   0.0, -40.0, 90000000, SPD_MMS, true, NULL, NULL);
-    feed(&L, lat0, lon0,   0.0,  40.0, 92000000, SPD_MMS, true, NULL, NULL);   /* S/F completes lap 1 */
+    feed(&L, lat0, lon0,   0.0,  40.0, 50000000, SPD_MMS, true, NULL);   /* S/F -> lap 1 */
+    feed(&L, lat0, lon0,   0.0, 150.0, 53000000, SPD_MMS, true, NULL);   /* sector 1 (n=100) */
+    feed(&L, lat0, lon0, 400.0, 150.0, 56000000, SPD_MMS, true, NULL);   /* east, skips sector 2 */
+    feed(&L, lat0, lon0, 400.0, -40.0, 80000000, SPD_MMS, true, NULL);   /* south, re-arm */
+    feed(&L, lat0, lon0,   0.0, -40.0, 90000000, SPD_MMS, true, NULL);
+    feed(&L, lat0, lon0,   0.0,  40.0, 92000000, SPD_MMS, true, NULL);   /* S/F completes lap 1 */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -464,20 +473,20 @@ static void test_sector_resync_after_skip(void)
     lap_t L; lap_init(&L, NULL);
     evlog_t log; memset(&log, 0, sizeof log);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    clean_sector_leg(&L, lat0, lon0, 0, NULL, NULL);          /* out-lap opens */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    clean_sector_leg(&L, lat0, lon0, 0, NULL);          /* out-lap opens */
 
     memset(&log, 0, sizeof log);
     /* lap 1: enter the e=0 corridor between the gates, so sector 1 is skipped but sector 2 is crossed. */
-    feed(&L, lat0, lon0,   0.0,  40.0, 50000000, SPD_MMS, true, ev_cb, &log);   /* S/F -> lap 1 */
-    feed(&L, lat0, lon0, 400.0,  40.0, 52000000, SPD_MMS, true, ev_cb, &log);   /* east (skip sector 1) */
-    feed(&L, lat0, lon0, 400.0, 150.0, 55000000, SPD_MMS, true, ev_cb, &log);   /* north, still east */
-    feed(&L, lat0, lon0,   0.0, 150.0, 58000000, SPD_MMS, true, ev_cb, &log);   /* west into the corridor */
-    feed(&L, lat0, lon0,   0.0, 260.0, 61000000, SPD_MMS, true, ev_cb, &log);   /* north: crosses sector 2 */
-    feed(&L, lat0, lon0, 400.0, 260.0, 80000000, SPD_MMS, true, ev_cb, &log);   /* east, re-arm */
-    feed(&L, lat0, lon0, 400.0, -40.0, 90000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0, -40.0, 95000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0,  40.0, 97000000, SPD_MMS, true, ev_cb, &log);   /* S/F completes lap 1 */
+    feed(&L, lat0, lon0,   0.0,  40.0, 50000000, SPD_MMS, true, &log);   /* S/F -> lap 1 */
+    feed(&L, lat0, lon0, 400.0,  40.0, 52000000, SPD_MMS, true, &log);   /* east (skip sector 1) */
+    feed(&L, lat0, lon0, 400.0, 150.0, 55000000, SPD_MMS, true, &log);   /* north, still east */
+    feed(&L, lat0, lon0,   0.0, 150.0, 58000000, SPD_MMS, true, &log);   /* west into the corridor */
+    feed(&L, lat0, lon0,   0.0, 260.0, 61000000, SPD_MMS, true, &log);   /* north: crosses sector 2 */
+    feed(&L, lat0, lon0, 400.0, 260.0, 80000000, SPD_MMS, true, &log);   /* east, re-arm */
+    feed(&L, lat0, lon0, 400.0, -40.0, 90000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0, -40.0, 95000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 97000000, SPD_MMS, true, &log);   /* S/F completes lap 1 */
 
     const lap_result_t *p = lap_prev(&L);
     TEST_ASSERT_NOT_NULL(p);
@@ -498,23 +507,23 @@ static void test_sector_delta_vs_best(void)
     trk_venue_t v; build_venue_sec(&v, lat0, lon0, 2, northings);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
 
-    clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);   /* out-lap opens */
-    clean_sector_leg(&L, lat0, lon0, 48000000, NULL, NULL);   /* out-lap completes; lap 1 runs */
+    clean_sector_leg(&L, lat0, lon0, 0,        NULL);   /* out-lap opens */
+    clean_sector_leg(&L, lat0, lon0, 48000000, NULL);   /* out-lap completes; lap 1 runs */
     /* lap 1 completes on the next S/F crossing and becomes best. */
-    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL, NULL);      /* S/F: lap 1 completes */
+    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL);      /* S/F: lap 1 completes */
     const lap_result_t *b = lap_best(&L);
     TEST_ASSERT_NOT_NULL(b);
     uint32_t best_s0 = b->sector_ms[0], best_s1 = b->sector_ms[1];
 
     /* lap 2: drive the sectors on a shifted timeline so the splits differ, capturing EV_SECTOR. */
     evlog_t log; memset(&log, 0, sizeof log);
-    feed(&L, lat0, lon0,   0.0, 140.0, 102000000, SPD_MMS, true, ev_cb, &log); /* sector 1 (n=100) */
-    feed(&L, lat0, lon0,   0.0, 240.0, 108000000, SPD_MMS, true, ev_cb, &log); /* sector 2 (n=200) */
-    feed(&L, lat0, lon0, 400.0, 240.0, 130000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0, 400.0, -40.0, 140000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0, -40.0, 148000000, SPD_MMS, true, ev_cb, &log);
+    feed(&L, lat0, lon0,   0.0, 140.0, 102000000, SPD_MMS, true, &log); /* sector 1 (n=100) */
+    feed(&L, lat0, lon0,   0.0, 240.0, 108000000, SPD_MMS, true, &log); /* sector 2 (n=200) */
+    feed(&L, lat0, lon0, 400.0, 240.0, 130000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0, 400.0, -40.0, 140000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0, -40.0, 148000000, SPD_MMS, true, &log);
 
     TEST_ASSERT_EQUAL_INT(2, count_type(&log, EV_SECTOR));
     int seen = 0;
@@ -572,14 +581,14 @@ static void test_disambiguation_locks_full_layout(void)
     lap_t L; lap_init(&L, NULL);
     evlog_t log; memset(&log, 0, sizeof log);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, ev_cb, &log);
+    arm_at_start(&L, lat0, lon0, 0, &log);
 
-    feed(&L, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, ev_cb, &log);   /* S/F -> out-lap, union */
-    feed(&L, lat0, lon0,   0.0, 360.0, 10000000, SPD_MMS, true, ev_cb, &log);   /* crosses Full gates 100/200/300 */
-    feed(&L, lat0, lon0, 400.0, 360.0, 15000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0, 400.0, -40.0, 30000000, SPD_MMS, true, ev_cb, &log);   /* re-arm S/F (>50 m, >20 s) */
-    feed(&L, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, ev_cb, &log);   /* S/F -> disambiguate + lock */
+    feed(&L, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, &log);   /* S/F -> out-lap, union */
+    feed(&L, lat0, lon0,   0.0, 360.0, 10000000, SPD_MMS, true, &log);   /* crosses Full gates 100/200/300 */
+    feed(&L, lat0, lon0, 400.0, 360.0, 15000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0, 400.0, -40.0, 30000000, SPD_MMS, true, &log);   /* re-arm S/F (>50 m, >20 s) */
+    feed(&L, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, &log);   /* S/F -> disambiguate + lock */
 
     TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_LAYOUT_LOCKED));
     TEST_ASSERT_EQUAL_UINT16(1, last_locked_id(&log));         /* Full wins */
@@ -592,14 +601,14 @@ static void test_disambiguation_locks_short_layout(void)
     lap_t L; lap_init(&L, NULL);
     evlog_t log; memset(&log, 0, sizeof log);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, ev_cb, &log);
+    arm_at_start(&L, lat0, lon0, 0, &log);
 
-    feed(&L, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, ev_cb, &log);   /* S/F -> out-lap, union */
-    feed(&L, lat0, lon0, 800.0,  40.0, 10000000, SPD_MMS, true, ev_cb, &log);   /* east (no Full gate) */
-    feed(&L, lat0, lon0, 800.0, 160.0, 18000000, SPD_MMS, true, ev_cb, &log);   /* crosses Short gate (e=800,n=100) */
-    feed(&L, lat0, lon0, 800.0, -40.0, 30000000, SPD_MMS, true, ev_cb, &log);   /* south, re-arm */
-    feed(&L, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, ev_cb, &log);
-    feed(&L, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, ev_cb, &log);   /* S/F -> disambiguate + lock */
+    feed(&L, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, &log);   /* S/F -> out-lap, union */
+    feed(&L, lat0, lon0, 800.0,  40.0, 10000000, SPD_MMS, true, &log);   /* east (no Full gate) */
+    feed(&L, lat0, lon0, 800.0, 160.0, 18000000, SPD_MMS, true, &log);   /* crosses Short gate (e=800,n=100) */
+    feed(&L, lat0, lon0, 800.0, -40.0, 30000000, SPD_MMS, true, &log);   /* south, re-arm */
+    feed(&L, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, &log);   /* S/F -> disambiguate + lock */
 
     TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_LAYOUT_LOCKED));
     TEST_ASSERT_EQUAL_UINT16(2, last_locked_id(&log));         /* Short wins */
@@ -609,11 +618,11 @@ static void test_disambiguation_locks_short_layout(void)
 
 /* A fix at ENU (e, n) about (lat0, lon0) with an explicit compass heading of motion. */
 static void feed_hdg(lap_t *L, double lat0, double lon0, double e, double n, int64_t t,
-                     double hdg_deg, lap_evt_cb_t cb, void *ctx)
+                     double hdg_deg, evlog_t *log)
 {
     gps_fix_t f = fix_ll(lat_of(lat0, n), lon_of(lon0, lat0, e), t, SPD_MMS, true);
     f.head_e5 = (int32_t)lround(hdg_deg * 1e5);
-    lap_on_fix(L, &f, NULL, cb, ctx);
+    drive_fix(L, &f, log);
 }
 
 /* §10.9: begin creation, mark S/F + two sector gates while moving north, drive a loop, and cross the
@@ -644,11 +653,11 @@ static void test_create_track_saves_valid_venue(void)
 
     /* drive a loop; distance integrates, and the S/F crossing after MIN_LAP_S finalises. */
     evlog_t log; memset(&log, 0, sizeof log);
-    feed_hdg(&L, lat0, lon0,   0.0, 300.0,  8000000,  0.0,   NULL, NULL);
-    feed_hdg(&L, lat0, lon0, 400.0, 300.0,  15000000, 90.0,  NULL, NULL);
-    feed_hdg(&L, lat0, lon0, 400.0,-100.0,  25000000, 180.0, NULL, NULL);   /* > MIN_LAP_S now */
-    feed_hdg(&L, lat0, lon0,   0.0,-100.0,  30000000, 270.0, NULL, NULL);
-    feed_hdg(&L, lat0, lon0,   0.0,  50.0,  35000000, 0.0,   ev_cb, &log);  /* S/F crossing → save */
+    feed_hdg(&L, lat0, lon0,   0.0, 300.0,  8000000,  0.0,   NULL);
+    feed_hdg(&L, lat0, lon0, 400.0, 300.0,  15000000, 90.0,  NULL);
+    feed_hdg(&L, lat0, lon0, 400.0,-100.0,  25000000, 180.0, NULL);   /* > MIN_LAP_S now */
+    feed_hdg(&L, lat0, lon0,   0.0,-100.0,  30000000, 270.0, NULL);
+    feed_hdg(&L, lat0, lon0,   0.0,  50.0,  35000000, 0.0,   &log);  /* S/F crossing → save */
 
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_VENUE_FOUND, lap_state(&L));
     TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_VENUE_FOUND));
@@ -695,14 +704,14 @@ static void test_rtc_restore_mid_lap_interrupted(void)
 
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, vs);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
-    clean_sector_leg(&L, lat0, lon0, 48000000, NULL, NULL);        /* out-lap completes; lap 1 runs */
-    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL, NULL);   /* lap 1 completes → best */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    clean_sector_leg(&L, lat0, lon0, 0,        NULL);        /* out-lap opens */
+    clean_sector_leg(&L, lat0, lon0, 48000000, NULL);        /* out-lap completes; lap 1 runs */
+    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL);   /* lap 1 completes → best */
     TEST_ASSERT_NOT_NULL(lap_best(&L));
     uint32_t best_ms = lap_best(&L)->time_ms;
 
-    feed(&L, lat0, lon0, 0.0, 140.0, 102000000, SPD_MMS, true, NULL, NULL); /* lap 2: cross sector 1 */
+    feed(&L, lat0, lon0, 0.0, 140.0, 102000000, SPD_MMS, true, NULL); /* lap 2: cross sector 1 */
     lap_rtc_t rtc; lap_export_rtc(&L, &rtc);
     uint32_t elapsed_before = lap_current_elapsed_ms(&L, 105000000);
     TEST_ASSERT_TRUE(elapsed_before > 0);
@@ -718,12 +727,12 @@ static void test_rtc_restore_mid_lap_interrupted(void)
     TEST_ASSERT_EQUAL_UINT16(2, L2.lap_no);
 
     /* resume: establish a segment origin, cross sector 2, loop, cross S/F to complete the lap. */
-    feed(&L2, lat0, lon0,   0.0, 150.0, 106000000, SPD_MMS, true, NULL, NULL);
-    feed(&L2, lat0, lon0,   0.0, 260.0, 110000000, SPD_MMS, true, NULL, NULL);   /* sector 2 */
-    feed(&L2, lat0, lon0, 400.0, 260.0, 130000000, SPD_MMS, true, NULL, NULL);
-    feed(&L2, lat0, lon0, 400.0, -40.0, 140000000, SPD_MMS, true, NULL, NULL);
-    feed(&L2, lat0, lon0,   0.0, -40.0, 148000000, SPD_MMS, true, NULL, NULL);
-    feed(&L2, lat0, lon0,   0.0,  40.0, 150000000, SPD_MMS, true, NULL, NULL);   /* S/F completes lap 2 */
+    feed(&L2, lat0, lon0,   0.0, 150.0, 106000000, SPD_MMS, true, NULL);
+    feed(&L2, lat0, lon0,   0.0, 260.0, 110000000, SPD_MMS, true, NULL);   /* sector 2 */
+    feed(&L2, lat0, lon0, 400.0, 260.0, 130000000, SPD_MMS, true, NULL);
+    feed(&L2, lat0, lon0, 400.0, -40.0, 140000000, SPD_MMS, true, NULL);
+    feed(&L2, lat0, lon0,   0.0, -40.0, 148000000, SPD_MMS, true, NULL);
+    feed(&L2, lat0, lon0,   0.0,  40.0, 150000000, SPD_MMS, true, NULL);   /* S/F completes lap 2 */
     const lap_result_t *p = lap_prev(&L2);
     TEST_ASSERT_NOT_NULL(p);
     TEST_ASSERT_EQUAL_UINT16(2, p->lap_no);
@@ -760,14 +769,14 @@ static void test_predictive_delta(void)
     lap_t L; lap_init(&L, NULL);
     lap_set_predictive(&L, pbd, pbt, prd, prt, PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    clean_sector_leg(&L, lat0, lon0, 0,        NULL, NULL);        /* out-lap opens */
-    clean_sector_leg(&L, lat0, lon0, 48000000, NULL, NULL);        /* out-lap completes; lap 1 runs */
-    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL, NULL);   /* lap 1 → best + predictive ref */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    clean_sector_leg(&L, lat0, lon0, 0,        NULL);        /* out-lap opens */
+    clean_sector_leg(&L, lat0, lon0, 48000000, NULL);        /* out-lap completes; lap 1 runs */
+    feed(&L, lat0, lon0, 0.0, 40.0, 98000000, SPD_MMS, true, NULL);   /* lap 1 → best + predictive ref */
     TEST_ASSERT_NOT_NULL(lap_best(&L));
     TEST_ASSERT_TRUE(L.pred_best_n >= 2);
 
-    feed(&L, lat0, lon0, 0.0, 140.0, 102000000, SPD_MMS, true, NULL, NULL); /* lap 2 running */
+    feed(&L, lat0, lon0, 0.0, 140.0, 102000000, SPD_MMS, true, NULL); /* lap 2 running */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
 
     uint16_t dq   = L.pred_best_dist_m[1];       /* a distance the reference holds exactly */
@@ -800,8 +809,8 @@ static void test_predictive_table_cap(void)
     lap_t L; lap_init(&L, NULL);
     lap_set_predictive(&L, pbd, pbt, prd, prt, PRED_TABLE_MAX);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL);    /* S/F → out-lap RUNNING */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
 
     int64_t t = 2000000;
@@ -809,7 +818,7 @@ static void test_predictive_table_cap(void)
         t += 200000;
         double n = 100.0 + ((i & 1) ? 40.0 : 0.0);
         double e = ((i & 1) ? 30.0 : 0.0);
-        feed(&L, lat0, lon0, e, n, t, SPD_MMS, true, NULL, NULL);
+        feed(&L, lat0, lon0, e, n, t, SPD_MMS, true, NULL);
     }
     TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
     TEST_ASSERT_TRUE(L.pred_rec_n > 0);
@@ -828,8 +837,8 @@ static void test_predictive_disabled_returns_no_delta(void)
     trk_venue_t v; build_venue(&v, lat0, lon0, 1);
     lap_t L; lap_init(&L, NULL);
     lap_set_venue(&L, &v);
-    arm_at_start(&L, lat0, lon0, 0, NULL, NULL);
-    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL, NULL);    /* S/F → out-lap RUNNING */
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, NULL);    /* S/F → out-lap RUNNING */
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
 
     bool have = true;
@@ -909,7 +918,12 @@ static double drive_synth_and_check(int rate, double tol_ms)
     gps_fix_t fix;
     int rc;
     while ((rc = synth_gps_next(&gps, run, &fix, NULL)) >= 0)
-        if (rc == 1) lap_on_fix(L, &fix, NULL, lap_cb, &log);
+        if (rc == 1) {
+            event_t evs[LAP_EVT_MAX];
+            int nev = 0;
+            lap_on_fix(L, &fix, NULL, evs, LAP_EVT_MAX, &nev);
+            for (int i = 0; i < nev; i++) lap_cb(&evs[i], &log);
+        }
 
     TEST_ASSERT_EQUAL_INT(11, log.n);                  /* out-lap + 10 flying laps */
     TEST_ASSERT_EQUAL_UINT16(0, log.lap_no[0]);
@@ -986,7 +1000,12 @@ static void test_ten_synth_laps_realistic_noise_within_200ms_at_5hz(void)
     gps_fix_t fix;
     int rc;
     while ((rc = synth_gps_next(&gps, run, &fix, NULL)) >= 0)
-        if (rc == 1) lap_on_fix(L, &fix, NULL, lap_cb, &log);
+        if (rc == 1) {
+            event_t evs[LAP_EVT_MAX];
+            int nev = 0;
+            lap_on_fix(L, &fix, NULL, evs, LAP_EVT_MAX, &nev);
+            for (int i = 0; i < nev; i++) lap_cb(&evs[i], &log);
+        }
 
     TEST_ASSERT_EQUAL_INT(11, log.n);
     TEST_ASSERT_EQUAL_UINT16(0, log.lap_no[0]);

@@ -71,29 +71,38 @@ static gps_fix_t gfix(int64_t gps_us, int32_t gspeed_mms, bool valid)
     return f;
 }
 
+/* Feed one fused sample and, when collect is set, drain the caller-returned events into EV. */
+static void drive_fused(const fused_sample_t *fs, bool collect)
+{
+    event_t evs[DRAG_EVT_MAX];
+    int nev = 0;
+    drag_on_fused(&D, fs, evs, DRAG_EVT_MAX, &nev);
+    if (collect) for (int i = 0; i < nev; i++) ev_cb(&evs[i], NULL);
+}
+
 #define DT_US        (1000000 / FUSION_HZ)    /* 10 000 us = one fused sample */
 #define ARM_LAST_K   200                      /* still samples 0..200: arms at t = 2.00 s */
 #define LAUNCH_K     201                      /* first launch sample; its time is the back-dated t0 */
 #define T_LAUNCH_US  ((int64_t)LAUNCH_K * DT_US)   /* 2.01 s */
 
 /* Drive still+slow fused samples until the engine arms (t = 2.00 s). */
-static void arm_engine(drag_evt_cb_t cb, void *ctx)
+static void arm_engine(bool collect)
 {
     for (int k = 0; k <= ARM_LAST_K; k++) {
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
-        drag_on_fused(&D, &fs, cb, ctx);
+        drive_fused(&fs, collect);
     }
 }
 
 /* From the armed state, feed a constant longitudinal g at 100 Hz with a 5 Hz Doppler GPS re-anchor
  * (gSpeed = a·(t − t0), the exact speed), until DONE or max_k. */
-static void run_const_g(double g, int max_k, drag_evt_cb_t cb, void *ctx)
+static void run_const_g(double g, int max_k, bool collect)
 {
     double a = g * G_MPS2;
     for (int k = LAUNCH_K; k <= max_k; k++) {
         int64_t t = (int64_t)k * DT_US;
         fused_sample_t fs = fused(t, (float)g, 0);
-        drag_on_fused(&D, &fs, cb, ctx);
+        drive_fused(&fs, collect);
         if (k % 20 == 0) {                          /* 5 Hz fixes */
             double tl = (double)(t - T_LAUNCH_US) / 1e6;
             if (tl < 0.0) tl = 0.0;
@@ -106,7 +115,7 @@ static void run_const_g(double g, int max_k, drag_evt_cb_t cb, void *ctx)
 
 /* Accelerate at 0.5 g to peak_kmh, then brake at −1 g to a stop (5 Hz Doppler follows the profile).
  * Used for the braking-distance and peak-180 bench cases. */
-static void run_accel_then_brake(double peak_kmh, drag_evt_cb_t cb, void *ctx)
+static void run_accel_then_brake(double peak_kmh, bool collect)
 {
     double a = 0.5 * G_MPS2, ab = 1.0 * G_MPS2, vpk = peak_kmh / 3.6;
     int nacc = (int)(vpk / a / 0.01 + 0.5);
@@ -117,7 +126,7 @@ static void run_accel_then_brake(double peak_kmh, drag_evt_cb_t cb, void *ctx)
         if (k < LAUNCH_K + nacc) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); }
         else                     { gl = -1.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
         fused_sample_t fs = fused(t, (float)gl, 0);
-        drag_on_fused(&D, &fs, cb, ctx);
+        drive_fused(&fs, collect);
         if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
         if (D.brake_done) break;
         if (drag_state(&D) == DRAG_ST_IDLE) break;
@@ -126,7 +135,7 @@ static void run_accel_then_brake(double peak_kmh, drag_evt_cb_t cb, void *ctx)
 
 /* Accelerate at 0.5 g until the 1/4 gate ends the run (DONE), then brake at −1 g to a stop — so the
  * braking gate completes *after* DONE (§11.2 DONE-then-brake). */
-static void run_quarter_then_brake(drag_evt_cb_t cb, void *ctx)
+static void run_quarter_then_brake(bool collect)
 {
     double a = 0.5 * G_MPS2, ab = 1.0 * G_MPS2, vpk = 0.0;
     int64_t tpk = 0;
@@ -136,7 +145,7 @@ static void run_quarter_then_brake(drag_evt_cb_t cb, void *ctx)
         if (drag_state(&D) != DRAG_ST_DONE) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); vpk = v; tpk = t; }
         else                                { gl = -1.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
         fused_sample_t fs = fused(t, (float)gl, 0);
-        drag_on_fused(&D, &fs, cb, ctx);
+        drive_fused(&fs, collect);
         if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
         if (D.brake_done) break;
     }
@@ -178,7 +187,7 @@ static void test_integration_constant_accel(void)
     const double a = 0.30 * G_MPS2;             /* g_lon = 0.30 → a ≈ 2.942 m/s² */
     for (int k = 0; k <= 300; k++) {            /* 3 s at 100 Hz */
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.30f, 0);
-        drag_on_fused(&D, &fs, NULL, NULL);
+        drive_fused(&fs, false);
         if (k == 100 || k == 200 || k == 300) {
             double t = (double)k * 0.01;
             TEST_ASSERT_DOUBLE_WITHIN(1e-6, a * t, D.v_est);
@@ -193,14 +202,14 @@ static void test_integration_constant_accel(void)
 static void test_gps_reanchor_resets_v_est(void)
 {
     drag_init(&D, NULL);
-    for (int k = 0; k <= 50; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    for (int k = 0; k <= 50; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drive_fused(&fs, false); }
     TEST_ASSERT_DOUBLE_WITHIN(1e-3, 0.20 * G_MPS2 * 0.5, D.v_est);
 
     gps_fix_t f1 = gfix(50 * DT_US, 5000, true);           /* Doppler says 5.000 m/s */
     drag_on_fix(&D, &f1);
     TEST_ASSERT_DOUBLE_WITHIN(1e-9, 5.0, D.v_est);
 
-    for (int k = 51; k <= 70; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drag_on_fused(&D, &fs, NULL, NULL); }
+    for (int k = 51; k <= 70; k++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.20f, 0); drive_fused(&fs, false); }
     TEST_ASSERT_DOUBLE_WITHIN(2e-3, 5.0 + 0.20 * G_MPS2 * 0.2, D.v_est);
 
     double before = D.v_est;
@@ -220,13 +229,13 @@ static void test_arm_after_still_dwell(void)
     drag_init(&D, NULL);
     for (int k = 0; k <= 199; k++) {            /* t = 0 .. 1.99 s: not yet armed */
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
-        drag_on_fused(&D, &fs, ev_cb, &EV);
+        drive_fused(&fs, true);
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
 
     fused_sample_t fs = fused((int64_t)200 * DT_US, 0.0f, FUS_STILL);   /* t = 2.00 s: arms */
-    drag_on_fused(&D, &fs, ev_cb, &EV);
+    drive_fused(&fs, true);
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));
     TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_ARMED));
     TEST_ASSERT_EQUAL_DOUBLE(0.0, D.v_est);     /* arming zeroes v_est and dist (§11.2) */
@@ -239,13 +248,13 @@ static void test_arm_requires_continuous_stillness(void)
     drag_init(&D, NULL);
     for (int k = 0; k <= 150; k++) {            /* 1.5 s still */
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
-        drag_on_fused(&D, &fs, ev_cb, &EV);
+        drive_fused(&fs, true);
     }
     fused_sample_t bump = fused((int64_t)151 * DT_US, 0.0f, 0);   /* stillness lost: timer restarts */
-    drag_on_fused(&D, &bump, ev_cb, &EV);
+    drive_fused(&bump, true);
     for (int k = 152; k <= 300; k++) {          /* another 1.49 s still — still short of 2 s */
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, FUS_STILL);
-        drag_on_fused(&D, &fs, ev_cb, &EV);
+        drive_fused(&fs, true);
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_ARMED));
@@ -260,8 +269,8 @@ static void test_arm_requires_continuous_stillness(void)
 static void test_run_0p5g_zero_to_hundred_and_quarter(void)
 {
     drag_init(&D, NULL);
-    arm_engine(ev_cb, &EV);
-    run_const_g(0.5, 1700, ev_cb, &EV);
+    arm_engine(true);
+    run_const_g(0.5, 1700, true);
 
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
     TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
@@ -289,8 +298,8 @@ static void test_run_0p5g_zero_to_hundred_and_quarter(void)
 static void test_run_0p5g_trap_and_line_speed(void)
 {
     drag_init(&D, NULL);
-    arm_engine(NULL, NULL);
-    run_const_g(0.5, 1700, NULL, NULL);
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);
 
     const drag_result_t *r = drag_current(&D);
     double trap_kmh = (double)r->trap_cms * 0.036;                 /* cm/s → km/h */
@@ -306,8 +315,8 @@ static void test_run_0p5g_trap_and_line_speed(void)
 static void test_run_0p5g_speed_range_100_200(void)
 {
     drag_init(&D, NULL);
-    arm_engine(NULL, NULL);
-    run_const_g(0.5, 1700, NULL, NULL);
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);
 
     const drag_gate_res_t *g = gate_by_id(drag_current(&D), 5);
     TEST_ASSERT_NOT_NULL(g);
@@ -321,8 +330,8 @@ static void test_run_0p5g_speed_range_100_200(void)
 static void test_interpolation_resolution_5ms(void)
 {
     drag_init(&D, NULL);
-    arm_engine(NULL, NULL);
-    run_const_g(0.5, 1700, NULL, NULL);
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);
 
     const drag_result_t *r = drag_current(&D);
     double a = 0.5 * G_MPS2;
@@ -340,8 +349,8 @@ static void test_rollout_shifts_t0(void)
     drag_cfg_t c; drag_cfg_defaults(&c);
     c.rollout = true;
     drag_init(&D, &c);
-    arm_engine(NULL, NULL);
-    run_const_g(0.5, 1700, NULL, NULL);
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);
 
     const drag_result_t *r = drag_current(&D);
     TEST_ASSERT_TRUE(r->flags & DRAG_F_ROLLOUT);
@@ -358,8 +367,8 @@ static void test_rollout_shifts_t0(void)
 static void test_braking_distance_100_to_0(void)
 {
     drag_init(&D, NULL);
-    arm_engine(ev_cb, &EV);
-    run_accel_then_brake(105.0, ev_cb, &EV);
+    arm_engine(true);
+    run_accel_then_brake(105.0, true);
 
     const drag_gate_res_t *gb = gate_by_id(drag_current(&D), 11);
     TEST_ASSERT_NOT_NULL(gb);
@@ -373,18 +382,18 @@ static void test_braking_distance_100_to_0(void)
 static void test_false_start_abort(void)
 {
     drag_init(&D, NULL);
-    arm_engine(ev_cb, &EV);
+    arm_engine(true);
     for (int k = LAUNCH_K; k <= 215; k++) {                       /* g-spike: launches at ~k=211 */
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.3f, 0);
-        drag_on_fused(&D, &fs, ev_cb, &EV);
+        drive_fused(&fs, true);
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
     fused_sample_t s216 = fused((int64_t)216 * DT_US, 0.0f, 0);
-    drag_on_fused(&D, &s216, ev_cb, &EV);
+    drive_fused(&s216, true);
     gps_fix_t stall = gfix((int64_t)216 * DT_US, 0, true);        /* Doppler: stopped */
     drag_on_fix(&D, &stall);
     fused_sample_t s217 = fused((int64_t)217 * DT_US, 0.0f, 0);   /* v_est ≈ 0 within 2 s of launch */
-    drag_on_fused(&D, &s217, ev_cb, &EV);
+    drive_fused(&s217, true);
 
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));       /* re-armed, run discarded */
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));
@@ -400,8 +409,8 @@ static void test_false_start_abort(void)
 static void test_low_g_launch_no_false_start(void)
 {
     drag_init(&D, NULL);
-    arm_engine(ev_cb, &EV);
-    run_const_g(0.2, 2800, ev_cb, &EV);
+    arm_engine(true);
+    run_const_g(0.2, 2800, true);
 
     TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
@@ -415,8 +424,8 @@ static void test_low_g_launch_no_false_start(void)
 static void test_done_then_brake(void)
 {
     drag_init(&D, NULL);
-    arm_engine(ev_cb, &EV);
-    run_quarter_then_brake(ev_cb, &EV);
+    arm_engine(true);
+    run_quarter_then_brake(true);
 
     const drag_gate_res_t *gb = gate_by_id(drag_current(&D), 11);
     TEST_ASSERT_TRUE(gb->hit);
@@ -435,8 +444,8 @@ static void test_bench_visibility_180_vs_320(void)
     uint16_t rows[8]; int n;
 
     drag_init(&D, NULL);
-    arm_engine(NULL, NULL);
-    run_accel_then_brake(180.0, NULL, NULL);        /* peaks at 180, brakes to a stop → DONE */
+    arm_engine(false);
+    run_accel_then_brake(180.0, false);        /* peaks at 180, brakes to a stop → DONE */
     const drag_result_t *r180 = drag_current(&D);
     TEST_ASSERT_TRUE(gate_by_id(r180, 2)->hit);     /* 0-100 hit */
     TEST_ASSERT_FALSE(gate_by_id(r180, 3)->hit);    /* 0-200 not */
@@ -448,8 +457,8 @@ static void test_bench_visibility_180_vs_320(void)
     TEST_ASSERT_EQUAL_UINT16(0,   rows[1]);         /* the 1/4 row */
 
     drag_init(&D, NULL);
-    arm_engine(NULL, NULL);
-    run_const_g(1.0, 1300, NULL, NULL);             /* 1 g reaches the 1/4 at ~320 km/h */
+    arm_engine(false);
+    run_const_g(1.0, 1300, false);             /* 1 g reaches the 1/4 at ~320 km/h */
     const drag_result_t *r320 = drag_current(&D);
     TEST_ASSERT_TRUE(gate_by_id(r320, 2)->hit && gate_by_id(r320, 3)->hit &&
                      gate_by_id(r320, 4)->hit && gate_by_id(r320, 10)->hit);
@@ -469,8 +478,8 @@ static void test_bench_drop_lowest_when_over_four(void)
     c.benches_kmh[0] = 60; c.benches_kmh[1] = 100; c.benches_kmh[2] = 200; c.benches_kmh[3] = 300;
     c.n_benches = 4;
     drag_init(&D, &c);
-    arm_engine(NULL, NULL);
-    run_const_g(1.0, 1300, NULL, NULL);
+    arm_engine(false);
+    run_const_g(1.0, 1300, false);
 
     uint16_t rows[8];
     int n = bench_rows(&D.cfg, drag_current(&D), rows, 4);
@@ -488,11 +497,11 @@ static void test_best_per_gate_two_runs(void)
     drag_init(&D, NULL);
     TEST_ASSERT_NULL(drag_best(&D, 2));             /* nothing completed yet */
 
-    arm_engine(NULL, NULL);
-    run_const_g(0.5, 1700, NULL, NULL);             /* 0-100 = 5665 ms, 1/4 = 12810 ms */
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);             /* 0-100 = 5665 ms, 1/4 = 12810 ms */
     drag_reset(&D);                                 /* keeps the session best */
-    arm_engine(NULL, NULL);
-    run_const_g(0.6, 1500, NULL, NULL);             /* 0-100 = 4721 ms, 1/4 = 11694 ms (faster) */
+    arm_engine(false);
+    run_const_g(0.6, 1500, false);             /* 0-100 = 4721 ms, 1/4 = 11694 ms (faster) */
 
     const drag_result_t *b100 = drag_best(&D, 2);
     const drag_result_t *bq   = drag_best(&D, 10);

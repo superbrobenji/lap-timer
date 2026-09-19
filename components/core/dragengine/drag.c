@@ -172,12 +172,13 @@ const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id)
 
 /* ---- events ---- */
 
-static void emit(drag_evt_cb_t cb, void *ctx, uint8_t type, uint16_t arg16,
+static void emit(event_t *out, int cap, int *n, uint8_t type, uint16_t arg16,
                  int64_t gps_us, int64_t mono_us, uint32_t arg32, uint32_t arg32b)
 {
-    if (!cb) return;
+    CORE_ASSERT_VOID(*n < cap, DRAG_ASSERT_CODE);   /* caller passes a DRAG_EVT_MAX buffer; overflow = miscount bug */
     event_t ev = { type, 0, arg16, gps_us, mono_us, arg32, arg32b };
-    cb(&ev, ctx);
+    out[*n] = ev;
+    (*n)++;
 }
 
 /* ---- history ring ---- */
@@ -230,7 +231,7 @@ static void update_best(drag_t *D)
  * (tp,vp,dp) is the previous sample, (tc,vc,dc) the current one. Records any SPEED_FROM0/SPEED_RANGE/
  * DIST gate crossed in the interval and accumulates the trap window for the 1/4 gate. */
 
-static void record_gate(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t idx,
+static void record_gate(drag_t *D, event_t *out, int cap, int *n, uint8_t idx,
                         int64_t t_cross, double v_cross_mps, double dist_cross_m)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
@@ -246,11 +247,11 @@ static void record_gate(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t idx,
     g->speed_cms = (uint16_t)(v_cross_mps * 100.0 + 0.5);
     g->dist_cm   = (uint32_t)(dist_cross_m * 100.0 + 0.5);
     D->last_gate_gps_us = t_cross;
-    emit(cb, ctx, EV_DRAG_GATE, D->cfg.gates[idx].id, t_cross, t_cross, g->time_ms, g->speed_cms);
+    emit(out, cap, n, EV_DRAG_GATE, D->cfg.gates[idx].id, t_cross, t_cross, g->time_ms, g->speed_cms);
 }
 
 /* The SPEED_RANGE gate (§11.1 gate 5, a→b km/h): arm at the a-crossing, record the b-crossing. */
-static void gate_step_range(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t i,
+static void gate_step_range(drag_t *D, event_t *out, int cap, int *n, uint8_t i,
                             int64_t tp, double vp, double dp, int64_t tc, double vc, double dc)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
@@ -282,12 +283,12 @@ static void gate_step_range(drag_t *D, drag_evt_cb_t cb, void *ctx, uint8_t i,
             if (d_int < 0) d_int = 0;
             g->dist_cm   = (uint32_t)(d_int * 100.0 + 0.5);
             D->last_gate_gps_us = t_b;
-            emit(cb, ctx, EV_DRAG_GATE, def->id, t_b, t_b, g->time_ms, g->speed_cms);
+            emit(out, cap, n, EV_DRAG_GATE, def->id, t_b, t_b, g->time_ms, g->speed_cms);
         }
     }
 }
 
-static void gate_step(drag_t *D, drag_evt_cb_t cb, void *ctx,
+static void gate_step(drag_t *D, event_t *out, int cap, int *n,
                       int64_t tp, double vp, double dp, int64_t tc, double vc, double dc)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
@@ -305,7 +306,7 @@ static void gate_step(drag_t *D, drag_evt_cb_t cb, void *ctx,
                 double frac = (V - vp) / (vc - vp);
                 int64_t t_cross = tp + (int64_t)(frac * (double)(tc - tp));
                 double d_cross = dp + frac * (dc - dp);
-                record_gate(D, cb, ctx, i, t_cross, V, d_cross);
+                record_gate(D, out, cap, n, i, t_cross, V, d_cross);
             }
             break;
         }
@@ -316,12 +317,12 @@ static void gate_step(drag_t *D, drag_evt_cb_t cb, void *ctx,
                 double frac = (Dm - dp) / (dc - dp);
                 int64_t t_cross = tp + (int64_t)(frac * (double)(tc - tp));
                 double v_cross = vp + frac * (vc - vp);
-                record_gate(D, cb, ctx, i, t_cross, v_cross, Dm);
+                record_gate(D, out, cap, n, i, t_cross, v_cross, Dm);
             }
             break;
         }
         case DRAG_SPEED_RANGE:
-            gate_step_range(D, cb, ctx, i, tp, vp, dp, tc, vc, dc);
+            gate_step_range(D, out, cap, n, i, tp, vp, dp, tc, vc, dc);
             break;
         case DRAG_BRAKE:
         default:
@@ -351,7 +352,7 @@ static void finalize_trap(drag_t *D)
  * Starts when v_est falls through the gate's high speed (100 km/h) after a run peak above it, and ends
  * when v_est < 0.5 km/h; the result is the distance accumulated in between. d_inc is this sample's
  * distance increment. May run before or after DONE. Returns true if the gate completed on this call. */
-static bool brake_step(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t now, int64_t mono, double d_inc)
+static bool brake_step(drag_t *D, event_t *out, int cap, int *n, int64_t now, int64_t mono, double d_inc)
 {
     CORE_ASSERT_RET(D != NULL, DRAG_ASSERT_CODE, false);
     CORE_ASSERT_RET(D->cfg.n_gates <= DRAG_MAX_GATES, DRAG_ASSERT_CODE, false);   /* loop bound */
@@ -388,7 +389,7 @@ static bool brake_step(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t now, int6
         D->brake_active = false;
         D->brake_done   = true;
         D->last_gate_gps_us = now;
-        emit(cb, ctx, EV_DRAG_GATE, D->cfg.gates[bi].id, now, mono, g->time_ms, 0);
+        emit(out, cap, n, EV_DRAG_GATE, D->cfg.gates[bi].id, now, mono, g->time_ms, 0);
         return true;
     }
     return false;
@@ -396,7 +397,7 @@ static bool brake_step(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t now, int6
 
 /* ---- state transitions ---- */
 
-static void enter_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+static void enter_armed(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us, int64_t mono_us)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     D->state = DRAG_ST_ARMED;
@@ -404,7 +405,7 @@ static void enter_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, 
     D->v_prev = D->dist_prev = 0.0;
     D->launch_run = false;
     reset_run(D);
-    emit(cb, ctx, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
+    emit(out, cap, n, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
 }
 
 /* §11.2 false start: discard the run and return to ARMED (no event, no run_no consumed). */
@@ -420,14 +421,14 @@ static void abort_to_armed(drag_t *D)
     reset_run(D);
 }
 
-static void enter_done(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, int64_t mono_us)
+static void enter_done(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us, int64_t mono_us)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     D->state = DRAG_ST_DONE;
     D->done_gps_us = gps_us;
     finalize_trap(D);
     update_best(D);                      /* freeze the result into the session best */
-    emit(cb, ctx, EV_DRAG_DONE, D->run_no, gps_us, mono_us, 0, 0);
+    emit(out, cap, n, EV_DRAG_DONE, D->run_no, gps_us, mono_us, 0, 0);
 }
 
 /* Launch: back-date t0 to the first sample of the contiguous g_lon > DRAG_LAUNCH_SCAN_G run ending at
@@ -435,7 +436,7 @@ static void enter_done(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t gps_us, i
  * LAUNCHED. Gates are evaluated over the reconstructed samples too (harmless: no default gate can be
  * crossed in the sub-second launch window). Rollout is applied later on the first live sample whose
  * dist crosses DRAG_ROLLOUT_M. */
-static void do_launch(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t mono_us)
+static void do_launch(drag_t *D, event_t *out, int cap, int *n, int64_t mono_us)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(D->hist_count <= DRAG_HIST_N, DRAG_ASSERT_CODE);   /* ring count in range */
@@ -474,7 +475,7 @@ static void do_launch(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t mono_us)
         v += 0.5 * (a_p + a_c) * dt;
         if (v < 0.0) v = 0.0;
         dist += 0.5 * (v_p + v) * dt;
-        gate_step(D, cb, ctx, t_p, v_p, d_p, tc, v, dist);
+        gate_step(D, out, cap, n, t_p, v_p, d_p, tc, v, dist);
         a_p = a_c; v_p = v; d_p = dist; t_p = tc;
         cur = nxt;
     }
@@ -482,7 +483,7 @@ static void do_launch(drag_t *D, drag_evt_cb_t cb, void *ctx, int64_t mono_us)
     D->dist_m = dist;
     D->v_peak = v;
     D->state = DRAG_ST_LAUNCHED;
-    emit(cb, ctx, EV_DRAG_LAUNCH, 0, D->t0_gps_us, mono_us, 0, 0);
+    emit(out, cap, n, EV_DRAG_LAUNCH, 0, D->t0_gps_us, mono_us, 0, 0);
 }
 
 /* Is a braking result still expected? (keeps the run in DONE until braking resolves.) */
@@ -500,7 +501,7 @@ static bool brake_pending(const drag_t *D)
 /* ---- per-state fused-sample handling (§11.2), one helper per DRAG_ST_* ---- */
 
 /* IDLE: watch for the arm condition (slow + FUS_STILL held for DRAG_ARM_STILL_S). */
-static void step_idle(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample_t *fs, int64_t now)
+static void step_idle(drag_t *D, event_t *out, int cap, int *n, const fused_sample_t *fs, int64_t now)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
@@ -511,7 +512,7 @@ static void step_idle(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample
     if (slow && still) {
         if (!D->still_run) { D->still_run = true; D->still_since_us = now; }
         else if (now - D->still_since_us >= (int64_t)DRAG_ARM_STILL_S * 1000000) {
-            enter_armed(D, cb, ctx, now, fs->mono_us);
+            enter_armed(D, out, cap, n, now, fs->mono_us);
         }
     } else {
         D->still_run = false;
@@ -519,7 +520,7 @@ static void step_idle(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample
 }
 
 /* ARMED: launch when g_lon > DRAG_LAUNCH_G continuously for DRAG_LAUNCH_HOLD_MS (§11.2). */
-static void step_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample_t *fs, int64_t now)
+static void step_armed(drag_t *D, event_t *out, int cap, int *n, const fused_sample_t *fs, int64_t now)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
@@ -527,7 +528,7 @@ static void step_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sampl
     if (fs->g_lon > (float)DRAG_LAUNCH_G) {
         if (!D->launch_run) { D->launch_run = true; D->launch_since_us = now; }
         else if (now - D->launch_since_us >= (int64_t)DRAG_LAUNCH_HOLD_MS * 1000) {
-            do_launch(D, cb, ctx, fs->mono_us);
+            do_launch(D, out, cap, n, fs->mono_us);
         }
     } else {
         D->launch_run = false;
@@ -535,7 +536,7 @@ static void step_armed(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sampl
 }
 
 /* LAUNCHED: rollout, gate evaluation, braking, false-start abort and the DONE transitions (§11.2). */
-static void step_launched(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample_t *fs,
+static void step_launched(drag_t *D, event_t *out, int cap, int *n, const fused_sample_t *fs,
                           int64_t now, double d_inc)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
@@ -557,8 +558,8 @@ static void step_launched(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sa
         D->cur.flags |= DRAG_F_ROLLOUT;
     }
     if (D->v_est > D->v_peak) D->v_peak = D->v_est;
-    gate_step(D, cb, ctx, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
-    brake_step(D, cb, ctx, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
+    gate_step(D, out, cap, n, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
+    brake_step(D, out, cap, n, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
 
     /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm.
      * Guarded on v_peak having already cleared the threshold once: a sustained low-g launch is
@@ -580,30 +581,32 @@ static void step_launched(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sa
                    now - D->last_gate_gps_us >= (int64_t)DRAG_TIMEOUT_S * 1000000;
     if (quarter) {
         D->cur.flags |= DRAG_F_QUARTER;
-        enter_done(D, cb, ctx, now, fs->mono_us);
+        enter_done(D, out, cap, n, now, fs->mono_us);
     } else if (stopped || faded) {
-        enter_done(D, cb, ctx, now, fs->mono_us);
+        enter_done(D, out, cap, n, now, fs->mono_us);
     }
 }
 
 /* DONE: braking may still complete (§11.2); settle back to IDLE 5 s after DONE once it has resolved. */
-static void step_done(drag_t *D, drag_evt_cb_t cb, void *ctx, const fused_sample_t *fs,
+static void step_done(drag_t *D, event_t *out, int cap, int *n, const fused_sample_t *fs,
                       int64_t now, double d_inc)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(D->state == DRAG_ST_DONE, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(d_inc >= 0.0, DRAG_ASSERT_CODE);
-    if (brake_step(D, cb, ctx, now, fs->mono_us, d_inc)) update_best(D);
+    if (brake_step(D, out, cap, n, now, fs->mono_us, d_inc)) update_best(D);
     if (now - D->done_gps_us >= (int64_t)DRAG_DONE_SETTLE_S * 1000000 && !brake_pending(D))
         go_idle_keep_result(D);
 }
 
 /* ---- one fused sample (100 Hz) ---- */
 
-void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx)
+void drag_on_fused(drag_t *D, const fused_sample_t *fs, event_t *out, int cap, int *n)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
+    CORE_ASSERT_VOID(out != NULL && n != NULL && cap > 0, DRAG_ASSERT_CODE);   /* caller-drained event buffer */
+    *n = 0;                                                    /* engine appends this sample's events; caller drains them */
     if (!fs) return;
     CORE_ASSERT_VOID(isfinite(fs->g_lon), DRAG_ASSERT_CODE);   /* accumulated into v_est/dist_m: a NaN would corrupt them permanently */
     const int64_t now = fs->gps_us;
@@ -625,10 +628,10 @@ void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *
     hist_push(D, now, fs->g_lon);
 
     switch (D->state) {
-    case DRAG_ST_IDLE:     step_idle(D, cb, ctx, fs, now); break;
-    case DRAG_ST_ARMED:    step_armed(D, cb, ctx, fs, now); break;
-    case DRAG_ST_LAUNCHED: step_launched(D, cb, ctx, fs, now, d_inc); break;
-    case DRAG_ST_DONE:     step_done(D, cb, ctx, fs, now, d_inc); break;
+    case DRAG_ST_IDLE:     step_idle(D, out, cap, n, fs, now); break;
+    case DRAG_ST_ARMED:    step_armed(D, out, cap, n, fs, now); break;
+    case DRAG_ST_LAUNCHED: step_launched(D, out, cap, n, fs, now, d_inc); break;
+    case DRAG_ST_DONE:     step_done(D, out, cap, n, fs, now, d_inc); break;
     default:               break;
     }
 

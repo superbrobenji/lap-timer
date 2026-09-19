@@ -152,10 +152,14 @@ static void on_fix(const gps_fix_t *fix_in, void *vctx)
     if (valid) tb_on_fix(&c->tb, fix.gps_us, fix.mono_us, 0);
     fus_set_gps_speed(&c->fus, (float)fix.gspeed_mms / 1000.0f,
                       (float)fix.head_e5 / 1e5f, fix.mono_us, valid);
-    if (c->mode == REPLAY_MODE_LAP)
-        lap_on_fix(&c->lap, &fix, c->have_fused ? &c->latest_fused : NULL, engine_cb, c);
-    else if (c->mode == REPLAY_MODE_DRAG)
+    if (c->mode == REPLAY_MODE_LAP) {
+        event_t evs[LAP_EVT_MAX];
+        int nev = 0;
+        lap_on_fix(&c->lap, &fix, c->have_fused ? &c->latest_fused : NULL, evs, LAP_EVT_MAX, &nev);
+        for (int i = 0; i < nev; i++) engine_cb(&evs[i], c);
+    } else if (c->mode == REPLAY_MODE_DRAG) {
         drag_on_fix(&c->drag, &fix);
+    }
 
     bool moving = valid && ((double)fix.gspeed_mms * MMS_TO_KMH) > (double)MOVING_SPEED_KMH;
     if (!c->have_moving || moving != c->moving) {
@@ -172,7 +176,12 @@ static void on_fused(const fused_sample_t *fs, void *vctx)
     c->latest_fused = *fs;
     c->have_fused = true;
     c->out->n_fused++;
-    if (c->mode == REPLAY_MODE_DRAG) drag_on_fused(&c->drag, fs, engine_cb, c);
+    if (c->mode == REPLAY_MODE_DRAG) {
+        event_t evs[DRAG_EVT_MAX];
+        int nev = 0;
+        drag_on_fused(&c->drag, fs, evs, DRAG_EVT_MAX, &nev);
+        for (int i = 0; i < nev; i++) engine_cb(&evs[i], c);
+    }
 }
 
 static int run_feed(rr_ctx_t *c, const char *path, const uint8_t *buf, size_t n)
