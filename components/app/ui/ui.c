@@ -163,6 +163,16 @@ static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
     (void)xQueueSend(g_cmd_q, &c, 0);
 }
 
+/* Append one row (label + action) to the parallel menu arrays and advance the count; the label
+ * points at caller-owned storage (s_model.menu_items[] does not copy). */
+static void menu_add(uint8_t *n, const char *lbl, uint8_t act)
+{
+    LT_ASSERT_VOID(*n < UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* room left in menu_items[]/s_menu_action[] */
+    s_model.menu_items[*n] = lbl;
+    s_menu_action[*n]      = act;
+    (*n)++;
+}
+
 /* Build the §20.7 menu into s_model.menu_items[]/menu_n; dynamic labels reflect current state. */
 static void build_menu(void)
 {
@@ -175,27 +185,19 @@ static void build_menu(void)
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
 
-#define UI_MENU_ADD(lbl, act)               \
-    do {                                    \
-        s_model.menu_items[n] = (lbl);      \
-        s_menu_action[n]      = (uint8_t)(act); \
-        n++;                                \
-    } while (0)
-
-    UI_MENU_ADD(s_lbl_mode, MA_MODE);
-    UI_MENU_ADD("Layout", MA_LAYOUT);
-    UI_MENU_ADD("New track", MA_NEWTRACK);
-    UI_MENU_ADD("Calibrate", MA_CALIBRATE);
-    UI_MENU_ADD(s_lbl_units, MA_UNITS);
-    UI_MENU_ADD("Export (BLE)", MA_EXPORT);
+    menu_add(&n, s_lbl_mode, MA_MODE);
+    menu_add(&n, "Layout", MA_LAYOUT);
+    menu_add(&n, "New track", MA_NEWTRACK);
+    menu_add(&n, "Calibrate", MA_CALIBRATE);
+    menu_add(&n, s_lbl_units, MA_UNITS);
+    menu_add(&n, "Export (BLE)", MA_EXPORT);
 #if CFG_HAS_BLE_RC
-    UI_MENU_ADD("Live to phone", MA_LIVE);
+    menu_add(&n, "Live to phone", MA_LIVE);
 #endif
-    UI_MENU_ADD("Diagnostics", MA_DIAG);
-    UI_MENU_ADD("Sessions", MA_SESSIONS);
-    UI_MENU_ADD(s_lbl_disp, MA_DISPLAY);
-    UI_MENU_ADD("Sleep now", MA_SLEEP);
-#undef UI_MENU_ADD
+    menu_add(&n, "Diagnostics", MA_DIAG);
+    menu_add(&n, "Sessions", MA_SESSIONS);
+    menu_add(&n, s_lbl_disp, MA_DISPLAY);
+    menu_add(&n, "Sleep now", MA_SLEEP);
 
     LT_ASSERT_VOID(n <= UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* did not overrun menu_items[]/action[] */
     s_model.menu_n = n;
@@ -239,6 +241,35 @@ static void ui_exit_menu(void)
     s_dirty        = true;
 }
 
+/* MA_MODE: toggle Lap/Drag, reset the page (§22.6), push the mode command, refresh the label.
+ * (Split verbatim out of menu_select for rule 4.) */
+static void menu_do_mode(void)
+{
+    s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
+    s_model.mode  = s_mode;
+    s_model.page  = 0; /* §22.6: a mode switch resets the screen */
+    ui_send_cmd(CMD_SET_MODE, s_mode, 0);
+    snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
+}
+
+/* MA_UNITS: toggle km/h<->mph, persist, refresh the label. (Split verbatim out of menu_select.) */
+static void menu_do_units(void)
+{
+    s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
+    (void)lt_cfg_save(&s_cfg);
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
+             s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+}
+
+/* MA_DISPLAY: toggle the live clock, persist, refresh the label. (Split verbatim out of menu_select.) */
+static void menu_do_display(void)
+{
+    s_cfg.display.live_clock = !s_cfg.display.live_clock;
+    (void)lt_cfg_save(&s_cfg);
+    snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
+             s_cfg.display.live_clock ? "on" : "off");
+}
+
 static void menu_select(void)
 {
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* indexes s_menu_action[] */
@@ -246,54 +277,20 @@ static void menu_select(void)
     uint8_t act = s_menu_action[s_model.menu_sel];
     LT_ASSERT_VOID(act <= MA_SLEEP, UI_APP_ASSERT_CODE);   /* a valid menu action enum */
     switch (act) {
-    case MA_MODE:
-        s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
-        s_model.mode  = s_mode;
-        s_model.page  = 0; /* §22.6: a mode switch resets the screen */
-        ui_send_cmd(CMD_SET_MODE, s_mode, 0);
-        snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
-        break;
-    case MA_LAYOUT:
-        /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
-        ui_send_cmd(CMD_SET_LAYOUT, 0, 0);
-        ESP_LOGI(TAG, "menu: Layout -> Auto (venue layout list TBD)");
-        break;
-    case MA_CALIBRATE:
-        ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); /* pipeline drops it until the calib session lands */
-        ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT");
-        break;
-    case MA_UNITS:
-        s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
-        (void)lt_cfg_save(&s_cfg);
-        snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
-                 s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
-        break;
-    case MA_DISPLAY:
-        s_cfg.display.live_clock = !s_cfg.display.live_clock;
-        (void)lt_cfg_save(&s_cfg);
-        snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
-                 s_cfg.display.live_clock ? "on" : "off");
-        break;
-    case MA_NEWTRACK:
-        ESP_LOGW(TAG, "menu: New track not implemented (plan 05)");
-        break;
-    case MA_EXPORT:
-        ESP_LOGW(TAG, "menu: Export (BLE) not implemented (plan 06)");
-        break;
-    case MA_LIVE:
-        ESP_LOGW(TAG, "menu: Live to phone not implemented (plan 06)");
-        break;
-    case MA_DIAG:
-        ESP_LOGW(TAG, "menu: Diagnostics export not implemented (§17.10, plan 05)");
-        break;
-    case MA_SESSIONS:
-        ESP_LOGW(TAG, "menu: Sessions ops not implemented (plan 05)");
-        break;
-    case MA_SLEEP:
-        ESP_LOGW(TAG, "menu: Sleep now -- hold MODE 3 s to confirm (not implemented, plan 07)");
-        break;
-    default:
-        break;
+    case MA_MODE:    menu_do_mode();    break;
+    case MA_UNITS:   menu_do_units();   break;
+    case MA_DISPLAY: menu_do_display(); break;
+    /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
+    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (venue layout list TBD)"); break;
+    /* pipeline drops CMD_CALIB_ORIENT until the calib session lands. */
+    case MA_CALIBRATE: ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT"); break;
+    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (plan 05)"); break;
+    case MA_EXPORT:   ESP_LOGW(TAG, "menu: Export (BLE) not implemented (plan 06)"); break;
+    case MA_LIVE:     ESP_LOGW(TAG, "menu: Live to phone not implemented (plan 06)"); break;
+    case MA_DIAG:     ESP_LOGW(TAG, "menu: Diagnostics export not implemented (§17.10, plan 05)"); break;
+    case MA_SESSIONS: ESP_LOGW(TAG, "menu: Sessions ops not implemented (plan 05)"); break;
+    case MA_SLEEP:    ESP_LOGW(TAG, "menu: Sleep now -- hold MODE 3 s to confirm (not implemented, plan 07)"); break;
+    default: break;
     }
     s_dirty = true;
 }
@@ -505,65 +502,53 @@ static void handle_drag_gate(const event_t *e)
     s_dirty = true;
 }
 
+/* EV_SECTOR -> model (split verbatim out of handle_event for rule 4). */
+static void handle_sector(const event_t *e)
+{
+    LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);   /* engine sector idx in range */
+    s_model.cur_sector_idx = (uint8_t)e->arg16;
+    s_model.cur_ms_at_gate = e->arg32;
+    s_model.sector_delta_ms = (int32_t)e->arg32b;
+    s_dirty                = true;
+}
+
+/* EV_VENUE_FOUND -> model (split verbatim out of handle_event for rule 4). */
+static void handle_venue_found(const event_t *e, int64_t now)
+{
+    snprintf(s_model.venue_name, sizeof s_model.venue_name, "V%u", (unsigned)e->arg16);
+    s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
+    show_venue_oneshot(now);
+    s_dirty = true;
+}
+
+/* EV_LAYOUT_LOCKED -> model (split verbatim out of handle_event for rule 4). */
+static void handle_layout_locked(const event_t *e, int64_t now)
+{
+    snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
+    show_venue_oneshot(now); /* layout phase: render shows layout_name (non-empty) */
+    s_dirty = true;
+}
+
 static void handle_event(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* model screen stays valid */
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);   /* esp_timer stamp drives the one-shot timers */
     switch (e->type) {
-    case EV_LAP_COMPLETE:
-        handle_lap_complete(e);
-        break;
-    case EV_SECTOR:
-        LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);   /* engine sector idx in range */
-        s_model.cur_sector_idx = (uint8_t)e->arg16;
-        s_model.cur_ms_at_gate = e->arg32;
-        s_model.sector_delta_ms = (int32_t)e->arg32b;
-        s_dirty                = true;
-        break;
-    case EV_VENUE_FOUND:
-        snprintf(s_model.venue_name, sizeof s_model.venue_name, "V%u", (unsigned)e->arg16);
-        s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
-        show_venue_oneshot(now);
-        s_dirty = true;
-        break;
-    case EV_LAYOUT_LOCKED:
-        snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
-        show_venue_oneshot(now); /* layout phase: render shows layout_name (non-empty) */
-        s_dirty = true;
-        break;
-    case EV_FIX_LOST:
-        s_fix_lost = true;
-        s_dirty    = true;
-        break;
-    case EV_FIX_OK:
-        s_fix_lost = false;
-        s_dirty    = true;
-        break;
-    case EV_MOTION:
-        /* Proxy: no per-fix speed is broadcast to the ui yet, so moving conservatively locks the
-         * menu (== the lock threshold). EV_STILL clears it. Flagged as a coarse gate. */
-        s_gspeed_kmh = MENU_LOCK_SPEED_KMH;
-        break;
-    case EV_STILL:
-        s_gspeed_kmh = 0;
-        break;
-    case EV_DRAG_ARMED:
-        s_model.drag_armed = true;
-        s_model.drag_n     = 0;
-        s_dirty            = true;
-        break;
-    case EV_DRAG_LAUNCH:
-        s_model.drag_armed = false;
-        s_dirty            = true;
-        break;
-    case EV_DRAG_GATE:
-        handle_drag_gate(e);
-        break;
-    case EV_DRAG_DONE:
-        s_dirty = true;
-        break;
-    default:
-        break;
+    case EV_LAP_COMPLETE:  handle_lap_complete(e); break;
+    case EV_SECTOR:        handle_sector(e); break;
+    case EV_VENUE_FOUND:   handle_venue_found(e, now); break;
+    case EV_LAYOUT_LOCKED: handle_layout_locked(e, now); break;
+    case EV_FIX_LOST: s_fix_lost = true; s_dirty = true; break;
+    case EV_FIX_OK:   s_fix_lost = false; s_dirty = true; break;
+    /* Proxy: no per-fix speed is broadcast to the ui yet, so moving conservatively locks the menu
+     * (== the lock threshold). EV_STILL clears it. Flagged as a coarse gate. */
+    case EV_MOTION: s_gspeed_kmh = MENU_LOCK_SPEED_KMH; break;
+    case EV_STILL:  s_gspeed_kmh = 0; break;
+    case EV_DRAG_ARMED:  s_model.drag_armed = true; s_model.drag_n = 0; s_dirty = true; break;
+    case EV_DRAG_LAUNCH: s_model.drag_armed = false; s_dirty = true; break;
+    case EV_DRAG_GATE:   handle_drag_gate(e); break;
+    case EV_DRAG_DONE:   s_dirty = true; break;
+    default: break;
     }
 }
 
@@ -599,6 +584,65 @@ static void render_now(void)
 }
 
 /* ---- task ---- */
+
+/* One iteration of the ui task loop (§20.3): reset the WDT, drain buttons + events, expire
+ * transient one-shots, auto-exit an idle menu, then render once if anything changed. Split
+ * verbatim out of the intentionally-non-terminating ui_task loop for rule 4. */
+static void ui_loop_iter(QueueHandle_t btn_q)
+{
+    esp_task_wdt_reset();
+
+    btn_raw_t ev;
+    if (btn_q != NULL && xQueueReceive(btn_q, &ev, pdMS_TO_TICKS(UI_TICK_MS)) == pdTRUE) {
+        process_mask(ev.mask, ev.mono_us);
+        /* rule 2: bounded drain of the rest (btn_q depth 8 << the cap). */
+        for (int i = 0; i < UI_BTN_DRAIN_MAX && xQueueReceive(btn_q, &ev, 0) == pdTRUE; i++) {
+            process_mask(ev.mask, ev.mono_us);
+        }
+    } else if (btn_q == NULL) {
+        vTaskDelay(pdMS_TO_TICKS(UI_TICK_MS));
+    }
+
+    int64_t now = esp_timer_get_time();
+
+    /* Reconcile with the live level: catches an edge the ISR's global 25 ms guard coalesced. */
+    uint8_t cur = 0;
+    if (board_buttons_read(&cur) == 0) {
+        process_mask(cur, now);
+    }
+    check_held(now);
+
+    /* Coalesce (§20.3): drain the whole event queue before rendering once (rule 2: bounded). */
+    event_t e;
+    for (int i = 0; i < UI_EVT_DRAIN_MAX && g_ui_evt_q != NULL
+                    && xQueueReceive(g_ui_evt_q, &e, 0) == pdTRUE; i++) {
+        handle_event(&e, now);
+    }
+
+    /* Model invariants the post-drain screen logic below depends on. */
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);
+
+    /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. */
+    if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
+        s_oneshot_until_us = 0;
+        s_model.screen     = SCR_RIDING;
+        s_dirty            = true;
+    }
+    /* Menu idle auto-exit (§20.7). */
+    if (s_model.screen == SCR_MENU && (now - s_last_input_us) >= (int64_t)MENU_IDLE_MS * 1000) {
+        ui_exit_menu();
+    }
+
+    update_flags();
+
+    if (s_dirty) {
+        render_now();
+        s_dirty = false;
+    }
+
+    g_hb[HB_UI]++;
+}
 
 static void ui_task(void *arg)
 {
@@ -638,58 +682,7 @@ static void ui_task(void *arg)
     QueueHandle_t btn_q = ui_buttons_queue();
 
     for (;;) {
-        esp_task_wdt_reset();
-
-        btn_raw_t ev;
-        if (btn_q != NULL && xQueueReceive(btn_q, &ev, pdMS_TO_TICKS(UI_TICK_MS)) == pdTRUE) {
-            process_mask(ev.mask, ev.mono_us);
-            /* rule 2: bounded drain of the rest (btn_q depth 8 << the cap). */
-            for (int i = 0; i < UI_BTN_DRAIN_MAX && xQueueReceive(btn_q, &ev, 0) == pdTRUE; i++) {
-                process_mask(ev.mask, ev.mono_us);
-            }
-        } else if (btn_q == NULL) {
-            vTaskDelay(pdMS_TO_TICKS(UI_TICK_MS));
-        }
-
-        int64_t now = esp_timer_get_time();
-
-        /* Reconcile with the live level: catches an edge the ISR's global 25 ms guard coalesced. */
-        uint8_t cur = 0;
-        if (board_buttons_read(&cur) == 0) {
-            process_mask(cur, now);
-        }
-        check_held(now);
-
-        /* Coalesce (§20.3): drain the whole event queue before rendering once (rule 2: bounded). */
-        event_t e;
-        for (int i = 0; i < UI_EVT_DRAIN_MAX && g_ui_evt_q != NULL
-                        && xQueueReceive(g_ui_evt_q, &e, 0) == pdTRUE; i++) {
-            handle_event(&e, now);
-        }
-
-        /* Model invariants the post-drain screen logic below depends on. */
-        LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
-        LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);
-
-        /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. */
-        if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
-            s_oneshot_until_us = 0;
-            s_model.screen     = SCR_RIDING;
-            s_dirty            = true;
-        }
-        /* Menu idle auto-exit (§20.7). */
-        if (s_model.screen == SCR_MENU && (now - s_last_input_us) >= (int64_t)MENU_IDLE_MS * 1000) {
-            ui_exit_menu();
-        }
-
-        update_flags();
-
-        if (s_dirty) {
-            render_now();
-            s_dirty = false;
-        }
-
-        g_hb[HB_UI]++;
+        ui_loop_iter(btn_q);
     }
 }
 

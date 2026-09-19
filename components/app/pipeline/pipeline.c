@@ -284,6 +284,10 @@ static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
     LT_ASSERT_VOID(fix != NULL, PIPE_ASSERT_CODE);
     if (s_mode == MODE_LAP && s_resume_pending && valid) {
         s_resume_pending = false;
+        /* An armed resume snapshot was validated (magic+version+CRC) at init and every save writes
+         * a valid fix's gps_us (> 0, §6.5), so a zero save-stamp here is a corrupt/foreign snapshot,
+         * not a real resume point -- the two-sided freshness test below would misread it. */
+        LT_ASSERT_VOID(s_resume.saved_gps_us != 0, PIPE_ASSERT_CODE);
         /* F2 (issue #35): the freshness test must be two-sided. `age <= 0` means this fix PREDATES
          * the saved snapshot (a rewound clock, or a sim replay restarting the capture from t0) --
          * resuming then restores lap_start_gps_us into the future relative to incoming fixes and the
