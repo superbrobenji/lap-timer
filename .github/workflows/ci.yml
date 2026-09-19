@@ -41,13 +41,15 @@ jobs:
         run: echo "test/CMakeLists.txt not present yet"
 
   static-analysis:
-    # Power of 10 (Holzmann/JPL) static analysis -- design §5, plan Session 4.5.1 Task 2.
-    # REPORT-ONLY: every analyser step below is `continue-on-error: true`, so this job can never
-    # fail the build this session (findings are printed to the job log as information). It is
-    # deliberately NOT added to the branch-protection required checks yet -- that flip, plus
-    # `--enforce-fnptr`/`--fail-on-violation` on the linter, is plan Session 4.5.6, once the
-    # rules 1-8/10 retrofit (Sessions 4.5.2-4.5.4) and the rule 9 function-pointer rework
-    # (Session 4.5.5) are both complete.
+    # Power of 10 (Holzmann/JPL) static analysis -- design §5, plan Session 4.5.6 (blocking flip).
+    # BLOCKING as of plan-4.5-done: the custom linter (the authoritative rule 3/4/4-compound/5/8/9
+    # gate) and clang-tidy (rule-mapped checks, currently clean over components/core) FAIL the job
+    # on any violation. cppcheck stays `continue-on-error: true` (advisory second analyser, rule 10
+    # "preferably more than one"): its full-tree style/portability output is largely non-Power-of-10
+    # and driving it to zero is disproportionate -- see design §5. The rule-6/10 compiler warnings
+    # (-Wmissing-prototypes/-declarations, -Wshadow, -Werror) are enforced by the build jobs.
+    # To make this a merge gate, add `static-analysis` to the branch-protection required checks
+    # (a GitHub repo setting, not expressible here).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,9 +57,8 @@ jobs:
           submodules: recursive
       - name: Install cppcheck + clang-tidy
         run: sudo apt-get update && sudo apt-get install -y cppcheck clang-tidy
-      - name: power_of_10.py linter (project-specific rules 3/4/5/8/9; rule 9 inert until 4.5.5)
-        continue-on-error: true
-        run: python3 tools/lint/power_of_10.py
+      - name: power_of_10.py linter (BLOCKING; rules 3/4/4-compound/5/8/9)
+        run: python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation
       - name: cppcheck (warning+style+portability; design §5 second analyser, rule 10)
         continue-on-error: true
         run: |
@@ -87,16 +88,17 @@ jobs:
       # compile database once an IDF-container step exists in this job (or firmware.yml uploads
       # its compile_commands.json for this job to consume) -- likely alongside the rule 9
       # (Session 4.5.5) or blocking-flip (Session 4.5.6) work.
-      - name: clang-tidy over components/core (host compile DB; report-only)
+      - name: clang-tidy over components/core (host compile DB; BLOCKING, rule-mapped checks)
         if: steps.probe.outputs.present == 'true'
-        continue-on-error: true
         run: |
           # Only .c files: each is its own translation unit in the compile DB and pulls in its
           # own headers, so clang-tidy still sees + reports (per HeaderFilterRegex) the in-scope
           # headers without needing a compile-command entry for a .h on its own. jsmn.c is
-          # vendored (design §1) and excluded.
+          # vendored (design §1) and excluded. --warnings-as-errors='*' makes the rule-mapped
+          # checks in .clang-tidy fail the job (components/core is clean under them as of 4.5.6);
+          # local `clang-tidy` runs (without the flag) stay advisory.
           find components/core -name '*.c' -not -path 'components/core/util/jsmn.c' -print0 \
-            | xargs -0 clang-tidy -p test/build --quiet
+            | xargs -0 clang-tidy -p test/build --quiet --warnings-as-errors='*'
 
   tracks-generated:
     runs-on: ubuntu-latest
