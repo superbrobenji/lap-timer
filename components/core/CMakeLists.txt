@@ -10,4 +10,4 @@ endif()
 # automatically. ui/include holds the ui/-scoped public headers (core/ui/fonts.h, core/ui/icons.h,
 # core/ui/render.h, core/ui/model.h).
 idf_component_register(SRCS ${CORE_SRCS} INCLUDE_DIRS include ui/include)
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
