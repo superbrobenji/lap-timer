@@ -7,20 +7,32 @@
  * gcc-16.
  */
 #include "core/ui/model.h"
+#include "core/core.h"
 
 #include <string.h>
+
+/* Power of 10 rule 5 (spec §17.9, design doc §3): this module's assertions report UI_ASSERT_CODE
+ * (shared with render.c: components/core/ui is one assertion "module" for the retrofit). They
+ * guard genuine anomalies -- NULL params -- never the existing, tested "up to N" clamps
+ * (best_n_sectors/drag_n/menu_n/boot_n_lines and friends): those are this module's documented,
+ * specified behavior for an over-long model field (draw the first N and silently trim the rest),
+ * not a bug, so they stay plain clamps rather than becoming assertions. */
+#define UI_ASSERT_CODE 0x0AA0
 
 /* ---- tiny pure-integer string helpers (no snprintf/stdio: core/ui stays free of <stdio.h>,
  * mirroring render.c's <string.h>-only policy) ---- */
 
 static char *put_char(char *p, char c)
 {
+    CORE_ASSERT_RET(p != NULL, UI_ASSERT_CODE, p);
     *p++ = c;
     return p;
 }
 
 static char *put_str(char *p, const char *s)
 {
+    CORE_ASSERT_RET(p != NULL, UI_ASSERT_CODE, p);
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, p);
     while (*s != '\0') {
         *p++ = *s++;
     }
@@ -30,6 +42,7 @@ static char *put_str(char *p, const char *s)
 /* Decimal, no leading zeros (0 itself renders as "0"). */
 static char *put_uint(char *p, unsigned v)
 {
+    CORE_ASSERT_RET(p != NULL, UI_ASSERT_CODE, p);
     char tmp[12];
     int  n = 0;
     if (v == 0) {
@@ -48,6 +61,7 @@ static char *put_uint(char *p, unsigned v)
 /* "W.FF" from a g-value stored as g*100 (e.g. 132 -> "1.32"). */
 static char *put_g_e2(char *p, uint16_t g_e2)
 {
+    CORE_ASSERT_RET(p != NULL, UI_ASSERT_CODE, p);
     unsigned whole = (unsigned)g_e2 / 100u;
     unsigned frac = (unsigned)g_e2 % 100u;
     p = put_uint(p, whole);
@@ -74,6 +88,7 @@ static const char EMPTY_TIME[] = "-:--.--";
  * bytes. Pure integer division/modulo, no float. */
 static void fmt_time_ms(char *buf, uint32_t ms)
 {
+    CORE_ASSERT_VOID(buf != NULL, UI_ASSERT_CODE);
     unsigned cs = (unsigned)((ms / 10u) % 100u);
     unsigned s = (unsigned)((ms / 1000u) % 60u);
     unsigned m = (unsigned)(ms / 60000u);
@@ -90,6 +105,7 @@ static void fmt_time_ms(char *buf, uint32_t ms)
         p = put_char(p, '0');
     }
     p = put_uint(p, cs);
+    CORE_ASSERT_VOID((size_t)(p - buf) < TIME_BUF_LEN, UI_ASSERT_CODE); /* room left for the NUL, per this function's own documented buf size */
     *p = '\0';
 }
 
@@ -98,6 +114,7 @@ static void fmt_time_ms(char *buf, uint32_t ms)
  * unsigned arithmetic rather than `-dms`). */
 static void fmt_delta_ms(char *buf, int32_t dms)
 {
+    CORE_ASSERT_VOID(buf != NULL, UI_ASSERT_CODE);
     char    *p = buf;
     uint32_t mag;
     if (dms < 0) {
@@ -116,6 +133,7 @@ static void fmt_delta_ms(char *buf, int32_t dms)
         p = put_char(p, '0');
     }
     p = put_uint(p, cs);
+    CORE_ASSERT_VOID((size_t)(p - buf) < DELTA_BUF_LEN, UI_ASSERT_CODE); /* room left for the NUL, per this function's own documented buf size */
     *p = '\0';
 }
 
@@ -151,6 +169,7 @@ static const int8_t FAULT_ICON_FOR_BIT[14] = {
 
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     const int pitch = ICON_W + 2; /* 2px gap between icons */
     int       x = FAULT_STRIP_X0;
     int       y = FAULT_STRIP_Y;
@@ -169,6 +188,7 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
             char    *p = pct_buf;
             p = put_uint(p, pct);
             p = put_char(p, '%');
+            CORE_ASSERT_VOID((size_t)(p - pct_buf) < sizeof pct_buf, UI_ASSERT_CODE); /* room left for the NUL */
             *p = '\0';
             int text_w = (int)strlen(pct_buf) * FONT_SMALL.w;
             int text_y = y + (ICON_H - FONT_SMALL.h) / 2;
@@ -194,6 +214,8 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 
 static void render_lap_page0(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
 
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_BEST_Y, "BEST");
@@ -220,6 +242,7 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
         char *p = sbuf;
         p = put_char(p, 'S');
         p = put_uint(p, m->cur_sector_idx);
+        CORE_ASSERT_VOID((size_t)(p - sbuf) < sizeof sbuf, UI_ASSERT_CODE); /* room left for the NUL */
         *p = '\0';
         fb_text(fb, &FONT_MED, LAP_CUR_SECTOR_X, LAP_ROW_CUR_Y, sbuf);
     }
@@ -255,6 +278,8 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
 
 static void render_lap_page1(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP1_TITLE_Y, "BEST LAP");
 
     for (uint8_t i = 0; i < m->best_n_sectors && i < LAP_MAX_SECTORS + 1; i++) {
@@ -292,6 +317,8 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
 
 static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char  buf[48];
     char *p;
 
@@ -375,6 +402,8 @@ static const char DRAG_EMPTY_TIME[] = "--";
  * blank-cell gaps described above. */
 static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(r != NULL, UI_ASSERT_CODE);
     /* is_distance (the 100-0 braking gate, metres) reaches the layout only via pages 1/2's gate
      * grid, not the page-0 benches; the branch below is defensive and covered by the drag_p1/p2 goldens. */
     fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, y, r->label);
@@ -387,6 +416,7 @@ static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
         p = put_uint(p, r->dist_m);
         p = put_char(p, ' ');
         p = put_char(p, 'm');
+        CORE_ASSERT_VOID((size_t)(p - dbuf) < sizeof dbuf, UI_ASSERT_CODE); /* room left for the NUL */
         *p = '\0';
         fb_text_right(fb, &FONT_SMALL, DRAG_TIME_RIGHT_X, y, dbuf);
     } else {
@@ -401,6 +431,7 @@ static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
         p = put_char(p, '@');
         p = put_char(p, ' ');
         p = put_uint(p, r->trap_kmh);
+        CORE_ASSERT_VOID((size_t)(p - tbuf) < sizeof tbuf, UI_ASSERT_CODE); /* room left for the NUL -- trap_kmh's worst case (5 digits) exactly fills tbuf */
         *p = '\0';
         fb_text(fb, &FONT_SMALL, DRAG_TRAP_X, y, tbuf);
     }
@@ -408,6 +439,8 @@ static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
 
 static void render_drag_page0(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     /* §11.4: rows are the SPEED_FROM0 benches that were hit, ascending by target, then the 1/4
      * row; max 4 rows, dropping the lowest (frontmost, since ascending) bench first if more than
      * 3 benches were hit. The caller (the ui task, session 4.3) fills m->drag[]/drag_n in that
@@ -453,6 +486,9 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
 
 static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char *title)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(title != NULL, UI_ASSERT_CODE);
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, DRAG12_TITLE_Y, title);
 
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
@@ -480,6 +516,7 @@ static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char 
             fmt_time_ms(tbuf, m->drag[i].t_ms);
             p = put_str(p, tbuf);
         }
+        CORE_ASSERT_VOID((size_t)(p - sbuf) < sizeof sbuf, UI_ASSERT_CODE); /* room left for the NUL */
         *p = '\0';
         fb_text(fb, &FONT_SMALL, x, y, sbuf);
     }
@@ -487,11 +524,15 @@ static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char 
 
 static void render_drag_page1(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     render_drag_gate_grid(fb, m, "LAST RUN");
 }
 
 static void render_drag_page2(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     render_drag_gate_grid(fb, m, "SESSION BEST");
 }
 
@@ -499,6 +540,8 @@ static void render_drag_page2(fb_t *fb, const screen_model_t *m)
 
 void screens_moto_render(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_clear(fb, 0); /* white background before every full-screen render */
 
     switch (m->mode) {
@@ -546,6 +589,9 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
  * the string instead of just running off the right edge. */
 static int center_x(const fb_t *fb, const font_t *f, const char *s)
 {
+    CORE_ASSERT_RET(fb != NULL, UI_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, 0);
     int w = (int)strlen(s) * (int)f->w;
     int x = ((int)fb->w - w) / 2;
     return x < 0 ? 0 : x;
@@ -573,6 +619,8 @@ static const char ONESHOT_NEWTRACK_SUB[]    = "Cross S/F, press MODE";
  * ("<check>  OK"/"FAIL", caller's job to pad/format -- boot_line is plain text, not a table). */
 static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, m->boot_name), BOOT_NAME_Y, m->boot_name);
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, m->boot_ver), BOOT_VER_Y, m->boot_ver);
 
@@ -592,6 +640,8 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
  * means "venue found" (show venue_name). */
 static void render_oneshot_venue(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     const char *label = ONESHOT_VENUE_LABEL;
     const char *value = m->venue_name;
     if (m->layout_name[0] != '\0') {
@@ -606,6 +656,8 @@ static void render_oneshot_venue(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot_safe(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     (void)m;
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_SAFE_TEXT), SAFE_TEXT_Y,
              ONESHOT_SAFE_TEXT);
@@ -616,6 +668,8 @@ static void render_oneshot_safe(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_LOWBATT_TITLE), LOWBATT_TITLE_Y,
              ONESHOT_LOWBATT_TITLE);
 
@@ -624,6 +678,7 @@ static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
     uint8_t  pct = m->batt_pct > 100u ? 100u : m->batt_pct;
     p = put_uint(p, pct);
     p = put_char(p, '%');
+    CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
     *p = '\0';
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), LOWBATT_PCT_Y, buf);
 }
@@ -637,6 +692,8 @@ static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_OTA_TITLE), OTA_TITLE_Y,
              ONESHOT_OTA_TITLE);
 
@@ -647,6 +704,7 @@ static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
     char *p = buf;
     p = put_uint(p, pct);
     p = put_char(p, '%');
+    CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
     *p = '\0';
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), OTA_PCT_Y, buf);
 }
@@ -656,6 +714,8 @@ static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot_ota_fail(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     (void)m;
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_OTAFAIL_LINE1), OTAFAIL_LINE1_Y,
              ONESHOT_OTAFAIL_LINE1);
@@ -668,6 +728,8 @@ static void render_oneshot_ota_fail(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot_calibrate(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     (void)m;
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_CALIBRATE_TITLE), CALIBRATE_TITLE_Y,
              ONESHOT_CALIBRATE_TITLE);
@@ -680,6 +742,8 @@ static void render_oneshot_calibrate(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     (void)m;
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_NEWTRACK_TITLE), NEWTRACK_TITLE_Y,
              ONESHOT_NEWTRACK_TITLE);
@@ -689,6 +753,8 @@ static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
 
 static void render_oneshot(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_clear(fb, 0);
 
     switch (m->oneshot) {
@@ -739,6 +805,7 @@ static void render_oneshot(fb_t *fb, const screen_model_t *m)
  * missing-glyph reasoning as the DRAG row label above (render_drag_row). */
 static bool item_fits_font_med(const char *s)
 {
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, false);
     for (const char *p = s; *p != '\0'; p++) {
         if (*p == ' ') {
             continue;
@@ -759,6 +826,8 @@ static bool item_fits_font_med(const char *s)
  * within the MENU_ROW_H slot either way. */
 static void render_menu(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_clear(fb, 0);
 
     fb_text(fb, &FONT_MED, LAP_LABEL_X, MENU_TITLE_Y, "MENU");
@@ -792,6 +861,8 @@ static void render_menu(fb_t *fb, const screen_model_t *m)
 
 void screens_render(fb_t *fb, const screen_model_t *m)
 {
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     switch (m->screen) {
     case SCR_MENU:
         render_menu(fb, m);
