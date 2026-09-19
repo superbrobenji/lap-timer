@@ -14,11 +14,15 @@
  */
 #include "hal/gps.h"
 #include "sim_capture.h"
+#include "core/core.h"
 
 #include "esp_timer.h"
 
 #include <stdio.h>
 #include <string.h>
+
+/* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
+#define GPS_SIM_ASSERT_CODE 0x0C40
 
 static const gps_profile_t s_profile = {
     .max_rate_hz = SIM_FIX_RATE_HZ,
@@ -53,7 +57,7 @@ int gps_configure(uint8_t rate_hz)
 
 int gps_poll(gps_fix_t *out)
 {
-    if (!out) return -1;
+    CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
     if (s_idx >= SIM_FIX_COUNT) return 0;                 /* capture exhausted: idle */
 
     int64_t now = esp_timer_get_time();
@@ -63,6 +67,8 @@ int gps_poll(gps_fix_t *out)
     int64_t due_us = SIM_FIXES[s_idx].gps_us - SIM_FIXES[0].gps_us;
     if (now - s_t0_mono_us < due_us) return 0;
 
+    /* Index invariant the array access below assumes: s_idx must stay within the capture. */
+    CORE_ASSERT_RET(s_idx < SIM_FIX_COUNT, GPS_SIM_ASSERT_CODE, 0);
     const sim_fix_t *s = &SIM_FIXES[s_idx];
     memset(out, 0, sizeof *out);
     out->gps_us     = s->gps_us;

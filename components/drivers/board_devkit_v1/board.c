@@ -15,6 +15,8 @@
 #include "hal/board.h"
 #include "build_config.h"
 
+#include "core/core.h"
+
 #include <errno.h>
 #include <stdlib.h>
 
@@ -28,6 +30,8 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+
+#define BOARD_ASSERT_CODE 0x0C10   /* Power of 10 rule 5 (core/core.h); board.c's own code */
 
 static const char *TAG = "board";
 
@@ -93,6 +97,29 @@ static void IRAM_ATTR pps_isr(void *arg)
 }
 #endif
 
+/* Battery ADC bring-up (ADC1_CH6/GPIO34): 12-bit, 12 dB atten, eFuse line-fit calibration.
+ * Spec §3.3 says "11 dB"; ADC_ATTEN_DB_11 is deprecated in v5.3.2 and aliased to
+ * ADC_ATTEN_DB_12 (identical ~150-2450 mV range), so DB_12 is used. Split verbatim out of
+ * board_init (rule 4). s_adc_cali may legitimately end NULL (approximate mV) if eFuse Vref
+ * is absent -- that is not an error. */
+static void board_init_battery_adc(void)
+{
+    adc_oneshot_unit_init_cfg_t unit_cfg = { .unit_id = ADC_UNIT_1 };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
+    adc_oneshot_chan_cfg_t chan_cfg = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_12 };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, ADC_BATT_CHANNEL, &chan_cfg));
+    adc_cali_line_fitting_config_t cali_cfg = {
+        .unit_id = ADC_UNIT_1,
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_12,
+        .default_vref = 1100,   /* only used if eFuse Vref is absent; this board has eFuse Vref */
+    };
+    if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_adc_cali) != ESP_OK) {
+        s_adc_cali = NULL;
+        ESP_LOGW(TAG, "ADC eFuse calibration unavailable; battery mV will be approximate");
+    }
+}
+
 int board_init(void)
 {
     if (s_inited) return 0;
@@ -154,6 +181,7 @@ int board_init(void)
         .flags = { .enable_internal_pullup = true },
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &s_i2c_bus));
+    CORE_ASSERT_RET(s_i2c_bus != NULL, BOARD_ASSERT_CODE, -EIO);   /* ESP_OK must imply a usable bus handle */
 
     /* --- VSPI (SPI3) bus: SCK 18, MOSI 23, MISO 19. Devices (e-paper/SD) attach in 3.3/3.4. --- */
     spi_bus_config_t spi_cfg = {
@@ -166,23 +194,9 @@ int board_init(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &spi_cfg, SPI_DMA_CH_AUTO));
 
-    /* --- battery ADC: ADC1_CH6 (GPIO34), 12 dB atten, 12-bit, eFuse line-fit calibration.
-     *     Spec §3.3 says "11 dB"; ADC_ATTEN_DB_11 is deprecated in v5.3.2 and aliased to
-     *     ADC_ATTEN_DB_12 (identical ~150-2450 mV range), so DB_12 is used. --- */
-    adc_oneshot_unit_init_cfg_t unit_cfg = { .unit_id = ADC_UNIT_1 };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &s_adc));
-    adc_oneshot_chan_cfg_t chan_cfg = { .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_12 };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, ADC_BATT_CHANNEL, &chan_cfg));
-    adc_cali_line_fitting_config_t cali_cfg = {
-        .unit_id = ADC_UNIT_1,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-        .default_vref = 1100,   /* only used if eFuse Vref is absent; this board has eFuse Vref */
-    };
-    if (adc_cali_create_scheme_line_fitting(&cali_cfg, &s_adc_cali) != ESP_OK) {
-        s_adc_cali = NULL;
-        ESP_LOGW(TAG, "ADC eFuse calibration unavailable; battery mV will be approximate");
-    }
+    /* --- battery ADC (split out to board_init_battery_adc for rule 4): ADC1_CH6, 12-bit --- */
+    board_init_battery_adc();
+    CORE_ASSERT_RET(s_adc != NULL, BOARD_ASSERT_CODE, -EIO);   /* ADC bring-up must yield a usable unit handle */
 
     s_inited = true;
     ESP_LOGI(TAG, "board_devkit_v1 init: I2C0(21/22) VSPI(18/23/19) ADC1_CH6(34) buttons(32/33/25)");
@@ -203,8 +217,11 @@ static int cmp_int(const void *a, const void *b)
 
 int board_battery_read_mv(uint16_t *mv)
 {
-    if (!mv) return -EINVAL;
+    CORE_ASSERT_RET(mv != NULL, BOARD_ASSERT_CODE, -EINVAL);
     if (!s_adc) return -EIO;
+    /* the mean-of-middle-samples math below divides by (BATT_SAMPLES - 2*BATT_TRIM); guard
+     * that divisor here so a future §16.4 tuning of these constants can't introduce a div-by-0 */
+    CORE_ASSERT_RET(BATT_SAMPLES > 2 * BATT_TRIM, BOARD_ASSERT_CODE, -EIO);
 
     int s[BATT_SAMPLES];
     for (int i = 0; i < BATT_SAMPLES; i++) {

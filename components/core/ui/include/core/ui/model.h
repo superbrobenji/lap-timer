@@ -89,7 +89,7 @@ typedef struct {
     /* BOOT one-shot (§20.6, §17.6): name + version banner, up to 4 self-test "OK"/"FAIL" lines
      * (the caller pre-formats each line, e.g. "IMU     OK"). */
     char    boot_name[16];
-    char    boot_ver[24];
+    char    boot_ver[32];   /* holds a full `git describe --dirty` version (e.g. "v0.1.0-123-gdeadbee-dirty") */
     char    boot_line[4][22];
     uint8_t boot_n_lines;
 

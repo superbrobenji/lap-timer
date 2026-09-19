@@ -6,6 +6,10 @@
  * FIFO samples, so the pipeline starts and idles on that variant. moto_sim (imu_sim) runs fusion.
  */
 #include "hal/imu.h"
+#include "core/core.h"
+
+/* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
+#define IMU_MPU_ASSERT_CODE 0x0C50
 
 int imu_init(void) { return 0; }
 
@@ -18,7 +22,7 @@ int imu_self_test(uint8_t *pass_mask)
 int imu_read_fifo(imu_raw_t *out, size_t max, size_t *n_read, int64_t read_mono_us)
 {
     (void)out; (void)max; (void)read_mono_us;
-    if (!n_read) return -1;
+    CORE_ASSERT_RET(n_read != NULL, IMU_MPU_ASSERT_CODE, -1);   /* written just below */
     *n_read = 0;                        /* no sensor yet */
     return 0;
 }
