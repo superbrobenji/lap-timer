@@ -31,6 +31,7 @@
 #include "core/event.h"
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 
+#include "app/lt_assert.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
@@ -47,6 +48,10 @@
 #include "esp_timer.h"
 
 static const char *TAG = "ui";
+
+/* Power-of-10 rule 5 assertion code for the app-side ui module (design §3): the app assert hook
+ * records this code plus __FILE__/__LINE__, pinning the exact failing check. */
+#define UI_APP_ASSERT_CODE 0x0B50
 
 /* ---- §4.3 task ---- */
 #define UI_CORE 0
@@ -67,6 +72,10 @@ static const char *TAG = "ui";
 #define UI_STACK_WORDS (UI_STACK_BYTES / sizeof(StackType_t))
 #define UI_STALL_S     10 /* §17.2 ui heartbeat-stall window (a full refresh may take 2 s) */
 #define UI_TICK_MS     100 /* loop timeout: poll cadence + long/idle-timer granularity */
+/* Rule 2 explicit static loop bounds for the per-wake queue drains: both queues hold single-digit
+ * depths (btn_q is 8; §4.4), so these caps sit far above any real backlog and are never reached. */
+#define UI_BTN_DRAIN_MAX 32
+#define UI_EVT_DRAIN_MAX 64
 
 /* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ---- */
 #define FB_W      296
@@ -86,6 +95,7 @@ static const char *TAG = "ui";
 #define MENU_LOCK_SPEED_KMH 10    /* menu entry gated below this (§20.7 / Appendix A) */
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
 #define UI_MENU_VISIBLE_ROWS 4    /* mirrors render_menu()'s MENU_VISIBLE_ROWS in core/ui */
+#define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
 
 /* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2 s) ---- */
 #define ONESHOT_BOOT_MS  2000
@@ -141,6 +151,7 @@ static char    s_lbl_disp[20];
 
 static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
 {
+    LT_ASSERT_VOID(type <= CMD_IMU_MODE, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type */
     if (g_cmd_q == NULL) {
         return;
     }
@@ -155,6 +166,8 @@ static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
 /* Build the §20.7 menu into s_model.menu_items[]/menu_n; dynamic labels reflect current state. */
 static void build_menu(void)
 {
+    LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);                     /* label depends on it */
+    LT_ASSERT_VOID(s_cfg.units <= CFG_UNITS_MPH, UI_APP_ASSERT_CODE);           /* label depends on it */
     uint8_t n = 0;
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
@@ -184,22 +197,28 @@ static void build_menu(void)
     UI_MENU_ADD("Sleep now", MA_SLEEP);
 #undef UI_MENU_ADD
 
+    LT_ASSERT_VOID(n <= UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* did not overrun menu_items[]/action[] */
     s_model.menu_n = n;
 }
 
 static void menu_scroll_to_sel(void)
 {
+    LT_ASSERT_VOID(s_model.menu_n <= UI_MENU_MAX, UI_APP_ASSERT_CODE);        /* model menu invariant */
+    LT_ASSERT_VOID(s_model.menu_sel < s_model.menu_n, UI_APP_ASSERT_CODE);   /* selection is a real row */
     if (s_model.menu_sel < s_model.menu_top) {
         s_model.menu_top = s_model.menu_sel;
     } else if (s_model.menu_sel >= (uint8_t)(s_model.menu_top + UI_MENU_VISIBLE_ROWS)) {
         s_model.menu_top = (uint8_t)(s_model.menu_sel - UI_MENU_VISIBLE_ROWS + 1);
     }
+    LT_ASSERT_VOID(s_model.menu_top <= s_model.menu_sel, UI_APP_ASSERT_CODE);   /* selection now visible */
 }
 
 static void ui_open_menu(void)
 {
     if (s_gspeed_kmh < MENU_LOCK_SPEED_KMH) {
         build_menu();
+        LT_ASSERT_VOID(s_model.menu_n > 0, UI_APP_ASSERT_CODE);            /* build_menu always adds rows */
+        LT_ASSERT_VOID(s_model.menu_n <= UI_MENU_MAX, UI_APP_ASSERT_CODE);
         s_model.screen   = SCR_MENU;
         s_model.menu_sel = 0;
         s_model.menu_top = 0;
@@ -215,13 +234,17 @@ static void ui_open_menu(void)
 
 static void ui_exit_menu(void)
 {
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* leaving a valid screen */
     s_model.screen = SCR_RIDING;
     s_dirty        = true;
 }
 
 static void menu_select(void)
 {
+    LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* indexes s_menu_action[] */
+    LT_ASSERT_VOID(s_model.menu_sel < s_model.menu_n, UI_APP_ASSERT_CODE);
     uint8_t act = s_menu_action[s_model.menu_sel];
+    LT_ASSERT_VOID(act <= MA_SLEEP, UI_APP_ASSERT_CODE);   /* a valid menu action enum */
     switch (act) {
     case MA_MODE:
         s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
@@ -279,6 +302,9 @@ static void menu_select(void)
 
 static void btn_short(uint8_t bit)
 {
+    LT_ASSERT_VOID(bit == BTN_MODE || bit == BTN_UP || bit == BTN_DOWN, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);       /* dispatches on it below */
+    LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE); /* one-shot selector read below */
     /* A deliberate press dismisses a transient (BOOT/VENUE) one-shot. */
     if (s_model.screen == SCR_ONESHOT &&
         (s_model.oneshot == ONESHOT_BOOT || s_model.oneshot == ONESHOT_VENUE)) {
@@ -304,6 +330,7 @@ static void btn_short(uint8_t bit)
             menu_select();
         }
     } else if (s_model.screen == SCR_RIDING) {
+        LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);   /* page wrap math assumes 0..2 */
         if (bit == BTN_UP) {
             s_model.page = (uint8_t)((s_model.page + 2) % 3); /* previous page (wrap) */
             s_dirty      = true;
@@ -320,6 +347,8 @@ static void btn_long(uint8_t bit)
     if (bit != BTN_MODE) {
         return; /* only MODE uses long/vlong */
     }
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* dispatches on it below */
+    LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
     if (s_model.screen == SCR_MENU) {
         /* §20.7: long MODE backs/exits -- except on "Sleep now", which confirms on vlong (3 s). */
         if (s_menu_action[s_model.menu_sel] != MA_SLEEP) {
@@ -338,6 +367,8 @@ static void btn_vlong(uint8_t bit)
     if (bit != BTN_MODE) {
         return;
     }
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* dispatches on it below */
+    LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
     if (s_model.screen == SCR_MENU && s_menu_action[s_model.menu_sel] == MA_SLEEP) {
         ESP_LOGW(TAG, "menu: Sleep now confirmed -- not implemented (plan 07)");
         ui_exit_menu();
@@ -354,6 +385,7 @@ static void btn_combo(void)
 /* Apply a new button mask sampled at `now`, driving press/release edges. */
 static void process_mask(uint8_t mask, int64_t now)
 {
+    LT_ASSERT_VOID(mask <= (BTN_MODE | BTN_UP | BTN_DOWN), UI_APP_ASSERT_CODE);   /* only 3 button bits */
     if (mask != s_prev_mask) {
         s_last_input_us = now;
     }
@@ -367,6 +399,7 @@ static void process_mask(uint8_t mask, int64_t now)
             s_vlong_fired[i] = false;
         } else if (was && !is) {
             int64_t held = now - s_press_us[i];
+            LT_ASSERT_VOID(held >= 0, UI_APP_ASSERT_CODE);   /* now is monotonic vs the press stamp */
             if (!s_long_fired[i] && !s_vlong_fired[i] && held < (int64_t)BTN_SHORT_MS * 1000) {
                 btn_short(bit);
             }
@@ -394,6 +427,7 @@ static void check_held(int64_t now)
             continue;
         }
         int64_t held = now - s_press_us[i];
+        LT_ASSERT_VOID(held >= 0, UI_APP_ASSERT_CODE);   /* now is monotonic vs the press stamp */
         if (!s_vlong_fired[i] && held >= (int64_t)BTN_VLONG_MS * 1000) {
             s_vlong_fired[i] = true;
             s_long_fired[i]  = true; /* suppress a late long */
@@ -407,6 +441,7 @@ static void check_held(int64_t now)
     }
     if (s_combo_start_us != 0 && !s_combo_fired &&
         (now - s_combo_start_us) >= (int64_t)BTN_COMBO_MS * 1000) {
+        LT_ASSERT_VOID(now >= s_combo_start_us, UI_APP_ASSERT_CODE);   /* combo timer is monotonic */
         s_combo_fired   = true;
         s_last_input_us = now;
         btn_combo();
@@ -417,6 +452,8 @@ static void check_held(int64_t now)
 
 static void show_venue_oneshot(int64_t now)
 {
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* gated on it below */
+    LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);   /* stamp for the one-shot revert timer */
     if (s_model.screen != SCR_RIDING) {
         return; /* don't interrupt the menu or another one-shot */
     }
@@ -425,32 +462,59 @@ static void show_venue_oneshot(int64_t now)
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
 }
 
+/* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). */
+static void handle_lap_complete(const event_t *e)
+{
+    uint32_t lap_ms = e->arg32;
+    s_model.have_prev = true;
+    s_model.prev_ms   = lap_ms;
+    if (!s_model.have_best || lap_ms < s_model.best_ms) {
+        s_model.best_ms   = lap_ms;
+        s_model.have_best = true;
+        s_model.new_best  = true;
+    } else {
+        s_model.new_best = false;
+    }
+    if (s_model.laps_total < UINT16_MAX) {
+        s_model.laps_total++;
+    }
+    if (s_model.laps_valid < UINT16_MAX) {
+        s_model.laps_valid++;
+    }
+    s_model.cur_ms_at_gate = 0;
+    s_model.cur_sector_idx = 0;
+    s_dirty                = true;
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* valid <= total */
+    LT_ASSERT_VOID(!s_model.have_best || s_model.best_ms <= s_model.prev_ms, UI_APP_ASSERT_CODE);
+}
+
+/* EV_DRAG_GATE -> model (split verbatim out of handle_event for rule 4). */
+static void handle_drag_gate(const event_t *e)
+{
+    LT_ASSERT_VOID(s_model.drag_n <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);   /* indexes s_model.drag[] */
+    if (s_model.drag_n < DRAG_MAX_GATES) {
+        drag_row_t *r = &s_model.drag[s_model.drag_n++];
+        memset(r, 0, sizeof *r);
+        /* gate-id -> §6.6 label map needs the drag cfg gate list (not plumbed to ui yet); a
+         * compact "G<id>" placeholder is enough for the no-panel dirty-box log this milestone. */
+        snprintf(r->label, sizeof r->label, "G%u", (unsigned)e->arg16);
+        r->t_ms    = e->arg32;
+        r->present = true;
+    }
+    LT_ASSERT_VOID(s_model.drag_n <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);   /* append kept it bounded */
+    s_dirty = true;
+}
+
 static void handle_event(const event_t *e, int64_t now)
 {
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* model screen stays valid */
+    LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);   /* esp_timer stamp drives the one-shot timers */
     switch (e->type) {
-    case EV_LAP_COMPLETE: {
-        uint32_t lap_ms = e->arg32;
-        s_model.have_prev = true;
-        s_model.prev_ms   = lap_ms;
-        if (!s_model.have_best || lap_ms < s_model.best_ms) {
-            s_model.best_ms   = lap_ms;
-            s_model.have_best = true;
-            s_model.new_best  = true;
-        } else {
-            s_model.new_best = false;
-        }
-        if (s_model.laps_total < UINT16_MAX) {
-            s_model.laps_total++;
-        }
-        if (s_model.laps_valid < UINT16_MAX) {
-            s_model.laps_valid++;
-        }
-        s_model.cur_ms_at_gate = 0;
-        s_model.cur_sector_idx = 0;
-        s_dirty                = true;
+    case EV_LAP_COMPLETE:
+        handle_lap_complete(e);
         break;
-    }
     case EV_SECTOR:
+        LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);   /* engine sector idx in range */
         s_model.cur_sector_idx = (uint8_t)e->arg16;
         s_model.cur_ms_at_gate = e->arg32;
         s_model.sector_delta_ms = (int32_t)e->arg32b;
@@ -493,16 +557,7 @@ static void handle_event(const event_t *e, int64_t now)
         s_dirty            = true;
         break;
     case EV_DRAG_GATE:
-        if (s_model.drag_n < DRAG_MAX_GATES) {
-            drag_row_t *r = &s_model.drag[s_model.drag_n++];
-            memset(r, 0, sizeof *r);
-            /* gate-id -> §6.6 label map needs the drag cfg gate list (not plumbed to ui yet); a
-             * compact "G<id>" placeholder is enough for the no-panel dirty-box log this milestone. */
-            snprintf(r->label, sizeof r->label, "G%u", (unsigned)e->arg16);
-            r->t_ms    = e->arg32;
-            r->present = true;
-        }
-        s_dirty = true;
+        handle_drag_gate(e);
         break;
     case EV_DRAG_DONE:
         s_dirty = true;
@@ -530,7 +585,14 @@ static void update_flags(void)
 
 static void render_now(void)
 {
+    LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);            /* fb_init ran before any render */
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE); /* screens_render dispatches on it */
+    LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);              /* riding renderer dispatches on it */
     screens_render(&s_fb, &s_model);
+    /* The pure renderer clips every primitive to the fb, so the reported dirty box must lie within
+     * the framebuffer -- a box past FB_W/FB_H would mean a renderer clipping bug. */
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= FB_W, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= FB_H, UI_APP_ASSERT_CODE);
     ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u", (unsigned)s_model.screen,
              (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
              (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1);
@@ -549,8 +611,10 @@ static void ui_task(void *arg)
     (void)lt_cfg_load(&s_cfg);
     s_mode       = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode = s_mode;
+    LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);   /* valid engine mode from cfg */
 
     fb_init(&s_fb, s_fb_bits, FB_W, FB_H);
+    LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);   /* framebuffer is armed for render_now */
 
     /* First screen: SAFE MODE one-shot in safe mode (§17.5, boot self-test skipped), else BOOT. */
     uint32_t f0 = sys_flags_get();
@@ -566,6 +630,8 @@ static void ui_task(void *arg)
         s_oneshot_until_us   = esp_timer_get_time() + (int64_t)ONESHOT_BOOT_MS * 1000;
     }
     s_model.flags = f0;
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);        /* first screen valid */
+    LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);  /* one-shot selector valid */
     render_now();
     esp_task_wdt_reset();
 
@@ -577,7 +643,8 @@ static void ui_task(void *arg)
         btn_raw_t ev;
         if (btn_q != NULL && xQueueReceive(btn_q, &ev, pdMS_TO_TICKS(UI_TICK_MS)) == pdTRUE) {
             process_mask(ev.mask, ev.mono_us);
-            while (xQueueReceive(btn_q, &ev, 0) == pdTRUE) {
+            /* rule 2: bounded drain of the rest (btn_q depth 8 << the cap). */
+            for (int i = 0; i < UI_BTN_DRAIN_MAX && xQueueReceive(btn_q, &ev, 0) == pdTRUE; i++) {
                 process_mask(ev.mask, ev.mono_us);
             }
         } else if (btn_q == NULL) {
@@ -593,11 +660,16 @@ static void ui_task(void *arg)
         }
         check_held(now);
 
-        /* Coalesce (§20.3): drain the whole event queue before rendering once. */
+        /* Coalesce (§20.3): drain the whole event queue before rendering once (rule 2: bounded). */
         event_t e;
-        while (g_ui_evt_q != NULL && xQueueReceive(g_ui_evt_q, &e, 0) == pdTRUE) {
+        for (int i = 0; i < UI_EVT_DRAIN_MAX && g_ui_evt_q != NULL
+                        && xQueueReceive(g_ui_evt_q, &e, 0) == pdTRUE; i++) {
             handle_event(&e, now);
         }
+
+        /* Model invariants the post-drain screen logic below depends on. */
+        LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+        LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);
 
         /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. */
         if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
@@ -629,4 +701,5 @@ void ui_start(void)
     ui_buttons_init(); /* create btn_q + attach the board ISR before the task drains it */
     s_task = xTaskCreateStaticPinnedToCore(ui_task, "ui", UI_STACK_WORDS, NULL, UI_PRIO, s_stack,
                                            &s_tcb, UI_CORE);
+    LT_ASSERT_VOID(s_task != NULL, UI_APP_ASSERT_CODE);   /* static creation only fails on bad params */
 }
