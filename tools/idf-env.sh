@@ -28,10 +28,28 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)';
   echo "ESP-IDF $_idf_env_ver needs Python >= 3.10; found $(python3 --version 2>&1). Install with: brew install python@3.12"
   unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py; return 1
 fi
+# Bypass export.sh's check-python-dependencies pre-flight (issue #33). Under this bench's drifted
+# pip/setuptools/importlib.metadata that gate intermittently misfires on the dotted distribution
+# name `ruamel.yaml.clib` and returns non-zero even though every dependency is actually satisfied
+# (tools/check_python_dependencies.py reports OK). An intermittent failure here used to make this
+# script return 1 and the build silently fall through to a leaked 5.5.1 env -- the toolchain
+# flip-flop that polluted DRAM measurements. The committed dependencies.lock pins the versions and
+# CI runs the authoritative check on a clean env, so skipping the buggy local gate is safe.
+export IDF_PYTHON_CHECK_CONSTRAINTS=no
 if ! _idf_env_out="$(. "$IDF_PATH/export.sh" 2>&1)"; then
   echo "$_idf_env_out"; echo "ESP-IDF export.sh failed"
   unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py _idf_env_out; return 1
 fi
 . "$IDF_PATH/export.sh" > /dev/null 2>&1
-unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py _idf_env_out
+# Fail loud on a wrong-toolchain env instead of silently building on whatever idf.py is in PATH.
+# The active idf.py must report the version named in .idf-version; otherwise a stale/leaked env
+# (e.g. 5.5.1 from ~/esp/esp-idf) is active and every on-target measurement would be off-lock.
+_idf_env_active="$(idf.py --version 2>/dev/null)"
+case "$_idf_env_active" in
+  *"$_idf_env_ver"*) ;;
+  *) echo "ESP-IDF toolchain mismatch: expected $_idf_env_ver (.idf-version), active: ${_idf_env_active:-<none>}"
+     echo "the build would not match the pinned lock -- refusing. check IDF_PATH / a leaked export.sh env"
+     unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py _idf_env_out _idf_env_active; return 1 ;;
+esac
+unset _idf_env_self _idf_env_dir _idf_env_ver _idf_env_py _idf_env_out _idf_env_active
 idf.py --version
