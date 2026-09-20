@@ -25,6 +25,7 @@
 #include "app/logger.h"
 #include "app/lt_err.h"
 #include "app/lt_ipc.h"
+#include "app/link.h"
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
@@ -188,6 +189,12 @@ static void boot_subsystems(void)
     /* §4.7 step 11 (cont): the §4.4 pipeline<->logger rings + the logger's event/control
      * queues. The pipeline producer lands in 3.4; 3.3 creates them and the logger consumes. */
     lt_ipc_init();
+
+    /* §4.7 step 11 (cont): start the peer link (Plan 5 §18). Creates the bounded stream ring
+     * + a low-priority drain task and configures the detect line, BEFORE the pipeline produces
+     * (below) so stream_push has somewhere to go. Streams only when a peer is attached; idle and
+     * leak-free with none. */
+    link_start();
 
     /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). It idles until a
      * LOGGER_OPEN_SESSION request arrives (from the pipeline below on the sim build, the power

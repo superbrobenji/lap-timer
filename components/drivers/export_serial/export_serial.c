@@ -28,6 +28,7 @@
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
+#include "app/link.h"        /* link_sink_serial_emit (stream transport half), link_note_cmd_activity */
 #include "app/pipeline.h"
 #include "hal/storage.h"
 
@@ -50,11 +51,13 @@
 #include "esp_system.h"          /* esp_get_free_heap_size / esp_get_minimum_free_heap_size */
 #include "esp_task_wdt.h"       /* dbg hang: subscribe the calling task so the task WDT fires deterministically */
 #include "esp_timer.h"
+#include "driver/uart.h"        /* uart_write_bytes -- raw binary TX for the peer stream (no \n->\r\n mangling) */
 #include "linenoise/linenoise.h"
 
 #define EXP_SERIAL_ASSERT_CODE 0x0C20   /* Power of 10 rule 5 (core/core.h); export_serial.c's own code */
 
 static int s_reset_reason;
+static volatile bool s_uart_ready;   /* the console UART driver is installed (set after esp_console starts) */
 
 /* ================================================================== *
  *  Base64 (§18.4: binary formats are Base64-encoded between the markers)
@@ -176,6 +179,7 @@ static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
  * the assembled body through Base64 at flush (§18.4: STATUS record and other binary payloads). */
 static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t len, bool binary)
 {
+    link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs during a framed transfer */
 
@@ -265,6 +269,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
                        bool binary, bool has_tail)
 {
     CORE_ASSERT_VOID(payload != NULL || len == 0, EXP_SERIAL_ASSERT_CODE);   /* a non-empty payload needs a real buffer */
+    link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
 
@@ -752,6 +757,28 @@ static int cmd_dbg(int argc, char **argv)
 }
 
 /* ================================================================== *
+ *  link stream sink (transport half, §18) -- NOT part of the dev UX
+ *
+ * The STRONG link_sink_serial_emit: overrides link.c's weak no-op at link time and writes
+ * one fully-framed 0xFF stream frame to the console UART. The link module (components/app/
+ * link) owns presence + fan-out and calls this only when a serial peer is attached; here we
+ * just push the bytes. Raw uart_write_bytes -- not stdout -- so the binary frame is not
+ * mangled by the console's \n->\r\n TX translation. It shares UART0 with the REPL only
+ * temporally (the stream flows to a machine peer, the REPL serves a human, §8). Runs on the
+ * link task, so a brief UART block is off the pipeline's critical path; with no peer reading,
+ * the UART still transmits (no flow control) so it never blocks indefinitely. Guarded by
+ * s_uart_ready so a stream frame can never reach an uninstalled driver.
+ * ================================================================== */
+int link_sink_serial_emit(const uint8_t *frame, size_t len)
+{
+    CORE_ASSERT_RET(frame != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len > 0, EXP_SERIAL_ASSERT_CODE, -1);
+    if (!s_uart_ready) return -1;                 /* console UART not up yet (pre-boot-step-12) */
+    int w = uart_write_bytes((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, frame, len);
+    return (w == (int)len) ? 0 : -1;
+}
+
+/* ================================================================== *
  *  REPL bring-up
  * ================================================================== */
 static void register_cmd(const char *command, const char *help, esp_console_cmd_func_t func)
@@ -791,4 +818,5 @@ void export_serial_start(int reset_reason)
     register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|crash|hang", cmd_dbg);
 
     esp_console_start_repl(repl);
+    s_uart_ready = true;   /* the console UART driver is installed: the stream sink may now write */
 }

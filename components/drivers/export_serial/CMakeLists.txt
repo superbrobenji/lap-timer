@@ -6,7 +6,7 @@
 idf_component_register(
     SRCS "export_serial.c"
     INCLUDE_DIRS "include"
-    REQUIRES app lt_hal core console esp_timer esp_system)
+    REQUIRES app lt_hal core console esp_timer esp_system esp_driver_uart)
 
 # build_config.h is not used here (cmd.c in `app` owns the CFG_* reads); no build-tree include.
 

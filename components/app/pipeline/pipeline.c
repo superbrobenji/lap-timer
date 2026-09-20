@@ -21,6 +21,7 @@
 #include "app/lt_rtc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_assert.h"
+#include "app/link.h"        /* stream_push -- fan the fused-log/event stream to an attached peer (§18) */
 
 #include "hal/gps.h"
 #include "hal/imu.h"
@@ -31,6 +32,7 @@
 #include "core/fus.h"
 #include "core/geo.h"
 #include "core/lap.h"
+#include "core/ses.h"      /* SES_T_FUSED / SES_T_EVENT -- stream record type codes */
 #include "core/tb.h"
 #include "core/trk.h"
 #include "core/types.h"
@@ -165,6 +167,12 @@ static void emit_event(const event_t *ev)
     LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* only stable §4.5 codes are broadcast */
     if (g_evt_q) { (void)xQueueSend(g_evt_q, ev, 0); logger_notify(); }
     if (g_ui_evt_q) (void)xQueueSend(g_ui_evt_q, ev, 0);   /* fan-out to the ui task (drop-newest on full) */
+    /* §18: fan the event out to an attached peer as a live stream record (drop-on-full,
+     * non-blocking -- never stalls this task). rec[0] = §14 type, rest = the raw event_t. */
+    uint8_t rec[1 + sizeof(event_t)];
+    rec[0] = SES_T_EVENT;
+    memcpy(rec + 1, ev, sizeof *ev);
+    stream_push(rec, sizeof rec);
 }
 
 static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)
@@ -460,6 +468,11 @@ static void on_raw(const imu_raw_t *raw)
         s_fused_ctr = 0;
         (void)ring_push(&g_fused_ring, &fused);     /* overwrite-oldest */
         logger_notify();
+        /* §18: stream the decimated fused sample (at cfg.log_fused_hz) to an attached peer. */
+        uint8_t rec[1 + sizeof(fused_sample_t)];
+        rec[0] = SES_T_FUSED;
+        memcpy(rec + 1, &fused, sizeof fused);
+        stream_push(rec, sizeof rec);
     }
     LT_ASSERT_VOID(s_fused_ctr < (uint32_t)FUSED_DECIM, PIPE_ASSERT_CODE);   /* decimation counter wrapped */
 }
