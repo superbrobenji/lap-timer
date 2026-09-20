@@ -635,3 +635,38 @@ int pipeline_laps_snapshot(lap_result_t *out, int max)
     LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, n);   /* the retry cap is never reached in practice */
     return n;
 }
+
+int pipeline_lap_count(void)
+{
+    /* Same count pipeline_laps_snapshot would return with an unbounded max: the ring keeps the
+     * newest PIPE_LAPS_KEEP. s_lap_total only grows; an aligned read is a fine loop bound. */
+    uint32_t total = s_lap_total;
+    return (total < (uint32_t)PIPE_LAPS_KEEP) ? (int)total : PIPE_LAPS_KEEP;
+}
+
+int pipeline_lap_at(int index, lap_result_t *out)
+{
+    LT_ASSERT_RET(out != NULL, PIPE_ASSERT_CODE, -1);   /* caller passes its own local */
+    if (index < 0) return -1;                            /* out-of-range is routine, not an anomaly */
+    /* F4 seqlock read of ONE lap, in the same newest-last order pipeline_laps_snapshot yields at
+     * out[index]: retry while the writer is mid-update (odd) or ran during the read. */
+    bool stable = false;
+    int rc = -1;
+    for (int attempt = 0; attempt < PIPE_LAPS_SNAP_RETRY_MAX && !stable; attempt++) {
+        uint32_t seq0 = __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE);
+        if (seq0 & 1u) continue;                         /* writer mid-update */
+        uint32_t total = s_lap_total;
+        int n = (total < (uint32_t)PIPE_LAPS_KEEP) ? (int)total : PIPE_LAPS_KEEP;
+        if (index < n) {
+            uint32_t start = (total > (uint32_t)n) ? total - (uint32_t)n : 0u;
+            *out = s_laps[(start + (uint32_t)index) % PIPE_LAPS_KEEP];
+            rc = 0;
+        } else {
+            rc = -1;
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);         /* read above happens-before re-reading seq */
+        stable = (seq0 == __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE));
+    }
+    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, rc);   /* the retry cap is never reached in practice */
+    return rc;
+}
