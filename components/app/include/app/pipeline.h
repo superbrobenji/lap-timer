@@ -17,4 +17,12 @@ void pipeline_start(void);   /* create + start the task (boot step 12) */
  * lap_result_t into `out` and returns the number copied. Safe to call from another task. */
 int  pipeline_laps_snapshot(lap_result_t *out, int max);
 
+/* Number of completed laps available (== pipeline_laps_snapshot's return with an unbounded max);
+ * the ring keeps the newest PIPE_LAPS_KEEP. Use as the loop bound for pipeline_lap_at. */
+int  pipeline_lap_count(void);
+/* Copy the `index`-th completed lap (0-based, SAME newest-last order pipeline_laps_snapshot yields
+ * at out[index]) into `*out`, using the SAME F4 seqlock retry. Returns 0 on success, <0 if index
+ * is out of range for the current ring. Lets a reader stream laps without a full snapshot array. */
+int  pipeline_lap_at(int index, lap_result_t *out);
+
 #endif /* APP_PIPELINE_H */
