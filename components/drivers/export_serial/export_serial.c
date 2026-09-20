@@ -22,6 +22,8 @@
  */
 #include "export_serial.h"
 
+#include "build_config.h"    /* CFG_HAS_DEVUX -- gate the interactive dbg UX (§4.6) */
+
 #include "app/cmd.h"
 #include "app/logger.h"
 #include "app/lt_ipc.h"
@@ -56,7 +58,9 @@
 
 #define EXP_SERIAL_ASSERT_CODE 0x0C20   /* Power of 10 rule 5 (core/core.h); export_serial.c's own code */
 
-static int s_reset_reason;
+#if CFG_HAS_DEVUX
+static int s_reset_reason;   /* shown by `dbg status`; dev UX only */
+#endif
 static volatile bool s_uart_ready;   /* the console UART driver is installed (set after esp_console starts) */
 
 /* ================================================================== *
@@ -434,6 +438,11 @@ static int cmd_close_c(int argc, char **argv)
     return 0;
 }
 
+/* ---- DEVUX (§4.6): the interactive operator UX below -- the `dbg` diagnostics verbs
+ * and their help -- is gated OFF for the prod-slim image. The cmd + stream + OTA
+ * transport above and the REPL bring-up below stay unconditional (Plan 5 sub-project A). */
+#if CFG_HAS_DEVUX
+
 /* ================================================================== *
  *  dbg -- diagnostics verbs (migrated from the 3.2-3.4 console)
  * ================================================================== */
@@ -756,6 +765,8 @@ static int cmd_dbg(int argc, char **argv)
     return 1;
 }
 
+#endif /* CFG_HAS_DEVUX -- dbg UX */
+
 /* ================================================================== *
  *  link stream sink (transport half, §18) -- NOT part of the dev UX
  *
@@ -789,7 +800,11 @@ static void register_cmd(const char *command, const char *help, esp_console_cmd_
 
 void export_serial_start(int reset_reason)
 {
+#if CFG_HAS_DEVUX
     s_reset_reason = reset_reason;
+#else
+    (void)reset_reason;
+#endif
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
@@ -815,7 +830,9 @@ void export_serial_start(int reset_reason)
     register_cmd("diag",   "diagnostics JSON (§17.10)", cmd_diag_c);
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
+#if CFG_HAS_DEVUX
     register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|crash|hang", cmd_dbg);
+#endif
 
     esp_console_start_repl(repl);
     s_uart_ready = true;   /* the console UART driver is installed: the stream sink may now write */

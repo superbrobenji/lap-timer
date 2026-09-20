@@ -26,6 +26,10 @@
 #define CFG_HAS_BLE        @CFG_HAS_BLE@
 #define CFG_HAS_BLE_RC     @CFG_HAS_BLE_RC@
 #define CFG_HAS_EXPORT_SERIAL @CFG_HAS_EXPORT_SERIAL@
+/* DEVUX (§4.6, Plan 5 sub-project A): the interactive operator UX (the `dbg` diagnostics
+ * verbs + their help) inside export_serial. Default ON. When OFF the prod image keeps only
+ * the cmd + stream + OTA-receive transport; the dev UX moves to the dev controller. */
+#define CFG_HAS_DEVUX      @CFG_HAS_DEVUX@
 
 #define CFG_FUSED_LOG_HZ   @CFG_FUSED_LOG_HZ@
 

@@ -253,6 +253,11 @@ void app_main(void)
 
     ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%d)", (unsigned)boot_cnt,
              (long long)((esp_timer_get_time() - t_boot) / 1000), (int)safe);
+#if CFG_HAS_EXPORT_SERIAL && !CFG_HAS_DEVUX
+    /* §4.6 DEVUX=OFF: the interactive dbg UX is compiled out; the serial link is the
+     * cmd + stream + OTA-receive transport only (Plan 5 sub-project A prod-slim). */
+    ESP_LOGI(TAG, "serial link: prod-slim (DEVUX off -- transport only, no dbg UX)");
+#endif
 
     /* The main task returns: the supervisor and console tasks run on, and the idle tasks on
      * both cores feed the task WDT. Pipeline/logger/ui/power start here in 3.4. */
