@@ -50,8 +50,12 @@ static const char *TAG = "log";
 #define LOG_STACK_WORDS  (LOG_STACK_BYTES / sizeof(StackType_t))
 #define LOG_STALL_S      5             /* supervisor heartbeat-stall window (§17.2) */
 
-/* §13.3 cadence + buffers */
-#define BATCH_CAP        4096
+/* §13.3 cadence + buffers. BATCH_CAP is right-sized to the real worst case: batch_append flushes
+ * before the batch would exceed it, and the size-flush fires at BATCH_FLUSH_B, so the most content
+ * ever held is BATCH_FLUSH_B + one max real frame (DRAG_RUN, 16 gates = 211 B, §12.3) = 3795 B; the
+ * FRAME_TMP_CAP (256) append ceiling keeps this <= 3840 for any frame. .log bytes are unaffected --
+ * only the number of sto_write chunks can change, never the concatenated file content. */
+#define BATCH_CAP        3840
 #define BATCH_FLUSH_B    3584          /* write when the batch reaches this */
 #define WRITE_INTERVAL_MS 1000
 #define SYNC_INTERVAL_MS  2000
