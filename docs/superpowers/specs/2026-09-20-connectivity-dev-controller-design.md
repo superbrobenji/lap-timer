@@ -33,6 +33,25 @@ storage). A WiFi headroom spike (throwaway) established:
 Conclusion: **approach 2 (separate dev controller over UART).** The dev controller connects by
 jumper wires to the lap-timer's UART0 + boot pins — no USB-to-USB cable needed.
 
+### 2a. DRAM correction + BLE sequencing (2026-09-20, revised)
+
+Bringing `conn_ble` up on a stable toolchain (issue #33 fixed, PR #50) corrected two earlier
+hypotheses and reshaped the BLE sequencing:
+
+- The DRAM ceiling is **our own static `.bss`** (app ~73 KB + core ~25 KB of the 124 KB region),
+  **not** the radio stacks. `libesp_wifi.a` occupies ~0 internal DRAM; `libbt.a` only ~4.4 KB. So
+  "exclude esp_wifi to reclaim ~21.6 KB" and "cut WiFi RX buffers ~13 KB" are both dead ends — those
+  buffers are heap, not `.bss`. (See `reference-dram-budget` memory / `plan-dram-reclaim`.)
+- A behavior-preserving **static-DRAM reclaim** freed +10.9 KB (neo6m 9888 → 20840 free). With it,
+  `conn_ble` wired **fits neo6m** (5836 B free) — but not comfortably, and `moto_sim` (full firmware
+  + replayed sensors) still overflows by 3624 B.
+- **`conn_ble`'s ~15 KB is the NimBLE host stack**, not a trimmable buffer, and the prod image still
+  carries ~20 KB of dev tooling that **leaves in sub-project C**. Rather than cram BLE into a
+  crowded image now (and pressure Plans 5.3/5.5) then slim it, **BLE activation + flash-validation
+  move to sub-project C**, into the post-offload firmware where it fits with ~25 KB free. The dev
+  board never uses BLE (it links over UART `cmd`/stream), so this blocks nothing in A or B. The
+  `conn_ble` code is complete and parked on `s5.2-conn-ble`.
+
 ## 3. Architecture — the prod/dev split
 
 Principle: **the lap-timer prod firmware carries only production function; the dev controller owns
@@ -66,7 +85,7 @@ all development responsibilities.**
 
 | # | Sub-project | Scope | Depends on |
 |---|---|---|---|
-| **A** | Lap-timer prod link (revised Plan 5) | `app/cmd` + fused-log stream + OTA-receive/signed-verify/rollback over UART0; keep BLE RaceChrono live; slim dev-only code out of the prod image; hot-swap-safe link + detect | — |
+| **A** | Lap-timer prod link (revised Plan 5) | `app/cmd` + fused-log stream + OTA-receive/signed-verify/rollback over UART0; slim dev-only code out of the prod image; hot-swap-safe link + detect. BLE RaceChrono code written but **activation deferred to C** (§2a) | — |
 | **B** | Dev controller / flasher (new plan) | Separate ESP32 firmware: WiFi AP+webserver, `esp-serial-flasher` + boot-pin control, `cmd`-host, GitHub OTA fetch, black-box log store + WiFi offload | A's protocol |
 | **C** | Prod hardening (later, gated on B tested) | Make the dev controller the lap-timer's **sole** control/flash path: secure boot v2 + flash encryption (only key-signed images boot), authenticated `cmd` control channel, no open console; keep the ROM UART bootloader (the dev controller flashes through it, but only signed images run) | A, **B built + tested** |
 
@@ -99,7 +118,7 @@ for bootstrapping and for debugging the dev controller itself; C removes them on
 ## 7. Relationship to the original Plan 5
 
 - 5.1 `app/cmd` over serial → **kept** (foundation of A; `cmd.c` already exists).
-- 5.2 `conn_ble` (NimBLE RaceChrono) → **kept on the lap-timer** (live telemetry out).
+- 5.2 `conn_ble` (NimBLE RaceChrono) → **kept on the lap-timer**, but **activated in sub-project C** (§2a: fits comfortably only after dev-tooling offload frees DRAM). Code parked on `s5.2-conn-ble`.
 - 5.3 / 5.4 web export + config pages → **moved to the dev controller** (B); the lap-timer only
   answers `cmd`.
 - 5.5 OTA → **split**: lap-timer side = OTA-receive + signed-verify + rollback (A); GitHub fetch +
@@ -120,7 +139,7 @@ for bootstrapping and for debugging the dev controller itself; C removes them on
 
 - The lap-timer prod image gets **leaner** (sheds tooling), easing flash/RAM — the opposite of the
   single-device WiFi path.
-- BLE RaceChrono live telemetry is **retained**.
+- BLE RaceChrono live telemetry is **retained** (code done; activated in sub-project C, §2a).
 - A second device + a ~7-pin connector are added; field updates require the dev controller attached
   (this is a dev/maintenance tool, not over-the-air-while-riding).
 - Bricked-device recovery + full (re)flash become possible (the dev controller does full flashes).
