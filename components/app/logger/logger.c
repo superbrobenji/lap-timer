@@ -59,8 +59,8 @@ static const char *TAG = "log";
 #define LOOP_TIMEOUT_MS   1000
 #define FRAME_TMP_CAP    256           /* >= max framed record (247 payload + 5) */
 
-/* §12.5 .sum assembly (sized so HDR+VENUE+laps+drags+END always fit BATCH_CAP). */
-#define SUM_BUILD_CAP    4096
+/* §12.5 .sum assembly: LAP/DRAG frames accumulate here, then rebuild_sum streams HDR+VENUE+laps+
+ * drags+END straight to the .sum fd (A1) -- no assemble-then-emit scratch. */
 #define LAP_ACC_CAP      3072
 #define DRAG_ACC_CAP     512
 
@@ -151,42 +151,50 @@ static void acc_append(uint8_t *acc, size_t *len, size_t cap, const uint8_t *fra
     *len += (size_t)n;
 }
 
-/* §12.5: rebuild .sum = HDR + VENUE + every LAP + every DRAG_RUN [+ END] via tmp+sync+rename. */
+/* Stream one .sum section to the open tmp fd, in emission order (§12.5). Skips a zero-length
+ * section (an empty accumulator, exactly as the old off+len memcpy did nothing); reports and
+ * propagates an I/O error so the caller skips sync+rename, leaving an incomplete .sum.tmp with no
+ * rename -- the same power-cut failure mode as the previous single sto_write (§13.1). */
+static int sum_write(sto_file_t f, const uint8_t *p, size_t n)
+{
+    LT_ASSERT_RET(p != NULL, LOG_ASSERT_CODE, -1);
+    LT_ASSERT_RET(n <= LAP_ACC_CAP, LOG_ASSERT_CODE, -1);   /* largest section is a full lap accumulator */
+    if (n == 0) return 0;
+    if (sto_write(f, p, n) != 0) { (void)errlog_add(E_STO_WRITE, (uint32_t)n); return -1; }
+    return 0;
+}
+
+/* §12.5: rebuild .sum = HDR + VENUE + every LAP + every DRAG_RUN [+ END] via tmp+sync+rename.
+ * A1: each HDR/VENUE/END frame is encoded into one small stack buffer and streamed to the open fd;
+ * the accumulators stream straight from their own storage -- no 4 KB assemble-then-emit scratch.
+ * The bytes are identical to the old single-buffer build: its fit-guards were always satisfied
+ * (HDR 99 + VENUE 41 + LAP_ACC_CAP 3072 + DRAG_ACC_CAP 512 + END 14 = 3738 < the old 4096 cap), so
+ * every section was, and still is, emitted in the same order. */
 static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 {
     if (s_id[0] == 0) return;
-    static uint8_t buf[SUM_BUILD_CAP];
-    size_t off = 0;
-    int n;
-
-    n = ses_encode_hdr(&s_hdr, buf + off, SUM_BUILD_CAP - off);
-    if (n < 0) return;
-    off += (size_t)n;
-    LT_ASSERT_VOID(off <= SUM_BUILD_CAP, LOG_ASSERT_CODE);   /* HDR must fit within its own reported cap */
-    n = ses_encode_venue(s_venue_id, s_layout_id, s_venue_name, buf + off, SUM_BUILD_CAP - off);
-    if (n > 0) off += (size_t)n;
-    LT_ASSERT_VOID(off <= SUM_BUILD_CAP, LOG_ASSERT_CODE);   /* VENUE must fit within its own reported cap */
-    LT_ASSERT_VOID(s_lap_len <= LAP_ACC_CAP, LOG_ASSERT_CODE);     /* source-length guard for the memcpy below */
-    LT_ASSERT_VOID(s_drag_len <= DRAG_ACC_CAP, LOG_ASSERT_CODE);   /* source-length guard for the memcpy below */
-    if (off + s_lap_len <= SUM_BUILD_CAP)  { memcpy(buf + off, s_lap_acc, s_lap_len);   off += s_lap_len; }
-    if (off + s_drag_len <= SUM_BUILD_CAP) { memcpy(buf + off, s_drag_acc, s_drag_len); off += s_drag_len; }
-    if (closing) {
-        n = ses_encode_end(end_gps_us, end_reason, buf + off, SUM_BUILD_CAP - off);
-        if (n > 0) off += (size_t)n;
-    }
-    LT_ASSERT_VOID(off <= SUM_BUILD_CAP, LOG_ASSERT_CODE);   /* buffer capacity before the write below */
+    uint8_t frame[FRAME_TMP_CAP];
+    int n = ses_encode_hdr(&s_hdr, frame, sizeof frame);
+    if (n < 0) return;                                             /* HDR is mandatory (matches pre-A1) */
+    LT_ASSERT_VOID((size_t)n <= sizeof frame, LOG_ASSERT_CODE);    /* encoded frame within the stack buffer */
+    LT_ASSERT_VOID(s_lap_len <= LAP_ACC_CAP, LOG_ASSERT_CODE);     /* accumulator invariant (acc_append) */
+    LT_ASSERT_VOID(s_drag_len <= DRAG_ACC_CAP, LOG_ASSERT_CODE);   /* accumulator invariant (acc_append) */
 
     char tmp_path[40], sum_path[40];
     log_path(tmp_path, sizeof tmp_path, s_id, ".sum.tmp");
     log_path(sum_path, sizeof sum_path, s_id, ".sum");
     sto_file_t f;
     if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) { (void)errlog_add(E_STO_WRITE, 0); return; }
-    int rc = sto_write(f, buf, off);
-    if (rc != 0) (void)errlog_add(E_STO_WRITE, (uint32_t)off);
-    if (rc == 0) {
-        rc = sto_sync(f);
-        if (rc != 0) (void)errlog_add(E_STO_WRITE, 0);
-    }
+
+    int rc = sum_write(f, frame, (size_t)n);                       /* HDR */
+    if (rc == 0) { n = ses_encode_venue(s_venue_id, s_layout_id, s_venue_name, frame, sizeof frame);
+                   if (n > 0) rc = sum_write(f, frame, (size_t)n); }
+    if (rc == 0) rc = sum_write(f, s_lap_acc, s_lap_len);
+    if (rc == 0) rc = sum_write(f, s_drag_acc, s_drag_len);
+    if (rc == 0 && closing) { n = ses_encode_end(end_gps_us, end_reason, frame, sizeof frame);
+                              if (n > 0) rc = sum_write(f, frame, (size_t)n); }
+
+    if (rc == 0) { rc = sto_sync(f); if (rc != 0) (void)errlog_add(E_STO_WRITE, 0); }
     (void)sto_close(f);
     if (rc == 0 && sto_rename(tmp_path, sum_path) != 0) (void)errlog_add(E_STO_WRITE, 0);   /* atomic (§13.1) */
 }
