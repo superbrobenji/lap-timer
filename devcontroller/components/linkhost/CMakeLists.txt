@@ -4,9 +4,9 @@
 # REQUIRES the lap-timer's `app` IDF component itself -- see the top-level CMakeLists.txt note
 # for why (it would pull in the whole lap-timer app tree and its driver dependencies).
 idf_component_register(
-    SRCS "linkhost.c"
+    SRCS "linkhost.c" "host/linkhost_proto.c"
     INCLUDE_DIRS "include" "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include"
-    REQUIRES esp_driver_uart)
+    REQUIRES esp_driver_uart esp_timer esp_partition)
 
 # build_config.h from the build tree (DC_LINK_UART/TX/RX/BAUD).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
