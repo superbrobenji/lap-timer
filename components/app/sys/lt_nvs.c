@@ -58,6 +58,7 @@ typedef struct __attribute__((packed)) {
 #define K_CTR   "ctr"
 #define K_CFG   "cfg"
 #define K_STALL "stall_rst"                     /* §17.2/§17.5: supervisor stall-restart marker */
+#define K_OTAPEND "ota_pend"                    /* §19.4: OTA-applied pending-validation flag */
 
 #define COUNTER_FLUSH_US (60 * 1000000LL)       /* >=60 s batching (§15.2) */
 
@@ -327,6 +328,28 @@ bool lt_stall_flag_take(void)
     if (nvs_get_u8(s_h_sys, K_STALL, &v) != ESP_OK || v == 0) return false;
     if (nvs_set_u8(s_h_sys, K_STALL, 0) == ESP_OK) (void)nvs_commit(s_h_sys);   /* consume once */
     return true;
+}
+
+int lt_ota_pending_set(void)
+{
+    /* §19.4: ota_end() persists this before esp_ota_set_boot_partition + reboot. Persist now -- it
+     * must survive the reboot it precedes. */
+    if (nvs_set_u8(s_h_sys, K_OTAPEND, 1) != ESP_OK) return -1;
+    (void)nvs_commit(s_h_sys);
+    return 0;
+}
+
+bool lt_ota_pending_get(void)
+{
+    uint8_t v = 0;
+    return nvs_get_u8(s_h_sys, K_OTAPEND, &v) == ESP_OK && v != 0;
+}
+
+void lt_ota_pending_clear(void)
+{
+    /* §19.4: the supervisor clears the flag once it has marked the image valid or logged the
+     * rollback, so a later boot is not treated as OTA-related. */
+    if (nvs_set_u8(s_h_sys, K_OTAPEND, 0) == ESP_OK) (void)nvs_commit(s_h_sys);
 }
 
 const char *lt_reset_reason_str(int r)

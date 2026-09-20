@@ -113,6 +113,10 @@ static uint32_t       s_fused_ctr;
 
 /* motion / fix-lost edges (§6.5, §9.1) */
 static bool s_moving, s_have_moving;
+
+/* §19.4 OTA-validate gate: set once the pipeline has ingested at least one GPS fix (set-once,
+ * monotonic). The supervisor reads it via pipeline_gps_seen() before marking a pending image valid. */
+static volatile bool s_gps_seen;
 static int  s_invalid_run;
 static bool s_fix_lost;
 
@@ -580,7 +584,7 @@ static void pipeline_task(void *arg)
 
         /* GPS: drain every fix due, run on_fix (rule 2: bounded; ~1 fix/period << the cap). */
         gps_fix_t fix;
-        for (int i = 0; i < PIPE_FIX_DRAIN_MAX && gps_poll(&fix) == 1; i++) on_fix(&fix);
+        for (int i = 0; i < PIPE_FIX_DRAIN_MAX && gps_poll(&fix) == 1; i++) { on_fix(&fix); s_gps_seen = true; }
 
         /* IMU: read the samples due since the last read, run on_raw for each. */
         int64_t now = esp_timer_get_time();
@@ -669,4 +673,11 @@ int pipeline_lap_at(int index, lap_result_t *out)
     }
     LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, rc);   /* the retry cap is never reached in practice */
     return rc;
+}
+
+bool pipeline_gps_seen(void)
+{
+    /* §19.4 OTA-validate condition: true once at least one GPS fix has been ingested since boot
+     * (set-once). Read cross-task by the supervisor; a set-once volatile bool needs no lock. */
+    return s_gps_seen;
 }

@@ -84,6 +84,13 @@ void     lt_safe_clear(void);
 void lt_stall_flag_set(void);
 bool lt_stall_flag_take(void);
 
+/* OTA pending flag (lt_sys/ota_pend, §19.4): set by ota_end() before the applied image reboots so
+ * the next boot -- whether it lands on the new image (PENDING_VERIFY) or a bootloader rollback --
+ * can be recognised. The supervisor clears it after validating or logging the rollback. Persistent u8. */
+int  lt_ota_pending_set(void);      /* set + commit; 0 ok, -1 on NVS error */
+bool lt_ota_pending_get(void);      /* true iff the flag is set */
+void lt_ota_pending_clear(void);    /* clear + commit */
+
 /* cfg blob (lt_cfg/cfg): load validates version+CRC16 then cfg_validate (returns corrections,
  * <0 => absent/corrupt so the caller keeps its defaults). save packs + CRC16 + writes. */
 int  lt_cfg_load(cfg_t *c);
