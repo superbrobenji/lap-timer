@@ -97,7 +97,8 @@ live monitor + black-box logging · firmware upload → cmd-OTA flash.
 ## 5a. Lap-timer-side (A) changes this plan makes
 
 A shipped a *human* console; making it robust for a *machine* peer warrants three small, additive
-lap-timer changes (done as lap-timer commits within B's plan — they don't alter existing behavior):
+lap-timer changes (done as lap-timer commits within B's plan — they don't alter existing behavior).
+**Approved 2026-09-20: OK to touch the (merged) lap-timer for these.**
 
 1. **Length-prefix the `0xFF` stream frame** — add a `len u8` after `flags` (frame becomes
    `0xFF|seq|flags|len|payload`). Removes B's dependency on a type→size table and makes the demux
@@ -138,9 +139,9 @@ raw partition for a staged lap-timer image (~1.25 M — sized to the OTA slot ma
 ~525–590 KB today) · **`logs`** LittleFS, rotating black-box logs (remainder, ~0.9–1 M). Reflashing
 B's app or www does not touch `logs`. **Log budget:** a stream record ≈ `4 (frame) + ~68 (record)` B
 at ~10 Hz ≈ **~2.6 MB/h**, so a ~1 MB log partition holds **~20–25 min** of continuous capture; the
-`logstore` cap + rotation keep the newest. *(If field sessions need longer unbroken logs, an 8/16 MB
-ESP32 module — or dropping on-B staging in favor of browser-chunked upload with resume — buys more
-`logs` space; flagged for review, §15.)*
+`logstore` cap + rotation keep the newest. **Decision (2026-09-20): accept ~20–25 min continuous for
+now** (rotation keeps the newest); keep on-B stage-then-push flash; revisit with an 8/16 MB ESP32
+module later (§15).
 
 ## 7. Data flow
 
@@ -238,10 +239,10 @@ wires ahead of the formal connector.
 
 ## 15. Open questions / risks
 
-- **Log capacity vs staging (flash budget, §6):** ~1 MB `logs` ≈ ~20–25 min continuous. If field
-  runs need longer unbroken capture, options are an 8/16 MB module (relieves everything) or
-  browser-chunked upload with resume (frees the `ota_stage` 1.25 MB for logs, at the cost of a more
-  complex uploader). **Flagged for review** — pick before the plan sizes partitions.
+- **Log capacity vs staging (flash budget, §6):** ~1 MB `logs` ≈ ~20–25 min continuous. **Decided
+  (2026-09-20): accept ~20–25 min for now** — keep on-B stage-then-push flash; a bigger (8/16 MB)
+  ESP32 module later extends `logs` without design change. Browser-chunked upload remains a fallback
+  if staging ever needs to yield its space.
 - **httpd concurrency:** async handlers + one worker on the classic ESP32 must sustain the SPA + an
   SSE stream + a background flash without RAM starvation; validated in sessions 3–5.
 - **`config set` surface:** whether every tunable fits under the 256 B line via diff/minify, or needs
