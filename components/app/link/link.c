@@ -17,6 +17,7 @@
 
 #include "app/cmd.h"          /* LINK_STREAM_TAG, CMD_FLAG_LAST, CMD_CHUNK_MAX */
 #include "app/lt_assert.h"
+#include "app/lt_proto.h"     /* LT_STREAM_TAG -- the shared wire contract a dev-controller peer decodes against */
 
 #include "core/ring.h"
 #include "core/event.h"      /* event_t -- sizing the SES_T_EVENT stream record (FIX 3 static assert) */
@@ -56,7 +57,8 @@
 #define LINK_STREAM_CAP   16u                 /* ring depth (power of two); ~1.6 s of buffer at 10 Hz */
 
 _Static_assert((LINK_STREAM_CAP & (LINK_STREAM_CAP - 1u)) == 0u, "LINK_STREAM_CAP must be a power of two");
-_Static_assert(4 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame must fit one §18.1 data chunk");
+_Static_assert(5 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame (5-byte header + payload) must fit one §18.1 data chunk");
+_Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must mirror app/lt_proto.h's LT_STREAM_TAG");
 
 /* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
  * SES_T_FUSED -> 1 + sizeof(fused_sample_t), SES_T_EVENT -> 1 + sizeof(event_t). If either struct
@@ -116,19 +118,21 @@ static void link_poll_detect(void)
 #endif
 }
 
-/* Frame one record as a §18.1 unsolicited stream chunk and fan out to each attached sink. */
+/* Frame one record as a §18.1 unsolicited stream chunk (tag|seq_lo|seq_hi|flags|len, see
+ * app/lt_proto.h's lt_stream_hdr_t) and fan out to each attached sink. */
 static void link_deliver(const link_rec_t *r)
 {
     LT_ASSERT_VOID(r != NULL, LINK_ASSERT_CODE);                         /* drain popped a real slot */
     LT_ASSERT_VOID(r->len > 0 && r->len <= LINK_REC_MAX, LINK_ASSERT_CODE);   /* len set by stream_push's bound */
-    uint8_t frame[4 + LINK_REC_MAX];
+    uint8_t frame[5 + LINK_REC_MAX];
     uint16_t seq = s_seq++;
     frame[0] = LINK_STREAM_TAG;                 /* 0xFF: an unsolicited stream frame, not a cmd response */
     frame[1] = (uint8_t)seq;
     frame[2] = (uint8_t)(seq >> 8);
     frame[3] = CMD_FLAG_LAST;                   /* each record is one self-contained chunk */
-    memcpy(frame + 4, r->data, r->len);
-    size_t flen = (size_t)4 + r->len;
+    frame[4] = (uint8_t)r->len;                 /* len: payload byte count that follows (lt_stream_hdr_t) */
+    memcpy(frame + 5, r->data, r->len);
+    size_t flen = (size_t)5 + r->len;
     if (link_serial_present())   (void)link_sink_serial_emit(frame, flen);
     if (link_sink_ble_present()) (void)link_sink_ble_emit(frame, flen);
     /* A THIRD peer transport would fan out with one more `if (...present) sink_emit(...)` line. */

@@ -4,7 +4,8 @@
  * stream_push(); the link module buffers them in a bounded, non-blocking SPSC ring (drop-newest on
  * full, like fix_ring -- the pipeline is NEVER stalled) and a low-priority drain task fans each out
  * to whichever peer transport is attached, framed as an unsolicited §18.1 LINK_STREAM_TAG (0xFF)
- * chunk: `tag u8 | seq u16 LE | flags u8 | payload`. The payload is a §14-typed stream record:
+ * chunk: `tag u8 | seq u16 LE | flags u8 | len u8 | payload` (app/lt_proto.h's lt_stream_hdr_t is
+ * the shared 5-byte-header definition of this frame). The payload is a §14-typed stream record:
  * `rec[0]` is the SES_T_* type (SES_T_FUSED / SES_T_EVENT) and the rest is the raw struct.
  *
  * Fan-out sinks are resolved at LINK time (weak no-op default here; the serial transport in

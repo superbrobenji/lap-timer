@@ -28,6 +28,7 @@
 #include "app/logger.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
+#include "app/lt_proto.h"    /* LT_FRAME_*_FMT -- the ---BEGIN/---END framing shared with a dev-controller peer */
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"         /* ota_begin/ota_data/ota_end/ota_abort -- the `ota recv` bench push (§19.6) */
@@ -157,12 +158,12 @@ static void ser_flush(ser_ctx_t *c)
     /* CRC32 is over the raw payload (the client Base64-decodes first, then verifies). */
     uint32_t crc  = esp_rom_crc32_le(0, c->buf, c->len);
     size_t   size = c->binary ? (4 * ((c->len + 2) / 3)) : c->len;
-    printf("---BEGIN %s %u---\r\n", c->name ? c->name : "data", (unsigned)size);
+    printf(LT_FRAME_BEGIN_FMT, c->name ? c->name : "data", (unsigned)size);
     if (c->len) {
         if (c->binary) (void)b64_write_all(c->buf, c->len);
         else           fwrite(c->buf, 1, c->len, stdout);
     }
-    printf("\r\n---END %08x---\r\n", (unsigned)crc);
+    printf("\r\n" LT_FRAME_END_FMT, (unsigned)crc);
     fflush(stdout);
 }
 
@@ -302,7 +303,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         return;
     }
 
-    printf("---BEGIN %s %u---\r\n", name ? name : "data", (unsigned)m.out);
+    printf(LT_FRAME_BEGIN_FMT, name ? name : "data", (unsigned)m.out);
     fflush(stdout);
 
     sframe_t pr; sframe_init(&pr, /*print*/true, binary, has_tail);
@@ -320,7 +321,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     }
 
     uint32_t crc = has_tail ? (pr.have_tail_crc ? pr.tail_crc : 0) : pr.crc;
-    printf("\r\n---END %08x---\r\n", (unsigned)crc);
+    printf("\r\n" LT_FRAME_END_FMT, (unsigned)crc);
     fflush(stdout);
 
     esp_log_level_set("*", saved);

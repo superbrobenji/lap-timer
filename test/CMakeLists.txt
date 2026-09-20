@@ -60,6 +60,14 @@ foreach(src ${CORE_TEST_SRCS})
   endif()
 endforeach()
 
+# test_proto only needs the shared lap-timer <-> dev-controller protocol header (app/lt_proto.h,
+# a pure standalone header -- stdint.h only, no ESP-IDF/FreeRTOS deps), so it just needs the app
+# component's include root on its path for `#include "app/lt_proto.h"` to resolve (mirrors the
+# INCLUDE_DIRS the on-device build gets from components/app/CMakeLists.txt).
+if(TARGET test_proto)
+  target_include_directories(test_proto PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../components/app/include)
+endif()
+
 # test_smoke and test_ses_frame inspect failed CORE_ASSERT_ reports, so they link assert_support.c
 # (test/assert_support.h) -- the shared STRONG core_assert_report recorder that overrides core.c's
 # weak no-op default for those binaries. It is not a test_*.c, so the glob above never builds it as
