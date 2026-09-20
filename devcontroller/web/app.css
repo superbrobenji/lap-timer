@@ -1,0 +1,277 @@
+/*
+  Lap Timer Dev Controller — stylesheet.
+
+  No API dependency (pure presentation). Paired with index.html/app.js which
+  target the REST/SSE contract in
+  docs/superpowers/specs/2026-09-20-dev-controller-B-design.md (§3, §7).
+  Plain CSS, no preprocessor, no CDN — served from the www LittleFS partition.
+*/
+
+:root {
+  color-scheme: light dark;
+  --bg: #10161c;
+  --bg-panel: #182028;
+  --bg-field: #0d1318;
+  --fg: #e6edf3;
+  --fg-muted: #8a97a3;
+  --border: #2a333c;
+  --accent: #4da6ff;
+  --ok: #3fb950;
+  --bad: #f85149;
+  --warn: #d29922;
+  --radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+code {
+  background: var(--bg-field);
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.hint { color: var(--fg-muted); font-size: 0.9em; }
+.muted { color: var(--fg-muted); }
+
+/* --- status bar --- */
+
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  z-index: 10;
+}
+
+.status-bar__main { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  flex: none;
+}
+
+.status-bar--connected .status-dot { background: var(--ok); }
+.status-bar--disconnected .status-dot { background: var(--bad); }
+.status-bar--unknown .status-dot { background: var(--warn); }
+
+.status-bar__details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--fg-muted);
+  font-size: 0.9em;
+}
+
+/* --- layout / tabs --- */
+
+main { max-width: 900px; margin: 0 auto; padding: 12px; }
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.tabs__btn {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.95em;
+}
+
+.tabs__btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.panel {
+  display: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.panel.is-active { display: block; }
+
+.panel h2 { margin-top: 0; }
+
+/* --- forms / buttons --- */
+
+button {
+  background: var(--accent);
+  color: #041019;
+  border: none;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.secondary,
+#config-reload, #sessions-reload, #logs-reload {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+input[type="text"],
+input[type="number"],
+input[type="file"],
+select {
+  background: var(--bg-field);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 0.95em;
+}
+
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+
+.msg {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin: 8px 0;
+  font-size: 0.9em;
+}
+
+.msg--ok { background: rgba(63, 185, 80, 0.15); color: var(--ok); }
+.msg--err { background: rgba(248, 81, 73, 0.15); color: var(--bad); }
+.msg--info { background: rgba(77, 166, 255, 0.15); color: var(--accent); }
+
+.warn {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--warn);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+/* --- config form --- */
+
+.config-form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+}
+
+.config-form legend { padding: 0 6px; color: var(--fg-muted); font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.04em; }
+
+.config-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.config-field label {
+  color: var(--fg-muted);
+  font-size: 0.9em;
+  word-break: break-all;
+}
+
+.config-field input[type="text"],
+.config-field input[type="number"] { width: 55%; min-width: 100px; }
+
+/* --- tables --- */
+
+.table-wrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+
+th, td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+th { color: var(--fg-muted); font-weight: 600; }
+
+table a { color: var(--accent); margin-right: 8px; text-decoration: none; }
+table a:hover { text-decoration: underline; }
+
+/* --- monitor --- */
+
+.monitor-pane {
+  height: 320px;
+  overflow-y: auto;
+  background: var(--bg-field);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.monitor-pane div { border-bottom: 1px dashed var(--border); padding: 2px 0; }
+.monitor-pane div:last-child { border-bottom: none; }
+
+/* --- flash progress --- */
+
+.progress {
+  position: relative;
+  height: 22px;
+  background: var(--bg-field);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.progress__bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.progress__label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+/* --- small screens --- */
+
+@media (max-width: 480px) {
+  .config-field { flex-direction: column; align-items: flex-start; }
+  .config-field input[type="text"],
+  .config-field input[type="number"] { width: 100%; }
+  .status-bar { flex-direction: column; align-items: flex-start; }
+}

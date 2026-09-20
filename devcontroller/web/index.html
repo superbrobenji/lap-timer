@@ -1,0 +1,121 @@
+<!--
+  Lap Timer Dev Controller — static SPA shell.
+
+  API contract (see docs/superpowers/specs/2026-09-20-dev-controller-B-design.md
+  §3, §7 and docs/superpowers/plans/2026-09-20-plan-5.5-dev-controller.md
+  Tasks 2/4/5/6). Served from the dev controller's read-only LittleFS `www`
+  partition at http://192.168.4.1/ — no build step, no framework, no CDN.
+  All behaviour lives in app.js; this file is just section markup.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lap Timer Dev Controller</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header id="status-bar" class="status-bar status-bar--unknown">
+    <div class="status-bar__main">
+      <span id="status-dot" class="status-dot"></span>
+      <span id="status-text">Checking link&hellip;</span>
+    </div>
+    <div id="status-details" class="status-bar__details"></div>
+  </header>
+
+  <main>
+    <nav class="tabs" id="tabs">
+      <button class="tabs__btn" data-tab="config" type="button">Config</button>
+      <button class="tabs__btn" data-tab="sessions" type="button">Sessions</button>
+      <button class="tabs__btn" data-tab="monitor" type="button">Live monitor</button>
+      <button class="tabs__btn" data-tab="logs" type="button">Logs</button>
+      <button class="tabs__btn" data-tab="flash" type="button">Flash</button>
+    </nav>
+
+    <section id="panel-config" class="panel">
+      <h2>Config</h2>
+      <p class="hint">Loaded from <code>GET /api/config</code>. Saving sends the
+        whole edited document to <code>POST /api/config</code>; the firmware
+        diffs it against the live config and applies only the changed keys.</p>
+      <div id="config-status" class="msg" hidden></div>
+      <form id="config-form" class="config-form">
+        <div id="config-fields">
+          <p class="muted">Not loaded yet.</p>
+        </div>
+        <div class="row">
+          <button type="submit" id="config-save">Save config</button>
+          <button type="button" id="config-reload">Reload</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="panel-sessions" class="panel">
+      <h2>Sessions</h2>
+      <p class="hint">From <code>GET /api/sessions</code>. Each format link
+        downloads via <code>GET /api/session/&lt;id&gt;?fmt=&lt;f&gt;</code>.</p>
+      <div id="sessions-status" class="msg" hidden></div>
+      <div class="table-wrap">
+        <table id="sessions-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Mode</th><th>Venue</th><th>Laps</th>
+              <th>Best</th><th>Log</th><th>Summary</th><th>Download</th>
+            </tr>
+          </thead>
+          <tbody id="sessions-body">
+            <tr><td colspan="8" class="muted">Not loaded yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <button type="button" id="sessions-reload">Reload</button>
+    </section>
+
+    <section id="panel-monitor" class="panel">
+      <h2>Live monitor</h2>
+      <p class="hint"><code>EventSource('/api/stream')</code> — one SSE event
+        per fused-sample/event record. Last 200 rows kept.</p>
+      <div class="row">
+        <button type="button" id="monitor-toggle">Start</button>
+        <span id="monitor-count" class="muted">0 rows</span>
+      </div>
+      <div id="monitor-pane" class="monitor-pane" aria-live="off"></div>
+    </section>
+
+    <section id="panel-logs" class="panel">
+      <h2>Black-box logs</h2>
+      <p class="hint">From <code>GET /api/logs</code>; download via
+        <code>GET /api/log/&lt;id&gt;</code>.</p>
+      <div id="logs-status" class="msg" hidden></div>
+      <div class="table-wrap">
+        <table id="logs-table">
+          <thead><tr><th>ID</th><th>Size</th><th>Download</th></tr></thead>
+          <tbody id="logs-body">
+            <tr><td colspan="3" class="muted">Not loaded yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <button type="button" id="logs-reload">Reload</button>
+    </section>
+
+    <section id="panel-flash" class="panel">
+      <h2>Flash lap-timer firmware</h2>
+      <p class="warn">&#9888; Charge the lap-timer first &mdash; OTA needs
+        battery &ge; 3800&nbsp;mV or a charger connected
+        (<code>E_OTA_PRECOND</code>), and the flash draws from the same
+        shared battery.</p>
+      <div id="flash-status" class="msg" hidden></div>
+      <form id="flash-form" class="row">
+        <input type="file" id="flash-file" accept=".bin" required>
+        <button type="submit" id="flash-submit">Flash</button>
+      </form>
+      <div class="progress" id="flash-progress-wrap" hidden>
+        <div class="progress__bar" id="flash-progress-bar"></div>
+        <span class="progress__label" id="flash-progress-label">0%</span>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
