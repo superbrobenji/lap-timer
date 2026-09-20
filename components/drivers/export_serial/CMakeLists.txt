@@ -6,9 +6,11 @@
 idf_component_register(
     SRCS "export_serial.c"
     INCLUDE_DIRS "include"
-    REQUIRES app lt_hal core console esp_timer esp_system)
+    REQUIRES app lt_hal core console esp_timer esp_system esp_driver_uart)
 
-# build_config.h is not used here (cmd.c in `app` owns the CFG_* reads); no build-tree include.
+# build_config.h from the build tree (§21.1): export_serial reads CFG_HAS_DEVUX to gate the
+# interactive `dbg` UX from the always-on cmd + stream transport (§4.6, Plan 5 sub-project A).
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
 
 # Same strictness as components/core (§17.9); conversion warnings non-fatal for IDF macros.
 target_compile_options(${COMPONENT_LIB} PRIVATE

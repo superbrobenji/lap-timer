@@ -25,6 +25,7 @@ usage: ./build.sh <env> <command> [options]
   commands:     build flash monitor flash-monitor clean size menuconfig
   options:      --port <dev>              serial port for flash / monitor
                 --flash-size 4MB|8MB|16MB flash module size (default 4MB)
+                --devux ON|OFF            interactive dev UX (dbg verbs); default ON
                 --yes                     confirm a flash (required by 'flash')
 USAGE
     exit 2
@@ -36,10 +37,12 @@ ENV_NAME="$1"; CMD="$2"; shift 2
 PORT=""
 FLASH_SIZE="4MB"
 ASSUME_YES=0
+DEVUX_FLAG="ON"   # default ON; --devux OFF selects the prod-slim variant
 while [ $# -gt 0 ]; do
     case "$1" in
         --port)       PORT="${2:?--port needs a value}"; shift 2 ;;
         --flash-size) FLASH_SIZE="${2:?--flash-size needs a value}"; shift 2 ;;
+        --devux)      DEVUX_FLAG="${2:?--devux needs a value}"; shift 2 ;;
         --yes)        ASSUME_YES=1; shift ;;
         *) echo "unknown option: $1" >&2; usage ;;
     esac
@@ -71,6 +74,9 @@ esac
 BUILD_DIR="build/${ENV_NAME}"
 DFLAGS=()
 for f in "${FLAGS[@]}"; do DFLAGS+=("-D${f}"); done
+# DEVUX is not a per-env FLAG; pass it explicitly every build (default ON) so a prior
+# --devux OFF in this build dir never sticks via the CMake cache (§4.6, Plan 5 sub-project A).
+DFLAGS+=("-DDEVUX=${DEVUX_FLAG}")
 
 PORT_ARGS=()
 [ -n "$PORT" ] && PORT_ARGS=(-p "$PORT")

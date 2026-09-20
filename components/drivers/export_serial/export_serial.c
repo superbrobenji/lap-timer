@@ -22,12 +22,16 @@
  */
 #include "export_serial.h"
 
+#include "build_config.h"    /* CFG_HAS_DEVUX -- gate the interactive dbg UX (§4.6) */
+
 #include "app/cmd.h"
 #include "app/logger.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
+#include "app/ota.h"         /* ota_begin/ota_data/ota_end/ota_abort -- the `ota recv` bench push (§19.6) */
+#include "app/link.h"        /* link_sink_serial_emit (stream transport half), link_note_cmd_activity */
 #include "app/pipeline.h"
 #include "hal/storage.h"
 
@@ -43,6 +47,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"    /* UART0-TX mutex: serialize framed console responses vs. raw stream frames */
 
 #include "esp_console.h"
 #include "esp_log.h"
@@ -50,11 +55,24 @@
 #include "esp_system.h"          /* esp_get_free_heap_size / esp_get_minimum_free_heap_size */
 #include "esp_task_wdt.h"       /* dbg hang: subscribe the calling task so the task WDT fires deterministically */
 #include "esp_timer.h"
+#include "driver/uart.h"        /* uart_write_bytes -- raw binary TX for the peer stream (no \n->\r\n mangling) */
 #include "linenoise/linenoise.h"
 
 #define EXP_SERIAL_ASSERT_CODE 0x0C20   /* Power of 10 rule 5 (core/core.h); export_serial.c's own code */
 
-static int s_reset_reason;
+#if CFG_HAS_DEVUX
+static int s_reset_reason;   /* shown by `dbg status`; dev UX only */
+#endif
+static volatile bool s_uart_ready;   /* the console UART driver is installed (set after esp_console starts) */
+
+/* UART0-TX mutual exclusion (§18.4). A framed console transfer (run_cmd / run_stream / cmd_ota)
+ * writes a multi-line ---BEGIN/body/---END response to UART0 via printf; the link drain task (prio 4
+ * > REPL prio 2) writes raw 0xFF stream frames to the same UART0 via link_sink_serial_emit and would
+ * otherwise preempt mid-response and inject binary bytes, corrupting the §18.4 export. This mutex is
+ * held for a transfer's whole output; the drop-tolerant stream sink takes it non-blocking and drops
+ * its frame when a transfer owns it. Created in export_serial_start() before the REPL starts. */
+static StaticSemaphore_t s_uart_mtx_buf;
+static SemaphoreHandle_t s_uart_mtx;
 
 /* ================================================================== *
  *  Base64 (§18.4: binary formats are Base64-encoded between the markers)
@@ -176,6 +194,8 @@ static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
  * the assembled body through Base64 at flush (§18.4: STATUS record and other binary payloads). */
 static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t len, bool binary)
 {
+    link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole framed response (§18.4) */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs during a framed transfer */
 
@@ -187,6 +207,8 @@ static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t
     (void)cmd_dispatch(op, /*tag*/1, payload, len, ser_emit, &s_ser);
 
     esp_log_level_set("*", saved);
+    fflush(stdout);                               /* flush inside the lock: no buffered bytes escape after the give */
+    xSemaphoreGive(s_uart_mtx);
 }
 
 /* ================================================================== *
@@ -265,6 +287,8 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
                        bool binary, bool has_tail)
 {
     CORE_ASSERT_VOID(payload != NULL || len == 0, EXP_SERIAL_ASSERT_CODE);   /* a non-empty payload needs a real buffer */
+    link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole two-pass framed transfer (§18.4) */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
 
@@ -274,6 +298,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         printf("ERR 0x%04x: %s\r\n", (unsigned)m.err_code, m.errmsg);
         fflush(stdout);
         esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
         return;
     }
 
@@ -290,6 +315,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         printf("\r\nERR 0x%04x: %s\r\n", (unsigned)pr.err_code, pr.errmsg);
         fflush(stdout);
         esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
         return;
     }
 
@@ -298,6 +324,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     fflush(stdout);
 
     esp_log_level_set("*", saved);
+    xSemaphoreGive(s_uart_mtx);   /* flush already done above (inside the lock); release before the postcondition */
     /* postcondition (checked after the log level is already restored, so a trip here changes
      * nothing further): a has_tail op that produced a body must have lifted a real tail CRC --
      * cmd_dispatch's OPEN/READ contract always appends one to the final chunk. */
@@ -428,6 +455,11 @@ static int cmd_close_c(int argc, char **argv)
     run_cmd(CMD_CLOSE, "close", NULL, 0, false);
     return 0;
 }
+
+/* ---- DEVUX (§4.6): the interactive operator UX below -- the `dbg` diagnostics verbs
+ * and their help -- is gated OFF for the prod-slim image. The cmd + stream + OTA
+ * transport above and the REPL bring-up below stay unconditional (Plan 5 sub-project A). */
+#if CFG_HAS_DEVUX
 
 /* ================================================================== *
  *  dbg -- diagnostics verbs (migrated from the 3.2-3.4 console)
@@ -752,6 +784,195 @@ static int cmd_dbg(int argc, char **argv)
 }
 
 /* ================================================================== *
+ *  ota recv -- dev-bench OTA image push over UART0 (§19.6)
+ *
+ * A raw-binary image push for flash-testing the §19.6 OTA matrix over USB-UART. The text
+ * esp_console line (256 B) cannot carry a ~500 KB image, so `ota recv` handshakes then reads the
+ * image straight off the UART0 driver ring. This is safe because the console line reader (linenoise
+ * dumb mode) is idle for the whole duration of this handler -- it read exactly the command line up
+ * to '\n' and does not read ahead -- so a direct uart_read_bytes() is the only consumer of the RX
+ * ring, and the host waits for OTA-READY before streaming, so no image byte is ever eaten by the
+ * line reader or lost. Bypassing stdin/VFS also avoids the console's line-ending translation
+ * mangling raw bytes. DEV/bench only (CFG_HAS_DEVUX): the prod OTA push is the dev board's binary
+ * link, not this text console. Power of 10: bounded reads, static buffer (no heap), no fn pointer.
+ * ================================================================== */
+#define OTA_RECV_CHUNK    4096u    /* raw read granularity + one ota_data() per chunk */
+#define OTA_RECV_READ_MS  3000     /* per-read UART timeout window */
+#define OTA_RECV_MAX_STALL 3       /* consecutive empty read windows (~9 s) with no byte -> give up */
+#define OTA_BEGIN_PAYLOAD 76u      /* §19.4: size u32 LE | sha[32] | ver[16] | hwid[24] */
+
+/* {offset u32 LE | chunk[]} for ota_data(); static -> off the 6 KB REPL stack, no heap (rule 3). */
+static uint8_t s_ota_buf[4 + OTA_RECV_CHUNK];
+
+static int ota_nib(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode `len` bytes from `len`*2 hex chars; -1 on a bad length or non-hex digit. */
+static int ota_hex2bin(const char *hex, uint8_t *out, size_t len)
+{
+    CORE_ASSERT_RET(hex != NULL && out != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    if (strlen(hex) != len * 2) return -1;
+    for (size_t i = 0; i < len; i++) {          /* bounded: len == 32 (SHA-256) */
+        int hi = ota_nib(hex[2 * i]);
+        int lo = ota_nib(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Build the 76 B OTA_BEGIN payload from `ota recv <size> <sha_hex> <ver> <hwid>`. 0 on success
+ * (with *size_out set); -1 with an OTA-ERR line already printed on a malformed argument. */
+static int ota_build_begin(int argc, char **argv, uint8_t *payload, uint32_t *size_out)
+{
+    CORE_ASSERT_RET(argv != NULL && payload != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(size_out != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    if (argc < 6) { printf("OTA-ERR usage\r\n"); fflush(stdout); return -1; }
+    char *end = NULL;
+    unsigned long size = strtoul(argv[2], &end, 10);
+    if (end == argv[2] || *end != '\0' || size == 0) { printf("OTA-ERR badsize\r\n"); fflush(stdout); return -1; }
+    memset(payload, 0, OTA_BEGIN_PAYLOAD);
+    payload[0] = (uint8_t)size;        payload[1] = (uint8_t)(size >> 8);
+    payload[2] = (uint8_t)(size >> 16); payload[3] = (uint8_t)(size >> 24);
+    if (ota_hex2bin(argv[3], payload + 4, 32) != 0) { printf("OTA-ERR badsha\r\n"); fflush(stdout); return -1; }
+    size_t vl = strlen(argv[4]); if (vl > 16) vl = 16; memcpy(payload + 36, argv[4], vl);   /* ver[16] */
+    size_t hl = strlen(argv[5]); if (hl > 24) hl = 24; memcpy(payload + 52, argv[5], hl);   /* hwid[24] */
+    *size_out = (uint32_t)size;
+    return 0;
+}
+
+/* Fill exactly `want` bytes into `dst` from the console UART, tolerating short reads. Returns
+ * `want` on success, -1 on a driver error, -2 on a read stall (no byte for OTA_RECV_MAX_STALL
+ * windows). Bounded: at most `want` progressing reads plus OTA_RECV_MAX_STALL empty windows. */
+static int ota_fill_chunk(uart_port_t port, uint8_t *dst, uint32_t want)
+{
+    CORE_ASSERT_RET(dst != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(want > 0 && want <= OTA_RECV_CHUNK, EXP_SERIAL_ASSERT_CODE, -1);
+    uint32_t got = 0, stalls = 0;
+    while (got < want) {
+        int r = uart_read_bytes(port, dst + got, want - got, pdMS_TO_TICKS(OTA_RECV_READ_MS));
+        if (r < 0) return -1;
+        if (r == 0) { if (++stalls >= OTA_RECV_MAX_STALL) return -2; continue; }
+        stalls = 0;
+        got += (uint32_t)r;
+    }
+    return (int)got;
+}
+
+/* Stream <size> raw image bytes off UART0 in bounded chunks, driving ota_data(). 0 on a complete
+ * transfer; on any write/timeout failure it has already called ota_abort() + printed an OTA-ERR
+ * line and returns -1. Bounded (rule 2): at most size/OTA_RECV_CHUNK + 1 chunk iterations. */
+static int ota_recv_stream(uint32_t size)
+{
+    CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(s_uart_ready, EXP_SERIAL_ASSERT_CODE, -1);   /* the console UART driver is installed */
+    const uart_port_t port = (uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM;
+    uint32_t recvd = 0;
+    while (recvd < size) {
+        uint32_t want = size - recvd;
+        if (want > OTA_RECV_CHUNK) want = OTA_RECV_CHUNK;
+        int got = ota_fill_chunk(port, s_ota_buf + 4, want);
+        if (got < 0) {
+            (void)ota_abort();
+            printf("OTA-ERR %s\r\n", (got == -2) ? "timeout" : "read");   /* literal fmt (-Wformat-security) */
+            fflush(stdout);
+            return -1;
+        }
+        s_ota_buf[0] = (uint8_t)recvd;         s_ota_buf[1] = (uint8_t)(recvd >> 8);
+        s_ota_buf[2] = (uint8_t)(recvd >> 16); s_ota_buf[3] = (uint8_t)(recvd >> 24);
+        int rc = ota_data(s_ota_buf, (size_t)got + 4);
+        if (rc != 0) {
+            (void)ota_abort();
+            printf("OTA-ERR 0x%04x\r\n", (unsigned)rc);
+            fflush(stdout);
+            return -1;
+        }
+        recvd += (uint32_t)got;
+    }
+    return 0;
+}
+
+/* `ota recv <size_dec> <sha256_hex> <ver_str> <hwid_str>` -- dev bench OTA push (§19.6). Builds the
+ * 76 B OTA_BEGIN payload; on a clean begin prints OTA-READY, streams <size> raw bytes off UART0,
+ * then OTA_END. Logs are quiesced for the transfer so only the OTA-* tokens reach the host. */
+static int cmd_ota(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc < 2 || strcmp(argv[1], "recv") != 0) {
+        printf("usage: ota recv <size_dec> <sha256_hex> <ver_str> <hwid_str>\n");
+        return 1;
+    }
+    static uint8_t payload[OTA_BEGIN_PAYLOAD];   /* static: keep the 76 B off the REPL stack, no heap */
+    uint32_t size = 0;
+    if (ota_build_begin(argc, argv, payload, &size) != 0) return 1;   /* OTA-ERR already printed */
+    CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, 1);             /* build_begin rejects size == 0 */
+    /* Own UART0 TX for the whole handshake + raw transfer (OTA-READY .. OTA-END), so a stream frame
+     * can never inject binary bytes into the OTA-* token stream. Taken AFTER the argument asserts:
+     * those macros return (never abort on target), and a return while holding the mutex would leak
+     * it. The pre-transfer usage / OTA-ERR-bad* lines are single tokens emitted before any handshake
+     * and need no lock. */
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);
+    esp_log_level_t saved = esp_log_level_get("*");
+    esp_log_level_set("*", ESP_LOG_ERROR);       /* only the OTA-* tokens on the wire during the push */
+    int brc = ota_begin(payload, OTA_BEGIN_PAYLOAD);
+    if (brc != 0) {                              /* precondition / early hwid reject -> no raw mode */
+        printf("OTA-ERR 0x%04x\r\n", (unsigned)brc);
+        fflush(stdout);
+        esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
+        return 1;
+    }
+    printf("OTA-READY\r\n");                      /* handshake: the host streams the image only now */
+    fflush(stdout);
+    if (ota_recv_stream(size) != 0) {             /* aborted + OTA-ERR already printed (inside the lock) */
+        esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
+        return 1;
+    }
+    int erc = ota_end();                          /* SHA + ECDSA verify; 0 -> supervisor reboots (§19.4) */
+    printf("OTA-END 0x%04x\r\n", (unsigned)erc);
+    fflush(stdout);
+    esp_log_level_set("*", saved);
+    xSemaphoreGive(s_uart_mtx);
+    return 0;
+}
+
+#endif /* CFG_HAS_DEVUX -- dbg UX */
+
+/* ================================================================== *
+ *  link stream sink (transport half, §18) -- NOT part of the dev UX
+ *
+ * The STRONG link_sink_serial_emit: overrides link.c's weak no-op at link time and writes
+ * one fully-framed 0xFF stream frame to the console UART. The link module (components/app/
+ * link) owns presence + fan-out and calls this only when a serial peer is attached; here we
+ * just push the bytes. Raw uart_write_bytes -- not stdout -- so the binary frame is not
+ * mangled by the console's \n->\r\n TX translation. It shares UART0 with the REPL only
+ * temporally (the stream flows to a machine peer, the REPL serves a human, §8). Runs on the
+ * link task, so a brief UART block is off the pipeline's critical path; with no peer reading,
+ * the UART still transmits (no flow control) so it never blocks indefinitely. Guarded by
+ * s_uart_ready so a stream frame can never reach an uninstalled driver.
+ * ================================================================== */
+int link_sink_serial_emit(const uint8_t *frame, size_t len)
+{
+    CORE_ASSERT_RET(frame != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(len > 0, EXP_SERIAL_ASSERT_CODE, -1);
+    if (!s_uart_ready) return -1;                 /* console UART not up yet (pre-boot-step-12) */
+    /* A framed console transfer owns UART0 TX -> drop this stream frame rather than interleave binary
+     * bytes into its ---BEGIN/body/---END response. The stream is drop-tolerant, so a drop is NOT a
+     * transport error: return 0. Non-blocking take so the link drain never stalls behind a slow
+     * file/OTA transfer. link_stream_dropped() already accounts for ring drops upstream. */
+    if (s_uart_mtx && xSemaphoreTake(s_uart_mtx, 0) != pdTRUE) return 0;
+    int w = uart_write_bytes((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, frame, len);
+    if (s_uart_mtx) xSemaphoreGive(s_uart_mtx);
+    return (w == (int)len) ? 0 : -1;
+}
+
+/* ================================================================== *
  *  REPL bring-up
  * ================================================================== */
 static void register_cmd(const char *command, const char *help, esp_console_cmd_func_t func)
@@ -762,7 +983,17 @@ static void register_cmd(const char *command, const char *help, esp_console_cmd_
 
 void export_serial_start(int reset_reason)
 {
+#if CFG_HAS_DEVUX
     s_reset_reason = reset_reason;
+#else
+    (void)reset_reason;
+#endif
+
+    /* Create the UART0-TX mutex BEFORE the REPL starts and before s_uart_ready is published, so no
+     * framed transfer or stream frame can run before it exists (link_sink_serial_emit is a no-op
+     * until s_uart_ready, which is set last). */
+    s_uart_mtx = xSemaphoreCreateMutexStatic(&s_uart_mtx_buf);
+    CORE_ASSERT_VOID(s_uart_mtx != NULL, EXP_SERIAL_ASSERT_CODE);
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
@@ -788,7 +1019,11 @@ void export_serial_start(int reset_reason)
     register_cmd("diag",   "diagnostics JSON (§17.10)", cmd_diag_c);
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
+#if CFG_HAS_DEVUX
     register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|crash|hang", cmd_dbg);
+    register_cmd("ota",    "ota recv <size> <sha256_hex> <ver> <hwid>  (dev bench image push, §19.6)", cmd_ota);
+#endif
 
     esp_console_start_repl(repl);
+    s_uart_ready = true;   /* the console UART driver is installed: the stream sink may now write */
 }

@@ -17,6 +17,7 @@
 #include "app/lt_err.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
+#include "app/ota.h"              /* OTA receive-side state machine (CMD_OTA_*, §19.4) */
 
 #include "core/cfg.h"
 #include "core/exp.h"              /* streaming exporter (vbo/nmea/json) */
@@ -840,6 +841,26 @@ static int op_close(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 }
 
 /* ------------------------------------------------------------------ */
+/* CMD_OTA_* (§19.4): drive the receive-side state machine, then acknowledge. An empty LAST chunk
+ * is the success ack; any E_OTA_* code from the state machine is reported as an ERROR chunk. The
+ * heavy lifting (esp_ota, signature/hwid/SHA/precondition) is in app/ota (weak-stubbed until 5.4). */
+static int op_ota(uint8_t op, const uint8_t *payload, size_t len,
+                  cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
+{
+    LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
+    int rc;
+    switch (op) {
+    case CMD_OTA_BEGIN: rc = ota_begin(payload, len); break;
+    case CMD_OTA_DATA:  rc = ota_data(payload, len);  break;
+    case CMD_OTA_END:   rc = ota_end();               break;
+    case CMD_OTA_ABORT: rc = ota_abort();             break;
+    default:            rc = E_CONN_PROTO;            break;
+    }
+    if (rc != 0) return emit_error(emit, ctx, tag, seq, (uint16_t)rc, "ota");
+    return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);   /* empty LAST chunk = ack */
+}
+
 int cmd_dispatch(uint8_t op, uint8_t tag, const uint8_t *payload, size_t len,
                  cmd_emit_fn emit, void *ctx)
 {
@@ -863,6 +884,10 @@ int cmd_dispatch(uint8_t op, uint8_t tag, const uint8_t *payload, size_t len,
     case CMD_LIST:         return op_list(emit, ctx, tag);
     case CMD_OPEN:         return op_open(payload, len, emit, ctx, tag);
     case CMD_READ:         return op_read(payload, len, emit, ctx, tag);
+    case CMD_OTA_BEGIN:
+    case CMD_OTA_DATA:
+    case CMD_OTA_END:
+    case CMD_OTA_ABORT:    return op_ota(op, payload, len, emit, ctx, tag, &seq);
     default:
         return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "unknown op");
     }

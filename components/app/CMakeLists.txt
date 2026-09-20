@@ -13,6 +13,7 @@ idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS include
     REQUIRES core lt_hal nvs_flash esp_timer esp_system console
+             app_update esp_app_format esp_partition spi_flash mbedtls
              gps_$ENV{LT_GPS} imu_$ENV{LT_IMU})
 # The pipeline (globbed into `app`) calls the GPS/IMU HAL (hal/gps.h, hal/imu.h), so the selected
 # gps_${GPS}/imu_${IMU} driver is a real dependency of `app`: declaring it here places the driver

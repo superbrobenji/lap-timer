@@ -27,10 +27,18 @@ enum {
     CMD_FLAG_ERROR = 0x02,  /* bit1: payload = code u16 (LE) | msg utf8 */
 };
 
-/* Op codes (§18.1). Task 4 implements the non-file ops; LIST/OPEN/READ are Task 5. */
+/* The tag reserved for unsolicited fused-log / event STREAM frames pushed to an attached peer
+ * (Plan 5 sub-project A, §18): a stream frame reuses the chunk framing (tag | seq u16 | flags |
+ * payload) but carries this tag instead of a request tag, so a client demultiplexes stream
+ * records from command responses. Payload is a §14 record. */
+enum { LINK_STREAM_TAG = 0xFF };
+
+/* Op codes (§18.1). STATUS/CONFIG/ERRLOG/DIAG + LIST/OPEN/READ/DELETE/CLOSE are implemented; the
+ * OTA_* ops (§19.4) are the receive-side firmware-update state machine (session 5.4). */
 enum { CMD_STATUS=0x01, CMD_LIST=0x02, CMD_OPEN=0x03, CMD_READ=0x04, CMD_CLOSE=0x05, CMD_DELETE=0x06,
        CMD_CONFIG_GET=0x10, CMD_CONFIG_SET=0x11, CMD_ERRLOG_GET=0x14, CMD_ERRLOG_CLEAR=0x15,
-       CMD_DIAG_GET=0x16 };
+       CMD_DIAG_GET=0x16,
+       CMD_OTA_BEGIN=0x20, CMD_OTA_DATA=0x21, CMD_OTA_END=0x22, CMD_OTA_ABORT=0x23 };
 
 /* Run one op. Streams the response through `emit`. Returns 0 (including when the op reported an
  * ERROR chunk), or -1 if `emit` signalled a transport error. Not reentrant: one request at a

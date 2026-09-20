@@ -26,6 +26,14 @@ enum {
     E_CONN_BLE_INIT   = 0x0701,
     E_CONN_XFER_ABORT = 0x0702,
     E_CONN_PROTO      = 0x0703,   /* unknown op / malformed payload / not-yet-implemented op */
+
+    /* OTA (§17.7, §19.6). Land with the OTA receive-side (Plan 5 sub-project A, session 5.4). */
+    E_OTA_PRECOND     = 0x0801,   /* precondition failed (§19.5: low battery, already pending, ...) */
+    E_OTA_HWID        = 0x0802,   /* target image hwid / project_name mismatch */
+    E_OTA_WRITE       = 0x0803,   /* esp_ota_write / SHA-256 mismatch */
+    E_OTA_SIG         = 0x0804,   /* ECDSA signature verification failed (esp_ota_end) */
+    E_OTA_VALIDATED   = 0x0805,   /* pending image passed self-test -> marked valid (info) */
+    E_OTA_ROLLBACK    = 0x0806,   /* bootloader rolled back a bad image (logged next boot) */
 };
 
 #endif /* APP_LT_ERR_H */

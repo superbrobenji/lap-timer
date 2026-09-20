@@ -114,6 +114,8 @@ Roadmap exit (§19.6): good / corrupt / wrong-hwid / crashing images each behave
 - [ ] **Step 3:** supervisor pending-verify: on boot, if `ota_pending`, gate `esp_ota_mark_app_valid_cancel_rollback()` on the §19.4 conditions; log `E_OTA_VALIDATED`; on failure path log `E_OTA_ROLLBACK`.
 - [ ] **Step 4 (verify):** build + sign; flash `moto_neo6m`; **wait for "ready"**. Push a **good** signed image over serial `OTA_*` → applies + validates. Push a **corrupt** (bad SHA) → `E_OTA_WRITE`, running image untouched. **Wrong-hwid** → `E_OTA_HWID`, abort. A **crashing** image → bootloader rolls back, `E_OTA_ROLLBACK` next boot. Linter/host/build green. Commit; tag `p05-d4`.
 
+> **⚠ 2026-09-20 UPDATE — full OTA §19.6 matrix deferred to Plan 6.** OTA_BEGIN's §19.5 precondition (charger OR batt ≥ `BATT_OTA_MIN_MV` 3800 mV) reads real hardware (`board_charger_present`/`board_battery_read_mv`), which needs the **power hardware that lands in Plan 6**. Every apply/reject/rollback case requires OTA_BEGIN to pass the precondition first, so the full matrix (good/corrupt/wrong-hwid/crashing) can only be run meaningfully once that hardware exists. **On the current bench we verify only that OTA correctly REFUSES without power** (`ota recv …` → `E_OTA_PRECOND` 0x0801) — the guard works. The push transport itself (`ota recv` serial command + `tools/ota_push.py`) is built now (also a serial recovery-flash tool). The good/corrupt/wrong-hwid/apply+rollback matrix moves to **Plan 6** (wrong-hwid case = push the `moto_neo6m` image to a `moto_sim` device; good-apply case on `moto_sim` so `pipeline_gps_seen()` latches for supervisor validation). Code (`ota.c` receive path) is done + host-tested.
+
 ---
 
 ## Session 5.5 — prod-slim: flag-gate the dev console

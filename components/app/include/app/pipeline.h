@@ -24,5 +24,8 @@ int  pipeline_lap_count(void);
  * at out[index]) into `*out`, using the SAME F4 seqlock retry. Returns 0 on success, <0 if index
  * is out of range for the current ring. Lets a reader stream laps without a full snapshot array. */
 int  pipeline_lap_at(int index, lap_result_t *out);
+/* True once the pipeline has ingested at least one GPS fix since boot (set-once, monotonic). One
+ * of the §19.4 conditions the supervisor gates a pending-OTA validation on. Safe from any task. */
+bool pipeline_gps_seen(void);
 
 #endif /* APP_PIPELINE_H */
