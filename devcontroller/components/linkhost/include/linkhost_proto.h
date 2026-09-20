@@ -9,6 +9,8 @@
  *   - linkhost_crc32 (esp_rom_crc32_le(0,..)-compatible == zlib CRC-32; local, no ROM dep),
  *   - linkhost_status_decode (the binary §18.2 STATUS record),
  *   - linkhost_parse_frame (---BEGIN/---END, base64 for binary formats, CRC over the decoded body),
+ *   - lh_dl_* (a STREAMING ---BEGIN/---END parser that never buffers the whole body -- for the
+ *     KB..MB session files that overflow LINKHOST_ASM_MAX; the one intentional callback here),
  *   - linkhost_feed (the length-aware, noise-tolerant demux) + its stream ring / response slot,
  *   - the cmd-OTA flash token parser + state machine.
  */
@@ -95,6 +97,68 @@ int linkhost_stream_pop(lt_stream_rec_t *out);
 /* Pops the most-recently-assembled framed response. Returns 1 and sets *status (0 or LINKHOST_E_*)
  * and *out (when status==0) if one was pending; 0 if none is pending. */
 int linkhost_pop_response(linkhost_frame_t *out, int *status);
+
+/* ================================================================================================
+ *  Streaming session download (Plan 5.5): a pure, IDF-free state machine that parses one
+ *  ---BEGIN/---END framed response WITHOUT ever buffering the whole body. Real session files are
+ *  KB..MB (a `.log` was 46 KB) and blow past LINKHOST_ASM_MAX, so linkhost_cmd/linkhost_parse_frame
+ *  cannot carry them. This machine is fed raw incoming bytes: it parses the header (exposing
+ *  name+size), then streams the body -- base64-decoding on the fly for binary formats, carrying
+ *  <=3 chars across feed boundaries -- invoking a caller chunk callback with each decoded block,
+ *  accumulating a running CRC-32 over the DECODED bytes, and at ---END comparing it to the trailer.
+ *  The chunk callback is the ONE intentional function pointer in this file: the streaming sink
+ *  (httpd_resp_send_chunk on target). ---- */
+#define LH_DL_CHUNK  512u    /* decoded bytes buffered before a chunk_cb call */
+#define LH_DL_LINE   96u     /* header/trailer line accumulator (a BEGIN/END line is < 64 B) */
+
+/* Streaming download state. LH_DL_DONE and LH_DL_ERR are terminal (state >= LH_DL_DONE);
+ * LH_DL_HDR/_BODY/_TAIL are in-progress. */
+typedef enum {
+    LH_DL_HDR = 0,   /* scanning for / parsing the ---BEGIN header line */
+    LH_DL_BODY,      /* streaming the body (base64-decoding when is_binary) */
+    LH_DL_TAIL,      /* parsing the ---END <crc>--- trailer */
+    LH_DL_DONE,      /* trailer parsed; crc_ok set (terminal) */
+    LH_DL_ERR,       /* malformed framing or a callback abort (terminal) */
+} lh_dl_state_t;
+
+/* Chunk sink: fed each decoded block (<= LH_DL_CHUNK bytes). Returns non-zero to abort the
+ * transfer (e.g. the transport closed); lh_dl_feed then stops and goes terminal (LH_DL_ERR). */
+typedef int (*lh_dl_chunk_cb)(void *ctx, const uint8_t *data, size_t n);
+
+typedef struct {
+    lh_dl_state_t  state;
+    bool           is_binary;    /* base64-decode the body (log/sum); raw text otherwise (json/vbo/nmea) */
+    lh_dl_chunk_cb cb;
+    void          *cb_ctx;
+
+    /* ---- public: valid once the header has parsed (state >= LH_DL_BODY) ---- */
+    char           name[16];     /* frame name from ---BEGIN <name> ... */
+    uint32_t       body_size;    /* on-wire body byte count (base64 length for binary) */
+    uint32_t       decoded_len;  /* running count of decoded bytes handed to cb */
+
+    /* ---- internal ---- */
+    char           line[LH_DL_LINE];
+    size_t         line_len;
+    bool           line_skip;    /* the current line overflowed -> skip to newline */
+    uint32_t       body_got;     /* on-wire body bytes consumed */
+    uint32_t       tail_seen;    /* bytes scanned in the trailer (bounded) */
+    uint8_t        b64[4];       /* base64 carry across feed boundaries */
+    size_t         b64_len;
+    uint8_t        chunk[LH_DL_CHUNK];
+    size_t         chunk_len;
+    uint32_t       crc;          /* running CRC-32 register (pre-final-xor) over decoded bytes */
+    bool           crc_ok;       /* set at ---END (valid when state == LH_DL_DONE) */
+    int            result;       /* LINKHOST_E_* recorded for the LH_DL_ERR state */
+} lh_dl_ctx_t;
+
+/* Initialises a download context. `is_binary` selects on-the-fly base64 decoding of the body. */
+void lh_dl_init(lh_dl_ctx_t *c, bool is_binary, lh_dl_chunk_cb cb, void *cb_ctx);
+/* Feeds raw incoming bytes; invokes cb with each decoded block. Returns the (possibly terminal)
+ * running state; stops consuming once terminal. */
+lh_dl_state_t lh_dl_feed(lh_dl_ctx_t *c, const uint8_t *bytes, size_t n);
+/* Terminal result: 0 (complete + CRC ok), LINKHOST_E_CRC / LINKHOST_E_PROTO, or LINKHOST_E_TIMEOUT
+ * while still incomplete (not yet terminal). */
+int lh_dl_result(const lh_dl_ctx_t *c);
 
 /* ---- cmd-OTA flash (Task 6): the OTA-token parser + a pure, injectable state machine. ---- */
 /* Mapped codes for the named OTA-ERR reasons (a bare 0x%04x reason passes through unchanged). */

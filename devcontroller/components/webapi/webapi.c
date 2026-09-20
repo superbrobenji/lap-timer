@@ -223,6 +223,42 @@ static bool fmt_valid(const char *fmt)
            strcmp(fmt, LT_FMT_SUM) == 0;
 }
 
+/* linkhost_download streaming sink: relays each decoded block to the browser as an HTTP chunk. It
+ * lives on do_session_download's stack for the whole transfer, so `disp` stays valid for
+ * httpd_resp_set_hdr (which keeps the pointer, not a copy) until the response is sent. */
+typedef struct {
+    httpd_req_t *req;
+    const char  *id;
+    const char  *fmt;
+    char         disp[96];
+    bool         headers_set;
+    bool         started;         /* a body chunk was actually sent -> the point of no return */
+    bool         transport_dead;  /* httpd_resp_send_chunk failed -> the socket is already gone */
+} dl_sink_t;
+
+/* Commits the download headers exactly once, before the first chunk goes out (chunked responses
+ * emit headers with the first send_chunk). */
+static void dl_set_headers(dl_sink_t *s)
+{
+    if (s->headers_set) return;
+    snprintf(s->disp, sizeof s->disp, "attachment; filename=\"session_%s.%s\"", s->id, s->fmt);
+    httpd_resp_set_type(s->req, fmt_content_type(s->fmt));
+    httpd_resp_set_hdr(s->req, "Content-Disposition", s->disp);
+    s->headers_set = true;
+}
+
+static int session_chunk_cb(void *ctx, const uint8_t *data, size_t n)
+{
+    dl_sink_t *s = (dl_sink_t *)ctx;
+    dl_set_headers(s);
+    if (httpd_resp_send_chunk(s->req, (const char *)data, (ssize_t)n) != ESP_OK) {
+        s->transport_dead = true;
+        return 1;                                              /* abort: the client disconnected */
+    }
+    s->started = true;
+    return 0;
+}
+
 static void do_session_download(httpd_req_t *req)
 {
     char id[32];
@@ -243,32 +279,34 @@ static void do_session_download(httpd_req_t *req)
         return;
     }
 
-    char cmd[64];
-    int cn = snprintf(cmd, sizeof cmd, "%s %s %s", LT_CMD_OPEN, id, fmt);
-    if (cn < 0 || (size_t)cn >= sizeof cmd) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad session id");
+    /* Stream the framed response body straight to the browser -- never buffer the whole file, so a
+     * KB..MB session survives (the old linkhost_cmd path capped at LINKHOST_ASM_MAX = 1024 B). */
+    dl_sink_t sink = { .req = req, .id = id, .fmt = fmt };
+    int rc = linkhost_download(id, fmt, session_chunk_cb, &sink);
+
+    if (sink.transport_dead) {                                 /* client vanished mid-stream */
+        ESP_LOGW(TAG, "session %s %s: client disconnected mid-download", id, fmt);
+        return;                                                /* socket gone; async just completes */
+    }
+    if (rc == 0) {
+        dl_set_headers(&sink);                                 /* also covers an empty-body session */
+        httpd_resp_send_chunk(req, NULL, 0);                   /* terminate the chunked response */
         return;
     }
-
-    linkhost_frame_t f;
-    int rc = linkhost_cmd(cmd, &f);
-    if (rc == LINKHOST_E_CRC) {
-        /* the CRC arrives at ---END after the body; on mismatch abort the socket so the browser
-         * sees a failed/truncated download (design section 5, "Download semantics"). */
-        ESP_LOGW(TAG, "session %s %s CRC mismatch -> abort socket", id, fmt);
+    if (sink.started) {
+        /* A CRC/proto failure surfaces only at ---END, AFTER the body has streamed. The bytes
+         * already sent cannot be un-sent (httpd_resp_send_chunk(req, NULL, 0) would just cleanly
+         * finish a valid-looking response), so abort the socket -- the browser then sees a
+         * truncated/failed download instead of a complete but corrupt file. */
+        ESP_LOGW(TAG, "session %s %s rc=%d after streaming -> abort socket", id, fmt, rc);
         httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
         return;
     }
-    if (rc != 0) {
-        send_not_connected(req);
-        return;
-    }
-
-    char disp[80];
-    snprintf(disp, sizeof disp, "attachment; filename=\"session_%s.%s\"", id, fmt);
-    httpd_resp_set_type(req, fmt_content_type(fmt));
-    httpd_resp_set_hdr(req, "Content-Disposition", disp);
-    httpd_resp_send(req, (const char *)f.body, (ssize_t)f.body_len);
+    /* Nothing streamed yet -> a clean error response is still possible. */
+    if (rc == LINKHOST_E_CRC || rc == LINKHOST_E_PROTO)
+        send_json(req, "502 Bad Gateway", "{\"error\":\"session read failed\"}");
+    else
+        send_not_connected(req);                               /* timeout / not connected */
 }
 
 /* ---------- async: log file download ---------- */

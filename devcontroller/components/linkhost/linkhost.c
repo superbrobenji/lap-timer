@@ -1,8 +1,9 @@
 /* linkhost.c -- Plan 5.5 Task 3/6 IDF glue. The UART1 transport that drives the pure state
  * machines in host/linkhost_proto.c: a background RX task feeds linkhost_feed (the demux); a
  * mutex keeps one request in flight; linkhost_cmd/linkhost_status wait for the assembled framed
- * response; linkhost_flash streams the staged image from the `ota_stage` partition and drives the
- * OTA-token state machine. No wire-protocol logic lives here -- see linkhost_proto.c. */
+ * response; linkhost_download pauses the demux and drives the streaming lh_dl_* parser off UART1
+ * for KB..MB session files; linkhost_flash streams the staged image from the `ota_stage` partition
+ * and drives the OTA-token state machine. No wire-protocol logic lives here -- see linkhost_proto.c. */
 #include "linkhost.h"
 
 #include <assert.h>
@@ -30,11 +31,13 @@ static const char *TAG = "linkhost";
 #define OTA_READY_TMO_MS   3000
 #define OTA_DONE_TMO_MS    10000                 /* lap-timer aborts after ~9 s without bytes */
 #define OTA_CHUNK          512
+#define DL_IDLE_TMO_MS     3000                  /* abort a download after this long with no bytes */
+#define DL_HARD_TMO_MS     120000                /* absolute cap on one download (MB files at low baud) */
 
 static SemaphoreHandle_t s_req_mtx;              /* one request in flight (§18.1) */
 static TaskHandle_t      s_rx_task;
 static volatile int64_t  s_last_activity_us;     /* stamped by the RX task on any link traffic */
-static volatile bool     s_flash_active;         /* pauses the RX task while linkhost_flash owns UART1 */
+static volatile bool     s_rx_paused;            /* pauses the demux RX task while flash/download owns UART1 */
 static bool              s_inited;
 
 /* ---- RX task: pump UART1 -> the demux ---- */
@@ -43,7 +46,7 @@ static void rx_task(void *arg)
     (void)arg;
     static uint8_t buf[LINK_RX_CHUNK];
     for (;;) {                                   /* service task: bounded per-iteration work */
-        if (s_flash_active) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+        if (s_rx_paused) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         int n = uart_read_bytes(DC_LINK_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
             s_last_activity_us = esp_timer_get_time();
@@ -149,6 +152,59 @@ bool linkhost_peer_present(void)
     return (esp_timer_get_time() - last) < LINK_PRESENT_US;
 }
 
+/* ---- streaming session download ---- */
+/* Mirrors export_serial's fmt_from_str: only the log/sum session formats are Base64-encoded on the
+ * wire; json/vbo/nmea are raw text. (The parser stays format-agnostic via lh_dl_init's flag.) */
+static bool fmt_is_binary(const char *fmt)
+{
+    return strcmp(fmt, LT_FMT_LOG) == 0 || strcmp(fmt, LT_FMT_SUM) == 0;
+}
+
+int linkhost_download(const char *id, const char *fmt, lh_dl_chunk_cb chunk_cb, void *ctx)
+{
+    assert(id != NULL);
+    assert(fmt != NULL);
+    assert(chunk_cb != NULL);
+    if (!s_inited) return LINKHOST_E_NOTCONN;
+
+    char cmd[64];
+    int cn = snprintf(cmd, sizeof(cmd), "%s %s %s\r", LT_CMD_OPEN, id, fmt);
+    if (cn <= 0 || (size_t)cn >= sizeof(cmd)) return LINKHOST_E_PROTO;
+
+    lh_dl_ctx_t dl;
+    lh_dl_init(&dl, fmt_is_binary(fmt), chunk_cb, ctx);
+
+    xSemaphoreTake(s_req_mtx, portMAX_DELAY);
+    s_rx_paused = true;                          /* the demux RX task must not steal these bytes */
+    vTaskDelay(pdMS_TO_TICKS(25));               /* let the RX task release UART1 */
+    uart_flush_input(DC_LINK_UART);              /* drop stale prompt/heartbeat before `open` */
+
+    uart_write_bytes(DC_LINK_UART, cmd, (size_t)cn);
+
+    static uint8_t buf[LINK_RX_CHUNK];
+    int64_t now      = esp_timer_get_time();
+    int64_t idle_dl  = now + (int64_t)DL_IDLE_TMO_MS * 1000;   /* reset on every read */
+    int64_t hard_dl  = now + (int64_t)DL_HARD_TMO_MS * 1000;   /* absolute bound on the loop */
+    lh_dl_state_t st = dl.state;
+    while (st < LH_DL_DONE) {                     /* bounded by hard_dl / idle_dl */
+        int64_t t = esp_timer_get_time();
+        if (t >= hard_dl || t >= idle_dl) break;                    /* timeout -> incomplete */
+        int n = uart_read_bytes(DC_LINK_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
+        if (n > 0) {
+            idle_dl = esp_timer_get_time() + (int64_t)DL_IDLE_TMO_MS * 1000;
+            st = lh_dl_feed(&dl, buf, (size_t)n);
+        }
+    }
+
+    s_rx_paused = false;
+    xSemaphoreGive(s_req_mtx);
+
+    int result = lh_dl_result(&dl);
+    ESP_LOGI(TAG, "linkhost_download: %s %s -> result=%d (state=%d decoded=%u)",
+             id, fmt, result, (int)dl.state, (unsigned)dl.decoded_len);
+    return result;
+}
+
 /* ---- cmd-OTA flash (stage-then-push) ---- */
 static void sha_to_hex(const uint8_t sha[32], char out[65])
 {
@@ -196,7 +252,7 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
 
     int result;
     xSemaphoreTake(s_req_mtx, portMAX_DELAY);
-    s_flash_active = true;
+    s_rx_paused = true;
     vTaskDelay(pdMS_TO_TICKS(25));               /* let the RX task release UART1 */
     uart_flush_input(DC_LINK_UART);
 
@@ -229,7 +285,7 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
 
     result = linkhost_flash_result(&f);
 done:
-    s_flash_active = false;
+    s_rx_paused = false;
     xSemaphoreGive(s_req_mtx);
     ESP_LOGI(TAG, "linkhost_flash: size=%u -> result=%d (state=%d code=0x%04x)",
              (unsigned)size, result, (int)f.state, (unsigned)f.code);

@@ -43,6 +43,17 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out);
 /* True when link activity (a `status` heartbeat / stream frame) has been seen within a few seconds. */
 bool linkhost_peer_present(void);
 
+/* ---- streaming session download ----
+ * Runs `open <id> <fmt>` and STREAMS the framed response body to `chunk_cb` without ever buffering
+ * the whole file (real .log/.vbo/... are KB..MB and overflow LINKHOST_ASM_MAX). `chunk_cb` receives
+ * each decoded block (base64-decoded on the fly for the binary log/sum formats; raw text for
+ * json/vbo/nmea) and returns non-zero to abort (e.g. the HTTP socket closed). Returns 0 on a
+ * complete, CRC-verified transfer, or LINKHOST_E_CRC/_PROTO/_TIMEOUT/_NOTCONN. NOTE: on any
+ * non-zero return AFTER bytes have already been streamed, the sent prefix cannot be un-sent -- the
+ * caller must abort the transport so the peer sees a truncated download. Use linkhost_cmd for the
+ * small JSON ops (config/list/status). */
+int linkhost_download(const char *id, const char *fmt, lh_dl_chunk_cb chunk_cb, void *ctx);
+
 /* ---- cmd-OTA flash ----
  * Runs `ota recv <size> <sha> <ver> <hwid>` against the image already staged in the `ota_stage`
  * partition, streaming it in bounded chunks and reporting progress via cb. Returns 0 on

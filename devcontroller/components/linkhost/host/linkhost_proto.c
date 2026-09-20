@@ -1,10 +1,11 @@
 /* linkhost_proto.c -- linkhost's PURE, IDF-free logic (Plan 5.5 Task 3/6). No esp_* / driver / freertos:
  * this file builds host-side (devcontroller/test) and on B's IDF target. See linkhost_proto.h.
  *
- * Pragmatic P10 (Plan 5.5 Global Constraints): every loop has an explicit cap, functions >20 code
- * lines carry >=2 assertions, and no function pointers. The demux is strictly length-driven -- it
- * never scans for the next 0xFF (a §18.1 payload byte can be 0xFF); the Task-1 length prefix makes
- * stream framing unambiguous.
+ * Pragmatic P10 (Plan 5.5 Global Constraints): every loop has an explicit cap and functions >20
+ * code lines carry >=2 assertions. Function pointers are avoided except for the ONE deliberate
+ * streaming sink -- lh_dl_*'s chunk callback (a whole session file cannot be buffered to return by
+ * value). The demux is strictly length-driven -- it never scans for the next 0xFF (a §18.1 payload
+ * byte can be 0xFF); the Task-1 length prefix makes stream framing unambiguous.
  */
 #include "linkhost_proto.h"
 
@@ -14,17 +15,25 @@
 /* ================================================================================================
  *  CRC-32  (esp_rom_crc32_le(0, buf, len)-compatible == zlib CRC-32)
  * ============================================================================================== */
-uint32_t linkhost_crc32(const uint8_t *buf, size_t len)
+/* Folds `len` bytes into a running CRC-32 register (pre-final-xor). Seed with 0xFFFFFFFF; the
+ * caller xors with 0xFFFFFFFF at the end. Lets the streaming download accumulate a CRC block by
+ * block without buffering the whole body. */
+static uint32_t crc32_feed(uint32_t crc, const uint8_t *buf, size_t len)
 {
     assert(buf != NULL || len == 0);
-    uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < len; i++) {          /* bounded by len */
         crc ^= buf[i];
         for (int b = 0; b < 8; b++) {           /* bounded: 8 bit rounds */
             crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
         }
     }
-    return crc ^ 0xFFFFFFFFu;
+    return crc;
+}
+
+uint32_t linkhost_crc32(const uint8_t *buf, size_t len)
+{
+    assert(buf != NULL || len == 0);
+    return crc32_feed(0xFFFFFFFFu, buf, len) ^ 0xFFFFFFFFu;
 }
 
 /* ================================================================================================
@@ -40,6 +49,29 @@ static int b64_val(uint8_t c)
     return -1;
 }
 
+/* Decodes one 4-char base64 quantum `g` into `out` (up to 3 bytes). Returns byte count (1..3), or
+ * <0 on an invalid char / misplaced padding. Shared by the buffered and the streaming decoders. */
+static int b64_quantum(const uint8_t g[4], uint8_t out[3])
+{
+    assert(g != NULL);
+    assert(out != NULL);
+    int pad = 0;
+    uint32_t acc = 0;
+    for (int k = 0; k < 4; k++) {                /* bounded: 4 chars/quantum */
+        uint8_t c = g[k];
+        if (c == '=') { acc <<= 6; pad++; continue; }
+        int v = b64_val(c);
+        if (v < 0 || pad != 0) return -1;        /* invalid char, or data after padding */
+        acc = (acc << 6) | (uint32_t)v;
+    }
+    int nbytes = 3 - pad;                        /* pad 0->3, 1->2, 2->1 bytes */
+    if (nbytes <= 0) return -1;
+    out[0] = (uint8_t)(acc >> 16);
+    if (nbytes > 1) out[1] = (uint8_t)(acc >> 8);
+    if (nbytes > 2) out[2] = (uint8_t)(acc);
+    return nbytes;
+}
+
 /* Decodes `n` base64 chars from `src` into `dst` (cap `dst_cap`). Returns decoded length, or <0. */
 static int b64_decode(const uint8_t *src, size_t n, uint8_t *dst, size_t dst_cap)
 {
@@ -48,21 +80,11 @@ static int b64_decode(const uint8_t *src, size_t n, uint8_t *dst, size_t dst_cap
     if ((n & 3u) != 0) return -1;               /* base64 always arrives in 4-char quanta */
     size_t out = 0;
     for (size_t i = 0; i < n; i += 4) {          /* bounded by n/4 */
-        int pad = 0;
-        uint32_t acc = 0;
-        for (int k = 0; k < 4; k++) {            /* bounded: 4 chars/quantum */
-            uint8_t c = src[i + (size_t)k];
-            if (c == '=') { acc <<= 6; pad++; continue; }
-            int v = b64_val(c);
-            if (v < 0 || pad != 0) return -1;    /* invalid char, or data after padding */
-            acc = (acc << 6) | (uint32_t)v;
-        }
-        int nbytes = 3 - pad;                    /* pad 0->3, 1->2, 2->1 bytes */
-        if (nbytes <= 0) return -1;
+        uint8_t tmp[3];
+        int nbytes = b64_quantum(src + i, tmp);
+        if (nbytes < 0) return -1;
         if (out + (size_t)nbytes > dst_cap) return -1;
-        if (nbytes > 0) dst[out++] = (uint8_t)(acc >> 16);
-        if (nbytes > 1) dst[out++] = (uint8_t)(acc >> 8);
-        if (nbytes > 2) dst[out++] = (uint8_t)(acc);
+        for (int k = 0; k < nbytes; k++) dst[out++] = tmp[k];   /* bounded: <=3 */
     }
     return (int)out;
 }
@@ -227,6 +249,208 @@ int linkhost_parse_frame(const uint8_t *bytes, size_t n, linkhost_frame_t *out)
     out->body     = s_body;
     out->body_len = body_len;
     return 0;
+}
+
+/* ================================================================================================
+ *  Streaming ---BEGIN/---END download (lh_dl_*): parses one framed response WITHOUT buffering the
+ *  whole body. Fed raw incoming bytes; base64-decodes binary bodies on the fly (carrying <=3 chars
+ *  across feeds); hands each decoded block to the caller chunk_cb; verifies a running CRC-32 at
+ *  ---END. Reuses parse_hex8 / b64_quantum / crc32_feed above.
+ * ============================================================================================== */
+#define LH_DL_TAIL_MAX  128u   /* bytes tolerated after the body before ---END (bound) */
+
+/* Parses "---BEGIN <name> <size>---" out of a completed header line. UNLIKE parse_begin() this
+ * does NOT cap the size at LINKHOST_ASM_MAX (the whole point is to stream oversize bodies); only a
+ * u32 overflow guards it. Returns true + fills name/size on a match. */
+static bool dl_parse_begin(const char *line, size_t len, char *name, size_t name_cap,
+                           uint32_t *size_out)
+{
+    assert(name != NULL);
+    assert(size_out != NULL);
+    static const char PFX[] = LT_FRAME_BEGIN_PFX;          /* "---BEGIN " */
+    size_t pl = sizeof(PFX) - 1;
+    if (len < pl || memcmp(line, PFX, pl) != 0) return false;
+
+    size_t i = pl, ns = 0;
+    while (i < len && line[i] != ' ' && ns + 1 < name_cap) name[ns++] = line[i++];  /* bounded by len */
+    name[ns] = '\0';
+    if (i >= len || line[i] != ' ' || ns == 0) return false;
+    i++;
+
+    if (i >= len || line[i] < '0' || line[i] > '9') return false;
+    uint32_t v = 0;
+    while (i < len && line[i] >= '0' && line[i] <= '9') {   /* bounded by len */
+        if (v > (0xFFFFFFFFu - 9u) / 10u) return false;    /* u32 overflow guard */
+        v = v * 10u + (uint32_t)(line[i] - '0');
+        i++;
+    }
+    if (i + 3 > len || memcmp(line + i, "---", 3) != 0) return false;
+    *size_out = v;
+    return true;
+}
+
+/* Parses "---END <8hex>---" out of a completed trailer line into *crc_out. Returns true on a match. */
+static bool dl_parse_end(const char *line, size_t len, uint32_t *crc_out)
+{
+    assert(line != NULL);
+    assert(crc_out != NULL);
+    static const char PFX[] = LT_FRAME_END_PFX;            /* "---END " */
+    size_t pl = sizeof(PFX) - 1;
+    if (len < pl + 8u + 3u || memcmp(line, PFX, pl) != 0) return false;
+    if (parse_hex8((const uint8_t *)line + pl, len - pl, crc_out) != 8) return false;
+    if (memcmp(line + pl + 8u, "---", 3) != 0) return false;
+    return true;
+}
+
+void lh_dl_init(lh_dl_ctx_t *c, bool is_binary, lh_dl_chunk_cb cb, void *cb_ctx)
+{
+    assert(c != NULL);
+    memset(c, 0, sizeof(*c));
+    c->state     = LH_DL_HDR;
+    c->is_binary = is_binary;
+    c->cb        = cb;
+    c->cb_ctx    = cb_ctx;
+    c->crc       = 0xFFFFFFFFu;                  /* running CRC seed; xored at ---END */
+}
+
+/* Flushes the pending decoded chunk to the sink. Returns non-zero if the sink asked to abort. */
+static int dl_flush_chunk(lh_dl_ctx_t *c)
+{
+    assert(c != NULL);
+    if (c->chunk_len == 0) return 0;
+    int r = c->cb ? c->cb(c->cb_ctx, c->chunk, c->chunk_len) : 0;
+    c->chunk_len = 0;
+    return r;
+}
+
+/* Feeds `n` decoded bytes into the running CRC + the bounded chunk buffer, flushing to the sink
+ * whenever it fills. Returns non-zero if the sink asked to abort. */
+static int dl_emit(lh_dl_ctx_t *c, const uint8_t *data, size_t n)
+{
+    assert(c != NULL);
+    assert(data != NULL || n == 0);
+    c->crc = crc32_feed(c->crc, data, n);
+    c->decoded_len += (uint32_t)n;
+    for (size_t i = 0; i < n; i++) {             /* bounded by n */
+        c->chunk[c->chunk_len++] = data[i];
+        if (c->chunk_len == LH_DL_CHUNK && dl_flush_chunk(c)) return 1;
+    }
+    return 0;
+}
+
+static void dl_fail(lh_dl_ctx_t *c, int result)
+{
+    c->state  = LH_DL_ERR;
+    c->result = result;
+}
+
+/* HDR: accumulate a candidate line; on newline classify it. A ---BEGIN line seeds the body;
+ * anything else (command echo, prompt, boot/ESP_LOG noise) is discarded and scanning continues. */
+static void dl_feed_hdr(lh_dl_ctx_t *c, uint8_t b)
+{
+    assert(c != NULL);
+    assert(c->state == LH_DL_HDR);
+    if (b != '\n') {
+        if (!c->line_skip && c->line_len + 1u < LH_DL_LINE) c->line[c->line_len++] = (char)b;
+        else c->line_skip = true;                /* overlong -> not a header; skip to newline */
+        return;
+    }
+    size_t len = c->line_len;
+    if (len > 0 && c->line[len - 1] == '\r') len--;
+    c->line[len] = '\0';
+    uint32_t size = 0;
+    if (len > 0 && dl_parse_begin(c->line, len, c->name, sizeof c->name, &size)) {
+        c->body_size = size;
+        c->body_got  = 0;
+        c->b64_len   = 0;
+        c->line_len  = 0;
+        c->line_skip = false;
+        c->tail_seen = 0;
+        c->state = (size == 0) ? LH_DL_TAIL : LH_DL_BODY;   /* empty body -> straight to the trailer */
+        return;
+    }
+    c->line_len  = 0;                            /* echo/prompt/noise line -> discard, keep scanning */
+    c->line_skip = false;
+}
+
+/* BODY: consume exactly body_size on-wire bytes; base64-decode 4->3 (carry across feeds) for binary
+ * bodies or pass text bytes through, emitting decoded blocks; then hand off to the trailer. */
+static void dl_feed_body(lh_dl_ctx_t *c, uint8_t b)
+{
+    assert(c != NULL);
+    assert(c->state == LH_DL_BODY);
+    if (c->is_binary) {
+        c->b64[c->b64_len++] = b;
+        if (c->b64_len == 4u) {
+            uint8_t tmp[3];
+            int nb = b64_quantum(c->b64, tmp);
+            c->b64_len = 0;
+            if (nb < 0) { dl_fail(c, LINKHOST_E_PROTO); return; }
+            if (dl_emit(c, tmp, (size_t)nb)) { dl_fail(c, LINKHOST_E_PROTO); return; }
+        }
+    } else if (dl_emit(c, &b, 1)) {
+        dl_fail(c, LINKHOST_E_PROTO);
+        return;
+    }
+    if (++c->body_got >= c->body_size) {         /* body complete */
+        if (c->is_binary && c->b64_len != 0) { dl_fail(c, LINKHOST_E_PROTO); return; }  /* ragged base64 */
+        if (dl_flush_chunk(c)) { dl_fail(c, LINKHOST_E_PROTO); return; }
+        c->line_len  = 0;
+        c->line_skip = false;
+        c->tail_seen = 0;
+        c->state = LH_DL_TAIL;
+    }
+}
+
+/* TAIL: scan bounded lines after the body for "---END <crc>---"; compare the running CRC. */
+static void dl_feed_tail(lh_dl_ctx_t *c, uint8_t b)
+{
+    assert(c != NULL);
+    assert(c->state == LH_DL_TAIL);
+    if (++c->tail_seen > LH_DL_TAIL_MAX) { dl_fail(c, LINKHOST_E_PROTO); return; }
+    if (b != '\n') {
+        if (!c->line_skip && c->line_len + 1u < LH_DL_LINE) c->line[c->line_len++] = (char)b;
+        else c->line_skip = true;
+        return;
+    }
+    size_t len = c->line_len;
+    if (len > 0 && c->line[len - 1] == '\r') len--;
+    c->line[len] = '\0';
+    uint32_t crc_want = 0;
+    if (len > 0 && dl_parse_end(c->line, len, &crc_want)) {
+        c->crc_ok = ((c->crc ^ 0xFFFFFFFFu) == crc_want);
+        c->result = c->crc_ok ? 0 : LINKHOST_E_CRC;
+        c->state  = LH_DL_DONE;
+        return;
+    }
+    c->line_len  = 0;                            /* not the END line (e.g. the \r\n gap) -> keep scanning */
+    c->line_skip = false;
+}
+
+lh_dl_state_t lh_dl_feed(lh_dl_ctx_t *c, const uint8_t *bytes, size_t n)
+{
+    assert(c != NULL);
+    assert(bytes != NULL || n == 0);
+    for (size_t i = 0; i < n && c->state < LH_DL_DONE; i++) {   /* bounded by n; stop when terminal */
+        uint8_t b = bytes[i];
+        switch (c->state) {
+        case LH_DL_HDR:  dl_feed_hdr(c, b);  break;
+        case LH_DL_BODY: dl_feed_body(c, b); break;
+        case LH_DL_TAIL: dl_feed_tail(c, b); break;
+        default:         break;
+        }
+    }
+    return c->state;
+}
+
+int lh_dl_result(const lh_dl_ctx_t *c)
+{
+    assert(c != NULL);
+    switch (c->state) {
+    case LH_DL_DONE: return c->crc_ok ? 0 : LINKHOST_E_CRC;
+    case LH_DL_ERR:  return c->result;
+    default:         return LINKHOST_E_TIMEOUT;   /* still HDR/BODY/TAIL: incomplete */
+    }
 }
 
 /* ================================================================================================
