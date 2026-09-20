@@ -216,6 +216,40 @@ int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
     return n;
 }
 
+/* Same oldest->newest, empty-slots-skipped walk as lt_errlog_snapshot, exposed by count/index so
+ * callers (cmd.c ERRLOG_GET/DIAG_GET) can stream entries into JSON without a second full-size
+ * snapshot array. lt_errlog_at(i) returns byte-for-byte the entry lt_errlog_snapshot would place
+ * at out[i] for the same ring state. */
+int lt_errlog_count(void)
+{
+    ring_lock();
+    int n = 0;
+    for (int i = 0; i < ERR_RING_LEN; i++)
+        if (s_ring.entry[(s_ring.head + i) % ERR_RING_LEN].code != 0) n++;
+    ring_unlock();
+    return n;
+}
+
+int lt_errlog_at(int index, lt_err_entry_t *out)
+{
+    LT_ASSERT_RET(out != NULL, NVS_ASSERT_CODE, -1);
+    if (index < 0) return -1;                       /* out-of-range is routine input, not an anomaly */
+    ring_lock();                                    /* F1: consistent single-entry view vs. errlog_add */
+    int n = 0, rc = -1;
+    for (int i = 0; i < ERR_RING_LEN; i++) {
+        const err_entry_t *e = &s_ring.entry[(s_ring.head + i) % ERR_RING_LEN];
+        if (e->code == 0) continue;                 /* untouched slot (real codes >= 0x0101, §17.7) */
+        if (n == index) {
+            out->code = e->code; out->arg = e->arg; out->uptime_s = e->uptime_s; out->boot = e->boot;
+            rc = 0;
+            break;
+        }
+        n++;
+    }
+    ring_unlock();
+    return rc;
+}
+
 void lt_errlog_clear(void)
 {
     ring_lock();                                /* F1: clear vs. a concurrent errlog_add */

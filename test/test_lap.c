@@ -1031,6 +1031,52 @@ static void test_ten_synth_laps_realistic_noise_within_200ms_at_5hz(void)
 }
 #endif /* ESP_PLATFORM */
 
+/* §10.5 union-gate upper bound (plan 2026-09-20, Task B2, verify-first): a legal venue may carry
+ * TRK_MAX_LAYOUTS(8) candidate layouts that all share one S/F line yet each define LAP_MAX_SECTORS(8)
+ * ENTIRELY DISTINCT sector gates. build_union() deduplicates only gates whose endpoints coincide, so
+ * with no shared sector gates the disambiguation union saturates at 8 x 8 = 64 = LAP_MAX_UGATES. This
+ * proves the ugate[] worst case is exactly its current size (no margin), i.e. ugate[] cannot be
+ * shrunk -- reclaim 0. Nothing in the spec/data model forces cross-layout sector sharing, so this is
+ * a reachable legal venue, not a synthetic one. */
+static void build_venue_8x8_distinct(trk_venue_t *v, double lat0, double lon0)
+{
+    memset(v, 0, sizeof *v);
+    v->id = TRK_USER_ID_BASE;
+    snprintf(v->name, sizeof v->name, "Saturate");
+    v->lat = lat0; v->lon = lon0;
+    v->radius_m = VENUE_RADIUS_DEFAULT_M;
+    v->n_layouts = TRK_MAX_LAYOUTS;
+    trk_line_t sf = ew_gate(lat0, lon0, 0.0, 0.0);           /* one S/F shared by every layout */
+    for (uint8_t k = 0; k < TRK_MAX_LAYOUTS; k++) {
+        trk_layout_t *ly = &v->layouts[k];
+        ly->id = (uint16_t)(k + 1);
+        snprintf(ly->name, sizeof ly->name, "L%u", (unsigned)k);
+        ly->dir_sign = 1; ly->sf = sf; ly->length_m = 2500;
+        ly->n_sectors = LAP_MAX_SECTORS;
+        for (uint8_t s = 0; s < LAP_MAX_SECTORS; s++) {
+            double northing = 100.0 + (double)(k * LAP_MAX_SECTORS + s) * 10.0;   /* all 64 distinct */
+            ly->sectors[s] = ew_gate(lat0, lon0, 0.0, northing);
+        }
+    }
+}
+
+static void test_ugate_union_saturates_at_lap_max_ugates(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue_8x8_distinct(&v, lat0, lon0);
+    TEST_ASSERT_EQUAL_INT(0, trk_validate_venue(&v));        /* it is a LEGAL venue */
+
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    feed(&L, lat0, lon0, 0.0, 40.0, 2000000, SPD_MMS, true, &log);   /* S/F northbound -> out-lap + union */
+
+    TEST_ASSERT_EQUAL_UINT8(TRK_MAX_LAYOUTS, L.n_cand);      /* all 8 layouts are candidates */
+    TEST_ASSERT_EQUAL_UINT8(LAP_MAX_UGATES, L.n_ugate);      /* union saturates the array exactly */
+    TEST_ASSERT_EQUAL_INT(64, LAP_MAX_UGATES);               /* == TRK_MAX_LAYOUTS * LAP_MAX_SECTORS */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1051,6 +1097,7 @@ int main(void)
     RUN_TEST(test_sector_delta_vs_best);
     RUN_TEST(test_disambiguation_locks_full_layout);
     RUN_TEST(test_disambiguation_locks_short_layout);
+    RUN_TEST(test_ugate_union_saturates_at_lap_max_ugates);
     RUN_TEST(test_create_track_saves_valid_venue);
     RUN_TEST(test_create_cancel);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);

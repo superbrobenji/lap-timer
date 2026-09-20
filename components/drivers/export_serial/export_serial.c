@@ -111,9 +111,13 @@ static size_t b64_write_all(const uint8_t *src, size_t n)
  *  §18.1 command ops -> framed serial output (§18.4)
  * ================================================================== */
 
-/* Response assembly for one request (one in flight, §18.1). The emit callback appends chunk
- * payloads here; the LAST chunk triggers the frame print. */
-#define SER_ASM_MAX 3072
+/* Response assembly for one buffered request (one in flight, §18.1). The emit callback appends
+ * chunk payloads here; the LAST chunk triggers the frame print. Right-sized (A3): the two large
+ * read-only responses that used to set this (CONFIG_GET ~939 B, ERRLOG_GET up to ~2145 B) now
+ * stream via run_stream(), so the only ops still assembled here are STATUS (a fixed 20 B record),
+ * DIAG_GET (variable JSON, <= ~335 B worst case) and the tiny CONFIG_SET/DELETE/CLOSE acks and
+ * <= ~130 B error lines. 640 B holds the DIAG_GET worst case with wide margin. */
+#define SER_ASM_MAX 640
 typedef struct {
     const char *name;              /* frame name for BEGIN/END */
     uint8_t     buf[SER_ASM_MAX];
@@ -123,7 +127,7 @@ typedef struct {
     uint16_t    err_code;
 } ser_ctx_t;
 
-static ser_ctx_t s_ser;            /* static: keeps the 3 KB buffer off the console stack */
+static ser_ctx_t s_ser;            /* static: keeps the assembly buffer off the console stack */
 
 static void ser_flush(ser_ctx_t *c)
 {
@@ -356,7 +360,14 @@ static int cmd_read_c(int argc, char **argv)
     return 0;
 }
 
-/* ---- text commands (§18.4) ---- */
+/* ---- text commands (§18.4) ----
+ * run_cmd (single dispatch, buffered) vs run_stream (two-pass, unbuffered): STATUS and DIAG_GET
+ * stay on run_cmd. STATUS is tiny; DIAG_GET embeds live uptime_s/heap values whose decimal WIDTH
+ * can change between the measuring and printing passes, which would make the BEGIN size disagree
+ * with the printed body -- so it must be framed from a single captured snapshot. CONFIG_GET and
+ * ERRLOG_GET are large but their content is stable across the two passes (config / log-time ring
+ * fields), matching LIST's already-accepted two-pass read, so they stream and no longer size the
+ * assembly buffer. */
 static int cmd_status_c(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -364,10 +375,13 @@ static int cmd_status_c(int argc, char **argv)
     return 0;
 }
 
-static char s_setbuf[1024];   /* `config set <json>` reassembly */
+/* `config set <json>` argv reassembly. Right-sized (A3): the reassembly is built from one console
+ * input line, and export_serial_start() sets repl_cfg.max_cmdline_length = 256 (asserted below to
+ * be < sizeof s_setbuf), so 320 holds any real line with 64 B of margin. */
+static char s_setbuf[320];
 static int cmd_config_c(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_cmd(CMD_CONFIG_GET, "config", NULL, 0, false); return 0; }
+    if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_stream(CMD_CONFIG_GET, "config", NULL, 0, /*binary*/false, /*has_tail*/false); return 0; }
     if (argc >= 3 && strcmp(argv[1], "set") == 0) {
         /* rejoin argv[2..] so a JSON body split on spaces is reassembled (quotes must be escaped
          * on the command line, e.g. config set {\"units\":1} -- esp_console strips bare quotes). */
@@ -390,7 +404,7 @@ static int cmd_config_c(int argc, char **argv)
 static int cmd_errlog_c(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "clear") == 0) { run_cmd(CMD_ERRLOG_CLEAR, "errlog", NULL, 0, false); return 0; }
-    run_cmd(CMD_ERRLOG_GET, "errlog", NULL, 0, false);
+    run_stream(CMD_ERRLOG_GET, "errlog", NULL, 0, /*binary*/false, /*has_tail*/false);
     return 0;
 }
 
@@ -635,12 +649,13 @@ static int dbg_logck(int argc, char **argv)
 /* ---- dbg laps (from 3.4) ---- */
 static int dbg_laps(void)
 {
-    static lap_result_t laps[24];
-    int n = pipeline_laps_snapshot(laps, (int)(sizeof laps / sizeof laps[0]));
+    int n = pipeline_lap_count();   /* A3: stream laps via pipeline_lap_at(), no local snapshot array */
     if (n == 0) { printf("laps: none completed yet\n"); return 0; }
     printf("laps: %d completed\n", n);
     for (int i = 0; i < n; i++) {
-        const lap_result_t *l = &laps[i];
+        lap_result_t lap;
+        if (pipeline_lap_at(i, &lap) != 0) break;   /* ring advanced under us: stop cleanly */
+        const lap_result_t *l = &lap;
         printf("  lap %-3u %lu.%03lu s  flags=0x%02x  splits[",
                (unsigned)l->lap_no, (unsigned long)(l->time_ms / 1000u),
                (unsigned long)(l->time_ms % 1000u), (unsigned)l->flags);

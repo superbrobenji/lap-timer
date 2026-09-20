@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-14-lap-timer-design.md` §18 (connectivity), §19 (OTA); architecture `docs/superpowers/specs/2026-09-20-connectivity-dev-controller-design.md` (the two-device split; this is sub-project A).
 
+> **⚠ 2026-09-20 UPDATE — BLE (Session 5.2) deferred to sub-project C.** `conn_ble` is written and fits the neo6m target (5836 B free after the DRAM reclaim), but its ~15 KB NimBLE host stack leaves no comfortable headroom while the prod image still carries ~20 KB of dev tooling. That tooling is offloaded to the dev controller in sub-project C, so **BLE activation + flash-validation move to C** (into the roomy post-offload firmware). The code is parked on `s5.2-conn-ble`. This plan's other sessions do **not** need BLE: the dev board links over the UART `cmd`/stream transport (which exists), 5.3 is validated over the serial peer, 5.4 (OTA) and 5.5 (prod-slim) are BLE-independent. Prerequisite reclaim: `docs/superpowers/plans/2026-09-20-plan-dram-reclaim.md` (+10.9 KB, landed). Where this plan says "BLE" as a live transport below, read it as "activates in C".
+
 ## Global Constraints
 
 - **Power of 10 compliance (blocking):** every new `.c` in `components/**`/`main/**` passes `tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation` and the `-Werror` set (incl. `-Wmissing-prototypes`/`-Wmissing-declarations`). Functions ≤60 code lines, compound bodies ≤30, ≥2 genuine assertions per >20-line function, no new unregistered function pointer (NimBLE GATT callbacks are an IDF-boundary function-pointer site → register in `docs/power-of-10-deviations.md` with the §2 burden of proof, same class as PD-1..6).
@@ -64,9 +66,11 @@ Roadmap exit: `cmd` serial path verified end-to-end; `OTA_*` op codes defined; t
 
 ---
 
-## Session 5.2 — `conn_ble`: NimBLE RaceChrono service (BLE cmd transport + status) — the big new one
+## Session 5.2 — `conn_ble`: NimBLE RaceChrono service — CODE-COMPLETE, ACTIVATION DEFERRED TO SUB-PROJECT C
 
-Roadmap exit (§18.2): a phone (nRF Connect / `bleak`) sees the service, connects, and pulls a session via `cmd` OPEN/READ over BLE; `status` reads back live state; tag `p05-d2`. Flash-gated (BLE is on-device only).
+> Status 2026-09-20: the module (`conn_ble.c`/`.h`, GAP advertising, GATT `cmd`/`data`/`status`, flow control) is written, builds, and fits neo6m — parked on `s5.2-conn-ble`. It is **not wired into `app_main` on the prod line** until sub-project C frees DRAM by offloading dev tooling. The flash gate below runs in C.
+
+Roadmap exit (§18.2), **run in C**: a phone (nRF Connect / `bleak`) sees the service, connects, and pulls a session via `cmd` OPEN/READ over BLE; `status` reads back live state; tag deferred. Flash-gated (BLE is on-device only).
 
 **Files:** new `components/app/conn_ble/conn_ble.c` + `include/app/conn_ble.h`; `main/app_main.c` (start conn_ble when `CONN` has `ble`); `sdkconfig.defaults` (NimBLE MTU 512, DLE on, 1 conn, role central/observer off); `docs/power-of-10-deviations.md` (register the GATT/GAP callback function-pointer sites — IDF API contract, §2 burden of proof).
 
