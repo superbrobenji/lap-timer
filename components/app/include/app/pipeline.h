@@ -17,4 +17,8 @@ void pipeline_start(void);   /* create + start the task (boot step 12) */
  * lap_result_t into `out` and returns the number copied. Safe to call from another task. */
 int  pipeline_laps_snapshot(lap_result_t *out, int max);
 
+/* True once the pipeline has ingested at least one GPS fix since boot (set-once, monotonic). One
+ * of the §19.4 conditions the supervisor gates a pending-OTA validation on. Safe from any task. */
+bool pipeline_gps_seen(void);
+
 #endif /* APP_PIPELINE_H */
