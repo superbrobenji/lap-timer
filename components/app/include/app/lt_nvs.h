@@ -51,6 +51,13 @@ typedef struct {
 /* Copy the error ring oldest->newest into `out` (up to `cap` entries, empty slots skipped);
  * returns the number copied. Used by ERRLOG_GET / DIAG_GET (§18.1, §17.10). */
 int  lt_errlog_snapshot(lt_err_entry_t *out, int cap);
+/* Number of surviving (non-empty) error-ring entries -- the same count lt_errlog_snapshot would
+ * return with an unbounded cap. Lets callers stream entries by index without a full-ring copy. */
+int  lt_errlog_count(void);
+/* Fetch the `index`-th error-ring entry (0-based) in the SAME oldest->newest, empty-slots-skipped
+ * order lt_errlog_snapshot produces, into `*out`. Returns 0 on success, <0 if index is out of
+ * range. Each call takes a consistent single-entry view under the ring lock. */
+int  lt_errlog_at(int index, lt_err_entry_t *out);
 /* Clear the error ring (RAM + NVS). On-flash layout is unchanged; the ring is zeroed. */
 void lt_errlog_clear(void);
 
