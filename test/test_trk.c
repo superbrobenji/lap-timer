@@ -2,6 +2,7 @@
 #include "core/trk.h"
 #include "core/ses.h"
 #include "core/consts.h"
+#include "core/json.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -274,6 +275,73 @@ static void test_json_rejects_document_deeper_than_the_depth_cap(void)
     TEST_ASSERT_TRUE(strlen(err) > 0);
 }
 
+/* Emit a syntactically valid venue JSON with `n_layouts` layouts, each carrying `n_sec` sector gates,
+ * every optional field present and full (non-shortcut) sf + sector lines -- i.e. the token-maximal
+ * shape for a given (layouts, sectors). Coordinates are distinct and >= MIN_GATE_LEN_M apart so the
+ * document also passes trk_validate_venue whenever (n_layouts, n_sec) are within spec. Returns the
+ * byte length written. Verify-first support for plan Task B1 (toks[] sizing). */
+static int emit_venue_json(char *b, size_t cap, int n_layouts, int n_sec)
+{
+    int p = 0;
+    p += snprintf(b + p, cap - (size_t)p,
+        "{\"id\":65535,\"name\":\"MaxVenue\",\"lat\":-26.0,\"lon\":28.0,"
+        "\"radius_m\":50000,\"verified\":true,\"layouts\":[");
+    for (int k = 0; k < n_layouts; k++) {
+        p += snprintf(b + p, cap - (size_t)p,
+            "%s{\"id\":%d,\"name\":\"L\",\"dir\":%d,\"length_m\":9999,"
+            "\"sf\":[[-26.0,28.%04d],[-26.0,28.%04d]],\"sectors\":[",
+            k ? "," : "", k + 1, (k % 2) ? -1 : 1, 1000 + k, 1003 + k);
+        for (int s = 0; s < n_sec; s++) {
+            int g = k * LAP_MAX_SECTORS + s;                 /* unique per (layout, sector) */
+            p += snprintf(b + p, cap - (size_t)p,
+                "%s[[-26.%04d,28.0],[-26.%04d,28.0003]]", s ? "," : "", 1000 + g, 1000 + g);
+        }
+        p += snprintf(b + p, cap - (size_t)p, "]}");
+    }
+    p += snprintf(b + p, cap - (size_t)p, "]}");
+    return p;
+}
+
+/* Task B1 verify-first: the maximal legal venue (TRK_MAX_LAYOUTS x LAP_MAX_SECTORS, all fields)
+ * tokenises to exactly 615 jsmn tokens -- more than trk_from_json's MAX_TOKS(512) scratch buffer --
+ * so it is already rejected today at the json_parse stage, cleanly (return -1, err set, no crash;
+ * this suite runs under ASan/UBSan). This locks the computed worst-case bound and the clean-rejection
+ * behaviour: shrinking MAX_TOKS below 512 would fail this, and so would a grammar change that pushes
+ * the true bound off 615. */
+static void test_json_max_venue_token_bound(void)
+{
+    static char js[8192];
+    int n = emit_venue_json(js, sizeof js, TRK_MAX_LAYOUTS, LAP_MAX_SECTORS);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+
+    static jsmntok_t big[1024];
+    int cnt = json_parse(js, (size_t)n, big, 1024);
+    TEST_ASSERT_EQUAL_INT(615, cnt);                 /* the verified worst-case token count */
+    TEST_ASSERT_GREATER_THAN_INT(512, cnt);          /* ... which exceeds MAX_TOKS */
+
+    static trk_venue_t v; char err[64]; err[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(-1, trk_from_json(&v, js, (size_t)n, err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("malformed json", err);   /* JSMN_ERROR_NOMEM path, not a fault */
+}
+
+/* The success side of the 512-token boundary: a large but sub-cap legal venue
+ * (TRK_MAX_LAYOUTS x 6 sectors = 503 tokens) still tokenises under MAX_TOKS and parses successfully,
+ * confirming reclaim 0 does not regress any venue that works today. */
+static void test_json_large_venue_within_cap_parses(void)
+{
+    static char js[8192];
+    int n = emit_venue_json(js, sizeof js, TRK_MAX_LAYOUTS, 6);
+    static jsmntok_t big[1024];
+    int cnt = json_parse(js, (size_t)n, big, 1024);
+    TEST_ASSERT_GREATER_THAN_INT(0, cnt);
+    TEST_ASSERT_LESS_OR_EQUAL_INT(512, cnt);         /* fits the current scratch buffer */
+
+    static trk_venue_t v; char err[64]; err[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(0, trk_from_json(&v, js, (size_t)n, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(TRK_MAX_LAYOUTS, v.n_layouts);
+    TEST_ASSERT_EQUAL_UINT8(6, v.layouts[0].n_sectors);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -289,5 +357,7 @@ int main(void)
     RUN_TEST(test_save_produces_identical_blobs_regardless_of_padding_garbage);
     RUN_TEST(test_json_rejects_degenerate_line_and_duplicate_layout_ids);
     RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
+    RUN_TEST(test_json_max_venue_token_bound);
+    RUN_TEST(test_json_large_venue_within_cap_parses);
     return UNITY_END();
 }

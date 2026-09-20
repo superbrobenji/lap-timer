@@ -13,6 +13,17 @@
  * fault hook). */
 #define TRK_ASSERT_CODE 0x0A80
 
+/* Scratch jsmn-token budget for parsing ONE incoming custom-venue JSON upload (20 B/token with
+ * JSMN_PARENT_LINKS -> 10,240 B static). Verify-first sizing (plan 2026-09-20, Task B1): the
+ * maximal legal venue under the current spec -- TRK_MAX_LAYOUTS(8) layouts x LAP_MAX_SECTORS(8)
+ * sectors, every field present, full sf + sector lines (the "same"/"reverse" shortcuts tokenise to
+ * FEWER tokens) -- tokenises to exactly 615 jsmn tokens (host-verified against the real jsmn.c /
+ * json_parse; regression-locked in test/test_trk.c test_json_max_venue_token_bound). 512 is
+ * therefore ALREADY below that worst case: a truly maximal upload is rejected today at json_parse
+ * (JSMN_ERROR_NOMEM -> "malformed json", a clean fail(), never a crash). It is deliberately NOT
+ * shrunk here (reclaim 0): a smaller cap would reject yet more legal venues. Growing it to >=615 to
+ * accept the maximal upload is a separate DRAM-cost decision, out of scope for the reclaim plan and
+ * filed for a spec-reconciliation ticket. */
 #define MAX_TOKS 512
 
 static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
