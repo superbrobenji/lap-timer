@@ -47,6 +47,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"    /* UART0-TX mutex: serialize framed console responses vs. raw stream frames */
 
 #include "esp_console.h"
 #include "esp_log.h"
@@ -63,6 +64,15 @@
 static int s_reset_reason;   /* shown by `dbg status`; dev UX only */
 #endif
 static volatile bool s_uart_ready;   /* the console UART driver is installed (set after esp_console starts) */
+
+/* UART0-TX mutual exclusion (§18.4). A framed console transfer (run_cmd / run_stream / cmd_ota)
+ * writes a multi-line ---BEGIN/body/---END response to UART0 via printf; the link drain task (prio 4
+ * > REPL prio 2) writes raw 0xFF stream frames to the same UART0 via link_sink_serial_emit and would
+ * otherwise preempt mid-response and inject binary bytes, corrupting the §18.4 export. This mutex is
+ * held for a transfer's whole output; the drop-tolerant stream sink takes it non-blocking and drops
+ * its frame when a transfer owns it. Created in export_serial_start() before the REPL starts. */
+static StaticSemaphore_t s_uart_mtx_buf;
+static SemaphoreHandle_t s_uart_mtx;
 
 /* ================================================================== *
  *  Base64 (§18.4: binary formats are Base64-encoded between the markers)
@@ -185,6 +195,7 @@ static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
 static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t len, bool binary)
 {
     link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole framed response (§18.4) */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs during a framed transfer */
 
@@ -196,6 +207,8 @@ static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t
     (void)cmd_dispatch(op, /*tag*/1, payload, len, ser_emit, &s_ser);
 
     esp_log_level_set("*", saved);
+    fflush(stdout);                               /* flush inside the lock: no buffered bytes escape after the give */
+    xSemaphoreGive(s_uart_mtx);
 }
 
 /* ================================================================== *
@@ -275,6 +288,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
 {
     CORE_ASSERT_VOID(payload != NULL || len == 0, EXP_SERIAL_ASSERT_CODE);   /* a non-empty payload needs a real buffer */
     link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole two-pass framed transfer (§18.4) */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
 
@@ -284,6 +298,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         printf("ERR 0x%04x: %s\r\n", (unsigned)m.err_code, m.errmsg);
         fflush(stdout);
         esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
         return;
     }
 
@@ -300,6 +315,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         printf("\r\nERR 0x%04x: %s\r\n", (unsigned)pr.err_code, pr.errmsg);
         fflush(stdout);
         esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
         return;
     }
 
@@ -308,6 +324,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     fflush(stdout);
 
     esp_log_level_set("*", saved);
+    xSemaphoreGive(s_uart_mtx);   /* flush already done above (inside the lock); release before the postcondition */
     /* postcondition (checked after the log level is already restored, so a trip here changes
      * nothing further): a has_tail op that produced a body must have lifted a real tail CRC --
      * cmd_dispatch's OPEN/READ contract always appends one to the final chunk. */
@@ -894,6 +911,12 @@ static int cmd_ota(int argc, char **argv)
     uint32_t size = 0;
     if (ota_build_begin(argc, argv, payload, &size) != 0) return 1;   /* OTA-ERR already printed */
     CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, 1);             /* build_begin rejects size == 0 */
+    /* Own UART0 TX for the whole handshake + raw transfer (OTA-READY .. OTA-END), so a stream frame
+     * can never inject binary bytes into the OTA-* token stream. Taken AFTER the argument asserts:
+     * those macros return (never abort on target), and a return while holding the mutex would leak
+     * it. The pre-transfer usage / OTA-ERR-bad* lines are single tokens emitted before any handshake
+     * and need no lock. */
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);       /* only the OTA-* tokens on the wire during the push */
     int brc = ota_begin(payload, OTA_BEGIN_PAYLOAD);
@@ -901,15 +924,21 @@ static int cmd_ota(int argc, char **argv)
         printf("OTA-ERR 0x%04x\r\n", (unsigned)brc);
         fflush(stdout);
         esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
         return 1;
     }
     printf("OTA-READY\r\n");                      /* handshake: the host streams the image only now */
     fflush(stdout);
-    if (ota_recv_stream(size) != 0) { esp_log_level_set("*", saved); return 1; }   /* aborted + printed */
+    if (ota_recv_stream(size) != 0) {             /* aborted + OTA-ERR already printed (inside the lock) */
+        esp_log_level_set("*", saved);
+        xSemaphoreGive(s_uart_mtx);
+        return 1;
+    }
     int erc = ota_end();                          /* SHA + ECDSA verify; 0 -> supervisor reboots (§19.4) */
     printf("OTA-END 0x%04x\r\n", (unsigned)erc);
     fflush(stdout);
     esp_log_level_set("*", saved);
+    xSemaphoreGive(s_uart_mtx);
     return 0;
 }
 
@@ -933,7 +962,13 @@ int link_sink_serial_emit(const uint8_t *frame, size_t len)
     CORE_ASSERT_RET(frame != NULL, EXP_SERIAL_ASSERT_CODE, -1);
     CORE_ASSERT_RET(len > 0, EXP_SERIAL_ASSERT_CODE, -1);
     if (!s_uart_ready) return -1;                 /* console UART not up yet (pre-boot-step-12) */
+    /* A framed console transfer owns UART0 TX -> drop this stream frame rather than interleave binary
+     * bytes into its ---BEGIN/body/---END response. The stream is drop-tolerant, so a drop is NOT a
+     * transport error: return 0. Non-blocking take so the link drain never stalls behind a slow
+     * file/OTA transfer. link_stream_dropped() already accounts for ring drops upstream. */
+    if (s_uart_mtx && xSemaphoreTake(s_uart_mtx, 0) != pdTRUE) return 0;
     int w = uart_write_bytes((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, frame, len);
+    if (s_uart_mtx) xSemaphoreGive(s_uart_mtx);
     return (w == (int)len) ? 0 : -1;
 }
 
@@ -953,6 +988,12 @@ void export_serial_start(int reset_reason)
 #else
     (void)reset_reason;
 #endif
+
+    /* Create the UART0-TX mutex BEFORE the REPL starts and before s_uart_ready is published, so no
+     * framed transfer or stream frame can run before it exists (link_sink_serial_emit is a no-op
+     * until s_uart_ready, which is set last). */
+    s_uart_mtx = xSemaphoreCreateMutexStatic(&s_uart_mtx_buf);
+    CORE_ASSERT_VOID(s_uart_mtx != NULL, EXP_SERIAL_ASSERT_CODE);
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();

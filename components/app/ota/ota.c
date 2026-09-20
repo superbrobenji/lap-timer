@@ -61,7 +61,7 @@ static const char __attribute__((section(".rodata_custom_desc"), used)) hwid[OTA
 
 typedef enum { OTA_IDLE = 0, OTA_RECV, OTA_REBOOT } ota_st_t;
 
-static ota_st_t               s_state;
+static volatile ota_st_t      s_state;             /* volatile: read by the supervisor task in ota_reboot_due */
 static esp_ota_handle_t       s_handle;
 static const esp_partition_t *s_target;
 static uint32_t               s_size;                /* declared image size (from OTA_BEGIN) */
@@ -69,7 +69,7 @@ static uint32_t               s_recv;                /* bytes written == next ex
 static uint8_t                s_sha_want[OTA_SHA_LEN];
 static mbedtls_sha256_context s_sha;
 static bool                   s_hwid_ok;             /* the §19.3 target check has passed */
-static int64_t                s_reboot_at_us;
+static int64_t                s_reboot_at_us = INT64_MAX;   /* armed by ota_end; INT64_MAX = not due (reboot-arm race) */
 
 static uint32_t rd_u32le(const uint8_t *p)
 {
@@ -95,6 +95,7 @@ static void ota_reset(void)
     s_size = 0;
     s_recv = 0;
     s_hwid_ok = false;
+    s_reboot_at_us = INT64_MAX;             /* disarm: no reboot is due in IDLE (reboot-arm race) */
     sys_flags_clear(SYS_OTA_PENDING);
 }
 
@@ -193,8 +194,12 @@ int ota_end(void)
     if (e != ESP_OK) { ota_reset(); ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(e)); return E_OTA_SIG; }
     if (esp_ota_set_boot_partition(s_target) != ESP_OK) { ota_reset(); return E_OTA_WRITE; }
     if (lt_ota_pending_set() != 0) ESP_LOGE(TAG, "ota_pending persist failed");
-    s_state = OTA_REBOOT;
+    /* Arm the deadline FIRST, then publish OTA_REBOOT with a release store: the supervisor's
+     * ota_reboot_due() pairs an acquire load of s_state with this release, so it can never observe
+     * OTA_REBOOT while s_reboot_at_us still holds its INT64_MAX init (which would reboot instantly,
+     * truncating the settle delay and losing the OTA-END ack). */
     s_reboot_at_us = esp_timer_get_time() + (int64_t)OTA_REBOOT_DELAY_S * 1000000;
+    __atomic_store_n(&s_state, OTA_REBOOT, __ATOMIC_RELEASE);
     ESP_LOGW(TAG, "image applied; supervisor reboots in %d s", OTA_REBOOT_DELAY_S);
     return 0;
 }
@@ -212,5 +217,6 @@ bool ota_in_progress(void) { return s_state != OTA_IDLE; }
 
 bool ota_reboot_due(void)
 {
-    return s_state == OTA_REBOOT && esp_timer_get_time() >= s_reboot_at_us;
+    if (__atomic_load_n(&s_state, __ATOMIC_ACQUIRE) != OTA_REBOOT) return false;
+    return esp_timer_get_time() >= s_reboot_at_us;   /* acquire above pairs with ota_end's release */
 }

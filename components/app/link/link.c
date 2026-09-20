@@ -19,6 +19,9 @@
 #include "app/lt_assert.h"
 
 #include "core/ring.h"
+#include "core/event.h"      /* event_t -- sizing the SES_T_EVENT stream record (FIX 3 static assert) */
+#include "core/types.h"      /* fused_sample_t -- sizing the SES_T_FUSED stream record (FIX 3 static assert) */
+#include "core/ses.h"        /* SES_T_* -- the stream record type byte */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -54,6 +57,13 @@
 
 _Static_assert((LINK_STREAM_CAP & (LINK_STREAM_CAP - 1u)) == 0u, "LINK_STREAM_CAP must be a power of two");
 _Static_assert(4 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame must fit one §18.1 data chunk");
+
+/* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
+ * SES_T_FUSED -> 1 + sizeof(fused_sample_t), SES_T_EVENT -> 1 + sizeof(event_t). If either struct
+ * grows past LINK_REC_MAX, stream_push()'s `len > LINK_REC_MAX` guard would silently drop the whole
+ * record -- catch that at compile time so a future field addition fails the build, not the stream. */
+_Static_assert(1 + sizeof(fused_sample_t) <= LINK_REC_MAX, "SES_T_FUSED stream record must fit LINK_REC_MAX");
+_Static_assert(1 + sizeof(event_t) <= LINK_REC_MAX, "SES_T_EVENT stream record must fit LINK_REC_MAX");
 
 typedef struct { uint16_t len; uint8_t data[LINK_REC_MAX]; } link_rec_t;
 
