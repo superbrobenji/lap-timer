@@ -30,6 +30,7 @@
 #include "app/lt_nvs.h"
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
+#include "app/ota.h"         /* ota_begin/ota_data/ota_end/ota_abort -- the `ota recv` bench push (§19.6) */
 #include "app/link.h"        /* link_sink_serial_emit (stream transport half), link_note_cmd_activity */
 #include "app/pipeline.h"
 #include "hal/storage.h"
@@ -765,6 +766,153 @@ static int cmd_dbg(int argc, char **argv)
     return 1;
 }
 
+/* ================================================================== *
+ *  ota recv -- dev-bench OTA image push over UART0 (§19.6)
+ *
+ * A raw-binary image push for flash-testing the §19.6 OTA matrix over USB-UART. The text
+ * esp_console line (256 B) cannot carry a ~500 KB image, so `ota recv` handshakes then reads the
+ * image straight off the UART0 driver ring. This is safe because the console line reader (linenoise
+ * dumb mode) is idle for the whole duration of this handler -- it read exactly the command line up
+ * to '\n' and does not read ahead -- so a direct uart_read_bytes() is the only consumer of the RX
+ * ring, and the host waits for OTA-READY before streaming, so no image byte is ever eaten by the
+ * line reader or lost. Bypassing stdin/VFS also avoids the console's line-ending translation
+ * mangling raw bytes. DEV/bench only (CFG_HAS_DEVUX): the prod OTA push is the dev board's binary
+ * link, not this text console. Power of 10: bounded reads, static buffer (no heap), no fn pointer.
+ * ================================================================== */
+#define OTA_RECV_CHUNK    4096u    /* raw read granularity + one ota_data() per chunk */
+#define OTA_RECV_READ_MS  3000     /* per-read UART timeout window */
+#define OTA_RECV_MAX_STALL 3       /* consecutive empty read windows (~9 s) with no byte -> give up */
+#define OTA_BEGIN_PAYLOAD 76u      /* §19.4: size u32 LE | sha[32] | ver[16] | hwid[24] */
+
+/* {offset u32 LE | chunk[]} for ota_data(); static -> off the 6 KB REPL stack, no heap (rule 3). */
+static uint8_t s_ota_buf[4 + OTA_RECV_CHUNK];
+
+static int ota_nib(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode `len` bytes from `len`*2 hex chars; -1 on a bad length or non-hex digit. */
+static int ota_hex2bin(const char *hex, uint8_t *out, size_t len)
+{
+    CORE_ASSERT_RET(hex != NULL && out != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    if (strlen(hex) != len * 2) return -1;
+    for (size_t i = 0; i < len; i++) {          /* bounded: len == 32 (SHA-256) */
+        int hi = ota_nib(hex[2 * i]);
+        int lo = ota_nib(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Build the 76 B OTA_BEGIN payload from `ota recv <size> <sha_hex> <ver> <hwid>`. 0 on success
+ * (with *size_out set); -1 with an OTA-ERR line already printed on a malformed argument. */
+static int ota_build_begin(int argc, char **argv, uint8_t *payload, uint32_t *size_out)
+{
+    CORE_ASSERT_RET(argv != NULL && payload != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(size_out != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    if (argc < 6) { printf("OTA-ERR usage\r\n"); fflush(stdout); return -1; }
+    char *end = NULL;
+    unsigned long size = strtoul(argv[2], &end, 10);
+    if (end == argv[2] || *end != '\0' || size == 0) { printf("OTA-ERR badsize\r\n"); fflush(stdout); return -1; }
+    memset(payload, 0, OTA_BEGIN_PAYLOAD);
+    payload[0] = (uint8_t)size;        payload[1] = (uint8_t)(size >> 8);
+    payload[2] = (uint8_t)(size >> 16); payload[3] = (uint8_t)(size >> 24);
+    if (ota_hex2bin(argv[3], payload + 4, 32) != 0) { printf("OTA-ERR badsha\r\n"); fflush(stdout); return -1; }
+    size_t vl = strlen(argv[4]); if (vl > 16) vl = 16; memcpy(payload + 36, argv[4], vl);   /* ver[16] */
+    size_t hl = strlen(argv[5]); if (hl > 24) hl = 24; memcpy(payload + 52, argv[5], hl);   /* hwid[24] */
+    *size_out = (uint32_t)size;
+    return 0;
+}
+
+/* Fill exactly `want` bytes into `dst` from the console UART, tolerating short reads. Returns
+ * `want` on success, -1 on a driver error, -2 on a read stall (no byte for OTA_RECV_MAX_STALL
+ * windows). Bounded: at most `want` progressing reads plus OTA_RECV_MAX_STALL empty windows. */
+static int ota_fill_chunk(uart_port_t port, uint8_t *dst, uint32_t want)
+{
+    CORE_ASSERT_RET(dst != NULL, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(want > 0 && want <= OTA_RECV_CHUNK, EXP_SERIAL_ASSERT_CODE, -1);
+    uint32_t got = 0, stalls = 0;
+    while (got < want) {
+        int r = uart_read_bytes(port, dst + got, want - got, pdMS_TO_TICKS(OTA_RECV_READ_MS));
+        if (r < 0) return -1;
+        if (r == 0) { if (++stalls >= OTA_RECV_MAX_STALL) return -2; continue; }
+        stalls = 0;
+        got += (uint32_t)r;
+    }
+    return (int)got;
+}
+
+/* Stream <size> raw image bytes off UART0 in bounded chunks, driving ota_data(). 0 on a complete
+ * transfer; on any write/timeout failure it has already called ota_abort() + printed an OTA-ERR
+ * line and returns -1. Bounded (rule 2): at most size/OTA_RECV_CHUNK + 1 chunk iterations. */
+static int ota_recv_stream(uint32_t size)
+{
+    CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(s_uart_ready, EXP_SERIAL_ASSERT_CODE, -1);   /* the console UART driver is installed */
+    const uart_port_t port = (uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM;
+    uint32_t recvd = 0;
+    while (recvd < size) {
+        uint32_t want = size - recvd;
+        if (want > OTA_RECV_CHUNK) want = OTA_RECV_CHUNK;
+        int got = ota_fill_chunk(port, s_ota_buf + 4, want);
+        if (got < 0) {
+            (void)ota_abort();
+            printf("OTA-ERR %s\r\n", (got == -2) ? "timeout" : "read");   /* literal fmt (-Wformat-security) */
+            fflush(stdout);
+            return -1;
+        }
+        s_ota_buf[0] = (uint8_t)recvd;         s_ota_buf[1] = (uint8_t)(recvd >> 8);
+        s_ota_buf[2] = (uint8_t)(recvd >> 16); s_ota_buf[3] = (uint8_t)(recvd >> 24);
+        int rc = ota_data(s_ota_buf, (size_t)got + 4);
+        if (rc != 0) {
+            (void)ota_abort();
+            printf("OTA-ERR 0x%04x\r\n", (unsigned)rc);
+            fflush(stdout);
+            return -1;
+        }
+        recvd += (uint32_t)got;
+    }
+    return 0;
+}
+
+/* `ota recv <size_dec> <sha256_hex> <ver_str> <hwid_str>` -- dev bench OTA push (§19.6). Builds the
+ * 76 B OTA_BEGIN payload; on a clean begin prints OTA-READY, streams <size> raw bytes off UART0,
+ * then OTA_END. Logs are quiesced for the transfer so only the OTA-* tokens reach the host. */
+static int cmd_ota(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc < 2 || strcmp(argv[1], "recv") != 0) {
+        printf("usage: ota recv <size_dec> <sha256_hex> <ver_str> <hwid_str>\n");
+        return 1;
+    }
+    static uint8_t payload[OTA_BEGIN_PAYLOAD];   /* static: keep the 76 B off the REPL stack, no heap */
+    uint32_t size = 0;
+    if (ota_build_begin(argc, argv, payload, &size) != 0) return 1;   /* OTA-ERR already printed */
+    CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, 1);             /* build_begin rejects size == 0 */
+    esp_log_level_t saved = esp_log_level_get("*");
+    esp_log_level_set("*", ESP_LOG_ERROR);       /* only the OTA-* tokens on the wire during the push */
+    int brc = ota_begin(payload, OTA_BEGIN_PAYLOAD);
+    if (brc != 0) {                              /* precondition / early hwid reject -> no raw mode */
+        printf("OTA-ERR 0x%04x\r\n", (unsigned)brc);
+        fflush(stdout);
+        esp_log_level_set("*", saved);
+        return 1;
+    }
+    printf("OTA-READY\r\n");                      /* handshake: the host streams the image only now */
+    fflush(stdout);
+    if (ota_recv_stream(size) != 0) { esp_log_level_set("*", saved); return 1; }   /* aborted + printed */
+    int erc = ota_end();                          /* SHA + ECDSA verify; 0 -> supervisor reboots (§19.4) */
+    printf("OTA-END 0x%04x\r\n", (unsigned)erc);
+    fflush(stdout);
+    esp_log_level_set("*", saved);
+    return 0;
+}
+
 #endif /* CFG_HAS_DEVUX -- dbg UX */
 
 /* ================================================================== *
@@ -832,6 +980,7 @@ void export_serial_start(int reset_reason)
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
 #if CFG_HAS_DEVUX
     register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|crash|hang", cmd_dbg);
+    register_cmd("ota",    "ota recv <size> <sha256_hex> <ver> <hwid>  (dev bench image push, §19.6)", cmd_ota);
 #endif
 
     esp_console_start_repl(repl);
