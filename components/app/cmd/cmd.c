@@ -43,7 +43,8 @@ enum { CMD_STREAM_MAX_CHUNKS = 8192 };
  * ------------------------------------------------------------------ */
 static char           s_json[3072];   /* JSON / text response assembly (cfg, errlog, diag) */
 static cfg_t          s_cfg;          /* working config for CONFIG_GET/SET */
-static lt_err_entry_t s_err[32];      /* error-ring snapshot (ERR_RING_LEN, §15.2) */
+/* No error-ring snapshot array here: ERRLOG_GET/DIAG_GET stream entries via lt_errlog_count()/
+ * lt_errlog_at() straight into s_json, so the 512 B second copy of the ring is gone (§15.2). */
 
 /* ------------------------------------------------------------------ *
  *  chunked emit helpers (§18.1)
@@ -204,14 +205,16 @@ static int op_errlog_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq
 {
     LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
-    int n = lt_errlog_snapshot(s_err, (int)(sizeof s_err / sizeof s_err[0]));
+    int n = lt_errlog_count();
     int w = 0;
     w += snprintf(s_json + w, sizeof s_json - (size_t)w, "[");
     for (int i = 0; i < n && w > 0 && (size_t)w < sizeof s_json; i++) {
+        lt_err_entry_t e;
+        if (lt_errlog_at(i, &e) != 0) break;   /* ring shrank under a concurrent add: stop cleanly */
         w += snprintf(s_json + w, sizeof s_json - (size_t)w,
                       "%s{\"code\":%u,\"arg\":%u,\"uptime_s\":%u,\"boot\":%u}",
-                      i ? "," : "", (unsigned)s_err[i].code, (unsigned)s_err[i].arg,
-                      (unsigned)s_err[i].uptime_s, (unsigned)s_err[i].boot);
+                      i ? "," : "", (unsigned)e.code, (unsigned)e.arg,
+                      (unsigned)e.uptime_s, (unsigned)e.boot);
     }
     if (w > 0 && (size_t)w < sizeof s_json)
         w += snprintf(s_json + w, sizeof s_json - (size_t)w, "]");
@@ -236,7 +239,7 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
     const lt_counters_t *c = lt_counters();
     uint32_t up      = (uint32_t)(esp_timer_get_time() / 1000000);
     uint32_t heapmin = (uint32_t)esp_get_minimum_free_heap_size();
-    int n = lt_errlog_snapshot(s_err, (int)(sizeof s_err / sizeof s_err[0]));
+    int n = lt_errlog_count();
     int last = (n > 5) ? 5 : n;                            /* last (newest) 5 codes */
 
     int w = snprintf(s_json, sizeof s_json,
@@ -247,9 +250,12 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
         (unsigned)c->boots, (unsigned)c->crashes, (unsigned)c->wdt,
         (unsigned)c->gps_reset, (unsigned)c->i2c_recover,
         (unsigned)storage_free_kb(), (unsigned)heapmin, (unsigned)sys_flags_get());
-    for (int i = 0; i < last && w > 0 && (size_t)w < sizeof s_json; i++)
+    for (int i = 0; i < last && w > 0 && (size_t)w < sizeof s_json; i++) {
+        lt_err_entry_t e;
+        if (lt_errlog_at(n - last + i, &e) != 0) break;    /* ring shrank under a concurrent add */
         w += snprintf(s_json + w, sizeof s_json - (size_t)w, "%s%u",
-                      i ? "," : "", (unsigned)s_err[n - last + i].code);
+                      i ? "," : "", (unsigned)e.code);
+    }
     if (w > 0 && (size_t)w < sizeof s_json)
         w += snprintf(s_json + w, sizeof s_json - (size_t)w, "]}");
     return emit_bytes(emit, ctx, tag, seq, (const uint8_t *)s_json, strlen(s_json), true);
@@ -505,14 +511,14 @@ static struct {
 /* ---- LIST (0x02): enumerate /sessions, emit the §14.3 JSON array (may span chunks) ---- */
 typedef struct {
     char     id[11];
-    uint32_t log_kb, sum_kb;
+    uint16_t log_kb, sum_kb;   /* file size in KB; storage partition ~1.34 MiB -> max 1375 KB, fits uint16_t */
     bool     has_log, has_sum;
     /* cached .sum scan (measuring pass fills it; printing pass renders from it) */
-    int64_t  start_utc;
+    uint32_t start_utc;        /* UTC epoch seconds (gps_us/1e6, non-negative); fits uint32_t until 2106 */
     bool     mode_drag;
     char     venue[33];
     uint16_t venue_id, layout_id;
-    int      laps;
+    int16_t  laps;             /* laps in one session; far within int16_t */
     uint32_t best_ms;
     bool     have_best;
 } sess_ent_t;
@@ -545,8 +551,8 @@ static void scan_one_entry(const char *name, uint32_t size)
         s_sess[idx].log_kb = s_sess[idx].sum_kb = 0;
         s_sess[idx].has_log = s_sess[idx].has_sum = false;
     }
-    if (is_log) { s_sess[idx].has_log = (size > 0); s_sess[idx].log_kb = (size + 1023) / 1024; }
-    else        { s_sess[idx].has_sum = true;       s_sess[idx].sum_kb = (size + 1023) / 1024; }
+    if (is_log) { s_sess[idx].has_log = (size > 0); s_sess[idx].log_kb = (uint16_t)((size + 1023) / 1024); }
+    else        { s_sess[idx].has_sum = true;       s_sess[idx].sum_kb = (uint16_t)((size + 1023) / 1024); }
 }
 
 /* Minimal JSON string escaper (§14.3 "strings escaped"): copies src into dst with ", \ and
@@ -589,7 +595,7 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
             if (!s_sess[i].has_sum) continue;
             memset(&s_ss, 0, sizeof s_ss);
             (void)read_sum_scan(s_sess[i].id, &s_ss);
-            s_sess[i].start_utc  = s_ss.have_hdr ? s_ss.hdr.start_gps_us / 1000000 : 0;
+            s_sess[i].start_utc  = (uint32_t)(s_ss.have_hdr ? s_ss.hdr.start_gps_us / 1000000 : 0);
             s_sess[i].mode_drag  = s_ss.have_hdr && s_ss.hdr.mode == 1;
             memcpy(s_sess[i].venue, s_ss.have_venue ? s_ss.venue : "", sizeof s_sess[i].venue);
             if (!s_ss.have_venue) s_sess[i].venue[0] = '\0';
@@ -597,7 +603,7 @@ static int op_list(cmd_emit_fn emit, void *ctx, uint8_t tag)
                                                    : (s_ss.have_hdr ? s_ss.hdr.venue_id : 0);
             s_sess[i].layout_id  = s_ss.have_venue ? s_ss.layout_id
                                                    : (s_ss.have_hdr ? s_ss.hdr.layout_id : 0);
-            s_sess[i].laps       = s_ss.laps;
+            s_sess[i].laps       = (int16_t)s_ss.laps;
             s_sess[i].best_ms    = s_ss.best_ms;
             s_sess[i].have_best  = s_ss.have_best;
         }
