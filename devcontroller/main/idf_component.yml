@@ -1,0 +1,7 @@
+## main mounts the `www`/`logs` LittleFS partitions, so it pulls the ecosystem-standard LittleFS
+## component (joltwallet/littlefs) via the IDF component manager, pinned to the same version the
+## lap-timer uses for consistency (devcontroller/dependencies.lock captures the resolved tree;
+## devcontroller/managed_components/ is gitignored).
+dependencies:
+  joltwallet/littlefs:
+    version: "==1.16.5"

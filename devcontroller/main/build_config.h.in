@@ -1,0 +1,16 @@
+/* build_config.h -- generated from main/build_config.h.in by devcontroller/CMakeLists.txt.
+ * Do not edit; this is B's compile-time configuration (Plan 5.5 Task 2). */
+#ifndef DC_BUILD_CONFIG_H
+#define DC_BUILD_CONFIG_H
+
+#define CFG_DC_VERSION   "@CFG_DC_VERSION@"
+
+/* UART1 link to the lap-timer (Global Constraints: "B link is on UART1"; UART0 stays free for
+ * B's own console/flashing). GPIO17 (TX) / GPIO16 (RX) are free, non-strapping pins on a classic
+ * ESP32 devkit. */
+#define DC_LINK_UART     1
+#define DC_LINK_TX       17
+#define DC_LINK_RX       16
+#define DC_LINK_BAUD     115200
+
+#endif /* DC_BUILD_CONFIG_H */
