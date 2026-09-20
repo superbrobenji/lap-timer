@@ -80,7 +80,7 @@ esp_err_t linkhost_init(void)
     s_req_mtx = xSemaphoreCreateMutex();
     if (!s_req_mtx) return ESP_ERR_NO_MEM;
 
-    if (xTaskCreate(rx_task, "linkhost_rx", 4096, NULL, 4, &s_rx_task) != pdPASS) {
+    if (xTaskCreate(rx_task, "linkhost_rx", 6144, NULL, 4, &s_rx_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 
