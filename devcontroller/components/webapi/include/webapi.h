@@ -13,18 +13,16 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+#include "config_diff.h"   /* config_diff_minify / config_diff_next_line (pure, host-testable) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Registers /api/status, /api/config (GET/POST), /api/sessions, /api/session/<id>, and the
- * static-file catch-all onto an already-started httpd instance. */
+/* Registers /api/status, /api/config (GET/POST), /api/sessions, /api/session/<id>, /api/logs,
+ * /api/log/<id>, and the static-file SPA catch-all onto an already-started httpd instance, and
+ * starts the async download worker on first call. The SSE monitor + /api/flash are a later step. */
 esp_err_t webapi_register(httpd_handle_t server);
-
-/* Produces the minimal `config set` argument (only the keys that differ between current_json and
- * desired_json, minified, \"-escaped) into out[out_cap]. Returns the written length, or <0 if it
- * would exceed the ~250 B `config set` line budget (the caller then splits or errors). */
-int config_diff_minify(const char *current_json, const char *desired_json, char *out, size_t out_cap);
 
 #ifdef __cplusplus
 }

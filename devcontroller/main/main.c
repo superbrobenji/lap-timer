@@ -102,90 +102,30 @@ static void littlefs_mount(const char *base_path, const char *label, bool read_o
                  (unsigned)(used / 1024u), (unsigned)(total / 1024u));
 }
 
-/* ---- GET /api/status: linkhost_status -> JSON ---- */
-static esp_err_t api_status_handler(httpd_req_t *req)
-{
-    lt_status_t st;
-    int rc = linkhost_status(&st);
-    char body[192];
-    int n;
-    if (rc != 0) {
-        n = snprintf(body, sizeof body, "{\"connected\":false}");
-        httpd_resp_set_status(req, "503 Service Unavailable");
-    } else {
-        n = snprintf(body, sizeof body,
-                     "{\"connected\":true,\"proto\":%u,\"state\":%u,\"batt_pct\":%u,"
-                     "\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,\"fw\":\"%s\"}",
-                     (unsigned)st.proto, (unsigned)st.state, (unsigned)st.batt_pct,
-                     (unsigned)st.batt_mv, (unsigned long)st.free_kb, (unsigned)st.sessions,
-                     st.fw);
-    }
-    if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, body, n);
-}
-
-/* ---- static file catch-all: serves web/ contents baked into `www` (index.html at "/"); a
- * placeholder page when the file (or the whole partition) is missing -- the SPA merges into
- * `www` in a later task. ---- */
-static esp_err_t static_file_handler(httpd_req_t *req)
-{
-    char path[160];
-    const char *uri = (strcmp(req->uri, "/") == 0) ? "/index.html" : req->uri;
-    int n = snprintf(path, sizeof path, "%s%s", WWW_BASE, uri);
-    if (n < 0 || (size_t)n >= sizeof path) return ESP_FAIL;
-
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        static const char placeholder[] =
-            "<!doctype html><html><body><h1>laptimer-dev</h1>"
-            "<p>www is empty (SPA not merged yet). "
-            "<a href=\"/api/status\">/api/status</a></p></body></html>";
-        httpd_resp_set_type(req, "text/html");
-        return httpd_resp_send(req, placeholder, sizeof placeholder - 1);
-    }
-
-    httpd_resp_set_type(req, "text/html");
-    char buf[512];
-    size_t rd;
-    esp_err_t rc = ESP_OK;
-    while ((rd = fread(buf, 1, sizeof buf, f)) > 0) {
-        if (httpd_resp_send_chunk(req, buf, (ssize_t)rd) != ESP_OK) {
-            rc = ESP_FAIL;
-            break;
-        }
-    }
-    fclose(f);
-    httpd_resp_send_chunk(req, NULL, 0);   /* terminate the chunked response either way */
-    return rc;
-}
-
+/* ---- start esp_http_server and register all /api + static handlers via webapi_register.
+ * The httpd is tuned for webapi's async download worker: extra URI-handler slots, spare sockets
+ * for an in-flight download, a deeper request stack for the config-diff path, and the wildcard
+ * match fn the SPA catch-all needs. (Status + static serving now live in webapi.c.) ---- */
 static void httpd_start_and_register(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.uri_match_fn = httpd_uri_match_wildcard;   /* needed for the wildcard catch-all below */
+    config.uri_match_fn    = httpd_uri_match_wildcard;   /* /api/session wildcard + the SPA catch-all */
+    config.max_uri_handlers = 16;                         /* 8 handlers today, headroom for more */
+    config.max_open_sockets = 7;                          /* leave sockets spare for a download */
+    config.stack_size       = 8192;                       /* config-diff + relays need the room */
+    config.lru_purge_enable = true;                       /* reap the LRU socket under pressure */
 
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed");
         return;
     }
 
-    /* Registered before the wildcard catch-all so the exact match wins (Task 4 moves this
-     * handler into webapi_register). */
-    static const httpd_uri_t status_uri = {
-        .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler,
-    };
-    httpd_register_uri_handler(server, &status_uri);
-
-    static const httpd_uri_t static_uri = {
-        .uri = "/*", .method = HTTP_GET, .handler = static_file_handler,
-    };
-    httpd_register_uri_handler(server, &static_uri);
-
-    esp_err_t wr = webapi_register(server);
+    esp_err_t wr = webapi_register(server);   /* registers handlers + starts the async worker */
     if (wr != ESP_OK)
-        ESP_LOGW(TAG, "webapi_register: %s (Task 4 not yet landed)", esp_err_to_name(wr));
+        ESP_LOGE(TAG, "webapi_register failed: %s", esp_err_to_name(wr));
+    else
+        ESP_LOGI(TAG, "webapi handlers registered");
 }
 
 /* ESP-IDF calls app_main() as the framework entry point; it has no project header to declare it

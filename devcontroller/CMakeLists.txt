@@ -44,3 +44,10 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(devcontroller)
+
+# ---- pack the vanilla SPA (web/) into the read-only `www` LittleFS partition ----
+# Plan 5.5 Task 4 Step 6. littlefs_create_partition_image comes from the joltwallet/littlefs
+# managed component's project_include.cmake (available after project()); base_dir resolves relative
+# to this file (devcontroller/), so `web` is devcontroller/web. FLASH_IN_PROJECT makes `idf.py
+# flash` write the image alongside the app.
+littlefs_create_partition_image(www web FLASH_IN_PROJECT)
