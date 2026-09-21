@@ -262,8 +262,13 @@ int linkhost_parse_frame(const uint8_t *bytes, size_t n, linkhost_frame_t *out)
     const uint8_t *tail = mem_find(p, (size_t)(end - p), LT_FRAME_END_PFX,
                                    sizeof(LT_FRAME_END_PFX) - 1);
     if (!tail) return LINKHOST_E_PROTO;
-    /* the CR/LF gap between body and ---END must be tiny (\r\n) -- reject a stray body match */
-    if ((size_t)(tail - p) > 2) return LINKHOST_E_PROTO;
+    /* The gap between the body and ---END must be only CR/LF. The lap-timer's console applies a
+     * \n->\r\n translation to framed output, so a spec "\r\n" separator arrives as "\r\r\n"
+     * (3 bytes); accept any short run of CR/LF rather than a fixed count (still rejects a far
+     * stray ---END match inside noise). */
+    for (const uint8_t *q = p; q < tail; q++)
+        if (*q != '\r' && *q != '\n') return LINKHOST_E_PROTO;
+    if ((size_t)(tail - p) > 4) return LINKHOST_E_PROTO;
     const uint8_t *hp = tail + (sizeof(LT_FRAME_END_PFX) - 1);
     uint32_t crc_want = 0;
     if (parse_hex8(hp, (size_t)(end - hp), &crc_want) != 8) return LINKHOST_E_PROTO;

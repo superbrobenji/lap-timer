@@ -67,11 +67,36 @@ void test_C_prompt_glued_to_begin(void)
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, st, "C: st!=0");
 }
 
+
+/* frame with the real on-wire CRLF-translated separators (\r\r\n) the lap-timer console emits. */
+static void add_frame_crcrlf(uint8_t *s, size_t *L)
+{
+    app(s, L, "---BEGIN status 28---\r\r\n", 24);
+    app(s, L, "AQAAAAAAACQDAAAZADAuMS4wLQA=", 28);
+    app(s, L, "\r\r\n---END 23a09022---\r\r\n", 24);
+}
+
+/* D: the ACTUAL on-device bytes -- \r\r\n separators from the console's \n->\r\n translation. */
+void test_D_crlf_translated(void)
+{
+    uint8_t s[512]; size_t L = 0;
+    const uint8_t f1[] = { 0xFF, 0x01, 0x00, 0x00, 0x03, 0x01, 0xAA, 0xBB };
+    app(s, &L, f1, sizeof f1);
+    app(s, &L, "status\r\r\n", 9);
+    add_frame_crcrlf(s, &L);
+    app(s, &L, "laptimer> ", 10);
+    linkhost_frame_t f; int st;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, feed_and_pop(s, L, &f, &st), "D: no response");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, st, "D: st!=0 (CRLF-translated framing rejected)");
+    TEST_ASSERT_EQUAL_UINT(20, (unsigned)f.body_len);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_A_frame_only);
     RUN_TEST(test_B_realistic);
     RUN_TEST(test_C_prompt_glued_to_begin);
+    RUN_TEST(test_D_crlf_translated);
     return UNITY_END();
 }
