@@ -14,6 +14,7 @@ idf_component_register(
     INCLUDE_DIRS include
     REQUIRES core lt_hal nvs_flash esp_timer esp_system console
              app_update esp_app_format esp_partition spi_flash mbedtls
+             esp_driver_gpio
              gps_$ENV{LT_GPS} imu_$ENV{LT_IMU})
 # The pipeline (globbed into `app`) calls the GPS/IMU HAL (hal/gps.h, hal/imu.h), so the selected
 # gps_${GPS}/imu_${IMU} driver is a real dependency of `app`: declaring it here places the driver
@@ -22,6 +23,11 @@ idf_component_register(
 # edge). LT_GPS/LT_IMU are exported into the environment by the top-level CMakeLists (a flag-derived
 # component name cannot be read from the cache during IDF's early-expansion pass, but the
 # environment is inherited); main also requires them so the driver is pulled into the image.
+
+# §6 peer connector detect line (board_devkit_v1): GPIO4, free + internal-pull-up capable +
+# non-strapping. link.c enables its (active-low) detect path once this is >= 0. See
+# docs/superpowers/specs/2026-09-21-peer-presence-detect-design.md.
+target_compile_definitions(${COMPONENT_LIB} PRIVATE LINK_DETECT_GPIO=4)
 
 # build_config.h (CFG_HAS_PPS etc.) from the build tree (§21.1).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

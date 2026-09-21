@@ -52,6 +52,7 @@
 #define LINK_STACK_BYTES  3072
 #define LINK_STACK_WORDS  (LINK_STACK_BYTES / sizeof(StackType_t))
 #define LINK_POLL_MS      20                 /* drain-wake / detect-poll cadence (also the notify timeout) */
+#define LINK_DETECT_STABLE   3               /* consecutive 20ms polls a level must hold before it flips presence (~60 ms) */
 #define LINK_DRAIN_BURST  32                 /* rule 2: max records drained per wake (> ring cap) */
 #define LINK_PEER_TIMEOUT_MS 3000u           /* mark the peer absent this long after the last heartbeat */
 #define LINK_STREAM_CAP   16u                 /* ring depth (power of two); ~1.6 s of buffer at 10 Hz */
@@ -111,8 +112,21 @@ static void link_poll_detect(void)
 {
 #if LINK_DETECT_GPIO >= 0
     /* active-low: a peer on the connector pulls the detect line to GND; the pin idles high on its
-     * internal pull-up, so level 0 = present. */
-    s_detect_asserted = (gpio_get_level((gpio_num_t)LINK_DETECT_GPIO) == 0);
+     * internal pull-up, so level 0 = present. Debounce: a level must hold for LINK_DETECT_STABLE
+     * consecutive polls before it flips s_detect_asserted, so a bouncy connector/jumper does not
+     * flap the stream on/off. State is drain-task-only (link_task), so no synchronization. */
+    static uint8_t detect_run;               /* consecutive reads equal to detect_cand */
+    static bool    detect_cand;              /* the candidate level being counted toward */
+    bool raw = (gpio_get_level((gpio_num_t)LINK_DETECT_GPIO) == 0);
+    if (raw != detect_cand) {
+        detect_cand = raw;
+        detect_run = 1;
+    } else if (detect_run < LINK_DETECT_STABLE) {
+        detect_run++;
+    }
+    if (detect_run >= LINK_DETECT_STABLE) {
+        s_detect_asserted = detect_cand;
+    }
 #else
     s_detect_asserted = false;   /* no detect pin assigned yet (Plan 6 hardware); heartbeat only */
 #endif
