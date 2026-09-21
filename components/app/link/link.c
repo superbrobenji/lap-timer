@@ -89,13 +89,19 @@ __attribute__((weak)) bool link_sink_ble_present(void)                          
 
 static uint32_t link_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-/* Serial peer present: the detect line, or a `cmd` heartbeat within the timeout window. */
+/* Serial peer present. With a detect pin wired (§6 connector), the detect line is DEFINITIVE: the
+ * `cmd` heartbeat is NOT OR'd in, so an active console / status poll cannot mask an unplugged
+ * dev-kit. The heartbeat is the presence signal ONLY on boards with no detect pin
+ * (LINK_DETECT_GPIO < 0). See docs/superpowers/specs/2026-09-21-peer-presence-detect-design.md. */
 static bool link_serial_present(void)
 {
-    if (s_detect_asserted) return true;
+#if LINK_DETECT_GPIO >= 0
+    return s_detect_asserted;
+#else
     if (!atomic_load(&s_cmd_seen)) return false;
     uint32_t elapsed = link_now_ms() - atomic_load(&s_last_cmd_ms);   /* modular; wrap-safe */
     return elapsed < LINK_PEER_TIMEOUT_MS;
+#endif
 }
 
 void link_note_cmd_activity(void)

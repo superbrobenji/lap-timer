@@ -63,10 +63,13 @@ The detect-line code path in `link.c` already exists behind `#if LINK_DETECT_GPI
    changing `s_detect_asserted`. Implement inside `link_poll_detect()` with a small run-length
    counter (drain-task-only state, no locking).
 
-3. **Keep the `detect OR recent-cmd` fallback** in `link_serial_present()` unchanged: presence is
-   asserted by the detect line **or** a `cmd` within `LINK_PEER_TIMEOUT_MS`. With the detect line
-   as the primary, the cmd path is a harmless fallback (e.g. a human on the console, or an
-   incidental dev-kit `status` request, still gets the stream without the detect wire).
+3. **Make the detect line definitive when a detect pin is configured.** `link_serial_present()`
+   returns the detect line alone when `LINK_DETECT_GPIO >= 0`; the `cmd`-heartbeat path is the
+   presence signal ONLY on boards with no detect pin (`LINK_DETECT_GPIO < 0`). Rationale (found at
+   the 2026-09-21 flash gate, supersedes an earlier "keep the OR fallback" call): with the OR, an
+   active console / dev-kit status poll keeps the cmd-heartbeat fresh and masks an unplugged detect
+   line, so pulling the detect wire did not stop the stream. Detect-definitive makes presence purely
+   LT-driven; the detect wire becomes required for streaming (it always is on the §6 connector).
 
 No change to the stream framing, the ring, or `stream_push` — only what drives `s_detect_asserted`.
 
