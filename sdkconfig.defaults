@@ -20,6 +20,11 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Keep the UART RX ISR in IRAM (T-C): during `ota recv` each 4 KB chunk drives esp_ota_write(),
+# a ~10-40 ms flash program with the cache disabled on both cores. With the ISR in IRAM it keeps
+# draining the 128 B HW FIFO into the console's 256 B RX ring throughout that cache-off window;
+# without it the FIFO overflows in ~11 ms and image bytes are dropped. The 256 B ring itself is
+# fixed by IDF's REPL (no Kconfig) -- see the RX-ring note in export_serial.c ota_recv_stream().
 CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
 CONFIG_SPI_MASTER_ISR_IN_IRAM=y

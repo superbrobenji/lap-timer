@@ -241,13 +241,22 @@ static void ui_exit_menu(void)
     s_dirty        = true;
 }
 
-/* MA_MODE: toggle Lap/Drag, reset the page (§22.6), push the mode command, refresh the label.
- * (Split verbatim out of menu_select for rule 4.) */
+/* Every UI-driven cfg change is a read-modify-write (T-D): reload the blob from NVS immediately
+ * before mutating one field, so a CONFIG_SET the dev controller persisted since this task's boot
+ * load is NOT silently reverted by writing back a stale s_cfg (cmd.c is the other writer). On a
+ * load failure s_cfg keeps its last-known-good value (lt_cfg_load leaves it untouched), which is
+ * the same fall-back the boot seed uses. */
+
+/* MA_MODE: toggle Lap/Drag, reset the page (§22.6), persist cfg.mode, push the mode command,
+ * refresh the label. (Split verbatim out of menu_select for rule 4.) */
 static void menu_do_mode(void)
 {
     s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
     s_model.mode  = s_mode;
     s_model.page  = 0; /* §22.6: a mode switch resets the screen */
+    (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
+    s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
+    (void)lt_cfg_save(&s_cfg);
     ui_send_cmd(CMD_SET_MODE, s_mode, 0);
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
 }
@@ -255,6 +264,7 @@ static void menu_do_mode(void)
 /* MA_UNITS: toggle km/h<->mph, persist, refresh the label. (Split verbatim out of menu_select.) */
 static void menu_do_units(void)
 {
+    (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
     (void)lt_cfg_save(&s_cfg);
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
@@ -264,6 +274,7 @@ static void menu_do_units(void)
 /* MA_DISPLAY: toggle the live clock, persist, refresh the label. (Split verbatim out of menu_select.) */
 static void menu_do_display(void)
 {
+    (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.display.live_clock = !s_cfg.display.live_clock;
     (void)lt_cfg_save(&s_cfg);
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
