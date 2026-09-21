@@ -22,7 +22,9 @@
  *   GET  /api/stream              -> SSE (EventSource); each event's data is
  *                                     one JSON fused-sample or event record.
  *   GET  /api/logs                -> {logs:[{id,bytes}]}
- *   GET  /api/log/<id>            -> log file download
+ *   GET  /api/log/<id>?fmt=       -> log file download; fmt=jsonl (default)
+ *                                     transcodes to NDJSON, fmt=bin is the raw
+ *                                     on-flash file
  *   POST /api/flash               <- multipart/form-data field "firmware"
  *                                     (.bin); 202 {staged,size,ver,hwid} once
  *                                     the image is in the staging partition,
@@ -825,7 +827,12 @@
         el("td", { text: l.id !== undefined ? String(l.id) : "?" }),
         el("td", { text: fmtBytes(l.bytes) })
       ]);
-      var dl = el("td", {}, [el("a", { href: "/api/log/" + encodeURIComponent(l.id), text: "download" })]);
+      var logHref = "/api/log/" + encodeURIComponent(l.id);
+      var dl = el("td", {}, [
+        el("a", { href: logHref + "?fmt=jsonl", text: "download (.jsonl)" }),
+        document.createTextNode(" "),
+        el("a", { href: logHref + "?fmt=bin", text: "raw" })
+      ]);
       tr.appendChild(dl);
       body.appendChild(tr);
     });

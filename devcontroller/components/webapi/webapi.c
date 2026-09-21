@@ -19,7 +19,10 @@
  *   GET  /api/session/<id>?fmt=   async: `open <id> <fmt>` -> stream the decoded body; CRC error
  *                                 -> abort the socket.
  *   GET  /api/logs                logstore_list -> {logs:[{id,bytes}]}.
- *   GET  /api/log/<id>            async: stream a stored log file.
+ *   GET  /api/log/<id>?fmt=       async: stream a stored log file. Default fmt=jsonl transcodes
+ *                                 each on-flash record to NDJSON (application/x-ndjson,
+ *                                 reusing linkhost_stream_to_json via logstore_rec_to_json);
+ *                                 fmt=bin streams the raw file verbatim (application/octet-stream).
  *   GET  /api/stream              live-monitor SSE (one reader at a time), on its own task.
  *   POST /api/flash               multipart/form-data `firmware` -> stream into the `ota_stage`
  *                                 partition, then push it cmd-OTA on a worker task; 202 as soon
@@ -29,6 +32,7 @@
 #include "webapi.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -47,6 +51,7 @@
 #include "linkhost.h"
 #include "linkhost_proto.h"
 #include "logstore.h"
+#include "logstore_rec.h"
 #include "multipart.h"
 
 static const char *TAG = "webapi";
@@ -477,13 +482,93 @@ static void do_sessions_stream(httpd_req_t *req)
     send_stream_error(req, rc, &rerr);
 }
 
-/* ---------- async: log file download ---------- */
+/* ---------- async: log file download (issue #67: raw or transcoded NDJSON) ---------- */
+
+/* Sliding read buffer for the jsonl transcode: must hold at least one max-size on-flash record
+ * (logstore_rec_hdr_t + LT_REC_MAX payload) so logstore_rec_to_json always has a chance to make
+ * forward progress once it has seen a whole record -- a load-bearing bound, not just a
+ * convenient buffer size (pragmatic-P10: explicit cap). */
+#define LOG_JSONL_BUF (2u * 512u)
+_Static_assert(LOG_JSONL_BUF >= sizeof(logstore_rec_hdr_t) + LT_REC_MAX,
+               "LOG_JSONL_BUF must hold at least one max-size logstore record");
+
+/* One transcoded record's JSON text; linkhost_stream_to_json's largest object (the fused-sample
+ * line) is well under 200 B. */
+#define LOG_JSON_LINE_MAX 256u
+
+/* Defensive loop cap for stream_log_jsonl's outer for(;;): each pass either reads more bytes or
+ * consumes >=1 buffered record, so this bounds the whole transfer by (worst case) one pass per
+ * minimum-size (header-only) record in the largest possible log file, generously rounded up --
+ * never expected to trip, but pragmatic-P10 wants an explicit bound articulated, not an unbounded
+ * loop trusting the file to be well-formed. */
+#define LOG_JSONL_MAX_ITERS 200000u
+
+/* Reads `fd` (already positioned at the first on-flash record -- LOGSTORE_REC_AREA_OFFSET past
+ * the file's own header) to EOF, transcoding each complete record to an NDJSON line via
+ * logstore_rec_to_json and sending it as an HTTP chunk. Stops early on a send failure (client
+ * gone), a malformed record (LOGSTORE_JSON_ERR), or a truncated tail at EOF. */
+static void stream_log_jsonl(httpd_req_t *req, int fd, const char *id)
+{
+    assert(req != NULL);
+    assert(fd >= 0);
+    assert(id != NULL);
+
+    char   buf[LOG_JSONL_BUF];
+    char   json[LOG_JSON_LINE_MAX];
+    size_t len  = 0;       /* bytes buffered at buf[0..len) */
+    bool   eof  = false;
+
+    for (uint32_t iter = 0; iter < LOG_JSONL_MAX_ITERS; iter++) {
+        assert(len <= sizeof buf);
+        if (!eof && len < sizeof buf) {
+            ssize_t r = read(fd, buf + len, sizeof buf - len);
+            if (r < 0) { ESP_LOGW(TAG, "log %s jsonl: read: %s", id, strerror(errno)); break; }
+            if (r == 0) eof = true;
+            else        len += (size_t)r;
+        }
+
+        size_t consumed = 0;
+        int n = logstore_rec_to_json((const uint8_t *)buf, len, json, sizeof json, &consumed);
+
+        if (n > 0) {
+            if (httpd_resp_send_chunk(req, json, n) != ESP_OK) break;
+            if (httpd_resp_send_chunk(req, "\n", 1) != ESP_OK) break;
+            memmove(buf, buf + consumed, len - consumed);
+            len -= consumed;
+        } else if (n == LOGSTORE_JSON_SKIP) {
+            memmove(buf, buf + consumed, len - consumed);
+            len -= consumed;
+        } else if (n == LOGSTORE_JSON_NEED_MORE) {
+            if (eof || len == sizeof buf) break;   /* truncated tail, or a record that can't fit */
+            /* else: loop back around and read more into buf[len..) */
+        } else {                                    /* LOGSTORE_JSON_ERR: len > LT_REC_MAX */
+            ESP_LOGW(TAG, "log %s jsonl: malformed record, stopping stream early", id);
+            break;
+        }
+    }
+}
 
 static void do_log_download(httpd_req_t *req)
 {
+    assert(req != NULL);
+
     char id[32];
     if (path_tail(req, "/api/log/", id, sizeof id) <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing log id");
+        return;
+    }
+    assert(id[0] != '\0');
+
+    char fmt[8] = "jsonl";                                     /* default: transcoded NDJSON */
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < 256) {
+        char q[256];
+        if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK)
+            (void)httpd_query_key_value(q, "fmt", fmt, sizeof fmt);
+    }
+    bool raw = (strcmp(fmt, "bin") == 0);
+    if (!raw && strcmp(fmt, "jsonl") != 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad fmt");
         return;
     }
 
@@ -494,15 +579,26 @@ static void do_log_download(httpd_req_t *req)
     }
 
     char disp[64];
-    snprintf(disp, sizeof disp, "attachment; filename=\"%s.log\"", id);
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    if (raw) {
+        snprintf(disp, sizeof disp, "attachment; filename=\"%s.log\"", id);
+        httpd_resp_set_type(req, "application/octet-stream");
+        httpd_resp_set_hdr(req, "Content-Disposition", disp);
 
-    char buf[512];
-    for (;;) {                                                 /* bounded by file size */
-        ssize_t r = read(fd, buf, sizeof buf);
-        if (r <= 0) break;
-        if (httpd_resp_send_chunk(req, buf, r) != ESP_OK) break;
+        char buf[512];
+        for (;;) {                                             /* bounded by file size */
+            ssize_t r = read(fd, buf, sizeof buf);
+            if (r <= 0) break;
+            if (httpd_resp_send_chunk(req, buf, r) != ESP_OK) break;
+        }
+    } else {
+        snprintf(disp, sizeof disp, "attachment; filename=\"%s.jsonl\"", id);
+        httpd_resp_set_type(req, "application/x-ndjson");
+        httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+        /* Skip the file's own logstore_file_hdr_t (magic + created_unix) -- only the raw ?fmt=bin
+         * path includes it verbatim; the record parser must not see it as a fake first record. */
+        (void)lseek(fd, LOGSTORE_REC_AREA_OFFSET, SEEK_SET);
+        stream_log_jsonl(req, fd, id);
     }
     close(fd);
     httpd_resp_send_chunk(req, NULL, 0);
