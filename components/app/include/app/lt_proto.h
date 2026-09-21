@@ -21,6 +21,12 @@
  * §18.2 STATUS record (20 bytes, cmd.c's op_status): LT_STATUS_LEN + the LT_ST_OFF_* field
  * offsets, copied verbatim from the current op_status body so a peer can decode the record
  * without re-deriving the layout.
+ *
+ * §14 stream records (SES_T_FUSED/SES_T_EVENT, the two record types §18.1 streams unsolicited):
+ * LT_FUSED_REC_LEN/LT_FUSED_OFF_* and LT_EVENT_REC_LEN/LT_EVENT_OFF_* mirror
+ * core/types.h's fused_sample_t and core/event.h's event_t byte-for-byte. components/app/link/
+ * link.c compile-checks these offsets against the real structs (_Static_assert + offsetof), so a
+ * struct-layout drift fails that build instead of silently corrupting a peer's decode.
  */
 #ifndef APP_LT_PROTO_H
 #define APP_LT_PROTO_H
@@ -59,6 +65,37 @@ enum {
     LT_ST_OFF_FREE_KB  = 7,    /* u32 LE   storage_free_kb() */
     LT_ST_OFF_SESS     = 11,   /* u16 LE   session_count() */
     LT_ST_OFF_FW       = 13,   /* char[7]  fw_short() -- 13 + 7 == LT_STATUS_LEN */
+};
+
+/* ---- §14 SES_T_FUSED stream record (40 bytes) -- verbatim from core/types.h's fused_sample_t --- */
+enum {
+    LT_SES_T_FUSED = 0x04,     /* mirrors core/ses.h's SES_T_FUSED: the stream record's type byte */
+
+    LT_FUSED_REC_LEN     = 40, /* sizeof(fused_sample_t) */
+
+    LT_FUSED_OFF_MONO_US = 0,  /* i64 LE   mono_us -- device monotonic timestamp, us */
+    LT_FUSED_OFF_GPS_US  = 8,  /* i64 LE   gps_us -- tb_mono_to_gps(mono_us) */
+    LT_FUSED_OFF_G_LON   = 16, /* f32      g_lon -- longitudinal g */
+    LT_FUSED_OFF_G_LAT   = 20, /* f32      g_lat -- lateral g; +lat = right */
+    LT_FUSED_OFF_G_COMB  = 24, /* f32      g_comb -- combined g */
+    LT_FUSED_OFF_LEAN    = 28, /* f32      lean_deg -- lean angle; + = right */
+    LT_FUSED_OFF_YAW     = 32, /* f32      yaw_dps -- earth-frame yaw rate; + = left turn */
+    LT_FUSED_OFF_FLAGS   = 36, /* u8       flags -- FUS_* (core/types.h) */
+};
+
+/* ---- §14 SES_T_EVENT stream record (32 bytes) -- verbatim from core/event.h's event_t -------- */
+enum {
+    LT_SES_T_EVENT = 0x09,     /* mirrors core/ses.h's SES_T_EVENT: the stream record's type byte */
+
+    LT_EVENT_REC_LEN     = 32, /* sizeof(event_t) */
+
+    LT_EVENT_OFF_TYPE    = 0,  /* u8       type -- EV_* (core/event.h) */
+    LT_EVENT_OFF_FLAGS   = 1,  /* u8       flags -- event-specific (§4.5 table) */
+    LT_EVENT_OFF_ARG16   = 2,  /* u16 LE   arg16 -- event-specific; bytes 4..7 are struct padding */
+    LT_EVENT_OFF_GPS_US  = 8,  /* i64 LE   gps_us -- event timestamp */
+    LT_EVENT_OFF_MONO_US = 16, /* i64 LE   mono_us -- event timestamp */
+    LT_EVENT_OFF_ARG32   = 24, /* u32 LE   arg32 -- event-specific */
+    LT_EVENT_OFF_ARG32B  = 28, /* u32 LE   arg32b -- event-specific */
 };
 
 /* ---- §18.1/§18.4 command + format name constants shared with a machine peer ---- */
