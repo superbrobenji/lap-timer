@@ -23,6 +23,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "mdns.h"
 #include "nvs_flash.h"
 
 #include "build_config.h"
@@ -35,6 +36,7 @@ static const char *TAG = "dc_main";
 #define DC_WIFI_SSID     "laptimer-dev"
 #define DC_WIFI_CHANNEL  1
 #define DC_WIFI_MAX_CONN 4
+#define DC_MDNS_HOST     "laptimer-dev"   /* -> http://laptimer-dev.local */
 
 #define WWW_BASE  "/www"
 #define WWW_PART  "www"
@@ -88,6 +90,18 @@ static void wifi_ap_start(void)
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "SoftAP up: ssid=%s psk=%s channel=%d ip=192.168.4.1",
              DC_WIFI_SSID, (const char *)ap_config.ap.password, DC_WIFI_CHANNEL);
+}
+
+/* mDNS: advertise "laptimer-dev.local" + the _http._tcp service on the AP so the SPA is reachable
+ * by name (no 192.168.4.1 to type). Non-fatal -- a client can always fall back to the IP. */
+static void mdns_start(void)
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) { ESP_LOGW(TAG, "mdns_init: %s", esp_err_to_name(err)); return; }
+    (void)mdns_hostname_set(DC_MDNS_HOST);
+    (void)mdns_instance_name_set("Lap-timer dev controller");
+    (void)mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
+    ESP_LOGI(TAG, "mDNS up: http://%s.local", DC_MDNS_HOST);
 }
 
 static void littlefs_mount(const char *base_path, const char *label, bool read_only)
@@ -150,6 +164,7 @@ void app_main(void)
 
     nvs_init_or_erase();
     wifi_ap_start();
+    mdns_start();
 
     littlefs_mount(WWW_BASE, WWW_PART, true);
     littlefs_mount(LOGS_BASE, LOGS_PART, false);

@@ -5,3 +5,7 @@
 dependencies:
   joltwallet/littlefs:
     version: "==1.16.5"
+  ## mDNS so the SPA is reachable at http://laptimer-dev.local on the AP (no IP to type).
+  ## mdns left the IDF core in 5.x -> pulled from the registry; the lock captures the exact tree.
+  espressif/mdns:
+    version: "^1.2.0"
