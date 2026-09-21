@@ -34,3 +34,27 @@ Five Fable reviews of the current `p5.5-dev-controller` branch: dev controller (
 3. **With dev-controller integration step 2:** T-C/T-E/T-F (RX ring, mutex/ERR-lines, retry/torn-JSON, logstore cap, security) — fold into the SSE+flash work.
 4. **Verify carefully, then fix:** H4/H5 (drag/lap engine) — touch the vetted engine only after confirming with a targeted test.
 5. **File issues:** T-B (two-pass memo), T-D (cfg race/mode), and the LOW batch.
+
+---
+
+## Outcomes (fixed 2026-09-21, merged to p5.5-dev-controller @ combined gate green)
+
+All findings the user scoped as "fix everything confirmed-real" were verified-first and addressed across 4 parallel streams; merged clean (disjoint files); combined gate: lap-timer host **33/33**, dev-controller host **6/6**, P10 linter 0, moto_neo6m + moto_sim + core_selftest rc=0, dev-controller build rc=0.
+
+- **B1 config-escape** — FIXED (`config_diff_escape`, escaped-length budgeted).
+- **B2 sessions streaming** — FIXED (`/api/sessions` via `lh_dl` async).
+- **H1 assert→NVS storm** — FIXED (dedup immediate repeats + rate-limit flash ≤1/5 s; distinct reports persist immediately).
+- **H2 assert-sink recursion** — FIXED (`errlog_add` assert-free + head clamp).
+- **H3 OTA partition-state validation** — FIXED (supervisor gates on `esp_ota_get_state_partition` unconditionally; flag before `set_boot`, fatal on failure).
+- **H4 drag Doppler re-anchor** — REAL, FIXED (don't overwrite `v_prev`; reproducer test added).
+- **H5 lap chord across GPS outage** — REAL, FIXED (crossing on a chord >`LAP_SEG_GAP_US` marks the opened lap `LAP_F_GPS_LOST`; reproducer test added). **Replay lap times unchanged** (28.071/28.044/28.028).
+- **T-A wire-checks-as-asserts** — FIXED (13 `ses_records` sites + `json_parse(n=0)` → plain `return -1`).
+- **T-B two-pass framing tears** — FIXED (errlog/config-get single-dispatch snapshot; `SER_ASM_MAX`→2560).
+- **T-C `ota recv` RX overflow** — dev-controller side FIXED (16 KB RX ring + `UART_ISR_IN_IRAM`); lap-timer side PARTIAL (IRAM set; the 256 B console ring is hardcoded in IDF 5.3.2 → documented; robust fix = host per-chunk ACK, deferred).
+- **T-D cfg race + mode desync** — FIXED (UI read-modify-write; mode single-source from `cfg.mode`).
+- **T-E dev-controller robustness** — FIXED (bounded mutex→503, `ERR`→`LINKHOST_E_REMOTE`→4xx/502, copy-out + name-match, download timeout scaled, logstore full-reserve + fsync).
+- **T-F security** — FIXED (reject `<0x20` in relayed JSON; per-device AP PSK `ltdev-<mac>` from eFuse).
+
+**No false positives** — every confirmed-real finding held up under code inspection / a reproducing test.
+
+**Still open (tracked):** T-C robust per-chunk-ACK OTA transport (needs bench + a protocol change); the LOW batch (invalid-lap-as-best UI count, planned-restart LOGGER_CLOSE, VENUE truncation, id `..` validation, stream-frame CRC, safe-mode gating, rule-5 touch-ups) — file as issues. **⚠ AP password is now per-device `ltdev-<mac>`** (printed at boot), not `laptimer-dev-ap`.
