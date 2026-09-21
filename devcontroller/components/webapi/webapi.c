@@ -693,6 +693,14 @@ static void flash_task(void *arg)
  * *left left holding the body bytes still unread (for the caller to drain). */
 static const char *flash_stage_body(httpd_req_t *req, size_t *left, const char **status)
 {
+    assert(req != NULL);
+    assert(left != NULL && status != NULL);
+    /* Only api_flash_post reaches here, and only after it has claimed the single flight and reset
+     * the staging context. A partly-used s_stage would mean a second, overlapping upload -- which
+     * would interleave two images in the partition instead of failing. */
+    assert(s_flash.busy && s_flash.state == FLASH_STAGING);
+    assert(s_stage.part != NULL && s_stage.written == 0u && s_stage.blk_len == 0u);
+
     const char *emsg = NULL;
     int mrc = MP_MORE;
     int timeouts = 0;
@@ -778,6 +786,16 @@ static const char *flash_stage_body(httpd_req_t *req, size_t *left, const char *
 
 static esp_err_t api_flash_post(httpd_req_t *req)
 {
+    assert(req != NULL);
+    /* The upload half runs on the single httpd request task, so no second upload can be part-way
+     * through when a new request arrives -- FLASH_STAGING here would mean reentrancy, which would
+     * tear s_mp/s_stage mid-parse. And a set `busy` always has an owner: flash_task clears it, so
+     * a busy+IDLE controller would wedge this endpoint at 409 forever.
+     * (FLASH_DONE_* with `busy` still set IS legal: flash_task publishes the state just before
+     * releasing the guard.) */
+    assert(s_flash.state != FLASH_STAGING);
+    assert(!s_flash.busy || s_flash.state != FLASH_IDLE);
+
     size_t left = req->content_len;
 
     if (s_flash.busy) {
@@ -833,6 +851,11 @@ static esp_err_t api_flash_post(httpd_req_t *req)
         flash_drain(req, left);
         return send_error_json(req, status, emsg);
     }
+
+    /* flash_stage_body's postcondition: a complete, parseable image is in the partition and the
+     * single flight is still ours (nothing but this handler and flash_task touches `busy`). */
+    assert(s_flash.busy && s_flash.size >= (uint32_t)IMG_DESC_MIN_LEN);
+    assert(s_flash.ver[0] != '\0' && s_flash.hwid[0] != '\0');
 
     s_flash.total = s_flash.size;
     s_flash.state = FLASH_PUSHING;              /* must be set before the task can finish */
