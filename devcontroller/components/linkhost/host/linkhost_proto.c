@@ -617,7 +617,14 @@ static void classify_line(void)
 {
     char name[16];
     uint32_t size = 0;
-    const uint8_t *r = parse_begin(s_dx.line, s_dx.line_len, name, sizeof(name), &size);
+    /* Tolerate leading echo/prompt/noise glued to the header with no newline before ---BEGIN
+     * (e.g. "laptimer> ---BEGIN status ..."), matching linkhost_parse_frame's mem_find
+     * tolerance -- otherwise the glued line fails the strict prefix check and the whole
+     * response is dropped (a status reply lost -> /api/status 503 while the stream flows). */
+    const uint8_t *begin = mem_find(s_dx.line, s_dx.line_len, LT_FRAME_BEGIN_PFX,
+                                    sizeof(LT_FRAME_BEGIN_PFX) - 1);
+    const size_t   blen  = begin ? s_dx.line_len - (size_t)(begin - s_dx.line) : 0;
+    const uint8_t *r     = begin ? parse_begin(begin, blen, name, sizeof(name), &size) : NULL;
     if (!r) {
         /* Not a framed header. A non-framed "ERR 0x<code>: <msg>" is the lap-timer refusing the
          * command -- complete it as a remote-error response so the caller fails fast (400/404/502)
@@ -639,11 +646,11 @@ static void classify_line(void)
         return;                                       /* echo/prompt/log/boot -> drop */
     }
 
-    /* Re-emit the header line (plus a '\n') into the frame buffer for linkhost_parse_frame. */
-    if (s_dx.line_len + 1u > FRAME_CAP) { s_dx.state = DX_SCAN; return; }
-    memcpy(s_dx.frame, s_dx.line, s_dx.line_len);
-    s_dx.frame[s_dx.line_len] = '\n';
-    s_dx.frame_len = s_dx.line_len + 1u;
+    /* Re-emit the header line from ---BEGIN (dropping any leading noise) + a '\n'. */
+    if (blen + 1u > FRAME_CAP) { s_dx.state = DX_SCAN; return; }
+    memcpy(s_dx.frame, begin, blen);
+    s_dx.frame[blen] = '\n';
+    s_dx.frame_len = blen + 1u;
     s_dx.body_need = size;
     s_dx.body_got  = 0;
     s_dx.state = DX_RESP_BODY;
