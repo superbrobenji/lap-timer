@@ -238,7 +238,7 @@ int ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 19, SES_ASSERT_CODE, -1);
+    if (len != 19) return -1;
     br_t r; br_init(&r, payload, len);
     out->lap_no = br_u16(&r); out->idx = br_u8(&r); out->gps_us = br_i64(&r);
     out->split_ms = br_u32(&r); out->delta_ms = br_i32(&r);
@@ -265,12 +265,12 @@ int ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len >= 14, SES_ASSERT_CODE, -1);
+    if (len < 14) return -1;
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     out->run_no = br_u16(&r); out->t0_gps_us = br_i64(&r); out->flags = br_u8(&r); out->trap_cms = br_u16(&r); out->n_gates = br_u8(&r);
-    CORE_ASSERT_RET(out->n_gates <= DRAG_MAX_GATES, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 14 + 12 * out->n_gates, SES_ASSERT_CODE, -1);
+    if (out->n_gates > DRAG_MAX_GATES) return -1;
+    if (len != 14 + 12 * out->n_gates) return -1;
     for (uint8_t i = 0; i < out->n_gates; i++) {
         drag_gate_res_t *g = &out->gates[i];
         g->gate_id = br_u8(&r); g->time_ms = br_u32(&r); g->speed_cms = br_u16(&r); g->dist_cm = br_u32(&r); g->hit = br_u8(&r);
@@ -290,7 +290,7 @@ int ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *o
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 21, SES_ASSERT_CODE, -1);
+    if (len != 21) return -1;
     br_t r; br_init(&r, payload, len);
     out->run_no = br_u16(&r); out->gate_id = br_u8(&r); out->gps_us = br_i64(&r);
     out->time_ms = br_u32(&r); out->speed_cms = br_u16(&r); out->dist_cm = br_u32(&r);
@@ -311,7 +311,7 @@ int ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 22, SES_ASSERT_CODE, -1);
+    if (len != 22) return -1;
     br_t r; br_init(&r, payload, len);
     out->mono_us = br_i64(&r); out->gps_us = br_i64(&r); out->code = br_u16(&r); out->arg = br_u32(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -329,7 +329,7 @@ int ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 17, SES_ASSERT_CODE, -1);
+    if (len != 17) return -1;
     br_t r; br_init(&r, payload, len);
     out->mono_us = br_i64(&r); out->gps_us = br_i64(&r); out->quality = br_u8(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -349,7 +349,7 @@ int ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 36, SES_ASSERT_CODE, -1);
+    if (len != 36) return -1;
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);
@@ -387,7 +387,7 @@ int ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 9, SES_ASSERT_CODE, -1);
+    if (len != 9) return -1;
     br_t r; br_init(&r, payload, len);
     out->gps_us = br_i64(&r); out->reason = br_u8(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -405,7 +405,7 @@ int ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 9, SES_ASSERT_CODE, -1);
+    if (len != 9) return -1;
     br_t r; br_init(&r, payload, len);
     out->gps_us = br_i64(&r); out->kind = br_u8(&r);
     return br_underflow(&r) ? -1 : 1;
@@ -428,7 +428,7 @@ int ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 25, SES_ASSERT_CODE, -1);
+    if (len != 25) return -1;
     br_t r; br_init(&r, payload, len);
     for (int i = 0; i < 9; i++) out->r_e4[i] = br_i16(&r);
     for (int i = 0; i < 3; i++) out->gbias[i] = br_i16(&r);
@@ -458,10 +458,11 @@ int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out)
 {
     CORE_ASSERT_RET(payload != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(len == 94, SES_ASSERT_CODE, -1);
+    if (len != 94) return -1;
     br_t r; br_init(&r, payload, len);
     memset(out, 0, sizeof *out);
-    CORE_ASSERT_RET(br_u8(&r) == 1, SES_ASSERT_CODE, -1);
+    uint8_t ver = br_u8(&r);                        /* read hoisted out of the check: br_u8 consumes a byte */
+    if (ver != 1) return -1;
     br_u8(&r);                                      /* reserved, currently unused */
     br_bytes(&r, out->session_id, 10); out->session_id[10] = '\0'; out->mode = br_u8(&r); out->variant = br_u8(&r);
     out->venue_id = br_u16(&r); out->layout_id = br_u16(&r);

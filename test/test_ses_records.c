@@ -1,5 +1,8 @@
 #include "unity.h"
 #include "core/ses.h"
+#include "core/json.h"
+#include "core/cfg.h"
+#include "assert_support.h"   /* T-A: decoding untrusted input must NOT fire the fault hook */
 #include <stdint.h>
 #include <string.h>
 
@@ -270,6 +273,7 @@ static void test_calib_round_trip(void)
 
 static void test_decoders_reject_malformed_payloads(void)
 {
+    lt_test_assert_reset();                       /* T-A: every rejection below must be a plain return, not a fault */
     uint8_t p[256]; memset(p, 0, sizeof p);
     gps_fix_t f; lap_result_t lap; drag_result_t run; ses_hdr_t hdr; fused_sample_t fs;
     ses_fix_state_t fst; ses_fix_state_init(&fst);
@@ -341,6 +345,27 @@ static void test_decoders_reject_malformed_payloads(void)
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_end(p, 8, &en));
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_mark(p, 10, &mk));
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(p, 24, &cal));
+
+    /* T-A: not one of the wire-format rejections above may have routed through CORE_ASSERT (which on
+     * device writes the persisted error ring -- an OTA header-version bump would otherwise storm it). */
+    TEST_ASSERT_EQUAL_UINT(0, lt_test_assert_count());
+}
+
+/* T-A: an empty document (n == 0) is untrusted input a peer can send; json_parse / cfg_from_json must
+ * reject it as malformed WITHOUT firing the fault hook (previously json_parse's `n > 0` assert did). */
+static void test_empty_json_and_config_are_rejected_without_a_fault(void)
+{
+    lt_test_assert_reset();
+    jsmntok_t toks[8];
+    TEST_ASSERT_LESS_THAN_INT(1, json_parse("", 0, toks, 8));          /* < 1 => malformed */
+    TEST_ASSERT_LESS_THAN_INT(1, json_parse(NULL, 0, toks, 8));        /* cfg_from_json's json==NULL,n==0 path */
+
+    cfg_t c; cfg_defaults(&c);
+    char err[48];
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, "", 0, err, sizeof err));
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, NULL, 0, err, sizeof err));
+
+    TEST_ASSERT_EQUAL_UINT(0, lt_test_assert_count());
 }
 
 /* deterministic LCG, same pattern as the other suites */
@@ -408,6 +433,7 @@ int main(void)
     RUN_TEST(test_small_record_round_trips);
     RUN_TEST(test_calib_round_trip);
     RUN_TEST(test_decoders_reject_malformed_payloads);
+    RUN_TEST(test_empty_json_and_config_are_rejected_without_a_fault);
     RUN_TEST(test_fuzz_ten_thousand_fix_random_walk_round_trips);
     return UNITY_END();
 }

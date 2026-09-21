@@ -62,6 +62,12 @@ typedef struct __attribute__((packed)) {
 
 #define COUNTER_FLUSH_US (60 * 1000000LL)       /* >=60 s batching (§15.2) */
 
+/* H1: coalesce error-ring flash writes for a REPEATING (deduped) report. A distinct report still
+ * persists immediately (crash/stall records stay reliable); a stuck hot-path assert reporting the
+ * same (code,arg) every tick can refresh the ring in RAM but only writes flash once per this
+ * interval, so a 100 Hz failing assert cannot storm flash or wear the 24 KB NVS partition out. */
+#define ERRLOG_MIN_PERSIST_US (5 * 1000000LL)
+
 /* ---- RAM mirrors ---- */
 static nvs_handle_t   s_h_sys, s_h_err, s_h_cfg;
 static bool           s_ready;
@@ -71,6 +77,14 @@ static bool           s_counters_dirty;
 static int64_t        s_counters_last_us;
 static err_ring_t     s_ring;
 static crash_entry_t  s_crash[CRASH_LOG_LEN];
+
+/* H1 dedup + rate-limit state (errlog_add). s_last_* is the most recently ADDED (code,arg): an
+ * immediate repeat is folded onto the newest ring slot instead of overwriting all 32 with one
+ * fault. s_ring_persist_us is the last time the ring was written to flash. */
+static uint16_t       s_last_code;
+static uint32_t       s_last_arg;
+static bool           s_last_valid;
+static int64_t        s_ring_persist_us;
 
 /* F1: serialise the shared error-ring RAM mirror (s_ring) + its NVS write. errlog_add is called
  * from the logger/supervisor/console (core 0) AND the pipeline via the core assert hook (core 1),
@@ -113,6 +127,10 @@ int lt_nvs_init(void)
     if (nvs_get_u32(s_h_sys, K_BOOT, &s_boot_cnt) != ESP_OK) s_boot_cnt = 0;
     if (load_blob(s_h_err, K_CTR, &s_counters, sizeof(s_counters)) != 0) memset(&s_counters, 0, sizeof(s_counters));
     if (load_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) != 0) memset(&s_ring, 0, sizeof(s_ring));
+    /* H2: head comes straight from the NVS blob (load_blob only checks size). A same-size blob from
+     * a different firmware/layout could carry head >= ERR_RING_LEN; clamp it here so errlog_add
+     * never indexes past s_ring.entry[] (and never needs an assertion to catch it -- see errlog_add). */
+    if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
     if (load_blob(s_h_sys, K_CRASH, s_crash, sizeof(s_crash)) != 0) memset(s_crash, 0, sizeof(s_crash));
 
     s_counters_last_us = esp_timer_get_time();
@@ -155,24 +173,39 @@ int lt_counters_flush(bool force)
 
 const lt_counters_t *lt_counters(void) { return &s_counters; }
 
+/* Write the RAM ring to NVS and stamp the last-write time. Caller holds ring_lock. The stamp lets
+ * the H1 rate-limit cap how often a repeating (deduped) report is allowed to touch flash. */
+static void errlog_persist(void)
+{
+    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
+    s_ring_persist_us = esp_timer_get_time();
+}
+
 int errlog_add(uint16_t code, uint32_t arg)
 {
-    /* code must be non-zero: 0 is the sentinel lt_errlog_snapshot uses to mean "untouched slot"
-     * (§17.7 real codes are >= 0x0101), so a zero code here would create an entry indistinguishable
-     * from empty. s_ring.head is internal state that indexes s_ring.entry[]; re-checking its bound
-     * here (rather than trusting the mod-ERR_RING_LEN wrap below) guards against future corruption.
-     * Neither check depends on lt_nvs_init() having succeeded -- the RAM ring update below must
-     * still happen (best-effort, NVS-persistence-optional) even if NVS itself never came up. */
-    LT_ASSERT_RET(code != 0, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(s_ring.head < ERR_RING_LEN, NVS_ASSERT_CODE, -1);
+    /* Assert-FREE (H2): errlog_add IS the assertion sink (core_assert_report -> here). An
+     * LT_ASSERT here would re-enter core_assert_fail -> core_assert_report -> errlog_add and recurse
+     * to a boot-time stack overflow, so both guards are plain, self-recovering checks: code 0 is the
+     * empty-slot sentinel (§17.7 real codes >= 0x0101), and a corrupt head is clamped, never asserted.
+     * H1: a stuck hot-path assert reports the same (code,arg) every tick -- dedup it onto the newest
+     * slot and rate-limit the flash write so it cannot storm NVS; a distinct report persists at once
+     * so genuine crash/stall records stay reliable. */
+    if (code == 0) return -1;
     ring_lock();                                /* F1: RMW of s_ring + its NVS write is not atomic */
+    if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
+    bool repeat = s_last_valid && code == s_last_code && arg == s_last_arg;
+    if (repeat) {
+        uint8_t newest = (uint8_t)((s_ring.head + ERR_RING_LEN - 1) % ERR_RING_LEN);
+        s_ring.entry[newest].uptime_s = uptime_s_now();
+        if (esp_timer_get_time() - s_ring_persist_us >= ERRLOG_MIN_PERSIST_US) errlog_persist();
+        ring_unlock();
+        return 0;
+    }
     err_entry_t *e = &s_ring.entry[s_ring.head];
-    e->code = code;
-    e->uptime_s = uptime_s_now();
-    e->boot = (uint16_t)s_boot_cnt;
-    e->arg = arg;
+    e->code = code; e->uptime_s = uptime_s_now(); e->boot = (uint16_t)s_boot_cnt; e->arg = arg;
     s_ring.head = (uint8_t)((s_ring.head + 1) % ERR_RING_LEN);
-    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
+    s_last_code = code; s_last_arg = arg; s_last_valid = true;
+    errlog_persist();
     ring_unlock();
     ESP_LOGW(TAG, "errlog 0x%04x arg=%u", code, (unsigned)arg);
     return 0;
@@ -255,7 +288,9 @@ void lt_errlog_clear(void)
 {
     ring_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
+    s_last_valid = false;                       /* H1: drop dedup state so a post-clear repeat re-appends */
     if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
+    s_ring_persist_us = esp_timer_get_time();
     ring_unlock();
 }
 
