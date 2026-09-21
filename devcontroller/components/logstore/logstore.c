@@ -83,6 +83,12 @@ static uint32_t s_next_id = 1;
 static int      s_cur_fd = -1;
 static uint32_t s_cur_bytes;                  /* bytes written to the current file so far */
 static char     s_cur_id[LOGSTORE_ID_BUF];
+static int64_t  s_last_fsync_us;              /* time of the last fsync of the live file (M7) */
+
+/* Worst-case on-disk size of one whole log file: header + a file grown to the per-file cap. The
+ * total-cap reservation must hold back this much for the file about to be written -- not just the
+ * first record -- or steady state overfills the partition and every append ENOSPC-wedges (M6). */
+#define LOGSTORE_FILE_WORST (sizeof(logstore_file_hdr_t) + LOGSTORE_MAX_FILE_BYTES)
 
 /* ---- small POSIX helpers (mirrors components/drivers/storage_internal/storage_internal.c's
  * style: this is a separate ESP-IDF project with no shared HAL, so the same small primitives are
@@ -249,11 +255,12 @@ esp_err_t logstore_init(size_t cap_bytes)
     assert(cap_bytes <= UINT32_MAX);
     if (cap_bytes == 0 || cap_bytes > UINT32_MAX) return ESP_ERR_INVALID_ARG;
 
-    s_ready     = false;
-    s_cap_bytes = (uint32_t)cap_bytes;
-    s_cur_fd    = -1;
-    s_cur_bytes = 0;
-    s_next_id   = 1;
+    s_ready        = false;
+    s_cap_bytes    = (uint32_t)cap_bytes;
+    s_cur_fd       = -1;
+    s_cur_bytes    = 0;
+    s_next_id      = 1;
+    s_last_fsync_us = 0;   /* the first append fsyncs, making the new file visible promptly */
 
     if (!esp_littlefs_mounted(LOGS_PART_LABEL)) {
         esp_vfs_littlefs_conf_t conf = {
@@ -278,7 +285,9 @@ esp_err_t logstore_init(size_t cap_bytes)
     logstore_file_info_t files[LOGSTORE_ROT_MAX_FILES];
     int n = scan_existing(files, LOGSTORE_ROT_MAX_FILES, &s_next_id);
     (void)n;
-    enforce_cap(0);
+    /* Reserve the whole worst-case file we are about to open (M6), so the resumed set plus the new
+     * file cannot exceed the cap even after the new file grows to LOGSTORE_MAX_FILE_BYTES. */
+    enforce_cap((uint32_t)LOGSTORE_FILE_WORST);
 
     esp_err_t oe = open_new_file();
     if (oe != ESP_OK) return oe;
@@ -298,11 +307,14 @@ int logstore_append(const lt_stream_rec_t *rec)
 
     if (logstore_should_rotate(0, s_cur_bytes, incoming, s_cap_bytes, LOGSTORE_MAX_FILE_BYTES)) {
         if (s_cur_fd >= 0) {
+            (void)fsync(s_cur_fd);   /* commit the file we are closing before it becomes read-only */
             close(s_cur_fd);
             s_cur_fd = -1;
         }
-        /* the about-to-be-created file will hold its own header plus this record */
-        enforce_cap((uint32_t)(sizeof(logstore_file_hdr_t) + incoming));
+        /* Reserve the whole worst-case future file (header + per-file cap), not just this one
+         * record: the new file grows to LOGSTORE_MAX_FILE_BYTES unchecked, so reserving only the
+         * first record lets steady state overrun the partition and ENOSPC-wedge (M6). */
+        enforce_cap((uint32_t)LOGSTORE_FILE_WORST);
         if (open_new_file() != ESP_OK) {
             s_ready = false;   /* out of files/space: stop accepting appends until re-init */
             return -1;
@@ -320,6 +332,16 @@ int logstore_append(const lt_stream_rec_t *rec)
     if (rec->len > 0 && write_all(s_cur_fd, rec->data, rec->len) != 0) return -1;
 
     s_cur_bytes += incoming;
+
+    /* Commit the live file at most ~once per second (M7): LittleFS persists size/metadata only on
+     * sync/close, so without this GET /api/logs lists the current file at its 8 B header, reads of
+     * it return stale/empty content, and a power cut (the very event a black box is for) loses up
+     * to a whole file. Time-gated so a high append rate can't turn every record into a flash sync. */
+    int64_t now_us = esp_timer_get_time();
+    if (now_us - s_last_fsync_us >= 1000000) {   /* >= 1 s */
+        (void)fsync(s_cur_fd);
+        s_last_fsync_us = now_us;
+    }
     return 0;
 }
 
