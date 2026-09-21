@@ -69,6 +69,54 @@ static esp_err_t send_not_connected(httpd_req_t *req)
     return send_json(req, "503 Service Unavailable", "{\"connected\":false}");
 }
 
+/* Sends {"error":"<msg>"} with `status`, escaping the message (control chars dropped, JSON
+ * metacharacters escaped) so an odd remote message can't break the JSON handed to the SPA. */
+static esp_err_t send_error_json(httpd_req_t *req, const char *status, const char *msg)
+{
+    char esc[LINKHOST_ERRMSG_MAX * 2 + 1];
+    size_t o = 0;
+    for (const char *p = msg; p && *p && o + 2u < sizeof esc; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') { esc[o++] = '\\'; esc[o++] = (char)c; }
+        else if (c >= 0x20 && c < 0x7F) esc[o++] = (char)c;   /* drop control / non-ASCII */
+    }
+    esc[o] = '\0';
+    char body[LINKHOST_ERRMSG_MAX * 2 + 32];
+    int n = snprintf(body, sizeof body, "{\"error\":\"%s\"}", esc);
+    if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
+    return send_json(req, status, body);
+}
+
+/* Response mapping for the small fixed linkhost_cmd ops (config get/set, status): a remote
+ * `ERR 0x..` -> 400 with the lap-timer's message; a busy link -> 503; anything else -> the SPA's
+ * not-connected shape. `f` carries err_msg when rc == LINKHOST_E_REMOTE. */
+static esp_err_t send_cmd_link_error(httpd_req_t *req, int rc, const linkhost_frame_t *f)
+{
+    if (rc == LINKHOST_E_REMOTE)
+        return send_error_json(req, "400 Bad Request",
+                               f->err_msg[0] ? f->err_msg : "lap-timer rejected the request");
+    if (rc == LINKHOST_E_BUSY)
+        return send_json(req, "503 Service Unavailable", "{\"error\":\"link busy, retry\"}");
+    return send_not_connected(req);   /* TIMEOUT / NOTCONN / CRC / PROTO */
+}
+
+/* Response mapping for a streaming relay that failed BEFORE any body byte was sent: a remote error
+ * -> 502 for a storage code (0x04xx), else 404 (unknown session/file); CRC/PROTO -> 502; busy ->
+ * 503; anything else -> not-connected. */
+static void send_stream_error(httpd_req_t *req, int rc, const linkhost_remote_err_t *rerr)
+{
+    if (rc == LINKHOST_E_REMOTE) {
+        const char *status = ((rerr->code & 0xFF00u) == 0x0400u) ? "502 Bad Gateway" : "404 Not Found";
+        send_error_json(req, status, rerr->msg[0] ? rerr->msg : "lap-timer error");
+    } else if (rc == LINKHOST_E_CRC || rc == LINKHOST_E_PROTO) {
+        send_json(req, "502 Bad Gateway", "{\"error\":\"read failed\"}");
+    } else if (rc == LINKHOST_E_BUSY) {
+        send_json(req, "503 Service Unavailable", "{\"error\":\"link busy, retry\"}");
+    } else {
+        send_not_connected(req);
+    }
+}
+
 /* Copies req->uri after `prefix` up to '?' or end into out[outsz]. Returns the length, or -1. */
 static int path_tail(const httpd_req_t *req, const char *prefix, char *out, size_t outsz)
 {
@@ -110,7 +158,7 @@ static esp_err_t api_config_get(httpd_req_t *req)
 {
     linkhost_frame_t f;
     int rc = linkhost_cmd(LT_CMD_CONFIG_GET, &f);
-    if (rc != 0) return send_not_connected(req);
+    if (rc != 0) return send_cmd_link_error(req, rc, &f);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, (const char *)f.body, (ssize_t)f.body_len);
 }
@@ -138,7 +186,7 @@ static esp_err_t api_config_post(httpd_req_t *req)
     /* fetch the live config (copy it out -- linkhost's body buffer is reused by the next cmd) */
     linkhost_frame_t cur;
     int rc = linkhost_cmd(LT_CMD_CONFIG_GET, &cur);
-    if (rc != 0) return send_not_connected(req);
+    if (rc != 0) return send_cmd_link_error(req, rc, &cur);
     if (cur.body_len > ASSEMBLE_MAX) return ESP_FAIL;
     memcpy(s_cur_cfg, cur.body, cur.body_len);
     s_cur_cfg[cur.body_len] = '\0';
@@ -150,9 +198,19 @@ static esp_err_t api_config_post(httpd_req_t *req)
     if (dlen <= 2)                                             /* "{}" -> nothing to change */
         return send_json(req, NULL, "{\"changed\":0}");
 
-    /* push the changed keys, split into <=250 B `config set` lines */
+    /* Console-injection guard (T-F): the minified diff copies string values verbatim, so a raw
+     * byte < 0x20 here came from inside a JSON string (jsmn accepts control chars) and would split
+     * the `config set` line into extra commands on the lap-timer. Reject the whole POST. */
+    for (int i = 0; i < dlen; i++) {
+        if ((unsigned char)s_diff[i] < 0x20)
+            return send_json(req, "400 Bad Request",
+                             "{\"error\":\"control character in config value\"}");
+    }
+
+    /* push the changed keys, split into `config set` lines each <=250 B AFTER escaping */
     size_t cursor = 0;
     char obj[CFG_SET_OBJ_MAX + 1];
+    char esc[CFG_SET_OBJ_MAX * 2 + 1];                         /* escaped object: each byte can double */
     char cmd[CFG_SET_LINE_MAX + 1];
     int lines = 0;
     for (;;) {                                                 /* bounded: cursor advances or caps */
@@ -161,13 +219,20 @@ static esp_err_t api_config_post(httpd_req_t *req)
         if (m < 0)
             return send_json(req, "413 Payload Too Large",
                              "{\"error\":\"a changed value exceeds the console line limit\"}");
-        int cn = snprintf(cmd, sizeof cmd, "%s %s", LT_CMD_CONFIG_SET, obj);
+        /* Escape the object for esp_console (B1): a bare {"k":"v"} has its quotes stripped by
+         * esp_console_split_argv -> malformed JSON at the lap-timer. next_line budgeted the escaped
+         * length, so `config set <escaped>` stays within the 256 B console line limit. */
+        int en = config_diff_escape(obj, esc, sizeof esc);
+        if (en < 0)
+            return send_json(req, "413 Payload Too Large",
+                             "{\"error\":\"a changed value exceeds the console line limit\"}");
+        int cn = snprintf(cmd, sizeof cmd, "%s %s", LT_CMD_CONFIG_SET, esc);
         if (cn < 0 || (size_t)cn >= sizeof cmd)
             return send_json(req, "413 Payload Too Large",
                              "{\"error\":\"config set line too long\"}");
         linkhost_frame_t ack;
         int sr = linkhost_cmd(cmd, &ack);
-        if (sr != 0) return send_not_connected(req);
+        if (sr != 0) return send_cmd_link_error(req, sr, &ack);
         if (++lines > 32) break;                               /* hard cap on lines per POST */
     }
 
@@ -175,17 +240,6 @@ static esp_err_t api_config_post(httpd_req_t *req)
     int rn = snprintf(resp, sizeof resp, "{\"changed\":%d}", lines);
     if (rn < 0 || (size_t)rn >= sizeof resp) return ESP_FAIL;
     return send_json(req, NULL, resp);
-}
-
-/* ---------- GET /api/sessions : relay `list` JSON ---------- */
-
-static esp_err_t api_sessions(httpd_req_t *req)
-{
-    linkhost_frame_t f;
-    int rc = linkhost_cmd(LT_CMD_LIST, &f);
-    if (rc != 0) return send_not_connected(req);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, (const char *)f.body, (ssize_t)f.body_len);
 }
 
 /* ---------- GET /api/logs : logstore_list -> {logs:[{id,bytes}]} ---------- */
@@ -282,7 +336,8 @@ static void do_session_download(httpd_req_t *req)
     /* Stream the framed response body straight to the browser -- never buffer the whole file, so a
      * KB..MB session survives (the old linkhost_cmd path capped at LINKHOST_ASM_MAX = 1024 B). */
     dl_sink_t sink = { .req = req, .id = id, .fmt = fmt };
-    int rc = linkhost_download(id, fmt, session_chunk_cb, &sink);
+    linkhost_remote_err_t rerr;
+    int rc = linkhost_download(id, fmt, session_chunk_cb, &sink, &rerr);
 
     if (sink.transport_dead) {                                 /* client vanished mid-stream */
         ESP_LOGW(TAG, "session %s %s: client disconnected mid-download", id, fmt);
@@ -302,11 +357,47 @@ static void do_session_download(httpd_req_t *req)
         httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
         return;
     }
-    /* Nothing streamed yet -> a clean error response is still possible. */
-    if (rc == LINKHOST_E_CRC || rc == LINKHOST_E_PROTO)
-        send_json(req, "502 Bad Gateway", "{\"error\":\"session read failed\"}");
-    else
-        send_not_connected(req);                               /* timeout / not connected */
+    /* Nothing streamed yet -> a clean error response is still possible (404/502/503). */
+    send_stream_error(req, rc, &rerr);
+}
+
+/* ---------- async: GET /api/sessions (stream `list` JSON) ----------
+ * `list` is JSON but its frame (measured 3662 B on hardware, growing with session count) overflows
+ * the buffered linkhost_cmd/LINKHOST_ASM_MAX path -> it used to 503 past ~6 sessions. Stream it
+ * through lh_dl_* exactly like a session download (raw text, not base64). */
+static int sessions_chunk_cb(void *ctx, const uint8_t *data, size_t n)
+{
+    dl_sink_t *s = (dl_sink_t *)ctx;
+    if (!s->headers_set) { httpd_resp_set_type(s->req, "application/json"); s->headers_set = true; }
+    if (httpd_resp_send_chunk(s->req, (const char *)data, (ssize_t)n) != ESP_OK) {
+        s->transport_dead = true;
+        return 1;                                              /* abort: the client disconnected */
+    }
+    s->started = true;
+    return 0;
+}
+
+static void do_sessions_stream(httpd_req_t *req)
+{
+    dl_sink_t sink = { .req = req };
+    linkhost_remote_err_t rerr;
+    int rc = linkhost_download_cmd(LT_CMD_LIST, /*is_binary*/false, sessions_chunk_cb, &sink, &rerr);
+
+    if (sink.transport_dead) {
+        ESP_LOGW(TAG, "sessions: client disconnected mid-stream");
+        return;
+    }
+    if (rc == 0) {
+        if (!sink.headers_set) httpd_resp_set_type(req, "application/json");  /* empty list */
+        httpd_resp_send_chunk(req, NULL, 0);
+        return;
+    }
+    if (sink.started) {
+        ESP_LOGW(TAG, "sessions rc=%d after streaming -> abort socket", rc);
+        httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+        return;
+    }
+    send_stream_error(req, rc, &rerr);
 }
 
 /* ---------- async: log file download ---------- */
@@ -349,7 +440,8 @@ static void async_worker(void *arg)
         async_job_t job;
         if (xQueueReceive(s_async_q, &job, portMAX_DELAY) != pdTRUE) continue;
         httpd_req_t *req = job.req;
-        if (strncmp(req->uri, "/api/session/", 13) == 0) do_session_download(req);
+        if (strcmp(req->uri, "/api/sessions") == 0)        do_sessions_stream(req);
+        else if (strncmp(req->uri, "/api/session/", 13) == 0) do_session_download(req);
         else if (strncmp(req->uri, "/api/log/", 9) == 0)  do_log_download(req);
         else httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
         httpd_req_async_handler_complete(req);
@@ -441,7 +533,7 @@ esp_err_t webapi_register(httpd_handle_t server)
         { .uri = "/api/status",     .method = HTTP_GET,  .handler = api_status },
         { .uri = "/api/config",     .method = HTTP_GET,  .handler = api_config_get },
         { .uri = "/api/config",     .method = HTTP_POST, .handler = api_config_post },
-        { .uri = "/api/sessions",   .method = HTTP_GET,  .handler = api_sessions },
+        { .uri = "/api/sessions",   .method = HTTP_GET,  .handler = api_async_begin },
         { .uri = "/api/session/*",  .method = HTTP_GET,  .handler = api_async_begin },
         { .uri = "/api/logs",       .method = HTTP_GET,  .handler = api_logs },
         { .uri = "/api/log/*",      .method = HTTP_GET,  .handler = api_async_begin },

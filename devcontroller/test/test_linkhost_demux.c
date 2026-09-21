@@ -130,11 +130,29 @@ static void test_resync_on_stream_tag_from_noise(void)
     TEST_ASSERT_EQUAL_INT(-1, linkhost_stream_pop(&r));
 }
 
+/* A non-framed "ERR 0x<code>: <msg>" line -- what export_serial prints when a command fails -- is
+ * completed as a remote-error response (M3), not dropped as noise, so linkhost_cmd fails fast with
+ * a real error/message instead of waiting out the link timeout and reporting a misleading 503. */
+static void test_err_line_becomes_remote_response(void)
+{
+    const char *line = "ERR 0x0703: config json error\r\n";
+    linkhost_feed((const uint8_t *)line, strlen(line));
+
+    linkhost_frame_t f;
+    int st = -999;
+    TEST_ASSERT_EQUAL_INT(1, linkhost_pop_response(&f, &st));
+    TEST_ASSERT_EQUAL_INT(LINKHOST_E_REMOTE, st);
+    TEST_ASSERT_EQUAL_UINT16(0x0703, f.err_code);
+    TEST_ASSERT_EQUAL_STRING("config json error", f.err_msg);
+    TEST_ASSERT_EQUAL_INT(0, linkhost_pop_response(&f, &st));   /* consumed */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_mixed_stream_single_feed);
     RUN_TEST(test_mixed_stream_split_feed);
     RUN_TEST(test_resync_on_stream_tag_from_noise);
+    RUN_TEST(test_err_line_becomes_remote_response);
     return UNITY_END();
 }

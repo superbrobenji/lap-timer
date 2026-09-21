@@ -20,6 +20,7 @@
 #include "esp_http_server.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
@@ -32,7 +33,6 @@
 static const char *TAG = "dc_main";
 
 #define DC_WIFI_SSID     "laptimer-dev"
-#define DC_WIFI_PASS     "laptimer-dev-ap"   /* WPA2-PSK, >=8 chars */
 #define DC_WIFI_CHANNEL  1
 #define DC_WIFI_MAX_CONN 4
 
@@ -40,8 +40,10 @@ static const char *TAG = "dc_main";
 #define WWW_PART  "www"
 #define LOGS_BASE "/logs"
 #define LOGS_PART "logs"
-/* partitions.csv's `logs` partition is ~960 KB; leave rotation headroom below the raw size. */
-#define LOGS_CAP_BYTES (900u * 1024u)
+/* partitions.csv's `logs` partition is 0xF0000 = 960 KB. logstore reserves the full worst-case
+ * file (header + 64 KB per-file cap) inside this budget, so keep it under partition - 64 KB - ~32 KB
+ * LittleFS metadata slack (T-E/M6) to avoid ENOSPC at steady state. */
+#define LOGS_CAP_BYTES (832u * 1024u)
 
 static void nvs_init_or_erase(void)
 {
@@ -67,15 +69,25 @@ static void wifi_ap_start(void)
             .ssid           = DC_WIFI_SSID,
             .ssid_len       = (uint8_t)strlen(DC_WIFI_SSID),
             .channel        = DC_WIFI_CHANNEL,
-            .password       = DC_WIFI_PASS,
             .max_connection = DC_WIFI_MAX_CONN,
             .authmode       = WIFI_AUTH_WPA2_PSK,
         },
     };
+    /* Per-device WPA2 PSK derived from the eFuse MAC (T-F): a source-constant PSK let anyone within
+     * radio range join the AP and drive `config set` / `ota recv`. "ltdev-" + 12 hex = 18 chars
+     * (>=8 for WPA2), printed below so the operator can read it off the boot console. */
+    uint8_t mac[6] = { 0 };
+    esp_err_t me = esp_efuse_mac_get_default(mac);
+    if (me != ESP_OK) ESP_LOGW(TAG, "efuse mac read failed: %s", esp_err_to_name(me));
+    snprintf((char *)ap_config.ap.password, sizeof ap_config.ap.password,
+             "ltdev-%02x%02x%02x%02x%02x%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "SoftAP up: ssid=%s channel=%d ip=192.168.4.1", DC_WIFI_SSID, DC_WIFI_CHANNEL);
+    ESP_LOGI(TAG, "SoftAP up: ssid=%s psk=%s channel=%d ip=192.168.4.1",
+             DC_WIFI_SSID, (const char *)ap_config.ap.password, DC_WIFI_CHANNEL);
 }
 
 static void littlefs_mount(const char *base_path, const char *label, bool read_only)

@@ -37,12 +37,23 @@ int config_diff_minify(const char *current_json, const char *desired_json,
                        char *out, size_t out_cap);
 
 /* Splits a minified object (as produced by config_diff_minify) into successive `config set`
- * object arguments, each "{...}" <= CFG_SET_OBJ_MAX bytes, greedily packing whole key fragments.
- * *cursor must be 0 on the first call; each call writes the next object to out[out_cap] and
- * advances *cursor. Returns the length written (NUL-terminated), 0 when the whole object has been
- * consumed (out untouched -- also the first-call result for "{}"), or <0 if a single fragment
- * cannot fit out_cap/CFG_SET_OBJ_MAX or the input is not a minified object. */
+ * object arguments, each "{...}" whose ESP-console-ESCAPED form (see config_diff_escape) is
+ * <= CFG_SET_OBJ_MAX bytes, greedily packing whole key fragments. *cursor must be 0 on the first
+ * call; each call writes the next (raw, un-escaped) object to out[out_cap] and advances *cursor.
+ * Returns the raw length written (NUL-terminated), 0 when the whole object has been consumed (out
+ * untouched -- also the first-call result for "{}"), or <0 if a single fragment's escaped form
+ * cannot fit CFG_SET_OBJ_MAX / out_cap or the input is not a minified object. Budgeting on the
+ * ESCAPED length keeps the final `config set <escaped-obj>` line within the console's 256 B
+ * max_cmdline_length after config_diff_escape expands quotes/backslashes/spaces. */
 int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out_cap);
+
+/* Escapes a raw minified `config set` object argument for the lap-timer's esp_console REPL:
+ * esp_console_split_argv STRIPS bare double quotes and treats '\\' as an escape, so a bare
+ * {"units":"mph"} arrives as {units:mph} (malformed). This rewrites '"'->'\\"', '\\'->'\\\\' and
+ * ' '->'\\ ' (a space inside a string value would otherwise split the arg), so the console
+ * reconstructs the exact original JSON. Writes a NUL-terminated string to out[out_cap]; returns
+ * the escaped length, or <0 if it does not fit out_cap. */
+int config_diff_escape(const char *obj, char *out, size_t out_cap);
 
 #ifdef __cplusplus
 }

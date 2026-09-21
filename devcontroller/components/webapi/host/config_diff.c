@@ -158,6 +158,17 @@ int config_diff_minify(const char *current_json, const char *desired_json,
     return (int)o;
 }
 
+/* True for the bytes config_diff_escape expands (each costs one extra byte on the console line). */
+static int esc_char(char c) { return c == '"' || c == '\\' || c == ' '; }
+
+/* Escaped byte length of src[0,len) (each '"'/'\\'/' ' becomes two bytes). */
+static size_t escaped_len(const char *src, size_t len)
+{
+    size_t e = 0;
+    for (size_t i = 0; i < len; i++) e += esc_char(src[i]) ? 2u : 1u;   /* bounded by len */
+    return e;
+}
+
 int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out_cap)
 {
     if (!obj || !cursor || !out || out_cap < 3) return -1;
@@ -169,6 +180,7 @@ int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out
 
     size_t o = 0;
     out[o++] = '{';
+    size_t eo = 1;                                            /* escaped length so far ('{' is 1 B) */
     int frags = 0;
 
     while (p < n - 1u) {                                       /* bounded by n */
@@ -194,14 +206,19 @@ int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out
             fe++;
         }
         size_t flen = fe - fs;
-        size_t extra = (frags ? 1u : 0u) + flen;              /* optional comma + fragment */
-        if (o + extra + 1u > CFG_SET_OBJ_MAX || o + extra + 2u > out_cap) {
+        size_t extra    = (frags ? 1u : 0u) + flen;                          /* raw: comma + fragment */
+        size_t eextra   = (frags ? 1u : 0u) + escaped_len(obj + fs, flen);   /* escaped: comma + fragment */
+        /* Budget the ESCAPED object (eo + eextra + '}') against CFG_SET_OBJ_MAX so the console line
+         * stays within max_cmdline_length after config_diff_escape; also keep the raw output within
+         * out_cap ('}' + NUL). */
+        if (eo + eextra + 1u > CFG_SET_OBJ_MAX || o + extra + 2u > out_cap) {
             if (frags == 0) return -1;                        /* one fragment cannot fit */
             break;                                            /* flush; resume at fs next call */
         }
-        if (frags) out[o++] = ',';
+        if (frags) { out[o++] = ','; eo++; }
         memcpy(out + o, obj + fs, flen);
-        o += flen;
+        o  += flen;
+        eo += escaped_len(obj + fs, flen);
         frags++;
 
         p = fe;
@@ -211,5 +228,27 @@ int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out
     out[o++] = '}';
     out[o] = '\0';
     *cursor = p;
+    return (int)o;
+}
+
+int config_diff_escape(const char *obj, char *out, size_t out_cap)
+{
+    if (!obj || !out || out_cap == 0) return -1;
+    size_t n = strnlen(obj, CFG_JSON_MAX + 1u);
+    if (n > CFG_JSON_MAX) return -1;
+
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {                          /* bounded by n */
+        char c = obj[i];
+        if (esc_char(c)) {
+            if (o + 2u >= out_cap) return -1;                 /* need room for '\\', c and the NUL */
+            out[o++] = '\\';
+            out[o++] = c;
+        } else {
+            if (o + 1u >= out_cap) return -1;
+            out[o++] = c;
+        }
+    }
+    out[o] = '\0';
     return (int)o;
 }
