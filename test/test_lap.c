@@ -1077,6 +1077,54 @@ static void test_ugate_union_saturates_at_lap_max_ugates(void)
     TEST_ASSERT_EQUAL_INT(64, LAP_MAX_UGATES);               /* == TRK_MAX_LAYOUTS * LAP_MAX_SECTORS */
 }
 
+/* H5 regression (§6.4): a crossing found on a chord that spans a GPS outage must not silently open a
+ * clean VALID lap. Invalid fixes are skipped without advancing prev_*, so the first valid fix after a
+ * long gap forms a long chord from the last pre-outage fix; if that chord crosses S/F, cross_time
+ * interpolates a garbage t_cross and open_lap used to zero the flags -- so the FOLLOWING lap could
+ * complete VALID with a start tens of seconds wrong (and poison best). The lap opened over such a gap
+ * must carry LAP_F_GPS_LOST. Existing outage tests inject a single invalid fix, so the chord stays
+ * ~2 s and interpolation is accurate; this long-gap case was uncovered. */
+static void test_lap_across_gps_outage_not_clean_valid(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap opens (~1 s) */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* out-lap completes; lap 1 runs (~41 s) */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);                   /* lap 1 in progress, prev = (0,-40)@80 s */
+
+    /* A ~40 s GPS outage: invalid fixes set GPS_LOST on lap 1 and leave prev_* unchanged. */
+    feed(&L, lat0, lon0, 0.0, -40.0, 90000000,  0, false, &log);
+    feed(&L, lat0, lon0, 0.0, -40.0, 100000000, 0, false, &log);
+    feed(&L, lat0, lon0, 0.0, -40.0, 110000000, 0, false, &log);
+
+    /* First valid fix after the outage is 40 s later and north of S/F: the (0,-40)@80 s -> (0,40)@120 s
+     * chord crosses S/F, completing lap 1 (correctly GPS_LOST) and opening lap 2 at a garbage t_cross. */
+    feed(&L, lat0, lon0, 0.0, 40.0, 120000000, SPD_MMS, true, &log);
+
+    const lap_result_t *l1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, l1->lap_no);
+    TEST_ASSERT_TRUE(l1->flags & LAP_F_GPS_LOST);            /* the completing lap is flagged (pre-existing) */
+    TEST_ASSERT_EQUAL_UINT16(2, L.lap_no);                   /* lap 2 opened over the gap chord */
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_GPS_LOST);          /* FIX: the opened lap carries GPS_LOST */
+
+    /* lap 2 completes on clean fixes; it must NOT be reported as a clean VALID lap. */
+    feed(&L, lat0, lon0, 300.0,  40.0, 150000000, SPD_MMS, true, &log);   /* east, clear + re-arm */
+    feed(&L, lat0, lon0, 300.0, -40.0, 155000000, SPD_MMS, true, &log);   /* south */
+    feed(&L, lat0, lon0,   0.0, -40.0, 165000000, SPD_MMS, true, &log);   /* back to start */
+    feed(&L, lat0, lon0,   0.0,  40.0, 167000000, SPD_MMS, true, &log);   /* cross S/F -> completes lap 2 */
+
+    const lap_result_t *l2 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(2, l2->lap_no);
+    TEST_ASSERT_TRUE(l2->flags & LAP_F_GPS_LOST);            /* start was unreliable */
+    TEST_ASSERT_FALSE(l2->flags & LAP_F_VALID);              /* so lap 2 is not a clean VALID lap */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1091,6 +1139,7 @@ int main(void)
     RUN_TEST(test_best_and_prev_best_from_valid_only);
     RUN_TEST(test_pit_flag_on_slow_section);
     RUN_TEST(test_gps_lost_flag_on_invalid_fix);
+    RUN_TEST(test_lap_across_gps_outage_not_clean_valid);
     RUN_TEST(test_sector_splits_sum_to_lap_time);
     RUN_TEST(test_incomplete_flag_when_sector_skipped);
     RUN_TEST(test_sector_resync_after_skip);

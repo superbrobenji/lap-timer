@@ -17,6 +17,11 @@
  * within this many metres (§10.5 union deduplication and lock re-derivation). */
 #define UGATE_SAME_M 2.0
 
+/* H5 (§6.4): a crossing found on a chord longer than this spans a GPS gap (invalid or absent fixes
+ * skip prev_*), so cross_time interpolates an unreliable t_cross; a lap opened at it carries
+ * LAP_F_GPS_LOST. Well above the worst normal fix spacing (a lap timer runs GPS at >= 1 Hz). */
+#define LAP_SEG_GAP_US (5LL * 1000000)   /* 5 s */
+
 /* ---- configuration and lifecycle ---- */
 
 void lap_cfg_defaults(lap_cfg_t *c)
@@ -749,11 +754,12 @@ static bool update_leave_venue(lap_t *L, double lat, double lon, int64_t now)
 }
 
 /* Open a new lap at t_cross: reset per-lap accumulation and re-arm the locked layout's sector gates. */
-static void open_lap(lap_t *L, uint16_t lap_no, int64_t t_cross)
+static void open_lap(lap_t *L, uint16_t lap_no, int64_t t_cross, bool seg_gap)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     L->lap_no = lap_no;
     L->lap_flags = 0;
+    if (seg_gap) L->lap_flags |= LAP_F_GPS_LOST;   /* H5: opened over a gap-spanning chord (§6.4) */
     L->lap_start_gps_us = t_cross;
     L->lap_dist_m = 0.0;
     L->pit_slow = false;
@@ -767,7 +773,8 @@ static void open_lap(lap_t *L, uint16_t lap_no, int64_t t_cross)
 }
 
 /* Complete the current lap at t_cross (§10.4) and advance to the next. */
-static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, event_t *out, int cap, int *n)
+static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, bool seg_gap,
+                         event_t *out, int cap, int *n)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     int64_t elapsed = t_cross - L->lap_start_gps_us;
@@ -830,7 +837,7 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, event_t *ou
     }
     emit(out, cap, n, EV_LAP_COMPLETE, flags, L->lap_no, t_cross, mono_us, r.time_ms, (uint32_t)lap_delta);
 
-    open_lap(L, (uint16_t)(L->lap_no + 1), t_cross);               /* §10.4 step 7 */
+    open_lap(L, (uint16_t)(L->lap_no + 1), t_cross, seg_gap);      /* §10.4 step 7 */
 }
 
 /* §10.9 step 3: close creation at the S/F crossing. Length comes from the integrated distance, the
@@ -921,7 +928,7 @@ static void scan_for_venue(lap_t *L, const gps_fix_t *fix, event_t *out, int cap
 
 /* Act on an accepted S/F crossing at t_cross (§10.3/§10.4/§10.5): debounce the matched gates, then
  * either open the out-lap and narrow candidates (ARMED) or complete the current lap (RUNNING). */
-static void process_sf_crossing(lap_t *L, const gps_fix_t *fix, int64_t t_cross,
+static void process_sf_crossing(lap_t *L, const gps_fix_t *fix, int64_t t_cross, bool seg_gap,
                                 const bool *matched, event_t *out, int cap, int *n)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
@@ -941,7 +948,7 @@ static void process_sf_crossing(lap_t *L, const gps_fix_t *fix, int64_t t_cross,
             if (matched[i]) L->cand[k++] = L->cand[i];
         L->n_cand = k;
         L->state = LAP_ST_RUNNING;
-        open_lap(L, 0, t_cross);
+        open_lap(L, 0, t_cross, seg_gap);
         if (L->n_cand == 1) {
             lock_layout(L, 0, t_cross, fix->mono_us, out, cap, n);   /* single/forced layout */
         } else {
@@ -955,7 +962,7 @@ static void process_sf_crossing(lap_t *L, const gps_fix_t *fix, int64_t t_cross,
     } else {
         if (L->lap_no == 0 && !L->locked)
             disambiguate_and_lock(L, t_cross, fix->mono_us, out, cap, n);   /* §10.5 */
-        complete_lap(L, t_cross, fix->mono_us, out, cap, n);
+        complete_lap(L, t_cross, fix->mono_us, seg_gap, out, cap, n);
     }
 }
 
@@ -998,7 +1005,8 @@ static void process_segment(lap_t *L, geo_enu_t cur, const gps_fix_t *fix, event
 
     if (hit) {
         const int64_t t_cross = cross_time(L, cur, v1, t_earliest, now);
-        process_sf_crossing(L, fix, t_cross, matched, out, cap, n);
+        const bool    seg_gap = (now - L->prev_gps_us) > LAP_SEG_GAP_US;   /* H5: chord spans a GPS gap */
+        process_sf_crossing(L, fix, t_cross, seg_gap, matched, out, cap, n);
     }
 }
 
