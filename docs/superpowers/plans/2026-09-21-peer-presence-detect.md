@@ -14,7 +14,9 @@
 
 - **Detect pin:** lap-timer **GPIO4**, **active-low** (low = dev-kit present), **internal pull-up** enabled, polled every `LINK_POLL_MS` (20 ms) in `link_task`.
 - **Debounce:** require **`LINK_DETECT_STABLE` = 3** consecutive identical reads (~60 ms) before flipping `s_detect_asserted`.
-- **Keep** `link_serial_present()`'s existing `detect OR recent-cmd` fallback unchanged.
+- **Keep** `link_serial_present()`'s existing `detect OR recent-cmd` fallback unchanged. *Superseded
+  at the flash gate (`132621d`): detect is definitive when a pin is wired* — see the design doc
+  §3.3 for the rationale.
 - **Pin is defined via the build system, not hardcoded in `link.c`** — `link.c` keeps its `#ifndef LINK_DETECT_GPIO / #define (-1)` default; the value `4` is supplied by `components/app/CMakeLists.txt` compile definition (board_devkit_v1's §6 connector detect pin).
 - **Lap-timer changes gate on the strict P10 linter** (`tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation`) + both firmware envs (`moto_sim`, `moto_neo6m`) + `core_selftest` building clean. Dev-controller change gates on its host tests + build (no blocking linter).
 - **Do NOT flash** any board without the user's "ready" (they hold BOOT). On-target verification is a flash gate run with the user present.
@@ -178,6 +180,9 @@ Expected: clean boot, `dev controller ready`, no `link_heartbeat` task.
 ## Self-Review
 
 **Spec coverage:** §2 presence contract → Task 1 (GPIO4, active-low, pull-up) + Task 3 Step 1 (wiring). §3 lap-timer changes → Task 1 (pin define, debounce, kept fallback). §4 dev-controller changes → Task 2 (remove heartbeat; consumer unchanged). §5 behavior + §7 testing → Task 3. §6 edge cases → covered by the design (no code); §8 out-of-scope (sim events, #67 format) → Task 3 Step 6 notes events as separate. All spec sections map to a task.
+
+*Superseded at the flash gate (`132621d`): detect is definitive when a pin is wired* — "kept
+fallback" above no longer describes the shipped behavior; see the design doc §3.3.
 
 **Placeholder scan:** no TBD/TODO; every code step has concrete code; the debounce, the CMake def, and the deletions are shown verbatim.
 

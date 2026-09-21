@@ -7,11 +7,13 @@
  * LINK time (weak no-op default here; export_serial provides the strong serial sink), so the
  * fan-out stores no function pointer -- Power of 10 rule-9 clean (mirrors core_assert_report).
  *
- * Peer-detect: a peer is present when the GPIO detect line asserts (LINK_DETECT_GPIO, assigned with
- * the connector hardware in Plan 6 -- disabled by default here) OR when a recent `cmd` heartbeat
- * arrived (link_note_cmd_activity, called by the serial transport on every request; a STATUS poll is
- * the handshake). With no peer the ring is never fed and the drain task idles -- no hang, no error
- * spam. All state is static (no allocation), so detach leaks nothing.
+ * Peer-detect: with a detect pin wired (LINK_DETECT_GPIO >= 0 -- both build envs set it
+ * unconditionally today, see components/app/CMakeLists.txt), the GPIO detect line is the
+ * DEFINITIVE presence signal; the `cmd` heartbeat (link_note_cmd_activity, called by the serial
+ * transport on every request; a STATUS poll is the handshake) is the presence signal ONLY as a
+ * fallback on a build with no detect pin (LINK_DETECT_GPIO < 0). With no peer the ring is never
+ * fed and the drain task idles -- no hang, no error spam. All state is static (no allocation), so
+ * detach leaks nothing.
  */
 #include "app/link.h"
 
@@ -34,9 +36,11 @@
 
 #define LINK_ASSERT_CODE 0x0B90   /* Power of 10 rule 5 (app/lt_assert.h); link.c's own code */
 
-/* GPIO detect line (§6 connector). -1 = no pin assigned yet: the connector pinout lands with the
- * Plan 6 hardware, so on today's proto board presence comes from the `cmd` heartbeat alone. When a
- * pin is assigned, also add `esp_driver_gpio` to components/app/CMakeLists.txt REQUIRES. */
+/* GPIO detect line (§6 connector). Both build envs today set this unconditionally to GPIO4 via
+ * components/app/CMakeLists.txt (which also unconditionally REQUIREs `esp_driver_gpio`), so
+ * link_serial_present() below always takes the definitive detect-line path. -1 is a defensive
+ * default only, for a hypothetical build that does not define LINK_DETECT_GPIO -- on such a build
+ * presence falls back to the `cmd` heartbeat alone (see link_serial_present()). */
 #ifndef LINK_DETECT_GPIO
 #define LINK_DETECT_GPIO (-1)
 #endif
@@ -78,7 +82,10 @@ static link_rec_t   s_stream_store[LINK_STREAM_CAP];
 static ring_t       g_stream_ring;
 static uint16_t     s_seq;                        /* stream chunk sequence (drain task only) */
 static bool         s_ready;                      /* published last in link_start() */
-static bool         s_detect_asserted;            /* GPIO detect line state (drain task only) */
+static _Atomic bool s_detect_asserted;            /* GPIO detect line state: written by link_task
+                                                    * (core 0), read cross-core by stream_push ->
+                                                    * link_peer_present() on the pipeline task
+                                                    * (core 1) -- must be atomic (I3). */
 static _Atomic uint32_t s_last_cmd_ms;            /* last cmd heartbeat (link_now_ms units) */
 static _Atomic bool     s_cmd_seen;               /* a cmd request has arrived at least once */
 
@@ -96,7 +103,7 @@ static uint32_t link_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 100
 static bool link_serial_present(void)
 {
 #if LINK_DETECT_GPIO >= 0
-    return s_detect_asserted;
+    return atomic_load(&s_detect_asserted);
 #else
     if (!atomic_load(&s_cmd_seen)) return false;
     uint32_t elapsed = link_now_ms() - atomic_load(&s_last_cmd_ms);   /* modular; wrap-safe */
@@ -120,7 +127,9 @@ static void link_poll_detect(void)
     /* active-low: a peer on the connector pulls the detect line to GND; the pin idles high on its
      * internal pull-up, so level 0 = present. Debounce: a level must hold for LINK_DETECT_STABLE
      * consecutive polls before it flips s_detect_asserted, so a bouncy connector/jumper does not
-     * flap the stream on/off. State is drain-task-only (link_task), so no synchronization. */
+     * flap the stream on/off. detect_run/detect_cand are drain-task-only (link_task) state, so no
+     * synchronization on THEM; s_detect_asserted itself is read cross-core (link_peer_present() on
+     * the pipeline task) and is `_Atomic` for that reason (I3). */
     static uint8_t detect_run;               /* consecutive reads equal to detect_cand */
     static bool    detect_cand;              /* the candidate level being counted toward */
     bool raw = (gpio_get_level((gpio_num_t)LINK_DETECT_GPIO) == 0);
@@ -131,10 +140,10 @@ static void link_poll_detect(void)
         detect_run++;
     }
     if (detect_run >= LINK_DETECT_STABLE) {
-        s_detect_asserted = detect_cand;
+        atomic_store(&s_detect_asserted, detect_cand);
     }
 #else
-    s_detect_asserted = false;   /* no detect pin assigned yet (Plan 6 hardware); heartbeat only */
+    atomic_store(&s_detect_asserted, false);   /* no detect pin assigned yet (Plan 6 hardware); heartbeat only */
 #endif
 }
 

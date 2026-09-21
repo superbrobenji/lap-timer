@@ -47,6 +47,12 @@ A dedicated **detect line** signals "a dev controller is attached":
 pin, but treated as a separate detect wire). **Plan 6** formalizes this as the connector's detect
 pin; this design is that pin pulled forward and is forward-compatible.
 
+**Deep-sleep caveat (M7):** `GPIO4` is an **RTC GPIO**, and its internal pull-up is **not held
+across deep sleep** (RTC domain pull config is separate from, and reset relative to, the digital
+GPIO config applied on wake). With detect now definitive (§3.3), a floating line during sleep reads
+as a false PRESENT/ABSENT bounce on wake. Plan 6's PARK work must explicitly hold or re-assert the
+pull-up (e.g. `rtc_gpio_pullup_en` / hold enable before sleep) so the detect line never floats.
+
 ## 3. Lap-timer firmware changes (`components/app/link`)
 
 The detect-line code path in `link.c` already exists behind `#if LINK_DETECT_GPIO >= 0`
