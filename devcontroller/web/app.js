@@ -952,11 +952,25 @@
         showMsg(msg, "info", "Upload staged; pushing to the lap-timer…");
         pollFlashStatus();
       } else {
-        var detail = xhr.responseText || xhr.status;
+        // POST /api/flash rejects with {"error":"..."} (503 answers {"connected":false}).
+        var detail = xhr.responseText || String(xhr.status);
+        var serverMsg = "";
+        try {
+          var parsed = JSON.parse(xhr.responseText);
+          if (parsed && typeof parsed.error === "string") serverMsg = parsed.error;
+        } catch (e) { /* not JSON: fall back to the raw text */ }
         if (xhr.status === 409) {
           showMsg(msg, "err", "A flash is already in progress.");
-        } else if (xhr.status === 412 || xhr.status === 423) {
-          showMsg(msg, "err", "Precondition failed — charge the lap-timer (≥3800 mV) or connect a charger, then retry.");
+        } else if (xhr.status === 412) {
+          // NOT the battery precondition: that arrives later as flash_err "0x0801".
+          showMsg(msg, "err", "Rejected: not a valid signed lap-timer image." +
+            (serverMsg ? " (" + serverMsg + ")" : ""));
+        } else if (xhr.status === 413) {
+          showMsg(msg, "err", "Image too large for the staging partition.");
+        } else if (xhr.status === 423) {
+          showMsg(msg, "err", "Lap-timer link busy — retry shortly.");
+        } else if (xhr.status === 503) {
+          showMsg(msg, "err", "Lap-timer not connected.");
         } else {
           showMsg(msg, "err", "Flash upload failed: " + detail);
         }
