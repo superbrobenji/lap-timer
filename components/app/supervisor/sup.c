@@ -117,20 +117,28 @@ static void ota_reboot_check(void)
     esp_restart();
 }
 
-/* §19.4, once after boot: if an OTA was in flight (ota_pending set) decide which image is running --
- * the new one on trial (PENDING_VERIFY -> validate below once healthy) or the previously-valid image
- * the bootloader rolled back to (log E_OTA_ROLLBACK, count it, clear the flag). No OTA in flight -> nop. */
+/* §19.4, once after boot: decide which image is running -- the new one on trial (PENDING_VERIFY ->
+ * validate below once healthy) or the previously-valid image the bootloader rolled back to
+ * (log E_OTA_ROLLBACK, count it, clear the flag). No OTA in flight and nothing on trial -> nop.
+ *
+ * H3: the running slot's own PENDING_VERIFY state -- not the NVS ota_pending flag -- is the
+ * authority. The flag can be lost to an NVS GC/full or a power-cut between ota_end's persist and
+ * set_boot, yet the freshly-booted image is still in PENDING_VERIFY and MUST be validated-or-
+ * rolled-back. So read the partition state UNCONDITIONALLY; the flag serves only to attribute an
+ * actual rollback (it was set, yet a non-pending image is running == the bootloader reverted). */
 static void ota_boot_decide(void)
 {
-    if (!lt_ota_pending_get()) return;
     const esp_partition_t *run = esp_ota_get_running_partition();
     LT_ASSERT_VOID(run != NULL, SUP_ASSERT_CODE);
     esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
-    if (esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
-        s_ota_awaiting = true;                 /* new image on trial; ota_try_validate() confirms it */
+    bool pending_verify = (esp_ota_get_state_partition(run, &st) == ESP_OK &&
+                           st == ESP_OTA_IMG_PENDING_VERIFY);
+    if (pending_verify) {
+        s_ota_awaiting = true;                 /* new image on trial (flag or not); ota_try_validate() confirms it */
         return;
     }
-    (void)errlog_add(E_OTA_ROLLBACK, 0);       /* reverted image sees ota_pending with itself running */
+    if (!lt_ota_pending_get()) return;         /* no OTA in flight and nothing on trial -> nop */
+    (void)errlog_add(E_OTA_ROLLBACK, 0);       /* flag set + a non-pending image running == a revert */
     lt_counters_inc(LT_CTR_OTA_ROLLBACK, true);
     lt_ota_pending_clear();
     ESP_LOGW(TAG, "OTA image rolled back by the bootloader");

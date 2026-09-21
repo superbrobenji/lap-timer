@@ -26,6 +26,7 @@
 #include "hal/gps.h"
 #include "hal/imu.h"
 
+#include "core/cfg.h"       /* cfg_t / cfg_defaults / CFG_MODE_* -- pipeline reads cfg.mode (T-D) */
 #include "core/consts.h"
 #include "core/drag.h"
 #include "core/event.h"
@@ -513,7 +514,16 @@ static void pipeline_init(void)
     fus_init(&s_fus, NULL, (uint8_t)(CFG_VARIANT_MOTO ? 1 : 0));
     lap_init(&s_lap, NULL);
     drag_init(&s_drag, NULL);
-    s_mode = MODE_LAP;
+    /* T-D: cfg.mode is the single source of truth for the operating mode. The ui seeds its own
+     * s_mode from cfg.mode and persists a menu toggle there; the pipeline reads the same field
+     * here so screen and engine agree at boot (previously this hard-coded MODE_LAP, so a persisted
+     * DRAG cfg ran the lap engine until the first menu toggle inverted both). Fall back to the LAP
+     * default if the cfg blob can't be read (lt_cfg_load leaves cfg untouched on failure). */
+    cfg_t cfg;
+    cfg_defaults(&cfg);
+    (void)lt_cfg_load(&cfg);
+    s_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);   /* valid engine mode from cfg */
     stats_reset();
     s_last_temp_us = esp_timer_get_time();
     LT_ASSERT_VOID(s_last_temp_us >= 0, PIPE_ASSERT_CODE);   /* esp_timer base is monotonic/non-negative */

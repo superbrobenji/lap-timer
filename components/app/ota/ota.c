@@ -192,8 +192,16 @@ int ota_end(void)
     esp_err_t e = esp_ota_end(s_handle);                          /* ECDSA signature verify */
     s_handle = 0;                                                 /* esp_ota_end frees the handle regardless */
     if (e != ESP_OK) { ota_reset(); ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(e)); return E_OTA_SIG; }
-    if (esp_ota_set_boot_partition(s_target) != ESP_OK) { ota_reset(); return E_OTA_WRITE; }
-    if (lt_ota_pending_set() != 0) ESP_LOGE(TAG, "ota_pending persist failed");
+    /* §19.4 (H3): persist the pending-verify flag BEFORE arming the boot slot, and treat a persist
+     * failure as fatal for the update. esp_ota_end already froze the slot; simply not calling
+     * set_boot leaves the running image in place, so aborting here is safe. If the flag cannot be
+     * written we must NOT activate the new image -- it would otherwise boot unvalidated with no
+     * record that an OTA was in flight. The running partition's PENDING_VERIFY state is the
+     * supervisor's real authority (it validates/rolls back on that state unconditionally), so a
+     * flag lost to a power-cut in the tiny window below still resolves correctly; keeping the flag
+     * ahead of set_boot only tightens the fail-closed guarantee. */
+    if (lt_ota_pending_set() != 0) { ESP_LOGE(TAG, "ota_pending persist failed"); ota_reset(); return E_OTA_WRITE; }
+    if (esp_ota_set_boot_partition(s_target) != ESP_OK) { lt_ota_pending_clear(); ota_reset(); return E_OTA_WRITE; }
     /* Arm the deadline FIRST, then publish OTA_REBOOT with a release store: the supervisor's
      * ota_reboot_due() pairs an acquire load of s_state with this release, so it can never observe
      * OTA_REBOOT while s_reboot_at_us still holds its INT64_MAX init (which would reboot instantly,
