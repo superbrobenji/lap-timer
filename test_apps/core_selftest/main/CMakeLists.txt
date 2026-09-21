@@ -37,8 +37,15 @@ file(WRITE "${SUITES_GEN}" "${SUITES_GEN_CONTENT}")
 # (test/assert_support.h) that test_smoke/test_ses_frame call. It is not a test_*.c suite, so the
 # glob above skips it; compile it directly so the on-target link resolves lt_test_assert_* and the
 # strong recorder overrides core.c's weak core_assert_report default.
+#
+# APP_INCLUDE_DIR: test_proto.c includes app/lt_proto.h, a pure standalone header (stdint.h only,
+# no ESP-IDF/FreeRTOS deps -- see components/app/include/app/lt_proto.h). Adding just the app
+# component's include root (not REQUIRES app) resolves that #include without pulling app's full
+# sources/deps (nvs_flash, gps/imu HAL, ...) into this lightweight core-only selftest.
+set(APP_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include")
 idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" ${WRAPPERS}
-                       INCLUDE_DIRS "." "${TEST_DIR}" REQUIRES core unity_vendored pthread esp_timer)
+                       INCLUDE_DIRS "." "${TEST_DIR}" "${APP_INCLUDE_DIR}"
+                       REQUIRES core unity_vendored pthread esp_timer)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function -Wno-unused-parameter)

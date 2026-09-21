@@ -1,0 +1,9 @@
+# Name,     Type, SubType,  Offset,   Size,     Flags
+# 4 MB flash budget (Plan 5.5 Global Constraints). www/logs use the `spiffs` subtype id (0x82),
+# which LittleFS reuses (same convention as the lap-timer's own `storage` partition).
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xF000,   0x1000,
+factory,    app,  factory,  0x10000,  0x180000,
+www,        data, spiffs,   0x190000, 0x40000,
+ota_stage,  data, 0x40,     0x1D0000, 0x140000,
+logs,       data, spiffs,   0x310000, 0xF0000,

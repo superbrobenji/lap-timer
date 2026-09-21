@@ -11,10 +11,15 @@
 
 int json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks)
 {
+    /* An empty document (n == 0) is untrusted input a peer can legitimately send -- an empty config
+     * upload reaches cfg_from_json(json, 0) (T-A). Reject it as malformed (return < 1, so callers
+     * report "malformed json") WITHOUT firing the fault hook, and BEFORE the js!=NULL invariant:
+     * cfg_from_json's own precondition allows json==NULL when n==0. toks/max_toks are the caller's
+     * own scratch buffer -- genuine invariants, so they stay assertions. */
+    if (n == 0) return -1;
     CORE_ASSERT_RET(js != NULL, JSON_ASSERT_CODE, -1);
     CORE_ASSERT_RET(toks != NULL, JSON_ASSERT_CODE, -1);
     CORE_ASSERT_RET(max_toks > 0, JSON_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(n > 0, JSON_ASSERT_CODE, -1);
     jsmn_parser p; jsmn_init(&p);
     int r = jsmn_parse(&p, js, n, toks, max_toks);
     if (r < 0) return -1;

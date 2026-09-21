@@ -28,6 +28,7 @@
 #include "app/logger.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
+#include "app/lt_proto.h"    /* LT_FRAME_*_FMT -- the ---BEGIN/---END framing shared with a dev-controller peer */
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"         /* ota_begin/ota_data/ota_end/ota_abort -- the `ota recv` bench push (§19.6) */
@@ -130,12 +131,15 @@ static size_t b64_write_all(const uint8_t *src, size_t n)
  * ================================================================== */
 
 /* Response assembly for one buffered request (one in flight, §18.1). The emit callback appends
- * chunk payloads here; the LAST chunk triggers the frame print. Right-sized (A3): the two large
- * read-only responses that used to set this (CONFIG_GET ~939 B, ERRLOG_GET up to ~2145 B) now
- * stream via run_stream(), so the only ops still assembled here are STATUS (a fixed 20 B record),
- * DIAG_GET (variable JSON, <= ~335 B worst case) and the tiny CONFIG_SET/DELETE/CLOSE acks and
- * <= ~130 B error lines. 640 B holds the DIAG_GET worst case with wide margin. */
-#define SER_ASM_MAX 640
+ * chunk payloads here; the LAST chunk triggers the frame print. Right-sized (A3): the ops framed
+ * here are STATUS (a fixed 20 B record), DIAG_GET (variable JSON, <= ~335 B worst case), the tiny
+ * CONFIG_SET/DELETE/CLOSE acks and <= ~130 B error lines, and -- since T-B -- CONFIG_GET (~939 B)
+ * and ERRLOG_GET (up to ~2145 B: 32 ring entries). Those two moved BACK here from run_stream()
+ * because run_stream re-dispatches the op twice (measure then print) against LIVE state, so an
+ * errlog_add() (17 call sites in other tasks) or a menu cfg edit landing between the passes made
+ * the printed body longer than the announced ---BEGIN size and tore the frame. A single buffered
+ * dispatch here snapshots the body once. 2560 B holds the ERRLOG_GET worst case with margin. */
+#define SER_ASM_MAX 2560
 typedef struct {
     const char *name;              /* frame name for BEGIN/END */
     uint8_t     buf[SER_ASM_MAX];
@@ -157,12 +161,12 @@ static void ser_flush(ser_ctx_t *c)
     /* CRC32 is over the raw payload (the client Base64-decodes first, then verifies). */
     uint32_t crc  = esp_rom_crc32_le(0, c->buf, c->len);
     size_t   size = c->binary ? (4 * ((c->len + 2) / 3)) : c->len;
-    printf("---BEGIN %s %u---\r\n", c->name ? c->name : "data", (unsigned)size);
+    printf(LT_FRAME_BEGIN_FMT, c->name ? c->name : "data", (unsigned)size);
     if (c->len) {
         if (c->binary) (void)b64_write_all(c->buf, c->len);
         else           fwrite(c->buf, 1, c->len, stdout);
     }
-    printf("\r\n---END %08x---\r\n", (unsigned)crc);
+    printf("\r\n" LT_FRAME_END_FMT, (unsigned)crc);
     fflush(stdout);
 }
 
@@ -302,7 +306,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         return;
     }
 
-    printf("---BEGIN %s %u---\r\n", name ? name : "data", (unsigned)m.out);
+    printf(LT_FRAME_BEGIN_FMT, name ? name : "data", (unsigned)m.out);
     fflush(stdout);
 
     sframe_t pr; sframe_init(&pr, /*print*/true, binary, has_tail);
@@ -320,7 +324,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     }
 
     uint32_t crc = has_tail ? (pr.have_tail_crc ? pr.tail_crc : 0) : pr.crc;
-    printf("\r\n---END %08x---\r\n", (unsigned)crc);
+    printf("\r\n" LT_FRAME_END_FMT, (unsigned)crc);
     fflush(stdout);
 
     esp_log_level_set("*", saved);
@@ -388,13 +392,15 @@ static int cmd_read_c(int argc, char **argv)
 }
 
 /* ---- text commands (§18.4) ----
- * run_cmd (single dispatch, buffered) vs run_stream (two-pass, unbuffered): STATUS and DIAG_GET
- * stay on run_cmd. STATUS is tiny; DIAG_GET embeds live uptime_s/heap values whose decimal WIDTH
- * can change between the measuring and printing passes, which would make the BEGIN size disagree
- * with the printed body -- so it must be framed from a single captured snapshot. CONFIG_GET and
- * ERRLOG_GET are large but their content is stable across the two passes (config / log-time ring
- * fields), matching LIST's already-accepted two-pass read, so they stream and no longer size the
- * assembly buffer. */
+ * run_cmd (single dispatch, buffered) vs run_stream (two-pass, unbuffered): STATUS, DIAG_GET,
+ * CONFIG_GET and ERRLOG_GET all stay on run_cmd. STATUS is tiny; DIAG_GET embeds live uptime_s/heap
+ * values whose decimal WIDTH can change between the measuring and printing passes; and (T-B)
+ * CONFIG_GET / ERRLOG_GET are rebuilt from LIVE state (cmd.c re-reads the cfg blob / the error ring
+ * on each dispatch, NOT from a memoised snapshot the way LIST does), so a menu cfg edit or an
+ * errlog_add() from another task landing between run_stream's two passes made the printed body
+ * disagree with the announced ---BEGIN size and tore the frame. run_cmd dispatches once and frames
+ * from that single snapshot, so the tear is structurally impossible. Only LIST/OPEN/READ (memoised
+ * / read-only file streams too large to buffer) still use run_stream. */
 static int cmd_status_c(int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -408,7 +414,7 @@ static int cmd_status_c(int argc, char **argv)
 static char s_setbuf[320];
 static int cmd_config_c(int argc, char **argv)
 {
-    if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_stream(CMD_CONFIG_GET, "config", NULL, 0, /*binary*/false, /*has_tail*/false); return 0; }
+    if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_cmd(CMD_CONFIG_GET, "config", NULL, 0, /*binary*/false); return 0; }   /* T-B: single-snapshot, no two-pass tear */
     if (argc >= 3 && strcmp(argv[1], "set") == 0) {
         /* rejoin argv[2..] so a JSON body split on spaces is reassembled (quotes must be escaped
          * on the command line, e.g. config set {\"units\":1} -- esp_console strips bare quotes). */
@@ -431,7 +437,7 @@ static int cmd_config_c(int argc, char **argv)
 static int cmd_errlog_c(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "clear") == 0) { run_cmd(CMD_ERRLOG_CLEAR, "errlog", NULL, 0, false); return 0; }
-    run_stream(CMD_ERRLOG_GET, "errlog", NULL, 0, /*binary*/false, /*has_tail*/false);
+    run_cmd(CMD_ERRLOG_GET, "errlog", NULL, 0, /*binary*/false);   /* T-B: single-snapshot, no two-pass tear */
     return 0;
 }
 
@@ -866,7 +872,26 @@ static int ota_fill_chunk(uart_port_t port, uint8_t *dst, uint32_t want)
 
 /* Stream <size> raw image bytes off UART0 in bounded chunks, driving ota_data(). 0 on a complete
  * transfer; on any write/timeout failure it has already called ota_abort() + printed an OTA-ERR
- * line and returns -1. Bounded (rule 2): at most size/OTA_RECV_CHUNK + 1 chunk iterations. */
+ * line and returns -1. Bounded (rule 2): at most size/OTA_RECV_CHUNK + 1 chunk iterations.
+ *
+ * T-C -- console RX-ring constraint (documented; §19.6 is DEVUX bench tooling):
+ *   esp_console_new_repl_uart() installs the UART driver with a FIXED 256 B RX ring
+ *   (IDF 5.3.2 esp_console_repl_chip.c: uart_driver_install(ch, 256, 0, 0, NULL, 0)) and IDF
+ *   exposes no Kconfig to size it, so the console RX buffer is NOT tunable via sdkconfig, and the
+ *   only runtime lever -- deleting + re-installing the console driver with a >=8 KB ring around the
+ *   raw phase -- cannot be bench-verified here (flashing is out of scope) and would risk wedging
+ *   the REPL, so it is deliberately NOT done in this change.
+ *   Each chunk drives esp_ota_write(4 KB), a ~10-40 ms flash program with the cache disabled on
+ *   both cores. The one sdkconfig lever that matters IS set: CONFIG_UART_ISR_IN_IRAM=y (see
+ *   sdkconfig.defaults) forces the console RX ISR into IRAM, so it keeps draining the 128 B HW
+ *   FIFO into the 256 B ring THROUGHOUT the cache-off write -- without it the FIFO overflows in
+ *   ~11 ms. With it, a typical (~10-15 ms) write fits inside the 256 B ring at 115200 baud;
+ *   only a worst-case ~40 ms write can still overrun it -> dropped bytes -> a byte-offset
+ *   mismatch in ota_data() -> ota_abort() + "OTA-ERR". This fails SAFE (no unverified image is
+ *   ever applied: SHA-256 + ECDSA gate esp_ota_end), only unreliable for a large image push.
+ *   The robust fix belongs on the host side and lands with the dev-controller integration step:
+ *   a per-chunk OTA-ACK handshake (the pusher waits for an ACK/next-offset token before sending
+ *   the next chunk) so the wire never has more than one chunk in flight. */
 static int ota_recv_stream(uint32_t size)
 {
     CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, -1);

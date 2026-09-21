@@ -202,7 +202,10 @@ void drag_on_fix(drag_t *D, const gps_fix_t *fix)
     double v = (double)fix->gspeed_mms / 1000.0;    /* mm/s → m/s */
     if (v < 0.0) v = 0.0;
     D->v_est  = v;
-    D->v_prev = v;                                  /* the next fused step integrates from here */
+    /* H4 (§6.6): do NOT overwrite v_prev. The next fused step evaluates its gate/brake crossing over
+     * (v_prev -> anchored v_est), so a re-anchor that steps across a speed threshold is still seen as
+     * a crossing; overwriting v_prev with v skipped that step and lost the gate (and its BRAKE mirror)
+     * for good. Integration reads v_est (not v_prev), so it is unaffected. */
     if (D->state == DRAG_ST_LAUNCHED && v > D->v_peak) D->v_peak = v;
 }
 

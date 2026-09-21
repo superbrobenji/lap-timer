@@ -55,17 +55,28 @@ file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
   if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens"
-     AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame")
+     AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
+     AND NOT name STREQUAL "test_ses_records")
     add_core_test(${name})
   endif()
 endforeach()
 
-# test_smoke and test_ses_frame inspect failed CORE_ASSERT_ reports, so they link assert_support.c
-# (test/assert_support.h) -- the shared STRONG core_assert_report recorder that overrides core.c's
-# weak no-op default for those binaries. It is not a test_*.c, so the glob above never builds it as
-# its own suite.
+# test_proto only needs the shared lap-timer <-> dev-controller protocol header (app/lt_proto.h,
+# a pure standalone header -- stdint.h only, no ESP-IDF/FreeRTOS deps), so it just needs the app
+# component's include root on its path for `#include "app/lt_proto.h"` to resolve (mirrors the
+# INCLUDE_DIRS the on-device build gets from components/app/CMakeLists.txt).
+if(TARGET test_proto)
+  target_include_directories(test_proto PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../components/app/include)
+endif()
+
+# test_smoke, test_ses_frame and test_ses_records inspect failed CORE_ASSERT_ reports (test_ses_records
+# asserts the wire/JSON decoders reject malformed input WITHOUT firing the fault hook -- T-A), so they
+# link assert_support.c (test/assert_support.h) -- the shared STRONG core_assert_report recorder that
+# overrides core.c's weak no-op default for those binaries. It is not a test_*.c, so the glob above
+# never builds it as its own suite.
 add_core_test(test_smoke assert_support.c)
 add_core_test(test_ses_frame assert_support.c)
+add_core_test(test_ses_records assert_support.c)
 
 # test_ui and test_screens compare rendered framebuffers against PBM goldens in test/snapshots/ by
 # absolute path (TEST_DIR), since CTest runs a test's working directory from the build tree, not

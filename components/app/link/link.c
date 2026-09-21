@@ -7,16 +7,19 @@
  * LINK time (weak no-op default here; export_serial provides the strong serial sink), so the
  * fan-out stores no function pointer -- Power of 10 rule-9 clean (mirrors core_assert_report).
  *
- * Peer-detect: a peer is present when the GPIO detect line asserts (LINK_DETECT_GPIO, assigned with
- * the connector hardware in Plan 6 -- disabled by default here) OR when a recent `cmd` heartbeat
- * arrived (link_note_cmd_activity, called by the serial transport on every request; a STATUS poll is
- * the handshake). With no peer the ring is never fed and the drain task idles -- no hang, no error
- * spam. All state is static (no allocation), so detach leaks nothing.
+ * Peer-detect: with a detect pin wired (LINK_DETECT_GPIO >= 0 -- both build envs set it
+ * unconditionally today, see components/app/CMakeLists.txt), the GPIO detect line is the
+ * DEFINITIVE presence signal; the `cmd` heartbeat (link_note_cmd_activity, called by the serial
+ * transport on every request; a STATUS poll is the handshake) is the presence signal ONLY as a
+ * fallback on a build with no detect pin (LINK_DETECT_GPIO < 0). With no peer the ring is never
+ * fed and the drain task idles -- no hang, no error spam. All state is static (no allocation), so
+ * detach leaks nothing.
  */
 #include "app/link.h"
 
 #include "app/cmd.h"          /* LINK_STREAM_TAG, CMD_FLAG_LAST, CMD_CHUNK_MAX */
 #include "app/lt_assert.h"
+#include "app/lt_proto.h"     /* LT_STREAM_TAG -- the shared wire contract a dev-controller peer decodes against */
 
 #include "core/ring.h"
 #include "core/event.h"      /* event_t -- sizing the SES_T_EVENT stream record (FIX 3 static assert) */
@@ -33,9 +36,11 @@
 
 #define LINK_ASSERT_CODE 0x0B90   /* Power of 10 rule 5 (app/lt_assert.h); link.c's own code */
 
-/* GPIO detect line (§6 connector). -1 = no pin assigned yet: the connector pinout lands with the
- * Plan 6 hardware, so on today's proto board presence comes from the `cmd` heartbeat alone. When a
- * pin is assigned, also add `esp_driver_gpio` to components/app/CMakeLists.txt REQUIRES. */
+/* GPIO detect line (§6 connector). Both build envs today set this unconditionally to GPIO4 via
+ * components/app/CMakeLists.txt (which also unconditionally REQUIREs `esp_driver_gpio`), so
+ * link_serial_present() below always takes the definitive detect-line path. -1 is a defensive
+ * default only, for a hypothetical build that does not define LINK_DETECT_GPIO -- on such a build
+ * presence falls back to the `cmd` heartbeat alone (see link_serial_present()). */
 #ifndef LINK_DETECT_GPIO
 #define LINK_DETECT_GPIO (-1)
 #endif
@@ -51,12 +56,14 @@
 #define LINK_STACK_BYTES  3072
 #define LINK_STACK_WORDS  (LINK_STACK_BYTES / sizeof(StackType_t))
 #define LINK_POLL_MS      20                 /* drain-wake / detect-poll cadence (also the notify timeout) */
+#define LINK_DETECT_STABLE   3               /* consecutive 20ms polls a level must hold before it flips presence (~60 ms) */
 #define LINK_DRAIN_BURST  32                 /* rule 2: max records drained per wake (> ring cap) */
 #define LINK_PEER_TIMEOUT_MS 3000u           /* mark the peer absent this long after the last heartbeat */
 #define LINK_STREAM_CAP   16u                 /* ring depth (power of two); ~1.6 s of buffer at 10 Hz */
 
 _Static_assert((LINK_STREAM_CAP & (LINK_STREAM_CAP - 1u)) == 0u, "LINK_STREAM_CAP must be a power of two");
-_Static_assert(4 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame must fit one §18.1 data chunk");
+_Static_assert(5 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame (5-byte header + payload) must fit one §18.1 data chunk");
+_Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must mirror app/lt_proto.h's LT_STREAM_TAG");
 
 /* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
  * SES_T_FUSED -> 1 + sizeof(fused_sample_t), SES_T_EVENT -> 1 + sizeof(event_t). If either struct
@@ -75,7 +82,10 @@ static link_rec_t   s_stream_store[LINK_STREAM_CAP];
 static ring_t       g_stream_ring;
 static uint16_t     s_seq;                        /* stream chunk sequence (drain task only) */
 static bool         s_ready;                      /* published last in link_start() */
-static bool         s_detect_asserted;            /* GPIO detect line state (drain task only) */
+static _Atomic bool s_detect_asserted;            /* GPIO detect line state: written by link_task
+                                                    * (core 0), read cross-core by stream_push ->
+                                                    * link_peer_present() on the pipeline task
+                                                    * (core 1) -- must be atomic (I3). */
 static _Atomic uint32_t s_last_cmd_ms;            /* last cmd heartbeat (link_now_ms units) */
 static _Atomic bool     s_cmd_seen;               /* a cmd request has arrived at least once */
 
@@ -86,13 +96,19 @@ __attribute__((weak)) bool link_sink_ble_present(void)                          
 
 static uint32_t link_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-/* Serial peer present: the detect line, or a `cmd` heartbeat within the timeout window. */
+/* Serial peer present. With a detect pin wired (§6 connector), the detect line is DEFINITIVE: the
+ * `cmd` heartbeat is NOT OR'd in, so an active console / status poll cannot mask an unplugged
+ * dev-kit. The heartbeat is the presence signal ONLY on boards with no detect pin
+ * (LINK_DETECT_GPIO < 0). See docs/superpowers/specs/2026-09-21-peer-presence-detect-design.md. */
 static bool link_serial_present(void)
 {
-    if (s_detect_asserted) return true;
+#if LINK_DETECT_GPIO >= 0
+    return atomic_load(&s_detect_asserted);
+#else
     if (!atomic_load(&s_cmd_seen)) return false;
     uint32_t elapsed = link_now_ms() - atomic_load(&s_last_cmd_ms);   /* modular; wrap-safe */
     return elapsed < LINK_PEER_TIMEOUT_MS;
+#endif
 }
 
 void link_note_cmd_activity(void)
@@ -109,26 +125,43 @@ static void link_poll_detect(void)
 {
 #if LINK_DETECT_GPIO >= 0
     /* active-low: a peer on the connector pulls the detect line to GND; the pin idles high on its
-     * internal pull-up, so level 0 = present. */
-    s_detect_asserted = (gpio_get_level((gpio_num_t)LINK_DETECT_GPIO) == 0);
+     * internal pull-up, so level 0 = present. Debounce: a level must hold for LINK_DETECT_STABLE
+     * consecutive polls before it flips s_detect_asserted, so a bouncy connector/jumper does not
+     * flap the stream on/off. detect_run/detect_cand are drain-task-only (link_task) state, so no
+     * synchronization on THEM; s_detect_asserted itself is read cross-core (link_peer_present() on
+     * the pipeline task) and is `_Atomic` for that reason (I3). */
+    static uint8_t detect_run;               /* consecutive reads equal to detect_cand */
+    static bool    detect_cand;              /* the candidate level being counted toward */
+    bool raw = (gpio_get_level((gpio_num_t)LINK_DETECT_GPIO) == 0);
+    if (raw != detect_cand) {
+        detect_cand = raw;
+        detect_run = 1;
+    } else if (detect_run < LINK_DETECT_STABLE) {
+        detect_run++;
+    }
+    if (detect_run >= LINK_DETECT_STABLE) {
+        atomic_store(&s_detect_asserted, detect_cand);
+    }
 #else
-    s_detect_asserted = false;   /* no detect pin assigned yet (Plan 6 hardware); heartbeat only */
+    atomic_store(&s_detect_asserted, false);   /* no detect pin assigned yet (Plan 6 hardware); heartbeat only */
 #endif
 }
 
-/* Frame one record as a §18.1 unsolicited stream chunk and fan out to each attached sink. */
+/* Frame one record as a §18.1 unsolicited stream chunk (tag|seq_lo|seq_hi|flags|len, see
+ * app/lt_proto.h's lt_stream_hdr_t) and fan out to each attached sink. */
 static void link_deliver(const link_rec_t *r)
 {
     LT_ASSERT_VOID(r != NULL, LINK_ASSERT_CODE);                         /* drain popped a real slot */
     LT_ASSERT_VOID(r->len > 0 && r->len <= LINK_REC_MAX, LINK_ASSERT_CODE);   /* len set by stream_push's bound */
-    uint8_t frame[4 + LINK_REC_MAX];
+    uint8_t frame[5 + LINK_REC_MAX];
     uint16_t seq = s_seq++;
     frame[0] = LINK_STREAM_TAG;                 /* 0xFF: an unsolicited stream frame, not a cmd response */
     frame[1] = (uint8_t)seq;
     frame[2] = (uint8_t)(seq >> 8);
     frame[3] = CMD_FLAG_LAST;                   /* each record is one self-contained chunk */
-    memcpy(frame + 4, r->data, r->len);
-    size_t flen = (size_t)4 + r->len;
+    frame[4] = (uint8_t)r->len;                 /* len: payload byte count that follows (lt_stream_hdr_t) */
+    memcpy(frame + 5, r->data, r->len);
+    size_t flen = (size_t)5 + r->len;
     if (link_serial_present())   (void)link_sink_serial_emit(frame, flen);
     if (link_sink_ble_present()) (void)link_sink_ble_emit(frame, flen);
     /* A THIRD peer transport would fan out with one more `if (...present) sink_emit(...)` line. */

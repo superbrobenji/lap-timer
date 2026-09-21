@@ -1,0 +1,60 @@
+# Fable whole-codebase review — lap-timer + dev controller (2026-09-21)
+
+Five Fable reviews of the current `p5.5-dev-controller` branch: dev controller (whole), lap-timer split 4 ways (core-algo, core-io, app/system, drivers+main). Full per-area detail: `scratchpad/fable-review-{devcontroller,core-algo,core-io,app,drivers}.md`. Verdicts below are the orchestrator's triage; **[CONFIRMED]** = verified in code this session, **[REPORTED]** = Fable finding not yet independently verified, **[PoC]** = the reviewer compiled+ran a host PoC.
+
+## Confirmed gate-blockers (dev controller) — fix before the UART bench gate
+- **B1 [CONFIRMED] `POST /api/config` never applies** (`webapi.c:164` + `host/config_diff.c`): the diff emits bare-quote JSON (`{"b":9}`) sent straight to `config set`; esp_console `split_argv` strips the quotes → lap-timer sees `{b:9}` → malformed → 6 s timeout → 503. Fix: escape `\`/`"` (and budget the escaped length) per line.
+- **B2 [CONFIRMED] `GET /api/sessions` fails past ~6 sessions** (`webapi.c:api_sessions`): uses buffered `linkhost_cmd(LT_CMD_LIST)`; the `list` frame is >1024 B (measured 3662 B on HW) → `parse_begin` rejects it → 503. Fix: relay `list` through the streaming `lh_dl_*` path (as the session download already does).
+
+## HIGH (lap-timer) — verify, then fix; real if confirmed
+- **H1 [REPORTED] assert→NVS write-storm** (`sys/lt_nvs.c:158-194`, `core_assert_report`): every failed `LT_ASSERT` does a synchronous ~385 B NVS blob write + commit, no dedup/rate-limit. A persistently-failing hot-path assert (e.g. pipeline `isfinite` at 100 Hz on a stuck NaN) → ~100 flash writes/s → heartbeat stall → crash loop + NVS endurance death in hours. **Systemic** (see also A-theme). Fix: dedup (code,line) in the recorder; persist the ring lazily from the supervisor, not inside the assert.
+- **H2 [REPORTED] assert-sink recursion** (`lt_nvs.c:166-167`): asserts inside `errlog_add` route back into `errlog_add` → a bad `head` (`:115` checks size only) → stack overflow at boot step 1, un-caught by safe mode. Fix: make `errlog_add` assert-free + clamp `head`.
+- **H3 [REPORTED] OTA validation keyed only on NVS `ota_pend`** (`ota.c:195-196`, `sup.c:124-137`): the pending flag is set *after* `set_boot_partition` and its failure is ignored; the supervisor never checks the running slot's `ESP_OTA_IMG_PENDING_VERIFY` state. An NVS-write fail or power-cut in the window → new image runs unvalidated, silently reverts on the next clean reset (no `E_OTA_ROLLBACK`), and later OTAs fail `E_OTA_WRITE`. Fix: check partition state unconditionally; set the flag before `set_boot`, fatal on failure. (NOTE: the reboot-arm ordering race from the prior review IS fixed — release/acquire confirmed sound.)
+- **H4 [REPORTED] core-algo — drag Doppler re-anchor hides gate crossings** (`dragengine/drag.c:199-208`): setting `v_prev = gSpeed` on a re-anchor can step across a gate threshold so the crossing is never detected (BRAKE mirror too). Tests use Doppler==integrated → uncovered. **Verify carefully (mature engine).**
+- **H5 [REPORTED] core-algo — lap chord across a GPS outage** (`lapengine/lap.c:1061/964/820`): a 40 s chord after an outage can interpolate a garbage S/F cross-time; `open_lap` zeroes flags so the next lap completes VALID with a start ~30 s wrong → can poison `best`. Fix: carry `LAP_F_GPS_LOST` into the opened lap. **Verify carefully.**
+
+## MAJOR themes (mostly dev-controller integration seams + cross-cutting)
+- **T-A: assert-persist misuse** — H1/H2 above + core-io [PoC] `session/ses_records.c` uses `CORE_ASSERT` for *wire-format* checks (untrusted input) → bad input writes to the persisted error ring (four sibling decoders correctly `return -1`); `cfg_from_json(n=0)` trips `json_parse`'s assert. Fix: plain returns for input validation; assert only true invariants.
+- **T-B: two-pass framing tears under concurrency** — `export_serial.c` `errlog`/`config get` rebuild from live state between the measure and print passes (LIST is memoised, these aren't) → body ≠ `---BEGIN size` → corrupt frame if an entry lands between passes. Fix: memoise like LIST.
+- **T-C: `ota recv` RX-ring overflow** (lap-timer `export_serial.c:859` + dev-controller push): the console's 256 B RX ring + no flow control while `esp_ota_write` stalls the REPL → dropped bytes → `OTA-ERR timeout` (fails safe via SHA/ECDSA, but unreliable). Fix: ≥8 KB RX ring before the raw phase (or per-chunk ACK) + `CONFIG_UART_ISR_IN_IRAM`.
+- **T-D: cfg last-writer-wins + mode desync** (`ui.c:654-656`, `pipeline.c:516`): the UI loads cfg once and a Units/Display toggle saves the stale copy → reverts any `CONFIG_SET`; UI seeds mode from `cfg.mode` while the pipeline hard-codes LAP → screen/engine disagree. Fix: read-modify-write cfg; single source of truth for mode.
+- **T-E: dev-controller robustness** — UART RX loss during downloads (≥16 KB ring + ISR-in-IRAM + decouple drain from TCP), httpd task blocking on `s_req_mtx` at `portMAX_DELAY` (bounded take → 423/503; use `peer_present`), `ERR 0x..` lines treated as noise → 6 s stalls (parse → `LINKHOST_E_REMOTE`), retry + static `s_body` torn JSON + no name matching (copy-out + match `frame.name`), `DL_HARD_TMO_MS` 120 s < a 1 MB `.log` (scale to size), logstore steady-state overfill → ENOSPC wedge (reserve full record set), newest log not `fsync`'d.
+- **T-F: dev-controller security** — console injection via raw `\n` in JSON strings (jsmn allows control chars) + a constant AP PSK in source → anyone in range can run `delete`/`ota recv`. Fix: reject bytes <0x20 in relayed JSON; per-device PSK. (Sub-project C hardens the channel; this is the interim.)
+
+## Lower / noise / N-A
+- core-io LOW: exporter aborts the whole VBO/NMEA on one undecodable FIX (skip instead); exp_json header buffer < escaped worst case; lenient number/bool parsing (bounded by `cfg_validate`).
+- app LOW: invalid lap can become "best" in the UI count (`ui.c:464`); planned restart skips `LOGGER_CLOSE`; VENUE name truncated to 23; client id `..`/`/` unvalidated (cmd + logstore); fd leak on a stream-cap assert path; seqlock retry-exhaustion returns torn data; event-queue drops uncounted; OTA `ver` no downgrade guard; stream frames have no CRC.
+- drivers LOW: `dbg logtest` SPSC double-write on sim; safe-mode is a flag only (doesn't gate task/driver init — may be the deferred §17.5 tree); board IRAM-ISR flags not delivered; uncalibrated ADC fallback constant wrong; storage mounted-but-DEAD path.
+- **N-A:** `gps_neo6m`/`imu_mpu6050` are Plan-03 stubs (real UBX/FIFO code is Plan 8) — those items don't apply yet. Rule-5 shortfalls (`check_stalls`, `lt_boot_record_reset`, `lt_nvs_init`) + `cw_t` fn-pointer ledger entry: address in a P10 touch-up.
+- **Verified SOUND:** F4 seqlock, SPSC rings, the UART0-TX mutex (all paths), OTA check order (hwid@4KB→SHA→ECDSA→set_boot→release/acquire reboot-arm), two-pass memo for LIST, `s_err` reclaim, base64/CRC, ADC math, geo/fusion/tracks/tb, record codec bounds, framebuffer index math.
+
+## Recommended fix scope / order
+1. **Now (before tomorrow's UART gate):** B1 + B2 (dev-controller config-escape + sessions-streaming) — confirmed, gate-blocking.
+2. **Soon (lap-timer robustness):** verify + fix H1/H2/T-A (the assert→NVS storm + recursion + wire-checks-as-asserts — one coherent change to the assert/errlog policy) and H3 (OTA partition-state validation). These are real reliability/endurance risks.
+3. **With dev-controller integration step 2:** T-C/T-E/T-F (RX ring, mutex/ERR-lines, retry/torn-JSON, logstore cap, security) — fold into the SSE+flash work.
+4. **Verify carefully, then fix:** H4/H5 (drag/lap engine) — touch the vetted engine only after confirming with a targeted test.
+5. **File issues:** T-B (two-pass memo), T-D (cfg race/mode), and the LOW batch.
+
+---
+
+## Outcomes (fixed 2026-09-21, merged to p5.5-dev-controller @ combined gate green)
+
+All findings the user scoped as "fix everything confirmed-real" were verified-first and addressed across 4 parallel streams; merged clean (disjoint files); combined gate: lap-timer host **33/33**, dev-controller host **6/6**, P10 linter 0, moto_neo6m + moto_sim + core_selftest rc=0, dev-controller build rc=0.
+
+- **B1 config-escape** — FIXED (`config_diff_escape`, escaped-length budgeted).
+- **B2 sessions streaming** — FIXED (`/api/sessions` via `lh_dl` async).
+- **H1 assert→NVS storm** — FIXED (dedup immediate repeats + rate-limit flash ≤1/5 s; distinct reports persist immediately).
+- **H2 assert-sink recursion** — FIXED (`errlog_add` assert-free + head clamp).
+- **H3 OTA partition-state validation** — FIXED (supervisor gates on `esp_ota_get_state_partition` unconditionally; flag before `set_boot`, fatal on failure).
+- **H4 drag Doppler re-anchor** — REAL, FIXED (don't overwrite `v_prev`; reproducer test added).
+- **H5 lap chord across GPS outage** — REAL, FIXED (crossing on a chord >`LAP_SEG_GAP_US` marks the opened lap `LAP_F_GPS_LOST`; reproducer test added). **Replay lap times unchanged** (28.071/28.044/28.028).
+- **T-A wire-checks-as-asserts** — FIXED (13 `ses_records` sites + `json_parse(n=0)` → plain `return -1`).
+- **T-B two-pass framing tears** — FIXED (errlog/config-get single-dispatch snapshot; `SER_ASM_MAX`→2560).
+- **T-C `ota recv` RX overflow** — dev-controller side FIXED (16 KB RX ring + `UART_ISR_IN_IRAM`); lap-timer side PARTIAL (IRAM set; the 256 B console ring is hardcoded in IDF 5.3.2 → documented; robust fix = host per-chunk ACK, deferred).
+- **T-D cfg race + mode desync** — FIXED (UI read-modify-write; mode single-source from `cfg.mode`).
+- **T-E dev-controller robustness** — FIXED (bounded mutex→503, `ERR`→`LINKHOST_E_REMOTE`→4xx/502, copy-out + name-match, download timeout scaled, logstore full-reserve + fsync).
+- **T-F security** — FIXED (reject `<0x20` in relayed JSON; per-device AP PSK `ltdev-<mac>` from eFuse).
+
+**No false positives** — every confirmed-real finding held up under code inspection / a reproducing test.
+
+**Still open (tracked):** T-C robust per-chunk-ACK OTA transport (needs bench + a protocol change); the LOW batch (invalid-lap-as-best UI count, planned-restart LOGGER_CLOSE, VENUE truncation, id `..` validation, stream-frame CRC, safe-mode gating, rule-5 touch-ups) — file as issues. **⚠ AP password is now per-device `ltdev-<mac>`** (printed at boot), not `laptimer-dev-ap`.

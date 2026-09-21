@@ -1,8 +1,10 @@
 /* app/lt_nvs.h -- persistent state on NVS (spec §15.2). Thin lap-timer layer over the IDF
  * `nvs`/`nvs_flash` API: the boot counter, the 9 crash/health counters, the 32-entry error
  * ring, the crash log (crash-loop detection, §17.5), the safe-mode gate, and the packed cfg
- * blob (version + CRC16 via core). Write policy per §15.2: error-ring entries persist
- * immediately; counters are batched (>=60 s) except on crash paths; cfg only on change.
+ * blob (version + CRC16 via core). Write policy per §15.2: a DISTINCT error-ring entry persists
+ * immediately; an immediate repeat of the same (code,arg) is deduped and its flash write rate-
+ * limited (H1, so a stuck hot-path assert cannot storm NVS); counters are batched (>=60 s) except
+ * on crash paths; cfg only on change.
  */
 #ifndef APP_LT_NVS_H
 #define APP_LT_NVS_H
@@ -36,7 +38,10 @@ void     lt_counters_inc(lt_counter_id_t id, bool persist);
 int      lt_counters_flush(bool force);
 const lt_counters_t *lt_counters(void);
 
-/* Error ring (lt_err/ring): append {code, uptime_s, boot, arg}; persists immediately. */
+/* Error ring (lt_err/ring): append {code, uptime_s, boot, arg}. A distinct report persists to NVS
+ * immediately; an immediate repeat of the same (code,arg) is folded onto the newest entry and its
+ * flash write is rate-limited (H1). Assertion-safe: this is the assert sink, so it never itself
+ * asserts (H2). Returns 0 (code 0 is rejected as the empty-slot sentinel). */
 int  errlog_add(uint16_t code, uint32_t arg);
 
 /* Public shape of one error-ring entry (§17.7); a copy of the private on-flash record, so the

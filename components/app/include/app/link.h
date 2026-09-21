@@ -4,7 +4,8 @@
  * stream_push(); the link module buffers them in a bounded, non-blocking SPSC ring (drop-newest on
  * full, like fix_ring -- the pipeline is NEVER stalled) and a low-priority drain task fans each out
  * to whichever peer transport is attached, framed as an unsolicited §18.1 LINK_STREAM_TAG (0xFF)
- * chunk: `tag u8 | seq u16 LE | flags u8 | payload`. The payload is a §14-typed stream record:
+ * chunk: `tag u8 | seq u16 LE | flags u8 | len u8 | payload` (app/lt_proto.h's lt_stream_hdr_t is
+ * the shared 5-byte-header definition of this frame). The payload is a §14-typed stream record:
  * `rec[0]` is the SES_T_* type (SES_T_FUSED / SES_T_EVENT) and the rest is the raw struct.
  *
  * Fan-out sinks are resolved at LINK time (weak no-op default here; the serial transport in
@@ -14,12 +15,14 @@
  * its own strong link_sink_ble_emit + presence; link_deliver() already fans out to it. Until then
  * the BLE sink stays the weak no-op and is never present, so this build streams over serial only.
  *
- * Peer-detect (§6 connector): presence is asserted either by the GPIO detect line (LINK_DETECT_GPIO,
- * assigned with the connector hardware in Plan 6; disabled by default here) OR by a `cmd` heartbeat
- * -- any request through the serial transport calls link_note_cmd_activity(), and a STATUS poll is
- * the canonical handshake. With no peer the ring is never fed and the drain task idles: no hang, no
- * error spam. Attach mid-run starts streaming; detach stops it cleanly (all state is static -- no
- * allocation, nothing to leak).
+ * Peer-detect (§6 connector): with a detect pin wired (LINK_DETECT_GPIO >= 0 -- both build envs set
+ * it unconditionally today, see components/app/CMakeLists.txt), the GPIO detect line is the
+ * DEFINITIVE presence signal: an active console / STATUS poll cannot mask an unplugged dev-kit.
+ * The `cmd` heartbeat -- any request through the serial transport calls link_note_cmd_activity(),
+ * a STATUS poll being the canonical handshake -- is the presence signal ONLY as a fallback on a
+ * build with no detect pin (LINK_DETECT_GPIO < 0). With no peer the ring is never fed and the
+ * drain task idles: no hang, no error spam. Attach mid-run starts streaming; detach stops it
+ * cleanly (all state is static -- no allocation, nothing to leak).
  */
 #ifndef APP_LINK_H
 #define APP_LINK_H
@@ -42,10 +45,13 @@ void link_start(void);
 void stream_push(const uint8_t *rec, size_t len);
 
 /* Heartbeat: the serial transport calls this on every `cmd` request from a peer (a STATUS poll is
- * the §18 handshake) so the link marks the peer present for LINK_PEER_TIMEOUT_MS. Safe from any task. */
+ * the §18 handshake). On a build with no detect pin (LINK_DETECT_GPIO < 0) this marks the peer
+ * present for LINK_PEER_TIMEOUT_MS; with a detect pin wired the GPIO line is definitive and this
+ * call does not affect presence (still cheap and safe to call unconditionally). Safe from any task. */
 void link_note_cmd_activity(void);
 
-/* True while a peer is attached (detect line asserted, or a recent cmd heartbeat). Safe from any task. */
+/* True while a peer is attached: the GPIO detect line when a pin is wired (definitive), else a
+ * recent cmd heartbeat (fallback, no-detect-pin builds only). Safe from any task. */
 bool link_peer_present(void);
 
 /* Stream records dropped because the ring was full (diagnostic snapshot). */

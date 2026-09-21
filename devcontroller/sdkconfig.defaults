@@ -1,0 +1,43 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+
+# WiFi SoftAP (Plan 5.5 Task 2): B's own AP, no STA in the MVP.
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+
+# esp_http_server: the SPA + JSON API's request headers/URI can run a bit longer than the
+# component's small defaults (config POST bodies, session download query strings).
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+
+# linkhost UART1 RX robustness (T-C/T-E): keep the RX ISR in IRAM so it keeps draining the 128 B
+# HW FIFO while a LittleFS/NVS flash write has the cache (and normal ISRs) disabled -- otherwise a
+# log rotation/append during a live download drops UART bytes -> CRC mismatch at ---END. Paired
+# with the >=16 KB software RX ring in linkhost.c.
+CONFIG_UART_ISR_IN_IRAM=y
+
+# LittleFS: two partitions mounted (`www` RO, `logs` RW). Geometry mirrors the lap-timer's
+# §13.1 settings (block_size 4096 is fixed by the component for the ESP32).
+CONFIG_LITTLEFS_MAX_PARTITIONS=2
+CONFIG_LITTLEFS_READ_SIZE=128
+CONFIG_LITTLEFS_WRITE_SIZE=128
+CONFIG_LITTLEFS_CACHE_SIZE=512
+CONFIG_LITTLEFS_LOOKAHEAD_SIZE=128
+CONFIG_LITTLEFS_BLOCK_CYCLES=512
+
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_BROWNOUT_DET=y
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_FREERTOS_HZ=1000
+
+# app_main does WiFi AP + 2x LittleFS mount + linkhost + httpd -- 3584 default overflows (boot crash)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

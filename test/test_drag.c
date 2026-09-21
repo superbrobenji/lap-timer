@@ -512,10 +512,47 @@ static void test_best_per_gate_two_runs(void)
     TEST_ASSERT_NULL(drag_best(&D, 4));             /* 0-300 unreached by either run */
 }
 
+/* H4 regression (§6.6): a Doppler re-anchor must not hide a speed-gate crossing. The IMU integrates
+ * v_est up to just below the 100 km/h gate; then a valid fix reports a Doppler speed just above it
+ * (the receiver is ahead of the IMU). The vehicle physically crossed 100 km/h at the anchor, so the
+ * engine must record gate id 2. The defect: drag_on_fix overwrote v_prev with the anchored speed, so
+ * the next fused step saw vp >= V and the crossing (and its BRAKE mirror) was lost for good. Fixtures
+ * elsewhere feed Doppler == integrated speed, so the anchor step is zero and never exercises this. */
+static void test_gps_reanchor_does_not_hide_speed_gate(void)
+{
+    const double V100 = 100.0 / 3.6;                 /* 27.778 m/s = the id-2 (0-100) gate */
+    drag_init(&D, NULL);
+    arm_engine(false);
+
+    /* Launch at 0.5 g and climb by IMU alone (NO Doppler fix yet) until v_est sits just below the
+     * 100 km/h gate -- so the IMU has not itself crossed it. */
+    int k = LAUNCH_K;
+    for (; k <= 2000 && D.v_est < 27.0; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.5f, 0);
+        drive_fused(&fs, false);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    TEST_ASSERT_TRUE(D.v_est < V100);                        /* not yet at 100 km/h */
+    TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit); /* 0-100 not yet recorded */
+
+    /* A valid Doppler fix reports 28.0 m/s (100.8 km/h): the anchor steps v_est across the gate. */
+    gps_fix_t jump = gfix((int64_t)(k - 1) * DT_US, 28000, true);
+    drag_on_fix(&D, &jump);
+
+    /* A few more cruising samples (g = 0): v_est holds ~28 m/s. */
+    for (int j = 0; j < 5; j++) { fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, 0); drive_fused(&fs, false); k++; }
+
+    const drag_gate_res_t *g100 = gate_by_id(drag_current(&D), 2);
+    TEST_ASSERT_NOT_NULL(g100);
+    TEST_ASSERT_TRUE(g100->hit);                             /* the anchored crossing must be recorded */
+    TEST_ASSERT_INT_WITHIN(3, 2778, (int)g100->speed_cms);   /* recorded at the 100 km/h threshold */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_integration_constant_accel);
+    RUN_TEST(test_gps_reanchor_does_not_hide_speed_gate);
     RUN_TEST(test_gps_reanchor_resets_v_est);
     RUN_TEST(test_arm_after_still_dwell);
     RUN_TEST(test_arm_requires_continuous_stillness);
