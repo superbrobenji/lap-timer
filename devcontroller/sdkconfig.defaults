@@ -14,6 +14,12 @@ CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
 
+# linkhost UART1 RX robustness (T-C/T-E): keep the RX ISR in IRAM so it keeps draining the 128 B
+# HW FIFO while a LittleFS/NVS flash write has the cache (and normal ISRs) disabled -- otherwise a
+# log rotation/append during a live download drops UART bytes -> CRC mismatch at ---END. Paired
+# with the >=16 KB software RX ring in linkhost.c.
+CONFIG_UART_ISR_IN_IRAM=y
+
 # LittleFS: two partitions mounted (`www` RO, `logs` RW). Geometry mirrors the lap-timer's
 # §13.1 settings (block_size 4096 is fixed by the component for the ESP32).
 CONFIG_LITTLEFS_MAX_PARTITIONS=2

@@ -33,7 +33,12 @@ enum {
     LINKHOST_E_NOTCONN = -2,   /* no lap-timer peer detected (no heartbeat / not yet wired) */
     LINKHOST_E_CRC     = -3,   /* decoded body CRC did not match the ---END crc32 */
     LINKHOST_E_PROTO   = -4,   /* malformed framing / oversize body / unexpected token */
+    LINKHOST_E_REMOTE  = -5,   /* the lap-timer answered `ERR 0x<code>: <msg>` (see err_code/err_msg) */
+    LINKHOST_E_BUSY    = -6,   /* the link is owned by another in-flight request (bounded-take miss) */
 };
+
+/* Max bytes of a remote `ERR 0x<code>: <msg>` message carried back to the caller (truncated). */
+#define LINKHOST_ERRMSG_MAX 48
 
 /* ---- §18.2 STATUS record, decoded ---- */
 typedef struct {
@@ -71,6 +76,10 @@ typedef struct {
     uint32_t       size;
     const uint8_t *body;
     size_t         body_len;
+    /* Valid only when the response is a remote error (linkhost_pop_response status ==
+     * LINKHOST_E_REMOTE): the lap-timer's `ERR 0x<code>: <msg>` code + (truncated) message. */
+    uint16_t       err_code;
+    char           err_msg[LINKHOST_ERRMSG_MAX];
 } linkhost_frame_t;
 
 /* ---- CRC-32 (esp_rom_crc32_le(0, buf, len)-compatible: reflected poly 0xEDB88320, init/xorout
@@ -149,6 +158,8 @@ typedef struct {
     uint32_t       crc;          /* running CRC-32 register (pre-final-xor) over decoded bytes */
     bool           crc_ok;       /* set at ---END (valid when state == LH_DL_DONE) */
     int            result;       /* LINKHOST_E_* recorded for the LH_DL_ERR state */
+    uint16_t       err_code;     /* remote `ERR 0x<code>` code (valid when result == LINKHOST_E_REMOTE) */
+    char           err_msg[LINKHOST_ERRMSG_MAX];  /* the remote error message (truncated) */
 } lh_dl_ctx_t;
 
 /* Initialises a download context. `is_binary` selects on-the-fly base64 decoding of the body. */

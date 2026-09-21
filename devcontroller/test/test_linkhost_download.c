@@ -237,6 +237,24 @@ static void test_stream_incomplete(void)
     TEST_ASSERT_EQUAL_INT(LINKHOST_E_TIMEOUT, lh_dl_result(&c));
 }
 
+/* ---- a non-framed "ERR 0x<code>: <msg>" reply fails the stream FAST as LINKHOST_E_REMOTE (M3),
+ * carrying the code + message, instead of stalling until the idle timeout; no body reaches the
+ * sink so the caller can still send a clean 404/502. ---- */
+static void test_stream_remote_error(void)
+{
+    const char *frame = "open S404 log\r\nERR 0x0703: open: no such file\r\n";
+
+    sink_t s = { .abort_after = -1 };
+    lh_dl_ctx_t c;
+    lh_dl_init(&c, /*is_binary*/true, sink_cb, &s);
+    feed_split(&c, (const uint8_t *)frame, strlen(frame));
+
+    TEST_ASSERT_EQUAL_INT(LINKHOST_E_REMOTE, lh_dl_result(&c));
+    TEST_ASSERT_EQUAL_UINT16(0x0703, c.err_code);
+    TEST_ASSERT_EQUAL_STRING("open: no such file", c.err_msg);
+    TEST_ASSERT_EQUAL_UINT(0, s.len);                     /* nothing was streamed */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -247,5 +265,6 @@ int main(void)
     RUN_TEST(test_stream_leading_noise);
     RUN_TEST(test_stream_callback_abort);
     RUN_TEST(test_stream_incomplete);
+    RUN_TEST(test_stream_remote_error);
     return UNITY_END();
 }

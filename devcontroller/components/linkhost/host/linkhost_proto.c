@@ -170,6 +170,44 @@ static const uint8_t *parse_begin(const uint8_t *line, size_t len, char *name, s
     return line + i + 3;
 }
 
+/* Parses a non-framed error line "ERR 0x<code>: <msg>" -- what export_serial.c prints on any
+ * command failure (malformed json, unknown session, storage error, second-pass abort). Returns
+ * true and fills *code + msg[msg_cap] (NUL-terminated, truncated) on a match; false otherwise.
+ * Shared by the buffered demux (classify_line) and the streaming download parser (dl_feed_hdr) so
+ * both fail fast with a real remote error instead of stalling on the link timeout. */
+static bool parse_err_line(const uint8_t *line, size_t len, uint16_t *code, char *msg, size_t msg_cap)
+{
+    assert(code != NULL);
+    assert(msg != NULL || msg_cap == 0);
+    static const char PFX[] = "ERR 0x";
+    size_t pl = sizeof(PFX) - 1;
+    if (len < pl || memcmp(line, PFX, pl) != 0) return false;
+
+    size_t i = pl;
+    uint32_t v = 0;
+    int nd = 0;
+    while (i < len && nd < 4) {                    /* bounded: <=4 hex digits (u16 code) */
+        uint8_t c = line[i];
+        uint32_t d;
+        if (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (uint32_t)(c - 'A' + 10);
+        else break;
+        v = (v << 4) | d;
+        i++;
+        nd++;
+    }
+    if (nd == 0 || i >= len || line[i] != ':') return false;   /* need "<hex>:" */
+    i++;
+    if (i < len && line[i] == ' ') i++;            /* skip the one separator space */
+    *code = (uint16_t)v;
+
+    size_t o = 0;
+    while (i < len && o + 1u < msg_cap) msg[o++] = (char)line[i++];   /* bounded by len */
+    if (msg_cap > 0) msg[o] = '\0';
+    return true;
+}
+
 /* ================================================================================================
  *  Response frame parser
  * ============================================================================================== */
@@ -369,6 +407,19 @@ static void dl_feed_hdr(lh_dl_ctx_t *c, uint8_t b)
         c->state = (size == 0) ? LH_DL_TAIL : LH_DL_BODY;   /* empty body -> straight to the trailer */
         return;
     }
+    /* A non-framed "ERR 0x<code>: <msg>" line means the lap-timer refused the command (bad id,
+     * malformed request, storage error) before emitting a frame -- fail fast with a remote error
+     * rather than waiting out the idle timeout. */
+    {
+        uint16_t code = 0;
+        char emsg[LINKHOST_ERRMSG_MAX];
+        if (len > 0 && parse_err_line((const uint8_t *)c->line, len, &code, emsg, sizeof emsg)) {
+            c->err_code = code;
+            memcpy(c->err_msg, emsg, sizeof c->err_msg);
+            dl_fail(c, LINKHOST_E_REMOTE);
+            return;
+        }
+    }
     c->line_len  = 0;                            /* echo/prompt/noise line -> discard, keep scanning */
     c->line_skip = false;
 }
@@ -537,7 +588,7 @@ int linkhost_pop_response(linkhost_frame_t *out, int *status)
     assert(status != NULL);
     if (!s_dx.resp_ready) return 0;
     *status = s_dx.resp_status;
-    if (s_dx.resp_status == 0) *out = s_dx.resp;
+    *out = s_dx.resp;   /* copy name + err_code/err_msg always; body pointer valid only when status==0 */
     s_dx.resp_ready = false;
     return 1;
 }
@@ -567,7 +618,26 @@ static void classify_line(void)
     char name[16];
     uint32_t size = 0;
     const uint8_t *r = parse_begin(s_dx.line, s_dx.line_len, name, sizeof(name), &size);
-    if (!r) { s_dx.state = DX_SCAN; return; }         /* echo/prompt/log/ERR/boot -> drop */
+    if (!r) {
+        /* Not a framed header. A non-framed "ERR 0x<code>: <msg>" is the lap-timer refusing the
+         * command -- complete it as a remote-error response so the caller fails fast (400/404/502)
+         * instead of waiting out the link timeout, unless a response is already pending unread
+         * (never clobber a completed frame; a real command's slot is drained before it is sent). */
+        if (!s_dx.resp_ready) {
+            uint16_t code = 0;
+            char emsg[LINKHOST_ERRMSG_MAX];
+            if (parse_err_line(s_dx.line, s_dx.line_len, &code, emsg, sizeof emsg)) {
+                s_dx.resp.err_code = code;
+                memcpy(s_dx.resp.err_msg, emsg, sizeof s_dx.resp.err_msg);
+                s_dx.resp.body     = NULL;
+                s_dx.resp.body_len = 0;
+                s_dx.resp_status   = LINKHOST_E_REMOTE;
+                s_dx.resp_ready    = true;
+            }
+        }
+        s_dx.state = DX_SCAN;
+        return;                                       /* echo/prompt/log/boot -> drop */
+    }
 
     /* Re-emit the header line (plus a '\n') into the frame buffer for linkhost_parse_frame. */
     if (s_dx.line_len + 1u > FRAME_CAP) { s_dx.state = DX_SCAN; return; }
