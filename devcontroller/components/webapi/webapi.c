@@ -523,8 +523,15 @@ static void do_stream(httpd_req_t *req)
     char line[320];
     for (;;) {                                   /* until the client disconnects (send fails) */
         int sent = 0;
-        while (cursor != s_bc_head && sent < 32) {
-            if ((uint32_t)(s_bc_head - cursor) > BC_CAP) cursor = s_bc_head - BC_CAP;  /* overrun: skip */
+        int iter = 0;   /* M1: `sent` only counts successfully-decoded records, so bound the loop
+                          * itself too -- a run of records that all fail to decode must not spin
+                          * past one ring's worth of work per wake. */
+        while (cursor != s_bc_head && sent < 32 && iter < BC_CAP) {
+            iter++;
+            /* M2: on overrun, `s_bc_head - BC_CAP` is congruent mod BC_CAP to `s_bc_head` itself --
+             * i.e. the exact slot the producer writes next -- so landing there is a guaranteed
+             * torn read against a live producer. +2 skips it plus one extra record of margin. */
+            if ((uint32_t)(s_bc_head - cursor) > BC_CAP) cursor = s_bc_head - BC_CAP + 2u;  /* overrun: skip */
             lt_stream_rec_t rec = s_bc[cursor & (BC_CAP - 1u)];
             cursor++;
             int jn = linkhost_stream_to_json(&rec, line + 6, sizeof(line) - 12);
@@ -549,8 +556,12 @@ static void sse_task(void *arg)
 {
     httpd_req_t *req = (httpd_req_t *)arg;
     do_stream(req);
-    httpd_req_async_handler_complete(req);
+    /* M3: clear BEFORE completing the request. httpd_req_async_handler_complete() is what lets a
+     * new /api/stream request land; clearing the flag after it would leave a window where a
+     * request accepted in-between sets s_sse_active true and this dying task then immediately
+     * clears it, leaving two monitor tasks running concurrently. */
     s_sse_active = false;
+    httpd_req_async_handler_complete(req);
     vTaskDelete(NULL);
 }
 
@@ -858,6 +869,21 @@ static esp_err_t api_flash_post(httpd_req_t *req)
     assert(s_flash.ver[0] != '\0' && s_flash.hwid[0] != '\0');
 
     s_flash.total = s_flash.size;
+
+    /* M5: build the 202 body BEFORE starting the push. Building it after xTaskCreate() succeeded
+     * meant a (currently unreachable) snprintf overflow would leave this request with no response
+     * at all while the push proceeded anyway -- the client would hang with nothing to show for a
+     * push already under way. Build first; on overflow, respond 500 and never start the task. */
+    char body[160];
+    int n = snprintf(body, sizeof body,
+                     "{\"staged\":true,\"size\":%lu,\"ver\":\"%s\",\"hwid\":\"%s\"}",
+                     (unsigned long)s_flash.size, s_flash.ver, s_flash.hwid);
+    if (n < 0 || (size_t)n >= sizeof body) {
+        s_flash.state = FLASH_IDLE;
+        s_flash.busy  = false;
+        return send_error_json(req, "500 Internal Server Error", "response body build failed");
+    }
+
     s_flash.state = FLASH_PUSHING;              /* must be set before the task can finish */
     if (xTaskCreate(flash_task, "webapi_flash", 4096, NULL, 5, NULL) != pdPASS) {
         s_flash.state = FLASH_IDLE;
@@ -867,11 +893,6 @@ static esp_err_t api_flash_post(httpd_req_t *req)
 
     ESP_LOGI(TAG, "staged %lu B (ver=%s hwid=%s) -> pushing",
              (unsigned long)s_flash.size, s_flash.ver, s_flash.hwid);
-    char body[160];
-    int n = snprintf(body, sizeof body,
-                     "{\"staged\":true,\"size\":%lu,\"ver\":\"%s\",\"hwid\":\"%s\"}",
-                     (unsigned long)s_flash.size, s_flash.ver, s_flash.hwid);
-    if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
     return send_json(req, "202 Accepted", body);
 }
 

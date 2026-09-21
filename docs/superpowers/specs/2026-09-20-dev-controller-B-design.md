@@ -167,6 +167,11 @@ loops with explicit caps, ≥2 assertions in real functions, small focused modul
 The network layer (WiFi, `esp_http_server`, later mbedTLS) uses the framework — dynamic allocation
 allowed. **No blocking P10 linter** for B; gate = host tests + review.
 
+Assertions use raw `assert()` (`CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=2`): a tripped
+invariant panics and reboots. This is a deliberate departure from the lap-timer's never-abort
+`LT_ASSERT` (spec §17.9) — B is not the flight-critical timer, and a clean reboot is an acceptable,
+simpler failure mode for the dev controller's own bugs.
+
 ## 9. Versioning (independent of the lap-timer)
 
 B versions on its own tag namespace `dc-v*` (`git describe --tags --match "dc-v*" --dirty --always`

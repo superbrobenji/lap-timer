@@ -163,10 +163,17 @@ static void stream_consumer(void *arg)
 {
     (void)arg;
     lt_stream_rec_t r;
+    static bool s_append_fail_logged;   /* I4 (partial, #68 tracks the rest): warn once, not every
+                                          * record, once logstore_append starts failing (e.g. the
+                                          * s_ready wedge on open_new_file() failure) -- no other
+                                          * indicator exists yet that black-box logging has stopped. */
     for (;;) {
         int any = 0;
         while (linkhost_stream_pop(&r) == 0) {   /* bounded: ring is finite, drains then returns */
-            (void)logstore_append(&r);
+            if (logstore_append(&r) != 0 && !s_append_fail_logged) {
+                ESP_LOGW(TAG, "logstore_append failed; black-box logging may have stopped (see #68)");
+                s_append_fail_logged = true;
+            }
             webapi_stream_push(&r);
             any = 1;
         }
@@ -191,7 +198,7 @@ void app_main(void)
 
     esp_err_t lr = logstore_init(LOGS_CAP_BYTES);
     if (lr != ESP_OK)
-        ESP_LOGW(TAG, "logstore_init: %s (Task 5 not yet landed)", esp_err_to_name(lr));
+        ESP_LOGW(TAG, "logstore_init failed: %s (black-box logging disabled)", esp_err_to_name(lr));
 
     esp_err_t ir = linkhost_init();
     if (ir != ESP_OK)
@@ -199,7 +206,9 @@ void app_main(void)
 
     httpd_start_and_register();
 
-    if (xTaskCreate(stream_consumer, "stream_consumer", 4096, NULL, 6, NULL) != pdPASS)
+    /* 8192 (C1): logstore_append's rotation path (enforce_cap -> scan_existing/open_new_file)
+     * nests VFS calls several frames deep on this task's stack; 4096 was not enough headroom. */
+    if (xTaskCreate(stream_consumer, "stream_consumer", 8192, NULL, 6, NULL) != pdPASS)
         ESP_LOGW(TAG, "stream_consumer task create failed");
 
     ESP_LOGI(TAG, "dev controller ready");

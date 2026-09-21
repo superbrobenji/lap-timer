@@ -883,10 +883,18 @@
    */
   function pollFlashStatus() {
     var sawDisconnect = false;
+    var sawFlashing = false;   // I5a: only a push we actually observed running can "succeed"
     var attempts = 0;
+    var lastPct = 0;
+    var startMs = Date.now();
     // Pushing a 1.2 MB image at 115200 baud takes ~110s; `attempts` is reset
     // while d.flashing, so this budget only covers the reboot + reconnect.
     var MAX_ATTEMPTS = 240;
+    // I5c: a wall-clock cap independent of `attempts` -- `attempts` resets on
+    // every d.flashing poll, so it alone never bounds a controller that keeps
+    // reporting flashing:true (or keeps being briefly unreachable). 8 minutes
+    // covers the ~110s push plus a slow reboot/reconnect with real margin.
+    var MAX_ELAPSED_MS = 8 * 60 * 1000;
     clearInterval(flashPollTimer);
     flashPollTimer = setInterval(function () {
       attempts++;
@@ -900,18 +908,36 @@
           return;
         }
         if (d && typeof d.flash_pct === "number") {
-          setFlashProgress(d.flash_pct, "applying " + d.flash_pct + "%");
+          sawFlashing = true;
+          lastPct = d.flash_pct;
+          setFlashProgress(lastPct, "applying " + d.flash_pct + "%");
         } else if (d && d.flashing) {
-          setFlashProgress(90, "applying update…");
+          sawFlashing = true;
+          lastPct = 90;
+          setFlashProgress(lastPct, "applying update…");
         }
         if (d && d.flashing) attempts = 0;   // the reconnect budget starts after the push
+
+        // I5b: only an explicit {connected:false} body -- the dev
+        // controller's own 503 when the LAP-TIMER link is down -- counts as
+        // "the lap-timer went away to reboot". `res.data == null` (a network
+        // error, or no parseable body) means the DEV CONTROLLER itself is
+        // unreachable; that can happen too (e.g. it panics mid-push) but is
+        // not the flash-success signal and must never set sawDisconnect.
+        if (d && d.connected === false) {
+          sawDisconnect = true;
+        } else if (d == null) {
+          setFlashProgress(lastPct, "dev controller unreachable, retrying…");
+        }
+
         var connected = !!(d && d.connected);
-        if (!connected) sawDisconnect = true;
-        if (connected && sawDisconnect) {
+        if (sawFlashing && sawDisconnect && connected) {
           clearInterval(flashPollTimer);
           setFlashProgress(100, "done — reconnected" + (d.fw ? " (fw " + d.fw + ")" : ""));
           setFlashBusy(false);
-        } else if (attempts >= MAX_ATTEMPTS) {
+          return;
+        }
+        if (attempts >= MAX_ATTEMPTS || (Date.now() - startMs) >= MAX_ELAPSED_MS) {
           clearInterval(flashPollTimer);
           showMsg($("#flash-status"), "err", "Timed out waiting for the lap-timer to reconnect after flashing.");
           setFlashBusy(false);

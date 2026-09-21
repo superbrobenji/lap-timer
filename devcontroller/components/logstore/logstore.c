@@ -85,6 +85,18 @@ static uint32_t s_cur_bytes;                  /* bytes written to the current fi
 static char     s_cur_id[LOGSTORE_ID_BUF];
 static int64_t  s_last_fsync_us;              /* time of the last fsync of the live file (M7) */
 
+/* Scratch buffers for scan_existing()/enforce_cap(), and for logstore_init()'s own file-resume
+ * scan (C1): file-scope static, so they don't sit on the caller's stack (enforce_cap runs off
+ * logstore_append, on the stream_consumer task -- see main.c). logstore's write path is
+ * single-consumer: logstore_append (stream_consumer task only) and logstore_init (called once at
+ * boot, before stream_consumer is created) are never active at the same time, and logstore_init
+ * does not read its scan results after handing them to enforce_cap (see logstore_init below), so
+ * the two safely share ONE static buffer rather than needing separate ones. logstore_list keeps
+ * its OWN on-stack files[] -- it runs on webapi's httpd task, a different, potentially-concurrent
+ * reader, so it must NOT share this buffer. */
+static logstore_file_info_t s_scan_files[LOGSTORE_ROT_MAX_FILES];
+static int                  s_drop_idx[LOGSTORE_ROT_MAX_FILES];
+
 /* Worst-case on-disk size of one whole log file: header + a file grown to the per-file cap. The
  * total-cap reservation must hold back this much for the file about to be written -- not just the
  * first record -- or steady state overfills the partition and every append ENOSPC-wedges (M6). */
@@ -188,21 +200,19 @@ static int scan_existing(logstore_file_info_t *out, int max, uint32_t *out_next_
  * `incoming_bytes` about to be written, fit within s_cap_bytes. */
 static void enforce_cap(uint32_t incoming_bytes)
 {
-    logstore_file_info_t files[LOGSTORE_ROT_MAX_FILES];
-    int n = scan_existing(files, LOGSTORE_ROT_MAX_FILES, NULL);
+    int n = scan_existing(s_scan_files, LOGSTORE_ROT_MAX_FILES, NULL);   /* C1: static, not stack */
     if (n <= 0) return;
 
-    int drop_idx[LOGSTORE_ROT_MAX_FILES];
-    int n_drop = logstore_pick_drop(files, n, incoming_bytes, s_cap_bytes, drop_idx,
+    int n_drop = logstore_pick_drop(s_scan_files, n, incoming_bytes, s_cap_bytes, s_drop_idx,
                                      LOGSTORE_ROT_MAX_FILES);
     for (int i = 0; i < n_drop; i++) {
         char path[LOGSTORE_PATH_MAX];
-        if (build_path(files[drop_idx[i]].id, path, sizeof path) != 0) continue;
+        if (build_path(s_scan_files[s_drop_idx[i]].id, path, sizeof path) != 0) continue;
         if (unlink(path) != 0 && errno != ENOENT)
             ESP_LOGW(TAG, "unlink %s: %s", path, strerror(errno));
         else
-            ESP_LOGI(TAG, "rotated out %s (%u B)", files[drop_idx[i]].id,
-                     (unsigned)files[drop_idx[i]].bytes);
+            ESP_LOGI(TAG, "rotated out %s (%u B)", s_scan_files[s_drop_idx[i]].id,
+                     (unsigned)s_scan_files[s_drop_idx[i]].bytes);
     }
 }
 
@@ -281,9 +291,11 @@ esp_err_t logstore_init(size_t cap_bytes)
     }
 
     /* Resume past whatever ids already exist (a prior boot's files) rather than colliding with
-     * them; also drop anything already over cap_bytes (e.g. cap_bytes shrank across an upgrade). */
-    logstore_file_info_t files[LOGSTORE_ROT_MAX_FILES];
-    int n = scan_existing(files, LOGSTORE_ROT_MAX_FILES, &s_next_id);
+     * them; also drop anything already over cap_bytes (e.g. cap_bytes shrank across an upgrade).
+     * Uses s_scan_files (C1): this scan's only output logstore_init still needs is s_next_id
+     * (captured via out_next_id right here), so it never reads `s_scan_files` again after this
+     * call -- safe to let the enforce_cap() call below overwrite the same static. */
+    int n = scan_existing(s_scan_files, LOGSTORE_ROT_MAX_FILES, &s_next_id);
     (void)n;
     /* Reserve the whole worst-case file we are about to open (M6), so the resumed set plus the new
      * file cannot exceed the cap even after the new file grows to LOGSTORE_MAX_FILE_BYTES. */
