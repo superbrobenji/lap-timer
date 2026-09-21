@@ -23,14 +23,19 @@
  *                                     one JSON fused-sample or event record.
  *   GET  /api/logs                -> {logs:[{id,bytes}]}
  *   GET  /api/log/<id>            -> log file download
- *   POST /api/flash               <- multipart/form-data (.bin); stages +
- *                                     pushes cmd-OTA to the lap-timer.
+ *   POST /api/flash               <- multipart/form-data field "firmware"
+ *                                     (.bin); 202 {staged,size,ver,hwid} once
+ *                                     the image is in the staging partition,
+ *                                     then the push runs in the background.
+ *                                     409 already flashing, 400 bad body,
+ *                                     412 not a usable image, 413 too large,
+ *                                     423 link busy, 503 link down.
  *
- * No field name for flash progress is specified in the design docs, so the
- * flash panel below (see submitFlash/pollFlashStatus) reads an optional
- * status.flash_pct / status.flashing if the firmware happens to send one,
- * and otherwise falls back to a disconnect/reconnect heuristic on
- * /api/status. See the "contract ambiguity" note in the commit message.
+ * Flash progress rides GET /api/status: while the push runs it answers
+ * {connected:true, flashing:true, flash_pct:N}; a FAILED push adds
+ * "flash_err" ("0x0801".."0x0804", or "link <n>") to the normal status body
+ * until the next POST /api/flash. A SUCCESSFUL push reboots the lap-timer, so
+ * it shows up as a disconnect followed by a reconnect (see pollFlashStatus).
  */
 
 (function () {
@@ -862,27 +867,44 @@
     $("#flash-file").disabled = busy;
   }
 
+  /* E_OTA_* codes the lap-timer reports in GET /api/status's flash_err
+   * (components/app/include/app/lt_err.h), in words the operator can act on. */
+  var FLASH_ERR_TEXT = {
+    "0x0801": "Precondition failed — charge the lap-timer (≥3800 mV) or connect a charger, then retry.",
+    "0x0802": "Image is for a different hardware id.",
+    "0x0803": "Write or SHA-256 failure on the lap-timer.",
+    "0x0804": "Signature verification failed (unsigned or corrupt image)."
+  };
+
   /**
-   * After the upload completes, the lap-timer OTA-applies + reboots. There is
-   * no documented progress field on GET /api/status, so if the firmware
-   * happens to expose status.flash_pct / status.flashing this is used;
-   * otherwise this just waits for a disconnect-then-reconnect as the
-   * "apply done" signal.
+   * Follows the background push via GET /api/status: flash_pct/flashing while
+   * it runs, flash_err if it failed, and a disconnect-then-reconnect (the
+   * lap-timer reboots into the new slot) as the success signal.
    */
   function pollFlashStatus() {
     var sawDisconnect = false;
     var attempts = 0;
-    var MAX_ATTEMPTS = 150; // ~150s at 1s interval
+    // Pushing a 1.2 MB image at 115200 baud takes ~110s; `attempts` is reset
+    // while d.flashing, so this budget only covers the reboot + reconnect.
+    var MAX_ATTEMPTS = 240;
     clearInterval(flashPollTimer);
     flashPollTimer = setInterval(function () {
       attempts++;
       fetchJson("/api/status").then(function (res) {
         var d = res.data;
+        if (d && d.flash_err) {
+          clearInterval(flashPollTimer);
+          setFlashBusy(false);
+          showMsg($("#flash-status"), "err",
+            FLASH_ERR_TEXT[d.flash_err] || ("Flash failed: " + d.flash_err));
+          return;
+        }
         if (d && typeof d.flash_pct === "number") {
           setFlashProgress(d.flash_pct, "applying " + d.flash_pct + "%");
         } else if (d && d.flashing) {
           setFlashProgress(90, "applying update…");
         }
+        if (d && d.flashing) attempts = 0;   // the reconnect budget starts after the push
         var connected = !!(d && d.connected);
         if (!connected) sawDisconnect = true;
         if (connected && sawDisconnect) {
@@ -927,7 +949,7 @@
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         setFlashProgress(100, "uploaded, staging…");
-        showMsg(msg, "info", "Upload complete; lap-timer is applying the update.");
+        showMsg(msg, "info", "Upload staged; pushing to the lap-timer…");
         pollFlashStatus();
       } else {
         var detail = xhr.responseText || xhr.status;

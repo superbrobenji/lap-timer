@@ -1,15 +1,17 @@
-/* webapi.c -- Plan 5.5 Task 4 (CRUD half): the /api URI handlers + static SPA serving.
+/* webapi.c -- Plan 5.5 Tasks 4/5/6: the /api URI handlers + static SPA serving.
  *
  * A thin bridge over `linkhost` (the UART1 client to the lap-timer's export_serial console) and
  * `logstore` (B's own black-box log). The lap-timer already emits JSON for the query ops, so most
  * handlers relay a framed response body straight to the browser (design B-B, sections 3 and 7).
  * Long-lived downloads (a whole session / a log file) run on a worker task via
- * httpd_req_async_handler_begin so they never block the httpd's request task. The live-monitor
- * SSE stream and POST /api/flash are a LATER step -- not implemented here.
+ * httpd_req_async_handler_begin so they never block the httpd's request task; the live monitor and
+ * the cmd-OTA flash push each get a dedicated one-shot task for the same reason.
  *
  * Endpoints (binding contract = devcontroller/web/app.js):
  *   GET  /api/status              linkhost_status -> {connected,proto,state,flags,batt_pct,
  *                                 batt_mv,free_kb,sessions,fw}; 503 {"connected":false} if down.
+ *                                 While a flash push runs: {connected,flashing,flash_pct}; after a
+ *                                 failed push the normal body also carries "flash_err".
  *   GET  /api/config              relay `config get` JSON.
  *   POST /api/config              diff vs a fresh `config get`, push changed keys as one-or-more
  *                                 `config set <obj>` lines; 413 if one change exceeds the cap.
@@ -18,25 +20,34 @@
  *                                 -> abort the socket.
  *   GET  /api/logs                logstore_list -> {logs:[{id,bytes}]}.
  *   GET  /api/log/<id>            async: stream a stored log file.
+ *   GET  /api/stream              live-monitor SSE (one reader at a time), on its own task.
+ *   POST /api/flash               multipart/form-data `firmware` -> stream into the `ota_stage`
+ *                                 partition, then push it cmd-OTA on a worker task; 202 as soon
+ *                                 as the image is staged, progress via GET /api/status.
  *   GET  (catch-all)              static SPA from the `www` LittleFS mount (index at "/").
  */
 #include "webapi.h"
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "mbedtls/sha256.h"
 
 #include "config_diff.h"
+#include "image_desc.h"
 #include "linkhost.h"
 #include "linkhost_proto.h"
 #include "logstore.h"
+#include "multipart.h"
 
 static const char *TAG = "webapi";
 
@@ -69,6 +80,30 @@ void webapi_stream_push(const lt_stream_rec_t *r)
     s_bc[h & (BC_CAP - 1u)] = *r;
     s_bc_head = h + 1u;
 }
+
+/* ---- cmd-OTA flash (POST /api/flash): one at a time, staged then pushed ----
+ * `busy` covers the whole operation, from the first upload byte to the end of the push, so a
+ * second POST is refused rather than corrupting the staging partition. The fields the push task
+ * reads are written only while `busy` is true and the task does not exist yet. */
+typedef enum {
+    FLASH_IDLE = 0,
+    FLASH_STAGING,      /* the multipart body is streaming into `ota_stage` */
+    FLASH_PUSHING,      /* the worker task owns the link (linkhost_flash) */
+    FLASH_DONE_OK,
+    FLASH_DONE_ERR
+} flash_state_t;
+
+static struct {
+    volatile bool          busy;
+    volatile flash_state_t state;
+    volatile uint32_t      sent;    /* bytes pushed to the lap-timer so far */
+    volatile uint32_t      total;   /* staged image size, for the percentage */
+    volatile int           result;  /* linkhost_flash rc; meaningful in FLASH_DONE_* */
+    uint32_t               size;
+    uint8_t                sha[32];
+    char                   ver[IMG_VER_LEN];
+    char                   hwid[IMG_HWID_LEN + 1];
+} s_flash;
 
 /* ---------- small helpers ---------- */
 
@@ -153,17 +188,43 @@ static int path_tail(const httpd_req_t *req, const char *prefix, char *out, size
 
 static esp_err_t api_status(httpd_req_t *req)
 {
+    /* While the push owns the link, answer from our own state: linkhost_flash holds the request
+     * mutex (portMAX_DELAY) and pauses the RX demux for the whole transfer, so a `status`
+     * round-trip here would just burn the bounded mutex take and come back BUSY. */
+    if (s_flash.state == FLASH_PUSHING) {
+        uint32_t total = s_flash.total;
+        uint32_t sent  = s_flash.sent;
+        unsigned pct = (total > 0u) ? (unsigned)(((uint64_t)sent * 100u) / total) : 0u;
+        if (pct > 100u) pct = 100u;
+        char pbody[64];
+        int pn = snprintf(pbody, sizeof pbody,
+                          "{\"connected\":true,\"flashing\":true,\"flash_pct\":%u}", pct);
+        if (pn < 0 || (size_t)pn >= sizeof pbody) return ESP_FAIL;
+        return send_json(req, NULL, pbody);
+    }
+
     lt_status_t st;
     int rc = linkhost_status(&st);
     if (rc != 0) return send_not_connected(req);
 
-    char body[224];
+    /* A successful push reboots the lap-timer, so the SPA sees a 503 and then a reconnect. A
+     * FAILED one leaves it running, so the failure has to ride the next 200 instead -- it stays
+     * here until the next POST /api/flash clears it. */
+    char ferr[40] = "";
+    if (s_flash.state == FLASH_DONE_ERR) {
+        int frc = s_flash.result;
+        if (frc > 0) snprintf(ferr, sizeof ferr, ",\"flash_err\":\"0x%04x\"", (unsigned)frc);
+        else         snprintf(ferr, sizeof ferr, ",\"flash_err\":\"link %d\"", frc);
+    }
+
+    char body[288];
     int n = snprintf(body, sizeof body,
                      "{\"connected\":true,\"proto\":%u,\"state\":%u,\"flags\":%u,"
-                     "\"batt_pct\":%u,\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,\"fw\":\"%s\"}",
+                     "\"batt_pct\":%u,\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,"
+                     "\"fw\":\"%s\"%s}",
                      (unsigned)st.proto, (unsigned)st.state, (unsigned)st.flags,
                      (unsigned)st.batt_pct, (unsigned)st.batt_mv, (unsigned long)st.free_kb,
-                     (unsigned)st.sessions, st.fw);
+                     (unsigned)st.sessions, st.fw, ferr);
     if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
     return send_json(req, NULL, body);
 }
@@ -512,6 +573,285 @@ static esp_err_t api_stream_begin(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---------- POST /api/flash : stage the upload, then push it cmd-OTA ----------
+ * Two halves. The upload half runs on the httpd request task (it needs httpd_req_recv) and
+ * streams the multipart body straight into the `ota_stage` partition -- a 1.2 MB image never fits
+ * in RAM -- while hashing it. The push half (linkhost_flash) runs on a one-shot worker task,
+ * because it takes the link mutex with portMAX_DELAY and pauses the RX demux for ~110 s: doing
+ * that on the httpd task would freeze the whole SPA, including the /api/status poll that reports
+ * the progress. The handler therefore answers 202 as soon as the image is staged. */
+
+#define FLASH_FIELD          "firmware"   /* the multipart field name app.js posts */
+#define UPLOAD_BUF           1024         /* one httpd_req_recv chunk */
+#define STAGE_BLOCK          4096         /* flash sector: the erase+write granularity */
+#define UPLOAD_TIMEOUTS_MAX  10           /* consecutive HTTPD_SOCK_ERR_TIMEOUT retries */
+#define DRAIN_READS_MAX      8192         /* cap on the reads used to drain a rejected body */
+
+/* Single-flight scratch, guarded by s_flash.busy. The 4 KB block buffer must not live on the
+ * httpd task's stack, and nothing here is ever touched by two tasks at once. */
+static char       s_up_buf[UPLOAD_BUF];
+static uint8_t    s_stage_blk[STAGE_BLOCK];
+static mp_ctx_t   s_mp;
+
+typedef enum { STAGE_OK = 0, STAGE_FULL, STAGE_WRITE } stage_err_t;
+
+typedef struct {
+    const esp_partition_t *part;
+    uint32_t               written;   /* bytes committed to flash (always a multiple of STAGE_BLOCK) */
+    size_t                 blk_len;   /* bytes pending in s_stage_blk */
+    stage_err_t            err;
+    mbedtls_sha256_context sha;
+} stage_ctx_t;
+
+static stage_ctx_t s_stage;
+
+/* Erases the sector at s->written and writes the first `len` bytes of the block buffer into it.
+ * Lazy per-sector erase: erasing the whole 1.25 MB partition up front would stall the upload for
+ * seconds and TCP would time out. */
+static int stage_commit(stage_ctx_t *s, size_t len)
+{
+    assert(s != NULL && s->part != NULL);
+    assert(len > 0u && len <= (size_t)STAGE_BLOCK);
+    assert((s->written % (uint32_t)STAGE_BLOCK) == 0u);          /* erase_range needs alignment */
+
+    if (esp_partition_erase_range(s->part, s->written, STAGE_BLOCK) != ESP_OK) return -1;
+    if (esp_partition_write(s->part, s->written, s_stage_blk, len) != ESP_OK) return -1;
+    s->written += (uint32_t)len;
+    return 0;
+}
+
+/* The multipart sink: buffer the wanted part's bytes a sector at a time into `ota_stage`, hashing
+ * exactly what gets staged. Returns nonzero to abort the parse (-> MP_E_SINK), with the reason in
+ * s->err so the handler can pick 413 vs 500. */
+static int stage_sink(void *ctx, const uint8_t *data, size_t n)
+{
+    stage_ctx_t *s = (stage_ctx_t *)ctx;
+    assert(s != NULL && s->part != NULL);
+    assert(data != NULL);
+
+    if ((uint64_t)s->written + s->blk_len + n > (uint64_t)s->part->size) {
+        s->err = STAGE_FULL;
+        return 1;
+    }
+    if (mbedtls_sha256_update(&s->sha, data, n) != 0) {
+        s->err = STAGE_WRITE;
+        return 1;
+    }
+    size_t off = 0;
+    while (off < n) {                                            /* bounded by n */
+        size_t room = (size_t)STAGE_BLOCK - s->blk_len;
+        size_t take = ((n - off) < room) ? (n - off) : room;
+        memcpy(s_stage_blk + s->blk_len, data + off, take);
+        s->blk_len += take;
+        off += take;
+        if (s->blk_len == (size_t)STAGE_BLOCK) {
+            if (stage_commit(s, (size_t)STAGE_BLOCK) != 0) { s->err = STAGE_WRITE; return 1; }
+            s->blk_len = 0;
+        }
+    }
+    return 0;
+}
+
+/* Drains up to `left` unread request bytes before a rejection is sent. httpd_req_delete purges
+ * only CONFIG_HTTPD_PURGE_BUF_LEN (32 B) per call, so refusing a 1 MB upload without draining
+ * would leave the rest of the body on the socket to be misread as the next request. */
+static void flash_drain(httpd_req_t *req, size_t left)
+{
+    int timeouts = 0;
+    for (int i = 0; i < DRAIN_READS_MAX && left > 0u; i++) {      /* bounded both ways */
+        size_t want = (left < sizeof s_up_buf) ? left : sizeof s_up_buf;
+        int r = httpd_req_recv(req, s_up_buf, want);
+        if (r > 0) { left -= (size_t)r; timeouts = 0; continue; }
+        if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= UPLOAD_TIMEOUTS_MAX) continue;
+        break;
+    }
+}
+
+static void flash_progress(uint32_t sent, uint32_t total, void *ctx)
+{
+    (void)ctx;
+    s_flash.sent  = sent;
+    s_flash.total = total;
+}
+
+/* The push half. Owns the link for the whole transfer, then publishes the outcome for
+ * GET /api/status and releases the single-flight guard. */
+static void flash_task(void *arg)
+{
+    (void)arg;
+    int rc = linkhost_flash(s_flash.ver, s_flash.hwid, s_flash.size, s_flash.sha,
+                            flash_progress, NULL);
+    s_flash.result = rc;
+    s_flash.state  = (rc == 0) ? FLASH_DONE_OK : FLASH_DONE_ERR;
+    s_flash.busy   = false;
+    ESP_LOGI(TAG, "flash push of %lu B finished rc=%d", (unsigned long)s_flash.size, rc);
+    vTaskDelete(NULL);
+}
+
+/* Streams the multipart body into `ota_stage` and, on success, fills s_flash.{size,sha,ver,hwid}.
+ * Returns NULL on success; otherwise the error message, with *status set to the HTTP status and
+ * *left left holding the body bytes still unread (for the caller to drain). */
+static const char *flash_stage_body(httpd_req_t *req, size_t *left, const char **status)
+{
+    const char *emsg = NULL;
+    int mrc = MP_MORE;
+    int timeouts = 0;
+
+    mbedtls_sha256_init(&s_stage.sha);
+    if (mbedtls_sha256_starts(&s_stage.sha, 0) != 0) {
+        *status = "500 Internal Server Error";
+        emsg = "sha init failed";
+    }
+
+    while (emsg == NULL && *left > 0u) {                          /* bounded by content_len */
+        size_t want = (*left < sizeof s_up_buf) ? *left : sizeof s_up_buf;
+        int r = httpd_req_recv(req, s_up_buf, want);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= UPLOAD_TIMEOUTS_MAX) continue;
+            *status = "400 Bad Request";
+            emsg = "upload aborted";
+            *left = 0u;                                           /* the socket is gone: no drain */
+            break;
+        }
+        timeouts = 0;
+        *left -= (size_t)r;
+        mrc = mp_feed(&s_mp, (const uint8_t *)s_up_buf, (size_t)r, stage_sink, &s_stage);
+        if (mrc == MP_E_SINK) {
+            *status = (s_stage.err == STAGE_FULL) ? "413 Payload Too Large"
+                                                  : "500 Internal Server Error";
+            emsg = (s_stage.err == STAGE_FULL) ? "image too large" : "stage write failed";
+        } else if (mrc < 0) {
+            *status = "400 Bad Request";
+            emsg = "malformed multipart body";
+        }
+    }
+
+    /* flush the partial final sector */
+    if (emsg == NULL && s_stage.blk_len > 0u) {
+        if (stage_commit(&s_stage, s_stage.blk_len) != 0) {
+            *status = "500 Internal Server Error";
+            emsg = "stage write failed";
+        }
+        s_stage.blk_len = 0;
+    }
+    if (emsg == NULL && !mp_found(&s_mp)) {
+        *status = "400 Bad Request";
+        emsg = "missing firmware field";
+    }
+    if (emsg == NULL && mrc != MP_DONE) {
+        *status = "400 Bad Request";
+        emsg = "truncated multipart body";
+    }
+
+    uint8_t sha[32];
+    if (emsg == NULL && mbedtls_sha256_finish(&s_stage.sha, sha) != 0) {
+        *status = "500 Internal Server Error";
+        emsg = "sha failed";
+    }
+    mbedtls_sha256_free(&s_stage.sha);       /* also releases the SHA engine on every error path */
+    if (emsg != NULL) return emsg;
+
+    if (s_stage.written < (uint32_t)IMG_DESC_MIN_LEN) {
+        *status = "412 Precondition Failed";
+        return "not an ESP32 app image";
+    }
+
+    /* Read the descriptor back OUT of the partition, so ver/hwid describe the bytes that will
+     * actually be pushed rather than the bytes we thought we wrote. */
+    uint8_t hdr[IMG_DESC_MIN_LEN];
+    if (esp_partition_read(s_stage.part, 0, hdr, sizeof hdr) != ESP_OK) {
+        *status = "500 Internal Server Error";
+        return "stage read failed";
+    }
+    int prc = img_desc_parse(hdr, sizeof hdr, s_flash.ver, s_flash.hwid);
+    if (prc != 0) {
+        *status = "412 Precondition Failed";
+        if (prc == -2) return "bad image version";
+        if (prc == -3) return "bad image hwid";
+        return "not an ESP32 app image";
+    }
+
+    s_flash.size = s_stage.written;
+    memcpy(s_flash.sha, sha, sizeof s_flash.sha);
+    return NULL;
+}
+
+static esp_err_t api_flash_post(httpd_req_t *req)
+{
+    size_t left = req->content_len;
+
+    if (s_flash.busy) {
+        flash_drain(req, left);
+        return send_error_json(req, "409 Conflict", "flash in progress");
+    }
+    if (left == 0u)
+        return send_error_json(req, "400 Bad Request", "empty upload");
+
+    char ct[192];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof ct) != ESP_OK ||
+        mp_init(&s_mp, ct, FLASH_FIELD) != 0) {
+        flash_drain(req, left);
+        return send_error_json(req, "400 Bad Request", "expected multipart/form-data");
+    }
+
+    /* Fail fast on a dead or busy link BEFORE pulling a 1.2 MB body over WiFi. */
+    lt_status_t st;
+    int lrc = linkhost_status(&st);
+    if (lrc == LINKHOST_E_BUSY) {
+        flash_drain(req, left);
+        return send_error_json(req, "423 Locked", "link busy");
+    }
+    if (lrc != 0) {
+        flash_drain(req, left);
+        return send_not_connected(req);
+    }
+
+    const esp_partition_t *stage =
+        esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "ota_stage");
+    if (!stage) {
+        flash_drain(req, left);
+        return send_error_json(req, "500 Internal Server Error", "no ota_stage partition");
+    }
+    assert((stage->size % (uint32_t)STAGE_BLOCK) == 0u);   /* stage_commit erases whole sectors */
+
+    s_flash.busy   = true;
+    s_flash.state  = FLASH_STAGING;
+    s_flash.sent   = 0;
+    s_flash.total  = 0;
+    s_flash.result = 0;
+    s_flash.size   = 0;
+
+    memset(&s_stage, 0, sizeof s_stage);
+    s_stage.part = stage;
+
+    const char *status = NULL;
+    const char *emsg = flash_stage_body(req, &left, &status);
+    if (emsg != NULL) {
+        s_flash.state = FLASH_IDLE;
+        s_flash.busy  = false;
+        ESP_LOGW(TAG, "flash upload rejected: %s %s", status, emsg);
+        flash_drain(req, left);
+        return send_error_json(req, status, emsg);
+    }
+
+    s_flash.total = s_flash.size;
+    s_flash.state = FLASH_PUSHING;              /* must be set before the task can finish */
+    if (xTaskCreate(flash_task, "webapi_flash", 4096, NULL, 5, NULL) != pdPASS) {
+        s_flash.state = FLASH_IDLE;
+        s_flash.busy  = false;
+        return send_error_json(req, "500 Internal Server Error", "cannot start flash task");
+    }
+
+    ESP_LOGI(TAG, "staged %lu B (ver=%s hwid=%s) -> pushing",
+             (unsigned long)s_flash.size, s_flash.ver, s_flash.hwid);
+    char body[160];
+    int n = snprintf(body, sizeof body,
+                     "{\"staged\":true,\"size\":%lu,\"ver\":\"%s\",\"hwid\":\"%s\"}",
+                     (unsigned long)s_flash.size, s_flash.ver, s_flash.hwid);
+    if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
+    return send_json(req, "202 Accepted", body);
+}
+
 /* ---------- async plumbing ---------- */
 
 static void async_worker(void *arg)
@@ -619,6 +959,7 @@ esp_err_t webapi_register(httpd_handle_t server)
         { .uri = "/api/logs",       .method = HTTP_GET,  .handler = api_logs },
         { .uri = "/api/log/*",      .method = HTTP_GET,  .handler = api_async_begin },
         { .uri = "/api/stream",     .method = HTTP_GET,  .handler = api_stream_begin },
+        { .uri = "/api/flash",      .method = HTTP_POST, .handler = api_flash_post },
         { .uri = "/*",              .method = HTTP_GET,  .handler = static_file },
     };
     for (size_t i = 0; i < sizeof uris / sizeof uris[0]; i++) {

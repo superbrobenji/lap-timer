@@ -1,9 +1,9 @@
 /* devcontroller/components/webapi/include/webapi.h -- webapi: the api/ URI handlers + static
  * SPA serving (docs/superpowers/plans/2026-09-20-plan-5.5-dev-controller.md, sub-project B,
- * Task 4).
+ * Tasks 4/5/6).
  *
- * PINNED interface for Task 4. Task 2 (this scaffold) ships a compiling not-implemented stub;
- * Task 4 implements the real handlers + config_diff_minify (via jsmn).
+ * PINNED interface: the whole component is registered through webapi_register, and the only other
+ * entry point is webapi_stream_push (the live-monitor feed). See webapi.c for the endpoint list.
  */
 #ifndef WEBAPI_H
 #define WEBAPI_H
@@ -21,9 +21,9 @@ extern "C" {
 #endif
 
 /* Registers /api/status, /api/config (GET/POST), /api/sessions, /api/session/<id>, /api/logs,
- * /api/log/<id>, /api/stream (live-monitor SSE), and the static-file SPA catch-all onto an
- * already-started httpd instance, and starts the async download worker on first call. /api/flash
- * is a later step. */
+ * /api/log/<id>, /api/stream (live-monitor SSE), POST /api/flash (cmd-OTA stage-then-push) and
+ * the static-file SPA catch-all onto an already-started httpd instance, and starts the async
+ * download worker on first call. */
 esp_err_t webapi_register(httpd_handle_t server);
 
 /* Called by the stream-consumer task (main.c) to publish one demuxed record to the live monitor. */
