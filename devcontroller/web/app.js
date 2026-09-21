@@ -702,27 +702,44 @@
   var monitorRowCount = 0;
   var MONITOR_MAX_ROWS = 200;
 
-  // EV_* names (components/core/include/core/event.h) for readable EVENT rows.
-  var EVENT_NAMES = {
-    1: "VENUE_FOUND", 2: "LAYOUT_LOCKED", 3: "ARMED", 4: "SECTOR", 5: "LAP_COMPLETE",
-    6: "FIX_LOST", 7: "FIX_OK", 8: "DRAG_ARMED", 9: "DRAG_LAUNCH", 10: "DRAG_GATE",
-    11: "DRAG_DONE", 12: "MOTION", 13: "STILL", 14: "CALIB_DONE", 15: "FAULT"
-  };
+  var i32 = function (u) { return u > 0x7fffffff ? u - 0x100000000 : u; };  // uint32 -> signed
+  var signMs = function (ms) { return (ms >= 0 ? "+" : "") + (ms / 1000).toFixed(3) + "s"; };
+
+  // Decode one EVENT record (event.h EV_* codes) into a plain-English sentence.
+  function formatEvent(p) {
+    switch (p.code) {
+      case 1:  return "Venue found (id " + p.arg16 + ")";
+      case 2:  return "Layout locked (id " + p.arg16 + ")";
+      case 3:  return "Armed";
+      case 4:  return "Sector " + (p.arg16 + 1) + " — " + fmtMs(p.arg32) + " (Δ " + signMs(i32(p.arg32b)) + ")";
+      case 5:  return "LAP " + p.arg16 + " complete — " + fmtMs(p.arg32) +
+                      (p.flags ? "  [flags 0x" + p.flags.toString(16) + "]" : "");
+      case 6:  return "GPS fix lost";
+      case 7:  return "GPS fix OK";
+      case 8:  return "Drag armed";
+      case 9:  return "Launch!";
+      case 10: return "Drag gate " + p.arg16 + " — " + fmtMs(p.arg32) +
+                      " @ " + (p.arg32b / 100 * 3.6).toFixed(1) + " km/h";
+      case 11: return "Drag run " + p.arg16 + " done";
+      case 12: return "Motion detected";
+      case 13: return "Still";
+      case 14: return "Calibration done (stage " + p.arg16 + ")";
+      case 15: return "FAULT — error 0x" + (p.arg16 || 0).toString(16);
+      default: return "Event code " + p.code + " (arg16=" + p.arg16 + " arg32=" + p.arg32 + ")";
+    }
+  }
 
   // Formats one decoded /api/stream record (see linkhost_stream_to_json) into a readable line.
   // Falls back to the raw JSON for a shape this function does not recognize.
   function formatStreamRecord(ts, parsed) {
-    if (parsed.t === "fused") {
+    if (parsed.t === "fused") {                         // 10 Hz sensor-fusion motion sample
       var lean = (parsed.lean_cdeg / 100).toFixed(1);
       var g = (parsed.g_mg / 1000).toFixed(2);
       var yaw = (parsed.yaw_cdps / 100).toFixed(1);
-      return ts + "  FUSED  lean " + lean + "°  g " + g + "  yaw " + yaw + "°/s";
+      return ts + "  Motion   lean " + lean + "°   g " + g + "   yaw " + yaw + "°/s";
     }
     if (parsed.t === "event") {
-      var name = EVENT_NAMES[parsed.code];
-      var label = name ? "code=" + parsed.code + " (" + name + ")" : "code=" + parsed.code;
-      return ts + "  EVENT  " + label + "  arg16=" + parsed.arg16 + " arg32=" + parsed.arg32 +
-             " arg32b=" + parsed.arg32b;
+      return ts + "  ● Event: " + formatEvent(parsed);
     }
     return ts + "  " + JSON.stringify(parsed);
   }

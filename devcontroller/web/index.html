@@ -73,8 +73,11 @@
 
     <section id="panel-monitor" class="panel">
       <h2>Live monitor</h2>
-      <p class="hint"><code>EventSource('/api/stream')</code> — one SSE event
-        per fused-sample/event record. Last 200 rows kept.</p>
+      <p class="hint"><b>Live view only</b> — starts when you press Start and shows the most recent
+        200 rows on screen; a refresh clears it (it streams from the moment you connect, it does not
+        replay the past). <b>Motion</b> = 10&nbsp;Hz sensor-fusion sample (lean, g-force, yaw rate);
+        <b>Event</b> = lap-timer events (laps, sectors, GPS, drag). Recorded data is saved on the
+        device &mdash; download it from the <b>Logs</b> tab.</p>
       <div class="row">
         <button type="button" id="monitor-toggle">Start</button>
         <span id="monitor-count" class="muted">0 rows</span>

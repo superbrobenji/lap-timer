@@ -174,6 +174,20 @@ static void stream_consumer(void *arg)
     }
 }
 
+/* Link keepalive: the lap-timer only streams (and thus logs) while it has seen a `cmd` within its
+ * ~3 s peer window. Send a lightweight `status` every LINK_HEARTBEAT_MS so the stream + black-box
+ * logging run continuously and autonomously, independent of the browser's status poll. */
+#define LINK_HEARTBEAT_MS 1500
+static void link_heartbeat(void *arg)
+{
+    (void)arg;
+    lt_status_t st;
+    for (;;) {
+        (void)linkhost_status(&st);          /* result ignored: this is a keepalive */
+        vTaskDelay(pdMS_TO_TICKS(LINK_HEARTBEAT_MS));
+    }
+}
+
 /* ESP-IDF calls app_main() as the framework entry point; it has no project header to declare it
  * in (-Wmissing-prototypes needs a prototype in scope at the definition). */
 void app_main(void);
@@ -201,6 +215,9 @@ void app_main(void)
 
     if (xTaskCreate(stream_consumer, "stream_consumer", 4096, NULL, 6, NULL) != pdPASS)
         ESP_LOGW(TAG, "stream_consumer task create failed");
+
+    if (xTaskCreate(link_heartbeat, "link_heartbeat", 4096, NULL, 4, NULL) != pdPASS)
+        ESP_LOGW(TAG, "link_heartbeat task create failed");
 
     ESP_LOGI(TAG, "dev controller ready");
 }
