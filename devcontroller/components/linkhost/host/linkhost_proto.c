@@ -10,6 +10,8 @@
 #include "linkhost_proto.h"
 
 #include <assert.h>
+#include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ================================================================================================
@@ -111,6 +113,43 @@ bool linkhost_status_decode(const uint8_t rec[LT_STATUS_LEN], lt_status_t *out)
     memcpy(out->fw, &rec[LT_ST_OFF_FW], 7);
     out->fw[7] = '\0';
     return true;
+}
+
+/* Decode one demuxed stream record (SES_T_FUSED / SES_T_EVENT) to a compact JSON object for the
+ * live monitor (SSE). Returns bytes written (>0, excluding the NUL) or -1 for an unknown/short
+ * record (caller skips it). Floats are emitted as scaled ints (avoids %f on target). Offsets MUST
+ * match components/core/include/core/types.h fused_sample_t and core/event.h event_t. */
+int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap)
+{
+    assert(r != NULL);
+    assert(out != NULL);
+    if (cap == 0) return -1;
+    const uint8_t *d = r->data;
+    if (r->type == 0x04 && r->len >= 37) {          /* SES_T_FUSED = fused_sample_t */
+        int64_t gps_us; float g_lon, g_lat, g_comb, lean, yaw;
+        memcpy(&gps_us, d + 8, 8);
+        memcpy(&g_lon, d + 16, 4); memcpy(&g_lat, d + 20, 4); memcpy(&g_comb, d + 24, 4);
+        memcpy(&lean, d + 28, 4); memcpy(&yaw, d + 32, 4);
+        int n = snprintf(out, cap,
+            "{\"t\":\"fused\",\"seq\":%u,\"gps_us\":%lld,\"lean_cdeg\":%ld,\"g_lon_mg\":%ld,"
+            "\"g_lat_mg\":%ld,\"g_mg\":%ld,\"yaw_cdps\":%ld,\"flags\":%u}",
+            (unsigned)r->seq, (long long)gps_us,
+            (long)lroundf(lean * 100.0f), (long)lroundf(g_lon * 1000.0f), (long)lroundf(g_lat * 1000.0f),
+            (long)lroundf(g_comb * 1000.0f), (long)lroundf(yaw * 100.0f), (unsigned)d[36]);
+        return (n > 0 && (size_t)n < cap) ? n : -1;
+    }
+    if (r->type == 0x09 && r->len >= 32) {          /* SES_T_EVENT = event_t */
+        uint16_t a16; uint32_t a32, a32b; int64_t gps_us;
+        memcpy(&a16, d + 2, 2); memcpy(&gps_us, d + 8, 8);
+        memcpy(&a32, d + 24, 4); memcpy(&a32b, d + 28, 4);
+        int n = snprintf(out, cap,
+            "{\"t\":\"event\",\"seq\":%u,\"code\":%u,\"flags\":%u,\"arg16\":%u,\"arg32\":%u,"
+            "\"arg32b\":%u,\"gps_us\":%lld}",
+            (unsigned)r->seq, (unsigned)d[0], (unsigned)d[1], (unsigned)a16,
+            (unsigned)a32, (unsigned)a32b, (long long)gps_us);
+        return (n > 0 && (size_t)n < cap) ? n : -1;
+    }
+    return -1;
 }
 
 /* ================================================================================================

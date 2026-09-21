@@ -702,14 +702,44 @@
   var monitorRowCount = 0;
   var MONITOR_MAX_ROWS = 200;
 
+  // EV_* names (components/core/include/core/event.h) for readable EVENT rows.
+  var EVENT_NAMES = {
+    1: "VENUE_FOUND", 2: "LAYOUT_LOCKED", 3: "ARMED", 4: "SECTOR", 5: "LAP_COMPLETE",
+    6: "FIX_LOST", 7: "FIX_OK", 8: "DRAG_ARMED", 9: "DRAG_LAUNCH", 10: "DRAG_GATE",
+    11: "DRAG_DONE", 12: "MOTION", 13: "STILL", 14: "CALIB_DONE", 15: "FAULT"
+  };
+
+  // Formats one decoded /api/stream record (see linkhost_stream_to_json) into a readable line.
+  // Falls back to the raw JSON for a shape this function does not recognize.
+  function formatStreamRecord(ts, parsed) {
+    if (parsed.t === "fused") {
+      var lean = (parsed.lean_cdeg / 100).toFixed(1);
+      var g = (parsed.g_mg / 1000).toFixed(2);
+      var yaw = (parsed.yaw_cdps / 100).toFixed(1);
+      return ts + "  FUSED  lean " + lean + "°  g " + g + "  yaw " + yaw + "°/s";
+    }
+    if (parsed.t === "event") {
+      var name = EVENT_NAMES[parsed.code];
+      var label = name ? "code=" + parsed.code + " (" + name + ")" : "code=" + parsed.code;
+      return ts + "  EVENT  " + label + "  arg16=" + parsed.arg16 + " arg32=" + parsed.arg32 +
+             " arg32b=" + parsed.arg32b;
+    }
+    return ts + "  " + JSON.stringify(parsed);
+  }
+
   function appendMonitorRow(rawData) {
     var pane = $("#monitor-pane");
+    var ts = new Date().toLocaleTimeString();
     var text;
     try {
       var parsed = JSON.parse(rawData);
-      text = new Date().toLocaleTimeString() + "  " + JSON.stringify(parsed);
+      if (parsed && typeof parsed.info === "string") {
+        text = ts + "  " + parsed.info;
+      } else {
+        text = formatStreamRecord(ts, parsed);
+      }
     } catch (e) {
-      text = new Date().toLocaleTimeString() + "  " + rawData;
+      text = ts + "  " + rawData;
     }
     pane.appendChild(el("div", { text: text }));
     monitorRowCount++;

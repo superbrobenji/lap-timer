@@ -23,11 +23,14 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mdns.h"
 #include "nvs_flash.h"
 
 #include "build_config.h"
 #include "linkhost.h"
+#include "linkhost_proto.h"
 #include "logstore.h"
 #include "webapi.h"
 
@@ -154,6 +157,23 @@ static void httpd_start_and_register(void)
         ESP_LOGI(TAG, "webapi handlers registered");
 }
 
+/* Drain the demuxed lap-timer stream: persist every record (black-box logging) and publish it to
+ * the live monitor. linkhost_stream_pop is the single consumer of the demux ring. */
+static void stream_consumer(void *arg)
+{
+    (void)arg;
+    lt_stream_rec_t r;
+    for (;;) {
+        int any = 0;
+        while (linkhost_stream_pop(&r) == 0) {   /* bounded: ring is finite, drains then returns */
+            (void)logstore_append(&r);
+            webapi_stream_push(&r);
+            any = 1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(any ? 5 : 40));
+    }
+}
+
 /* ESP-IDF calls app_main() as the framework entry point; it has no project header to declare it
  * in (-Wmissing-prototypes needs a prototype in scope at the definition). */
 void app_main(void);
@@ -178,6 +198,9 @@ void app_main(void)
         ESP_LOGW(TAG, "linkhost_init: %s", esp_err_to_name(ir));
 
     httpd_start_and_register();
+
+    if (xTaskCreate(stream_consumer, "stream_consumer", 4096, NULL, 6, NULL) != pdPASS)
+        ESP_LOGW(TAG, "stream_consumer task create failed");
 
     ESP_LOGI(TAG, "dev controller ready");
 }

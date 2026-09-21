@@ -103,6 +103,9 @@ void linkhost_reset(void);
 size_t linkhost_feed(const uint8_t *bytes, size_t n);
 /* Pops one demuxed stream record. 0 if one was returned, <0 if the ring is empty. */
 int linkhost_stream_pop(lt_stream_rec_t *out);
+/* Decode one stream record (SES_T_FUSED/EVENT) to a compact JSON object for the live monitor.
+ * Returns bytes written (>0) or -1 for an unknown/short record (skip it). Floats -> scaled ints. */
+int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap);
 /* Pops the most-recently-assembled framed response. Returns 1 and sets *status (0 or LINKHOST_E_*)
  * and *out (when status==0) if one was pending; 0 if none is pending. */
 int linkhost_pop_response(linkhost_frame_t *out, int *status);

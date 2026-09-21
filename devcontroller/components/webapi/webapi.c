@@ -28,12 +28,14 @@
 #include <unistd.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "config_diff.h"
 #include "linkhost.h"
+#include "linkhost_proto.h"
 #include "logstore.h"
 
 static const char *TAG = "webapi";
@@ -53,6 +55,20 @@ static char s_diff[ASSEMBLE_MAX + 1];
 #define ASYNC_Q_LEN 4
 typedef struct { httpd_req_t *req; } async_job_t;
 static QueueHandle_t s_async_q;
+
+/* ---- live-monitor broadcast: the consumer task pushes here; ONE SSE reader tracks a cursor. ---- */
+#define BC_CAP 64u                    /* power of two */
+static lt_stream_rec_t s_bc[BC_CAP];
+static volatile uint32_t s_bc_head;   /* total pushed; publish AFTER the store */
+static volatile bool s_sse_active;    /* one live monitor at a time */
+
+void webapi_stream_push(const lt_stream_rec_t *r)
+{
+    if (!r) return;
+    uint32_t h = s_bc_head;
+    s_bc[h & (BC_CAP - 1u)] = *r;
+    s_bc_head = h + 1u;
+}
 
 /* ---------- small helpers ---------- */
 
@@ -431,6 +447,71 @@ static void do_log_download(httpd_req_t *req)
     httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* ---------- live monitor: GET /api/stream (SSE) ---------- */
+
+/* SSE loop: stream new broadcast records as `data: {json}\n\n`, with a periodic heartbeat comment
+ * so a dead client is detected via send failure. Runs on its own task (not the shared download
+ * worker) so an open monitor never starves session/log downloads. */
+static void do_stream(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    if (httpd_resp_send_chunk(req, "retry: 3000\n\n", 13) != ESP_OK) return;
+    uint32_t cursor = s_bc_head;                 /* start at newest; skip any backlog */
+    int64_t last_beat = esp_timer_get_time();
+    char line[320];
+    for (;;) {                                   /* until the client disconnects (send fails) */
+        int sent = 0;
+        while (cursor != s_bc_head && sent < 32) {
+            if ((uint32_t)(s_bc_head - cursor) > BC_CAP) cursor = s_bc_head - BC_CAP;  /* overrun: skip */
+            lt_stream_rec_t rec = s_bc[cursor & (BC_CAP - 1u)];
+            cursor++;
+            int jn = linkhost_stream_to_json(&rec, line + 6, sizeof(line) - 12);
+            if (jn > 0) {
+                memcpy(line, "data: ", 6);
+                line[6 + jn] = '\n';
+                line[7 + jn] = '\n';
+                if (httpd_resp_send_chunk(req, line, (ssize_t)(8 + jn)) != ESP_OK) return;
+                sent++;
+            }
+        }
+        int64_t now = esp_timer_get_time();
+        if (now - last_beat > 12000000) {         /* 12s keepalive comment */
+            if (httpd_resp_send_chunk(req, ": beat\n\n", 8) != ESP_OK) return;
+            last_beat = now;
+        }
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+}
+
+static void sse_task(void *arg)
+{
+    httpd_req_t *req = (httpd_req_t *)arg;
+    do_stream(req);
+    httpd_req_async_handler_complete(req);
+    s_sse_active = false;
+    vTaskDelete(NULL);
+}
+
+/* GET /api/stream: one live monitor at a time; runs on a dedicated task. */
+static esp_err_t api_stream_begin(httpd_req_t *req)
+{
+    if (s_sse_active) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"error\":\"monitor already active\"}");
+    }
+    httpd_req_t *copy = NULL;
+    if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) return ESP_FAIL;
+    s_sse_active = true;
+    if (xTaskCreate(sse_task, "webapi_sse", 4096, copy, 5, NULL) != pdPASS) {
+        s_sse_active = false;
+        httpd_req_async_handler_complete(copy);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 /* ---------- async plumbing ---------- */
 
 static void async_worker(void *arg)
@@ -537,6 +618,7 @@ esp_err_t webapi_register(httpd_handle_t server)
         { .uri = "/api/session/*",  .method = HTTP_GET,  .handler = api_async_begin },
         { .uri = "/api/logs",       .method = HTTP_GET,  .handler = api_logs },
         { .uri = "/api/log/*",      .method = HTTP_GET,  .handler = api_async_begin },
+        { .uri = "/api/stream",     .method = HTTP_GET,  .handler = api_stream_begin },
         { .uri = "/*",              .method = HTTP_GET,  .handler = static_file },
     };
     for (size_t i = 0; i < sizeof uris / sizeof uris[0]; i++) {
