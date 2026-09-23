@@ -56,6 +56,7 @@
 #include "logstore.h"
 #include "logstore_rec.h"
 #include "multipart.h"
+#include "status_json.h"
 
 static const char *TAG = "webapi";
 
@@ -226,25 +227,20 @@ static esp_err_t api_status(httpd_req_t *req)
     }
 
     /* Status/stream ages + black-box logging health, straight off the same cache linkhost_status
-     * just read -- no extra UART1 traffic (Plan 5.6 T3). */
+     * just read -- no extra UART1 traffic (Plan 5.6 T3). linkhost_stats_snapshot is the locked
+     * door onto linkstats' shared state (fix 1); the age math and JSON formatting below run on
+     * this local copy, outside any lock. */
     int64_t now = esp_timer_get_time();
     linkstats_t ls;
-    linkstats_snapshot(&ls);
-    long long status_age = (long long)linkstats_age_ms(ls.last_status_us, now);
-    long long stream_age = (long long)linkstats_age_ms(ls.last_fused_us, now);
+    linkhost_stats_snapshot(&ls);
+    int64_t status_age = linkhost_stats_age_ms(ls.last_status_us, now);
+    int64_t stream_age = linkhost_stats_age_ms(ls.last_fused_us, now);
     bool logging = logstore_ready();
 
+    /* Pure formatter (test_status_json.c, fix 2): never sends a silently truncated body. */
     char body[352];
-    int n = snprintf(body, sizeof body,
-                     "{\"connected\":true,\"proto\":%u,\"state\":%u,\"flags\":%u,"
-                     "\"batt_pct\":%u,\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,"
-                     "\"fw\":\"%s\"%s,"
-                     "\"status_age_ms\":%lld,\"stream_age_ms\":%lld,\"logging\":%s}",
-                     (unsigned)st.proto, (unsigned)st.state, (unsigned)st.flags,
-                     (unsigned)st.batt_pct, (unsigned)st.batt_mv, (unsigned long)st.free_kb,
-                     (unsigned)st.sessions, st.fw, ferr,
-                     status_age, stream_age, logging ? "true" : "false");
-    if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
+    int n = status_json_format(body, sizeof body, &st, ferr, status_age, stream_age, logging);
+    if (n < 0) return ESP_FAIL;
     return send_json(req, NULL, body);
 }
 

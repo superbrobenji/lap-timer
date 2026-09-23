@@ -72,6 +72,9 @@ code {
 .status-bar--connected .status-dot { background: var(--ok); }
 .status-bar--disconnected .status-dot { background: var(--bad); }
 .status-bar--unknown .status-dot { background: var(--warn); }
+/* Connected but the 0xFF stream has gone quiet ("... · stream idle" in app.js): amber, same
+ * treatment as --unknown, overriding --connected's green (same specificity, declared after). */
+.status-bar--idle .status-dot { background: var(--warn); }
 
 .status-bar__details {
   display: flex;

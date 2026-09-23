@@ -56,6 +56,15 @@ static volatile bool     s_rx_parked;            /* true only while rx_task is i
                                                    * provably NOT inside uart_read_bytes (#65 handshake) */
 static bool              s_inited;
 
+/* Guards the linkstats module's global state (Plan 5.6 T3 fix 1): writer = stream_consumer
+ * (main.c, an unpinned FreeRTOS task) via linkhost_stats_on_record; readers = the httpd request
+ * task via linkhost_status/linkhost_peer_present (linkstats_status_fresh) and webapi's api_status
+ * via linkhost_stats_snapshot. On the dual-core ESP32 writer and readers can run concurrently on
+ * either core, so the struct copy in linkstats_snapshot (and its 20-byte status_rec memcpy) can
+ * tear without a lock. linkstats.c itself stays IDF-free/unlocked -- every access from the IDF
+ * glue layer goes through this spinlock instead. */
+static portMUX_TYPE s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* linkhost_cmd copies the framed body out of the parser's shared s_body into here, so a late
  * duplicate reply parsed by the RX task can't tear an httpd send that is still reading the body.
  * Touched only on the httpd request task (linkhost_cmd is single-flight via s_req_mtx). */
@@ -231,12 +240,17 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
 }
 
 /* Served from the pushed-STATUS cache (Plan 5.6 T3): the lap-timer streams LT_REC_STATUS at 1 Hz
- * (and on-edge) rather than answering a framed `status` round-trip, so this never touches UART1. */
+ * (and on-edge) rather than answering a framed `status` round-trip, so this never touches UART1.
+ * linkstats_status_fresh reads the shared cache -> under s_stats_mux (fix 1). */
 int linkhost_status(lt_status_t *out)
 {
     assert(out != NULL);
     if (!s_inited) return LINKHOST_E_NOTCONN;
-    return linkstats_status_fresh(esp_timer_get_time(), LINK_STATUS_STALE_MS, out) ? 0 : LINKHOST_E_NOTCONN;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_stats_mux);
+    bool fresh = linkstats_status_fresh(now, LINK_STATUS_STALE_MS, out);
+    portEXIT_CRITICAL(&s_stats_mux);
+    return fresh ? 0 : LINKHOST_E_NOTCONN;
 }
 
 int64_t linkhost_now_us(void)
@@ -244,10 +258,40 @@ int64_t linkhost_now_us(void)
     return esp_timer_get_time();
 }
 
+/* ---- linkstats: the only door onto the module's shared global state (fix 1). linkstats.c stays
+ * IDF-free/unlocked; every caller outside this file goes through these locked wrappers instead of
+ * linkstats_* directly. linkhost_stats_age_ms is the one exception that needs no lock: it is a
+ * pure function of its two int64 arguments (no shared state read), so it is exposed as a thin
+ * pass-through rather than duplicating its two-line formula at every caller. */
+void linkhost_stats_on_record(const lt_stream_rec_t *r)
+{
+    assert(r != NULL);
+    portENTER_CRITICAL(&s_stats_mux);
+    linkstats_on_record(r, linkhost_now_us());
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
+void linkhost_stats_snapshot(linkstats_t *out)
+{
+    assert(out != NULL);
+    portENTER_CRITICAL(&s_stats_mux);
+    linkstats_snapshot(out);
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
+int64_t linkhost_stats_age_ms(int64_t last_us, int64_t now_us)
+{
+    return linkstats_age_ms(last_us, now_us);
+}
+
 bool linkhost_peer_present(void)
 {
     lt_status_t st;
-    if (linkstats_status_fresh(esp_timer_get_time(), LINK_STATUS_STALE_MS, &st)) return true;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_stats_mux);
+    bool fresh = linkstats_status_fresh(now, LINK_STATUS_STALE_MS, &st);
+    portEXIT_CRITICAL(&s_stats_mux);
+    if (fresh) return true;
     int64_t last = s_last_activity_us;                 /* transitional fallback: any traffic < 3 s */
     return last != 0 && (esp_timer_get_time() - last) < LINK_PRESENT_US;
 }

@@ -22,7 +22,6 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
-#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,7 +31,6 @@
 #include "build_config.h"
 #include "linkhost.h"
 #include "linkhost_proto.h"
-#include "linkstats.h"
 #include "logstore.h"
 #include "webapi.h"
 
@@ -172,7 +170,7 @@ static void stream_consumer(void *arg)
     for (;;) {
         int any = 0;
         while (linkhost_stream_pop(&r) == 0) {   /* bounded: ring is finite, drains then returns */
-            linkstats_on_record(&r, esp_timer_get_time());   /* stamp the /api/status cache (T3) */
+            linkhost_stats_on_record(&r);   /* stamp the /api/status cache (T3), locked (fix 1) */
             if (logstore_append(&r) != 0 && !s_append_fail_logged) {
                 ESP_LOGW(TAG, "logstore_append failed; black-box logging may have stopped (see #68)");
                 s_append_fail_logged = true;

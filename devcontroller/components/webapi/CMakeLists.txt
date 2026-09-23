@@ -5,6 +5,7 @@
 #   config_diff.c  the config diff/minify logic (test_config_diff.c)
 #   multipart.c    the streaming multipart/form-data parser for POST /api/flash (test_multipart.c)
 #   image_desc.c   the app-image ver/hwid header parser (test_image_desc.c)
+#   status_json.c  the GET /api/status success-body formatter (test_status_json.c, Plan 5.6 T3 fix 2)
 # host/jsmn.c is a LOCAL vendored copy of jsmn (from components/core/util/jsmn.{c,h}) so the diff
 # parses JSON without `REQUIRES core` -- which would drag the whole lap-timer app/driver tree into
 # B. config_diff.c takes jsmn's declarations (JSMN_HEADER) and links jsmn.c's impl; both resolve
@@ -14,6 +15,7 @@
 # while hashing it with mbedtls' SHA-256.
 idf_component_register(
     SRCS "webapi.c" "host/config_diff.c" "host/jsmn.c" "host/multipart.c" "host/image_desc.c"
+         "host/status_json.c"
     INCLUDE_DIRS "include"
     REQUIRES esp_http_server linkhost logstore
     PRIV_REQUIRES esp_timer esp_partition mbedtls)

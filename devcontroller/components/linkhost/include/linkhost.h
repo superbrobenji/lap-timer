@@ -20,6 +20,7 @@
 #include "esp_err.h"
 
 #include "linkhost_proto.h"   /* pure logic: value types, error codes, parser/demux/status/flash decls */
+#include "linkstats.h"        /* linkstats_t + the pure counters/ages this header's wrappers lock around */
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +49,19 @@ int linkhost_status(lt_status_t *out);
 /* Monotonic clock (esp_timer_get_time()) through one door, so pure callers (e.g. the console) can
  * get a timestamp without depending on esp_timer.h directly. */
 int64_t linkhost_now_us(void);
+
+/* ---- linkstats: the ONLY door onto the module's shared global state (Plan 5.6 T3 fix 1).
+ * linkstats.c stays IDF-free/unlocked; callers outside linkhost.c must go through these locked
+ * wrappers rather than linkstats_on_record/linkstats_snapshot directly, or a dual-core race can
+ * tear the struct copy (linkstats_snapshot's 20-byte status_rec memcpy in particular). ---- */
+/* Folds one demuxed stream record into the stats, stamped with linkhost_now_us() inside the lock.
+ * Call from the stream-consumer task only (the sole writer). */
+void linkhost_stats_on_record(const lt_stream_rec_t *r);
+/* Copies the current stats out under the lock. */
+void linkhost_stats_snapshot(linkstats_t *out);
+/* Age of a last-seen timestamp in ms; -1 if last_us == 0. Pure (no shared state read) -- exposed
+ * unlocked so callers never need to import linkstats.h's function surface directly. */
+int64_t linkhost_stats_age_ms(int64_t last_us, int64_t now_us);
 
 /* ---- request/response + stream ---- */
 /* Sends "<cmd>\r", reads the framed response (base64-decoding + CRC-verifying binary bodies),
