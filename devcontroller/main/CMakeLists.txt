@@ -15,5 +15,4 @@ target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
 # Same strictness as the lap-timer's own components (spec §17.9 rule 6/10), pragmatic-P10-inspired
 # per Plan 5.5 Global Constraints (no blocking linter for B, but the same warning bar).
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations
-    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)

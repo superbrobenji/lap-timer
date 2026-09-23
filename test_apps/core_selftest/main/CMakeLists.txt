@@ -48,5 +48,4 @@ idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" ${WRAPPERS}
                        REQUIRES core unity_vendored pthread esp_timer)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-function -Wno-unused-parameter)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEST_DIR})

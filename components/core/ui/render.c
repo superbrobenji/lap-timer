@@ -184,7 +184,10 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
             uint8_t ink = 0;
             if (bitmap != NULL) {
                 uint8_t byte = bitmap[(size_t)row * (size_t)stride + (size_t)(col / 8)];
-                ink = (uint8_t)((byte >> (7 - (col % 8))) & 1u);
+                /* col >= 0 by construction: cx0 >= x (clip clamps up, not down), so
+                 * col = ix - x >= cx0 - x >= 0 for every ix in [cx0, cx1). Shift in the
+                 * unsigned domain so the result stays unsigned end to end (gcc -Wsign-conversion). */
+                ink = (uint8_t)(((unsigned int)byte >> (7 - (col % 8))) & 1u); /* p10 */
             }
             fb_set_px(fb, ix, iy, ink);
         }

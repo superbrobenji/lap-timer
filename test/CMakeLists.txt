@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # One strict flag set for core, tools and tests (spec §17.9, §21.4).
-set(LAPTIMER_STRICT_FLAGS -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+set(LAPTIMER_STRICT_FLAGS -Wall -Wextra -Werror -Wshadow -Wconversion)
 
 set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
 file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
@@ -20,8 +20,6 @@ add_library(core STATIC ${CORE_SRCS})
 # mirroring the ESP-IDF component's INCLUDE_DIRS (components/core/CMakeLists.txt).
 target_include_directories(core PUBLIC ${CORE_DIR}/include ${CORE_DIR}/ui/include)
 target_compile_options(core PRIVATE ${LAPTIMER_STRICT_FLAGS})
-# vendored third-party sources get relaxed warnings (file added in Task 8)
-set_source_files_properties(${CORE_DIR}/util/jsmn.c PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion;-Wno-unused-function")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   # -fno-sanitize-recover makes a UBSan finding abort the test run instead of printing and continuing,

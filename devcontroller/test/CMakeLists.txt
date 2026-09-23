@@ -14,8 +14,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-set(DC_STRICT -Wall -Wextra -Werror -Wshadow -Wconversion
-              -Wno-error=conversion -Wno-error=sign-conversion)
+set(DC_STRICT -Wall -Wextra -Werror -Wshadow -Wconversion)
 
 set(DC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/..)                 # devcontroller/
 set(APP_INC ${CMAKE_CURRENT_SOURCE_DIR}/../../components/app/include)  # app/lt_proto.h (IDF-free)
