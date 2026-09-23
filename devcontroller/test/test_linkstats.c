@@ -63,10 +63,8 @@ void test_status_fresh_exact_boundary(void) {
     TEST_ASSERT_TRUE(linkstats_status_fresh(1000000 + 3000 * 1000 - 1, 3000, &out));  /* 1 us short */
     TEST_ASSERT_FALSE(linkstats_status_fresh(1000000 + 3000 * 1000, 3000, &out));     /* exactly stale_ms */
 }
-/* Finding 3: a truncated STATUS record (len < LT_STATUS_LEN) still counts toward n_status/
- * last_status_us -- it IS a STATUS-typed record on the wire -- but is never copied into the
- * cache (status_valid stays false), so it can never be served as fresh (linkstats.h's doc comment
- * on linkstats_on_record already states the >= LT_STATUS_LEN cache condition this pins). */
+/* Pins truncated STATUS handling: counted (n_status/last_status_us), not cached (status_valid
+ * stays false, so it can never be served as fresh). */
 void test_truncated_status_record_not_cached(void) {
     lt_stream_rec_t st = rec(LT_REC_STATUS, 9, (uint8_t)(LT_STATUS_LEN - 1));   /* one byte short */
     linkstats_on_record(&st, 1000000);

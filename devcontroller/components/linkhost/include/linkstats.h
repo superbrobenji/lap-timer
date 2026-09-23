@@ -29,7 +29,8 @@ void    linkstats_reset(void);
 /* Folds one demuxed stream record into the running stats: per-type count + last-seen time,
  * cross-type seq-gap detection (any non-+1 step vs. the previous record of ANY type bumps
  * `gaps`), and (for LT_REC_STATUS, when the payload is at least LT_STATUS_LEN) the raw STATUS
- * cache. */
+ * cache. A STATUS-typed record shorter than LT_STATUS_LEN still increments n_status and stamps
+ * last_status_us, but is not copied into status_rec and leaves status_valid unchanged. */
 void    linkstats_on_record(const lt_stream_rec_t *r, int64_t now_us);
 /* Copies the current stats out. */
 void    linkstats_snapshot(linkstats_t *out);
