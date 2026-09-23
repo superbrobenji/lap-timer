@@ -147,6 +147,33 @@ static void test_err_line_becomes_remote_response(void)
     TEST_ASSERT_EQUAL_INT(0, linkhost_pop_response(&f, &st));   /* consumed */
 }
 
+/* A raw LT_REC_STATUS (0x40) frame -- the lap-timer's 1 Hz STATUS push (Plan 5.6 Task 1) -- must
+ * demux like any other known type: len=LT_STATUS_REC_LEN(21) -> a popped record with
+ * type==LT_REC_STATUS and len==LT_STATUS_LEN(20) after the type byte is stripped. */
+static void test_status_record_demuxes(void)
+{
+    uint8_t s[32];
+    size_t L = 0;
+    const uint8_t hdr[] = { 0xFF, 0x05, 0x00, 0x00, LT_STATUS_REC_LEN, LT_REC_STATUS };
+    app(s, &L, hdr, sizeof hdr);
+    uint8_t body[LT_STATUS_LEN];
+    memset(body, 0, sizeof body);
+    body[LT_ST_OFF_PROTO] = 1;
+    body[LT_ST_OFF_SESS]  = 7;
+    app(s, &L, body, sizeof body);
+
+    TEST_ASSERT_EQUAL_UINT(L, linkhost_feed(s, L));
+
+    lt_stream_rec_t r;
+    TEST_ASSERT_EQUAL_INT(0, linkhost_stream_pop(&r));
+    TEST_ASSERT_EQUAL_UINT16(5, r.seq);
+    TEST_ASSERT_EQUAL_UINT8(LT_REC_STATUS, r.type);
+    TEST_ASSERT_EQUAL_UINT8(LT_STATUS_LEN, r.len);
+    TEST_ASSERT_EQUAL_UINT8(1, r.data[LT_ST_OFF_PROTO]);
+    TEST_ASSERT_EQUAL_UINT8(7, r.data[LT_ST_OFF_SESS]);
+    TEST_ASSERT_EQUAL_INT(-1, linkhost_stream_pop(&r));   /* ring now empty */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -154,5 +181,6 @@ int main(void)
     RUN_TEST(test_mixed_stream_split_feed);
     RUN_TEST(test_resync_on_stream_tag_from_noise);
     RUN_TEST(test_err_line_becomes_remote_response);
+    RUN_TEST(test_status_record_demuxes);
     return UNITY_END();
 }

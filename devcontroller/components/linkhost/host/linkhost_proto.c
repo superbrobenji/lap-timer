@@ -153,6 +153,17 @@ int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap)
             (unsigned)a32, (unsigned)a32b, (long long)gps_us);
         return (n > 0 && (size_t)n < cap) ? n : -1;
     }
+    if (r->type == LT_REC_STATUS && r->len >= LT_STATUS_LEN) {
+        lt_status_t st;
+        if (!linkhost_status_decode(r->data, &st)) return -1;
+        int n = snprintf(out, cap,
+            "{\"t\":\"status\",\"seq\":%u,\"proto\":%u,\"state\":%u,\"flags\":%u,\"batt_pct\":%u,"
+            "\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,\"fw\":\"%s\"}",
+            (unsigned)r->seq, (unsigned)st.proto, (unsigned)st.state, (unsigned)st.flags,
+            (unsigned)st.batt_pct, (unsigned)st.batt_mv, (unsigned long)st.free_kb,
+            (unsigned)st.sessions, st.fw);
+        return (n > 0 && (size_t)n < cap) ? n : -1;
+    }
     return -1;
 }
 
@@ -605,11 +616,12 @@ void linkhost_reset(void)
     s_dx.state = DX_SCAN;
 }
 
-/* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END). Unknown
- * types are still consumed length-first, then dropped -- the demux stays synced regardless. */
+/* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END), plus the
+ * out-of-band LT_REC_STATUS (0x40) push (Plan 5.6 Task 1). Unknown types are still consumed
+ * length-first, then dropped -- the demux stays synced regardless. */
 static bool stream_type_known(uint8_t t)
 {
-    return (t >= 0x01 && t <= 0x0E) || t == 0x7F;
+    return (t >= 0x01 && t <= 0x0E) || t == 0x7F || t == LT_REC_STATUS;
 }
 
 static void ring_push(const lt_stream_rec_t *r)
