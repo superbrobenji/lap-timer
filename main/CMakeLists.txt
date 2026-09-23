@@ -23,6 +23,4 @@ target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
 
 # §17.9 rule 6/10: hold app_main to the same pedantic warnings as the components (measured 4.5.6).
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations
-    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion
-   )
+    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)

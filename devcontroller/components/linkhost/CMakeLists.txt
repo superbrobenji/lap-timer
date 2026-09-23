@@ -14,5 +14,4 @@ target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
 # Pragmatic-P10-inspired (Plan 5.5 Global Constraints): same warning bar as the lap-timer's own
 # components, no blocking linter for B.
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations
-    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)

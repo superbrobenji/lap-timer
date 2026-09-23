@@ -24,5 +24,4 @@ idf_component_register(
     PRIV_REQUIRES joltwallet__littlefs esp_timer linkhost)
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations
-    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
+    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)

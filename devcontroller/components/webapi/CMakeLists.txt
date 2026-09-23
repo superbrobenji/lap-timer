@@ -19,10 +19,4 @@ idf_component_register(
     PRIV_REQUIRES esp_timer esp_partition mbedtls)
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations
-    -Wno-error=conversion -Wno-error=sign-conversion -Wno-error=float-conversion)
-
-# Vendored third-party jsmn: single-header parser with known (downgraded) signedness conversions;
-# keep the build output clean.
-set_source_files_properties(host/jsmn.c PROPERTIES
-    COMPILE_OPTIONS "-Wno-conversion;-Wno-sign-conversion")
+    -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)
