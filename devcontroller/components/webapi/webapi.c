@@ -597,7 +597,12 @@ static void do_log_download(httpd_req_t *req)
 
         /* Skip the file's own logstore_file_hdr_t (magic + created_unix) -- only the raw ?fmt=bin
          * path includes it verbatim; the record parser must not see it as a fake first record. */
-        (void)lseek(fd, LOGSTORE_REC_AREA_OFFSET, SEEK_SET);
+        if (lseek(fd, LOGSTORE_REC_AREA_OFFSET, SEEK_SET) < 0) {
+            ESP_LOGW(TAG, "log %s jsonl: lseek: %s", id, strerror(errno));
+            close(fd);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "seek failed");
+            return;
+        }
         stream_log_jsonl(req, fd, id);
     }
     close(fd);

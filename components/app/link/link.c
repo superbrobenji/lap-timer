@@ -65,6 +65,8 @@
 _Static_assert((LINK_STREAM_CAP & (LINK_STREAM_CAP - 1u)) == 0u, "LINK_STREAM_CAP must be a power of two");
 _Static_assert(5 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame (5-byte header + payload) must fit one §18.1 data chunk");
 _Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must mirror app/lt_proto.h's LT_STREAM_TAG");
+_Static_assert((int)SES_T_FUSED == (int)LT_SES_T_FUSED, "SES_T_FUSED must mirror app/lt_proto.h's LT_SES_T_FUSED");
+_Static_assert((int)SES_T_EVENT == (int)LT_SES_T_EVENT, "SES_T_EVENT must mirror app/lt_proto.h's LT_SES_T_EVENT");
 
 /* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
  * SES_T_FUSED -> 1 + sizeof(fused_sample_t), SES_T_EVENT -> 1 + sizeof(event_t). If either struct

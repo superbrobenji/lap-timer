@@ -44,7 +44,7 @@ static const char *TAG = "linkhost";
 #define RX_PARK_TMO_MS     200                   /* bounded wait for rx_task to park before flush (#65) */
 #define RX_PARK_POLL_MS    5
 #define RX_DRAIN_TMO_MS    10                    /* per-iteration read timeout while draining to quiet */
-#define RX_DRAIN_CAP       10                    /* bounded drain iterations (~150 ms worst case) */
+#define RX_DRAIN_CAP       10                    /* bounded drain iterations (~100 ms worst case) */
 
 static SemaphoreHandle_t s_req_mtx;              /* one request in flight (§18.1) */
 static TaskHandle_t      s_rx_task;
