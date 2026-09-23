@@ -516,7 +516,13 @@ static void logger_task(void *arg)
 {
     (void)arg;
     sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
-    s_last_evict_ms = s_last_status_ms = now_ms();
+    /* Plan 5.6 T1 fix 2: prime the status.h cache HERE (logger task, storage already mounted by
+     * boot_storage() before boot_subsystems()'s logger_start(), app_main.c) so a STATUS built
+     * before the first 5 s cadence tick -- or before any session ever opens -- reports the real
+     * free_kb/sessions, not a cold 0/0. Crammed onto the init line (matches this function's own
+     * evict_if_due/status_cache_refresh_if_due call below) to stay within the P10 rule-5 line
+     * budget for a task entry, which must never itself LT_ASSERT_*-return (see sup_task's note). */
+    s_last_evict_ms = s_last_status_ms = now_ms(); status_cache_update(storage_free_kb(), session_count());
     ESP_LOGI(TAG, "logger up (core %d prio %d)", LOG_CORE, LOG_PRIO);
 
     for (;;) {

@@ -17,6 +17,11 @@
 
 #define STATUS_ASSERT_CODE 0x0BA0   /* Power of 10 rule 5 (app/lt_assert.h); status.c's own code */
 
+/* Relaxed, not the default seq_cst (which costs an extra `memw` fence on xtensa per access):
+ * each word is independent (no ordering relation between s_free_kb/s_sessions or to anything
+ * else the reader/writer touch), the writer is always the logger task (status_cache_update()),
+ * and a reader on any task just wants the latest whole u32/u16 -- a plain relaxed load/store on
+ * a single word can never tear and needs no fence to be correct here. */
 static _Atomic uint32_t s_free_kb;
 static _Atomic uint16_t s_sessions;
 
@@ -47,8 +52,8 @@ static void fw_short(char *dst, size_t cap)
 
 void status_cache_update(uint32_t free_kb, uint16_t sessions)
 {
-    atomic_store(&s_free_kb, free_kb);
-    atomic_store(&s_sessions, sessions);
+    atomic_store_explicit(&s_free_kb, free_kb, memory_order_relaxed);
+    atomic_store_explicit(&s_sessions, sessions, memory_order_relaxed);
 }
 
 /* Builds the §18.2 STATUS record. Shared by the framed `status` reply (cmd.c's op_status) and
@@ -63,7 +68,7 @@ void status_build(uint8_t out[LT_STATUS_LEN])
     put_u16le(&out[LT_ST_OFF_FLAGS], (uint16_t)(sys_flags_get() & 0xFFFFu));
     out[LT_ST_OFF_BATT_PCT] = 0;                           /* power lands in Plan 6 */
     put_u16le(&out[LT_ST_OFF_BATT_MV], 0);
-    put_u32le(&out[LT_ST_OFF_FREE_KB], atomic_load(&s_free_kb));
-    put_u16le(&out[LT_ST_OFF_SESS], atomic_load(&s_sessions));
+    put_u32le(&out[LT_ST_OFF_FREE_KB], atomic_load_explicit(&s_free_kb, memory_order_relaxed));
+    put_u16le(&out[LT_ST_OFF_SESS], atomic_load_explicit(&s_sessions, memory_order_relaxed));
     fw_short((char *)&out[LT_ST_OFF_FW], 7);
 }
