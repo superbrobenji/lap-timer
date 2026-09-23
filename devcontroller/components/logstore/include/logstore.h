@@ -9,6 +9,7 @@
 #ifndef LOGSTORE_H
 #define LOGSTORE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -41,6 +42,11 @@ int logstore_append(const lt_stream_rec_t *rec);
 
 /* Fills out[] with up to `max` log entries (newest first), returns the count written. */
 int logstore_list(logstore_entry_t *out, int max);
+
+/* True once logstore_init has opened a current file and logstore_append is accepting records;
+ * false before init, or once an append failure has wedged it (Plan 5.6 T3, /api/status "logging").
+ * Safe to call from any task -- s_ready is read cross-task from the stream_consumer writer. */
+bool logstore_ready(void);
 
 /* Opens a previously-rotated (or current) log file for reading by id; *out is a read handle
  * usable with the standard read()/close() calls. Returns 0 on success, <0 on error. */

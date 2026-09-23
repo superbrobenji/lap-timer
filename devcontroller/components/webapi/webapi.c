@@ -8,10 +8,12 @@
  * the cmd-OTA flash push each get a dedicated one-shot task for the same reason.
  *
  * Endpoints (binding contract = devcontroller/web/app.js):
- *   GET  /api/status              linkhost_status -> {connected,proto,state,flags,batt_pct,
- *                                 batt_mv,free_kb,sessions,fw}; 503 {"connected":false} if down.
- *                                 While a flash push runs: {connected,flashing,flash_pct}; after a
- *                                 failed push the normal body also carries "flash_err".
+ *   GET  /api/status              linkhost_status (served from the pushed-STATUS cache -- never
+ *                                 touches UART1) -> {connected,proto,state,flags,batt_pct,
+ *                                 batt_mv,free_kb,sessions,fw,status_age_ms,stream_age_ms,logging};
+ *                                 503 {"connected":false} if down. While a flash push runs:
+ *                                 {connected,flashing,flash_pct}; after a failed push the normal
+ *                                 body also carries "flash_err".
  *   GET  /api/config              relay `config get` JSON.
  *   POST /api/config              diff vs a fresh `config get`, push changed keys as one-or-more
  *                                 `config set <obj>` lines; 413 if one change exceeds the cap.
@@ -50,6 +52,7 @@
 #include "image_desc.h"
 #include "linkhost.h"
 #include "linkhost_proto.h"
+#include "linkstats.h"
 #include "logstore.h"
 #include "logstore_rec.h"
 #include "multipart.h"
@@ -222,14 +225,25 @@ static esp_err_t api_status(httpd_req_t *req)
         else         snprintf(ferr, sizeof ferr, ",\"flash_err\":\"link %d\"", frc);
     }
 
-    char body[288];
+    /* Status/stream ages + black-box logging health, straight off the same cache linkhost_status
+     * just read -- no extra UART1 traffic (Plan 5.6 T3). */
+    int64_t now = esp_timer_get_time();
+    linkstats_t ls;
+    linkstats_snapshot(&ls);
+    long long status_age = (long long)linkstats_age_ms(ls.last_status_us, now);
+    long long stream_age = (long long)linkstats_age_ms(ls.last_fused_us, now);
+    bool logging = logstore_ready();
+
+    char body[352];
     int n = snprintf(body, sizeof body,
                      "{\"connected\":true,\"proto\":%u,\"state\":%u,\"flags\":%u,"
                      "\"batt_pct\":%u,\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,"
-                     "\"fw\":\"%s\"%s}",
+                     "\"fw\":\"%s\"%s,"
+                     "\"status_age_ms\":%lld,\"stream_age_ms\":%lld,\"logging\":%s}",
                      (unsigned)st.proto, (unsigned)st.state, (unsigned)st.flags,
                      (unsigned)st.batt_pct, (unsigned)st.batt_mv, (unsigned long)st.free_kb,
-                     (unsigned)st.sessions, st.fw, ferr);
+                     (unsigned)st.sessions, st.fw, ferr,
+                     status_age, stream_age, logging ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
     return send_json(req, NULL, body);
 }

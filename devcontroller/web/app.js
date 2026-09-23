@@ -141,7 +141,9 @@
 
       var d = res.data;
       var connected = !!d.connected;
-      bar.className = "status-bar status-bar--" + (connected ? "connected" : "disconnected");
+      var idle = connected && typeof d.stream_age_ms === "number" && d.stream_age_ms > 3000;
+      bar.className = "status-bar status-bar--" + (connected ? "connected" : "disconnected") +
+        (idle ? " status-bar--idle" : "");
       dotText.textContent = connected ? "Lap-timer connected" : "Lap-timer not connected";
 
       var parts = [];
@@ -154,7 +156,11 @@
       }
       if (d.free_kb !== undefined) parts.push("free " + fmtKb(d.free_kb));
       if (d.sessions !== undefined) parts.push(d.sessions + " sessions");
-      details.textContent = parts.join("  ·  ");
+
+      var suffix = "";
+      if (idle) suffix += " · stream idle";
+      if (d.logging === false) suffix += " · logging stopped (storage)";
+      details.textContent = parts.join("  ·  ") + suffix;
     });
   }
 

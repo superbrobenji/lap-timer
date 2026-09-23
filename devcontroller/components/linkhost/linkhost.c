@@ -19,6 +19,7 @@
 #include "esp_partition.h"
 
 #include "build_config.h"
+#include "linkstats.h"
 
 static const char *TAG = "linkhost";
 
@@ -35,6 +36,7 @@ static const char *TAG = "linkhost";
 #define LINK_ABSENT_TMO_MS  500                  /* one short attempt when no peer heartbeat is seen */
 #define LINK_REQ_MTX_MS     400                  /* bounded s_req_mtx take: never park the httpd task */
 #define LINK_PRESENT_US    (3 * 1000 * 1000)     /* peer_present window (<3 s, §Task 3 Step 7) */
+#define LINK_STATUS_STALE_MS 3000                /* §4.2: a STATUS older than this = not connected */
 #define OTA_READY_TMO_MS   3000
 #define OTA_DONE_TMO_MS    10000                 /* lap-timer aborts after ~9 s without bytes */
 #define OTA_CHUNK          512
@@ -228,23 +230,26 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
     return result;
 }
 
+/* Served from the pushed-STATUS cache (Plan 5.6 T3): the lap-timer streams LT_REC_STATUS at 1 Hz
+ * (and on-edge) rather than answering a framed `status` round-trip, so this never touches UART1. */
 int linkhost_status(lt_status_t *out)
 {
     assert(out != NULL);
-    linkhost_frame_t f;
-    int rc = linkhost_cmd(LT_CMD_STATUS, &f);
-    if (rc != 0) return rc;
-    if (f.body_len != LT_STATUS_LEN) return LINKHOST_E_PROTO;
-    if (!linkhost_status_decode(f.body, out)) return LINKHOST_E_PROTO;
-    return 0;
+    if (!s_inited) return LINKHOST_E_NOTCONN;
+    return linkstats_status_fresh(esp_timer_get_time(), LINK_STATUS_STALE_MS, out) ? 0 : LINKHOST_E_NOTCONN;
+}
+
+int64_t linkhost_now_us(void)
+{
+    return esp_timer_get_time();
 }
 
 bool linkhost_peer_present(void)
 {
-    if (!s_inited) return false;
-    int64_t last = s_last_activity_us;
-    if (last == 0) return false;
-    return (esp_timer_get_time() - last) < LINK_PRESENT_US;
+    lt_status_t st;
+    if (linkstats_status_fresh(esp_timer_get_time(), LINK_STATUS_STALE_MS, &st)) return true;
+    int64_t last = s_last_activity_us;                 /* transitional fallback: any traffic < 3 s */
+    return last != 0 && (esp_timer_get_time() - last) < LINK_PRESENT_US;
 }
 
 /* ---- streaming session download ---- */

@@ -40,8 +40,14 @@ typedef struct {
 esp_err_t linkhost_init(void);
 
 /* ---- status ---- */
-/* Runs `status`, reads the framed base64 record, decodes it. 0 on success, LINKHOST_E_* < 0. */
+/* Reads the STATUS cache the RX demux stamps from the lap-timer's autonomous 0xFF stream
+ * (Plan 5.6 T3): NEVER touches UART1. 0 with *out decoded when the cached STATUS is fresh
+ * (< LINK_STATUS_STALE_MS old), else LINKHOST_E_NOTCONN. */
 int linkhost_status(lt_status_t *out);
+
+/* Monotonic clock (esp_timer_get_time()) through one door, so pure callers (e.g. the console) can
+ * get a timestamp without depending on esp_timer.h directly. */
+int64_t linkhost_now_us(void);
 
 /* ---- request/response + stream ---- */
 /* Sends "<cmd>\r", reads the framed response (base64-decoding + CRC-verifying binary bodies),
