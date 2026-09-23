@@ -18,6 +18,7 @@
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"              /* OTA receive-side state machine (CMD_OTA_*, §19.4) */
+#include "app/status.h"           /* status_build() -- storage-free (Plan 5.6 T1 fix 1) */
 
 #include "core/cfg.h"
 #include "core/exp.h"              /* streaming exporter (vbo/nmea/json) */
@@ -106,43 +107,6 @@ static int emit_error(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq,
     return emit(ctx, tag, (*seq)++, CMD_FLAG_ERROR | CMD_FLAG_LAST, buf, 2 + mlen);
 }
 
-/* ------------------------------------------------------------------ *
- *  shared getters
- * ------------------------------------------------------------------ */
-static uint32_t storage_free_kb(void)
-{
-    sto_info_t si;
-    return (sto_info(&si) == 0) ? si.free_kb : 0;
-}
-
-/* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
-static uint16_t session_count(void)
-{
-    int c = 0;
-    sto_iter_t it;
-    if (sto_list_open(&it, "/sessions") == 0) {
-        sto_entry_t e;
-        while (sto_list_next(&it, &e) == 1) {
-            const char *dot = strrchr(e.name, '.');
-            if (dot && strcmp(dot, ".sum") == 0) c++;
-        }
-        sto_list_close(&it);
-    }
-    return (c > 0xFFFF) ? 0xFFFF : (uint16_t)c;
-}
-
-/* fw char[7]: the git version trimmed of a leading 'v', truncated to fit 7 bytes incl. NUL. */
-static void fw_short(char *dst, size_t cap)
-{
-    LT_ASSERT_VOID(dst != NULL, CMD_ASSERT_CODE);
-    LT_ASSERT_VOID(cap > 0, CMD_ASSERT_CODE);   /* dst[i] = '\0' below would write out of bounds at cap == 0 */
-    const char *v = CFG_FW_VERSION;
-    if (*v == 'v' || *v == 'V') v++;
-    size_t i = 0;
-    for (; i + 1 < cap && v[i]; i++) dst[i] = v[i];
-    dst[i] = '\0';
-}
-
 /* Load the current config into s_cfg: defaults, then overwrite with the stored blob if valid. */
 static void load_cfg(void)
 {
@@ -154,23 +118,9 @@ static void load_cfg(void)
  *  ops
  * ------------------------------------------------------------------ */
 
-/* Builds the §18.2 STATUS record. Shared by the framed `status` reply (op_status) and the
- * 1 Hz stream push (link.c, Plan 5.6) so the two can never drift. */
-void status_build(uint8_t out[LT_STATUS_LEN])
-{
-    LT_ASSERT_VOID(out != NULL, CMD_ASSERT_CODE);
-    memset(out, 0, LT_STATUS_LEN);
-    out[LT_ST_OFF_PROTO] = 1;
-    out[LT_ST_OFF_STATE] = 0;                              /* device state machine lands later */
-    put_u16le(&out[LT_ST_OFF_FLAGS], (uint16_t)(sys_flags_get() & 0xFFFFu));
-    out[LT_ST_OFF_BATT_PCT] = 0;                           /* power lands in Plan 6 */
-    put_u16le(&out[LT_ST_OFF_BATT_MV], 0);
-    put_u32le(&out[LT_ST_OFF_FREE_KB], storage_free_kb());
-    put_u16le(&out[LT_ST_OFF_SESS], session_count());
-    fw_short((char *)&out[LT_ST_OFF_FW], 7);
-}
-
-/* STATUS (0x01) -> the 20-byte §18.2 status record (little-endian). */
+/* STATUS (0x01) -> the 20-byte §18.2 status record (little-endian). status_build() (app/status.h,
+ * Plan 5.6 T1 fix 1) is storage-free and shared with the pipeline's 1 Hz stream push, so the two
+ * can never drift. */
 static int op_status(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
     LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
@@ -248,6 +198,12 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
     const lt_counters_t *c = lt_counters();
     uint32_t up      = (uint32_t)(esp_timer_get_time() / 1000000);
     uint32_t heapmin = (uint32_t)esp_get_minimum_free_heap_size();
+    /* Live storage query, not the status.h cache: DIAG_GET runs on the console/cmd task, which
+     * hal/storage.h's contract allows for read-only queries (the same task LIST/OPEN/READ already
+     * call sto_* from below), so a fresh sto_info() here is not the pipeline-task violation the
+     * status_build() cache exists to avoid (Plan 5.6 T1 fix 1). */
+    sto_info_t si;
+    uint32_t free_kb = (sto_info(&si) == 0) ? si.free_kb : 0;
     int n = lt_errlog_count();
     int last = (n > 5) ? 5 : n;                            /* last (newest) 5 codes */
 
@@ -258,7 +214,7 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
         CFG_FW_VERSION, CFG_HWID, (unsigned)up,
         (unsigned)c->boots, (unsigned)c->crashes, (unsigned)c->wdt,
         (unsigned)c->gps_reset, (unsigned)c->i2c_recover,
-        (unsigned)storage_free_kb(), (unsigned)heapmin, (unsigned)sys_flags_get());
+        (unsigned)free_kb, (unsigned)heapmin, (unsigned)sys_flags_get());
     for (int i = 0; i < last && w > 0 && (size_t)w < sizeof s_json; i++) {
         lt_err_entry_t e;
         if (lt_errlog_at(n - last + i, &e) != 0) break;    /* ring shrank under a concurrent add */

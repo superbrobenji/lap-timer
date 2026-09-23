@@ -61,14 +61,17 @@
 #define LINK_DRAIN_BURST  32                 /* rule 2: max records drained per wake (> ring cap) */
 #define LINK_PEER_TIMEOUT_MS 3000u           /* mark the peer absent this long after the last heartbeat */
 #define LINK_STREAM_CAP   16u                 /* ring depth (power of two); ~1.6 s of buffer at 10 Hz */
-#define LINK_STATUS_PERIOD_MS 1000            /* §4.1 (Plan 5.6): STATUS push cadence while a peer is present */
 
 _Static_assert((LINK_STREAM_CAP & (LINK_STREAM_CAP - 1u)) == 0u, "LINK_STREAM_CAP must be a power of two");
 _Static_assert(5 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame (5-byte header + payload) must fit one §18.1 data chunk");
 _Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must mirror app/lt_proto.h's LT_STREAM_TAG");
 _Static_assert((int)SES_T_FUSED == (int)LT_SES_T_FUSED, "SES_T_FUSED must mirror app/lt_proto.h's LT_SES_T_FUSED");
 _Static_assert((int)SES_T_EVENT == (int)LT_SES_T_EVENT, "SES_T_EVENT must mirror app/lt_proto.h's LT_SES_T_EVENT");
-_Static_assert(1 + LT_STATUS_REC_LEN - 1 <= LINK_REC_MAX, "STATUS stream record must fit LINK_REC_MAX");
+/* LT_REC_STATUS (app/lt_proto.h): the STATUS record the PIPELINE task pushes at ~1 Hz (Plan 5.6
+ * §4.1, T1 fix 1 -- link_task must never call stream_push: g_stream_ring is SPSC and the pipeline
+ * task is its one documented producer, see stream_push()'s doc comment in app/link.h). Checked
+ * here anyway since this is where every other stream-record wire-contract assert already lives. */
+_Static_assert((int)LT_STATUS_REC_LEN <= (int)LINK_REC_MAX, "STATUS stream record must fit LINK_REC_MAX");
 _Static_assert((int)LT_REC_STATUS != (int)SES_T_FUSED && (int)LT_REC_STATUS != (int)SES_T_EVENT && (int)LT_REC_STATUS != (int)SES_T_END, "LT_REC_STATUS must not collide with a streamed/terminal SES_T_*");
 
 /* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
@@ -118,8 +121,6 @@ static _Atomic bool s_detect_asserted;            /* GPIO detect line state: wri
                                                     * (core 1) -- must be atomic (I3). */
 static _Atomic uint32_t s_last_cmd_ms;            /* last cmd heartbeat (link_now_ms units) */
 static _Atomic bool     s_cmd_seen;               /* a cmd request has arrived at least once */
-static uint32_t         s_last_status_ms;         /* link_task-only: last STATUS push (link_now_ms units) */
-static bool             s_prev_present;           /* link_task-only: presence last wake, for the on-edge push */
 
 /* --- weak sink defaults (a compiled-in transport overrides the strong symbol at link time) --- */
 __attribute__((weak)) int  link_sink_serial_emit(const uint8_t *frame, size_t len) { (void)frame; (void)len; return 0; }
@@ -199,23 +200,6 @@ static void link_deliver(const link_rec_t *r)
     /* A THIRD peer transport would fan out with one more `if (...present) sink_emit(...)` line. */
 }
 
-/* Plan 5.6 §4.1: push a STATUS record every LINK_STATUS_PERIOD_MS while a peer is present, and
- * immediately on the absent->present edge so a freshly plugged dev-kit gets status at once. */
-static void link_push_status_if_due(void)
-{
-    bool present = link_peer_present();
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    bool edge = present && !s_prev_present;
-    s_prev_present = present;
-    if (!present) return;
-    if (!edge && (uint32_t)(now_ms - s_last_status_ms) < LINK_STATUS_PERIOD_MS) return;
-    s_last_status_ms = now_ms;
-    uint8_t rec[LT_STATUS_REC_LEN];
-    rec[0] = LT_REC_STATUS;
-    status_build(&rec[1]);
-    stream_push(rec, sizeof rec);                          /* drop-on-full / M1-held: next tick resends */
-}
-
 static void link_task(void *arg)
 {
     (void)arg;
@@ -224,7 +208,6 @@ static void link_task(void *arg)
     for (;;) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LINK_POLL_MS));      /* wake on push, else poll cadence */
         link_poll_detect();
-        link_push_status_if_due();
         link_rec_t r;
         int n = 0;
         while (n < LINK_DRAIN_BURST && ring_pop(&g_stream_ring, &r)) {    /* rule 2: bounded burst */

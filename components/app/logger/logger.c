@@ -21,6 +21,7 @@
 #include "app/lt_sup.h"
 #include "app/lt_nvs.h"
 #include "app/lt_err.h"
+#include "app/status.h"      /* status_cache_update() -- logger.c owns storage, feeds the cache (Plan 5.6 T1 fix 1) */
 #include "hal/storage.h"
 
 #include "core/event.h"
@@ -60,6 +61,7 @@ static const char *TAG = "log";
 #define WRITE_INTERVAL_MS 1000
 #define SYNC_INTERVAL_MS  2000
 #define EVICT_INTERVAL_MS 60000
+#define STATUS_REFRESH_MS 5000         /* Plan 5.6 T1 fix 1: status.h cache refresh cadence */
 #define LOOP_TIMEOUT_MS   1000
 #define FRAME_TMP_CAP    256           /* >= max framed record (247 payload + 5) */
 
@@ -93,10 +95,37 @@ static uint8_t s_drag_acc[DRAG_ACC_CAP]; static size_t s_drag_len;
 static bool    s_sum_dirty;
 
 /* timing + state */
-static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms;
+static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms, s_last_status_ms;
 static bool     s_samples_full;        /* SYS_STORAGE_FULL: sample logging paused, summaries continue */
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+/* storage_free_kb/session_count (Plan 5.6 T1 fix 1, moved verbatim from cmd.c's op_status):
+ * hal/storage.h's own contract is "called from one task only (logger, plus cmd for read-only
+ * listing/export)" -- this task IS that owner, so these two live here now and feed the
+ * status.h cache (status_cache_update, called below) instead of running on whichever task
+ * calls status_build(). */
+static uint32_t storage_free_kb(void)
+{
+    sto_info_t si;
+    return (sto_info(&si) == 0) ? si.free_kb : 0;
+}
+
+/* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
+static uint16_t session_count(void)
+{
+    int c = 0;
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") == 0) {
+        sto_entry_t e;
+        while (sto_list_next(&it, &e) == 1) {
+            const char *dot = strrchr(e.name, '.');
+            if (dot && strcmp(dot, ".sum") == 0) c++;
+        }
+        sto_list_close(&it);
+    }
+    return (c > 0xFFFF) ? 0xFFFF : (uint16_t)c;
+}
 
 /* Bounded copy into a fixed on-wire header field (§12): copies at most cap-1 bytes and always
  * NUL-terminates. Truncation of an over-long value (e.g. a git-describe dev version longer than the
@@ -257,6 +286,7 @@ static void open_session(const log_request_t *req)
     (void)sto_sync(s_log_fd);                        /* and sync it: a cut right after open must not lose the .log HDR either */
     rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
     eviction_check();                                /* §12.7: eviction runs at session start, not only every 60 s */
+    status_cache_update(storage_free_kb(), session_count());   /* Plan 5.6 T1 fix 1: refresh after open+evict */
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
@@ -275,6 +305,7 @@ static void close_session(const log_request_t *req)
     (void)sto_close(s_log_fd);
     s_open = false;
     rebuild_sum(true, req->gps_us, req->reason);     /* finalise .sum with END */
+    status_cache_update(storage_free_kb(), session_count());   /* Plan 5.6 T1 fix 1: refresh after close */
     ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
 }
 
@@ -460,11 +491,32 @@ static void drain_requests(void)
     }
 }
 
+/* Eviction can move both free_kb and the session count, so refresh the status.h cache right
+ * after it runs (Plan 5.6 T1 fix 1). Pulled out of logger_task's own body (a task entry that
+ * must never assert-return, see sup_task's note) to keep that loop short and this ordinary
+ * helper free to assert normally in the future. */
+static void evict_if_due(uint32_t now)
+{
+    if ((now - s_last_evict_ms) < EVICT_INTERVAL_MS) return;
+    eviction_check();
+    s_last_evict_ms = now_ms();
+    status_cache_update(storage_free_kb(), session_count());
+}
+
+/* Keep the status.h cache from going stale even with no open/close/evict in the last
+ * STATUS_REFRESH_MS (Plan 5.6 T1 fix 1). */
+static void status_cache_refresh_if_due(uint32_t now)
+{
+    if ((now - s_last_status_ms) < STATUS_REFRESH_MS) return;
+    status_cache_update(storage_free_kb(), session_count());
+    s_last_status_ms = now;
+}
+
 static void logger_task(void *arg)
 {
     (void)arg;
     sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
-    s_last_evict_ms = now_ms();
+    s_last_evict_ms = s_last_status_ms = now_ms();
     ESP_LOGI(TAG, "logger up (core %d prio %d)", LOG_CORE, LOG_PRIO);
 
     for (;;) {
@@ -484,7 +536,7 @@ static void logger_task(void *arg)
             s_last_sync_ms = now;
         }
         if (s_sum_dirty && s_open) { rebuild_sum(false, 0, 0); s_sum_dirty = false; }
-        if ((now - s_last_evict_ms) >= EVICT_INTERVAL_MS) { eviction_check(); s_last_evict_ms = now_ms(); }
+        evict_if_due(now); status_cache_refresh_if_due(now);   /* Plan 5.6 T1 fix 1 */
 
         g_hb[HB_LOGGER]++;
     }
