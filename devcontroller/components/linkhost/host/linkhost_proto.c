@@ -618,7 +618,9 @@ void linkhost_reset(void)
 
 /* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END), plus the
  * out-of-band LT_REC_STATUS (0x40) push (Plan 5.6 Task 1). Unknown types are still consumed
- * length-first, then dropped -- the demux stays synced regardless. */
+ * length-first, then dropped -- the demux stays synced regardless.
+ * Adding a wire record type? Add it here first: a type unknown here is dropped by stream_emit but
+ * still consumed a seq number, so linkstats would report it as a gap. */
 static bool stream_type_known(uint8_t t)
 {
     return (t >= 0x01 && t <= 0x0E) || t == 0x7F || t == LT_REC_STATUS;
