@@ -61,7 +61,6 @@ static const char *TAG = "log";
 #define WRITE_INTERVAL_MS 1000
 #define SYNC_INTERVAL_MS  2000
 #define EVICT_INTERVAL_MS 60000
-#define STATUS_REFRESH_MS 5000         /* Plan 5.6 T1 fix 1: status.h cache refresh cadence */
 #define LOOP_TIMEOUT_MS   1000
 #define FRAME_TMP_CAP    256           /* >= max framed record (247 payload + 5) */
 
@@ -95,8 +94,17 @@ static uint8_t s_drag_acc[DRAG_ACC_CAP]; static size_t s_drag_len;
 static bool    s_sum_dirty;
 
 /* timing + state */
-static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms, s_last_status_ms;
+static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms;
 static bool     s_samples_full;        /* SYS_STORAGE_FULL: sample logging paused, summaries continue */
+
+/* status.h cache, maintained incrementally (Plan 5.6 T1 fix 3 -- no periodic storage rescan):
+ * s_sessions_cached/s_free_kb_cached are this task's own mirror of what it last pushed via
+ * status_cache_update() (status.h has no getter); s_bytes_since_info is .log bytes written
+ * (do_write()) since s_free_kb_cached was last a REAL storage_free_kb() reading, so
+ * status_cache_estimate() can publish a storage-free estimate between real refreshes. */
+static uint16_t s_sessions_cached;
+static uint32_t s_free_kb_cached;
+static uint32_t s_bytes_since_info;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -111,15 +119,21 @@ static uint32_t storage_free_kb(void)
     return (sto_info(&si) == 0) ? si.free_kb : 0;
 }
 
-/* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
+/* session_count: number of `.sum` files under /sessions (one per session, §12.1). Name-only
+ * listing (sto_list_next_name, no stat()) so this stays O(n) instead of sto_list_next's O(n^2)
+ * on LittleFS (Plan 5.6 T1 fix 3); yields every 16 entries so a large /sessions can't starve
+ * IDLE0/the task WDT on this task even so. Called once at logger start (the only full listing
+ * this file runs -- see status_cache_prime()); every later refresh is incremental. */
 static uint16_t session_count(void)
 {
     int c = 0;
     sto_iter_t it;
     if (sto_list_open(&it, "/sessions") == 0) {
-        sto_entry_t e;
-        while (sto_list_next(&it, &e) == 1) {
-            const char *dot = strrchr(e.name, '.');
+        char name[STO_NAME_MAX];
+        int n = 0;
+        while (sto_list_next_name(&it, name, sizeof name) == 1) {
+            if (++n % 16 == 0) taskYIELD();
+            const char *dot = strrchr(name, '.');
             if (dot && strcmp(dot, ".sum") == 0) c++;
         }
         sto_list_close(&it);
@@ -156,6 +170,7 @@ static void do_write(void)
     LT_ASSERT_VOID(s_batch_len <= BATCH_CAP, LOG_ASSERT_CODE);   /* buffer capacity before the write */
     LT_ASSERT_VOID(s_log_fd >= 0, LOG_ASSERT_CODE);              /* valid session state: s_open implies an open fd */
     if (sto_write(s_log_fd, s_batch, s_batch_len) != 0) (void)errlog_add(E_STO_WRITE, (uint32_t)s_batch_len);
+    s_bytes_since_info += (uint32_t)s_batch_len;   /* Plan 5.6 T1 fix 3: status_cache_estimate()'s input */
     s_batch_len = 0;
     s_last_write_ms = now_ms();
 }
@@ -285,8 +300,11 @@ static void open_session(const log_request_t *req)
     do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
     (void)sto_sync(s_log_fd);                        /* and sync it: a cut right after open must not lose the .log HDR either */
     rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
-    eviction_check();                                /* §12.7: eviction runs at session start, not only every 60 s */
-    status_cache_update(storage_free_kb(), session_count());   /* Plan 5.6 T1 fix 1: refresh after open+evict */
+    eviction_check();                                /* §12.7: eviction runs at session start, not only every 60 s;
+                                                        * Plan 5.6 T1 fix 3: also refreshes the status.h cache when
+                                                        * it actually evicts. sessions is NOT bumped here -- only
+                                                        * close_session's .sum counts a session (see status_cache_prime()
+                                                        * for the only full recount, at boot). */
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
@@ -305,7 +323,13 @@ static void close_session(const log_request_t *req)
     (void)sto_close(s_log_fd);
     s_open = false;
     rebuild_sum(true, req->gps_us, req->reason);     /* finalise .sum with END */
-    status_cache_update(storage_free_kb(), session_count());   /* Plan 5.6 T1 fix 1: refresh after close */
+    /* Plan 5.6 T1 fix 3: incremental, not a rescan -- a .sum now exists for this session, and
+     * closing is the one definitive "a session is now counted" boundary this file uses (see
+     * status_cache_prime()'s doc comment for why open_session does not also bump this). */
+    s_sessions_cached++;
+    s_free_kb_cached = storage_free_kb();
+    s_bytes_since_info = 0;
+    status_cache_update(s_free_kb_cached, s_sessions_cached);
     ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
 }
 
@@ -449,14 +473,20 @@ static void eviction_check(void)
         if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
         return;
     }
-    /* free < 10 %: delete the oldest .log that is not the current session. */
+    /* free < 10 %: delete the oldest .log that is not the current session. Per-entry stat() (via
+     * sto_list_next, not the name-only sto_list_next_name) is kept -- eviction wants sizes/ages
+     * available to it (a T12 latency-work candidate, §4). This loop stays O(n^2) on LittleFS; the
+     * taskYIELD() every 16 entries (Plan 5.6 T1 fix 3) only feeds IDLE0/the task WDT through it,
+     * it does not fix the complexity. */
     evict_ctx_t e;
     memset(&e, 0, sizeof e);
     if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
     sto_iter_t it;
     if (sto_list_open(&it, "/sessions") == 0) {
         sto_entry_t ent;
+        int n = 0;
         while (sto_list_next(&it, &ent) == 1) {
+            if (++n % 16 == 0) taskYIELD();
             const char *name = ent.name;
             size_t len = strlen(name);
             if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
@@ -475,6 +505,14 @@ static void eviction_check(void)
     } else if (si.free_kb < si.total_kb / 20u) {    /* nothing to delete and < 5 %: pause samples */
         if (!s_samples_full) { s_samples_full = true; sys_flags_set(SYS_STORAGE_FULL); (void)errlog_add(E_STO_FULL, 0); }
     }
+    /* Plan 5.6 T1 fix 3: e.oldest, when set, is always a .log (never a .sum -- the filter above
+     * only ever candidates .log names), so an eviction pass never changes the session count;
+     * refresh the cheap free_kb reading (one sto_info(), not a re-listing) and re-baseline the
+     * between-refresh byte estimate either way (an unlink, or the samples-paused branch, both
+     * reached only because free space was already tight). */
+    s_free_kb_cached = storage_free_kb();
+    s_bytes_since_info = 0;
+    status_cache_update(s_free_kb_cached, s_sessions_cached);
 }
 
 /* Drain the logger's control queue (open/close/rebuild/evict commands, §4.4). Pulled out of
@@ -491,38 +529,50 @@ static void drain_requests(void)
     }
 }
 
-/* Eviction can move both free_kb and the session count, so refresh the status.h cache right
- * after it runs (Plan 5.6 T1 fix 1). Pulled out of logger_task's own body (a task entry that
- * must never assert-return, see sup_task's note) to keep that loop short and this ordinary
- * helper free to assert normally in the future. */
+/* Pulled out of logger_task's own body (a task entry that must never assert-return, see
+ * sup_task's note) to keep that loop short and this ordinary helper free to assert normally in
+ * the future. eviction_check() itself refreshes the status.h cache when it actually evicts
+ * (Plan 5.6 T1 fix 3) -- no separate refresh needed here. */
 static void evict_if_due(uint32_t now)
 {
     if ((now - s_last_evict_ms) < EVICT_INTERVAL_MS) return;
     eviction_check();
     s_last_evict_ms = now_ms();
-    status_cache_update(storage_free_kb(), session_count());
 }
 
-/* Keep the status.h cache from going stale even with no open/close/evict in the last
- * STATUS_REFRESH_MS (Plan 5.6 T1 fix 1). */
-static void status_cache_refresh_if_due(uint32_t now)
+/* Plan 5.6 T1 fix 3: the only full session_count() scan this file ever runs (name-only, O(n),
+ * yields every 16 entries -- see session_count()) is this ONE priming pass at logger start;
+ * every later refresh is incremental (close_session/eviction_check) or a storage-free estimate
+ * (status_cache_estimate). This is why open_session does NOT also call this: it neither closes a
+ * session (no new .sum counted) nor is the storage owner's only chance to see one. */
+static void status_cache_prime(void)
 {
-    if ((now - s_last_status_ms) < STATUS_REFRESH_MS) return;
-    status_cache_update(storage_free_kb(), session_count());
-    s_last_status_ms = now;
+    s_sessions_cached = session_count();
+    s_free_kb_cached = storage_free_kb();
+    status_cache_update(s_free_kb_cached, s_sessions_cached);
+}
+
+/* Plan 5.6 T1 fix 3: cheap re-publish between real refreshes (open/close/evict/priming) --
+ * estimates free_kb by subtracting .log bytes appended since the cache was last a real
+ * storage_free_kb() reading (s_bytes_since_info, updated in do_write()) from the cached value,
+ * clamped at 0. No sto_info()/listing call: pure arithmetic, safe to run every loop tick. */
+static void status_cache_estimate(void)
+{
+    uint32_t used_kb = s_bytes_since_info >> 10;
+    uint32_t free_kb = (s_free_kb_cached > used_kb) ? s_free_kb_cached - used_kb : 0;
+    status_cache_update(free_kb, s_sessions_cached);
 }
 
 static void logger_task(void *arg)
 {
     (void)arg;
     sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
-    /* Plan 5.6 T1 fix 2: prime the status.h cache HERE (logger task, storage already mounted by
-     * boot_storage() before boot_subsystems()'s logger_start(), app_main.c) so a STATUS built
-     * before the first 5 s cadence tick -- or before any session ever opens -- reports the real
-     * free_kb/sessions, not a cold 0/0. Crammed onto the init line (matches this function's own
-     * evict_if_due/status_cache_refresh_if_due call below) to stay within the P10 rule-5 line
-     * budget for a task entry, which must never itself LT_ASSERT_*-return (see sup_task's note). */
-    s_last_evict_ms = s_last_status_ms = now_ms(); status_cache_update(storage_free_kb(), session_count());
+    /* Prime the status.h cache HERE (logger task, storage already mounted by boot_storage()
+     * before boot_subsystems()'s logger_start(), app_main.c) so a STATUS built before any
+     * session ever opens or closes reports the real free_kb/sessions, not a cold 0/0 (Plan 5.6
+     * T1 fix 2/3). Crammed onto one line to stay within the P10 rule-5 line budget for a task
+     * entry, which must never itself LT_ASSERT_*-return (see sup_task's note). */
+    s_last_evict_ms = now_ms(); status_cache_prime();
     ESP_LOGI(TAG, "logger up (core %d prio %d)", LOG_CORE, LOG_PRIO);
 
     for (;;) {
@@ -542,7 +592,7 @@ static void logger_task(void *arg)
             s_last_sync_ms = now;
         }
         if (s_sum_dirty && s_open) { rebuild_sum(false, 0, 0); s_sum_dirty = false; }
-        evict_if_due(now); status_cache_refresh_if_due(now);   /* Plan 5.6 T1 fix 1 */
+        evict_if_due(now); status_cache_estimate();   /* Plan 5.6 T1 fix 3: no periodic storage scan */
 
         g_hb[HB_LOGGER]++;
     }
