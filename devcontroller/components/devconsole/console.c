@@ -1,4 +1,4 @@
-/* devcontroller/components/console/console.c -- see include/console.h. The REPL scaffold: the ONE
+/* devcontroller/components/devconsole/console.c -- see include/console.h. The REPL scaffold: the ONE
  * esp_console registration door (console_register), the shared --json arg-stripping helper
  * (console_wants_json), and console_start (creates+starts the REPL on the console UART, then wires
  * up each command module). Copies the lap-timer's export_serial.c REPL bring-up pattern

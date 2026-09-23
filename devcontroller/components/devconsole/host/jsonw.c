@@ -1,4 +1,4 @@
-/* devcontroller/components/console/host/jsonw.c -- see include/jsonw.h. Pure, IDF-free; no heap,
+/* devcontroller/components/devconsole/host/jsonw.c -- see include/jsonw.h. Pure, IDF-free; no heap,
  * no shared state (Plan 5.6 Task 4). Every append funnels through jw_raw, which is the ONLY place
  * that touches w->buf/len/overflow, so the "always NUL-terminated, never a partial write" contract
  * holds no matter which jsonw_* entry point is called.

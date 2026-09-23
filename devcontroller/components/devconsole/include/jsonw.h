@@ -1,4 +1,4 @@
-/* devcontroller/components/console/include/jsonw.h -- jsonw: a bounded, no-heap JSON object
+/* devcontroller/components/devconsole/include/jsonw.h -- jsonw: a bounded, no-heap JSON object
  * writer for the console's `--json` command bodies (Plan 5.6 Task 4).
  *
  * PINNED interface (host-tested: devcontroller/test/test_jsonw.c). Pure, IDF-free: no heap, no

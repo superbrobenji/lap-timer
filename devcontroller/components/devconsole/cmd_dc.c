@@ -1,4 +1,4 @@
-/* devcontroller/components/console/cmd_dc.c -- the `dc` command: the dev-kit's own
+/* devcontroller/components/devconsole/cmd_dc.c -- the `dc` command: the dev-kit's own
  * self-diagnostics on its own USB console, independent of the WiFi AP/SPA (Plan 5.6 Task 4).
  *
  *   dc status [--json]                device/link/logstore snapshot (see dc_status below)
@@ -29,6 +29,7 @@
 #include "jsonw.h"
 #include "linkhost.h"        /* lt_status_t, linkstats_t + the linkhost_stats_* locked wrappers */
 #include "logstore.h"
+#include "rate.h"            /* rate_x10: pure records/sec*10, host-tested (test_rate.c) */
 
 /* GET /api/logs (webapi.c) uses the same 16-entry scratch array for the same reason: logstore_list
  * bounds its own scan to LOGSTORE_ROT_MAX_FILES, and 16 is already more rotated files than the
@@ -46,16 +47,6 @@ static void dc_err(bool json, const char *reason)
 {
     if (json) printf("{\"err\":\"%s\"}\n", reason);
     else      printf("ERR %s\n", reason);
-}
-
-/* Rate * 10 (one implied decimal) since jsonw has no float writer (task-4-brief resolution 3).
- * -1 when there is no previous sample yet. dt_us > 0 is asserted by the caller (s_prev_us != 0
- * guarantees now has advanced, since linkhost_now_us is monotonic and dc_status always samples a
- * fresh `now` after any previous call already stored one). */
-static long long dc_rate_x10(uint32_t n_now, uint32_t n_prev, int64_t dt_us)
-{
-    assert(dt_us > 0);
-    return ((long long)(n_now - n_prev) * 10LL * 1000000LL) / dt_us;
 }
 
 static int dc_status(int argc, char **argv, bool json)
@@ -76,14 +67,19 @@ static int dc_status(int argc, char **argv, bool json)
     int64_t status_age_ms = linkhost_stats_age_ms(ls.last_status_us, now);
     int64_t stream_age_ms = linkhost_stats_age_ms(ls.last_fused_us, now);
 
+    /* dt_us == 0 doubles as the "no previous sample yet" sentinel (s_prev_us == 0, the very
+     * first call): rate_x10 itself reports "no rate" for dt_us <= 0, so no separate first-call
+     * branch is needed here. A counter that went BACKWARDS since the last sample (e.g.
+     * linkstats_reset() on a link re-attach mid sampling window) forces BOTH rates to -1 rather
+     * than just the one whose counter reset -- a torn sample (one counter reset, the other not)
+     * is still not a trustworthy pair of rates. */
+    int64_t dt_us = (s_prev_us != 0) ? (now - s_prev_us) : 0;
+    bool reset = (ls.n_fused < s_prev.n_fused) || (ls.n_status < s_prev.n_status);
     long long fused_rate_x10 = -1;
     long long status_rate_x10 = -1;
-    if (s_prev_us != 0) {
-        int64_t dt_us = now - s_prev_us;
-        if (dt_us > 0) {
-            fused_rate_x10  = dc_rate_x10(ls.n_fused, s_prev.n_fused, dt_us);
-            status_rate_x10 = dc_rate_x10(ls.n_status, s_prev.n_status, dt_us);
-        }
+    if (!reset) {
+        fused_rate_x10  = rate_x10(ls.n_fused, s_prev.n_fused, dt_us);
+        status_rate_x10 = rate_x10(ls.n_status, s_prev.n_status, dt_us);
     }
     s_prev = ls;
     s_prev_us = now;
@@ -135,9 +131,9 @@ static int dc_status(int argc, char **argv, bool json)
     printf("link.connected: %s\n", connected ? "true" : "false");
     printf("link.status_age_ms: %lld\n", (long long)status_age_ms);
     printf("link.stream_age_ms: %lld\n", (long long)stream_age_ms);
-    if (fused_rate_x10 < 0) printf("link.fused_rate: -1\n");
+    if (fused_rate_x10 < 0) printf("link.fused_rate: n/a\n");
     else printf("link.fused_rate: %lld.%lld/s\n", fused_rate_x10 / 10, fused_rate_x10 % 10);
-    if (status_rate_x10 < 0) printf("link.status_rate: -1\n");
+    if (status_rate_x10 < 0) printf("link.status_rate: n/a\n");
     else printf("link.status_rate: %lld.%lld/s\n", status_rate_x10 / 10, status_rate_x10 % 10);
     printf("link.gaps: %u\n", (unsigned)ls.gaps);
     printf("logstore.ready: %s\n", logstore_ready() ? "true" : "false");
@@ -195,17 +191,12 @@ static int dc_baud(int argc, char **argv, bool json)
     return 0;
 }
 
-static void dc_usage(void)
-{
-    printf("usage: dc status [--json] | dc log <error|warn|info|debug> | dc baud <rate>\n");
-}
-
 static int cmd_dc_main(int argc, char **argv)
 {
     assert(argv != NULL);
     bool json = console_wants_json(&argc, argv);
     if (argc < 2) {
-        dc_usage();
+        dc_err(json, "usage: dc status [--json] | dc log <level> | dc baud <rate>");
         return 1;
     }
     if (strcmp(argv[1], "status") == 0) return dc_status(argc, argv, json);

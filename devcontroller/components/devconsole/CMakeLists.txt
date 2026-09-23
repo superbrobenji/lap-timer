@@ -2,9 +2,11 @@
 # so debugging never needs the WiFi AP (Plan 5.6 Task 4). console.c is the REPL scaffold + the ONE
 # registration door (console_register); cmd_dc.c is the first command module (`dc
 # status|log|baud`); host/jsonw.c is the pure, IDF-free JSON writer every `--json` command builds
-# its body with -- compiled here for the on-target build AND linked directly by
-# devcontroller/test/test_jsonw.c on the host (mirrors webapi's host/status_json.c / logstore's
-# host/logstore_rot.c: one implementation, not two copies drifting apart).
+# its body with; host/rate.c is the pure records/sec*10 arithmetic behind `dc status`'s
+# fused_rate/status_rate fields (Plan 5.6 T4 fix 1). Both are compiled here for the on-target
+# build AND linked directly by devcontroller/test/test_jsonw.c / test_rate.c on the host (mirrors
+# webapi's host/status_json.c / logstore's host/logstore_rot.c: one implementation, not two
+# copies drifting apart).
 #
 # NAMED "devconsole", not "console": ESP-IDF's own built-in esp_console library IS a component
 # literally named "console" (esp-idf/components/console, provides esp_console.h). A project
@@ -22,7 +24,7 @@
 # the two subsystems `dc status` reports on. None of these leak into console.h's public surface
 # (console_start/console_wants_json/console_register are all plain C), so everything is PRIV.
 idf_component_register(
-    SRCS "console.c" "cmd_dc.c" "host/jsonw.c"
+    SRCS "console.c" "cmd_dc.c" "host/jsonw.c" "host/rate.c"
     INCLUDE_DIRS "include"
     PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system linkhost logstore)
 

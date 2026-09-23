@@ -1,4 +1,4 @@
-/* devcontroller/components/console/include/console.h -- console: esp_console REPL on the
+/* devcontroller/components/devconsole/include/console.h -- console: esp_console REPL on the
  * dev-kit's own USB (UART0), the primary developer interface so debugging never needs the WiFi AP
  * (Plan 5.6 Task 4).
  *

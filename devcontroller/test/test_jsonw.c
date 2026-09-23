@@ -1,4 +1,4 @@
-/* test_jsonw.c -- Unity host tests for components/console/host/jsonw.c (Plan 5.6 Task 4).
+/* test_jsonw.c -- Unity host tests for components/devconsole/host/jsonw.c (Plan 5.6 Task 4).
  * Pure, IDF-free: exercises jsonw_t's bounded, no-heap JSON writer directly (no esp_* deps).
  */
 #include "jsonw.h"

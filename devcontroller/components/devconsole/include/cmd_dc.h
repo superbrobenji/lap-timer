@@ -1,4 +1,4 @@
-/* devcontroller/components/console/include/cmd_dc.h -- the `dc` command module (status/log/baud),
+/* devcontroller/components/devconsole/include/cmd_dc.h -- the `dc` command module (status/log/baud),
  * the dev-kit's own self-diagnostics (Plan 5.6 Task 4).
  *
  * Not part of console.h's PINNED interface (console.c only needs cmd_dc_register, called once
