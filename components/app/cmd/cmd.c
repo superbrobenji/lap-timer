@@ -154,21 +154,29 @@ static void load_cfg(void)
  *  ops
  * ------------------------------------------------------------------ */
 
+/* Builds the §18.2 STATUS record. Shared by the framed `status` reply (op_status) and the
+ * 1 Hz stream push (link.c, Plan 5.6) so the two can never drift. */
+void status_build(uint8_t out[LT_STATUS_LEN])
+{
+    LT_ASSERT_VOID(out != NULL, CMD_ASSERT_CODE);
+    memset(out, 0, LT_STATUS_LEN);
+    out[LT_ST_OFF_PROTO] = 1;
+    out[LT_ST_OFF_STATE] = 0;                              /* device state machine lands later */
+    put_u16le(&out[LT_ST_OFF_FLAGS], (uint16_t)(sys_flags_get() & 0xFFFFu));
+    out[LT_ST_OFF_BATT_PCT] = 0;                           /* power lands in Plan 6 */
+    put_u16le(&out[LT_ST_OFF_BATT_MV], 0);
+    put_u32le(&out[LT_ST_OFF_FREE_KB], storage_free_kb());
+    put_u16le(&out[LT_ST_OFF_SESS], session_count());
+    fw_short((char *)&out[LT_ST_OFF_FW], 7);
+}
+
 /* STATUS (0x01) -> the 20-byte §18.2 status record (little-endian). */
 static int op_status(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
     LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
-    uint8_t st[20];
-    memset(st, 0, sizeof st);
-    st[0] = 1;                                              /* proto_ver = 1 */
-    st[1] = 0;                                              /* state: device state machine lands later */
-    put_u16le(&st[2], (uint16_t)(sys_flags_get() & 0xFFFFu));
-    st[4] = 0;                                              /* batt_pct: placeholder (power lands later) */
-    put_u16le(&st[5], 0);                                  /* batt_mv:  placeholder */
-    put_u32le(&st[7], storage_free_kb());
-    put_u16le(&st[11], session_count());
-    fw_short((char *)&st[13], 7);                          /* fw char[7] */
+    uint8_t st[LT_STATUS_LEN];
+    status_build(st);
     return emit_bytes(emit, ctx, tag, seq, st, sizeof st, true);
 }
 

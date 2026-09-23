@@ -14,6 +14,8 @@
 #ifndef APP_CMD_H
 #define APP_CMD_H
 
+#include "app/lt_proto.h"          /* LT_STATUS_LEN -- status_build()'s output size */
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -45,5 +47,9 @@ enum { CMD_STATUS=0x01, CMD_LIST=0x02, CMD_OPEN=0x03, CMD_READ=0x04, CMD_CLOSE=0
  * time (the transport enforces §18.1's "one request in flight"). */
 int cmd_dispatch(uint8_t op, uint8_t tag, const uint8_t *payload, size_t len,
                  cmd_emit_fn emit, void *ctx);
+
+/* Builds the §18.2 STATUS record (LT_STATUS_LEN bytes). Shared by the framed `status` reply
+ * (op_status) and the 1 Hz stream push (link.c, Plan 5.6) so the two can never drift. */
+void status_build(uint8_t out[LT_STATUS_LEN]);
 
 #endif /* APP_CMD_H */
