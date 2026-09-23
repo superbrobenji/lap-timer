@@ -41,11 +41,17 @@ static const char *TAG = "linkhost";
 #define DL_IDLE_TMO_MS     3000                  /* abort a download after this long with no bytes */
 #define DL_HARD_MIN_MS     15000                 /* floor on the absolute download cap (small files) */
 #define DL_HARD_MARGIN_US  (5 * 1000 * 1000)     /* slack added on top of the size-scaled transfer time */
+#define RX_PARK_TMO_MS     200                   /* bounded wait for rx_task to park before flush (#65) */
+#define RX_PARK_POLL_MS    5
+#define RX_DRAIN_TMO_MS    10                    /* per-iteration read timeout while draining to quiet */
+#define RX_DRAIN_CAP       10                    /* bounded drain iterations (~100 ms worst case) */
 
 static SemaphoreHandle_t s_req_mtx;              /* one request in flight (§18.1) */
 static TaskHandle_t      s_rx_task;
 static volatile int64_t  s_last_activity_us;     /* stamped by the RX task on any link traffic */
 static volatile bool     s_rx_paused;            /* pauses the demux RX task while flash/download owns UART1 */
+static volatile bool     s_rx_parked;            /* true only while rx_task is in the paused-sleep, i.e.
+                                                   * provably NOT inside uart_read_bytes (#65 handshake) */
 static bool              s_inited;
 
 /* linkhost_cmd copies the framed body out of the parser's shared s_body into here, so a late
@@ -59,12 +65,52 @@ static void rx_task(void *arg)
     (void)arg;
     static uint8_t buf[LINK_RX_CHUNK];
     for (;;) {                                   /* service task: bounded per-iteration work */
-        if (s_rx_paused) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+        if (s_rx_paused) {
+            s_rx_parked = true;                   /* provably not in uart_read_bytes (#65 handshake) */
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        s_rx_parked = false;                      /* about to own UART1 again */
         int n = uart_read_bytes(DC_LINK_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
             s_last_activity_us = esp_timer_get_time();
             (void)linkhost_feed(buf, (size_t)n);
         }
+    }
+}
+
+/* Deterministic replacement for a fixed "hope it parked" delay (#65): rx_task and a download/flash
+ * loop both call uart_read_bytes on the SAME UART -- ESP-IDF hands concurrent readers DISTINCT
+ * bytes, so if rx_task is still mid-read when the response arrives it silently steals bytes from
+ * the download parser -> truncated body -> "bad response" (worst on the first call after a
+ * backlog, when rx_task's exact parking time is least predictable).
+ *
+ * Waits (bounded) for rx_task to observe s_rx_paused and park itself out of uart_read_bytes
+ * (proceeds anyway with a warning on timeout -- never blocks forever), flushes the driver's RX
+ * ring, then drains-to-quiet: reads and discards until a read times out empty (the link has gone
+ * idle) or a bounded iteration cap is hit, clearing any 0xFF stream-frame tail that was mid-
+ * transmission when the flush landed. Must be called with s_rx_paused already true and s_req_mtx
+ * held (single request in flight). */
+static void rx_park_and_drain(void)
+{
+    assert(s_inited);
+    assert(s_rx_paused);
+
+    int waited = 0;
+    while (!s_rx_parked && waited < RX_PARK_TMO_MS) {     /* bounded: RX_PARK_TMO_MS / poll interval */
+        vTaskDelay(pdMS_TO_TICKS(RX_PARK_POLL_MS));
+        waited += RX_PARK_POLL_MS;
+    }
+    if (!s_rx_parked) {
+        ESP_LOGW(TAG, "rx_park_and_drain: rx_task did not park within %d ms", RX_PARK_TMO_MS);
+    }
+
+    uart_flush_input(DC_LINK_UART);               /* drop stale prompt/heartbeat before the command */
+
+    uint8_t scratch[LINK_RX_CHUNK];
+    for (int i = 0; i < RX_DRAIN_CAP; i++) {              /* bounded: RX_DRAIN_CAP iterations */
+        int n = uart_read_bytes(DC_LINK_UART, scratch, sizeof(scratch), pdMS_TO_TICKS(RX_DRAIN_TMO_MS));
+        if (n <= 0) break;                                /* link quiet: nothing left in flight */
     }
 }
 
@@ -225,8 +271,7 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
 
     xSemaphoreTake(s_req_mtx, portMAX_DELAY);    /* worker task: OK to wait for the link (not httpd) */
     s_rx_paused = true;                          /* the demux RX task must not steal these bytes */
-    vTaskDelay(pdMS_TO_TICKS(25));               /* let the RX task release UART1 */
-    uart_flush_input(DC_LINK_UART);              /* drop stale prompt/heartbeat before the command */
+    rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
 
     uart_write_bytes(DC_LINK_UART, cmd, clen);
     uart_write_bytes(DC_LINK_UART, "\r", 1);
@@ -256,7 +301,9 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
         }
     }
 
-    s_rx_paused = false;
+    s_rx_paused = false;                         /* rx_task clears s_rx_parked on its next non-paused
+                                                   * iteration (before it reads again) -- no need to
+                                                   * clear it here too. */
     xSemaphoreGive(s_req_mtx);
 
     int result = lh_dl_result(&dl);
@@ -331,8 +378,7 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
     int result;
     xSemaphoreTake(s_req_mtx, portMAX_DELAY);
     s_rx_paused = true;
-    vTaskDelay(pdMS_TO_TICKS(25));               /* let the RX task release UART1 */
-    uart_flush_input(DC_LINK_UART);
+    rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
 
     lh_flash_ctx_t f;
     linkhost_flash_ctx_init(&f);
@@ -363,7 +409,9 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
 
     result = linkhost_flash_result(&f);
 done:
-    s_rx_paused = false;
+    s_rx_paused = false;                         /* rx_task clears s_rx_parked on its next non-paused
+                                                   * iteration (before it reads again) -- no need to
+                                                   * clear it here too. */
     xSemaphoreGive(s_req_mtx);
     ESP_LOGI(TAG, "linkhost_flash: size=%u -> result=%d (state=%d code=0x%04x)",
              (unsigned)size, result, (int)f.state, (unsigned)f.code);

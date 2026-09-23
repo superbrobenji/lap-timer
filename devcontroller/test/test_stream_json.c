@@ -12,39 +12,39 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Builds a SES_T_FUSED record: mono_us@0 (unused by the decoder), gps_us@8, floats g_lon@16/
- * g_lat@20/g_comb@24/lean_deg@28/yaw_dps@32, flags@36. */
+/* Builds a SES_T_FUSED record, placing each field at its app/lt_proto.h LT_FUSED_OFF_* contract
+ * offset (mono_us@LT_FUSED_OFF_MONO_US is left zero -- unused by the decoder). */
 static void make_fused(lt_stream_rec_t *r, uint16_t seq, int64_t gps_us,
                         float g_lon, float g_lat, float g_comb, float lean, float yaw, uint8_t flags)
 {
     memset(r, 0, sizeof *r);
     r->seq  = seq;
-    r->type = 0x04;
-    r->len  = 40;
-    memcpy(r->data + 8, &gps_us, 8);
-    memcpy(r->data + 16, &g_lon, 4);
-    memcpy(r->data + 20, &g_lat, 4);
-    memcpy(r->data + 24, &g_comb, 4);
-    memcpy(r->data + 28, &lean, 4);
-    memcpy(r->data + 32, &yaw, 4);
-    r->data[36] = flags;
+    r->type = LT_SES_T_FUSED;
+    r->len  = LT_FUSED_REC_LEN;
+    memcpy(r->data + LT_FUSED_OFF_GPS_US, &gps_us, 8);
+    memcpy(r->data + LT_FUSED_OFF_G_LON, &g_lon, 4);
+    memcpy(r->data + LT_FUSED_OFF_G_LAT, &g_lat, 4);
+    memcpy(r->data + LT_FUSED_OFF_G_COMB, &g_comb, 4);
+    memcpy(r->data + LT_FUSED_OFF_LEAN, &lean, 4);
+    memcpy(r->data + LT_FUSED_OFF_YAW, &yaw, 4);
+    r->data[LT_FUSED_OFF_FLAGS] = flags;
 }
 
-/* Builds a SES_T_EVENT record: type@0, flags@1, arg16@2, gps_us@8, mono_us@16 (unused), arg32@24,
- * arg32b@28. */
+/* Builds a SES_T_EVENT record, placing each field at its app/lt_proto.h LT_EVENT_OFF_* contract
+ * offset (mono_us@LT_EVENT_OFF_MONO_US is left zero -- unused by the decoder). */
 static void make_event(lt_stream_rec_t *r, uint16_t seq, uint8_t code, uint8_t flags,
                         uint16_t arg16, int64_t gps_us, uint32_t arg32, uint32_t arg32b)
 {
     memset(r, 0, sizeof *r);
     r->seq  = seq;
-    r->type = 0x09;
-    r->len  = 32;
-    r->data[0] = code;
-    r->data[1] = flags;
-    memcpy(r->data + 2, &arg16, 2);
-    memcpy(r->data + 8, &gps_us, 8);
-    memcpy(r->data + 24, &arg32, 4);
-    memcpy(r->data + 28, &arg32b, 4);
+    r->type = LT_SES_T_EVENT;
+    r->len  = LT_EVENT_REC_LEN;
+    r->data[LT_EVENT_OFF_TYPE] = code;
+    r->data[LT_EVENT_OFF_FLAGS] = flags;
+    memcpy(r->data + LT_EVENT_OFF_ARG16, &arg16, 2);
+    memcpy(r->data + LT_EVENT_OFF_GPS_US, &gps_us, 8);
+    memcpy(r->data + LT_EVENT_OFF_ARG32, &arg32, 4);
+    memcpy(r->data + LT_EVENT_OFF_ARG32B, &arg32b, 4);
 }
 
 void test_fused_record_scaled_ints(void)
@@ -89,7 +89,7 @@ void test_unknown_type_rejected(void)
     lt_stream_rec_t r;
     memset(&r, 0, sizeof r);
     r.seq  = 1;
-    r.type = 0x02;      /* not SES_T_FUSED (0x04) or SES_T_EVENT (0x09) */
+    r.type = 0x02;      /* not SES_T_FUSED (LT_SES_T_FUSED) or SES_T_EVENT (LT_SES_T_EVENT) */
     r.len  = 10;
 
     char buf[320];

@@ -57,6 +57,7 @@
 #include "esp_task_wdt.h"       /* dbg hang: subscribe the calling task so the task WDT fires deterministically */
 #include "esp_timer.h"
 #include "driver/uart.h"        /* uart_write_bytes -- raw binary TX for the peer stream (no \n->\r\n mangling) */
+#include "driver/uart_vfs.h"    /* uart_vfs_dev_port_set_tx_line_endings -- LF window around a framed response */
 #include "linenoise/linenoise.h"
 
 #define EXP_SERIAL_ASSERT_CODE 0x0C20   /* Power of 10 rule 5 (core/core.h); export_serial.c's own code */
@@ -194,12 +195,35 @@ static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
     return 0;
 }
 
+/* LF window (§18.4 fix): esp_console_repl_chip.c sets ESP_LINE_ENDINGS_CRLF on the console UART at
+ * init, so a bare stdout '\n' becomes '\r\n' on the wire -- turning this file's own \r\n frame
+ * markers (LT_FRAME_*_FMT, lt_proto.h) into \r\r\n and mangling text-format bodies (open vbo/nmea/
+ * json). frame_tx_begin/frame_tx_end bracket a framed critical section: take the mutex, drain
+ * anything buffered under CRLF, then switch to LF so every byte written for the rest of the
+ * section -- BEGIN/body/END/frame-internal ERR alike -- lands on the wire unmodified; frame_tx_end
+ * flushes the frame, restores CRLF (so the REPL prompt and `dbg`/plain-text output stay CRLF), and
+ * releases the mutex. Callers MUST route every exit path (including an early ERR return) through
+ * frame_tx_end so LF mode can never leak past the critical section. */
+static void frame_tx_begin(void)
+{
+    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole framed response (§18.4) */
+    fflush(stdout);                               /* drain anything buffered under CRLF before switching */
+    uart_vfs_dev_port_set_tx_line_endings((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_LF);
+}
+
+static void frame_tx_end(void)
+{
+    fflush(stdout);                               /* the whole frame must be on the wire before switching back */
+    uart_vfs_dev_port_set_tx_line_endings((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, ESP_LINE_ENDINGS_CRLF);
+    xSemaphoreGive(s_uart_mtx);
+}
+
 /* Run one op through cmd_dispatch with logging quiesced, then framed by ser_emit. `binary` routes
  * the assembled body through Base64 at flush (§18.4: STATUS record and other binary payloads). */
 static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t len, bool binary)
 {
     link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
-    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole framed response (§18.4) */
+    frame_tx_begin();                             /* own UART0 TX + LF window for the whole framed response */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs during a framed transfer */
 
@@ -211,8 +235,7 @@ static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t
     (void)cmd_dispatch(op, /*tag*/1, payload, len, ser_emit, &s_ser);
 
     esp_log_level_set("*", saved);
-    fflush(stdout);                               /* flush inside the lock: no buffered bytes escape after the give */
-    xSemaphoreGive(s_uart_mtx);
+    frame_tx_end();                                /* flushes, restores CRLF, releases the mutex */
 }
 
 /* ================================================================== *
@@ -292,7 +315,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
 {
     CORE_ASSERT_VOID(payload != NULL || len == 0, EXP_SERIAL_ASSERT_CODE);   /* a non-empty payload needs a real buffer */
     link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
-    xSemaphoreTake(s_uart_mtx, portMAX_DELAY);    /* own UART0 TX for the whole two-pass framed transfer (§18.4) */
+    frame_tx_begin();                             /* own UART0 TX + LF window for the whole two-pass transfer */
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
 
@@ -300,9 +323,8 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &m);
     if (m.err) {
         printf("ERR 0x%04x: %s\r\n", (unsigned)m.err_code, m.errmsg);
-        fflush(stdout);
         esp_log_level_set("*", saved);
-        xSemaphoreGive(s_uart_mtx);
+        frame_tx_end();                            /* flushes, restores CRLF, releases the mutex */
         return;
     }
 
@@ -317,18 +339,16 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
          * or storage degraded between the two passes). Abort the frame with an error line rather
          * than closing a body-less "success" with a bogus ---END. */
         printf("\r\nERR 0x%04x: %s\r\n", (unsigned)pr.err_code, pr.errmsg);
-        fflush(stdout);
         esp_log_level_set("*", saved);
-        xSemaphoreGive(s_uart_mtx);
+        frame_tx_end();                            /* flushes, restores CRLF, releases the mutex */
         return;
     }
 
     uint32_t crc = has_tail ? (pr.have_tail_crc ? pr.tail_crc : 0) : pr.crc;
     printf("\r\n" LT_FRAME_END_FMT, (unsigned)crc);
-    fflush(stdout);
 
     esp_log_level_set("*", saved);
-    xSemaphoreGive(s_uart_mtx);   /* flush already done above (inside the lock); release before the postcondition */
+    frame_tx_end();   /* flushes under LF, restores CRLF, releases the mutex; before the postcondition */
     /* postcondition (checked after the log level is already restored, so a trip here changes
      * nothing further): a has_tail op that produced a body must have lifted a real tail CRC --
      * cmd_dispatch's OPEN/READ contract always appends one to the final chunk. */

@@ -20,6 +20,7 @@
  */
 #include "logstore.h"
 
+#include "logstore_rec.h"
 #include "logstore_rot.h"
 
 #include <assert.h>
@@ -68,14 +69,14 @@ typedef struct __attribute__((packed)) {
                                * offline (this device is AP-only, no WiFi STA/NTP). */
 } logstore_file_hdr_t;
 
-/* Precedes every appended record's `len` payload bytes. */
-typedef struct __attribute__((packed)) {
-    uint64_t ts_us;   /* esp_timer_get_time() at append time: monotonic microseconds since boot */
-    uint16_t seq;
-    uint8_t  flags;
-    uint8_t  type;
-    uint8_t  len;
-} logstore_rec_hdr_t;
+/* logstore_rec_hdr_t now lives in include/logstore_rec.h (issue #67) so the pure NDJSON
+ * transcode (host/logstore_json.c) and its host test can include it without esp_err.h/linkhost.h
+ * (this file's other includes). This pins the file-header size that helper's caller (webapi.c)
+ * must skip before parsing records against logstore_rec.h's LOGSTORE_REC_AREA_OFFSET, so a future
+ * change to logstore_file_hdr_t fails the build here instead of silently desyncing the jsonl
+ * download's record parser. */
+_Static_assert(sizeof(logstore_file_hdr_t) == LOGSTORE_REC_AREA_OFFSET,
+               "logstore_file_hdr_t size must match logstore_rec.h's LOGSTORE_REC_AREA_OFFSET");
 
 static bool     s_ready;
 static uint32_t s_cap_bytes;

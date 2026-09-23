@@ -32,6 +32,7 @@
 #include "esp_timer.h"
 
 #include <stdatomic.h>
+#include <stddef.h>           /* offsetof -- the per-field _Static_assert's below */
 #include <string.h>
 
 #define LINK_ASSERT_CODE 0x0B90   /* Power of 10 rule 5 (app/lt_assert.h); link.c's own code */
@@ -64,6 +65,8 @@
 _Static_assert((LINK_STREAM_CAP & (LINK_STREAM_CAP - 1u)) == 0u, "LINK_STREAM_CAP must be a power of two");
 _Static_assert(5 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame (5-byte header + payload) must fit one §18.1 data chunk");
 _Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must mirror app/lt_proto.h's LT_STREAM_TAG");
+_Static_assert((int)SES_T_FUSED == (int)LT_SES_T_FUSED, "SES_T_FUSED must mirror app/lt_proto.h's LT_SES_T_FUSED");
+_Static_assert((int)SES_T_EVENT == (int)LT_SES_T_EVENT, "SES_T_EVENT must mirror app/lt_proto.h's LT_SES_T_EVENT");
 
 /* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
  * SES_T_FUSED -> 1 + sizeof(fused_sample_t), SES_T_EVENT -> 1 + sizeof(event_t). If either struct
@@ -71,6 +74,30 @@ _Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must
  * record -- catch that at compile time so a future field addition fails the build, not the stream. */
 _Static_assert(1 + sizeof(fused_sample_t) <= LINK_REC_MAX, "SES_T_FUSED stream record must fit LINK_REC_MAX");
 _Static_assert(1 + sizeof(event_t) <= LINK_REC_MAX, "SES_T_EVENT stream record must fit LINK_REC_MAX");
+
+/* app/lt_proto.h's LT_FUSED_OFF_* / LT_EVENT_OFF_* are the wire contract a dev-controller peer (which
+ * cannot see these core structs) decodes raw stream bytes against. Tie every field's real offset to
+ * that contract here so a struct-layout change fails THIS build, not a peer's silent decode. If one
+ * of these fails to compile, the OFFSET VALUE in lt_proto.h is wrong -- fix the constant there, never
+ * the struct. */
+_Static_assert(sizeof(fused_sample_t) == LT_FUSED_REC_LEN, "fused_sample_t size drifted from LT_FUSED_REC_LEN");
+_Static_assert(offsetof(fused_sample_t, mono_us)   == LT_FUSED_OFF_MONO_US, "fused_sample_t.mono_us offset drift");
+_Static_assert(offsetof(fused_sample_t, gps_us)    == LT_FUSED_OFF_GPS_US,  "fused_sample_t.gps_us offset drift");
+_Static_assert(offsetof(fused_sample_t, g_lon)     == LT_FUSED_OFF_G_LON,   "fused_sample_t.g_lon offset drift");
+_Static_assert(offsetof(fused_sample_t, g_lat)     == LT_FUSED_OFF_G_LAT,   "fused_sample_t.g_lat offset drift");
+_Static_assert(offsetof(fused_sample_t, g_comb)    == LT_FUSED_OFF_G_COMB,  "fused_sample_t.g_comb offset drift");
+_Static_assert(offsetof(fused_sample_t, lean_deg)  == LT_FUSED_OFF_LEAN,    "fused_sample_t.lean_deg offset drift");
+_Static_assert(offsetof(fused_sample_t, yaw_dps)   == LT_FUSED_OFF_YAW,     "fused_sample_t.yaw_dps offset drift");
+_Static_assert(offsetof(fused_sample_t, flags)     == LT_FUSED_OFF_FLAGS,   "fused_sample_t.flags offset drift");
+
+_Static_assert(sizeof(event_t) == LT_EVENT_REC_LEN, "event_t size drifted from LT_EVENT_REC_LEN");
+_Static_assert(offsetof(event_t, type)    == LT_EVENT_OFF_TYPE,    "event_t.type offset drift");
+_Static_assert(offsetof(event_t, flags)   == LT_EVENT_OFF_FLAGS,   "event_t.flags offset drift");
+_Static_assert(offsetof(event_t, arg16)   == LT_EVENT_OFF_ARG16,   "event_t.arg16 offset drift");
+_Static_assert(offsetof(event_t, gps_us)  == LT_EVENT_OFF_GPS_US,  "event_t.gps_us offset drift");
+_Static_assert(offsetof(event_t, mono_us) == LT_EVENT_OFF_MONO_US, "event_t.mono_us offset drift");
+_Static_assert(offsetof(event_t, arg32)   == LT_EVENT_OFF_ARG32,   "event_t.arg32 offset drift");
+_Static_assert(offsetof(event_t, arg32b)  == LT_EVENT_OFF_ARG32B,  "event_t.arg32b offset drift");
 
 typedef struct { uint16_t len; uint8_t data[LINK_REC_MAX]; } link_rec_t;
 
