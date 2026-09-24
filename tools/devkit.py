@@ -358,19 +358,40 @@ def _cmd_stream_stats(ser):
     return 0
 
 
-def _cmd_stream_tap(ser, rec_type):
-    """`stream tap [type]`: sends `stream tap on [type]` (no --json -- its ack is human text, "OK
-    tap on <type>" or "ERR <reason>"; the decoded rows the consumer task prints while tap is on
-    are already one JSON object per line, unrelated to --json). The ack is read via send_cmd,
-    which blocks (bounded, STREAM_TAP_ACK_TIMEOUT_S) until the prompt that follows it -- so the
-    row loop below only starts once the ack (and nothing before it) has been consumed, and no live
-    row is mistaken for the ack or vice versa. An "ERR ..." ack raises DevkitError. Prints every
-    row until Ctrl-C, then always sends `stream tap off` so the dev-kit stops flooding the console
-    after this tool exits."""
-    on_line = "stream tap on" + ((" " + rec_type) if rec_type else "")
-    ack = send_cmd(ser, on_line, timeout=STREAM_TAP_ACK_TIMEOUT_S)
+def _tap_start(ser, on_line, timeout=STREAM_TAP_ACK_TIMEOUT_S):
+    """Send `on_line` ("stream tap on [type]") via send_cmd and split its reply into lines. The
+    FIRST non-empty line is the ack ("OK tap on <type>", or "ERR <reason>" -- raised as
+    DevkitError); every remaining non-empty line is a tap row. send_cmd only returns once it sees
+    the "devkit> " prompt that follows the ack, but the device can start emitting tap rows before
+    it even prints that ack (cmd_stream.c sets s_tap_on = true, THEN prints "OK tap on ..."), so
+    zero or more rows can race ahead of, or land between, the ack and the prompt -- landing INSIDE
+    send_cmd's returned text instead of arriving later through the normal row loop. Those trailing
+    lines are exactly those raced-ahead rows; returns them (possibly []) so the caller can print
+    them instead of silently discarding them."""
+    text = send_cmd(ser, on_line, timeout=timeout)
+    lines = [ln for ln in (raw.strip("\r") for raw in text.split("\n")) if ln]
+    if not lines:
+        return []
+    ack, rows = lines[0], lines[1:]
     if ack.startswith("ERR"):
         raise DevkitError(ack)
+    return rows
+
+
+def _cmd_stream_tap(ser, rec_type):
+    """`stream tap [type]`: sends `stream tap on [type]` via _tap_start (no --json -- its ack is
+    human text, "OK tap on <type>" or "ERR <reason>"; the decoded rows the consumer task prints
+    while tap is on are already one JSON object per line, unrelated to --json). _tap_start reads
+    through send_cmd's bounded wait for the "devkit> " prompt that follows the ack and returns any
+    rows that raced ahead of that prompt (see _tap_start's docstring for why that race is real);
+    those are printed here, flushed, BEFORE the row loop starts, so nothing that already arrived
+    on the wire is lost. An "ERR ..." ack raises DevkitError. Prints every row until Ctrl-C, then
+    always sends `stream tap off` so the dev-kit stops flooding the console after this tool
+    exits."""
+    on_line = "stream tap on" + ((" " + rec_type) if rec_type else "")
+    for row in _tap_start(ser, on_line):
+        print(row)
+        sys.stdout.flush()
     try:
         while True:
             line = _readline(ser, time.monotonic() + TAP_MAX_S)

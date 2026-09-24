@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from devkit import (  # noqa: E402
     DevkitError,
     _shell_close,
+    _tap_start,
     push_and_wait,
     read_json,
     send_cmd,
@@ -181,6 +182,31 @@ class PushAndWaitTest(unittest.TestCase):
         with self.assertRaises(DevkitError) as ctx:
             push_and_wait(ser, timeout=1.0)
         self.assertIn("link -4", str(ctx.exception))
+
+
+class TapStartTest(unittest.TestCase):
+    """_tap_start(ser, on_line) is the piece _cmd_stream_tap calls to enable the tap and recover
+    any rows that raced ahead of the "devkit> " prompt send_cmd waits for (cmd_stream.c sets
+    s_tap_on = true before printing the "OK tap on ..." ack, so a row can land on the wire between
+    the ack and the prompt -- inside send_cmd's own reply text -- rather than arriving later
+    through the normal row loop)."""
+
+    def test_returns_a_row_that_raced_ahead_of_the_prompt(self):
+        # The reviewer's exact repro: one tap row lands between the ack and the next prompt.
+        rx = b'stream tap on fused\r\nOK tap on fused\r\n{"t":"fused","v":1}\r\ndevkit> '
+        ser = FakeSerial(rx=rx)
+
+        rows = _tap_start(ser, "stream tap on fused")
+
+        self.assertEqual(rows, ['{"t":"fused","v":1}'])
+
+    def test_raises_on_err_ack(self):
+        rx = b"stream tap on\r\nERR busy\r\ndevkit> "
+        ser = FakeSerial(rx=rx)
+
+        with self.assertRaises(DevkitError) as ctx:
+            _tap_start(ser, "stream tap on")
+        self.assertIn("busy", str(ctx.exception))
 
 
 class ShellCloseTest(unittest.TestCase):
