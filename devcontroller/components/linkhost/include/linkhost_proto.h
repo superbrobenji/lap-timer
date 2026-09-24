@@ -110,6 +110,15 @@ int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap);
  * and *out (when status==0) if one was pending; 0 if none is pending. */
 int linkhost_pop_response(linkhost_frame_t *out, int *status);
 
+/* Read-only view of the demux's current in-progress line buffer (Plan 5.6 Task 5): the bytes
+ * accumulated since the last '\n' that have not yet been classified as a ---BEGIN header or
+ * dropped as noise. Exposed only so linkhost's `link trace` can hexdump whatever arrived on a
+ * per-attempt command timeout -- there is otherwise no debug visibility into a reply that never
+ * completed a full frame. *len is set to the buffered length (0 if nothing is pending). The
+ * returned pointer is into module-static state: valid only until the next linkhost_feed call, and
+ * the caller must never write through it. */
+const uint8_t *linkhost_line_peek(size_t *len);
+
 /* ================================================================================================
  *  Streaming session download (Plan 5.5): a pure, IDF-free state machine that parses one
  *  ---BEGIN/---END framed response WITHOUT ever buffering the whole body. Real session files are

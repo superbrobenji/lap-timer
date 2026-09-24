@@ -655,6 +655,13 @@ int linkhost_pop_response(linkhost_frame_t *out, int *status)
     return 1;
 }
 
+const uint8_t *linkhost_line_peek(size_t *len)
+{
+    assert(len != NULL);
+    *len = s_dx.line_len;
+    return s_dx.line;
+}
+
 /* Emits one assembled stream record from sh[]/sp[] to the ring (dropping unknown types). */
 static void stream_emit(void)
 {

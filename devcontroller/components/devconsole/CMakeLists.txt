@@ -18,15 +18,22 @@
 # never get compiled at all. Confirmed empirically (task-4-report.md deviations). "devconsole"
 # avoids the collision while PRIV_REQUIRES below unambiguously reaches the real IDF `console`.
 #
+# cmd_lt.c (Plan 5.6 Task 5): the `lt`/`link` commands, a manual relay to the lap-timer's framed
+# console over linkhost's UART1 client, with round-trip timing (linkhost_cmd_timed) and a `link
+# trace` debug hexdump. `lt config set <json>` reuses webapi's config_diff_escape (host/config_diff.c)
+# so the wire escaping matches POST /api/config exactly -- hence the added webapi PRIV_REQUIRES
+# below (one-directional: webapi never depends on devconsole).
+#
 # PRIV_REQUIRES: `console` is the IDF esp_console component (esp_console.h, used only inside this
 # component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done; esp_wifi is `dc
 # status`'s esp_wifi_ap_get_sta_list; esp_system is esp_get_free_heap_size; linkhost/logstore are
-# the two subsystems `dc status` reports on. None of these leak into console.h's public surface
-# (console_start/console_wants_json/console_register are all plain C), so everything is PRIV.
+# the two subsystems `dc status` reports on; webapi is cmd_lt.c's config_diff_escape (above). None
+# of these leak into console.h's public surface (console_start/console_wants_json/console_register
+# are all plain C), so everything is PRIV.
 idf_component_register(
-    SRCS "console.c" "cmd_dc.c" "host/jsonw.c" "host/rate.c"
+    SRCS "console.c" "cmd_dc.c" "cmd_lt.c" "host/jsonw.c" "host/rate.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system linkhost logstore)
+    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system linkhost logstore webapi)
 
 # build_config.h from the build tree (CFG_DC_VERSION, for `dc status`'s version field).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

@@ -19,6 +19,7 @@
 #include "esp_partition.h"
 
 #include "build_config.h"
+#include "hexfmt.h"
 #include "linkstats.h"
 
 static const char *TAG = "linkhost";
@@ -55,6 +56,12 @@ static volatile bool     s_rx_paused;            /* pauses the demux RX task whi
 static volatile bool     s_rx_parked;            /* true only while rx_task is in the paused-sleep, i.e.
                                                    * provably NOT inside uart_read_bytes (#65 handshake) */
 static bool              s_inited;
+static volatile bool     s_trace;                  /* `link trace on|off` (Plan 5.6 Task 5) */
+
+/* HEXFMT_LINE_CAP: hexfmt_line's own bound is 32 formatted bytes; the "ff " triplet per byte plus
+ * the 4-byte ellipsis is comfortably under 128 -- a fixed local buffer, no heap on the trace path. */
+#define HEXFMT_LINE_CAP 128
+#define TRACE_DUMP_LINES 4                          /* bound on the timeout hexdump (brief Step 5) */
 
 /* Guards the linkstats module's global state (Plan 5.6 T3 fix 1): writer = stream_consumer
  * (main.c, an unpinned FreeRTOS task) via linkhost_stats_on_record; readers = the httpd request
@@ -182,19 +189,49 @@ static const char *expected_frame_name(const char *cmd)
     return NULL;
 }
 
-int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
+/* Logs (trace on only) the demux's current in-progress line buffer as up to TRACE_DUMP_LINES
+ * hexfmt_line rows of <=32 bytes each -- whatever arrived but never completed a full frame, the
+ * one debug signal available on a timed-out attempt (brief Step 5 / ambiguity 2). */
+static void trace_dump_pending(int attempt_num)
+{
+    size_t plen = 0;
+    const uint8_t *p = linkhost_line_peek(&plen);
+    ESP_LOGI(TAG, "trace: timeout attempt %d, %u B pending:", attempt_num, (unsigned)plen);
+    size_t off = 0;
+    for (int line = 0; line < TRACE_DUMP_LINES && off < plen; line++) {   /* bounded: <=4 lines */
+        size_t take = plen - off;
+        if (take > 32u) take = 32u;
+        char hx[HEXFMT_LINE_CAP];
+        hexfmt_line(p + off, take, hx, sizeof hx);
+        ESP_LOGI(TAG, "trace:   %s", hx);
+        off += take;
+    }
+}
+
+void linkhost_trace_set(bool on) { s_trace = on; }
+bool linkhost_trace_get(void)    { return s_trace; }
+
+int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stats_t *st)
 {
     assert(cmd != NULL);
     assert(out != NULL);
-    if (!s_inited) return LINKHOST_E_NOTCONN;
+    if (!s_inited) {
+        if (st) { st->attempts = 0; st->latency_us = 0; st->result = LINKHOST_E_NOTCONN; }
+        return LINKHOST_E_NOTCONN;
+    }
 
     size_t clen = strlen(cmd);
-    if (clen == 0 || clen > 250) return LINKHOST_E_PROTO;   /* console max_cmdline_length is 256 B */
+    if (clen == 0 || clen > 250) {                            /* console max_cmdline_length is 256 B */
+        if (st) { st->attempts = 0; st->latency_us = 0; st->result = LINKHOST_E_PROTO; }
+        return LINKHOST_E_PROTO;
+    }
 
     /* Bounded take: a download/flash on the worker task can hold s_req_mtx for many seconds; the
      * httpd request task must never park on it (M2) -- report BUSY and let the caller answer 503. */
-    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE)
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE) {
+        if (st) { st->attempts = 0; st->latency_us = 0; st->result = LINKHOST_E_BUSY; }
         return LINKHOST_E_BUSY;
+    }
 
     /* No heartbeat seen -> the peer is (probably) absent: one short attempt instead of 3x2 s, so a
      * disconnected link fails fast rather than freezing the UI for 6 s per request. */
@@ -203,26 +240,38 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
     int  attempts = present ? (LINK_CMD_RETRIES + 1) : 1;
     int  per_tmo  = present ? LINK_CMD_TIMEOUT_MS : LINK_ABSENT_TMO_MS;
 
-    int result = present ? LINKHOST_E_TIMEOUT : LINKHOST_E_NOTCONN;
+    int     result        = present ? LINKHOST_E_TIMEOUT : LINKHOST_E_NOTCONN;
+    int     attempts_made  = 0;
+    bool    got_any        = false;
+    int64_t t0              = esp_timer_get_time();   /* the FIRST write happens right below */
+    int64_t t_reply         = t0;
+
     for (int attempt = 0; attempt < attempts; attempt++) {           /* bounded retries */
         drain_pending();
+        attempts_made++;
+        if (s_trace) ESP_LOGI(TAG, "trace: send '%s' attempt %d", cmd, attempts_made);
         uart_write_bytes(DC_LINK_UART, cmd, clen);
         uart_write_bytes(DC_LINK_UART, "\r", 1);
 
         int64_t deadline = esp_timer_get_time() + (int64_t)per_tmo * 1000;
         bool got = false;
         while (esp_timer_get_time() < deadline) {                    /* bounded by the deadline */
-            int st;
-            if (linkhost_pop_response(out, &st)) {
-                if (st == 0 && want && strcmp(out->name, want) != 0)
+            int fst;
+            if (linkhost_pop_response(out, &fst)) {
+                if (fst == 0 && want && strcmp(out->name, want) != 0)
                     continue;      /* a late reply for a different command: keep waiting */
-                result = st;       /* 0, or LINKHOST_E_CRC/_PROTO/_REMOTE from the parser/classifier */
+                result = fst;      /* 0, or LINKHOST_E_CRC/_PROTO/_REMOTE from the parser/classifier */
                 got = true;
+                t_reply = esp_timer_get_time();
+                if (s_trace)
+                    ESP_LOGI(TAG, "trace: reply '%s' status=%d after %lld ms",
+                             out->name, fst, (long long)(t_reply - t0) / 1000);
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(5));
         }
-        if (got) break;
+        if (got) { got_any = true; break; }
+        if (s_trace) trace_dump_pending(attempts_made);
     }
 
     /* Copy the body out of the parser's shared static buffer into a request-task-owned buffer so a
@@ -235,8 +284,19 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
         result = LINKHOST_E_PROTO;   /* body larger than the assembly bound -> treat as malformed */
     }
 
+    if (st) {
+        st->attempts   = attempts_made;
+        st->latency_us = (got_any ? t_reply : esp_timer_get_time()) - t0;
+        st->result     = result;
+    }
+
     xSemaphoreGive(s_req_mtx);
     return result;
+}
+
+int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
+{
+    return linkhost_cmd_timed(cmd, out, NULL);
 }
 
 /* Served from the pushed-STATUS cache (Plan 5.6 T3): the lap-timer streams LT_REC_STATUS at 1 Hz
@@ -330,6 +390,7 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
     int64_t idle_dl  = start + (int64_t)DL_IDLE_TMO_MS * 1000;   /* reset on every read */
     int64_t hard_dl  = start + (int64_t)DL_HARD_MIN_MS * 1000;   /* floor; scaled once size is known */
     bool    scaled   = false;
+    bool    hdr_traced = false;                   /* `link trace`: log the header exactly once */
     lh_dl_state_t st = dl.state;
     while (st < LH_DL_DONE) {                     /* bounded by hard_dl / idle_dl */
         int64_t t = esp_timer_get_time();
@@ -338,6 +399,10 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
         if (n > 0) {
             idle_dl = esp_timer_get_time() + (int64_t)DL_IDLE_TMO_MS * 1000;
             st = lh_dl_feed(&dl, buf, (size_t)n);
+        }
+        if (s_trace && !hdr_traced && dl.state >= LH_DL_BODY) {
+            ESP_LOGI(TAG, "trace: dl header '%s' size=%u", dl.name, (unsigned)dl.body_size);
+            hdr_traced = true;
         }
         /* Scale the absolute cap to the announced body once the header parses (M5): a fixed 120 s
          * was < a 1 MB .log (~1.37 MB base64 ~= 119 s at this baud). transfer_us = size*10/baud;
@@ -360,6 +425,9 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
         rerr->code = dl.err_code;
         memcpy(rerr->msg, dl.err_msg, sizeof rerr->msg);
     }
+    if (s_trace)
+        ESP_LOGI(TAG, "trace: dl done '%s' bytes=%u result=%d",
+                 dl.name, (unsigned)dl.decoded_len, result);
     ESP_LOGI(TAG, "linkhost_download_cmd: '%s' -> result=%d (state=%d decoded=%u)",
              cmd, result, (int)dl.state, (unsigned)dl.decoded_len);
     return result;

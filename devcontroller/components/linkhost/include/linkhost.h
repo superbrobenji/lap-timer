@@ -76,6 +76,25 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out);
 /* True when link activity (a `status` heartbeat / stream frame) has been seen within a few seconds. */
 bool linkhost_peer_present(void);
 
+/* ---- round-trip timing (Plan 5.6 Task 5, the `lt` console relay) ---- */
+typedef struct {
+    int     attempts;     /* attempts made this call (1..LINK_CMD_RETRIES+1) */
+    int64_t latency_us;   /* accepted reply time minus the FIRST write; total elapsed on failure */
+    int     result;       /* the linkhost_cmd_timed return code (mirrors the function's return) */
+} linkhost_cmd_stats_t;
+
+/* Same contract as linkhost_cmd, but also fills *st (nullable) with round-trip stats: attempts
+ * made, latency measured from the first write of the first attempt to the accepted reply (or the
+ * total time elapsed if every attempt failed), and the return code. linkhost_cmd is a thin wrapper
+ * (linkhost_cmd_timed(cmd, out, NULL)). */
+int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stats_t *st);
+
+/* ---- link trace (Plan 5.6 Task 5): verbose ESP_LOGI("trace: ...") of every linkhost_cmd_timed /
+ * linkhost_download_cmd attempt (send/reply/timeout-hexdump for a command; header/bytes/result for
+ * a download) -- toggled by the console's `link trace on|off`. Off by default. ---- */
+void linkhost_trace_set(bool on);
+bool linkhost_trace_get(void);
+
 /* ---- streaming session download ----
  * Runs `open <id> <fmt>` and STREAMS the framed response body to `chunk_cb` without ever buffering
  * the whole file (real .log/.vbo/... are KB..MB and overflow LINKHOST_ASM_MAX). `chunk_cb` receives
