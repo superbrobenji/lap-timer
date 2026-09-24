@@ -103,6 +103,12 @@ void linkhost_reset(void);
 size_t linkhost_feed(const uint8_t *bytes, size_t n);
 /* Pops one demuxed stream record. 0 if one was returned, <0 if the ring is empty. */
 int linkhost_stream_pop(lt_stream_rec_t *out);
+/* Ring high-water (Plan 5.6 Task 6): the largest fill (records queued at once) the stream ring has
+ * reached since linkhost_reset(). Maintained by the single producer (stream_emit's ring push) as
+ * max(hw, fill_just_after_the_push); read here by the console (`stream stats`) as a single relaxed
+ * word read -- ring_hw is monotonic non-decreasing, so a torn/stale read is merely "slightly out of
+ * date", never wrong-direction, and needs no lock. */
+uint16_t linkhost_stream_ring_hw(void);
 /* Decode one stream record (SES_T_FUSED/EVENT) to a compact JSON object for the live monitor.
  * Returns bytes written (>0) or -1 for an unknown/short record (skip it). Floats -> scaled ints. */
 int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap);

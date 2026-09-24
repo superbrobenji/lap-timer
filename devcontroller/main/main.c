@@ -181,6 +181,7 @@ static void stream_consumer(void *arg)
                 s_append_fail_logged = true;
             }
             webapi_stream_push(&r);
+            console_stream_tap(&r);   /* T6: no-op unless `stream tap on` (rate-limited, filtered) */
             any = 1;
         }
         vTaskDelay(pdMS_TO_TICKS(any ? 5 : 40));

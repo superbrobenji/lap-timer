@@ -26,16 +26,21 @@
 # specifically so this component would not need a webapi dependency just to escape one console
 # argument).
 #
+# REQUIRES linkhost: console.h's console_stream_tap (Plan 5.6 Task 6) takes a `const
+# lt_stream_rec_t *`, so console.h itself #includes linkhost_proto.h -- linkhost's public include
+# dir must reach anyone who includes console.h, same reasoning as webapi's own REQUIRES linkhost.
+#
 # PRIV_REQUIRES: `console` is the IDF esp_console component (esp_console.h, used only inside this
 # component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done; esp_wifi is `dc
-# status`'s esp_wifi_ap_get_sta_list; esp_system is esp_get_free_heap_size; linkhost/logstore are
-# the two subsystems `dc status` reports on (and linkhost is cmd_lt.c's wire_escape, above). None
-# of these leak into console.h's public surface (console_start/console_wants_json/console_register
-# are all plain C), so everything is PRIV.
+# status`'s esp_wifi_ap_get_sta_list; esp_system is esp_get_free_heap_size; logstore is the other
+# subsystem `dc status` reports on. None of these (linkhost aside) leak into console.h's public
+# surface (console_start/console_wants_json/console_register/console_stream_tap are all plain C
+# + the one linkhost_proto.h type), so everything but linkhost stays PRIV.
 idf_component_register(
-    SRCS "console.c" "cmd_dc.c" "cmd_lt.c" "host/jsonw.c" "host/rate.c"
+    SRCS "console.c" "cmd_dc.c" "cmd_lt.c" "cmd_stream.c" "host/jsonw.c" "host/rate.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system linkhost logstore)
+    REQUIRES linkhost
+    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system logstore)
 
 # build_config.h from the build tree (CFG_DC_VERSION, for `dc status`'s version field).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

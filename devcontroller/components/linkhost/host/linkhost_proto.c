@@ -605,6 +605,7 @@ static struct {
     lt_stream_rec_t ring[RING_CAP];
     volatile uint32_t ring_head;   /* written by feed */
     volatile uint32_t ring_tail;   /* written by stream_pop */
+    volatile uint16_t ring_hw;     /* monotonic high-water fill, written by feed (see ring_push) */
 
     /* response slot (SPSC: producer = feed, consumer = pop_response) */
     linkhost_frame_t resp;
@@ -634,6 +635,11 @@ static void ring_push(const lt_stream_rec_t *r)
     if ((uint32_t)(head - s_dx.ring_tail) >= RING_CAP) return;   /* full: drop newest */
     s_dx.ring[head & (RING_CAP - 1u)] = *r;
     s_dx.ring_head = head + 1u;                                  /* publish after the store */
+    /* Ring high-water (Task 6 resolution 2): fill right after this push, folded into the
+     * monotonic max. Single producer (this function, called only from linkhost_feed) -- no lock
+     * needed to write it; linkhost_stream_ring_hw's read is documented as benign/relaxed. */
+    uint32_t fill = s_dx.ring_head - s_dx.ring_tail;
+    if (fill > s_dx.ring_hw) s_dx.ring_hw = (uint16_t)fill;
 }
 
 int linkhost_stream_pop(lt_stream_rec_t *out)
@@ -644,6 +650,11 @@ int linkhost_stream_pop(lt_stream_rec_t *out)
     *out = s_dx.ring[tail & (RING_CAP - 1u)];
     s_dx.ring_tail = tail + 1u;
     return 0;
+}
+
+uint16_t linkhost_stream_ring_hw(void)
+{
+    return s_dx.ring_hw;   /* single relaxed word read: monotonic, so a stale value is fine */
 }
 
 int linkhost_pop_response(linkhost_frame_t *out, int *status)

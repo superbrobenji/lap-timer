@@ -15,6 +15,7 @@
 
 #include "cmd_dc.h"
 #include "cmd_lt.h"
+#include "cmd_stream.h"
 
 static const char *TAG = "console";
 
@@ -56,8 +57,10 @@ esp_err_t console_start(void)
         return e;
     }
 
-    cmd_dc_register();   /* T4 */
-    cmd_lt_register();   /* T5 */   /* later tasks append: cmd_stream_register(); ... */
+    cmd_dc_register();       /* T4 */
+    cmd_lt_register();       /* T5 */
+    cmd_stream_register();   /* T6 */
+    /* later tasks append: cmd_selftest_register(); cmd_flash_register(); ... */
 
     ESP_LOGI(TAG, "REPL up on UART%d (%d cmd registered)", CONFIG_ESP_CONSOLE_UART_NUM, s_ncmd);
     return esp_console_start_repl(s_repl);
