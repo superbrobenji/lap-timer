@@ -57,7 +57,10 @@ int otastage_begin_bounded(uint32_t max);
 /* Buffers and writes `n` bytes: a lazy 4 KB erase-then-write through the single static staging
  * block, each full block folded into the running SHA-256 as it is written. May be called any
  * number of times after otastage_begin/otastage_begin_bounded. Returns OTASTAGE_OK, OTASTAGE_E_SIZE
- * (this write would exceed the bound given at begin), or OTASTAGE_E_WRITE (an erase/write failed). */
+ * (this write would exceed the bound given at begin), or OTASTAGE_E_WRITE (an erase/write failed).
+ * On any non-OK return the SHA context is still live: the caller MUST call otastage_abort (never
+ * otastage_finish -- the staged bytes are already known incomplete/invalid) to release it before
+ * starting a new attempt. */
 int otastage_write(const uint8_t *p, size_t n);
 
 /* Flushes any partial final block -- BEFORE any size/image check below, so even a stage that ends

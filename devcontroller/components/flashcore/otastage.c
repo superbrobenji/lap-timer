@@ -124,7 +124,11 @@ int otastage_finish(uint8_t sha[32], char ver[IMG_VER_LEN], char hwid[IMG_HWID_L
     }
 
     if (!stage_bounds_finish_ok(s_stage.mode, s_stage.written, s_stage.bound)) {
-        s_stage.active = false;
+        /* otastage_abort frees the still-live SHA context (fix round 2: this path used to set
+         * active=false and return without freeing it -- with CONFIG_MBEDTLS_HARDWARE_SHA=y that
+         * leaks the hardware SHA engine lock until reboot, after which every SHA-256 in the
+         * firmware silently falls back to software). */
+        otastage_abort();
         return OTASTAGE_E_SIZE;
     }
 
