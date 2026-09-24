@@ -1,4 +1,5 @@
-/* image_desc.c -- the PURE app-image header parser behind POST /api/flash (Plan 5.5 Task 6).
+/* image_desc.c -- the PURE app-image header parser behind POST /api/flash and (later) the
+ * console's `flash stage` (Plan 5.5 Task 6; moved into flashcore in Plan 5.6 Task 7).
  * Reads the two fields the lap-timer's `ota recv` line needs (version + hardware id) straight out
  * of the staged image, at the fixed spec 19.3 offsets. Kept IDF-free (offsets, not
  * esp_app_desc.h) so devcontroller/test/test_image_desc.c links it on the host.

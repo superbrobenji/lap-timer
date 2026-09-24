@@ -1,0 +1,142 @@
+/* flashctl.c -- see include/flashctl.h. The exact busy/state machine and push task that used to
+ * live in webapi.c as s_flash / flash_task / flash_progress (Plan 5.5 Task 6), moved behind a
+ * stable API in Plan 5.6 Task 7. flashctl_get copies the whole status struct under the same
+ * portMUX_TYPE spinlock the push task uses to update pct/state/result (mirrors linkhost.c's
+ * s_stats_mux pattern) -- a plain struct copy across tasks would tear.
+ *
+ * flashctl_try_begin_staging is the one change beyond a straight move: the old code's busy check
+ * (`if (s_flash.busy)`) and busy claim (`s_flash.busy = true`) were two separate steps with
+ * several fallible checks in between (content-type, link status, partition lookup) -- a real
+ * TOCTOU for two front ends racing this endpoint. Folding check+claim into one spinlock-protected
+ * step here closes that window; the caller now claims first and releases via flashctl_end_staging
+ * on any later failure. */
+#include "flashctl.h"
+
+#include <assert.h>
+#include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_log.h"
+
+#include "linkhost.h"
+
+static const char *TAG = "flashctl";
+
+static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Guarded by s_mux. ver/hwid/size/sha are written only by flashctl_start_push, before the task it
+ * spawns exists (mirrors webapi.c's old comment: "written only while busy is true and the task
+ * does not exist yet"), so the task reads them once under the lock at its start with no further
+ * synchronisation needed for the rest of its run. sha is not part of the public status struct (no
+ * caller has needed to read it back) so it stays a private companion to `s_flash`. */
+static flashctl_status_t s_flash;
+static uint8_t            s_flash_sha[32];
+
+bool flashctl_try_begin_staging(void)
+{
+    bool claimed = false;
+    portENTER_CRITICAL(&s_mux);
+    if (!s_flash.busy) {
+        s_flash.busy  = true;
+        s_flash.state = FLASHCTL_STAGING;
+        claimed = true;
+    }
+    portEXIT_CRITICAL(&s_mux);
+    return claimed;
+}
+
+void flashctl_end_staging(bool ok)
+{
+    assert(s_flash.busy && s_flash.state == FLASHCTL_STAGING);
+    if (ok) return;   /* stays STAGING/busy: ready for flashctl_start_push, now or later */
+    portENTER_CRITICAL(&s_mux);
+    s_flash.state = FLASHCTL_IDLE;
+    s_flash.busy  = false;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+void flashctl_clear_result(void)
+{
+    portENTER_CRITICAL(&s_mux);
+    s_flash.pct     = 0;
+    s_flash.result  = 0;
+    s_flash.size    = 0;
+    s_flash.ver[0]  = '\0';
+    s_flash.hwid[0] = '\0';
+    portEXIT_CRITICAL(&s_mux);
+}
+
+/* The one function pointer passed to linkhost_flash: publishes push progress under the lock
+ * flashctl_get reads. Same formula as webapi.c's old flash_progress + api_status's percent math,
+ * just computed here instead of split across two files. */
+static void flash_progress(uint32_t sent, uint32_t total, void *ctx)
+{
+    (void)ctx;
+    unsigned pct = (total > 0u) ? (unsigned)(((uint64_t)sent * 100u) / total) : 0u;
+    if (pct > 100u) pct = 100u;
+    portENTER_CRITICAL(&s_mux);
+    s_flash.pct = (uint8_t)pct;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+/* The push half. Owns the link for the whole transfer, then publishes the outcome for
+ * flashctl_get and releases the single-flight guard. */
+static void flash_task(void *arg)
+{
+    (void)arg;
+    char     ver[IMG_VER_LEN];
+    char     hwid[IMG_HWID_LEN + 1];
+    uint32_t size;
+    uint8_t  sha[32];
+
+    portENTER_CRITICAL(&s_mux);
+    memcpy(ver, s_flash.ver, sizeof ver);
+    memcpy(hwid, s_flash.hwid, sizeof hwid);
+    size = s_flash.size;
+    memcpy(sha, s_flash_sha, sizeof sha);
+    portEXIT_CRITICAL(&s_mux);
+
+    int rc = linkhost_flash(ver, hwid, size, sha, flash_progress, NULL);
+
+    portENTER_CRITICAL(&s_mux);
+    s_flash.result = rc;
+    s_flash.state  = (rc == 0) ? FLASHCTL_DONE_OK : FLASHCTL_DONE_ERR;
+    s_flash.busy   = false;
+    portEXIT_CRITICAL(&s_mux);
+
+    ESP_LOGI(TAG, "flash push of %lu B finished rc=%d", (unsigned long)size, rc);
+    vTaskDelete(NULL);
+}
+
+int flashctl_start_push(const char *ver, const char *hwid, uint32_t size, const uint8_t sha[32])
+{
+    assert(ver != NULL && hwid != NULL && sha != NULL);
+    assert(s_flash.busy && s_flash.state == FLASHCTL_STAGING);
+
+    portENTER_CRITICAL(&s_mux);
+    memcpy(s_flash.ver, ver, sizeof s_flash.ver);
+    memcpy(s_flash.hwid, hwid, sizeof s_flash.hwid);
+    s_flash.size = size;
+    memcpy(s_flash_sha, sha, sizeof s_flash_sha);
+    s_flash.state = FLASHCTL_PUSHING;         /* must be set before the task can finish */
+    portEXIT_CRITICAL(&s_mux);
+
+    if (xTaskCreate(flash_task, "flashctl_push", 4096, NULL, 5, NULL) != pdPASS) {
+        portENTER_CRITICAL(&s_mux);
+        s_flash.state = FLASHCTL_IDLE;
+        s_flash.busy  = false;
+        portEXIT_CRITICAL(&s_mux);
+        return -1;
+    }
+    return 0;
+}
+
+void flashctl_get(flashctl_status_t *out)
+{
+    assert(out != NULL);
+    portENTER_CRITICAL(&s_mux);
+    *out = s_flash;
+    portEXIT_CRITICAL(&s_mux);
+}
