@@ -106,12 +106,12 @@ static int stream_stats(int argc, char **argv, bool json)
         return 0;
     }
 
-    if (fused_rate_x10 < 0) printf("fused_rate_x10: n/a\n");
-    else printf("fused_rate_x10: %lld.%lld/s\n", fused_rate_x10 / 10, fused_rate_x10 % 10);
-    if (event_rate_x10 < 0) printf("event_rate_x10: n/a\n");
-    else printf("event_rate_x10: %lld.%lld/s\n", event_rate_x10 / 10, event_rate_x10 % 10);
-    if (status_rate_x10 < 0) printf("status_rate_x10: n/a\n");
-    else printf("status_rate_x10: %lld.%lld/s\n", status_rate_x10 / 10, status_rate_x10 % 10);
+    if (fused_rate_x10 < 0) printf("fused_rate: n/a\n");
+    else printf("fused_rate: %lld.%lld/s\n", fused_rate_x10 / 10, fused_rate_x10 % 10);
+    if (event_rate_x10 < 0) printf("event_rate: n/a\n");
+    else printf("event_rate: %lld.%lld/s\n", event_rate_x10 / 10, event_rate_x10 % 10);
+    if (status_rate_x10 < 0) printf("status_rate: n/a\n");
+    else printf("status_rate: %lld.%lld/s\n", status_rate_x10 / 10, status_rate_x10 % 10);
     printf("gaps: %u\n", (unsigned)ls.gaps);
     printf("n_fused: %u\n", (unsigned)ls.n_fused);
     printf("n_event: %u\n", (unsigned)ls.n_event);
