@@ -66,8 +66,13 @@ int cmd_shell_run(bool json)
     while (linkhost_now_us() < deadline) {                      /* bounded by the cap */
         int n = uart_read_bytes(usb, b, sizeof b, pdMS_TO_TICKS(10));
         for (int i = 0; i < n; i++) {                           /* bounded by n */
-            if (at_line_start && b[i] == '~') { tilde = 1; continue; }
             if (tilde && b[i] == '.') goto out;
+            if (tilde && b[i] == '~') {      /* pending tilde + a new ~: forward the pending one,
+                                               * keep the new one pending (~~. -> one ~, then exit) */
+                uart_write_bytes(DC_LINK_UART, "~", 1);
+                continue;
+            }
+            if (at_line_start && b[i] == '~') { tilde = 1; continue; }
             if (tilde) { uart_write_bytes(DC_LINK_UART, "~", 1); tilde = 0; }
             uart_write_bytes(DC_LINK_UART, &b[i], 1);
             at_line_start = (b[i] == '\r' || b[i] == '\n');
