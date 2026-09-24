@@ -211,6 +211,11 @@ static void trace_dump_pending(int attempt_num)
 void linkhost_trace_set(bool on) { s_trace = on; }
 bool linkhost_trace_get(void)    { return s_trace; }
 
+size_t linkhost_trace_last_reply(uint8_t *out, size_t cap)
+{
+    return linkhost_rawcap_copy(out, cap);
+}
+
 int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stats_t *st)
 {
     assert(cmd != NULL);

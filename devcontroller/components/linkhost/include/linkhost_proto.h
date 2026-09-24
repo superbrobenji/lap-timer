@@ -136,6 +136,25 @@ int linkhost_pop_response(linkhost_frame_t *out, int *status);
  * caller must never write through it. */
 const uint8_t *linkhost_line_peek(size_t *len);
 
+/* ---- raw reply capture (Plan 5.6 Task 9's `selftest framing`) ----
+ * When ON, the demux appends the RAW incoming bytes of a framed reply -- from the byte that
+ * starts the ---BEGIN marker line through the end of the ---END <crc>---\r\n line, CR/LF included,
+ * EXACTLY as received on the wire (unlike linkhost_parse_frame's re-synced s_dx.frame, which
+ * drops leading noise and re-synthesizes the header line's own terminator) -- into a 256-byte
+ * static buffer. Overwrite = truncate: the FIRST 256 bytes are kept and any bytes beyond that are
+ * counted by linkhost_rawcap_dropped() -- a self-test only needs the marker lines and the first
+ * body lines. Each new ---BEGIN restarts the capture (resets to empty first). Stream frames
+ * (0xFF records) are NEVER captured -- only bytes the response-frame body/tail states consume.
+ * Independent of linkhost_trace_set's ESP_LOGI trace; toggling one never affects the other. Off
+ * by default and after linkhost_reset(). */
+void   linkhost_rawcap_set(bool on);
+/* Copies up to `cap` bytes of the current capture into `out`. Returns the number of bytes copied
+ * (<= cap, <= 256). */
+size_t linkhost_rawcap_copy(uint8_t *out, size_t cap);
+/* Bytes seen beyond the 256-byte cap for the CURRENT (or most recently completed) capture; reset
+ * to 0 by each new ---BEGIN, same as the capture itself. */
+size_t linkhost_rawcap_dropped(void);
+
 /* ================================================================================================
  *  Streaming session download (Plan 5.5): a pure, IDF-free state machine that parses one
  *  ---BEGIN/---END framed response WITHOUT ever buffering the whole body. Real session files are

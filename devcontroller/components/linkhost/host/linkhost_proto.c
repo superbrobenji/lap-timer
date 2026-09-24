@@ -564,6 +564,60 @@ int lh_dl_result(const lh_dl_ctx_t *c)
 }
 
 /* ================================================================================================
+ *  Raw reply capture (Plan 5.6 Task 9's `selftest framing`) -- see linkhost_rawcap_set's doc in
+ *  linkhost_proto.h. Independent module-global state (not part of s_dx below): a separate static,
+ *  like s_body above, rather than reset by every demux operation -- only linkhost_reset() and a
+ *  new ---BEGIN touch it.
+ * ============================================================================================== */
+#define RAWCAP_CAP 256u
+
+static struct {
+    bool    on;
+    uint8_t buf[RAWCAP_CAP];
+    size_t  len;
+    size_t  dropped;
+} s_rawcap;
+
+void linkhost_rawcap_set(bool on) { s_rawcap.on = on; }
+
+size_t linkhost_rawcap_copy(uint8_t *out, size_t cap)
+{
+    assert(out != NULL || cap == 0);
+    size_t n = (s_rawcap.len < cap) ? s_rawcap.len : cap;
+    if (n > 0) memcpy(out, s_rawcap.buf, n);
+    return n;
+}
+
+size_t linkhost_rawcap_dropped(void)
+{
+    return s_rawcap.dropped;
+}
+
+/* A new ---BEGIN was just recognized: restarts the capture (empties it). No-op if capture is off,
+ * so toggling capture on mid-stream never starts mid-frame -- only a FRESH header seeds it. */
+static void rawcap_restart(void)
+{
+    if (!s_rawcap.on) return;
+    s_rawcap.len = 0;
+    s_rawcap.dropped = 0;
+}
+
+/* Appends one raw wire byte, truncating (and counting) past RAWCAP_CAP. No-op if capture is off. */
+static void rawcap_push(uint8_t b)
+{
+    if (!s_rawcap.on) return;
+    if (s_rawcap.len < RAWCAP_CAP) s_rawcap.buf[s_rawcap.len++] = b;
+    else s_rawcap.dropped++;
+}
+
+/* Appends `n` raw bytes verbatim (the reconstructed header line). No-op if capture is off. */
+static void rawcap_push_n(const uint8_t *p, size_t n)
+{
+    if (!s_rawcap.on) return;
+    for (size_t i = 0; i < n; i++) rawcap_push(p[i]);   /* bounded: n <= LINE_CAP */
+}
+
+/* ================================================================================================
  *  Demux state machine + stream ring + response slot (module-global; SPSC lock-free)
  * ============================================================================================== */
 #define RING_CAP    32u                             /* power of two */
@@ -617,6 +671,7 @@ void linkhost_reset(void)
 {
     memset(&s_dx, 0, sizeof(s_dx));
     s_dx.state = DX_SCAN;
+    memset(&s_rawcap, 0, sizeof(s_rawcap));   /* off, empty -- matches linkhost_rawcap_set's doc */
 }
 
 /* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END), plus the
@@ -694,8 +749,11 @@ static void stream_emit(void)
 }
 
 /* Classifies a completed line (in s_dx.line, length s_dx.line_len). If it is a ---BEGIN header,
- * seeds the RESP_BODY state; otherwise the line is noise and we return to SCAN. */
-static void classify_line(void)
+ * seeds the RESP_BODY state; otherwise the line is noise and we return to SCAN. `had_cr` is
+ * whether the line (as fed) ended in \r before the \n that triggered this call -- s_dx.line_len
+ * has ALREADY had that trailing \r stripped by the caller, so classify_line reconstructs it for
+ * the raw capture below rather than re-scanning. */
+static void classify_line(bool had_cr)
 {
     char name[16];
     uint32_t size = 0;
@@ -736,6 +794,17 @@ static void classify_line(void)
     s_dx.body_need = size;
     s_dx.body_got  = 0;
     s_dx.state = DX_RESP_BODY;
+
+    /* Raw capture (Plan 5.6 Task 9): a new ---BEGIN restarts it, then seeds it with the header
+     * line EXACTLY as received -- begin[0..blen) is already verbatim raw bytes (every byte pushed
+     * to s_dx.line during DX_LINE is unmodified), plus the \r that had_cr says was stripped off
+     * line_len (still true to the wire, unlike s_dx.frame's synthesized '\n' above), plus the '\n'
+     * that just completed this line. The body/tail bytes are appended as DX_RESP_BODY/DX_RESP_TAIL
+     * consume them below (rawcap_push at the same call sites as frame_push). */
+    rawcap_restart();
+    rawcap_push_n(begin, blen);
+    if (had_cr) rawcap_push((uint8_t)'\r');
+    rawcap_push((uint8_t)'\n');
 }
 
 static void frame_push(uint8_t b)
@@ -760,8 +829,9 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
             if (b == LT_STREAM_TAG) {            /* ASCII noise never holds 0xFF -> a stream frame */
                 s_dx.sh[0] = b; s_dx.sh_got = 1; s_dx.state = DX_STREAM_HDR;
             } else if (b == '\n') {
-                if (s_dx.line_len > 0 && s_dx.line[s_dx.line_len - 1] == '\r') s_dx.line_len--;
-                classify_line();
+                bool had_cr = (s_dx.line_len > 0 && s_dx.line[s_dx.line_len - 1] == '\r');
+                if (had_cr) s_dx.line_len--;
+                classify_line(had_cr);
             } else if (s_dx.line_len < LINE_CAP) {
                 s_dx.line[s_dx.line_len++] = b;
             } else {
@@ -779,6 +849,7 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
                 s_dx.sh[0] = b; s_dx.sh_got = 1; s_dx.state = DX_STREAM_HDR;
             } else {
                 frame_push(b);
+                rawcap_push(b);                  /* raw reply capture (Plan 5.6 Task 9) */
                 if (++s_dx.body_got >= s_dx.body_need) {
                     s_dx.tail_off = s_dx.frame_len;   /* anchor the ---END scan past the body */
                     s_dx.state = DX_RESP_TAIL;
@@ -791,6 +862,7 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
                 s_dx.sh[0] = b; s_dx.sh_got = 1; s_dx.state = DX_STREAM_HDR;
             } else {
                 frame_push(b);
+                rawcap_push(b);                  /* raw reply capture (Plan 5.6 Task 9) */
                 if (b == '\n'
                     && mem_find(s_dx.frame + s_dx.tail_off, s_dx.frame_len - s_dx.tail_off,
                                 LT_FRAME_END_PFX, sizeof(LT_FRAME_END_PFX) - 1) != NULL) {

@@ -95,6 +95,20 @@ int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stat
 void linkhost_trace_set(bool on);
 bool linkhost_trace_get(void);
 
+/* ---- raw reply capture wrapper (Plan 5.6 Task 9's `selftest framing`) ----
+ * Thin pass-through to linkhost_proto.h's linkhost_rawcap_copy (arm the capture first via
+ * linkhost_rawcap_set(true), also declared there -- independent of linkhost_trace_set's ESP_LOGI
+ * trace above). Safe to call any time AFTER linkhost_cmd_timed has returned for the command whose
+ * reply is being inspected: the demux's RX task is the SOLE writer of the capture, appending bytes
+ * as linkhost_feed processes them off UART1; the byte that completes a reply (the '\n' ending its
+ * ---END line) is captured BEFORE that same demux step publishes the reply via resp_ready (see
+ * linkhost_proto.c's DX_RESP_TAIL case), and linkhost_cmd_timed only returns once it has observed
+ * resp_ready true for that reply. So by the time this is called, the capture for that reply is
+ * already fully written and the request-owning task (this caller) is the only reader -- no lock
+ * needed, unlike linkhost_line_peek's genuinely concurrent (and merely best-effort) cross-task
+ * snapshot. Returns the number of bytes copied (<= cap, <= 256). */
+size_t linkhost_trace_last_reply(uint8_t *out, size_t cap);
+
 /* ---- streaming session download ----
  * Runs `open <id> <fmt>` and STREAMS the framed response body to `chunk_cb` without ever buffering
  * the whole file (real .log/.vbo/... are KB..MB and overflow LINKHOST_ASM_MAX). `chunk_cb` receives
