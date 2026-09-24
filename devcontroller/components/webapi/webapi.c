@@ -778,6 +778,11 @@ static const char *flash_stage_body(httpd_req_t *req, size_t *left, const char *
     int frc = otastage_finish(sha, ver, hwid, size);
     if (frc == OTASTAGE_E_IMAGE) {
         *status = "412 Precondition Failed";
+        /* otastage_last_image_rc mirrors img_desc_parse's own -1/-2/-3 (image_desc.h) so the SPA
+         * gets back the same three distinguishable reasons the pre-flashcore code gave it. */
+        int irc = otastage_last_image_rc();
+        if (irc == -2) return "bad image version";
+        if (irc == -3) return "bad image hwid";
         return "not an ESP32 app image";
     }
     if (frc != OTASTAGE_OK) {
@@ -838,13 +843,14 @@ static esp_err_t api_flash_post(httpd_req_t *req)
         return send_error_json(req, "500 Internal Server Error", "no ota_stage partition");
     }
 
-    /* otastage_begin repeats this same partition lookup internally; passing stage->size as the
-     * bound makes otastage_write's overflow check trigger at exactly the point the old
-     * stage_sink's `written+blk_len+n > part->size` check did (size==0/size>part->size can never
-     * actually fire here -- POST /api/flash does not know the final image size up front, unlike a
-     * console `flash stage <size> <sha>`, which is what otastage_begin's size argument is really
-     * for). */
-    int brc = otastage_begin(stage->size);
+    /* BOUNDED, not EXACT: POST /api/flash does not know the final image size up front (an unsized
+     * multipart body), unlike a console `flash stage <size> <sha>`, which is told the exact size
+     * by the operator and uses otastage_begin instead. otastage_begin_bounded repeats this same
+     * partition lookup internally; passing stage->size as the ceiling makes otastage_write's
+     * overflow check trigger at exactly the point the old stage_sink's
+     * `written+blk_len+n > part->size` check did (max==0/max>part->size can never actually fire
+     * here). */
+    int brc = otastage_begin_bounded(stage->size);
     if (brc != OTASTAGE_OK) {
         flashctl_end_staging(false);
         flash_drain(req, left);

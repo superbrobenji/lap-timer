@@ -1,7 +1,11 @@
 /* otastage.c -- see include/otastage.h. The exact erase/write/read-back/parse sequence that used
  * to live in webapi.c as s_stage_blk/stage_ctx_t/stage_commit/stage_sink (Plan 5.5 Task 6), moved
  * behind a stable API in Plan 5.6 Task 7 so both POST /api/flash and a later console `flash
- * stage` drive the same code. Single-flight, no heap: one static 4 KB staging block. */
+ * stage` drive the same code. Single-flight, no heap: one static 4 KB staging block.
+ *
+ * The size-bound arithmetic (write-overflow and finish-time EXACT/BOUNDED validity) is pure and
+ * lives in stage_bounds.c/.h so it can be host-tested directly -- this file only owns the
+ * IDF-bound parts (esp_partition, mbedtls) around it. */
 #include "otastage.h"
 
 #include <assert.h>
@@ -11,35 +15,37 @@
 #include "esp_partition.h"
 #include "mbedtls/sha256.h"
 
+#include "stage_bounds.h"
+
 #define STAGE_BLOCK 4096u   /* flash sector: the erase+write granularity */
 
 typedef struct {
-    const esp_partition_t *part;
-    uint32_t                bound;     /* the size passed to otastage_begin: otastage_write's
-                                        * overflow check compares the running total against this,
-                                        * not part->size directly, so a caller that declares the
-                                        * final image size up front gets a tighter bound. */
+    const esp_partition_t  *part;
+    uint32_t                bound;     /* the size/max passed to otastage_begin*: see `mode` */
+    stage_bounds_mode_t     mode;      /* EXACT (otastage_begin) or BOUNDED (otastage_begin_bounded) */
     uint32_t                written;   /* bytes committed to flash; always a multiple of STAGE_BLOCK */
     size_t                  blk_len;   /* bytes pending in s_blk */
     bool                    active;
     mbedtls_sha256_context  sha;
+    int                     last_image_rc;   /* img_desc_parse's rc, valid after OTASTAGE_E_IMAGE */
 } stage_state_t;
 
 static stage_state_t s_stage;
 static uint8_t       s_blk[STAGE_BLOCK];
 
-int otastage_begin(uint32_t size)
+static int stage_begin_common(uint32_t bound, stage_bounds_mode_t mode)
 {
     const esp_partition_t *part =
         esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "ota_stage");
     if (!part) return OTASTAGE_E_WRITE;
     assert((part->size % STAGE_BLOCK) == 0u);   /* stage_commit erases whole sectors */
 
-    if (size == 0u || size > part->size) return OTASTAGE_E_SIZE;
+    if (bound == 0u || bound > part->size) return OTASTAGE_E_SIZE;
 
     memset(&s_stage, 0, sizeof s_stage);
     s_stage.part  = part;
-    s_stage.bound = size;
+    s_stage.bound = bound;
+    s_stage.mode  = mode;
 
     mbedtls_sha256_init(&s_stage.sha);
     if (mbedtls_sha256_starts(&s_stage.sha, 0) != 0) {
@@ -48,6 +54,16 @@ int otastage_begin(uint32_t size)
     }
     s_stage.active = true;
     return OTASTAGE_OK;
+}
+
+int otastage_begin(uint32_t size)
+{
+    return stage_begin_common(size, STAGE_BOUNDS_EXACT);
+}
+
+int otastage_begin_bounded(uint32_t max)
+{
+    return stage_begin_common(max, STAGE_BOUNDS_BOUNDED);
 }
 
 /* Erases the sector at s_stage.written and writes the first `len` bytes of s_blk into it. Lazy
@@ -71,7 +87,7 @@ int otastage_write(const uint8_t *p, size_t n)
     assert(s_stage.active);
 
     if (n == 0u) return OTASTAGE_OK;
-    if ((uint64_t)s_stage.written + (uint64_t)s_stage.blk_len + (uint64_t)n > (uint64_t)s_stage.bound)
+    if (stage_bounds_write_overflows(s_stage.written, s_stage.blk_len, n, s_stage.bound))
         return OTASTAGE_E_SIZE;
     if (mbedtls_sha256_update(&s_stage.sha, p, n) != 0) return OTASTAGE_E_WRITE;
 
@@ -96,12 +112,20 @@ int otastage_finish(uint8_t sha[32], char ver[IMG_VER_LEN], char hwid[IMG_HWID_L
     assert(sha != NULL && ver != NULL && hwid != NULL && size != NULL);
     assert(s_stage.active);
 
+    /* Flush BEFORE any size/image check (see otastage.h): even a stage about to be rejected still
+     * gets its trailing partial sector committed. Harmless -- the bytes are meaningless once
+     * rejected, and the next begin/write erases over them regardless. */
     if (s_stage.blk_len > 0u) {
         if (stage_commit(s_stage.blk_len) != 0) {
             otastage_abort();
             return OTASTAGE_E_WRITE;
         }
         s_stage.blk_len = 0;
+    }
+
+    if (!stage_bounds_finish_ok(s_stage.mode, s_stage.written, s_stage.bound)) {
+        s_stage.active = false;
+        return OTASTAGE_E_SIZE;
     }
 
     uint8_t digest[32];
@@ -113,6 +137,7 @@ int otastage_finish(uint8_t sha[32], char ver[IMG_VER_LEN], char hwid[IMG_HWID_L
     }
 
     if (s_stage.written < (uint32_t)IMG_DESC_MIN_LEN) {
+        s_stage.last_image_rc = -1;          /* same reason img_desc_parse uses for "too short" */
         s_stage.active = false;
         return OTASTAGE_E_IMAGE;
     }
@@ -124,7 +149,9 @@ int otastage_finish(uint8_t sha[32], char ver[IMG_VER_LEN], char hwid[IMG_HWID_L
         s_stage.active = false;
         return OTASTAGE_E_WRITE;
     }
-    if (img_desc_parse(hdr, sizeof hdr, ver, hwid) != 0) {
+    int prc = img_desc_parse(hdr, sizeof hdr, ver, hwid);
+    s_stage.last_image_rc = prc;
+    if (prc != 0) {
         s_stage.active = false;
         return OTASTAGE_E_IMAGE;
     }
@@ -133,6 +160,11 @@ int otastage_finish(uint8_t sha[32], char ver[IMG_VER_LEN], char hwid[IMG_HWID_L
     *size = s_stage.written;
     s_stage.active = false;
     return OTASTAGE_OK;
+}
+
+int otastage_last_image_rc(void)
+{
+    return s_stage.last_image_rc;
 }
 
 void otastage_abort(void)

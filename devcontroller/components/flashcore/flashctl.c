@@ -49,7 +49,12 @@ bool flashctl_try_begin_staging(void)
 
 void flashctl_end_staging(bool ok)
 {
-    assert(s_flash.busy && s_flash.state == FLASHCTL_STAGING);
+    portENTER_CRITICAL(&s_mux);
+    bool              busy  = s_flash.busy;
+    flashctl_state_t  state = s_flash.state;
+    portEXIT_CRITICAL(&s_mux);
+    assert(busy && state == FLASHCTL_STAGING);
+
     if (ok) return;   /* stays STAGING/busy: ready for flashctl_start_push, now or later */
     portENTER_CRITICAL(&s_mux);
     s_flash.state = FLASHCTL_IDLE;
@@ -113,7 +118,12 @@ static void flash_task(void *arg)
 int flashctl_start_push(const char *ver, const char *hwid, uint32_t size, const uint8_t sha[32])
 {
     assert(ver != NULL && hwid != NULL && sha != NULL);
-    assert(s_flash.busy && s_flash.state == FLASHCTL_STAGING);
+
+    portENTER_CRITICAL(&s_mux);
+    bool              busy  = s_flash.busy;
+    flashctl_state_t  state = s_flash.state;
+    portEXIT_CRITICAL(&s_mux);
+    assert(busy && state == FLASHCTL_STAGING);
 
     portENTER_CRITICAL(&s_mux);
     memcpy(s_flash.ver, ver, sizeof s_flash.ver);
