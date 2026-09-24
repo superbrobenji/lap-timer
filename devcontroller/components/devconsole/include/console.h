@@ -19,6 +19,8 @@
 
 #include "esp_err.h"
 
+#include "linkhost_proto.h"   /* lt_stream_rec_t (console_stream_tap) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +36,12 @@ bool console_wants_json(int *argc, char **argv);
 
 /* The one registration door: wraps esp_console_cmd_register. */
 void console_register(const char *name, const char *help, int (*fn)(int, char **));
+
+/* Called by main.c's stream_consumer for every popped record (Plan 5.6 Task 6): a no-op unless
+ * `stream tap on` is active, filtered by type when one is set, and rate-limited to 5 rows/s.
+ * Implemented in cmd_stream.c. Runs on the consumer task, NOT the console task -- keep it short:
+ * no logging, no blocking. */
+void console_stream_tap(const lt_stream_rec_t *r);
 
 #ifdef __cplusplus
 }
