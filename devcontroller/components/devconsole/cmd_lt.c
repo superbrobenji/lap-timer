@@ -2,10 +2,11 @@
  * lap-timer's framed console over UART1, with round-trip timing and a debug hexdump trace
  * (Plan 5.6 Task 5).
  *
- *   lt status [--json]                  `status` -> the raw §18.2 STATUS record body
+ *   lt status [--json]                  `status` -> the decoded §18.2 STATUS record (named fields)
  *   lt list [--json]                    `list` -> the session-list JSON, streamed (linkhost_download_cmd)
  *   lt config get [--json]              `config get` -> the live config JSON
- *   lt config set <json> [--json]       `config set <esc>` -- escaped exactly like POST /api/config
+ *   lt config set <json> [--json]       `config set <esc>` -- escaped via linkhost's wire_escape,
+ *                                        the same one POST /api/config uses
  *   lt delete <id> [--json]             `delete <id>`
  *   lt open <id> <fmt> [--json]         `open <id> <fmt>` -> streamed (linkhost_download_cmd)
  *   link trace on|off [--json]          toggles linkhost's verbose ESP_LOGI("trace: ...")
@@ -26,15 +27,26 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "config_diff.h"   /* config_diff_escape + CFG_SET_* -- the same wire escaping POST /api/config uses */
 #include "console.h"
+#include "hexfmt.h"        /* status-body-wrong-length fallback dump */
 #include "jsonw.h"
 #include "linkhost.h"      /* linkhost_cmd_timed / linkhost_download_cmd, LT_CMD_.. / LT_FMT_.. , trace get/set */
+#include "wire_escape.h"   /* wire_escape -- the same wire escaping POST /api/config uses (linkhost, not webapi:
+                            * Plan 5.6 Task 5 fix 1 moved it out of webapi's config_diff so this component has no
+                            * dependency on webapi) */
 
 /* Max reply-body bytes embedded in a --json object's "body" field: the wire body itself can be up
  * to LINKHOST_ASM_MAX (1024 B, config get is ~939 B); this just keeps one console line reasonable.
  * The human form prints the full (untruncated) body instead -- see lt_report_cmd. */
 #define LT_JSON_BODY_MAX 512u
+
+/* `config set` line budget: mirrors webapi/include/config_diff.h's CFG_SET_* exactly, duplicated
+ * (not imported) so this component has no dependency on webapi -- both sides derive from the same
+ * two facts: the lap-timer console's max_cmdline_length is 256 B, Plan 5.5 Task 4 keeps every line
+ * <=250 B, and "config set " is 11 bytes. */
+#define LT_CFG_LINE_MAX   250u
+#define LT_CFG_PREFIX_LEN 11u
+#define LT_CFG_OBJ_MAX    (LT_CFG_LINE_MAX - LT_CFG_PREFIX_LEN)   /* 239 */
 
 static void lt_err(bool json, const char *reason)
 {
@@ -95,6 +107,85 @@ static void lt_report_cmd(bool json, const char *cmd, const linkhost_frame_t *f,
     printf("%s\n", buf);
 }
 
+/* `status` replies with the raw 20-byte §18.2 STATUS record (binary, base64 on the wire --
+ * frame_is_binary("status") in linkhost_proto.c), not text: lt_report_cmd's generic body
+ * handling would either dump non-printable bytes (human) or hand jsonw_str a string that stops at
+ * the first embedded NUL (json -- e.g. flags == 0x0000 at byte offset 2, silently truncating
+ * everything after it). So `status` gets its own reporter that decodes the record
+ * (linkhost_status_decode, same as cmd_dc.c's dc_status) and prints named fields instead. */
+static void lt_report_status(bool json, const linkhost_frame_t *f, const linkhost_cmd_stats_t *st)
+{
+    assert(f != NULL);
+    assert(st != NULL);
+    long long rt_ms = (long long)(st->latency_us / 1000);
+
+    if (st->result == 0 && f->body && f->body_len == LT_STATUS_LEN) {
+        lt_status_t ls;
+        if (linkhost_status_decode(f->body, &ls)) {
+            if (json) {
+                char buf[384];
+                jsonw_t w;
+                jsonw_begin(&w, buf, sizeof buf);
+                jsonw_str(&w, "cmd", LT_CMD_STATUS);
+                jsonw_int(&w, "rc", st->result);
+                jsonw_int(&w, "attempts", st->attempts);
+                jsonw_int(&w, "rt_ms", rt_ms);
+                jsonw_uint(&w, "proto", ls.proto);
+                jsonw_uint(&w, "state", ls.state);
+                jsonw_uint(&w, "flags", ls.flags);
+                jsonw_uint(&w, "batt_pct", ls.batt_pct);
+                jsonw_uint(&w, "batt_mv", ls.batt_mv);
+                jsonw_uint(&w, "free_kb", ls.free_kb);
+                jsonw_uint(&w, "sessions", ls.sessions);
+                jsonw_str(&w, "fw", ls.fw);
+                if (!jsonw_end(&w)) { lt_err(true, "reply too large"); return; }
+                printf("%s\n", buf);
+                return;
+            }
+            printf("proto: %u\n", (unsigned)ls.proto);
+            printf("state: %u\n", (unsigned)ls.state);
+            printf("flags: %u\n", (unsigned)ls.flags);
+            printf("batt_pct: %u\n", (unsigned)ls.batt_pct);
+            printf("batt_mv: %u\n", (unsigned)ls.batt_mv);
+            printf("free_kb: %lu\n", (unsigned long)ls.free_kb);
+            printf("sessions: %u\n", (unsigned)ls.sessions);
+            printf("fw: %s\n", ls.fw);
+            printf("-- rt %lld ms, attempts %d, rc %d\n", rt_ms, st->attempts, st->result);
+            return;
+        }
+    }
+
+    /* Not a decodable 20-byte STATUS record: a successful reply of the wrong length (a protocol
+     * mismatch, not expected in practice), a remote error, or a link failure. Falls back to the
+     * generic {cmd,rc,attempts,rt_ms,name,body} shape, with body a bounded hexfmt_line dump of
+     * whatever bytes did come back rather than raw (possibly non-printable) bytes. */
+    char hex[3u * 32u + 8u];   /* hexfmt_line's own bound: <=32 bytes -> <=~100 chars + ellipsis */
+    hex[0] = '\0';
+    if (st->result == 0 && f->body && f->body_len > 0) hexfmt_line(f->body, f->body_len, hex, sizeof hex);
+
+    if (json) {
+        char buf[512];
+        jsonw_t w;
+        jsonw_begin(&w, buf, sizeof buf);
+        jsonw_str(&w, "cmd", LT_CMD_STATUS);
+        jsonw_int(&w, "rc", st->result);
+        jsonw_int(&w, "attempts", st->attempts);
+        jsonw_int(&w, "rt_ms", rt_ms);
+        jsonw_str(&w, "name", f->name);
+        jsonw_str(&w, "body", (st->result == LINKHOST_E_REMOTE) ? f->err_msg : hex);
+        if (!jsonw_end(&w)) { lt_err(true, "reply too large"); return; }
+        printf("%s\n", buf);
+        return;
+    }
+
+    if (st->result == 0 && hex[0] != '\0') {
+        printf("%s\n", hex);
+    } else if (st->result == LINKHOST_E_REMOTE) {
+        printf("ERR remote 0x%04x: %s\n", (unsigned)f->err_code, f->err_msg);
+    }
+    printf("-- rt %lld ms, attempts %d, rc %d\n", rt_ms, st->attempts, st->result);
+}
+
 static int lt_status(int argc, char **argv, bool json)
 {
     (void)argv;
@@ -102,7 +193,7 @@ static int lt_status(int argc, char **argv, bool json)
     linkhost_frame_t f = { 0 };
     linkhost_cmd_stats_t st;
     linkhost_cmd_timed(LT_CMD_STATUS, &f, &st);
-    lt_report_cmd(json, LT_CMD_STATUS, &f, &st);
+    lt_report_status(json, &f, &st);
     return (st.result == 0) ? 0 : 1;
 }
 
@@ -136,27 +227,27 @@ static int lt_join_json(int argc, char **argv, char *out, size_t out_cap)
     return (w > 0) ? (int)w : -1;
 }
 
-/* `config set <json>`: escapes the payload exactly the way POST /api/config does (webapi.c's
- * config_diff_escape) before sending it as `config set <esc>` -- the LAP-TIMER's own
+/* `config set <json>`: escapes the payload via linkhost's wire_escape -- the same escaping
+ * POST /api/config uses (webapi.c) -- before sending it as `config set <esc>`. The LAP-TIMER's own
  * esp_console_split_argv strips bare double quotes, so an un-escaped {"k":"v"} would arrive there
  * as {k:v} and fail to parse. */
 static int lt_config_set(int argc, char **argv, bool json)
 {
     if (argc < 4) { lt_err(json, "usage: lt config set <json> [--json]"); return 1; }
 
-    char raw[CFG_SET_OBJ_MAX + 1];
+    char raw[LT_CFG_OBJ_MAX + 1];
     if (lt_join_json(argc, argv, raw, sizeof raw) < 0) {
         lt_err(json, "config payload too large");
         return 1;
     }
 
-    char esc[CFG_SET_OBJ_MAX * 2 + 1];
-    if (config_diff_escape(raw, esc, sizeof esc) < 0) {
+    char esc[LT_CFG_OBJ_MAX * 2 + 1];
+    if (wire_escape(raw, esc, sizeof esc) == 0) {
         lt_err(json, "config payload too large");
         return 1;
     }
 
-    char cmd[CFG_SET_LINE_MAX + 1];
+    char cmd[LT_CFG_LINE_MAX + 1];
     int cn = snprintf(cmd, sizeof cmd, "%s %s", LT_CMD_CONFIG_SET, esc);
     if (cn < 0 || (size_t)cn >= sizeof cmd) { lt_err(json, "config set line too long"); return 1; }
 

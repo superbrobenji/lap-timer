@@ -585,7 +585,9 @@ static struct {
     dx_state_t state;
 
     uint8_t  line[LINE_CAP];
-    size_t   line_len;
+    volatile size_t line_len;   /* cross-task read by linkhost_line_peek (Plan 5.6 T5 fix 1) --
+                                  * matches this struct's other cross-task-shared fields
+                                  * (resp_ready, ring_head/tail) below */
 
     uint8_t  frame[FRAME_CAP];
     size_t   frame_len;

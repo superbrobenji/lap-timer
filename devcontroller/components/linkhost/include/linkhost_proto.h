@@ -114,9 +114,20 @@ int linkhost_pop_response(linkhost_frame_t *out, int *status);
  * accumulated since the last '\n' that have not yet been classified as a ---BEGIN header or
  * dropped as noise. Exposed only so linkhost's `link trace` can hexdump whatever arrived on a
  * per-attempt command timeout -- there is otherwise no debug visibility into a reply that never
- * completed a full frame. *len is set to the buffered length (0 if nothing is pending). The
- * returned pointer is into module-static state: valid only until the next linkhost_feed call, and
- * the caller must never write through it. */
+ * completed a full frame. *len is set to the buffered length (0 if nothing is pending).
+ *
+ * CROSS-TASK READ (fix 1): linkhost_feed (the RX task, the sole writer of s_dx.line/line_len) and
+ * this accessor (called from the request task via linkhost_cmd_timed's trace hook) run on
+ * different FreeRTOS tasks/cores with no lock between them -- unlike linkhost_pop_response's
+ * resp/resp_ready or the stream ring's head/tail, there is no publish protocol here, so the
+ * snapshot this returns may be stale (a line the RX task already moved past) or torn (RX task
+ * mid-write while this reads). `line_len` is `volatile` so at least each read/write is an actual
+ * memory access (not cached/reordered across the two tasks) and is always < LINE_CAP, bounding the
+ * snapshot to reads within `line`'s allocation -- but the exact byte content at any given `len` is
+ * only a best-effort snapshot. Debug use only (the trace hexdump); never treat this as a
+ * synchronized read of a completed value the way linkhost_pop_response's frame is. The returned
+ * pointer is into module-static state: valid only until the next linkhost_feed call, and the
+ * caller must never write through it. */
 const uint8_t *linkhost_line_peek(size_t *len);
 
 /* ================================================================================================

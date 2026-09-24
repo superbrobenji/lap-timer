@@ -57,6 +57,7 @@
 #include "logstore_rec.h"
 #include "multipart.h"
 #include "status_json.h"
+#include "wire_escape.h"   /* wire_escape (Plan 5.6 Task 5 fix 1: moved from config_diff_escape) */
 
 static const char *TAG = "webapi";
 
@@ -313,9 +314,10 @@ static esp_err_t api_config_post(httpd_req_t *req)
                              "{\"error\":\"a changed value exceeds the console line limit\"}");
         /* Escape the object for esp_console (B1): a bare {"k":"v"} has its quotes stripped by
          * esp_console_split_argv -> malformed JSON at the lap-timer. next_line budgeted the escaped
-         * length, so `config set <escaped>` stays within the 256 B console line limit. */
-        int en = config_diff_escape(obj, esc, sizeof esc);
-        if (en < 0)
+         * length, so `config set <escaped>` stays within the 256 B console line limit. wire_escape
+         * (linkhost, Plan 5.6 Task 5 fix 1) reports overflow as 0 rather than a negative length. */
+        size_t en = wire_escape(obj, esc, sizeof esc);
+        if (en == 0)
             return send_json(req, "413 Payload Too Large",
                              "{\"error\":\"a changed value exceeds the console line limit\"}");
         int cn = snprintf(cmd, sizeof cmd, "%s %s", LT_CMD_CONFIG_SET, esc);
