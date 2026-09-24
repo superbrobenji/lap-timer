@@ -539,3 +539,26 @@ done:
              (unsigned)size, result, (int)f.state, (unsigned)f.code);
     return result;
 }
+
+/* ---- raw byte bridge (Plan 5.6 Task 8's `lt shell`) ---- */
+int linkhost_bridge_begin(void)
+{
+    if (!s_inited) return LINKHOST_E_NOTCONN;
+
+    /* Bounded take, exactly like linkhost_cmd_timed (M2): the REPL task must never park forever on
+     * a busy link -- report BUSY so cmd_shell.c can print "busy" instead of hanging the REPL. */
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE) {
+        return LINKHOST_E_BUSY;
+    }
+    s_rx_paused = true;                          /* the demux RX task must not steal these bytes */
+    rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
+    return 0;
+}
+
+void linkhost_bridge_end(void)
+{
+    s_rx_paused = false;                         /* rx_task clears s_rx_parked on its next non-paused
+                                                   * iteration (before it reads again) -- no need to
+                                                   * clear it here too. */
+    xSemaphoreGive(s_req_mtx);
+}

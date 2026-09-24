@@ -37,6 +37,13 @@
 # host-tested verdict logic (test_selftest_eval.c) -- exactly the jsonw/rate.c split cmd_dc.c
 # already uses.
 #
+# cmd_shell.c (Plan 5.6 Task 8): `lt shell`, a transparent raw-byte bridge between this console's
+# own USB and the lap-timer's console over UART1 -- a subcommand of `lt` (cmd_lt.c dispatches to
+# cmd_shell_run), not a command of its own, so it has no cmd_shell_register/console_register.
+# Takes UART1 via linkhost_bridge_begin/_end and filters the lap-timer's autonomous 0xFF stream
+# frames out of the forwarded bytes via linkhost's host/bridge_filter.c (pure, host-tested by
+# test_bridge_filter.c).
+#
 # PRIV_REQUIRES: `console` is the IDF esp_console component (esp_console.h, used only inside this
 # component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done; esp_wifi is `dc
 # status`'s esp_wifi_ap_get_sta_list; esp_system is esp_get_free_heap_size; logstore is the other
@@ -44,7 +51,7 @@
 # surface (console_start/console_wants_json/console_register/console_stream_tap are all plain C
 # + the one linkhost_proto.h type), so everything but linkhost stays PRIV.
 idf_component_register(
-    SRCS "console.c" "cmd_dc.c" "cmd_lt.c" "cmd_stream.c" "cmd_selftest.c"
+    SRCS "console.c" "cmd_dc.c" "cmd_lt.c" "cmd_stream.c" "cmd_selftest.c" "cmd_shell.c"
          "host/jsonw.c" "host/rate.c" "host/selftest_eval.c"
     INCLUDE_DIRS "include"
     REQUIRES linkhost

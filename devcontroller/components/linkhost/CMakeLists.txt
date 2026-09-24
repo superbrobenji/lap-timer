@@ -3,8 +3,15 @@
 # header so linkhost.h's `#include "app/lt_proto.h"` resolves for every consumer; nothing here
 # REQUIRES the lap-timer's `app` IDF component itself -- see the top-level CMakeLists.txt note
 # for why (it would pull in the whole lap-timer app tree and its driver dependencies).
+#
+# host/bridge_filter.c (Plan 5.6 Task 8): the pure §18.1 stream-frame remover `lt shell`'s bridge
+# loop (devconsole/cmd_shell.c) runs every UART1 byte through before writing to USB -- see
+# include/bridge_filter.h. linkhost_bridge_begin/_end (linkhost.c) hand the caller raw ownership of
+# UART1 via the same s_req_mtx + rx_park_and_drain handshake linkhost_download_cmd/linkhost_flash
+# already use.
 idf_component_register(
     SRCS "linkhost.c" "host/linkhost_proto.c" "host/linkstats.c" "host/hexfmt.c" "host/wire_escape.c"
+         "host/bridge_filter.c"
     INCLUDE_DIRS "include" "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include"
     REQUIRES esp_driver_uart esp_timer esp_partition)
 

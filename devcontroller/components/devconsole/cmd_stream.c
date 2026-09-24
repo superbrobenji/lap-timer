@@ -215,6 +215,11 @@ void console_stream_tap(const lt_stream_rec_t *r)
     printf("%s\n", buf);
 }
 
+void cmd_stream_tap_off(void)
+{
+    s_tap_on = false;
+}
+
 static int cmd_stream_main(int argc, char **argv)
 {
     assert(argv != NULL);

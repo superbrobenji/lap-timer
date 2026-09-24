@@ -137,6 +137,17 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
 int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
                    const uint8_t sha256[32], flash_progress_cb cb, void *ctx);
 
+/* ---- raw byte bridge (Plan 5.6 Task 8's `lt shell`) ----
+ * Hands UART1 to the caller so it can pump raw bytes both ways between the USB console and the
+ * lap-timer's own console: linkhost_bridge_begin takes s_req_mtx (bounded, like linkhost_cmd_timed
+ * -- LINKHOST_E_BUSY on a 400 ms miss rather than blocking the REPL task forever), pauses and parks
+ * the demux RX task (the same rx_park_and_drain handshake linkhost_download_cmd/linkhost_flash use,
+ * #65) so the caller's own uart_read_bytes(DC_LINK_UART, ...) is the ONLY reader, and returns 0.
+ * linkhost_bridge_end un-pauses the RX task and gives the mutex back. Must be paired: begin (0),
+ * pump bytes, end -- never call end without a successful begin. */
+int linkhost_bridge_begin(void);
+void linkhost_bridge_end(void);
+
 #ifdef __cplusplus
 }
 #endif

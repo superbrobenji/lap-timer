@@ -9,15 +9,20 @@
  *                                        the same one POST /api/config uses
  *   lt delete <id> [--json]             `delete <id>`
  *   lt open <id> <fmt> [--json]         `open <id> <fmt>` -> streamed (linkhost_download_cmd)
+ *   lt shell                            raw byte bridge to the lap-timer's own console (Task 8);
+ *                                        `~.` at a line start or a 10-min cap exits -- no --json form
  *   link trace on|off [--json]          toggles linkhost's verbose ESP_LOGI("trace: ...")
  *
  * status/config get/config set/delete route through linkhost_cmd_timed (one bounded body, with
  * round-trip stats); list/open route through linkhost_download_cmd (unbounded streaming body --
- * text formats are printed as chunks arrive, binary formats are only byte-counted). Every
- * subcommand strips a trailing --json via console_wants_json and reports a LOCAL usage error as
- * `ERR <reason>` / `{"err":"<reason>"}` with a non-zero return, same as cmd_dc.c; a completed
- * round trip (success or a link-level failure) always ends with the "-- rt/attempts/rc" summary
- * (or its --json equivalent) so a timeout/CRC/busy failure is still visible with its timing.
+ * text formats are printed as chunks arrive, binary formats are only byte-counted); shell hands
+ * UART1 to cmd_shell_run (cmd_shell.c) for the duration of the bridge. Every subcommand strips a
+ * trailing --json via console_wants_json and reports a LOCAL usage error as `ERR <reason>` /
+ * `{"err":"<reason>"}` with a non-zero return, same as cmd_dc.c; a completed round trip (success
+ * or a link-level failure) always ends with the "-- rt/attempts/rc" summary (or its --json
+ * equivalent) so a timeout/CRC/busy failure is still visible with its timing -- shell is the one
+ * exception (an interactive bridge, not a single request/reply), and --json on it is rejected
+ * outright rather than silently ignored.
  */
 #include "cmd_lt.h"
 
@@ -27,6 +32,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cmd_shell.h"     /* cmd_shell_run -- `lt shell`, Plan 5.6 Task 8 */
 #include "console.h"
 #include "hexfmt.h"        /* status-body-wrong-length fallback dump */
 #include "jsonw.h"
@@ -380,12 +386,27 @@ static int lt_open(int argc, char **argv, bool json)
  *  dispatch + registration
  * ============================================================================================== */
 
+static int lt_shell(int argc, bool json)
+{
+    /* Argument-count validation is the dispatcher's job everywhere else in this file; the --json
+     * rejection itself ("ERR shell has no json form") is cmd_shell_run's own, since cmd_shell.h
+     * pins it to take json and answer for it (Plan 5.6 Task 8 ruling 1) -- not duplicated here.
+     * Always plain text (never lt_err's json form): shell has no --json output at all, not even
+     * for a usage error. */
+    if (argc != 2) {
+        printf("ERR usage: lt shell\n");
+        return 1;
+    }
+    return cmd_shell_run(json);
+}
+
 static int cmd_lt_main(int argc, char **argv)
 {
     assert(argv != NULL);
     bool json = console_wants_json(&argc, argv);
     if (argc < 2) {
-        lt_err(json, "usage: lt status|list|config get|config set <json>|delete <id>|open <id> <fmt>");
+        lt_err(json, "usage: lt status|list|config get|config set <json>|delete <id>|"
+                     "open <id> <fmt>|shell");
         return 1;
     }
     if (strcmp(argv[1], "status") == 0) return lt_status(argc, argv, json);
@@ -393,7 +414,8 @@ static int cmd_lt_main(int argc, char **argv)
     if (strcmp(argv[1], "config") == 0) return lt_config(argc, argv, json);
     if (strcmp(argv[1], "delete") == 0) return lt_delete(argc, argv, json);
     if (strcmp(argv[1], "open")   == 0) return lt_open(argc, argv, json);
-    lt_err(json, "unknown subcommand (want status|list|config|delete|open)");
+    if (strcmp(argv[1], "shell")  == 0) return lt_shell(argc, json);
+    lt_err(json, "unknown subcommand (want status|list|config|delete|open|shell)");
     return 1;
 }
 
@@ -424,6 +446,6 @@ static int cmd_link_main(int argc, char **argv)
 void cmd_lt_register(void)
 {
     console_register("lt", "lt status|list|config get|config set <json>|delete <id>|"
-                            "open <id> <fmt> [--json]", cmd_lt_main);
+                            "open <id> <fmt> [--json]|shell", cmd_lt_main);
     console_register("link", "link trace on|off [--json]", cmd_link_main);
 }

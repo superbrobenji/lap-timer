@@ -18,6 +18,12 @@ extern "C" {
  * console_register. */
 void cmd_stream_register(void);
 
+/* Forces the tap off (s_tap_on = false) without going through the `stream tap off` console path --
+ * `lt shell` (cmd_shell.c, Plan 5.6 Task 8) calls this before entering the bridge loop so a
+ * still-armed tap can never print decoded-record JSON onto the USB console while it is bridged
+ * raw to the lap-timer. */
+void cmd_stream_tap_off(void);
+
 #ifdef __cplusplus
 }
 #endif
