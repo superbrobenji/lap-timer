@@ -82,6 +82,11 @@ LT_TIMEOUT_S = 10.0             # lt <cmd>: a framed round trip to the lap-timer
 SELFTEST_TIMEOUT_S = 30.0       # selftest [all]: `stream` alone samples for ~10 s by default
 STAGE_READY_TIMEOUT_S = 5.0
 PUSH_TIMEOUT_S = 120.0          # a 600 KB image is ~55 s at 115200 baud; generous slack on top
+STREAM_TAP_ACK_TIMEOUT_S = 2.0  # stream tap on <type>: local, one round trip through the console
+SHELL_CLOSE_TIMEOUT_S = 2.0     # lt shell: wait for the device's own "bridge closed" after '~.'
+TAP_MAX_S = 3600.0              # stream tap's row loop: per-_readline bound, not a session cap
+                                 # (the loop itself runs until Ctrl-C; this just keeps each single
+                                 # wait finite so a dead link doesn't block forever between rows)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
@@ -263,6 +268,7 @@ def push_and_wait(ser, timeout=PUSH_TIMEOUT_S):
         clean = _strip_ansi(line).strip()
         if clean.startswith("pushing "):
             print(clean)
+            sys.stdout.flush()
             continue
         if clean.startswith("flash result "):
             result = clean[len("flash result ") :].strip()
@@ -353,23 +359,27 @@ def _cmd_stream_stats(ser):
 
 
 def _cmd_stream_tap(ser, rec_type):
-    """`stream tap [type]`: sends `stream tap on [type]` (no --json -- the enable ack is
-    irrelevant, the decoded rows the consumer task prints while tap is on are already one JSON
-    object per line), prints every row until Ctrl-C, then always sends `stream tap off` so the
-    dev-kit stops flooding the console after this tool exits."""
+    """`stream tap [type]`: sends `stream tap on [type]` (no --json -- its ack is human text, "OK
+    tap on <type>" or "ERR <reason>"; the decoded rows the consumer task prints while tap is on
+    are already one JSON object per line, unrelated to --json). The ack is read via send_cmd,
+    which blocks (bounded, STREAM_TAP_ACK_TIMEOUT_S) until the prompt that follows it -- so the
+    row loop below only starts once the ack (and nothing before it) has been consumed, and no live
+    row is mistaken for the ack or vice versa. An "ERR ..." ack raises DevkitError. Prints every
+    row until Ctrl-C, then always sends `stream tap off` so the dev-kit stops flooding the console
+    after this tool exits."""
     on_line = "stream tap on" + ((" " + rec_type) if rec_type else "")
-    ser.write((on_line + "\r\n").encode("ascii"))
-    ser.flush()
-    # Best-effort: drain the "OK tap on ..." ack + the next prompt before the row stream starts.
-    _read_until(ser, PROMPT.encode("ascii"), time.monotonic() + 2.0)
+    ack = send_cmd(ser, on_line, timeout=STREAM_TAP_ACK_TIMEOUT_S)
+    if ack.startswith("ERR"):
+        raise DevkitError(ack)
     try:
         while True:
-            line = _readline(ser, time.monotonic() + 3600.0)
+            line = _readline(ser, time.monotonic() + TAP_MAX_S)
             if line is None:
                 continue
             clean = _strip_ansi(line).strip()
             if clean:
                 print(clean)
+                sys.stdout.flush()
     except KeyboardInterrupt:
         pass
     finally:
@@ -393,6 +403,24 @@ def _cmd_flash(ser, image_path):
     return 0
 
 
+def _shell_close(ser, timeout=SHELL_CLOSE_TIMEOUT_S):
+    """Best-effort clean shutdown of the device's `lt shell` bridge (cmd_shell.c, T8): send the
+    "~." escape -- write errors are ignored, the port may already be in a bad state on this path --
+    then wait up to `timeout` s (also ignored on expiry) for the device's own "bridge closed" line.
+    Called from every non-graceful exit out of _cmd_shell's relay loop (Ctrl-C, any other
+    exception) so the device's bridge does not sit open until its own 10 min cap merely because the
+    host side gave up. The loop's own graceful exits (seeing "bridge closed", or the user typing
+    "~." themselves) already send the escape / see the confirmation inline and do not call this.
+    Returns True if "bridge closed" was actually seen, False on a write failure or a timeout."""
+    try:
+        ser.write(b"~.")
+        ser.flush()
+    except Exception:
+        return False
+    deadline = time.monotonic() + timeout
+    return _read_until(ser, b"bridge closed", deadline) is not None
+
+
 def _cmd_shell(ser):
     """`lt shell`: raw byte bridge to the lap-timer console (spec §5.2 / cmd_shell.c, T8), relayed
     1:1 between this terminal and the serial port. The local tty is put into cbreak mode so every
@@ -403,8 +431,12 @@ def _cmd_shell(ser):
     then that byte, both forwarded together): typing "~." sends those two bytes through -- so the
     device's OWN bridge closes too -- and this loop then exits without waiting for "bridge closed"
     (belt-and-braces: exiting on "bridge closed" arriving is the other, independent way out, e.g.
-    if the device's 10 min cap fires first). The tty is ALWAYS restored on exit (return, exception,
-    or Ctrl-C) via the try/finally below."""
+    if the device's 10 min cap fires first). On Ctrl-C, or any other exception out of the relay
+    loop, _shell_close(ser) is called FIRST (send "~." + wait for "bridge closed", both
+    best-effort) so the device's bridge is told to close too, before the tty is restored -- a bare
+    Ctrl-C must not leave the device's bridge open. The tty is ALWAYS restored on exit (every path
+    above) via the try/finally below, which runs after the except handlers per normal Python
+    try/except/finally ordering."""
     import select
     import termios
     import tty
@@ -453,7 +485,12 @@ def _cmd_shell(ser):
                 ser.flush()
                 at_bol = b in (b"\r", b"\n")
     except KeyboardInterrupt:
+        _shell_close(ser)
+        print("bridge closed by Ctrl-C", file=sys.stderr)
         return 0
+    except Exception:
+        _shell_close(ser)
+        raise
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 

@@ -19,7 +19,14 @@ import unittest
 # how this file is invoked (module path, plain script, or `cd tools && python3 -m unittest ...`).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from devkit import DevkitError, push_and_wait, read_json, send_cmd, stage_image  # noqa: E402
+from devkit import (  # noqa: E402
+    DevkitError,
+    _shell_close,
+    push_and_wait,
+    read_json,
+    send_cmd,
+    stage_image,
+)
 
 
 class FakeSerial:
@@ -28,10 +35,17 @@ class FakeSerial:
     next b"\\n", or whatever's left with no trailing newline once the queue drains -- modelling a
     per-call read timeout) and byte-by-byte by .read(n). Every .write() is appended to `written`
     for exact-bytes assertions. No timers, no blocking: devkit.py's own deadline loops are what
-    make a real timeout observable, not this double."""
+    make a real timeout observable, not this double.
 
-    def __init__(self, rx=b""):
+    `chunks`, when given instead of `rx`, scripts .readline() to return each element in order on
+    successive calls regardless of newline content -- e.g. `[b'{"a":', b'1}\\n']` -- so a caller
+    can exercise a JSON (or any other) line split across two reads by the real serial port, not
+    just one already-whole line. Once the list is exhausted, .readline() returns b"" (a timeout)
+    like the `rx` mode does once its buffer drains."""
+
+    def __init__(self, rx=b"", chunks=None):
         self._rx = rx
+        self._chunks = list(chunks) if chunks is not None else None
         self.written = bytearray()
         self.timeout = 1.0
         self.dtr = True
@@ -45,6 +59,8 @@ class FakeSerial:
         pass
 
     def readline(self):
+        if self._chunks is not None:
+            return self._chunks.pop(0) if self._chunks else b""
         if not self._rx:
             return b""
         idx = self._rx.find(b"\n")
@@ -85,6 +101,14 @@ class ReadJsonTest(unittest.TestCase):
         with self.assertRaises(DevkitError) as ctx:
             read_json(ser, timeout=0.05)
         self.assertIn("timeout", str(ctx.exception))
+
+    def test_parses_a_line_fragmented_across_two_readline_calls(self):
+        # A real serial port can hand back a JSON line in more than one readline() call (the
+        # writer paused mid-line, or the read just landed on a buffer boundary); _readline must
+        # accumulate across calls rather than treating the first partial chunk as the whole line.
+        ser = FakeSerial(chunks=[b'{"a":', b'1}\n'])
+        obj = read_json(ser, timeout=1.0)
+        self.assertEqual(obj, {"a": 1})
 
 
 class SendCmdTest(unittest.TestCase):
@@ -157,6 +181,28 @@ class PushAndWaitTest(unittest.TestCase):
         with self.assertRaises(DevkitError) as ctx:
             push_and_wait(ser, timeout=1.0)
         self.assertIn("link -4", str(ctx.exception))
+
+
+class ShellCloseTest(unittest.TestCase):
+    """_shell_close(ser) is the piece _cmd_shell calls on Ctrl-C / any other exception out of its
+    relay loop, so the device's `lt shell` bridge is told to close (rather than sitting open until
+    its own 10 min cap) even when the host side exits ungracefully."""
+
+    def test_sends_escape_and_returns_true_on_bridge_closed(self):
+        ser = FakeSerial(rx=b"\r\nbridge closed\r\ndevkit> ")
+
+        result = _shell_close(ser, timeout=1.0)
+
+        self.assertTrue(result)
+        self.assertEqual(bytes(ser.written), b"~.")
+
+    def test_returns_false_on_timeout_when_bridge_closed_never_arrives(self):
+        ser = FakeSerial(rx=b"")   # device never replies
+
+        result = _shell_close(ser, timeout=0.05)
+
+        self.assertFalse(result)
+        self.assertEqual(bytes(ser.written), b"~.")   # the escape is still sent regardless
 
 
 if __name__ == "__main__":
