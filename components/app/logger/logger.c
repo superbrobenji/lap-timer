@@ -121,8 +121,9 @@ static uint32_t storage_free_kb(void)
 
 /* session_count: number of `.sum` files under /sessions (one per session, §12.1). Name-only
  * listing (sto_list_next_name, no stat()) so this stays O(n) instead of sto_list_next's O(n^2)
- * on LittleFS (Plan 5.6 T1 fix 3); yields every 16 entries so a large /sessions can't starve
- * IDLE0/the task WDT on this task even so. Called once at logger start (the only full listing
+ * on LittleFS (Plan 5.6 T1 fix 3). Plan 5.6 T1 fix 4: vTaskDelay(1) every 16 entries blocks this
+ * priority-8 task for one tick so IDLE0 (priority 0) runs and the task WDT is fed -- taskYIELD()
+ * would not, it never schedules a lower-priority task. Called once at logger start (the only full listing
  * this file runs -- see status_cache_prime()); every later refresh is incremental. */
 static uint16_t session_count(void)
 {
@@ -132,7 +133,7 @@ static uint16_t session_count(void)
         char name[STO_NAME_MAX];
         int n = 0;
         while (sto_list_next_name(&it, name, sizeof name) == 1) {
-            if (++n % 16 == 0) taskYIELD();
+            if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
             const char *dot = strrchr(name, '.');
             if (dot && strcmp(dot, ".sum") == 0) c++;
         }
@@ -217,22 +218,27 @@ static int sum_write(sto_file_t f, const uint8_t *p, size_t n)
  * the accumulators stream straight from their own storage -- no 4 KB assemble-then-emit scratch.
  * The bytes are identical to the old single-buffer build: its fit-guards were always satisfied
  * (HDR 99 + VENUE 41 + LAP_ACC_CAP 3072 + DRAG_ACC_CAP 512 + END 14 = 3738 < the old 4096 cap), so
- * every section was, and still is, emitted in the same order. */
-static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
+ * every section was, and still is, emitted in the same order.
+ * Plan 5.6 T1 fix 4: returns true only when the .sum was fully written, synced and atomically
+ * renamed into place; every failure path returns false (each one still recorded by errlog_add), so
+ * a caller that counts sessions cannot count a .sum that never landed. */
+static bool rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 {
-    if (s_id[0] == 0) return;
+    if (s_id[0] == 0) return false;
     uint8_t frame[FRAME_TMP_CAP];
     int n = ses_encode_hdr(&s_hdr, frame, sizeof frame);
-    if (n < 0) return;                                             /* HDR is mandatory (matches pre-A1) */
-    LT_ASSERT_VOID((size_t)n <= sizeof frame, LOG_ASSERT_CODE);    /* encoded frame within the stack buffer */
-    LT_ASSERT_VOID(s_lap_len <= LAP_ACC_CAP, LOG_ASSERT_CODE);     /* accumulator invariant (acc_append) */
-    LT_ASSERT_VOID(s_drag_len <= DRAG_ACC_CAP, LOG_ASSERT_CODE);   /* accumulator invariant (acc_append) */
+    if (n < 0) return false;                                       /* HDR is mandatory (matches pre-A1) */
+    /* Plan 5.6 T1 fix 4: LT_ASSERT_RET(..., false), not LT_ASSERT_VOID -- a reported, recovered
+     * assertion leaves no .sum on disk, so it must report "did not land" like every other failure. */
+    LT_ASSERT_RET((size_t)n <= sizeof frame, LOG_ASSERT_CODE, false);   /* encoded frame within the stack buffer */
+    LT_ASSERT_RET(s_lap_len <= LAP_ACC_CAP, LOG_ASSERT_CODE, false);    /* accumulator invariant (acc_append) */
+    LT_ASSERT_RET(s_drag_len <= DRAG_ACC_CAP, LOG_ASSERT_CODE, false);  /* accumulator invariant (acc_append) */
 
     char tmp_path[40], sum_path[40];
     log_path(tmp_path, sizeof tmp_path, s_id, ".sum.tmp");
     log_path(sum_path, sizeof sum_path, s_id, ".sum");
     sto_file_t f;
-    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) { (void)errlog_add(E_STO_WRITE, 0); return; }
+    if (sto_open(tmp_path, STO_WR | STO_CREATE, &f) != 0) { (void)errlog_add(E_STO_WRITE, 0); return false; }
 
     int rc = sum_write(f, frame, (size_t)n);                       /* HDR */
     if (rc == 0) { n = ses_encode_venue(s_venue_id, s_layout_id, s_venue_name, frame, sizeof frame);
@@ -244,7 +250,9 @@ static void rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 
     if (rc == 0) { rc = sto_sync(f); if (rc != 0) (void)errlog_add(E_STO_WRITE, 0); }
     (void)sto_close(f);
-    if (rc == 0 && sto_rename(tmp_path, sum_path) != 0) (void)errlog_add(E_STO_WRITE, 0);   /* atomic (§13.1) */
+    if (rc != 0) return false;
+    if (sto_rename(tmp_path, sum_path) != 0) { (void)errlog_add(E_STO_WRITE, 0); return false; }   /* atomic (§13.1) */
+    return true;
 }
 
 static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
@@ -299,7 +307,9 @@ static void open_session(const log_request_t *req)
     batch_append(tmp, n);
     do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
     (void)sto_sync(s_log_fd);                        /* and sync it: a cut right after open must not lose the .log HDR either */
-    rebuild_sum(false, 0, 0);                        /* initial .sum: HDR + VENUE */
+    /* initial .sum: HDR + VENUE. Failure already recorded by errlog_add inside; the .sum is
+     * rebuilt again at the next LAP/close. */
+    (void)rebuild_sum(false, 0, 0);
     eviction_check();                                /* §12.7: eviction runs at session start, not only every 60 s;
                                                         * Plan 5.6 T1 fix 3: also refreshes the status.h cache when
                                                         * it actually evicts. sessions is NOT bumped here -- only
@@ -322,11 +332,12 @@ static void close_session(const log_request_t *req)
     (void)sto_sync(s_log_fd);
     (void)sto_close(s_log_fd);
     s_open = false;
-    rebuild_sum(true, req->gps_us, req->reason);     /* finalise .sum with END */
-    /* Plan 5.6 T1 fix 3: incremental, not a rescan -- a .sum now exists for this session, and
-     * closing is the one definitive "a session is now counted" boundary this file uses (see
-     * status_cache_prime()'s doc comment for why open_session does not also bump this). */
-    s_sessions_cached++;
+    /* Finalise .sum with END. Plan 5.6 T1 fix 3: the count is incremental, not a rescan -- closing
+     * is the one definitive "a session is now counted" boundary this file uses (see
+     * status_cache_prime()'s doc comment for why open_session does not also bump this).
+     * Plan 5.6 T1 fix 4: and only a .sum that actually landed counts -- rebuild_sum returns false
+     * on any write/sync/rename failure (recorded by errlog_add inside), leaving the count put. */
+    if (rebuild_sum(true, req->gps_us, req->reason)) s_sessions_cached++;
     s_free_kb_cached = storage_free_kb();
     s_bytes_since_info = 0;
     status_cache_update(s_free_kb_cached, s_sessions_cached);
@@ -339,7 +350,8 @@ static void handle_request(const log_request_t *req)
     switch (req->type) {
     case LOGGER_OPEN_SESSION:    open_session(req); break;
     case LOGGER_CLOSE_SESSION:   close_session(req); break;
-    case LOGGER_REBUILD_SUMMARY: if (s_open) rebuild_sum(false, 0, 0); break;
+    /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
+    case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); break;
     case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; break;   /* force an eviction pass this loop */
     default: break;
     }
@@ -476,8 +488,9 @@ static void eviction_check(void)
     /* free < 10 %: delete the oldest .log that is not the current session. Per-entry stat() (via
      * sto_list_next, not the name-only sto_list_next_name) is kept -- eviction wants sizes/ages
      * available to it (a T12 latency-work candidate, §4). This loop stays O(n^2) on LittleFS; the
-     * taskYIELD() every 16 entries (Plan 5.6 T1 fix 3) only feeds IDLE0/the task WDT through it,
-     * it does not fix the complexity. */
+     * vTaskDelay(1) every 16 entries (Plan 5.6 T1 fix 4) only feeds IDLE0/the task WDT through it,
+     * it does not fix the complexity: blocking this priority-8 task for one tick is what lets IDLE0
+     * (priority 0) run: taskYIELD() would not, it never schedules a lower-priority task. */
     evict_ctx_t e;
     memset(&e, 0, sizeof e);
     if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
@@ -486,7 +499,7 @@ static void eviction_check(void)
         sto_entry_t ent;
         int n = 0;
         while (sto_list_next(&it, &ent) == 1) {
-            if (++n % 16 == 0) taskYIELD();
+            if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
             const char *name = ent.name;
             size_t len = strlen(name);
             if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
@@ -591,7 +604,8 @@ static void logger_task(void *arg)
             (void)sto_sync(s_log_fd);
             s_last_sync_ms = now;
         }
-        if (s_sum_dirty && s_open) { rebuild_sum(false, 0, 0); s_sum_dirty = false; }
+        /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
+        if (s_sum_dirty && s_open) { (void)rebuild_sum(false, 0, 0); s_sum_dirty = false; }
         evict_if_due(now); status_cache_estimate();   /* Plan 5.6 T1 fix 3: no periodic storage scan */
 
         g_hb[HB_LOGGER]++;
