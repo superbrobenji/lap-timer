@@ -66,13 +66,50 @@ A new stream record carrying the existing 20-byte §18.2 STATUS payload (the exa
   `LT_ST_OFF_*` block — no new layout.
 - `status_build(uint8_t out[LT_STATUS_LEN])` is factored out of `cmd.c`'s `op_status` so the framed
   reply and the push share one builder (a host test pins the two byte-identical).
-- **Cadence:** `link_task` (the existing 20 ms detect-debounce loop) pushes one STATUS record every
-  `LINK_STATUS_PERIOD_MS = 1000` (every 50th tick), **plus one immediately when the detect line
-  asserts** (debounced), so the dev-kit has fresh status within milliseconds of a plug-in.
+- **Cadence:** the **pipeline task** — `g_stream_ring`'s sole SPSC producer — pushes one STATUS
+  record at the existing decimated fused-push site, every `CFG_FUSED_LOG_HZ`-th fused sample (≈1 s
+  at the shipped `CFG_FUSED_LOG_HZ = 10`), **plus one on the absent→present detect edge as seen by
+  the pipeline** — resolved at that same site's cadence (≤ one tick of it, ~100 ms; not
+  "immediately"). `link_task` does not push: a second producer on a single-producer ring would race
+  it. See Implementation notes below.
 - The record goes through `stream_push()` like fused/event: length-prefixed, demuxed on the dev-kit,
   dropped (not queued) if the serial sink cannot take M1 — the next tick resends.
-- Bandwidth ~25 B/s. Lap-timer budget: ~40 lines in `link.c`/`cmd.c`, one `uint8_t` tick counter,
-  a 20-byte stack scratch, no new statics (DRAM is at ~432 B free — measured at the gate).
+- Bandwidth ~25 B/s. Lap-timer budget: net **+16 B used / −16 B free** across `app/sys/status.c` +
+  `app/pipeline/pipeline.c` + `app/logger/logger.c` (392 B free measured at the gate, against the
+  session's ≤16 B ceiling) — see Implementation notes below for why the producer and the free-KB/
+  session-count cache moved off `link.c`/`cmd.c` alone.
+
+#### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+Landed as `app/sys/status.c` + `app/pipeline/pipeline.c` + `app/logger/logger.c` changes (Task 1,
+commits `5ced6e1`/`e8c23a8`/`95bc7dd`/`1fa8a17`), not the `link.c`/`cmd.c`-only shape sketched above:
+
+- **Producer:** `pipeline.c`'s `on_raw()`, at the same decimated-fused-push block that already
+  pushes `SES_T_FUSED`. `s_status_tick`/`s_prev_present` (both new pipeline-task statics) track
+  cadence and the edge; pushing from `link_task` instead was tried first and reverted — it is a
+  second task, and the stream ring is documented single-producer.
+- **`status_build()` is storage-free.** It reads `app/sys/status.c`'s `s_free_kb`/`s_sessions`
+  (`_Atomic`, `memory_order_relaxed` — independent single words, writer always the logger task, a
+  reader wants only the latest whole value) instead of calling `hal/storage.h` itself. The logger —
+  the storage owner — primes the cache as the first action of `logger_task` (before its main loop,
+  so boot-time STATUS is never `free_kb=0, sessions=0`) and updates it incrementally: `sessions` +1
+  on `close_session` once its `.sum` has landed (an eviction pass never changes the count: it unlinks
+  only `.log` files, never the paired `.sum`); `free_kb` re-read via `storage_free_kb()` at priming,
+  `close_session` and after an eviction pass; estimated between those events from the bytes appended
+  (no storage call).
+- **Rationale.** The first bench flash of the naive design (`status_build()` scanning `/sessions` on
+  every push/read) task-WDT-boot-looped: `session_count()`'s `sto_list_next` calls LittleFS `stat()`
+  per entry, and each `stat()` is its own directory walk (O(n²) for one listing); called from
+  `open_session()`'s post-eviction refresh moments after boot, it starved `IDLE0` past the task-WDT
+  window. The same per-entry-`stat()` cost is judged the likely root of the ~4 s framed `status`
+  latency measured on the pre-5.6 bench (§2) — §9/T12 does the on-target confirmation.
+- **`sessions` cache upkeep, completed.** Beyond the `close_session` +1 above, `sessions` is also
+  recounted when a session is deleted: `op_delete` posts `LOGGER_RECOUNT` and the logger re-primes
+  the cache (the same priming pass `logger_task` runs at boot) rather than decrementing in place, so
+  a delete of a session the cache never counted (e.g. one from a boot before the cache existed)
+  cannot under/over-count. `free_kb` is refreshed on every eviction pass (`evict_if_due`, every 60 s)
+  once `eviction_check()` returns, not only inside the tight-storage (`free_kb < 10%`) branch, so a
+  slow storage-free drift is visible in STATUS even when nothing is ever evicted.
 
 ### 4.2 What the dev-kit does with it
 
@@ -98,7 +135,7 @@ A new stream record carrying the existing 20-byte §18.2 STATUS payload (the exa
   "unplugged" reads as not connected — correct.
 - `stream_age_ms` growing while `connected` is true now means exactly one thing: telemetry stopped
   with the link alive. No magic threshold is needed to avoid false idles because nothing suppresses
-  the stream periodically any more; the SPA shows "stream idle" above 3 s.
+  the stream periodically any more; the SPA shows "stream idle" above 3 s (only while STATUS keeps arriving — a detect pull stops both, so it shows *not connected* instead; bench-confirmed 2026-09-25).
 - `503 {"connected":false}` is returned when the cache is stale, as today.
 
 ### 4.4 On-demand commands (unchanged shape)
@@ -115,39 +152,77 @@ on the lap-timer (used by `lt status` and by the transition-period console).
 `linkhost` + `logstore` are the core; `webapi` (HTTP) and the new console are front-ends that call
 them. Additions to `linkhost`, in the pure host-testable module:
 
-- **`linkstats`**: per-type record counters, sequence-gap detection (dropped frames), last-seen
-  timestamps for STATUS/FUSED/EVENT, ring high-water, and the STATUS cache. Single source for
-  `status_age_ms`/`stream_age_ms` (the ad-hoc `s_last_stream_ms` in `webapi.c` moves here).
+- **`linkstats`**: per-type record counters, sequence-gap detection (dropped frames — `gaps` counts
+  every seq discontinuity across *all* record types, including a record the demux itself drops as an
+  unknown type byte; see Implementation notes below), last-seen timestamps for STATUS/FUSED/EVENT,
+  ring high-water, and the STATUS cache. Single source for `status_age_ms`/`stream_age_ms` (the
+  ad-hoc `s_last_stream_ms` in `webapi.c` moves here).
 - **link trace hooks**: optional timestamped logging of every request (bytes sent, per-attempt
   outcome, reply latency, and on failure a bounded hex dump of the received bytes).
 
 Neither front-end owns state. Anything the console needs that only `webapi.c` has today is moved
 down into the core, not duplicated.
 
+#### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+`linkhost_proto.c`'s `stream_type_known(t)` is the single gate a demuxed record must pass to reach
+the ring (and so `linkstats`); it returns true for the `SES_T_*` range, `SES_T_END`, and
+`LT_REC_STATUS`. A byte outside that set is still consumed length-first (the demux stays synced) but
+never reaches `linkstats`, so its seq number reads as a gap — correct today, since every record type
+the lap-timer emits is already known. **Adding a new wire record type without adding it to
+`stream_type_known` first will manufacture a `gaps` count for an otherwise healthy stream** — the
+function carries a comment to this effect for whoever adds the next type.
+
 ### 5.2 The console (REPL) on the dev-kit's UART0
 
 An `esp_console` REPL on the dev-kit's own USB UART, the same pattern as the lap-timer's console
 (logs and prompt share the port; `dc log <level>` quiets logs). Every command accepts `--json` and
 then emits exactly one JSON object (or NDJSON lines for `tap`/`trace`), line-atomic, so a host can
-filter log lines by prefix.
+filter log lines by prefix. The component directory is `devcontroller/components/devconsole/` — not
+`console` — because that name collides with ESP-IDF's own `console` component (see Implementation
+notes below). JSON rates are integers ×10 (e.g. `fused_rate_x10`), since the pure `jsonw` writer has
+no float form; the human (non-`--json`) form divides back down and prints `n/a` where the JSON form
+would be negative (no samples yet).
 
 | command | does |
 |---|---|
-| `dc status` | AP/clients, link (connected, status/stream age, per-type rates, gaps), logstore (ready, file, bytes), heap, uptime, version |
-| `dc log <level>` | dev-kit log verbosity on this console |
-| `dc baud <rate>` | switch this console's baud for a faster `flash stage` upload (optional optimisation; 115200 is the requirement) |
-| `lt <console cmd…>` | relay any lap-timer console command through `linkhost` (framed or streaming download); prints the reply, round-trip ms, attempt count |
-| `lt shell` | transparent byte bridge UART0↔UART1 until `~.` at line start or a 10 min cap; takes the link mutex, pauses the demux (as a download does), silences dev-kit logging; resyncs on exit |
+| `dc status` | AP/clients, link (connected, status/stream age, per-type rates as `*_rate_x10`, gaps), logstore (ready, file, bytes), heap, uptime, version |
+| `dc log <level>` | dev-kit log verbosity on this console; `--json` answers `{"level":…}` |
+| `dc baud <rate>` | switch this console's baud for a faster `flash stage` upload (optional optimisation; 115200 is the requirement); `--json` answers `{"baud":…}` |
+| `lt <console cmd…>` | relay any lap-timer console command through `linkhost` (framed or streaming download); prints the reply, round-trip ms, attempt count. `lt status --json` is the one exception to "prints the reply": it emits the *decoded* §18.2 STATUS fields (named, like `dc status`), not the raw framed body |
+| `lt shell` | transparent byte bridge UART0↔UART1 until `~.` at line start or a 10 min cap; takes the link mutex, pauses the demux (as a download does), silences dev-kit logging, forces `stream tap` off, and filters whole binary stream frames out of the UART1→USB bytes it forwards so a bridged session shows only the lap-timer's own console bytes; resyncs on exit. Refused (`busy`) while a `flash push` is in flight, since both hold the same link mutex |
 | `link trace on\|off` | per-request trace (§5.1) |
-| `stream stats` | rates per type over the last 10 s, seq gaps, ring high-water |
+| `stream stats [secs]` | rates over a measured window (default 2 s): samples the counters before and after `secs`, then reports `*_rate_x10` over that interval, seq gaps, ring high-water. Independent of `dc status`, which samples its own fixed 1 s window |
 | `stream tap on\|off [type]` | print decoded records as JSON rows, rate-limited to 5/s |
 | `selftest link [N=20]` | N framed `status` round-trips: latency min/median/max, attempts, failures; PASS if median < 100 ms, max < 500 ms, 0 failures |
 | `selftest stream [s=10]` | measured rates: PASS if fused ≥ 8/s, status ≥ 0.8/s, 0 gaps |
 | `selftest framing` | relay one command with trace on; PASS if every `---BEGIN`/`---END` marker is followed by exactly one CR before LF |
 | `selftest all` | the three above; one verdict |
-| `flash stage <size> <sha256hex>` | receive a raw image over this console into `ota_stage` (§5.4) |
+| `flash stage <size> <sha256hex>` | receive a raw image over this console into `ota_stage` (§5.4). A `STAGING` claim left unpushed for 10 min is reclaimed by the next `flash stage` |
 | `flash push` | push the staged image to the lap-timer with the Task 6 `linkhost_flash` |
-| `flash status` / `flash abort` | progress (`staged`, `pushing`, `flash_pct`, last result) / cancel |
+| `flash status` / `flash abort` | progress row: `state, busy, pct, result, ver, hwid, size` (`result` is `0x%04x`, or `"link -N"` for a linkhost-level failure) / `abort` discards a staged image still awaiting `flash push` -- answers `ERR not mine` if the current `STAGING` claim is owned by `/api/flash` rather than this console |
+
+#### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+- **Component name.** `esp_console`'s own IDF component is literally named `console`; a dev-kit
+  component of the same name shadows it in the build. The console front-end lives in
+  `devcontroller/components/devconsole/` (`console.c`, `cmd_dc.c`, `cmd_lt.c`, `cmd_stream.c`,
+  `cmd_selftest.c`, `cmd_shell.c`, `host/jsonw.c`).
+- **Rates.** `jsonw` (pure, host-tested) has integer/bool/string writers only — no float form — so
+  every rate is carried as `<name>_rate_x10` (tenths, e.g. `102` = 10.2/s); the human form divides
+  and prints `n/a` for a negative (not-yet-measured) value rather than a bogus `-0.1/s`.
+- **`lt status`** cannot use the generic `lt <cmd>` relay's raw-body report: `status`'s reply is
+  binary (Base64 on the wire), not the printable text every other framed command returns. It gets its
+  own reporter (`lt_report_status`, shared with `dc status`'s decoder) that prints named `LT_ST_OFF_*`
+  fields instead of a body dump.
+- **`lt shell`** turns `stream tap` off *and* filters (`bridge_filter`) because the bridge forwards
+  raw UART1 bytes to the operator's terminal: an unfiltered `0xFF` stream record or a stray `tap`
+  JSON row would land mid-line in whatever the operator is typing into the lap-timer's own console.
+- **`flash abort`** cancels only a `flash stage` that has already completed and is waiting for
+  `flash push` (state `FLASHCTL_STAGING`) — the console is a single REPL task, so a `flash stage` in
+  *progress* runs to completion (or failure) inside that one command call and cannot be interrupted by
+  a second command line on the same console.
+  Both `flash push` and `flash abort` prove ownership of the `STAGING` claim with a token stamped when staging finished (not flashctl's state alone), so a claim reclaimed after the 10-minute TTL answers `ERR nothing staged (claim expired or taken by /api/flash)` from `flash push` or `ERR not mine` from `flash abort` instead of touching another owner's in-flight claim; if flashctl has already moved past `STAGING`, `flash abort` forgets the console's stale bookkeeping and answers `ERR not staging (stale stage forgotten)`.
 
 ### 5.3 Host CLI
 
@@ -155,6 +230,29 @@ filter log lines by prefix.
 trace | stream [stats|tap] | selftest [link|stream|framing|all] | flash <image.bin> | shell`.
 It drives the REPL in `--json` mode and parses the objects; `selftest all` replaces the ad-hoc
 bench scripts of the Plan 5.5 gates.
+
+#### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+- **CR-only line endings.** The REPL UART is configured for CR line endings
+  (`esp_console_new_repl_uart` → `ESP_LINE_ENDINGS_CR`): ENTER is a bare `\r`, and a following `\n`
+  is left as a stray byte in the UART driver's ring rather than consumed as part of the line. Every
+  command line `devkit.py` sends therefore ends in a single `\r`, never `\r\n` — `send_cmd`, the
+  `--json` one-shot commands, `flash stage <size> <sha256hex>\r`, `flash push\r`, `stream tap on
+  [type]\r`/`stream tap off\r`, and `lt shell\r`. This matters most for `flash stage`: a stray `\n`
+  ahead of the raw image bytes becomes image byte 0, corrupting the upload.
+- **`shell`'s Ctrl-C close.** `lt shell`'s bridge (cmd_shell.c) honours the `~.` escape only when the
+  device considers itself at the start of a line. A clean exit (the operator typing `~.` themselves)
+  is always at a line start by construction, but a Ctrl-C (or any other exception) out of the relay
+  loop can land mid-line. `devkit.py`'s shutdown path for that case therefore sends `\r~.` (a bare CR
+  first), not a bare `~.` — the CR is inert on the lap-timer console when already at a line start (it
+  just reprints the prompt) but guarantees the device sees `~.` at a line start either way, so the
+  bridge always closes.
+- **`read_json` ignores stream rows.** `stream tap`'s row loop prints bare `{"t":"fused",...}` (or
+  `"event"`/`"status"`) rows from the console's other task, which can interleave on the wire with a
+  one-shot command's own JSON reply. `read_json` skips any parsed object carrying a `"t"` key unless
+  the caller passes `accept_rows=True`, so `status`/`lt`/`trace`/`stream stats`/`selftest` can never
+  mistake a racing tap row for their own reply. `_cmd_stream_tap`'s own row-printing loop reads via
+  `_readline` directly, not `read_json`, so it is unaffected and still prints every row, tap or not.
 
 ### 5.4 Flashing the lap-timer over USB
 
@@ -167,17 +265,37 @@ host:    flash stage <size> <sha256hex>\r
 dev-kit: STAGE-READY                      (ota_stage erased for size; console in raw mode)
 host:    <size> raw bytes
 dev-kit: STAGE-END 0x0000                 (SHA-256 matches; image parsed: ver/hwid via image_desc)
-      |  STAGE-ERR <code>                 (badsize | badsha | timeout | write)
+      |  STAGE-ERR <code>                 (usage | badsize | badsha | busy | timeout | write | image
+                                            | abort — see Implementation notes below)
 host:    flash push\r  →  progress lines / final result (same codes as /api/flash's flash_err)
 ```
 
-`/api/flash` and the console share the staging core (`ota_stage` write + SHA + `image_desc`) and
-the push. Works at 115200 baud (a 600 KB image ≈ 55 s per hop); the CLI may negotiate a higher
-console baud (`dc baud`) for the upload if the dev-kit's USB bridge tolerates it — an optimisation,
-not a requirement. This is cmd-OTA: it needs a signed image, a working lap-timer firmware, and the
-§19.5 battery precondition. The ROM-bootloader path (`esp-serial-flasher` over EN/GPIO0, for a
-bricked lap-timer; the sub-project C foundation) stays deferred; `flash` is shaped so `flash --rom`
-plugs in later without redesign.
+`/api/flash` and the console share the staging core (`ota_stage` write + SHA + `image_desc`) and the
+push. The console path knows the image size up front (`flash stage <size> ...`) and stages exact-size
+via `otastage_begin(size)`; the web path streams a multipart body of unknown size ahead of time and
+stages via `otastage_begin_bounded(max)` instead — the same `otastage_write`/`otastage_finish` underneath
+either way. The push itself runs on one task, `flashctl_push`, shared by both front-ends (single-flight:
+`flashctl_try_begin_staging()` is the busy guard behind the `busy` code above). Works at 115200 baud (a
+600 KB image ≈ 55 s per hop); the CLI may negotiate a higher console baud (`dc baud`) for the upload if
+the dev-kit's USB bridge tolerates it — an optimisation, not a requirement. This is cmd-OTA: it needs a
+signed image, a working lap-timer firmware, and the §19.5 battery precondition. The ROM-bootloader path
+(`esp-serial-flasher` over EN/GPIO0, for a bricked lap-timer; the sub-project C foundation) stays
+deferred; `flash` is shaped so `flash --rom` plugs in later without redesign.
+
+#### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+`otastage.h`'s `OTASTAGE_E_SIZE`/`_E_WRITE`/`_E_IMAGE` map to three of the wire codes
+(`badsize`/`write`/`image`); the rest are console-side, not staging-core: `usage` (bad `flash stage`
+grammar, or a trailing `--json` — this subcommand's own output *is* the wire protocol, so `--json` is
+rejected outright), `badsha` (the finished SHA-256 doesn't match the declared hex), `busy`
+(`flashctl_try_begin_staging()` already held — by a concurrent `POST /api/flash`, most commonly),
+`timeout` (the raw-byte read stalled past `FLASH_STALL_MAX_MS = 3000` cumulative, or the transfer never
+completed), and `abort` (`flash abort`, honoured only while STAGING has completed and PUSH has not
+started — see §5.2's Implementation notes). `image` is a Task 10 addition beyond this section's
+original four-code sketch: `OTASTAGE_E_IMAGE` (too few bytes staged, or a bad `esp_app_desc`/hwid
+header) had no code to map to until it was added. Every failure once `STAGE-READY` has printed frees
+the SHA context, releases the single-flight guard, and drains any in-flight image bytes off UART0 for a
+bounded window so they are never read back as REPL command characters.
 
 ### 5.5 Out of scope (YAGNI)
 
@@ -187,9 +305,11 @@ dev-kit PCB (stock ESP32 devkit + RJ45 breakout until then).
 
 ## 6. Data flow
 
-- **Status (push):** `link_task` 1 Hz → `status_build()` → `stream_push(LT_REC_STATUS)` → serial
-  sink (drops if M1 held) → dev-kit `rx_task` → demux → ring → `stream_consumer` → linkstats cache +
-  logstore + SSE. `/api/status` and `dc status` read the cache. Zero UART traffic per status read.
+- **Status (push):** pipeline task (decimated fused-push site, ~1 Hz + on the detect edge) →
+  `status_build()` (storage-free, reads the logger-primed cache) → `stream_push(LT_REC_STATUS)` →
+  serial sink (drops if M1 held) → dev-kit `rx_task` → demux → ring → `stream_consumer` → linkstats
+  cache + logstore + SSE. `/api/status` and `dc status` read the cache. Zero UART traffic per status
+  read. See §4.1 Implementation notes.
 - **Command (on demand):** `/api/*` or `lt <cmd>` → `linkhost_cmd`/`linkhost_download_cmd` →
   UART1 → framed reply → demux/`lh_dl` → reply. `link trace` instruments each step. Downloads and
   flash pause the demux (the #65 park handshake); the stream gap during a transfer is accepted, as
@@ -222,7 +342,8 @@ dev-kit PCB (stock ESP32 devkit + RJ45 breakout until then).
 End state: the lap-timer is the standalone unit with its own battery (Plan 6); the dev-kit is a
 board that plugs into it, is **powered by it**, and is hot-swappable. Today's bench (dev-kit on USB
 feeding the lap-timer over a 5 V jumper) is an interim until Plan 6, and is why the OTA slot erase
-browned out the lap-timer on the single-USB bench.
+browned out the lap-timer on the single-USB bench. This section's contract is reproduced for a
+hardware-focused reader in `docs/hardware/devkit-port.md`.
 
 ### 8.1 Connector: RJ45 (8P8C), standard straight-through Ethernet patch cable
 
@@ -279,12 +400,19 @@ until a custom dev-kit board exists. The interim jumper bench remains documented
 ## 9. Testing and the acceptance loop
 
 **Host tests (no hardware):**
-- Lap-timer: `status_build()` output byte-identical to the framed `op_status` body (existing STATUS
-  decoder as oracle); `LT_REC_STATUS` value and layout compile-checked.
+- Lap-timer: `status_build()` output matching the framed `op_status` body is guaranteed by
+  construction, not by a dedicated byte-identity test — `op_status` calls `status_build()` directly,
+  and `LT_REC_STATUS`/`LT_STATUS_REC_LEN` are compile-checked by `_Static_assert`s in `link.c` and
+  the host `test_proto` case (the lap-timer harness links `components/core` only, so no
+  `status_build()`-vs-`op_status` comparison test exists).
 - Dev-kit: demux accepts and routes `LT_REC_STATUS`; `linkstats` counters, seq-gap detection,
   staleness (`connected` flips at 3 s), age math; STATUS → JSON row; console `--json` formatting of
   `dc status`/`selftest` from a fake stats struct; the `flash stage` handshake parser (pure);
   `tools/devkit.py` parsing against canned JSON.
+- **Landed test files** (Tasks 1–11, `test/` + `devcontroller/test/` + `tools/`): `test_linkstats.c`,
+  `test_stream_json.c`, `test_status_json.c`, `test_jsonw.c`, `test_rate.c`, `test_hexfmt.c`,
+  `test_wire_escape.c`, `test_selftest_eval.c`, `test_rawcap.c`, `test_bridge_filter.c`,
+  `test_stage_args.c`, `test_stage_bounds.c`, `test_flash_fmt.c`, `tools/test_devkit.py`.
 
 **On-target self-tests are the flash gate:** `devkit.py selftest all` over one USB cable, no AP:
 `stream` (≈10 Hz fused + 1 Hz status, 0 gaps), `link` (latency distribution), `framing`
@@ -300,10 +428,30 @@ status poll runs.
 If the root turns out to be architectural rather than a bug, that is recorded as a ledger ruling and
 becomes its own follow-up; it does not silently widen 5.6.
 
-**Bench configuration for development:** dev-kit on USB (console + power), lap-timer powered from
-the dev-kit's 5 V rail (jumper now, the Plan 6 port later). Independent lap-timer power is optional
-for dev work and required for the Plan 6 OTA matrix. The lap-timer's own USB is needed only to
-flash it until `esp-serial-flasher` lands.
+**Bench configuration for development:** both boards on the laptop's own USB (console + power each),
+**the 5 V jumper OUT** by default — see `docs/hardware/devkit-port.md` §4 for the interim-bench rules
+(the jumper browns the lap-timer out during `esp_ota_begin`'s erase, so it stays out except when
+deliberately testing the jumper-fed path; the dev-kit-TX→lap-timer-RX wire is pulled only while
+flashing the lap-timer directly over its own USB). Independent lap-timer power (the jumper, or the
+Plan 6 port once it exists) is required only for the Plan 6 OTA-apply matrix, not for day-to-day dev
+work. The lap-timer's own USB is needed only to flash it until `esp-serial-flasher` lands.
+
+### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+**CI parity.** The host harnesses (`test/`, `devcontroller/test/`) are pure C11, built with
+`CMAKE_EXPORT_COMPILE_COMMANDS=ON` and compiled clean, zero warnings, under Apple clang on the
+development machine; CI now builds and runs both under Linux gcc, plus the firmware they pair with:
+`.github/workflows/ci.yml`'s `host-tests` job builds the lap-timer's `test/` tree, its new
+`dc-host-tests` job builds and runs `devcontroller/test/` (the dev-kit's pure host-testable logic,
+under ASan/UBSan, as its own Unity executables), and its new `tools-tests` job runs
+`python3 -m unittest tools/test_devkit.py`; `.github/workflows/firmware.yml`'s build matrix now
+includes `devcontroller` alongside `moto_neo6m`/`moto_sim`, built with `idf.py build` in the same
+pinned `espressif/idf:v5.3.2` container as the lap-timer firmware. The hygiene and static-analysis
+jobs are unchanged. The two toolchains still diverge on warning coverage — gcc's
+`-Wsign-conversion` has already caught sites clang accepted in this codebase (the vendored `jsmn`
+patch and a host-harness `-Wsign-conversion` fix, both pre-5.6, `26fd088`/`26977ea`) — so a
+`gcc-16 -fsyntax-only` sweep over the compile database stays a local pre-push step for either host
+harness, ahead of what CI itself already re-verifies on push.
 
 ## 10. Roadmap placement and sequencing
 
@@ -317,7 +465,7 @@ the roadmap tail.
 
 | session | scope | gate |
 |---|---|---|
-| 5.6.1 Contract | `status_build`, `LT_REC_STATUS` + asserts, 1 Hz + on-detect push (`link_task`); dev-kit demux/linkstats/status cache, `/api/status` from cache, `connected`/`stream_age`/`status_age`, STATUS rows in SSE/NDJSON | full lap-timer gate + dev-kit host tests; flash gate: SPA open, live monitor ≈ 10 Hz with the poll running; DRAM/stack recorded |
+| 5.6.1 Contract | `status_build`, `LT_REC_STATUS` + asserts, 1 Hz + on-detect push (**pipeline task**, not `link_task` — see §4.1 Implementation notes); dev-kit demux/linkstats/status cache, `/api/status` from cache, `connected`/`stream_age`/`status_age`, STATUS rows in SSE/NDJSON | full lap-timer gate + dev-kit host tests; flash gate: SPA open, live monitor ≈ 10 Hz with the poll running; DRAM/stack recorded |
 | 5.6.2 Tooling | `esp_console` REPL, shared-core discipline, `dc status`, `dc log`, `lt <cmd>` + timing, `link trace`, `stream stats\|tap`, `--json` | flash gate over USB only |
 | 5.6.3 Self-tests, CLI, flash, acceptance | `selftest *`, `tools/devkit.py`, `lt shell`, `flash stage/push/status/abort` + `devkit.py flash`; then the acceptance loop (root-cause + fix the 4 s latency) | `selftest all` green; `devkit.py flash` stages + pushes (apply still gated on Plan 6 power) |
 | 5.6.4 Bench day + docs | full gate via `devkit.py selftest all` + AP check; connector contract into `docs/hardware/` (pinout, cable rules, PoE warning) + Plan 6 BOM lines (panel RJ45, boost, TVS); roadmap update | tag `plan-5.6-done` |

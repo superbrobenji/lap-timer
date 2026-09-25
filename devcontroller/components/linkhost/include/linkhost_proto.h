@@ -103,12 +103,57 @@ void linkhost_reset(void);
 size_t linkhost_feed(const uint8_t *bytes, size_t n);
 /* Pops one demuxed stream record. 0 if one was returned, <0 if the ring is empty. */
 int linkhost_stream_pop(lt_stream_rec_t *out);
+/* Ring high-water (Plan 5.6 Task 6): the largest fill (records queued at once) the stream ring has
+ * reached since linkhost_reset(). Maintained by the single producer (stream_emit's ring push) as
+ * max(hw, fill_just_after_the_push); read here by the console (`stream stats`) as a single relaxed
+ * word read -- ring_hw is monotonic non-decreasing, so a torn/stale read is merely "slightly out of
+ * date", never wrong-direction, and needs no lock. */
+uint16_t linkhost_stream_ring_hw(void);
 /* Decode one stream record (SES_T_FUSED/EVENT) to a compact JSON object for the live monitor.
  * Returns bytes written (>0) or -1 for an unknown/short record (skip it). Floats -> scaled ints. */
 int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap);
 /* Pops the most-recently-assembled framed response. Returns 1 and sets *status (0 or LINKHOST_E_*)
  * and *out (when status==0) if one was pending; 0 if none is pending. */
 int linkhost_pop_response(linkhost_frame_t *out, int *status);
+
+/* Read-only view of the demux's current in-progress line buffer (Plan 5.6 Task 5): the bytes
+ * accumulated since the last '\n' that have not yet been classified as a ---BEGIN header or
+ * dropped as noise. Exposed only so linkhost's `link trace` can hexdump whatever arrived on a
+ * per-attempt command timeout -- there is otherwise no debug visibility into a reply that never
+ * completed a full frame. *len is set to the buffered length (0 if nothing is pending).
+ *
+ * CROSS-TASK READ (fix 1): linkhost_feed (the RX task, the sole writer of s_dx.line/line_len) and
+ * this accessor (called from the request task via linkhost_cmd_timed's trace hook) run on
+ * different FreeRTOS tasks/cores with no lock between them -- unlike linkhost_pop_response's
+ * resp/resp_ready or the stream ring's head/tail, there is no publish protocol here, so the
+ * snapshot this returns may be stale (a line the RX task already moved past) or torn (RX task
+ * mid-write while this reads). `line_len` is `volatile` so at least each read/write is an actual
+ * memory access (not cached/reordered across the two tasks) and is always < LINE_CAP, bounding the
+ * snapshot to reads within `line`'s allocation -- but the exact byte content at any given `len` is
+ * only a best-effort snapshot. Debug use only (the trace hexdump); never treat this as a
+ * synchronized read of a completed value the way linkhost_pop_response's frame is. The returned
+ * pointer is into module-static state: valid only until the next linkhost_feed call, and the
+ * caller must never write through it. */
+const uint8_t *linkhost_line_peek(size_t *len);
+
+/* ---- raw reply capture (Plan 5.6 Task 9's `selftest framing`) ----
+ * When ON, the demux appends the RAW incoming bytes of a framed reply -- from the byte that
+ * starts the ---BEGIN marker line through the end of the ---END <crc>---\r\n line, CR/LF included,
+ * EXACTLY as received on the wire (unlike linkhost_parse_frame's re-synced s_dx.frame, which
+ * drops leading noise and re-synthesizes the header line's own terminator) -- into a 256-byte
+ * static buffer. Overwrite = truncate: the FIRST 256 bytes are kept and any bytes beyond that are
+ * counted by linkhost_rawcap_dropped() -- a self-test only needs the marker lines and the first
+ * body lines. Each new ---BEGIN restarts the capture (resets to empty first). Stream frames
+ * (0xFF records) are NEVER captured -- only bytes the response-frame body/tail states consume.
+ * Independent of linkhost_trace_set's ESP_LOGI trace; toggling one never affects the other. Off
+ * by default and after linkhost_reset(). */
+void   linkhost_rawcap_set(bool on);
+/* Copies up to `cap` bytes of the current capture into `out`. Returns the number of bytes copied
+ * (<= cap, <= 256). */
+size_t linkhost_rawcap_copy(uint8_t *out, size_t cap);
+/* Bytes seen beyond the 256-byte cap for the CURRENT (or most recently completed) capture; reset
+ * to 0 by each new ---BEGIN, same as the capture itself. */
+size_t linkhost_rawcap_dropped(void);
 
 /* ================================================================================================
  *  Streaming session download (Plan 5.5): a pure, IDF-free state machine that parses one

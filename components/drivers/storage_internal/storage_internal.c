@@ -239,6 +239,27 @@ int sto_list_next(sto_iter_t *it, sto_entry_t *out)
     return 0;                                    /* directory exhausted, or rule-2 cap hit */
 }
 
+/* Same iterator/bound/return-convention as sto_list_next, but no stat() (Plan 5.6 T1 fix 3):
+ * each sto_list_next entry's stat() is its own LittleFS directory walk, so a full listing there
+ * is O(n^2) in entry count; a caller that only needs names (a session count, say) stays O(n)
+ * with this instead. */
+int sto_list_next_name(sto_iter_t *it, char *name, size_t cap)
+{
+    CORE_ASSERT_RET(it != NULL, STO_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(name != NULL && cap > 0, STO_ASSERT_CODE, -1);
+    if (!it->d) return -1;
+    struct dirent *ent;
+    while (it->iters++ < STO_LIST_MAX_ENTRIES && (ent = readdir(it->d)) != NULL) {
+        if (ent->d_name[0] == '.' &&
+            (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
+            continue;                            /* skip "." and ".." */
+        /* explicit precision caps the copy to `cap` so -Wformat-truncation can see it fits. */
+        (void)snprintf(name, cap, "%.*s", (int)(cap - 1), ent->d_name);
+        return 1;
+    }
+    return 0;                                    /* directory exhausted, or rule-2 cap hit */
+}
+
 void sto_list_close(sto_iter_t *it)
 {
     if (it && it->d) { closedir(it->d); it->d = NULL; }

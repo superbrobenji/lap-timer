@@ -40,6 +40,50 @@ jobs:
         if: steps.probe.outputs.present != 'true'
         run: echo "test/CMakeLists.txt not present yet"
 
+  dc-host-tests:
+    # Dev-controller (sub-project B) host harness -- mirrors host-tests above, but for
+    # devcontroller/test (Plan 5.6 closeout): the pure, IDF-free component logic under
+    # devcontroller/components/*/host/*.c, built and run under ASan/UBSan as 24 Unity
+    # executables (devcontroller/test/CMakeLists.txt).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f devcontroller/test/CMakeLists.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Configure
+        if: steps.probe.outputs.present == 'true'
+        run: cmake -S devcontroller/test -B devcontroller/test/build -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        if: steps.probe.outputs.present == 'true'
+        run: cmake --build devcontroller/test/build --parallel
+      - name: Test
+        if: steps.probe.outputs.present == 'true'
+        run: ctest --test-dir devcontroller/test/build --output-on-failure
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "devcontroller/test/CMakeLists.txt not present yet"
+
+  tools-tests:
+    # Python unit tests for tools/ host CLIs (Plan 5.6 closeout: tools/devkit.py). Stdlib only --
+    # pyserial is imported lazily inside devkit.py (only where a real port is opened), so this
+    # exercises devkit.py's pure helpers (read_json/send_cmd/stage_image/push_and_wait) against a
+    # FakeSerial double with no install step needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe inputs
+        id: probe
+        run: echo "present=$([ -f tools/test_devkit.py ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: python3 -m unittest tools/test_devkit.py
+        if: steps.probe.outputs.present == 'true'
+        run: python3 -m unittest tools/test_devkit.py
+      - name: Nothing to do
+        if: steps.probe.outputs.present != 'true'
+        run: echo "tools/test_devkit.py not present yet"
+
   static-analysis:
     # Power of 10 (Holzmann/JPL) static analysis -- design §5, plan Session 4.5.6 (blocking flip).
     # BLOCKING as of plan-4.5-done: the custom linter (the authoritative rule 3/4/4-compound/5/8/9

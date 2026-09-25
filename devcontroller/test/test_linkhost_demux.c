@@ -147,6 +147,53 @@ static void test_err_line_becomes_remote_response(void)
     TEST_ASSERT_EQUAL_INT(0, linkhost_pop_response(&f, &st));   /* consumed */
 }
 
+/* A raw LT_REC_STATUS (0x40) frame -- the lap-timer's 1 Hz STATUS push (Plan 5.6 Task 1) -- must
+ * demux like any other known type: len=LT_STATUS_REC_LEN(21) -> a popped record with
+ * type==LT_REC_STATUS and len==LT_STATUS_LEN(20) after the type byte is stripped. */
+static void test_status_record_demuxes(void)
+{
+    uint8_t s[32];
+    size_t L = 0;
+    const uint8_t hdr[] = { 0xFF, 0x05, 0x00, 0x00, LT_STATUS_REC_LEN, LT_REC_STATUS };
+    app(s, &L, hdr, sizeof hdr);
+    uint8_t body[LT_STATUS_LEN];
+    memset(body, 0, sizeof body);
+    body[LT_ST_OFF_PROTO] = 1;
+    body[LT_ST_OFF_SESS]  = 7;
+    app(s, &L, body, sizeof body);
+
+    TEST_ASSERT_EQUAL_UINT(L, linkhost_feed(s, L));
+
+    lt_stream_rec_t r;
+    TEST_ASSERT_EQUAL_INT(0, linkhost_stream_pop(&r));
+    TEST_ASSERT_EQUAL_UINT16(5, r.seq);
+    TEST_ASSERT_EQUAL_UINT8(LT_REC_STATUS, r.type);
+    TEST_ASSERT_EQUAL_UINT8(LT_STATUS_LEN, r.len);
+    TEST_ASSERT_EQUAL_UINT8(1, r.data[LT_ST_OFF_PROTO]);
+    TEST_ASSERT_EQUAL_UINT8(7, r.data[LT_ST_OFF_SESS]);
+    TEST_ASSERT_EQUAL_INT(-1, linkhost_stream_pop(&r));   /* ring now empty */
+}
+
+/* Ring high-water (Plan 5.6 Task 6 resolution 2): pushes N=5 known records into the stream ring in
+ * one feed and asserts linkhost_stream_ring_hw() == N, then drains the ring and asserts it STAYS N
+ * -- it's a monotonic high-water mark, not a live fill count that would fall back to 0. */
+static void test_ring_hw(void)
+{
+    uint8_t s[7 * 5];
+    size_t L = 0;
+    for (uint8_t i = 0; i < 5; i++) {
+        const uint8_t f[] = { 0xFF, i, 0x00, 0x01, 0x02, 0x05, (uint8_t)(0x10 + i) };
+        app(s, &L, f, sizeof f);
+    }
+    TEST_ASSERT_EQUAL_UINT(L, linkhost_feed(s, L));
+    TEST_ASSERT_EQUAL_UINT16(5, linkhost_stream_ring_hw());
+
+    lt_stream_rec_t r;
+    for (int i = 0; i < 5; i++) TEST_ASSERT_EQUAL_INT(0, linkhost_stream_pop(&r));
+    TEST_ASSERT_EQUAL_INT(-1, linkhost_stream_pop(&r));      /* ring now empty */
+    TEST_ASSERT_EQUAL_UINT16(5, linkhost_stream_ring_hw());  /* high-water persists after draining */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -154,5 +201,7 @@ int main(void)
     RUN_TEST(test_mixed_stream_split_feed);
     RUN_TEST(test_resync_on_stream_tag_from_noise);
     RUN_TEST(test_err_line_becomes_remote_response);
+    RUN_TEST(test_status_record_demuxes);
+    RUN_TEST(test_ring_hw);
     return UNITY_END();
 }

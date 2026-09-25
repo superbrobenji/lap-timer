@@ -98,6 +98,13 @@ enum {
     LT_EVENT_OFF_ARG32B  = 28, /* u32 LE   arg32b -- event-specific */
 };
 
+/* ---- §4.1 (Plan 5.6) STATUS pushed on the stream: type byte + the 20-byte §18.2 STATUS record.
+ * 0x40 is outside core/ses.h's SES_T_* range (0x01..0x0E, 0x7F); link.c compile-checks that. */
+enum {
+    LT_REC_STATUS     = 0x40,                  /* stream record type byte for a pushed STATUS */
+    LT_STATUS_REC_LEN = 1 + LT_STATUS_LEN,     /* len field of the 0xFF frame carrying it (21) */
+};
+
 /* ---- §18.1/§18.4 command + format name constants shared with a machine peer ---- */
 #define LT_CMD_STATUS     "status"
 #define LT_CMD_LIST       "list"

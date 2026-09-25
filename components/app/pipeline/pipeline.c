@@ -22,6 +22,8 @@
 #include "app/lt_nvs.h"
 #include "app/lt_assert.h"
 #include "app/link.h"        /* stream_push -- fan the fused-log/event stream to an attached peer (§18) */
+#include "app/lt_proto.h"    /* LT_REC_STATUS / LT_STATUS_REC_LEN -- STATUS stream-record wire contract */
+#include "app/status.h"      /* status_build() -- storage-free (Plan 5.6 T1 fix 1) */
 
 #include "hal/gps.h"
 #include "hal/imu.h"
@@ -113,6 +115,13 @@ static double  s_last_valid_lat, s_last_valid_lon;
 static fused_sample_t s_latest_fused;
 static bool           s_have_fused;
 static uint32_t       s_fused_ctr;
+
+/* Plan 5.6 §4.1 T1 fix 1: LT_REC_STATUS push cadence, driven off the decimated fused-push site
+ * below (this task, g_stream_ring's one documented producer -- never link_task, which would
+ * race it on the SPSC ring). s_status_tick counts fused pushes (CFG_FUSED_LOG_HZ of them make
+ * ~1 s); s_prev_present detects the absent->present edge for an immediate first push. */
+static uint8_t s_status_tick;
+static bool    s_prev_present;
 
 /* motion / fix-lost edges (§6.5, §9.1) */
 static bool s_moving, s_have_moving;
@@ -474,6 +483,23 @@ static void on_raw(const imu_raw_t *raw)
         rec[0] = SES_T_FUSED;
         memcpy(rec + 1, &fused, sizeof fused);
         stream_push(rec, sizeof rec);
+
+        /* Plan 5.6 §4.1 T1 fix 1: push LT_REC_STATUS at ~1 Hz (once every CFG_FUSED_LOG_HZ fused
+         * pushes -- this call site runs at CFG_FUSED_LOG_HZ, so counting to it is ~1 s) and
+         * immediately on the absent->present edge, from THIS task -- g_stream_ring's one
+         * documented producer (never link_task, which would race it: the ring is SPSC).
+         * status_build() (app/status.h) is storage-free, so no I/O runs on the pipeline task. */
+        bool present = link_peer_present();
+        bool edge = present && !s_prev_present;
+        s_prev_present = present;
+        if (present && (edge || ++s_status_tick >= CFG_FUSED_LOG_HZ)) {
+            s_status_tick = 0;
+            uint8_t srec[LT_STATUS_REC_LEN];
+            srec[0] = LT_REC_STATUS;
+            status_build(&srec[1]);
+            stream_push(srec, sizeof srec);
+        }
+        LT_ASSERT_VOID(s_status_tick < (uint8_t)CFG_FUSED_LOG_HZ, PIPE_ASSERT_CODE);   /* tick resets before reaching cadence */
     }
     LT_ASSERT_VOID(s_fused_ctr < (uint32_t)FUSED_DECIM, PIPE_ASSERT_CODE);   /* decimation counter wrapped */
 }

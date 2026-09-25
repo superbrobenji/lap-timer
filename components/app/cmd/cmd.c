@@ -15,9 +15,11 @@
 #include "app/logger.h"           /* logger_open_session_id -- DELETE must skip the open session */
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
+#include "app/lt_ipc.h"           /* g_log_req_q/LOGGER_RECOUNT -- DELETE re-primes the status.h cache */
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"              /* OTA receive-side state machine (CMD_OTA_*, §19.4) */
+#include "app/status.h"           /* status_build() -- storage-free (Plan 5.6 T1 fix 1) */
 
 #include "core/cfg.h"
 #include "core/exp.h"              /* streaming exporter (vbo/nmea/json) */
@@ -106,43 +108,6 @@ static int emit_error(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq,
     return emit(ctx, tag, (*seq)++, CMD_FLAG_ERROR | CMD_FLAG_LAST, buf, 2 + mlen);
 }
 
-/* ------------------------------------------------------------------ *
- *  shared getters
- * ------------------------------------------------------------------ */
-static uint32_t storage_free_kb(void)
-{
-    sto_info_t si;
-    return (sto_info(&si) == 0) ? si.free_kb : 0;
-}
-
-/* session_count: number of `.sum` files under /sessions (one per session, §12.1). */
-static uint16_t session_count(void)
-{
-    int c = 0;
-    sto_iter_t it;
-    if (sto_list_open(&it, "/sessions") == 0) {
-        sto_entry_t e;
-        while (sto_list_next(&it, &e) == 1) {
-            const char *dot = strrchr(e.name, '.');
-            if (dot && strcmp(dot, ".sum") == 0) c++;
-        }
-        sto_list_close(&it);
-    }
-    return (c > 0xFFFF) ? 0xFFFF : (uint16_t)c;
-}
-
-/* fw char[7]: the git version trimmed of a leading 'v', truncated to fit 7 bytes incl. NUL. */
-static void fw_short(char *dst, size_t cap)
-{
-    LT_ASSERT_VOID(dst != NULL, CMD_ASSERT_CODE);
-    LT_ASSERT_VOID(cap > 0, CMD_ASSERT_CODE);   /* dst[i] = '\0' below would write out of bounds at cap == 0 */
-    const char *v = CFG_FW_VERSION;
-    if (*v == 'v' || *v == 'V') v++;
-    size_t i = 0;
-    for (; i + 1 < cap && v[i]; i++) dst[i] = v[i];
-    dst[i] = '\0';
-}
-
 /* Load the current config into s_cfg: defaults, then overwrite with the stored blob if valid. */
 static void load_cfg(void)
 {
@@ -154,21 +119,15 @@ static void load_cfg(void)
  *  ops
  * ------------------------------------------------------------------ */
 
-/* STATUS (0x01) -> the 20-byte §18.2 status record (little-endian). */
+/* STATUS (0x01) -> the 20-byte §18.2 status record (little-endian). status_build() (app/status.h,
+ * Plan 5.6 T1 fix 1) is storage-free and shared with the pipeline's 1 Hz stream push, so the two
+ * can never drift. */
 static int op_status(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
     LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
-    uint8_t st[20];
-    memset(st, 0, sizeof st);
-    st[0] = 1;                                              /* proto_ver = 1 */
-    st[1] = 0;                                              /* state: device state machine lands later */
-    put_u16le(&st[2], (uint16_t)(sys_flags_get() & 0xFFFFu));
-    st[4] = 0;                                              /* batt_pct: placeholder (power lands later) */
-    put_u16le(&st[5], 0);                                  /* batt_mv:  placeholder */
-    put_u32le(&st[7], storage_free_kb());
-    put_u16le(&st[11], session_count());
-    fw_short((char *)&st[13], 7);                          /* fw char[7] */
+    uint8_t st[LT_STATUS_LEN];
+    status_build(st);
     return emit_bytes(emit, ctx, tag, seq, st, sizeof st, true);
 }
 
@@ -240,6 +199,12 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
     const lt_counters_t *c = lt_counters();
     uint32_t up      = (uint32_t)(esp_timer_get_time() / 1000000);
     uint32_t heapmin = (uint32_t)esp_get_minimum_free_heap_size();
+    /* Live storage query, not the status.h cache: DIAG_GET runs on the console/cmd task, which
+     * hal/storage.h's contract allows for read-only queries (the same task LIST/OPEN/READ already
+     * call sto_* from below), so a fresh sto_info() here is not the pipeline-task violation the
+     * status_build() cache exists to avoid (Plan 5.6 T1 fix 1). */
+    sto_info_t si;
+    uint32_t free_kb = (sto_info(&si) == 0) ? si.free_kb : 0;
     int n = lt_errlog_count();
     int last = (n > 5) ? 5 : n;                            /* last (newest) 5 codes */
 
@@ -250,7 +215,7 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
         CFG_FW_VERSION, CFG_HWID, (unsigned)up,
         (unsigned)c->boots, (unsigned)c->crashes, (unsigned)c->wdt,
         (unsigned)c->gps_reset, (unsigned)c->i2c_recover,
-        (unsigned)storage_free_kb(), (unsigned)heapmin, (unsigned)sys_flags_get());
+        (unsigned)free_kb, (unsigned)heapmin, (unsigned)sys_flags_get());
     for (int i = 0; i < last && w > 0 && (size_t)w < sizeof s_json; i++) {
         lt_err_entry_t e;
         if (lt_errlog_at(n - last + i, &e) != 0) break;    /* ring shrank under a concurrent add */
@@ -285,7 +250,21 @@ static int op_delete(const uint8_t *payload, size_t len,
     (void)snprintf(path, sizeof path, "/sessions/%s.log", id);
     (void)sto_unlink(path);
     (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
-    (void)sto_unlink(path);
+    /* I1 (Plan 5.6 final-review A): session_count() only ever counts .sum files, and only
+     * close_session ever increments the status.h sessions cache -- a delete is otherwise
+     * invisible to it. On a successful unlink, ask the logger to re-prime the cache (name-only
+     * recount + a fresh free_kb read, both on the logger task, the storage owner). Non-blocking:
+     * a momentarily full queue is acceptable (the count self-heals at the next recount) but is
+     * still worth a report, mirrored on cmd.c's own CMD_ASSERT_CODE the way its own LT_ASSERT_*
+     * calls above do -- core_assert_fail() directly, not the LT_ASSERT_* macros, since those
+     * would `return` here and skip the ack this op still owes the caller. */
+    if (sto_unlink(path) == 0) {
+        log_request_t req = { .type = LOGGER_RECOUNT };
+        if (g_log_req_q) {
+            if (xQueueSend(g_log_req_q, &req, 0) == pdTRUE) logger_notify();
+            else core_assert_fail(CMD_ASSERT_CODE, __FILE__, __LINE__);
+        }
+    }
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
 }
 

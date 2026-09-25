@@ -153,6 +153,17 @@ int linkhost_stream_to_json(const lt_stream_rec_t *r, char *out, size_t cap)
             (unsigned)a32, (unsigned)a32b, (long long)gps_us);
         return (n > 0 && (size_t)n < cap) ? n : -1;
     }
+    if (r->type == LT_REC_STATUS && r->len >= LT_STATUS_LEN) {
+        lt_status_t st;
+        if (!linkhost_status_decode(r->data, &st)) return -1;
+        int n = snprintf(out, cap,
+            "{\"t\":\"status\",\"seq\":%u,\"proto\":%u,\"state\":%u,\"flags\":%u,\"batt_pct\":%u,"
+            "\"batt_mv\":%u,\"free_kb\":%lu,\"sessions\":%u,\"fw\":\"%s\"}",
+            (unsigned)r->seq, (unsigned)st.proto, (unsigned)st.state, (unsigned)st.flags,
+            (unsigned)st.batt_pct, (unsigned)st.batt_mv, (unsigned long)st.free_kb,
+            (unsigned)st.sessions, st.fw);
+        return (n > 0 && (size_t)n < cap) ? n : -1;
+    }
     return -1;
 }
 
@@ -553,6 +564,60 @@ int lh_dl_result(const lh_dl_ctx_t *c)
 }
 
 /* ================================================================================================
+ *  Raw reply capture (Plan 5.6 Task 9's `selftest framing`) -- see linkhost_rawcap_set's doc in
+ *  linkhost_proto.h. Independent module-global state (not part of s_dx below): a separate static,
+ *  like s_body above, rather than reset by every demux operation -- only linkhost_reset() and a
+ *  new ---BEGIN touch it.
+ * ============================================================================================== */
+#define RAWCAP_CAP 256u
+
+static struct {
+    bool    on;
+    uint8_t buf[RAWCAP_CAP];
+    size_t  len;
+    size_t  dropped;
+} s_rawcap;
+
+void linkhost_rawcap_set(bool on) { s_rawcap.on = on; }
+
+size_t linkhost_rawcap_copy(uint8_t *out, size_t cap)
+{
+    assert(out != NULL || cap == 0);
+    size_t n = (s_rawcap.len < cap) ? s_rawcap.len : cap;
+    if (n > 0) memcpy(out, s_rawcap.buf, n);
+    return n;
+}
+
+size_t linkhost_rawcap_dropped(void)
+{
+    return s_rawcap.dropped;
+}
+
+/* A new ---BEGIN was just recognized: restarts the capture (empties it). No-op if capture is off,
+ * so toggling capture on mid-stream never starts mid-frame -- only a FRESH header seeds it. */
+static void rawcap_restart(void)
+{
+    if (!s_rawcap.on) return;
+    s_rawcap.len = 0;
+    s_rawcap.dropped = 0;
+}
+
+/* Appends one raw wire byte, truncating (and counting) past RAWCAP_CAP. No-op if capture is off. */
+static void rawcap_push(uint8_t b)
+{
+    if (!s_rawcap.on) return;
+    if (s_rawcap.len < RAWCAP_CAP) s_rawcap.buf[s_rawcap.len++] = b;
+    else s_rawcap.dropped++;
+}
+
+/* Appends `n` raw bytes verbatim (the reconstructed header line). No-op if capture is off. */
+static void rawcap_push_n(const uint8_t *p, size_t n)
+{
+    if (!s_rawcap.on) return;
+    for (size_t i = 0; i < n; i++) rawcap_push(p[i]);   /* bounded: n <= LINE_CAP */
+}
+
+/* ================================================================================================
  *  Demux state machine + stream ring + response slot (module-global; SPSC lock-free)
  * ============================================================================================== */
 #define RING_CAP    32u                             /* power of two */
@@ -574,7 +639,9 @@ static struct {
     dx_state_t state;
 
     uint8_t  line[LINE_CAP];
-    size_t   line_len;
+    volatile size_t line_len;   /* cross-task read by linkhost_line_peek (Plan 5.6 T5 fix 1) --
+                                  * matches this struct's other cross-task-shared fields
+                                  * (resp_ready, ring_head/tail) below */
 
     uint8_t  frame[FRAME_CAP];
     size_t   frame_len;
@@ -592,6 +659,7 @@ static struct {
     lt_stream_rec_t ring[RING_CAP];
     volatile uint32_t ring_head;   /* written by feed */
     volatile uint32_t ring_tail;   /* written by stream_pop */
+    volatile uint16_t ring_hw;     /* monotonic high-water fill, written by feed (see ring_push) */
 
     /* response slot (SPSC: producer = feed, consumer = pop_response) */
     linkhost_frame_t resp;
@@ -603,13 +671,17 @@ void linkhost_reset(void)
 {
     memset(&s_dx, 0, sizeof(s_dx));
     s_dx.state = DX_SCAN;
+    memset(&s_rawcap, 0, sizeof(s_rawcap));   /* off, empty -- matches linkhost_rawcap_set's doc */
 }
 
-/* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END). Unknown
- * types are still consumed length-first, then dropped -- the demux stays synced regardless. */
+/* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END), plus the
+ * out-of-band LT_REC_STATUS (0x40) push (Plan 5.6 Task 1). Unknown types are still consumed
+ * length-first, then dropped -- the demux stays synced regardless.
+ * Adding a wire record type? Add it here first: a type unknown here is dropped by stream_emit but
+ * still consumed a seq number, so linkstats would report it as a gap. */
 static bool stream_type_known(uint8_t t)
 {
-    return (t >= 0x01 && t <= 0x0E) || t == 0x7F;
+    return (t >= 0x01 && t <= 0x0E) || t == 0x7F || t == LT_REC_STATUS;
 }
 
 static void ring_push(const lt_stream_rec_t *r)
@@ -618,6 +690,11 @@ static void ring_push(const lt_stream_rec_t *r)
     if ((uint32_t)(head - s_dx.ring_tail) >= RING_CAP) return;   /* full: drop newest */
     s_dx.ring[head & (RING_CAP - 1u)] = *r;
     s_dx.ring_head = head + 1u;                                  /* publish after the store */
+    /* Ring high-water (Task 6 resolution 2): fill right after this push, folded into the
+     * monotonic max. Single producer (this function, called only from linkhost_feed) -- no lock
+     * needed to write it; linkhost_stream_ring_hw's read is documented as benign/relaxed. */
+    uint32_t fill = s_dx.ring_head - s_dx.ring_tail;
+    if (fill > s_dx.ring_hw) s_dx.ring_hw = (uint16_t)fill;
 }
 
 int linkhost_stream_pop(lt_stream_rec_t *out)
@@ -630,6 +707,11 @@ int linkhost_stream_pop(lt_stream_rec_t *out)
     return 0;
 }
 
+uint16_t linkhost_stream_ring_hw(void)
+{
+    return s_dx.ring_hw;   /* single relaxed word read: monotonic, so a stale value is fine */
+}
+
 int linkhost_pop_response(linkhost_frame_t *out, int *status)
 {
     assert(out != NULL);
@@ -639,6 +721,13 @@ int linkhost_pop_response(linkhost_frame_t *out, int *status)
     *out = s_dx.resp;   /* copy name + err_code/err_msg always; body pointer valid only when status==0 */
     s_dx.resp_ready = false;
     return 1;
+}
+
+const uint8_t *linkhost_line_peek(size_t *len)
+{
+    assert(len != NULL);
+    *len = s_dx.line_len;
+    return s_dx.line;
 }
 
 /* Emits one assembled stream record from sh[]/sp[] to the ring (dropping unknown types). */
@@ -660,8 +749,11 @@ static void stream_emit(void)
 }
 
 /* Classifies a completed line (in s_dx.line, length s_dx.line_len). If it is a ---BEGIN header,
- * seeds the RESP_BODY state; otherwise the line is noise and we return to SCAN. */
-static void classify_line(void)
+ * seeds the RESP_BODY state; otherwise the line is noise and we return to SCAN. `had_cr` is
+ * whether the line (as fed) ended in \r before the \n that triggered this call -- s_dx.line_len
+ * has ALREADY had that trailing \r stripped by the caller, so classify_line reconstructs it for
+ * the raw capture below rather than re-scanning. */
+static void classify_line(bool had_cr)
 {
     char name[16];
     uint32_t size = 0;
@@ -702,6 +794,17 @@ static void classify_line(void)
     s_dx.body_need = size;
     s_dx.body_got  = 0;
     s_dx.state = DX_RESP_BODY;
+
+    /* Raw capture (Plan 5.6 Task 9): a new ---BEGIN restarts it, then seeds it with the header
+     * line EXACTLY as received -- begin[0..blen) is already verbatim raw bytes (every byte pushed
+     * to s_dx.line during DX_LINE is unmodified), plus the \r that had_cr says was stripped off
+     * line_len (still true to the wire, unlike s_dx.frame's synthesized '\n' above), plus the '\n'
+     * that just completed this line. The body/tail bytes are appended as DX_RESP_BODY/DX_RESP_TAIL
+     * consume them below (rawcap_push at the same call sites as frame_push). */
+    rawcap_restart();
+    rawcap_push_n(begin, blen);
+    if (had_cr) rawcap_push((uint8_t)'\r');
+    rawcap_push((uint8_t)'\n');
 }
 
 static void frame_push(uint8_t b)
@@ -726,8 +829,9 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
             if (b == LT_STREAM_TAG) {            /* ASCII noise never holds 0xFF -> a stream frame */
                 s_dx.sh[0] = b; s_dx.sh_got = 1; s_dx.state = DX_STREAM_HDR;
             } else if (b == '\n') {
-                if (s_dx.line_len > 0 && s_dx.line[s_dx.line_len - 1] == '\r') s_dx.line_len--;
-                classify_line();
+                bool had_cr = (s_dx.line_len > 0 && s_dx.line[s_dx.line_len - 1] == '\r');
+                if (had_cr) s_dx.line_len--;
+                classify_line(had_cr);
             } else if (s_dx.line_len < LINE_CAP) {
                 s_dx.line[s_dx.line_len++] = b;
             } else {
@@ -745,6 +849,7 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
                 s_dx.sh[0] = b; s_dx.sh_got = 1; s_dx.state = DX_STREAM_HDR;
             } else {
                 frame_push(b);
+                rawcap_push(b);                  /* raw reply capture (Plan 5.6 Task 9) */
                 if (++s_dx.body_got >= s_dx.body_need) {
                     s_dx.tail_off = s_dx.frame_len;   /* anchor the ---END scan past the body */
                     s_dx.state = DX_RESP_TAIL;
@@ -757,6 +862,7 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
                 s_dx.sh[0] = b; s_dx.sh_got = 1; s_dx.state = DX_STREAM_HDR;
             } else {
                 frame_push(b);
+                rawcap_push(b);                  /* raw reply capture (Plan 5.6 Task 9) */
                 if (b == '\n'
                     && mem_find(s_dx.frame + s_dx.tail_off, s_dx.frame_len - s_dx.tail_off,
                                 LT_FRAME_END_PFX, sizeof(LT_FRAME_END_PFX) - 1) != NULL) {

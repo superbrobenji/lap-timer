@@ -43,6 +43,7 @@ typedef enum {
     LOGGER_CLOSE_SESSION   = 1,   /* write END, finalise .sum, close .log */
     LOGGER_REBUILD_SUMMARY = 2,   /* force a .sum rewrite now */
     LOGGER_EVICT           = 3,   /* run the §12.7 eviction check now */
+    LOGGER_RECOUNT         = 4,   /* re-prime the status.h cache now (cmd.c's DELETE, Plan 5.6 final-review A I1) */
 } log_req_type_t;
 
 typedef struct {

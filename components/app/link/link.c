@@ -67,6 +67,12 @@ _Static_assert(5 + LINK_REC_MAX <= CMD_CHUNK_MAX, "a stream frame (5-byte header
 _Static_assert((int)LINK_STREAM_TAG == (int)LT_STREAM_TAG, "LINK_STREAM_TAG must mirror app/lt_proto.h's LT_STREAM_TAG");
 _Static_assert((int)SES_T_FUSED == (int)LT_SES_T_FUSED, "SES_T_FUSED must mirror app/lt_proto.h's LT_SES_T_FUSED");
 _Static_assert((int)SES_T_EVENT == (int)LT_SES_T_EVENT, "SES_T_EVENT must mirror app/lt_proto.h's LT_SES_T_EVENT");
+/* LT_REC_STATUS (app/lt_proto.h): the STATUS record the PIPELINE task pushes at ~1 Hz (Plan 5.6
+ * §4.1, T1 fix 1 -- link_task must never call stream_push: g_stream_ring is SPSC and the pipeline
+ * task is its one documented producer, see stream_push()'s doc comment in app/link.h). Checked
+ * here anyway since this is where every other stream-record wire-contract assert already lives. */
+_Static_assert((int)LT_STATUS_REC_LEN <= (int)LINK_REC_MAX, "STATUS stream record must fit LINK_REC_MAX");
+_Static_assert((int)LT_REC_STATUS != (int)SES_T_FUSED && (int)LT_REC_STATUS != (int)SES_T_EVENT && (int)LT_REC_STATUS != (int)SES_T_END, "LT_REC_STATUS must not collide with a streamed/terminal SES_T_*");
 
 /* The pipeline (pipeline.c) pushes each stream record as a type byte + the raw §14 struct:
  * SES_T_FUSED -> 1 + sizeof(fused_sample_t), SES_T_EVENT -> 1 + sizeof(event_t). If either struct

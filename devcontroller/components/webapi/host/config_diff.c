@@ -3,6 +3,11 @@
  * `REQUIRES core` (which would glob the whole lap-timer app/driver tree); here we take the
  * declarations only (JSMN_HEADER) and link the implementation from jsmn.c. The JSMN_* feature
  * macros MUST match jsmn.c so the jsmntok_t layout (JSMN_PARENT_LINKS adds `parent`) agrees. */
+/* strnlen() is POSIX.1-2008, not ISO C: glibc hides it under the host harness's strict -std=c11
+ * unless a feature-test macro asks for it (macOS libc and ESP-IDF's newlib expose it regardless).
+ * Declared here, at the source, so both host harnesses and CI (Linux gcc) agree. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "config_diff.h"
 
 #include <assert.h>
@@ -158,7 +163,12 @@ int config_diff_minify(const char *current_json, const char *desired_json,
     return (int)o;
 }
 
-/* True for the bytes config_diff_escape expands (each costs one extra byte on the console line). */
+/* True for the bytes linkhost's wire_escape() expands (each costs one extra byte on the console
+ * line): kept here as a thin, private mirror of wire_escape.c's own predicate (Plan 5.6 Task 5
+ * fix 1 moved the actual escaping -- config_diff_escape -- out to
+ * devcontroller/components/linkhost/host/wire_escape.c, since it is a wire-protocol concern, not a
+ * config-diff one) purely so escaped_len below can budget config_diff_next_line's line-splitting
+ * against the SAME escaping rule without this file depending on linkhost for one three-way `||`. */
 static int esc_char(char c) { return c == '"' || c == '\\' || c == ' '; }
 
 /* Escaped byte length of src[0,len) (each '"'/'\\'/' ' becomes two bytes). */
@@ -209,8 +219,8 @@ int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out
         size_t extra    = (frags ? 1u : 0u) + flen;                          /* raw: comma + fragment */
         size_t eextra   = (frags ? 1u : 0u) + escaped_len(obj + fs, flen);   /* escaped: comma + fragment */
         /* Budget the ESCAPED object (eo + eextra + '}') against CFG_SET_OBJ_MAX so the console line
-         * stays within max_cmdline_length after config_diff_escape; also keep the raw output within
-         * out_cap ('}' + NUL). */
+         * stays within max_cmdline_length after linkhost's wire_escape(); also keep the raw output
+         * within out_cap ('}' + NUL). */
         if (eo + eextra + 1u > CFG_SET_OBJ_MAX || o + extra + 2u > out_cap) {
             if (frags == 0) return -1;                        /* one fragment cannot fit */
             break;                                            /* flush; resume at fs next call */
@@ -228,27 +238,5 @@ int config_diff_next_line(const char *obj, size_t *cursor, char *out, size_t out
     out[o++] = '}';
     out[o] = '\0';
     *cursor = p;
-    return (int)o;
-}
-
-int config_diff_escape(const char *obj, char *out, size_t out_cap)
-{
-    if (!obj || !out || out_cap == 0) return -1;
-    size_t n = strnlen(obj, CFG_JSON_MAX + 1u);
-    if (n > CFG_JSON_MAX) return -1;
-
-    size_t o = 0;
-    for (size_t i = 0; i < n; i++) {                          /* bounded by n */
-        char c = obj[i];
-        if (esc_char(c)) {
-            if (o + 2u >= out_cap) return -1;                 /* need room for '\\', c and the NUL */
-            out[o++] = '\\';
-            out[o++] = c;
-        } else {
-            if (o + 1u >= out_cap) return -1;
-            out[o++] = c;
-        }
-    }
-    out[o] = '\0';
     return (int)o;
 }

@@ -64,6 +64,12 @@ int  sto_list_open(sto_iter_t *it, const char *dir);
  * *out was filled, 0 when the directory (or the rule-2 STO_LIST_MAX_ENTRIES scan cap) is
  * exhausted, or -1 on error. Callers loop `while (sto_list_next(&it, &e) == 1) { ... }`. */
 int  sto_list_next(sto_iter_t *it, sto_entry_t *out);
+/* Same iterator, same bound (STO_LIST_MAX_ENTRIES) and return convention (1 = entry, 0 = end,
+ * -1 = error) as sto_list_next, but copies only the bounded, NUL-terminated entry name into
+ * `name` (cap bytes) -- no stat() (Plan 5.6 T1 fix 3). On LittleFS each sto_list_next entry's
+ * stat() is its own directory walk, making a full listing O(n^2) in entry count; a caller that
+ * only needs names (a session count, say) uses this instead to stay O(n). */
+int  sto_list_next_name(sto_iter_t *it, char *name, size_t cap);
 /* Closes the iterator opened by sto_list_open. Safe to call once after sto_list_next returns
  * 0 or -1 (and safe to call on an iterator that failed to open, since it->d is checked). */
 void sto_list_close(sto_iter_t *it);

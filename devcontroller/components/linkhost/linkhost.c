@@ -19,6 +19,8 @@
 #include "esp_partition.h"
 
 #include "build_config.h"
+#include "hexfmt.h"
+#include "linkstats.h"
 
 static const char *TAG = "linkhost";
 
@@ -34,7 +36,17 @@ static const char *TAG = "linkhost";
 #define LINK_CMD_RETRIES    2
 #define LINK_ABSENT_TMO_MS  500                  /* one short attempt when no peer heartbeat is seen */
 #define LINK_REQ_MTX_MS     400                  /* bounded s_req_mtx take: never park the httpd task */
+#define LINK_FLASH_MTX_MS   5000                 /* bounded s_req_mtx take for linkhost_flash (I4,
+                                                   * final review): a `lt shell` bridge can hold
+                                                   * s_req_mtx for up to its own 10-minute cap, and a
+                                                   * web push must not be able to stall invisibly
+                                                   * behind it -- 5 s is generous next to every other
+                                                   * link round trip (LINK_CMD_TIMEOUT_MS is 2 s) but
+                                                   * still short next to a `lt shell` session, so a
+                                                   * push queued behind one fails fast (LINKHOST_E_BUSY)
+                                                   * instead of hanging until the shell exits. */
 #define LINK_PRESENT_US    (3 * 1000 * 1000)     /* peer_present window (<3 s, §Task 3 Step 7) */
+#define LINK_STATUS_STALE_MS 3000                /* §4.2: a STATUS older than this = not connected */
 #define OTA_READY_TMO_MS   3000
 #define OTA_DONE_TMO_MS    10000                 /* lap-timer aborts after ~9 s without bytes */
 #define OTA_CHUNK          512
@@ -53,6 +65,21 @@ static volatile bool     s_rx_paused;            /* pauses the demux RX task whi
 static volatile bool     s_rx_parked;            /* true only while rx_task is in the paused-sleep, i.e.
                                                    * provably NOT inside uart_read_bytes (#65 handshake) */
 static bool              s_inited;
+static volatile bool     s_trace;                  /* `link trace on|off` (Plan 5.6 Task 5) */
+
+/* HEXFMT_LINE_CAP: hexfmt_line's own bound is 32 formatted bytes; the "ff " triplet per byte plus
+ * the 4-byte ellipsis is comfortably under 128 -- a fixed local buffer, no heap on the trace path. */
+#define HEXFMT_LINE_CAP 128
+#define TRACE_DUMP_LINES 4                          /* bound on the timeout hexdump (brief Step 5) */
+
+/* Guards the linkstats module's global state (Plan 5.6 T3 fix 1): writer = stream_consumer
+ * (main.c, an unpinned FreeRTOS task) via linkhost_stats_on_record; readers = the httpd request
+ * task via linkhost_status/linkhost_peer_present (linkstats_status_fresh) and webapi's api_status
+ * via linkhost_stats_snapshot. On the dual-core ESP32 writer and readers can run concurrently on
+ * either core, so the struct copy in linkstats_snapshot (and its 20-byte status_rec memcpy) can
+ * tear without a lock. linkstats.c itself stays IDF-free/unlocked -- every access from the IDF
+ * glue layer goes through this spinlock instead. */
+static portMUX_TYPE s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* linkhost_cmd copies the framed body out of the parser's shared s_body into here, so a late
  * duplicate reply parsed by the RX task can't tear an httpd send that is still reading the body.
@@ -171,19 +198,54 @@ static const char *expected_frame_name(const char *cmd)
     return NULL;
 }
 
-int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
+/* Logs (trace on only) the demux's current in-progress line buffer as up to TRACE_DUMP_LINES
+ * hexfmt_line rows of <=32 bytes each -- whatever arrived but never completed a full frame, the
+ * one debug signal available on a timed-out attempt (brief Step 5 / ambiguity 2). */
+static void trace_dump_pending(int attempt_num)
+{
+    size_t plen = 0;
+    const uint8_t *p = linkhost_line_peek(&plen);
+    ESP_LOGI(TAG, "trace: timeout attempt %d, %u B pending:", attempt_num, (unsigned)plen);
+    size_t off = 0;
+    for (int line = 0; line < TRACE_DUMP_LINES && off < plen; line++) {   /* bounded: <=4 lines */
+        size_t take = plen - off;
+        if (take > 32u) take = 32u;
+        char hx[HEXFMT_LINE_CAP];
+        hexfmt_line(p + off, take, hx, sizeof hx);
+        ESP_LOGI(TAG, "trace:   %s", hx);
+        off += take;
+    }
+}
+
+void linkhost_trace_set(bool on) { s_trace = on; }
+bool linkhost_trace_get(void)    { return s_trace; }
+
+size_t linkhost_trace_last_reply(uint8_t *out, size_t cap)
+{
+    return linkhost_rawcap_copy(out, cap);
+}
+
+int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stats_t *st)
 {
     assert(cmd != NULL);
     assert(out != NULL);
-    if (!s_inited) return LINKHOST_E_NOTCONN;
+    if (!s_inited) {
+        if (st) { st->attempts = 0; st->latency_us = 0; st->result = LINKHOST_E_NOTCONN; }
+        return LINKHOST_E_NOTCONN;
+    }
 
     size_t clen = strlen(cmd);
-    if (clen == 0 || clen > 250) return LINKHOST_E_PROTO;   /* console max_cmdline_length is 256 B */
+    if (clen == 0 || clen > 250) {                            /* console max_cmdline_length is 256 B */
+        if (st) { st->attempts = 0; st->latency_us = 0; st->result = LINKHOST_E_PROTO; }
+        return LINKHOST_E_PROTO;
+    }
 
     /* Bounded take: a download/flash on the worker task can hold s_req_mtx for many seconds; the
      * httpd request task must never park on it (M2) -- report BUSY and let the caller answer 503. */
-    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE)
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE) {
+        if (st) { st->attempts = 0; st->latency_us = 0; st->result = LINKHOST_E_BUSY; }
         return LINKHOST_E_BUSY;
+    }
 
     /* No heartbeat seen -> the peer is (probably) absent: one short attempt instead of 3x2 s, so a
      * disconnected link fails fast rather than freezing the UI for 6 s per request. */
@@ -192,26 +254,38 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
     int  attempts = present ? (LINK_CMD_RETRIES + 1) : 1;
     int  per_tmo  = present ? LINK_CMD_TIMEOUT_MS : LINK_ABSENT_TMO_MS;
 
-    int result = present ? LINKHOST_E_TIMEOUT : LINKHOST_E_NOTCONN;
+    int     result        = present ? LINKHOST_E_TIMEOUT : LINKHOST_E_NOTCONN;
+    int     attempts_made  = 0;
+    bool    got_any        = false;
+    int64_t t0              = esp_timer_get_time();   /* the FIRST write happens right below */
+    int64_t t_reply         = t0;
+
     for (int attempt = 0; attempt < attempts; attempt++) {           /* bounded retries */
         drain_pending();
+        attempts_made++;
+        if (s_trace) ESP_LOGI(TAG, "trace: send '%s' attempt %d", cmd, attempts_made);
         uart_write_bytes(DC_LINK_UART, cmd, clen);
         uart_write_bytes(DC_LINK_UART, "\r", 1);
 
         int64_t deadline = esp_timer_get_time() + (int64_t)per_tmo * 1000;
         bool got = false;
         while (esp_timer_get_time() < deadline) {                    /* bounded by the deadline */
-            int st;
-            if (linkhost_pop_response(out, &st)) {
-                if (st == 0 && want && strcmp(out->name, want) != 0)
+            int fst;
+            if (linkhost_pop_response(out, &fst)) {
+                if (fst == 0 && want && strcmp(out->name, want) != 0)
                     continue;      /* a late reply for a different command: keep waiting */
-                result = st;       /* 0, or LINKHOST_E_CRC/_PROTO/_REMOTE from the parser/classifier */
+                result = fst;      /* 0, or LINKHOST_E_CRC/_PROTO/_REMOTE from the parser/classifier */
                 got = true;
+                t_reply = esp_timer_get_time();
+                if (s_trace)
+                    ESP_LOGI(TAG, "trace: reply '%s' status=%d after %lld ms",
+                             out->name, fst, (long long)(t_reply - t0) / 1000);
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(5));
         }
-        if (got) break;
+        if (got) { got_any = true; break; }
+        if (s_trace) trace_dump_pending(attempts_made);
     }
 
     /* Copy the body out of the parser's shared static buffer into a request-task-owned buffer so a
@@ -224,27 +298,76 @@ int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
         result = LINKHOST_E_PROTO;   /* body larger than the assembly bound -> treat as malformed */
     }
 
+    if (st) {
+        st->attempts   = attempts_made;
+        st->latency_us = (got_any ? t_reply : esp_timer_get_time()) - t0;
+        st->result     = result;
+    }
+
     xSemaphoreGive(s_req_mtx);
     return result;
 }
 
+int linkhost_cmd(const char *cmd, linkhost_frame_t *out)
+{
+    return linkhost_cmd_timed(cmd, out, NULL);
+}
+
+/* Served from the pushed-STATUS cache (Plan 5.6 T3): the lap-timer streams LT_REC_STATUS at 1 Hz
+ * (and on-edge) rather than answering a framed `status` round-trip, so this never touches UART1.
+ * linkstats_status_fresh reads the shared cache -> under s_stats_mux (fix 1). */
 int linkhost_status(lt_status_t *out)
 {
     assert(out != NULL);
-    linkhost_frame_t f;
-    int rc = linkhost_cmd(LT_CMD_STATUS, &f);
-    if (rc != 0) return rc;
-    if (f.body_len != LT_STATUS_LEN) return LINKHOST_E_PROTO;
-    if (!linkhost_status_decode(f.body, out)) return LINKHOST_E_PROTO;
-    return 0;
+    if (!s_inited) return LINKHOST_E_NOTCONN;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_stats_mux);
+    bool fresh = linkstats_status_fresh(now, LINK_STATUS_STALE_MS, out);
+    portEXIT_CRITICAL(&s_stats_mux);
+    return fresh ? 0 : LINKHOST_E_NOTCONN;
+}
+
+int64_t linkhost_now_us(void)
+{
+    return esp_timer_get_time();
+}
+
+/* ---- linkstats: the only door onto the module's shared global state (fix 1). linkstats.c stays
+ * IDF-free/unlocked; every caller outside this file goes through these locked wrappers instead of
+ * linkstats_* directly. linkhost_stats_age_ms is the one exception that needs no lock: it is a
+ * pure function of its two int64 arguments (no shared state read), so it is exposed as a thin
+ * pass-through rather than duplicating its two-line formula at every caller. */
+void linkhost_stats_on_record(const lt_stream_rec_t *r)
+{
+    assert(r != NULL);
+    portENTER_CRITICAL(&s_stats_mux);
+    linkstats_on_record(r, linkhost_now_us());
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
+void linkhost_stats_snapshot(linkstats_t *out)
+{
+    assert(out != NULL);
+    portENTER_CRITICAL(&s_stats_mux);
+    linkstats_snapshot(out);
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
+int64_t linkhost_stats_age_ms(int64_t last_us, int64_t now_us)
+{
+    return linkstats_age_ms(last_us, now_us);
 }
 
 bool linkhost_peer_present(void)
 {
-    if (!s_inited) return false;
-    int64_t last = s_last_activity_us;
-    if (last == 0) return false;
-    return (esp_timer_get_time() - last) < LINK_PRESENT_US;
+    lt_status_t st;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_stats_mux);
+    bool fresh = linkstats_status_fresh(now, LINK_STATUS_STALE_MS, &st);
+    portEXIT_CRITICAL(&s_stats_mux);
+    if (fresh) return true;
+    int64_t last = s_last_activity_us;                 /* transitional fallback: any traffic < 3 s */
+    return last != 0 && (esp_timer_get_time() - last) < LINK_PRESENT_US;
 }
 
 /* ---- streaming session download ---- */
@@ -281,6 +404,7 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
     int64_t idle_dl  = start + (int64_t)DL_IDLE_TMO_MS * 1000;   /* reset on every read */
     int64_t hard_dl  = start + (int64_t)DL_HARD_MIN_MS * 1000;   /* floor; scaled once size is known */
     bool    scaled   = false;
+    bool    hdr_traced = false;                   /* `link trace`: log the header exactly once */
     lh_dl_state_t st = dl.state;
     while (st < LH_DL_DONE) {                     /* bounded by hard_dl / idle_dl */
         int64_t t = esp_timer_get_time();
@@ -289,6 +413,10 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
         if (n > 0) {
             idle_dl = esp_timer_get_time() + (int64_t)DL_IDLE_TMO_MS * 1000;
             st = lh_dl_feed(&dl, buf, (size_t)n);
+        }
+        if (s_trace && !hdr_traced && dl.state >= LH_DL_BODY) {
+            ESP_LOGI(TAG, "trace: dl header '%s' size=%u", dl.name, (unsigned)dl.body_size);
+            hdr_traced = true;
         }
         /* Scale the absolute cap to the announced body once the header parses (M5): a fixed 120 s
          * was < a 1 MB .log (~1.37 MB base64 ~= 119 s at this baud). transfer_us = size*10/baud;
@@ -311,6 +439,9 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
         rerr->code = dl.err_code;
         memcpy(rerr->msg, dl.err_msg, sizeof rerr->msg);
     }
+    if (s_trace)
+        ESP_LOGI(TAG, "trace: dl done '%s' bytes=%u result=%d",
+                 dl.name, (unsigned)dl.decoded_len, result);
     ESP_LOGI(TAG, "linkhost_download_cmd: '%s' -> result=%d (state=%d decoded=%u)",
              cmd, result, (int)dl.state, (unsigned)dl.decoded_len);
     return result;
@@ -376,7 +507,15 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
     if (cn <= 0 || (size_t)cn >= sizeof(cmd)) return LINKHOST_E_PROTO;
 
     int result;
-    xSemaphoreTake(s_req_mtx, portMAX_DELAY);
+    /* Bounded take (I4, final review): a `lt shell` bridge can hold s_req_mtx for up to its own
+     * 10-minute cap (cmd_shell.c) -- the old portMAX_DELAY here let a web push queue silently
+     * behind it with no visible symptom until the shell exited. A miss reports LINKHOST_E_BUSY,
+     * same shape as linkhost_cmd_timed/linkhost_bridge_begin; flashctl.c's flash_task already
+     * publishes this return code as flashctl_status_t.result, and flash_result_str renders a
+     * negative result as "link %d" for both front-ends to display. */
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_FLASH_MTX_MS)) != pdTRUE) {
+        return LINKHOST_E_BUSY;
+    }
     s_rx_paused = true;
     rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
 
@@ -416,4 +555,27 @@ done:
     ESP_LOGI(TAG, "linkhost_flash: size=%u -> result=%d (state=%d code=0x%04x)",
              (unsigned)size, result, (int)f.state, (unsigned)f.code);
     return result;
+}
+
+/* ---- raw byte bridge (Plan 5.6 Task 8's `lt shell`) ---- */
+int linkhost_bridge_begin(void)
+{
+    if (!s_inited) return LINKHOST_E_NOTCONN;
+
+    /* Bounded take, exactly like linkhost_cmd_timed (M2): the REPL task must never park forever on
+     * a busy link -- report BUSY so cmd_shell.c can print "busy" instead of hanging the REPL. */
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE) {
+        return LINKHOST_E_BUSY;
+    }
+    s_rx_paused = true;                          /* the demux RX task must not steal these bytes */
+    rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
+    return 0;
+}
+
+void linkhost_bridge_end(void)
+{
+    s_rx_paused = false;                         /* rx_task clears s_rx_parked on its next non-paused
+                                                   * iteration (before it reads again) -- no need to
+                                                   * clear it here too. */
+    xSemaphoreGive(s_req_mtx);
 }

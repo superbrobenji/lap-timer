@@ -1,10 +1,14 @@
 /* devcontroller/test/test_config_diff.c -- host tests for the PURE config diff/minify logic
  * (components/webapi/host/config_diff.c, Plan 5.5 Task 4 Step 1). No esp_http_server, no UART:
- * exercises config_diff_minify + config_diff_next_line directly. */
+ * exercises config_diff_minify + config_diff_next_line directly. The esp-console escaping itself
+ * (formerly config_diff_escape) moved to linkhost's wire_escape() (Plan 5.6 Task 5 fix 1; see
+ * test_wire_escape.c for its own dedicated cases) -- this file's remaining escape-adjacent case,
+ * test_next_line_escaped_line_within_console_cap, now calls wire_escape() directly to verify the
+ * end-to-end B1 budget guarantee still holds. */
 #include "unity.h"
 #include "config_diff.h"
+#include "wire_escape.h"
 
-#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -145,58 +149,11 @@ void test_next_line_splits_when_over_budget(void)
     TEST_ASSERT_EQUAL_INT(0, config_diff_next_line(obj, &cursor, line, sizeof line));
 }
 
-/* ---- config_diff_escape: esp_console round-trip + escaped-length budget (B1) ---- */
-
-/* A faithful emulator of esp_console_split_argv over a single (space-escaped) arg token: a
- * backslash escapes the next char (taken literally), a bare double quote toggles quoted mode and
- * is DROPPED, an unescaped space outside quotes ends the arg. This is exactly the transform the
- * lap-timer's REPL applies, so escape()->this must reproduce the original object byte-for-byte. */
-static void split_argv_token(const char *in, char *out, size_t out_cap)
-{
-    size_t o = 0;
-    bool in_q = false, esc = false;
-    for (const char *p = in; *p; p++) {
-        char c = *p;
-        if (esc) { if (o + 1 < out_cap) out[o++] = c; esc = false; continue; }
-        if (c == '\\') { esc = true; continue; }        /* escape: next char is literal */
-        if (c == '"')  { in_q = !in_q; continue; }       /* bare quote toggles + is stripped */
-        if (c == ' ' && !in_q) { o = 0; continue; }      /* unescaped space: new arg (token reset) */
-        if (o + 1 < out_cap) out[o++] = c;
-    }
-    out[o] = '\0';
-}
-
-/* A bare {"units":"mph"} would have its quotes stripped by the console -> {units:mph} (malformed).
- * config_diff_escape must produce a line that split_argv reconstructs back to the exact JSON. */
-void test_escape_roundtrip_quotes(void)
-{
-    const char raw[] = "{\"units\":\"mph\"}";
-    char esc[128], back[128];
-    int n = config_diff_escape(raw, esc, sizeof esc);
-    TEST_ASSERT_TRUE(n > 0);
-    TEST_ASSERT_TRUE(strchr(esc, '"') == NULL || strstr(esc, "\\\"") != NULL);  /* every " is escaped */
-    split_argv_token(esc, back, sizeof back);
-    TEST_ASSERT_EQUAL_STRING(raw, back);
-}
-
-/* A string value containing a space and a backslash must also survive (space -> "\ " so the arg is
- * not split; backslash -> "\\" so the console does not eat it as an escape). */
-void test_escape_roundtrip_space_and_backslash(void)
-{
-    const char raw[] = "{\"v\":\"a b\\c\"}";   /* bytes: {"v":"a b\c"} */
-    char esc[128], back[128];
-    int n = config_diff_escape(raw, esc, sizeof esc);
-    TEST_ASSERT_TRUE(n > 0);
-    split_argv_token(esc, back, sizeof back);
-    TEST_ASSERT_EQUAL_STRING(raw, back);
-}
-
-/* config_diff_escape reports overflow rather than truncating. */
-void test_escape_overflow_returns_negative(void)
-{
-    char esc[4];
-    TEST_ASSERT_TRUE(config_diff_escape("{\"a\":\"bbbb\"}", esc, sizeof esc) < 0);
-}
+/* ---- wire_escape (linkhost) x config_diff_next_line: escaped-length budget (B1) ----
+ * wire_escape's own round-trip/overflow cases live in test_wire_escape.c now (Plan 5.6 Task 5
+ * fix 1: config_diff_escape moved out of this component to linkhost/host/wire_escape.c). This
+ * file keeps only the end-to-end case that is genuinely config_diff's concern: that
+ * config_diff_next_line's packing, once escaped, still fits one console line. */
 
 /* THE B1 budget guarantee: config_diff_next_line packs each object so that, AFTER escaping, the
  * whole "config set <obj>" line stays within the 256 B console limit. A quote-heavy object packed
@@ -221,10 +178,10 @@ void test_next_line_escaped_line_within_console_cap(void)
         int m = config_diff_next_line(obj, &cursor, line, sizeof line);
         if (m == 0) break;
         TEST_ASSERT_TRUE(m > 0);
-        int en = config_diff_escape(line, esc, sizeof esc);
+        size_t en = wire_escape(line, esc, sizeof esc);
         TEST_ASSERT_TRUE(en > 0);
-        TEST_ASSERT_TRUE((size_t)en <= CFG_SET_OBJ_MAX);                      /* escaped object fits */
-        TEST_ASSERT_TRUE((size_t)en + CFG_SET_PREFIX_LEN <= CFG_SET_LINE_MAX);/* full line <= 250 B */
+        TEST_ASSERT_TRUE(en <= CFG_SET_OBJ_MAX);                      /* escaped object fits */
+        TEST_ASSERT_TRUE(en + CFG_SET_PREFIX_LEN <= CFG_SET_LINE_MAX);/* full line <= 250 B */
         emitted++;
         TEST_ASSERT_TRUE(++guard < 50);                                       /* bounded */
     }
@@ -246,9 +203,6 @@ int main(void)
     RUN_TEST(test_next_line_single_object_then_done);
     RUN_TEST(test_next_line_empty_object_is_done);
     RUN_TEST(test_next_line_splits_when_over_budget);
-    RUN_TEST(test_escape_roundtrip_quotes);
-    RUN_TEST(test_escape_roundtrip_space_and_backslash);
-    RUN_TEST(test_escape_overflow_returns_negative);
     RUN_TEST(test_next_line_escaped_line_within_console_cap);
     return UNITY_END();
 }

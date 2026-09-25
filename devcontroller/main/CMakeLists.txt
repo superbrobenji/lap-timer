@@ -6,7 +6,7 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES esp_wifi esp_netif esp_event nvs_flash esp_http_server linkhost logstore webapi
+    REQUIRES esp_wifi esp_netif esp_event nvs_flash esp_http_server linkhost logstore webapi devconsole
     PRIV_REQUIRES joltwallet__littlefs)
 
 # build_config.h from the build tree (CFG_DC_VERSION).

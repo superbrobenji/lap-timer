@@ -1,5 +1,6 @@
-/* devcontroller/components/webapi/include/image_desc.h -- a PURE parser for the lap-timer app
- * image header (Plan 5.5 sub-project B, Task 6).
+/* devcontroller/components/flashcore/include/image_desc.h -- a PURE parser for the lap-timer app
+ * image header (Plan 5.5 sub-project B, Task 6; moved into flashcore in Plan 5.6 Task 7 so both
+ * POST /api/flash and the console's `flash stage` share it).
  *
  * `ota recv <size> <sha> <ver> <hwid>` needs the version and hardware id of the image being
  * pushed. Both sit at fixed offsets in every ESP-IDF app image (spec 19.3), so B reads them out of

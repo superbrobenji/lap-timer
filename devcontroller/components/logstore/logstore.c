@@ -78,7 +78,7 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(logstore_file_hdr_t) == LOGSTORE_REC_AREA_OFFSET,
                "logstore_file_hdr_t size must match logstore_rec.h's LOGSTORE_REC_AREA_OFFSET");
 
-static bool     s_ready;
+static volatile bool s_ready;   /* read cross-task by logstore_ready() (webapi's httpd task) */
 static uint32_t s_cap_bytes;
 static uint32_t s_next_id = 1;
 static int      s_cur_fd = -1;
@@ -356,6 +356,11 @@ int logstore_append(const lt_stream_rec_t *rec)
         s_last_fsync_us = now_us;
     }
     return 0;
+}
+
+bool logstore_ready(void)
+{
+    return s_ready;
 }
 
 int logstore_list(logstore_entry_t *out, int max)

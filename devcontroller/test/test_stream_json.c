@@ -96,11 +96,25 @@ void test_unknown_type_rejected(void)
     TEST_ASSERT_EQUAL_INT(-1, linkhost_stream_to_json(&r, buf, sizeof buf));
 }
 
+void test_status_record_to_json(void) {
+    lt_stream_rec_t r; memset(&r, 0, sizeof r);
+    r.type = LT_REC_STATUS; r.seq = 3; r.len = LT_STATUS_LEN;
+    r.data[LT_ST_OFF_PROTO] = 1; r.data[LT_ST_OFF_BATT_PCT] = 55;
+    r.data[LT_ST_OFF_SESS] = 12; memcpy(&r.data[LT_ST_OFF_FW], "0.1.0-5", 7);
+    char out[256];
+    int n = linkhost_stream_to_json(&r, out, sizeof out);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"t\":\"status\",\"seq\":3,\"proto\":1,\"state\":0,\"flags\":0,\"batt_pct\":55,"
+        "\"batt_mv\":0,\"free_kb\":0,\"sessions\":12,\"fw\":\"0.1.0-5\"}", out);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_fused_record_scaled_ints);
     RUN_TEST(test_event_record_fields);
     RUN_TEST(test_unknown_type_rejected);
+    RUN_TEST(test_status_record_to_json);
     return UNITY_END();
 }

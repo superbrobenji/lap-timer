@@ -20,6 +20,7 @@
 #include "esp_err.h"
 
 #include "linkhost_proto.h"   /* pure logic: value types, error codes, parser/demux/status/flash decls */
+#include "linkstats.h"        /* linkstats_t + the pure counters/ages this header's wrappers lock around */
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,8 +41,27 @@ typedef struct {
 esp_err_t linkhost_init(void);
 
 /* ---- status ---- */
-/* Runs `status`, reads the framed base64 record, decodes it. 0 on success, LINKHOST_E_* < 0. */
+/* Reads the STATUS cache the RX demux stamps from the lap-timer's autonomous 0xFF stream
+ * (Plan 5.6 T3): NEVER touches UART1. 0 with *out decoded when the cached STATUS is fresh
+ * (< LINK_STATUS_STALE_MS old), else LINKHOST_E_NOTCONN. */
 int linkhost_status(lt_status_t *out);
+
+/* Monotonic clock (esp_timer_get_time()) through one door, so pure callers (e.g. the console) can
+ * get a timestamp without depending on esp_timer.h directly. */
+int64_t linkhost_now_us(void);
+
+/* ---- linkstats: the ONLY door onto the module's shared global state (Plan 5.6 T3 fix 1).
+ * linkstats.c stays IDF-free/unlocked; callers outside linkhost.c must go through these locked
+ * wrappers rather than linkstats_on_record/linkstats_snapshot directly, or a dual-core race can
+ * tear the struct copy (linkstats_snapshot's 20-byte status_rec memcpy in particular). ---- */
+/* Folds one demuxed stream record into the stats, stamped with linkhost_now_us() inside the lock.
+ * Call from the stream-consumer task only (the sole writer). */
+void linkhost_stats_on_record(const lt_stream_rec_t *r);
+/* Copies the current stats out under the lock. */
+void linkhost_stats_snapshot(linkstats_t *out);
+/* Age of a last-seen timestamp in ms; -1 if last_us == 0. Pure (no shared state read) -- exposed
+ * unlocked so callers never need to import linkstats.h's function surface directly. */
+int64_t linkhost_stats_age_ms(int64_t last_us, int64_t now_us);
 
 /* ---- request/response + stream ---- */
 /* Sends "<cmd>\r", reads the framed response (base64-decoding + CRC-verifying binary bodies),
@@ -55,6 +75,39 @@ int linkhost_status(lt_status_t *out);
 int linkhost_cmd(const char *cmd, linkhost_frame_t *out);
 /* True when link activity (a `status` heartbeat / stream frame) has been seen within a few seconds. */
 bool linkhost_peer_present(void);
+
+/* ---- round-trip timing (Plan 5.6 Task 5, the `lt` console relay) ---- */
+typedef struct {
+    int     attempts;     /* attempts made this call (1..LINK_CMD_RETRIES+1) */
+    int64_t latency_us;   /* accepted reply time minus the FIRST write; total elapsed on failure */
+    int     result;       /* the linkhost_cmd_timed return code (mirrors the function's return) */
+} linkhost_cmd_stats_t;
+
+/* Same contract as linkhost_cmd, but also fills *st (nullable) with round-trip stats: attempts
+ * made, latency measured from the first write of the first attempt to the accepted reply (or the
+ * total time elapsed if every attempt failed), and the return code. linkhost_cmd is a thin wrapper
+ * (linkhost_cmd_timed(cmd, out, NULL)). */
+int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stats_t *st);
+
+/* ---- link trace (Plan 5.6 Task 5): verbose ESP_LOGI("trace: ...") of every linkhost_cmd_timed /
+ * linkhost_download_cmd attempt (send/reply/timeout-hexdump for a command; header/bytes/result for
+ * a download) -- toggled by the console's `link trace on|off`. Off by default. ---- */
+void linkhost_trace_set(bool on);
+bool linkhost_trace_get(void);
+
+/* ---- raw reply capture wrapper (Plan 5.6 Task 9's `selftest framing`) ----
+ * Thin pass-through to linkhost_proto.h's linkhost_rawcap_copy (arm the capture first via
+ * linkhost_rawcap_set(true), also declared there -- independent of linkhost_trace_set's ESP_LOGI
+ * trace above). Safe to call any time AFTER linkhost_cmd_timed has returned for the command whose
+ * reply is being inspected: the demux's RX task is the SOLE writer of the capture, appending bytes
+ * as linkhost_feed processes them off UART1; the byte that completes a reply (the '\n' ending its
+ * ---END line) is captured BEFORE that same demux step publishes the reply via resp_ready (see
+ * linkhost_proto.c's DX_RESP_TAIL case), and linkhost_cmd_timed only returns once it has observed
+ * resp_ready true for that reply. So by the time this is called, the capture for that reply is
+ * already fully written and the request-owning task (this caller) is the only reader -- no lock
+ * needed, unlike linkhost_line_peek's genuinely concurrent (and merely best-effort) cross-task
+ * snapshot. Returns the number of bytes copied (<= cap, <= 256). */
+size_t linkhost_trace_last_reply(uint8_t *out, size_t cap);
 
 /* ---- streaming session download ----
  * Runs `open <id> <fmt>` and STREAMS the framed response body to `chunk_cb` without ever buffering
@@ -80,9 +133,23 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
 /* ---- cmd-OTA flash ----
  * Runs `ota recv <size> <sha> <ver> <hwid>` against the image already staged in the `ota_stage`
  * partition, streaming it in bounded chunks and reporting progress via cb. Returns 0 on
- * `OTA-END 0x0000`, else the `OTA-ERR` code (or a LINKHOST_E_* on timeout/protocol failure). */
+ * `OTA-END 0x0000`, else the `OTA-ERR` code (or a LINKHOST_E_* on timeout/protocol failure). The
+ * request-owning mutex is taken with a bounded timeout (I4, final review): a `lt shell` bridge can
+ * hold it for up to its own 10-minute cap, so a busy link here returns LINKHOST_E_BUSY rather than
+ * blocking the push task for the shell's whole duration. */
 int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
                    const uint8_t sha256[32], flash_progress_cb cb, void *ctx);
+
+/* ---- raw byte bridge (Plan 5.6 Task 8's `lt shell`) ----
+ * Hands UART1 to the caller so it can pump raw bytes both ways between the USB console and the
+ * lap-timer's own console: linkhost_bridge_begin takes s_req_mtx (bounded, like linkhost_cmd_timed
+ * -- LINKHOST_E_BUSY on a 400 ms miss rather than blocking the REPL task forever), pauses and parks
+ * the demux RX task (the same rx_park_and_drain handshake linkhost_download_cmd/linkhost_flash use,
+ * #65) so the caller's own uart_read_bytes(DC_LINK_UART, ...) is the ONLY reader, and returns 0.
+ * linkhost_bridge_end un-pauses the RX task and gives the mutex back. Must be paired: begin (0),
+ * pump bytes, end -- never call end without a successful begin. */
+int linkhost_bridge_begin(void);
+void linkhost_bridge_end(void);
 
 #ifdef __cplusplus
 }

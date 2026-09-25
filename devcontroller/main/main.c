@@ -10,6 +10,10 @@
  * logstore_init and webapi_register are also called here (both still Task 5/4 stubs) so the
  * whole devcontroller/ tree compiles+links as one image, and so Tasks 4/5 slot in without
  * further main.c surgery.
+ *
+ * console_start() (Plan 5.6 Task 4) runs LAST: it's the REPL on the dev-kit's own USB (UART0),
+ * and its command modules (dc status, later lt/link/stream/...) reach into every subsystem above,
+ * so none of them may still be mid-bringup when a command runs.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -29,6 +33,7 @@
 #include "nvs_flash.h"
 
 #include "build_config.h"
+#include "console.h"
 #include "linkhost.h"
 #include "linkhost_proto.h"
 #include "logstore.h"
@@ -170,11 +175,13 @@ static void stream_consumer(void *arg)
     for (;;) {
         int any = 0;
         while (linkhost_stream_pop(&r) == 0) {   /* bounded: ring is finite, drains then returns */
+            linkhost_stats_on_record(&r);   /* stamp the /api/status cache (T3), locked (fix 1) */
             if (logstore_append(&r) != 0 && !s_append_fail_logged) {
                 ESP_LOGW(TAG, "logstore_append failed; black-box logging may have stopped (see #68)");
                 s_append_fail_logged = true;
             }
             webapi_stream_push(&r);
+            console_stream_tap(&r);   /* T6: no-op unless `stream tap on` (rate-limited, filtered) */
             any = 1;
         }
         vTaskDelay(pdMS_TO_TICKS(any ? 5 : 40));
@@ -210,6 +217,13 @@ void app_main(void)
      * nests VFS calls several frames deep on this task's stack; 4096 was not enough headroom. */
     if (xTaskCreate(stream_consumer, "stream_consumer", 8192, NULL, 6, NULL) != pdPASS)
         ESP_LOGW(TAG, "stream_consumer task create failed");
+
+    /* LAST (Plan 5.6 T4): the REPL's command modules (dc status, later lt/link/stream/...) reach
+     * into every subsystem above, so none of them may still be mid-bringup when a command runs.
+     * esp_console_start_repl is non-blocking (spawns its own task), so this still returns. */
+    esp_err_t cr = console_start();
+    if (cr != ESP_OK)
+        ESP_LOGW(TAG, "console_start: %s", esp_err_to_name(cr));
 
     ESP_LOGI(TAG, "dev controller ready");
 }
