@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "cmd_dc.h"
+#include "cmd_flash.h"
 #include "cmd_lt.h"
 #include "cmd_selftest.h"
 #include "cmd_stream.h"
@@ -62,7 +63,7 @@ esp_err_t console_start(void)
     cmd_lt_register();       /* T5 */
     cmd_stream_register();   /* T6 */
     cmd_selftest_register(); /* T9 */
-    /* later tasks append: cmd_flash_register(); ... */
+    cmd_flash_register();    /* T10 */
 
     ESP_LOGI(TAG, "REPL up on UART%d (%d cmd registered)", CONFIG_ESP_CONSOLE_UART_NUM, s_ncmd);
     return esp_console_start_repl(s_repl);

@@ -44,18 +44,29 @@
 # frames out of the forwarded bytes via linkhost's host/bridge_filter.c (pure, host-tested by
 # test_bridge_filter.c).
 #
+# cmd_flash.c (Plan 5.6 Task 10): `flash stage|push|status|abort`, receiving a signed lap-timer
+# app image over THIS console's own USB (raw uart_read_bytes on CONFIG_ESP_CONSOLE_UART_NUM, the
+# same port the REPL runs on) into flashcore's ota_stage, then pushing it to the lap-timer via
+# flashcore's flashctl. host/flash_fmt.c is the pure "0x%04x"/"link %d" result-code formatter
+# `flash push`/`flash status` share, host-tested by test_flash_fmt.c (same jsonw/rate.c split
+# every other command module here already follows).
+#
 # PRIV_REQUIRES: `console` is the IDF esp_console component (esp_console.h, used only inside this
-# component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done; esp_wifi is `dc
-# status`'s esp_wifi_ap_get_sta_list; esp_system is esp_get_free_heap_size; logstore is the other
-# subsystem `dc status` reports on. None of these (linkhost aside) leak into console.h's public
-# surface (console_start/console_wants_json/console_register/console_stream_tap are all plain C
-# + the one linkhost_proto.h type), so everything but linkhost stays PRIV.
+# component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done AND `flash
+# stage`'s raw uart_read_bytes loop; esp_wifi is `dc status`'s esp_wifi_ap_get_sta_list; esp_system
+# is esp_get_free_heap_size; logstore is the other subsystem `dc status` reports on; flashcore is
+# `flash`'s otastage_*/flashctl_*/stage_args_parse (Task 7) -- none of its headers are part of
+# console.h's public surface, so it stays PRIV like the rest of this list. None of these (linkhost
+# aside) leak into console.h's public surface (console_start/console_wants_json/console_register/
+# console_stream_tap are all plain C + the one linkhost_proto.h type), so everything but linkhost
+# stays PRIV.
 idf_component_register(
-    SRCS "console.c" "cmd_dc.c" "cmd_lt.c" "cmd_stream.c" "cmd_selftest.c" "cmd_shell.c"
-         "host/jsonw.c" "host/rate.c" "host/selftest_eval.c"
+    SRCS "console.c" "cmd_dc.c" "cmd_flash.c" "cmd_lt.c" "cmd_stream.c" "cmd_selftest.c"
+         "cmd_shell.c"
+         "host/jsonw.c" "host/rate.c" "host/selftest_eval.c" "host/flash_fmt.c"
     INCLUDE_DIRS "include"
     REQUIRES linkhost
-    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system logstore)
+    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system logstore flashcore)
 
 # build_config.h from the build tree (CFG_DC_VERSION, for `dc status`'s version field).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
