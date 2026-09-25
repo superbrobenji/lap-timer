@@ -60,6 +60,15 @@ live monitor + black-box logging · firmware upload → cmd-OTA flash.
 
 ## 5. The lap-timer interface B drives (detail)
 
+**Superseded (2026-09-25, Plan 5.6):** the 2 s `status` poll / heartbeat this section assumes (B
+sending a framed `status` command to the lap-timer on a timer to detect presence and refresh state)
+is replaced by the push design in `docs/superpowers/specs/2026-09-23-devkit-primary-interface-design.md`
+§4: the lap-timer itself pushes a `LT_REC_STATUS` record on its existing `0xFF` stream at 1 Hz and on
+the detect edge, `GET /api/status` is served from the dev-kit's local status cache and never touches
+UART1, and `connected` means a STATUS record younger than 3 s. The framed request/response mechanics
+below (BEGIN/END framing, CRC, the on-demand `status`/`config`/`list`/`open`/`read`/`ota recv` shape,
+and the stream frame layout) are unchanged and remain the contract for on-demand commands.
+
 - **Request/response:** B writes `<cmd> <args>\r` on UART1 and reads the framed response
   (`---BEGIN <name> <size>---\n`, `<size>` body bytes — Base64-decode for binary formats — then
   `---END <crc32hex>---`), verifying the CRC over the decoded body. One request in flight (§18.1);
@@ -189,6 +198,13 @@ channel) is sub-project C. **UI:** since B draws from the shared battery, surfac
 precondition (`E_OTA_PRECOND`, ≥3800 mV or charging) as a "charge first" hint before a flash.
 
 ## 11. Error handling and hot-swap
+
+**Superseded (2026-09-25, Plan 5.6):** the periodic `status` heartbeat named in the Hot-swap bullet
+below is replaced by the lap-timer's autonomous 1 Hz `LT_REC_STATUS` push
+(`docs/superpowers/specs/2026-09-23-devkit-primary-interface-design.md` §4); `/api/status` reads a
+local cache and never sends a heartbeat over UART1, and `connected` means a STATUS record younger
+than 3 s. The GPIO detect line still gates the lap-timer's stream + autonomous logging exactly as
+described below (it landed in the interim peer-presence redesign, ahead of the Plan-6 connector).
 
 - **Link errors:** UART timeout / lap-timer absent → typed `linkhost` error → API 503 (not
   connected) / 504 (timeout) → UI banner. B keeps serving its UI with no lap-timer attached.
