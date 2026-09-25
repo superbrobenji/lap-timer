@@ -17,7 +17,7 @@
 #include "cmd_flash.h"
 #include "cmd_lt.h"
 #include "cmd_selftest.h"
-#include "cmd_stream.h"
+#include "cmd_stream.h"   /* cmd_stream_tap_off -- console_wants_json's M3 side effect below */
 
 static const char *TAG = "console";
 
@@ -40,6 +40,15 @@ bool console_wants_json(int *argc, char **argv)
     assert(argv != NULL);
     if (*argc > 0 && strcmp(argv[*argc - 1], "--json") == 0) {
         (*argc)--;
+        /* M3 (final review): an active `stream tap` prints decoded-JSON stream rows to this same
+         * USB console from the CONSUMER task at any time (console_stream_tap, cmd_stream.c) -- if
+         * one lands between here and the one JSON object the caller is about to print, that reply
+         * is no longer the only thing on the wire, and a machine parser reading one line per
+         * command breaks. Every --json-capable subcommand strips --json through this one function
+         * (see console.h), so turning the tap off HERE covers all of them --
+         * dc/lt/link/stream stats/selftest/flash status|push -- with one line instead of repeating
+         * the call at each site. */
+        cmd_stream_tap_off();
         return true;
     }
     return false;

@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"   /* esp_timer_get_time -- M7's staged_us stamp / TTL comparison */
 
 #include "linkhost.h"
 
@@ -37,10 +38,23 @@ static uint8_t            s_flash_sha[32];
 bool flashctl_try_begin_staging(void)
 {
     bool claimed = false;
+    int64_t now = esp_timer_get_time();   /* read outside the lock: a plain monotonic clock call */
     portENTER_CRITICAL(&s_mux);
     if (!s_flash.busy) {
-        s_flash.busy  = true;
-        s_flash.state = FLASHCTL_STAGING;
+        s_flash.busy      = true;
+        s_flash.state     = FLASHCTL_STAGING;
+        s_flash.staged_us = 0;            /* fresh claim: not staged (finished) yet */
+        claimed = true;
+    } else if (s_flash.state == FLASHCTL_STAGING && s_flash.staged_us != 0 &&
+              (now - s_flash.staged_us) >= FLASHCTL_STAGE_TTL_US) {
+        /* M7 (final review): a stage that finished (staged_us stamped by flashctl_end_staging(true)
+         * below) but was never pushed within FLASHCTL_STAGE_TTL_US -- its owner is gone (a crashed
+         * console session, an abandoned browser tab). Reclaim: reset to a fresh STAGING claim for
+         * THIS caller in the SAME critical section as the staleness check, so no third caller can
+         * ever observe the momentarily-freed guard and race this one for it. */
+        s_flash.busy      = true;
+        s_flash.state     = FLASHCTL_STAGING;
+        s_flash.staged_us = 0;
         claimed = true;
     }
     portEXIT_CRITICAL(&s_mux);
@@ -55,10 +69,19 @@ void flashctl_end_staging(bool ok)
     portEXIT_CRITICAL(&s_mux);
     assert(busy && state == FLASHCTL_STAGING);
 
-    if (ok) return;   /* stays STAGING/busy: ready for flashctl_start_push, now or later */
+    if (ok) {
+        /* M7: stamp so an unpushed claim can eventually be reclaimed (see
+         * flashctl_try_begin_staging above) -- stays STAGING/busy: ready for flashctl_start_push,
+         * now or later. */
+        portENTER_CRITICAL(&s_mux);
+        s_flash.staged_us = esp_timer_get_time();
+        portEXIT_CRITICAL(&s_mux);
+        return;
+    }
     portENTER_CRITICAL(&s_mux);
-    s_flash.state = FLASHCTL_IDLE;
-    s_flash.busy  = false;
+    s_flash.state     = FLASHCTL_IDLE;
+    s_flash.busy      = false;
+    s_flash.staged_us = 0;
     portEXIT_CRITICAL(&s_mux);
 }
 
@@ -130,7 +153,8 @@ int flashctl_start_push(const char *ver, const char *hwid, uint32_t size, const 
     memcpy(s_flash.hwid, hwid, sizeof s_flash.hwid);
     s_flash.size = size;
     memcpy(s_flash_sha, sha, sizeof s_flash_sha);
-    s_flash.state = FLASHCTL_PUSHING;         /* must be set before the task can finish */
+    s_flash.state     = FLASHCTL_PUSHING;     /* must be set before the task can finish */
+    s_flash.staged_us = 0;                    /* M7: no longer an unpushed claim to reclaim */
     portEXIT_CRITICAL(&s_mux);
 
     if (xTaskCreate(flash_task, "flashctl_push", 4096, NULL, 5, NULL) != pdPASS) {

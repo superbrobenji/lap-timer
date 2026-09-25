@@ -30,6 +30,7 @@
 #include "bridge_filter.h"
 #include "build_config.h"   /* DC_LINK_UART */
 #include "cmd_stream.h"     /* cmd_stream_tap_off */
+#include "flashctl.h"       /* flashctl_get -- I4 final-review: refuse while a push is in flight */
 #include "linkhost.h"       /* linkhost_bridge_begin/_end, linkhost_now_us */
 
 #define SHELL_CAP_US (10LL * 60 * 1000000)   /* 10-minute cap */
@@ -39,6 +40,21 @@ int cmd_shell_run(bool json)
 {
     if (json) {
         printf("ERR shell has no json form\n");
+        return 1;
+    }
+
+    /* I4 (final review): flashctl.c's flash_task owns linkhost's UART1 mutex for the whole push
+     * (linkhost_flash), and this console's own `lt shell` bridge would otherwise be free to grab
+     * it right out from under a push in flight (linkhost_flash's take is bounded -- LINK_FLASH_MTX_MS
+     * -- so it would just fail with LINKHOST_E_BUSY, a confusing way for an operator to learn a push
+     * was running). Checked HERE, in the console, rather than inside linkhost_bridge_begin itself:
+     * layering keeps flashcore depending on linkhost, never the other way around, so linkhost.c
+     * cannot reach into flashctl_get. devconsole already PRIV_REQUIRES flashcore (see this
+     * component's CMakeLists.txt), so the console is the right place for this cross-module check. */
+    flashctl_status_t fst;
+    flashctl_get(&fst);
+    if (fst.busy && fst.state == FLASHCTL_PUSHING) {
+        printf("busy (push in flight)\n");
         return 1;
     }
 

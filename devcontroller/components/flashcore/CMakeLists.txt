@@ -13,11 +13,12 @@
 #                  otastage.c itself is IDF-bound and cannot be linked into the host harness.
 #
 # PRIV_REQUIRES: otastage.c streams into the `ota_stage` partition (esp_partition) while hashing
-# with mbedtls' SHA-256; flashctl.c spawns the push task and drives it via linkhost_flash.
+# with mbedtls' SHA-256; flashctl.c spawns the push task and drives it via linkhost_flash, and
+# (M7, final review) stamps/compares esp_timer_get_time() for its stale-STAGING-claim reclaim.
 idf_component_register(
     SRCS "otastage.c" "flashctl.c" "host/image_desc.c" "host/stage_args.c" "host/stage_bounds.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES esp_partition mbedtls linkhost)
+    PRIV_REQUIRES esp_partition mbedtls linkhost esp_timer)
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)

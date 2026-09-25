@@ -31,7 +31,13 @@ extern "C" {
 esp_err_t console_start(void);
 
 /* Strips a trailing "--json" argument if present: decrements *argc and returns true; otherwise
- * leaves *argc unchanged and returns false. Every --json-capable subcommand calls this first. */
+ * leaves *argc unchanged and returns false. Every --json-capable subcommand calls this first.
+ * SIDE EFFECT (M3, final review): on the true path, also forces `stream tap` off
+ * (cmd_stream_tap_off) -- an active tap prints decoded-JSON stream rows to this console's USB
+ * from the consumer task at any time, which would otherwise interleave with (or land right after)
+ * the one JSON object a --json command is about to print. This is the ONE place that guard is
+ * applied; every --json-capable command routes through here (dc, lt, link, stream stats,
+ * selftest, flash status/push), so none of them need their own call. */
 bool console_wants_json(int *argc, char **argv);
 
 /* The one registration door: wraps esp_console_cmd_register. */

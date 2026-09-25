@@ -181,8 +181,9 @@ static esp_err_t api_status(httpd_req_t *req)
     flashctl_get(&fs);
 
     /* While the push owns the link, answer from our own state: linkhost_flash holds the request
-     * mutex (portMAX_DELAY) and pauses the RX demux for the whole transfer, so a `status`
-     * round-trip here would just burn the bounded mutex take and come back BUSY. */
+     * mutex (bounded, LINK_FLASH_MTX_MS -- I4, final review) and pauses the RX demux for the whole
+     * transfer, so a `status` round-trip here would just burn that bounded mutex take and come
+     * back BUSY. */
     if (fs.state == FLASHCTL_PUSHING) {
         char pbody[64];
         int pn = snprintf(pbody, sizeof pbody,
@@ -680,9 +681,10 @@ static esp_err_t api_stream_begin(httpd_req_t *req)
  * Two halves. The upload half runs on the httpd request task (it needs httpd_req_recv) and
  * streams the multipart body straight into the `ota_stage` partition -- a 1.2 MB image never fits
  * in RAM -- while hashing it. The push half (linkhost_flash) runs on a one-shot worker task,
- * because it takes the link mutex with portMAX_DELAY and pauses the RX demux for ~110 s: doing
- * that on the httpd task would freeze the whole SPA, including the /api/status poll that reports
- * the progress. The handler therefore answers 202 as soon as the image is staged. */
+ * because once it acquires the link mutex (bounded -- LINK_FLASH_MTX_MS, I4 final review) it holds
+ * it and pauses the RX demux for ~110 s while it streams the image: doing that on the httpd task
+ * would freeze the whole SPA, including the /api/status poll that reports the progress. The
+ * handler therefore answers 202 as soon as the image is staged. */
 
 #define FLASH_FIELD          "firmware"   /* the multipart field name app.js posts */
 #define UPLOAD_BUF           1024         /* one httpd_req_recv chunk */

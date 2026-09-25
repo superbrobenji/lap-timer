@@ -56,7 +56,10 @@
  * abort` there DISCARDS the staged image outright (clears this file's ver/hwid/size/sha
  * bookkeeping, releases flashctl's guard via flashctl_end_staging(false)) and reports `OK abort
  * (staged image discarded)` / `{"abort":true,"discarded":true}`, real semantics rather than a
- * no-op.
+ * no-op. A THIRD case (M9, final review): flashctl reports STAGING but this console holds neither
+ * s_staged nor s_stage_inflight -- the claim belongs to a concurrent POST /api/flash (staged, or
+ * mid stage-then-push). `flash abort` there refuses: `ERR not mine (staging owned by /api/flash)`
+ * / `{"err":"not mine"}`, non-zero return, and touches neither s_abort nor flashctl's guard.
  *
  * Pragmatic-P10: the 4096 B chunk buffer (s_stage_buf) and the staged-image bookkeeping
  * (s_stage_ver/hwid/size/sha, s_staged) are static, not heap -- one `flash stage` attempt at a
@@ -106,6 +109,14 @@ static char            s_stage_hwid[IMG_HWID_LEN + 1];
 static uint32_t        s_stage_size;
 static uint8_t         s_stage_sha[32];
 static volatile bool   s_abort;
+
+/* M9 (final review): true from a successful flashctl_try_begin_staging call inside
+ * cmd_flash_stage until that attempt's raw phase ends (finish or fail) -- i.e. while THIS console
+ * is the one actively receiving bytes for the flashctl STAGING claim it holds. Paired with
+ * s_staged (the OTHER window this console can own the claim: staged and waiting for `flash
+ * push`), it lets cmd_flash_abort tell "I hold this claim" apart from a concurrent POST
+ * /api/flash's own STAGING window -- flashctl's state alone cannot distinguish the two owners. */
+static volatile bool   s_stage_inflight;
 
 static void flash_err(bool json, const char *reason)
 {
@@ -276,6 +287,7 @@ static int cmd_flash_stage(int argc, char **argv)
         return 1;
     }
     flashctl_clear_result();
+    s_stage_inflight = true;   /* M9: this console now owns the claim -- see the flag's own comment */
 
     if (otastage_begin(size) != OTASTAGE_OK) {
         /* Ruling 2 maps EVERY otastage_begin failure to "badsize" (it can also fail with
@@ -284,6 +296,7 @@ static int cmd_flash_stage(int argc, char **argv)
          * so no otastage_abort() call belongs on this path. */
         flashctl_end_staging(false);
         flash_stage_err("badsize");
+        s_stage_inflight = false;
         return 1;
     }
 
@@ -295,6 +308,16 @@ static int cmd_flash_stage(int argc, char **argv)
     esp_log_level_t saved = esp_log_level_get("*");
     esp_log_level_set("*", ESP_LOG_NONE);
 
+    /* C1 (final review): this console runs with CR line endings, but a host tool (or a human
+     * pasting the command) commonly sends "...\r\n" -- the '\n' has no meaning to this console's
+     * line editor but is still a real byte that lands in UART0's RX ring right behind the '\r'
+     * that ended the `flash stage` command line. Left alone, flash_stage_recv's raw uart_read_bytes
+     * would eat that stray '\n' as image byte 0, corrupting every transfer from such a host. The
+     * host cannot have sent any image bytes yet -- by protocol it is still waiting to see
+     * STAGE-READY before it starts the raw phase -- so flushing the RX ring here can only ever
+     * discard that stray newline (or nothing at all), never a real image byte. */
+    uart_flush_input((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM);
+
     printf("STAGE-READY\r\n");
     fflush(stdout);
     uart_wait_tx_done((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(100));
@@ -303,6 +326,7 @@ static int cmd_flash_stage(int argc, char **argv)
 
     esp_log_level_set("*", saved);
     s_abort = false;   /* this attempt is over either way -- never let a request outlive it */
+    s_stage_inflight = false;
     return rc;
 }
 
@@ -351,10 +375,15 @@ static int cmd_flash_push(int argc, char **argv, bool json)
     flashctl_status_t st;
     flashctl_get(&st);
     if (!st.busy || st.state != FLASHCTL_STAGING) {
-        /* flashctl's guard is not where a just-staged image should leave it -- a concurrent
-         * POST /api/flash, or a flashctl_start_push retry after this same console already
-         * consumed s_staged once (see below). */
-        flash_err(json, "busy");
+        /* This console's belief that it still holds the flashctl STAGING claim is stale: past
+         * FLASHCTL_STAGE_TTL_US, flashctl_try_begin_staging() treats an unpushed STAGING claim as
+         * reclaimable (M7, final review), so a `flash stage` left staged too long can have been
+         * silently handed to a fresh claimant (POST /api/flash, or another `flash stage`) by the
+         * time `flash push` finally runs. Either way, the image this file remembers is gone --
+         * forget it and say so plainly ("nothing staged"), not "busy": a retry of `flash push`
+         * can never help here, only a fresh `flash stage` can. */
+        flash_forget_staged();
+        flash_err(json, "nothing staged");
         return 1;
     }
 
@@ -448,14 +477,20 @@ static int cmd_flash_status(int argc, char **argv, bool json)
 }
 
 /* `flash abort` -- see the file header note. Only meaningful while flashctl's guard is held in
- * FLASHCTL_STAGING. Two sub-cases, distinguished by this file's own s_staged flag (flashctl's
- * state alone cannot tell them apart):
+ * FLASHCTL_STAGING. Three sub-cases, distinguished by this file's own s_staged/s_stage_inflight
+ * flags (flashctl's state alone cannot tell any of them apart -- it has no notion of WHICH front
+ * end holds a STAGING claim):
  *   - s_staged true: a `flash stage` already completed (STAGE-END printed) and is waiting for
  *     `flash push`. Reachable today (this console is otherwise idle in that window) -- discards
  *     the staged image outright: real semantics, not a no-op.
- *   - s_staged false: a raw receive would be in flight. NOT reachable from this same console
- *     today (its REPL task is blocked inside `flash stage`'s own call the whole time), but wired
- *     for a future second front-end -- sets s_abort, which the raw loop checks every iteration. */
+ *   - s_stage_inflight true (s_staged still false): a raw receive owned by THIS console would be
+ *     in flight. NOT reachable from this same console today (its REPL task is blocked inside
+ *     `flash stage`'s own call the whole time), but wired for a future second front-end -- sets
+ *     s_abort, which the raw loop checks every iteration.
+ *   - neither: this console holds NEITHER half of the claim, yet flashctl reports STAGING -- the
+ *     claim belongs to somebody else (POST /api/flash, mid stage-then-push; M9, final review).
+ *     Answering OK here would let this console cancel a web upload it has no part in and no
+ *     visibility into; refuse instead. */
 static int cmd_flash_abort(int argc, char **argv, bool json)
 {
     (void)argv;
@@ -479,10 +514,19 @@ static int cmd_flash_abort(int argc, char **argv, bool json)
         return 0;
     }
 
-    s_abort = true;
-    if (json) printf("{\"ok\":true}\n");
-    else      printf("OK\n");
-    return 0;
+    if (s_stage_inflight) {
+        s_abort = true;
+        if (json) printf("{\"ok\":true}\n");
+        else      printf("OK\n");
+        return 0;
+    }
+
+    /* M9: flashctl is STAGING, but neither of this console's own ownership flags is set -- the
+     * claim belongs to a concurrent POST /api/flash (or a reclaimed-then-reclaimed-again claim
+     * from a different front end entirely). Not ours to cancel. */
+    if (json) printf("{\"err\":\"not mine\"}\n");
+    else      printf("ERR not mine (staging owned by /api/flash)\n");
+    return 1;
 }
 
 static int cmd_flash_main(int argc, char **argv)
