@@ -256,6 +256,7 @@ static bool rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 }
 
 static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
+static void status_cache_prime(void);   /* forward decl: called from logger_task at boot and from handle_request (LOGGER_RECOUNT) */
 
 static void open_session(const log_request_t *req)
 {
@@ -353,6 +354,10 @@ static void handle_request(const log_request_t *req)
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
     case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); break;
     case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; break;   /* force an eviction pass this loop */
+    /* cmd.c's DELETE posts this after unlinking a .sum: a delete is otherwise invisible to the
+     * status.h sessions count (only close_session ever increments it). status_cache_prime() reruns
+     * the name-only session_count() + a fresh storage_free_kb() read (Plan 5.6 final-review A I1). */
+    case LOGGER_RECOUNT:         status_cache_prime(); break;
     default: break;
     }
 }
@@ -475,6 +480,20 @@ static void drain_events(void)
 
 typedef struct { char oldest[STO_NAME_MAX]; char curlog[STO_NAME_MAX]; } evict_ctx_t;
 
+/* Plan 5.6 final-review A I2: publish a free_kb reading the caller already has in hand --
+ * s_free_kb_cached, s_bytes_since_info (re-baselined so status_cache_estimate() starts fresh
+ * from here) and the status.h cache itself. Shared by eviction_check's early-return path
+ * (plentiful space: si.free_kb is already a real reading, zero extra I/O to publish it) and its
+ * tight-storage refresh (a fresh storage_free_kb() reading) so free_kb stops going stale while
+ * space stays plentiful, without duplicating the three-line publish or growing this file's
+ * statics. */
+static void cache_publish_free(uint32_t free_kb)
+{
+    s_free_kb_cached = free_kb;
+    s_bytes_since_info = 0;
+    status_cache_update(s_free_kb_cached, s_sessions_cached);
+}
+
 static void eviction_check(void)
 {
     LT_ASSERT_VOID(!s_open || s_id[0] != '\0', LOG_ASSERT_CODE);   /* valid session state */
@@ -483,6 +502,10 @@ static void eviction_check(void)
     LT_ASSERT_VOID(si.free_kb <= si.total_kb, LOG_ASSERT_CODE);   /* HAL report sanity before the % math below */
     if (si.free_kb >= si.total_kb / 10u) {
         if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
+        /* Plan 5.6 final-review A I2: the common path -- publish the si.free_kb already in hand
+         * instead of returning before the cache is ever refreshed while space stays plentiful
+         * (only prime/close/tight-eviction used to touch it). Zero extra I/O. */
+        cache_publish_free(si.free_kb);
         return;
     }
     /* free < 10 %: delete the oldest .log that is not the current session. Per-entry stat() (via
@@ -523,9 +546,7 @@ static void eviction_check(void)
      * refresh the cheap free_kb reading (one sto_info(), not a re-listing) and re-baseline the
      * between-refresh byte estimate either way (an unlink, or the samples-paused branch, both
      * reached only because free space was already tight). */
-    s_free_kb_cached = storage_free_kb();
-    s_bytes_since_info = 0;
-    status_cache_update(s_free_kb_cached, s_sessions_cached);
+    cache_publish_free(storage_free_kb());
 }
 
 /* Drain the logger's control queue (open/close/rebuild/evict commands, §4.4). Pulled out of
@@ -557,11 +578,17 @@ static void evict_if_due(uint32_t now)
  * yields every 16 entries -- see session_count()) is this ONE priming pass at logger start;
  * every later refresh is incremental (close_session/eviction_check) or a storage-free estimate
  * (status_cache_estimate). This is why open_session does NOT also call this: it neither closes a
- * session (no new .sum counted) nor is the storage owner's only chance to see one. */
+ * session (no new .sum counted) nor is the storage owner's only chance to see one. Also the
+ * LOGGER_RECOUNT handler (cmd.c's DELETE, Plan 5.6 final-review A I1) -- a rescan is the only way
+ * to see a session count that just went DOWN (close_session only ever increments it). Resets
+ * s_bytes_since_info too: both callers just took a real storage_free_kb() reading, so
+ * status_cache_estimate() must restart its between-refresh estimate from here, not from bytes
+ * appended before this priming pass. */
 static void status_cache_prime(void)
 {
     s_sessions_cached = session_count();
     s_free_kb_cached = storage_free_kb();
+    s_bytes_since_info = 0;
     status_cache_update(s_free_kb_cached, s_sessions_cached);
 }
 

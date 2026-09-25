@@ -15,6 +15,7 @@
 #include "app/logger.h"           /* logger_open_session_id -- DELETE must skip the open session */
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
+#include "app/lt_ipc.h"           /* g_log_req_q/LOGGER_RECOUNT -- DELETE re-primes the status.h cache */
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"              /* OTA receive-side state machine (CMD_OTA_*, §19.4) */
@@ -249,7 +250,21 @@ static int op_delete(const uint8_t *payload, size_t len,
     (void)snprintf(path, sizeof path, "/sessions/%s.log", id);
     (void)sto_unlink(path);
     (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
-    (void)sto_unlink(path);
+    /* I1 (Plan 5.6 final-review A): session_count() only ever counts .sum files, and only
+     * close_session ever increments the status.h sessions cache -- a delete is otherwise
+     * invisible to it. On a successful unlink, ask the logger to re-prime the cache (name-only
+     * recount + a fresh free_kb read, both on the logger task, the storage owner). Non-blocking:
+     * a momentarily full queue is acceptable (the count self-heals at the next recount) but is
+     * still worth a report, mirrored on cmd.c's own CMD_ASSERT_CODE the way its own LT_ASSERT_*
+     * calls above do -- core_assert_fail() directly, not the LT_ASSERT_* macros, since those
+     * would `return` here and skip the ack this op still owes the caller. */
+    if (sto_unlink(path) == 0) {
+        log_request_t req = { .type = LOGGER_RECOUNT };
+        if (g_log_req_q) {
+            if (xQueueSend(g_log_req_q, &req, 0) == pdTRUE) logger_notify();
+            else core_assert_fail(CMD_ASSERT_CODE, __FILE__, __LINE__);
+        }
+    }
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
 }
 
