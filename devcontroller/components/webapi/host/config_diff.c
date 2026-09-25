@@ -3,6 +3,11 @@
  * `REQUIRES core` (which would glob the whole lap-timer app/driver tree); here we take the
  * declarations only (JSMN_HEADER) and link the implementation from jsmn.c. The JSMN_* feature
  * macros MUST match jsmn.c so the jsmntok_t layout (JSMN_PARENT_LINKS adds `parent`) agrees. */
+/* strnlen() is POSIX.1-2008, not ISO C: glibc hides it under the host harness's strict -std=c11
+ * unless a feature-test macro asks for it (macOS libc and ESP-IDF's newlib expose it regardless).
+ * Declared here, at the source, so both host harnesses and CI (Linux gcc) agree. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "config_diff.h"
 
 #include <assert.h>

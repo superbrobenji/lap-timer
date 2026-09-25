@@ -3,6 +3,11 @@
  * linkhost IDF component and linked directly by the host test
  * (devcontroller/test/test_wire_escape.c).
  */
+/* strnlen() is POSIX.1-2008, not ISO C: glibc hides it under the host harness's strict -std=c11
+ * unless a feature-test macro asks for it (macOS libc and ESP-IDF's newlib expose it regardless).
+ * Declared here, at the source, so both host harnesses and CI (Linux gcc) agree. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "wire_escape.h"
 
 #include <stdbool.h>
