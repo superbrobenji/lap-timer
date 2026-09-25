@@ -135,7 +135,7 @@ commits `5ced6e1`/`e8c23a8`/`95bc7dd`/`1fa8a17`), not the `link.c`/`cmd.c`-only 
   "unplugged" reads as not connected — correct.
 - `stream_age_ms` growing while `connected` is true now means exactly one thing: telemetry stopped
   with the link alive. No magic threshold is needed to avoid false idles because nothing suppresses
-  the stream periodically any more; the SPA shows "stream idle" above 3 s.
+  the stream periodically any more; the SPA shows "stream idle" above 3 s (only while STATUS keeps arriving — a detect pull stops both, so it shows *not connected* instead; bench-confirmed 2026-09-25).
 - `503 {"connected":false}` is returned when the cache is stale, as today.
 
 ### 4.4 On-demand commands (unchanged shape)
