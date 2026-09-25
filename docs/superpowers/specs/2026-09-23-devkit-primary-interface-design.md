@@ -222,6 +222,7 @@ would be negative (no samples yet).
   `flash push` (state `FLASHCTL_STAGING`) — the console is a single REPL task, so a `flash stage` in
   *progress* runs to completion (or failure) inside that one command call and cannot be interrupted by
   a second command line on the same console.
+  Both `flash push` and `flash abort` prove ownership of the `STAGING` claim with a token stamped when staging finished (not flashctl's state alone), so a claim reclaimed after the 10-minute TTL answers `ERR nothing staged (claim expired or taken by /api/flash)` from `flash push` or `ERR not mine` from `flash abort` instead of touching another owner's in-flight claim; if flashctl has already moved past `STAGING`, `flash abort` forgets the console's stale bookkeeping and answers `ERR not staging (stale stage forgotten)`.
 
 ### 5.3 Host CLI
 

@@ -528,6 +528,14 @@ static int cmd_flash_abort(int argc, char **argv, bool json)
     flashctl_status_t st;
     flashctl_get(&st);
     if (st.state != FLASHCTL_STAGING) {
+        /* flashctl has moved past STAGING (a different owner reclaimed and pushed, or a push
+         * finished): whatever this console remembers as staged is gone too -- forget it so a later
+         * `flash push` cannot even try, and say so instead of the generic "not staging". */
+        if (s_staged) {
+            flash_forget_staged();
+            flash_err(json, "not staging (stale stage forgotten)");
+            return 1;
+        }
         flash_err(json, "not staging");
         return 1;
     }
