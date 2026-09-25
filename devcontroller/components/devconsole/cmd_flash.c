@@ -26,21 +26,37 @@
  * already being held by a concurrent POST /api/flash; `abort` covers `flash abort` (see below).
  *
  * Every failure once STAGE-READY has been printed leaves NOTHING behind: the SHA context is freed
- * (otastage_abort, or otastage_finish -- which frees it whether it returns OK or an error, no
- * matter which -- already ran, so no extra abort call there), flashctl's single-flight guard is
+ * (otastage_abort; otastage_finish itself already frees it on every return path -- OK or error --
+ * before this file ever gets a chance to call otastage_abort again, so a stray extra call there
+ * would just be a safe no-op guarded by otastage's own `active` flag, never a double-free -- this
+ * file still never makes that redundant call, for clarity), flashctl's single-flight guard is
  * released (flashctl_end_staging(false)), and any image bytes still in flight on the wire (e.g. a
  * host that kept sending after we gave up) are drained off UART0 for a bounded window so they
  * never get interpreted as REPL command characters once we return to the prompt.
  *
+ * Nothing but the STAGE-ERR/STAGE-READY/STAGE-END/pushing/flash-result protocol lines may reach
+ * this console's USB while a stage or push is live: `cmd_stream_tap_off()` plus an
+ * `esp_log_level_set("*", ESP_LOG_NONE)`
+ * (saved/restored around the raw phase and the push poll, one exit funnel each) silence every
+ * other source of console output, mirroring `cmd_shell.c`'s `lt shell` bridge and the lap-timer's
+ * own `ota recv` (export_serial.c's cmd_ota saved/restores esp_log_level around its OTA-READY..
+ * OTA-END handshake the same way). `stream tap` is left off afterward, same as `lt shell` -- it is
+ * an explicit opt-in the operator turns back on themselves; only the log level is restored.
+ *
  * `flash abort` note: this console is a single REPL task processing one command line at a time --
  * `flash stage`'s raw-read loop runs to completion (or failure) INSIDE that one command's call,
  * blocking the REPL from reading a second command line meanwhile. So `flash abort` typed at THIS
- * console can never actually interrupt a `flash stage` in progress on this same console; the
- * s_abort flag it sets is checked by the raw loop for a FUTURE second front-end (a second UART, or
- * an out-of-band abort mechanism) that Plan 5.6 does not add. Today `flash abort` is only useful
- * while a stage has completed and is waiting for `flash push` (state stays FLASHCTL_STAGING) --
- * setting s_abort there is a harmless no-op (nothing is left to check it) but the command still
- * reports OK, since the guard IS in STAGING and the request is honoured as best this design can.
+ * console can never interrupt a `flash stage` currently receiving bytes; the s_abort flag it would
+ * set in that case is checked by the raw loop for a FUTURE second front-end (a second UART, or an
+ * out-of-band abort mechanism) that Plan 5.6 does not add -- and is always cleared at the start
+ * and end of every `flash stage` attempt so a request against one attempt can never leak into the
+ * next (fix round 1: it used to latch forever once set, since nothing ever cleared it). What IS
+ * reachable today: a `flash stage` that already completed (STAGE-END printed) and is waiting for
+ * `flash push` -- flashctl's guard stays held (state FLASHCTL_STAGING) in that window, and `flash
+ * abort` there DISCARDS the staged image outright (clears this file's ver/hwid/size/sha
+ * bookkeeping, releases flashctl's guard via flashctl_end_staging(false)) and reports `OK abort
+ * (staged image discarded)` / `{"abort":true,"discarded":true}`, real semantics rather than a
+ * no-op.
  *
  * Pragmatic-P10: the 4096 B chunk buffer (s_stage_buf) and the staged-image bookkeeping
  * (s_stage_ver/hwid/size/sha, s_staged) are static, not heap -- one `flash stage` attempt at a
@@ -58,9 +74,11 @@
 #include <string.h>
 
 #include "driver/uart.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "cmd_stream.h"     /* cmd_stream_tap_off -- silenced during a stage/push, see file header */
 #include "console.h"
 #include "flash_fmt.h"
 #include "flashctl.h"
@@ -223,6 +241,10 @@ static int flash_stage_recv(uint32_t size, const uint8_t sha_arg[32])
  * wants the positional args after them. */
 static int cmd_flash_stage(int argc, char **argv)
 {
+    s_abort = false;   /* fix round 1: clear any abort request left over from a prior attempt --
+                        * see the file header note. Must happen before flashctl_try_begin_staging
+                        * so a fresh claim never starts pre-armed. */
+
     uint32_t size = 0;
     uint8_t  sha[32];
 
@@ -248,11 +270,23 @@ static int cmd_flash_stage(int argc, char **argv)
         return 1;
     }
 
+    /* Silence every other USB writer for the whole raw handshake (fix round 1, item 2): nothing
+     * but STAGE-READY/STAGE-END/STAGE-ERR may appear on the wire from here until this function
+     * returns, on ANY exit path (success or any STAGE-ERR) -- this is the one exit funnel that
+     * restores the log level, matching cmd_shell.c's `lt shell` / export_serial.c's cmd_ota. */
+    cmd_stream_tap_off();
+    esp_log_level_t saved = esp_log_level_get("*");
+    esp_log_level_set("*", ESP_LOG_NONE);
+
     printf("STAGE-READY\r\n");
     fflush(stdout);
     uart_wait_tx_done((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(100));
 
-    return flash_stage_recv(size, sha);
+    int rc = flash_stage_recv(size, sha);
+
+    esp_log_level_set("*", saved);
+    s_abort = false;   /* this attempt is over either way -- never let a request outlive it */
+    return rc;
 }
 
 /* Formats and prints the final `flash result <str>` (or its --json object) once flashctl reaches
@@ -313,6 +347,17 @@ static int cmd_flash_push(int argc, char **argv, bool json)
     }
     s_staged = false;   /* consumed: flashctl now owns the push; a retry needs a fresh `flash stage` */
 
+    /* Same silencing as `flash stage`'s raw phase (fix round 1, item 2): only `pushing NN%` /
+     * `flash result ...` (or the one --json object) may reach this console's USB while the push
+     * task (flashcore/flashctl.c's flash_task) is running -- that task ESP_LOGI's a one-line
+     * summary on completion via the "flashctl" tag, which has no per-tag override anywhere in this
+     * tree, so it inherits the "*" level set here and is suppressed for the duration too. One exit
+     * funnel restores it regardless of outcome (done/timeout). */
+    cmd_stream_tap_off();
+    esp_log_level_t saved = esp_log_level_get("*");
+    esp_log_level_set("*", ESP_LOG_NONE);
+
+    int rc = 1;
     uint8_t last_pct = 0xFFu;   /* not a valid pct (0..100): forces the first print */
     for (int i = 0; i < FLASH_PUSH_MAX_POLLS; i++) {
         vTaskDelay(pdMS_TO_TICKS(FLASH_PUSH_POLL_MS));
@@ -321,11 +366,16 @@ static int cmd_flash_push(int argc, char **argv, bool json)
             printf("pushing %u%%\n", (unsigned)st.pct);
             last_pct = st.pct;
         }
-        if (st.state == FLASHCTL_DONE_OK || st.state == FLASHCTL_DONE_ERR)
-            return flash_push_report(json, &st);
+        if (st.state == FLASHCTL_DONE_OK || st.state == FLASHCTL_DONE_ERR) {
+            rc = flash_push_report(json, &st);
+            goto push_done;
+        }
     }
     flash_err(json, "push timeout");
-    return 1;
+
+push_done:
+    esp_log_level_set("*", saved);
+    return rc;
 }
 
 /* `flash status [--json]` -- a plain flashctl_get snapshot, formatted. Always returns 0 (the
@@ -373,10 +423,15 @@ static int cmd_flash_status(int argc, char **argv, bool json)
     return 0;
 }
 
-/* `flash abort` -- see the file header note: only meaningful while a stage is outstanding
- * (FLASHCTL_STAGING), and today that is only reachable between a completed `flash stage` and the
- * `flash push` that follows it, since this same console's own raw loop cannot be interrupted from
- * the same single-threaded REPL. */
+/* `flash abort` -- see the file header note. Only meaningful while flashctl's guard is held in
+ * FLASHCTL_STAGING. Two sub-cases, distinguished by this file's own s_staged flag (flashctl's
+ * state alone cannot tell them apart):
+ *   - s_staged true: a `flash stage` already completed (STAGE-END printed) and is waiting for
+ *     `flash push`. Reachable today (this console is otherwise idle in that window) -- discards
+ *     the staged image outright: real semantics, not a no-op.
+ *   - s_staged false: a raw receive would be in flight. NOT reachable from this same console
+ *     today (its REPL task is blocked inside `flash stage`'s own call the whole time), but wired
+ *     for a future second front-end -- sets s_abort, which the raw loop checks every iteration. */
 static int cmd_flash_abort(int argc, char **argv, bool json)
 {
     (void)argv;
@@ -391,6 +446,19 @@ static int cmd_flash_abort(int argc, char **argv, bool json)
         flash_err(json, "not staging");
         return 1;
     }
+
+    if (s_staged) {
+        s_staged = false;
+        memset(s_stage_ver, 0, sizeof s_stage_ver);
+        memset(s_stage_hwid, 0, sizeof s_stage_hwid);
+        s_stage_size = 0;
+        memset(s_stage_sha, 0, sizeof s_stage_sha);
+        flashctl_end_staging(false);
+        if (json) printf("{\"abort\":true,\"discarded\":true}\n");
+        else      printf("OK abort (staged image discarded)\n");
+        return 0;
+    }
+
     s_abort = true;
     if (json) printf("{\"ok\":true}\n");
     else      printf("OK\n");
