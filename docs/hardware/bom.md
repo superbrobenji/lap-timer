@@ -28,6 +28,17 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 15 | SS14 Schottky diode | 1 | optional: USB + battery co-existence | §3.2 | to order (optional) | Communica | R3 |
 | 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §3.2 | to order | Communica | R15 |
 
+## Plan 6 — dev-kit connector
+
+New lines from the Plan 5.6 physical-interface design (`docs/superpowers/specs/2026-09-23-devkit-primary-interface-design.md` §8; pinout and rules reproduced in `docs/hardware/devkit-port.md`). Plan 6 builds the port; these are lap-timer-side additions only (the dev-kit side is an RJ45 breakout wired to the stock devkit's headers).
+
+| # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
+|---|------|-----|---------|------|--------|-----------|--------|
+| 28 | RJ45 8P8C panel-mount jack (IP-rated boot optional) | 1 | lap-timer-side dev-kit connector, outside the enclosure | Plan 5.6 spec §8.1 | to order | Communica / Mantech / AliExpress | R30 |
+| 29 | 5 V boost converter module, ≥ 500 mA, with an enable pin | 1 | 5V_DK rail, DETECT-gated enable (zero quiescent draw unplugged) | Plan 5.6 spec §8.2, §8.3 | to order | AliExpress / Mantech | R25 |
+| 30 | TVS diode, 5 V working voltage (SMAJ5.0A-class) | 1 | 5V_DK surge/miswire protection (guards against a PoE 48 V mistake) | Plan 5.6 spec §8.1 | to order | Communica / Mantech | R5 |
+| 31 | Straight-through Cat5e patch cable, short (≤ 1 m) | 1 | dev-kit ↔ lap-timer link; crossover cables are explicitly unsafe here | Plan 5.6 spec §8.1 | to order | any electronics/computer shop | R20 |
+
 ## Controls, wiring, enclosure
 
 | # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
