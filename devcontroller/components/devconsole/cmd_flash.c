@@ -125,6 +125,23 @@ static const char *flash_state_name(flashctl_state_t s)
     return "unknown";
 }
 
+/* Clears this file's own staged-image bookkeeping (s_staged plus the ver/hwid/size/sha statics
+ * `flash push` would otherwise reuse). Deliberately does NOT touch flashctl's own guard -- its two
+ * callers need different guard handling: `flash abort`'s discard path still holds flashctl's guard
+ * (state FLASHCTL_STAGING) and must release it itself (flashctl_end_staging(false)) right after
+ * calling this; a `flashctl_start_push` failure (fix round 2) must NOT call flashctl_end_staging
+ * here -- flashctl.c's own xTaskCreate-failure branch already reset state to FLASHCTL_IDLE/
+ * busy=false unconditionally before returning, so calling flashctl_end_staging again would violate
+ * ITS OWN precondition assert (busy && state == FLASHCTL_STAGING) and crash the firmware. */
+static void flash_forget_staged(void)
+{
+    s_staged = false;
+    memset(s_stage_ver, 0, sizeof s_stage_ver);
+    memset(s_stage_hwid, 0, sizeof s_stage_hwid);
+    s_stage_size = 0;
+    memset(s_stage_sha, 0, sizeof s_stage_sha);
+}
+
 /* Reads and discards whatever shows up on the console UART for a fixed ~200 ms budget -- so a
  * host that was still sending image bytes when we gave up never has its leftover bytes land on
  * the REPL as command characters once this call returns. Fixed iteration count (bounded, no
@@ -342,7 +359,14 @@ static int cmd_flash_push(int argc, char **argv, bool json)
     }
 
     if (flashctl_start_push(s_stage_ver, s_stage_hwid, s_stage_size, s_stage_sha) != 0) {
-        flash_err(json, "push");
+        /* flashctl_start_push has exactly one failure code (an xTaskCreate failure), and
+         * flashctl.c's own failure branch already reset state to FLASHCTL_IDLE/busy=false
+         * unconditionally before returning -- flashctl itself has nothing staged any more. Forget
+         * this console's own copy too (fix round 2), or `flash abort`/`flash status` would keep
+         * reporting an image staged that flashctl has already discarded, and only a fresh `flash
+         * stage` (not the `flash push` the operator would naturally retry) could ever recover. */
+        flash_forget_staged();
+        flash_err(json, "push (image discarded, re-stage)");
         return 1;
     }
     s_staged = false;   /* consumed: flashctl now owns the push; a retry needs a fresh `flash stage` */
@@ -448,12 +472,8 @@ static int cmd_flash_abort(int argc, char **argv, bool json)
     }
 
     if (s_staged) {
-        s_staged = false;
-        memset(s_stage_ver, 0, sizeof s_stage_ver);
-        memset(s_stage_hwid, 0, sizeof s_stage_hwid);
-        s_stage_size = 0;
-        memset(s_stage_sha, 0, sizeof s_stage_sha);
-        flashctl_end_staging(false);
+        flash_forget_staged();
+        flashctl_end_staging(false);   /* still held (STAGING) here -- release it ourselves */
         if (json) printf("{\"abort\":true,\"discarded\":true}\n");
         else      printf("OK abort (staged image discarded)\n");
         return 0;
