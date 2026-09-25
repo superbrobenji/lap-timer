@@ -92,10 +92,11 @@ commits `5ced6e1`/`e8c23a8`/`95bc7dd`/`1fa8a17`), not the `link.c`/`cmd.c`-only 
   (`_Atomic`, `memory_order_relaxed` — independent single words, writer always the logger task, a
   reader wants only the latest whole value) instead of calling `hal/storage.h` itself. The logger —
   the storage owner — primes the cache as the first action of `logger_task` (before its main loop,
-  so boot-time STATUS is never `free_kb=0, sessions=0`) and updates it incrementally: `sessions` ±1
-  on `close_session`/an actual eviction-unlink; `free_kb` re-read via `storage_free_kb()` only on
-  those same events, and estimated between them by subtracting bytes written since the last real
-  reading.
+  so boot-time STATUS is never `free_kb=0, sessions=0`) and updates it incrementally: `sessions` +1
+  on `close_session` once its `.sum` has landed (an eviction pass never changes the count: it unlinks
+  only `.log` files, never the paired `.sum`); `free_kb` re-read via `storage_free_kb()` at priming,
+  `close_session` and after an eviction pass; estimated between those events from the bytes appended
+  (no storage call).
 - **Rationale.** The first bench flash of the naive design (`status_build()` scanning `/sessions` on
   every push/read) task-WDT-boot-looped: `session_count()`'s `sto_list_next` calls LittleFS `stat()`
   per entry, and each `stat()` is its own directory walk (O(n²) for one listing); called from
@@ -393,24 +394,30 @@ status poll runs.
 If the root turns out to be architectural rather than a bug, that is recorded as a ledger ruling and
 becomes its own follow-up; it does not silently widen 5.6.
 
-**Bench configuration for development:** dev-kit on USB (console + power), lap-timer powered from
-the dev-kit's 5 V rail (jumper now, the Plan 6 port later). Independent lap-timer power is optional
-for dev work and required for the Plan 6 OTA matrix. The lap-timer's own USB is needed only to
-flash it until `esp-serial-flasher` lands.
+**Bench configuration for development:** both boards on the laptop's own USB (console + power each),
+**the 5 V jumper OUT** by default — see `docs/hardware/devkit-port.md` §4 for the interim-bench rules
+(the jumper browns the lap-timer out during `esp_ota_begin`'s erase, so it stays out except when
+deliberately testing the jumper-fed path; the dev-kit-TX→lap-timer-RX wire is pulled only while
+flashing the lap-timer directly over its own USB). Independent lap-timer power (the jumper, or the
+Plan 6 port once it exists) is required only for the Plan 6 OTA-apply matrix, not for day-to-day dev
+work. The lap-timer's own USB is needed only to flash it until `esp-serial-flasher` lands.
 
 ### Implementation notes (Plan 5.6 execution, 2026-09-25)
 
 **CI parity.** The host harnesses (`test/`, `devcontroller/test/`) are pure C11, built with
 `CMAKE_EXPORT_COMPILE_COMMANDS=ON` and compiled clean, zero warnings, under Apple clang on the
-development machine; `.github/workflows/ci.yml`'s `host-tests` job builds the lap-timer's `test/`
-tree the same way under Linux gcc on CI. The two toolchains diverge on warning coverage — gcc's
+development machine; CI now builds and runs both under Linux gcc, plus the firmware they pair with:
+`.github/workflows/ci.yml`'s `host-tests` job builds the lap-timer's `test/` tree, its new
+`dc-host-tests` job builds and runs `devcontroller/test/` (the dev-kit's pure host-testable logic,
+under ASan/UBSan, as its own Unity executables), and its new `tools-tests` job runs
+`python3 -m unittest tools/test_devkit.py`; `.github/workflows/firmware.yml`'s build matrix now
+includes `devcontroller` alongside `moto_neo6m`/`moto_sim`, built with `idf.py build` in the same
+pinned `espressif/idf:v5.3.2` container as the lap-timer firmware. The hygiene and static-analysis
+jobs are unchanged. The two toolchains still diverge on warning coverage — gcc's
 `-Wsign-conversion` has already caught sites clang accepted in this codebase (the vendored `jsmn`
-patch and a host-harness `-Wsign-conversion` fix, both pre-5.6, `26fd088`/`26977ea`). A
-`gcc-16 -fsyntax-only` sweep over the compile database, run locally before relying on a "0 warnings"
-claim, is part of the gate for any change to either host harness — not only what the CI job itself
-currently runs. **Gap:** `devcontroller/test/` is not yet wired into a CI job (`ci.yml`'s
-`host-tests` job only probes `test/CMakeLists.txt`); until it is, the local `gcc-16` sweep is the
-only gcc-parity check `devcontroller/test/` gets.
+patch and a host-harness `-Wsign-conversion` fix, both pre-5.6, `26fd088`/`26977ea`) — so a
+`gcc-16 -fsyntax-only` sweep over the compile database stays a local pre-push step for either host
+harness, ahead of what CI itself already re-verifies on push.
 
 ## 10. Roadmap placement and sequencing
 
