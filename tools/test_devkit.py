@@ -111,6 +111,20 @@ class ReadJsonTest(unittest.TestCase):
         obj = read_json(ser, timeout=1.0)
         self.assertEqual(obj, {"a": 1})
 
+    def test_skips_a_stream_tap_row_and_returns_the_command_reply(self):
+        # `stream tap` prints bare {"t":"fused",...} (or "event"/"status") rows from another task,
+        # which can land on the wire between a command and its own JSON reply. read_json must not
+        # mistake one for the reply it's waiting for.
+        rx = b'{"t":"fused","v":1}\n' b'{"test":"link","pass":true}\n'
+        ser = FakeSerial(rx=rx)
+        obj = read_json(ser, timeout=1.0)
+        self.assertEqual(obj, {"test": "link", "pass": True})
+
+    def test_accept_rows_returns_the_tap_row_itself(self):
+        ser = FakeSerial(rx=b'{"t":"fused","v":1}\n')
+        obj = read_json(ser, timeout=1.0, accept_rows=True)
+        self.assertEqual(obj, {"t": "fused", "v": 1})
+
 
 class SendCmdTest(unittest.TestCase):
     def test_strips_the_echo_and_ansi(self):
@@ -123,7 +137,7 @@ class SendCmdTest(unittest.TestCase):
         ser = FakeSerial(rx=rx)
         reply = send_cmd(ser, "dc log info", timeout=1.0)
 
-        self.assertEqual(bytes(ser.written), b"dc log info\r\n")
+        self.assertEqual(bytes(ser.written), b"dc log info\r")
         self.assertNotIn("\x1b", reply)
         self.assertNotIn("dc log info", reply)
         self.assertEqual(reply, "I (123) console: ok\r\nOK info")
@@ -148,7 +162,7 @@ class StageImageTest(unittest.TestCase):
         code = stage_image(ser, self.path)
 
         self.assertEqual(code, "0x0000")
-        expected = ("flash stage %d %s\r\n" % (len(data), sha_hex)).encode("ascii") + data
+        expected = ("flash stage %d %s\r" % (len(data), sha_hex)).encode("ascii") + data
         self.assertEqual(bytes(ser.written), expected)
 
     def test_stage_err_badsha_raises_devkiterror(self):
@@ -169,7 +183,7 @@ class PushAndWaitTest(unittest.TestCase):
         result = push_and_wait(ser, timeout=1.0)
 
         self.assertEqual(result, "0x0000")
-        self.assertEqual(bytes(ser.written), b"flash push\r\n")
+        self.assertEqual(bytes(ser.written), b"flash push\r")
 
     def test_raises_on_nonzero_result(self):
         ser = FakeSerial(rx=b"flash result 0x0102\r\n")
@@ -214,13 +228,16 @@ class ShellCloseTest(unittest.TestCase):
     relay loop, so the device's `lt shell` bridge is told to close (rather than sitting open until
     its own 10 min cap) even when the host side exits ungracefully."""
 
-    def test_sends_escape_and_returns_true_on_bridge_closed(self):
+    def test_sends_cr_escape_and_returns_true_on_bridge_closed(self):
+        # The leading '\r' guarantees at_line_start on the device (cmd_shell.c honours '~' only
+        # at the start of a line) even when _shell_close fires mid-line, e.g. Ctrl-C between
+        # keystrokes after some non-newline bytes have already been relayed.
         ser = FakeSerial(rx=b"\r\nbridge closed\r\ndevkit> ")
 
         result = _shell_close(ser, timeout=1.0)
 
         self.assertTrue(result)
-        self.assertEqual(bytes(ser.written), b"~.")
+        self.assertEqual(bytes(ser.written), b"\r~.")
 
     def test_returns_false_on_timeout_when_bridge_closed_never_arrives(self):
         ser = FakeSerial(rx=b"")   # device never replies
@@ -228,7 +245,36 @@ class ShellCloseTest(unittest.TestCase):
         result = _shell_close(ser, timeout=0.05)
 
         self.assertFalse(result)
-        self.assertEqual(bytes(ser.written), b"~.")   # the escape is still sent regardless
+        self.assertEqual(bytes(ser.written), b"\r~.")   # the escape is still sent regardless
+
+
+class NoStrayLineFeedTest(unittest.TestCase):
+    """C1/M4: the REPL UART is ESP_LINE_ENDINGS_CR -- ENTER is a bare '\\r'; a following '\\n' is
+    left as a stray byte in the UART driver's ring and (for `flash stage`) becomes image byte 0.
+    Every command line devkit.py writes must therefore end in '\\r' alone, never '\\r\\n' -- this
+    exercises send_cmd, stage_image and push_and_wait together and asserts no write, anywhere,
+    ever contains a '\\n' byte."""
+
+    def test_no_write_contains_a_line_feed(self):
+        fd, path = tempfile.mkstemp(prefix="devkit_test_")
+        os.close(fd)
+        try:
+            data = b"hello world"
+            with open(path, "wb") as f:
+                f.write(data)
+
+            ser = FakeSerial(rx=(
+                b"OK info\r\n" b"devkit> "
+                b"STAGE-READY\r\n" b"STAGE-END 0x0000\r\n"
+                b"flash result 0x0000\r\n"
+            ))
+            send_cmd(ser, "dc log info", timeout=1.0)
+            stage_image(ser, path)
+            push_and_wait(ser, timeout=1.0)
+
+            self.assertNotIn(b"\n", bytes(ser.written))
+        finally:
+            os.remove(path)
 
 
 if __name__ == "__main__":

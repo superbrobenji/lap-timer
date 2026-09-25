@@ -103,6 +103,13 @@ commits `5ced6e1`/`e8c23a8`/`95bc7dd`/`1fa8a17`), not the `link.c`/`cmd.c`-only 
   `open_session()`'s post-eviction refresh moments after boot, it starved `IDLE0` past the task-WDT
   window. The same per-entry-`stat()` cost is judged the likely root of the ~4 s framed `status`
   latency measured on the pre-5.6 bench (§2) — §9/T12 does the on-target confirmation.
+- **`sessions` cache upkeep, completed.** Beyond the `close_session` +1 above, `sessions` is also
+  recounted when a session is deleted: `op_delete` posts `LOGGER_RECOUNT` and the logger re-primes
+  the cache (the same priming pass `logger_task` runs at boot) rather than decrementing in place, so
+  a delete of a session the cache never counted (e.g. one from a boot before the cache existed)
+  cannot under/over-count. `free_kb` is refreshed on every eviction pass (`evict_if_due`, every 60 s)
+  once `eviction_check()` returns, not only inside the tight-storage (`free_kb < 10%`) branch, so a
+  slow storage-free drift is visible in STATUS even when nothing is ever evicted.
 
 ### 4.2 What the dev-kit does with it
 
@@ -180,20 +187,20 @@ would be negative (no samples yet).
 | command | does |
 |---|---|
 | `dc status` | AP/clients, link (connected, status/stream age, per-type rates as `*_rate_x10`, gaps), logstore (ready, file, bytes), heap, uptime, version |
-| `dc log <level>` | dev-kit log verbosity on this console |
-| `dc baud <rate>` | switch this console's baud for a faster `flash stage` upload (optional optimisation; 115200 is the requirement) |
+| `dc log <level>` | dev-kit log verbosity on this console; `--json` answers `{"level":…}` |
+| `dc baud <rate>` | switch this console's baud for a faster `flash stage` upload (optional optimisation; 115200 is the requirement); `--json` answers `{"baud":…}` |
 | `lt <console cmd…>` | relay any lap-timer console command through `linkhost` (framed or streaming download); prints the reply, round-trip ms, attempt count. `lt status --json` is the one exception to "prints the reply": it emits the *decoded* §18.2 STATUS fields (named, like `dc status`), not the raw framed body |
-| `lt shell` | transparent byte bridge UART0↔UART1 until `~.` at line start or a 10 min cap; takes the link mutex, pauses the demux (as a download does), silences dev-kit logging, forces `stream tap` off, and filters whole binary stream frames out of the UART1→USB bytes it forwards so a bridged session shows only the lap-timer's own console bytes; resyncs on exit |
+| `lt shell` | transparent byte bridge UART0↔UART1 until `~.` at line start or a 10 min cap; takes the link mutex, pauses the demux (as a download does), silences dev-kit logging, forces `stream tap` off, and filters whole binary stream frames out of the UART1→USB bytes it forwards so a bridged session shows only the lap-timer's own console bytes; resyncs on exit. Refused (`busy`) while a `flash push` is in flight, since both hold the same link mutex |
 | `link trace on\|off` | per-request trace (§5.1) |
-| `stream stats` | rates per type over the last 10 s (`*_rate_x10`), seq gaps, ring high-water |
+| `stream stats [secs]` | rates over a measured window (default 2 s): samples the counters before and after `secs`, then reports `*_rate_x10` over that interval, seq gaps, ring high-water. Independent of `dc status`, which samples its own fixed 1 s window |
 | `stream tap on\|off [type]` | print decoded records as JSON rows, rate-limited to 5/s |
 | `selftest link [N=20]` | N framed `status` round-trips: latency min/median/max, attempts, failures; PASS if median < 100 ms, max < 500 ms, 0 failures |
 | `selftest stream [s=10]` | measured rates: PASS if fused ≥ 8/s, status ≥ 0.8/s, 0 gaps |
 | `selftest framing` | relay one command with trace on; PASS if every `---BEGIN`/`---END` marker is followed by exactly one CR before LF |
 | `selftest all` | the three above; one verdict |
-| `flash stage <size> <sha256hex>` | receive a raw image over this console into `ota_stage` (§5.4) |
+| `flash stage <size> <sha256hex>` | receive a raw image over this console into `ota_stage` (§5.4). A `STAGING` claim left unpushed for 10 min is reclaimed by the next `flash stage` |
 | `flash push` | push the staged image to the lap-timer with the Task 6 `linkhost_flash` |
-| `flash status` / `flash abort` | progress (`staged`, `pushing`, `flash_pct`, last result) / `abort` discards a staged image still awaiting `flash push` |
+| `flash status` / `flash abort` | progress row: `state, busy, pct, result, ver, hwid, size` (`result` is `0x%04x`, or `"link -N"` for a linkhost-level failure) / `abort` discards a staged image still awaiting `flash push` -- answers `ERR not mine` if the current `STAGING` claim is owned by `/api/flash` rather than this console |
 
 #### Implementation notes (Plan 5.6 execution, 2026-09-25)
 
@@ -222,6 +229,29 @@ would be negative (no samples yet).
 trace | stream [stats|tap] | selftest [link|stream|framing|all] | flash <image.bin> | shell`.
 It drives the REPL in `--json` mode and parses the objects; `selftest all` replaces the ad-hoc
 bench scripts of the Plan 5.5 gates.
+
+#### Implementation notes (Plan 5.6 execution, 2026-09-25)
+
+- **CR-only line endings.** The REPL UART is configured for CR line endings
+  (`esp_console_new_repl_uart` → `ESP_LINE_ENDINGS_CR`): ENTER is a bare `\r`, and a following `\n`
+  is left as a stray byte in the UART driver's ring rather than consumed as part of the line. Every
+  command line `devkit.py` sends therefore ends in a single `\r`, never `\r\n` — `send_cmd`, the
+  `--json` one-shot commands, `flash stage <size> <sha256hex>\r`, `flash push\r`, `stream tap on
+  [type]\r`/`stream tap off\r`, and `lt shell\r`. This matters most for `flash stage`: a stray `\n`
+  ahead of the raw image bytes becomes image byte 0, corrupting the upload.
+- **`shell`'s Ctrl-C close.** `lt shell`'s bridge (cmd_shell.c) honours the `~.` escape only when the
+  device considers itself at the start of a line. A clean exit (the operator typing `~.` themselves)
+  is always at a line start by construction, but a Ctrl-C (or any other exception) out of the relay
+  loop can land mid-line. `devkit.py`'s shutdown path for that case therefore sends `\r~.` (a bare CR
+  first), not a bare `~.` — the CR is inert on the lap-timer console when already at a line start (it
+  just reprints the prompt) but guarantees the device sees `~.` at a line start either way, so the
+  bridge always closes.
+- **`read_json` ignores stream rows.** `stream tap`'s row loop prints bare `{"t":"fused",...}` (or
+  `"event"`/`"status"`) rows from the console's other task, which can interleave on the wire with a
+  one-shot command's own JSON reply. `read_json` skips any parsed object carrying a `"t"` key unless
+  the caller passes `accept_rows=True`, so `status`/`lt`/`trace`/`stream stats`/`selftest` can never
+  mistake a racing tap row for their own reply. `_cmd_stream_tap`'s own row-printing loop reads via
+  `_readline` directly, not `read_json`, so it is unaffected and still prints every row, tap or not.
 
 ### 5.4 Flashing the lap-timer over USB
 
@@ -369,8 +399,11 @@ until a custom dev-kit board exists. The interim jumper bench remains documented
 ## 9. Testing and the acceptance loop
 
 **Host tests (no hardware):**
-- Lap-timer: `status_build()` output byte-identical to the framed `op_status` body (existing STATUS
-  decoder as oracle); `LT_REC_STATUS` value and layout compile-checked.
+- Lap-timer: `status_build()` output matching the framed `op_status` body is guaranteed by
+  construction, not by a dedicated byte-identity test — `op_status` calls `status_build()` directly,
+  and `LT_REC_STATUS`/`LT_STATUS_REC_LEN` are compile-checked by `_Static_assert`s in `link.c` and
+  the host `test_proto` case (the lap-timer harness links `components/core` only, so no
+  `status_build()`-vs-`op_status` comparison test exists).
 - Dev-kit: demux accepts and routes `LT_REC_STATUS`; `linkstats` counters, seq-gap detection,
   staleness (`connected` flips at 3 s), age math; STATUS → JSON row; console `--json` formatting of
   `dc status`/`selftest` from a fake stats struct; the `flash stage` handshake parser (pure);
