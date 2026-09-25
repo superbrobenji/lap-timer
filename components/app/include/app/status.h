@@ -9,9 +9,16 @@
  * listing/export)" once the pipeline task started calling it too.
  *
  * The cache is kept fresh by the logger task (components/app/logger/logger.c), the storage
- * owner: it calls status_cache_update() after open_session/close_session/eviction_check and on
- * a 5 s cadence, so a peer never sees free_kb/sessions more than ~5 s stale (session open/close
- * and eviction refresh it immediately on the events that actually move those numbers).
+ * owner. sessions is name-only-counted once at logger start (status_cache_prime()); after that it
+ * only moves on the two events that can actually change the on-flash .sum count: +1 on
+ * close_session, once its .sum has landed, and a full recount on LOGGER_RECOUNT (posted by
+ * cmd.c's DELETE after it unlinks a .sum -- close_session's increment alone would otherwise miss
+ * every delete). free_kb is a real storage_free_kb() read at those same events (prime / close /
+ * recount) plus every eviction pass (its own ~60 s tick, sooner if LOGGER_EVICT forces one), and
+ * is estimated from .log bytes appended since the last real read the rest of the time
+ * (status_cache_estimate()). Either way, status_cache_update() runs every logger loop tick, so a
+ * peer is never more than one loop tick behind whatever the cache last held -- not a fixed
+ * cadence on free_kb/sessions themselves, which only change on the events above.
  */
 #ifndef APP_STATUS_H
 #define APP_STATUS_H
@@ -26,8 +33,10 @@
 void status_build(uint8_t out[LT_STATUS_LEN]);
 
 /* Refresh the free_kb/sessions cache status_build() reads (single-word atomics, no lock). Called
- * by the logger task -- the sole hal/storage.h owner -- after anything that can move either
- * number (session open, session close, eviction) and on its own periodic cadence besides. */
+ * by the logger task -- the sole hal/storage.h owner -- every loop tick: with a real reading at
+ * prime / close_session / eviction / recount (the events that can actually move either number,
+ * see this file's header comment) and an estimate the rest of the time
+ * (logger.c's status_cache_estimate()). */
 void status_cache_update(uint32_t free_kb, uint16_t sessions);
 
 #endif /* APP_STATUS_H */
