@@ -41,12 +41,12 @@ The staging protocol deliberately mirrors the lap-timer's own `ota recv` handsha
 host tools share their shape (`extract_ver_hwid`/`wait_for_token`/`stream_image` there have direct
 analogues here):
 
-    host:    flash stage <size> <sha256hex>\\r\\n
+    host:    flash stage <size> <sha256hex>\\r   (a bare CR -- the REPL UART is ESP_LINE_ENDINGS_CR)
     dev-kit: STAGE-READY                  (ota_stage erased for size; console now in raw mode)
     host:    <size> raw bytes
     dev-kit: STAGE-END 0x0000             (SHA-256 matches; image parsed: ver/hwid via image_desc)
           |  STAGE-ERR <code>             (badsize | badsha | timeout | write)
-    host:    flash push\\r\\n  ->  "pushing NN%" progress lines, then a final result:
+    host:    flash push\\r  ->  "pushing NN%" progress lines, then a final result:
     dev-kit: flash result 0x0000          (pushed + applied by the lap-timer's `ota recv`)
           |  flash result 0x<code>        (an E_OTA_* code -- same table as /api/flash's flash_err)
           |  flash result link -N         (a linkhost-level failure, e.g. LINKHOST_E_TIMEOUT)
@@ -163,12 +163,18 @@ def _read_until(ser, target, deadline, max_iters=2000000):
 #  Pure helpers (serial-like `ser` in, no globals) -- unit-tested against FakeSerial
 # ==================================================================================================
 
-def read_json(ser, timeout=5.0):
+def read_json(ser, timeout=5.0, accept_rows=False):
     """Read lines from `ser` until one, after stripping ANSI escapes and surrounding whitespace,
     starts with '{'; parse it as JSON and return the dict. A line that is not valid JSON, or that
     parses to something other than an object, is skipped (log noise, an echoed command, ...), not
-    raised on. Raises DevkitError("timeout waiting for json") if `timeout` s pass with no such
-    line, or DevkitError(obj["err"]) if the parsed object carries the console's own error key."""
+    raised on. `stream tap`'s row loop prints bare `{"t":"fused",...}` (or "event"/"status") rows
+    from another task, which can interleave with any command's own JSON reply on the same port; by
+    default those are skipped too (a "t" key marks a tap row, not a command reply) so a one-shot
+    JSON command (status/lt/trace/stream stats/selftest) can't mistake a tap row racing on the wire
+    for its own reply -- pass accept_rows=True for the (currently unused) case of a caller that
+    actually wants tap rows via this helper. Raises DevkitError("timeout waiting for json") if
+    `timeout` s pass with no such line, or DevkitError(obj["err"]) if the parsed object carries the
+    console's own error key."""
     deadline = time.monotonic() + timeout
     while True:
         line = _readline(ser, deadline)
@@ -183,19 +189,24 @@ def read_json(ser, timeout=5.0):
             continue
         if not isinstance(obj, dict):
             continue
+        if not accept_rows and "t" in obj:
+            continue
         if "err" in obj:
             raise DevkitError(obj["err"])
         return obj
 
 
 def send_cmd(ser, line, timeout=5.0):
-    """Write `line` + CRLF, then read raw bytes until the next "devkit> " prompt (bounded by
-    `timeout` s). Returns the reply text with the echoed command line (esp_console/linenoise
+    """Write `line` + a bare CR, then read raw bytes until the next "devkit> " prompt (bounded by
+    `timeout` s). The REPL UART is configured for CR line endings (esp_console_new_repl_uart ->
+    ESP_LINE_ENDINGS_CR): ENTER is '\\r' alone -- a following '\\n' is left as a stray byte in the
+    UART driver's ring and would corrupt the next raw read (`flash stage`'s image upload), so this
+    never writes '\\n'. Returns the reply text with the echoed command line (esp_console/linenoise
     echoes every typed character back) removed, ANSI escapes stripped, and the trailing
     prompt/newlines trimmed. Raises DevkitError("timeout waiting for prompt") on timeout. Used for
     the human (non-JSON) commands; JSON commands go through read_json instead (see _json_cmd)."""
     deadline = time.monotonic() + timeout
-    ser.write((line + "\r\n").encode("ascii"))
+    ser.write((line + "\r").encode("ascii"))
     ser.flush()
     raw = _read_until(ser, PROMPT.encode("ascii"), deadline)
     if raw is None:
@@ -222,7 +233,7 @@ def stage_image(ser, path, ready_timeout=STAGE_READY_TIMEOUT_S):
     size = len(data)
     sha_hex = hashlib.sha256(data).hexdigest()
 
-    ser.write(("flash stage %d %s\r\n" % (size, sha_hex)).encode("ascii"))
+    ser.write(("flash stage %d %s\r" % (size, sha_hex)).encode("ascii"))
     ser.flush()
 
     ready_deadline = time.monotonic() + ready_timeout
@@ -259,7 +270,7 @@ def push_and_wait(ser, timeout=PUSH_TIMEOUT_S):
     "0x0000") on success; raises DevkitError on any other result or on a `timeout`-second wait
     with no result line at all."""
     deadline = time.monotonic() + timeout
-    ser.write(b"flash push\r\n")
+    ser.write(b"flash push\r")
     ser.flush()
     while True:
         line = _readline(ser, deadline)
@@ -281,7 +292,7 @@ def push_and_wait(ser, timeout=PUSH_TIMEOUT_S):
 def _json_cmd(ser, line, timeout=JSON_TIMEOUT_S):
     """Send `line` with " --json" appended and return the parsed reply via read_json. Every
     one-shot JSON subcommand (status/lt/trace/stream stats/selftest) goes through this."""
-    ser.write((line + " --json\r\n").encode("ascii"))
+    ser.write((line + " --json\r").encode("ascii"))
     ser.flush()
     return read_json(ser, timeout)
 
@@ -404,7 +415,7 @@ def _cmd_stream_tap(ser, rec_type):
     except KeyboardInterrupt:
         pass
     finally:
-        ser.write(b"stream tap off\r\n")
+        ser.write(b"stream tap off\r")
         ser.flush()
         _read_until(ser, PROMPT.encode("ascii"), time.monotonic() + 2.0)
     return 0
@@ -425,16 +436,21 @@ def _cmd_flash(ser, image_path):
 
 
 def _shell_close(ser, timeout=SHELL_CLOSE_TIMEOUT_S):
-    """Best-effort clean shutdown of the device's `lt shell` bridge (cmd_shell.c, T8): send the
-    "~." escape -- write errors are ignored, the port may already be in a bad state on this path --
-    then wait up to `timeout` s (also ignored on expiry) for the device's own "bridge closed" line.
-    Called from every non-graceful exit out of _cmd_shell's relay loop (Ctrl-C, any other
-    exception) so the device's bridge does not sit open until its own 10 min cap merely because the
-    host side gave up. The loop's own graceful exits (seeing "bridge closed", or the user typing
-    "~." themselves) already send the escape / see the confirmation inline and do not call this.
-    Returns True if "bridge closed" was actually seen, False on a write failure or a timeout."""
+    """Best-effort clean shutdown of the device's `lt shell` bridge (cmd_shell.c, T8): send a bare
+    CR followed by the "~." escape -- write errors are ignored, the port may already be in a bad
+    state on this path -- then wait up to `timeout` s (also ignored on expiry) for the device's own
+    "bridge closed" line. The device honours '~' only at the start of a line (cmd_shell.c's
+    at_line_start), and this can be called mid-line (e.g. Ctrl-C fires between keystrokes, after
+    some non-newline bytes have already been relayed); the leading '\\r' is inert on the lap-timer
+    console when not mid-line -- it just reprints the prompt -- but guarantees at_line_start is
+    true before the escape, so "~." is always honoured. Called from every non-graceful exit out of
+    _cmd_shell's relay loop (Ctrl-C, any other exception) so the device's bridge does not sit open
+    until its own 10 min cap merely because the host side gave up. The loop's own graceful exits
+    (seeing "bridge closed", or the user typing "~." themselves) already send the escape / see the
+    confirmation inline and do not call this. Returns True if "bridge closed" was actually seen,
+    False on a write failure or a timeout."""
     try:
-        ser.write(b"~.")
+        ser.write(b"\r~.")
         ser.flush()
     except Exception:
         return False
@@ -462,7 +478,7 @@ def _cmd_shell(ser):
     import termios
     import tty
 
-    ser.write(b"lt shell\r\n")
+    ser.write(b"lt shell\r")
     ser.flush()
 
     fd = sys.stdin.fileno()
