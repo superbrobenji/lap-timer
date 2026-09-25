@@ -20,3 +20,7 @@ tools/.venv/
 
 # agent worktrees
 .claude/worktrees/
+
+# Python bytecode caches (tools/test_devkit.py, tools/lint)
+__pycache__/
+*.pyc
