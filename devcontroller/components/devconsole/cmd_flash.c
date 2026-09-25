@@ -53,10 +53,16 @@
  * next (fix round 1: it used to latch forever once set, since nothing ever cleared it). What IS
  * reachable today: a `flash stage` that already completed (STAGE-END printed) and is waiting for
  * `flash push` -- flashctl's guard stays held (state FLASHCTL_STAGING) in that window, and `flash
- * abort` there DISCARDS the staged image outright (clears this file's ver/hwid/size/sha
- * bookkeeping, releases flashctl's guard via flashctl_end_staging(false)) and reports `OK abort
- * (staged image discarded)` / `{"abort":true,"discarded":true}`, real semantics rather than a
- * no-op. A THIRD case (M9, final review): flashctl reports STAGING but this console holds neither
+ * abort` there presents this console's saved ownership token (s_stage_token, from the
+ * flashctl_end_staging(true) that finished the stage) to flashctl_release_staged (M10, round 2). A
+ * match DISCARDS the staged image outright (clears this file's ver/hwid/size/sha/token
+ * bookkeeping, releases flashctl's guard) and reports `OK abort (staged image discarded)` /
+ * `{"abort":true,"discarded":true}`, real semantics rather than a no-op. A mismatch -- this
+ * console's claim was reclaimed out from under it by flashctl_try_begin_staging's TTL path (M7)
+ * before this abort ran, and flashctl is now STAGING for a DIFFERENT owner -- refuses instead:
+ * `ERR not mine` / `{"err":"not mine"}`, non-zero return, same as the M9 case below (this file's
+ * own staged bookkeeping is still forgotten either way, since it no longer describes a live claim).
+ * A THIRD case (M9, final review): flashctl reports STAGING but this console holds neither
  * s_staged nor s_stage_inflight -- the claim belongs to a concurrent POST /api/flash (staged, or
  * mid stage-then-push). `flash abort` there refuses: `ERR not mine (staging owned by /api/flash)`
  * / `{"err":"not mine"}`, non-zero return, and touches neither s_abort nor flashctl's guard.
@@ -110,6 +116,14 @@ static uint32_t        s_stage_size;
 static uint8_t         s_stage_sha[32];
 static volatile bool   s_abort;
 
+/* M10 (final review, round 2): the ownership token flashctl_end_staging(true) returned for the
+ * claim s_staged is bookkeeping for -- flash_stage_finish stores it, cmd_flash_push and
+ * cmd_flash_abort present it back to flashctl_start_push / flashctl_release_staged so flashctl can
+ * tell "this console still owns the claim it staged" apart from "this claim was reclaimed by a
+ * fresh caller (TTL expiry) and merely still happens to be STAGING" -- flashctl's state alone
+ * cannot distinguish the two (see the defect note at the top of this file). */
+static uint64_t        s_stage_token;
+
 /* M9 (final review): true from a successful flashctl_try_begin_staging call inside
  * cmd_flash_stage until that attempt's raw phase ends (finish or fail) -- i.e. while THIS console
  * is the one actively receiving bytes for the flashctl STAGING claim it holds. Paired with
@@ -136,14 +150,16 @@ static const char *flash_state_name(flashctl_state_t s)
     return "unknown";
 }
 
-/* Clears this file's own staged-image bookkeeping (s_staged plus the ver/hwid/size/sha statics
- * `flash push` would otherwise reuse). Deliberately does NOT touch flashctl's own guard -- its two
- * callers need different guard handling: `flash abort`'s discard path still holds flashctl's guard
- * (state FLASHCTL_STAGING) and must release it itself (flashctl_end_staging(false)) right after
- * calling this; a `flashctl_start_push` failure (fix round 2) must NOT call flashctl_end_staging
- * here -- flashctl.c's own xTaskCreate-failure branch already reset state to FLASHCTL_IDLE/
- * busy=false unconditionally before returning, so calling flashctl_end_staging again would violate
- * ITS OWN precondition assert (busy && state == FLASHCTL_STAGING) and crash the firmware. */
+/* Clears this file's own staged-image bookkeeping (s_staged plus the ver/hwid/size/sha/token
+ * statics `flash push`/`flash abort` would otherwise reuse). Deliberately does NOT touch flashctl's
+ * own guard -- callers need different guard handling: `flash abort`'s discard path calls
+ * flashctl_release_staged(s_stage_token) itself (M10, round 2) right before or after calling this
+ * (either order is fine -- the token is read/cleared by each independently); a
+ * `flashctl_start_push` FLASHCTL_E_NOT_OWNER or xTaskCreate-failure return (fix round 2 / M10) must
+ * NOT call flashctl_end_staging or flashctl_release_staged here -- flashctl.c has already either
+ * left the OTHER owner's claim untouched (E_NOT_OWNER) or reset state to FLASHCTL_IDLE/busy=false
+ * itself (xTaskCreate failure); calling flashctl_end_staging again on either path would violate ITS
+ * OWN precondition assert (busy && state == FLASHCTL_STAGING) and crash the firmware. */
 static void flash_forget_staged(void)
 {
     s_staged = false;
@@ -151,6 +167,7 @@ static void flash_forget_staged(void)
     memset(s_stage_hwid, 0, sizeof s_stage_hwid);
     s_stage_size = 0;
     memset(s_stage_sha, 0, sizeof s_stage_sha);
+    s_stage_token = 0;   /* M10: no claim left to present a token for */
 }
 
 /* Reads and discards whatever shows up on the console UART for a fixed ~200 ms budget -- so a
@@ -221,7 +238,10 @@ static int flash_stage_finish(uint32_t size, const uint8_t sha_arg[32])
     memcpy(s_stage_sha, sha, sizeof s_stage_sha);
     s_staged = true;
 
-    flashctl_end_staging(true);   /* stays STAGING/busy: ready for `flash push` */
+    /* stays STAGING/busy: ready for `flash push`. M10 (round 2): the returned stamp IS this
+     * claim's ownership token -- stash it so a later `flash push`/`flash abort` can prove to
+     * flashctl it's still the same claim, not a stale caller whose claim was reclaimed meanwhile. */
+    s_stage_token = flashctl_end_staging(true);
     printf("STAGE-END 0x0000\r\n");
     fflush(stdout);
     return 0;
@@ -372,33 +392,39 @@ static int cmd_flash_push(int argc, char **argv, bool json)
         return 1;
     }
 
-    flashctl_status_t st;
-    flashctl_get(&st);
-    if (!st.busy || st.state != FLASHCTL_STAGING) {
-        /* This console's belief that it still holds the flashctl STAGING claim is stale: past
-         * FLASHCTL_STAGE_TTL_US, flashctl_try_begin_staging() treats an unpushed STAGING claim as
-         * reclaimable (M7, final review), so a `flash stage` left staged too long can have been
-         * silently handed to a fresh claimant (POST /api/flash, or another `flash stage`) by the
-         * time `flash push` finally runs. Either way, the image this file remembers is gone --
-         * forget it and say so plainly ("nothing staged"), not "busy": a retry of `flash push`
-         * can never help here, only a fresh `flash stage` can. */
+    /* M10 (round 2): ownership is no longer inferred from flashctl's state alone (that was the
+     * defect this round fixes -- a stale caller whose claim was reclaimed by
+     * flashctl_try_begin_staging's TTL path could pass a state-only check and push/abort a
+     * DIFFERENT owner's in-flight claim). flashctl_start_push now makes the authoritative call
+     * itself, atomically, by comparing s_stage_token against its live staged_us. */
+    int prc = flashctl_start_push(s_stage_ver, s_stage_hwid, s_stage_size, s_stage_sha,
+                                  s_stage_token);
+    if (prc == FLASHCTL_E_NOT_OWNER) {
+        /* This console's claim is stale: past FLASHCTL_STAGE_TTL_US, flashctl_try_begin_staging()
+         * reclaimed an unpushed STAGING claim for a fresh caller (M7, final review) -- POST
+         * /api/flash, or another `flash stage` -- before this `flash push` finally ran. The image
+         * this file remembers is gone either way; forget it and say so plainly, not "busy": a
+         * retry of `flash push` can never help here, only a fresh `flash stage` can. */
         flash_forget_staged();
-        flash_err(json, "nothing staged");
+        if (json) printf("{\"err\":\"nothing staged\"}\n");
+        else      printf("ERR nothing staged (claim expired or taken by /api/flash)\n");
         return 1;
     }
-
-    if (flashctl_start_push(s_stage_ver, s_stage_hwid, s_stage_size, s_stage_sha) != 0) {
-        /* flashctl_start_push has exactly one failure code (an xTaskCreate failure), and
-         * flashctl.c's own failure branch already reset state to FLASHCTL_IDLE/busy=false
-         * unconditionally before returning -- flashctl itself has nothing staged any more. Forget
-         * this console's own copy too (fix round 2), or `flash abort`/`flash status` would keep
-         * reporting an image staged that flashctl has already discarded, and only a fresh `flash
-         * stage` (not the `flash push` the operator would naturally retry) could ever recover. */
+    if (prc != 0) {
+        /* The only remaining failure is an xTaskCreate failure, and flashctl.c's own failure
+         * branch already reset state to FLASHCTL_IDLE/busy=false unconditionally before returning
+         * -- flashctl itself has nothing staged any more. Forget this console's own copy too (fix
+         * round 2), or `flash abort`/`flash status` would keep reporting an image staged that
+         * flashctl has already discarded, and only a fresh `flash stage` (not the `flash push` the
+         * operator would naturally retry) could ever recover. */
         flash_forget_staged();
         flash_err(json, "push (image discarded, re-stage)");
         return 1;
     }
     s_staged = false;   /* consumed: flashctl now owns the push; a retry needs a fresh `flash stage` */
+    s_stage_token = 0;  /* M10: this claim is no longer this console's to abort/re-push */
+
+    flashctl_status_t st;
 
     /* Same silencing as `flash stage`'s raw phase (fix round 1, item 2): only `pushing NN%` /
      * `flash result ...` (or the one --json object) may reach this console's USB while the push
@@ -507,8 +533,15 @@ static int cmd_flash_abort(int argc, char **argv, bool json)
     }
 
     if (s_staged) {
+        /* M10 (round 2): as with `flash push` above, ownership is proven with the token, not
+         * inferred from flashctl reporting STAGING -- a reclaimed claim (past FLASHCTL_STAGE_TTL_US)
+         * would otherwise let this stale abort cancel a DIFFERENT owner's in-flight claim. */
+        bool released = flashctl_release_staged(s_stage_token);
         flash_forget_staged();
-        flashctl_end_staging(false);   /* still held (STAGING) here -- release it ourselves */
+        if (!released) {
+            flash_err(json, "not mine");
+            return 1;
+        }
         if (json) printf("{\"abort\":true,\"discarded\":true}\n");
         else      printf("OK abort (staged image discarded)\n");
         return 0;

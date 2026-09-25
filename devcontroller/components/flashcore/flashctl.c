@@ -51,7 +51,19 @@ bool flashctl_try_begin_staging(void)
          * below) but was never pushed within FLASHCTL_STAGE_TTL_US -- its owner is gone (a crashed
          * console session, an abandoned browser tab). Reclaim: reset to a fresh STAGING claim for
          * THIS caller in the SAME critical section as the staleness check, so no third caller can
-         * ever observe the momentarily-freed guard and race this one for it. */
+         * ever observe the momentarily-freed guard and race this one for it.
+         *
+         * M10 (round 2): this reclaim hands the SAME (busy=true, state=STAGING) shape back out to
+         * a brand-new caller while the ORIGINAL caller may still be holding a reference to this
+         * claim (a console's s_staged bookkeeping, say) and can turn up later believing it still
+         * owns it. That is only safe because staged_us is zeroed right here: the original caller's
+         * ownership token (whatever flashctl_end_staging(true) returned to IT) was that OLD
+         * staged_us value, and flashctl_start_push / flashctl_release_staged both compare their
+         * caller's token against the CURRENT s_flash.staged_us inside their own critical section --
+         * once this reclaim (or a later flashctl_start_push) overwrites staged_us, the stale
+         * caller's token can never match again, so it can neither push nor abort the new owner's
+         * claim. Reclaiming state alone, without the token check on the other end, would let a
+         * stale caller do exactly that (the defect M10 fixes). */
         s_flash.busy      = true;
         s_flash.state     = FLASHCTL_STAGING;
         s_flash.staged_us = 0;
@@ -61,7 +73,7 @@ bool flashctl_try_begin_staging(void)
     return claimed;
 }
 
-void flashctl_end_staging(bool ok)
+uint64_t flashctl_end_staging(bool ok)
 {
     portENTER_CRITICAL(&s_mux);
     bool              busy  = s_flash.busy;
@@ -72,17 +84,20 @@ void flashctl_end_staging(bool ok)
     if (ok) {
         /* M7: stamp so an unpushed claim can eventually be reclaimed (see
          * flashctl_try_begin_staging above) -- stays STAGING/busy: ready for flashctl_start_push,
-         * now or later. */
+         * now or later. M10 (round 2): this stamp doubles as the ownership token handed back to
+         * the caller -- see the doc comment in flashctl.h. */
+        int64_t stamp;
         portENTER_CRITICAL(&s_mux);
-        s_flash.staged_us = esp_timer_get_time();
+        stamp = s_flash.staged_us = esp_timer_get_time();
         portEXIT_CRITICAL(&s_mux);
-        return;
+        return (uint64_t)stamp;
     }
     portENTER_CRITICAL(&s_mux);
     s_flash.state     = FLASHCTL_IDLE;
     s_flash.busy      = false;
     s_flash.staged_us = 0;
     portEXIT_CRITICAL(&s_mux);
+    return 0;
 }
 
 void flashctl_clear_result(void)
@@ -138,24 +153,36 @@ static void flash_task(void *arg)
     vTaskDelete(NULL);
 }
 
-int flashctl_start_push(const char *ver, const char *hwid, uint32_t size, const uint8_t sha[32])
+int flashctl_start_push(const char *ver, const char *hwid, uint32_t size, const uint8_t sha[32],
+                        uint64_t token)
 {
     assert(ver != NULL && hwid != NULL && sha != NULL);
 
+    /* M10 (round 2): the precondition check AND the ownership-token check happen inside the SAME
+     * critical section as the state write below (unlike the old two-critical-section shape this
+     * replaced) -- so there is no window between "we decided we're the owner" and "we mutated
+     * state" for a concurrent flashctl_try_begin_staging TTL-reclaim to interleave. A stale caller
+     * (its claim already reclaimed, so token != the live staged_us -- or the guard isn't even
+     * STAGING any more) gets FLASHCTL_E_NOT_OWNER and NOTHING here is touched; it must never hit
+     * the old `assert(busy && state == STAGING)`, since a stale caller turning up late is an
+     * expected, not exceptional, event now (see flashctl_try_begin_staging's TTL reclaim). */
+    bool ok;
     portENTER_CRITICAL(&s_mux);
-    bool              busy  = s_flash.busy;
-    flashctl_state_t  state = s_flash.state;
+    if (!(s_flash.busy && s_flash.state == FLASHCTL_STAGING) ||
+        token != (uint64_t)s_flash.staged_us) {
+        ok = false;
+    } else {
+        memcpy(s_flash.ver, ver, sizeof s_flash.ver);
+        memcpy(s_flash.hwid, hwid, sizeof s_flash.hwid);
+        s_flash.size = size;
+        memcpy(s_flash_sha, sha, sizeof s_flash_sha);
+        s_flash.state     = FLASHCTL_PUSHING;     /* must be set before the task can finish */
+        s_flash.staged_us = 0;                    /* M7: no longer an unpushed claim to reclaim */
+        ok = true;
+    }
     portEXIT_CRITICAL(&s_mux);
-    assert(busy && state == FLASHCTL_STAGING);
 
-    portENTER_CRITICAL(&s_mux);
-    memcpy(s_flash.ver, ver, sizeof s_flash.ver);
-    memcpy(s_flash.hwid, hwid, sizeof s_flash.hwid);
-    s_flash.size = size;
-    memcpy(s_flash_sha, sha, sizeof s_flash_sha);
-    s_flash.state     = FLASHCTL_PUSHING;     /* must be set before the task can finish */
-    s_flash.staged_us = 0;                    /* M7: no longer an unpushed claim to reclaim */
-    portEXIT_CRITICAL(&s_mux);
+    if (!ok) return FLASHCTL_E_NOT_OWNER;
 
     if (xTaskCreate(flash_task, "flashctl_push", 4096, NULL, 5, NULL) != pdPASS) {
         portENTER_CRITICAL(&s_mux);
@@ -165,6 +192,21 @@ int flashctl_start_push(const char *ver, const char *hwid, uint32_t size, const 
         return -1;
     }
     return 0;
+}
+
+bool flashctl_release_staged(uint64_t token)
+{
+    bool released = false;
+    portENTER_CRITICAL(&s_mux);
+    if (s_flash.busy && s_flash.state == FLASHCTL_STAGING && s_flash.staged_us != 0 &&
+        token == (uint64_t)s_flash.staged_us) {
+        s_flash.state     = FLASHCTL_IDLE;
+        s_flash.busy      = false;
+        s_flash.staged_us = 0;
+        released = true;
+    }
+    portEXIT_CRITICAL(&s_mux);
+    return released;
 }
 
 void flashctl_get(flashctl_status_t *out)

@@ -892,8 +892,17 @@ static esp_err_t api_flash_post(httpd_req_t *req)
         return send_error_json(req, "500 Internal Server Error", "response body build failed");
     }
 
-    flashctl_end_staging(true);
-    if (flashctl_start_push(ver, hwid, size, sha) != 0)
+    /* M10 (final review, round 2): flashctl_start_push now requires the ownership token
+     * flashctl_end_staging(true) returns, and fails with FLASHCTL_E_NOT_OWNER if it doesn't match
+     * the live claim (e.g. reclaimed by flashctl_try_begin_staging's TTL path). This request
+     * stages then pushes back-to-back with no intervening await -- nothing else can run on this
+     * task between the two calls -- so `tok` can never go stale before flashctl_start_push uses it;
+     * FLASHCTL_E_NOT_OWNER is unreachable here in practice. It still falls into the `!= 0` check
+     * below like any other failure, mapping to the same "500 Internal Server Error" / "cannot start
+     * flash task" response this function already uses for a flashctl_start_push failure -- no new
+     * status code needed. */
+    uint64_t tok = flashctl_end_staging(true);
+    if (flashctl_start_push(ver, hwid, size, sha, tok) != 0)
         return send_error_json(req, "500 Internal Server Error", "cannot start flash task");
 
     ESP_LOGI(TAG, "staged %lu B (ver=%s hwid=%s) -> pushing", (unsigned long)size, ver, hwid);
