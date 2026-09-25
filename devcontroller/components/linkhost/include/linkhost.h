@@ -133,7 +133,10 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
 /* ---- cmd-OTA flash ----
  * Runs `ota recv <size> <sha> <ver> <hwid>` against the image already staged in the `ota_stage`
  * partition, streaming it in bounded chunks and reporting progress via cb. Returns 0 on
- * `OTA-END 0x0000`, else the `OTA-ERR` code (or a LINKHOST_E_* on timeout/protocol failure). */
+ * `OTA-END 0x0000`, else the `OTA-ERR` code (or a LINKHOST_E_* on timeout/protocol failure). The
+ * request-owning mutex is taken with a bounded timeout (I4, final review): a `lt shell` bridge can
+ * hold it for up to its own 10-minute cap, so a busy link here returns LINKHOST_E_BUSY rather than
+ * blocking the push task for the shell's whole duration. */
 int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
                    const uint8_t sha256[32], flash_progress_cb cb, void *ctx);
 

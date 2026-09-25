@@ -1,7 +1,8 @@
 /* devcontroller/components/devconsole/cmd_dc.c -- the `dc` command: the dev-kit's own
  * self-diagnostics on its own USB console, independent of the WiFi AP/SPA (Plan 5.6 Task 4).
  *
- *   dc status [--json]                device/link/logstore snapshot (see dc_status below)
+ *   dc status [--json]                device/link/logstore snapshot (see dc_status below); takes
+ *                                     ~1 s (measures link rates over a fixed window, I5 final review)
  *   dc log <error|warn|info|debug>    esp_log_level_set("*", ...) -- quiet the REPL's own logs
  *   dc baud <rate>                    reopen the console UART at a new baud (host must follow)
  *
@@ -23,6 +24,7 @@
 #include "esp_wifi.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"   /* vTaskDelay -- dc_status's fixed 1 s rate-measurement window (I5) */
 
 #include "build_config.h"   /* CFG_DC_VERSION */
 #include "console.h"
@@ -36,12 +38,12 @@
  * black-box log ever keeps day to day. */
 #define DC_LOGSTORE_MAX 16
 
-/* `stream stats` sampling (brief Step 6): the previous dc_status snapshot, so fused/status rates
- * can be reported as records/sec since the last call. s_prev_us == 0 means "no previous sample"
- * (matches linkhost_stats_age_ms's own 0 == never convention) -- the first `dc status` of a boot
- * always reports rate -1, not a spurious huge rate against an unset baseline. */
-static linkstats_t s_prev;
-static int64_t     s_prev_us;
+/* `dc status` link-rate sampling window (I5, final review): a fixed 1 s snapshot-delay-snapshot,
+ * same shape as cmd_selftest.c's stream_run -- replaces the old "since the PREVIOUS `dc status`
+ * call" s_prev/s_prev_us design, whose reported rate depended on how long ago the operator last
+ * ran the command (seconds, or the whole session if this was the first call) rather than on
+ * anything resembling "records per second right now". */
+#define DC_STATUS_WINDOW_MS 1000
 
 static void dc_err(bool json, const char *reason)
 {
@@ -53,10 +55,14 @@ static int dc_status(int argc, char **argv, bool json)
 {
     (void)argv;
     if (argc != 2) {
-        dc_err(json, "usage: dc status [--json]");
+        dc_err(json, "usage: dc status [--json] (~1 s: measures link rates over a fixed window)");
         return 1;
     }
 
+    linkstats_t before;
+    linkhost_stats_snapshot(&before);
+    int64_t t0 = linkhost_now_us();
+    vTaskDelay(pdMS_TO_TICKS(DC_STATUS_WINDOW_MS));
     int64_t now = linkhost_now_us();
 
     lt_status_t st;
@@ -67,22 +73,19 @@ static int dc_status(int argc, char **argv, bool json)
     int64_t status_age_ms = linkhost_stats_age_ms(ls.last_status_us, now);
     int64_t stream_age_ms = linkhost_stats_age_ms(ls.last_fused_us, now);
 
-    /* dt_us == 0 doubles as the "no previous sample yet" sentinel (s_prev_us == 0, the very
-     * first call): rate_x10 itself reports "no rate" for dt_us <= 0, so no separate first-call
-     * branch is needed here. A counter that went BACKWARDS since the last sample (e.g.
-     * linkstats_reset() on a link re-attach mid sampling window) forces BOTH rates to -1 rather
-     * than just the one whose counter reset -- a torn sample (one counter reset, the other not)
-     * is still not a trustworthy pair of rates. */
-    int64_t dt_us = (s_prev_us != 0) ? (now - s_prev_us) : 0;
-    bool reset = (ls.n_fused < s_prev.n_fused) || (ls.n_status < s_prev.n_status);
+    /* Rates over the MEASURED elapsed time (now - t0, close to but not exactly
+     * DC_STATUS_WINDOW_MS -- vTaskDelay only guarantees "at least"), not the nominal window. A
+     * counter that went BACKWARDS during the window (e.g. linkstats_reset() on a link re-attach)
+     * forces BOTH rates to -1 rather than just the one whose counter reset -- a torn sample (one
+     * counter reset, the other not) is still not a trustworthy pair of rates. */
+    int64_t dt_us = now - t0;
+    bool reset = (ls.n_fused < before.n_fused) || (ls.n_status < before.n_status);
     long long fused_rate_x10 = -1;
     long long status_rate_x10 = -1;
     if (!reset) {
-        fused_rate_x10  = rate_x10(ls.n_fused, s_prev.n_fused, dt_us);
-        status_rate_x10 = rate_x10(ls.n_status, s_prev.n_status, dt_us);
+        fused_rate_x10  = rate_x10(ls.n_fused, before.n_fused, dt_us);
+        status_rate_x10 = rate_x10(ls.n_status, before.n_status, dt_us);
     }
-    s_prev = ls;
-    s_prev_us = now;
 
     logstore_entry_t entries[DC_LOGSTORE_MAX];
     int nfiles = logstore_list(entries, DC_LOGSTORE_MAX);
@@ -159,7 +162,10 @@ static int dc_log(int argc, char **argv, bool json)
         return 1;
     }
     esp_log_level_set("*", l);
-    printf("OK %s\n", lvl);
+    /* M2 (final review): a plain "OK <lvl>" line is not valid JSON -- a --json caller parsing
+     * this reply as one object would fail on exactly the success case. */
+    if (json) printf("{\"level\":\"%s\"}\n", lvl);
+    else      printf("OK %s\n", lvl);
     return 0;
 }
 
@@ -183,8 +189,10 @@ static int dc_baud(int argc, char **argv, bool json)
 
     /* Print + flush BEFORE reopening the UART at the new rate, or this OK line is garbled: it
      * would still be draining out of the TX FIFO at the OLD baud while the host is already
-     * listening at the NEW one (task-4-brief resolution 4). */
-    printf("OK %ld\n", rate);
+     * listening at the NEW one (task-4-brief resolution 4). M2 (final review): --json gets its own
+     * object here for the same reason as dc_log's -- "OK <n>" is not parseable JSON. */
+    if (json) printf("{\"baud\":%ld}\n", rate);
+    else      printf("OK %ld\n", rate);
     fflush(stdout);
     uart_wait_tx_done((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, pdMS_TO_TICKS(100));
     uart_set_baudrate((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, (uint32_t)rate);
@@ -196,7 +204,7 @@ static int cmd_dc_main(int argc, char **argv)
     assert(argv != NULL);
     bool json = console_wants_json(&argc, argv);
     if (argc < 2) {
-        dc_err(json, "usage: dc status [--json] | dc log <level> | dc baud <rate>");
+        dc_err(json, "usage: dc status [--json] (~1s) | dc log <level> | dc baud <rate>");
         return 1;
     }
     if (strcmp(argv[1], "status") == 0) return dc_status(argc, argv, json);
@@ -208,5 +216,5 @@ static int cmd_dc_main(int argc, char **argv)
 
 void cmd_dc_register(void)
 {
-    console_register("dc", "dc status [--json] | dc log <level> | dc baud <rate>", cmd_dc_main);
+    console_register("dc", "dc status [--json] (~1s) | dc log <level> | dc baud <rate>", cmd_dc_main);
 }

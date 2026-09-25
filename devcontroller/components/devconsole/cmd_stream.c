@@ -2,7 +2,9 @@
  * 0xFF record stream + a rate-limited decoded-row tap, on the dev-kit's own USB console
  * (Plan 5.6 Task 6).
  *
- *   stream stats [--json]                  fused/event/status rates + gaps + ring high-water + tap drops
+ *   stream stats [secs] [--json]            fused/event/status rates measured over a secs-second
+ *                                            window (default 2, clamped 1..30; I5 final review) +
+ *                                            gaps + ring high-water + tap drops
  *   stream tap on|off [fused|event|status]  toggle a rate-limited (5 rows/s) decoded-JSON tap
  *
  * console_stream_tap (declared in console.h, called by main.c's stream_consumer for every popped
@@ -21,7 +23,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"    /* vTaskDelay -- stream_stats's windowed rate measurement (I5) */
 
 #include "console.h"
 #include "jsonw.h"
@@ -36,12 +42,32 @@ static void stream_err(bool json, const char *reason)
     else      printf("ERR %s\n", reason);
 }
 
-/* ---- `stream stats`: rates since the PREVIOUS `stream stats` call (ambiguity resolution 1 --
- * mirrors dc_status's own s_prev/s_prev_us sampling, kept in this file rather than shared with
- * cmd_dc.c since the two commands sample independent windows). s_prev_us == 0 means "no previous
- * sample yet" -- the first call of a boot always reports -1 rates, never a spurious huge one. ---- */
-static linkstats_t s_prev;
-static int64_t     s_prev_us;
+/* ---- `stream stats`: rates measured over a fresh secs-second window (I5, final review), same
+ * snapshot -> vTaskDelay -> snapshot -> rate_x10-over-measured-elapsed shape as cmd_selftest.c's
+ * stream_run -- replaces the earlier "since the PREVIOUS `stream stats` call" design, whose
+ * reported rate depended on how long ago the operator last ran the command rather than on a fixed,
+ * predictable window. ---- */
+#define STREAM_STATS_DEFAULT_S 2
+#define STREAM_STATS_MIN_S     1
+#define STREAM_STATS_MAX_S     30
+
+/* Parses an optional bare integer argv[argi] into *out (clamped to
+ * [STREAM_STATS_MIN_S,STREAM_STATS_MAX_S]); *out is left at its default (already set by the
+ * caller) if the argument is absent. Returns false (usage error) for a present-but-non-numeric
+ * token; a present, merely out-of-range value is CLAMPED, not rejected -- mirrors
+ * cmd_selftest.c's st_parse_n. */
+static bool stream_parse_secs(int argc, char **argv, int argi, int *out)
+{
+    assert(out != NULL);
+    if (argi >= argc) return true;              /* absent: keep default */
+    char *end = NULL;
+    long v = strtol(argv[argi], &end, 10);
+    if (end == argv[argi] || *end != '\0') return false;   /* not a number: usage error */
+    if (v < STREAM_STATS_MIN_S) v = STREAM_STATS_MIN_S;
+    if (v > STREAM_STATS_MAX_S) v = STREAM_STATS_MAX_S;
+    *out = (int)v;
+    return true;
+}
 
 /* ---- tap state, shared with `stream tap` / console_stream_tap below (module-global so
  * stream_stats can report tap_dropped) ----
@@ -56,39 +82,44 @@ static volatile uint32_t s_tap_dropped;
 
 static int stream_stats(int argc, char **argv, bool json)
 {
-    (void)argv;
-    if (argc != 2) {
-        stream_err(json, "usage: stream stats [--json]");
+    int secs = STREAM_STATS_DEFAULT_S;
+    if (argc > 3 || !stream_parse_secs(argc, argv, 2, &secs)) {
+        stream_err(json, "usage: stream stats [1..30] [--json]");
         return 1;
     }
 
-    int64_t now = linkhost_now_us();
+    linkstats_t before;
+    linkhost_stats_snapshot(&before);
+    int64_t t0 = linkhost_now_us();
+    vTaskDelay(pdMS_TO_TICKS((uint32_t)secs * 1000u));
     linkstats_t ls;
     linkhost_stats_snapshot(&ls);
+    int64_t t1 = linkhost_now_us();
 
-    /* Reset guard (resolution 1): ANY counter going backwards (e.g. linkhost_reset() on a link
-     * re-attach) forces every rate to -1 and re-arms the baseline at the current sample, rather
-     * than reporting a torn mix of real and stale-baseline rates. */
-    int64_t dt_us = (s_prev_us != 0) ? (now - s_prev_us) : 0;
-    bool reset = (ls.n_fused < s_prev.n_fused) || (ls.n_event < s_prev.n_event)
-              || (ls.n_status < s_prev.n_status);
+    /* Rates over the MEASURED elapsed time (t1 - t0), not the nominal `secs` -- vTaskDelay only
+     * guarantees "at least". Reset guard: ANY counter going backwards during the window (e.g.
+     * linkhost_reset() on a link re-attach) forces every rate to -1 rather than reporting a torn
+     * mix of real and stale-baseline rates. */
+    int64_t dt_us = t1 - t0;
+    bool reset = (ls.n_fused < before.n_fused) || (ls.n_event < before.n_event)
+              || (ls.n_status < before.n_status);
     long long fused_rate_x10  = -1;
     long long event_rate_x10  = -1;
     long long status_rate_x10 = -1;
     if (!reset) {
-        fused_rate_x10  = rate_x10(ls.n_fused, s_prev.n_fused, dt_us);
-        event_rate_x10  = rate_x10(ls.n_event, s_prev.n_event, dt_us);
-        status_rate_x10 = rate_x10(ls.n_status, s_prev.n_status, dt_us);
+        fused_rate_x10  = rate_x10(ls.n_fused, before.n_fused, dt_us);
+        event_rate_x10  = rate_x10(ls.n_event, before.n_event, dt_us);
+        status_rate_x10 = rate_x10(ls.n_status, before.n_status, dt_us);
     }
-    s_prev = ls;
-    s_prev_us = now;
 
     uint16_t ring_hw = linkhost_stream_ring_hw();
+    long long secs_x10 = (long long)((dt_us * 10 + 500000) / 1000000);   /* measured elapsed, x10 */
 
     if (json) {
         char buf[256];
         jsonw_t w;
         jsonw_begin(&w, buf, sizeof buf);
+        jsonw_int(&w, "secs_x10", secs_x10);
         jsonw_int(&w, "fused_rate_x10", fused_rate_x10);
         jsonw_int(&w, "event_rate_x10", event_rate_x10);
         jsonw_int(&w, "status_rate_x10", status_rate_x10);
@@ -106,6 +137,7 @@ static int stream_stats(int argc, char **argv, bool json)
         return 0;
     }
 
+    printf("secs: %lld.%lld\n", secs_x10 / 10, secs_x10 % 10);
     if (fused_rate_x10 < 0) printf("fused_rate: n/a\n");
     else printf("fused_rate: %lld.%lld/s\n", fused_rate_x10 / 10, fused_rate_x10 % 10);
     if (event_rate_x10 < 0) printf("event_rate: n/a\n");
@@ -121,7 +153,8 @@ static int stream_stats(int argc, char **argv, bool json)
     return 0;
 }
 
-/* ---- `stream tap on|off [fused|event|status]` (state declared above, next to s_prev) ---- */
+/* ---- `stream tap on|off [fused|event|status]` (tap state declared above, next to the tap-off
+ * helper's TAP_RATE_HZ token bucket) ---- */
 
 static const char *tap_type_name(uint8_t t)
 {
@@ -225,7 +258,7 @@ static int cmd_stream_main(int argc, char **argv)
     assert(argv != NULL);
     bool json = console_wants_json(&argc, argv);
     if (argc < 2) {
-        stream_err(json, "usage: stream stats [--json] | stream tap on|off [fused|event|status]");
+        stream_err(json, "usage: stream stats [1..30] [--json] | stream tap on|off [fused|event|status]");
         return 1;
     }
     if (strcmp(argv[1], "stats") == 0) return stream_stats(argc, argv, json);
@@ -236,6 +269,7 @@ static int cmd_stream_main(int argc, char **argv)
 
 void cmd_stream_register(void)
 {
-    console_register("stream", "stream stats [--json] | stream tap on|off [fused|event|status]",
+    console_register("stream",
+                     "stream stats [1..30] [--json] | stream tap on|off [fused|event|status]",
                      cmd_stream_main);
 }

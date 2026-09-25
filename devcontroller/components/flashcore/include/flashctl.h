@@ -37,17 +37,40 @@ typedef struct {
     char             ver[IMG_VER_LEN];
     char             hwid[IMG_HWID_LEN + 1];
     uint32_t         size;
+    /* M7 (final review): esp_timer_get_time() at the moment a stage completed (the LAST
+     * flashctl_end_staging(true) call) -- 0 while no stage has finished yet (a fresh claim, or one
+     * still mid-transfer). Internal bookkeeping for flashctl_try_begin_staging's stale-STAGING
+     * reclaim below; not part of the console/HTTP status surface (cmd_flash.c/webapi.c don't print
+     * it) but exposed here anyway since flashctl_get copies this whole struct as one unit. */
+    int64_t          staged_us;
 } flashctl_status_t;
+
+/* M7 (final review): how long an image may sit STAGED-but-never-PUSHED before
+ * flashctl_try_begin_staging treats its claim as abandoned and reclaims it for a fresh caller --
+ * 10 minutes. Without this, a `flash stage` (or a POST /api/flash whose client vanished between
+ * the stage and the push) would hold the single-flight guard forever: no `flash push`/`flash
+ * abort` ever arrives to release it, and every later staging attempt (either front end) fails
+ * with "busy" until the device reboots. */
+#define FLASHCTL_STAGE_TTL_US ((int64_t)10 * 60 * 1000000)
 
 /* Atomically claims the single-flight guard (IDLE -> STAGING, busy=true) -- a single-word state
  * claim under a critical section, so two front ends racing this call can never both win. Returns
- * false without changing anything if a staging or push is already under way. */
+ * false without changing anything if a staging or push is already under way -- UNLESS that
+ * staging claim already finished (flashctl_end_staging(true) was called, staged_us != 0) and has
+ * sat unpushed for at least FLASHCTL_STAGE_TTL_US (M7, final review): that claim is treated as
+ * abandoned and reclaimed for THIS caller instead (reset to a fresh STAGING claim, same critical
+ * section as the check -- no window for a third caller to interleave). A claim still mid-transfer
+ * (staged_us == 0: no flashctl_end_staging(true) yet) is never reclaimed this way regardless of
+ * age; that window is bounded separately (cmd_flash.c's own FLASH_STALL_MAX_MS, or the lifetime of
+ * the POST /api/flash HTTP request). */
 bool flashctl_try_begin_staging(void);
 
 /* Ends the staging phase claimed by a prior (successful) flashctl_try_begin_staging. ok=false
  * releases the guard back to FLASHCTL_IDLE (the attempt failed or was abandoned). ok=true leaves
  * the guard held (state stays FLASHCTL_STAGING, busy stays true) so the caller can push
- * immediately (flashctl_start_push, as POST /api/flash does) or later (a console `flash push`). */
+ * immediately (flashctl_start_push, as POST /api/flash does) or later (a console `flash push`) --
+ * and stamps staged_us (M7) so a caller that never comes back to push can eventually be reclaimed
+ * by flashctl_try_begin_staging above. */
 void flashctl_end_staging(bool ok);
 
 /* Resets pct/result/ver/hwid/size to their idle values (but leaves state/busy untouched) -- call

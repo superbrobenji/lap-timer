@@ -36,6 +36,15 @@ static const char *TAG = "linkhost";
 #define LINK_CMD_RETRIES    2
 #define LINK_ABSENT_TMO_MS  500                  /* one short attempt when no peer heartbeat is seen */
 #define LINK_REQ_MTX_MS     400                  /* bounded s_req_mtx take: never park the httpd task */
+#define LINK_FLASH_MTX_MS   5000                 /* bounded s_req_mtx take for linkhost_flash (I4,
+                                                   * final review): a `lt shell` bridge can hold
+                                                   * s_req_mtx for up to its own 10-minute cap, and a
+                                                   * web push must not be able to stall invisibly
+                                                   * behind it -- 5 s is generous next to every other
+                                                   * link round trip (LINK_CMD_TIMEOUT_MS is 2 s) but
+                                                   * still short next to a `lt shell` session, so a
+                                                   * push queued behind one fails fast (LINKHOST_E_BUSY)
+                                                   * instead of hanging until the shell exits. */
 #define LINK_PRESENT_US    (3 * 1000 * 1000)     /* peer_present window (<3 s, §Task 3 Step 7) */
 #define LINK_STATUS_STALE_MS 3000                /* §4.2: a STATUS older than this = not connected */
 #define OTA_READY_TMO_MS   3000
@@ -498,7 +507,15 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
     if (cn <= 0 || (size_t)cn >= sizeof(cmd)) return LINKHOST_E_PROTO;
 
     int result;
-    xSemaphoreTake(s_req_mtx, portMAX_DELAY);
+    /* Bounded take (I4, final review): a `lt shell` bridge can hold s_req_mtx for up to its own
+     * 10-minute cap (cmd_shell.c) -- the old portMAX_DELAY here let a web push queue silently
+     * behind it with no visible symptom until the shell exited. A miss reports LINKHOST_E_BUSY,
+     * same shape as linkhost_cmd_timed/linkhost_bridge_begin; flashctl.c's flash_task already
+     * publishes this return code as flashctl_status_t.result, and flash_result_str renders a
+     * negative result as "link %d" for both front-ends to display. */
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_FLASH_MTX_MS)) != pdTRUE) {
+        return LINKHOST_E_BUSY;
+    }
     s_rx_paused = true;
     rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
 

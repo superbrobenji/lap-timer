@@ -51,6 +51,10 @@
 # `flash push`/`flash status` share, host-tested by test_flash_fmt.c (same jsonw/rate.c split
 # every other command module here already follows).
 #
+# host/idcheck.c (final-review fix round B, M6): lt_id_valid, the pure session-id charset/length
+# validator `lt delete`/`lt open` (cmd_lt.c) run before putting an operator-typed id on the wire,
+# host-tested by test_idcheck.c (same jsonw/rate.c/flash_fmt.c split).
+#
 # PRIV_REQUIRES: `console` is the IDF esp_console component (esp_console.h, used only inside this
 # component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done AND `flash
 # stage`'s raw uart_read_bytes loop; esp_wifi is `dc status`'s esp_wifi_ap_get_sta_list; esp_system
@@ -63,7 +67,7 @@
 idf_component_register(
     SRCS "console.c" "cmd_dc.c" "cmd_flash.c" "cmd_lt.c" "cmd_stream.c" "cmd_selftest.c"
          "cmd_shell.c"
-         "host/jsonw.c" "host/rate.c" "host/selftest_eval.c" "host/flash_fmt.c"
+         "host/jsonw.c" "host/rate.c" "host/selftest_eval.c" "host/flash_fmt.c" "host/idcheck.c"
     INCLUDE_DIRS "include"
     REQUIRES linkhost
     PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system logstore flashcore)

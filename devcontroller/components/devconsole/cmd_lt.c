@@ -7,8 +7,10 @@
  *   lt config get [--json]              `config get` -> the live config JSON
  *   lt config set <json> [--json]       `config set <esc>` -- escaped via linkhost's wire_escape,
  *                                        the same one POST /api/config uses
- *   lt delete <id> [--json]             `delete <id>`
- *   lt open <id> <fmt> [--json]         `open <id> <fmt>` -> streamed (linkhost_download_cmd)
+ *   lt delete <id> [--json]             `delete <id>` (id validated by idcheck's lt_id_valid
+ *                                        before anything goes on the wire -- M6, final review)
+ *   lt open <id> <fmt> [--json]         `open <id> <fmt>` -> streamed (linkhost_download_cmd);
+ *                                        <id> validated the same way as `lt delete`'s
  *   lt shell                            raw byte bridge to the lap-timer's own console (Task 8);
  *                                        `~.` at a line start or a 10-min cap exits -- no --json form
  *   link trace on|off [--json]          toggles linkhost's verbose ESP_LOGI("trace: ...")
@@ -35,6 +37,7 @@
 #include "cmd_shell.h"     /* cmd_shell_run -- `lt shell`, Plan 5.6 Task 8 */
 #include "console.h"
 #include "hexfmt.h"        /* status-body-wrong-length fallback dump */
+#include "idcheck.h"       /* lt_id_valid -- M6 final review: validate before `delete`/`open` go on the wire */
 #include "jsonw.h"
 #include "linkhost.h"      /* linkhost_cmd_timed / linkhost_download_cmd, LT_CMD_.. / LT_FMT_.. , trace get/set */
 #include "wire_escape.h"   /* wire_escape -- the same wire escaping POST /api/config uses (linkhost, not webapi:
@@ -279,6 +282,9 @@ static int lt_config(int argc, char **argv, bool json)
 static int lt_delete(int argc, char **argv, bool json)
 {
     if (argc != 3) { lt_err(json, "usage: lt delete <id> [--json]"); return 1; }
+    /* M6 (final review): validate before anything goes on the wire -- an unvalidated id was passed
+     * straight through to the lap-timer's `delete <id>` console command. */
+    if (!lt_id_valid(argv[2])) { lt_err(json, "bad id"); return 1; }
 
     /* export_serial.c has no LT_CMD_DELETE constant (it register_cmd("delete", ...) directly) --
      * "delete" is the literal command name on the lap-timer side too. */
@@ -370,6 +376,8 @@ static bool lt_fmt_is_binary(const char *fmt)
 static int lt_open(int argc, char **argv, bool json)
 {
     if (argc != 4) { lt_err(json, "usage: lt open <id> <vbo|nmea|json|log|sum> [--json]"); return 1; }
+    /* M6 (final review): validate before anything goes on the wire, same as lt_delete above. */
+    if (!lt_id_valid(argv[2])) { lt_err(json, "bad id"); return 1; }
     if (!lt_fmt_valid(argv[3])) {
         lt_err(json, "bad format (want vbo|nmea|json|log|sum)");
         return 1;

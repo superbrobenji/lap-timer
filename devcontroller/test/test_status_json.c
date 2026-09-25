@@ -66,15 +66,17 @@ void test_never_seen_ages_and_logging_false(void)
 
 /* (c) worst case: every numeric field at its type's maximum, the longest ferr fragment api_status
  * can actually build (LINKHOST_E_PROTO == -4 -> ",\"flash_err\":\"link -4\"", 22 B -- one byte
- * longer than the alternate 0xffff-hex branch's 21 B), fw at its 7-character cap (fw[8] - NUL),
- * and both ages at INT64_MAX. logging=false is picked over true ("false" > "true" by one byte) so
- * this is genuinely the longest body status_json_format can ever produce. Must still fit the
- * production 352 B buffer with room to spare. */
+ * longer than the alternate 0xffff-hex branch's 21 B), fw at its 7-character cap (fw[8] - NUL) with
+ * EVERY character needing escaping (M5, final review: recomputed for the fw_escape pass -- 7
+ * double-quote bytes, the worst case for the "\"" -> 2-byte rule, doubling to 14 escaped bytes
+ * instead of 7 plain ones), and both ages at INT64_MAX. logging=false is picked over true ("false"
+ * > "true" by one byte) so this is genuinely the longest body status_json_format can ever produce.
+ * Must still fit the production 352 B buffer with room to spare. */
 void test_worst_case_length_fits_352(void)
 {
     lt_status_t st;
     make_status(&st, UINT8_MAX, UINT8_MAX, UINT16_MAX, UINT8_MAX, UINT16_MAX, UINT32_MAX,
-               UINT16_MAX, "9.9.9-9");
+               UINT16_MAX, "\"" "\"" "\"" "\"" "\"" "\"" "\"");   /* 7 double-quote bytes */
 
     char buf[352];
     int n = status_json_format(buf, sizeof buf, &st, ",\"flash_err\":\"link -4\"",
@@ -83,6 +85,27 @@ void test_worst_case_length_fits_352(void)
     TEST_ASSERT_GREATER_THAN(0, n);
     printf("test_worst_case_length_fits_352: n=%d (cap=%d)\n", n, (int)sizeof buf);
     TEST_ASSERT_LESS_THAN_INT(352, n);
+    TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+}
+
+/* (e) M5 (final review): fw containing both escapable characters ('"' and '\\') asserted against
+ * the EXACT escaped output, pinning fw_escape's byte-for-byte behavior (not just "fits in cap"
+ * like (c) above) -- also covers that a plain, non-escaped character ('a'/'b'/'c') passes through
+ * unchanged and that escaping does not disturb any other field. */
+void test_fw_with_quote_and_backslash_escaped_exact(void)
+{
+    lt_status_t st;
+    make_status(&st, 1, 2, 5, 77, 4123, 2048, 9, "a\"b\\c");
+
+    char buf[352];
+    int n = status_json_format(buf, sizeof buf, &st, ",\"flash_err\":\"0x0203\"", 250, 1500, true);
+
+    TEST_ASSERT_GREATER_THAN(0, n);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"connected\":true,\"proto\":1,\"state\":2,\"flags\":5,"
+        "\"batt_pct\":77,\"batt_mv\":4123,\"free_kb\":2048,\"sessions\":9,"
+        "\"fw\":\"a\\\"b\\\\c\",\"flash_err\":\"0x0203\","
+        "\"status_age_ms\":250,\"stream_age_ms\":1500,\"logging\":true}", buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
 }
 
@@ -114,6 +137,7 @@ int main(void)
     RUN_TEST(test_known_status_exact_string);
     RUN_TEST(test_never_seen_ages_and_logging_false);
     RUN_TEST(test_worst_case_length_fits_352);
+    RUN_TEST(test_fw_with_quote_and_backslash_escaped_exact);
     RUN_TEST(test_cap_too_small_never_overflows);
     return UNITY_END();
 }
