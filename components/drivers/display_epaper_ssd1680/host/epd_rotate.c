@@ -19,8 +19,14 @@ size_t epd_rotate_line(const uint8_t *fb, uint16_t fb_w, uint16_t fb_h, uint16_t
     size_t ram_bytes = (size_t)(p->ram_w / 8);
 
     CORE_ASSERT_RET(fb != NULL && out != NULL, EPD_ASSERT_CODE, 0);
-    /* fb_h >= native_w: every y = native_w-1-c the loop below reads must be a valid fb row. */
-    CORE_ASSERT_RET(pr < p->native_h && fb_h >= p->native_w, EPD_ASSERT_CODE, 0);
+    /* fb_w must be the buffer's real (padded-to-8) stride width, per fb_init's w % 8 == 0
+     * contract (core/ui/render.h) -- a caller passing the panel's un-padded logical width
+     * (not a multiple of 8) would compute the wrong stride below. */
+    CORE_ASSERT_RET(fb_w % 8 == 0, EPD_ASSERT_CODE, 0);
+    /* fb_w >= native_h: every panel row pr (0..native_h-1) becomes a logical x < fb_w, never
+     * touching the buffer's padding columns. fb_h >= native_w: every y = native_w-1-c the loop
+     * below reads must be a valid fb row. */
+    CORE_ASSERT_RET(pr < p->native_h && fb_w >= p->native_h && fb_h >= p->native_w, EPD_ASSERT_CODE, 0);
     CORE_ASSERT_RET(cap >= ram_bytes, EPD_ASSERT_CODE, 0);
 
     uint16_t stride = (uint16_t)(fb_w / 8);
@@ -46,12 +52,20 @@ size_t epd_rotate_line(const uint8_t *fb, uint16_t fb_w, uint16_t fb_h, uint16_t
 bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t fb_w,
                            uint16_t fb_h, epd_window_t *out)
 {
+    const epd_panel_t *p = epd_panel();
+
     CORE_ASSERT_RET(out != NULL, EPD_ASSERT_CODE, false);
+    /* fb_w must be the buffer's real (padded-to-8) stride width -- see epd_rotate_line. A
+     * buffer-shape violation is an assertion, unlike the rect-shape checks below. */
+    CORE_ASSERT_RET(fb_w % 8 == 0, EPD_ASSERT_CODE, false);
 
     /* Routine rejection of a bad/empty caller rect, not an assertion (same reasoning as
      * render.c's per-pixel clipping: a dirty rect landing outside the frame is a normal call,
-     * not a genuine anomaly). */
-    if (w == 0 || h == 0 || x + w > fb_w || y + h > fb_h) {
+     * not a genuine anomaly). x + w is bounded by the panel's VISIBLE width (logical_w, ==
+     * native_h), not by fb_w: fb_w may be padded past the panel's real column count (e.g. 256
+     * vs. the 2.13" panel's 250), so a rect that fits the padded buffer but spills past column
+     * logical_w must still be rejected -- it would never actually land on the panel. */
+    if (w == 0 || h == 0 || x + w > p->logical_w || y + h > fb_h) {
         return false;
     }
 

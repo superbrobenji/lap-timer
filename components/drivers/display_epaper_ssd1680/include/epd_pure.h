@@ -34,12 +34,17 @@ const epd_panel_t *epd_panel(void);
  * framebuffer `fb` (fb_w x fb_h pixels, 1bpp row-major, MSB = leftmost, stride = fb_w/8
  * bytes/row -- core/ui/render.h's convention, bit 0 = black): panel column c (0..native_w-1) <-
  * logical pixel (x = pr, y = native_w-1-c) with rotation 0, i.e. the landscape image rotated 90
- * degrees clockwise into the portrait RAM. Writes ram_w/8 bytes MSB-first into `out` (columns
- * beyond native_w are padding, written as white = 1). Bit sense: the SSD1680 RAM is 1 = white --
- * the same sense as the framebuffer's 1 = white bit -- so the framebuffer bit is copied through
- * unchanged when `invert` is false, and flipped when `invert` is true. Returns bytes written
- * (ram_w/8, 16 today), or 0 if an assertion fails (fb/out NULL, pr out of range, cap too small,
- * or fb_h too short to hold every row this transposition reads). */
+ * degrees clockwise into the portrait RAM. fb_w is the BUFFER width, not the panel's visible
+ * width: fb_init (core/ui/render.h) requires w % 8 == 0, so fb_w is rounded up to the next
+ * multiple of 8 at/above the panel's logical width (e.g. 256 for the 2.13" panel's 250-column
+ * logical_w) -- only panel rows 0..native_h-1 are ever requested as `pr`, so the logical x this
+ * produces is always < fb_w, never touching the padding columns. Writes ram_w/8 bytes MSB-first
+ * into `out` (columns beyond native_w are padding, written as white = 1). Bit sense: the SSD1680
+ * RAM is 1 = white -- the same sense as the framebuffer's 1 = white bit -- so the framebuffer bit
+ * is copied through unchanged when `invert` is false, and flipped when `invert` is true. Returns
+ * bytes written (ram_w/8, 16 today), or 0 if an assertion fails (fb/out NULL, fb_w not a multiple
+ * of 8, fb_w or fb_h too small to hold every (row, column) this transposition reads, pr out of
+ * range, or cap too small). */
 size_t epd_rotate_line(const uint8_t *fb, uint16_t fb_w, uint16_t fb_h, uint16_t pr, bool invert,
                         uint8_t *out, size_t cap);
 
@@ -52,10 +57,14 @@ typedef struct {
 /* Rounds a logical (landscape) dirty rect {x,y,w,h} within an fb_w x fb_h framebuffer outward to
  * whole 8-px columns of panel RAM. After the 90-degree rotation the panel's RAM columns are the
  * logical y, so the rect's y range must snap outward to multiples of 8 (whole RAM bytes) while
- * the logical x range maps one-to-one to panel rows. Fills `*out` and returns true; leaves `*out`
- * untouched and returns false if the rect is empty (w == 0 || h == 0) or out of range
- * (x + w > fb_w || y + h > fb_h) -- routine rejection of a bad caller-supplied rect, not an
- * assertion. */
+ * the logical x range maps one-to-one to panel rows. fb_w is the BUFFER width (see
+ * epd_rotate_line above), rounded up to a multiple of 8 and possibly wider than the panel's
+ * VISIBLE width (epd_panel()->logical_w, == native_h) -- x + w is bounded by that visible width,
+ * not by fb_w, so a rect that fits the padded buffer but spills past the panel's real column
+ * count is still rejected. Fills `*out` and returns true; leaves `*out` untouched and returns
+ * false if the rect is empty (w == 0 || h == 0) or out of range (x + w > logical_w ||
+ * y + h > fb_h) -- routine rejection of a bad caller-supplied rect, not an assertion (fb_w not a
+ * multiple of 8 is the assertion; that's a buffer-shape bug, not a bad rect). */
 bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t fb_w,
                            uint16_t fb_h, epd_window_t *out);
 
