@@ -560,17 +560,22 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
 /* ---- one-shot screens (spec §20.6) ---- */
 
 /* Horizontal centering helper shared by the one-shot screens: the left x that centers `s` set in
- * font `f` within the framebuffer's width. Pure integer arithmetic; a string wider than the frame
- * (should not happen for the short one-shot captions used here) clamps to x=0 rather than going
- * negative -- fb_text clips off-frame draws safely either way, but a negative x would left-crop
- * the string instead of just running off the right edge. */
+ * font `f` within the panel's true visible width. Centers on CANVAS_VISIBLE_W (core/ui/canvas.h),
+ * not fb->w: fb->w is the padded, byte-aligned buffer width (256 on the 213 canvas), 6px wider
+ * than the panel's true visible area (250) -- centering on fb->w biases every one-shot caption
+ * (VENUE/SAFE/LOWBATT/OTA/OTAFAIL/CALIBRATE/NEWTRACK) 3px right of the panel's actual center
+ * (Plan 7 T3 fix 2). On the 296 canvas CANVAS_VISIBLE_W == fb->w, so this is unchanged there.
+ * Pure integer arithmetic; a string wider than the frame (should not happen for the short
+ * one-shot captions used here) clamps to x=0 rather than going negative -- fb_text clips
+ * off-frame draws safely either way, but a negative x would left-crop the string instead of just
+ * running off the right edge. */
 static int center_x(const fb_t *fb, const font_t *f, const char *s)
 {
     CORE_ASSERT_RET(fb != NULL, UI_ASSERT_CODE, 0);
     CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, 0);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, 0);
     int w = (int)strlen(s) * (int)f->w;
-    int x = ((int)fb->w - w) / 2;
+    int x = (CANVAS_VISIBLE_W - w) / 2;
     return x < 0 ? 0 : x;
 }
 
