@@ -23,10 +23,15 @@ size_t epd_rotate_line(const uint8_t *fb, uint16_t fb_w, uint16_t fb_h, uint16_t
      * contract (core/ui/render.h) -- a caller passing the panel's un-padded logical width
      * (not a multiple of 8) would compute the wrong stride below. */
     CORE_ASSERT_RET(fb_w % 8 == 0, EPD_ASSERT_CODE, 0);
-    /* fb_w >= native_h: every panel row pr (0..native_h-1) becomes a logical x < fb_w, never
-     * touching the buffer's padding columns. fb_h >= native_w: every y = native_w-1-c the loop
-     * below reads must be a valid fb row. */
-    CORE_ASSERT_RET(pr < p->native_h && fb_w >= p->native_h && fb_h >= p->native_w, EPD_ASSERT_CODE, 0);
+    /* One CORE_ASSERT_RET per invariant (not combined with &&): the fault-report path only
+     * records code+file+line, so a combined condition would hide which invariant actually
+     * tripped from the §17.7 error ring. */
+    CORE_ASSERT_RET(pr < p->native_h, EPD_ASSERT_CODE, 0);
+    /* Every panel row pr (0..native_h-1) becomes a logical x < fb_w, never touching the
+     * buffer's padding columns. */
+    CORE_ASSERT_RET(fb_w >= p->native_h, EPD_ASSERT_CODE, 0);
+    /* Every y = native_w-1-c the loop below reads must be a valid fb row. */
+    CORE_ASSERT_RET(fb_h >= p->native_w, EPD_ASSERT_CODE, 0);
     CORE_ASSERT_RET(cap >= ram_bytes, EPD_ASSERT_CODE, 0);
 
     uint16_t stride = (uint16_t)(fb_w / 8);

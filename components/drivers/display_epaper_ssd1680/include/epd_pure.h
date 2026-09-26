@@ -61,10 +61,11 @@ typedef struct {
  * epd_rotate_line above), rounded up to a multiple of 8 and possibly wider than the panel's
  * VISIBLE width (epd_panel()->logical_w, == native_h) -- x + w is bounded by that visible width,
  * not by fb_w, so a rect that fits the padded buffer but spills past the panel's real column
- * count is still rejected. Fills `*out` and returns true; leaves `*out` untouched and returns
- * false if the rect is empty (w == 0 || h == 0) or out of range (x + w > logical_w ||
- * y + h > fb_h) -- routine rejection of a bad caller-supplied rect, not an assertion (fb_w not a
- * multiple of 8 is the assertion; that's a buffer-shape bug, not a bad rect). */
+ * count is still rejected. Fills `*out` and returns true on success. On ANY rejection -- the rect
+ * is empty (w == 0 || h == 0), out of the panel's visible range (x + w > logical_w ||
+ * y + h > fb_h), `fb_w` is not a multiple of 8 (a buffer-shape bug, checked as an assertion, not
+ * a rect-shape one), or `out` is NULL -- `*out` is left completely untouched and the function
+ * returns false; the caller must not read `*out` after a false return. */
 bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t fb_w,
                            uint16_t fb_h, epd_window_t *out);
 
