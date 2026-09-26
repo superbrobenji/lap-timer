@@ -5,6 +5,11 @@
 #define APP_LT_ERR_H
 
 enum {
+    /* display (§17.7, §20.1/§20.3): the SSD1680 driver + refresh ladder (Plan 7 Task 5). */
+    E_DISP_BUSY_TIMEOUT = 0x0301,
+    E_DISP_DEAD         = 0x0302,
+    E_DISP_TEMP         = 0x0303,
+
     /* storage (§17.7); the full code table lands with the 3.5 console. */
     E_STO_WRITE       = 0x0401,
     E_STO_MOUNT       = 0x0402,

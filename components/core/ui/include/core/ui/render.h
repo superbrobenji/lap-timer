@@ -11,8 +11,10 @@
  * `bits` buffer, which is what makes the PBM goldens in test/snapshots/ deterministic and portable
  * across clang and gcc.
  *
- * Convention: `0 = black` in the framebuffer (e-paper convention; inverted at blit time by the
- * display driver in a later plan). Every primitive that takes a `black`/`pct` "ink" argument
+ * Convention: `0 = black` in the framebuffer (e-paper convention: this matches the SSD1680 panel's
+ * own RAM polarity bit-for-bit, so the display driver (display_epaper_ssd1680, Plan 7 Task 5)
+ * blits every row through unchanged -- no inversion happens). Every primitive that takes a
+ * `black`/`pct` "ink" argument
  * treats a nonzero value as "set to ink" (black, bit 0) and zero as "set to background" (white,
  * bit 1) — the opposite sense of the raw bit value. This is the opposite of fonts.h/icons.h,
  * where bit=1 in a glyph/icon bitmap means ink; render.c performs that translation when it blits
