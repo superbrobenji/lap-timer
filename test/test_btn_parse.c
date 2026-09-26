@@ -101,6 +101,18 @@ static void test_hold_garbage_leading_sign_returns_minus2(void)
     TEST_ASSERT_EQUAL_INT(-2, btn_parse("mode", "-5", &mask, &hold));
 }
 
+static void test_hold_garbage_leading_plus_returns_minus2(void)
+{
+    uint8_t mask = 0; uint32_t hold = 0;
+    TEST_ASSERT_EQUAL_INT(-2, btn_parse("mode", "+100", &mask, &hold));
+}
+
+static void test_hold_garbage_leading_whitespace_returns_minus2(void)
+{
+    uint8_t mask = 0; uint32_t hold = 0;
+    TEST_ASSERT_EQUAL_INT(-2, btn_parse("mode", " 100", &mask, &hold));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -117,5 +129,7 @@ int main(void)
     RUN_TEST(test_hold_garbage_partial_consumption_returns_minus2);
     RUN_TEST(test_hold_garbage_empty_string_returns_minus2);
     RUN_TEST(test_hold_garbage_leading_sign_returns_minus2);
+    RUN_TEST(test_hold_garbage_leading_plus_returns_minus2);
+    RUN_TEST(test_hold_garbage_leading_whitespace_returns_minus2);
     return UNITY_END();
 }

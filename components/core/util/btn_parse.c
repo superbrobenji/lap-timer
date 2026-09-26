@@ -22,7 +22,7 @@ int btn_parse(const char *name, const char *ms, uint8_t *mask, uint32_t *hold_ms
 
     uint32_t h = 100;
     if (ms != NULL) {
-        if (ms[0] == '\0' || ms[0] == '-') return -2;   /* empty, or a sign strtoul would wrap around */
+        if (ms[0] < '0' || ms[0] > '9') return -2;   /* must start with a bare digit: rejects empty, '+'/'-', and whitespace (strtoul accepts all three) */
         char *end = NULL;
         unsigned long v = strtoul(ms, &end, 10);
         if (end == NULL || *end != '\0') return -2;      /* full-consumption check: trailing garbage rejected */

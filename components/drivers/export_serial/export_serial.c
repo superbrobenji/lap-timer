@@ -802,6 +802,9 @@ static int dbg_btn(int argc, char **argv)
     }
 
     QueueHandle_t q = ui_buttons_queue();
+    if (q == NULL) {
+        printf("dbg btn: ui not started yet\n");
+    }
     CORE_ASSERT_RET(q != NULL, EXP_SERIAL_ASSERT_CODE, 1);   /* ui_start() must run before bench injection works */
 
     int64_t now = esp_timer_get_time();
