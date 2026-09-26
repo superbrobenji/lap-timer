@@ -29,6 +29,7 @@
 
 #include "core/cfg.h"
 #include "core/event.h"
+#include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H: compile-time by PANEL (Plan 7 T3) */
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 
 #include "app/lt_assert.h"
@@ -73,7 +74,11 @@ static const char *TAG = "ui";
 #define UI_BTN_DRAIN_MAX 32
 #define UI_EVT_DRAIN_MAX 64
 
-/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ---- */
+/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ----
+ * FB_W/FB_H/FB_STRIDE size the static buffer only, kept at the 296x128 (ws29v2) worst case so one
+ * build of this file holds either panel's canvas; the actual render dimensions -- CANVAS_W/CANVAS_H
+ * (core/ui/canvas.h), 256x122 on a ws213v4 build -- are what fb_init/render_now use below (Plan 7
+ * T3: compile-time canvas by PANEL). */
 #define FB_W      296
 #define FB_H      128
 #define FB_STRIDE (FB_W / 8)
@@ -582,9 +587,9 @@ static void render_now(void)
     LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);              /* riding renderer dispatches on it */
     screens_render(&s_fb, &s_model);
     /* The pure renderer clips every primitive to the fb, so the reported dirty box must lie within
-     * the framebuffer -- a box past FB_W/FB_H would mean a renderer clipping bug. */
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= FB_W, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= FB_H, UI_APP_ASSERT_CODE);
+     * the framebuffer -- a box past CANVAS_W/CANVAS_H would mean a renderer clipping bug. */
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= CANVAS_W, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= CANVAS_H, UI_APP_ASSERT_CODE);
     ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u", (unsigned)s_model.screen,
              (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
              (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1);
@@ -664,7 +669,7 @@ static void ui_task(void *arg)
     s_model.mode = s_mode;
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);   /* valid engine mode from cfg */
 
-    fb_init(&s_fb, s_fb_bits, FB_W, FB_H);
+    fb_init(&s_fb, s_fb_bits, CANVAS_W, CANVAS_H);
     LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);   /* framebuffer is armed for render_now */
 
     /* First screen: SAFE MODE one-shot in safe mode (§17.5, boot self-test skipped), else BOOT. */

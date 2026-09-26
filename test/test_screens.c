@@ -11,6 +11,7 @@
  */
 #include "unity.h"
 
+#include "core/ui/canvas.h"
 #include "core/ui/model.h"
 #include "pbm.h"
 
@@ -21,18 +22,20 @@
 #endif
 /* Snapshot paths must be absolute: CTest's working directory for a test is the build tree, not
  * this source directory, so a bare "test/snapshots/..." would resolve against the wrong cwd.
- * TEST_DIR is injected by test/CMakeLists.txt as CMAKE_CURRENT_SOURCE_DIR. */
-#define SNAP(name) TEST_DIR "/snapshots/" name
+ * TEST_DIR is injected by test/CMakeLists.txt as CMAKE_CURRENT_SOURCE_DIR. SNAP_SUBDIR (Plan 7 T3)
+ * lets a second executable (test_screens_213, -DCANVAS_FORCE_213=1) built from this same source
+ * point at its own golden set (test/snapshots/213/) without duplicating any test case. */
+#ifndef SNAP_SUBDIR
+#define SNAP_SUBDIR ""
+#endif
+#define SNAP(name) TEST_DIR "/snapshots/" SNAP_SUBDIR name
 
-#define FB_W 296
-#define FB_H 128
-
-static uint8_t s_bits[(FB_W / 8) * FB_H];
+static uint8_t s_bits[(CANVAS_W / 8) * CANVAS_H];
 static fb_t    s_fb;
 
 void setUp(void)
 {
-    fb_init(&s_fb, s_bits, FB_W, FB_H);
+    fb_init(&s_fb, s_bits, CANVAS_W, CANVAS_H);
 }
 void tearDown(void) {}
 
@@ -57,6 +60,7 @@ static void test_lap_p0_mid(void)
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_mid.pbm"), &s_fb));
 }
 
@@ -76,6 +80,7 @@ static void test_lap_p0_empty(void)
     m.batt_pct = 100;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_empty.pbm"), &s_fb));
 }
 
@@ -98,6 +103,7 @@ static void test_lap_p0_newbest_fault(void)
     m.batt_pct = 54;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_newbest_fault.pbm"), &s_fb));
 }
 
@@ -121,6 +127,7 @@ static void test_lap_p1_sectors(void)
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_sectors.pbm"), &s_fb));
 }
 
@@ -144,6 +151,7 @@ static void test_lap_p2_stats(void)
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats.pbm"), &s_fb));
 }
 
@@ -170,6 +178,7 @@ static void test_drag_p0_benches(void)
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_benches.pbm"), &s_fb));
 }
 
@@ -201,6 +210,7 @@ static void test_drag_p1_gates(void)
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
 }
 
@@ -229,6 +239,7 @@ static void test_drag_p2_best(void)
     m.batt_pct = 87;
 
     screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_best.pbm"), &s_fb));
 }
 
@@ -250,6 +261,7 @@ static void test_oneshot_boot(void)
     m.boot_n_lines = 4;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot.pbm"), &s_fb));
 }
 
@@ -263,6 +275,7 @@ static void test_oneshot_venue(void)
     strcpy(m.venue_name, "KILLARNEY");
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("venue.pbm"), &s_fb));
 }
 
@@ -273,6 +286,7 @@ static void test_oneshot_safe(void)
     m.oneshot = ONESHOT_SAFE;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("safe.pbm"), &s_fb));
 }
 
@@ -284,6 +298,7 @@ static void test_oneshot_lowbatt(void)
     m.batt_pct = 14;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lowbatt.pbm"), &s_fb));
 }
 
@@ -295,6 +310,7 @@ static void test_oneshot_ota(void)
     m.ota_pct = 63;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota.pbm"), &s_fb));
 }
 
@@ -305,6 +321,7 @@ static void test_oneshot_ota_fail(void)
     m.oneshot = ONESHOT_OTA_FAIL;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("otafail.pbm"), &s_fb));
 }
 
@@ -315,6 +332,7 @@ static void test_oneshot_calibrate(void)
     m.oneshot = ONESHOT_CALIBRATE;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("calibrate.pbm"), &s_fb));
 }
 
@@ -325,6 +343,7 @@ static void test_oneshot_newtrack(void)
     m.oneshot = ONESHOT_NEWTRACK;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack.pbm"), &s_fb));
 }
 
@@ -351,6 +370,7 @@ static void test_menu_top(void)
     m.menu_top = 0;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_top.pbm"), &s_fb));
 }
 
@@ -377,6 +397,7 @@ static void test_menu_scrolled(void)
     m.menu_top = 6;
 
     screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_scrolled.pbm"), &s_fb));
 }
 

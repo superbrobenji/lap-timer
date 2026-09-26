@@ -10,6 +10,7 @@
  */
 #include "unity.h"
 
+#include "core/ui/canvas.h"
 #include "core/ui/fonts.h"
 #include "core/ui/icons.h"
 #include "core/ui/render.h"
@@ -25,8 +26,12 @@
  * TEST_DIR is injected by test/CMakeLists.txt as CMAKE_CURRENT_SOURCE_DIR. */
 #define SNAP(name) TEST_DIR "/snapshots/" name
 
-#define FB_W 296
-#define FB_H 128
+/* This suite has no -DCANVAS_FORCE_213 variant (unlike test_screens.c/test_screens_213): it always
+ * builds/runs at core/ui/canvas.h's default 296x128 (Plan 7 T3 is a pure refactor here -- FB_W/FB_H
+ * become CANVAS_W/CANVAS_H with no behaviour change, so every goldens in this file stays
+ * byte-identical). */
+#define FB_W CANVAS_W
+#define FB_H CANVAS_H
 
 static uint8_t   s_bits[(FB_W / 8) * FB_H];
 static fb_t      s_fb;

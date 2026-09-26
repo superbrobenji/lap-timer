@@ -84,6 +84,30 @@ target_compile_definitions(test_ui PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}
 add_core_test(test_screens pbm.c)
 target_compile_definitions(test_screens PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
+# test_screens_213: the same test_screens.c source compiled for the ws213v4 canvas
+# (-DCANVAS_FORCE_213=1, core/ui/canvas.h), comparing against its own golden set under
+# test/snapshots/213/ (Plan 7 T3: compile-time canvas + a second golden set). Not routed through
+# add_core_test (which would add its own ${name}.c) since this target's source is test_screens.c,
+# not test_screens_213.c.
+#
+# screens_moto.c is also added directly here (in addition to linking the shared `core` library):
+# `core` is a single static library built ONCE for every host test (add_library(core STATIC
+# ${CORE_SRCS}) above), so its screens_moto.c.o is compiled without CANVAS_FORCE_213 and would
+# render the 296-canvas layout regardless of the fb size this test actually inits -- CANVAS_213 is
+# a compile-time branch, not a runtime one, so the object needs recompiling per canvas, not just
+# re-running against a bigger fb. Compiling it again here, ahead of `core` on the link line, gives
+# this target its own CANVAS_FORCE_213=1 screens_moto.c.o; the linker resolves
+# screens_moto_render/screens_render/fault_strip from that object and never needs (so never pulls
+# in) core's own copy of the same archive member, the same "object already on the link line beats
+# the archive's member" resolution this suite already relies on for assert_support.c overriding
+# core.c's weak core_assert_report default (add_core_test's ARGN, used by test_smoke and friends
+# above).
+add_executable(test_screens_213 test_screens.c pbm.c ${CORE_DIR}/ui/screens_moto.c)
+target_compile_definitions(test_screens_213 PRIVATE CANVAS_FORCE_213=1 TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}" SNAP_SUBDIR="213/")
+target_compile_options(test_screens_213 PRIVATE ${LAPTIMER_STRICT_FLAGS})
+target_link_libraries(test_screens_213 PRIVATE core unity m Threads::Threads)
+add_test(NAME test_screens_213 COMMAND test_screens_213)
+
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
 
