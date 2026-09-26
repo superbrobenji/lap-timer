@@ -33,12 +33,14 @@
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 
 #include "app/lt_assert.h"
+#include "app/lt_err.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 #include "app/ui.h"
 
 #include "hal/board.h"
+#include "hal/display.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -701,6 +703,17 @@ static void ui_task(void *arg)
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);        /* first screen valid */
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);  /* one-shot selector valid */
     render_now();
+
+    /* Display bring-up (Plan 7 Task 5): blit the just-rendered BOOT screen BEFORE disp_init so
+     * its first full refresh shows it on the panel. */
+    disp_blit(s_fb_bits);
+    const disp_caps_t *disp_caps;
+    int                disp_rc = disp_init(&disp_caps);
+    if (disp_rc != 0) {
+        errlog_add(E_DISP_DEAD, (uint32_t)(-disp_rc));
+        sys_flags_set(SYS_DISP_DEAD);
+    }
+
     esp_task_wdt_reset();
 
     QueueHandle_t btn_q = ui_buttons_queue();
