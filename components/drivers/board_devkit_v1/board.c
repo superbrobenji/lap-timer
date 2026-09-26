@@ -70,13 +70,18 @@ static bool                      s_inited;
 static QueueHandle_t s_btn_q;
 static volatile int64_t s_btn_last_us;
 
+/* Bench injection only (board_buttons_override, hal/board.h): bits forced on regardless of the
+ * real GPIO level, OR-ed into read_button_mask()'s result below. Written from the console task,
+ * read from the ui task's poll loop -- volatile, no lock needed for an 8-bit OR/AND-mask flag. */
+static volatile uint8_t s_btn_override;
+
 static uint8_t read_button_mask(void)
 {
     uint8_t m = 0;
     if (gpio_get_level(PIN_BTN_MODE)) m |= 0x1;
     if (gpio_get_level(PIN_BTN_UP))   m |= 0x2;
     if (gpio_get_level(PIN_BTN_DOWN)) m |= 0x4;
-    return m;
+    return (uint8_t)(m | s_btn_override);
 }
 
 static void IRAM_ATTR btn_isr(void *arg)
@@ -260,6 +265,12 @@ int board_buttons_read(uint8_t *mask)
     if (!mask) return -EINVAL;
     *mask = read_button_mask();
     return 0;
+}
+
+void board_buttons_override(uint8_t mask, bool on)
+{
+    if (on) s_btn_override = (uint8_t)(s_btn_override | mask);
+    else    s_btn_override = (uint8_t)(s_btn_override & (uint8_t)~mask);
 }
 
 int board_buttons_enable_isr(QueueHandle_t evt_q)

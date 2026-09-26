@@ -28,6 +28,13 @@ int  board_battery_read_mv(uint16_t *mv);          /* 64-sample average, calibra
 int  board_charger_present(bool *out);             /* CHRG pin, or false if not wired */
 int  board_buttons_read(uint8_t *mask);            /* bit0 MODE, bit1 UP, bit2 DOWN */
 
+/* Bench injection only; see dbg btn (export_serial.c, Plan 7 T8). While `on` is true, `mask`'s
+ * bits are OR-ed into every board_buttons_read()/read_button_mask() result -- i.e. through the
+ * SAME path the real GPIO level and the ISR-fed debounce state machine use -- so a console
+ * command can simulate a physical press without real hardware wired. `on` = false clears those
+ * bits again. Never called from production code paths. */
+void board_buttons_override(uint8_t mask, bool on);
+
 #ifdef ESP_PLATFORM   /* QueueHandle_t needs FreeRTOS headers, absent from the host test build */
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
