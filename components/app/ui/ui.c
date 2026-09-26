@@ -29,6 +29,7 @@
 
 #include "core/cfg.h"
 #include "core/event.h"
+#include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H/MENU_VISIBLE_ROWS: compile-time by PANEL (Plan 7 T3) */
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 
 #include "app/lt_assert.h"
@@ -73,7 +74,11 @@ static const char *TAG = "ui";
 #define UI_BTN_DRAIN_MAX 32
 #define UI_EVT_DRAIN_MAX 64
 
-/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ---- */
+/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ----
+ * FB_W/FB_H/FB_STRIDE size the static buffer only, kept at the 296x128 (ws29v2) worst case so one
+ * build of this file holds either panel's canvas; the actual render dimensions -- CANVAS_W/CANVAS_H
+ * (core/ui/canvas.h), 256x122 on a ws213v4 build -- are what fb_init/render_now use below (Plan 7
+ * T3: compile-time canvas by PANEL). */
 #define FB_W      296
 #define FB_H      128
 #define FB_STRIDE (FB_W / 8)
@@ -90,7 +95,6 @@ static const char *TAG = "ui";
 /* ---- menu (spec §20.7) ---- */
 #define MENU_LOCK_SPEED_KMH 10    /* menu entry gated below this (§20.7 / Appendix A) */
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
-#define UI_MENU_VISIBLE_ROWS 4    /* mirrors render_menu()'s MENU_VISIBLE_ROWS in core/ui */
 #define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
 
 /* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2 s) ---- */
@@ -205,8 +209,8 @@ static void menu_scroll_to_sel(void)
     LT_ASSERT_VOID(s_model.menu_sel < s_model.menu_n, UI_APP_ASSERT_CODE);   /* selection is a real row */
     if (s_model.menu_sel < s_model.menu_top) {
         s_model.menu_top = s_model.menu_sel;
-    } else if (s_model.menu_sel >= (uint8_t)(s_model.menu_top + UI_MENU_VISIBLE_ROWS)) {
-        s_model.menu_top = (uint8_t)(s_model.menu_sel - UI_MENU_VISIBLE_ROWS + 1);
+    } else if (s_model.menu_sel >= (uint8_t)(s_model.menu_top + MENU_VISIBLE_ROWS)) {
+        s_model.menu_top = (uint8_t)(s_model.menu_sel - MENU_VISIBLE_ROWS + 1);
     }
     LT_ASSERT_VOID(s_model.menu_top <= s_model.menu_sel, UI_APP_ASSERT_CODE);   /* selection now visible */
 }
@@ -582,9 +586,22 @@ static void render_now(void)
     LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);              /* riding renderer dispatches on it */
     screens_render(&s_fb, &s_model);
     /* The pure renderer clips every primitive to the fb, so the reported dirty box must lie within
-     * the framebuffer -- a box past FB_W/FB_H would mean a renderer clipping bug. */
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= FB_W, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= FB_H, UI_APP_ASSERT_CODE);
+     * the framebuffer -- a box past CANVAS_W/CANVAS_H would mean a renderer clipping bug.
+     *
+     * Deliberately CANVAS_W here, not CANVAS_VISIBLE_W (Plan 7 T3 fix 1, ruling T3-R1 asked for the
+     * latter): fb_clear() (render.c), called at the top of every screens_render() path, always sets
+     * dirty.x1 = fb->w -- clearing legitimately touches every addressable byte, including the
+     * padding columns between CANVAS_VISIBLE_W and CANVAS_W on the 213 canvas -- so dirty.x1 is
+     * CANVAS_W (256) after literally every render, never less. Binding this check to
+     * CANVAS_VISIBLE_W (250) would make it fire on every single refresh on a ws213v4 build, not
+     * just a genuine clipping bug -- confirmed by hitting exactly that failure in test_screens_213
+     * once test/test_screens.c's dirty-box assertions were rebound the same way (see that file's
+     * fb_max_ink_col() comment for the content-based check that actually verifies "nothing draws at
+     * x >= CANVAS_VISIBLE_W", which this cheap structural bounds check on the hot render path is
+     * not the right place for). CANVAS_W remains the correct bound for "did the renderer clip
+     * itself to the addressable buffer". */
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= CANVAS_W, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= CANVAS_H, UI_APP_ASSERT_CODE);
     ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u", (unsigned)s_model.screen,
              (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
              (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1);
@@ -664,7 +681,7 @@ static void ui_task(void *arg)
     s_model.mode = s_mode;
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);   /* valid engine mode from cfg */
 
-    fb_init(&s_fb, s_fb_bits, FB_W, FB_H);
+    fb_init(&s_fb, s_fb_bits, CANVAS_W, CANVAS_H);
     LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);   /* framebuffer is armed for render_now */
 
     /* First screen: SAFE MODE one-shot in safe mode (§17.5, boot self-test skipped), else BOOT. */

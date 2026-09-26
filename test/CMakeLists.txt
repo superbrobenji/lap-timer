@@ -14,6 +14,13 @@ set(LAPTIMER_STRICT_FLAGS -Wall -Wextra -Werror -Wshadow -Wconversion)
 
 set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
 file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
+# screens_moto.c's rendering depends on core/ui/canvas.h's CANVAS_213 branch, a compile-time
+# choice -- so unlike every other file in CORE_SRCS it cannot have one shared, canvas-agnostic
+# object in this single `core` library. Excluded here (Plan 7 T3 fix 1, minor #3) and compiled
+# again, per canvas, directly into each host target that needs it (test_screens, test_screens_213
+# below) -- so there is exactly one screens_moto.c.o per target and no reliance on link order to
+# pick the right one over a stale copy in this archive.
+list(FILTER CORE_SRCS EXCLUDE REGEX "/ui/screens_moto\\.c$")
 
 add_library(core STATIC ${CORE_SRCS})
 # ui/ headers live under their own include/ root (components/core/ui/include/core/ui/*.h),
@@ -83,8 +90,24 @@ add_core_test(test_ses_records assert_support.c)
 # this source dir.
 add_core_test(test_ui pbm.c)
 target_compile_definitions(test_ui PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-add_core_test(test_screens pbm.c)
+# screens_moto.c is excluded from CORE_SRCS above (its rendering depends on the compile-time
+# CANVAS_213 branch, so it cannot be one shared object for every canvas) -- test_screens needs it
+# compiled in directly, at the default (296) canvas.
+add_core_test(test_screens pbm.c ${CORE_DIR}/ui/screens_moto.c)
 target_compile_definitions(test_screens PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+# test_screens_213: the same test_screens.c source (plus its own screens_moto.c.o, compiled with
+# -DCANVAS_FORCE_213=1) comparing against its own golden set under test/snapshots/213/ (Plan 7 T3:
+# compile-time canvas + a second golden set). Not routed through add_core_test (which would add its
+# own ${name}.c) since this target's test source is test_screens.c, not test_screens_213.c. Because
+# screens_moto.c is not in the `core` library (excluded above), there is exactly one definition of
+# screens_moto_render/screens_render/fault_strip in this target's link -- no duplicate archive
+# member and so no dependence on link order to pick the right one (Plan 7 T3 fix 1, minor #3).
+add_executable(test_screens_213 test_screens.c pbm.c ${CORE_DIR}/ui/screens_moto.c)
+target_compile_definitions(test_screens_213 PRIVATE CANVAS_FORCE_213=1 TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}" SNAP_SUBDIR="213/")
+target_compile_options(test_screens_213 PRIVATE ${LAPTIMER_STRICT_FLAGS})
+target_link_libraries(test_screens_213 PRIVATE core unity m Threads::Threads)
+add_test(NAME test_screens_213 COMMAND test_screens_213)
 
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)

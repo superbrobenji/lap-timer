@@ -6,6 +6,7 @@
  * screen_model_t and the PBM goldens in test/snapshots/ are byte-identical across clang and
  * gcc-16.
  */
+#include "core/ui/canvas.h"
 #include "core/ui/model.h"
 #include "core/core.h"
 
@@ -161,11 +162,9 @@ static const int8_t FAULT_ICON_FOR_BIT[14] = {
     -1,                         /* 13 SYS_FUSION_DISAGREE */
 };
 
-/* Strip anchor (spec §20.5: "x descending from ~284, y≈116" on the 296x128 frame): the rightmost
- * icon's top-left. 284 + ICON_W(12) = 296 = fb width, so the first icon's right edge lands flush
- * with the frame edge; 116 + ICON_H(12) = 128 = fb height, flush with the bottom edge. */
-#define FAULT_STRIP_X0 284
-#define FAULT_STRIP_Y   116
+/* Strip anchor (spec §20.5: "x descending from ~284, y≈116" on the 296x128 frame; scaled per canvas
+ * in core/ui/canvas.h): the rightmost icon's top-left, chosen so x0 + ICON_W(12) and y + ICON_H(12)
+ * land flush with the frame's true visible edge on either canvas. */
 
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 {
@@ -202,16 +201,6 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 
 /* ---- LAP page 0 (spec §20.5): BEST/PREV/CUR/dS + fault strip ---- */
 
-#define LAP_LABEL_X          4
-#define LAP_TIME_RIGHT_X     200
-#define LAP_ROW_BEST_Y       4
-#define LAP_ROW_PREV_Y       46
-#define LAP_ROW_CUR_Y        88
-#define LAP_ROW_DELTA_Y      112
-#define LAP_CUR_TIME_RIGHT_X 180
-#define LAP_CUR_SECTOR_X     210
-#define LAP_DELTA_VALUE_X    24
-
 static void render_lap_page0(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -221,22 +210,22 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_BEST_Y, "BEST");
     if (m->have_best) {
         fmt_time_ms(buf, m->best_ms);
-        fb_text_right(fb, &FONT_BIG, LAP_TIME_RIGHT_X, LAP_ROW_BEST_Y, buf);
+        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_BEST_Y, buf);
     } else {
-        fb_text_right(fb, &FONT_BIG, LAP_TIME_RIGHT_X, LAP_ROW_BEST_Y, EMPTY_TIME);
+        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_BEST_Y, EMPTY_TIME);
     }
 
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_PREV_Y, "PREV");
     if (m->have_prev) {
         fmt_time_ms(buf, m->prev_ms);
-        fb_text_right(fb, &FONT_BIG, LAP_TIME_RIGHT_X, LAP_ROW_PREV_Y, buf);
+        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_PREV_Y, buf);
     } else {
-        fb_text_right(fb, &FONT_BIG, LAP_TIME_RIGHT_X, LAP_ROW_PREV_Y, EMPTY_TIME);
+        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_PREV_Y, EMPTY_TIME);
     }
 
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_CUR_Y, "CUR");
     fmt_time_ms(buf, m->cur_ms_at_gate);
-    fb_text_right(fb, &FONT_MED, LAP_CUR_TIME_RIGHT_X, LAP_ROW_CUR_Y, buf);
+    fb_text_right(fb, &LAP_CUR_FONT, LAP_CUR_TIME_RIGHT_X, LAP_ROW_CUR_Y, buf);
     {
         char  sbuf[8];
         char *p = sbuf;
@@ -244,15 +233,16 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
         p = put_uint(p, m->cur_sector_idx);
         CORE_ASSERT_VOID((size_t)(p - sbuf) < sizeof sbuf, UI_ASSERT_CODE); /* room left for the NUL */
         *p = '\0';
-        fb_text(fb, &FONT_MED, LAP_CUR_SECTOR_X, LAP_ROW_CUR_Y, sbuf);
+        fb_text(fb, &LAP_CUR_FONT, LAP_CUR_SECTOR_X, LAP_ROW_CUR_Y, sbuf);
     }
 
-    /* Spec §20.5 lists this row's value as FONT_MED, but at y=112 a 24px-tall FONT_MED cell runs
-     * to y=136 -- 8px past the 128px frame -- and eyeballing that literal reading showed real
-     * clipped/illegible ink (confirmed against the actual rendered PBM, not just cell-box math).
-     * The fault-icon strip occupies this same bottom band at 12px tall (FAULT_STRIP_Y=116), which
-     * is the same scale as FONT_SMALL, so this row uses FONT_SMALL for the value instead: it fits
-     * fully within the frame with no clipping and no collision with the CUR row above it. */
+    /* Spec §20.5 lists this row's value as FONT_MED, but at y=112 (296 canvas) a 24px-tall FONT_MED
+     * cell runs to y=136 -- 8px past the 128px frame -- and eyeballing that literal reading showed
+     * real clipped/illegible ink (confirmed against the actual rendered PBM, not just cell-box
+     * math). The fault-icon strip occupies this same bottom band at 12px tall (FAULT_STRIP_Y=116),
+     * which is the same scale as FONT_SMALL, so this row uses FONT_SMALL for the value instead: it
+     * fits fully within the frame with no clipping and no collision with the CUR row above it (same
+     * reasoning holds on the 213 canvas, whose CUR/dS rows sit even closer together). */
     fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_DELTA_Y, "dS");
     if (m->new_best) {
         fb_text(fb, &FONT_SMALL, LAP_DELTA_VALUE_X, LAP_ROW_DELTA_Y, "BEST");
@@ -266,15 +256,6 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
 }
 
 /* ---- LAP page 1 (spec §20.5): best-lap sector splits + THEO ---- */
-
-#define LAP1_TITLE_Y       4
-#define LAP1_SECTOR_COLS   3
-#define LAP1_SECTOR_X0     4
-#define LAP1_SECTOR_COL_W  96
-#define LAP1_SECTOR_Y0     20
-#define LAP1_SECTOR_ROW_H  16
-#define LAP1_THEO_LABEL_Y  88
-#define LAP1_THEO_VALUE_Y  80
 
 static void render_lap_page1(fb_t *fb, const screen_model_t *m)
 {
@@ -312,7 +293,6 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
 
 /* ---- LAP page 2 (spec §20.5): session stats ---- */
 
-#define LAP2_ROW_H 24
 static inline int lap2_row_y(int n) { return 8 + n * LAP2_ROW_H; }
 
 static void render_lap_page2(fb_t *fb, const screen_model_t *m)
@@ -361,15 +341,6 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 }
 
 /* ---- DRAG page 0 (spec §20.5 + §11.4 benches rule): up to 4 rows of benches + the 1/4 row ---- */
-
-#define DRAG_LABEL_X       4
-#define DRAG_TIME_RIGHT_X  180
-#define DRAG_TRAP_X        190
-#define DRAG0_ROW_Y0       8
-#define DRAG0_ROW_H        24
-#define DRAG0_MAX_ROWS     4
-#define DRAG_ARMED_RIGHT_X 296
-#define DRAG_ARMED_Y       4
 
 /* A row with no time yet (a bench not hit, or the 1/4 row before it is crossed) shows a literal
  * "--" -- spec §11.4's own worked example is "1/4 --" -- rather than the LAP screens' wider
@@ -476,13 +447,6 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
  * populated m->drag[] with. Laid out as a 2-column grid (7 rows do not fit one FONT_MED/FONT_SMALL
  * column within 128px; §20.5 leaves the exact grid unspecified beyond "FONT_MED/SMALL rows"),
  * echoing LAP page 1's sector grid: each cell is one "<label> <value>" FONT_SMALL string. ---- */
-
-#define DRAG12_TITLE_Y 4
-#define DRAG12_COLS    2
-#define DRAG12_COL_X0  4
-#define DRAG12_COL_W   148
-#define DRAG12_ROW_Y0  20
-#define DRAG12_ROW_H   16
 
 static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char *title)
 {
@@ -596,17 +560,22 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
 /* ---- one-shot screens (spec §20.6) ---- */
 
 /* Horizontal centering helper shared by the one-shot screens: the left x that centers `s` set in
- * font `f` within the framebuffer's width. Pure integer arithmetic; a string wider than the frame
- * (should not happen for the short one-shot captions used here) clamps to x=0 rather than going
- * negative -- fb_text clips off-frame draws safely either way, but a negative x would left-crop
- * the string instead of just running off the right edge. */
+ * font `f` within the panel's true visible width. Centers on CANVAS_VISIBLE_W (core/ui/canvas.h),
+ * not fb->w: fb->w is the padded, byte-aligned buffer width (256 on the 213 canvas), 6px wider
+ * than the panel's true visible area (250) -- centering on fb->w biases every one-shot caption
+ * (VENUE/SAFE/LOWBATT/OTA/OTAFAIL/CALIBRATE/NEWTRACK) 3px right of the panel's actual center
+ * (Plan 7 T3 fix 2). On the 296 canvas CANVAS_VISIBLE_W == fb->w, so this is unchanged there.
+ * Pure integer arithmetic; a string wider than the frame (should not happen for the short
+ * one-shot captions used here) clamps to x=0 rather than going negative -- fb_text clips
+ * off-frame draws safely either way, but a negative x would left-crop the string instead of just
+ * running off the right edge. */
 static int center_x(const fb_t *fb, const font_t *f, const char *s)
 {
     CORE_ASSERT_RET(fb != NULL, UI_ASSERT_CODE, 0);
     CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, 0);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, 0);
     int w = (int)strlen(s) * (int)f->w;
-    int x = ((int)fb->w - w) / 2;
+    int x = (CANVAS_VISIBLE_W - w) / 2;
     return x < 0 ? 0 : x;
 }
 
@@ -622,12 +591,6 @@ static const char ONESHOT_CALIBRATE_SUB[]   = "Hold upright, press MODE";
 static const char ONESHOT_NEWTRACK_TITLE[]  = "NEW TRACK";
 static const char ONESHOT_NEWTRACK_SUB[]    = "Cross S/F, press MODE";
 
-#define BOOT_NAME_Y    6
-#define BOOT_VER_Y     34
-#define BOOT_LINE_Y0   56
-#define BOOT_LINE_H    16
-#define BOOT_MAX_LINES 4
-
 /* BOOT (§20.6, §17.6): name + version banner, then up to 4 pre-formatted self-test lines
  * ("<check>  OK"/"FAIL", caller's job to pad/format -- boot_line is plain text, not a table). */
 static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
@@ -642,9 +605,6 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
         fb_text(fb, &FONT_SMALL, LAP_LABEL_X, BOOT_LINE_Y0 + (int)i * BOOT_LINE_H, m->boot_line[i]);
     }
 }
-
-#define VENUE_LABEL_Y 40
-#define VENUE_VALUE_Y 62
 
 /* VENUE (§20.6): "venue name big, then layout name" -- the ui task (session 4.3 Task 2) shows
  * this one-shot twice, once on EV_VENUE_FOUND and again on EV_LAYOUT_LOCKED, each a pure render of
@@ -665,8 +625,6 @@ static void render_oneshot_venue(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, value), VENUE_VALUE_Y, value);
 }
 
-#define SAFE_TEXT_Y 52
-
 static void render_oneshot_safe(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -675,9 +633,6 @@ static void render_oneshot_safe(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_SAFE_TEXT), SAFE_TEXT_Y,
              ONESHOT_SAFE_TEXT);
 }
-
-#define LOWBATT_TITLE_Y 32
-#define LOWBATT_PCT_Y   68
 
 static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
 {
@@ -695,13 +650,6 @@ static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
     *p = '\0';
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), LOWBATT_PCT_Y, buf);
 }
-
-#define OTA_TITLE_Y 16
-#define OTA_BAR_X   48
-#define OTA_BAR_Y   56
-#define OTA_BAR_W   200
-#define OTA_BAR_H   20
-#define OTA_PCT_Y   84
 
 static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
 {
@@ -722,9 +670,6 @@ static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), OTA_PCT_Y, buf);
 }
 
-#define OTAFAIL_LINE1_Y 36
-#define OTAFAIL_LINE2_Y 68
-
 static void render_oneshot_ota_fail(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -736,9 +681,6 @@ static void render_oneshot_ota_fail(fb_t *fb, const screen_model_t *m)
              ONESHOT_OTAFAIL_LINE2);
 }
 
-#define CALIBRATE_TITLE_Y 28
-#define CALIBRATE_SUB_Y   68
-
 static void render_oneshot_calibrate(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -749,9 +691,6 @@ static void render_oneshot_calibrate(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, ONESHOT_CALIBRATE_SUB), CALIBRATE_SUB_Y,
              ONESHOT_CALIBRATE_SUB);
 }
-
-#define NEWTRACK_TITLE_Y 28
-#define NEWTRACK_SUB_Y   68
 
 static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
 {
@@ -802,15 +741,6 @@ static void render_oneshot(fb_t *fb, const screen_model_t *m)
 
 /* ---- menu (spec §20.7) ---- */
 
-#define MENU_TITLE_Y      2
-#define MENU_SEP_Y        26
-#define MENU_LIST_Y0      30
-#define MENU_ROW_H        24
-#define MENU_VISIBLE_ROWS 4
-#define MENU_MARKER_X     4
-#define MENU_ITEM_X       18
-#define MENU_ITEM_MAX     12
-
 /* True when every character of `s` has a glyph in FONT_MED (a space is also accepted: unmapped
  * chars -- including space -- draw a blank cell in any font, per render.h, so a space "fits" any
  * font visually even though it has no glyph index). A menu caption with '/' or lowercase (most of
@@ -835,8 +765,9 @@ static bool item_fits_font_med(const char *s)
  * font choice); menu_top is the caller-driven first visible row (the ui task, session 4.3 Task 2,
  * keeps it scrolled so menu_sel is always visible -- this renderer trusts menu_top as given,
  * mirroring how every other screen here trusts its model rather than re-deriving it). Each row's
- * item text uses FONT_MED when it fits (item_fits_font_med), else FONT_SMALL, vertically centered
- * within the MENU_ROW_H slot either way. */
+ * item text uses FONT_MED when it fits (item_fits_font_med) AND the canvas allows it
+ * (MENU_ITEM_ALLOW_MED, core/ui/canvas.h -- 0 on the 213 canvas, whose MENU_ROW_H is shorter than
+ * FONT_MED's cell), else FONT_SMALL, vertically centered within the MENU_ROW_H slot either way. */
 static void render_menu(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -844,7 +775,12 @@ static void render_menu(fb_t *fb, const screen_model_t *m)
     fb_clear(fb, 0);
 
     fb_text(fb, &FONT_MED, LAP_LABEL_X, MENU_TITLE_Y, "MENU");
-    fb_hline(fb, 0, MENU_SEP_Y, (int)fb->w, 1);
+    /* CANVAS_VISIBLE_W (core/ui/canvas.h), not fb->w: fb->w is the padded, byte-aligned buffer
+     * width (256 on the 213 canvas), 6px wider than the panel's true visible area (250) -- a
+     * full-fb->w line would draw ink past the panel's right edge into that invisible padding
+     * (Plan 7 T3 fix 1, ruling T3-R1: "nothing may draw at x >= 250"). On the 296 canvas
+     * CANVAS_VISIBLE_W == fb->w, so this is unchanged there. */
+    fb_hline(fb, 0, MENU_SEP_Y, CANVAS_VISIBLE_W, 1);
 
     uint8_t n = m->menu_n > MENU_ITEM_MAX ? (uint8_t)MENU_ITEM_MAX : m->menu_n;
     for (uint8_t row = 0; row < MENU_VISIBLE_ROWS; row++) {
@@ -862,7 +798,7 @@ static void render_menu(fb_t *fb, const screen_model_t *m)
             fb_text(fb, &FONT_SMALL, MENU_MARKER_X, y + (MENU_ROW_H - FONT_SMALL.h) / 2, ">");
         }
 
-        if (item_fits_font_med(item)) {
+        if (MENU_ITEM_ALLOW_MED && item_fits_font_med(item)) {
             fb_text(fb, &FONT_MED, MENU_ITEM_X, y, item);
         } else {
             fb_text(fb, &FONT_SMALL, MENU_ITEM_X, y + (MENU_ROW_H - FONT_SMALL.h) / 2, item);
