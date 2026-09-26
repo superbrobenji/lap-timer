@@ -148,12 +148,14 @@ static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot 
 static int64_t s_last_input_us;    /* last button activity -> menu idle timeout */
 
 /* refresh policy bookkeeping (spec §20.3, Plan 7 Task 7): rf_in_t's counters/timestamps, plus the
- * failure ladder's own state. All times are esp_timer_get_time() microseconds. */
-static uint16_t s_partial_count;   /* partials issued since the last full */
+ * failure ladder's own state. All times are esp_timer_get_time() microseconds. The three int64_t
+ * fields are declared first (fix round 1, ruling T7-R3) so their 8-byte alignment doesn't force
+ * padding ahead of the smaller fields that follow. */
 static int64_t  s_last_full_us;    /* stamp of the last full refresh (incl. boot's disp_init) */
 static int64_t  s_last_partial_us; /* stamp of the last partial refresh */
-static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
 static int64_t  s_next_reinit_us;  /* next allowed disp_reinit() probe while SYS_DISP_DEAD */
+static uint16_t s_partial_count;   /* partials issued since the last full */
+static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
 static bool     s_wants_full;      /* next render should be a full refresh (page/menu/combo/etc) */
 
 /* button press-duration state machine (indexed 0=MODE,1=UP,2=DOWN) */
@@ -640,8 +642,7 @@ static void render_fb(void)
 static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
 {
     rf_in_t  in;
-    uint32_t flags = sys_flags_get();
-    memset(&in, 0, sizeof in);
+    uint32_t flags     = sys_flags_get();
     in.dirty           = true; /* only ever called when s_dirty gated the render (render_and_refresh) */
     in.wants_full      = s_wants_full;
     in.still           = s_gspeed_kmh < MENU_LOCK_SPEED_KMH;
@@ -699,7 +700,10 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now)
         return rc;
     }
 
-    errlog_add(E_DISP_BUSY_TIMEOUT, s_fail_streak);
+    /* Ruling T7-R8: pack both facts into one arg -- the pre-failure streak count in the high
+     * byte, the driver's -errno magnitude in the low byte -- so errlog distinguishes a BUSY
+     * timeout (-ETIMEDOUT = 110) from an SPI failure (-EIO = 5) without a second display code. */
+    errlog_add(E_DISP_BUSY_TIMEOUT, ((uint32_t)s_fail_streak << 8) | ((uint32_t)(-rc) & 0xFFu));
     int reinit_rc = disp_reinit();
     g_hb[HB_UI]++;
     if (reinit_rc == 0) {
@@ -721,38 +725,54 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now)
 }
 
 /* Executes the refresh kind the policy chose (RF_NONE is handled by the caller before this is
- * reached). Bookkeeping (partial_count/last_*_us/s_wants_full) follows the policy's decision, not
- * the driver rc -- a failed attempt still consumed this refresh slot and is handled by the ladder's
- * own fail_streak/dead accounting, not by re-deciding what kind of refresh this was. */
-static void do_refresh(rf_kind_t kind, int64_t now, int *rc_out)
+ * reached): RF_PARTIAL first tries to arm the dirty window, falling back to DISP_FULL (ruling R2)
+ * if that fails; RF_FULL goes straight to DISP_FULL. Fix round 1 (Important #2): bookkeeping
+ * follows the EFFECTIVE mode actually sent to the panel, not the policy's kind -- when the
+ * fallback above turns a decided partial into a full, a successful refresh must still reset
+ * s_partial_count, stamp s_last_full_us and clear s_wants_full like any other full. A FAILED
+ * refresh (either mode) updates none of that bookkeeping -- only the ladder's own
+ * fail_streak/dead accounting moves on failure. Reports the effective mode via *mode_out so the
+ * caller's log line reflects what actually happened on the panel. */
+static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
 {
-    LT_ASSERT_VOID(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(rc_out != NULL, UI_APP_ASSERT_CODE);
-    uint8_t mode;
-    if (kind == RF_PARTIAL) {
-        mode               = partial_window_or_full();
-        s_partial_count    = (uint16_t)(s_partial_count + 1);
-        s_last_partial_us  = now;
-    } else {
-        mode            = DISP_FULL;
-        s_partial_count = 0;
-        s_last_full_us  = now;
-        s_wants_full    = false;
+    LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
+    LT_ASSERT_RET(mode_out != NULL, UI_APP_ASSERT_CODE, -1);
+    uint8_t mode = (kind == RF_PARTIAL) ? partial_window_or_full() : DISP_FULL;
+    *mode_out    = mode;
+    int rc       = disp_refresh_ladder(mode, now);
+    if (rc == 0) {
+        if (mode == DISP_PARTIAL) {
+            s_partial_count   = (uint16_t)(s_partial_count + 1);
+            s_last_partial_us = now;
+        } else {
+            s_partial_count = 0;
+            s_last_full_us  = now;
+            s_wants_full    = false;
+        }
     }
-    *rc_out = disp_refresh_ladder(mode, now);
+    return rc;
 }
 
-/* Logs the render+refresh outcome (ruling R6: keep the render dirty-box log line, append
- * kind=P|F|N and, for a P/F attempt, the driver rc). */
-static void log_refresh(rf_kind_t kind, int rc)
+/* Logs the render+refresh outcome (ruling R6, refined by fix round 1): kind=N when the policy
+ * chose RF_NONE (`attempted` false, no mode/rc to report); otherwise kind=P|F reflects the
+ * EFFECTIVE mode sent to the panel (Important #2 -- not necessarily the policy's original
+ * decision, since partial_window_or_full() can fall back to a full), with the driver rc appended.
+ * Minor #6: ESP_LOGW when the refresh failed (rc != 0), ESP_LOGI otherwise. */
+static void log_refresh(bool attempted, uint8_t mode, int rc)
 {
-    LT_ASSERT_VOID(kind == RF_NONE || kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);
-    char kc = (kind == RF_FULL) ? 'F' : (kind == RF_PARTIAL) ? 'P' : 'N';
-    if (kind == RF_NONE) {
+    char kc = !attempted ? 'N' : ((mode == DISP_FULL) ? 'F' : 'P');
+    if (!attempted) {
         ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c", (unsigned)s_model.screen,
                  (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
                  (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc);
+        return;
+    }
+    if (rc != 0) {
+        ESP_LOGW(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d", (unsigned)s_model.screen,
+                 (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
+                 (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc, rc);
     } else {
         ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d", (unsigned)s_model.screen,
                  (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
@@ -781,11 +801,13 @@ static void render_and_refresh(void)
     rf_in_t   in   = build_rf_in(now, full_every);
     rf_kind_t kind = ui_refresh_decide(&in);
 
-    int rc = 0;
-    if (kind != RF_NONE) {
-        do_refresh(kind, now, &rc);
+    if (kind == RF_NONE) {
+        log_refresh(false, DISP_PARTIAL, 0);
+        return;
     }
-    log_refresh(kind, rc);
+    uint8_t mode = DISP_PARTIAL;
+    int     rc   = do_refresh(kind, now, &mode);
+    log_refresh(true, mode, rc);
 }
 
 /* While the panel is SYS_DISP_DEAD, probes disp_reinit() no more often than every
@@ -849,10 +871,13 @@ static void ui_loop_iter(QueueHandle_t btn_q)
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);
 
-    /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. */
+    /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. Ruling T7-R9: every transition
+     * that replaces the whole screen content (one-shot -> riding, menu enter/exit, page change)
+     * requests a full, same as ui_exit_menu()'s manual dismissal path. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
         s_oneshot_until_us = 0;
         s_model.screen     = SCR_RIDING;
+        s_wants_full       = true;
         s_dirty            = true;
     }
     /* Menu idle auto-exit (§20.7). */
