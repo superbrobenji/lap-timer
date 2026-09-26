@@ -39,6 +39,38 @@ void setUp(void)
 }
 void tearDown(void) {}
 
+/* Rightmost column (0-based) holding ink (a 0 bit -- render.h/render.c's fb_set_px: "0 = black",
+ * MSB-first within each byte) anywhere in fb, or -1 if the frame is entirely background. Used to
+ * confirm every screen's actual drawn content stays within the true visible width
+ * (CANVAS_VISIBLE_W, core/ui/canvas.h) -- a stronger, content-based check than fb->dirty, which
+ * fb_clear() (render.c) always sets to span the whole padded buffer width (CANVAS_W, e.g. 256 on
+ * the 213 canvas) on every render regardless of what ends up drawn, since clearing legitimately
+ * touches every addressable byte, padding columns included. Plan 7 T3 fix 1, ruling T3-R1. */
+static int fb_max_ink_col(const fb_t *fb)
+{
+    int max_col = -1;
+    for (int y = 0; y < (int)fb->h; y++) {
+        const uint8_t *row = fb->bits + (size_t)y * fb->stride;
+        for (int i = 0; i < (int)fb->stride; i++) {
+            uint8_t b = row[i];
+            if (b == 0xFFu) {
+                continue; /* every bit in this byte is background */
+            }
+            for (int bit = 0; bit < 8; bit++) {
+                int col = i * 8 + bit;
+                if (col >= (int)fb->w) {
+                    break;
+                }
+                uint8_t mask = (uint8_t)(0x80u >> bit);
+                if ((b & mask) == 0u && col > max_col) { /* 0 = ink */
+                    max_col = col;
+                }
+            }
+        }
+    }
+    return max_col;
+}
+
 /* ---- LAP page 0 ---- */
 
 static void test_lap_p0_mid(void)
@@ -61,6 +93,7 @@ static void test_lap_p0_mid(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_mid.pbm"), &s_fb));
 }
 
@@ -81,6 +114,7 @@ static void test_lap_p0_empty(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_empty.pbm"), &s_fb));
 }
 
@@ -104,6 +138,7 @@ static void test_lap_p0_newbest_fault(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_newbest_fault.pbm"), &s_fb));
 }
 
@@ -128,6 +163,7 @@ static void test_lap_p1_sectors(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_sectors.pbm"), &s_fb));
 }
 
@@ -152,6 +188,7 @@ static void test_lap_p2_stats(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats.pbm"), &s_fb));
 }
 
@@ -179,6 +216,7 @@ static void test_drag_p0_benches(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_benches.pbm"), &s_fb));
 }
 
@@ -211,6 +249,7 @@ static void test_drag_p1_gates(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
 }
 
@@ -240,6 +279,7 @@ static void test_drag_p2_best(void)
 
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_best.pbm"), &s_fb));
 }
 
@@ -262,6 +302,7 @@ static void test_oneshot_boot(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot.pbm"), &s_fb));
 }
 
@@ -276,6 +317,7 @@ static void test_oneshot_venue(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("venue.pbm"), &s_fb));
 }
 
@@ -287,6 +329,7 @@ static void test_oneshot_safe(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("safe.pbm"), &s_fb));
 }
 
@@ -299,6 +342,7 @@ static void test_oneshot_lowbatt(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lowbatt.pbm"), &s_fb));
 }
 
@@ -311,6 +355,7 @@ static void test_oneshot_ota(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota.pbm"), &s_fb));
 }
 
@@ -322,6 +367,7 @@ static void test_oneshot_ota_fail(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("otafail.pbm"), &s_fb));
 }
 
@@ -333,6 +379,7 @@ static void test_oneshot_calibrate(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("calibrate.pbm"), &s_fb));
 }
 
@@ -344,6 +391,7 @@ static void test_oneshot_newtrack(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack.pbm"), &s_fb));
 }
 
@@ -371,6 +419,7 @@ static void test_menu_top(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_top.pbm"), &s_fb));
 }
 
@@ -398,6 +447,7 @@ static void test_menu_scrolled(void)
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_scrolled.pbm"), &s_fb));
 }
 

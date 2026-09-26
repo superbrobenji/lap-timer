@@ -14,7 +14,6 @@
 #define CANVAS_H 128
 #define CANVAS_213 0
 #endif
-#define CANVAS_STRIDE (CANVAS_W / 8)
 
 /* CANVAS_W is the *addressable framebuffer* width, not the ws213v4 panel's true visible width:
  * fb_init() (components/core/ui/render.c) asserts w % 8 == 0 (render.h's documented contract --
@@ -29,7 +28,22 @@
  * centering) is still anchored to the true 250-wide/122-tall visible area, not CANVAS_W itself --
  * columns 250..255 are simply never drawn into, the same way a real ws213v4 driver pads its SPI
  * row buffer past the panel's visible pixels. CANVAS_H (122) needs no such padding: fb_init only
- * constrains width, since bits are packed horizontally within a row. */
+ * constrains width, since bits are packed horizontally within a row.
+ *
+ * CANVAS_VISIBLE_W (Plan 7 T3 fix 1, ruling T3-R1) names that true visible width explicitly, so
+ * every caller checking "did this draw land where the panel can actually show it" -- ui.c's
+ * render_now() dirty-box bounds check, and test_screens.c's per-golden ink-column scan (a content
+ * check, not the fb->dirty box: fb_clear() always reports the whole padded CANVAS_W as dirty,
+ * since clearing legitimately touches every addressable byte, padding columns included, so
+ * fb->dirty can never usefully be compared against CANVAS_VISIBLE_W) -- compares against 250 on
+ * the 213 canvas, not the padded 256-wide buffer: nothing may draw at x >= CANVAS_VISIBLE_W. On
+ * the 296 canvas the buffer width already equals the visible width, so CANVAS_VISIBLE_W ==
+ * CANVAS_W there. */
+#if CANVAS_213
+#define CANVAS_VISIBLE_W 250
+#else
+#define CANVAS_VISIBLE_W 296
+#endif
 
 /* §2's font-size deltas for the LAP riding page (screens_moto.c render_lap_page0): the 213 canvas
  * is too short for FONT_BIG's 40px cell (would run past CANVAS_H at any usable row spacing), so

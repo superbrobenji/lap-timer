@@ -770,7 +770,12 @@ static void render_menu(fb_t *fb, const screen_model_t *m)
     fb_clear(fb, 0);
 
     fb_text(fb, &FONT_MED, LAP_LABEL_X, MENU_TITLE_Y, "MENU");
-    fb_hline(fb, 0, MENU_SEP_Y, (int)fb->w, 1);
+    /* CANVAS_VISIBLE_W (core/ui/canvas.h), not fb->w: fb->w is the padded, byte-aligned buffer
+     * width (256 on the 213 canvas), 6px wider than the panel's true visible area (250) -- a
+     * full-fb->w line would draw ink past the panel's right edge into that invisible padding
+     * (Plan 7 T3 fix 1, ruling T3-R1: "nothing may draw at x >= 250"). On the 296 canvas
+     * CANVAS_VISIBLE_W == fb->w, so this is unchanged there. */
+    fb_hline(fb, 0, MENU_SEP_Y, CANVAS_VISIBLE_W, 1);
 
     uint8_t n = m->menu_n > MENU_ITEM_MAX ? (uint8_t)MENU_ITEM_MAX : m->menu_n;
     for (uint8_t row = 0; row < MENU_VISIBLE_ROWS; row++) {
