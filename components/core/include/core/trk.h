@@ -38,6 +38,11 @@ int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
 const trk_venue_t *trk_get(uint16_t venue_id);
 int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full or invalid */
+/* Parses `json` straight into a free (or same-id) user slot -- never through a stack-sized
+ * trk_venue_t temporary (Plan 7 Task 1). 0 ok (*venue_id_out, if non-NULL, gets the parsed venue's
+ * id -- trk_get(*venue_id_out) then resolves it); -1 on parse error or a full table (`err` filled,
+ * see trk_from_json). */
+int                trk_user_add_json(const char *json, size_t n, uint16_t *venue_id_out, char *err, size_t err_cap);
 int                trk_user_count(void);
 uint16_t           trk_next_user_id(void);
 /* Blob v2: u8 version(2) | u8 count | trk_venue_t[count] | u16 crc16 LE. Load rejects a wrong

@@ -348,6 +348,25 @@ static void test_json_large_venue_within_cap_parses(void)
     TEST_ASSERT_EQUAL_UINT8(6, s_v.layouts[0].n_sectors);
 }
 
+static void test_user_add_json_parses_into_a_slot(void)
+{
+    const char *json = "{\"id\":9001,\"name\":\"SIMTRACK\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":[{\"id\":1,\"name\":\"FULL\","
+                       "\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}";
+    uint16_t id = 0; char err[48] = {0};
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json, strlen(json), &id, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT16(9001, id);
+    const trk_venue_t *v = trk_get(9001);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_STRING("SIMTRACK", v->name);
+    TEST_ASSERT_EQUAL_UINT8(1, v->n_layouts);
+}
+static void test_user_add_json_rejects_malformed(void)
+{
+    uint16_t id = 7; char err[48] = {0};
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add_json("{\"id\":", 6, &id, err, sizeof err));
+    TEST_ASSERT_TRUE(err[0] != '\0');
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -365,5 +384,7 @@ int main(void)
     RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
     RUN_TEST(test_json_max_venue_token_bound);
     RUN_TEST(test_json_large_venue_within_cap_parses);
+    RUN_TEST(test_user_add_json_parses_into_a_slot);
+    RUN_TEST(test_user_add_json_rejects_malformed);
     return UNITY_END();
 }

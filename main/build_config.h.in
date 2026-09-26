@@ -33,4 +33,9 @@
 
 #define CFG_FUSED_LOG_HZ   @CFG_FUSED_LOG_HZ@
 
+/* trk_json.c's jsmn scratch-token cap (Plan 7 Task 1 DRAM reclaim): the only JSON venue parsed on
+ * a firmware build is gps_sim's 330-byte capture venue (~48 tokens); uploads of large venues are
+ * a host-tool path (trk_json.c falls back to 512 when this header is absent). */
+#define CFG_TRK_JSON_TOKS  @CFG_TRK_JSON_TOKS@
+
 #endif /* BUILD_CONFIG_H */

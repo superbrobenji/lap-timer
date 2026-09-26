@@ -1,6 +1,6 @@
 /* ui.c -- the app-side UI task, menu navigation and button debounce (spec §4.3, §20.3, §20.7-20.8).
  *
- * The ui task (core 0, prio 6, stack 6144 on real builds / 2560 on moto_sim) owns a static screen_model_t and a static 296x128 1-bpp
+ * The ui task (core 0, prio 6, stack 6144) owns a static screen_model_t and a static 296x128 1-bpp
  * framebuffer. It coalesces (§20.3): each wake it drains the button queue and the pipeline event
  * queue (g_ui_evt_q, the pipeline's fan-out copy for the ui), updates the model, and -- only when something changed -- renders ONCE via the
  * pure core/ui screens_render(). Plan 04 ships no display driver, so instead of refreshing a panel
@@ -56,19 +56,15 @@ static const char *TAG = "ui";
 /* ---- §4.3 task ---- */
 #define UI_CORE 0
 #define UI_PRIO 6
-/* §4.3 stack is 6144, which real builds use. The moto_sim BENCH image is DRAM-bound: its gps_sim
- * replay capture lives in DRAM (~13 KB more .bss than the real GPS driver), leaving too little room
- * for a full 6144-byte ui stack alongside the 4.7 KB framebuffer. On the sim the ui task does no
- * display work (no panel in plan 04 -- it only renders into the framebuffer and logs), and its real
- * high-water is well under the supervisor's own 3072-byte stack (which also runs NVS + logging), so
- * the sim uses 2560 (high-water not yet measured on target -- see the plan-04 review). Note the
- * sim DRAM margin is thin (~1 KB). Restore 6144 here once the sim capture moves to flash / the display driver
- * (which needs the extra margin for its refresh line buffer) lands. */
-#if CFG_GPS_SIM
-#define UI_STACK_BYTES 2560
-#else
+/* §4.3 stack: 6144 on every build, moto_sim included. Earlier plans shrank the moto_sim ui stack to
+ * 2560 to fit two sim-only DRAM statics alongside it: trk_json.c's 512-token scratch array (10,240
+ * B) and pipeline.c's s_venue copy of the sim capture's venue (2,752 B). Plan 7 Task 1 reclaimed
+ * both -- the token array is now device-sized (CFG_TRK_JSON_TOKS=64, since only the 330-byte sim
+ * capture venue is ever parsed on a firmware build) and the sim venue is parsed straight into the
+ * trk user table instead of a separate static -- so the sim's thin DRAM margin is gone and the ui
+ * task uses the same 6144-byte stack the display driver (this plan) needs for its refresh line
+ * buffer. */
 #define UI_STACK_BYTES 6144
-#endif
 #define UI_STACK_WORDS (UI_STACK_BYTES / sizeof(StackType_t))
 #define UI_STALL_S     10 /* §17.2 ui heartbeat-stall window (a full refresh may take 2 s) */
 #define UI_TICK_MS     100 /* loop timeout: poll cadence + long/idle-timer granularity */

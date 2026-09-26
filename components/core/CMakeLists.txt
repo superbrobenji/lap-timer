@@ -11,3 +11,8 @@ endif()
 # core/ui/render.h, core/ui/model.h).
 idf_component_register(SRCS ${CORE_SRCS} INCLUDE_DIRS include ui/include)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wshadow -Wconversion -Wmissing-prototypes -Wmissing-declarations)
+
+# build_config.h from the build tree (§21.1), mirrored from components/app and main: without this,
+# trk_json.c's `#if __has_include("build_config.h")` (Plan 7 Task 1 DRAM reclaim) silently resolves
+# false even on a firmware build, and CFG_TRK_JSON_TOKS never overrides the host 512-token default.
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

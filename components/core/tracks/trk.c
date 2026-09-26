@@ -98,6 +98,37 @@ int trk_user_add(const trk_venue_t *v)
     return 0;
 }
 
+static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
+
+/* Landing zone trk_user_add_json parses a venue JSON directly into, so a ~2.7 KB trk_venue_t never
+ * has to pass through a stack temporary (Plan 7 Task 1 DRAM reclaim; this mirrors why trk_from_json
+ * itself keeps its jsmn scratch array static, not on-stack): the first not-yet-active entry,
+ * user[user_n]. NULL once the table is full. Not reentrant, same as the rest of this module. */
+static trk_venue_t *user_slot_for_parse(void)
+{
+    CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, NULL);
+    return (user_n < TRK_MAX_USER) ? &user[user_n] : NULL;
+}
+
+int trk_user_add_json(const char *json, size_t n, uint16_t *venue_id_out, char *err, size_t err_cap)
+{
+    CORE_ASSERT_RET(json != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, -1);   /* venue_id_out may be NULL: not asserted */
+    trk_venue_t *slot = user_slot_for_parse();
+    if (slot == NULL) return fail(err, err_cap, "user table full");
+    if (trk_from_json(slot, json, n, err, err_cap) != 0) { memset(slot, 0, sizeof *slot); return -1; }
+    /* Same-id replace / new-entry append: the existing trk_user_add dedupe path, reused rather than
+     * duplicated. slot already IS user[user_n] (the parse landed there directly), so the "new
+     * entry" branch inside trk_user_add copies it onto itself (a harmless struct self-assignment)
+     * before bumping user_n; the "replace" branch copies it into the matching earlier index. Either
+     * way this cannot fail: slot already passed trk_from_json's trk_validate_venue, and
+     * user_slot_for_parse() just confirmed user_n < TRK_MAX_USER with no other mutator able to run
+     * in between (module is not reentrant) -- checked anyway, never taken. */
+    if (trk_user_add(slot) != 0) { memset(slot, 0, sizeof *slot); return fail(err, err_cap, "user table full"); }
+    if (venue_id_out != NULL) *venue_id_out = slot->id;
+    return 0;
+}
+
 uint16_t trk_next_user_id(void)
 {
     CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, TRK_USER_ID_BASE);

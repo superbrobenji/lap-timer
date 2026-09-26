@@ -138,6 +138,10 @@ else()
     set(CFG_GPS_SIM 0)
 endif()
 
+# device: the only JSON venue parsed on a firmware build is gps_sim's 330-byte capture venue
+# (~48 tokens); uploads of large venues are a host-tool path (512, trk_json.c's host fallback).
+set(CFG_TRK_JSON_TOKS 64)
+
 # ---- firmware version from git, with a fallback when no v* tag exists yet (§21.5) ----
 execute_process(
     COMMAND git describe --tags --match "v*" --dirty --always
