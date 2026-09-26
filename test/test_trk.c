@@ -367,6 +367,29 @@ static void test_user_add_json_rejects_malformed(void)
     TEST_ASSERT_TRUE(err[0] != '\0');
 }
 
+static void test_user_add_json_replaces_same_id(void)
+{
+    /* Ambiguity (1) from the Plan 7 T1 brief: a second trk_user_add_json parse carrying an id
+     * already present in the user table replaces that entry in place -- same semantics as
+     * trk_user_add -- rather than appending a second, stale copy. */
+    const char *json1 = "{\"id\":9002,\"name\":\"FIRST\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+                        "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}";
+    const char *json2 = "{\"id\":9002,\"name\":\"SECOND\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+                        "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]]},"
+                        "{\"id\":2,\"name\":\"HALF\",\"dir\":-1,\"sf\":\"same\"}]}";
+    uint16_t id1 = 0, id2 = 0; char err[48] = {0};
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json1, strlen(json1), &id1, err, sizeof err));
+    int count_after_first = trk_user_count();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json2, strlen(json2), &id2, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT16(9002, id1);
+    TEST_ASSERT_EQUAL_UINT16(9002, id2);
+    TEST_ASSERT_EQUAL_INT(count_after_first, trk_user_count());   /* replaced in place, not appended */
+    const trk_venue_t *v = trk_get(9002);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_STRING("SECOND", v->name);
+    TEST_ASSERT_EQUAL_UINT8(2, v->n_layouts);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -386,5 +409,6 @@ int main(void)
     RUN_TEST(test_json_large_venue_within_cap_parses);
     RUN_TEST(test_user_add_json_parses_into_a_slot);
     RUN_TEST(test_user_add_json_rejects_malformed);
+    RUN_TEST(test_user_add_json_replaces_same_id);
     return UNITY_END();
 }
