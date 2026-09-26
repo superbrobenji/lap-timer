@@ -44,7 +44,7 @@ static const epd_panel_t  *s_panel;
 static const uint8_t      *s_fb;    /* last blitted framebuffer (caller-owned, static in ui.c) */
 static epd_window_t        s_win;   /* pending partial window; valid when s_win_set */
 static bool                s_win_set;
-static uint8_t              s_line[16]; /* one panel RAM row (ram_w/8) -- the only driver buffer */
+static uint8_t             s_line[16]; /* one panel RAM row (ram_w/8) -- the only driver buffer */
 static disp_caps_t         s_caps;
 static bool                s_inited;
 static bool                s_added;      /* spi_bus_add_device() has run */
@@ -57,7 +57,10 @@ static void IRAM_ATTR pre_cb(spi_transaction_t *t)
     CORE_ASSERT_VOID(t != NULL, DISP_ASSERT_CODE);
     CORE_ASSERT_VOID((uintptr_t)t->user <= 1u, DISP_ASSERT_CODE);
 
-    gpio_set_level(PIN_DC, (uint32_t)(uintptr_t)t->user);
+    /* pre_cb must stay void (it is IDF's transaction_cb_t signature) so a DC-write failure here
+     * has no return path; a stuck DC line would corrupt the very next command/data byte, which
+     * shows up immediately as a garbled command sequence rather than silently. */
+    (void)gpio_set_level(PIN_DC, (uint32_t)(uintptr_t)t->user);
 }
 
 static int epd_cmd(uint8_t c)
@@ -133,9 +136,12 @@ static void epd_hw_reset(void)
     CORE_ASSERT_VOID(s_panel != NULL, DISP_ASSERT_CODE);
     CORE_ASSERT_VOID(s_dev != NULL, DISP_ASSERT_CODE);
 
-    gpio_set_level(PIN_RST, 0);
+    /* epd_hw_reset() is void (called from three places that already check the wait that follows
+     * it); a RST toggle failure here would leave BUSY stuck high, which the caller's very next
+     * epd_wait_busy() catches and reports as -ETIMEDOUT -- best-effort here is sufficient. */
+    (void)gpio_set_level(PIN_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(PIN_RST, 1);
+    (void)gpio_set_level(PIN_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
 }
 
@@ -308,7 +314,17 @@ static int epd_write_partial_frame(uint8_t cmd)
 }
 
 /* §20.1 "Partial refresh": border hold, window, the rect into 0x24, lut_partial, activate, wait
- * (~0.3-0.5 s), the same rect into 0x26 (diff baseline for the next partial), border restore. */
+ * (~0.3-0.5 s), the same rect into 0x26 (diff baseline for the next partial), border restore.
+ *
+ * Fix 1 (review round 1): every exit path must restore the border and clear s_win_set -- a
+ * failure partway through must not leave the border held or the window marked pending. Power-of-10
+ * rule 1 forbids a goto to a shared cleanup label, so this is a straight-line chain of
+ * `if (rc == 0) rc = step(...)` steps (each short-circuits once rc is nonzero, so only the FIRST
+ * failure's code survives into rc) followed by an unconditional cleanup block that always runs:
+ * the border restore is best-effort (its own result is discarded -- rc already holds the real
+ * error, if any) and s_win_set is always cleared. A retry after disp_reinit() then runs as a full
+ * refresh (disp_refresh() falls back to full whenever no window is pending), which rewrites both
+ * RAM planes from scratch -- the safe choice after a partial failed partway through. */
 static int epd_partial_refresh(void)
 {
     CORE_ASSERT_RET(s_panel != NULL, DISP_ASSERT_CODE, -ENODEV);
@@ -317,31 +333,23 @@ static int epd_partial_refresh(void)
     uint8_t border_hold[1]    = { 0x80 };
     uint8_t border_restore[1] = { s_panel->border };
     uint8_t lut[1]            = { s_panel->lut_partial };
+    int     rc;
 
-    if (epd_cmd(0x3C) != 0 || epd_data(border_hold, sizeof border_hold) != 0) {
-        return -EIO;
-    }
-    if (epd_set_partial_window() != 0 || epd_write_partial_frame(0x24) != 0) {
-        return -EIO;
-    }
-    if (epd_cmd(0x22) != 0 || epd_data(lut, sizeof lut) != 0) {
-        return -EIO;
-    }
-    if (epd_cmd(0x20) != 0) {
-        return -EIO;
-    }
-    if (epd_wait_busy() != 0) {
-        return -ETIMEDOUT;
-    }
-    if (epd_write_partial_frame(0x26) != 0) {
-        return -EIO;
-    }
-    if (epd_cmd(0x3C) != 0 || epd_data(border_restore, sizeof border_restore) != 0) {
-        return -EIO;
-    }
+    rc = epd_cmd(0x3C);
+    if (rc == 0) rc = epd_data(border_hold, sizeof border_hold);
+    if (rc == 0) rc = epd_set_partial_window();
+    if (rc == 0) rc = epd_write_partial_frame(0x24);
+    if (rc == 0) rc = epd_cmd(0x22);
+    if (rc == 0) rc = epd_data(lut, sizeof lut);
+    if (rc == 0) rc = epd_cmd(0x20);
+    if (rc == 0) rc = epd_wait_busy();
+    if (rc == 0) rc = epd_write_partial_frame(0x26);
 
+    (void)epd_cmd(0x3C);
+    (void)epd_data(border_restore, sizeof border_restore);
     s_win_set = false;
-    return 0;
+
+    return rc;
 }
 
 int disp_init(const disp_caps_t **caps)
@@ -358,8 +366,12 @@ int disp_init(const disp_caps_t **caps)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    gpio_config(&dc_rst);
-    gpio_set_level(PIN_RST, 1);
+    if (gpio_config(&dc_rst) != ESP_OK) {
+        return -EIO;
+    }
+    if (gpio_set_level(PIN_RST, 1) != ESP_OK) {
+        return -EIO;
+    }
 
     gpio_config_t busy_in = {
         .pin_bit_mask = (1ULL << PIN_BUSY),
@@ -368,7 +380,9 @@ int disp_init(const disp_caps_t **caps)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    gpio_config(&busy_in);
+    if (gpio_config(&busy_in) != ESP_OK) {
+        return -EIO;
+    }
 
     if (!s_added) {
         spi_device_interface_config_t devcfg = {
@@ -447,6 +461,10 @@ int disp_refresh(uint8_t mode)
     if (mode == DISP_PARTIAL && s_win_set) {   /* else treat as full (no window pending) */
         return epd_partial_refresh();
     }
+    /* A full refresh consumes any pending window: display.h documents disp_set_window's window as
+     * "for the next DISP_PARTIAL" -- one-shot. Clearing here covers both DISP_FULL with a window
+     * still pending and the fallback case just above (already false there, so a no-op). */
+    s_win_set = false;
     return epd_full_refresh();
 }
 
