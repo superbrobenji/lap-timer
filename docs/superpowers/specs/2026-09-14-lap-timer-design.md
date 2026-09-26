@@ -149,7 +149,7 @@ Stock DevKit deep-sleep draw is 5–15 mA (AMS1117 quiescent ~5 mA, power LED ~2
 | SPI MISO | 19 | in | | SD only; unused by e-paper |
 | E-paper CS | 5 | out | idle high | Boot strapping pin; idle-high is safe |
 | E-paper DC | 14 | out | | MTMS; emits a short clock at boot, harmless |
-| E-paper RST | 4 | out | active low | |
+| E-paper RST | 13 | out | active low | MTCK; unused by JTAG in this project; GPIO 4 is the dev-kit DETECT line (Plan 5.5) |
 | E-paper BUSY | 35 | in | high = busy | Input-only |
 | SD CS (O4) | 15 | out | idle high | MTDO strapping; idle-high pull-up is boot-safe |
 | Button MODE | 32 | in | active-high, 100 kΩ pull-down | RTC GPIO, EXT1 wake |
@@ -176,7 +176,7 @@ Battery tap: OUT+ ── 470k ──┬── 470k ── GND
                             └── GPIO34
 GPS TX ── GPIO16, GPS RX ── GPIO17
 MPU SDA ── GPIO21, SCL ── GPIO22, INT ── GPIO27
-E-paper: SCK 18, DIN 23, CS 5, DC 14, RST 4, BUSY 35
+E-paper: SCK 18, DIN 23, CS 5, DC 14, RST 13, BUSY 35
 Buttons: 3V3 ── switch ── GPIO32/33/25 ──100k── GND
 ```
 
@@ -2294,7 +2294,7 @@ Failure → `E_OTA_PRECOND` with a reason string.
 
 ### 20.1 Display driver (`display_epaper_ssd1680`)
 
-SPI: `SPI3_HOST` (VSPI), mode 0, 10 MHz, DC on GPIO 14 via pre-transfer callback, CS 5 hardware, queue size 4, DMA enabled, ISR in IRAM. RST 4, BUSY 35 polled at 1 ms with a timeout of 5 s (`-ETIMEDOUT` → ladder).
+SPI: `SPI3_HOST` (VSPI), mode 0, 10 MHz, DC on GPIO 14 via pre-transfer callback, CS 5 hardware, queue size 4, DMA enabled, ISR in IRAM. RST 13, BUSY 35 polled at 1 ms with a timeout of 5 s (`-ETIMEDOUT` → ladder).
 
 Panel table (`PANEL` build flag) **[VERIFY]** against the Waveshare reference driver of the actual panel:
 

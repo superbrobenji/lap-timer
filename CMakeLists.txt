@@ -21,7 +21,7 @@ set(CONN          "ble"      CACHE STRING "connectivity: ble | wifi | ble_wifi")
 set(CONN_BLE_RC   "OFF"      CACHE STRING "RaceChrono BLE bridge: ON | OFF")
 set(EXPORT_SERIAL "ON"       CACHE STRING "serial export console: ON | OFF")
 set(DEVUX         "ON"       CACHE STRING "interactive dev UX (dbg verbs) in the serial console: ON | OFF")
-set(PANEL         "ws29v2"   CACHE STRING "e-paper panel: ws213v4 | ws29v2")
+set(PANEL         "ws213v4"  CACHE STRING "e-paper panel: ws213v4 | ws29v2")
 
 # ---- validate the flag combination (§4.6) ----
 if(NOT VARIANT MATCHES "^(moto|car)$")
@@ -171,10 +171,12 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 #        the STORAGE=sd variant's storage_sd lands with the SD hardware).
 #   3.4  components/drivers/gps_${GPS}   components/drivers/imu_${IMU}
 #        (sim drivers now; the real gps_neo6m/imu_mpu6050 replace their plan-03 stubs with the
-#        sensors, plan 08. gps_ubx_common / display_${DISPLAY} / conn_* / export_serial land in
-#        the sessions that create them, gated exactly as in §21.1.) The pipeline lives in
-#        components/app (globbed by the app component), so no separate dir is needed for it.
-set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal components/drivers/gps_${GPS} components/drivers/imu_${IMU})
+#        sensors, plan 08. gps_ubx_common / conn_* / export_serial land in the sessions that
+#        create them, gated exactly as in §21.1.) The pipeline lives in components/app (globbed
+#        by the app component), so no separate dir is needed for it.
+#   Plan 7  components/drivers/display_${DISPLAY} (hal/display.h; display_epaper_ssd1680 is the
+#           only implementation so far -- display_oled_ssd1309 lands with the car variant).
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal components/drivers/gps_${GPS} components/drivers/imu_${IMU} components/drivers/display_${DISPLAY})
 
 # 3.5  components/drivers/export_serial (§18.4 serial console), gated by the EXPORT_SERIAL flag
 # (§4.6). Appended like the gps_${GPS}/imu_${IMU} dirs above; the flag is exported into the
@@ -190,6 +192,7 @@ endif()
 # cmake -P inherits the environment). Works for both build.sh and a bare idf.py -D invocation.
 set(ENV{LT_GPS} "${GPS}")
 set(ENV{LT_IMU} "${IMU}")
+set(ENV{LT_DISPLAY} "${DISPLAY}")
 set(ENV{LT_EXPORT_SERIAL} "${EXPORT_SERIAL}")
 
 # keep each named environment's generated sdkconfig inside its own build/<env>/

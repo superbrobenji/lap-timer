@@ -163,7 +163,7 @@ int board_init(void)
     ESP_ERROR_CHECK(gpio_config(&cs_out));
     gpio_set_level(PIN_EPD_CS, 1);
     gpio_set_level(PIN_SD_CS, 1);
-    /* e-paper DC(14)/RST(4)/BUSY(35) are owned by display_epaper (3.4); left alone here. */
+    /* e-paper DC(14)/RST(13)/BUSY(35) are owned by display_epaper (3.4); left alone here. */
 
     /* --- I2C master bus (new v5.3 API): SDA 21 / SCL 22. The 400 kHz SCL is a per-device
      *     property in this API; the IMU driver (3.4) sets scl_speed_hz=400000 when it adds
