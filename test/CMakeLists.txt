@@ -48,13 +48,15 @@ endfunction()
 # explicitly below: test_lap's exit-criterion case drives the host-only synth fixture, so it links
 # the replay library instead of core/unity/m directly (replaylib already carries those); test_ui
 # and test_screens (session 4.2, moto LAP screens, §20.4-20.5) both link pbm.c (§20.2's PBM
-# snapshot writer/comparator, test/pbm.h) alongside core/unity/m.
+# snapshot writer/comparator, test/pbm.h) alongside core/unity/m. test_epd_pure (Plan 7 Task 4)
+# is also held back: it needs the display_epaper_ssd1680 driver's two host/*.c sources and its
+# include/ dir, so it is added explicitly at the end of this file instead.
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
   if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens"
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
-     AND NOT name STREQUAL "test_ses_records")
+     AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure")
     add_core_test(${name})
   endif()
 endforeach()
@@ -94,3 +96,15 @@ add_executable(test_lap test_lap.c)
 target_compile_options(test_lap PRIVATE ${LAPTIMER_STRICT_FLAGS})
 target_link_libraries(test_lap PRIVATE replaylib unity Threads::Threads)
 add_test(NAME test_lap COMMAND test_lap)
+
+# test_epd_pure (Plan 7 Task 4): the display_epaper_ssd1680 driver's pure, host-testable parts
+# (panel table, landscape->portrait line transposition, RAM window rounding -- epd_pure.h). It
+# links the component's two host/*.c sources directly (not the ESP-IDF component target, which
+# does not exist on host) via add_core_test's ARGN, the same pattern test_ui/test_screens use for
+# pbm.c; core is still linked for CORE_ASSERT_RET's core_assert_fail (core/core.h).
+# EPD_FORCE_PANEL_213 selects the ws213v4 panel row in epd_panel() since the host build has no
+# build_config.h to read CFG_PANEL_WS213V4 from.
+set(EPD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/display_epaper_ssd1680)
+add_core_test(test_epd_pure ${EPD_DIR}/host/epd_panel.c ${EPD_DIR}/host/epd_rotate.c)
+target_include_directories(test_epd_pure PRIVATE ${EPD_DIR}/include)
+target_compile_definitions(test_epd_pure PRIVATE EPD_FORCE_PANEL_213=1)
