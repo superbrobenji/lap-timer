@@ -49,8 +49,8 @@ Mockup at 2.13" scale (250×122):
 │                                       L7 S2  │  FONT_SMALL marker, right-aligned at x 246, y 1
 │  -0.32                                       │  FONT_HUGE big slot, x 4, cell y 4..68 (digit ink y 17..64)
 │                                              │
-│ LAST                   BEST                  │  FONT_SMALL labels, y 78 (x 4 and x 128)
-│      1:52.34                1:51.90   [⚡▢]  │  FONT_MED values right-aligned at x 122 / x 246, y 90
+│ LAST                   BEST                  │  FONT_SMALL labels, y 72 (x 4 and x 128)
+│      1:52.34                1:51.90   [⚡▢]  │  FONT_MED values right-aligned at x 122 / x 246, y 84
 └──────────────────────────────────────────────┘
 ```
 
@@ -58,8 +58,8 @@ Rules:
 - **Big slot content:** `BIG_SECTOR_DELTA` → signed delta `±s.hh` (e.g. `-0.32`, `+1.05`); `BIG_LAP_DELTA` → the same format for the whole lap; `BIG_NONE` (no best lap yet, or before the first gate of the session) → `LAP n` in `FONT_MED` at x 4, y 40 (the huge font has no letters). Deltas are clamped to ±99.99 (`+99.99` is six glyphs = 234 px, the widest string, ending at x 238).
 - **Marker (top-right):** `L<lap_no> S<cur_sector_idx>` in `FONT_SMALL` (e.g. `L7 S2`, `L12 S0`), right-aligned at x 246 on y 1..13. It sits above the huge digits' ink line (DejaVu digits at 64 px start 13 px below the cell top), so it never collides with the big slot whatever its width.
 - **New best:** after `EV_LAP_COMPLETE` with `new_best`, a `FONT_SMALL` inverted tag `BEST` (white text on a black 32×14 box) sits 6 px right of the big number's last glyph, at y 50, until the next gate crossing (any change of `big_kind`/`big_delta_ms` clears it). With a six-glyph delta (ends x 238) the tag does not fit; it is then drawn over the marker's row at x 208, y 1 instead of the marker.
-- **Footer:** two halves of 125 px. `LAST` label (`FONT_SMALL`) at x 4, y 78; its value (`FONT_MED`, 7 glyphs = 98 px) right-aligned at x 122, y 90. `BEST` label at x 128, y 78; its value right-aligned at x 246, y 90. Missing values show `-:--.--` as today.
-- **Fault strip:** unchanged (`FAULT_STRIP_X0` 238 / `FAULT_STRIP_Y` 110), drawn last. When any fault icon is shown the BEST value right-aligns at `FAULT_STRIP_X0 - 4` = 234 instead of 246 so the icons never overprint a digit.
+- **Footer (ruling T2-R1):** two halves of 125 px. `LAST` label (`FONT_SMALL`) at x 4, `CARD_LABEL_Y`; its value (`FONT_MED`, 7 glyphs = 98 px) right-aligned at x 122, `CARD_VALUE_Y`. `BEST` label at x 128, `CARD_LABEL_Y`; its value right-aligned at x 246, `CARD_VALUE_Y`. `CARD_LABEL_Y`/`CARD_VALUE_Y` are 72/84 on the 2.13" and 76/88 on the 2.9", chosen so the footer values end above the fault strip. Missing values show `-:--.--` as today.
+- **Fault strip:** unchanged (`FAULT_STRIP_X0` 238 / `FAULT_STRIP_Y` 110 on the 2.13", 284/116 on the 2.9"), drawn last. Because the footer row band (`CARD_LABEL_Y`/`CARD_VALUE_Y` above) sits entirely above `FAULT_STRIP_Y` on both canvases, the BEST value always right-aligns at the right edge (x 246 / x 292) — no retraction when a fault icon is shown. `fault_strip_left_x()` exists for the DRAG footer only (§7, PF-2), not for this card.
 - **Before any lap:** big slot `LAP 1`, footer dashes, marker `L1 S0`.
 
 Rendering is a pure function of the model; the ui's refresh policy (§20.3) is unchanged — each gate crossing dirties the model and yields one partial refresh exactly as today.
@@ -89,7 +89,7 @@ Columns: `LAP1_SECTOR_COLS` = 3 columns of `(CANVAS_VISIBLE_W - 8) / 3` px on bo
 └──────────────────────────────────────────────┘
 ```
 
-Two columns at x 4 and x 128. Units follow `cfg.units` (`km/h`/`mph` as today, label text unchanged). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number.
+Two columns at x 4 and x 128. Units follow `cfg.units` (`km/h`/`mph` as today, label text unchanged). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
 
 ## 7. DRAG pages
 
@@ -99,7 +99,7 @@ Page 0 (run in progress):
 ┌──────────────────────────────────────────────┐
 │ 1/4                                   ARMED  │  FONT_SMALL latest-gate label; ARMED top-right (FONT_MED) until launch
 │  12.84                                       │  FONT_HUGE latest gate time (s.hh; `ss.hh` up to 6 glyphs)
-│ @173                                         │  FONT_MED trap speed row when the gate carries a speed (no unit: the model has no units field — follow-up)
+│ @173                                         │  `@` in FONT_SMALL, digits in FONT_MED (ruling T4-R1: FONT_MED has no `@` glyph); trap speed row when the gate carries a speed (no unit: the model has no units field — follow-up)
 │ 60ft 2.01   330ft 5.43   1/8 8.29            │  FONT_SMALL earlier gates of this run, in order
 └──────────────────────────────────────────────┘
 ```
@@ -107,9 +107,9 @@ Page 0 (run in progress):
 - Before launch: big slot shows `READY` in `FONT_MED` (no letters in `FONT_HUGE`), `ARMED` top-right while `drag_armed`; footer empty.
 - As gates hit (`EV_DRAG_GATE`), the newest gate takes the big slot (label above it, time in `FONT_HUGE`, speed row when `arg32b` speed is non-zero), and the previous gates of the run join the footer in hit order (label + time in `FONT_SMALL`, up to six entries, then the oldest scroll off the left).
 - The existing `drag_row_t` rows and `drag_n` remain the source; the renderer derives "newest" as `drag[drag_n - 1]`.
-- Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173` in `FONT_MED`; a unit suffix waits for a units field in the model (follow-up).
+- Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173`: the leading `@` draws in `FONT_SMALL` (ruling T4-R1: `FONT_MED` has no `@` glyph) and the digits beside it in `FONT_MED`; a unit suffix waits for a units field in the model (follow-up).
 
-Pages 1 (all gates of the last run) and 2 (session best per gate) share one list layout: a `FONT_SMALL` header at y 2 (`LAST RUN` / `SESSION BEST`), then seven gates in two columns of 123 px (x 4 and x 128) and four rows at y 16, 42, 68, 94; each cell is the `FONT_SMALL` label at the column's left edge (longest `100-200` = 49 px) and the `FONT_MED` value right-aligned at the column's right edge (x 122 / x 246), five glyphs at most (`ss.hh`, or `<dist> m` for the 100-0 gate, the `m` in `FONT_SMALL`). Drag gate times are under 60 s by construction (§6.6), so five glyphs always suffice. Empty gates show `--.--`.
+Pages 1 (all gates of the last run) and 2 (session best per gate) share one list layout: a `FONT_SMALL` header at y 2 (`LAST RUN` / `SESSION BEST`), then seven gates in two columns (ruling T4-R2: 118 px at x 4, 120 px at x 126 — not "two columns of 123 px") and four rows at y 16, 42, 68, 94; each cell is the `FONT_SMALL` label at the column's left edge (longest `100-200` = 49 px) and the `FONT_MED` value right-aligned at the column's right edge (x 122 / x 246), five glyphs at most (`ss.hh`, or `<dist> m` for the 100-0 gate, the `m` in `FONT_SMALL`). Drag gate times are under 60 s by construction (§6.6), so five glyphs always suffice. Empty gates show `--.--`.
 
 ## 8. Canvas constants (§20.5, `core/ui/canvas.h`)
 
@@ -118,7 +118,7 @@ All positions above are for the 2.13" canvas (`CANVAS_213`). The 2.9" (296×128)
 ## 9. Tests
 
 - `test/test_screens.c` cases, each with goldens on both canvases (`test/snapshots/*.pbm` and `test/snapshots/213/*.pbm`), plus the existing ink-column check (`fb_max_ink_col() < CANVAS_VISIBLE_W`):
-  `lap_p0_first_lap` (BIG_NONE, `LAP 1`, dashes), `lap_p0_sector_delta` (`-0.32`, `L7 S2`, LAST/BEST), `lap_p0_lap_delta_wide` (`+12.50`, marker relocated to the footer gap), `lap_p0_new_best` (BEST tag), `lap_p0_fault` (BEST value shifted left of the strip), `lap_p1_sectors` (3 sectors + deltas, one `----`), `lap_p1_many_sectors` (5 sectors → `S3 +2` on the 2.13", wrapped on the 2.9"), `lap_p2_stats`, `drag_p0_ready` (READY + ARMED), `drag_p0_gate_speed` (`12.84`, `@173`, three footer gates), `drag_p0_distance` (`38 m`), `drag_p1_gates`, `drag_p2_best`.
+  `lap_p0_first_lap` (BIG_NONE, `LAP 1`, dashes), `lap_p0_sector_delta` (`-0.32`, `L7 S2`, LAST/BEST), `lap_p0_lap_delta_wide` (`+12.50`, marker relocated to the footer gap), `lap_p0_new_best` (BEST tag), `lap_p0_fault` (footer sits above the fault strip, ruling T2-R1: BEST needs no retraction), `lap_p1_sectors` (3 sectors + deltas, one `----`), `lap_p1_many_sectors` (5 sectors → both canvases show `S3 +2`), `lap_p2_stats`, `lap_p2_stats_many_laps` (ruling T3-R2: a 3-digit `laps_total`/`laps_valid` degrades the `LAPS` suffix from `(N valid)` to `(N)` to nothing as each in turn fails to fit before `CANVAS_VISIBLE_W` on the 2.13"), `drag_p0_ready` (READY + ARMED), `drag_p0_gate_speed` (`12.84`, `@173`, three footer gates), `drag_p0_distance` (`38 m`), `drag_p1_gates`, `drag_p2_best`.
 - Golden review: each regenerated PBM is rendered to PNG and eyeballed before promotion (as in Plan 7 T3); the reviewer confirms nothing draws past `CANVAS_VISIBLE_W` and no two fields overlap (a new helper `fb_overlap_check` is **not** added — overlap is judged from the goldens).
 - Model wiring in `ui.c` is target-only; verified on the bench (photos: sector delta, lap delta, new best, drag ready).
 
