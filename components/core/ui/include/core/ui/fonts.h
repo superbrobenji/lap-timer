@@ -17,14 +17,13 @@ typedef struct {
 } font_t;
 
 extern const font_t FONT_HUGE;  /* 64 px: glyphs "0-9 : . - +" (cell 39x64) */
-extern const font_t FONT_BIG;   /* 40 px: glyphs "0-9 : . - + S" */
 extern const font_t FONT_MED;   /* 24 px: "0-9 : . - + A-Z" */
 extern const font_t FONT_SMALL; /* 12 px: ASCII 32..126 */
 
 /* Maps character `c` to its glyph index (0..font->count-1) into font->bitmaps, via the per-font
  * char->glyph-index map generated alongside the bitmap tables. Returns -1 when `c` has no glyph
  * in `font` (the renderer draws a blank cell in that case). `font` must be one of
- * &FONT_HUGE/&FONT_BIG/&FONT_MED/&FONT_SMALL. */
+ * &FONT_HUGE/&FONT_MED/&FONT_SMALL. */
 int font_glyph_index(const font_t *font, char c);
 
 #endif

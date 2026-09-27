@@ -162,6 +162,17 @@ static const int8_t FAULT_ICON_FOR_BIT[14] = {
     -1,                         /* 13 SYS_FUSION_DISAGREE */
 };
 
+/* Shared by fault_strip() and fault_strip_left_x() (PF-4): the icon (icons.h) for `bit`
+ * (SCR_SYS_*, model.h), or -1 if that bit draws no icon. The lookup itself lives in the one table
+ * above -- this wrapper is what makes "both functions use it" a compile-time fact rather than a
+ * convention two call sites could quietly drift apart on. */
+static int fault_icon_for_bit(int bit)
+{
+    CORE_ASSERT_RET(bit >= 0, UI_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(bit < 14, UI_ASSERT_CODE, -1);
+    return (int)FAULT_ICON_FOR_BIT[bit];
+}
+
 /* Strip anchor (spec §20.5: "x descending from ~284, y≈116" on the 296x128 frame; scaled per canvas
  * in core/ui/canvas.h): the rightmost icon's top-left, chosen so x0 + ICON_W(12) and y + ICON_H(12)
  * land flush with the frame's true visible edge on either canvas. */
@@ -177,7 +188,7 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
-        int icon = FAULT_ICON_FOR_BIT[bit];
+        int icon = fault_icon_for_bit(bit);
         if (icon < 0) {
             continue;
         }
@@ -199,59 +210,175 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
     }
 }
 
-/* ---- LAP page 0 (spec §20.5): BEST/PREV/CUR/dS + fault strip ---- */
+/* x of the leftmost icon fault_strip() will draw for `flags`, or CANVAS_VISIBLE_W when it draws
+ * none (spec 7b §4: the event-card footer keeps its BEST value CARD_FAULT_GAP px clear of this).
+ * Walks the same bit order / pitch stepping as fault_strip() above, through the same
+ * fault_icon_for_bit() table (PF-4), so the two can never disagree about which bits draw. Unlike
+ * fault_strip(), this takes no batt_pct -- so for SYS_BATT_LOW it reserves the widest "%<pct>"
+ * label fault_strip() could ever draw ("100%", 4 glyphs) rather than the caller's actual
+ * percentage. That makes the x this returns always <= fault_strip()'s real left edge for any
+ * batt_pct: a caller clearing its own content of that x never overlaps the strip, even though on
+ * a lower (1-2 digit) percentage it reserves a little more margin than fault_strip() actually
+ * needs. */
+int fault_strip_left_x(uint32_t flags)
+{
+    const int pitch = ICON_W + 2;
+    int       x = FAULT_STRIP_X0;
+    int       left = CANVAS_VISIBLE_W;
 
-static void render_lap_page0(fb_t *fb, const screen_model_t *m)
+    for (int bit = 0; bit < 14; bit++) {
+        if ((flags & (1u << bit)) == 0u) {
+            continue;
+        }
+        if (fault_icon_for_bit(bit) < 0) {
+            continue;
+        }
+        if (bit == SCR_SYS_BATT_LOW) {
+            x -= 4 * (int)FONT_SMALL.w + 1; /* worst case: "100%" */
+        }
+        left = x;
+        x -= pitch;
+    }
+    return left;
+}
+
+/* ---- LAP page 0 (spec 7b §3-4): the event card -- 64 px delta, LAST/BEST footer, lap/sector
+ * marker, inverted BEST tag, fault strip ---- */
+
+/* Signed delta (fmt_delta_ms's "+S.cc"/"-S.cc") with |value| clamped to `max_ms` first, so an
+ * out-of-range delta (e.g. a multi-lap gap after a pit stop) still fits FONT_HUGE's fixed 6-glyph
+ * budget ("+99.99") instead of growing past it. `buf` must be >= DELTA_BUF_LEN bytes. */
+static void fmt_delta_clamped(char *buf, int32_t dms, int32_t max_ms)
+{
+    CORE_ASSERT_VOID(buf != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(max_ms > 0 && max_ms <= CARD_DELTA_CLAMP_MS, UI_ASSERT_CODE);
+    int32_t d = dms;
+    if (d > max_ms) {
+        d = max_ms;
+    }
+    if (d < -max_ms) {
+        d = -max_ms;
+    }
+    fmt_delta_ms(buf, d);
+}
+
+/* Renders the 64 px big slot (FONT_HUGE): BIG_SECTOR_DELTA/BIG_LAP_DELTA show the signed delta,
+ * clamped to CARD_DELTA_CLAMP_MS; BIG_NONE (no best lap yet) falls back to "LAP n" in FONT_MED,
+ * since FONT_HUGE has no letters. Returns the pen x after the drawn text (CARD_BIG_X itself for
+ * the BIG_NONE case, since the caller only uses this to size the BEST tag / marker-collision
+ * check against a delta). */
+static int render_card_big(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_RET(fb != NULL, UI_ASSERT_CODE, CARD_BIG_X);
+    CORE_ASSERT_RET(m != NULL, UI_ASSERT_CODE, CARD_BIG_X);
+    if (m->big_kind == BIG_NONE) {
+        char  buf[16];
+        char *p = buf;
+        p = put_str(p, "LAP ");
+        p = put_uint(p, m->lap_no);
+        CORE_ASSERT_RET((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE, CARD_BIG_X); /* room left for the NUL */
+        *p = '\0';
+        return fb_text(fb, &FONT_MED, CARD_BIG_X, CARD_NONE_Y, buf);
+    }
+    char dbuf[DELTA_BUF_LEN];
+    fmt_delta_clamped(dbuf, m->big_delta_ms, CARD_DELTA_CLAMP_MS);
+    return fb_text(fb, &FONT_HUGE, CARD_BIG_X, CARD_BIG_Y, dbuf);
+}
+
+/* Top-right marker "L<lap_no> S<cur_sector_idx>" (FONT_SMALL, right-aligned): sits above the huge
+ * digits' ink line, so it never collides with the big slot whatever the delta's width. */
+static void render_card_marker(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    char  buf[16];
+    char *p = buf;
+    p = put_char(p, 'L');
+    p = put_uint(p, m->lap_no);
+    p = put_char(p, ' ');
+    p = put_char(p, 'S');
+    p = put_uint(p, m->cur_sector_idx);
+    CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
+    *p = '\0';
+    fb_text_right(fb, &FONT_SMALL, CARD_MARKER_RIGHT_X, CARD_MARKER_Y, buf);
+}
+
+/* Inverted "BEST" tag (spec 7b §4): white FONT_SMALL text on a solid black CARD_TAG_W x
+ * CARD_TAG_H box, drawn either beside the big number or over the marker row (render_lap_page0
+ * picks x/y for each case). */
+static void render_card_tag(fb_t *fb, int x, int y)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(x >= 0 && y >= 0, UI_ASSERT_CODE);
+    fb_rect(fb, x, y, CARD_TAG_W, CARD_TAG_H, 1, true);
+    fb_text_inv(fb, &FONT_SMALL, x + 2, y + 1, "BEST");
+}
+
+/* Footer: "LAST"/"BEST" labels (FONT_SMALL) over their right-aligned FONT_MED values. BEST's
+ * right edge pulls in to clear the fault strip (fault_strip_left_x() - CARD_FAULT_GAP) whenever
+ * any fault icon is shown; LAST's column is unaffected since the strip anchors bottom-right.
+ * best_right is floored at CARD_LEFT_RIGHT_X + CARD_FOOTER_MIN_GAP + (BEST value's own width): a
+ * wide strip (e.g. GPS + a low-battery "%<pct>" label together, both bits set) can otherwise pull
+ * best_right in far enough that the BEST value's left edge undercuts LAST's column and the two
+ * values print on top of each other -- confirmed by eyeballing that literal reading, which showed
+ * exactly that garbled overlap. That floor takes priority over full fault-strip clearance in this
+ * rare combination (a value overlapping another value is a worse defect than a digit sitting a
+ * couple of px from an icon), so on the 296 canvas this specific combination still lands its
+ * rightmost digit close to the strip -- a tighter defect than CARD_FAULT_GAP alone promises, but
+ * the least-bad option the CARD block's column widths leave room for. */
+static void render_card_footer(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
 
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_BEST_Y, "BEST");
-    if (m->have_best) {
-        fmt_time_ms(buf, m->best_ms);
-        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_BEST_Y, buf);
-    } else {
-        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_BEST_Y, EMPTY_TIME);
-    }
-
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_PREV_Y, "PREV");
+    fb_text(fb, &FONT_SMALL, CARD_LEFT_LABEL_X, CARD_LABEL_Y, "LAST");
     if (m->have_prev) {
         fmt_time_ms(buf, m->prev_ms);
-        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_PREV_Y, buf);
     } else {
-        fb_text_right(fb, &LAP_TIME_FONT, LAP_TIME_RIGHT_X, LAP_ROW_PREV_Y, EMPTY_TIME);
-    }
-
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_CUR_Y, "CUR");
-    fmt_time_ms(buf, m->cur_ms_at_gate);
-    fb_text_right(fb, &LAP_CUR_FONT, LAP_CUR_TIME_RIGHT_X, LAP_ROW_CUR_Y, buf);
-    {
-        char  sbuf[8];
-        char *p = sbuf;
-        p = put_char(p, 'S');
-        p = put_uint(p, m->cur_sector_idx);
-        CORE_ASSERT_VOID((size_t)(p - sbuf) < sizeof sbuf, UI_ASSERT_CODE); /* room left for the NUL */
+        char *p = put_str(buf, EMPTY_TIME);
         *p = '\0';
-        fb_text(fb, &LAP_CUR_FONT, LAP_CUR_SECTOR_X, LAP_ROW_CUR_Y, sbuf);
     }
+    fb_text_right(fb, &FONT_MED, CARD_LEFT_RIGHT_X, CARD_VALUE_Y, buf);
 
-    /* Spec §20.5 lists this row's value as FONT_MED, but at y=112 (296 canvas) a 24px-tall FONT_MED
-     * cell runs to y=136 -- 8px past the 128px frame -- and eyeballing that literal reading showed
-     * real clipped/illegible ink (confirmed against the actual rendered PBM, not just cell-box
-     * math). The fault-icon strip occupies this same bottom band at 12px tall (FAULT_STRIP_Y=116),
-     * which is the same scale as FONT_SMALL, so this row uses FONT_SMALL for the value instead: it
-     * fits fully within the frame with no clipping and no collision with the CUR row above it (same
-     * reasoning holds on the 213 canvas, whose CUR/dS rows sit even closer together). */
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP_ROW_DELTA_Y, "dS");
-    if (m->new_best) {
-        fb_text(fb, &FONT_SMALL, LAP_DELTA_VALUE_X, LAP_ROW_DELTA_Y, "BEST");
+    fb_text(fb, &FONT_SMALL, CARD_RIGHT_LABEL_X, CARD_LABEL_Y, "BEST");
+    if (m->have_best) {
+        fmt_time_ms(buf, m->best_ms);
     } else {
-        char dbuf[DELTA_BUF_LEN];
-        fmt_delta_ms(dbuf, m->sector_delta_ms);
-        fb_text(fb, &FONT_SMALL, LAP_DELTA_VALUE_X, LAP_ROW_DELTA_Y, dbuf);
+        char *p = put_str(buf, EMPTY_TIME);
+        *p = '\0';
     }
+    int best_w     = (int)strlen(buf) * (int)FONT_MED.w;
+    int best_min   = CARD_LEFT_RIGHT_X + CARD_FOOTER_MIN_GAP + best_w;
+    int best_right = fault_strip_left_x(m->flags) - CARD_FAULT_GAP;
+    if (best_right > CARD_RIGHT_RIGHT_X) {
+        best_right = CARD_RIGHT_RIGHT_X;
+    }
+    if (best_right < best_min) {
+        best_right = best_min;
+    }
+    fb_text_right(fb, &FONT_MED, best_right, CARD_VALUE_Y, buf);
+}
 
+/* The LAP page 0 event card (spec 7b §4): the 64 px big slot top-left, the lap/sector marker
+ * top-right (or, when a six-glyph delta leaves no room for the BEST tag beside it, the tag takes
+ * the marker's row instead), the LAST/BEST footer, and the fault strip drawn last as always. */
+static void render_lap_page0(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    int    end_x = render_card_big(fb, m);
+    size_t glyphs = (m->big_kind == BIG_NONE) ? 0u : (size_t)((end_x - CARD_BIG_X) / FONT_HUGE.w);
+    bool   wide = glyphs > 5u; /* six glyphs end at x 238: no room for the tag beside them */
+    if (m->new_best && wide) {
+        render_card_tag(fb, CARD_TAG_ALT_X, CARD_MARKER_Y); /* replaces the marker this lap */
+    } else {
+        render_card_marker(fb, m);
+        if (m->new_best) {
+            render_card_tag(fb, end_x + CARD_TAG_GAP, CARD_TAG_Y);
+        }
+    }
+    render_card_footer(fb, m);
     fault_strip(fb, m->flags, m->batt_pct);
 }
 
