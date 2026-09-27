@@ -9,7 +9,8 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | 1 | ESP32 DevKit V1 (ESP32-WROOM-32, CH340, 4 MB) | 1 | controller; verified ESP32-D0WD-V3 rev 3.1, 4 MB flash | §3.1, §3.3 | owned | — | — |
 | 2 | GY-NEO6M v2 GPS module | 1 | position, speed, time (5 Hz prototype) | §3.1, §7.3 | ordered, ~mid-Oct 2026 | Communica / Micro Robotics | R150 |
 | 3 | GY-521 (MPU6050) | 1 | lean angle, g-forces, motion wake | §3.1, §8 | ordered, ~mid-Oct 2026 | Communica / Micro Robotics | R60 |
-| 4 | Waveshare 2.9" e-Paper Module V2 (SSD1680, 296×128) | 1 | rider display | §3.1, §20.1 | to order | DIYElectronics / Micro Robotics | R450 |
+| 4 | Waveshare 2.13" e-Paper HAT rev2.1, panel V4 (SSD1680, 122×250) | 1 | rider display | §3.1, §20.1 | owned | DIYElectronics / Micro Robotics | R450 |
+| 4a | Waveshare 2.9" e-Paper Module V2 (SSD1680, 296×128) | 1 | rider display, alternative panel (`ws29v2`) | §3.1, §20.1 | alternative | DIYElectronics / Micro Robotics | R450 |
 
 ## Power
 
