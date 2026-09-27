@@ -119,6 +119,22 @@ static void test_text_inv_is_white_on_black(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_inv.pbm"), &s_fb));
 }
 
+static void test_text_inv_no_glyph_cell_is_solid_black(void)
+{
+    /* Test gap (finding 13a): FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP) -- fb_text_inv()
+     * draws a no-glyph cell as blank (all-background) in fb_text's normal sense, then inverts it,
+     * so every pixel of the cell must come out as ink (0 = black), not just the glyph strokes. */
+    int end = fb_text_inv(&s_fb, &FONT_MED, 4, 4, "@");
+    TEST_ASSERT_EQUAL_INT(4 + FONT_MED.w, end);
+    for (int y = 4; y < 4 + (int)FONT_MED.h; y++) {
+        for (int x = 4; x < 4 + (int)FONT_MED.w; x++) {
+            uint8_t byte = s_fb.bits[y * s_fb.stride + x / 8];
+            TEST_ASSERT_EQUAL_UINT8(0u, (uint8_t)((byte >> (7 - (x % 8))) & 1u));
+        }
+    }
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_inv_no_glyph.pbm"), &s_fb));
+}
+
 static void test_text_med_renders_line(void)
 {
     /* FONT_MED's glyph set is "0-9 : . - + A-Z" (no space, no lowercase) — a space still renders
@@ -211,6 +227,7 @@ int main(void)
     RUN_TEST(test_dirty_box_accumulates_bounding_box_of_draws);
     RUN_TEST(test_text_huge_renders_delta);
     RUN_TEST(test_text_inv_is_white_on_black);
+    RUN_TEST(test_text_inv_no_glyph_cell_is_solid_black);
     RUN_TEST(test_text_med_renders_line);
     RUN_TEST(test_text_small_renders_line);
     RUN_TEST(test_icons_and_bar);

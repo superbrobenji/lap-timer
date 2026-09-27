@@ -97,7 +97,7 @@
  * both canvases since the tag box itself (CARD_TAG_W/H above) is canvas-independent. */
 #define CARD_TAG_PAD_X 2
 #define CARD_TAG_PAD_Y 1
-#define CARD_FAULT_GAP 4         /* BEST value keeps this many px clear of the fault strip */
+#define DCARD_FAULT_GAP 4        /* px kept clear between DRAG page 0's footer text and the fault strip */
 #define CARD_DELTA_CLAMP_MS 99990
 
 /* ---- Plan 7b LAP page 1: sector board (spec 7b §5) ---- */
@@ -172,7 +172,10 @@
 #if CANVAS_213
 #define DLIST_HEADER_Y     2
 #define DLIST_COL2_X       126
-#define DLIST_COL1_RIGHT_X 122
+/* Ruling FR-5 (Plan 7b final fix 1): symmetric columns -- col 1 is 4..124 (120 px), col 2 is
+ * 126..246 (120 px), 2 px between the columns' boxes -- rather than the old 4..122/126..246
+ * (118/120 px) split. */
+#define DLIST_COL1_RIGHT_X 124
 #define DLIST_COL2_RIGHT_X 246
 #define DLIST_ROW_Y0       16
 #define DLIST_ROW_H        26
