@@ -89,47 +89,49 @@
 #define CARD_TAG_W    32
 #define CARD_TAG_H    14
 #define CARD_TAG_GAP  6
+/* Plan 7b T2 review minor m2: render_card_tag()'s inner text inset (screens_moto.c), shared by
+ * both canvases since the tag box itself (CARD_TAG_W/H above) is canvas-independent. */
+#define CARD_TAG_PAD_X 2
+#define CARD_TAG_PAD_Y 1
 #define CARD_FAULT_GAP 4         /* BEST value keeps this many px clear of the fault strip */
 #define CARD_DELTA_CLAMP_MS 99990
 
-/* LAP_LABEL_X is still used by pages 1/2 and the DRAG grid (both canvases) today; those uses move
- * to BOARD_X0/GRID_COL1_X in Task 3. LAP_TIME_RIGHT_X is still used by page 1's THEO row value
- * (render_lap_page1) today; that use moves with the rest of page 1's layout in Task 3 too. Both
- * are temporary reintroductions of constants this task's CARD block otherwise replaces. */
-#define LAP_LABEL_X 4 /* removed in Task 3 */
+/* ---- Plan 7b LAP page 1: sector board (spec 7b §5) ---- */
+#define BOARD_COLS  3
+#define BOARD_X0    4
+#define BOARD_COL_W ((CANVAS_VISIBLE_W - 8) / BOARD_COLS)
+#define BOARD_DELTA_CLAMP_MS 9990     /* "+9.99": five glyphs fit an 80 px column */
 #if CANVAS_213
-#define LAP_TIME_RIGHT_X 170 /* removed in Task 3 */
+#define BOARD_HEADER_Y 2
+#define BOARD_LABEL_Y  20
+#define BOARD_VALUE_Y  34
+#define BOARD_DELTA_Y  66
 #else
-#define LAP_TIME_RIGHT_X 200 /* removed in Task 3 */
+#define BOARD_HEADER_Y 2
+#define BOARD_LABEL_Y  22
+#define BOARD_VALUE_Y  36
+#define BOARD_DELTA_Y  70
 #endif
-
-/* ---- LAP page 1 (best-lap sector splits + THEO) ---- */
+/* ---- Plan 7b LAP page 2: stats grid (spec 7b §6) ---- */
 #if CANVAS_213
-#define LAP1_TITLE_Y       4
-#define LAP1_SECTOR_COLS   3
-#define LAP1_SECTOR_X0     4
-#define LAP1_SECTOR_COL_W  ((CANVAS_W - 8) / 3)
-#define LAP1_SECTOR_Y0     16
-#define LAP1_SECTOR_ROW_H  14
-#define LAP1_THEO_LABEL_Y  84
-#define LAP1_THEO_VALUE_Y  76
+#define GRID_COL1_X   4
+#define GRID_COL2_X   128
+#define GRID_LABEL_Y0 2
+#define GRID_VALUE_Y0 14
+#define GRID_LABEL_Y1 62
+#define GRID_VALUE_Y1 74
+#define GRID_FOOTER_Y 106
 #else
-#define LAP1_TITLE_Y       4
-#define LAP1_SECTOR_COLS   3
-#define LAP1_SECTOR_X0     4
-#define LAP1_SECTOR_COL_W  96
-#define LAP1_SECTOR_Y0     20
-#define LAP1_SECTOR_ROW_H  16
-#define LAP1_THEO_LABEL_Y  88
-#define LAP1_THEO_VALUE_Y  80
+#define GRID_COL1_X   4
+#define GRID_COL2_X   152
+#define GRID_LABEL_Y0 2
+#define GRID_VALUE_Y0 16
+#define GRID_LABEL_Y1 64
+#define GRID_VALUE_Y1 78
+#define GRID_FOOTER_Y 110
 #endif
-
-/* ---- LAP page 2 (session stats, 5 rows from a fixed y=8) ---- */
-#if CANVAS_213
-#define LAP2_ROW_H 20
-#else
-#define LAP2_ROW_H 24
-#endif
+#define GRID_SUB_GAP 4    /* px between a FONT_MED value and its FONT_SMALL suffix */
+#define GRID_SUB_DY  8    /* the suffix sits this many px below the value's top */
 
 /* ---- DRAG page 0 (benches + 1/4 row, spec §11.4) ---- */
 #if CANVAS_213

@@ -143,7 +143,8 @@ static void test_lap_p0_new_best(void)
 static void test_lap_p0_fault(void)
 {
     /* GPS has no fix and the battery is low -- exercises the fault strip together with the event
-     * card, confirming the footer's BEST value stays clear of the icons (fault_strip_left_x). */
+     * card; the footer rows sit above the strip (ruling T2-R1), so BEST needs no x retraction to
+     * stay clear of the icons. */
     screen_model_t m;
     lap_model_base(&m);
     m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = 210; m.big_sector_idx = 2;
@@ -154,50 +155,53 @@ static void test_lap_p0_fault(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_fault.pbm"), &s_fb));
 }
 
-/* ---- LAP page 1 (best-lap sector splits + THEO) ---- */
+/* ---- LAP page 1 (sector board, spec 7b §5) ---- */
 
 static void test_lap_p1_sectors(void)
 {
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 1;
-    m.have_best = true;
-    m.best_ms = 111900; /* 1:51.90 */
-    m.best_n_sectors = 4;
-    m.best_sector_ms[0] = 32100; /* S1 0:32.10 */
-    m.best_sector_ms[1] = 41000; /* S2 0:41.00 */
-    m.best_sector_ms[2] = 39240; /* S3 0:39.24 */
-    m.best_sector_ms[3] = 33200; /* S4 (unused by the spec's example, exercises 4 sectors / 2 rows) */
-    m.have_theo = true;
-    m.theo_best_ms = 111200; /* THEO 1:51.20 */
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Three sectors, both fit comfortably within the three-column board: S1/S2/S3 best-lap times
+     * on the value row, and a mix of a hit ("-0.12"/"+0.40") and a not-yet-reached ("----", S3)
+     * last-lap delta on the row below. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 3;
+    m.best_sector_ms[0] = 32100; m.best_sector_ms[1] = 41000; m.best_sector_ms[2] = 39240;
+    m.have_theo = true; m.theo_best_ms = 111200;
+    m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
+    m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
+    /* sector 3 of the current lap not reached yet: cell shows "----" */
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_sectors.pbm"), &s_fb));
 }
 
-/* ---- LAP page 2 (session stats) ---- */
+static void test_lap_p1_many_sectors(void)
+{
+    /* Five sectors: the board still shows only three columns, S3's label gains a "+2" suffix for
+     * the two sectors that do not fit, every last-lap delta is a huge +15.00s that clamps to the
+     * fixed "+9.99" budget, and no theoretical best is on record yet (THEO reads "-:--.--"). */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 5;
+    for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
+    m.have_theo = false;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_many_sectors.pbm"), &s_fb));   /* S3 label reads "S3 +2"; THEO reads -:--.-- */
+}
+
+/* ---- LAP page 2 (2x2 stats grid, spec 7b §6) ---- */
 
 static void test_lap_p2_stats(void)
 {
-    /* Values taken straight from spec §20.5's own worked example. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 2;
-    m.max_speed_kmh = 214;
-    m.lean_l_deg = 52;
-    m.lean_r_deg = 55;
-    m.lat_g_e2 = 132; /* 1.32 */
-    m.acc_g_e2 = 61;  /* 0.61 */
-    m.brk_g_e2 = 105; /* 1.05 */
-    m.laps_total = 12;
-    m.laps_valid = 10;
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Values taken straight from spec 7b §6's own worked example. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 2;
+    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -472,6 +476,7 @@ int main(void)
     RUN_TEST(test_lap_p0_new_best);
     RUN_TEST(test_lap_p0_fault);
     RUN_TEST(test_lap_p1_sectors);
+    RUN_TEST(test_lap_p1_many_sectors);
     RUN_TEST(test_lap_p2_stats);
     RUN_TEST(test_drag_p0_benches);
     RUN_TEST(test_drag_p1_gates);
