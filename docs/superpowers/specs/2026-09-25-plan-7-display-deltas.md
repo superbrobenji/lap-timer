@@ -63,3 +63,36 @@ Lap-timer console: `dbg btn <mode|up|down> [hold_ms]` posts the same `{mask, mon
 ## 7. Sequencing
 
 7.0 prep (pin change + spec §3, `PANEL` default, canvas header + 213 goldens, DRAM steps 1–3, `hal/display.h`) → 7.1 driver + boot screen (flash gate, `p07-d1`) → 7.2 partial refresh + `ui` wiring + policy + ladder (gate, `p07-d2`) → 7.3 ghosting/throttle/buttons/menu (gate, `p07-d3` = `plan-07-done`) → docs (roadmap: Plan 7 done, Plan 6 next; BOM #4 → the 2.13" V4 as owned). Subagent-driven, one worktree, reviews per task, final whole-branch review, PR.
+
+## 8. Implementation notes (bench 2026-09-27)
+
+**Hardware.** Confirmed as built: Waveshare 2.13" e-Paper HAT rev 2.1, panel V4 (SSD1680, 122×250 native, 250×122 landscape), owned since 2026-09-25. The `BS` pad is strapped 0 (4-wire SPI). Wiring: CLK GPIO 18, DIN 23, CS 5, DC 14, RST 13, BUSY 35 (RST moved off the spec's original GPIO 4, which is the dev-kit's **DETECT** line). The 2.9" V2 (`ws29v2`) stays the alternative panel behind the `PANEL` build flag; default is now `ws213v4`.
+
+**Canvas.** The 2.13" framebuffer is 256 px wide (byte-aligned) with 250 visible (`CANVAS_W` 256 / `CANVAS_VISIBLE_W` 250 / `CANVAS_H` 122). `fb_clear()` dirties the whole padded buffer, so the driver's window is clamped to 250 and the host tests check ink columns < 250. `MENU_VISIBLE_ROWS` is 6 on the 2.13" (4 on the 2.9"). A second golden set lives in `test/snapshots/213/`.
+
+**DRAM (`moto_sim`, internal DRAM free):**
+
+| Point | Free | Change |
+|-------|------|--------|
+| Before Plan 7 | 392 B | — |
+| After T1 (`CFG_TRK_JSON_TOKS` 64, sim venue parsed into the user-track table, `ui` stack back to 6144) | 8 520 B | device-sized track-JSON tokens |
+| After the driver (T5) | 8 264 B | |
+| After the `ui` wiring (T7) | ≈ 8 232 B | |
+
+Production `moto_neo6m` is unaffected (~9.5 KB free throughout). Sub-project C strip candidates recorded here: the user-track table (~11 KB) and the dev-only `dbg` command family.
+
+**Driver (`display_epaper_ssd1680`).** SPI3 at 10 MHz mode 0, DC driven from the transaction pre-callback, polling transactions only. BUSY is polled at 1 ms with a 5 s timeout that pets the task WDT every 500 ms and aborts the sequence on the first timeout. Writes ≤ 4 bytes go through `SPI_TRANS_USE_TXDATA` — the DMA-enabled bus cannot read flash-resident constants directly. `disp_blit()` called before `disp_init()` lands the boot screen inside init's own full refresh. A failed partial restores the border and consumes the window; the ladder's retry runs as a full, not a repeated partial. Framebuffer polarity matches the panel (0 = black); no inversion.
+
+**Measured on the bench (2026-09-27, `moto_sim`, v0.1.0-47):** full refresh ≈ 3.2 s end-to-end (button injection to log line, minus ~0.3 s console latency; includes both RAM-plane writes, rotation, and BUSY polling), partial ≈ 0.7 s. `disp_caps` still reports the datasheet-class 2000/400 ms.
+
+Refresh policy verified from the bench logs: partials fire on page changes while moving; a forced full fires at 2×`full_every` (20) partials while moving; full refresh fires on menu entry/exit and on page changes while still; the temperature throttle (`dbg flag set 11`) limits partials to one per 30 s with fulls suppressed; an externally set `SYS_DISP_DEAD` self-heals on the next loop (reinit succeeds); menu open/scroll/select/auto-exit (30 s) all drive the panel; a 10-minute soak ran with no task WDT.
+
+`display.live_clock` is stored but has no effect yet: the screen model carries `cur_ms_at_gate`, not a running lap time, so a 1 Hz tick would refresh identical pixels (ruling T7-R7). Follow-up once the pipeline supplies a running CUR time. Separately, the refresh "dirty window" is always the full visible frame today, because every screen render clears the framebuffer first (partials are full-window partials) — a future optimisation.
+
+**Bench findings fixed in Plan 7 (branch `p7-t9`):**
+1. `gps_sim` now parks at the end of its capture (delivers the last fix at speed 0, 1 Hz) instead of going silent, so `EV_STILL` arrives and the menu can be used on the bench.
+2. `dbg btn` injected holds must exceed the 1000/2000/3000 ms thresholds by ≥ 100 ms (e.g. `up+down 2200`); usage text updated.
+3. The logger's 60 s eviction scan used a per-entry `stat()` (O(n²) on LittleFS) and starved the ui past the task WDT at ~90 sessions — now a name-only scan, O(n).
+4. LittleFS reached 0 free blocks (at which point even `unlink()` fails) — the logger now keeps a reserve: it refuses to open a session below 5 % free, evicts in bounded multi-file passes (max 8 per pass) until 15 % free, and pairs the `SYS_STORAGE_FULL` flag with its latch. See spec §12.7 (updated alongside this doc) for the 5 %/15 %/8-per-pass numbers, on top of the existing 10 % trigger.
+
+**Bench procedure notes.** With the dev-kit's link wired to the lap-timer's UART0, USB `esptool` flashing fails (shared RX) — flash via the dev-kit's OTA push, or hold the dev-kit in reset over its own USB adapter (RTS asserted) for a USB flash. Console commands go through `lt shell`. The lap-timer's own USB log is read-only-usable.
