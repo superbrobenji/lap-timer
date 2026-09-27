@@ -532,10 +532,13 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r)
     fmt_secs_ms(buf, r->t_ms);
     fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
     if (r->has_trap) {
-        char *p = put_char(buf, '@');
-        p = put_uint(p, r->trap_kmh);
+        /* T4-R1: FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so '@' is drawn in FONT_SMALL,
+         * hugging the FONT_MED speed digits' baseline, and the speed itself (no '@') in FONT_MED
+         * beside it. */
+        fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_SPEED_Y + DCARD_AT_DY, "@");
+        char *p = put_uint(buf, r->trap_kmh);
         *p = '\0';
-        fb_text(fb, &FONT_MED, DCARD_LABEL_X, DCARD_SPEED_Y, buf);
+        fb_text(fb, &FONT_MED, DCARD_LABEL_X + (int)FONT_SMALL.w + DCARD_AT_GAP, DCARD_SPEED_Y, buf);
     }
 }
 

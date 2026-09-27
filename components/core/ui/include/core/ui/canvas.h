@@ -161,6 +161,11 @@
 #define DCARD_UNIT_DY    48    /* the "m" sits this far below the huge cell's top (near the baseline) */
 #define DCARD_FOOTER_MAX 6     /* earlier gates listed in the footer, newest last */
 #define DCARD_FOOTER_SEP "   "
+/* T4-R1 (Plan 7b T4 fix 1): FONT_MED has no '@' glyph, so the trap row's '@' is drawn in
+ * FONT_SMALL, then the speed digits in FONT_MED beside it -- canvas-independent, both canvases
+ * share the same small-font baseline offset and gap. */
+#define DCARD_AT_DY  8         /* the FONT_SMALL "@" sits this far below the FONT_MED row's top, hugging its baseline */
+#define DCARD_AT_GAP 2         /* px between the "@" and the FONT_MED speed digits */
 /* ---- Plan 7b DRAG pages 1/2: gate list (spec 7b §7) ---- */
 #define DLIST_ROWS 4
 #define DLIST_LABEL_DY 6
