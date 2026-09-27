@@ -82,7 +82,7 @@ Columns: `LAP1_SECTOR_COLS` = 3 columns of `(CANVAS_VISIBLE_W - 8) / 3` px on bo
 ```
 ┌──────────────────────────────────────────────┐
 │ MAX SPD                LEAN L/R              │  FONT_SMALL labels, y 2
-│  214                    52 / 55              │  FONT_MED values, y 14
+│  214                    L52 R55              │  FONT_MED values, y 14 (no '/' glyph in FONT_MED)
 │ LAT G                  LAPS                  │  FONT_SMALL labels, y 62
 │  1.32                   12 (10 valid)        │  FONT_MED value / FONT_MED + FONT_SMALL, y 74
 │ ACC 0.61   BRK 1.05                          │  FONT_SMALL footer, y 106
@@ -99,7 +99,7 @@ Page 0 (run in progress):
 ┌──────────────────────────────────────────────┐
 │ 1/4                                   ARMED  │  FONT_SMALL latest-gate label; ARMED top-right (FONT_MED) until launch
 │  12.84                                       │  FONT_HUGE latest gate time (s.hh; `ss.hh` up to 6 glyphs)
-│ @173 km/h                                    │  FONT_MED trap speed row when the gate carries a speed
+│ @173                                         │  FONT_MED trap speed row when the gate carries a speed (no unit: the model has no units field — follow-up)
 │ 60ft 2.01   330ft 5.43   1/8 8.29            │  FONT_SMALL earlier gates of this run, in order
 └──────────────────────────────────────────────┘
 ```
@@ -107,7 +107,7 @@ Page 0 (run in progress):
 - Before launch: big slot shows `READY` in `FONT_MED` (no letters in `FONT_HUGE`), `ARMED` top-right while `drag_armed`; footer empty.
 - As gates hit (`EV_DRAG_GATE`), the newest gate takes the big slot (label above it, time in `FONT_HUGE`, speed row when `arg32b` speed is non-zero), and the previous gates of the run join the footer in hit order (label + time in `FONT_SMALL`, up to six entries, then the oldest scroll off the left).
 - The existing `drag_row_t` rows and `drag_n` remain the source; the renderer derives "newest" as `drag[drag_n - 1]`.
-- Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173` in `FONT_MED` followed by `km/h` or `mph` in `FONT_SMALL` (same reason).
+- Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173` in `FONT_MED`; a unit suffix waits for a units field in the model (follow-up).
 
 Pages 1 (all gates of the last run) and 2 (session best per gate) share one list layout: a `FONT_SMALL` header at y 2 (`LAST RUN` / `SESSION BEST`), then seven gates in two columns of 123 px (x 4 and x 128) and four rows at y 16, 42, 68, 94; each cell is the `FONT_SMALL` label at the column's left edge (longest `100-200` = 49 px) and the `FONT_MED` value right-aligned at the column's right edge (x 122 / x 246), five glyphs at most (`ss.hh`, or `<dist> m` for the 100-0 gate, the `m` in `FONT_SMALL`). Drag gate times are under 60 s by construction (§6.6), so five glyphs always suffice. Empty gates show `--.--`.
 
