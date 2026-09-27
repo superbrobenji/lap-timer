@@ -17,8 +17,8 @@ This document only records what differs from, or is left open by, the base spec.
 
 ## 2. Canvas rule (compile-time, by `PANEL`)
 
-- `CFG_PANEL_WS213V4` → logical canvas **250×122**; `CFG_PANEL_WS29V2` → 296×128. The `ui` task keeps its static 4736-byte framebuffer (sized for the larger panel, §4.8) and initialises `fb_t` with the panel's dimensions (3904 bytes used on the 2.13").
-- One header, `core/ui/canvas.h`, owns the dimensions and the per-canvas layout constants; `screens_moto.c` uses those constants only (no literal 296/128/260 coordinates). Rule: **nothing renders below `y = height` or right of `x = width`** — the host test asserts the renderer's clip counters stay zero for every golden.
+- `CFG_PANEL_WS213V4` → logical canvas **250×122 visible**, backed by a byte-aligned **256×122** buffer (`CANVAS_W` 256 / `CANVAS_VISIBLE_W` 250 / `CANVAS_H` 122 — see §8); `CFG_PANEL_WS29V2` → 296×128, already byte-aligned (no padding). The `ui` task keeps its static 4736-byte framebuffer (sized for the larger panel, §4.8) and initialises `fb_t` with the panel's dimensions (3904 bytes used on the 2.13").
+- One header, `core/ui/canvas.h`, owns the dimensions and the per-canvas layout constants; `screens_moto.c` uses those constants only (no literal 296/128/260 coordinates). Rule: **nothing renders below `y = height` or right of `x = width`** — the host test asserts `fb_max_ink_col() < CANVAS_VISIBLE_W` for every golden (no renderer draws ink past the panel's visible width; `fb_clear()` itself dirties the whole padded buffer every render, so a zero-dirty-counter check would not be meaningful here — see `test/test_screens.c`).
 - §20.5 font scaling on the 122-px canvas (BIG is never used there):
 
 | Row | 296×128 (unchanged) | 250×122 |
@@ -29,7 +29,7 @@ This document only records what differs from, or is left open by, the base spec.
 | LAP ΔS | y=112, `FONT_SMALL` | y=70, `FONT_SMALL` |
 | DRAG rows (4) | `FONT_MED`, right x=180, `@` at x=190 | y=2/28/54/80, `FONT_MED`, right x=150, `@` at x=160 |
 | Fault strip | x0=284, y=116 | x0=238, y=110 |
-| Page 1/2, one-shots, menu | as §20.5–20.7 | same fonts (`FONT_MED` titles, `FONT_SMALL` rows), rows packed at 14 px pitch from y=2; the menu shows 7 rows instead of 8 |
+| Page 1/2, one-shots, menu | as §20.5–20.7 | same fonts (`FONT_MED` titles, `FONT_SMALL` rows), rows packed at 14 px pitch from y=2; the menu shows 6 rows (`MENU_VISIBLE_ROWS`, see §8) at 14 px `MENU_ROW_H`, vs. the 296×128 canvas's 4 rows at 24 px |
 
   The pixel values above are the starting layout; the committed PBM goldens (eyeballed as PNG, the existing workflow) are the acceptance artefact, and a value may move by a few pixels during that review without a spec change.
 
@@ -87,7 +87,7 @@ Production `moto_neo6m` is unaffected (~9.5 KB free throughout). Sub-project C s
 
 Refresh policy verified from the bench logs: partials fire on page changes while moving; a forced full fires at 2×`full_every` (20) partials while moving; full refresh fires on menu entry/exit and on page changes while still; the temperature throttle (`dbg flag set 11`) limits partials to one per 30 s with fulls suppressed; an externally set `SYS_DISP_DEAD` self-heals on the next loop (reinit succeeds); menu open/scroll/select/auto-exit (30 s) all drive the panel; a 10-minute soak ran with no task WDT.
 
-`display.live_clock` is stored but has no effect yet: the screen model carries `cur_ms_at_gate`, not a running lap time, so a 1 Hz tick would refresh identical pixels (ruling T7-R7). Follow-up once the pipeline supplies a running CUR time. Separately, the refresh "dirty window" is always the full visible frame today, because every screen render clears the framebuffer first (partials are full-window partials) — a future optimisation.
+`display.live_clock` is stored but has no effect yet: the screen model carries `cur_ms_at_gate`, not a running lap time, so a 1 Hz tick would refresh identical pixels (ruling T7-R7). Follow-up once the pipeline supplies a running CUR time. Similarly, `E_DISP_TEMP` (0x0303) and `SYS_DISP_TEMP_THROTTLE` have no producer yet: nothing sets the throttle from a real over-temperature reading until the MPU6050 temperature channel lands (Plan 8); `dbg flag set 11` (§4 / `export_serial.c`) is the only setter today, for bench-exercising the throttle path in §20.3. Separately, the refresh "dirty window" is always the full visible frame today, because every screen render clears the framebuffer first (partials are full-window partials) — a future optimisation.
 
 **Bench findings fixed in Plan 7 (branch `p7-t9`):**
 1. `gps_sim` now parks at the end of its capture (delivers the last fix at speed 0, 1 Hz) instead of going silent, so `EV_STILL` arrives and the menu can be used on the bench.

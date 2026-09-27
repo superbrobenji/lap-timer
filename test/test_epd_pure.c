@@ -64,6 +64,16 @@ static void test_window_rejects_spill_past_visible_width(void)
     TEST_ASSERT_TRUE(epd_window_from_rect(234, 0, 16, 5, 256, 122, &w));
     TEST_ASSERT_EQUAL_UINT16(234, w.r0); TEST_ASSERT_EQUAL_UINT16(250, w.r1);
 }
+/* Fix round 2 (finding 10b): a rect that fits the panel's x/w range but whose y/h range overflows
+ * the FRAMEBUFFER's height (fb_h) must still be rejected -- a distinct guard from the x+w-past-
+ * logical_w case above, and from epd_rotate_line's fb_h >= native_w assertion (a buffer-shape
+ * invariant, not this routine rect-shape rejection). */
+static void test_window_rejects_row_past_fb_h(void)
+{
+    epd_window_t w;
+    TEST_ASSERT_FALSE(epd_window_from_rect(10, 118, 20, 10, 256, 122, &w));   /* y+h=128 > fb_h=122 */
+    TEST_ASSERT_TRUE(epd_window_from_rect(10, 110, 20, 12, 256, 122, &w));    /* y+h=122 == fb_h: accepted */
+}
 static void test_panel_table_ws213v4(void)
 {
     const epd_panel_t *p = epd_panel();
@@ -75,4 +85,5 @@ int main(void) { UNITY_BEGIN(); RUN_TEST(test_rotate_all_white_fb_gives_all_ones
     RUN_TEST(test_rotate_single_black_pixel_lands_in_the_right_column); RUN_TEST(test_rotate_invert_flips_ink);
     RUN_TEST(test_rotate_rejects_unaligned_width);
     RUN_TEST(test_window_snaps_logical_y_to_ram_bytes); RUN_TEST(test_window_rejects_spill_past_visible_width);
+    RUN_TEST(test_window_rejects_row_past_fb_h);
     RUN_TEST(test_panel_table_ws213v4); return UNITY_END(); }

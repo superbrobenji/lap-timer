@@ -114,6 +114,11 @@ static const char *TAG = "ui";
  * retry lands 300 s after the flag was set, never immediately). */
 #define DISP_FAIL_STREAK_MAX 3
 #define DISP_DEAD_RETRY_US   (300LL * 1000000)
+/* Mirrors refresh_policy.c's RF_THROTTLE_MIN_US (30 s): gates how often ui_loop_iter() retries a
+ * throttle-deferred refresh (s_refresh_pending, Important #2) so it does not re-render every
+ * UI_TICK_MS while waiting -- the actual none-vs-partial decision still lives solely in
+ * ui_refresh_decide(), never duplicated here. */
+#define DISP_THROTTLE_RETRY_US (30LL * 1000000)
 
 /* Menu item actions; the visible order is built in build_menu() (spec §20.7's list). */
 enum {
@@ -157,6 +162,8 @@ static int64_t  s_next_reinit_us;  /* next allowed disp_reinit() probe while SYS
 static uint16_t s_partial_count;   /* partials issued since the last full */
 static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
 static bool     s_wants_full;      /* next render should be a full refresh (page/menu/combo/etc) */
+static bool     s_refresh_pending; /* fix round 2 (Important #2): RF_NONE returned while throttled
+                                     * -- a refresh is owed once the 30 s throttle window elapses */
 
 /* button press-duration state machine (indexed 0=MODE,1=UP,2=DOWN) */
 static uint8_t s_prev_mask;
@@ -643,7 +650,7 @@ static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
 {
     rf_in_t  in;
     uint32_t flags     = sys_flags_get();
-    in.dirty           = true; /* only ever called when s_dirty gated the render (render_and_refresh) */
+    in.dirty           = true; /* called from render_and_refresh(): a dirty render or the deferred (throttled) refresh */
     in.wants_full      = s_wants_full;
     in.still           = s_gspeed_kmh < MENU_LOCK_SPEED_KMH;
     in.throttled       = (flags & (1u << SYS_DISP_TEMP_THROTTLE)) != 0;
@@ -671,7 +678,11 @@ static uint8_t partial_window_or_full(void)
     uint16_t y0 = s_fb.dirty.y0;
     uint16_t x1 = s_fb.dirty.x1 < CANVAS_VISIBLE_W ? s_fb.dirty.x1 : (uint16_t)CANVAS_VISIBLE_W;
     uint16_t y1 = s_fb.dirty.y1 < CANVAS_H ? s_fb.dirty.y1 : (uint16_t)CANVAS_H;
-    if (x0 > x1 || y0 > y1) {
+    if (x0 >= x1 || y0 >= y1) {
+        /* Minor #7: >= , not > -- an empty box (x0 == x1 or y0 == y1, e.g. the clamp above
+         * landed exactly on the visible-area edge) must be caught here, not passed on to
+         * disp_set_window(), whose w > 0 / h > 0 asserts are for a genuine driver-contract
+         * violation, not this routine degenerate-dirty-box case. */
         return DISP_FULL; /* the visible-area clamp emptied the box: repaint the whole panel */
     }
     if (disp_set_window(x0, y0, (uint16_t)(x1 - x0), (uint16_t)(y1 - y0)) != 0) {
@@ -683,17 +694,22 @@ static uint8_t partial_window_or_full(void)
 }
 
 /* Runs `mode` through the panel and the failure ladder (spec §20.3): on failure it logs, reinits
- * and retries the SAME refresh once (ruling: disp_refresh(DISP_PARTIAL) with no pending window --
- * already consumed by the failed attempt -- runs a full, which is the intended fallback); a second
- * failure counts against s_fail_streak and, at DISP_FAIL_STREAK_MAX, marks the panel dead. Bumps
- * g_hb[HB_UI] after every blocking disp_refresh()/disp_reinit() call (ruling R3: a timed-out
- * refresh + reinit + retry can exceed UI_STALL_S). Returns the final driver rc. */
-static int disp_refresh_ladder(uint8_t mode, int64_t now)
+ * and retries once; a second failure counts against s_fail_streak and, at DISP_FAIL_STREAK_MAX,
+ * marks the panel dead. Bumps g_hb[HB_UI] after every blocking disp_refresh()/disp_reinit() call
+ * (ruling R3: a timed-out refresh + reinit + retry can exceed UI_STALL_S). Returns the final
+ * driver rc, with the EFFECTIVE mode actually sent to the panel on that final attempt reported
+ * through *effective_mode. Fix round 2 (minor #4): a failed DISP_PARTIAL has already consumed its
+ * pending window (epd_partial_refresh() always clears it, success or failure) -- the retry is
+ * therefore explicitly DISP_FULL, not a second DISP_PARTIAL relying on the driver's own
+ * no-window-pending fallback, so *effective_mode always matches what the panel actually got,
+ * never the caller's original request. */
+static int disp_refresh_ladder(uint8_t mode, int64_t now, uint8_t *effective_mode)
 {
     LT_ASSERT_RET(mode == DISP_PARTIAL || mode == DISP_FULL, UI_APP_ASSERT_CODE, -1);
-    LT_ASSERT_RET(now >= 0, UI_APP_ASSERT_CODE, -1);
+    LT_ASSERT_RET(effective_mode != NULL, UI_APP_ASSERT_CODE, -1);
 
-    int rc = disp_refresh(mode);
+    *effective_mode = mode;
+    int rc          = disp_refresh(mode);
     g_hb[HB_UI]++;
     if (rc == 0) {
         s_fail_streak = 0;
@@ -703,11 +719,13 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now)
     /* Ruling T7-R8: pack both facts into one arg -- the pre-failure streak count in the high
      * byte, the driver's -errno magnitude in the low byte -- so errlog distinguishes a BUSY
      * timeout (-ETIMEDOUT = 110) from an SPI failure (-EIO = 5) without a second display code. */
-    errlog_add(E_DISP_BUSY_TIMEOUT, ((uint32_t)s_fail_streak << 8) | ((uint32_t)(-rc) & 0xFFu));
+    (void)errlog_add(E_DISP_BUSY_TIMEOUT, ((uint32_t)s_fail_streak << 8) | ((uint32_t)(-rc) & 0xFFu));
     int reinit_rc = disp_reinit();
     g_hb[HB_UI]++;
     if (reinit_rc == 0) {
-        rc = disp_refresh(mode);
+        uint8_t retry_mode = (mode == DISP_PARTIAL) ? (uint8_t)DISP_FULL : mode;
+        *effective_mode = retry_mode;
+        rc = disp_refresh(retry_mode);
         g_hb[HB_UI]++;
     }
     if (rc == 0) {
@@ -718,7 +736,7 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now)
     s_fail_streak++;
     if (s_fail_streak >= DISP_FAIL_STREAK_MAX) {
         sys_flags_set(SYS_DISP_DEAD);
-        errlog_add(E_DISP_DEAD, 0);
+        (void)errlog_add(E_DISP_DEAD, 0);
         s_next_reinit_us = now + DISP_DEAD_RETRY_US;
     }
     return rc;
@@ -726,22 +744,21 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now)
 
 /* Executes the refresh kind the policy chose (RF_NONE is handled by the caller before this is
  * reached): RF_PARTIAL first tries to arm the dirty window, falling back to DISP_FULL (ruling R2)
- * if that fails; RF_FULL goes straight to DISP_FULL. Fix round 1 (Important #2): bookkeeping
- * follows the EFFECTIVE mode actually sent to the panel, not the policy's kind -- when the
- * fallback above turns a decided partial into a full, a successful refresh must still reset
- * s_partial_count, stamp s_last_full_us and clear s_wants_full like any other full. A FAILED
- * refresh (either mode) updates none of that bookkeeping -- only the ladder's own
- * fail_streak/dead accounting moves on failure. Reports the effective mode via *mode_out so the
- * caller's log line reflects what actually happened on the panel. */
+ * if that fails; RF_FULL goes straight to DISP_FULL. Bookkeeping follows the EFFECTIVE mode
+ * disp_refresh_ladder() reports (fix round 2, minor #4: that now accounts for its own
+ * partial-consumed-the-window retry-as-full, not just this function's own partial_window_or_full()
+ * fallback) -- a successful full (whether requested or the ladder's retry) resets s_partial_count,
+ * stamps s_last_full_us and clears s_wants_full; a FAILED refresh updates none of that bookkeeping.
+ * Reports the effective mode via *mode_out so the caller's log line reflects what actually
+ * happened on the panel. */
 static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
 {
     LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
     LT_ASSERT_RET(mode_out != NULL, UI_APP_ASSERT_CODE, -1);
     uint8_t mode = (kind == RF_PARTIAL) ? partial_window_or_full() : DISP_FULL;
-    *mode_out    = mode;
-    int rc       = disp_refresh_ladder(mode, now);
+    int     rc   = disp_refresh_ladder(mode, now, mode_out);
     if (rc == 0) {
-        if (mode == DISP_PARTIAL) {
+        if (*mode_out == DISP_PARTIAL) {
             s_partial_count   = (uint16_t)(s_partial_count + 1);
             s_last_partial_us = now;
         } else {
@@ -757,7 +774,10 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
  * chose RF_NONE (`attempted` false, no mode/rc to report); otherwise kind=P|F reflects the
  * EFFECTIVE mode sent to the panel (Important #2 -- not necessarily the policy's original
  * decision, since partial_window_or_full() can fall back to a full), with the driver rc appended.
- * Minor #6: ESP_LOGW when the refresh failed (rc != 0), ESP_LOGI otherwise. */
+ * Fix round 2 (minor #11): one ESP_LOG_LEVEL() call replaces the previous two ESP_LOGW/ESP_LOGI
+ * branches, which differed only in level, not in text -- the bench parses this exact line
+ * ("refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c" + " rc=%d" for the attempted case), which
+ * stays byte-identical for both the P and F outcomes. */
 static void log_refresh(bool attempted, uint8_t mode, int rc)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
@@ -769,15 +789,14 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
                  (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc);
         return;
     }
-    if (rc != 0) {
-        ESP_LOGW(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d", (unsigned)s_model.screen,
-                 (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
-                 (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc, rc);
-    } else {
-        ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d", (unsigned)s_model.screen,
-                 (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
-                 (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc, rc);
-    }
+    /* A ternary of two enum constants used directly as ESP_LOG_LEVEL()'s `level` argument trips
+     * -Wint-in-bool-context once macro-expanded into the macro's `if (level==ESP_LOG_ERROR)`
+     * chain (GCC 13.2, this toolchain) -- hoisting it into a plain local sidesteps that, since
+     * the macro then only ever sees a bare identifier there. */
+    esp_log_level_t lvl = (rc != 0) ? ESP_LOG_WARN : ESP_LOG_INFO;
+    ESP_LOG_LEVEL(lvl, TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d",
+                  (unsigned)s_model.screen, (unsigned)s_model.page, (unsigned)s_fb.dirty.x0,
+                  (unsigned)s_fb.dirty.y0, (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc, rc);
 }
 
 /* Renders the model, then feeds the pure refresh policy (§20.3) and carries out whatever it
@@ -802,9 +821,14 @@ static void render_and_refresh(void)
     rf_kind_t kind = ui_refresh_decide(&in);
 
     if (kind == RF_NONE) {
+        /* Important #2: a refresh suppressed by the temperature throttle is owed, not dropped
+         * (spec §20.3) -- remember exactly that (never for the dead/nothing-changed RF_NONE
+         * cases, which need no retry of their own: dead already re-arms via dead_retry()). */
+        s_refresh_pending = in.throttled;
         log_refresh(false, DISP_PARTIAL, 0);
         return;
     }
+    s_refresh_pending = false; /* this call resolved whatever was pending, one way or another */
     uint8_t mode = DISP_PARTIAL;
     int     rc   = do_refresh(kind, now, &mode);
     log_refresh(true, mode, rc);
@@ -888,7 +912,14 @@ static void ui_loop_iter(QueueHandle_t btn_q)
     update_flags();
     dead_retry(now); /* R5: paced disp_reinit() probe while SYS_DISP_DEAD */
 
-    if (s_dirty) {
+    /* Important #2: a throttle-deferred refresh is owed, not dropped (spec §20.3) -- re-check
+     * every tick but only actually re-render/refresh once the 30 s window has elapsed (never on
+     * every UI_TICK_MS while waiting); render_and_refresh() re-runs the pure policy itself, so
+     * the none-vs-partial call stays in one place. */
+    if (s_refresh_pending && (now - s_last_partial_us) >= DISP_THROTTLE_RETRY_US) {
+        render_and_refresh();
+        s_dirty = false;
+    } else if (s_dirty) {
         render_and_refresh();
         s_dirty = false;
     }
@@ -935,14 +966,20 @@ static void ui_task(void *arg)
      * refresh policy's first full (ruling R4): on success it seeds s_last_full_us/s_partial_count
      * as if RF_FULL had just run; on failure nothing is seeded -- SYS_DISP_DEAD makes the policy
      * return RF_NONE until dead_retry()'s 300 s probe (armed here) clears it. */
-    disp_blit(s_fb_bits);
+    (void)disp_blit(s_fb_bits);   /* cannot fail here: s_fb_bits is a static array (never NULL) and
+                                    * epd_panel() (bound as a side effect) never returns NULL either */
     const disp_caps_t *disp_caps;
     int                disp_rc = disp_init(&disp_caps);
     if (disp_rc == 0) {
+        /* Minor #5: catches a PANEL/canvas mismatch at boot -- disp_init() always fills *caps by
+         * the time it returns 0 (moved ahead of its own boot-refresh call, fix round 2). */
+        LT_ASSERT_VOID(disp_caps != NULL, UI_APP_ASSERT_CODE);
+        LT_ASSERT_VOID(disp_caps->width == CANVAS_VISIBLE_W && disp_caps->height == CANVAS_H &&
+                       disp_caps->partial_ok, UI_APP_ASSERT_CODE);
         s_last_full_us  = esp_timer_get_time();
         s_partial_count = 0;
     } else {
-        errlog_add(E_DISP_DEAD, (uint32_t)(-disp_rc));
+        (void)errlog_add(E_DISP_DEAD, (uint32_t)(-disp_rc));
         sys_flags_set(SYS_DISP_DEAD);
         s_next_reinit_us = esp_timer_get_time() + DISP_DEAD_RETRY_US;
     }
