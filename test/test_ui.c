@@ -100,11 +100,23 @@ static void test_dirty_box_accumulates_bounding_box_of_draws(void)
 
 /* ---- font-size coverage (roadmap exit for session 4.1) + icon/bar goldens ---- */
 
-static void test_text_big_renders_lap_time(void)
+static void test_text_huge_renders_delta(void)
 {
-    /* FONT_BIG's glyph set is "0-9 : . - + S" (fonts.h) — a lap time fits it exactly. */
-    fb_text(&s_fb, &FONT_BIG, 4, 4, "1:23.45");
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_big.pbm"), &s_fb));
+    /* FONT_HUGE's glyph set is "0-9 : . - +" (fonts.h): a signed delta fits it exactly. */
+    fb_text(&s_fb, &FONT_HUGE, 4, 4, "-0.32");
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_huge.pbm"), &s_fb));
+}
+
+static void test_text_inv_is_white_on_black(void)
+{
+    /* Inverted text: opaque black cells, glyph ink white. The BEST tag (spec §4) is drawn with it. */
+    int end = fb_text_inv(&s_fb, &FONT_SMALL, 4, 4, "BEST");
+    TEST_ASSERT_EQUAL_INT(4 + 4 * FONT_SMALL.w, end);
+    /* corner pixel of the first cell is background for the glyph, so it must now be black (0) */
+    TEST_ASSERT_EQUAL_UINT8(0u, (uint8_t)((s_fb.bits[4 * s_fb.stride + 0] >> 3) & 1u)); /* x=4,y=4 */
+    /* a pixel outside the cells is untouched (white = 1) */
+    TEST_ASSERT_EQUAL_UINT8(1u, (uint8_t)((s_fb.bits[4 * s_fb.stride + 5] >> 7) & 1u)); /* x=40,y=4 */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_inv.pbm"), &s_fb));
 }
 
 static void test_text_med_renders_line(void)
@@ -142,12 +154,12 @@ static void test_composite_lap_screen(void)
      * Coordinates are chosen so nothing overlaps, to keep this readable as a review artefact
      * (deliberate overlap is exercised separately by the clipping test below). */
     fb_text(&s_fb, &FONT_SMALL, 4, 4, "BEST");
-    fb_text_right(&s_fb, &FONT_BIG, 292, 4, "1:51.90"); /* x[124,292) y[4,44) */
+    fb_text(&s_fb, &FONT_HUGE, 4, 4, "-0.32"); /* x[4,199) y[4,68) */
 
-    fb_text(&s_fb, &FONT_SMALL, 4, 50, "PREV");
-    fb_text_right(&s_fb, &FONT_MED, 200, 48, "1:52.34"); /* x[88,200) y[48,72) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 72, "PREV");
+    fb_text_right(&s_fb, &FONT_MED, 200, 72, "1:52.34"); /* x[88,200) y[72,96) */
 
-    fb_text(&s_fb, &FONT_SMALL, 4, 80, "S2  1:12.30"); /* x[4,81) y[80,92) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 100, "S2  1:12.30"); /* x[4,81) y[100,112) */
 
     fb_text(&s_fb, &FONT_MED, 4, 96, "-0.21"); /* x[4,74) y[96,120) */
     fb_icon(&s_fb, ICON_GPS, 270, 100);         /* x[270,282) y[100,112) */
@@ -196,7 +208,8 @@ int main(void)
     RUN_TEST(test_fb_init_starts_with_no_dirty_region);
     RUN_TEST(test_fb_clear_marks_the_whole_frame_dirty);
     RUN_TEST(test_dirty_box_accumulates_bounding_box_of_draws);
-    RUN_TEST(test_text_big_renders_lap_time);
+    RUN_TEST(test_text_huge_renders_delta);
+    RUN_TEST(test_text_inv_is_white_on_black);
     RUN_TEST(test_text_med_renders_line);
     RUN_TEST(test_text_small_renders_line);
     RUN_TEST(test_icons_and_bar);

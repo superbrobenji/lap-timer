@@ -63,6 +63,12 @@ int fb_text(fb_t *fb, const font_t *f, int x, int y, const char *s);
  * called with x = x_right - strlen(s) * f->w). Returns that computed left x. */
 int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s);
 
+/* Draws `s` as white glyphs on a solid black opaque cell (each cell f->w x f->h): the inverse of
+ * fb_text -- ink pixels become background (white), background pixels (including a no-glyph blank
+ * cell) become ink (black). Same clipping/dirty rules as fb_text. Returns the pen x after the
+ * last character (x + strlen(s) * f->w). */
+int fb_text_inv(fb_t *fb, const font_t *f, int x, int y, const char *s);
+
 /* Blits the ICON_W x ICON_H icon `icon_id` at (x,y), same opaque per-pixel-clipped blit as a
  * glyph cell. icon_id >= ICON_COUNT is a no-op. */
 void fb_icon(fb_t *fb, uint8_t icon_id, int x, int y);

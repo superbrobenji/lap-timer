@@ -26,6 +26,7 @@ REGEN_CMD = "python3 tools/fonts/gen_fonts.py > components/core/ui/fonts.c"
 # (C name, px size passed to ImageFont.truetype, character set in spec order). Bitmaps are stored
 # sorted by code point regardless of this order; the char->index map recovers the mapping.
 FONT_SPECS = [
+    ("FONT_HUGE", 64, "0123456789:.-+"),
     ("FONT_BIG", 40, "0123456789:.-+S"),
     ("FONT_MED", 24, "0123456789:.-+" + "".join(chr(c) for c in range(ord("A"), ord("Z") + 1))),
     ("FONT_SMALL", 12, "".join(chr(c) for c in range(32, 127))),
