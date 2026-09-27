@@ -208,6 +208,23 @@ static void test_lap_p2_stats(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats.pbm"), &s_fb));
 }
 
+static void test_lap_p2_stats_many_laps(void)
+{
+    /* Ruling T3-R2: a 3-digit laps_total/laps_valid pushes the LAPS cell's "(N valid)" suffix past
+     * CANVAS_VISIBLE_W on the narrower 213 canvas (GRID_COL2_X 128 + "120"'s width + the suffix
+     * does not fit before x 250) -- render_grid_laps degrades to the shorter "(118)" there, while
+     * the wider 296 canvas still fits the full "(118 valid)". */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 2;
+    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 120; m.laps_valid = 118;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_many_laps.pbm"), &s_fb));
+}
+
 /* ---- DRAG page 0 (benches, spec §11.4) ---- */
 
 static void test_drag_p0_benches(void)
@@ -478,6 +495,7 @@ int main(void)
     RUN_TEST(test_lap_p1_sectors);
     RUN_TEST(test_lap_p1_many_sectors);
     RUN_TEST(test_lap_p2_stats);
+    RUN_TEST(test_lap_p2_stats_many_laps);
     RUN_TEST(test_drag_p0_benches);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
