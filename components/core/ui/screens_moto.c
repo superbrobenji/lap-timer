@@ -254,9 +254,9 @@ int fault_strip_left_x(uint32_t flags)
     const int pitch = ICON_W + 2;
     int       x = FAULT_STRIP_X0;
     int       left = CANVAS_VISIBLE_W;
+    CORE_ASSERT_RET(FAULT_STRIP_X0 + ICON_W <= CANVAS_VISIBLE_W, UI_ASSERT_CODE, CANVAS_VISIBLE_W); /* Plan 7b T3 fix 1: the strip's own anchor stays on-canvas -- a real precondition, replacing the tautological loop-index check the for-condition already guarantees */
 
     for (int bit = 0; bit < 14; bit++) {
-        CORE_ASSERT_RET(bit >= 0 && bit < 14, UI_ASSERT_CODE, left); /* Plan 7b T2 review minor m3: loop index stays in the bit-table's domain */
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
@@ -456,6 +456,37 @@ static void grid_cell(fb_t *fb, int x, int ly, int vy, const char *label, const 
     fb_text(fb, &FONT_MED, x, vy, value);
 }
 
+/* LAPS cell (spec 7b §6), split out of render_lap_page2 (rule 4: keeps that function's line count
+ * down) because its "(N valid)" suffix needs its own degrade-by-width logic (ruling T3-R2): unlike
+ * every other grid value, its width depends on laps_valid's digit count, so a caller with a large
+ * laps_total/laps_valid (e.g. a long track day, 100+ laps) could otherwise push the suffix past
+ * CANVAS_VISIBLE_W on the narrower 213 canvas. Draws "(N valid)" when that fits within
+ * CANVAS_VISIBLE_W - GRID_COL1_X (the same margin the grid's left column keeps), else the shorter
+ * "(N)" when that fits, else nothing. */
+static void render_grid_laps(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    char  buf[24];
+    char *p = put_uint(buf, m->laps_total); *p = '\0';
+    grid_cell(fb, GRID_COL2_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAPS", buf);
+    int end   = GRID_COL2_X + (int)strlen(buf) * FONT_MED.w;
+    int start = end + GRID_SUB_GAP;
+    int limit = CANVAS_VISIBLE_W - GRID_COL1_X;
+
+    p = put_str(buf, "("); p = put_uint(p, m->laps_valid); p = put_str(p, " valid)"); *p = '\0';
+    if (start + (int)strlen(buf) * FONT_SMALL.w > limit) {
+        p = put_str(buf, "("); p = put_uint(p, m->laps_valid); p = put_str(p, ")"); *p = '\0';
+        if (start + (int)strlen(buf) * FONT_SMALL.w > limit) {
+            buf[0] = '\0'; /* neither suffix fits: draw nothing rather than clip past the visible edge */
+        }
+    }
+    if (buf[0] != '\0') {
+        CORE_ASSERT_VOID(start + (int)strlen(buf) * FONT_SMALL.w <= limit, UI_ASSERT_CODE);
+        fb_text(fb, &FONT_SMALL, start, GRID_VALUE_Y1 + GRID_SUB_DY, buf);
+    }
+}
+
 static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -468,11 +499,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     grid_cell(fb, GRID_COL2_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "LEAN L/R", buf);   /* PF-3: FONT_SMALL has '/', FONT_MED does not, hence L52 R55 */
     p = put_g_e2(buf, m->lat_g_e2); *p = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAT G", buf);
-    p = put_uint(buf, m->laps_total); *p = '\0';
-    grid_cell(fb, GRID_COL2_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAPS", buf);
-    int end = GRID_COL2_X + (int)strlen(buf) * FONT_MED.w;
-    p = put_str(buf, "("); p = put_uint(p, m->laps_valid); p = put_str(p, " valid)"); *p = '\0';
-    fb_text(fb, &FONT_SMALL, end + GRID_SUB_GAP, GRID_VALUE_Y1 + GRID_SUB_DY, buf);
+    render_grid_laps(fb, m);
     p = put_str(buf, "ACC "); p = put_g_e2(p, m->acc_g_e2); p = put_str(p, "   BRK "); p = put_g_e2(p, m->brk_g_e2); *p = '\0';
     fb_text(fb, &FONT_SMALL, GRID_COL1_X, GRID_FOOTER_Y, buf);
 }
