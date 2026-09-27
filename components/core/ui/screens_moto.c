@@ -504,72 +504,75 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     fb_text(fb, &FONT_SMALL, GRID_COL1_X, GRID_FOOTER_Y, buf);
 }
 
-/* ---- DRAG page 0 (spec §20.5 + §11.4 benches rule): up to 4 rows of benches + the 1/4 row ---- */
+/* ---- DRAG page 0 (spec 7b §7): the run card -- the newest gate's value fills the 64 px big
+ * slot, the earlier gates of this run join a FONT_SMALL footer in hit order, and ARMED/the fault
+ * strip sit as before. Before the first gate the big slot shows "READY" (FONT_MED: FONT_HUGE has
+ * no letters at all). ---- */
 
-/* A row with no time yet (a bench not hit, or the 1/4 row before it is crossed) shows a literal
- * "--" -- spec §11.4's own worked example is "1/4 --" -- rather than the LAP screens' wider
- * "-:--.--" placeholder. Unlike the old LAP page 1 THEO row's right-aligned value (removed in Plan
- * 7b Task 3), which sat close enough to its label column that an oversized placeholder visibly
- * clobbered it (per EMPTY_TIME's comment above), a DRAG row's label (x=4) and value (right-aligned
- * x=180) are far enough apart that this is a stylistic match to the spec text rather than a
- * clobbering concern.
- */
-static const char DRAG_EMPTY_TIME[] = "--";
-
-/* Draws one DRAG row: `label` FONT_SMALL at DRAG_LABEL_X, a value right-aligned at
- * DRAG_TIME_RIGHT_X, and — only when has_trap — "@ <trap_kmh>" FONT_SMALL at DRAG_TRAP_X (spec's
- * own example: "@ 305").
- *
- * The value is `t_ms` formatted as a time (FONT_MED) for a normal gate, "<dist_m> m" (FONT_SMALL)
- * for a distance gate (#40: the 100-0 braking gate, DRAG_BRAKE in core/drag.h, is a stopping
- * DISTANCE in metres, not an elapsed time), or "--" (FONT_MED) if the gate was not hit this run.
- * The distance value uses FONT_SMALL rather than FONT_MED for the same reason the label does:
- * FONT_MED's glyph set ("0-9 : . - + A-Z", fonts.c FONT_MED_MAP) has no lowercase 'm', so a
- * literal "<dist_m> m" in FONT_MED would draw the unit as a blank cell.
- *
- * The label is drawn in FONT_SMALL rather than the spec text's literal "four rows of FONT_MED"
- * reading: FONT_MED's glyph set is "0-9 : . - + A-Z" (fonts.c FONT_MED_MAP, 40 glyphs) — no '/'
- * and no lowercase — so a FONT_MED "1/4" would render as "1", a blank cell, "4" (the '/' glyph is
- * unmapped, which fb_text draws as blank, per render.h) and a FONT_MED "60ft" would lose both
- * lowercase letters. FONT_SMALL is ASCII 32-126 (every gate-name character is present) and is the
- * same font LAP page 0 already uses for its row labels — this is the same kind of evidence-based
- * call as that screen's dS-row font override, just for missing glyphs rather than vertical
- * overflow. Confirmed by eyeballing: a FONT_MED render of "1/4"/"60ft" actually drew the blank-cell
- * gaps described above. */
-static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
+/* The newest gate's big value (spec 7b §7): a normal gate's elapsed time in FONT_HUGE
+ * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
+ * stopping DISTANCE in metres, not an elapsed time) -- the distance as a plain integer in
+ * FONT_HUGE followed by a FONT_SMALL "m" (FONT_HUGE has no lowercase, so the unit itself must use
+ * a different font). A gate with has_trap set also draws its trap speed as "@<trap_kmh>" on the
+ * row below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading
+ * character draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows
+ * "@173" this way and the model has no units field yet for a suffix (follow-up). */
+static void render_dcard_value(fb_t *fb, const drag_row_t *r)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(r != NULL, UI_ASSERT_CODE);
-    /* is_distance (the 100-0 braking gate, metres) reaches the layout only via pages 1/2's gate
-     * grid, not the page-0 benches; the branch below is defensive and covered by the drag_p1/p2 goldens. */
-    fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, y, r->label);
-
-    if (!r->present) {
-        fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, DRAG_EMPTY_TIME);
-    } else if (r->is_distance) {
-        char  dbuf[16];
-        char *p = dbuf;
-        p = put_uint(p, r->dist_m);
-        p = put_char(p, ' ');
-        p = put_char(p, 'm');
-        CORE_ASSERT_VOID((size_t)(p - dbuf) < sizeof dbuf, UI_ASSERT_CODE); /* room left for the NUL */
+    char buf[TIME_BUF_LEN];
+    if (r->is_distance) {
+        char *p = put_uint(buf, r->dist_m);
         *p = '\0';
-        fb_text_right(fb, &FONT_SMALL, DRAG_TIME_RIGHT_X, y, dbuf);
-    } else {
-        char buf[TIME_BUF_LEN];
-        fmt_time_ms(buf, r->t_ms);
-        fb_text_right(fb, &FONT_MED, DRAG_TIME_RIGHT_X, y, buf);
+        int end = fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
+        fb_text(fb, &FONT_SMALL, end + DCARD_UNIT_GAP, DCARD_BIG_Y + DCARD_UNIT_DY, "m");
+        return;
     }
-
+    fmt_secs_ms(buf, r->t_ms);
+    fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
     if (r->has_trap) {
-        char  tbuf[8];
-        char *p = tbuf;
-        p = put_char(p, '@');
-        p = put_char(p, ' ');
+        char *p = put_char(buf, '@');
         p = put_uint(p, r->trap_kmh);
-        CORE_ASSERT_VOID((size_t)(p - tbuf) < sizeof tbuf, UI_ASSERT_CODE); /* room left for the NUL -- trap_kmh's worst case (5 digits) exactly fills tbuf */
         *p = '\0';
-        fb_text(fb, &FONT_SMALL, DRAG_TRAP_X, y, tbuf);
+        fb_text(fb, &FONT_MED, DCARD_LABEL_X, DCARD_SPEED_Y, buf);
+    }
+}
+
+/* The run-card footer (spec 7b §7): gates 0..n-2 (every gate of this run except the newest, which
+ * already fills the big slot), oldest first, up to DCARD_FOOTER_MAX entries -- older ones scroll
+ * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist_m>m" for the
+ * distance gate), joined by DCARD_FOOTER_SEP. PF-2: the row stops before it would draw under the
+ * fault strip -- its right limit is fault_strip_left_x(m->flags) - CARD_FAULT_GAP, which is always
+ * <= CANVAS_VISIBLE_W, so this also never draws past the visible edge. */
+static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /* gates 0..n-2 */
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL && n >= 1u && n <= DRAG_MAX_GATES, UI_ASSERT_CODE);
+    uint8_t first = (n - 1u > DCARD_FOOTER_MAX) ? (uint8_t)(n - 1u - DCARD_FOOTER_MAX) : 0u;
+    int     x = DCARD_LABEL_X;
+    int     limit = fault_strip_left_x(m->flags) - CARD_FAULT_GAP; /* PF-2: never under a fault icon */
+    for (uint8_t i = first; i + 1u < n && i < DRAG_MAX_GATES; i++) {
+        const drag_row_t *r = &m->drag[i];
+        char  buf[TIME_BUF_LEN + 12];
+        char *p = put_str(buf, r->label);
+        p = put_char(p, ' ');
+        if (r->is_distance) {
+            p = put_uint(p, r->dist_m);
+            p = put_char(p, 'm');
+        } else {
+            char t[TIME_BUF_LEN];
+            fmt_secs_ms(t, r->t_ms);
+            p = put_str(p, t);
+        }
+        if (i + 2u < n) {
+            p = put_str(p, DCARD_FOOTER_SEP);
+        }
+        *p = '\0';
+        if (x + (int)strlen(buf) * FONT_SMALL.w > limit) {
+            break; /* never past the fault strip (PF-2) */
+        }
+        x = fb_text(fb, &FONT_SMALL, x, DCARD_FOOTER_Y, buf);
     }
 }
 
@@ -577,77 +580,57 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    /* §11.4: rows are the SPEED_FROM0 benches that were hit, ascending by target, then the 1/4
-     * row; max 4 rows, dropping the lowest (frontmost, since ascending) bench first if more than
-     * 3 benches were hit. The caller (the ui task, session 4.3) fills m->drag[]/drag_n in that
-     * order already — this renderer only applies the trim, identifying "the 1/4 row" by its label
-     * (matching that ordering contract) rather than assuming a fixed slot, so it stays correct
-     * (and does not underflow drag_n - 1) even for a model with zero rows. */
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
-    uint8_t quarter = (n > 0 && strcmp(m->drag[n - 1].label, "1/4") == 0) ? 1u : 0u;
-    uint8_t bench_n = (uint8_t)(n - quarter);
-    uint8_t start = 0;
-    while (bench_n > 3u) {
-        start++;
-        bench_n--;
+    if (n == 0u) {
+        fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, "READY");
+    } else {
+        fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);
+        render_dcard_value(fb, &m->drag[n - 1u]);
+        render_dcard_footer(fb, m, n);
     }
-
-    int row = 0;
-    for (uint8_t i = start; i < n && row < DRAG0_MAX_ROWS; i++, row++) {
-        render_drag_row(fb, &m->drag[i], DRAG0_ROW_Y0 + row * DRAG0_ROW_H);
-    }
-
     if (m->drag_armed) {
-        fb_text_right(fb, &FONT_SMALL, DRAG_ARMED_RIGHT_X, DRAG_ARMED_Y, "ARMED");
+        fb_text_right(fb, &FONT_MED, DCARD_ARMED_RIGHT_X, DCARD_ARMED_Y, "ARMED");
     }
 
     /* Mirrors LAP page 0 (the other primary in-ride screen): only the page-0 riding view shows the
-     * fault strip, not the pages-1/2 review grids below. */
+     * fault strip, not the pages-1/2 review lists below. */
     fault_strip(fb, m->flags, m->batt_pct);
 }
 
-/* ---- DRAG pages 1/2 (spec §20.5): all seven gates of the last run / best-per-gate this session
- * — same row set (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0), just different values, so one
- * grid layout serves both; they differ only in the title drawn and in which values the caller
- * populated m->drag[] with. Laid out as a 2-column grid (7 rows do not fit one FONT_MED/FONT_SMALL
- * column within 128px; §20.5 leaves the exact grid unspecified beyond "FONT_MED/SMALL rows"),
- * echoing LAP page 1's sector grid: each cell is one "<label> <value>" FONT_SMALL string. ---- */
+/* ---- DRAG pages 1/2 (spec 7b §7): all seven gates of the last run / best-per-gate this session
+ * -- same row set (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0), just different values, so one
+ * list layout serves both; they differ only in the title drawn and in which values the caller
+ * populated m->drag[] with. Two columns of DLIST_ROWS rows each (the left column fills first):
+ * each cell is a FONT_SMALL label at the column's left edge and a FONT_MED value right-aligned at
+ * the column's right edge, "--.--" for a gate not hit this run/session. ---- */
 
-static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char *title)
+static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char *title)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(title != NULL, UI_ASSERT_CODE);
-    fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, DRAG12_TITLE_Y, title);
-
+    CORE_ASSERT_VOID(m != NULL && title != NULL, UI_ASSERT_CODE);
+    fb_text(fb, &FONT_SMALL, DLIST_COL1_X, DLIST_HEADER_Y, title);
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
-    for (uint8_t i = 0; i < n; i++) {
-        int col = i % DRAG12_COLS;
-        int row = i / DRAG12_COLS;
-        int x = DRAG12_COL_X0 + col * DRAG12_COL_W;
-        int y = DRAG12_ROW_Y0 + row * DRAG12_ROW_H;
-
-        char  tbuf[TIME_BUF_LEN];
-        char  sbuf[40]; /* label (<=7 chars) + ' ' + value (<=~8 chars) + NUL, generous */
-        char *p = sbuf;
-        p = put_str(p, m->drag[i].label);
-        p = put_char(p, ' ');
-        if (!m->drag[i].present) {
-            p = put_str(p, DRAG_EMPTY_TIME);
-        } else if (m->drag[i].is_distance) {
-            /* #40: the 100-0 braking gate is a distance, not a time -- see render_drag_row's
-             * comment above for the same distinction (this grid is already all-FONT_SMALL, so no
-             * font-fallback concern for the lowercase 'm' unit here). */
-            p = put_uint(p, m->drag[i].dist_m);
-            p = put_char(p, ' ');
-            p = put_char(p, 'm');
+    for (uint8_t i = 0; i < n && i < 2u * DLIST_ROWS; i++) {
+        int col = i / DLIST_ROWS, row = i % DLIST_ROWS; /* left column fills first */
+        int x = col ? DLIST_COL2_X : DLIST_COL1_X;
+        int xr = col ? DLIST_COL2_RIGHT_X : DLIST_COL1_RIGHT_X;
+        int y = DLIST_ROW_Y0 + row * DLIST_ROW_H;
+        const drag_row_t *r = &m->drag[i];
+        char buf[TIME_BUF_LEN];
+        fb_text(fb, &FONT_SMALL, x, y + DLIST_LABEL_DY, r->label);
+        if (!r->present) {
+            char *p = put_str(buf, "--.--");
+            *p = '\0';
+            fb_text_right(fb, &FONT_MED, xr, y, buf);
+        } else if (r->is_distance) {
+            char *p = put_uint(buf, r->dist_m);
+            *p = '\0';
+            fb_text_right(fb, &FONT_MED, xr - DLIST_UNIT_W, y, buf);
+            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + 2, y + DLIST_LABEL_DY, "m");
         } else {
-            fmt_time_ms(tbuf, m->drag[i].t_ms);
-            p = put_str(p, tbuf);
+            fmt_secs_ms(buf, r->t_ms);
+            fb_text_right(fb, &FONT_MED, xr, y, buf);
         }
-        CORE_ASSERT_VOID((size_t)(p - sbuf) < sizeof sbuf, UI_ASSERT_CODE); /* room left for the NUL */
-        *p = '\0';
-        fb_text(fb, &FONT_SMALL, x, y, sbuf);
     }
 }
 
@@ -655,14 +638,14 @@ static void render_drag_page1(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    render_drag_gate_grid(fb, m, "LAST RUN");
+    render_drag_gate_list(fb, m, "LAST RUN");
 }
 
 static void render_drag_page2(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    render_drag_gate_grid(fb, m, "SESSION BEST");
+    render_drag_gate_list(fb, m, "SESSION BEST");
 }
 
 /* ---- dispatch ---- */
@@ -767,7 +750,7 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
 
     uint8_t n = m->boot_n_lines > BOOT_MAX_LINES ? (uint8_t)BOOT_MAX_LINES : m->boot_n_lines;
     for (uint8_t i = 0; i < n; i++) {
-        fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, BOOT_LINE_Y0 + (int)i * BOOT_LINE_H, m->boot_line[i]);
+        fb_text(fb, &FONT_SMALL, TEXT_MARGIN_X, BOOT_LINE_Y0 + (int)i * BOOT_LINE_H, m->boot_line[i]);
     }
 }
 
@@ -910,7 +893,7 @@ static void render_oneshot(fb_t *fb, const screen_model_t *m)
  * chars -- including space -- draw a blank cell in any font, per render.h, so a space "fits" any
  * font visually even though it has no glyph index). A menu caption with '/' or lowercase (most of
  * §20.7's own item list, e.g. "Mode: Lap / Drag") fails this and falls back to FONT_SMALL -- same
- * missing-glyph reasoning as the DRAG row label above (render_drag_row). */
+ * missing-glyph reasoning as the DRAG gate labels above (render_drag_gate_list). */
 static bool item_fits_font_med(const char *s)
 {
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, false);
@@ -939,7 +922,7 @@ static void render_menu(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_clear(fb, 0);
 
-    fb_text(fb, &FONT_MED, DRAG_LABEL_X, MENU_TITLE_Y, "MENU");
+    fb_text(fb, &FONT_MED, TEXT_MARGIN_X, MENU_TITLE_Y, "MENU");
     /* CANVAS_VISIBLE_W (core/ui/canvas.h), not fb->w: fb->w is the padded, byte-aligned buffer
      * width (256 on the 213 canvas), 6px wider than the panel's true visible area (250) -- a
      * full-fb->w line would draw ink past the panel's right edge into that invisible padding

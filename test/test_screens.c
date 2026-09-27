@@ -225,91 +225,85 @@ static void test_lap_p2_stats_many_laps(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_many_laps.pbm"), &s_fb));
 }
 
-/* ---- DRAG page 0 (benches, spec §11.4) ---- */
+/* ---- DRAG page 0 (spec 7b §7): the run card ---- */
 
-static void test_drag_p0_benches(void)
+/* Appends one gate to m->drag[]/drag_n (present=true; the two `false, 0` distance params are
+ * overridden in the caller when a case needs a distance gate). */
+static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint16_t trap, bool dist, uint16_t dist_m)
 {
-    /* A run that has hit 0-100 and 0-200 (2 of the 3 default benches_kmh, so no trim needed) and
-     * crossed the 1/4 with a trap speed -- spec's own DRAG page-0 example ("@ 305"-style trap) and
-     * the session's named golden "0-100 + 0-200 hit, 1/4 present with a trap speed". Times follow
-     * a constant 0.5g run (matching §22.2's test_drag.c synthetic fixture: 0-100 at 5.66s, 1/4 at
-     * 12.81s, trap ~223 km/h) so the numbers are physically consistent, not just plausible-looking.
-     */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_DRAG;
-    m.page = 0;
-    m.drag_n = 3;
-    m.drag[0] = (drag_row_t){.label = "0-100", .t_ms = 5660, .present = true};
-    m.drag[1] = (drag_row_t){.label = "0-200", .t_ms = 11900, .present = true};
-    m.drag[2] = (drag_row_t){
-        .label = "1/4", .t_ms = 12810, .present = true, .trap_kmh = 223, .has_trap = true};
-    m.drag_armed = false;
-    m.flags = 0;
-    m.batt_pct = 87;
+    drag_row_t *r = &m->drag[m->drag_n++];
+    memset(r, 0, sizeof *r);
+    strcpy(r->label, label); r->t_ms = t_ms; r->present = true;
+    r->trap_kmh = trap; r->has_trap = trap != 0; r->is_distance = dist; r->dist_m = dist_m;
+}
 
+static void test_drag_p0_ready(void)
+{
+    /* Before the first gate: big slot reads "READY" (FONT_MED, no letters in FONT_HUGE), ARMED
+     * top-right while drag_armed, footer empty. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_armed = true; m.batt_pct = 90;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_benches.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_ready.pbm"), &s_fb));
 }
 
-/* ---- DRAG page 1 (all gates of the last run) ---- */
-
-static void test_drag_p1_gates(void)
+static void test_drag_p0_gate_speed(void)
 {
-    /* All seven §6.6 gates hit on one run, in the spec's own listed order (60ft, 330ft, 1/8,
-     * 1000ft, 1/4, 100-200, 100-0). Same constant-0.5g run as the page-0 case (60ft/330ft/1/8/
-     * 1000ft/1/4 times derived from t = sqrt(2d / (0.5 * 9.81)); 100-200 is the time between the
-     * v=100 and v=200 km/h crossings under the same acceleration. #40: 100-0 (DRAG_BRAKE,
-     * core/drag.h) is a stopping DISTANCE in metres, not an elapsed time -- .is_distance/.dist_m
-     * now carry that (~39 m at 0.5g from 100 km/h, matching the §22.1 bench measurement recorded
-     * in docs/measurements.md), replacing the earlier placeholder .t_ms reading that this comment
-     * used to describe. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_DRAG;
-    m.page = 1;
-    m.drag_n = 7;
-    m.drag[0] = (drag_row_t){.label = "60ft", .t_ms = 2731, .present = true};
-    m.drag[1] = (drag_row_t){.label = "330ft", .t_ms = 6405, .present = true};
-    m.drag[2] = (drag_row_t){.label = "1/8", .t_ms = 9057, .present = true};
-    m.drag[3] = (drag_row_t){.label = "1000ft", .t_ms = 11148, .present = true};
-    m.drag[4] = (drag_row_t){
-        .label = "1/4", .t_ms = 12810, .present = true, .trap_kmh = 223, .has_trap = true};
-    m.drag[5] = (drag_row_t){.label = "100-200", .t_ms = 5664, .present = true};
-    m.drag[6] = (drag_row_t){.label = "100-0", .present = true, .dist_m = 39, .is_distance = true};
-    m.flags = 0;
-    m.batt_pct = 87;
+    /* Four gates hit, newest ("1/4") carries a trap speed: big slot shows "12.84" (FONT_HUGE),
+     * "@173" row below it (FONT_MED), footer lists the three earlier gates "60ft 2.01   330ft
+     * 5.43   1/8 8.29" in hit order. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
+}
 
+static void test_drag_p0_distance(void)
+{
+    /* Newest gate is the 100-0 braking distance (#40): big slot shows "38" (FONT_HUGE) + a small
+     * "m" (FONT_SMALL, since FONT_HUGE has no lowercase); footer shows the one earlier gate,
+     * "100-200 6.12". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    drag_gate(&m, "100-200", 6120, 0, false, 0); drag_gate(&m, "100-0", 0, 0, true, 38);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance.pbm"), &s_fb));     /* big "38" + small "m"; footer "100-200 6.12" */
+}
+
+/* ---- DRAG pages 1/2 (gate list, spec 7b §7) ---- */
+
+static void test_drag_p1_gates(void)   /* seven gates, two present-false */
+{
+    /* All seven §6.6 gates named, in the spec's own listed order (60ft, 330ft, 1/8, 1000ft, 1/4,
+     * 100-200, 100-0); the 100-200 gate was not reached this run (present forced false after the
+     * fact) -- the list shows "--.--" for it. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "100-200", 0, 0, false, 0); m.drag[5].present = false;
+    drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
 }
 
-/* ---- DRAG page 2 (best per gate this session) ---- */
-
-static void test_drag_p2_best(void)
+static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, every gate present */
 {
-    /* Same seven-gate row set as page 1, but the session-best value per gate (spec: "best per
-     * gate this session") -- a little faster than the single run in test_drag_p1_gates, as a
-     * multi-run session's best-of would be. #40: 100-0 is again a distance (a shorter session-best
-     * stopping distance, 37 m vs. p1's 39 m -- shorter is better for braking, same direction as
-     * every other gate here being a little quicker). */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_DRAG;
-    m.page = 2;
-    m.drag_n = 7;
-    m.drag[0] = (drag_row_t){.label = "60ft", .t_ms = 2700, .present = true};
-    m.drag[1] = (drag_row_t){.label = "330ft", .t_ms = 6350, .present = true};
-    m.drag[2] = (drag_row_t){.label = "1/8", .t_ms = 9000, .present = true};
-    m.drag[3] = (drag_row_t){.label = "1000ft", .t_ms = 11080, .present = true};
-    m.drag[4] = (drag_row_t){
-        .label = "1/4", .t_ms = 12750, .present = true, .trap_kmh = 225, .has_trap = true};
-    m.drag[5] = (drag_row_t){.label = "100-200", .t_ms = 5600, .present = true};
-    m.drag[6] = (drag_row_t){.label = "100-0", .present = true, .dist_m = 37, .is_distance = true};
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Session-best per gate (title "SESSION BEST"): same seven rows as test_drag_p1_gates, but
+     * gate 5 (100-200) is now present with t_ms 6120 -- every gate hit this session. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 2; m.batt_pct = 90;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "100-200", 6120, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -496,7 +490,9 @@ int main(void)
     RUN_TEST(test_lap_p1_many_sectors);
     RUN_TEST(test_lap_p2_stats);
     RUN_TEST(test_lap_p2_stats_many_laps);
-    RUN_TEST(test_drag_p0_benches);
+    RUN_TEST(test_drag_p0_ready);
+    RUN_TEST(test_drag_p0_gate_speed);
+    RUN_TEST(test_drag_p0_distance);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
     RUN_TEST(test_oneshot_boot);
