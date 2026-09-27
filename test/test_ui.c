@@ -156,12 +156,12 @@ static void test_composite_lap_screen(void)
     fb_text(&s_fb, &FONT_SMALL, 4, 4, "BEST");
     fb_text(&s_fb, &FONT_HUGE, 4, 4, "-0.32"); /* x[4,199) y[4,68) */
 
-    fb_text(&s_fb, &FONT_SMALL, 4, 72, "PREV");
-    fb_text_right(&s_fb, &FONT_MED, 200, 72, "1:52.34"); /* x[88,200) y[72,96) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 78, "PREV"); /* x[4,32) y[78,90) */
+    fb_text_right(&s_fb, &FONT_MED, 200, 72, "1:52.34"); /* x[102,200) y[72,96) */
 
     fb_text(&s_fb, &FONT_SMALL, 4, 100, "S2  1:12.30"); /* x[4,81) y[100,112) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 114, "-0.21"); /* x[4,39) y[114,126) */
 
-    fb_text(&s_fb, &FONT_MED, 4, 96, "-0.21"); /* x[4,74) y[96,120) */
     fb_icon(&s_fb, ICON_GPS, 270, 100);         /* x[270,282) y[100,112) */
 
     fb_bar(&s_fb, 90, 100, 170, 16, 62); /* stand-in session progress/level indicator, x[90,260) y[100,116) */
