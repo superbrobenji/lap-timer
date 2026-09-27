@@ -784,12 +784,19 @@ static int dbg_mem(void)
  * next poll tick. `name` + `hold_ms` are parsed by the pure, host-tested btn_parse() (core/
  * btn_parse.h); hold_ms is clamped 20..5000 there, so the vTaskDelay below is always bounded
  * (rule 2) -- the console task blocking for it is acceptable (brief, Step 1).
+ *
+ * Ruling T9-R1: an injected hold_ms exactly equal to a ui hold threshold (BTN_LONG_MS 1000,
+ * BTN_COMBO_MS 2000, BTN_VLONG_MS 3000 in ui.c) releases before the ui task's next UI_TICK_MS
+ * (100 ms) poll ever observes the hold having reached that threshold, so the ladder never fires.
+ * Real buttons are unaffected -- a human release is never timed to the millisecond -- so the fix
+ * is in this tool's usage text: it tells the operator to clear the threshold by >= 100 ms (one
+ * ui poll tick), not in the injection path itself.
  */
 static int dbg_btn(int argc, char **argv)
 {
     CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
     if (argc < 3) {
-        printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]\n");
+        printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]   (hold must exceed 1000/2000/3000 ms thresholds by >= 100 ms, e.g. 2200 for the combo)\n");
         return 1;
     }
 
@@ -797,7 +804,7 @@ static int dbg_btn(int argc, char **argv)
     uint32_t hold_ms = 0;
     const char *ms_arg = (argc >= 4) ? argv[3] : NULL;
     if (btn_parse(argv[2], ms_arg, &mask, &hold_ms) != 0) {
-        printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]\n");
+        printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]   (hold must exceed 1000/2000/3000 ms thresholds by >= 100 ms, e.g. 2200 for the combo)\n");
         return 1;
     }
 
