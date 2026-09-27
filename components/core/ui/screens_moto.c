@@ -81,7 +81,7 @@ static char *put_g_e2(char *p, uint16_t g_e2)
 /* 7 chars, matching a real "M:SS.cc" value's width for a single-digit minute count (e.g.
  * "1:51.90"): fb_text/fb_text_right blit opaque cells (background pixels included, not just ink),
  * so a right-aligned placeholder wider than the real value it stands in for would eat into the
- * "BEST"/"PREV" label at LAP_LABEL_X — confirmed by eyeballing an 8-char "--:--.--" placeholder,
+ * row's own label at its left margin — confirmed by eyeballing an 8-char "--:--.--" placeholder,
  * which visibly clobbered the label. */
 static const char EMPTY_TIME[] = "-:--.--";
 
@@ -136,6 +136,31 @@ static void fmt_delta_ms(char *buf, int32_t dms)
     p = put_uint(p, cs);
     CORE_ASSERT_VOID((size_t)(p - buf) < DELTA_BUF_LEN, UI_ASSERT_CODE); /* room left for the NUL, per this function's own documented buf size */
     *p = '\0';
+}
+
+/* Unsigned SS.cc below 100 s, SSS.c from 100 s -- the LAP page 1 sector board's fixed-width value
+ * cell (spec 7b §5): <= 5 glyphs either way, matching BOARD_COL_W (canvas.h). Ruling T2-R2: this
+ * was specified by the Task 2 brief but not added there (it would have been an unused static under
+ * -Werror with no caller yet); Task 3's render_lap_page1 is its first caller. */
+static void fmt_secs_ms(char *buf, uint32_t ms)
+{
+    CORE_ASSERT_VOID(buf != NULL, UI_ASSERT_CODE);
+    unsigned s = (unsigned)(ms / 1000u);
+    char    *p = buf;
+    if (s < 100u) {
+        unsigned cs = (unsigned)((ms / 10u) % 100u);
+        p = put_uint(p, s);
+        p = put_char(p, '.');
+        if (cs < 10u) p = put_char(p, '0');
+        p = put_uint(p, cs);
+    } else {
+        if (s > 999u) s = 999u;
+        p = put_uint(p, s);
+        p = put_char(p, '.');
+        p = put_uint(p, (unsigned)((ms / 100u) % 10u));
+    }
+    *p = '\0';
+    CORE_ASSERT_VOID(strlen(buf) <= 5u, UI_ASSERT_CODE);
 }
 
 /* ---- shared fault-icon strip (spec §20.5 + §17.4) ---- */
@@ -231,6 +256,7 @@ int fault_strip_left_x(uint32_t flags)
     int       left = CANVAS_VISIBLE_W;
 
     for (int bit = 0; bit < 14; bit++) {
+        CORE_ASSERT_RET(bit >= 0 && bit < 14, UI_ASSERT_CODE, left); /* Plan 7b T2 review minor m3: loop index stays in the bit-table's domain */
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
@@ -243,6 +269,7 @@ int fault_strip_left_x(uint32_t flags)
         left = x;
         x -= pitch;
     }
+    CORE_ASSERT_RET(left >= 0 && left <= CANVAS_VISIBLE_W, UI_ASSERT_CODE, CANVAS_VISIBLE_W); /* m3: the returned x never lands outside the visible frame */
     return left;
 }
 
@@ -315,7 +342,7 @@ static void render_card_tag(fb_t *fb, int x, int y)
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(x >= 0 && y >= 0, UI_ASSERT_CODE);
     fb_rect(fb, x, y, CARD_TAG_W, CARD_TAG_H, 1, true);
-    fb_text_inv(fb, &FONT_SMALL, x + 2, y + 1, "BEST");
+    fb_text_inv(fb, &FONT_SMALL, x + CARD_TAG_PAD_X, y + CARD_TAG_PAD_Y, "BEST");
 }
 
 /* Footer: "LAST"/"BEST" labels (FONT_SMALL) over their right-aligned FONT_MED values, both fixed
@@ -374,45 +401,60 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
     fault_strip(fb, m->flags, m->batt_pct);
 }
 
-/* ---- LAP page 1 (spec §20.5): best-lap sector splits + THEO ---- */
+/* ---- LAP page 1 (spec 7b §5): sector board -- BEST LAP/THEO header, three columns of
+ * (label, best-lap sector time, last-lap sector delta) ---- */
 
+static void render_board_header(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    char  buf[TIME_BUF_LEN + 12];
+    char  t[TIME_BUF_LEN];
+    char *p = put_str(buf, "BEST LAP ");
+    if (m->have_best) { fmt_time_ms(t, m->best_ms); p = put_str(p, t); } else p = put_str(p, EMPTY_TIME);
+    *p = '\0';
+    fb_text(fb, &FONT_SMALL, BOARD_X0, BOARD_HEADER_Y, buf);
+    p = put_str(buf, "THEO ");
+    if (m->have_theo) { fmt_time_ms(t, m->theo_best_ms); p = put_str(p, t); } else p = put_str(p, EMPTY_TIME);
+    *p = '\0';
+    fb_text_right(fb, &FONT_SMALL, CANVAS_VISIBLE_W - BOARD_X0, BOARD_HEADER_Y, buf);
+}
+
+/* Three columns of BOARD_COL_W px each (spec 7b §5): S1/S2/S3 labels (S3 gains a "+n" suffix when
+ * best_n_sectors runs past three columns, up to LAP_MAX_SECTORS+1), the best-lap sector time below
+ * each label, and the last-lap sector delta (clamped, "----" when the current lap has not reached
+ * that sector yet) on the bottom row. */
 static void render_lap_page1(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP1_TITLE_Y, "BEST LAP");
-
-    for (uint8_t i = 0; i < m->best_n_sectors && i < LAP_MAX_SECTORS + 1; i++) {
-        int col = (int)i % LAP1_SECTOR_COLS;
-        int row = (int)i / LAP1_SECTOR_COLS;
-        int x = LAP1_SECTOR_X0 + col * LAP1_SECTOR_COL_W;
-        int y = LAP1_SECTOR_Y0 + row * LAP1_SECTOR_ROW_H;
-
-        char  tbuf[TIME_BUF_LEN];
-        char  sbuf[TIME_BUF_LEN + 8];
-        char *p = sbuf;
-        fmt_time_ms(tbuf, m->best_sector_ms[i]);
-        p = put_char(p, 'S');
+    render_board_header(fb, m);
+    uint8_t n = m->best_n_sectors > LAP_MAX_SECTORS + 1 ? (uint8_t)(LAP_MAX_SECTORS + 1) : m->best_n_sectors;
+    for (uint8_t i = 0; i < BOARD_COLS; i++) {
+        int   x = BOARD_X0 + (int)i * BOARD_COL_W;
+        char  buf[TIME_BUF_LEN];
+        char *p = put_char(buf, 'S');
         p = put_uint(p, (unsigned)i + 1u);
-        p = put_char(p, ' ');
-        p = put_str(p, tbuf);
+        if (i == BOARD_COLS - 1 && n > BOARD_COLS) { p = put_str(p, " +"); p = put_uint(p, (unsigned)(n - BOARD_COLS)); }
         *p = '\0';
-        fb_text(fb, &FONT_SMALL, x, y, sbuf);
-    }
-
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, LAP1_THEO_LABEL_Y, "THEO");
-    if (m->have_theo) {
-        char tbuf[TIME_BUF_LEN];
-        fmt_time_ms(tbuf, m->theo_best_ms);
-        fb_text_right(fb, &FONT_MED, LAP_TIME_RIGHT_X, LAP1_THEO_VALUE_Y, tbuf);
-    } else {
-        fb_text_right(fb, &FONT_MED, LAP_TIME_RIGHT_X, LAP1_THEO_VALUE_Y, EMPTY_TIME);
+        fb_text(fb, &FONT_SMALL, x, BOARD_LABEL_Y, buf);
+        if (i < n) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
+        fb_text(fb, &FONT_MED, x, BOARD_VALUE_Y, buf);
+        if (i < n && m->have_last_sector_delta[i]) { fmt_delta_clamped(buf, m->last_sector_delta_ms[i], BOARD_DELTA_CLAMP_MS); }
+        else { p = put_str(buf, "----"); *p = '\0'; }
+        fb_text(fb, &FONT_MED, x, BOARD_DELTA_Y, buf);
     }
 }
 
-/* ---- LAP page 2 (spec §20.5): session stats ---- */
+/* ---- LAP page 2 (spec 7b §6): 2x2 stats grid ---- */
 
-static inline int lap2_row_y(int n) { return 8 + n * LAP2_ROW_H; }
+static void grid_cell(fb_t *fb, int x, int ly, int vy, const char *label, const char *value)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(label != NULL && value != NULL, UI_ASSERT_CODE);
+    fb_text(fb, &FONT_SMALL, x, ly, label);
+    fb_text(fb, &FONT_MED, x, vy, value);
+}
 
 static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 {
@@ -420,53 +462,30 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char  buf[48];
     char *p;
-
-    p = buf;
-    p = put_str(p, "MAX SPD ");
-    p = put_uint(p, m->max_speed_kmh);
-    *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(0), buf);
-
-    p = buf;
-    p = put_str(p, "LEAN L ");
-    p = put_uint(p, m->lean_l_deg);
-    p = put_str(p, " R ");
-    p = put_uint(p, m->lean_r_deg);
-    *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(1), buf);
-
-    p = buf;
-    p = put_str(p, "LAT G ");
-    p = put_g_e2(p, m->lat_g_e2);
-    *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(2), buf);
-
-    p = buf;
-    p = put_str(p, "ACC ");
-    p = put_g_e2(p, m->acc_g_e2);
-    p = put_str(p, " BRK ");
-    p = put_g_e2(p, m->brk_g_e2);
-    *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(3), buf);
-
-    p = buf;
-    p = put_str(p, "LAPS ");
-    p = put_uint(p, m->laps_total);
-    p = put_str(p, " (");
-    p = put_uint(p, m->laps_valid);
-    p = put_str(p, " valid)");
-    *p = '\0';
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, lap2_row_y(4), buf);
+    p = put_uint(buf, m->max_speed_kmh); *p = '\0';
+    grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "MAX SPD", buf);
+    p = put_char(buf, 'L'); p = put_uint(p, m->lean_l_deg); p = put_char(p, ' '); p = put_char(p, 'R'); p = put_uint(p, m->lean_r_deg); *p = '\0';
+    grid_cell(fb, GRID_COL2_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "LEAN L/R", buf);   /* PF-3: FONT_SMALL has '/', FONT_MED does not, hence L52 R55 */
+    p = put_g_e2(buf, m->lat_g_e2); *p = '\0';
+    grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAT G", buf);
+    p = put_uint(buf, m->laps_total); *p = '\0';
+    grid_cell(fb, GRID_COL2_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAPS", buf);
+    int end = GRID_COL2_X + (int)strlen(buf) * FONT_MED.w;
+    p = put_str(buf, "("); p = put_uint(p, m->laps_valid); p = put_str(p, " valid)"); *p = '\0';
+    fb_text(fb, &FONT_SMALL, end + GRID_SUB_GAP, GRID_VALUE_Y1 + GRID_SUB_DY, buf);
+    p = put_str(buf, "ACC "); p = put_g_e2(p, m->acc_g_e2); p = put_str(p, "   BRK "); p = put_g_e2(p, m->brk_g_e2); *p = '\0';
+    fb_text(fb, &FONT_SMALL, GRID_COL1_X, GRID_FOOTER_Y, buf);
 }
 
 /* ---- DRAG page 0 (spec §20.5 + §11.4 benches rule): up to 4 rows of benches + the 1/4 row ---- */
 
 /* A row with no time yet (a bench not hit, or the 1/4 row before it is crossed) shows a literal
  * "--" -- spec §11.4's own worked example is "1/4 --" -- rather than the LAP screens' wider
- * "-:--.--" placeholder. Unlike LAP_TIME_RIGHT_X (200, close enough to LAP_LABEL_X's "BEST"/"PREV"
- * labels that an oversized placeholder visibly clobbered them, per EMPTY_TIME's comment above), a
- * DRAG row's label (x=4) and value (right-aligned x=180) are far enough apart that this is a
- * stylistic match to the spec text rather than a clobbering concern.
+ * "-:--.--" placeholder. Unlike the old LAP page 1 THEO row's right-aligned value (removed in Plan
+ * 7b Task 3), which sat close enough to its label column that an oversized placeholder visibly
+ * clobbered it (per EMPTY_TIME's comment above), a DRAG row's label (x=4) and value (right-aligned
+ * x=180) are far enough apart that this is a stylistic match to the spec text rather than a
+ * clobbering concern.
  */
 static const char DRAG_EMPTY_TIME[] = "--";
 
@@ -486,10 +505,10 @@ static const char DRAG_EMPTY_TIME[] = "--";
  * and no lowercase — so a FONT_MED "1/4" would render as "1", a blank cell, "4" (the '/' glyph is
  * unmapped, which fb_text draws as blank, per render.h) and a FONT_MED "60ft" would lose both
  * lowercase letters. FONT_SMALL is ASCII 32-126 (every gate-name character is present) and is the
- * same font LAP page 0 already uses for its row labels (LAP_LABEL_X) — this is the same kind of
- * evidence-based call as that screen's dS-row font override, just for missing glyphs rather than
- * vertical overflow. Confirmed by eyeballing: a FONT_MED render of "1/4"/"60ft" actually drew the
- * blank-cell gaps described above. */
+ * same font LAP page 0 already uses for its row labels — this is the same kind of evidence-based
+ * call as that screen's dS-row font override, just for missing glyphs rather than vertical
+ * overflow. Confirmed by eyeballing: a FONT_MED render of "1/4"/"60ft" actually drew the blank-cell
+ * gaps described above. */
 static void render_drag_row(fb_t *fb, const drag_row_t *r, int y)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -572,7 +591,7 @@ static void render_drag_gate_grid(fb_t *fb, const screen_model_t *m, const char 
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(title != NULL, UI_ASSERT_CODE);
-    fb_text(fb, &FONT_SMALL, LAP_LABEL_X, DRAG12_TITLE_Y, title);
+    fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, DRAG12_TITLE_Y, title);
 
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     for (uint8_t i = 0; i < n; i++) {
@@ -721,7 +740,7 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
 
     uint8_t n = m->boot_n_lines > BOOT_MAX_LINES ? (uint8_t)BOOT_MAX_LINES : m->boot_n_lines;
     for (uint8_t i = 0; i < n; i++) {
-        fb_text(fb, &FONT_SMALL, LAP_LABEL_X, BOOT_LINE_Y0 + (int)i * BOOT_LINE_H, m->boot_line[i]);
+        fb_text(fb, &FONT_SMALL, DRAG_LABEL_X, BOOT_LINE_Y0 + (int)i * BOOT_LINE_H, m->boot_line[i]);
     }
 }
 
@@ -893,7 +912,7 @@ static void render_menu(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_clear(fb, 0);
 
-    fb_text(fb, &FONT_MED, LAP_LABEL_X, MENU_TITLE_Y, "MENU");
+    fb_text(fb, &FONT_MED, DRAG_LABEL_X, MENU_TITLE_Y, "MENU");
     /* CANVAS_VISIBLE_W (core/ui/canvas.h), not fb->w: fb->w is the padded, byte-aligned buffer
      * width (256 on the 213 canvas), 6px wider than the panel's true visible area (250) -- a
      * full-fb->w line would draw ink past the panel's right edge into that invisible padding
