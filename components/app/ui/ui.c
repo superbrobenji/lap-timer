@@ -650,7 +650,7 @@ static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
 {
     rf_in_t  in;
     uint32_t flags     = sys_flags_get();
-    in.dirty           = true; /* only ever called when s_dirty gated the render (render_and_refresh) */
+    in.dirty           = true; /* called from render_and_refresh(): a dirty render or the deferred (throttled) refresh */
     in.wants_full      = s_wants_full;
     in.still           = s_gspeed_kmh < MENU_LOCK_SPEED_KMH;
     in.throttled       = (flags & (1u << SYS_DISP_TEMP_THROTTLE)) != 0;
