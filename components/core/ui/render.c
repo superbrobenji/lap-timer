@@ -163,6 +163,7 @@ void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
 static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, const uint8_t *bitmap, bool invert)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cw > 0 && ch > 0 && stride > 0, UI_ASSERT_CODE);
     int cx0 = x < 0 ? 0 : x;
     int cy0 = y < 0 ? 0 : y;
     int cx1 = x + cw;

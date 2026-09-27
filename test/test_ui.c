@@ -153,7 +153,7 @@ static void test_composite_lap_screen(void)
      * an icon and a bar together on one screen — the scenario plan Task 2 Step 1 describes.
      * Coordinates are chosen so nothing overlaps, to keep this readable as a review artefact
      * (deliberate overlap is exercised separately by the clipping test below). */
-    fb_text(&s_fb, &FONT_SMALL, 4, 4, "BEST");
+    fb_text(&s_fb, &FONT_SMALL, 204, 4, "BEST"); /* x[204,232) y[4,16) */
     fb_text(&s_fb, &FONT_HUGE, 4, 4, "-0.32"); /* x[4,199) y[4,68) */
 
     fb_text(&s_fb, &FONT_SMALL, 4, 78, "PREV"); /* x[4,32) y[78,90) */
