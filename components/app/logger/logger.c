@@ -323,7 +323,10 @@ static void open_session(const log_request_t *req)
     s_lap_len = 0;
     s_drag_len = 0;
     s_sum_dirty = false;
-    s_samples_full = false;
+    /* latch and sys flag move together (Plan 7 T9 fix 3b): only reached once the reserve guard
+     * above has already confirmed storage is genuinely above STO_RESERVE_PCT, so a latch that was
+     * set stays consistent with SYS_STORAGE_FULL instead of going stale. */
+    if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
 
     char path[40];
     log_path(path, sizeof path, s_id, ".log");
