@@ -45,6 +45,10 @@
 #define CANVAS_VISIBLE_W 296
 #endif
 
+/* Shared left text margin (Plan 7b T4, ruling T3-R1): canvas-independent, used by the boot/menu
+ * one-shot renderers and by the DRAG run-card/gate-list left edges (screens_moto.c). */
+#define TEXT_MARGIN_X 4
+
 /* ---- shared fault-icon strip (screens_moto.c fault_strip, spec §20.5 + §17.4) ----
  * x0 + ICON_W(12) and y + ICON_H(12) land flush with the true visible width/height on both
  * canvases (296/128 and 250/122), matching the fault_strip() comment's own flush-edge reasoning. */
@@ -133,43 +137,50 @@
 #define GRID_SUB_GAP 4    /* px between a FONT_MED value and its FONT_SMALL suffix */
 #define GRID_SUB_DY  8    /* the suffix sits this many px below the value's top */
 
-/* ---- DRAG page 0 (benches + 1/4 row, spec §11.4) ---- */
+/* ---- Plan 7b DRAG page 0: the run card (spec 7b §7) ---- */
 #if CANVAS_213
-#define DRAG_LABEL_X       4
-#define DRAG_TIME_RIGHT_X  150
-#define DRAG_TRAP_X        160
-#define DRAG0_ROW_Y0       2
-#define DRAG0_ROW_H        26
-#define DRAG0_MAX_ROWS     4
-#define DRAG_ARMED_RIGHT_X 250
-#define DRAG_ARMED_Y       4
+#define DCARD_LABEL_Y       2
+#define DCARD_BIG_Y         14
+#define DCARD_READY_Y       40
+#define DCARD_SPEED_Y       80
+#define DCARD_FOOTER_Y      108
+#define DCARD_ARMED_RIGHT_X 246
+#define DCARD_ARMED_Y       2
 #else
-#define DRAG_LABEL_X       4
-#define DRAG_TIME_RIGHT_X  180
-#define DRAG_TRAP_X        190
-#define DRAG0_ROW_Y0       8
-#define DRAG0_ROW_H        24
-#define DRAG0_MAX_ROWS     4
-#define DRAG_ARMED_RIGHT_X 296
-#define DRAG_ARMED_Y       4
+#define DCARD_LABEL_Y       2
+#define DCARD_BIG_Y         16
+#define DCARD_READY_Y       42
+#define DCARD_SPEED_Y       84
+#define DCARD_FOOTER_Y      114
+#define DCARD_ARMED_RIGHT_X 292
+#define DCARD_ARMED_Y       2
 #endif
-
-/* ---- DRAG pages 1/2 (2-col gate grid) ---- */
+#define DCARD_LABEL_X    TEXT_MARGIN_X
+#define DCARD_BIG_X      TEXT_MARGIN_X
+#define DCARD_UNIT_GAP   4     /* px between the huge distance digits and the FONT_SMALL "m" */
+#define DCARD_UNIT_DY    48    /* the "m" sits this far below the huge cell's top (near the baseline) */
+#define DCARD_FOOTER_MAX 6     /* earlier gates listed in the footer, newest last */
+#define DCARD_FOOTER_SEP "   "
+/* ---- Plan 7b DRAG pages 1/2: gate list (spec 7b §7) ---- */
+#define DLIST_ROWS 4
+#define DLIST_LABEL_DY 6
 #if CANVAS_213
-#define DRAG12_TITLE_Y 4
-#define DRAG12_COLS    2
-#define DRAG12_COL_X0  4
-#define DRAG12_COL_W   ((CANVAS_W - 8) / 2)
-#define DRAG12_ROW_Y0  16
-#define DRAG12_ROW_H   14
+#define DLIST_HEADER_Y     2
+#define DLIST_COL2_X       128
+#define DLIST_COL1_RIGHT_X 122
+#define DLIST_COL2_RIGHT_X 246
+#define DLIST_ROW_Y0       16
+#define DLIST_ROW_H        26
 #else
-#define DRAG12_TITLE_Y 4
-#define DRAG12_COLS    2
-#define DRAG12_COL_X0  4
-#define DRAG12_COL_W   148
-#define DRAG12_ROW_Y0  20
-#define DRAG12_ROW_H   16
+#define DLIST_HEADER_Y     2
+#define DLIST_COL2_X       152
+#define DLIST_COL1_RIGHT_X 146
+#define DLIST_COL2_RIGHT_X 292
+#define DLIST_ROW_Y0       18
+#define DLIST_ROW_H        26
 #endif
+#define DLIST_COL1_X TEXT_MARGIN_X
+#define DLIST_UNIT_W 10   /* room reserved right of a distance value for its FONT_SMALL "m" */
 
 /* ---- one-shot screens (spec §20.6) ---- */
 #if CANVAS_213
