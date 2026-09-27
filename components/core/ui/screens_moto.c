@@ -211,15 +211,19 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 }
 
 /* x of the leftmost icon fault_strip() will draw for `flags`, or CANVAS_VISIBLE_W when it draws
- * none (spec 7b §4: the event-card footer keeps its BEST value CARD_FAULT_GAP px clear of this).
- * Walks the same bit order / pitch stepping as fault_strip() above, through the same
+ * none. Walks the same bit order / pitch stepping as fault_strip() above, through the same
  * fault_icon_for_bit() table (PF-4), so the two can never disagree about which bits draw. Unlike
  * fault_strip(), this takes no batt_pct -- so for SYS_BATT_LOW it reserves the widest "%<pct>"
  * label fault_strip() could ever draw ("100%", 4 glyphs) rather than the caller's actual
  * percentage. That makes the x this returns always <= fault_strip()'s real left edge for any
  * batt_pct: a caller clearing its own content of that x never overlaps the strip, even though on
  * a lower (1-2 digit) percentage it reserves a little more margin than fault_strip() actually
- * needs. */
+ * needs.
+ * Plan 7b T2 fix 1 (ruling T2-R1): the LAP page 0 event-card footer (render_card_footer, below)
+ * no longer calls this -- CARD_LABEL_Y/CARD_VALUE_Y (canvas.h) were moved above FAULT_STRIP_Y
+ * instead, so the footer's row band and the fault strip's row band no longer share any y, and no
+ * x-retraction is needed there at all. Exported (not static) because Task 4 still
+ * needs this same "clear x" query. */
 int fault_strip_left_x(uint32_t flags)
 {
     const int pitch = ICON_W + 2;
@@ -314,22 +318,19 @@ static void render_card_tag(fb_t *fb, int x, int y)
     fb_text_inv(fb, &FONT_SMALL, x + 2, y + 1, "BEST");
 }
 
-/* Footer: "LAST"/"BEST" labels (FONT_SMALL) over their right-aligned FONT_MED values. BEST's
- * right edge pulls in to clear the fault strip (fault_strip_left_x() - CARD_FAULT_GAP) whenever
- * any fault icon is shown; LAST's column is unaffected since the strip anchors bottom-right.
- * best_right is floored at CARD_LEFT_RIGHT_X + CARD_FOOTER_MIN_GAP + (BEST value's own width): a
- * wide strip (e.g. GPS + a low-battery "%<pct>" label together, both bits set) can otherwise pull
- * best_right in far enough that the BEST value's left edge undercuts LAST's column and the two
- * values print on top of each other -- confirmed by eyeballing that literal reading, which showed
- * exactly that garbled overlap. That floor takes priority over full fault-strip clearance in this
- * rare combination (a value overlapping another value is a worse defect than a digit sitting a
- * couple of px from an icon), so on the 296 canvas this specific combination still lands its
- * rightmost digit close to the strip -- a tighter defect than CARD_FAULT_GAP alone promises, but
- * the least-bad option the CARD block's column widths leave room for. */
+/* Footer: "LAST"/"BEST" labels (FONT_SMALL) over their right-aligned FONT_MED values, both fixed
+ * columns (spec 7b §4). Plan 7b T2 fix 1 (ruling T2-R1): CARD_LABEL_Y/CARD_VALUE_Y now sit the
+ * whole footer row band above FAULT_STRIP_Y on both canvases (canvas.h), so BEST no longer needs
+ * to retract on x to clear the fault strip -- it always right-aligns at CARD_RIGHT_RIGHT_X, same
+ * as LAST always right-aligns at CARD_LEFT_RIGHT_X. The assertion below is the geometry proof
+ * that backs this: LAST's value ends at CARD_LEFT_RIGHT_X and BEST's (7-glyph FONT_MED, the
+ * widest EMPTY_TIME/fmt_time_ms ever produces for these fields) starts no further left than
+ * CARD_RIGHT_RIGHT_X - 7*FONT_MED.w, so the two columns cannot meet on either canvas. */
 static void render_card_footer(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(CARD_RIGHT_RIGHT_X - 7 * (int)FONT_MED.w >= CARD_LEFT_RIGHT_X, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
 
     fb_text(fb, &FONT_SMALL, CARD_LEFT_LABEL_X, CARD_LABEL_Y, "LAST");
@@ -348,16 +349,7 @@ static void render_card_footer(fb_t *fb, const screen_model_t *m)
         char *p = put_str(buf, EMPTY_TIME);
         *p = '\0';
     }
-    int best_w     = (int)strlen(buf) * (int)FONT_MED.w;
-    int best_min   = CARD_LEFT_RIGHT_X + CARD_FOOTER_MIN_GAP + best_w;
-    int best_right = fault_strip_left_x(m->flags) - CARD_FAULT_GAP;
-    if (best_right > CARD_RIGHT_RIGHT_X) {
-        best_right = CARD_RIGHT_RIGHT_X;
-    }
-    if (best_right < best_min) {
-        best_right = best_min;
-    }
-    fb_text_right(fb, &FONT_MED, best_right, CARD_VALUE_Y, buf);
+    fb_text_right(fb, &FONT_MED, CARD_RIGHT_RIGHT_X, CARD_VALUE_Y, buf);
 }
 
 /* The LAP page 0 event card (spec 7b §4): the 64 px big slot top-left, the lap/sector marker
