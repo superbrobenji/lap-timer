@@ -508,22 +508,23 @@ static void eviction_check(void)
         cache_publish_free(si.free_kb);
         return;
     }
-    /* free < 10 %: delete the oldest .log that is not the current session. Per-entry stat() (via
-     * sto_list_next, not the name-only sto_list_next_name) is kept -- eviction wants sizes/ages
-     * available to it (a T12 latency-work candidate, §4). This loop stays O(n^2) on LittleFS; the
-     * vTaskDelay(1) every 16 entries (Plan 5.6 T1 fix 4) only feeds IDLE0/the task WDT through it,
-     * it does not fix the complexity: blocking this priority-8 task for one tick is what lets IDLE0
-     * (priority 0) run: taskYIELD() would not, it never schedules a lower-priority task. */
+    /* free < 10 %: delete the oldest .log that is not the current session. The scan uses nothing
+     * but the entry NAME (the oldest session is the smallest .log name, §12.7), so this is the
+     * name-only sto_list_next_name -- no per-entry stat() -- making the pass O(n) on LittleFS
+     * instead of the O(n^2) sto_list_next walk that starved the ui task (priority 6) past the
+     * 5 s task WDT with 86 sessions on the bench (Plan 7 T9 fix 2). The vTaskDelay(1) every 16
+     * entries (Plan 5.6 T1 fix 4) still runs: it is what lets IDLE0 (priority 0) -- and, now that
+     * the pass itself is cheap, the ui task -- actually get scheduled ahead of this priority-8
+     * task; taskYIELD() would not, it never schedules a lower-priority task. */
     evict_ctx_t e;
     memset(&e, 0, sizeof e);
     if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
     sto_iter_t it;
     if (sto_list_open(&it, "/sessions") == 0) {
-        sto_entry_t ent;
+        char name[STO_NAME_MAX];
         int n = 0;
-        while (sto_list_next(&it, &ent) == 1) {
+        while (sto_list_next_name(&it, name, sizeof name) == 1) {
             if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
-            const char *name = ent.name;
             size_t len = strlen(name);
             if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
             if (strcmp(name, e.curlog) == 0) continue;                      /* never the current session */
