@@ -2117,6 +2117,8 @@ Boot screen lists each as `OK` / `FAIL` for 2 s (skipped when `SYS_SAFE_MODE`).
 | 0x0805 | `E_OTA_WRITE` | 0x0903 | `E_FUSION_CALIB_LOST` |
 | 0x0806 | `E_OTA_VALIDATED` (info) | | |
 
+`E_DISP_BUSY_TIMEOUT`'s `arg` packs `(fail_streak << 8) | (-rc & 0xFF)` — the pre-failure streak count in the high byte, the driver's `-errno` magnitude in the low byte — so an SPI failure (`-EIO` = 5) is distinguishable in the error ring from a BUSY timeout (`-ETIMEDOUT` = 110) without a second display error code (Plan 7 Task 7, ruling T7-R8).
+
 ### 17.8 Flash-write stalls
 
 Classic ESP32 disables the instruction cache during SPI flash erase/write; code not in IRAM stalls on both cores for the duration (4 KB erase ≈ 20–40 ms, 256 B program ≈ 0.3 ms). Consequences and mitigations:

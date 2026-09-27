@@ -63,7 +63,8 @@ foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
   if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens"
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
-     AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure")
+     AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
+     AND NOT name STREQUAL "test_epd_pure_29")
     add_core_test(${name})
   endif()
 endforeach()
@@ -131,3 +132,11 @@ set(EPD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/display_epaper_ssd
 add_core_test(test_epd_pure ${EPD_DIR}/host/epd_panel.c ${EPD_DIR}/host/epd_rotate.c)
 target_include_directories(test_epd_pure PRIVATE ${EPD_DIR}/include)
 target_compile_definitions(test_epd_pure PRIVATE EPD_FORCE_PANEL_213=1)
+
+# test_epd_pure_29 (final fix round, finding 10a): the same pure epd_pure.h coverage as
+# test_epd_pure above, but for the ws29v2 panel row (296x128 logical, ram_w 128 == native_w --
+# no RAM-padding tail, unlike ws213v4's 6-bit one). EPD_FORCE_PANEL_29 (host/epd_panel.c)
+# selects it since the host build has no build_config.h to read CFG_PANEL_WS29V2 from.
+add_core_test(test_epd_pure_29 ${EPD_DIR}/host/epd_panel.c ${EPD_DIR}/host/epd_rotate.c)
+target_include_directories(test_epd_pure_29 PRIVATE ${EPD_DIR}/include)
+target_compile_definitions(test_epd_pure_29 PRIVATE EPD_FORCE_PANEL_29=1)

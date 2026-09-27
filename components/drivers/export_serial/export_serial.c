@@ -807,23 +807,26 @@ static int dbg_btn(int argc, char **argv)
         printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]   (hold must exceed 1000/2000/3000 ms thresholds by >= 100 ms, e.g. 2200 for the combo)\n");
         return 1;
     }
+    CORE_ASSERT_RET(hold_ms <= 5000, EXP_SERIAL_ASSERT_CODE, 1);   /* btn_parse's own 20..5000 ms clamp held */
 
+    /* Minor #6: "ui not started yet" is an operator condition (ui_start() runs later in boot, or
+     * a bench script raced it), not a genuine anomaly -- it must not trip the fault hook. */
     QueueHandle_t q = ui_buttons_queue();
     if (q == NULL) {
         printf("dbg btn: ui not started yet\n");
+        return 1;
     }
-    CORE_ASSERT_RET(q != NULL, EXP_SERIAL_ASSERT_CODE, 1);   /* ui_start() must run before bench injection works */
 
     int64_t now = esp_timer_get_time();
     board_buttons_override(mask, true);
     btn_raw_t press = { .mask = mask, .mono_us = now };
-    xQueueSend(q, &press, pdMS_TO_TICKS(50));
+    (void)xQueueSend(q, &press, pdMS_TO_TICKS(50));   /* best-effort: a full btn_q only delays the ui's next poll tick */
 
     vTaskDelay(pdMS_TO_TICKS(hold_ms));   /* bounded 20..5000 ms (btn_parse clamp); console task, acceptable */
 
     board_buttons_override(mask, false);
     btn_raw_t release = { .mask = 0, .mono_us = now + (int64_t)hold_ms * 1000 };
-    xQueueSend(q, &release, pdMS_TO_TICKS(50));
+    (void)xQueueSend(q, &release, pdMS_TO_TICKS(50));   /* best-effort, same reasoning as the press send above */
 
     printf("OK btn %s %lu\n", argv[2], (unsigned long)hold_ms);
     return 0;

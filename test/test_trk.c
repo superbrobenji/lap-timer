@@ -390,6 +390,43 @@ static void test_user_add_json_replaces_same_id(void)
     TEST_ASSERT_EQUAL_UINT8(2, v->n_layouts);
 }
 
+/* Fix round 2 (finding 10c): once the user table is full, trk_user_add_json() returns the
+ * documented error ("user table full", the same message trk_user_add's own full-table path
+ * uses -- fail()'s single call site the two share) and leaves the table exactly as it was: same
+ * count, every already-added entry untouched, the overflow id absent, and *venue_id_out left
+ * alone (user_slot_for_parse() returns NULL before the parse -- or any write -- ever runs). */
+static void test_user_add_json_full_table_rejected_and_unchanged(void)
+{
+    char json[256];
+    uint16_t id = 0; char err[48];
+    for (int i = 0; i < TRK_MAX_USER; i++) {
+        int n = snprintf(json, sizeof json,
+            "{\"id\":%d,\"name\":\"V%d\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+            "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}",
+            9100 + i, 9100 + i);
+        err[0] = '\0';
+        TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json, (size_t)n, &id, err, sizeof err));
+    }
+    TEST_ASSERT_EQUAL_INT(TRK_MAX_USER, trk_user_count());
+
+    int n = snprintf(json, sizeof json,
+        "{\"id\":9200,\"name\":\"OVERFLOW\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+        "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}");
+    err[0] = '\0';
+    id = 4242;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add_json(json, (size_t)n, &id, err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("user table full", err);
+    TEST_ASSERT_EQUAL_UINT16(4242, id);                        /* venue_id_out untouched on failure */
+    TEST_ASSERT_EQUAL_INT(TRK_MAX_USER, trk_user_count());
+    TEST_ASSERT_NULL(trk_get(9200));
+    for (int i = 0; i < TRK_MAX_USER; i++) {
+        const trk_venue_t *v = trk_get((uint16_t)(9100 + i));
+        TEST_ASSERT_NOT_NULL(v);
+        char want[8]; snprintf(want, sizeof want, "V%d", 9100 + i);
+        TEST_ASSERT_EQUAL_STRING(want, v->name);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -410,5 +447,6 @@ int main(void)
     RUN_TEST(test_user_add_json_parses_into_a_slot);
     RUN_TEST(test_user_add_json_rejects_malformed);
     RUN_TEST(test_user_add_json_replaces_same_id);
+    RUN_TEST(test_user_add_json_full_table_rejected_and_unchanged);
     return UNITY_END();
 }

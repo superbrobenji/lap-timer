@@ -352,12 +352,20 @@ static int epd_partial_refresh(void)
     return rc;
 }
 
-int disp_init(const disp_caps_t **caps)
+/* GPIO config (DC/RST output, BUSY input) plus spi_bus_add_device(), guarded together by
+ * s_added so either runs exactly once no matter how many times ensure_device() is called.
+ * Shared by disp_init() (first-ever bring-up) and disp_reinit() (fix round 2, Important #1):
+ * a boot-time init failure that struck before the device was ever added (panel unplugged,
+ * gpio_config failure) must not permanently wedge the 300 s dead_retry() probe -- disp_reinit()
+ * calls this too, so a later reattach can still complete the add it missed at boot. */
+static int ensure_device(void)
 {
-    s_panel = epd_panel();   /* pure, constant -- bind so every entry point can assert on it */
-    CORE_ASSERT_RET(s_panel != NULL, DISP_ASSERT_CODE, -EIO);
-    CORE_ASSERT_RET(caps != NULL, DISP_ASSERT_CODE, -EINVAL);
-    CORE_ASSERT_RET(!s_inited, DISP_ASSERT_CODE, -EALREADY);   /* disp_reinit() is the re-init path */
+    CORE_ASSERT_RET(s_panel != NULL, DISP_ASSERT_CODE, -ENODEV);
+    CORE_ASSERT_RET(!s_added || s_dev != NULL, DISP_ASSERT_CODE, -ENODEV); /* added implies a bound handle */
+
+    if (s_added) {
+        return 0;
+    }
 
     gpio_config_t dc_rst = {
         .pin_bit_mask = (1ULL << PIN_DC) | (1ULL << PIN_RST),
@@ -384,34 +392,43 @@ int disp_init(const disp_caps_t **caps)
         return -EIO;
     }
 
-    if (!s_added) {
-        spi_device_interface_config_t devcfg = {
-            .mode = 0,
-            .clock_speed_hz = 10 * 1000 * 1000,
-            .spics_io_num = PIN_CS,
-            .queue_size = 4,
-            .pre_cb = pre_cb,
-            .flags = 0,
-        };
-        if (spi_bus_add_device(SPI3_HOST, &devcfg, &s_dev) != ESP_OK) {
-            return -EIO;
-        }
-        s_added = true;   /* the one heap allocation in this driver: IDF's own device handle */
+    spi_device_interface_config_t devcfg = {
+        .mode = 0,
+        .clock_speed_hz = 10 * 1000 * 1000,
+        .spics_io_num = PIN_CS,
+        .queue_size = 4,
+        .pre_cb = pre_cb,
+        .flags = 0,
+    };
+    if (spi_bus_add_device(SPI3_HOST, &devcfg, &s_dev) != ESP_OK) {
+        return -EIO;
+    }
+    s_added = true;   /* the one heap allocation in this driver: IDF's own device handle */
+
+    return 0;
+}
+
+int disp_init(const disp_caps_t **caps)
+{
+    s_panel = epd_panel();   /* pure, constant -- bind so every entry point can assert on it */
+    CORE_ASSERT_RET(s_panel != NULL, DISP_ASSERT_CODE, -EIO);
+    CORE_ASSERT_RET(caps != NULL, DISP_ASSERT_CODE, -EINVAL);
+    CORE_ASSERT_RET(!s_inited, DISP_ASSERT_CODE, -EALREADY);   /* disp_reinit() is the re-init path */
+
+    int rc = ensure_device();
+    if (rc != 0) {
+        return rc;
     }
 
-    int rc = epd_reset_and_init_seq();
+    rc = epd_reset_and_init_seq();
     if (rc != 0) {
         return rc;
     }
     s_inited = true;
 
-    if (s_fb != NULL) {   /* a framebuffer was already blitted -- show it now (boot screen) */
-        rc = epd_full_refresh();
-        if (rc != 0) {
-            return rc;
-        }
-    }
-
+    /* Fix round 2 (minor #5): fill caps before the boot refresh below, not after -- so a caller
+     * that gets a non-NULL *caps has real geometry even on a boot-refresh failure (the device is
+     * otherwise up: reset + init sequence already succeeded), not just on the fully-clean path. */
     s_caps.width              = s_panel->logical_w;
     s_caps.height             = s_panel->logical_h;
     s_caps.partial_ok         = 1;
@@ -420,6 +437,13 @@ int disp_init(const disp_caps_t **caps)
     s_caps.full_refresh_ms    = 2000;
     s_caps.partial_refresh_ms = 400;
     *caps = &s_caps;
+
+    if (s_fb != NULL) {   /* a framebuffer was already blitted -- show it now (boot screen) */
+        rc = epd_full_refresh();
+        if (rc != 0) {
+            return rc;
+        }
+    }
 
     return 0;
 }
@@ -488,10 +512,28 @@ int disp_wake(void)
     return epd_reset_and_init_seq();
 }
 
+/* Fix round 2 (Important #1): does NOT require a prior successful disp_init() -- a boot-time
+ * init failure (panel unplugged, BUSY stuck, gpio/spi add failure) leaves s_inited false
+ * forever, and this is the ONLY recovery path ui.c's dead_retry() has (paced every 300 s). Both
+ * invariants below hold whether or not disp_init() ever ran or succeeded: s_panel is bound the
+ * moment epd_panel() is first called (disp_init/disp_blit, both legal before this), and the
+ * added-implies-bound-handle check is trivially true before ensure_device() has ever added the
+ * device (s_added false) and stays true after. ensure_device() completes whatever disp_init()
+ * left undone (gpio config + spi_bus_add_device) before the reset/init sequence runs. */
 int disp_reinit(void)
 {
     CORE_ASSERT_RET(s_panel != NULL, DISP_ASSERT_CODE, -ENODEV);
-    CORE_ASSERT_RET(s_inited, DISP_ASSERT_CODE, -ENODEV);
+    CORE_ASSERT_RET(!s_added || s_dev != NULL, DISP_ASSERT_CODE, -ENODEV);
 
-    return epd_reset_and_init_seq();
+    int rc = ensure_device();
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = epd_reset_and_init_seq();
+    if (rc != 0) {
+        return rc;
+    }
+    s_inited = true;
+    return 0;
 }

@@ -560,8 +560,12 @@ static bool evict_scan_oldest(evict_ctx_t *e)
     return e->oldest[0] != 0;
 }
 
-/* Unlink one evicted .log (the .sum is kept, as today) and record it exactly as before: one
- * E_STO_EVICT errlog entry plus one ESP_LOGW line per file. */
+/* Unlink one evicted .log (the .sum is kept, as today) and record it: one E_STO_EVICT errlog
+ * entry plus one ESP_LOGW line per file. Fix round 2 (minor #13): `si` (the caller's loop-scoped
+ * reading) is from BEFORE this unlink ran, so the line now re-reads sto_info() after the unlink
+ * to report the true post-eviction free/total figure, not the stale pre-unlink one -- best-effort
+ * (falls back to the pre-unlink `*si` reading on failure; the caller's own loop re-reads sto_info()
+ * again anyway for its loop condition, so this extra read costs nothing beyond a clearer log line). */
 static void evict_one(const char *name, const sto_info_t *si)
 {
     LT_ASSERT_VOID(name != NULL, LOG_ASSERT_CODE);
@@ -570,7 +574,9 @@ static void evict_one(const char *name, const sto_info_t *si)
     (void)snprintf(p, sizeof p, "/sessions/%s", name);
     (void)sto_unlink(p);
     (void)errlog_add(E_STO_EVICT, 0);
-    ESP_LOGW(TAG, "evicted %s (free %u/%u KB)", name, (unsigned)si->free_kb, (unsigned)si->total_kb);
+    sto_info_t after = *si;
+    (void)sto_info(&after);
+    ESP_LOGW(TAG, "evicted %s (free %u/%u KB)", name, (unsigned)after.free_kb, (unsigned)after.total_kb);
 }
 
 /* Invariant: the filesystem must never reach 0 free blocks -- LittleFS cannot even unlink then
