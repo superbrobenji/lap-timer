@@ -506,13 +506,18 @@ static void show_venue_oneshot(int64_t now)
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
 }
 
-/* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). */
-static void handle_lap_complete(const event_t *e)
+/* Genuine (non-out) lap completion: PREV always takes the time; BEST/laps_valid update only when
+ * the engine marked the lap valid. `valid` reads LAP_F_VALID straight off the emitted event -- the
+ * engine already computes it (lap.c's complete_lap(): `flags |= LAP_F_VALID` iff none of
+ * GPS_LOST/PIT/INCOMPLETE/OUT_LAP/TOO_LONG are set) and stamps it into the very flags this event
+ * carries, so deriving it a second time here would just duplicate that logic. Split out of
+ * handle_lap_complete() to keep it under the 60-line cap (rule 4). */
+static void handle_lap_result(uint32_t lap_ms, uint8_t flags)
 {
-    uint32_t lap_ms = e->arg32;
+    bool valid = (flags & LAP_F_VALID) != 0;
     s_model.have_prev = true;
     s_model.prev_ms   = lap_ms;
-    if (!s_model.have_best || lap_ms < s_model.best_ms) {
+    if (valid && (!s_model.have_best || lap_ms < s_model.best_ms)) {
         s_model.best_ms   = lap_ms;
         s_model.have_best = true;
         s_model.new_best  = true;
@@ -522,14 +527,31 @@ static void handle_lap_complete(const event_t *e)
     if (s_model.laps_total < UINT16_MAX) {
         s_model.laps_total++;
     }
-    if (s_model.laps_valid < UINT16_MAX) {
+    if (valid && s_model.laps_valid < UINT16_MAX) {
         s_model.laps_valid++;
+    }
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* valid <= total */
+    /* best_ms <= prev_ms only holds when THIS lap was valid -- an invalid lap's time can be
+     * anything (e.g. a too-long lap can still read faster than the current best on the clock) and
+     * never updates best_ms, so it must not be held to that bound. */
+    LT_ASSERT_VOID(!valid || !s_model.have_best || s_model.best_ms <= s_model.prev_ms,
+                   UI_APP_ASSERT_CODE);
+}
+
+/* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). An out-lap
+ * (LAP_F_OUT_LAP: the engine's very first S/F crossing, lap_no==0, ~0 ms elapsed, r.time_ms forced
+ * to 0 in lap.c) is not a lap -- it must never touch PREV/BEST/laps_total/laps_valid (it used to,
+ * reading as a bogus BEST 0:00.00). Only the CUR gate resets, for the lap that has just started. */
+static void handle_lap_complete(const event_t *e)
+{
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);   /* drained from g_ui_evt_q, never NULL */
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* invariant on entry */
+    if ((e->flags & LAP_F_OUT_LAP) == 0) {
+        handle_lap_result(e->arg32, e->flags);
     }
     s_model.cur_ms_at_gate = 0;
     s_model.cur_sector_idx = 0;
     s_dirty                = true;
-    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* valid <= total */
-    LT_ASSERT_VOID(!s_model.have_best || s_model.best_ms <= s_model.prev_ms, UI_APP_ASSERT_CODE);
 }
 
 /* EV_DRAG_GATE -> model (split verbatim out of handle_event for rule 4). */
@@ -949,12 +971,19 @@ static void ui_task(void *arg)
         s_model.screen  = SCR_ONESHOT;
         s_model.oneshot = ONESHOT_SAFE; /* persistent (§17.5: one full-screen render, then idle) */
     } else {
-        snprintf(s_model.boot_name, sizeof s_model.boot_name, "LapTimer");
+        /* FONT_MED has no lowercase glyphs (digits, ": . - +", A-Z only -- fonts.h) -- "LapTimer"
+         * rendered as "L      T" on the real panel. All-caps has ink (host goldens already say
+         * "LAPTIMER"). */
+        snprintf(s_model.boot_name, sizeof s_model.boot_name, "LAPTIMER");
         snprintf(s_model.boot_ver, sizeof s_model.boot_ver, "%s", CFG_FW_VERSION);
-        s_model.boot_n_lines = 0;
+        s_model.boot_n_lines = 0; /* boot self-test lines have no producer yet -- nothing feeds
+                                    * boot_line[]/boot_n_lines today (follow-up; deltas doc §8). */
         s_model.screen       = SCR_ONESHOT;
         s_model.oneshot      = ONESHOT_BOOT;
-        s_oneshot_until_us   = esp_timer_get_time() + (int64_t)ONESHOT_BOOT_MS * 1000;
+        /* s_oneshot_until_us is armed further down, AFTER disp_init() returns -- not here. Arming
+         * it here would start the 2 s window before disp_init()'s ~3.5 s blocking bring-up, so the
+         * window would already be expired by the time the BOOT screen is first visible and the LAP
+         * page would replace it immediately. */
     }
     s_model.flags = f0;
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);        /* first screen valid */
@@ -982,6 +1011,14 @@ static void ui_task(void *arg)
         (void)errlog_add(E_DISP_DEAD, (uint32_t)(-disp_rc));
         sys_flags_set(SYS_DISP_DEAD);
         s_next_reinit_us = esp_timer_get_time() + DISP_DEAD_RETRY_US;
+    }
+
+    /* Arm the BOOT one-shot's 2 s auto-revert window now, whether disp_init() succeeded or failed
+     * (either way the screen is now on the panel or as on-panel as it will get) -- see the comment
+     * above where s_model.oneshot was set to ONESHOT_BOOT. SAFE mode's one-shot is persistent
+     * (§17.5) and is left untouched (s_oneshot_until_us stays 0). */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT) {
+        s_oneshot_until_us = esp_timer_get_time() + (int64_t)ONESHOT_BOOT_MS * 1000;
     }
 
     esp_task_wdt_reset();
