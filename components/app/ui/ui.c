@@ -512,9 +512,20 @@ static void show_venue_oneshot(int64_t now)
  * GPS_LOST/PIT/INCOMPLETE/OUT_LAP/TOO_LONG are set) and stamps it into the very flags this event
  * carries, so deriving it a second time here would just duplicate that logic. Split out of
  * handle_lap_complete() to keep it under the 60-line cap (rule 4). */
-static void handle_lap_result(uint32_t lap_ms, uint8_t flags)
+/* Clears the page 1 row 4 sector-delta cache (spec 7b §3): the lap that has just started has no
+ * sector deltas of its own yet -- EV_SECTOR repopulates them as it runs. Split out of
+ * handle_lap_result() to keep that function under the 60-line cap (rule 4). */
+static void clear_last_sector_deltas(void)
 {
-    bool valid = (flags & LAP_F_VALID) != 0;
+    for (uint8_t i = 0; i < LAP_MAX_SECTORS + 1; i++) {
+        s_model.have_last_sector_delta[i] = false;
+    }
+}
+
+static void handle_lap_result(uint32_t lap_ms, uint8_t flags, int32_t lap_delta_ms)
+{
+    bool valid    = (flags & LAP_F_VALID) != 0;
+    bool had_best = s_model.have_best;   /* captured before the BEST update below (spec 7b §3) */
     s_model.have_prev = true;
     s_model.prev_ms   = lap_ms;
     if (valid && (!s_model.have_best || lap_ms < s_model.best_ms)) {
@@ -536,6 +547,15 @@ static void handle_lap_result(uint32_t lap_ms, uint8_t flags)
      * never updates best_ms, so it must not be held to that bound. */
     LT_ASSERT_VOID(!valid || !s_model.have_best || s_model.best_ms <= s_model.prev_ms,
                    UI_APP_ASSERT_CODE);
+
+    /* Event card (spec 7b §3): the big slot shows this lap's delta only if a best already existed
+     * before it (else BIG_NONE); lap_no advances to the lap now starting; the sector-detail row
+     * resets for it. */
+    s_model.big_kind       = had_best ? (uint8_t)BIG_LAP_DELTA : (uint8_t)BIG_NONE;
+    s_model.big_delta_ms   = lap_delta_ms;
+    s_model.lap_no         = (uint16_t)(s_model.laps_total + 1u);
+    s_model.cur_sector_idx = 0;
+    clear_last_sector_deltas();
 }
 
 /* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). An out-lap
@@ -547,7 +567,7 @@ static void handle_lap_complete(const event_t *e)
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);   /* drained from g_ui_evt_q, never NULL */
     LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* invariant on entry */
     if ((e->flags & LAP_F_OUT_LAP) == 0) {
-        handle_lap_result(e->arg32, e->flags);
+        handle_lap_result(e->arg32, e->flags, (int32_t)e->arg32b);
     }
     s_model.cur_ms_at_gate = 0;
     s_model.cur_sector_idx = 0;
@@ -571,14 +591,25 @@ static void handle_drag_gate(const event_t *e)
     s_dirty = true;
 }
 
-/* EV_SECTOR -> model (split verbatim out of handle_event for rule 4). */
+/* EV_SECTOR -> model (split verbatim out of handle_event for rule 4). arg32b is 0 both for a
+ * genuine zero delta and for "no best lap yet" (event.h) -- big_kind and have_last_sector_delta[]
+ * follow s_model.have_best so a consumer never mistakes "no best yet" for a real zero delta (spec
+ * 7b §3). */
 static void handle_sector(const event_t *e)
 {
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);   /* engine sector idx in range */
-    s_model.cur_sector_idx = (uint8_t)e->arg16;
-    s_model.cur_ms_at_gate = e->arg32;
+    uint8_t idx = (uint8_t)e->arg16;
+    s_model.cur_sector_idx  = idx;
+    s_model.cur_ms_at_gate  = e->arg32;
     s_model.sector_delta_ms = (int32_t)e->arg32b;
-    s_dirty                = true;
+    s_model.big_kind        = s_model.have_best ? (uint8_t)BIG_SECTOR_DELTA : (uint8_t)BIG_NONE;
+    s_model.big_delta_ms    = (int32_t)e->arg32b;
+    s_model.big_sector_idx  = idx;
+    s_model.last_sector_delta_ms[idx]   = (int32_t)e->arg32b;
+    s_model.have_last_sector_delta[idx] = s_model.have_best;
+    s_model.new_best = false;   /* the BEST tag lives until the next gate (spec 7b §4) */
+    s_dirty          = true;
 }
 
 /* EV_VENUE_FOUND -> model (split verbatim out of handle_event for rule 4). */
@@ -960,6 +991,10 @@ static void ui_task(void *arg)
     (void)lt_cfg_load(&s_cfg);
     s_mode       = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode = s_mode;
+    /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
+     * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0. */
+    s_model.lap_no    = 1;
+    s_model.big_kind  = (uint8_t)BIG_NONE;
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);   /* valid engine mode from cfg */
 
     fb_init(&s_fb, s_fb_bits, CANVAS_W, CANVAS_H);
