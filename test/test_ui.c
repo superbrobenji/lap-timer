@@ -129,7 +129,7 @@ static void test_text_inv_no_glyph_cell_is_solid_black(void)
     for (int y = 4; y < 4 + (int)FONT_MED.h; y++) {
         for (int x = 4; x < 4 + (int)FONT_MED.w; x++) {
             uint8_t byte = s_fb.bits[y * s_fb.stride + x / 8];
-            TEST_ASSERT_EQUAL_UINT8(0u, (uint8_t)((byte >> (7 - (x % 8))) & 1u));
+            TEST_ASSERT_EQUAL_UINT8(0u, (uint8_t)(((unsigned int)byte >> (unsigned int)(7 - (x % 8))) & 1u));
         }
     }
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_inv_no_glyph.pbm"), &s_fb));
