@@ -171,7 +171,7 @@
 #define DLIST_LABEL_DY 6
 #if CANVAS_213
 #define DLIST_HEADER_Y     2
-#define DLIST_COL2_X       128
+#define DLIST_COL2_X       126
 #define DLIST_COL1_RIGHT_X 122
 #define DLIST_COL2_RIGHT_X 246
 #define DLIST_ROW_Y0       16
@@ -185,7 +185,8 @@
 #define DLIST_ROW_H        26
 #endif
 #define DLIST_COL1_X TEXT_MARGIN_X
-#define DLIST_UNIT_W 10   /* room reserved right of a distance value for its FONT_SMALL "m" */
+#define DLIST_UNIT_W 10     /* room reserved right of a distance value for its FONT_SMALL "m" */
+#define DLIST_UNIT_GAP 2    /* px between the distance digits and the FONT_SMALL "m" */
 
 /* ---- one-shot screens (spec §20.6) ---- */
 #if CANVAS_213

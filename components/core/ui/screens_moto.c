@@ -629,7 +629,7 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
             char *p = put_uint(buf, r->dist_m);
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr - DLIST_UNIT_W, y, buf);
-            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + 2, y + DLIST_LABEL_DY, "m");
+            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + DLIST_UNIT_GAP, y + DLIST_LABEL_DY, "m");
         } else {
             fmt_secs_ms(buf, r->t_ms);
             fb_text_right(fb, &FONT_MED, xr, y, buf);

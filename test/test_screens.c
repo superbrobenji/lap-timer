@@ -277,16 +277,19 @@ static void test_drag_p0_distance(void)
 
 /* ---- DRAG pages 1/2 (gate list, spec 7b §7) ---- */
 
-static void test_drag_p1_gates(void)   /* seven gates, two present-false */
+static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this run */
 {
     /* All seven §6.6 gates named, in the spec's own listed order (60ft, 330ft, 1/8, 1000ft, 1/4,
-     * 100-200, 100-0); the 100-200 gate was not reached this run (present forced false after the
-     * fact) -- the list shows "--.--" for it. */
+     * 100-200, 100-0); the 1000ft gate (index 3) was not reached this run (present forced false
+     * after the fact) -- the list shows "--.--" for it. Ruling T4-R2: 100-200 is present with
+     * 12.34s, the right column's worst case on the 213 canvas (its 49px label plus a 5-glyph
+     * FONT_MED time). */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    m.drag[3].present = false;
     drag_gate(&m, "1/4", 12840, 173, false, 0);
-    drag_gate(&m, "100-200", 0, 0, false, 0); m.drag[5].present = false;
+    drag_gate(&m, "100-200", 12340, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
