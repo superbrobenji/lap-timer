@@ -173,9 +173,10 @@ static void test_composite_lap_screen(void)
 
 static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
 {
-    /* FONT_BIG cell is 24px wide; starting at x=280 the last ~8px of the glyph fall past
-     * FB_W=296 -> right-edge clip. */
-    fb_text(&s_fb, &FONT_BIG, 280, 4, "88:88.88");
+    /* FONT_MED cell is 14px wide; starting at x=290 the last ~8px of the glyph fall past
+     * FB_W=296 -> right-edge clip (Plan 7b T2, ruling T1-R1: the 40px font this case used to
+     * exercise here was removed; FONT_MED gives the same right-edge-clip coverage instead). */
+    fb_text(&s_fb, &FONT_MED, 290, 4, "88:88.88");
 
     /* FONT_MED cell is 24px tall; starting at y=120 the bottom ~16px fall past FB_H=128 ->
      * bottom-edge clip. */

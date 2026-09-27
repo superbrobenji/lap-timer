@@ -45,20 +45,6 @@
 #define CANVAS_VISIBLE_W 296
 #endif
 
-/* §2's font-size deltas for the LAP riding page (screens_moto.c render_lap_page0): the 213 canvas
- * is too short for FONT_BIG's 40px cell (would run past CANVAS_H at any usable row spacing), so
- * BEST/PREV drop to FONT_MED and CUR's value/sector drop to FONT_SMALL. Named per usage (not a
- * ternary on the font struct itself -- font_t objects, not scalars, can't feed a "?:") so
- * screens_moto.c just writes `&LAP_TIME_FONT` / `&LAP_CUR_FONT` where it used to hardcode
- * `&FONT_BIG` / `&FONT_MED`. */
-#if CANVAS_213
-#define LAP_TIME_FONT FONT_MED
-#define LAP_CUR_FONT  FONT_SMALL
-#else
-#define LAP_TIME_FONT FONT_BIG
-#define LAP_CUR_FONT  FONT_MED
-#endif
-
 /* ---- shared fault-icon strip (screens_moto.c fault_strip, spec §20.5 + §17.4) ----
  * x0 + ICON_W(12) and y + ICON_H(12) land flush with the true visible width/height on both
  * canvases (296/128 and 250/122), matching the fault_strip() comment's own flush-edge reasoning. */
@@ -70,27 +56,58 @@
 #define FAULT_STRIP_Y  116
 #endif
 
-/* ---- LAP page 0 (BEST/PREV/CUR/dS) ---- */
+/* ---- Plan 7b LAP page 0: the event card (spec 7b §4) ---- */
 #if CANVAS_213
-#define LAP_LABEL_X          4
-#define LAP_TIME_RIGHT_X     170
-#define LAP_ROW_BEST_Y       2
-#define LAP_ROW_PREV_Y       28
-#define LAP_ROW_CUR_Y        54
-#define LAP_ROW_DELTA_Y      70
-#define LAP_CUR_TIME_RIGHT_X 150
-#define LAP_CUR_SECTOR_X     160
-#define LAP_DELTA_VALUE_X    24
+#define CARD_MARKER_RIGHT_X 246
+#define CARD_MARKER_Y       1
+#define CARD_BIG_X          4
+#define CARD_BIG_Y          4
+#define CARD_NONE_Y         40   /* "LAP n" (FONT_MED) row when the slot has no delta */
+#define CARD_TAG_Y          50   /* inverted BEST tag beside the big number */
+#define CARD_TAG_ALT_X      208  /* tag on the marker row when the number is six glyphs */
+#define CARD_LABEL_Y        78
+#define CARD_VALUE_Y        90
+#define CARD_LEFT_LABEL_X   4
+#define CARD_LEFT_RIGHT_X   122
+#define CARD_RIGHT_LABEL_X  128
+#define CARD_RIGHT_RIGHT_X  246
 #else
-#define LAP_LABEL_X          4
-#define LAP_TIME_RIGHT_X     200
-#define LAP_ROW_BEST_Y       4
-#define LAP_ROW_PREV_Y       46
-#define LAP_ROW_CUR_Y        88
-#define LAP_ROW_DELTA_Y      112
-#define LAP_CUR_TIME_RIGHT_X 180
-#define LAP_CUR_SECTOR_X     210
-#define LAP_DELTA_VALUE_X    24
+#define CARD_MARKER_RIGHT_X 292
+#define CARD_MARKER_Y       1
+#define CARD_BIG_X          4
+#define CARD_BIG_Y          6
+#define CARD_NONE_Y         42
+#define CARD_TAG_Y          52
+#define CARD_TAG_ALT_X      254
+#define CARD_LABEL_Y        82
+#define CARD_VALUE_Y        94
+#define CARD_LEFT_LABEL_X   4
+#define CARD_LEFT_RIGHT_X   146
+#define CARD_RIGHT_LABEL_X  152
+#define CARD_RIGHT_RIGHT_X  292
+#endif
+#define CARD_TAG_W    32
+#define CARD_TAG_H    14
+#define CARD_TAG_GAP  6
+#define CARD_FAULT_GAP 4         /* BEST value keeps this many px clear of the fault strip */
+#define CARD_DELTA_CLAMP_MS 99990
+/* Not in the brief's CARD block: needed so render_card_footer's fault-strip retraction (which
+ * pulls the BEST value's right edge in from CARD_RIGHT_RIGHT_X) has a floor -- without one, a
+ * wide fault strip (e.g. GPS + a low-battery "%<pct>" label together) can retract best_right far
+ * enough left that the BEST value's own left edge undercuts CARD_LEFT_RIGHT_X and overlaps the
+ * LAST value on the same row. Matches the existing CARD_LEFT_RIGHT_X -> CARD_RIGHT_LABEL_X gap (6
+ * px) already baked into both canvases' CARD block. */
+#define CARD_FOOTER_MIN_GAP 6
+
+/* LAP_LABEL_X is still used by pages 1/2 and the DRAG grid (both canvases) today; those uses move
+ * to BOARD_X0/GRID_COL1_X in Task 3. LAP_TIME_RIGHT_X is still used by page 1's THEO row value
+ * (render_lap_page1) today; that use moves with the rest of page 1's layout in Task 3 too. Both
+ * are temporary reintroductions of constants this task's CARD block otherwise replaces. */
+#define LAP_LABEL_X 4 /* removed in Task 3 */
+#if CANVAS_213
+#define LAP_TIME_RIGHT_X 170 /* removed in Task 3 */
+#else
+#define LAP_TIME_RIGHT_X 200 /* removed in Task 3 */
 #endif
 
 /* ---- LAP page 1 (best-lap sector splits + THEO) ---- */

@@ -71,75 +71,87 @@ static int fb_max_ink_col(const fb_t *fb)
     return max_col;
 }
 
-/* ---- LAP page 0 ---- */
+/* ---- LAP page 0: the event card (spec 7b §3-4) ---- */
 
-static void test_lap_p0_mid(void)
+static void lap_model_base(screen_model_t *m)
 {
-    /* Mid-session: a best and a previous lap on record, partway through the current lap, the
-     * last completed sector was 0.21s slower than best (spec's own example delta). */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 0;
-    m.have_best = true;
-    m.best_ms = 111900; /* 1:51.90 */
-    m.have_prev = true;
-    m.prev_ms = 112340; /* 1:52.34 */
-    m.cur_ms_at_gate = 72300; /* 1:12.30 */
-    m.cur_sector_idx = 2;
-    m.sector_delta_ms = -210; /* -0.21 */
-    m.new_best = false;
-    m.flags = 0;
-    m.batt_pct = 87;
-
-    screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
-    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_mid.pbm"), &s_fb));
+    memset(m, 0, sizeof *m);
+    m->mode = SCR_MODE_LAP;
+    m->page = 0;
+    m->have_best = true;  m->best_ms = 111900; /* 1:51.90 */
+    m->have_prev = true;  m->prev_ms = 112340; /* 1:52.34 */
+    m->lap_no = 7;
+    m->cur_sector_idx = 2;
+    m->batt_pct = 87;
 }
 
-static void test_lap_p0_empty(void)
+static void test_lap_p0_first_lap(void)
 {
-    /* Before any lap: BEST/PREV show "--:--.--"; CUR is reset to 0:00.00 S0 at S/F. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 0;
-    m.have_best = false;
-    m.have_prev = false;
-    m.cur_ms_at_gate = 0;
-    m.cur_sector_idx = 0;
-    m.sector_delta_ms = 0;
-    m.new_best = false;
-    m.flags = 0;
-    m.batt_pct = 100;
-
+    /* Before any lap has a best/prev on record: big slot falls back to "LAP n", footer shows the
+     * "-:--.--" placeholders, marker reads "L1 S0". */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.have_best = false; m.have_prev = false; m.lap_no = 1; m.cur_sector_idx = 0;
+    m.big_kind = BIG_NONE;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_empty.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_first_lap.pbm"), &s_fb));
 }
 
-static void test_lap_p0_newbest_fault(void)
+static void test_lap_p0_sector_delta(void)
 {
-    /* Just completed a new best lap (dS row shows "BEST" instead of a delta) while GPS has no fix
-     * (SYS_GPS_NOFIX, bit 1) -- exercises the fault-icon strip together with the new-best path. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 0;
-    m.have_best = true;
-    m.best_ms = 109870; /* 1:49.87, the lap that was just completed */
-    m.have_prev = true;
-    m.prev_ms = 111900; /* 1:51.90, the previous best */
-    m.cur_ms_at_gate = 15230; /* 0:15.23 into the new lap */
-    m.cur_sector_idx = 1;
-    m.sector_delta_ms = -1230; /* irrelevant while new_best is set, but populated for realism */
-    m.new_best = true;
-    m.flags = 1u << SCR_SYS_GPS_NOFIX;
-    m.batt_pct = 54;
-
+    /* Mid-lap: the last completed sector was 0.32s quicker than best -- the big slot shows the
+     * signed sector delta, not a lap delta. */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = -320; m.big_sector_idx = 2;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_newbest_fault.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_sector_delta.pbm"), &s_fb));
+}
+
+static void test_lap_p0_lap_delta_wide(void)
+{
+    /* A six-glyph lap delta ("+12.50", ends at x 238) leaves no room for the BEST tag beside the
+     * number, so it must move to the marker row instead (spec 7b §4). */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_LAP_DELTA; m.big_delta_ms = 12500; m.cur_sector_idx = 0; m.lap_no = 12;
+    m.new_best = true; /* tag must move to the marker row: six glyphs leave no room beside the number */
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_lap_delta_wide.pbm"), &s_fb));
+}
+
+static void test_lap_p0_new_best(void)
+{
+    /* A narrow lap delta ("-0.44") with new_best set: the BEST tag fits beside the number, so the
+     * marker stays put and the tag sits to the number's right. */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_LAP_DELTA; m.big_delta_ms = -440; m.new_best = true; m.cur_sector_idx = 0;
+    m.best_ms = 111460; m.prev_ms = 111460;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_new_best.pbm"), &s_fb));
+}
+
+static void test_lap_p0_fault(void)
+{
+    /* GPS has no fix and the battery is low -- exercises the fault strip together with the event
+     * card, confirming the footer's BEST value stays clear of the icons (fault_strip_left_x). */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = 210; m.big_sector_idx = 2;
+    m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW); m.batt_pct = 14;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_fault.pbm"), &s_fb));
 }
 
 /* ---- LAP page 1 (best-lap sector splits + THEO) ---- */
@@ -454,9 +466,11 @@ static void test_menu_scrolled(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_lap_p0_mid);
-    RUN_TEST(test_lap_p0_empty);
-    RUN_TEST(test_lap_p0_newbest_fault);
+    RUN_TEST(test_lap_p0_first_lap);
+    RUN_TEST(test_lap_p0_sector_delta);
+    RUN_TEST(test_lap_p0_lap_delta_wide);
+    RUN_TEST(test_lap_p0_new_best);
+    RUN_TEST(test_lap_p0_fault);
     RUN_TEST(test_lap_p1_sectors);
     RUN_TEST(test_lap_p2_stats);
     RUN_TEST(test_drag_p0_benches);
