@@ -65,8 +65,8 @@
 #define CARD_NONE_Y         40   /* "LAP n" (FONT_MED) row when the slot has no delta */
 #define CARD_TAG_Y          50   /* inverted BEST tag beside the big number */
 #define CARD_TAG_ALT_X      208  /* tag on the marker row when the number is six glyphs */
-#define CARD_LABEL_Y        78
-#define CARD_VALUE_Y        90
+#define CARD_LABEL_Y        72   /* Plan 7b T2 fix 1 (ruling T2-R1): values end at 108, below FAULT_STRIP_Y (110) */
+#define CARD_VALUE_Y        84
 #define CARD_LEFT_LABEL_X   4
 #define CARD_LEFT_RIGHT_X   122
 #define CARD_RIGHT_LABEL_X  128
@@ -79,8 +79,8 @@
 #define CARD_NONE_Y         42
 #define CARD_TAG_Y          52
 #define CARD_TAG_ALT_X      254
-#define CARD_LABEL_Y        82
-#define CARD_VALUE_Y        94
+#define CARD_LABEL_Y        76   /* Plan 7b T2 fix 1 (ruling T2-R1): values end at 112, below FAULT_STRIP_Y (116) */
+#define CARD_VALUE_Y        88
 #define CARD_LEFT_LABEL_X   4
 #define CARD_LEFT_RIGHT_X   146
 #define CARD_RIGHT_LABEL_X  152
@@ -91,13 +91,6 @@
 #define CARD_TAG_GAP  6
 #define CARD_FAULT_GAP 4         /* BEST value keeps this many px clear of the fault strip */
 #define CARD_DELTA_CLAMP_MS 99990
-/* Not in the brief's CARD block: needed so render_card_footer's fault-strip retraction (which
- * pulls the BEST value's right edge in from CARD_RIGHT_RIGHT_X) has a floor -- without one, a
- * wide fault strip (e.g. GPS + a low-battery "%<pct>" label together) can retract best_right far
- * enough left that the BEST value's own left edge undercuts CARD_LEFT_RIGHT_X and overlaps the
- * LAST value on the same row. Matches the existing CARD_LEFT_RIGHT_X -> CARD_RIGHT_LABEL_X gap (6
- * px) already baked into both canvases' CARD block. */
-#define CARD_FOOTER_MIN_GAP 6
 
 /* LAP_LABEL_X is still used by pages 1/2 and the DRAG grid (both canvases) today; those uses move
  * to BOARD_X0/GRID_COL1_X in Task 3. LAP_TIME_RIGHT_X is still used by page 1's THEO row value
