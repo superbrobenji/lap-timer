@@ -151,10 +151,14 @@ static void fmt_secs_ms(char *buf, uint32_t ms)
         unsigned cs = (unsigned)((ms / 10u) % 100u);
         p = put_uint(p, s);
         p = put_char(p, '.');
-        if (cs < 10u) p = put_char(p, '0');
+        if (cs < 10u) {
+            p = put_char(p, '0');
+        }
         p = put_uint(p, cs);
     } else {
-        if (s > 999u) s = 999u;
+        if (s > 999u) {
+            s = 999u;
+        }
         p = put_uint(p, s);
         p = put_char(p, '.');
         p = put_uint(p, (unsigned)((ms / 100u) % 10u));
@@ -217,6 +221,15 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
         if (icon < 0) {
             continue;
         }
+        /* The icon always occupies its own slot at the current x, drawn first so the SYS_BATT_LOW
+         * label below is positioned relative to it without the two overlapping (Plan 7b final fix
+         * 1, finding 17: the label used to draw at this same x only after the icon's slot had
+         * already been shifted left by the label's own width, so the icon's opaque blit clobbered
+         * the label's first ICON_W columns). Layout picked (label immediately left of the icon,
+         * not right of it) matches fault_strip_left_x()'s existing math below, which already
+         * reserves the label's width before the icon's own slot -- so that function's "leftmost x"
+         * contract needed no change. */
+        fb_icon(fb, (uint8_t)icon, x, y);
         if (bit == SCR_SYS_BATT_LOW) {
             char     pct_buf[8];
             uint8_t  pct = batt_pct > 100u ? 100u : batt_pct;
@@ -227,10 +240,9 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
             *p = '\0';
             int text_w = (int)strlen(pct_buf) * FONT_SMALL.w;
             int text_y = y + (ICON_H - FONT_SMALL.h) / 2;
-            fb_text(fb, &FONT_SMALL, x - text_w - 1, text_y, pct_buf);
-            x -= text_w + 1;
+            fb_text(fb, &FONT_SMALL, x - text_w - 1, text_y, pct_buf); /* immediately left of the icon */
+            x -= text_w + 1; /* reserve the label's width too before the next bit's pitch step */
         }
-        fb_icon(fb, (uint8_t)icon, x, y);
         x -= pitch;
     }
 }
@@ -247,9 +259,9 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
  * Plan 7b T2 fix 1 (ruling T2-R1): the LAP page 0 event-card footer (render_card_footer, below)
  * no longer calls this -- CARD_LABEL_Y/CARD_VALUE_Y (canvas.h) were moved above FAULT_STRIP_Y
  * instead, so the footer's row band and the fault strip's row band no longer share any y, and no
- * x-retraction is needed there at all. Exported (not static) because Task 4 still
- * needs this same "clear x" query. */
-int fault_strip_left_x(uint32_t flags)
+ * x-retraction is needed there at all. Only caller is render_dcard_footer (PF-2, below), so this
+ * stays file-static. */
+static int fault_strip_left_x(uint32_t flags)
 {
     const int pitch = ICON_W + 2;
     int       x = FAULT_STRIP_X0;
@@ -291,6 +303,7 @@ static void fmt_delta_clamped(char *buf, int32_t dms, int32_t max_ms)
         d = -max_ms;
     }
     fmt_delta_ms(buf, d);
+    CORE_ASSERT_VOID(strlen(buf) <= 6u, UI_ASSERT_CODE); /* sign + up to "99.99": never wider than the 6-glyph budget */
 }
 
 /* Renders the 64 px big slot (FONT_HUGE): BIG_SECTOR_DELTA/BIG_LAP_DELTA show the signed delta,
@@ -386,9 +399,12 @@ static void render_lap_page0(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    int    end_x = render_card_big(fb, m);
-    size_t glyphs = (m->big_kind == BIG_NONE) ? 0u : (size_t)((end_x - CARD_BIG_X) / FONT_HUGE.w);
-    bool   wide = glyphs > 5u; /* six glyphs end at x 238: no room for the tag beside them */
+    int  end_x = render_card_big(fb, m);
+    /* Ruling FR-4: whether the BEST tag fits beside the big number is a real geometry question
+     * (does the tag box, plus its gap, still land left of the marker's right edge?), not a glyph
+     * count -- a fixed "more than 5 glyphs" threshold was wrong on the 2.9" canvas, where a
+     * six-glyph delta still leaves room beside it (CARD_MARKER_RIGHT_X is wider there). */
+    bool wide = end_x + CARD_TAG_GAP + CARD_TAG_W > CARD_MARKER_RIGHT_X;
     if (m->new_best && wide) {
         render_card_tag(fb, CARD_TAG_ALT_X, CARD_MARKER_Y); /* replaces the marker this lap */
     } else {
@@ -411,11 +427,11 @@ static void render_board_header(fb_t *fb, const screen_model_t *m)
     char  buf[TIME_BUF_LEN + 12];
     char  t[TIME_BUF_LEN];
     char *p = put_str(buf, "BEST LAP ");
-    if (m->have_best) { fmt_time_ms(t, m->best_ms); p = put_str(p, t); } else p = put_str(p, EMPTY_TIME);
+    if (m->have_best) { fmt_time_ms(t, m->best_ms); p = put_str(p, t); } else { p = put_str(p, EMPTY_TIME); }
     *p = '\0';
     fb_text(fb, &FONT_SMALL, BOARD_X0, BOARD_HEADER_Y, buf);
     p = put_str(buf, "THEO ");
-    if (m->have_theo) { fmt_time_ms(t, m->theo_best_ms); p = put_str(p, t); } else p = put_str(p, EMPTY_TIME);
+    if (m->have_theo) { fmt_time_ms(t, m->theo_best_ms); p = put_str(p, t); } else { p = put_str(p, EMPTY_TIME); }
     *p = '\0';
     fb_text_right(fb, &FONT_SMALL, CANVAS_VISIBLE_W - BOARD_X0, BOARD_HEADER_Y, buf);
 }
@@ -440,7 +456,11 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
         fb_text(fb, &FONT_SMALL, x, BOARD_LABEL_Y, buf);
         if (i < n) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_VALUE_Y, buf);
-        if (i < n && m->have_last_sector_delta[i]) { fmt_delta_clamped(buf, m->last_sector_delta_ms[i], BOARD_DELTA_CLAMP_MS); }
+        /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i] (spec §5 literal),
+         * not on best_n_sectors -- no producer fills best_n_sectors yet (the best-lap sector
+         * times/theo wiring is roadmap follow-up #58), so gating the delta on `i < n` as well would
+         * always show "----" here on target. */
+        if (m->have_last_sector_delta[i]) { fmt_delta_clamped(buf, m->last_sector_delta_ms[i], BOARD_DELTA_CLAMP_MS); }
         else { p = put_str(buf, "----"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_DELTA_Y, buf);
     }
@@ -495,7 +515,11 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     char *p;
     p = put_uint(buf, m->max_speed_kmh); *p = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "MAX SPD", buf);
-    p = put_char(buf, 'L'); p = put_uint(p, m->lean_l_deg); p = put_char(p, ' '); p = put_char(p, 'R'); p = put_uint(p, m->lean_r_deg); *p = '\0';
+    /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
+     * to 99 before formatting so "L99 R99" is provably the widest this cell ever draws. */
+    uint8_t lean_l = m->lean_l_deg > 99u ? 99u : m->lean_l_deg;
+    uint8_t lean_r = m->lean_r_deg > 99u ? 99u : m->lean_r_deg;
+    p = put_char(buf, 'L'); p = put_uint(p, lean_l); p = put_char(p, ' '); p = put_char(p, 'R'); p = put_uint(p, lean_r); *p = '\0';
     grid_cell(fb, GRID_COL2_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "LEAN L/R", buf);   /* PF-3: FONT_SMALL has '/', FONT_MED does not, hence L52 R55 */
     p = put_g_e2(buf, m->lat_g_e2); *p = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAT G", buf);
@@ -527,7 +551,7 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r)
         *p = '\0';
         int end = fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
         fb_text(fb, &FONT_SMALL, end + DCARD_UNIT_GAP, DCARD_BIG_Y + DCARD_UNIT_DY, "m");
-        return;
+        return; /* a distance gate never draws a trap row, even if has_trap happened to be set */
     }
     fmt_secs_ms(buf, r->t_ms);
     fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
@@ -546,7 +570,7 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r)
  * already fills the big slot), oldest first, up to DCARD_FOOTER_MAX entries -- older ones scroll
  * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist_m>m" for the
  * distance gate), joined by DCARD_FOOTER_SEP. PF-2: the row stops before it would draw under the
- * fault strip -- its right limit is fault_strip_left_x(m->flags) - CARD_FAULT_GAP, which is always
+ * fault strip -- its right limit is fault_strip_left_x(m->flags) - DCARD_FAULT_GAP, which is always
  * <= CANVAS_VISIBLE_W, so this also never draws past the visible edge. */
 static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /* gates 0..n-2 */
 {
@@ -554,7 +578,7 @@ static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /*
     CORE_ASSERT_VOID(m != NULL && n >= 1u && n <= DRAG_MAX_GATES, UI_ASSERT_CODE);
     uint8_t first = (n - 1u > DCARD_FOOTER_MAX) ? (uint8_t)(n - 1u - DCARD_FOOTER_MAX) : 0u;
     int     x = DCARD_LABEL_X;
-    int     limit = fault_strip_left_x(m->flags) - CARD_FAULT_GAP; /* PF-2: never under a fault icon */
+    int     limit = fault_strip_left_x(m->flags) - DCARD_FAULT_GAP; /* PF-2: never under a fault icon */
     for (uint8_t i = first; i + 1u < n && i < DRAG_MAX_GATES; i++) {
         const drag_row_t *r = &m->drag[i];
         char  buf[TIME_BUF_LEN + 12];

@@ -75,7 +75,7 @@ Rendering is a pure function of the model; the ui's refresh policy (§20.3) is u
 └──────────────────────────────────────────────┘
 ```
 
-Columns: `LAP1_SECTOR_COLS` = 3 columns of `(CANVAS_VISIBLE_W - 8) / 3` px on both canvases; the board shows the first three sectors and appends `+n` to the S3 label when the layout has more (up to `LAP_MAX_SECTORS`). Row 4 cells show `----` when `have_last_sector_delta[i]` is false. `THEO` shows `-:--.--` until `have_theo`.
+Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BOARD_COLS`) px on both canvases; the board shows the first three sectors and appends `+n` to the S3 label when the layout has more (up to `LAP_MAX_SECTORS`). Row 4 cells show `----` when `have_last_sector_delta[i]` is false — that gating is independent of `best_n_sectors` (ruling FR-2: no producer fills `best_n_sectors` yet, the best-lap sector times/theo wiring is roadmap follow-up #58). `THEO` shows `-:--.--` until `have_theo`.
 
 ## 6. LAP page 2 — stats grid
 
@@ -89,7 +89,7 @@ Columns: `LAP1_SECTOR_COLS` = 3 columns of `(CANVAS_VISIBLE_W - 8) / 3` px on bo
 └──────────────────────────────────────────────┘
 ```
 
-Two columns at x 4 and x 128. Units follow `cfg.units` (`km/h`/`mph` as today, label text unchanged). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
+Two columns at x 4 and x 128. `MAX SPD`: the value is `km/h` today; unit conversion is a follow-up (nothing converts `max_speed_kmh`). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
 
 ## 7. DRAG pages
 
@@ -107,13 +107,13 @@ Page 0 (run in progress):
 - Before launch: big slot shows `READY` in `FONT_MED` (no letters in `FONT_HUGE`), `ARMED` top-right while `drag_armed`; footer empty.
 - As gates hit (`EV_DRAG_GATE`), the newest gate takes the big slot (label above it, time in `FONT_HUGE`, speed row when `arg32b` speed is non-zero), and the previous gates of the run join the footer in hit order (label + time in `FONT_SMALL`, up to six entries, then the oldest scroll off the left).
 - The existing `drag_row_t` rows and `drag_n` remain the source; the renderer derives "newest" as `drag[drag_n - 1]`.
-- Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173`: the leading `@` draws in `FONT_SMALL` (ruling T4-R1: `FONT_MED` has no `@` glyph) and the digits beside it in `FONT_MED`; a unit suffix waits for a units field in the model (follow-up).
+- Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173`: the leading `@` draws in `FONT_SMALL` (ruling T4-R1: `FONT_MED` has no `@` glyph) and the digits beside it in `FONT_MED`; a unit suffix waits for a units field in the model (follow-up). A distance gate never draws a trap row, even if `has_trap` happens to be set — the renderer returns right after the distance+unit draw.
 
-Pages 1 (all gates of the last run) and 2 (session best per gate) share one list layout: a `FONT_SMALL` header at y 2 (`LAST RUN` / `SESSION BEST`), then seven gates in two columns (ruling T4-R2: 118 px at x 4, 120 px at x 126 — not "two columns of 123 px") and four rows at y 16, 42, 68, 94; each cell is the `FONT_SMALL` label at the column's left edge (longest `100-200` = 49 px) and the `FONT_MED` value right-aligned at the column's right edge (x 122 / x 246), five glyphs at most (`ss.hh`, or `<dist> m` for the 100-0 gate, the `m` in `FONT_SMALL`). Drag gate times are under 60 s by construction (§6.6), so five glyphs always suffice. Empty gates show `--.--`.
+Pages 1 (all gates of the last run) and 2 (session best per gate) share one list layout: a `FONT_SMALL` header at y 2 (`LAST RUN` / `SESSION BEST`), then seven gates in two columns (ruling FR-5, superseding T4-R2: symmetric 120 px columns at x 4 and x 126 on the 2.13" — col 1 spans 4..124, col 2 spans 126..246, 2 px between the columns' boxes) and four rows at y 16, 42, 68, 94; each cell is the `FONT_SMALL` label at the column's left edge (longest `100-200` = 49 px) and the `FONT_MED` value right-aligned at the column's right edge (x 124 / x 246 on the 2.13", x 146 / x 292 on the 2.9"), five glyphs at most (`ss.hh`, or `<dist> m` for the 100-0 gate, the `m` in `FONT_SMALL`). Drag gate times are under 60 s by construction (§6.6), so five glyphs always suffice. Empty gates show `--.--`.
 
 ## 8. Canvas constants (§20.5, `core/ui/canvas.h`)
 
-All positions above are for the 2.13" canvas (`CANVAS_213`). The 2.9" (296×128) uses the same design with its own constant set: the big slot stays at 64 px, columns use `CANVAS_VISIBLE_W` proportionally (footer halves at 146/292, page-1/2 second column at x 152), rows shift by +3 px to use the extra 6 px of height. Every layout number lives in `canvas.h` under the existing `#if CANVAS_213` split; `screens_moto.c` holds no literals. Existing constants that the redesign replaces (`LAP_ROW_*`, `LAP_TIME_RIGHT_X`, `LAP_CUR_*`, `LAP_DELTA_*`, `DRAG0_*`, `LAP2_ROW_H`) are removed, not kept alongside.
+All positions above are for the 2.13" canvas (`CANVAS_213`). The 2.9" (296×128) uses the same design with its own constant set: the big slot stays at 64 px, columns use `CANVAS_VISIBLE_W` proportionally (footer halves at 146/292, page-1/2 second column at x 152), rows shift by +3 px to use the extra 6 px of height. Every layout number lives in `canvas.h` under the existing `#if CANVAS_213` split; `screens_moto.c` holds no literals. Existing constants that the redesign replaces (`LAP_ROW_*`, `LAP_TIME_RIGHT_X`, `LAP_CUR_*`, `LAP_DELTA_*`, `LAP1_*`, `DRAG0_*`, `DRAG12_*`, `LAP2_ROW_H`) are removed, not kept alongside.
 
 ## 9. Tests
 
@@ -128,4 +128,4 @@ Menu, one-shots, fault-strip icons, the refresh policy, predictive lap time (nee
 
 ## 11. Bench acceptance
 
-On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the best lap's sectors and last-lap deltas; page 2 the grid; DRAG page 0 `READY`/`ARMED` (via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.
+On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the last-lap sector deltas (best sector times arrive with #58); page 2 the grid; DRAG page 0 `READY`/`ARMED` (via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.

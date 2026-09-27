@@ -192,6 +192,24 @@ static void test_lap_p1_many_sectors(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_many_sectors.pbm"), &s_fb));   /* S3 label reads "S3 +2"; THEO reads -:--.-- */
 }
 
+static void test_lap_p1_deltas_only(void)
+{
+    /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i], never on
+     * best_n_sectors -- no producer fills best_n_sectors yet (roadmap follow-up #58), so on target
+     * best_n_sectors is 0 while the deltas for the sectors already crossed this lap are still
+     * real. best_sector_ms row stays "--.--" throughout (unaffected by this fix); sector 2's delta
+     * is unset ("----"), sectors 0/1 show real deltas. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 0;
+    m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
+    m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_deltas_only.pbm"), &s_fb));
+}
+
 /* ---- LAP page 2 (2x2 stats grid, spec 7b §6) ---- */
 
 static void test_lap_p2_stats(void)
@@ -223,6 +241,24 @@ static void test_lap_p2_stats_many_laps(void)
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_many_laps.pbm"), &s_fb));
+}
+
+static void test_lap_p2_stats_huge_laps(void)
+{
+    /* Test gap (finding 13b): a 5-digit laps_total/laps_valid (12000/11999) pushes the LAPS
+     * suffix past CANVAS_VISIBLE_W on both canvases. On the 213 (GRID_COL2_X 128, "12000" is 70 px
+     * of FONT_MED) neither "(11999 valid)" (91 px) nor the shorter "(11999)" (49 px) fits before
+     * x 246 -- render_grid_laps draws nothing after the number. On the wider 296 (GRID_COL2_X 152,
+     * limit x 292) "(11999 valid)" still does not fit but "(11999)" does, so it draws that. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 2;
+    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12000; m.laps_valid = 11999;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_huge_laps.pbm"), &s_fb));   /* 213: nothing after "12000"; 296: "(11999)" */
 }
 
 /* ---- DRAG page 0 (spec 7b §7): the run card ---- */
@@ -273,6 +309,52 @@ static void test_drag_p0_distance(void)
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance.pbm"), &s_fb));     /* big "38" + small "m"; footer "100-200 6.12" */
+}
+
+static void test_drag_p0_fault(void)
+{
+    /* Finding 5: PF-2's footer clip and fault_strip_left_x() with a bit set were untested on DRAG
+     * page 0 -- same four gates as test_drag_p0_gate_speed, plus GPS no-fix and a low battery. The
+     * footer must stop clear of the fault icons (PF-2), and the battery label/icon must both be
+     * fully legible (finding 17's overprint fix). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 14;
+    m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW);
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_fault.pbm"), &s_fb));
+}
+
+static void test_drag_p0_footer_scroll(void)
+{
+    /* Test gap (finding 13c): nine gates hit this run -- the footer windows to the last
+     * DCARD_FOOTER_MAX (6) gates before the newest (which fills the big slot on its own), so
+     * gates 0/1 ("1"/"2") scroll off and the footer starts at gate 2 ("3"). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    drag_gate(&m, "1", 1000, 0, false, 0); drag_gate(&m, "2", 2000, 0, false, 0);
+    drag_gate(&m, "3", 3000, 0, false, 0); drag_gate(&m, "4", 4000, 0, false, 0);
+    drag_gate(&m, "5", 5000, 0, false, 0); drag_gate(&m, "6", 6000, 0, false, 0);
+    drag_gate(&m, "7", 7000, 0, false, 0); drag_gate(&m, "8", 8000, 0, false, 0);
+    drag_gate(&m, "9", 9000, 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_footer_scroll.pbm"), &s_fb));   /* big "9.00"; footer starts "3 3.00", never "1"/"2" */
+}
+
+static void test_drag_p0_armed_gates(void)
+{
+    /* Test gap (finding 13d): drag_armed stays true (re-armed for the next run) while gates from
+     * the run just completed are still on screen -- ARMED top-right must coexist with the newest
+     * gate's label/huge value/footer rather than the two being mutually exclusive. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_armed = true;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_armed_gates.pbm"), &s_fb));
 }
 
 /* ---- DRAG pages 1/2 (gate list, spec 7b §7) ---- */
@@ -491,11 +573,16 @@ int main(void)
     RUN_TEST(test_lap_p0_fault);
     RUN_TEST(test_lap_p1_sectors);
     RUN_TEST(test_lap_p1_many_sectors);
+    RUN_TEST(test_lap_p1_deltas_only);
     RUN_TEST(test_lap_p2_stats);
     RUN_TEST(test_lap_p2_stats_many_laps);
+    RUN_TEST(test_lap_p2_stats_huge_laps);
     RUN_TEST(test_drag_p0_ready);
     RUN_TEST(test_drag_p0_gate_speed);
     RUN_TEST(test_drag_p0_distance);
+    RUN_TEST(test_drag_p0_fault);
+    RUN_TEST(test_drag_p0_footer_scroll);
+    RUN_TEST(test_drag_p0_armed_gates);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
     RUN_TEST(test_oneshot_boot);

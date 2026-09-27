@@ -506,22 +506,25 @@ static void show_venue_oneshot(int64_t now)
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
 }
 
+/* Clears the page 1 row 4 sector-delta cache (spec 7b §3): the lap that has just started has no
+ * sector deltas of its own yet -- EV_SECTOR repopulates them as it runs. */
+static void clear_last_sector_deltas(void)
+{
+    LT_ASSERT_VOID((size_t)(LAP_MAX_SECTORS + 1) <=
+                       sizeof s_model.have_last_sector_delta / sizeof s_model.have_last_sector_delta[0],
+                   UI_APP_ASSERT_CODE);   /* loop bound fits the array */
+    for (uint8_t i = 0; i < LAP_MAX_SECTORS + 1; i++) {
+        s_model.have_last_sector_delta[i] = false;
+    }
+    LT_ASSERT_VOID(!s_model.have_last_sector_delta[LAP_MAX_SECTORS], UI_APP_ASSERT_CODE);   /* every slot, including the last, is now clear */
+}
+
 /* Genuine (non-out) lap completion: PREV always takes the time; BEST/laps_valid update only when
  * the engine marked the lap valid. `valid` reads LAP_F_VALID straight off the emitted event -- the
  * engine already computes it (lap.c's complete_lap(): `flags |= LAP_F_VALID` iff none of
  * GPS_LOST/PIT/INCOMPLETE/OUT_LAP/TOO_LONG are set) and stamps it into the very flags this event
  * carries, so deriving it a second time here would just duplicate that logic. Split out of
  * handle_lap_complete() to keep it under the 60-line cap (rule 4). */
-/* Clears the page 1 row 4 sector-delta cache (spec 7b §3): the lap that has just started has no
- * sector deltas of its own yet -- EV_SECTOR repopulates them as it runs. Split out of
- * handle_lap_result() to keep that function under the 60-line cap (rule 4). */
-static void clear_last_sector_deltas(void)
-{
-    for (uint8_t i = 0; i < LAP_MAX_SECTORS + 1; i++) {
-        s_model.have_last_sector_delta[i] = false;
-    }
-}
-
 static void handle_lap_result(uint32_t lap_ms, uint8_t flags, int32_t lap_delta_ms)
 {
     bool valid    = (flags & LAP_F_VALID) != 0;
@@ -569,6 +572,9 @@ static void handle_lap_complete(const event_t *e)
     if ((e->flags & LAP_F_OUT_LAP) == 0) {
         handle_lap_result(e->arg32, e->flags, (int32_t)e->arg32b);
     }
+    /* An out-lap (above) skips handle_lap_result(), so have_last_sector_delta[] deliberately
+     * survives across it (spec 7b §3) -- it would need clearing here too if an out-lap ever
+     * followed a pit exit mid-session. */
     s_model.cur_ms_at_gate = 0;
     s_model.cur_sector_idx = 0;
     s_dirty                = true;
@@ -599,10 +605,11 @@ static void handle_sector(const event_t *e)
 {
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);   /* engine sector idx in range */
-    uint8_t idx = (uint8_t)e->arg16;
-    s_model.cur_sector_idx  = idx;
+    uint8_t idx = (uint8_t)e->arg16;   /* 0-based split index (lap.c: k-1) */
+    /* Ruling FR-1: cur_sector_idx is the 1-based count of sectors completed this lap (idx is
+     * 0-based), so the marker reads "S1" after the first gate, not "S0". */
+    s_model.cur_sector_idx  = (uint8_t)(idx + 1u);
     s_model.cur_ms_at_gate  = e->arg32;
-    s_model.sector_delta_ms = (int32_t)e->arg32b;
     s_model.big_kind        = s_model.have_best ? (uint8_t)BIG_SECTOR_DELTA : (uint8_t)BIG_NONE;
     s_model.big_delta_ms    = (int32_t)e->arg32b;
     s_model.big_sector_idx  = idx;

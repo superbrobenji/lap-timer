@@ -58,16 +58,16 @@ typedef struct {
     uint8_t  page; /* 0/1/2 */
 
     /* LAP page 0 */
-    uint32_t best_ms, prev_ms, cur_ms_at_gate;
-    uint8_t  cur_sector_idx;   /* S0..Sn shown on the CUR row */
-    int32_t  sector_delta_ms;  /* signed; shown on the last row unless new_best */
+    uint32_t best_ms, prev_ms;
+    uint32_t cur_ms_at_gate;   /* reserved: running CUR time for the live_clock follow-up -- no renderer reads it yet */
+    uint8_t  cur_sector_idx;   /* sectors completed this lap (1-based); 0 = none yet */
     bool     have_best, have_prev, new_best;
 
     /* LAP page 0 event card (spec 7b §3-4): what the 64 px big slot shows, plus the marker's lap
      * number and the sector-detail row (page 1 row 4) filled from EV_SECTOR as the lap runs. */
     uint8_t  big_kind;                                    /* BIG_* : what LAP page 0's big slot shows */
     int32_t  big_delta_ms;                                /* signed; valid for BIG_SECTOR_DELTA / BIG_LAP_DELTA */
-    uint8_t  big_sector_idx;                              /* 1..n for BIG_SECTOR_DELTA */
+    uint8_t  big_sector_idx;                              /* 0-based sector index as emitted by EV_SECTOR (arg16); reserved -- renderers use cur_sector_idx */
     uint16_t lap_no;                                      /* running lap number (laps_total + 1 while a lap runs) */
     int32_t  last_sector_delta_ms[LAP_MAX_SECTORS + 1];   /* page 1 row 4, index = sector idx */
     bool     have_last_sector_delta[LAP_MAX_SECTORS + 1];
@@ -143,13 +143,6 @@ enum {
  * SYS_FUSION_DISAGREE, which have no matching bitmap in icons.h) draw nothing. Exposed so the
  * DRAG renderer (Task 2) reuses it. */
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct);
-
-/* x of the leftmost icon fault_strip() would draw for `flags`, or CANVAS_VISIBLE_W when it draws
- * none. Derived from the same bit->icon table fault_strip() uses (screens_moto.c factors that
- * table into one static helper both functions call), so the two can never disagree. Lets a caller
- * (LAP page 0's event-card footer, Plan 7b Task 2) keep its own content clear of the strip without
- * duplicating fault_strip()'s layout knowledge. */
-int fault_strip_left_x(uint32_t flags);
 
 /* Renders the moto riding screens: dispatches on m->mode + m->page, clears the fb, draws the
  * screen and leaves fb->dirty as the changed region (the whole frame for a full screen render).

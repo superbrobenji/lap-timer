@@ -2338,7 +2338,7 @@ Command sequence (SSD1680):
 
 ### 20.4 Screen model
 
-`ui` keeps a `screen_model_t` updated from events: `best_ms, prev_ms, cur_ms_at_gate, cur_sector_idx, sector_delta_ms, lap_delta_ms, new_best, venue_name, layout_name, drag rows[4], flags, batt_pct, page, mode, menu state`. Rendering is a pure function of the model.
+`ui` keeps a `screen_model_t` updated from events: `best_ms, prev_ms, cur_ms_at_gate, cur_sector_idx, sector_delta_ms, lap_delta_ms, new_best, venue_name, layout_name, drag rows[4], flags, batt_pct, page, mode, menu state`. Rendering is a pure function of the model. This is the Plan 4 original field list (`lap_delta_ms` was never an actual model field, only an `EV_LAP_COMPLETE` payload, and `sector_delta_ms` has since been removed as dead state) — see `2026-09-27-plan-7b-glanceable-ui-design.md` §3 for the fields the model actually carries today.
 
 ### 20.5 Riding screens (2.9", 296×128; 2.13" scales fonts to MED/SMALL)
 
