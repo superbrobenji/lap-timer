@@ -129,3 +129,5 @@ Menu, one-shots, fault-strip icons, the refresh policy, predictive lap time (nee
 ## 11. Bench acceptance
 
 On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the last-lap sector deltas (best sector times arrive with #58); page 2 the grid; DRAG page 0 `READY`/`ARMED` (via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.
+
+Run 2026-09-28: passed (see the roadmap entry).
