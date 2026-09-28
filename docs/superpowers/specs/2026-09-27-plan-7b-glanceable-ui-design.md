@@ -36,8 +36,8 @@ bool     have_last_sector_delta[LAP_MAX_SECTORS + 1];
 
 `ui.c` fills them from events (all payloads already exist):
 - `EV_SECTOR` (arg16 sector idx, arg32 split ms, arg32b delta ms): `big_kind = BIG_SECTOR_DELTA`, `big_delta_ms = (int32_t)arg32b`, `big_sector_idx = arg16`, `cur_sector_idx = arg16`; `last_sector_delta_ms[idx] = delta`, `have_last_sector_delta[idx] = have_best` (a delta is meaningful only once a best lap exists — `EV_SECTOR` sends 0 for both "zero" and "no best yet").
-- `EV_LAP_COMPLETE` (arg16 lap no, arg32 lap ms, arg32b lap delta ms, flags): existing PREV/BEST/valid handling from Plan 7 bench fix 1 stays; then `big_kind = BIG_LAP_DELTA`, `big_delta_ms = (int32_t)arg32b` (when a best existed before this lap; else `BIG_NONE`), `new_best` as today, `lap_no = laps_total + 1`, `cur_sector_idx = 0`, and the `have_last_sector_delta[]` flags are cleared (the next lap's sector deltas replace them as they arrive). Out-laps (`LAP_F_OUT_LAP`) do not touch the big slot.
-- Session start / first lap: `big_kind = BIG_NONE`, `lap_no = 1`.
+- `EV_LAP_COMPLETE` (arg16 lap no, arg32 lap ms, arg32b lap delta ms, flags): existing PREV/BEST/valid handling from Plan 7 bench fix 1 stays; then `big_kind = BIG_LAP_DELTA`, `big_delta_ms = (int32_t)arg32b` (when a best existed before this lap; else `BIG_NONE`), `new_best` as today, `lap_no = laps_total + 1`, `cur_sector_idx = 0`. Out-laps (`LAP_F_OUT_LAP`) do not touch the big slot. Ruling B7b-1 (bench finding 1): `last_sector_delta_ms[]`/`have_last_sector_delta[]` are NOT touched here — they persist across the line (and across an out-lap) so page 1 keeps showing the just-finished lap's deltas; each `EV_SECTOR` overwrites its own slot as the new lap's gates arrive.
+- Session start / first lap: `big_kind = BIG_NONE`, `lap_no = 1`, `have_last_sector_delta[]` cleared (the only time it is cleared).
 - Everything else in the model is unchanged; rendering stays a pure function of the model.
 
 ## 4. LAP page 0 — the event card (amends §20.5)
@@ -75,7 +75,7 @@ Rendering is a pure function of the model; the ui's refresh policy (§20.3) is u
 └──────────────────────────────────────────────┘
 ```
 
-Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BOARD_COLS`) px on both canvases; the board shows the first three sectors and appends `+n` to the S3 label when the layout has more (up to `LAP_MAX_SECTORS`). Row 4 cells show `----` when `have_last_sector_delta[i]` is false — that gating is independent of `best_n_sectors` (ruling FR-2: no producer fills `best_n_sectors` yet, the best-lap sector times/theo wiring is roadmap follow-up #58). `THEO` shows `-:--.--` until `have_theo`.
+Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BOARD_COLS`) px on both canvases; the board shows the first three sectors and appends `+n` to the S3 label when the layout has more (up to `LAP_MAX_SECTORS`). Row 4 cells show `----` when `have_last_sector_delta[i]` is false — that gating is independent of `best_n_sectors` (ruling FR-2: no producer fills `best_n_sectors` yet, the best-lap sector times/theo wiring is roadmap follow-up #58). Last-lap sector deltas: the most recent delta per sector, overwritten as the new lap's gates arrive (ruling B7b-1, bench finding 1) — they are not cleared at the line, so row 4 keeps showing the lap that just finished until the next lap's `EV_SECTOR`s replace each cell in turn. `THEO` shows `-:--.--` until `have_theo`.
 
 ## 6. LAP page 2 — stats grid
 
