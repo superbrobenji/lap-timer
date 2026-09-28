@@ -15,14 +15,21 @@ idf_component_register(
     REQUIRES core lt_hal nvs_flash esp_timer esp_system console
              app_update esp_app_format esp_partition spi_flash mbedtls
              esp_driver_gpio
-             gps_$ENV{LT_GPS} imu_$ENV{LT_IMU})
+             gps_$ENV{LT_GPS} imu_$ENV{LT_IMU} display_$ENV{LT_DISPLAY})
 # The pipeline (globbed into `app`) calls the GPS/IMU HAL (hal/gps.h, hal/imu.h), so the selected
 # gps_${GPS}/imu_${IMU} driver is a real dependency of `app`: declaring it here places the driver
 # archive after `app` in the link so the pipeline's calls resolve regardless of how deep the
 # dependency graph makes `app` (the 3.5 export_serial console adds a main -> export_serial -> app
-# edge). LT_GPS/LT_IMU are exported into the environment by the top-level CMakeLists (a flag-derived
-# component name cannot be read from the cache during IDF's early-expansion pass, but the
-# environment is inherited); main also requires them so the driver is pulled into the image.
+# edge). Plan 7 Task 5 adds the same real dependency for the display driver: ui.c (globbed into
+# `app`) now calls hal/display.h's disp_blit/disp_init directly, so display_${DISPLAY} needs the
+# same explicit REQUIRES (lt_hal alone only exposes the header, not the implementation archive) --
+# without it, CMake has no declared edge between `app` and `display_${DISPLAY}`, so the generated
+# link command doesn't place/repeat that archive where the linker's forward-only archive scan can
+# resolve ui.c.o's undefined refs, and the final link fails with "undefined reference to
+# disp_blit/disp_init" even though both archives are individually correct (confirmed via nm/ar).
+# LT_GPS/LT_IMU/LT_DISPLAY are exported into the environment by the top-level CMakeLists (a
+# flag-derived component name cannot be read from the cache during IDF's early-expansion pass, but
+# the environment is inherited); main also requires them so the driver is pulled into the image.
 
 # §6 peer connector detect line (board_devkit_v1): GPIO4, free + internal-pull-up capable +
 # non-strapping. link.c enables its (active-low) detect path once this is >= 0. See

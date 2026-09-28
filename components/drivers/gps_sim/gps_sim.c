@@ -11,6 +11,10 @@
  * valid = 0 for the pipeline to fill via the §6.5 rule -- exactly as a real driver hands over a
  * freshly assembled fix. gps_sim_venue_json() hands the pipeline the capture's synthetic venue
  * (same JSON string replay used for --venue-json), so device and replay share one venue.
+ *
+ * Once the capture is exhausted, the driver keeps delivering the last capture fix as a parked
+ * bike (gspeed_mms = 0, everything else from that fix unchanged) at a fixed 1 Hz cadence instead
+ * of going silent, so the pipeline still sees a still fix (ruling T9-R2, Plan 7 T9 fix 1).
  */
 #include "hal/gps.h"
 #include "sim_capture.h"
@@ -24,6 +28,10 @@
 /* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
 #define GPS_SIM_ASSERT_CODE 0x0C40
 
+/* Parked-phase cadence once the capture is exhausted (ruling T9-R2): 1 Hz, independent of the
+ * capture's own SIM_FIX_RATE_HZ. */
+#define SIM_PARK_PERIOD_US 1000000
+
 static const gps_profile_t s_profile = {
     .max_rate_hz = SIM_FIX_RATE_HZ,
     .baud        = 38400,
@@ -36,6 +44,7 @@ static bool     s_started;        /* the playback clock has been anchored */
 static int64_t  s_t0_mono_us;     /* device mono time mapped to SIM_FIXES[0].gps_us */
 static int64_t  s_last_frame_us;  /* mono time of the last delivered fix */
 static uint32_t s_frames_ok;
+static uint32_t s_parked;         /* count of delivered parked fixes; saturates at UINT32_MAX */
 
 int gps_init(const gps_profile_t **out_profile)
 {
@@ -43,6 +52,7 @@ int gps_init(const gps_profile_t **out_profile)
     s_started = false;
     s_last_frame_us = 0;
     s_frames_ok = 0;
+    s_parked = 0;
     if (out_profile) *out_profile = &s_profile;
     return 0;
 }
@@ -52,16 +62,56 @@ int gps_configure(uint8_t rate_hz)
     (void)rate_hz;                /* the capture rate is fixed; nothing to push to a receiver */
     s_idx = 0;
     s_started = false;
+    s_parked = 0;
     return 0;
+}
+
+/* Once the capture is exhausted, deliver the last capture fix again as a parked bike: same
+ * position/accuracy/fix-type/sats/flags, gspeed_mms = 0, head_e5 unchanged (ruling T9-R2). Due
+ * when the parked cadence has elapsed since the mono time of the previous delivery (whether that
+ * was the last capture fix or an earlier parked fix); gps_us keeps advancing by
+ * SIM_PARK_PERIOD_US per delivered fix off the last capture fix's gps_us so the monotonic-GPS-
+ * time invariant downstream still holds. mono_us/valid/the frame bookkeeping follow the same
+ * rule as every other delivered fix. */
+static int deliver_parked(gps_fix_t *out, int64_t now)
+{
+    CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(s_idx >= SIM_FIX_COUNT, GPS_SIM_ASSERT_CODE, 0);
+
+    if (now - s_last_frame_us < SIM_PARK_PERIOD_US) return 0;
+
+    const sim_fix_t *s = &SIM_FIXES[SIM_FIX_COUNT - 1];
+    if (s_parked < UINT32_MAX) s_parked++;
+
+    memset(out, 0, sizeof *out);
+    out->gps_us     = s->gps_us + (int64_t)s_parked * SIM_PARK_PERIOD_US;
+    out->mono_us    = now;                                /* real arrival time on this board */
+    out->lat_e7     = s->lat_e7;
+    out->lon_e7     = s->lon_e7;
+    out->alt_mm     = s->alt_mm;
+    out->gspeed_mms = 0;                                  /* parked: no motion */
+    out->head_e5    = s->head_e5;
+    out->hacc_mm    = s->hacc_mm;
+    out->sacc_mms   = s->sacc_mms;
+    out->pdop_e2    = s->pdop_e2;
+    out->fix_type   = s->fix_type;
+    out->sats       = s->sats;
+    out->flags      = s->flags;
+    out->valid      = 0;                                  /* pipeline applies the §6.5 rule */
+
+    s_last_frame_us = now;
+    s_frames_ok++;
+    return 1;
 }
 
 int gps_poll(gps_fix_t *out)
 {
     CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
-    if (s_idx >= SIM_FIX_COUNT) return 0;                 /* capture exhausted: idle */
 
     int64_t now = esp_timer_get_time();
     if (!s_started) { s_started = true; s_t0_mono_us = now; }
+
+    if (s_idx >= SIM_FIX_COUNT) return deliver_parked(out, now);  /* capture exhausted: park */
 
     /* Fix s_idx is due once real elapsed time has reached its offset from the first fix. */
     int64_t due_us = SIM_FIXES[s_idx].gps_us - SIM_FIXES[0].gps_us;

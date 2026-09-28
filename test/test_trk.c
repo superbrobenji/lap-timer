@@ -348,6 +348,85 @@ static void test_json_large_venue_within_cap_parses(void)
     TEST_ASSERT_EQUAL_UINT8(6, s_v.layouts[0].n_sectors);
 }
 
+static void test_user_add_json_parses_into_a_slot(void)
+{
+    const char *json = "{\"id\":9001,\"name\":\"SIMTRACK\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":[{\"id\":1,\"name\":\"FULL\","
+                       "\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}";
+    uint16_t id = 0; char err[48] = {0};
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json, strlen(json), &id, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT16(9001, id);
+    const trk_venue_t *v = trk_get(9001);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_STRING("SIMTRACK", v->name);
+    TEST_ASSERT_EQUAL_UINT8(1, v->n_layouts);
+}
+static void test_user_add_json_rejects_malformed(void)
+{
+    uint16_t id = 7; char err[48] = {0};
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add_json("{\"id\":", 6, &id, err, sizeof err));
+    TEST_ASSERT_TRUE(err[0] != '\0');
+}
+
+static void test_user_add_json_replaces_same_id(void)
+{
+    /* Ambiguity (1) from the Plan 7 T1 brief: a second trk_user_add_json parse carrying an id
+     * already present in the user table replaces that entry in place -- same semantics as
+     * trk_user_add -- rather than appending a second, stale copy. */
+    const char *json1 = "{\"id\":9002,\"name\":\"FIRST\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+                        "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}";
+    const char *json2 = "{\"id\":9002,\"name\":\"SECOND\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+                        "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]]},"
+                        "{\"id\":2,\"name\":\"HALF\",\"dir\":-1,\"sf\":\"same\"}]}";
+    uint16_t id1 = 0, id2 = 0; char err[48] = {0};
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json1, strlen(json1), &id1, err, sizeof err));
+    int count_after_first = trk_user_count();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json2, strlen(json2), &id2, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT16(9002, id1);
+    TEST_ASSERT_EQUAL_UINT16(9002, id2);
+    TEST_ASSERT_EQUAL_INT(count_after_first, trk_user_count());   /* replaced in place, not appended */
+    const trk_venue_t *v = trk_get(9002);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_STRING("SECOND", v->name);
+    TEST_ASSERT_EQUAL_UINT8(2, v->n_layouts);
+}
+
+/* Fix round 2 (finding 10c): once the user table is full, trk_user_add_json() returns the
+ * documented error ("user table full", the same message trk_user_add's own full-table path
+ * uses -- fail()'s single call site the two share) and leaves the table exactly as it was: same
+ * count, every already-added entry untouched, the overflow id absent, and *venue_id_out left
+ * alone (user_slot_for_parse() returns NULL before the parse -- or any write -- ever runs). */
+static void test_user_add_json_full_table_rejected_and_unchanged(void)
+{
+    char json[256];
+    uint16_t id = 0; char err[48];
+    for (int i = 0; i < TRK_MAX_USER; i++) {
+        int n = snprintf(json, sizeof json,
+            "{\"id\":%d,\"name\":\"V%d\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+            "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}",
+            9100 + i, 9100 + i);
+        err[0] = '\0';
+        TEST_ASSERT_EQUAL_INT(0, trk_user_add_json(json, (size_t)n, &id, err, sizeof err));
+    }
+    TEST_ASSERT_EQUAL_INT(TRK_MAX_USER, trk_user_count());
+
+    int n = snprintf(json, sizeof json,
+        "{\"id\":9200,\"name\":\"OVERFLOW\",\"lat\":-26.0,\"lon\":28.0,\"radius_m\":1500,\"layouts\":["
+        "{\"id\":1,\"name\":\"FULL\",\"dir\":1,\"sf\":[[-26.001,28.0],[-26.001,28.0003]],\"sectors\":[]}]}");
+    err[0] = '\0';
+    id = 4242;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_add_json(json, (size_t)n, &id, err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("user table full", err);
+    TEST_ASSERT_EQUAL_UINT16(4242, id);                        /* venue_id_out untouched on failure */
+    TEST_ASSERT_EQUAL_INT(TRK_MAX_USER, trk_user_count());
+    TEST_ASSERT_NULL(trk_get(9200));
+    for (int i = 0; i < TRK_MAX_USER; i++) {
+        const trk_venue_t *v = trk_get((uint16_t)(9100 + i));
+        TEST_ASSERT_NOT_NULL(v);
+        char want[8]; snprintf(want, sizeof want, "V%d", 9100 + i);
+        TEST_ASSERT_EQUAL_STRING(want, v->name);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -365,5 +444,9 @@ int main(void)
     RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
     RUN_TEST(test_json_max_venue_token_bound);
     RUN_TEST(test_json_large_venue_within_cap_parses);
+    RUN_TEST(test_user_add_json_parses_into_a_slot);
+    RUN_TEST(test_user_add_json_rejects_malformed);
+    RUN_TEST(test_user_add_json_replaces_same_id);
+    RUN_TEST(test_user_add_json_full_table_rejected_and_unchanged);
     return UNITY_END();
 }

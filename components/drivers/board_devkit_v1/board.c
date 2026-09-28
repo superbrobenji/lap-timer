@@ -70,13 +70,18 @@ static bool                      s_inited;
 static QueueHandle_t s_btn_q;
 static volatile int64_t s_btn_last_us;
 
+/* Bench injection only (board_buttons_override, hal/board.h): bits forced on regardless of the
+ * real GPIO level, OR-ed into read_button_mask()'s result below. Written from the console task,
+ * read from the ui task's poll loop -- volatile, no lock needed for an 8-bit OR/AND-mask flag. */
+static volatile uint8_t s_btn_override;
+
 static uint8_t read_button_mask(void)
 {
     uint8_t m = 0;
     if (gpio_get_level(PIN_BTN_MODE)) m |= 0x1;
     if (gpio_get_level(PIN_BTN_UP))   m |= 0x2;
     if (gpio_get_level(PIN_BTN_DOWN)) m |= 0x4;
-    return m;
+    return (uint8_t)(m | s_btn_override);
 }
 
 static void IRAM_ATTR btn_isr(void *arg)
@@ -163,7 +168,7 @@ int board_init(void)
     ESP_ERROR_CHECK(gpio_config(&cs_out));
     gpio_set_level(PIN_EPD_CS, 1);
     gpio_set_level(PIN_SD_CS, 1);
-    /* e-paper DC(14)/RST(4)/BUSY(35) are owned by display_epaper (3.4); left alone here. */
+    /* e-paper DC(14)/RST(13)/BUSY(35) are owned by display_epaper (3.4); left alone here. */
 
     /* --- I2C master bus (new v5.3 API): SDA 21 / SCL 22. The 400 kHz SCL is a per-device
      *     property in this API; the IMU driver (3.4) sets scl_speed_hz=400000 when it adds
@@ -260,6 +265,12 @@ int board_buttons_read(uint8_t *mask)
     if (!mask) return -EINVAL;
     *mask = read_button_mask();
     return 0;
+}
+
+void board_buttons_override(uint8_t mask, bool on)
+{
+    if (on) s_btn_override = (uint8_t)(s_btn_override | mask);
+    else    s_btn_override = (uint8_t)(s_btn_override & (uint8_t)~mask);
 }
 
 int board_buttons_enable_isr(QueueHandle_t evt_q)

@@ -1,10 +1,14 @@
 /* ui.c -- the app-side UI task, menu navigation and button debounce (spec §4.3, §20.3, §20.7-20.8).
  *
- * The ui task (core 0, prio 6, stack 6144 on real builds / 2560 on moto_sim) owns a static screen_model_t and a static 296x128 1-bpp
+ * The ui task (core 0, prio 6, stack 6144) owns a static screen_model_t and a static 296x128 1-bpp
  * framebuffer. It coalesces (§20.3): each wake it drains the button queue and the pipeline event
- * queue (g_ui_evt_q, the pipeline's fan-out copy for the ui), updates the model, and -- only when something changed -- renders ONCE via the
- * pure core/ui screens_render(). Plan 04 ships no display driver, so instead of refreshing a panel
- * it logs the dirty box; the real disp_refresh() glue lands with the e-paper driver in a later plan.
+ * queue (g_ui_evt_q, the pipeline's fan-out copy for the ui), updates the model, and -- only when
+ * something changed -- renders ONCE via the pure core/ui screens_render() and hands the result to
+ * the pure refresh policy (core/ui/refresh_policy.h, Plan 7 Task 7): ui_refresh_decide() picks
+ * none/partial/full given the dirty/motion/fault state, render_and_refresh() carries that out
+ * against hal/display.h (disp_set_window/disp_refresh), and a failure ladder (reinit + retry once,
+ * three strikes -> SYS_DISP_DEAD, paced 300 s reinit probes while dead) keeps a wedged panel from
+ * ever stalling this task's heartbeat.
  *
  * Buttons (§20.8): ui_buttons.c pushes each debounced edge (board 25 ms guard) as a btn_raw_t; the
  * press-duration state machine here classifies short (< 500 ms) / long (>= 1000 ms, fires once while
@@ -29,15 +33,19 @@
 
 #include "core/cfg.h"
 #include "core/event.h"
+#include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H/MENU_VISIBLE_ROWS: compile-time by PANEL (Plan 7 T3) */
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
+#include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
 
 #include "app/lt_assert.h"
+#include "app/lt_err.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 #include "app/ui.h"
 
 #include "hal/board.h"
+#include "hal/display.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -56,19 +64,15 @@ static const char *TAG = "ui";
 /* ---- §4.3 task ---- */
 #define UI_CORE 0
 #define UI_PRIO 6
-/* §4.3 stack is 6144, which real builds use. The moto_sim BENCH image is DRAM-bound: its gps_sim
- * replay capture lives in DRAM (~13 KB more .bss than the real GPS driver), leaving too little room
- * for a full 6144-byte ui stack alongside the 4.7 KB framebuffer. On the sim the ui task does no
- * display work (no panel in plan 04 -- it only renders into the framebuffer and logs), and its real
- * high-water is well under the supervisor's own 3072-byte stack (which also runs NVS + logging), so
- * the sim uses 2560 (high-water not yet measured on target -- see the plan-04 review). Note the
- * sim DRAM margin is thin (~1 KB). Restore 6144 here once the sim capture moves to flash / the display driver
- * (which needs the extra margin for its refresh line buffer) lands. */
-#if CFG_GPS_SIM
-#define UI_STACK_BYTES 2560
-#else
+/* §4.3 stack: 6144 on every build, moto_sim included. Earlier plans shrank the moto_sim ui stack to
+ * 2560 to fit two sim-only DRAM statics alongside it: trk_json.c's 512-token scratch array (10,240
+ * B) and pipeline.c's s_venue copy of the sim capture's venue (2,752 B). Plan 7 Task 1 reclaimed
+ * both -- the token array is now device-sized (CFG_TRK_JSON_TOKS=64, since only the 330-byte sim
+ * capture venue is ever parsed on a firmware build) and the sim venue is parsed straight into the
+ * trk user table instead of a separate static -- so the sim's thin DRAM margin is gone and the ui
+ * task uses the same 6144-byte stack the display driver (this plan) needs for its refresh line
+ * buffer. */
 #define UI_STACK_BYTES 6144
-#endif
 #define UI_STACK_WORDS (UI_STACK_BYTES / sizeof(StackType_t))
 #define UI_STALL_S     10 /* §17.2 ui heartbeat-stall window (a full refresh may take 2 s) */
 #define UI_TICK_MS     100 /* loop timeout: poll cadence + long/idle-timer granularity */
@@ -77,7 +81,11 @@ static const char *TAG = "ui";
 #define UI_BTN_DRAIN_MAX 32
 #define UI_EVT_DRAIN_MAX 64
 
-/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ---- */
+/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ----
+ * FB_W/FB_H/FB_STRIDE size the static buffer only, kept at the 296x128 (ws29v2) worst case so one
+ * build of this file holds either panel's canvas; the actual render dimensions -- CANVAS_W/CANVAS_H
+ * (core/ui/canvas.h), 256x122 on a ws213v4 build -- are what fb_init/render_fb use below (Plan 7
+ * T3: compile-time canvas by PANEL). */
 #define FB_W      296
 #define FB_H      128
 #define FB_STRIDE (FB_W / 8)
@@ -94,12 +102,23 @@ static const char *TAG = "ui";
 /* ---- menu (spec §20.7) ---- */
 #define MENU_LOCK_SPEED_KMH 10    /* menu entry gated below this (§20.7 / Appendix A) */
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
-#define UI_MENU_VISIBLE_ROWS 4    /* mirrors render_menu()'s MENU_VISIBLE_ROWS in core/ui */
 #define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
 
 /* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2 s) ---- */
 #define ONESHOT_BOOT_MS  2000
 #define ONESHOT_VENUE_MS 2000
+
+/* ---- display refresh ladder (spec §20.3, Plan 7 Task 7) ----
+ * DISP_FAIL_STREAK_MAX consecutive disp_refresh()/disp_reinit()-retry failures mark the panel
+ * SYS_DISP_DEAD; DISP_DEAD_RETRY_US then paces the reinit probe while dead (ruling R5: the first
+ * retry lands 300 s after the flag was set, never immediately). */
+#define DISP_FAIL_STREAK_MAX 3
+#define DISP_DEAD_RETRY_US   (300LL * 1000000)
+/* Mirrors refresh_policy.c's RF_THROTTLE_MIN_US (30 s): gates how often ui_loop_iter() retries a
+ * throttle-deferred refresh (s_refresh_pending, Important #2) so it does not re-render every
+ * UI_TICK_MS while waiting -- the actual none-vs-partial decision still lives solely in
+ * ui_refresh_decide(), never duplicated here. */
+#define DISP_THROTTLE_RETRY_US (30LL * 1000000)
 
 /* Menu item actions; the visible order is built in build_menu() (spec §20.7's list). */
 enum {
@@ -132,6 +151,19 @@ static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the faul
 static bool    s_dirty;       /* model changed since last render -> render once (§20.3) */
 static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot (BOOT/VENUE); 0 = none */
 static int64_t s_last_input_us;    /* last button activity -> menu idle timeout */
+
+/* refresh policy bookkeeping (spec §20.3, Plan 7 Task 7): rf_in_t's counters/timestamps, plus the
+ * failure ladder's own state. All times are esp_timer_get_time() microseconds. The three int64_t
+ * fields are declared first (fix round 1, ruling T7-R3) so their 8-byte alignment doesn't force
+ * padding ahead of the smaller fields that follow. */
+static int64_t  s_last_full_us;    /* stamp of the last full refresh (incl. boot's disp_init) */
+static int64_t  s_last_partial_us; /* stamp of the last partial refresh */
+static int64_t  s_next_reinit_us;  /* next allowed disp_reinit() probe while SYS_DISP_DEAD */
+static uint16_t s_partial_count;   /* partials issued since the last full */
+static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
+static bool     s_wants_full;      /* next render should be a full refresh (page/menu/combo/etc) */
+static bool     s_refresh_pending; /* fix round 2 (Important #2): RF_NONE returned while throttled
+                                     * -- a refresh is owed once the 30 s throttle window elapses */
 
 /* button press-duration state machine (indexed 0=MODE,1=UP,2=DOWN) */
 static uint8_t s_prev_mask;
@@ -209,8 +241,8 @@ static void menu_scroll_to_sel(void)
     LT_ASSERT_VOID(s_model.menu_sel < s_model.menu_n, UI_APP_ASSERT_CODE);   /* selection is a real row */
     if (s_model.menu_sel < s_model.menu_top) {
         s_model.menu_top = s_model.menu_sel;
-    } else if (s_model.menu_sel >= (uint8_t)(s_model.menu_top + UI_MENU_VISIBLE_ROWS)) {
-        s_model.menu_top = (uint8_t)(s_model.menu_sel - UI_MENU_VISIBLE_ROWS + 1);
+    } else if (s_model.menu_sel >= (uint8_t)(s_model.menu_top + MENU_VISIBLE_ROWS)) {
+        s_model.menu_top = (uint8_t)(s_model.menu_sel - MENU_VISIBLE_ROWS + 1);
     }
     LT_ASSERT_VOID(s_model.menu_top <= s_model.menu_sel, UI_APP_ASSERT_CODE);   /* selection now visible */
 }
@@ -225,6 +257,7 @@ static void ui_open_menu(void)
         s_model.menu_sel = 0;
         s_model.menu_top = 0;
         s_last_input_us  = esp_timer_get_time();
+        s_wants_full     = true; /* menu entry: full refresh (§20.3 full-refresh triggers) */
         s_dirty          = true;
     } else {
         /* §20.7: above the lock speed the menu is ignored (a lock-icon flash). No lock glyph exists
@@ -238,6 +271,7 @@ static void ui_exit_menu(void)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* leaving a valid screen */
     s_model.screen = SCR_RIDING;
+    s_wants_full   = true; /* menu/one-shot exit: full refresh (§20.3 full-refresh triggers) */
     s_dirty        = true;
 }
 
@@ -341,9 +375,11 @@ static void btn_short(uint8_t bit)
         LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);   /* page wrap math assumes 0..2 */
         if (bit == BTN_UP) {
             s_model.page = (uint8_t)((s_model.page + 2) % 3); /* previous page (wrap) */
+            s_wants_full = true; /* page change: full refresh (§20.3 full-refresh triggers) */
             s_dirty      = true;
         } else if (bit == BTN_DOWN) {
             s_model.page = (uint8_t)((s_model.page + 1) % 3); /* next page (wrap) */
+            s_wants_full = true;
             s_dirty      = true;
         }
         /* MODE short in riding: reserved (no-op). */
@@ -385,9 +421,9 @@ static void btn_vlong(uint8_t bit)
 
 static void btn_combo(void)
 {
-    /* UP+DOWN held 2 s -> full refresh now (§20.8). No panel yet: log + force one render. */
-    ESP_LOGI(TAG, "full refresh requested (UP+DOWN)");
-    s_dirty = true;
+    /* UP+DOWN held 2 s -> full refresh now (§20.8, ghost clearing). */
+    s_wants_full = true;
+    s_dirty      = true;
 }
 
 /* Apply a new button mask sampled at `now`, driving press/release edges. */
@@ -470,13 +506,18 @@ static void show_venue_oneshot(int64_t now)
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
 }
 
-/* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). */
-static void handle_lap_complete(const event_t *e)
+/* Genuine (non-out) lap completion: PREV always takes the time; BEST/laps_valid update only when
+ * the engine marked the lap valid. `valid` reads LAP_F_VALID straight off the emitted event -- the
+ * engine already computes it (lap.c's complete_lap(): `flags |= LAP_F_VALID` iff none of
+ * GPS_LOST/PIT/INCOMPLETE/OUT_LAP/TOO_LONG are set) and stamps it into the very flags this event
+ * carries, so deriving it a second time here would just duplicate that logic. Split out of
+ * handle_lap_complete() to keep it under the 60-line cap (rule 4). */
+static void handle_lap_result(uint32_t lap_ms, uint8_t flags)
 {
-    uint32_t lap_ms = e->arg32;
+    bool valid = (flags & LAP_F_VALID) != 0;
     s_model.have_prev = true;
     s_model.prev_ms   = lap_ms;
-    if (!s_model.have_best || lap_ms < s_model.best_ms) {
+    if (valid && (!s_model.have_best || lap_ms < s_model.best_ms)) {
         s_model.best_ms   = lap_ms;
         s_model.have_best = true;
         s_model.new_best  = true;
@@ -486,14 +527,31 @@ static void handle_lap_complete(const event_t *e)
     if (s_model.laps_total < UINT16_MAX) {
         s_model.laps_total++;
     }
-    if (s_model.laps_valid < UINT16_MAX) {
+    if (valid && s_model.laps_valid < UINT16_MAX) {
         s_model.laps_valid++;
+    }
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* valid <= total */
+    /* best_ms <= prev_ms only holds when THIS lap was valid -- an invalid lap's time can be
+     * anything (e.g. a too-long lap can still read faster than the current best on the clock) and
+     * never updates best_ms, so it must not be held to that bound. */
+    LT_ASSERT_VOID(!valid || !s_model.have_best || s_model.best_ms <= s_model.prev_ms,
+                   UI_APP_ASSERT_CODE);
+}
+
+/* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). An out-lap
+ * (LAP_F_OUT_LAP: the engine's very first S/F crossing, lap_no==0, ~0 ms elapsed, r.time_ms forced
+ * to 0 in lap.c) is not a lap -- it must never touch PREV/BEST/laps_total/laps_valid (it used to,
+ * reading as a bogus BEST 0:00.00). Only the CUR gate resets, for the lap that has just started. */
+static void handle_lap_complete(const event_t *e)
+{
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);   /* drained from g_ui_evt_q, never NULL */
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* invariant on entry */
+    if ((e->flags & LAP_F_OUT_LAP) == 0) {
+        handle_lap_result(e->arg32, e->flags);
     }
     s_model.cur_ms_at_gate = 0;
     s_model.cur_sector_idx = 0;
     s_dirty                = true;
-    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* valid <= total */
-    LT_ASSERT_VOID(!s_model.have_best || s_model.best_ms <= s_model.prev_ms, UI_APP_ASSERT_CODE);
 }
 
 /* EV_DRAG_GATE -> model (split verbatim out of handle_event for rule 4). */
@@ -504,7 +562,7 @@ static void handle_drag_gate(const event_t *e)
         drag_row_t *r = &s_model.drag[s_model.drag_n++];
         memset(r, 0, sizeof *r);
         /* gate-id -> §6.6 label map needs the drag cfg gate list (not plumbed to ui yet); a
-         * compact "G<id>" placeholder is enough for the no-panel dirty-box log this milestone. */
+         * compact "G<id>" placeholder is enough until that lands. */
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)e->arg16);
         r->t_ms    = e->arg32;
         r->present = true;
@@ -579,19 +637,244 @@ static void update_flags(void)
     }
 }
 
-static void render_now(void)
+/* Renders the current model into s_fb (no panel I/O). Split out of the old render_now() (Plan 7
+ * Task 7) so ui_task's boot render -- before disp_init() has even run -- can fill the framebuffer
+ * without going through the refresh policy/ladder below, which assumes the panel is already
+ * initialised. */
+static void render_fb(void)
 {
     LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);            /* fb_init ran before any render */
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE); /* screens_render dispatches on it */
     LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);              /* riding renderer dispatches on it */
     screens_render(&s_fb, &s_model);
     /* The pure renderer clips every primitive to the fb, so the reported dirty box must lie within
-     * the framebuffer -- a box past FB_W/FB_H would mean a renderer clipping bug. */
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= FB_W, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= FB_H, UI_APP_ASSERT_CODE);
-    ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u", (unsigned)s_model.screen,
-             (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
-             (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1);
+     * the framebuffer -- a box past CANVAS_W/CANVAS_H would mean a renderer clipping bug.
+     *
+     * Deliberately CANVAS_W here, not CANVAS_VISIBLE_W (Plan 7 T3 fix 1, ruling T3-R1 asked for the
+     * latter): fb_clear() (render.c), called at the top of every screens_render() path, always sets
+     * dirty.x1 = fb->w -- clearing legitimately touches every addressable byte, including the
+     * padding columns between CANVAS_VISIBLE_W and CANVAS_W on the 213 canvas -- so dirty.x1 is
+     * CANVAS_W (256) after literally every render, never less. Binding this check to
+     * CANVAS_VISIBLE_W (250) would make it fire on every single refresh on a ws213v4 build, not
+     * just a genuine clipping bug -- confirmed by hitting exactly that failure in test_screens_213
+     * once test/test_screens.c's dirty-box assertions were rebound the same way (see that file's
+     * fb_max_ink_col() comment for the content-based check that actually verifies "nothing draws at
+     * x >= CANVAS_VISIBLE_W", which this cheap structural bounds check on the hot render path is
+     * not the right place for). CANVAS_W remains the correct bound for "did the renderer clip
+     * itself to the addressable buffer". */
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= CANVAS_W, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= CANVAS_H, UI_APP_ASSERT_CODE);
+}
+
+/* Builds one rf_in_t snapshot for ui_refresh_decide() (spec §20.3). `full_every` is already
+ * clamped to 1..50 by the caller (ruling R1: cfg only defaults it; the policy asserts >= 1). */
+static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
+{
+    rf_in_t  in;
+    uint32_t flags     = sys_flags_get();
+    in.dirty           = true; /* called from render_and_refresh(): a dirty render or the deferred (throttled) refresh */
+    in.wants_full      = s_wants_full;
+    in.still           = s_gspeed_kmh < MENU_LOCK_SPEED_KMH;
+    in.throttled       = (flags & (1u << SYS_DISP_TEMP_THROTTLE)) != 0;
+    in.dead            = (flags & (1u << SYS_DISP_DEAD)) != 0;
+    in.full_every      = full_every;
+    in.partial_count   = s_partial_count;
+    in.now_us          = now;
+    in.last_full_us    = s_last_full_us;
+    in.last_partial_us = s_last_partial_us;
+    LT_ASSERT_RET(in.full_every >= 1 && in.full_every <= 50, UI_APP_ASSERT_CODE, in); /* R1 clamp held */
+    LT_ASSERT_RET(in.now_us >= 0, UI_APP_ASSERT_CODE, in); /* esp_timer stamp is monotonic non-negative */
+    return in;
+}
+
+/* Arms the pending partial window from the render's dirty box, clamped to the panel's true visible
+ * area (ruling R2: disp_set_window() rejects x + w > 250; fb_clear() always reports the whole
+ * padded buffer as dirty). Returns DISP_PARTIAL if the window was armed, else DISP_FULL -- either
+ * because the box was degenerate or disp_set_window() itself failed (logged once here). */
+static uint8_t partial_window_or_full(void)
+{
+    LT_ASSERT_RET(s_fb.dirty.valid, UI_APP_ASSERT_CODE, DISP_FULL); /* something must have been drawn */
+    LT_ASSERT_RET(s_fb.dirty.x0 <= s_fb.dirty.x1 && s_fb.dirty.y0 <= s_fb.dirty.y1, UI_APP_ASSERT_CODE,
+                  DISP_FULL);
+    uint16_t x0 = s_fb.dirty.x0;
+    uint16_t y0 = s_fb.dirty.y0;
+    uint16_t x1 = s_fb.dirty.x1 < CANVAS_VISIBLE_W ? s_fb.dirty.x1 : (uint16_t)CANVAS_VISIBLE_W;
+    uint16_t y1 = s_fb.dirty.y1 < CANVAS_H ? s_fb.dirty.y1 : (uint16_t)CANVAS_H;
+    if (x0 >= x1 || y0 >= y1) {
+        /* Minor #7: >= , not > -- an empty box (x0 == x1 or y0 == y1, e.g. the clamp above
+         * landed exactly on the visible-area edge) must be caught here, not passed on to
+         * disp_set_window(), whose w > 0 / h > 0 asserts are for a genuine driver-contract
+         * violation, not this routine degenerate-dirty-box case. */
+        return DISP_FULL; /* the visible-area clamp emptied the box: repaint the whole panel */
+    }
+    if (disp_set_window(x0, y0, (uint16_t)(x1 - x0), (uint16_t)(y1 - y0)) != 0) {
+        ESP_LOGW(TAG, "disp_set_window(%u,%u,%u,%u) failed; falling back to full refresh",
+                 (unsigned)x0, (unsigned)y0, (unsigned)(x1 - x0), (unsigned)(y1 - y0));
+        return DISP_FULL;
+    }
+    return DISP_PARTIAL;
+}
+
+/* Runs `mode` through the panel and the failure ladder (spec §20.3): on failure it logs, reinits
+ * and retries once; a second failure counts against s_fail_streak and, at DISP_FAIL_STREAK_MAX,
+ * marks the panel dead. Bumps g_hb[HB_UI] after every blocking disp_refresh()/disp_reinit() call
+ * (ruling R3: a timed-out refresh + reinit + retry can exceed UI_STALL_S). Returns the final
+ * driver rc, with the EFFECTIVE mode actually sent to the panel on that final attempt reported
+ * through *effective_mode. Fix round 2 (minor #4): a failed DISP_PARTIAL has already consumed its
+ * pending window (epd_partial_refresh() always clears it, success or failure) -- the retry is
+ * therefore explicitly DISP_FULL, not a second DISP_PARTIAL relying on the driver's own
+ * no-window-pending fallback, so *effective_mode always matches what the panel actually got,
+ * never the caller's original request. */
+static int disp_refresh_ladder(uint8_t mode, int64_t now, uint8_t *effective_mode)
+{
+    LT_ASSERT_RET(mode == DISP_PARTIAL || mode == DISP_FULL, UI_APP_ASSERT_CODE, -1);
+    LT_ASSERT_RET(effective_mode != NULL, UI_APP_ASSERT_CODE, -1);
+
+    *effective_mode = mode;
+    int rc          = disp_refresh(mode);
+    g_hb[HB_UI]++;
+    if (rc == 0) {
+        s_fail_streak = 0;
+        return rc;
+    }
+
+    /* Ruling T7-R8: pack both facts into one arg -- the pre-failure streak count in the high
+     * byte, the driver's -errno magnitude in the low byte -- so errlog distinguishes a BUSY
+     * timeout (-ETIMEDOUT = 110) from an SPI failure (-EIO = 5) without a second display code. */
+    (void)errlog_add(E_DISP_BUSY_TIMEOUT, ((uint32_t)s_fail_streak << 8) | ((uint32_t)(-rc) & 0xFFu));
+    int reinit_rc = disp_reinit();
+    g_hb[HB_UI]++;
+    if (reinit_rc == 0) {
+        uint8_t retry_mode = (mode == DISP_PARTIAL) ? (uint8_t)DISP_FULL : mode;
+        *effective_mode = retry_mode;
+        rc = disp_refresh(retry_mode);
+        g_hb[HB_UI]++;
+    }
+    if (rc == 0) {
+        s_fail_streak = 0;
+        return rc;
+    }
+
+    s_fail_streak++;
+    if (s_fail_streak >= DISP_FAIL_STREAK_MAX) {
+        sys_flags_set(SYS_DISP_DEAD);
+        (void)errlog_add(E_DISP_DEAD, 0);
+        s_next_reinit_us = now + DISP_DEAD_RETRY_US;
+    }
+    return rc;
+}
+
+/* Executes the refresh kind the policy chose (RF_NONE is handled by the caller before this is
+ * reached): RF_PARTIAL first tries to arm the dirty window, falling back to DISP_FULL (ruling R2)
+ * if that fails; RF_FULL goes straight to DISP_FULL. Bookkeeping follows the EFFECTIVE mode
+ * disp_refresh_ladder() reports (fix round 2, minor #4: that now accounts for its own
+ * partial-consumed-the-window retry-as-full, not just this function's own partial_window_or_full()
+ * fallback) -- a successful full (whether requested or the ladder's retry) resets s_partial_count,
+ * stamps s_last_full_us and clears s_wants_full; a FAILED refresh updates none of that bookkeeping.
+ * Reports the effective mode via *mode_out so the caller's log line reflects what actually
+ * happened on the panel. */
+static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
+{
+    LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
+    LT_ASSERT_RET(mode_out != NULL, UI_APP_ASSERT_CODE, -1);
+    uint8_t mode = (kind == RF_PARTIAL) ? partial_window_or_full() : DISP_FULL;
+    int     rc   = disp_refresh_ladder(mode, now, mode_out);
+    if (rc == 0) {
+        if (*mode_out == DISP_PARTIAL) {
+            s_partial_count   = (uint16_t)(s_partial_count + 1);
+            s_last_partial_us = now;
+        } else {
+            s_partial_count = 0;
+            s_last_full_us  = now;
+            s_wants_full    = false;
+        }
+    }
+    return rc;
+}
+
+/* Logs the render+refresh outcome (ruling R6, refined by fix round 1): kind=N when the policy
+ * chose RF_NONE (`attempted` false, no mode/rc to report); otherwise kind=P|F reflects the
+ * EFFECTIVE mode sent to the panel (Important #2 -- not necessarily the policy's original
+ * decision, since partial_window_or_full() can fall back to a full), with the driver rc appended.
+ * Fix round 2 (minor #11): one ESP_LOG_LEVEL() call replaces the previous two ESP_LOGW/ESP_LOGI
+ * branches, which differed only in level, not in text -- the bench parses this exact line
+ * ("refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c" + " rc=%d" for the attempted case), which
+ * stays byte-identical for both the P and F outcomes. */
+static void log_refresh(bool attempted, uint8_t mode, int rc)
+{
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);
+    char kc = !attempted ? 'N' : ((mode == DISP_FULL) ? 'F' : 'P');
+    if (!attempted) {
+        ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c", (unsigned)s_model.screen,
+                 (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
+                 (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc);
+        return;
+    }
+    /* A ternary of two enum constants used directly as ESP_LOG_LEVEL()'s `level` argument trips
+     * -Wint-in-bool-context once macro-expanded into the macro's `if (level==ESP_LOG_ERROR)`
+     * chain (GCC 13.2, this toolchain) -- hoisting it into a plain local sidesteps that, since
+     * the macro then only ever sees a bare identifier there. */
+    esp_log_level_t lvl = (rc != 0) ? ESP_LOG_WARN : ESP_LOG_INFO;
+    ESP_LOG_LEVEL(lvl, TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d",
+                  (unsigned)s_model.screen, (unsigned)s_model.page, (unsigned)s_fb.dirty.x0,
+                  (unsigned)s_fb.dirty.y0, (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc, rc);
+}
+
+/* Renders the model, then feeds the pure refresh policy (§20.3) and carries out whatever it
+ * decides: RF_NONE is a no-op, RF_PARTIAL/RF_FULL run through the panel + failure ladder above.
+ * Split out of the old render_now() (Plan 7 Task 7) to stay under the 60-line function cap. */
+static void render_and_refresh(void)
+{
+    LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE); /* fb_init ran before any render */
+    render_fb();
+
+    int64_t now = esp_timer_get_time();
+    LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE); /* esp_timer stamp feeds the policy's now_us */
+
+    uint8_t full_every = s_cfg.display.full_every; /* R1: cfg only defaults it, so clamp here too */
+    if (full_every < 1) {
+        full_every = 1;
+    } else if (full_every > 50) {
+        full_every = 50;
+    }
+
+    rf_in_t   in   = build_rf_in(now, full_every);
+    rf_kind_t kind = ui_refresh_decide(&in);
+
+    if (kind == RF_NONE) {
+        /* Important #2: a refresh suppressed by the temperature throttle is owed, not dropped
+         * (spec §20.3) -- remember exactly that (never for the dead/nothing-changed RF_NONE
+         * cases, which need no retry of their own: dead already re-arms via dead_retry()). */
+        s_refresh_pending = in.throttled;
+        log_refresh(false, DISP_PARTIAL, 0);
+        return;
+    }
+    s_refresh_pending = false; /* this call resolved whatever was pending, one way or another */
+    uint8_t mode = DISP_PARTIAL;
+    int     rc   = do_refresh(kind, now, &mode);
+    log_refresh(true, mode, rc);
+}
+
+/* While the panel is SYS_DISP_DEAD, probes disp_reinit() no more often than every
+ * DISP_DEAD_RETRY_US (ruling R5): success clears the flag and asks for a full refresh next; a
+ * repeat failure just reschedules the next probe. */
+static void dead_retry(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);              /* esp_timer stamp drives the backoff */
+    LT_ASSERT_VOID(s_next_reinit_us >= 0, UI_APP_ASSERT_CODE); /* armed by the ladder or boot failure */
+    uint32_t flags = sys_flags_get();
+    if ((flags & (1u << SYS_DISP_DEAD)) == 0 || now < s_next_reinit_us) {
+        return;
+    }
+    if (disp_reinit() == 0) {
+        sys_flags_clear(SYS_DISP_DEAD);
+        s_fail_streak = 0;
+        s_wants_full  = true;
+        s_dirty       = true;
+    } else {
+        s_next_reinit_us = now + DISP_DEAD_RETRY_US;
+    }
 }
 
 /* ---- task ---- */
@@ -634,10 +917,13 @@ static void ui_loop_iter(QueueHandle_t btn_q)
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);
 
-    /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. */
+    /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. Ruling T7-R9: every transition
+     * that replaces the whole screen content (one-shot -> riding, menu enter/exit, page change)
+     * requests a full, same as ui_exit_menu()'s manual dismissal path. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
         s_oneshot_until_us = 0;
         s_model.screen     = SCR_RIDING;
+        s_wants_full       = true;
         s_dirty            = true;
     }
     /* Menu idle auto-exit (§20.7). */
@@ -646,9 +932,17 @@ static void ui_loop_iter(QueueHandle_t btn_q)
     }
 
     update_flags();
+    dead_retry(now); /* R5: paced disp_reinit() probe while SYS_DISP_DEAD */
 
-    if (s_dirty) {
-        render_now();
+    /* Important #2: a throttle-deferred refresh is owed, not dropped (spec §20.3) -- re-check
+     * every tick but only actually re-render/refresh once the 30 s window has elapsed (never on
+     * every UI_TICK_MS while waiting); render_and_refresh() re-runs the pure policy itself, so
+     * the none-vs-partial call stays in one place. */
+    if (s_refresh_pending && (now - s_last_partial_us) >= DISP_THROTTLE_RETRY_US) {
+        render_and_refresh();
+        s_dirty = false;
+    } else if (s_dirty) {
+        render_and_refresh();
         s_dirty = false;
     }
 
@@ -668,8 +962,8 @@ static void ui_task(void *arg)
     s_model.mode = s_mode;
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);   /* valid engine mode from cfg */
 
-    fb_init(&s_fb, s_fb_bits, FB_W, FB_H);
-    LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);   /* framebuffer is armed for render_now */
+    fb_init(&s_fb, s_fb_bits, CANVAS_W, CANVAS_H);
+    LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);   /* framebuffer is armed for render_fb */
 
     /* First screen: SAFE MODE one-shot in safe mode (§17.5, boot self-test skipped), else BOOT. */
     uint32_t f0 = sys_flags_get();
@@ -677,17 +971,56 @@ static void ui_task(void *arg)
         s_model.screen  = SCR_ONESHOT;
         s_model.oneshot = ONESHOT_SAFE; /* persistent (§17.5: one full-screen render, then idle) */
     } else {
-        snprintf(s_model.boot_name, sizeof s_model.boot_name, "LapTimer");
+        /* FONT_MED has no lowercase glyphs (digits, ": . - +", A-Z only -- fonts.h) -- "LapTimer"
+         * rendered as "L      T" on the real panel. All-caps has ink (host goldens already say
+         * "LAPTIMER"). */
+        snprintf(s_model.boot_name, sizeof s_model.boot_name, "LAPTIMER");
         snprintf(s_model.boot_ver, sizeof s_model.boot_ver, "%s", CFG_FW_VERSION);
-        s_model.boot_n_lines = 0;
+        s_model.boot_n_lines = 0; /* boot self-test lines have no producer yet -- nothing feeds
+                                    * boot_line[]/boot_n_lines today (follow-up; deltas doc §8). */
         s_model.screen       = SCR_ONESHOT;
         s_model.oneshot      = ONESHOT_BOOT;
-        s_oneshot_until_us   = esp_timer_get_time() + (int64_t)ONESHOT_BOOT_MS * 1000;
+        /* s_oneshot_until_us is armed further down, AFTER disp_init() returns -- not here. Arming
+         * it here would start the 2 s window before disp_init()'s ~3.5 s blocking bring-up, so the
+         * window would already be expired by the time the BOOT screen is first visible and the LAP
+         * page would replace it immediately. */
     }
     s_model.flags = f0;
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);        /* first screen valid */
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);  /* one-shot selector valid */
-    render_now();
+    render_fb();
+
+    /* Display bring-up (Plan 7 Task 5): blit the just-rendered BOOT screen BEFORE disp_init so
+     * its first full refresh shows it on the panel. disp_init()'s own full refresh counts as the
+     * refresh policy's first full (ruling R4): on success it seeds s_last_full_us/s_partial_count
+     * as if RF_FULL had just run; on failure nothing is seeded -- SYS_DISP_DEAD makes the policy
+     * return RF_NONE until dead_retry()'s 300 s probe (armed here) clears it. */
+    (void)disp_blit(s_fb_bits);   /* cannot fail here: s_fb_bits is a static array (never NULL) and
+                                    * epd_panel() (bound as a side effect) never returns NULL either */
+    const disp_caps_t *disp_caps;
+    int                disp_rc = disp_init(&disp_caps);
+    if (disp_rc == 0) {
+        /* Minor #5: catches a PANEL/canvas mismatch at boot -- disp_init() always fills *caps by
+         * the time it returns 0 (moved ahead of its own boot-refresh call, fix round 2). */
+        LT_ASSERT_VOID(disp_caps != NULL, UI_APP_ASSERT_CODE);
+        LT_ASSERT_VOID(disp_caps->width == CANVAS_VISIBLE_W && disp_caps->height == CANVAS_H &&
+                       disp_caps->partial_ok, UI_APP_ASSERT_CODE);
+        s_last_full_us  = esp_timer_get_time();
+        s_partial_count = 0;
+    } else {
+        (void)errlog_add(E_DISP_DEAD, (uint32_t)(-disp_rc));
+        sys_flags_set(SYS_DISP_DEAD);
+        s_next_reinit_us = esp_timer_get_time() + DISP_DEAD_RETRY_US;
+    }
+
+    /* Arm the BOOT one-shot's 2 s auto-revert window now, whether disp_init() succeeded or failed
+     * (either way the screen is now on the panel or as on-panel as it will get) -- see the comment
+     * above where s_model.oneshot was set to ONESHOT_BOOT. SAFE mode's one-shot is persistent
+     * (§17.5) and is left untouched (s_oneshot_until_us stays 0). */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT) {
+        s_oneshot_until_us = esp_timer_get_time() + (int64_t)ONESHOT_BOOT_MS * 1000;
+    }
+
     esp_task_wdt_reset();
 
     QueueHandle_t btn_q = ui_buttons_queue();

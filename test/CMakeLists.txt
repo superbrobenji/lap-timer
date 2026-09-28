@@ -14,6 +14,13 @@ set(LAPTIMER_STRICT_FLAGS -Wall -Wextra -Werror -Wshadow -Wconversion)
 
 set(CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/core)
 file(GLOB_RECURSE CORE_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/*.c)
+# screens_moto.c's rendering depends on core/ui/canvas.h's CANVAS_213 branch, a compile-time
+# choice -- so unlike every other file in CORE_SRCS it cannot have one shared, canvas-agnostic
+# object in this single `core` library. Excluded here (Plan 7 T3 fix 1, minor #3) and compiled
+# again, per canvas, directly into each host target that needs it (test_screens, test_screens_213
+# below) -- so there is exactly one screens_moto.c.o per target and no reliance on link order to
+# pick the right one over a stale copy in this archive.
+list(FILTER CORE_SRCS EXCLUDE REGEX "/ui/screens_moto\\.c$")
 
 add_library(core STATIC ${CORE_SRCS})
 # ui/ headers live under their own include/ root (components/core/ui/include/core/ui/*.h),
@@ -48,13 +55,16 @@ endfunction()
 # explicitly below: test_lap's exit-criterion case drives the host-only synth fixture, so it links
 # the replay library instead of core/unity/m directly (replaylib already carries those); test_ui
 # and test_screens (session 4.2, moto LAP screens, §20.4-20.5) both link pbm.c (§20.2's PBM
-# snapshot writer/comparator, test/pbm.h) alongside core/unity/m.
+# snapshot writer/comparator, test/pbm.h) alongside core/unity/m. test_epd_pure (Plan 7 Task 4)
+# is also held back: it needs the display_epaper_ssd1680 driver's two host/*.c sources and its
+# include/ dir, so it is added explicitly at the end of this file instead.
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
   if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens"
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
-     AND NOT name STREQUAL "test_ses_records")
+     AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
+     AND NOT name STREQUAL "test_epd_pure_29")
     add_core_test(${name})
   endif()
 endforeach()
@@ -81,8 +91,24 @@ add_core_test(test_ses_records assert_support.c)
 # this source dir.
 add_core_test(test_ui pbm.c)
 target_compile_definitions(test_ui PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-add_core_test(test_screens pbm.c)
+# screens_moto.c is excluded from CORE_SRCS above (its rendering depends on the compile-time
+# CANVAS_213 branch, so it cannot be one shared object for every canvas) -- test_screens needs it
+# compiled in directly, at the default (296) canvas.
+add_core_test(test_screens pbm.c ${CORE_DIR}/ui/screens_moto.c)
 target_compile_definitions(test_screens PRIVATE TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+# test_screens_213: the same test_screens.c source (plus its own screens_moto.c.o, compiled with
+# -DCANVAS_FORCE_213=1) comparing against its own golden set under test/snapshots/213/ (Plan 7 T3:
+# compile-time canvas + a second golden set). Not routed through add_core_test (which would add its
+# own ${name}.c) since this target's test source is test_screens.c, not test_screens_213.c. Because
+# screens_moto.c is not in the `core` library (excluded above), there is exactly one definition of
+# screens_moto_render/screens_render/fault_strip in this target's link -- no duplicate archive
+# member and so no dependence on link order to pick the right one (Plan 7 T3 fix 1, minor #3).
+add_executable(test_screens_213 test_screens.c pbm.c ${CORE_DIR}/ui/screens_moto.c)
+target_compile_definitions(test_screens_213 PRIVATE CANVAS_FORCE_213=1 TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}" SNAP_SUBDIR="213/")
+target_compile_options(test_screens_213 PRIVATE ${LAPTIMER_STRICT_FLAGS})
+target_link_libraries(test_screens_213 PRIVATE core unity m Threads::Threads)
+add_test(NAME test_screens_213 COMMAND test_screens_213)
 
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
@@ -94,3 +120,23 @@ add_executable(test_lap test_lap.c)
 target_compile_options(test_lap PRIVATE ${LAPTIMER_STRICT_FLAGS})
 target_link_libraries(test_lap PRIVATE replaylib unity Threads::Threads)
 add_test(NAME test_lap COMMAND test_lap)
+
+# test_epd_pure (Plan 7 Task 4): the display_epaper_ssd1680 driver's pure, host-testable parts
+# (panel table, landscape->portrait line transposition, RAM window rounding -- epd_pure.h). It
+# links the component's two host/*.c sources directly (not the ESP-IDF component target, which
+# does not exist on host) via add_core_test's ARGN, the same pattern test_ui/test_screens use for
+# pbm.c; core is still linked for CORE_ASSERT_RET's core_assert_fail (core/core.h).
+# EPD_FORCE_PANEL_213 selects the ws213v4 panel row in epd_panel() since the host build has no
+# build_config.h to read CFG_PANEL_WS213V4 from.
+set(EPD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/display_epaper_ssd1680)
+add_core_test(test_epd_pure ${EPD_DIR}/host/epd_panel.c ${EPD_DIR}/host/epd_rotate.c)
+target_include_directories(test_epd_pure PRIVATE ${EPD_DIR}/include)
+target_compile_definitions(test_epd_pure PRIVATE EPD_FORCE_PANEL_213=1)
+
+# test_epd_pure_29 (final fix round, finding 10a): the same pure epd_pure.h coverage as
+# test_epd_pure above, but for the ws29v2 panel row (296x128 logical, ram_w 128 == native_w --
+# no RAM-padding tail, unlike ws213v4's 6-bit one). EPD_FORCE_PANEL_29 (host/epd_panel.c)
+# selects it since the host build has no build_config.h to read CFG_PANEL_WS29V2 from.
+add_core_test(test_epd_pure_29 ${EPD_DIR}/host/epd_panel.c ${EPD_DIR}/host/epd_rotate.c)
+target_include_directories(test_epd_pure_29 PRIVATE ${EPD_DIR}/include)
+target_compile_definitions(test_epd_pure_29 PRIVATE EPD_FORCE_PANEL_29=1)

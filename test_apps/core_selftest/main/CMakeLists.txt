@@ -7,8 +7,10 @@ set(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../test")
 file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
 # test_ui and test_screens are host-only: they render PBM snapshots to the host filesystem
 # (TEST_DIR/snapshots) and compare byte-exact, which cannot run on the ESP32. They are exercised
-# by the host `test/` build only.
-list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens)\\.c$")
+# by the host `test/` build only. test_epd_pure (Plan 7 Task 4) links the display_epaper_ssd1680
+# driver's host/*.c sources directly (test/CMakeLists.txt), which this lightweight core-only
+# selftest does not have on its path, so it is excluded here too.
+list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*)\\.c$")
 set(SUITES "")
 foreach(f ${TEST_SRCS})
   get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg

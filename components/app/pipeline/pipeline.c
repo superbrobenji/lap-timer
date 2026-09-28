@@ -102,7 +102,9 @@ static bool        s_resume_active;         /* F2: a resumed lap is running; gua
 static int64_t     s_resumed_lap_start_us;  /* F2: resumed lap start; a later fix below it = rewind */
 
 #if CFG_GPS_SIM
-static trk_venue_t s_venue;                /* the sim capture's venue (from gps_sim's JSON) */
+/* No local trk_venue_t static here (Plan 7 Task 1 DRAM reclaim): pipeline_init below parses the
+ * sim capture's venue JSON straight into the trk user table via trk_user_add_json, so the venue
+ * lives in exactly one place -- the table entry lap_set_venue then points at. */
 extern const char *gps_sim_venue_json(void);   /* provided by the gps_sim driver (link-time) */
 #endif
 
@@ -572,23 +574,28 @@ static void pipeline_init(void)
     }
 
 #if CFG_GPS_SIM
-    /* Set the venue exactly as replay does: parse the sim capture's venue JSON with trk_from_json,
-     * then lap_set_venue. Same JSON + same parser => the device venue == the replay venue, so the
-     * lap engine starts ARMED against the identical S/F line. */
+    /* Set the venue exactly as replay does: parse the sim capture's venue JSON straight into the
+     * trk user table (trk_user_add_json -- same trk_from_json parser under the hood), then
+     * lap_set_venue against that table entry (§15.3: this also makes trk_get(venue_id) resolve, so
+     * a resumed lap can rebuild this venue). Same JSON + same parser => the device venue == the
+     * replay venue, so the lap engine starts ARMED against the identical S/F line. Parsing into the
+     * table -- rather than a local trk_venue_t -- means lap_set_venue's stored pointer (lap.h)
+     * points at stable, permanent storage, never a stack/static temporary (Plan 7 Task 1). */
     {
-        char err[96];
         const char *vj = gps_sim_venue_json();
-        if (vj && trk_from_json(&s_venue, vj, strlen(vj), err, sizeof err) == 0) {
-            LT_ASSERT_VOID(s_venue.n_layouts <= TRK_MAX_LAYOUTS, PIPE_ASSERT_CODE);   /* indexes layouts[] */
-            lap_set_venue(&s_lap, &s_venue);
-            (void)trk_user_add(&s_venue);   /* §15.3: make trk_get(venue_id) resolve so a resumed lap can rebuild this venue */
-            uint16_t layout_id = (s_venue.n_layouts > 0) ? s_venue.layouts[0].id : 0;
+        uint16_t vid = 0; char err[96];
+        if (vj && trk_user_add_json(vj, strlen(vj), &vid, err, sizeof err) == 0) {
+            const trk_venue_t *v = trk_get(vid);
+            LT_ASSERT_VOID(v != NULL, PIPE_ASSERT_CODE);
+            LT_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, PIPE_ASSERT_CODE);   /* indexes layouts[] */
+            lap_set_venue(&s_lap, v);
+            uint16_t layout_id = (v->n_layouts > 0) ? v->layouts[0].id : 0;
             /* open a logging session for the run + write the real VENUE record. */
             log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = MODE_LAP,
-                                  .venue_id = s_venue.id, .layout_id = layout_id, .gps_us = 0 };
+                                  .venue_id = v->id, .layout_id = layout_id, .gps_us = 0 };
             if (g_log_req_q) { (void)xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)); logger_notify(); }
-            logger_set_venue(s_venue.id, layout_id, s_venue.name);
-            ESP_LOGI(TAG, "venue \"%s\" (id %u) armed from sim capture", s_venue.name, (unsigned)s_venue.id);
+            logger_set_venue(v->id, layout_id, v->name);
+            ESP_LOGI(TAG, "venue \"%s\" (id %u) armed from sim capture", v->name, (unsigned)v->id);
         } else {
             ESP_LOGW(TAG, "sim venue parse failed: %s", err);
         }

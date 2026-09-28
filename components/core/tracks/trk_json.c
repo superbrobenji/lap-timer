@@ -5,6 +5,13 @@
 #include <string.h>
 #include <stdio.h>
 
+/* The firmware build tree generates build_config.h (top-level CMakeLists.txt, §4.6); the host
+ * tools/tests harness (test/CMakeLists.txt) compiles this file without it, so CFG_TRK_JSON_TOKS
+ * below falls back to the host value. */
+#if __has_include("build_config.h")
+#include "build_config.h"
+#endif
+
 /* Power of 10 rule 5 (spec §17.9, design doc §3): this module's assertions report TRK_ASSERT_CODE
  * (shared with trk.c: components/core/tracks is one assertion "module" for the retrofit). They
  * guard genuine anomalies -- NULL params, an internal count exceeding its TRK_MAX_ or LAP_MAX_
@@ -13,18 +20,31 @@
  * fault hook). */
 #define TRK_ASSERT_CODE 0x0A80
 
-/* Scratch jsmn-token budget for parsing ONE incoming custom-venue JSON upload (20 B/token with
- * JSMN_PARENT_LINKS -> 10,240 B static). Verify-first sizing (plan 2026-09-20, Task B1): the
- * maximal legal venue under the current spec -- TRK_MAX_LAYOUTS(8) layouts x LAP_MAX_SECTORS(8)
- * sectors, every field present, full sf + sector lines (the "same"/"reverse" shortcuts tokenise to
- * FEWER tokens) -- tokenises to exactly 615 jsmn tokens (host-verified against the real jsmn.c /
- * json_parse; regression-locked in test/test_trk.c test_json_max_venue_token_bound). 512 is
- * therefore ALREADY below that worst case: a truly maximal upload is rejected today at json_parse
- * (JSMN_ERROR_NOMEM -> "malformed json", a clean fail(), never a crash). It is deliberately NOT
- * shrunk here (reclaim 0): a smaller cap would reject yet more legal venues. Growing it to >=615 to
- * accept the maximal upload is a separate DRAM-cost decision, out of scope for the reclaim plan and
- * filed for a spec-reconciliation ticket. */
-#define MAX_TOKS 512
+/* Scratch jsmn-token budget for parsing ONE incoming venue JSON (20 B/token with
+ * JSMN_PARENT_LINKS). Two tiers, selected by CFG_TRK_JSON_TOKS (Plan 7 Task 1 DRAM reclaim):
+ *
+ * HOST (build_config.h absent -- tools/tests): 512, the original sizing. Verify-first (plan
+ * 2026-09-20, Task B1): the maximal legal venue under the current spec -- TRK_MAX_LAYOUTS(8)
+ * layouts x LAP_MAX_SECTORS(8) sectors, every field present, full sf + sector lines (the
+ * "same"/"reverse" shortcuts tokenise to FEWER tokens) -- tokenises to exactly 615 jsmn tokens
+ * (host-verified against the real jsmn.c / json_parse; regression-locked in test/test_trk.c
+ * test_json_max_venue_token_bound). 512 is therefore ALREADY below that worst case: a truly
+ * maximal upload is rejected today at json_parse (JSMN_ERROR_NOMEM -> "malformed json", a clean
+ * fail(), never a crash). It is deliberately NOT shrunk here: a smaller cap would reject yet more
+ * legal venues. Growing it to >=615 to accept the maximal upload is a separate DRAM-cost decision,
+ * out of scope for this reclaim and filed for a spec-reconciliation ticket.
+ *
+ * DEVICE (build_config.h present): 64 (main/build_config.h.in, set from CMakeLists.txt). The only
+ * JSON venue ever parsed on a firmware build is gps_sim's 330-byte capture venue -- measured at 48
+ * jsmn tokens (well under 64) -- via trk_user_add_json at pipeline init; there is no on-device path
+ * that parses an arbitrary user-uploaded venue today, so a large-upload token budget would be static
+ * DRAM spent on a case that never occurs on target. That upload flow (512-token cap, above) is a
+ * host/dev-controller-side tool. Should a future plan add on-device JSON venue upload, this cap
+ * must grow with it. */
+#ifndef CFG_TRK_JSON_TOKS
+#define CFG_TRK_JSON_TOKS 512   /* host tools/tests: the maximal-upload cap (see the note above) */
+#endif
+#define MAX_TOKS CFG_TRK_JSON_TOKS
 
 static int fail(char *err, size_t cap, const char *m) { if (err && cap) { strncpy(err, m, cap - 1); err[cap - 1] = '\0'; } return -1; }
 

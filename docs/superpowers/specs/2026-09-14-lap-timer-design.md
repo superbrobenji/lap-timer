@@ -149,7 +149,7 @@ Stock DevKit deep-sleep draw is 5–15 mA (AMS1117 quiescent ~5 mA, power LED ~2
 | SPI MISO | 19 | in | | SD only; unused by e-paper |
 | E-paper CS | 5 | out | idle high | Boot strapping pin; idle-high is safe |
 | E-paper DC | 14 | out | | MTMS; emits a short clock at boot, harmless |
-| E-paper RST | 4 | out | active low | |
+| E-paper RST | 13 | out | active low | MTCK; unused by JTAG in this project; GPIO 4 is the dev-kit DETECT line (Plan 5.5) |
 | E-paper BUSY | 35 | in | high = busy | Input-only |
 | SD CS (O4) | 15 | out | idle high | MTDO strapping; idle-high pull-up is boot-safe |
 | Button MODE | 32 | in | active-high, 100 kΩ pull-down | RTC GPIO, EXT1 wake |
@@ -176,7 +176,7 @@ Battery tap: OUT+ ── 470k ──┬── 470k ── GND
                             └── GPIO34
 GPS TX ── GPIO16, GPS RX ── GPIO17
 MPU SDA ── GPIO21, SCL ── GPIO22, INT ── GPIO27
-E-paper: SCK 18, DIN 23, CS 5, DC 14, RST 4, BUSY 35
+E-paper: SCK 18, DIN 23, CS 5, DC 14, RST 13, BUSY 35
 Buttons: 3V3 ── switch ── GPIO32/33/25 ──100k── GND
 ```
 
@@ -1734,7 +1734,9 @@ Logging pauses (no `FIX_*`/`FUSED`) when `still` for 10 s; resumes with a `FIX_K
 
 ### 12.7 Eviction (internal)
 
-At session start and every 60 s, if `free_kb < 10 % of total`: delete the oldest `.log` (by session id order) that is not the current session. `.sum` files are never auto-deleted. If no `.log` remains to delete and free < 5 %, logging of samples stops (`SYS_STORAGE_FULL`), summaries continue (they need < 4 KB). Logged `E_STO_EVICT` / `E_STO_FULL`.
+At session start and every 60 s, if `free_kb < 10 % of total`: delete the oldest `.log` (by session id order) that is not the current session, in bounded multi-file passes (at most 8 unlinks per pass) until `free_kb ≥ 15 % of total` or no `.log` remains to delete. `.sum` files are never auto-deleted. Opening a new session additionally refuses below `free_kb < 5 % of total` (running one eviction pass first): logging of samples stops (`SYS_STORAGE_FULL`), summaries continue (they need < 4 KB), and the `SYS_STORAGE_FULL` flag is cleared together with the samples-paused latch once a session opens above the reserve. Logged `E_STO_EVICT` / `E_STO_FULL`.
+
+Found on the Plan 7 bench (2026-09-27): the old single-unlink-per-60s eviction let LittleFS reach 0 free blocks, at which point even `unlink()` fails — the 5 %/15 %/8-per-pass reserve above fixes that deadlock.
 
 ---
 
@@ -2115,6 +2117,8 @@ Boot screen lists each as `OK` / `FAIL` for 2 s (skipped when `SYS_SAFE_MODE`).
 | 0x0805 | `E_OTA_WRITE` | 0x0903 | `E_FUSION_CALIB_LOST` |
 | 0x0806 | `E_OTA_VALIDATED` (info) | | |
 
+`E_DISP_BUSY_TIMEOUT`'s `arg` packs `(fail_streak << 8) | (-rc & 0xFF)` — the pre-failure streak count in the high byte, the driver's `-errno` magnitude in the low byte — so an SPI failure (`-EIO` = 5) is distinguishable in the error ring from a BUSY timeout (`-ETIMEDOUT` = 110) without a second display error code (Plan 7 Task 7, ruling T7-R8).
+
 ### 17.8 Flash-write stalls
 
 Classic ESP32 disables the instruction cache during SPI flash erase/write; code not in IRAM stalls on both cores for the duration (4 KB erase ≈ 20–40 ms, 256 B program ≈ 0.3 ms). Consequences and mitigations:
@@ -2294,9 +2298,9 @@ Failure → `E_OTA_PRECOND` with a reason string.
 
 ### 20.1 Display driver (`display_epaper_ssd1680`)
 
-SPI: `SPI3_HOST` (VSPI), mode 0, 10 MHz, DC on GPIO 14 via pre-transfer callback, CS 5 hardware, queue size 4, DMA enabled, ISR in IRAM. RST 4, BUSY 35 polled at 1 ms with a timeout of 5 s (`-ETIMEDOUT` → ladder).
+SPI: `SPI3_HOST` (VSPI), mode 0, 10 MHz, DC on GPIO 14 via pre-transfer callback, CS 5 hardware, queue size 4, DMA enabled, ISR in IRAM. RST 13, BUSY 35 polled at 1 ms with a timeout of 5 s (`-ETIMEDOUT` → ladder).
 
-Panel table (`PANEL` build flag) **[VERIFY]** against the Waveshare reference driver of the actual panel:
+Panel table (`PANEL` build flag), `ws213v4` **VERIFIED** against the owned panel on the bench 2026-09-27 (`moto_sim`, v0.1.0-47: full refresh ≈ 3.2 s end-to-end, partial ≈ 0.7 s — see the Plan 7 deltas doc's implementation notes; `disp_caps` still reports the datasheet-class 2000/400 ms below); `ws29v2` **[VERIFY]** against the Waveshare reference driver remains open:
 
 | Panel | Res (w×h, portrait native) | Landscape logical | Full LUT | Partial LUT | Border | Notes |
 |-------|----------------------------|-------------------|----------|-------------|--------|-------|
@@ -2326,9 +2330,11 @@ Command sequence (SSD1680):
 - Partial refresh on: `EV_LAP_COMPLETE`, `EV_SECTOR`, `EV_DRAG_GATE`, `EV_DRAG_DONE`, `EV_VENUE_FOUND`, `EV_LAYOUT_LOCKED`, `EV_FIX_LOST`/`EV_FIX_OK`, `EV_FAULT` (flag change), battery crossing 20 %, page change, menu navigation, OTA progress.
 - Full refresh when: `partial_count ≥ display.full_every`, or 30 min since last full, or on wake from PARK, or on page/menu entry when `still`. If the trigger occurs while moving and `partial_count < 2·full_every`, the full refresh is deferred until `still` (a partial is used instead).
 - Coalescing: `ui` drains its event queue completely, updates the screen model, renders once, refreshes once.
-- Never periodic while riding unless `display.live_clock`.
+- Never periodic while riding unless `display.live_clock`. As of Plan 7, `display.live_clock` is stored but has no effect: the screen model carries `cur_ms_at_gate`, not a running lap time, so a 1 Hz tick would refresh identical pixels; wiring it in is a follow-up once the pipeline supplies a running CUR time.
 - Temperature throttle (`SYS_DISP_TEMP_THROTTLE`): partial refreshes limited to one per 30 s, full refreshes suppressed.
 - Ladder: BUSY timeout → `disp_reinit` → retry the refresh once; three consecutive failures → `SYS_DISP_DEAD`, `E_DISP_DEAD`, retry `disp_reinit` every 300 s.
+- The partial-refresh "dirty window" is currently always the full visible frame: every screen render clears the framebuffer before drawing, so partials are full-window partials (a per-region dirty box is a future optimisation).
+- Verified on the bench 2026-09-27 (`moto_sim`, `dbg btn`/`dbg flag` injection — see the Plan 7 deltas doc's implementation notes): partials fire on page changes while moving; a forced full fires at 2×`full_every` (20) partials while moving; full refresh fires on menu entry/exit and on page changes while still; the temperature throttle (`dbg flag set 11`) limits partials to one per 30 s with fulls suppressed; an externally set `SYS_DISP_DEAD` self-heals on the next loop (reinit succeeds); menu open/scroll/select/auto-exit (30 s) all drive the panel; a 10-minute soak ran with no task WDT.
 
 ### 20.4 Screen model
 

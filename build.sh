@@ -26,6 +26,8 @@ usage: ./build.sh <env> <command> [options]
   options:      --port <dev>              serial port for flash / monitor
                 --flash-size 4MB|8MB|16MB flash module size (default 4MB)
                 --devux ON|OFF            interactive dev UX (dbg verbs); default ON
+                --panel ws213v4|ws29v2    e-paper panel (§4.6); default ws213v4, or $PANEL;
+                                          a non-default panel builds into build/<env>_<panel>
                 --yes                     confirm a flash (required by 'flash')
 USAGE
     exit 2
@@ -38,19 +40,29 @@ PORT=""
 FLASH_SIZE="4MB"
 ASSUME_YES=0
 DEVUX_FLAG="ON"   # default ON; --devux OFF selects the prod-slim variant
+PANEL_NAME="${PANEL:-ws213v4}"   # §4.6; --panel below overrides; ws213v4 is the owned hardware
 while [ $# -gt 0 ]; do
     case "$1" in
         --port)       PORT="${2:?--port needs a value}"; shift 2 ;;
         --flash-size) FLASH_SIZE="${2:?--flash-size needs a value}"; shift 2 ;;
         --devux)      DEVUX_FLAG="${2:?--devux needs a value}"; shift 2 ;;
+        --panel)      PANEL_NAME="${2:?--panel needs a value}"; shift 2 ;;
         --yes)        ASSUME_YES=1; shift ;;
         *) echo "unknown option: $1" >&2; usage ;;
     esac
 done
 
+case "$PANEL_NAME" in
+    ws213v4|ws29v2) ;;
+    *) echo "unknown --panel: $PANEL_NAME (use ws213v4|ws29v2)" >&2; usage ;;
+esac
+
 # ---- §4.6 named environments -> flags (VARIANT GPS IMU DISPLAY STORAGE CONN) ----
-# Every other flag (IMU default, CONN_BLE_RC, EXPORT_SERIAL, PANEL) keeps its
-# CMake default from the top-level CMakeLists.txt.
+# PANEL defaults to ws213v4 (the owned hardware, §4.6) and is passed explicitly below via
+# --panel/$PANEL, same as DEVUX just below -- a non-default panel builds into
+# build/<env>_<panel> so it never clobbers the default panel's build tree. Every other flag
+# (IMU default, CONN_BLE_RC, EXPORT_SERIAL) keeps its CMake default from the top-level
+# CMakeLists.txt.
 case "$ENV_NAME" in
     moto_neo6m)      FLAGS=(VARIANT=moto GPS=neo6m IMU=mpu6050 DISPLAY=epaper_ssd1680 STORAGE=internal CONN=ble) ;;
     moto_sim)        FLAGS=(VARIANT=moto GPS=sim   IMU=sim     DISPLAY=epaper_ssd1680 STORAGE=internal CONN=ble) ;;
@@ -72,11 +84,14 @@ case "$FLASH_SIZE" in
 esac
 
 BUILD_DIR="build/${ENV_NAME}"
+[ "$PANEL_NAME" = "ws213v4" ] || BUILD_DIR="build/${ENV_NAME}_${PANEL_NAME}"
 DFLAGS=()
 for f in "${FLAGS[@]}"; do DFLAGS+=("-D${f}"); done
-# DEVUX is not a per-env FLAG; pass it explicitly every build (default ON) so a prior
-# --devux OFF in this build dir never sticks via the CMake cache (§4.6, Plan 5 sub-project A).
+# DEVUX/PANEL are not per-env FLAGS; pass them explicitly every build (defaults ON / ws213v4) so
+# a prior --devux OFF or --panel ws29v2 in this build dir never sticks via the CMake cache
+# (§4.6, Plan 5 sub-project A / Plan 7 final fix round finding 16).
 DFLAGS+=("-DDEVUX=${DEVUX_FLAG}")
+DFLAGS+=("-DPANEL=${PANEL_NAME}")
 
 PORT_ARGS=()
 [ -n "$PORT" ] && PORT_ARGS=(-p "$PORT")

@@ -64,6 +64,17 @@ static const char *TAG = "log";
 #define LOOP_TIMEOUT_MS   1000
 #define FRAME_TMP_CAP    256           /* >= max framed record (247 payload + 5) */
 
+/* §12.7 storage thresholds (Plan 7 T9 fix 3, ruling T9-R3). A bench reboot loop that opened and
+ * wrote a new session every boot outran the old single-unlink-per-60s eviction: LittleFS reached
+ * 0 free blocks, at which point even unlink() cannot commit its metadata ("lfs.c:704 No more
+ * free space", "Unable to split") and the open/write path stalls in compaction past the task
+ * WDT. STO_EVICT_PCT/STO_TARGET_PCT bound eviction_check()'s bounded multi-file pass; STO_RESERVE_PCT
+ * is the hard floor open_session()'s reserve guard enforces so a session is never opened into it. */
+#define STO_EVICT_PCT      10u         /* free/total below this: start evicting (existing behaviour) */
+#define STO_TARGET_PCT     15u         /* evict (bounded) until free/total reaches at least this */
+#define STO_RESERVE_PCT    5u          /* never open/write below this -- open_session()'s hard floor */
+#define EVICT_MAX_PER_PASS 8u          /* rule 2: bound the unlinks any one eviction_check() call performs */
+
 /* §12.5 .sum assembly: LAP/DRAG frames accumulate here, then rebuild_sum streams HDR+VENUE+laps+
  * drags+END straight to the .sum fd (A1) -- no assemble-then-emit scratch. */
 #define LAP_ACC_CAP      3072
@@ -262,6 +273,28 @@ static void open_session(const log_request_t *req)
 {
     LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
     if (s_open) return;                            /* one open .log at a time */
+
+    /* Reserve guard (§12.7, Plan 7 T9 fix 3 / ruling T9-R3): before creating any file, refuse to
+     * open below STO_RESERVE_PCT free. Try one eviction pass first; if that still leaves free
+     * space below the reserve, do not open -- there is no file yet to leave half-created, and the
+     * next open request (or the 60 s eviction pass) retries naturally once space recovers. */
+    sto_info_t si;
+    if (sto_info(&si) == 0 && si.total_kb != 0 &&
+        si.free_kb < (si.total_kb * STO_RESERVE_PCT) / 100u) {
+        eviction_check();
+        if (sto_info(&si) == 0 && si.total_kb != 0 &&
+            si.free_kb < (si.total_kb * STO_RESERVE_PCT) / 100u) {
+            if (!s_samples_full) {
+                s_samples_full = true;
+                sys_flags_set(SYS_STORAGE_FULL);
+                (void)errlog_add(E_STO_FULL, 0);
+            }
+            ESP_LOGE(TAG, "storage below reserve (%u/%u KB): session not opened",
+                     (unsigned)si.free_kb, (unsigned)si.total_kb);
+            return;
+        }
+    }
+
     if (s_seq < 0xFF) s_seq++;
     (void)snprintf(s_id, sizeof s_id, "S%05u_%03u",
                    (unsigned)(lt_nvs_boot_get() & 0xFFFFu), (unsigned)s_seq);
@@ -290,7 +323,10 @@ static void open_session(const log_request_t *req)
     s_lap_len = 0;
     s_drag_len = 0;
     s_sum_dirty = false;
-    s_samples_full = false;
+    /* latch and sys flag move together (Plan 7 T9 fix 3b): only reached once the reserve guard
+     * above has already confirmed storage is genuinely above STO_RESERVE_PCT, so a latch that was
+     * set stays consistent with SYS_STORAGE_FULL instead of going stale. */
+    if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
 
     char path[40];
     log_path(path, sizeof path, s_id, ".log");
@@ -494,13 +530,66 @@ static void cache_publish_free(uint32_t free_kb)
     status_cache_update(s_free_kb_cached, s_sessions_cached);
 }
 
+/* Name-only scan (Plan 5.6 T1 fix 3 / Plan 7 T9 fix 2: sto_list_next_name, no per-entry stat(),
+ * O(n) instead of the O(n^2) sto_list_next walk) for the oldest .log under /sessions that is not
+ * the current open session (the oldest session is the smallest .log name, §12.7). Fills e->oldest
+ * and returns true when a candidate exists; returns false (e->oldest left empty) when there is
+ * nothing left to delete. The vTaskDelay(1) every 16 entries (Plan 5.6 T1 fix 4) is what lets
+ * IDLE0 (priority 0) -- and the ui task -- actually get scheduled ahead of this priority-8 task;
+ * taskYIELD() would not, it never schedules a lower-priority task. */
+static bool evict_scan_oldest(evict_ctx_t *e)
+{
+    LT_ASSERT_RET(e != NULL, LOG_ASSERT_CODE, false);
+    memset(e, 0, sizeof *e);
+    if (s_id[0]) (void)snprintf(e->curlog, sizeof e->curlog, "%s.log", s_id);
+    sto_iter_t it;
+    if (sto_list_open(&it, "/sessions") == 0) {
+        char name[STO_NAME_MAX];
+        int n = 0;
+        while (sto_list_next_name(&it, name, sizeof name) == 1) {
+            if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
+            size_t len = strlen(name);
+            if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
+            if (strcmp(name, e->curlog) == 0) continue;                     /* never the current session */
+            if (e->oldest[0] == 0 || strcmp(name, e->oldest) < 0)
+                (void)snprintf(e->oldest, sizeof e->oldest, "%s", name);    /* smallest id == oldest (§12.7) */
+        }
+        sto_list_close(&it);
+    }
+    LT_ASSERT_RET(strlen(e->oldest) < STO_NAME_MAX, LOG_ASSERT_CODE, false);   /* postcondition: name copy in bounds */
+    return e->oldest[0] != 0;
+}
+
+/* Unlink one evicted .log (the .sum is kept, as today) and record it: one E_STO_EVICT errlog
+ * entry plus one ESP_LOGW line per file. Fix round 2 (minor #13): `si` (the caller's loop-scoped
+ * reading) is from BEFORE this unlink ran, so the line now re-reads sto_info() after the unlink
+ * to report the true post-eviction free/total figure, not the stale pre-unlink one -- best-effort
+ * (falls back to the pre-unlink `*si` reading on failure; the caller's own loop re-reads sto_info()
+ * again anyway for its loop condition, so this extra read costs nothing beyond a clearer log line). */
+static void evict_one(const char *name, const sto_info_t *si)
+{
+    LT_ASSERT_VOID(name != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_VOID(si != NULL, LOG_ASSERT_CODE);
+    char p[STO_NAME_MAX + 12];   /* "/sessions/" (10) + a full oldest name + NUL */
+    (void)snprintf(p, sizeof p, "/sessions/%s", name);
+    (void)sto_unlink(p);
+    (void)errlog_add(E_STO_EVICT, 0);
+    sto_info_t after = *si;
+    (void)sto_info(&after);
+    ESP_LOGW(TAG, "evicted %s (free %u/%u KB)", name, (unsigned)after.free_kb, (unsigned)after.total_kb);
+}
+
+/* Invariant: the filesystem must never reach 0 free blocks -- LittleFS cannot even unlink then
+ * ("lfs.c:704 No more free space", "Unable to split"); this bounded multi-file pass (run every
+ * 60 s and at session start) plus open_session()'s reserve guard are what keep the bench's
+ * reboot-loop deadlock (Plan 7 T9 fix 3, ruling T9-R3) from recurring. */
 static void eviction_check(void)
 {
     LT_ASSERT_VOID(!s_open || s_id[0] != '\0', LOG_ASSERT_CODE);   /* valid session state */
     sto_info_t si;
     if (sto_info(&si) != 0 || si.total_kb == 0) return;
     LT_ASSERT_VOID(si.free_kb <= si.total_kb, LOG_ASSERT_CODE);   /* HAL report sanity before the % math below */
-    if (si.free_kb >= si.total_kb / 10u) {
+    if (si.free_kb >= (si.total_kb * STO_EVICT_PCT) / 100u) {
         if (s_samples_full) { s_samples_full = false; sys_flags_clear(SYS_STORAGE_FULL); }
         /* Plan 5.6 final-review A I2: the common path -- publish the si.free_kb already in hand
          * instead of returning before the cache is ever refreshed while space stays plentiful
@@ -508,44 +597,33 @@ static void eviction_check(void)
         cache_publish_free(si.free_kb);
         return;
     }
-    /* free < 10 %: delete the oldest .log that is not the current session. Per-entry stat() (via
-     * sto_list_next, not the name-only sto_list_next_name) is kept -- eviction wants sizes/ages
-     * available to it (a T12 latency-work candidate, §4). This loop stays O(n^2) on LittleFS; the
-     * vTaskDelay(1) every 16 entries (Plan 5.6 T1 fix 4) only feeds IDLE0/the task WDT through it,
-     * it does not fix the complexity: blocking this priority-8 task for one tick is what lets IDLE0
-     * (priority 0) run: taskYIELD() would not, it never schedules a lower-priority task. */
-    evict_ctx_t e;
-    memset(&e, 0, sizeof e);
-    if (s_id[0]) (void)snprintf(e.curlog, sizeof e.curlog, "%s.log", s_id);
-    sto_iter_t it;
-    if (sto_list_open(&it, "/sessions") == 0) {
-        sto_entry_t ent;
-        int n = 0;
-        while (sto_list_next(&it, &ent) == 1) {
-            if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
-            const char *name = ent.name;
-            size_t len = strlen(name);
-            if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
-            if (strcmp(name, e.curlog) == 0) continue;                      /* never the current session */
-            if (e.oldest[0] == 0 || strcmp(name, e.oldest) < 0)
-                (void)snprintf(e.oldest, sizeof e.oldest, "%s", name);      /* smallest id == oldest (§12.7) */
-        }
-        sto_list_close(&it);
+
+    /* free < STO_EVICT_PCT: evict oldest-first in a bounded multi-file pass, until free reaches
+     * STO_TARGET_PCT or EVICT_MAX_PER_PASS unlinks have run (rule 2: bounded loop) -- a single
+     * unlink per 60 s pass could not keep up with a bench reboot loop that opened and wrote a
+     * new session every boot (Plan 7 T9 fix 3). Each iteration re-scans (evict_scan_oldest, still
+     * O(n)/name-only) and re-reads sto_info(); the vTaskDelay(1) between passes, plus the one
+     * inside the scan, both still let IDLE0 -- and the ui task -- run ahead of this task. */
+    uint32_t pass = 0;
+    bool nothing_left = false;
+    while (si.free_kb < (si.total_kb * STO_TARGET_PCT) / 100u && pass < EVICT_MAX_PER_PASS) {
+        evict_ctx_t e;
+        if (!evict_scan_oldest(&e)) { nothing_left = true; break; }
+        evict_one(e.oldest, &si);
+        pass++;
+        if (sto_info(&si) != 0 || si.total_kb == 0) break;   /* re-read for the loop condition */
+        vTaskDelay(1);                                        /* one tick between passes */
     }
-    if (e.oldest[0]) {
-        char p[STO_NAME_MAX + 12];   /* "/sessions/" (10) + a full oldest name + NUL */
-        (void)snprintf(p, sizeof p, "/sessions/%s", e.oldest);
-        (void)sto_unlink(p);
-        (void)errlog_add(E_STO_EVICT, 0);
-        ESP_LOGW(TAG, "evicted %s (free %u/%u KB)", e.oldest, (unsigned)si.free_kb, (unsigned)si.total_kb);
-    } else if (si.free_kb < si.total_kb / 20u) {    /* nothing to delete and < 5 %: pause samples */
+    LT_ASSERT_VOID(pass <= EVICT_MAX_PER_PASS, LOG_ASSERT_CODE);   /* rule 2: bounded loop */
+
+    if (nothing_left && si.free_kb < (si.total_kb * STO_RESERVE_PCT) / 100u) {
+        /* nothing left to delete and still below the reserve: pause samples */
         if (!s_samples_full) { s_samples_full = true; sys_flags_set(SYS_STORAGE_FULL); (void)errlog_add(E_STO_FULL, 0); }
     }
-    /* Plan 5.6 T1 fix 3: e.oldest, when set, is always a .log (never a .sum -- the filter above
-     * only ever candidates .log names), so an eviction pass never changes the session count;
+    /* Plan 5.6 T1 fix 3: an evicted name is always a .log (never a .sum -- evict_scan_oldest's
+     * filter only ever candidates .log names), so this pass never changes the session count;
      * refresh the cheap free_kb reading (one sto_info(), not a re-listing) and re-baseline the
-     * between-refresh byte estimate either way (an unlink, or the samples-paused branch, both
-     * reached only because free space was already tight). */
+     * between-refresh byte estimate either way. */
     cache_publish_free(storage_free_kb());
 }
 

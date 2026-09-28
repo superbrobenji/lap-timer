@@ -34,8 +34,11 @@
 #include "app/ota.h"         /* ota_begin/ota_data/ota_end/ota_abort -- the `ota recv` bench push (§19.6) */
 #include "app/link.h"        /* link_sink_serial_emit (stream transport half), link_note_cmd_activity */
 #include "app/pipeline.h"
+#include "app/ui.h"          /* ui_buttons_queue() + btn_raw_t -- `dbg btn` bench injection (Plan 7 T8) */
+#include "hal/board.h"       /* board_buttons_override() -- `dbg btn` bench injection (Plan 7 T8) */
 #include "hal/storage.h"
 
+#include "core/btn_parse.h"  /* pure name/hold-ms parser behind `dbg btn` (Plan 7 T8, host-testable) */
 #include "core/core.h"
 #include "core/event.h"
 #include "core/ses.h"
@@ -772,6 +775,94 @@ static int dbg_mem(void)
     return 0;
 }
 
+/* ---- dbg btn (new: Plan 7 T8 bench button injection) ----
+ *
+ * The physical buttons (GPIO 32/33/25) arrive after the panel, so this drives the SAME path the
+ * ISR feeds: board_buttons_override() forces the injected mask into every board_buttons_read()
+ * the ui task polls (§20.3's "reconcile with the live level"), while the press/release btn_raw_t
+ * events posted onto ui_buttons_queue() wake the ui task immediately instead of waiting for its
+ * next poll tick. `name` + `hold_ms` are parsed by the pure, host-tested btn_parse() (core/
+ * btn_parse.h); hold_ms is clamped 20..5000 there, so the vTaskDelay below is always bounded
+ * (rule 2) -- the console task blocking for it is acceptable (brief, Step 1).
+ *
+ * Ruling T9-R1: an injected hold_ms exactly equal to a ui hold threshold (BTN_LONG_MS 1000,
+ * BTN_COMBO_MS 2000, BTN_VLONG_MS 3000 in ui.c) releases before the ui task's next UI_TICK_MS
+ * (100 ms) poll ever observes the hold having reached that threshold, so the ladder never fires.
+ * Real buttons are unaffected -- a human release is never timed to the millisecond -- so the fix
+ * is in this tool's usage text: it tells the operator to clear the threshold by >= 100 ms (one
+ * ui poll tick), not in the injection path itself.
+ */
+static int dbg_btn(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc < 3) {
+        printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]   (hold must exceed 1000/2000/3000 ms thresholds by >= 100 ms, e.g. 2200 for the combo)\n");
+        return 1;
+    }
+
+    uint8_t mask = 0;
+    uint32_t hold_ms = 0;
+    const char *ms_arg = (argc >= 4) ? argv[3] : NULL;
+    if (btn_parse(argv[2], ms_arg, &mask, &hold_ms) != 0) {
+        printf("usage: dbg btn <mode|up|down|up+down> [hold_ms]   (hold must exceed 1000/2000/3000 ms thresholds by >= 100 ms, e.g. 2200 for the combo)\n");
+        return 1;
+    }
+    CORE_ASSERT_RET(hold_ms <= 5000, EXP_SERIAL_ASSERT_CODE, 1);   /* btn_parse's own 20..5000 ms clamp held */
+
+    /* Minor #6: "ui not started yet" is an operator condition (ui_start() runs later in boot, or
+     * a bench script raced it), not a genuine anomaly -- it must not trip the fault hook. */
+    QueueHandle_t q = ui_buttons_queue();
+    if (q == NULL) {
+        printf("dbg btn: ui not started yet\n");
+        return 1;
+    }
+
+    int64_t now = esp_timer_get_time();
+    board_buttons_override(mask, true);
+    btn_raw_t press = { .mask = mask, .mono_us = now };
+    (void)xQueueSend(q, &press, pdMS_TO_TICKS(50));   /* best-effort: a full btn_q only delays the ui's next poll tick */
+
+    vTaskDelay(pdMS_TO_TICKS(hold_ms));   /* bounded 20..5000 ms (btn_parse clamp); console task, acceptable */
+
+    board_buttons_override(mask, false);
+    btn_raw_t release = { .mask = 0, .mono_us = now + (int64_t)hold_ms * 1000 };
+    (void)xQueueSend(q, &release, pdMS_TO_TICKS(50));   /* best-effort, same reasoning as the press send above */
+
+    printf("OK btn %s %lu\n", argv[2], (unsigned long)hold_ms);
+    return 0;
+}
+
+/* ---- dbg flag (new: Plan 7 T8 bench sys_flags injection) ----
+ *
+ * Forces a sys_flags bit (§17.4) on/off from the console, e.g. `dbg flag set 11` to force
+ * SYS_DISP_TEMP_THROTTLE and test the refresh-throttle path without waiting for a real
+ * over-temperature condition; `dbg flag clear 11` restores it.
+ */
+static int dbg_flag(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+
+    bool ok = (argc >= 4) &&
+              (strcmp(argv[2], "set") == 0 || strcmp(argv[2], "clear") == 0);
+    long bit = -1;
+    if (ok) {
+        char *end = NULL;
+        bit = strtol(argv[3], &end, 10);
+        ok = (argv[3][0] != '\0') && end != NULL && *end == '\0' && bit >= 0 && bit <= 15;
+    }
+    if (!ok) {
+        printf("usage: dbg flag set|clear <bit 0..15>\n");
+        return 1;
+    }
+
+    bool want_set = (strcmp(argv[2], "set") == 0);
+    if (want_set) sys_flags_set((uint8_t)bit);
+    else          sys_flags_clear((uint8_t)bit);
+
+    printf("OK flag %ld %s\n", bit, want_set ? "set" : "clear");
+    return 0;
+}
+
 /* ---- dbg dispatch ---- */
 static int cmd_dbg(int argc, char **argv)
 {
@@ -787,6 +878,8 @@ static int cmd_dbg(int argc, char **argv)
         if (strcmp(s, "laps")    == 0) return dbg_laps();
         if (strcmp(s, "rtc")     == 0) return dbg_rtc();
         if (strcmp(s, "mem")     == 0) return dbg_mem();
+        if (strcmp(s, "btn")     == 0) return dbg_btn(argc, argv);
+        if (strcmp(s, "flag")    == 0) return dbg_flag(argc, argv);
         if (strcmp(s, "crash")   == 0) {
             printf("dbg: forcing a panic (abort) -> ESP_RST_PANIC\n");
             fflush(stdout);
@@ -805,6 +898,8 @@ static int cmd_dbg(int argc, char **argv)
         }
     }
     printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | crash | hang\n");
+    printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection, Plan 7 T8)\n");
+    printf("       dbg flag set|clear <bit 0..15>  (bench sys_flags injection, Plan 7 T8)\n");
     printf("       dbg gps raw <on|off> | imu raw <on|off> | power <..> | sim <on|off>  (not in plan 03)\n");
     return 1;
 }
@@ -1065,7 +1160,7 @@ void export_serial_start(int reset_reason)
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
 #if CFG_HAS_DEVUX
-    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|crash|hang", cmd_dbg);
+    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn <n> [ms]|flag set|clear <b>|crash|hang", cmd_dbg);
     register_cmd("ota",    "ota recv <size> <sha256_hex> <ver> <hwid>  (dev bench image push, §19.6)", cmd_ota);
 #endif
 
