@@ -506,8 +506,10 @@ static void show_venue_oneshot(int64_t now)
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
 }
 
-/* Clears the page 1 row 4 sector-delta cache (spec 7b §3): the lap that has just started has no
- * sector deltas of its own yet -- EV_SECTOR repopulates them as it runs. */
+/* Clears the page 1 row 4 sector-delta cache (spec 7b §3). Ruling B7b-1 (bench finding 1): called
+ * only once, at session start (ui_task()'s init) -- NOT per lap. The last-lap sector deltas
+ * persist across the line (a rider still wants to see the lap that just ended); each EV_SECTOR
+ * simply overwrites its own slot as the new lap's gates arrive. */
 static void clear_last_sector_deltas(void)
 {
     LT_ASSERT_VOID((size_t)(LAP_MAX_SECTORS + 1) <=
@@ -552,13 +554,15 @@ static void handle_lap_result(uint32_t lap_ms, uint8_t flags, int32_t lap_delta_
                    UI_APP_ASSERT_CODE);
 
     /* Event card (spec 7b §3): the big slot shows this lap's delta only if a best already existed
-     * before it (else BIG_NONE); lap_no advances to the lap now starting; the sector-detail row
-     * resets for it. */
+     * before it (else BIG_NONE); lap_no advances to the lap now starting. Ruling B7b-1 (bench
+     * finding 1): the sector-detail row is deliberately NOT reset here -- last_sector_delta_ms[]/
+     * have_last_sector_delta[] persist across the line, each EV_SECTOR overwriting its own slot as
+     * the new lap's gates arrive, so page 1 keeps showing the just-finished lap's deltas until
+     * then. */
     s_model.big_kind       = had_best ? (uint8_t)BIG_LAP_DELTA : (uint8_t)BIG_NONE;
     s_model.big_delta_ms   = lap_delta_ms;
     s_model.lap_no         = (uint16_t)(s_model.laps_total + 1u);
     s_model.cur_sector_idx = 0;
-    clear_last_sector_deltas();
 }
 
 /* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). An out-lap
@@ -572,9 +576,9 @@ static void handle_lap_complete(const event_t *e)
     if ((e->flags & LAP_F_OUT_LAP) == 0) {
         handle_lap_result(e->arg32, e->flags, (int32_t)e->arg32b);
     }
-    /* An out-lap (above) skips handle_lap_result(), so have_last_sector_delta[] deliberately
-     * survives across it (spec 7b §3) -- it would need clearing here too if an out-lap ever
-     * followed a pit exit mid-session. */
+    /* have_last_sector_delta[]/last_sector_delta_ms[] are untouched by an out-lap too (spec 7b §3,
+     * ruling B7b-1): they persist across every lap boundary, out-laps included, and are simply
+     * overwritten per sector as EV_SECTOR fires. */
     s_model.cur_ms_at_gate = 0;
     s_model.cur_sector_idx = 0;
     s_dirty                = true;
@@ -999,9 +1003,14 @@ static void ui_task(void *arg)
     s_mode       = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode = s_mode;
     /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
-     * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0. */
+     * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0.
+     * clear_last_sector_deltas() (ruling B7b-1, bench finding 1) is called here and ONLY here --
+     * once at session start -- since have_last_sector_delta[] persists across every lap boundary
+     * thereafter (each EV_SECTOR just overwrites its own slot); this call documents that intent
+     * explicitly rather than relying on zero-init alone. */
     s_model.lap_no    = 1;
     s_model.big_kind  = (uint8_t)BIG_NONE;
+    clear_last_sector_deltas();
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);   /* valid engine mode from cfg */
 
     fb_init(&s_fb, s_fb_bits, CANVAS_W, CANVAS_H);
