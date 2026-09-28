@@ -71,212 +71,324 @@ static int fb_max_ink_col(const fb_t *fb)
     return max_col;
 }
 
-/* ---- LAP page 0 ---- */
+/* ---- LAP page 0: the event card (spec 7b §3-4) ---- */
 
-static void test_lap_p0_mid(void)
+static void lap_model_base(screen_model_t *m)
 {
-    /* Mid-session: a best and a previous lap on record, partway through the current lap, the
-     * last completed sector was 0.21s slower than best (spec's own example delta). */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 0;
-    m.have_best = true;
-    m.best_ms = 111900; /* 1:51.90 */
-    m.have_prev = true;
-    m.prev_ms = 112340; /* 1:52.34 */
-    m.cur_ms_at_gate = 72300; /* 1:12.30 */
-    m.cur_sector_idx = 2;
-    m.sector_delta_ms = -210; /* -0.21 */
-    m.new_best = false;
-    m.flags = 0;
-    m.batt_pct = 87;
+    memset(m, 0, sizeof *m);
+    m->mode = SCR_MODE_LAP;
+    m->page = 0;
+    m->have_best = true;  m->best_ms = 111900; /* 1:51.90 */
+    m->have_prev = true;  m->prev_ms = 112340; /* 1:52.34 */
+    m->lap_no = 7;
+    m->cur_sector_idx = 2;
+    m->batt_pct = 87;
+}
 
+static void test_lap_p0_first_lap(void)
+{
+    /* Before any lap has a best/prev on record: big slot falls back to "LAP n", footer shows the
+     * "-:--.--" placeholders, marker reads "L1 S0". */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.have_best = false; m.have_prev = false; m.lap_no = 1; m.cur_sector_idx = 0;
+    m.big_kind = BIG_NONE;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_mid.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_first_lap.pbm"), &s_fb));
 }
 
-static void test_lap_p0_empty(void)
+static void test_lap_p0_sector_delta(void)
 {
-    /* Before any lap: BEST/PREV show "--:--.--"; CUR is reset to 0:00.00 S0 at S/F. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 0;
-    m.have_best = false;
-    m.have_prev = false;
-    m.cur_ms_at_gate = 0;
-    m.cur_sector_idx = 0;
-    m.sector_delta_ms = 0;
-    m.new_best = false;
-    m.flags = 0;
-    m.batt_pct = 100;
-
+    /* Mid-lap: the last completed sector was 0.32s quicker than best -- the big slot shows the
+     * signed sector delta, not a lap delta. */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = -320; m.big_sector_idx = 2;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_empty.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_sector_delta.pbm"), &s_fb));
 }
 
-static void test_lap_p0_newbest_fault(void)
+static void test_lap_p0_lap_delta_wide(void)
 {
-    /* Just completed a new best lap (dS row shows "BEST" instead of a delta) while GPS has no fix
-     * (SYS_GPS_NOFIX, bit 1) -- exercises the fault-icon strip together with the new-best path. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 0;
-    m.have_best = true;
-    m.best_ms = 109870; /* 1:49.87, the lap that was just completed */
-    m.have_prev = true;
-    m.prev_ms = 111900; /* 1:51.90, the previous best */
-    m.cur_ms_at_gate = 15230; /* 0:15.23 into the new lap */
-    m.cur_sector_idx = 1;
-    m.sector_delta_ms = -1230; /* irrelevant while new_best is set, but populated for realism */
-    m.new_best = true;
-    m.flags = 1u << SCR_SYS_GPS_NOFIX;
-    m.batt_pct = 54;
-
+    /* A six-glyph lap delta ("+12.50", ends at x 238) leaves no room for the BEST tag beside the
+     * number, so it must move to the marker row instead (spec 7b §4). */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_LAP_DELTA; m.big_delta_ms = 12500; m.cur_sector_idx = 0; m.lap_no = 12;
+    m.new_best = true; /* tag must move to the marker row: six glyphs leave no room beside the number */
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_newbest_fault.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_lap_delta_wide.pbm"), &s_fb));
 }
 
-/* ---- LAP page 1 (best-lap sector splits + THEO) ---- */
+static void test_lap_p0_new_best(void)
+{
+    /* A narrow lap delta ("-0.44") with new_best set: the BEST tag fits beside the number, so the
+     * marker stays put and the tag sits to the number's right. */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_LAP_DELTA; m.big_delta_ms = -440; m.new_best = true; m.cur_sector_idx = 0;
+    m.best_ms = 111460; m.prev_ms = 111460;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_new_best.pbm"), &s_fb));
+}
+
+static void test_lap_p0_fault(void)
+{
+    /* GPS has no fix and the battery is low -- exercises the fault strip together with the event
+     * card; the footer rows sit above the strip (ruling T2-R1), so BEST needs no x retraction to
+     * stay clear of the icons. */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = 210; m.big_sector_idx = 2;
+    m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW); m.batt_pct = 14;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_fault.pbm"), &s_fb));
+}
+
+/* ---- LAP page 1 (sector board, spec 7b §5) ---- */
 
 static void test_lap_p1_sectors(void)
 {
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 1;
-    m.have_best = true;
-    m.best_ms = 111900; /* 1:51.90 */
-    m.best_n_sectors = 4;
-    m.best_sector_ms[0] = 32100; /* S1 0:32.10 */
-    m.best_sector_ms[1] = 41000; /* S2 0:41.00 */
-    m.best_sector_ms[2] = 39240; /* S3 0:39.24 */
-    m.best_sector_ms[3] = 33200; /* S4 (unused by the spec's example, exercises 4 sectors / 2 rows) */
-    m.have_theo = true;
-    m.theo_best_ms = 111200; /* THEO 1:51.20 */
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Three sectors, both fit comfortably within the three-column board: S1/S2/S3 best-lap times
+     * on the value row, and a mix of a hit ("-0.12"/"+0.40") and a not-yet-reached ("----", S3)
+     * last-lap delta on the row below. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 3;
+    m.best_sector_ms[0] = 32100; m.best_sector_ms[1] = 41000; m.best_sector_ms[2] = 39240;
+    m.have_theo = true; m.theo_best_ms = 111200;
+    m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
+    m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
+    /* sector 3 of the current lap not reached yet: cell shows "----" */
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_sectors.pbm"), &s_fb));
 }
 
-/* ---- LAP page 2 (session stats) ---- */
+static void test_lap_p1_many_sectors(void)
+{
+    /* Five sectors: the board still shows only three columns, S3's label gains a "+2" suffix for
+     * the two sectors that do not fit, every last-lap delta is a huge +15.00s that clamps to the
+     * fixed "+9.99" budget, and no theoretical best is on record yet (THEO reads "-:--.--"). */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 5;
+    for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
+    m.have_theo = false;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_many_sectors.pbm"), &s_fb));   /* S3 label reads "S3 +2"; THEO reads -:--.-- */
+}
+
+static void test_lap_p1_deltas_only(void)
+{
+    /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i], never on
+     * best_n_sectors -- no producer fills best_n_sectors yet (roadmap follow-up #58), so on target
+     * best_n_sectors is 0 while the deltas for the sectors already crossed this lap are still
+     * real. best_sector_ms row stays "--.--" throughout (unaffected by this fix); sector 2's delta
+     * is unset ("----"), sectors 0/1 show real deltas. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 0;
+    m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
+    m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_deltas_only.pbm"), &s_fb));
+}
+
+/* ---- LAP page 2 (2x2 stats grid, spec 7b §6) ---- */
 
 static void test_lap_p2_stats(void)
 {
-    /* Values taken straight from spec §20.5's own worked example. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_LAP;
-    m.page = 2;
-    m.max_speed_kmh = 214;
-    m.lean_l_deg = 52;
-    m.lean_r_deg = 55;
-    m.lat_g_e2 = 132; /* 1.32 */
-    m.acc_g_e2 = 61;  /* 0.61 */
-    m.brk_g_e2 = 105; /* 1.05 */
-    m.laps_total = 12;
-    m.laps_valid = 10;
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Values taken straight from spec 7b §6's own worked example. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 2;
+    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats.pbm"), &s_fb));
 }
 
-/* ---- DRAG page 0 (benches, spec §11.4) ---- */
-
-static void test_drag_p0_benches(void)
+static void test_lap_p2_stats_many_laps(void)
 {
-    /* A run that has hit 0-100 and 0-200 (2 of the 3 default benches_kmh, so no trim needed) and
-     * crossed the 1/4 with a trap speed -- spec's own DRAG page-0 example ("@ 305"-style trap) and
-     * the session's named golden "0-100 + 0-200 hit, 1/4 present with a trap speed". Times follow
-     * a constant 0.5g run (matching §22.2's test_drag.c synthetic fixture: 0-100 at 5.66s, 1/4 at
-     * 12.81s, trap ~223 km/h) so the numbers are physically consistent, not just plausible-looking.
-     */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_DRAG;
-    m.page = 0;
-    m.drag_n = 3;
-    m.drag[0] = (drag_row_t){.label = "0-100", .t_ms = 5660, .present = true};
-    m.drag[1] = (drag_row_t){.label = "0-200", .t_ms = 11900, .present = true};
-    m.drag[2] = (drag_row_t){
-        .label = "1/4", .t_ms = 12810, .present = true, .trap_kmh = 223, .has_trap = true};
-    m.drag_armed = false;
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Ruling T3-R2: a 3-digit laps_total/laps_valid pushes the LAPS cell's "(N valid)" suffix past
+     * CANVAS_VISIBLE_W on the narrower 213 canvas (GRID_COL2_X 128 + "120"'s width + the suffix
+     * does not fit before x 250) -- render_grid_laps degrades to the shorter "(118)" there, while
+     * the wider 296 canvas still fits the full "(118 valid)". */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 2;
+    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 120; m.laps_valid = 118;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_benches.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_many_laps.pbm"), &s_fb));
 }
 
-/* ---- DRAG page 1 (all gates of the last run) ---- */
-
-static void test_drag_p1_gates(void)
+static void test_lap_p2_stats_huge_laps(void)
 {
-    /* All seven §6.6 gates hit on one run, in the spec's own listed order (60ft, 330ft, 1/8,
-     * 1000ft, 1/4, 100-200, 100-0). Same constant-0.5g run as the page-0 case (60ft/330ft/1/8/
-     * 1000ft/1/4 times derived from t = sqrt(2d / (0.5 * 9.81)); 100-200 is the time between the
-     * v=100 and v=200 km/h crossings under the same acceleration. #40: 100-0 (DRAG_BRAKE,
-     * core/drag.h) is a stopping DISTANCE in metres, not an elapsed time -- .is_distance/.dist_m
-     * now carry that (~39 m at 0.5g from 100 km/h, matching the §22.1 bench measurement recorded
-     * in docs/measurements.md), replacing the earlier placeholder .t_ms reading that this comment
-     * used to describe. */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_DRAG;
-    m.page = 1;
-    m.drag_n = 7;
-    m.drag[0] = (drag_row_t){.label = "60ft", .t_ms = 2731, .present = true};
-    m.drag[1] = (drag_row_t){.label = "330ft", .t_ms = 6405, .present = true};
-    m.drag[2] = (drag_row_t){.label = "1/8", .t_ms = 9057, .present = true};
-    m.drag[3] = (drag_row_t){.label = "1000ft", .t_ms = 11148, .present = true};
-    m.drag[4] = (drag_row_t){
-        .label = "1/4", .t_ms = 12810, .present = true, .trap_kmh = 223, .has_trap = true};
-    m.drag[5] = (drag_row_t){.label = "100-200", .t_ms = 5664, .present = true};
-    m.drag[6] = (drag_row_t){.label = "100-0", .present = true, .dist_m = 39, .is_distance = true};
-    m.flags = 0;
-    m.batt_pct = 87;
+    /* Test gap (finding 13b): a 5-digit laps_total/laps_valid (12000/11999) pushes the LAPS
+     * suffix past CANVAS_VISIBLE_W on both canvases. On the 213 (GRID_COL2_X 128, "12000" is 70 px
+     * of FONT_MED) neither "(11999 valid)" (91 px) nor the shorter "(11999)" (49 px) fits before
+     * x 246 -- render_grid_laps draws nothing after the number. On the wider 296 (GRID_COL2_X 152,
+     * limit x 292) "(11999 valid)" still does not fit but "(11999)" does, so it draws that. */
+    screen_model_t m;
+    lap_model_base(&m); m.page = 2;
+    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12000; m.laps_valid = 11999;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_huge_laps.pbm"), &s_fb));   /* 213: nothing after "12000"; 296: "(11999)" */
+}
 
+/* ---- DRAG page 0 (spec 7b §7): the run card ---- */
+
+/* Appends one gate to m->drag[]/drag_n (present=true; the two `false, 0` distance params are
+ * overridden in the caller when a case needs a distance gate). */
+static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint16_t trap, bool dist, uint16_t dist_m)
+{
+    drag_row_t *r = &m->drag[m->drag_n++];
+    memset(r, 0, sizeof *r);
+    strcpy(r->label, label); r->t_ms = t_ms; r->present = true;
+    r->trap_kmh = trap; r->has_trap = trap != 0; r->is_distance = dist; r->dist_m = dist_m;
+}
+
+static void test_drag_p0_ready(void)
+{
+    /* Before the first gate: big slot reads "READY" (FONT_MED, no letters in FONT_HUGE), ARMED
+     * top-right while drag_armed, footer empty. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_armed = true; m.batt_pct = 90;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_ready.pbm"), &s_fb));
+}
+
+static void test_drag_p0_gate_speed(void)
+{
+    /* Four gates hit, newest ("1/4") carries a trap speed: big slot shows "12.84" (FONT_HUGE),
+     * "@173" row below it (FONT_MED), footer lists the three earlier gates "60ft 2.01   330ft
+     * 5.43   1/8 8.29" in hit order. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
+}
+
+static void test_drag_p0_distance(void)
+{
+    /* Newest gate is the 100-0 braking distance (#40): big slot shows "38" (FONT_HUGE) + a small
+     * "m" (FONT_SMALL, since FONT_HUGE has no lowercase); footer shows the one earlier gate,
+     * "100-200 6.12". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    drag_gate(&m, "100-200", 6120, 0, false, 0); drag_gate(&m, "100-0", 0, 0, true, 38);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance.pbm"), &s_fb));     /* big "38" + small "m"; footer "100-200 6.12" */
+}
+
+static void test_drag_p0_fault(void)
+{
+    /* Finding 5: PF-2's footer clip and fault_strip_left_x() with a bit set were untested on DRAG
+     * page 0 -- same four gates as test_drag_p0_gate_speed, plus GPS no-fix and a low battery. The
+     * footer must stop clear of the fault icons (PF-2), and the battery label/icon must both be
+     * fully legible (finding 17's overprint fix). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 14;
+    m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW);
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_fault.pbm"), &s_fb));
+}
+
+static void test_drag_p0_footer_scroll(void)
+{
+    /* Test gap (finding 13c): nine gates hit this run -- the footer windows to the last
+     * DCARD_FOOTER_MAX (6) gates before the newest (which fills the big slot on its own), so
+     * gates 0/1 ("1"/"2") scroll off and the footer starts at gate 2 ("3"). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    drag_gate(&m, "1", 1000, 0, false, 0); drag_gate(&m, "2", 2000, 0, false, 0);
+    drag_gate(&m, "3", 3000, 0, false, 0); drag_gate(&m, "4", 4000, 0, false, 0);
+    drag_gate(&m, "5", 5000, 0, false, 0); drag_gate(&m, "6", 6000, 0, false, 0);
+    drag_gate(&m, "7", 7000, 0, false, 0); drag_gate(&m, "8", 8000, 0, false, 0);
+    drag_gate(&m, "9", 9000, 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_footer_scroll.pbm"), &s_fb));   /* big "9.00"; footer starts "3 3.00", never "1"/"2" */
+}
+
+static void test_drag_p0_armed_gates(void)
+{
+    /* Test gap (finding 13d): drag_armed stays true (re-armed for the next run) while gates from
+     * the run just completed are still on screen -- ARMED top-right must coexist with the newest
+     * gate's label/huge value/footer rather than the two being mutually exclusive. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_armed = true;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_armed_gates.pbm"), &s_fb));
+}
+
+/* ---- DRAG pages 1/2 (gate list, spec 7b §7) ---- */
+
+static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this run */
+{
+    /* All seven §6.6 gates named, in the spec's own listed order (60ft, 330ft, 1/8, 1000ft, 1/4,
+     * 100-200, 100-0); the 1000ft gate (index 3) was not reached this run (present forced false
+     * after the fact) -- the list shows "--.--" for it. Ruling T4-R2: 100-200 is present with
+     * 12.34s, the right column's worst case on the 213 canvas (its 49px label plus a 5-glyph
+     * FONT_MED time). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    m.drag[3].present = false;
+    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "100-200", 12340, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
 }
 
-/* ---- DRAG page 2 (best per gate this session) ---- */
-
-static void test_drag_p2_best(void)
+static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, every gate present */
 {
-    /* Same seven-gate row set as page 1, but the session-best value per gate (spec: "best per
-     * gate this session") -- a little faster than the single run in test_drag_p1_gates, as a
-     * multi-run session's best-of would be. #40: 100-0 is again a distance (a shorter session-best
-     * stopping distance, 37 m vs. p1's 39 m -- shorter is better for braking, same direction as
-     * every other gate here being a little quicker). */
-    screen_model_t m = {0};
-    m.mode = SCR_MODE_DRAG;
-    m.page = 2;
-    m.drag_n = 7;
-    m.drag[0] = (drag_row_t){.label = "60ft", .t_ms = 2700, .present = true};
-    m.drag[1] = (drag_row_t){.label = "330ft", .t_ms = 6350, .present = true};
-    m.drag[2] = (drag_row_t){.label = "1/8", .t_ms = 9000, .present = true};
-    m.drag[3] = (drag_row_t){.label = "1000ft", .t_ms = 11080, .present = true};
-    m.drag[4] = (drag_row_t){
-        .label = "1/4", .t_ms = 12750, .present = true, .trap_kmh = 225, .has_trap = true};
-    m.drag[5] = (drag_row_t){.label = "100-200", .t_ms = 5600, .present = true};
-    m.drag[6] = (drag_row_t){.label = "100-0", .present = true, .dist_m = 37, .is_distance = true};
-    m.flags = 0;
-    m.batt_pct = 87;
-
+    /* Session-best per gate (title "SESSION BEST"): same seven rows as test_drag_p1_gates, but
+     * gate 5 (100-200) is now present with t_ms 6120 -- every gate hit this session. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 2; m.batt_pct = 90;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "100-200", 6120, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -454,12 +566,23 @@ static void test_menu_scrolled(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_lap_p0_mid);
-    RUN_TEST(test_lap_p0_empty);
-    RUN_TEST(test_lap_p0_newbest_fault);
+    RUN_TEST(test_lap_p0_first_lap);
+    RUN_TEST(test_lap_p0_sector_delta);
+    RUN_TEST(test_lap_p0_lap_delta_wide);
+    RUN_TEST(test_lap_p0_new_best);
+    RUN_TEST(test_lap_p0_fault);
     RUN_TEST(test_lap_p1_sectors);
+    RUN_TEST(test_lap_p1_many_sectors);
+    RUN_TEST(test_lap_p1_deltas_only);
     RUN_TEST(test_lap_p2_stats);
-    RUN_TEST(test_drag_p0_benches);
+    RUN_TEST(test_lap_p2_stats_many_laps);
+    RUN_TEST(test_lap_p2_stats_huge_laps);
+    RUN_TEST(test_drag_p0_ready);
+    RUN_TEST(test_drag_p0_gate_speed);
+    RUN_TEST(test_drag_p0_distance);
+    RUN_TEST(test_drag_p0_fault);
+    RUN_TEST(test_drag_p0_footer_scroll);
+    RUN_TEST(test_drag_p0_armed_gates);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
     RUN_TEST(test_oneshot_boot);

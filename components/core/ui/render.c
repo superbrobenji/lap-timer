@@ -157,10 +157,13 @@ void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
 /* Shared opaque 1bpp cell blit used by fb_text (per glyph) and fb_icon: draws a cw x ch cell at
  * (x,y) from `bitmap` (MSB-first, row-major, stride bytes/row, bit=1 is ink), or an all-
  * background cell when `bitmap` is NULL (used for fb_text's "no glyph" case). Clips per-pixel to
- * the framebuffer bounds and extends dirty by the clipped bounding box. */
-static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, const uint8_t *bitmap)
+ * the framebuffer bounds and extends dirty by the clipped bounding box. `invert` flips the cell's
+ * sense (fb_text_inv): ink pixels become background and background pixels become ink, so the
+ * NULL-bitmap "no glyph" case (ink 0 throughout) still comes out right -- a solid ink cell. */
+static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, const uint8_t *bitmap, bool invert)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(cw > 0 && ch > 0 && stride > 0, UI_ASSERT_CODE);
     int cx0 = x < 0 ? 0 : x;
     int cy0 = y < 0 ? 0 : y;
     int cx1 = x + cw;
@@ -189,16 +192,16 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
                  * unsigned domain so the result stays unsigned end to end (gcc -Wsign-conversion). */
                 ink = (uint8_t)(((unsigned int)byte >> (7 - (col % 8))) & 1u); /* p10 */
             }
-            fb_set_px(fb, ix, iy, ink);
+            fb_set_px(fb, ix, iy, invert ? (uint8_t)(ink ^ 1u) : ink);
         }
     }
     fb_extend_dirty(fb, cx0, cy0, cx1, cy1);
 }
 
-/* Draws `s` left-to-right starting at (x,y), one fixed-width font cell per character. Shared by
- * fb_text (draws at the caller's x) and fb_text_right (draws at a pre-computed left x so the
- * string's right edge lands at x_right). Returns the pen x after the last character. */
-static int fb_text_draw(fb_t *fb, const font_t *font, int x, int y, const char *s)
+/* Draws `s` left-to-right starting at (x,y), one fixed-width font cell per character, opaque
+ * (invert == false, fb_text/fb_text_right) or inverted (invert == true, fb_text_inv: ink pixels
+ * white, background pixels black). Returns the pen x after the last character. */
+static int fb_text_draw(fb_t *fb, const font_t *font, int x, int y, const char *s, bool invert)
 {
     CORE_ASSERT_RET(font != NULL, UI_ASSERT_CODE, x);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x);
@@ -209,7 +212,7 @@ static int fb_text_draw(fb_t *fb, const font_t *font, int x, int y, const char *
         if (idx >= 0) {
             glyph = font->bitmaps + (size_t)idx * (size_t)font->h * (size_t)font->stride;
         }
-        fb_blit_1bpp(fb, pen, y, font->w, font->h, font->stride, glyph);
+        fb_blit_1bpp(fb, pen, y, font->w, font->h, font->stride, glyph, invert);
         pen += font->w;
     }
     return pen;
@@ -219,7 +222,7 @@ int fb_text(fb_t *fb, const font_t *f, int x, int y, const char *s)
 {
     CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, x);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x);
-    return fb_text_draw(fb, f, x, y, s);
+    return fb_text_draw(fb, f, x, y, s, false);
 }
 
 int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s)
@@ -227,8 +230,19 @@ int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s)
     CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, x_right);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x_right);
     int x = x_right - (int)(strlen(s) * f->w);
-    fb_text_draw(fb, f, x, y, s);
+    fb_text_draw(fb, f, x, y, s, false);
     return x;
+}
+
+/* Same as fb_text, but every cell is drawn inverted: glyph ink comes out white and the glyph's
+ * background (including a no-glyph blank cell) comes out solid black -- white digits on a black
+ * tile, e.g. the BEST tag (spec §4). Returns the pen x after the last character, same as
+ * fb_text(). */
+int fb_text_inv(fb_t *fb, const font_t *f, int x, int y, const char *s)
+{
+    CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, x);
+    CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x);
+    return fb_text_draw(fb, f, x, y, s, true);
 }
 
 void fb_icon(fb_t *fb, uint8_t icon_id, int x, int y)
@@ -237,7 +251,7 @@ void fb_icon(fb_t *fb, uint8_t icon_id, int x, int y)
     if (icon_id >= ICON_COUNT) {
         return;
     }
-    fb_blit_1bpp(fb, x, y, ICON_W, ICON_H, ICON_STRIDE, &icon_bitmaps[icon_id][0][0]);
+    fb_blit_1bpp(fb, x, y, ICON_W, ICON_H, ICON_STRIDE, &icon_bitmaps[icon_id][0][0], false);
 }
 
 void fb_bar(fb_t *fb, int x, int y, int w, int h, uint8_t pct)

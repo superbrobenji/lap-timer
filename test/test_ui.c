@@ -100,11 +100,39 @@ static void test_dirty_box_accumulates_bounding_box_of_draws(void)
 
 /* ---- font-size coverage (roadmap exit for session 4.1) + icon/bar goldens ---- */
 
-static void test_text_big_renders_lap_time(void)
+static void test_text_huge_renders_delta(void)
 {
-    /* FONT_BIG's glyph set is "0-9 : . - + S" (fonts.h) — a lap time fits it exactly. */
-    fb_text(&s_fb, &FONT_BIG, 4, 4, "1:23.45");
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_big.pbm"), &s_fb));
+    /* FONT_HUGE's glyph set is "0-9 : . - +" (fonts.h): a signed delta fits it exactly. */
+    fb_text(&s_fb, &FONT_HUGE, 4, 4, "-0.32");
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_huge.pbm"), &s_fb));
+}
+
+static void test_text_inv_is_white_on_black(void)
+{
+    /* Inverted text: opaque black cells, glyph ink white. The BEST tag (spec §4) is drawn with it. */
+    int end = fb_text_inv(&s_fb, &FONT_SMALL, 4, 4, "BEST");
+    TEST_ASSERT_EQUAL_INT(4 + 4 * FONT_SMALL.w, end);
+    /* corner pixel of the first cell is background for the glyph, so it must now be black (0) */
+    TEST_ASSERT_EQUAL_UINT8(0u, (uint8_t)((s_fb.bits[4 * s_fb.stride + 0] >> 3) & 1u)); /* x=4,y=4 */
+    /* a pixel outside the cells is untouched (white = 1) */
+    TEST_ASSERT_EQUAL_UINT8(1u, (uint8_t)((s_fb.bits[4 * s_fb.stride + 5] >> 7) & 1u)); /* x=40,y=4 */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_inv.pbm"), &s_fb));
+}
+
+static void test_text_inv_no_glyph_cell_is_solid_black(void)
+{
+    /* Test gap (finding 13a): FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP) -- fb_text_inv()
+     * draws a no-glyph cell as blank (all-background) in fb_text's normal sense, then inverts it,
+     * so every pixel of the cell must come out as ink (0 = black), not just the glyph strokes. */
+    int end = fb_text_inv(&s_fb, &FONT_MED, 4, 4, "@");
+    TEST_ASSERT_EQUAL_INT(4 + FONT_MED.w, end);
+    for (int y = 4; y < 4 + (int)FONT_MED.h; y++) {
+        for (int x = 4; x < 4 + (int)FONT_MED.w; x++) {
+            uint8_t byte = s_fb.bits[y * s_fb.stride + x / 8];
+            TEST_ASSERT_EQUAL_UINT8(0u, (uint8_t)(((unsigned int)byte >> (unsigned int)(7 - (x % 8))) & 1u));
+        }
+    }
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("text_inv_no_glyph.pbm"), &s_fb));
 }
 
 static void test_text_med_renders_line(void)
@@ -141,15 +169,15 @@ static void test_composite_lap_screen(void)
      * an icon and a bar together on one screen — the scenario plan Task 2 Step 1 describes.
      * Coordinates are chosen so nothing overlaps, to keep this readable as a review artefact
      * (deliberate overlap is exercised separately by the clipping test below). */
-    fb_text(&s_fb, &FONT_SMALL, 4, 4, "BEST");
-    fb_text_right(&s_fb, &FONT_BIG, 292, 4, "1:51.90"); /* x[124,292) y[4,44) */
+    fb_text(&s_fb, &FONT_SMALL, 204, 4, "BEST"); /* x[204,232) y[4,16) */
+    fb_text(&s_fb, &FONT_HUGE, 4, 4, "-0.32"); /* x[4,199) y[4,68) */
 
-    fb_text(&s_fb, &FONT_SMALL, 4, 50, "PREV");
-    fb_text_right(&s_fb, &FONT_MED, 200, 48, "1:52.34"); /* x[88,200) y[48,72) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 78, "PREV"); /* x[4,32) y[78,90) */
+    fb_text_right(&s_fb, &FONT_MED, 200, 72, "1:52.34"); /* x[102,200) y[72,96) */
 
-    fb_text(&s_fb, &FONT_SMALL, 4, 80, "S2  1:12.30"); /* x[4,81) y[80,92) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 100, "S2  1:12.30"); /* x[4,81) y[100,112) */
+    fb_text(&s_fb, &FONT_SMALL, 4, 114, "-0.21"); /* x[4,39) y[114,126) */
 
-    fb_text(&s_fb, &FONT_MED, 4, 96, "-0.21"); /* x[4,74) y[96,120) */
     fb_icon(&s_fb, ICON_GPS, 270, 100);         /* x[270,282) y[100,112) */
 
     fb_bar(&s_fb, 90, 100, 170, 16, 62); /* stand-in session progress/level indicator, x[90,260) y[100,116) */
@@ -161,9 +189,10 @@ static void test_composite_lap_screen(void)
 
 static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
 {
-    /* FONT_BIG cell is 24px wide; starting at x=280 the last ~8px of the glyph fall past
-     * FB_W=296 -> right-edge clip. */
-    fb_text(&s_fb, &FONT_BIG, 280, 4, "88:88.88");
+    /* FONT_MED cell is 14px wide; starting at x=290 the last ~8px of the glyph fall past
+     * FB_W=296 -> right-edge clip (Plan 7b T2, ruling T1-R1: the 40px font this case used to
+     * exercise here was removed; FONT_MED gives the same right-edge-clip coverage instead). */
+    fb_text(&s_fb, &FONT_MED, 290, 4, "88:88.88");
 
     /* FONT_MED cell is 24px tall; starting at y=120 the bottom ~16px fall past FB_H=128 ->
      * bottom-edge clip. */
@@ -196,7 +225,9 @@ int main(void)
     RUN_TEST(test_fb_init_starts_with_no_dirty_region);
     RUN_TEST(test_fb_clear_marks_the_whole_frame_dirty);
     RUN_TEST(test_dirty_box_accumulates_bounding_box_of_draws);
-    RUN_TEST(test_text_big_renders_lap_time);
+    RUN_TEST(test_text_huge_renders_delta);
+    RUN_TEST(test_text_inv_is_white_on_black);
+    RUN_TEST(test_text_inv_no_glyph_cell_is_solid_black);
     RUN_TEST(test_text_med_renders_line);
     RUN_TEST(test_text_small_renders_line);
     RUN_TEST(test_icons_and_bar);

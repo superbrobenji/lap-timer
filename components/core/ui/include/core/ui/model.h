@@ -14,6 +14,9 @@
 
 enum { SCR_MODE_LAP = 0, SCR_MODE_DRAG = 1 };
 
+/* LAP page 0's big slot (spec 7b §3-4): what render_lap_page0's 64 px event-card number shows. */
+enum { BIG_NONE = 0, BIG_SECTOR_DELTA = 1, BIG_LAP_DELTA = 2 };
+
 /* Top-level screen selector (spec §20.6-20.7): which of the three screen families m->screen
  * selects. screens_render() (screens_moto.c) dispatches on this. */
 enum { SCR_RIDING = 0, SCR_MENU = 1, SCR_ONESHOT = 2 };
@@ -55,10 +58,19 @@ typedef struct {
     uint8_t  page; /* 0/1/2 */
 
     /* LAP page 0 */
-    uint32_t best_ms, prev_ms, cur_ms_at_gate;
-    uint8_t  cur_sector_idx;   /* S0..Sn shown on the CUR row */
-    int32_t  sector_delta_ms;  /* signed; shown on the last row unless new_best */
+    uint32_t best_ms, prev_ms;
+    uint32_t cur_ms_at_gate;   /* reserved: running CUR time for the live_clock follow-up -- no renderer reads it yet */
+    uint8_t  cur_sector_idx;   /* sectors completed this lap (1-based); 0 = none yet */
     bool     have_best, have_prev, new_best;
+
+    /* LAP page 0 event card (spec 7b §3-4): what the 64 px big slot shows, plus the marker's lap
+     * number and the sector-detail row (page 1 row 4) filled from EV_SECTOR as the lap runs. */
+    uint8_t  big_kind;                                    /* BIG_* : what LAP page 0's big slot shows */
+    int32_t  big_delta_ms;                                /* signed; valid for BIG_SECTOR_DELTA / BIG_LAP_DELTA */
+    uint8_t  big_sector_idx;                              /* 0-based sector index as emitted by EV_SECTOR (arg16); reserved -- renderers use cur_sector_idx */
+    uint16_t lap_no;                                      /* running lap number (laps_total + 1 while a lap runs) */
+    int32_t  last_sector_delta_ms[LAP_MAX_SECTORS + 1];   /* page 1 row 4, index = sector idx */
+    bool     have_last_sector_delta[LAP_MAX_SECTORS + 1];
 
     /* LAP page 1 (best-lap detail) */
     uint32_t best_sector_ms[LAP_MAX_SECTORS + 1];

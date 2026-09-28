@@ -45,19 +45,9 @@
 #define CANVAS_VISIBLE_W 296
 #endif
 
-/* §2's font-size deltas for the LAP riding page (screens_moto.c render_lap_page0): the 213 canvas
- * is too short for FONT_BIG's 40px cell (would run past CANVAS_H at any usable row spacing), so
- * BEST/PREV drop to FONT_MED and CUR's value/sector drop to FONT_SMALL. Named per usage (not a
- * ternary on the font struct itself -- font_t objects, not scalars, can't feed a "?:") so
- * screens_moto.c just writes `&LAP_TIME_FONT` / `&LAP_CUR_FONT` where it used to hardcode
- * `&FONT_BIG` / `&FONT_MED`. */
-#if CANVAS_213
-#define LAP_TIME_FONT FONT_MED
-#define LAP_CUR_FONT  FONT_SMALL
-#else
-#define LAP_TIME_FONT FONT_BIG
-#define LAP_CUR_FONT  FONT_MED
-#endif
+/* Shared left text margin (Plan 7b T4, ruling T3-R1): canvas-independent, used by the boot/menu
+ * one-shot renderers and by the DRAG run-card/gate-list left edges (screens_moto.c). */
+#define TEXT_MARGIN_X 4
 
 /* ---- shared fault-icon strip (screens_moto.c fault_strip, spec §20.5 + §17.4) ----
  * x0 + ICON_W(12) and y + ICON_H(12) land flush with the true visible width/height on both
@@ -70,94 +60,136 @@
 #define FAULT_STRIP_Y  116
 #endif
 
-/* ---- LAP page 0 (BEST/PREV/CUR/dS) ---- */
+/* ---- Plan 7b LAP page 0: the event card (spec 7b §4) ---- */
 #if CANVAS_213
-#define LAP_LABEL_X          4
-#define LAP_TIME_RIGHT_X     170
-#define LAP_ROW_BEST_Y       2
-#define LAP_ROW_PREV_Y       28
-#define LAP_ROW_CUR_Y        54
-#define LAP_ROW_DELTA_Y      70
-#define LAP_CUR_TIME_RIGHT_X 150
-#define LAP_CUR_SECTOR_X     160
-#define LAP_DELTA_VALUE_X    24
+#define CARD_MARKER_RIGHT_X 246
+#define CARD_MARKER_Y       1
+#define CARD_BIG_X          4
+#define CARD_BIG_Y          4
+#define CARD_NONE_Y         40   /* "LAP n" (FONT_MED) row when the slot has no delta */
+#define CARD_TAG_Y          50   /* inverted BEST tag beside the big number */
+#define CARD_TAG_ALT_X      208  /* tag on the marker row when the number is six glyphs */
+#define CARD_LABEL_Y        72   /* Plan 7b T2 fix 1 (ruling T2-R1): values end at 108, below FAULT_STRIP_Y (110) */
+#define CARD_VALUE_Y        84
+#define CARD_LEFT_LABEL_X   4
+#define CARD_LEFT_RIGHT_X   122
+#define CARD_RIGHT_LABEL_X  128
+#define CARD_RIGHT_RIGHT_X  246
 #else
-#define LAP_LABEL_X          4
-#define LAP_TIME_RIGHT_X     200
-#define LAP_ROW_BEST_Y       4
-#define LAP_ROW_PREV_Y       46
-#define LAP_ROW_CUR_Y        88
-#define LAP_ROW_DELTA_Y      112
-#define LAP_CUR_TIME_RIGHT_X 180
-#define LAP_CUR_SECTOR_X     210
-#define LAP_DELTA_VALUE_X    24
+#define CARD_MARKER_RIGHT_X 292
+#define CARD_MARKER_Y       1
+#define CARD_BIG_X          4
+#define CARD_BIG_Y          6
+#define CARD_NONE_Y         42
+#define CARD_TAG_Y          52
+#define CARD_TAG_ALT_X      254
+#define CARD_LABEL_Y        76   /* Plan 7b T2 fix 1 (ruling T2-R1): values end at 112, below FAULT_STRIP_Y (116) */
+#define CARD_VALUE_Y        88
+#define CARD_LEFT_LABEL_X   4
+#define CARD_LEFT_RIGHT_X   146
+#define CARD_RIGHT_LABEL_X  152
+#define CARD_RIGHT_RIGHT_X  292
 #endif
+#define CARD_TAG_W    32
+#define CARD_TAG_H    14
+#define CARD_TAG_GAP  6
+/* Plan 7b T2 review minor m2: render_card_tag()'s inner text inset (screens_moto.c), shared by
+ * both canvases since the tag box itself (CARD_TAG_W/H above) is canvas-independent. */
+#define CARD_TAG_PAD_X 2
+#define CARD_TAG_PAD_Y 1
+#define DCARD_FAULT_GAP 4        /* px kept clear between DRAG page 0's footer text and the fault strip */
+#define CARD_DELTA_CLAMP_MS 99990
 
-/* ---- LAP page 1 (best-lap sector splits + THEO) ---- */
+/* ---- Plan 7b LAP page 1: sector board (spec 7b §5) ---- */
+#define BOARD_COLS  3
+#define BOARD_X0    4
+#define BOARD_COL_W ((CANVAS_VISIBLE_W - 8) / BOARD_COLS)
+#define BOARD_DELTA_CLAMP_MS 9990     /* "+9.99": five glyphs fit an 80 px column */
 #if CANVAS_213
-#define LAP1_TITLE_Y       4
-#define LAP1_SECTOR_COLS   3
-#define LAP1_SECTOR_X0     4
-#define LAP1_SECTOR_COL_W  ((CANVAS_W - 8) / 3)
-#define LAP1_SECTOR_Y0     16
-#define LAP1_SECTOR_ROW_H  14
-#define LAP1_THEO_LABEL_Y  84
-#define LAP1_THEO_VALUE_Y  76
+#define BOARD_HEADER_Y 2
+#define BOARD_LABEL_Y  20
+#define BOARD_VALUE_Y  34
+#define BOARD_DELTA_Y  66
 #else
-#define LAP1_TITLE_Y       4
-#define LAP1_SECTOR_COLS   3
-#define LAP1_SECTOR_X0     4
-#define LAP1_SECTOR_COL_W  96
-#define LAP1_SECTOR_Y0     20
-#define LAP1_SECTOR_ROW_H  16
-#define LAP1_THEO_LABEL_Y  88
-#define LAP1_THEO_VALUE_Y  80
+#define BOARD_HEADER_Y 2
+#define BOARD_LABEL_Y  22
+#define BOARD_VALUE_Y  36
+#define BOARD_DELTA_Y  70
 #endif
+/* ---- Plan 7b LAP page 2: stats grid (spec 7b §6) ---- */
+#if CANVAS_213
+#define GRID_COL1_X   4
+#define GRID_COL2_X   128
+#define GRID_LABEL_Y0 2
+#define GRID_VALUE_Y0 14
+#define GRID_LABEL_Y1 62
+#define GRID_VALUE_Y1 74
+#define GRID_FOOTER_Y 106
+#else
+#define GRID_COL1_X   4
+#define GRID_COL2_X   152
+#define GRID_LABEL_Y0 2
+#define GRID_VALUE_Y0 16
+#define GRID_LABEL_Y1 64
+#define GRID_VALUE_Y1 78
+#define GRID_FOOTER_Y 110
+#endif
+#define GRID_SUB_GAP 4    /* px between a FONT_MED value and its FONT_SMALL suffix */
+#define GRID_SUB_DY  8    /* the suffix sits this many px below the value's top */
 
-/* ---- LAP page 2 (session stats, 5 rows from a fixed y=8) ---- */
+/* ---- Plan 7b DRAG page 0: the run card (spec 7b §7) ---- */
 #if CANVAS_213
-#define LAP2_ROW_H 20
+#define DCARD_LABEL_Y       2
+#define DCARD_BIG_Y         14
+#define DCARD_READY_Y       40
+#define DCARD_SPEED_Y       80
+#define DCARD_FOOTER_Y      108
+#define DCARD_ARMED_RIGHT_X 246
+#define DCARD_ARMED_Y       2
 #else
-#define LAP2_ROW_H 24
+#define DCARD_LABEL_Y       2
+#define DCARD_BIG_Y         16
+#define DCARD_READY_Y       42
+#define DCARD_SPEED_Y       84
+#define DCARD_FOOTER_Y      114
+#define DCARD_ARMED_RIGHT_X 292
+#define DCARD_ARMED_Y       2
 #endif
-
-/* ---- DRAG page 0 (benches + 1/4 row, spec §11.4) ---- */
+#define DCARD_LABEL_X    TEXT_MARGIN_X
+#define DCARD_BIG_X      TEXT_MARGIN_X
+#define DCARD_UNIT_GAP   4     /* px between the huge distance digits and the FONT_SMALL "m" */
+#define DCARD_UNIT_DY    48    /* the "m" sits this far below the huge cell's top (near the baseline) */
+#define DCARD_FOOTER_MAX 6     /* earlier gates listed in the footer, newest last */
+#define DCARD_FOOTER_SEP "   "
+/* T4-R1 (Plan 7b T4 fix 1): FONT_MED has no '@' glyph, so the trap row's '@' is drawn in
+ * FONT_SMALL, then the speed digits in FONT_MED beside it -- canvas-independent, both canvases
+ * share the same small-font baseline offset and gap. */
+#define DCARD_AT_DY  8         /* the FONT_SMALL "@" sits this far below the FONT_MED row's top, hugging its baseline */
+#define DCARD_AT_GAP 2         /* px between the "@" and the FONT_MED speed digits */
+/* ---- Plan 7b DRAG pages 1/2: gate list (spec 7b §7) ---- */
+#define DLIST_ROWS 4
+#define DLIST_LABEL_DY 6
 #if CANVAS_213
-#define DRAG_LABEL_X       4
-#define DRAG_TIME_RIGHT_X  150
-#define DRAG_TRAP_X        160
-#define DRAG0_ROW_Y0       2
-#define DRAG0_ROW_H        26
-#define DRAG0_MAX_ROWS     4
-#define DRAG_ARMED_RIGHT_X 250
-#define DRAG_ARMED_Y       4
+#define DLIST_HEADER_Y     2
+#define DLIST_COL2_X       126
+/* Ruling FR-5 (Plan 7b final fix 1): symmetric columns -- col 1 is 4..124 (120 px), col 2 is
+ * 126..246 (120 px), 2 px between the columns' boxes -- rather than the old 4..122/126..246
+ * (118/120 px) split. */
+#define DLIST_COL1_RIGHT_X 124
+#define DLIST_COL2_RIGHT_X 246
+#define DLIST_ROW_Y0       16
+#define DLIST_ROW_H        26
 #else
-#define DRAG_LABEL_X       4
-#define DRAG_TIME_RIGHT_X  180
-#define DRAG_TRAP_X        190
-#define DRAG0_ROW_Y0       8
-#define DRAG0_ROW_H        24
-#define DRAG0_MAX_ROWS     4
-#define DRAG_ARMED_RIGHT_X 296
-#define DRAG_ARMED_Y       4
+#define DLIST_HEADER_Y     2
+#define DLIST_COL2_X       152
+#define DLIST_COL1_RIGHT_X 146
+#define DLIST_COL2_RIGHT_X 292
+#define DLIST_ROW_Y0       18
+#define DLIST_ROW_H        26
 #endif
-
-/* ---- DRAG pages 1/2 (2-col gate grid) ---- */
-#if CANVAS_213
-#define DRAG12_TITLE_Y 4
-#define DRAG12_COLS    2
-#define DRAG12_COL_X0  4
-#define DRAG12_COL_W   ((CANVAS_W - 8) / 2)
-#define DRAG12_ROW_Y0  16
-#define DRAG12_ROW_H   14
-#else
-#define DRAG12_TITLE_Y 4
-#define DRAG12_COLS    2
-#define DRAG12_COL_X0  4
-#define DRAG12_COL_W   148
-#define DRAG12_ROW_Y0  20
-#define DRAG12_ROW_H   16
-#endif
+#define DLIST_COL1_X TEXT_MARGIN_X
+#define DLIST_UNIT_W 10     /* room reserved right of a distance value for its FONT_SMALL "m" */
+#define DLIST_UNIT_GAP 2    /* px between the distance digits and the FONT_SMALL "m" */
 
 /* ---- one-shot screens (spec §20.6) ---- */
 #if CANVAS_213
