@@ -720,41 +720,26 @@ static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_ga
     r->trap_cms    = res->speed_cms;
 }
 
-/* Page 0 (design §3): the current run's hit gates only, in table order (== hit order for a normal
- * forward-progressing run, same as the old append-only behaviour). drag_n = number hit. */
-static void drag_fill_page0(const pipe_drag_t *d)
+/* Pages 0/1 (design §3): both walk the current run's gates in table order and differ only in the
+ * hit filter and the `present` value -- merged into one helper (Plan 7c T5 fix 1, review finding
+ * 1). hit_only = true (page 0): keep only hit gates, present always true, drag_n = number hit
+ * (table order == hit order for a normal forward-progressing run, same as the old append-only
+ * behaviour). hit_only = false (page 1): keep every gate, present = hit. */
+static void drag_fill_from_run(const drag_result_t *run, bool hit_only)
 {
-    LT_ASSERT_VOID(d != NULL, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(d->current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(run != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(run->n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
     uint8_t n = 0;
-    for (uint8_t i = 0; i < d->current.n_gates && i < DRAG_MAX_GATES && n < DRAG_MAX_GATES; i++) {
-        const drag_gate_res_t *res = &d->current.gates[i];
-        if (!res->hit) {
+    for (uint8_t i = 0; i < run->n_gates && i < DRAG_MAX_GATES && n < DRAG_MAX_GATES; i++) {
+        const drag_gate_res_t *res = &run->gates[i];
+        if (hit_only && !res->hit) {
             continue;
         }
         const drag_gate_def_t *g = gate_by_id(res->gate_id);
         if (g == NULL) {
             continue;
         }
-        row_from_gate(&s_model.drag[n], g, res, true);
-        n++;
-    }
-    s_model.drag_n = n;
-}
-
-/* Page 1 (design §3): every gate of the last/current run in table order, present = hit. */
-static void drag_fill_page1(const pipe_drag_t *d)
-{
-    LT_ASSERT_VOID(d != NULL, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(d->current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
-    uint8_t n = 0;
-    for (uint8_t i = 0; i < d->current.n_gates && i < DRAG_MAX_GATES && n < DRAG_MAX_GATES; i++) {
-        const drag_gate_res_t *res = &d->current.gates[i];
-        const drag_gate_def_t *g   = gate_by_id(res->gate_id);
-        if (g == NULL) {
-            continue;
-        }
-        row_from_gate(&s_model.drag[n], g, res, res->hit != 0);
+        row_from_gate(&s_model.drag[n], g, res, hit_only ? true : (res->hit != 0));
         n++;
     }
     s_model.drag_n = n;
@@ -779,8 +764,7 @@ static void drag_fill_page2(const pipe_drag_t *d)
         }
         uint8_t         idx = (uint8_t)(g->id - 1u);
         drag_gate_res_t res;
-        memset(&res, 0, sizeof res);
-        res.gate_id = g->id;
+        memset(&res, 0, sizeof res);   /* row_from_gate reads g->id, not res.gate_id -- no dead store here */
         res.time_ms = d->best_time_ms[idx];
         res.dist_cm = d->best_time_ms[idx];
         row_from_gate(&s_model.drag[n], g, &res, d->have_best[idx]);
@@ -803,8 +787,8 @@ static void drag_rows_refill(void)
     }
     LT_ASSERT_VOID(d.current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
     switch (s_model.page) {
-    case 0: drag_fill_page0(&d); break;
-    case 1: drag_fill_page1(&d); break;
+    case 0: drag_fill_from_run(&d.current, true); break;
+    case 1: drag_fill_from_run(&d.current, false); break;
     case 2: drag_fill_page2(&d); break;
     default: break;
     }
