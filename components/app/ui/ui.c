@@ -111,8 +111,10 @@ static const char *TAG = "ui";
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
 #define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
 
-/* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2 s) ---- */
-#define ONESHOT_BOOT_MS  2000
+/* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2-3 s) ---- */
+/* Plan 7c T8 (design §6): 2000 -> 3000 so the +1 s boot_refmt_check() re-format (below) has time
+ * to land -- and be seen -- before the one-shot auto-reverts to riding. */
+#define ONESHOT_BOOT_MS  3000
 #define ONESHOT_VENUE_MS 2000
 
 /* ---- display refresh ladder (spec §20.3, Plan 7 Task 7) ----
@@ -178,6 +180,11 @@ static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the faul
 static bool    s_dirty;       /* model changed since last render -> render once (§20.3) */
 static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot (BOOT/VENUE); 0 = none */
 static int64_t s_last_input_us;    /* last button activity -> menu idle timeout */
+/* Plan 7c T8 (design §6): s_boot_arm_us is the esp_timer stamp the BOOT one-shot was armed at (0 =
+ * not BOOT, e.g. SAFE mode); boot_refmt_check() (below) uses it to fire its +1 s re-format exactly
+ * once (s_boot_refmt_done) -- by then the pipeline has reported GPS/IMU. */
+static int64_t s_boot_arm_us;
+static bool    s_boot_refmt_done;
 
 /* refresh policy bookkeeping (spec §20.3, Plan 7 Task 7): rf_in_t's counters/timestamps, plus the
  * failure ladder's own state. All times are esp_timer_get_time() microseconds. The three int64_t
@@ -1283,6 +1290,40 @@ static void clock_tick(int64_t now)
     }
 }
 
+/* Plan 7c T8 (design §6): formats the four BOOT self-test lines from sup_boot_report()'s table --
+ * STORAGE/DISPLAY/GPS/IMU, each "<LABEL> <STATUS>" ("--"/OK/FAIL/SIM). Called three times over
+ * boot (ui_task, below): once before the first BOOT render (STORAGE already known from app_main,
+ * the rest read "--"), once right after disp_init() reports DISPLAY, and once more ~1 s later via
+ * boot_refmt_check() once the pipeline has reported GPS/IMU. */
+static void boot_lines_format(void)
+{
+    static const char *const label[BOOT_SLOTS]  = { "STORAGE", "DISPLAY", "GPS", "IMU" };
+    static const char *const statw[4]           = { "--", "OK", "FAIL", "SIM" };
+    for (uint8_t i = 0; i < BOOT_SLOTS; i++) {
+        uint8_t st = sup_boot_status(i);
+        LT_ASSERT_VOID(st <= BOOT_SIM, UI_APP_ASSERT_CODE);   /* indexes statw[] below */
+        int n = snprintf(s_model.boot_line[i], sizeof s_model.boot_line[i], "%s %s", label[i], statw[st]);
+        LT_ASSERT_VOID(n > 0 && (size_t)n < sizeof s_model.boot_line[i], UI_APP_ASSERT_CODE);
+    }
+    s_model.boot_n_lines = BOOT_SLOTS;
+}
+
+/* Plan 7c T8: the pipeline's gps_init()/imu_init() calls (separate task) can still land after
+ * ui_task's own boot sequence returns, so the first two boot_lines_format() calls above can still
+ * show GPS/IMU as "--". Re-formats once more, ~1 s after the BOOT one-shot was armed, while it is
+ * still showing, and dirties the model so the normal render loop picks it up (Task 7's diff turns
+ * that into a partial over just the changed lines). Fires at most once per boot. */
+static void boot_refmt_check(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);
+    if (s_boot_refmt_done || s_boot_arm_us == 0) return;
+    if (s_model.screen != SCR_ONESHOT || s_model.oneshot != ONESHOT_BOOT) return;
+    if (now < s_boot_arm_us + 1000000) return;
+    boot_lines_format();
+    s_dirty           = true;
+    s_boot_refmt_done = true;
+}
+
 /* ---- task ---- */
 
 /* One iteration of the ui task loop (§20.3): reset the WDT, drain buttons + events, expire
@@ -1340,6 +1381,7 @@ static void ui_loop_iter(QueueHandle_t btn_q)
     update_flags();
     dead_retry(now); /* R5: paced disp_reinit() probe while SYS_DISP_DEAD */
     clock_tick(now); /* Plan 7c T6: live lap clock, once a second, before the render decision below */
+    boot_refmt_check(now); /* Plan 7c T8: one BOOT re-format ~1 s after arming, once GPS/IMU land */
 
     /* Important #2: a throttle-deferred refresh is owed, not dropped (spec §20.3) -- re-check
      * every tick but only actually re-render/refresh once the 30 s window has elapsed (never on
@@ -1404,12 +1446,14 @@ static void ui_task(void *arg)
          * "LAPTIMER"). */
         snprintf(s_model.boot_name, sizeof s_model.boot_name, "LAPTIMER");
         snprintf(s_model.boot_ver, sizeof s_model.boot_ver, "%s", CFG_FW_VERSION);
-        s_model.boot_n_lines = 0; /* boot self-test lines have no producer yet -- nothing feeds
-                                    * boot_line[]/boot_n_lines today (follow-up; deltas doc §8). */
+        /* Plan 7c T8 (design §6): format from sup_boot_report()'s table now -- STORAGE is already
+         * known (app_main's boot_storage() ran synchronously before this task started); DISPLAY/
+         * GPS/IMU still read "--" here and are filled in by the two later calls below. */
+        boot_lines_format();
         s_model.screen       = SCR_ONESHOT;
         s_model.oneshot      = ONESHOT_BOOT;
         /* s_oneshot_until_us is armed further down, AFTER disp_init() returns -- not here. Arming
-         * it here would start the 2 s window before disp_init()'s ~3.5 s blocking bring-up, so the
+         * it here would start the 3 s window before disp_init()'s ~3.5 s blocking bring-up, so the
          * window would already be expired by the time the BOOT screen is first visible and the LAP
          * page would replace it immediately. */
     }
@@ -1428,6 +1472,13 @@ static void ui_task(void *arg)
                                     * epd_panel() (bound as a side effect) never returns NULL either */
     const disp_caps_t *disp_caps;
     int                disp_rc = disp_init(&disp_caps);
+    /* Plan 7c T8 (design §6): report DISPLAY regardless of which one-shot is showing first (BOOT or
+     * SAFE); only BOOT re-formats + re-renders from it below -- SAFE has no self-test lines. */
+    sup_boot_report(BOOT_DISPLAY, disp_rc == 0 ? BOOT_OK : BOOT_FAIL);
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT) {
+        boot_lines_format();
+        s_dirty = true;   /* Task 7's diff turns this into a partial over just the changed lines */
+    }
     if (disp_rc == 0) {
         /* Minor #5: catches a PANEL/canvas mismatch at boot -- disp_init() always fills *caps by
          * the time it returns 0 (moved ahead of its own boot-refresh call, fix round 2). */
@@ -1445,12 +1496,14 @@ static void ui_task(void *arg)
         s_next_reinit_us = esp_timer_get_time() + DISP_DEAD_RETRY_US;
     }
 
-    /* Arm the BOOT one-shot's 2 s auto-revert window now, whether disp_init() succeeded or failed
+    /* Arm the BOOT one-shot's 3 s auto-revert window now, whether disp_init() succeeded or failed
      * (either way the screen is now on the panel or as on-panel as it will get) -- see the comment
      * above where s_model.oneshot was set to ONESHOT_BOOT. SAFE mode's one-shot is persistent
-     * (§17.5) and is left untouched (s_oneshot_until_us stays 0). */
+     * (§17.5) and is left untouched (s_oneshot_until_us / s_boot_arm_us stay 0). */
     if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT) {
-        s_oneshot_until_us = esp_timer_get_time() + (int64_t)ONESHOT_BOOT_MS * 1000;
+        int64_t arm_now    = esp_timer_get_time();
+        s_boot_arm_us      = arm_now;   /* Plan 7c T8: drives boot_refmt_check()'s +1 s re-format */
+        s_oneshot_until_us = arm_now + (int64_t)ONESHOT_BOOT_MS * 1000;
     }
 
     esp_task_wdt_reset();

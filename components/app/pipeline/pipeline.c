@@ -610,10 +610,35 @@ static void handle_cmd(const command_t *cmd)
     }
 }
 
-static void pipeline_init(void)
+/* GPS/IMU driver bring-up + the BOOT screen's self-test report for both (Plan 7c T8, design §6).
+ * Split out of pipeline_init() below to keep that function under RULE-4's 60-code-line cap. */
+static void pipeline_init_drivers(void)
 {
     const gps_profile_t *prof = NULL;
+    bool                  gps_ok = (gps_init(&prof) == 0 && prof);
+    if (gps_ok) {
+        (void)gps_configure(prof->max_rate_hz);
+        ESP_LOGI(TAG, "gps \"%s\" %u Hz", prof->name ? prof->name : "?", (unsigned)prof->max_rate_hz);
+    } else {
+        ESP_LOGW(TAG, "gps_init failed");
+    }
+    /* Plan 7c T8: the sim driver always "succeeds" at gps_init() -- report SIM so the BOOT screen
+     * shows which driver is actually wired, not just that init passed. */
+    sup_boot_report(BOOT_GPS, CFG_GPS_SIM ? BOOT_SIM : (gps_ok ? BOOT_OK : BOOT_FAIL));
 
+    bool imu_ok = (imu_init() == 0);
+    if (imu_ok) {
+        uint8_t mask = 0;
+        if (imu_self_test(&mask) != 0) ESP_LOGW(TAG, "imu self-test fail (mask 0x%02x)", mask);
+        (void)imu_set_mode(IMU_FULL);
+    } else {
+        ESP_LOGW(TAG, "imu_init failed");
+    }
+    sup_boot_report(BOOT_IMU, CFG_IMU_SIM ? BOOT_SIM : (imu_ok ? BOOT_OK : BOOT_FAIL));
+}
+
+static void pipeline_init(void)
+{
     tb_init(&s_tb);
     fus_init(&s_fus, NULL, (uint8_t)(CFG_VARIANT_MOTO ? 1 : 0));
     lap_init(&s_lap, NULL);
@@ -691,20 +716,7 @@ static void pipeline_init(void)
     }
 #endif
 
-    if (gps_init(&prof) == 0 && prof) {
-        (void)gps_configure(prof->max_rate_hz);
-        ESP_LOGI(TAG, "gps \"%s\" %u Hz", prof->name ? prof->name : "?", (unsigned)prof->max_rate_hz);
-    } else {
-        ESP_LOGW(TAG, "gps_init failed");
-    }
-
-    if (imu_init() == 0) {
-        uint8_t mask = 0;
-        if (imu_self_test(&mask) != 0) ESP_LOGW(TAG, "imu self-test fail (mask 0x%02x)", mask);
-        (void)imu_set_mode(IMU_FULL);
-    } else {
-        ESP_LOGW(TAG, "imu_init failed");
-    }
+    pipeline_init_drivers();
 }
 
 static void pipeline_task(void *arg)

@@ -506,6 +506,28 @@ static void test_oneshot_boot(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot.pbm"), &s_fb));
 }
 
+static void test_boot_four_lines(void)
+{
+    /* Plan 7c T8 (design §6): the exact content boot_lines_format() produces from
+     * sup_boot_report()'s table on a moto_sim boot -- STORAGE/DISPLAY already known, GPS SIM (the
+     * sim driver), IMU not yet reported ("--", the pipeline hasn't landed its report yet). */
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_BOOT;
+    strcpy(m.boot_name, "LAPTIMER");
+    strcpy(m.boot_ver, "v0.1.0-77-gabcdef0");
+    m.boot_n_lines = 4;
+    strcpy(m.boot_line[0], "STORAGE OK");
+    strcpy(m.boot_line[1], "DISPLAY OK");
+    strcpy(m.boot_line[2], "GPS SIM");
+    strcpy(m.boot_line[3], "IMU --");
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot_four_lines.pbm"), &s_fb));
+}
+
 static void test_oneshot_venue(void)
 {
     /* §20.6's own example ("KILLARNEY"). layout_name left empty: this is the "venue found" phase,
@@ -679,6 +701,7 @@ int main(void)
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
     RUN_TEST(test_oneshot_boot);
+    RUN_TEST(test_boot_four_lines);
     RUN_TEST(test_oneshot_venue);
     RUN_TEST(test_oneshot_safe);
     RUN_TEST(test_oneshot_lowbatt);

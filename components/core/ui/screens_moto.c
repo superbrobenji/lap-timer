@@ -838,6 +838,10 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    /* Plan 7c T8 (design §6): all BOOT_MAX_LINES self-test lines must sit above CANVAS_H --
+     * 44 + 3*14 + 12 = 98 < 122 (213 canvas), 56 + 3*16 + 12 = 116 < 128 (296x128 canvas). */
+    CORE_ASSERT_VOID(BOOT_LINE_Y0 + (BOOT_MAX_LINES - 1) * BOOT_LINE_H + FONT_SMALL.h <= CANVAS_H,
+                     UI_ASSERT_CODE);
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, m->boot_name), BOOT_NAME_Y, m->boot_name);
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, m->boot_ver), BOOT_VER_Y, m->boot_ver);
 

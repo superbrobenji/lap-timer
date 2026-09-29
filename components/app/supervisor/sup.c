@@ -48,6 +48,30 @@ static bool         s_safe_mode_cleared;   /* guards the §17.5 uptime auto-clea
 static bool         s_ota_boot_checked;    /* §19.4: the boot-time OTA validate-vs-rollback decision ran once */
 static bool         s_ota_awaiting;        /* §19.4: a pending image booted and is on trial, awaiting the health gate */
 
+/* Boot self-test table (Plan 7c T8, design §6): one relaxed atomic byte per BOOT_* slot, zero-
+ * initialised to BOOT_UNKNOWN. Plain statics (no init dependency) so any init site -- app_main
+ * before sup_start(), the pipeline/ui tasks after -- can report as soon as it knows its result. */
+static volatile uint8_t s_boot[BOOT_SLOTS];
+
+void sup_boot_report(uint8_t slot, uint8_t status)
+{
+    /* Both bad-slot and bad-status are programmer errors (a caller passing a raw int instead of a
+     * BOOT_* constant), not runtime input -- asserted, not clamped. */
+    LT_ASSERT_VOID(slot < BOOT_SLOTS, SUP_ASSERT_CODE);
+    LT_ASSERT_VOID(status <= BOOT_SIM, SUP_ASSERT_CODE);
+    __atomic_store_n(&s_boot[slot], status, __ATOMIC_RELAXED);
+}
+
+uint8_t sup_boot_status(uint8_t slot)
+{
+    LT_ASSERT_RET(slot < BOOT_SLOTS, SUP_ASSERT_CODE, BOOT_UNKNOWN);
+    uint8_t st = __atomic_load_n(&s_boot[slot], __ATOMIC_RELAXED);
+    /* Invariant: sup_boot_report() above is the table's only writer and already range-checks
+     * status before storing -- re-checking the read here guards against future slot corruption. */
+    LT_ASSERT_RET(st <= BOOT_SIM, SUP_ASSERT_CODE, BOOT_UNKNOWN);
+    return st;
+}
+
 int sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s)
 {
     /* hb_id is a task-registration index into s_watch[HB_COUNT]; task is the caller's own
