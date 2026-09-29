@@ -155,6 +155,20 @@ static void test_lap_p0_fault(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_fault.pbm"), &s_fb));
 }
 
+static void test_lap_p0_cur_clock(void)
+{
+    /* Live lap clock (design §4, Plan 7c T6): while cur_running the footer's LEFT cell shows CUR
+     * m:ss (fmt_time_s) in place of LAST; BEST is unchanged. 83400 ms -> "1:23". */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = -320; m.big_sector_idx = 2;
+    m.cur_running = true; m.cur_ms = 83400;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_cur_clock.pbm"), &s_fb));
+}
+
 /* ---- LAP page 1 (sector board, spec 7b §5) ---- */
 
 static void test_lap_p1_sectors(void)
@@ -645,6 +659,7 @@ int main(void)
     RUN_TEST(test_lap_p0_lap_delta_wide);
     RUN_TEST(test_lap_p0_new_best);
     RUN_TEST(test_lap_p0_fault);
+    RUN_TEST(test_lap_p0_cur_clock);
     RUN_TEST(test_lap_p1_sectors);
     RUN_TEST(test_lap_p1_many_sectors);
     RUN_TEST(test_lap_p1_deltas_only);

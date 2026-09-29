@@ -168,6 +168,30 @@ static void fmt_secs_ms(char *buf, uint32_t ms)
     CORE_ASSERT_VOID(strlen(buf) <= 5u, UI_ASSERT_CODE);
 }
 
+/* M:SS (no centiseconds) for the live lap clock (design §4, Plan 7c T6, ruling R-1): clamps at
+ * 99:59 (minutes >= 100 show 99:59) so the value is never more than 5 glyphs no matter how long
+ * the current lap runs -- unlike fmt_time_ms above, which shows hundredths and has no such
+ * ceiling. `buf` must be >= 6 bytes ("99:59\0"). */
+static void fmt_time_s(char *buf, uint32_t ms)
+{
+    CORE_ASSERT_VOID(buf != NULL, UI_ASSERT_CODE);
+    unsigned s = (unsigned)((ms / 1000u) % 60u);
+    unsigned m = (unsigned)(ms / 60000u);
+    if (m >= 100u) {
+        m = 99u;
+        s = 59u;
+    }
+    char *p = buf;
+    p = put_uint(p, m);
+    p = put_char(p, ':');
+    if (s < 10u) {
+        p = put_char(p, '0');
+    }
+    p = put_uint(p, s);
+    CORE_ASSERT_VOID((size_t)(p - buf) <= 5u, UI_ASSERT_CODE); /* ruling R-1: never more than 5 glyphs */
+    *p = '\0';
+}
+
 /* ---- shared fault-icon strip (spec §20.5 + §17.4) ---- */
 
 /* Bit position (SCR_SYS_*, model.h) -> icon (icons.h), or -1 for a bit with no icon: the §17.4
@@ -367,21 +391,22 @@ static void render_card_tag(fb_t *fb, int x, int y)
     fb_text_inv(fb, &FONT_SMALL, x + CARD_TAG_PAD_X, y + CARD_TAG_PAD_Y, "BEST");
 }
 
-/* Footer: "LAST"/"BEST" labels (FONT_SMALL) over their right-aligned FONT_MED values, both fixed
- * columns (spec 7b §4). Plan 7b T2 fix 1 (ruling T2-R1): CARD_LABEL_Y/CARD_VALUE_Y now sit the
- * whole footer row band above FAULT_STRIP_Y on both canvases (canvas.h), so BEST no longer needs
- * to retract on x to clear the fault strip -- it always right-aligns at CARD_RIGHT_RIGHT_X, same
- * as LAST always right-aligns at CARD_LEFT_RIGHT_X. The assertion below is the geometry proof
- * that backs this: LAST's value ends at CARD_LEFT_RIGHT_X and BEST's (7-glyph FONT_MED, the
- * widest EMPTY_TIME/fmt_time_ms ever produces for these fields) starts no further left than
- * CARD_RIGHT_RIGHT_X - 7*FONT_MED.w, so the two columns cannot meet on either canvas. */
-static void render_card_footer(fb_t *fb, const screen_model_t *m)
+/* Footer LEFT cell (spec 7b §4, amended design §4/Plan 7c T6): while m->cur_running (the live
+ * clock is on and a lap is in progress) shows label "CUR" over the running fmt_time_s(cur_ms);
+ * otherwise the "LAST" label over prev_ms exactly as before. Both right-align the same FONT_MED
+ * value at CARD_LEFT_RIGHT_X, so the geometry render_card_footer proves below still holds either
+ * way. Split out of render_card_footer to keep it under the function-length cap. */
+static void render_footer_left(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(CARD_RIGHT_RIGHT_X - 7 * (int)FONT_MED.w >= CARD_LEFT_RIGHT_X, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
-
+    if (m->cur_running) {
+        fb_text(fb, &FONT_SMALL, CARD_LEFT_LABEL_X, CARD_LABEL_Y, "CUR");
+        fmt_time_s(buf, m->cur_ms);
+        fb_text_right(fb, &FONT_MED, CARD_LEFT_RIGHT_X, CARD_VALUE_Y, buf);
+        return;
+    }
     fb_text(fb, &FONT_SMALL, CARD_LEFT_LABEL_X, CARD_LABEL_Y, "LAST");
     if (m->have_prev) {
         fmt_time_ms(buf, m->prev_ms);
@@ -390,7 +415,25 @@ static void render_card_footer(fb_t *fb, const screen_model_t *m)
         *p = '\0';
     }
     fb_text_right(fb, &FONT_MED, CARD_LEFT_RIGHT_X, CARD_VALUE_Y, buf);
+}
 
+/* Footer: LEFT cell (render_footer_left, above: LAST or, while the live clock ticks, CUR) beside
+ * the "BEST" label (FONT_SMALL) over its right-aligned FONT_MED value, both fixed columns (spec
+ * 7b §4). Plan 7b T2 fix 1 (ruling T2-R1): CARD_LABEL_Y/CARD_VALUE_Y now sit the whole footer row
+ * band above FAULT_STRIP_Y on both canvases (canvas.h), so BEST no longer needs to retract on x to
+ * clear the fault strip -- it always right-aligns at CARD_RIGHT_RIGHT_X, same as the left cell
+ * always right-aligns at CARD_LEFT_RIGHT_X. The assertion below is the geometry proof that backs
+ * this: the left cell's value ends at CARD_LEFT_RIGHT_X and BEST's (7-glyph FONT_MED, the widest
+ * EMPTY_TIME/fmt_time_ms ever produces for these fields) starts no further left than
+ * CARD_RIGHT_RIGHT_X - 7*FONT_MED.w, so the two columns cannot meet on either canvas. */
+static void render_card_footer(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(CARD_RIGHT_RIGHT_X - 7 * (int)FONT_MED.w >= CARD_LEFT_RIGHT_X, UI_ASSERT_CODE);
+    render_footer_left(fb, m);
+
+    char buf[TIME_BUF_LEN];
     fb_text(fb, &FONT_SMALL, CARD_RIGHT_LABEL_X, CARD_LABEL_Y, "BEST");
     if (m->have_best) {
         fmt_time_ms(buf, m->best_ms);

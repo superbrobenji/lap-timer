@@ -177,6 +177,17 @@ static bool     s_wants_full;      /* next render should be a full refresh (page
 static bool     s_refresh_pending; /* fix round 2 (Important #2): RF_NONE returned while throttled
                                      * -- a refresh is owed once the 30 s throttle window elapses */
 
+/* Live lap clock (Plan 7c T6, design §4): s_lap_start_mono_us is the mono_us stamp of the S/F
+ * crossing that started the lap now running (0 = none), set by handle_lap_complete() and cleared
+ * when the ui itself learns riding has left LAP mode (menu_do_mode(), below). clock_tick() (below)
+ * advances s_model.cur_ms/cur_running from it once a second while display.live_clock is on and
+ * LAP page 0 is showing. s_clock_tick marks a render that a clock tick alone caused, so
+ * do_refresh()/render_and_refresh() can keep a ticking clock's partials out of the full-refresh
+ * ladder's accounting (design §4 last bullet). */
+static int64_t s_lap_start_mono_us;
+static int64_t s_last_clock_us;
+static bool    s_clock_tick;
+
 /* button press-duration state machine (indexed 0=MODE,1=UP,2=DOWN) */
 static uint8_t s_prev_mask;
 static int64_t s_press_us[3];
@@ -300,6 +311,13 @@ static void menu_do_mode(void)
     s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
     s_model.mode  = s_mode;
     s_model.page  = 0; /* §22.6: a mode switch resets the screen */
+    if (s_mode == MODE_DRAG) {
+        /* Plan 7c T6 (design §4): leaving LAP mode means no lap is running any more -- the ui
+         * learns this directly here (no EV_* reaches it for a venue/layout loss or a lap reset),
+         * so stop the stopwatch now rather than let a later switch back to LAP resume ticking
+         * from a stale start stamp; clock_tick() itself already gates on mode == SCR_MODE_LAP. */
+        s_lap_start_mono_us = 0;
+    }
     (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
     s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
     (void)lt_cfg_save(&s_cfg);
@@ -333,7 +351,9 @@ static void menu_do_units(void)
     }
 }
 
-/* MA_DISPLAY: toggle the live clock, persist, refresh the label. (Split verbatim out of menu_select.) */
+/* MA_DISPLAY: toggle the live clock, persist, refresh the label. (Split verbatim out of
+ * menu_select.) s_dirty is set explicitly here (Plan 7c T6, design §4), not left to menu_select()'s
+ * own trailing set, so the card re-renders with/without CUR the moment riding resumes. */
 static void menu_do_display(void)
 {
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
@@ -341,6 +361,7 @@ static void menu_do_display(void)
     (void)lt_cfg_save(&s_cfg);
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
+    s_dirty = true;
 }
 
 static void menu_select(void)
@@ -668,13 +689,16 @@ static void handle_lap_complete(const event_t *e)
 {
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);   /* drained from g_ui_evt_q, never NULL */
     LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* invariant on entry */
+    /* Plan 7c T6 (design §4): every completed lap's own S/F crossing starts the clock for the lap
+     * now beginning -- out-lap included (its crossing starts lap 1) -- so this is stamped before
+     * the out-lap check below, which makes handle_lap_result() an early-return for that case. */
+    s_lap_start_mono_us = e->mono_us;
     if ((e->flags & LAP_F_OUT_LAP) == 0) {
         handle_lap_result(e->arg32, e->flags, (int32_t)e->arg32b);
     }
     /* have_last_sector_delta[]/last_sector_delta_ms[] are untouched by an out-lap too (spec 7b §3,
      * ruling B7b-1): they persist across every lap boundary, out-laps included, and are simply
      * overwritten per sector as EV_SECTOR fires. */
-    s_model.cur_ms_at_gate = 0;
     s_model.cur_sector_idx = 0;
     s_dirty                = true;
 }
@@ -806,7 +830,6 @@ static void handle_sector(const event_t *e)
     /* Ruling FR-1: cur_sector_idx is the 1-based count of sectors completed this lap (idx is
      * 0-based), so the marker reads "S1" after the first gate, not "S0". */
     s_model.cur_sector_idx  = (uint8_t)(idx + 1u);
-    s_model.cur_ms_at_gate  = e->arg32;
     s_model.big_kind        = s_model.have_best ? (uint8_t)BIG_SECTOR_DELTA : (uint8_t)BIG_NONE;
     s_model.big_delta_ms    = (int32_t)e->arg32b;
     s_model.big_sector_idx  = idx;
@@ -1009,8 +1032,11 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now, uint8_t *effective_mod
  * partial-consumed-the-window retry-as-full, not just this function's own partial_window_or_full()
  * fallback) -- a successful full (whether requested or the ladder's retry) resets s_partial_count,
  * stamps s_last_full_us and clears s_wants_full; a FAILED refresh updates none of that bookkeeping.
- * Reports the effective mode via *mode_out so the caller's log line reflects what actually
- * happened on the panel. */
+ * Plan 7c T6 (design §4 last bullet): a successful partial caused only by a clock tick (s_clock_tick)
+ * does NOT bump s_partial_count/s_last_partial_us -- it still counts fully as a real full when the
+ * policy or the fallback above promotes it to one, since that is a genuine full refresh regardless
+ * of what triggered it. Reports the effective mode via *mode_out so the caller's log line reflects
+ * what actually happened on the panel. */
 static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
 {
     LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
@@ -1019,8 +1045,10 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
     int     rc   = disp_refresh_ladder(mode, now, mode_out);
     if (rc == 0) {
         if (*mode_out == DISP_PARTIAL) {
-            s_partial_count   = (uint16_t)(s_partial_count + 1);
-            s_last_partial_us = now;
+            if (!s_clock_tick) {
+                s_partial_count   = (uint16_t)(s_partial_count + 1);
+                s_last_partial_us = now;
+            }
         } else {
             s_partial_count = 0;
             s_last_full_us  = now;
@@ -1061,7 +1089,10 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
 
 /* Renders the model, then feeds the pure refresh policy (§20.3) and carries out whatever it
  * decides: RF_NONE is a no-op, RF_PARTIAL/RF_FULL run through the panel + failure ladder above.
- * Split out of the old render_now() (Plan 7 Task 7) to stay under the 60-line function cap. */
+ * Split out of the old render_now() (Plan 7 Task 7) to stay under the 60-line function cap.
+ * Plan 7c T6 (design §4): s_clock_tick is cleared here, on every return path, once this render has
+ * either been accounted for (do_refresh(), above) or explicitly skipped (RF_NONE) -- never left set
+ * for a later, unrelated render to misread. */
 static void render_and_refresh(void)
 {
     LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE); /* fb_init ran before any render */
@@ -1086,12 +1117,14 @@ static void render_and_refresh(void)
          * cases, which need no retry of their own: dead already re-arms via dead_retry()). */
         s_refresh_pending = in.throttled;
         log_refresh(false, DISP_PARTIAL, 0);
+        s_clock_tick = false;
         return;
     }
     s_refresh_pending = false; /* this call resolved whatever was pending, one way or another */
     uint8_t mode = DISP_PARTIAL;
     int     rc   = do_refresh(kind, now, &mode);
     log_refresh(true, mode, rc);
+    s_clock_tick = false;
 }
 
 /* While the panel is SYS_DISP_DEAD, probes disp_reinit() no more often than every
@@ -1112,6 +1145,34 @@ static void dead_retry(int64_t now)
         s_dirty       = true;
     } else {
         s_next_reinit_us = now + DISP_DEAD_RETRY_US;
+    }
+}
+
+/* Live lap clock tick (Plan 7c T6, design §4): once a second, while display.live_clock is on, a
+ * lap is running (s_lap_start_mono_us != 0, armed by handle_lap_complete() above) and LAP page 0
+ * is the screen actually showing, advances s_model.cur_ms/cur_running from the lap's start stamp
+ * so the card footer's left cell shows a running CUR m:ss instead of LAST. A render this alone
+ * causes is marked s_clock_tick (only when nothing else already made this iteration dirty) so
+ * do_refresh() (above) keeps it out of the full-refresh ladder's partial_count/last_partial_us
+ * accounting; s_wants_full is never touched here, so a clock tick alone never forces a full. When
+ * the conditions stop holding, cur_running drops once (the cell reverts to LAST) -- that
+ * transition is a real model change, not a clock-driven one, so it dirties normally. */
+static void clock_tick(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE); /* esp_timer stamp, same clock as s_last_clock_us */
+    bool run = s_cfg.display.live_clock && s_lap_start_mono_us != 0 &&
+               s_model.screen == SCR_RIDING && s_model.page == 0 && s_model.mode == SCR_MODE_LAP;
+    if (run && (now - s_last_clock_us) >= 1000000) {
+        s_model.cur_ms      = (uint32_t)((now - s_lap_start_mono_us) / 1000);
+        s_model.cur_running = true;
+        s_last_clock_us     = now;
+        if (!s_dirty) {
+            s_clock_tick = true;
+        }
+        s_dirty = true;
+    } else if (!run && s_model.cur_running) {
+        s_model.cur_running = false;
+        s_dirty             = true;
     }
 }
 
@@ -1171,6 +1232,7 @@ static void ui_loop_iter(QueueHandle_t btn_q)
 
     update_flags();
     dead_retry(now); /* R5: paced disp_reinit() probe while SYS_DISP_DEAD */
+    clock_tick(now); /* Plan 7c T6: live lap clock, once a second, before the render decision below */
 
     /* Important #2: a throttle-deferred refresh is owed, not dropped (spec §20.3) -- re-check
      * every tick but only actually re-render/refresh once the 30 s window has elapsed (never on

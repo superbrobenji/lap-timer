@@ -67,7 +67,11 @@ typedef struct {
 
     /* LAP page 0 */
     uint32_t best_ms, prev_ms;
-    uint32_t cur_ms_at_gate;   /* reserved: running CUR time for the live_clock follow-up -- no renderer reads it yet */
+    uint32_t cur_ms;           /* Plan 7c T6 (design §4): running lap-clock time while cur_running,
+                                 * fed once a second by ui.c's clock_tick(); rendered as the footer's
+                                 * CUR m:ss (fmt_time_s, screens_moto.c) in place of LAST */
+    bool     cur_running;      /* true while display.live_clock is on and a lap is in progress; set
+                                 * and cleared by ui.c's clock_tick() */
     uint8_t  cur_sector_idx;   /* sectors completed this lap (1-based); 0 = none yet */
     bool     have_best, have_prev, new_best;
 
