@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "core/cfg.h"
+#include "core/drag.h" /* drag_cfg_t/drag_gate_def_t/drag_cfg_from_user/drag_gate_label (Plan 7c T2/T5) */
 #include "core/event.h"
 #include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H/MENU_VISIBLE_ROWS: compile-time by PANEL (Plan 7 T3) */
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
@@ -152,6 +153,10 @@ static fb_t           s_fb;
 static session_max_t s_session_max;
 
 static cfg_t   s_cfg;         /* ui's working config copy (cmd.c uses the same load-from-NVS pattern) */
+/* Plan 7c T5 (design §3): the DRAG gate table + bench list, built once at boot from s_cfg
+ * (drag_cfg_from_user) and rebuilt in menu_do_units() so a units change relabels the SPEED_FROM0
+ * benches too. drag_rows_refill() below reads it for every row's label/kind. */
+static drag_cfg_t s_drag_cfg;
 static uint8_t s_mode;        /* MODE_LAP / MODE_DRAG (mirrors s_model.mode) */
 static uint16_t s_gspeed_kmh; /* menu-lock proxy from EV_MOTION/EV_STILL (see handle_event) */
 static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the fault strip */
@@ -302,9 +307,17 @@ static void menu_do_mode(void)
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
 }
 
+/* Forward decl: menu_do_units() (below) rebuilds the DRAG gate table on a units change and, if the
+ * DRAG screen's rows are the ones showing, refills them immediately so labels/benches follow the
+ * new setting the moment riding resumes; drag_rows_refill() itself is defined further down next to
+ * the other DRAG row-building helpers (Plan 7c T5). */
+static void drag_rows_refill(void);
+
 /* MA_UNITS: toggle km/h<->mph, persist, refresh the label and the model (the menu is showing, so
- * the change appears on screen the moment riding resumes -- Plan 7c T4, design §3). (Split
- * verbatim out of menu_select.) */
+ * the change appears on screen the moment riding resumes -- Plan 7c T4, design §3). Plan 7c T5:
+ * also rebuilds s_drag_cfg (the SPEED_FROM0 bench list is unit-dependent, design §3) and, when the
+ * current riding mode is DRAG, refills the rows now so they are already correct once the menu
+ * exits. (Split verbatim out of menu_select.) */
 static void menu_do_units(void)
 {
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
@@ -314,6 +327,10 @@ static void menu_do_units(void)
     s_dirty       = true;
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+    }
 }
 
 /* MA_DISPLAY: toggle the live clock, persist, refresh the label. (Split verbatim out of menu_select.) */
@@ -403,6 +420,10 @@ static void btn_short(uint8_t bit)
             s_model.page = (uint8_t)((s_model.page + 1) % 3); /* next page (wrap) */
             s_wants_full = true;
             s_dirty      = true;
+        }
+        if ((bit == BTN_UP || bit == BTN_DOWN) && s_model.mode == SCR_MODE_DRAG) {
+            /* Plan 7c T5 (design §3): DRAG rows are filled per page -- rebuild for the new one. */
+            drag_rows_refill();
         }
         /* MODE short in riding: reserved (no-op). */
     }
@@ -658,27 +679,135 @@ static void handle_lap_complete(const event_t *e)
     s_dirty                = true;
 }
 
-/* EV_DRAG_GATE -> model (split verbatim out of handle_event for rule 4). */
-static void handle_drag_gate(const event_t *e)
+/* ---- DRAG rows (Plan 7c T5, design §3): rebuilds s_model.drag[]/drag_n from the pipeline's drag
+ * snapshot with real §6.6 gate names, for whichever DRAG page (0/1/2) is currently selected. This
+ * replaces the old append-only handle_drag_gate(), which only ever fed page 0 with anonymous
+ * "G<n>" rows. ---- */
+
+/* Bounded scan of s_drag_cfg.gates[0..n_gates) for the gate whose id matches; NULL when unknown
+ * (a stale/corrupt id from a mismatched snapshot -- defensive, should not happen since both sides
+ * build their table from the same cfg_t). */
+static const drag_gate_def_t *gate_by_id(uint8_t id)
 {
-    LT_ASSERT_VOID(s_model.drag_n <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);   /* indexes s_model.drag[] */
-    if (s_model.drag_n < DRAG_MAX_GATES) {
-        drag_row_t *r = &s_model.drag[s_model.drag_n++];
-        memset(r, 0, sizeof *r);
-        /* gate-id -> §6.6 label map needs the drag cfg gate list (not plumbed to ui yet); a
-         * compact "G<id>" placeholder is enough until that lands. */
-        snprintf(r->label, sizeof r->label, "G%u", (unsigned)e->arg16);
-        r->t_ms    = e->arg32;
-        r->present = true;
-        /* Plan 7c T4 fix 1 (ruling R-4): store the gate's speed (arg32b, cm/s) raw -- the display
-         * unit conversion happens at render time only (screens_moto.c's render_dcard_value), so a
-         * units toggle after this run still relabels it correctly. Ready the moment Task 5's gate
-         * table (not plumbed to ui yet) identifies the 1/4-mile trap gate and sets has_trap;
-         * trap_cms is inert until then. */
-        r->trap_cms = (uint16_t)e->arg32b;
+    LT_ASSERT_RET(id >= 1u && id <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE, NULL);
+    LT_ASSERT_RET(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE, NULL);
+    for (uint8_t i = 0; i < s_drag_cfg.n_gates && i < DRAG_MAX_GATES; i++) {
+        if (s_drag_cfg.gates[i].id == id) {
+            return &s_drag_cfg.gates[i];
+        }
     }
-    LT_ASSERT_VOID(s_model.drag_n <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);   /* append kept it bounded */
-    s_dirty = true;
+    return NULL;
+}
+
+/* Fills one drag_row_t from a gate definition + its result (a real per-run gate_res_t for pages
+ * 0/1, or a synthetic one built from the session-best record for page 2 -- see drag_fill_page2).
+ * Ruling R-4 (Plan 7c T4 fix 1, reaffirmed for T5): trap_cms is stored RAW (res->speed_cms); the
+ * display-unit conversion happens only at render time (screens_moto.c's render_dcard_value), so a
+ * units toggle after this run still relabels it correctly -- speed_display() is never called here. */
+static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_gate_res_t *res, bool present)
+{
+    LT_ASSERT_VOID(r != NULL && g != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(res != NULL, UI_APP_ASSERT_CODE);
+    memset(r, 0, sizeof *r);
+    if (drag_gate_label(g, r->label, sizeof r->label) < 0) {
+        snprintf(r->label, sizeof r->label, "G%u", (unsigned)g->id);   /* fallback: bounded */
+    }
+    r->present     = present;
+    r->is_distance = g->kind == DRAG_BRAKE;
+    r->dist_m      = (uint16_t)(res->dist_cm / 100u);
+    r->t_ms        = res->time_ms;
+    r->has_trap    = (g->kind == DRAG_DIST && g->a == 40234u && res->speed_cms > 0u);
+    r->trap_cms    = res->speed_cms;
+}
+
+/* Page 0 (design §3): the current run's hit gates only, in table order (== hit order for a normal
+ * forward-progressing run, same as the old append-only behaviour). drag_n = number hit. */
+static void drag_fill_page0(const pipe_drag_t *d)
+{
+    LT_ASSERT_VOID(d != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(d->current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < d->current.n_gates && i < DRAG_MAX_GATES && n < DRAG_MAX_GATES; i++) {
+        const drag_gate_res_t *res = &d->current.gates[i];
+        if (!res->hit) {
+            continue;
+        }
+        const drag_gate_def_t *g = gate_by_id(res->gate_id);
+        if (g == NULL) {
+            continue;
+        }
+        row_from_gate(&s_model.drag[n], g, res, true);
+        n++;
+    }
+    s_model.drag_n = n;
+}
+
+/* Page 1 (design §3): every gate of the last/current run in table order, present = hit. */
+static void drag_fill_page1(const pipe_drag_t *d)
+{
+    LT_ASSERT_VOID(d != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(d->current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < d->current.n_gates && i < DRAG_MAX_GATES && n < DRAG_MAX_GATES; i++) {
+        const drag_gate_res_t *res = &d->current.gates[i];
+        const drag_gate_def_t *g   = gate_by_id(res->gate_id);
+        if (g == NULL) {
+            continue;
+        }
+        row_from_gate(&s_model.drag[n], g, res, res->hit != 0);
+        n++;
+    }
+    s_model.drag_n = n;
+}
+
+/* Page 2 (design §3): one row per configured gate, present = have_best[id-1]. best_time_ms[id-1]
+ * holds the session-best time_ms, EXCEPT for a BRAKE gate where it holds the best (shortest)
+ * stopping dist_cm instead (§11.3, confirmed against pipeline.c's publish_drag_snapshot()) -- so
+ * the synthetic gate_res_t below feeds the same value into both time_ms and dist_cm, and
+ * row_from_gate's is_distance branch (g->kind == DRAG_BRAKE) picks the right one. speed_cms is
+ * left 0: the session-best record carries no trap speed, so has_trap is always false here, which
+ * render_drag_gate_list (screens_moto.c) never reads anyway (only page 0's card does). */
+static void drag_fill_page2(const pipe_drag_t *d)
+{
+    LT_ASSERT_VOID(d != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    uint8_t n = 0;
+    for (uint8_t j = 0; j < s_drag_cfg.n_gates && j < DRAG_MAX_GATES && n < DRAG_MAX_GATES; j++) {
+        const drag_gate_def_t *g = &s_drag_cfg.gates[j];
+        if (g->id < 1u || g->id > DRAG_MAX_GATES) {
+            continue;   /* defensive: every id checked before indexing best_time_ms[]/have_best[] */
+        }
+        uint8_t         idx = (uint8_t)(g->id - 1u);
+        drag_gate_res_t res;
+        memset(&res, 0, sizeof res);
+        res.gate_id = g->id;
+        res.time_ms = d->best_time_ms[idx];
+        res.dist_cm = d->best_time_ms[idx];
+        row_from_gate(&s_model.drag[n], g, &res, d->have_best[idx]);
+        n++;
+    }
+    s_model.drag_n = n;
+}
+
+/* Rebuilds s_model.drag[]/drag_n for whichever page is currently selected, from a fresh pipeline
+ * snapshot -- called on every drag event and on every DRAG page change (design §3). A snapshot
+ * failure (pipeline_drag_snapshot() only ever returns 0 today, but the contract allows otherwise)
+ * leaves the model's existing rows in place rather than clobbering them with a half-read, same
+ * policy as copy_best_snapshot() above. */
+static void drag_rows_refill(void)
+{
+    LT_ASSERT_VOID(s_model.page < 3u, UI_APP_ASSERT_CODE);   /* dispatches on it below */
+    pipe_drag_t d;
+    if (pipeline_drag_snapshot(&d) != 0) {
+        return;
+    }
+    LT_ASSERT_VOID(d.current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    switch (s_model.page) {
+    case 0: drag_fill_page0(&d); break;
+    case 1: drag_fill_page1(&d); break;
+    case 2: drag_fill_page2(&d); break;
+    default: break;
+    }
 }
 
 /* EV_SECTOR -> model (split verbatim out of handle_event for rule 4). arg32b is 0 both for a
@@ -735,10 +864,13 @@ static void handle_event(const event_t *e, int64_t now)
      * (== the lock threshold). EV_STILL clears it. Flagged as a coarse gate. */
     case EV_MOTION: s_gspeed_kmh = MENU_LOCK_SPEED_KMH; break;
     case EV_STILL:  s_gspeed_kmh = 0; break;
-    case EV_DRAG_ARMED:  s_model.drag_armed = true; s_model.drag_n = 0; s_dirty = true; break;
+    /* Plan 7c T5 (design §3): drag_rows_refill() re-derives drag_n from the snapshot itself, so
+     * EV_DRAG_ARMED must NOT zero it first -- doing so would race a refill that reads the still-
+     * frozen previous run before the engine's own ARMED reset lands in the next snapshot. */
+    case EV_DRAG_ARMED:  s_model.drag_armed = true; drag_rows_refill(); s_dirty = true; break;
     case EV_DRAG_LAUNCH: s_model.drag_armed = false; s_dirty = true; break;
-    case EV_DRAG_GATE:   handle_drag_gate(e); break;
-    case EV_DRAG_DONE:   s_dirty = true; break;
+    case EV_DRAG_GATE:   drag_rows_refill(); s_dirty = true; break;
+    case EV_DRAG_DONE:   drag_rows_refill(); s_dirty = true; break;
     default: break;
     }
 }
@@ -1083,6 +1215,7 @@ static void ui_task(void *arg)
     s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode  = s_mode;
     s_model.units = s_cfg.units; /* Plan 7c T4 (design §3): every speed_display() call on screen uses it */
+    drag_cfg_from_user(&s_cfg, &s_drag_cfg); /* Plan 7c T5: gate table for DRAG row labels/benches */
     /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
      * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0.
      * clear_last_sector_deltas() (ruling B7b-1, bench finding 1) is called here and ONLY here --
