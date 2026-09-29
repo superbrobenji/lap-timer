@@ -970,7 +970,12 @@ static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
  * DISP_FULL -- either because the box was degenerate or disp_set_window() itself failed (logged
  * once here). Before T7 the source was s_fb.dirty (the render's own draw box, always the whole
  * padded buffer since fb_clear() touches everything every render); s_diff is narrower -- only what
- * actually changed versus the panel's last known content, which is the point of this task. */
+ * actually changed versus the panel's last known content, which is the point of this task.
+ * Fix round 1: only ever called for kind == RF_PARTIAL, and render_and_refresh() now guarantees
+ * s_diff.valid before letting kind == RF_PARTIAL reach here -- an unchanged frame (s_diff invalid)
+ * either skips before the policy is even asked, or, if wants_full forces the question, only acts
+ * on a policy answer of RF_FULL (which never calls this function; see render_and_refresh()'s
+ * decision table). The assert below is therefore a real invariant, not a defensive placeholder. */
 static uint8_t partial_window_or_full(void)
 {
     LT_ASSERT_RET(s_diff.valid, UI_APP_ASSERT_CODE, DISP_FULL); /* something must have differed */
@@ -1089,18 +1094,25 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
  * ("refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c" + " rc=%d" for the attempted case), which
  * stays byte-identical for both the P and F outcomes.
  * Plan 7c T7 (design §5): the box printed is s_diff (the diff-vs-panel rect), not the render's own
- * draw box. On the diff-unchanged kind=N call (render_and_refresh()'s early return) fb_diff_rect()
- * only clears s_diff.valid, leaving x0/y0/x1/y1 at whatever the last real diff computed -- harmless
- * (kind=N already says nothing was attempted), not the current frame's box. */
+ * draw box.
+ * Fix round 1 (minor #2): s_diff.valid is false whenever the last fb_diff_rect() call found no
+ * difference (the diff-unchanged kind=N skip in render_and_refresh(), or fix 1's unchanged-but-
+ * forced-full path, where an RF_FULL outcome is logged as kind=F without ever computing a real
+ * box) -- x0/y0/x1/y1 are then whatever the last REAL diff computed, not this call's box. Print
+ * 0,0,0,0 instead of that stale value in both cases. */
 static void log_refresh(bool attempted, uint8_t mode, int rc)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);
-    char kc = !attempted ? 'N' : ((mode == DISP_FULL) ? 'F' : 'P');
+    char     kc  = !attempted ? 'N' : ((mode == DISP_FULL) ? 'F' : 'P');
+    uint16_t dx0 = s_diff.valid ? s_diff.x0 : 0;
+    uint16_t dy0 = s_diff.valid ? s_diff.y0 : 0;
+    uint16_t dx1 = s_diff.valid ? s_diff.x1 : 0;
+    uint16_t dy1 = s_diff.valid ? s_diff.y1 : 0;
     if (!attempted) {
         ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c", (unsigned)s_model.screen,
-                 (unsigned)s_model.page, (unsigned)s_diff.x0, (unsigned)s_diff.y0,
-                 (unsigned)s_diff.x1, (unsigned)s_diff.y1, kc);
+                 (unsigned)s_model.page, (unsigned)dx0, (unsigned)dy0, (unsigned)dx1,
+                 (unsigned)dy1, kc);
         return;
     }
     /* A ternary of two enum constants used directly as ESP_LOG_LEVEL()'s `level` argument trips
@@ -1109,8 +1121,8 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
      * the macro then only ever sees a bare identifier there. */
     esp_log_level_t lvl = (rc != 0) ? ESP_LOG_WARN : ESP_LOG_INFO;
     ESP_LOG_LEVEL(lvl, TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d",
-                  (unsigned)s_model.screen, (unsigned)s_model.page, (unsigned)s_diff.x0,
-                  (unsigned)s_diff.y0, (unsigned)s_diff.x1, (unsigned)s_diff.y1, kc, rc);
+                  (unsigned)s_model.screen, (unsigned)s_model.page, (unsigned)dx0, (unsigned)dy0,
+                  (unsigned)dx1, (unsigned)dy1, kc, rc);
 }
 
 /* Renders the model, then feeds the pure refresh policy (§20.3) and carries out whatever it
@@ -1120,6 +1132,21 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
  * s_fb_prev (the last frame the panel actually accepted). An identical frame with no forced full
  * costs nothing at all -- no policy call, no counters/timestamps touched, and s_refresh_pending is
  * cleared too (a throttled render that reverted to what the panel already shows is no longer owed).
+ * Fix round 1 (Important, reachable assert): an unchanged frame can still need the policy asked --
+ * s_wants_full (e.g. the UP+DOWN ghost-clear combo, which has no speed gate) can be set while
+ * riding, and ui_refresh_decide() only turns wants_full into RF_FULL while "still"; while moving it
+ * can hand back RF_PARTIAL (or, if throttled, RF_NONE) instead. s_diff.valid is guaranteed false
+ * whenever changed is false (fb_diff_rect() always clears it first, before it ever finds a
+ * differing byte), so letting do_refresh(RF_PARTIAL) reach partial_window_or_full() in that state
+ * would trip its "something must have differed" assert on ordinary, expected control flow -- so the
+ * policy's answer is checked before acting on it. Decision table (changed x wants_full x policy):
+ *   changed=true                         -> always act on kind as returned; s_diff is valid, so
+ *                                            partial_window_or_full() has a real box if RF_PARTIAL.
+ *   changed=false, wants_full=false      -> skip before the policy is even called (below).
+ *   changed=false, wants_full=true,
+ *     policy returns RF_FULL             -> act on it (DISP_FULL never reads s_diff).
+ *     policy returns RF_PARTIAL/RF_NONE  -> skip, same as the wants_full=false case; s_wants_full
+ *                                            stays set so the next render asks again.
  * Plan 7c T6 (fix round 1) ruling, carried here: a render that starts with s_refresh_pending
  * already true is never "only a clock tick". tick_only is computed once, at entry -- before
  * anything below can change s_refresh_pending -- as s_clock_tick && !s_refresh_pending, and folded
@@ -1160,6 +1187,16 @@ static void render_and_refresh(void)
 
     rf_in_t   in   = build_rf_in(now, full_every);
     rf_kind_t kind = ui_refresh_decide(&in);
+
+    if (!changed && kind != RF_FULL) {
+        /* Fix round 1: an unchanged frame only reaches here with wants_full set, asking the policy
+         * for a forced full; anything but RF_FULL means "not yet" -- skip exactly like the
+         * wants_full=false case above, never handing an invalid s_diff to do_refresh(). */
+        log_refresh(false, DISP_PARTIAL, 0);
+        s_refresh_pending = false;
+        s_clock_tick      = false;
+        return;
+    }
 
     if (kind == RF_NONE) {
         /* Important #2: a refresh suppressed by the temperature throttle is owed, not dropped
