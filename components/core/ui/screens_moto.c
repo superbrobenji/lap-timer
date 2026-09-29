@@ -461,9 +461,10 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
         if (i < n && m->have_best_sector[i]) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_VALUE_Y, buf);
         /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i] (spec §5 literal),
-         * not on best_n_sectors -- no producer fills best_n_sectors yet (the best-lap sector
-         * times/theo wiring is roadmap follow-up #58), so gating the delta on `i < n` as well would
-         * always show "----" here on target. */
+         * never on best_n_sectors -- ui.c's copy_best_snapshot() (Plan 7c T3, #79) is the producer
+         * that fills best_n_sectors now, but the delta row is a different signal (this lap's live
+         * sector splits vs. the locked layout's best-sector count) and must not be gated on it: a
+         * lap can cross sector i before the pipeline has ever recorded a best time for it. */
         if (m->have_last_sector_delta[i]) { fmt_delta_clamped(buf, m->last_sector_delta_ms[i], BOARD_DELTA_CLAMP_MS); }
         else { p = put_str(buf, "----"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_DELTA_Y, buf);

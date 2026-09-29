@@ -297,17 +297,28 @@ static void publish_drag_snapshot(void)
 }
 
 /* Engine callback (lap_on_fix / drag_on_fused). Forward every event to evt_q, and on completion
- * hand the logger the full result. */
+ * hand the logger the full result.
+ *
+ * Plan 7c T3 fix 1 (review finding 1): EV_LAP_COMPLETE publishes s_best/s_laps[] under the F4
+ * seqlock in on_lap_complete() -- that publish must land BEFORE emit_event() puts this same event
+ * on g_ui_evt_q, or the ui task, reacting to the very event it just dequeued, could read the
+ * previous lap's data instead of this one's (on the dual-core target, the event and the seqlock
+ * write are otherwise ordered only by which runs first on this task -- there is no other fence).
+ * Running on_lap_complete() first makes that structural: whichever task next reads s_best/s_laps[]
+ * after dequeuing this event is guaranteed to see this lap's publish, not a stale one. Every other
+ * event type keeps the original emit-then-handle order -- EV_SECTOR/EV_DRAG_DONE's handlers don't
+ * publish anything a same-event consumer reads back (on_drag_done() only hands the result to the
+ * logger via its own queue; s_dragsnap is published separately by publish_drag_snapshot(), fix 2). */
 static void engine_cb(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
     LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* stable §4.5 code, drives the switch */
-    emit_event(ev);
-    switch (ev->type) {
-    case EV_LAP_COMPLETE:
+    if (ev->type == EV_LAP_COMPLETE) {
         on_lap_complete(ev->gps_us);
         s_rtc_save_due = true;     /* §15.3: save after on_fix, once open_lap has opened the new lap */
-        break;
+    }
+    emit_event(ev);
+    switch (ev->type) {
     case EV_SECTOR:
         LT_ASSERT_VOID(ev->arg16 <= LAP_MAX_SECTORS, PIPE_ASSERT_CODE);   /* engine sector idx in range */
         ESP_LOGI(TAG, "  sector %u  split %lu ms  delta %ld ms", (unsigned)ev->arg16,
@@ -315,7 +326,7 @@ static void engine_cb(const event_t *ev)
         s_rtc_save_due = true;     /* §15.3: the crossed sector is now the resume point */
         break;
     case EV_DRAG_DONE:    on_drag_done(); break;
-    default: break;
+    default: break;               /* EV_LAP_COMPLETE handled above, before emit_event() */
     }
 }
 
@@ -527,11 +538,16 @@ static void on_raw(const imu_raw_t *raw)
         event_t evs[DRAG_EVT_MAX];
         int nev = 0;
         drag_on_fused(&s_drag, &fused, evs, DRAG_EVT_MAX, &nev);
-        for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
-        /* Plan 7c T3 (ruling R-2): publish s_dragsnap once per step that produced >= 1 drag event
-         * -- ARMED/LAUNCH/GATE/DONE all forward through this same loop, so one call here covers
-         * every kind uniformly instead of a publish site per event type. */
+        /* Plan 7c T3 fix 1 (review finding 2): publish s_dragsnap BEFORE forwarding this step's
+         * events -- same argument as fix 1 above (engine_cb's emit_event enqueues onto
+         * g_ui_evt_q), and safe to do here because drag_on_fused() has already fully settled
+         * D->cur/D->best for every event in evs[] by the time it returns: enter_done() calls
+         * update_best(D) before its own emit() (drag.c ~433-434), and step_done()'s brake_step()
+         * -> update_best() (drag.c ~601) both run synchronously inside this same drag_on_fused()
+         * call, well before any event reaches a queue. One call here still covers ARMED/LAUNCH/
+         * GATE/DONE uniformly (>= 1 event this step), same as before. */
         if (nev > 0) publish_drag_snapshot();
+        for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
     }
 
     stats_step(&fused);

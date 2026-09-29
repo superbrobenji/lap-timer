@@ -628,12 +628,9 @@ static void handle_lap_result(uint32_t lap_ms, uint8_t flags, int32_t lap_delta_
 
     /* Plan 7c T3 (design §2): LAP page 1's best-sector board and page 2's session stats grid, both
      * filled from real pipeline data via the F4 seqlock snapshot readers. pipeline.c's engine_cb
-     * queues this EV_LAP_COMPLETE (emit_event) before on_lap_complete() publishes s_best/s_laps[]
-     * for it, so on paper a snapshot read here could in principle still see the previous lap's
-     * data -- the seqlock only promises a torn-free read, not that this specific lap's publish has
-     * landed yet. In practice the pipeline task's own next few instructions (on_lap_complete) run
-     * well before the cross-core wake + dequeue that gets this task here, and any such staleness
-     * would only last until the very next lap event self-corrects it -- never a torn/invalid read. */
+     * (Plan 7c T3 fix 1) publishes s_best/s_laps[] for this EV_LAP_COMPLETE BEFORE queuing the
+     * event itself, so this read is guaranteed to see this lap's data, not the previous one's --
+     * a structural ordering the producer enforces, not a timing assumption made here. */
     copy_best_snapshot();
     fold_lap_stats();
 }
