@@ -517,11 +517,15 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char  buf[48];
+    char  label[16];
     char *p;
-    /* Plan 7c T3 (design §2): max_speed_cms is the raw session-max the pipeline folds; the display
-     * unit conversion happens here, at render (units=0/km/h for now -- Task 4 adds the toggle). */
-    p = put_uint(buf, speed_display(m->max_speed_cms, 0)); *p = '\0';
-    grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "MAX SPD", buf);
+    /* Plan 7c T4 (design §3): max_speed_cms is the raw session-max the pipeline folds; the display
+     * unit conversion happens here, at render, using the model's units toggle. The label carries
+     * the unit too (grid_cell already draws labels in FONT_SMALL, which has the lowercase glyphs
+     * "km/h"/"mph" need -- FONT_MED has none). */
+    p = put_uint(buf, speed_display(m->max_speed_cms, m->units)); *p = '\0';
+    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, m->units ? "mph" : "km/h"); *lp = '\0';
+    grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, label, buf);
     /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
      * to 99 before formatting so "L99 R99" is provably the widest this cell ever draws. */
     uint8_t lean_l = m->lean_l_deg > 99u ? 99u : m->lean_l_deg;
@@ -544,11 +548,12 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
  * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
  * stopping DISTANCE in metres, not an elapsed time) -- the distance as a plain integer in
  * FONT_HUGE followed by a FONT_SMALL "m" (FONT_HUGE has no lowercase, so the unit itself must use
- * a different font). A gate with has_trap set also draws its trap speed as "@<trap_kmh>" on the
+ * a different font). A gate with has_trap set also draws its trap speed as "@<trap_speed>" on the
  * row below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading
  * character draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows
- * "@173" this way and the model has no units field yet for a suffix (follow-up). */
-static void render_dcard_value(fb_t *fb, const drag_row_t *r)
+ * "@173" this way. Plan 7c T4 (design §3): trap_speed is already in the display unit (filled by
+ * the ui, never converted here); a FONT_SMALL "km/h"/"mph" suffix follows the digits. */
+static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(r != NULL, UI_ASSERT_CODE);
@@ -567,9 +572,11 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r)
          * hugging the FONT_MED speed digits' baseline, and the speed itself (no '@') in FONT_MED
          * beside it. */
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_SPEED_Y + DCARD_AT_DY, "@");
-        char *p = put_uint(buf, r->trap_kmh);
+        char *p = put_uint(buf, r->trap_speed);
         *p = '\0';
-        fb_text(fb, &FONT_MED, DCARD_LABEL_X + (int)FONT_SMALL.w + DCARD_AT_GAP, DCARD_SPEED_Y, buf);
+        int end = fb_text(fb, &FONT_MED, DCARD_LABEL_X + (int)FONT_SMALL.w + DCARD_AT_GAP, DCARD_SPEED_Y, buf);
+        /* Same FONT_SMALL baseline as the "@" above (DCARD_SPEED_Y + DCARD_AT_DY, T4-R1). */
+        fb_text(fb, &FONT_SMALL, end + DCARD_SPEED_UNIT_GAP, DCARD_SPEED_Y + DCARD_AT_DY, units ? "mph" : "km/h");
     }
 }
 
@@ -619,7 +626,7 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
         fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, "READY");
     } else {
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);
-        render_dcard_value(fb, &m->drag[n - 1u]);
+        render_dcard_value(fb, &m->drag[n - 1u], m->units);
         render_dcard_footer(fb, m, n);
     }
     if (m->drag_armed) {

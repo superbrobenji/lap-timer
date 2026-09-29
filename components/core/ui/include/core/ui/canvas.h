@@ -166,6 +166,10 @@
  * share the same small-font baseline offset and gap. */
 #define DCARD_AT_DY  8         /* the FONT_SMALL "@" sits this far below the FONT_MED row's top, hugging its baseline */
 #define DCARD_AT_GAP 2         /* px between the "@" and the FONT_MED speed digits */
+/* Plan 7c T4 (design §3): the trap row's unit suffix (FONT_SMALL "km/h"/"mph"), drawn after the
+ * FONT_MED trap-speed digits on the "@" row's baseline (DCARD_SPEED_Y + DCARD_AT_DY) --
+ * canvas-independent like DCARD_AT_DY/DCARD_AT_GAP above. */
+#define DCARD_SPEED_UNIT_GAP 4 /* px between the trap-speed digits and the FONT_SMALL unit suffix */
 /* ---- Plan 7b DRAG pages 1/2: gate list (spec 7b §7) ---- */
 #define DLIST_ROWS 4
 #define DLIST_LABEL_DY 6

@@ -285,7 +285,9 @@ static void test_lap_p2_stats_filled(void)
     /* Real pipeline data (Plan 7c T3, design §2): max_speed_cms is the raw session-max value the
      * pipeline folds from lap_stats_t; the renderer converts it to km/h at render time
      * (speed_display, core/ui/units.h) -- 5944 cm/s -> 214 km/h, the same value test_lap_p2_stats
-     * used to set directly, so this and the three cases above must keep byte-identical goldens. */
+     * used to set directly, so this and the three cases above keep the same MAX SPD value; Plan 7c
+     * T4 (design §3) puts the unit in the label ("MAX SPD km/h") on every one of them since m.units
+     * defaults to 0 (km/h) via memset -- see test_lap_p2_stats_mph below for the mph label/value. */
     screen_model_t m; lap_model_base(&m); m.page = 2;
     m.max_speed_cms = 5944;   /* 214 km/h */
     m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
@@ -294,6 +296,22 @@ static void test_lap_p2_stats_filled(void)
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_filled.pbm"), &s_fb));
+}
+
+static void test_lap_p2_stats_mph(void)
+{
+    /* Plan 7c T4 (design §3): same model as test_lap_p2_stats_filled but m.units = 1 (mph) -- the
+     * label reads "MAX SPD mph" and the value converts to 133 (5944 cm/s -> 133 mph, speed_display
+     * rounds to nearest; see units.c). */
+    screen_model_t m; lap_model_base(&m); m.page = 2;
+    m.units = 1;
+    m.max_speed_cms = 5944;   /* 133 mph */
+    m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12; m.laps_valid = 10;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_mph.pbm"), &s_fb));
 }
 
 /* ---- DRAG page 0 (spec 7b §7): the run card ---- */
@@ -305,7 +323,7 @@ static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint1
     drag_row_t *r = &m->drag[m->drag_n++];
     memset(r, 0, sizeof *r);
     strcpy(r->label, label); r->t_ms = t_ms; r->present = true;
-    r->trap_kmh = trap; r->has_trap = trap != 0; r->is_distance = dist; r->dist_m = dist_m;
+    r->trap_speed = trap; r->has_trap = trap != 0; r->is_distance = dist; r->dist_m = dist_m;
 }
 
 static void test_drag_p0_ready(void)
@@ -322,15 +340,30 @@ static void test_drag_p0_ready(void)
 static void test_drag_p0_gate_speed(void)
 {
     /* Four gates hit, newest ("1/4") carries a trap speed: big slot shows "12.84" (FONT_HUGE),
-     * "@173" row below it (FONT_MED), footer lists the three earlier gates "60ft 2.01   330ft
-     * 5.43   1/8 8.29" in hit order. */
+     * "@173" + "km/h" row below it (FONT_MED digits, FONT_SMALL unit suffix -- Plan 7c T4, design
+     * §3; m.units defaults to 0/km/h via memset), footer lists the three earlier gates "60ft 2.01
+     * 330ft 5.43   1/8 8.29" in hit order. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173 km/h" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
+}
+
+static void test_drag_p0_trap_mph(void)
+{
+    /* Plan 7c T4 (design §3): same layout as test_drag_p0_gate_speed but m.units = 1 (mph) and a
+     * trap_speed already in mph (the ui converts before filling the model -- the renderer never
+     * converts): "@107" + "mph". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.units = 1;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 107, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_trap_mph.pbm"), &s_fb));   /* big 12.84, "@107 mph" row */
 }
 
 static void test_drag_p0_distance(void)
@@ -351,7 +384,8 @@ static void test_drag_p0_fault(void)
     /* Finding 5: PF-2's footer clip and fault_strip_left_x() with a bit set were untested on DRAG
      * page 0 -- same four gates as test_drag_p0_gate_speed, plus GPS no-fix and a low battery. The
      * footer must stop clear of the fault icons (PF-2), and the battery label/icon must both be
-     * fully legible (finding 17's overprint fix). */
+     * fully legible (finding 17's overprint fix). The trap row also gains the "km/h" suffix (Plan
+     * 7c T4, design §3; m.units defaults to 0 via memset), same as test_drag_p0_gate_speed. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 14;
     m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW);
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
@@ -614,8 +648,10 @@ int main(void)
     RUN_TEST(test_lap_p2_stats_many_laps);
     RUN_TEST(test_lap_p2_stats_huge_laps);
     RUN_TEST(test_lap_p2_stats_filled);
+    RUN_TEST(test_lap_p2_stats_mph);
     RUN_TEST(test_drag_p0_ready);
     RUN_TEST(test_drag_p0_gate_speed);
+    RUN_TEST(test_drag_p0_trap_mph);
     RUN_TEST(test_drag_p0_distance);
     RUN_TEST(test_drag_p0_fault);
     RUN_TEST(test_drag_p0_footer_scroll);

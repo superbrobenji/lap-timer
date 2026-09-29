@@ -37,6 +37,7 @@
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 #include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
 #include "core/ui/stats_fold.h" /* session_max_t / session_max_fold (Plan 7c T1/T3) */
+#include "core/ui/units.h" /* speed_display (Plan 7c T1/T4): trap-speed conversion for handle_drag_gate */
 
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
@@ -302,12 +303,16 @@ static void menu_do_mode(void)
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
 }
 
-/* MA_UNITS: toggle km/h<->mph, persist, refresh the label. (Split verbatim out of menu_select.) */
+/* MA_UNITS: toggle km/h<->mph, persist, refresh the label and the model (the menu is showing, so
+ * the change appears on screen the moment riding resumes -- Plan 7c T4, design §3). (Split
+ * verbatim out of menu_select.) */
 static void menu_do_units(void)
 {
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
     (void)lt_cfg_save(&s_cfg);
+    s_model.units = s_cfg.units;
+    s_dirty       = true;
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
 }
@@ -666,6 +671,10 @@ static void handle_drag_gate(const event_t *e)
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)e->arg16);
         r->t_ms    = e->arg32;
         r->present = true;
+        /* Plan 7c T4 (design §3): arg32b always carries the gate's speed (cm/s) -- convert to the
+         * display unit now so it is ready the moment Task 5's gate table (not plumbed to ui yet)
+         * identifies the 1/4-mile trap gate and sets has_trap; trap_speed is inert until then. */
+        r->trap_speed = speed_display((uint16_t)e->arg32b, s_model.units);
     }
     LT_ASSERT_VOID(s_model.drag_n <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);   /* append kept it bounded */
     s_dirty = true;
@@ -1070,8 +1079,9 @@ static void ui_task(void *arg)
     /* ui's own config copy (units / live-clock toggles + save), like cmd.c. */
     cfg_defaults(&s_cfg);
     (void)lt_cfg_load(&s_cfg);
-    s_mode       = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
-    s_model.mode = s_mode;
+    s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    s_model.mode  = s_mode;
+    s_model.units = s_cfg.units; /* Plan 7c T4 (design §3): every speed_display() call on screen uses it */
     /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
      * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0.
      * clear_last_sector_deltas() (ruling B7b-1, bench finding 1) is called here and ONLY here --

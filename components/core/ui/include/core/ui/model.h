@@ -43,7 +43,9 @@ typedef struct {
     char     label[8];   /* "0-100" / "1/4" / "60ft" / "100-0" / "100-200" / "1000ft" ... */
     uint32_t t_ms;        /* elapsed for the gate; 0 + !present => "--" (ignored if is_distance) */
     bool     present;     /* gate hit this run */
-    uint16_t trap_kmh;    /* trap speed for the 1/4 row (0 = none) */
+    uint16_t trap_speed;  /* trap speed for the 1/4 row (0 = none); already in the display unit --
+                            * filled by the ui (speed_display, core/ui/units.h); the renderer draws
+                            * it verbatim and appends the unit, it never converts (Plan 7c T4) */
     bool     has_trap;
     /* #40: the 100-0 braking gate (DRAG_BRAKE, core/drag.h) is a stopping DISTANCE in metres, not
      * an elapsed time -- t_ms has no meaning for it. When is_distance is set, the renderer shows
@@ -56,6 +58,9 @@ typedef struct {
 typedef struct {
     uint8_t  mode; /* SCR_MODE_LAP / _DRAG (meaningful when screen == SCR_RIDING) */
     uint8_t  page; /* 0/1/2 */
+    uint8_t  units; /* Plan 7c T4 (design §3): 0 = km/h, 1 = mph (CFG_UNITS_KMH/CFG_UNITS_MPH); set
+                      * from s_cfg.units at boot and on every menu toggle -- every speed_display()
+                      * call on screen (LAP page 2 MAX SPD, the DRAG trap row) uses it */
 
     /* LAP page 0 */
     uint32_t best_ms, prev_ms;
