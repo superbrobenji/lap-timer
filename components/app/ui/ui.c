@@ -84,14 +84,18 @@ static const char *TAG = "ui";
 #define UI_BTN_DRAIN_MAX 32
 #define UI_EVT_DRAIN_MAX 64
 
-/* ---- framebuffer (spec §4.8: 296x128 / 8 = 4.7 KB, sized for the larger panel) ----
- * FB_W/FB_H/FB_STRIDE size the static buffer only, kept at the 296x128 (ws29v2) worst case so one
- * build of this file holds either panel's canvas; the actual render dimensions -- CANVAS_W/CANVAS_H
- * (core/ui/canvas.h), 256x122 on a ws213v4 build -- are what fb_init/render_fb use below (Plan 7
- * T3: compile-time canvas by PANEL). */
-#define FB_W      296
-#define FB_H      128
-#define FB_STRIDE (FB_W / 8)
+/* ---- framebuffer (spec §4.8: sized by the compile-time canvas -- 256x122/8 = 3904 B on ws213v4,
+ * 296x128/8 = 4736 B on ws29v2) ----
+ * Pre-review fix (ruling R-5): FB_STRIDE/FB_H used to be pinned to the 296x128 (ws29v2) worst case
+ * "so one build of this file holds either panel's canvas" -- but since Plan 7 T3 the canvas is
+ * itself a compile-time choice (CANVAS_W/CANVAS_H, core/ui/canvas.h, selected by PANEL), so one
+ * build of ui.c never holds the other panel's canvas anyway, and fb_init(&s_fb, ..., CANVAS_W,
+ * CANVAS_H) already only ever touches the first (CANVAS_W/8)*CANVAS_H bytes of whatever it's
+ * given. The worst-case sizing bought nothing but wasted static DRAM on every ws213v4 build
+ * (including s_fb_prev_bits below, added by Plan 7c T7) -- FB_STRIDE/FB_H now just alias
+ * CANVAS_W/CANVAS_H directly. */
+#define FB_STRIDE (CANVAS_W / 8)
+#define FB_H      CANVAS_H
 
 /* ---- buttons (spec §20.8, Appendix A). Board mask: bit0 MODE, bit1 UP, bit2 DOWN (§5.1). ---- */
 #define BTN_MODE 0x1u
@@ -144,17 +148,17 @@ static StackType_t  s_stack[UI_STACK_WORDS];
 static TaskHandle_t s_task;
 
 static screen_model_t s_model;
-static uint8_t        s_fb_bits[FB_STRIDE * FB_H]; /* (296/8)*128 = 4736 B */
+static uint8_t        s_fb_bits[FB_STRIDE * FB_H]; /* 3904 B on ws213v4, 4736 B on ws29v2 */
 static fb_t           s_fb;
 
-/* Plan 7c T7 (design §5): the last frame the panel actually accepted, same worst-case sizing as
- * s_fb_bits above (FB_STRIDE * FB_H, not CANVAS_W/CANVAS_H) so one build of this file holds either
- * panel's canvas here too. render_and_refresh() diffs the freshly rendered s_fb against this on
- * every render (fb_diff_rect, Task 1) into s_diff; do_refresh() copies s_fb_bits over it after a
- * refresh the panel actually accepted -- never on failure, never on a throttled/skipped render, so
- * a render that was throttled is still "different from the panel" next time and gets refreshed --
- * and the boot block does the same copy right after a successful disp_init(). */
-static uint8_t   s_fb_prev_bits[FB_STRIDE * FB_H]; /* (296/8)*128 = 4736 B */
+/* Plan 7c T7 (design §5): the last frame the panel actually accepted, same compile-time-canvas
+ * sizing as s_fb_bits above (FB_STRIDE * FB_H, which is CANVAS_W/CANVAS_H under the hood -- see
+ * the framebuffer block above, ruling R-5). render_and_refresh() diffs the freshly rendered s_fb
+ * against this on every render (fb_diff_rect, Task 1) into s_diff; do_refresh() copies s_fb_bits
+ * over it after a refresh the panel actually accepted -- never on failure, never on a throttled/
+ * skipped render, so a render that was throttled is still "different from the panel" next time and
+ * gets refreshed -- and the boot block does the same copy right after a successful disp_init(). */
+static uint8_t   s_fb_prev_bits[FB_STRIDE * FB_H]; /* 3904 B on ws213v4, 4736 B on ws29v2 */
 static fb_t      s_fb_prev;
 static fb_rect_t s_diff; /* bounding box from the most recent fb_diff_rect() call, below */
 
