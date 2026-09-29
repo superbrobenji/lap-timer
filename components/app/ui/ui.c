@@ -1152,11 +1152,16 @@ static void dead_retry(int64_t now)
  * lap is running (s_lap_start_mono_us != 0, armed by handle_lap_complete() above) and LAP page 0
  * is the screen actually showing, advances s_model.cur_ms/cur_running from the lap's start stamp
  * so the card footer's left cell shows a running CUR m:ss instead of LAST. A render this alone
- * causes is marked s_clock_tick (only when nothing else already made this iteration dirty) so
- * do_refresh() (above) keeps it out of the full-refresh ladder's partial_count/last_partial_us
- * accounting; s_wants_full is never touched here, so a clock tick alone never forces a full. When
- * the conditions stop holding, cur_running drops once (the cell reverts to LAST) -- that
- * transition is a real model change, not a clock-driven one, so it dirties normally. */
+ * causes is tentatively marked s_clock_tick (only when nothing else already made this iteration
+ * dirty) so do_refresh() (above) keeps it out of the full-refresh ladder's
+ * partial_count/last_partial_us accounting; s_wants_full is never touched here, so a clock tick
+ * alone never forces a full. "Tentatively": this function cannot see whether ui_loop_iter's
+ * throttle-pending branch (which fires independent of s_dirty) is about to consume this same
+ * render to resolve an owed refresh -- that branch clears s_clock_tick itself before calling
+ * render_and_refresh() (Plan 7c T6 fix round 1) so such a render is never wrongly exempted from
+ * accounting. When the tick conditions stop holding, cur_running drops once (the cell reverts to
+ * LAST) -- that transition is a real model change, not a clock-driven one, so it dirties
+ * normally. */
 static void clock_tick(int64_t now)
 {
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE); /* esp_timer stamp, same clock as s_last_clock_us */
@@ -1237,8 +1242,16 @@ static void ui_loop_iter(QueueHandle_t btn_q)
     /* Important #2: a throttle-deferred refresh is owed, not dropped (spec §20.3) -- re-check
      * every tick but only actually re-render/refresh once the 30 s window has elapsed (never on
      * every UI_TICK_MS while waiting); render_and_refresh() re-runs the pure policy itself, so
-     * the none-vs-partial call stays in one place. */
+     * the none-vs-partial call stays in one place.
+     * Plan 7c T6 fix round 1: clock_tick() (above) tags s_clock_tick purely off !s_dirty, which
+     * cannot see that THIS branch fires independent of s_dirty -- a tick due on the very iteration
+     * the 30 s throttle window reopens would otherwise get free-ridden into this call and have its
+     * do_refresh() bookkeeping (s_partial_count/s_last_partial_us) skipped, even though this
+     * render is resolving a real owed backlog, not "only a tick". Clearing it here first forces
+     * do_refresh() to account normally, so s_last_partial_us actually advances and the throttle's
+     * 30 s rate limit is not bypassed by every later tick. */
     if (s_refresh_pending && (now - s_last_partial_us) >= DISP_THROTTLE_RETRY_US) {
+        s_clock_tick = false; /* this call is never "only a tick" -- see comment above */
         render_and_refresh();
         s_dirty = false;
     } else if (s_dirty) {
