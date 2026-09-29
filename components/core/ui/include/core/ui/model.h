@@ -43,9 +43,12 @@ typedef struct {
     char     label[8];   /* "0-100" / "1/4" / "60ft" / "100-0" / "100-200" / "1000ft" ... */
     uint32_t t_ms;        /* elapsed for the gate; 0 + !present => "--" (ignored if is_distance) */
     bool     present;     /* gate hit this run */
-    uint16_t trap_speed;  /* trap speed for the 1/4 row (0 = none); already in the display unit --
-                            * filled by the ui (speed_display, core/ui/units.h); the renderer draws
-                            * it verbatim and appends the unit, it never converts (Plan 7c T4) */
+    uint16_t trap_cms;    /* trap speed for the 1/4 row (0 = none), raw cm/s straight from the gate
+                            * event (EV_DRAG_GATE's arg32b) -- the display unit conversion happens
+                            * at render time only (speed_display(trap_cms, m->units)), same rule as
+                            * every other speed on screen (design §3, ruling R-4, Plan 7c T4 fix 1):
+                            * freezing it in the display unit at event time would mislabel it after
+                            * a later units toggle. */
     bool     has_trap;
     /* #40: the 100-0 braking gate (DRAG_BRAKE, core/drag.h) is a stopping DISTANCE in metres, not
      * an elapsed time -- t_ms has no meaning for it. When is_distance is set, the renderer shows

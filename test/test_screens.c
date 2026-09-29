@@ -317,13 +317,16 @@ static void test_lap_p2_stats_mph(void)
 /* ---- DRAG page 0 (spec 7b §7): the run card ---- */
 
 /* Appends one gate to m->drag[]/drag_n (present=true; the two `false, 0` distance params are
- * overridden in the caller when a case needs a distance gate). */
-static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint16_t trap, bool dist, uint16_t dist_m)
+ * overridden in the caller when a case needs a distance gate). trap_cms is raw cm/s (Plan 7c T4
+ * fix 1, ruling R-4) -- the renderer converts it with speed_display(trap_cms, m->units) at render
+ * time, so callers pass whatever cm/s value renders to the digits they want, not the digits
+ * themselves. */
+static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint16_t trap_cms, bool dist, uint16_t dist_m)
 {
     drag_row_t *r = &m->drag[m->drag_n++];
     memset(r, 0, sizeof *r);
     strcpy(r->label, label); r->t_ms = t_ms; r->present = true;
-    r->trap_speed = trap; r->has_trap = trap != 0; r->is_distance = dist; r->dist_m = dist_m;
+    r->trap_cms = trap_cms; r->has_trap = trap_cms != 0; r->is_distance = dist; r->dist_m = dist_m;
 }
 
 static void test_drag_p0_ready(void)
@@ -341,11 +344,12 @@ static void test_drag_p0_gate_speed(void)
 {
     /* Four gates hit, newest ("1/4") carries a trap speed: big slot shows "12.84" (FONT_HUGE),
      * "@173" + "km/h" row below it (FONT_MED digits, FONT_SMALL unit suffix -- Plan 7c T4, design
-     * §3; m.units defaults to 0/km/h via memset), footer lists the three earlier gates "60ft 2.01
-     * 330ft 5.43   1/8 8.29" in hit order. */
+     * §3; m.units defaults to 0/km/h via memset). trap_cms is raw cm/s (ruling R-4, fix round 1):
+     * 4806 cm/s -> 173 km/h (speed_display: (4806*36 + 500) / 1000 = 173). Footer lists the three
+     * earlier gates "60ft 2.01   330ft 5.43   1/8 8.29" in hit order. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
-    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4806, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -355,11 +359,11 @@ static void test_drag_p0_gate_speed(void)
 static void test_drag_p0_trap_mph(void)
 {
     /* Plan 7c T4 (design §3): same layout as test_drag_p0_gate_speed but m.units = 1 (mph) and a
-     * trap_speed already in mph (the ui converts before filling the model -- the renderer never
-     * converts): "@107" + "mph". */
+     * trap_cms that converts to 107 mph at render time (ruling R-4, fix round 1): 4783 cm/s -> 107
+     * mph (speed_display: (4783*22369 + 500000) / 1000000 = 107): "@107" + "mph". */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.units = 1;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
-    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 107, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4783, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -385,11 +389,12 @@ static void test_drag_p0_fault(void)
      * page 0 -- same four gates as test_drag_p0_gate_speed, plus GPS no-fix and a low battery. The
      * footer must stop clear of the fault icons (PF-2), and the battery label/icon must both be
      * fully legible (finding 17's overprint fix). The trap row also gains the "km/h" suffix (Plan
-     * 7c T4, design §3; m.units defaults to 0 via memset), same as test_drag_p0_gate_speed. */
+     * 7c T4, design §3; m.units defaults to 0 via memset), same as test_drag_p0_gate_speed --
+     * trap_cms 4806 -> 173 km/h (ruling R-4, fix round 1; same value, see that test's comment). */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 14;
     m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW);
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
-    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4806, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -439,7 +444,7 @@ static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this r
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
     m.drag[3].present = false;
-    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
     drag_gate(&m, "100-200", 12340, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
@@ -455,7 +460,7 @@ static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, ev
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 2; m.batt_pct = 90;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
-    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
     drag_gate(&m, "100-200", 6120, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);

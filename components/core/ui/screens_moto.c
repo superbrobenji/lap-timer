@@ -307,6 +307,14 @@ static void fmt_delta_clamped(char *buf, int32_t dms, int32_t max_ms)
     CORE_ASSERT_VOID(strlen(buf) <= 6u, UI_ASSERT_CODE); /* sign + up to "99.99": never wider than the 6-glyph budget */
 }
 
+/* Plan 7c T4 (design §3): the FONT_SMALL unit string for every speed_display() value on screen --
+ * shared by LAP page 2's "MAX SPD" label and the DRAG trap row's suffix (fix round 1: factored out
+ * of the two call sites' duplicated ternary). */
+static const char *unit_suffix(uint8_t units)
+{
+    return units ? "mph" : "km/h";
+}
+
 /* Renders the 64 px big slot (FONT_HUGE): BIG_SECTOR_DELTA/BIG_LAP_DELTA show the signed delta,
  * clamped to CARD_DELTA_CLAMP_MS; BIG_NONE (no best lap yet) falls back to "LAP n" in FONT_MED,
  * since FONT_HUGE has no letters. Returns the pen x after the drawn text (CARD_BIG_X itself for
@@ -524,7 +532,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
      * the unit too (grid_cell already draws labels in FONT_SMALL, which has the lowercase glyphs
      * "km/h"/"mph" need -- FONT_MED has none). */
     p = put_uint(buf, speed_display(m->max_speed_cms, m->units)); *p = '\0';
-    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, m->units ? "mph" : "km/h"); *lp = '\0';
+    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, unit_suffix(m->units)); *lp = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, label, buf);
     /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
      * to 99 before formatting so "L99 R99" is provably the widest this cell ever draws. */
@@ -548,11 +556,12 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
  * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
  * stopping DISTANCE in metres, not an elapsed time) -- the distance as a plain integer in
  * FONT_HUGE followed by a FONT_SMALL "m" (FONT_HUGE has no lowercase, so the unit itself must use
- * a different font). A gate with has_trap set also draws its trap speed as "@<trap_speed>" on the
- * row below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading
- * character draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows
- * "@173" this way. Plan 7c T4 (design §3): trap_speed is already in the display unit (filled by
- * the ui, never converted here); a FONT_SMALL "km/h"/"mph" suffix follows the digits. */
+ * a different font). A gate with has_trap set also draws its trap speed as "@<trap>" on the row
+ * below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading character
+ * draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows "@173" this
+ * way. Plan 7c T4 fix 1 (ruling R-4): trap_cms is raw cm/s -- converted to the display unit HERE,
+ * at render time, same as every other speed on screen (freezing it at event time would mislabel a
+ * run after a later units toggle); a FONT_SMALL unit suffix follows the digits. */
 static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -572,11 +581,11 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
          * hugging the FONT_MED speed digits' baseline, and the speed itself (no '@') in FONT_MED
          * beside it. */
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_SPEED_Y + DCARD_AT_DY, "@");
-        char *p = put_uint(buf, r->trap_speed);
+        char *p = put_uint(buf, speed_display(r->trap_cms, units));
         *p = '\0';
         int end = fb_text(fb, &FONT_MED, DCARD_LABEL_X + (int)FONT_SMALL.w + DCARD_AT_GAP, DCARD_SPEED_Y, buf);
         /* Same FONT_SMALL baseline as the "@" above (DCARD_SPEED_Y + DCARD_AT_DY, T4-R1). */
-        fb_text(fb, &FONT_SMALL, end + DCARD_SPEED_UNIT_GAP, DCARD_SPEED_Y + DCARD_AT_DY, units ? "mph" : "km/h");
+        fb_text(fb, &FONT_SMALL, end + DCARD_SPEED_UNIT_GAP, DCARD_SPEED_Y + DCARD_AT_DY, unit_suffix(units));
     }
 }
 

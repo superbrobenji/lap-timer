@@ -37,7 +37,6 @@
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 #include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
 #include "core/ui/stats_fold.h" /* session_max_t / session_max_fold (Plan 7c T1/T3) */
-#include "core/ui/units.h" /* speed_display (Plan 7c T1/T4): trap-speed conversion for handle_drag_gate */
 
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
@@ -671,10 +670,12 @@ static void handle_drag_gate(const event_t *e)
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)e->arg16);
         r->t_ms    = e->arg32;
         r->present = true;
-        /* Plan 7c T4 (design §3): arg32b always carries the gate's speed (cm/s) -- convert to the
-         * display unit now so it is ready the moment Task 5's gate table (not plumbed to ui yet)
-         * identifies the 1/4-mile trap gate and sets has_trap; trap_speed is inert until then. */
-        r->trap_speed = speed_display((uint16_t)e->arg32b, s_model.units);
+        /* Plan 7c T4 fix 1 (ruling R-4): store the gate's speed (arg32b, cm/s) raw -- the display
+         * unit conversion happens at render time only (screens_moto.c's render_dcard_value), so a
+         * units toggle after this run still relabels it correctly. Ready the moment Task 5's gate
+         * table (not plumbed to ui yet) identifies the 1/4-mile trap gate and sets has_trap;
+         * trap_cms is inert until then. */
+        r->trap_cms = (uint16_t)e->arg32b;
     }
     LT_ASSERT_VOID(s_model.drag_n <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);   /* append kept it bounded */
     s_dirty = true;
