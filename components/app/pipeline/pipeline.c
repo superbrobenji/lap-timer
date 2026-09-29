@@ -144,10 +144,18 @@ static bool        s_stats_gps_lost;       /* current fix invalid (min_speed ign
 
 /* completed laps for `dbg laps` (ring, newest last). F4: the pipeline task (core 1) writes s_laps[]
  * / s_lap_total while the console task (core 0) reads them in pipeline_laps_snapshot -- a seqlock
- * (s_laps_seq, odd while writing) gives the reader a torn-free, ordered copy without a spinlock. */
+ * (s_laps_seq, odd while writing) gives the reader a torn-free, ordered copy without a spinlock.
+ *
+ * Plan 7c T3 (design §2): the SAME seqlock now also guards s_best (best-known sector splits +
+ * theoretical lap, app/pipeline.h pipe_best_t) and s_dragsnap (the drag run in progress/last
+ * frozen + session-best per gate, pipe_drag_t) -- both are written only by this task, only inside
+ * a seq_enter()/seq_leave() section, and read by pipeline_best_snapshot()/pipeline_drag_snapshot()
+ * via the shared snap_read() below. */
 static lap_result_t   s_laps[PIPE_LAPS_KEEP];
 static volatile uint32_t s_lap_total;
 static uint32_t          s_laps_seq;       /* even = stable, odd = writer mid-update (F4 seqlock) */
+static pipe_best_t       s_best;
+static pipe_drag_t       s_dragsnap;
 
 /* ---------------- helpers ---------------- */
 
@@ -195,6 +203,21 @@ static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)
     emit_event(&ev);
 }
 
+/* F4 seqlock write-section helpers (Plan 7c T3, ruling R-2): bump s_laps_seq to odd on entry --
+ * after asserting no writer is already mid-update, since only the pipeline task ever writes it --
+ * and back to even on leave. Shared by every writer of s_laps[]/s_best/s_dragsnap; the ACQ_REL
+ * RMWs fence the plain stores between the two calls so a reader never sees a torn record. */
+static void seq_enter(void)
+{
+    LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE);
+    __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* enter: seq -> odd */
+}
+static void seq_leave(void)
+{
+    __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* leave: seq -> even */
+    LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE); /* left cleanly */
+}
+
 /* Freeze the just-completed lap (lap_prev) + the accumulated stats, store + submit + print. */
 static void on_lap_complete(int64_t end_gps_us)
 {
@@ -203,17 +226,20 @@ static void on_lap_complete(int64_t end_gps_us)
     lap_result_t lr = *p;
     stats_finalise(&lr.stats);
 
-    /* F4 seqlock write invariant: only the pipeline task writes s_laps_seq, so it must be even
-     * (no writer in flight) on entry -- an odd value here would mean a torn/re-entrant write. */
-    LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE);
-
-    /* F4 seqlock write: bump to odd, publish the slot + total, bump to even. The ACQ_REL RMWs
-     * fence the plain stores between them so the reader never sees a torn lap_result_t. */
-    __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* enter: seq -> odd */
+    /* F4 seqlock write: publish the lap slot + total and (Plan 7c T3, design §2) s_best -- the
+     * engine's own best-sector table mirrored verbatim (it only updates on a valid lap, so a copy
+     * here needs no extra validity check) plus the derived theoretical best. One section, one
+     * struct-sized critical region, so a concurrent reader converges in ~1 retry. */
+    seq_enter();
     s_laps[s_lap_total % PIPE_LAPS_KEEP] = lr;
     s_lap_total++;
-    __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* leave: seq -> even */
-    LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE); /* left cleanly */
+    LT_ASSERT_VOID(sizeof s_best.best_sector_ms == sizeof s_lap.best_sector_ms, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(sizeof s_best.have_best_sector == sizeof s_lap.have_best_sector, PIPE_ASSERT_CODE);
+    memcpy(s_best.best_sector_ms, s_lap.best_sector_ms, sizeof s_best.best_sector_ms);
+    memcpy(s_best.have_best_sector, s_lap.have_best_sector, sizeof s_best.have_best_sector);
+    s_best.n_sectors = s_lap.best_sector_count;
+    s_best.theo_ms   = lap_theoretical_best_ms(&s_lap);
+    seq_leave();
 
     s_resume_active = false;               /* F2: the resumed lap (if any) has completed; guard done */
 
@@ -238,6 +264,36 @@ static void on_drag_done(void)
     logger_submit_drag(cur);
     ESP_LOGI(TAG, "DRAG run %u  gates=%u trap=%u cm/s", (unsigned)cur->run_no,
              (unsigned)cur->n_gates, (unsigned)cur->trap_cms);
+}
+
+/* Refreshes s_dragsnap (Plan 7c T3, design §2 follow-up; ruling R-2): called once per pipeline
+ * step that produced at least one drag event -- on_raw's drag-event forwarding loop below, which
+ * covers ARMED/LAUNCH/GATE/DONE uniformly rather than one publish site per event kind. Builds the
+ * whole snapshot in a local first (drag_current/drag_best only ever run on this same task, so
+ * there is no concurrency hazard reading D->best here) and publishes it as a single struct copy
+ * under one seqlock section, same pattern as on_lap_complete. */
+static void publish_drag_snapshot(void)
+{
+    LT_ASSERT_VOID(s_drag.cfg.n_gates <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);   /* fits cfg.gates[]/the snapshot */
+    pipe_drag_t snap;
+    memset(&snap, 0, sizeof snap);
+    const drag_result_t *cur = drag_current(&s_drag);
+    if (cur) snap.current = *cur;   /* else stays zeroed: n_gates 0 == "no run yet" */
+    for (uint8_t j = 0; j < s_drag.cfg.n_gates; j++) {
+        uint8_t id = s_drag.cfg.gates[j].id;
+        LT_ASSERT_VOID(id >= 1u && id <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);   /* 1-based, indexes best_time_ms[id-1] */
+        const drag_result_t *br = drag_best(&s_drag, id);
+        if (!br) continue;          /* gate never hit this session: have_best[id-1] stays false */
+        /* cfg.gates[]/best.gates[] are laid out in the same order at init (drag.c init_best) and
+         * never reordered after, so index j names the same gate in both -- verified, not assumed. */
+        LT_ASSERT_VOID(br->gates[j].gate_id == id, PIPE_ASSERT_CODE);
+        bool brake = (s_drag.cfg.gates[j].kind == DRAG_BRAKE);   /* §11.3: BRAKE's "best" is the shortest dist_cm */
+        snap.best_time_ms[id - 1] = brake ? br->gates[j].dist_cm : br->gates[j].time_ms;
+        snap.have_best[id - 1]    = true;
+    }
+    seq_enter();
+    s_dragsnap = snap;
+    seq_leave();
 }
 
 /* Engine callback (lap_on_fix / drag_on_fused). Forward every event to evt_q, and on completion
@@ -472,6 +528,10 @@ static void on_raw(const imu_raw_t *raw)
         int nev = 0;
         drag_on_fused(&s_drag, &fused, evs, DRAG_EVT_MAX, &nev);
         for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
+        /* Plan 7c T3 (ruling R-2): publish s_dragsnap once per step that produced >= 1 drag event
+         * -- ARMED/LAUNCH/GATE/DONE all forward through this same loop, so one call here covers
+         * every kind uniformly instead of a publish site per event type. */
+        if (nev > 0) publish_drag_snapshot();
     }
 
     stats_step(&fused);
@@ -596,6 +656,12 @@ static void pipeline_init(void)
             LT_ASSERT_VOID(v != NULL, PIPE_ASSERT_CODE);
             LT_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, PIPE_ASSERT_CODE);   /* indexes layouts[] */
             lap_set_venue(&s_lap, v);
+            /* Plan 7c T3 (design §2): a venue/layout change invalidates the previous layout's best
+             * sector splits/theoretical best -- clear s_best under the same seqlock every other
+             * writer of it uses. */
+            seq_enter();
+            memset(&s_best, 0, sizeof s_best);
+            seq_leave();
             uint16_t layout_id = (v->n_layouts > 0) ? v->layouts[0].id : 0;
             /* open a logging session for the run + write the real VENUE record. */
             log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = MODE_LAP,
@@ -736,6 +802,54 @@ int pipeline_lap_at(int index, lap_result_t *out)
     }
     LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, rc);   /* the retry cap is never reached in practice */
     return rc;
+}
+
+enum { PIPE_SNAP_BEST = 0, PIPE_SNAP_DRAG = 1 };   /* snap_read() kind selector */
+
+/* F4 seqlock reader shared by pipeline_best_snapshot()/pipeline_drag_snapshot() (Plan 7c T3,
+ * ruling R-2): one bounded-retry loop (same shape as pipeline_lap_at above), selecting the source
+ * record by `kind` via a switch rather than a function pointer (lint --enforce-fnptr forbids
+ * those). `size` must equal the sizeof of the record `kind` names -- callers always pass
+ * sizeof(*out), so a producer/consumer struct-size mismatch trips the assert below instead of a
+ * silent short copy. */
+static int snap_read(uint8_t kind, void *dst, size_t size)
+{
+    LT_ASSERT_RET(dst != NULL, PIPE_ASSERT_CODE, -1);
+    bool stable = false;
+    int  rc = -1;
+    for (int attempt = 0; attempt < PIPE_LAPS_SNAP_RETRY_MAX && !stable; attempt++) {
+        uint32_t seq0 = __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE);
+        if (seq0 & 1u) continue;                          /* writer mid-update */
+        switch (kind) {
+        case PIPE_SNAP_BEST:
+            LT_ASSERT_RET(size == sizeof s_best, PIPE_ASSERT_CODE, -1);
+            memcpy(dst, &s_best, size);
+            break;
+        case PIPE_SNAP_DRAG:
+            LT_ASSERT_RET(size == sizeof s_dragsnap, PIPE_ASSERT_CODE, -1);
+            memcpy(dst, &s_dragsnap, size);
+            break;
+        default:
+            LT_ASSERT_RET(false, PIPE_ASSERT_CODE, -1);   /* unreachable: only this file calls snap_read */
+        }
+        rc = 0;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);           /* copy above happens-before re-reading seq */
+        stable = (seq0 == __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE));
+    }
+    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, rc);   /* the retry cap is never reached in practice */
+    return rc;
+}
+
+int pipeline_best_snapshot(pipe_best_t *out)
+{
+    LT_ASSERT_RET(out != NULL, PIPE_ASSERT_CODE, -1);   /* caller passes its own local */
+    return snap_read(PIPE_SNAP_BEST, out, sizeof *out);
+}
+
+int pipeline_drag_snapshot(pipe_drag_t *out)
+{
+    LT_ASSERT_RET(out != NULL, PIPE_ASSERT_CODE, -1);   /* caller passes its own local */
+    return snap_read(PIPE_SNAP_DRAG, out, sizeof *out);
 }
 
 bool pipeline_gps_seen(void)

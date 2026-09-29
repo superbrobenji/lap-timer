@@ -28,4 +28,31 @@ int  pipeline_lap_at(int index, lap_result_t *out);
  * of the §19.4 conditions the supervisor gates a pending-OTA validation on. Safe from any task. */
 bool pipeline_gps_seen(void);
 
+/* Best-known sector splits + theoretical best for the locked layout (design §2). Refreshed on
+ * every EV_LAP_COMPLETE (valid or not -- the engine only updates its own bests on a valid lap, so
+ * this simply mirrors it) and cleared when the venue/layout changes. Guarded by the same F4
+ * seqlock (s_laps_seq) as pipeline_laps_snapshot/pipeline_lap_at. */
+typedef struct {
+    uint32_t best_sector_ms[LAP_MAX_SECTORS + 1];   /* from the engine's best-sector table */
+    bool     have_best_sector[LAP_MAX_SECTORS + 1];
+    uint8_t  n_sectors;                             /* splits in the locked layout (n_sec + 1) */
+    uint32_t theo_ms;                                /* lap_theoretical_best_ms(); 0 = not yet */
+} pipe_best_t;
+/* Copy the current best-sector/theoretical-best record into *out. Safe to call from another task.
+ * Returns 0 on success (always succeeds once pipeline_init has run; s_best is valid, if all-zero,
+ * from static init before the first lap/venue). */
+int  pipeline_best_snapshot(pipe_best_t *out);
+
+/* Drag run in progress (or last frozen) + the session-best value per gate (design §2 follow-up:
+ * the DRAG page 1/2 producer). Refreshed once per pipeline step that produced at least one drag
+ * event (ARMED/LAUNCH/GATE/DONE alike), under the same F4 seqlock as pipe_best_t. */
+typedef struct {
+    drag_result_t current;                          /* zeroed n_gates when no run yet */
+    uint32_t      best_time_ms[DRAG_MAX_GATES];      /* index = gate id - 1; BRAKE: stopping dist_cm */
+    bool          have_best[DRAG_MAX_GATES];
+} pipe_drag_t;
+/* Copy the current drag run/session-best record into *out. Safe to call from another task. Returns
+ * 0 on success (always succeeds; s_dragsnap is valid, if all-zero, before the first drag sample). */
+int  pipeline_drag_snapshot(pipe_drag_t *out);
+
 #endif /* APP_PIPELINE_H */

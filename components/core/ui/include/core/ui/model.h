@@ -74,12 +74,13 @@ typedef struct {
 
     /* LAP page 1 (best-lap detail) */
     uint32_t best_sector_ms[LAP_MAX_SECTORS + 1];
+    bool     have_best_sector[LAP_MAX_SECTORS + 1];   /* Plan 7c T3: gates the value row (design §2) */
     uint8_t  best_n_sectors;
     uint32_t theo_best_ms;
     bool     have_theo;
 
     /* LAP page 2 (session stats) */
-    uint16_t max_speed_kmh;
+    uint16_t max_speed_cms;   /* Plan 7c T3: raw cm/s; converted to the display unit at render (speed_display) */
     uint8_t  lean_l_deg, lean_r_deg;
     uint16_t lat_g_e2, acc_g_e2, brk_g_e2; /* g x 100 */
     uint16_t laps_total, laps_valid;

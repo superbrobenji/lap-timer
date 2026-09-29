@@ -36,12 +36,14 @@
 #include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H/MENU_VISIBLE_ROWS: compile-time by PANEL (Plan 7 T3) */
 #include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
 #include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
+#include "core/ui/stats_fold.h" /* session_max_t / session_max_fold (Plan 7c T1/T3) */
 
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
+#include "app/pipeline.h" /* pipeline_best_snapshot / pipeline_lap_at / pipeline_lap_count (Plan 7c T3) */
 #include "app/ui.h"
 
 #include "hal/board.h"
@@ -143,6 +145,11 @@ static TaskHandle_t s_task;
 static screen_model_t s_model;
 static uint8_t        s_fb_bits[FB_STRIDE * FB_H]; /* (296/8)*128 = 4736 B */
 static fb_t           s_fb;
+
+/* Session-max accumulator (Plan 7c T3, design §2): folded from every completed lap's lap_stats_t
+ * in handle_lap_result()/fold_lap_stats() below; drives the LAP page 2 stats grid. Zero-initialised
+ * static storage (max of nothing == 0), same reset-at-boot-only lifetime as laps_total/laps_valid. */
+static session_max_t s_session_max;
 
 static cfg_t   s_cfg;         /* ui's working config copy (cmd.c uses the same load-from-NVS pattern) */
 static uint8_t s_mode;        /* MODE_LAP / MODE_DRAG (mirrors s_model.mode) */
@@ -535,6 +542,47 @@ static void clear_last_sector_deltas(void)
     LT_ASSERT_VOID(!s_model.have_last_sector_delta[LAP_MAX_SECTORS], UI_APP_ASSERT_CODE);   /* every slot, including the last, is now clear */
 }
 
+/* LAP page 1 (design §2): copies the pipeline's best-sector/theoretical-best snapshot into the
+ * model. A snapshot failure (pipeline_best_snapshot() only ever returns 0 today, but the contract
+ * allows otherwise) leaves the model's existing values in place rather than clobbering them with a
+ * half-read. Split out of handle_lap_result() (rule 4). */
+static void copy_best_snapshot(void)
+{
+    pipe_best_t pb;
+    LT_ASSERT_VOID(sizeof pb.best_sector_ms == sizeof s_model.best_sector_ms, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(sizeof pb.have_best_sector == sizeof s_model.have_best_sector, UI_APP_ASSERT_CODE);
+    if (pipeline_best_snapshot(&pb) != 0) {
+        return;
+    }
+    memcpy(s_model.best_sector_ms, pb.best_sector_ms, sizeof s_model.best_sector_ms);
+    memcpy(s_model.have_best_sector, pb.have_best_sector, sizeof s_model.have_best_sector);
+    s_model.best_n_sectors = pb.n_sectors;
+    s_model.theo_best_ms   = pb.theo_ms;
+    s_model.have_theo      = pb.theo_ms != 0;
+}
+
+/* LAP page 2 (design §2): folds the lap that just completed into the session-max accumulator and
+ * derives the model's stats-grid fields from it. `lean_*_deg` = cdeg/100 (both fields are already
+ * non-negative magnitudes, stats_step/pipeline.c); `*_g_e2` = round(e3/10) (also non-negative).
+ * Split out of handle_lap_result() (rule 4). */
+static void fold_lap_stats(void)
+{
+    int idx = pipeline_lap_count() - 1;
+    LT_ASSERT_VOID(idx >= 0, UI_APP_ASSERT_CODE);   /* a genuine lap just completed and was published first */
+    lap_result_t lr;
+    if (pipeline_lap_at(idx, &lr) != 0) {
+        return;
+    }
+    session_max_fold(&s_session_max, &lr.stats);
+    s_model.max_speed_cms = s_session_max.max_speed_cms;
+    s_model.lean_l_deg = (uint8_t)(s_session_max.max_lean_l_cdeg / 100);
+    s_model.lean_r_deg = (uint8_t)(s_session_max.max_lean_r_cdeg / 100);
+    s_model.lat_g_e2   = (uint16_t)((s_session_max.max_glat_e3 + 5) / 10);
+    s_model.acc_g_e2   = (uint16_t)((s_session_max.max_gacc_e3 + 5) / 10);
+    s_model.brk_g_e2   = (uint16_t)((s_session_max.max_gbrake_e3 + 5) / 10);
+    LT_ASSERT_VOID(s_model.lean_l_deg <= 90 && s_model.lean_r_deg <= 90, UI_APP_ASSERT_CODE);   /* a lean angle never exceeds 90 deg */
+}
+
 /* Genuine (non-out) lap completion: PREV always takes the time; BEST/laps_valid update only when
  * the engine marked the lap valid. `valid` reads LAP_F_VALID straight off the emitted event -- the
  * engine already computes it (lap.c's complete_lap(): `flags |= LAP_F_VALID` iff none of
@@ -577,6 +625,17 @@ static void handle_lap_result(uint32_t lap_ms, uint8_t flags, int32_t lap_delta_
     s_model.big_delta_ms   = lap_delta_ms;
     s_model.lap_no         = (uint16_t)(s_model.laps_total + 1u);
     s_model.cur_sector_idx = 0;
+
+    /* Plan 7c T3 (design §2): LAP page 1's best-sector board and page 2's session stats grid, both
+     * filled from real pipeline data via the F4 seqlock snapshot readers. pipeline.c's engine_cb
+     * queues this EV_LAP_COMPLETE (emit_event) before on_lap_complete() publishes s_best/s_laps[]
+     * for it, so on paper a snapshot read here could in principle still see the previous lap's
+     * data -- the seqlock only promises a torn-free read, not that this specific lap's publish has
+     * landed yet. In practice the pipeline task's own next few instructions (on_lap_complete) run
+     * well before the cross-core wake + dequeue that gets this task here, and any such staleness
+     * would only last until the very next lap event self-corrects it -- never a torn/invalid read. */
+    copy_best_snapshot();
+    fold_lap_stats();
 }
 
 /* EV_LAP_COMPLETE -> model (split verbatim out of handle_event for rule 4). An out-lap

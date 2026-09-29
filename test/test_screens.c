@@ -166,6 +166,7 @@ static void test_lap_p1_sectors(void)
     lap_model_base(&m); m.page = 1;
     m.best_n_sectors = 3;
     m.best_sector_ms[0] = 32100; m.best_sector_ms[1] = 41000; m.best_sector_ms[2] = 39240;
+    m.have_best_sector[0] = true; m.have_best_sector[1] = true; m.have_best_sector[2] = true;
     m.have_theo = true; m.theo_best_ms = 111200;
     m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
     m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
@@ -184,7 +185,7 @@ static void test_lap_p1_many_sectors(void)
     screen_model_t m;
     lap_model_base(&m); m.page = 1;
     m.best_n_sectors = 5;
-    for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
+    for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_best_sector[i] = true; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
     m.have_theo = false;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
@@ -210,6 +211,24 @@ static void test_lap_p1_deltas_only(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_deltas_only.pbm"), &s_fb));
 }
 
+static void test_lap_p1_filled(void)
+{
+    /* Real pipeline data (Plan 7c T3, design §2): S1/S2 have a best-lap sector time on record, S3
+     * does not yet (have_best_sector[2] false) -- its value cell must show "--.--" even though i <
+     * n, not m.best_sector_ms[2]'s (unset, 0) value. THEO is on record too. */
+    screen_model_t m; lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 3;
+    m.best_sector_ms[0] = 32100; m.best_sector_ms[1] = 41000; m.best_sector_ms[2] = 39240;
+    m.have_best_sector[0] = true; m.have_best_sector[1] = true; m.have_best_sector[2] = false;   /* S3 not yet */
+    m.have_theo = true; m.theo_best_ms = 111200;
+    m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
+    m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_filled.pbm"), &s_fb));   /* S1 32.10 / S2 41.00 / S3 --.-- ; deltas -0.12 +0.40 ---- ; THEO 1:51.20 */
+}
+
 /* ---- LAP page 2 (2x2 stats grid, spec 7b §6) ---- */
 
 static void test_lap_p2_stats(void)
@@ -217,7 +236,7 @@ static void test_lap_p2_stats(void)
     /* Values taken straight from spec 7b §6's own worked example. */
     screen_model_t m;
     lap_model_base(&m); m.page = 2;
-    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.max_speed_cms = 5944; m.lean_l_deg = 52; m.lean_r_deg = 55;
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
@@ -234,7 +253,7 @@ static void test_lap_p2_stats_many_laps(void)
      * the wider 296 canvas still fits the full "(118 valid)". */
     screen_model_t m;
     lap_model_base(&m); m.page = 2;
-    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.max_speed_cms = 5944; m.lean_l_deg = 52; m.lean_r_deg = 55;
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 120; m.laps_valid = 118;
     screens_moto_render(&s_fb, &m);
@@ -252,13 +271,29 @@ static void test_lap_p2_stats_huge_laps(void)
      * limit x 292) "(11999 valid)" still does not fit but "(11999)" does, so it draws that. */
     screen_model_t m;
     lap_model_base(&m); m.page = 2;
-    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.max_speed_cms = 5944; m.lean_l_deg = 52; m.lean_r_deg = 55;
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12000; m.laps_valid = 11999;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_huge_laps.pbm"), &s_fb));   /* 213: nothing after "12000"; 296: "(11999)" */
+}
+
+static void test_lap_p2_stats_filled(void)
+{
+    /* Real pipeline data (Plan 7c T3, design §2): max_speed_cms is the raw session-max value the
+     * pipeline folds from lap_stats_t; the renderer converts it to km/h at render time
+     * (speed_display, core/ui/units.h) -- 5944 cm/s -> 214 km/h, the same value test_lap_p2_stats
+     * used to set directly, so this and the three cases above must keep byte-identical goldens. */
+    screen_model_t m; lap_model_base(&m); m.page = 2;
+    m.max_speed_cms = 5944;   /* 214 km/h */
+    m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12; m.laps_valid = 10;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_filled.pbm"), &s_fb));
 }
 
 /* ---- DRAG page 0 (spec 7b §7): the run card ---- */
@@ -574,9 +609,11 @@ int main(void)
     RUN_TEST(test_lap_p1_sectors);
     RUN_TEST(test_lap_p1_many_sectors);
     RUN_TEST(test_lap_p1_deltas_only);
+    RUN_TEST(test_lap_p1_filled);
     RUN_TEST(test_lap_p2_stats);
     RUN_TEST(test_lap_p2_stats_many_laps);
     RUN_TEST(test_lap_p2_stats_huge_laps);
+    RUN_TEST(test_lap_p2_stats_filled);
     RUN_TEST(test_drag_p0_ready);
     RUN_TEST(test_drag_p0_gate_speed);
     RUN_TEST(test_drag_p0_distance);

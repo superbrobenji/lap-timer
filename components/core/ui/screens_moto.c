@@ -8,6 +8,7 @@
  */
 #include "core/ui/canvas.h"
 #include "core/ui/model.h"
+#include "core/ui/units.h"
 #include "core/core.h"
 
 #include <string.h>
@@ -454,7 +455,10 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
         if (i == BOARD_COLS - 1 && n > BOARD_COLS) { p = put_str(p, " +"); p = put_uint(p, (unsigned)(n - BOARD_COLS)); }
         *p = '\0';
         fb_text(fb, &FONT_SMALL, x, BOARD_LABEL_Y, buf);
-        if (i < n) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
+        /* Plan 7c T3 (design §2): a sector's best time shows only once the pipeline has one on
+         * record (have_best_sector[i]) -- i < n alone is not enough, since best_n_sectors reports
+         * the locked layout's split count before every sector has completed a valid lap yet. */
+        if (i < n && m->have_best_sector[i]) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_VALUE_Y, buf);
         /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i] (spec §5 literal),
          * not on best_n_sectors -- no producer fills best_n_sectors yet (the best-lap sector
@@ -513,7 +517,9 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char  buf[48];
     char *p;
-    p = put_uint(buf, m->max_speed_kmh); *p = '\0';
+    /* Plan 7c T3 (design §2): max_speed_cms is the raw session-max the pipeline folds; the display
+     * unit conversion happens here, at render (units=0/km/h for now -- Task 4 adds the toggle). */
+    p = put_uint(buf, speed_display(m->max_speed_cms, 0)); *p = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "MAX SPD", buf);
     /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
      * to 99 before formatting so "L99 R99" is provably the widest this cell ever draws. */
