@@ -30,7 +30,7 @@ typedef struct { uint16_t max_speed_cms; int16_t max_lean_l_cdeg, max_lean_r_cde
 void session_max_fold(session_max_t *acc, const lap_stats_t *lap);   /* element-wise max; asserts non-NULL */
 ```
 
-The model's page-2 fields become derived at fold time: `max_speed_kmh` (display unit conversion happens at render, see §3), `lean_l_deg`/`lean_r_deg` = cdeg/100, `lat_g_e2`/`acc_g_e2`/`brk_g_e2` = e3/10 (rounded). Session maxima reset at boot (they already zero-initialise) — never mid-session.
+The model's page-2 fields are derived at fold time: `max_speed_cms` (raw; converted to the display unit at render, see §3), `lean_l_deg`/`lean_r_deg` = cdeg/100, `lat_g_e2`/`acc_g_e2`/`brk_g_e2` = e3/10 (rounded). Session maxima reset at boot (they already zero-initialise) — never mid-session.
 
 Rendering is unchanged for both pages except the `have_best_sector` gate; 7b §5's sentence "the value row keeps showing `--.--` until #58/#79" is replaced by "until that sector has a best time".
 
@@ -66,16 +66,16 @@ typedef struct {
 int pipeline_drag_snapshot(pipe_drag_t *out);
 ```
 
-On a BRAKE `EV_DRAG_GATE` the ui reads the snapshot for `dist_cm` (row `is_distance = true`, `dist_m = cm/100`); on `EV_DRAG_DONE` it rebuilds the page-1 rows (all gates of the last run, from `current`) and the page-2 rows (session best per gate) from the snapshot, replacing today's append-only `drag[]` handling, which only ever fed page 0. The renderer is unchanged.
+The model has one `drag[]`/`drag_n` array shared by the three DRAG pages, so the ui fills it for the page being shown, from the snapshot, on every drag event and on every page change: page 0 = the current run's hit gates in hit order (as today), page 1 = all gates of the last run in table order with `present` flags, page 2 = the session best per gate (`have_best`). BRAKE rows take `is_distance = true`, `dist_m = dist_cm / 100` from the snapshot (the event carries only the speed). This replaces today's append-only handling, which only ever fed page 0. The renderer is unchanged.
 
-**Units.** `screen_model_t` gains `uint8_t units` (`CFG_UNITS_KMH`/`CFG_UNITS_MPH`), set from `s_cfg.units` at boot and when the menu toggles it (`s_dirty = true`). One pure helper `uint16_t speed_display(uint16_t cms, uint8_t units)` (cm/s → whole km/h or mph, integer maths, rounded) is used by every speed on screen: page 2 `MAX SPD`, the DRAG trap row, DRAG list values. The unit string (`km/h`/`mph`) is drawn in `FONT_SMALL` once per place: page 2 label becomes `MAX SPD km/h`; the DRAG trap row `@173` gains a small suffix at `DCARD_LABEL_X + FONT_SMALL.w + DCARD_AT_GAP + 3*FONT_MED.w + DCARD_UNIT_GAP` on the label baseline. Times are never converted. The model keeps `max_speed_cms` (raw) instead of `max_speed_kmh`.
+**Units.** `screen_model_t` gains `uint8_t units` (`CFG_UNITS_KMH`/`CFG_UNITS_MPH`), set from `s_cfg.units` at boot and when the menu toggles it (`s_dirty = true`). One pure helper `uint16_t speed_display(uint16_t cms, uint8_t units)` (cm/s → whole km/h or mph, integer maths, rounded) is used by every speed on screen: page 2 `MAX SPD` and the DRAG trap row (gate times and distances are not speeds and never convert). The unit string (`km/h`/`mph`) is drawn in `FONT_SMALL` once per place: page 2 label becomes `MAX SPD km/h`; the DRAG trap row `@173` gains a small suffix at `DCARD_LABEL_X + FONT_SMALL.w + DCARD_AT_GAP + 3*FONT_MED.w + DCARD_UNIT_GAP` on the label baseline. Times are never converted. The model keeps `max_speed_cms` (raw) instead of `max_speed_kmh`.
 
 ## 4. Live clock (#80)
 
 - `ui.c` keeps `int64_t s_lap_start_mono_us` (0 = no lap running), set from `e->mono_us` on **every** `EV_LAP_COMPLETE`, including the out-lap (its crossing starts lap 1); cleared at boot.
 - `screen_model_t` gains `uint32_t cur_ms` (running lap time) and `bool cur_running`; the reserved `cur_ms_at_gate` is removed.
 - Tick: in `ui_loop_iter()`, when `s_cfg.display.live_clock && s_lap_start_mono_us != 0 && screen == SCR_RIDING && page == 0 && mode == LAP` and at least 1000 ms passed since the last tick: `cur_ms = (now - s_lap_start_mono_us) / 1000`, `s_dirty = true`, and a flag `s_clock_tick = true` for the refresh bookkeeping.
-- Card rendering (amends 7b §4): with `cur_running && units-independent` the LAST cell shows label `CUR` and value `m:ss` in `FONT_MED` (`fmt_time_s()`, whole seconds, ≤ 5 glyphs); LAST is not shown while the clock runs; BEST unchanged. With the clock off the card is exactly the 7b card.
+- Card rendering (amends 7b §4): while `cur_running` is set (the ui sets it only when the live clock is on and a lap is running) the LAST cell shows label `CUR` and value `m:ss` in `FONT_MED` (`fmt_time_s()`, whole seconds, ≤ 5 glyphs); LAST is not shown while the clock runs; BEST unchanged. With the clock off the card is exactly the 7b card.
 - Policy: a render triggered only by a clock tick is a partial that does **not** increment `partial_count` and never promotes to a full; it obeys `throttled` and `dead` like any refresh. Event-driven renders in the same iteration keep their normal accounting. Implementation: `ui.c` passes `dirty = true, wants_full = false` and, when `s_clock_tick` was the only cause, skips the counter/timestamp updates after a successful partial.
 
 ## 5. Dirty-region rendering (#84)
