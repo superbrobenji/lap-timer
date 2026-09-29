@@ -147,6 +147,17 @@ static screen_model_t s_model;
 static uint8_t        s_fb_bits[FB_STRIDE * FB_H]; /* (296/8)*128 = 4736 B */
 static fb_t           s_fb;
 
+/* Plan 7c T7 (design §5): the last frame the panel actually accepted, same worst-case sizing as
+ * s_fb_bits above (FB_STRIDE * FB_H, not CANVAS_W/CANVAS_H) so one build of this file holds either
+ * panel's canvas here too. render_and_refresh() diffs the freshly rendered s_fb against this on
+ * every render (fb_diff_rect, Task 1) into s_diff; do_refresh() copies s_fb_bits over it after a
+ * refresh the panel actually accepted -- never on failure, never on a throttled/skipped render, so
+ * a render that was throttled is still "different from the panel" next time and gets refreshed --
+ * and the boot block does the same copy right after a successful disp_init(). */
+static uint8_t   s_fb_prev_bits[FB_STRIDE * FB_H]; /* (296/8)*128 = 4736 B */
+static fb_t      s_fb_prev;
+static fb_rect_t s_diff; /* bounding box from the most recent fb_diff_rect() call, below */
+
 /* Session-max accumulator (Plan 7c T3, design §2): folded from every completed lap's lap_stats_t
  * in handle_lap_result()/fold_lap_stats() below; drives the LAP page 2 stats grid. Zero-initialised
  * static storage (max of nothing == 0), same reset-at-boot-only lifetime as laps_total/laps_valid. */
@@ -948,19 +959,22 @@ static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
     return in;
 }
 
-/* Arms the pending partial window from the render's dirty box, clamped to the panel's true visible
- * area (ruling R2: disp_set_window() rejects x + w > 250; fb_clear() always reports the whole
- * padded buffer as dirty). Returns DISP_PARTIAL if the window was armed, else DISP_FULL -- either
- * because the box was degenerate or disp_set_window() itself failed (logged once here). */
+/* Arms the pending partial window from the diff rect (s_diff: the bounding box of bytes that
+ * differ from the last frame the panel accepted, computed by render_and_refresh() via
+ * fb_diff_rect(), Plan 7c T7 design §5), clamped to the panel's true visible area (ruling R2:
+ * disp_set_window() rejects x + w > 250). Returns DISP_PARTIAL if the window was armed, else
+ * DISP_FULL -- either because the box was degenerate or disp_set_window() itself failed (logged
+ * once here). Before T7 the source was s_fb.dirty (the render's own draw box, always the whole
+ * padded buffer since fb_clear() touches everything every render); s_diff is narrower -- only what
+ * actually changed versus the panel's last known content, which is the point of this task. */
 static uint8_t partial_window_or_full(void)
 {
-    LT_ASSERT_RET(s_fb.dirty.valid, UI_APP_ASSERT_CODE, DISP_FULL); /* something must have been drawn */
-    LT_ASSERT_RET(s_fb.dirty.x0 <= s_fb.dirty.x1 && s_fb.dirty.y0 <= s_fb.dirty.y1, UI_APP_ASSERT_CODE,
-                  DISP_FULL);
-    uint16_t x0 = s_fb.dirty.x0;
-    uint16_t y0 = s_fb.dirty.y0;
-    uint16_t x1 = s_fb.dirty.x1 < CANVAS_VISIBLE_W ? s_fb.dirty.x1 : (uint16_t)CANVAS_VISIBLE_W;
-    uint16_t y1 = s_fb.dirty.y1 < CANVAS_H ? s_fb.dirty.y1 : (uint16_t)CANVAS_H;
+    LT_ASSERT_RET(s_diff.valid, UI_APP_ASSERT_CODE, DISP_FULL); /* something must have differed */
+    LT_ASSERT_RET(s_diff.x0 <= s_diff.x1 && s_diff.y0 <= s_diff.y1, UI_APP_ASSERT_CODE, DISP_FULL);
+    uint16_t x0 = s_diff.x0;
+    uint16_t y0 = s_diff.y0;
+    uint16_t x1 = s_diff.x1 < CANVAS_VISIBLE_W ? s_diff.x1 : (uint16_t)CANVAS_VISIBLE_W;
+    uint16_t y1 = s_diff.y1 < CANVAS_H ? s_diff.y1 : (uint16_t)CANVAS_H;
     if (x0 >= x1 || y0 >= y1) {
         /* Minor #7: >= , not > -- an empty box (x0 == x1 or y0 == y1, e.g. the clamp above
          * landed exactly on the visible-area edge) must be caught here, not passed on to
@@ -1044,6 +1058,10 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
     uint8_t mode = (kind == RF_PARTIAL) ? partial_window_or_full() : DISP_FULL;
     int     rc   = disp_refresh_ladder(mode, now, mode_out);
     if (rc == 0) {
+        /* Plan 7c T7 (design §5): the panel now shows this frame, whichever mode it took --
+         * refresh s_fb_prev_bits so the next diff is against reality. Left untouched on failure so
+         * the next diff still covers the union of what changed then and what changes next. */
+        memcpy(s_fb_prev_bits, s_fb_bits, sizeof s_fb_prev_bits);
         if (*mode_out == DISP_PARTIAL) {
             if (!s_clock_tick) {
                 s_partial_count   = (uint16_t)(s_partial_count + 1);
@@ -1065,7 +1083,11 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
  * Fix round 2 (minor #11): one ESP_LOG_LEVEL() call replaces the previous two ESP_LOGW/ESP_LOGI
  * branches, which differed only in level, not in text -- the bench parses this exact line
  * ("refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c" + " rc=%d" for the attempted case), which
- * stays byte-identical for both the P and F outcomes. */
+ * stays byte-identical for both the P and F outcomes.
+ * Plan 7c T7 (design §5): the box printed is s_diff (the diff-vs-panel rect), not the render's own
+ * draw box. On the diff-unchanged kind=N call (render_and_refresh()'s early return) fb_diff_rect()
+ * only clears s_diff.valid, leaving x0/y0/x1/y1 at whatever the last real diff computed -- harmless
+ * (kind=N already says nothing was attempted), not the current frame's box. */
 static void log_refresh(bool attempted, uint8_t mode, int rc)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
@@ -1073,8 +1095,8 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
     char kc = !attempted ? 'N' : ((mode == DISP_FULL) ? 'F' : 'P');
     if (!attempted) {
         ESP_LOGI(TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c", (unsigned)s_model.screen,
-                 (unsigned)s_model.page, (unsigned)s_fb.dirty.x0, (unsigned)s_fb.dirty.y0,
-                 (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc);
+                 (unsigned)s_model.page, (unsigned)s_diff.x0, (unsigned)s_diff.y0,
+                 (unsigned)s_diff.x1, (unsigned)s_diff.y1, kc);
         return;
     }
     /* A ternary of two enum constants used directly as ESP_LOG_LEVEL()'s `level` argument trips
@@ -1083,23 +1105,47 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
      * the macro then only ever sees a bare identifier there. */
     esp_log_level_t lvl = (rc != 0) ? ESP_LOG_WARN : ESP_LOG_INFO;
     ESP_LOG_LEVEL(lvl, TAG, "refresh scr=%u pg=%u dirty %u,%u..%u,%u kind=%c rc=%d",
-                  (unsigned)s_model.screen, (unsigned)s_model.page, (unsigned)s_fb.dirty.x0,
-                  (unsigned)s_fb.dirty.y0, (unsigned)s_fb.dirty.x1, (unsigned)s_fb.dirty.y1, kc, rc);
+                  (unsigned)s_model.screen, (unsigned)s_model.page, (unsigned)s_diff.x0,
+                  (unsigned)s_diff.y0, (unsigned)s_diff.x1, (unsigned)s_diff.y1, kc, rc);
 }
 
 /* Renders the model, then feeds the pure refresh policy (§20.3) and carries out whatever it
  * decides: RF_NONE is a no-op, RF_PARTIAL/RF_FULL run through the panel + failure ladder above.
  * Split out of the old render_now() (Plan 7 Task 7) to stay under the 60-line function cap.
- * Plan 7c T6 (design §4): s_clock_tick is cleared here, on every return path, once this render has
- * either been accounted for (do_refresh(), above) or explicitly skipped (RF_NONE) -- never left set
- * for a later, unrelated render to misread. */
+ * Plan 7c T7 (design §5): the first thing after rendering is a diff of the fresh s_fb against
+ * s_fb_prev (the last frame the panel actually accepted). An identical frame with no forced full
+ * costs nothing at all -- no policy call, no counters/timestamps touched, and s_refresh_pending is
+ * cleared too (a throttled render that reverted to what the panel already shows is no longer owed).
+ * Plan 7c T6 (fix round 1) ruling, carried here: a render that starts with s_refresh_pending
+ * already true is never "only a clock tick". tick_only is computed once, at entry -- before
+ * anything below can change s_refresh_pending -- as s_clock_tick && !s_refresh_pending, and folded
+ * straight back into s_clock_tick, so do_refresh()'s accounting gate (which just reads
+ * s_clock_tick) sees the corrected value without a second copy of this rule; the extra clear
+ * ui_loop_iter's pending branch used to do before calling this function is gone (T7) -- s_diff/
+ * tick_only logic here already produces the same result whenever that branch's own guard
+ * (s_refresh_pending true) holds.
+ * s_clock_tick is cleared here, on every return path, once this render has either been accounted
+ * for (do_refresh(), above) or explicitly skipped (diff-unchanged or RF_NONE) -- never left set for
+ * a later, unrelated render to misread. */
 static void render_and_refresh(void)
 {
     LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE); /* fb_init ran before any render */
+    bool tick_only = s_clock_tick && !s_refresh_pending;
+    s_clock_tick   = tick_only;
+
     render_fb();
 
     int64_t now = esp_timer_get_time();
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE); /* esp_timer stamp feeds the policy's now_us */
+
+    bool changed = fb_diff_rect(&s_fb_prev, &s_fb, &s_diff);
+    if (!changed && !s_wants_full) {
+        /* The panel already shows this frame -- no policy call, no bookkeeping of any kind. */
+        log_refresh(false, DISP_PARTIAL, 0);
+        s_refresh_pending = false;
+        s_clock_tick      = false;
+        return;
+    }
 
     uint8_t full_every = s_cfg.display.full_every; /* R1: cfg only defaults it, so clamp here too */
     if (full_every < 1) {
@@ -1113,8 +1159,8 @@ static void render_and_refresh(void)
 
     if (kind == RF_NONE) {
         /* Important #2: a refresh suppressed by the temperature throttle is owed, not dropped
-         * (spec §20.3) -- remember exactly that (never for the dead/nothing-changed RF_NONE
-         * cases, which need no retry of their own: dead already re-arms via dead_retry()). */
+         * (spec §20.3) -- remember exactly that (never for the dead RF_NONE case, which needs no
+         * retry of its own: dead already re-arms via dead_retry()). */
         s_refresh_pending = in.throttled;
         log_refresh(false, DISP_PARTIAL, 0);
         s_clock_tick = false;
@@ -1243,15 +1289,15 @@ static void ui_loop_iter(QueueHandle_t btn_q)
      * every tick but only actually re-render/refresh once the 30 s window has elapsed (never on
      * every UI_TICK_MS while waiting); render_and_refresh() re-runs the pure policy itself, so
      * the none-vs-partial call stays in one place.
-     * Plan 7c T6 fix round 1: clock_tick() (above) tags s_clock_tick purely off !s_dirty, which
+     * Plan 7c T6 fix round 1 / T7: clock_tick() (above) tags s_clock_tick purely off !s_dirty, which
      * cannot see that THIS branch fires independent of s_dirty -- a tick due on the very iteration
-     * the 30 s throttle window reopens would otherwise get free-ridden into this call and have its
-     * do_refresh() bookkeeping (s_partial_count/s_last_partial_us) skipped, even though this
-     * render is resolving a real owed backlog, not "only a tick". Clearing it here first forces
-     * do_refresh() to account normally, so s_last_partial_us actually advances and the throttle's
-     * 30 s rate limit is not bypassed by every later tick. */
+     * the 30 s throttle window reopens must not get free-ridden into this call's do_refresh()
+     * bookkeeping (s_partial_count/s_last_partial_us), even though this render is resolving a real
+     * owed backlog, not "only a tick". render_and_refresh() (T7) now computes
+     * tick_only = s_clock_tick && !s_refresh_pending itself, at its own entry, so this branch no
+     * longer clears s_clock_tick before calling it -- s_refresh_pending is true here (that is this
+     * branch's own guard), so tick_only comes out false regardless of s_clock_tick's value. */
     if (s_refresh_pending && (now - s_last_partial_us) >= DISP_THROTTLE_RETRY_US) {
-        s_clock_tick = false; /* this call is never "only a tick" -- see comment above */
         render_and_refresh();
         s_dirty = false;
     } else if (s_dirty) {
@@ -1288,6 +1334,8 @@ static void ui_task(void *arg)
 
     fb_init(&s_fb, s_fb_bits, CANVAS_W, CANVAS_H);
     LT_ASSERT_VOID(s_fb.bits != NULL, UI_APP_ASSERT_CODE);   /* framebuffer is armed for render_fb */
+    fb_init(&s_fb_prev, s_fb_prev_bits, CANVAS_W, CANVAS_H); /* Plan 7c T7: last-accepted-frame copy */
+    fb_clear(&s_fb_prev, 0); /* known state until the post-disp_init() memcpy below overwrites it */
 
     /* First screen: SAFE MODE one-shot in safe mode (§17.5, boot self-test skipped), else BOOT. */
     uint32_t f0 = sys_flags_get();
@@ -1317,8 +1365,9 @@ static void ui_task(void *arg)
     /* Display bring-up (Plan 7 Task 5): blit the just-rendered BOOT screen BEFORE disp_init so
      * its first full refresh shows it on the panel. disp_init()'s own full refresh counts as the
      * refresh policy's first full (ruling R4): on success it seeds s_last_full_us/s_partial_count
-     * as if RF_FULL had just run; on failure nothing is seeded -- SYS_DISP_DEAD makes the policy
-     * return RF_NONE until dead_retry()'s 300 s probe (armed here) clears it. */
+     * as if RF_FULL had just run (and, Plan 7c T7, copies s_fb_bits into s_fb_prev_bits -- the
+     * panel really does hold this BOOT frame now); on failure nothing is seeded -- SYS_DISP_DEAD
+     * makes the policy return RF_NONE until dead_retry()'s 300 s probe (armed here) clears it. */
     (void)disp_blit(s_fb_bits);   /* cannot fail here: s_fb_bits is a static array (never NULL) and
                                     * epd_panel() (bound as a side effect) never returns NULL either */
     const disp_caps_t *disp_caps;
@@ -1331,6 +1380,9 @@ static void ui_task(void *arg)
                        disp_caps->partial_ok, UI_APP_ASSERT_CODE);
         s_last_full_us  = esp_timer_get_time();
         s_partial_count = 0;
+        /* Plan 7c T7: the panel now holds the BOOT frame blitted above -- seed s_fb_prev_bits so
+         * the first riding render's diff is against reality, not the fb_clear() placeholder. */
+        memcpy(s_fb_prev_bits, s_fb_bits, sizeof s_fb_prev_bits);
     } else {
         (void)errlog_add(E_DISP_DEAD, (uint32_t)(-disp_rc));
         sys_flags_set(SYS_DISP_DEAD);
