@@ -1139,14 +1139,26 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
  * whenever changed is false (fb_diff_rect() always clears it first, before it ever finds a
  * differing byte), so letting do_refresh(RF_PARTIAL) reach partial_window_or_full() in that state
  * would trip its "something must have differed" assert on ordinary, expected control flow -- so the
- * policy's answer is checked before acting on it. Decision table (changed x wants_full x policy):
- *   changed=true                         -> always act on kind as returned; s_diff is valid, so
- *                                            partial_window_or_full() has a real box if RF_PARTIAL.
- *   changed=false, wants_full=false      -> skip before the policy is even called (below).
- *   changed=false, wants_full=true,
- *     policy returns RF_FULL             -> act on it (DISP_FULL never reads s_diff).
- *     policy returns RF_PARTIAL/RF_NONE  -> skip, same as the wants_full=false case; s_wants_full
- *                                            stays set so the next render asks again.
+ * policy's answer is checked before acting on it.
+ * Fix round 2 (Important): the fix round 1 guard below must not blanket-clear s_refresh_pending --
+ * an unchanged frame whose RF_NONE came from the temperature throttle (not dead) is still owed a
+ * retry once the 30 s window reopens (spec §20.3, Important #2), exactly like the changed==true
+ * RF_NONE case just below it. Decision table (changed x wants_full x policy x throttled):
+ *   changed=true                            -> always act on kind as returned; s_diff is valid, so
+ *                                               partial_window_or_full() has a real box if
+ *                                               RF_PARTIAL (the RF_NONE block just below still
+ *                                               applies its own throttled handling, unaffected).
+ *   changed=false, wants_full=false         -> skip before the policy is even called (below).
+ *   changed=false, wants_full=true:
+ *     policy returns RF_FULL                -> act on it (DISP_FULL never reads s_diff).
+ *     policy returns RF_PARTIAL             -> skip; genuinely nothing to redraw on an unchanged
+ *                                               frame, so s_refresh_pending clears.
+ *     policy returns RF_NONE, throttled     -> skip, but s_refresh_pending stays owed so
+ *                                               ui_loop_iter()'s retry re-asks the policy once the
+ *                                               30 s window reopens.
+ *     policy returns RF_NONE, not throttled -> skip (dead); s_refresh_pending clears -- dead
+ *                                               re-arms on its own via dead_retry().
+ *   Every "skip" row leaves s_wants_full set so a later render asks again.
  * Plan 7c T6 (fix round 1) ruling, carried here: a render that starts with s_refresh_pending
  * already true is never "only a clock tick". tick_only is computed once, at entry -- before
  * anything below can change s_refresh_pending -- as s_clock_tick && !s_refresh_pending, and folded
@@ -1191,10 +1203,13 @@ static void render_and_refresh(void)
     if (!changed && kind != RF_FULL) {
         /* Fix round 1: an unchanged frame only reaches here with wants_full set, asking the policy
          * for a forced full; anything but RF_FULL means "not yet" -- skip exactly like the
-         * wants_full=false case above, never handing an invalid s_diff to do_refresh(). */
+         * wants_full=false case above, never handing an invalid s_diff to do_refresh().
+         * Fix round 2: a throttled RF_NONE is still owed a retry (spec §20.3, Important #2) -- only
+         * RF_PARTIAL (nothing to redraw) or a non-throttled RF_NONE (dead, which re-arms on its
+         * own via dead_retry()) clear s_refresh_pending outright. */
+        s_refresh_pending = (kind == RF_NONE) ? in.throttled : false;
         log_refresh(false, DISP_PARTIAL, 0);
-        s_refresh_pending = false;
-        s_clock_tick      = false;
+        s_clock_tick = false;
         return;
     }
 
