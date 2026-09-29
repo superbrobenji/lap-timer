@@ -342,11 +342,22 @@ static void menu_select(void)
 
 /* ---- button gestures ---- */
 
+/* Bench/diagnostic trace of every classified press (§20.8 debounce check on real switches): one
+ * line per registered short/long/vlong/combo, so a bounce that double-registers shows in the log
+ * even when the renders coalesce several presses into one refresh. */
+static const char *btn_name(uint8_t bit)
+{
+    LT_ASSERT_RET(bit == BTN_MODE || bit == BTN_UP || bit == BTN_DOWN, UI_APP_ASSERT_CODE, "?");
+    LT_ASSERT_RET((bit & (uint8_t)(bit - 1u)) == 0u, UI_APP_ASSERT_CODE, "?");   /* exactly one bit */
+    return bit == BTN_MODE ? "MODE" : (bit == BTN_UP ? "UP" : "DOWN");
+}
+
 static void btn_short(uint8_t bit)
 {
     LT_ASSERT_VOID(bit == BTN_MODE || bit == BTN_UP || bit == BTN_DOWN, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);       /* dispatches on it below */
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE); /* one-shot selector read below */
+    ESP_LOGI(TAG, "btn: short %s", btn_name(bit));
     /* A deliberate press dismisses a transient (BOOT/VENUE) one-shot. */
     if (s_model.screen == SCR_ONESHOT &&
         (s_model.oneshot == ONESHOT_BOOT || s_model.oneshot == ONESHOT_VENUE)) {
@@ -393,6 +404,7 @@ static void btn_long(uint8_t bit)
     }
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* dispatches on it below */
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
+    ESP_LOGI(TAG, "btn: long %s", btn_name(bit));
     if (s_model.screen == SCR_MENU) {
         /* §20.7: long MODE backs/exits -- except on "Sleep now", which confirms on vlong (3 s). */
         if (s_menu_action[s_model.menu_sel] != MA_SLEEP) {
@@ -413,6 +425,7 @@ static void btn_vlong(uint8_t bit)
     }
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* dispatches on it below */
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
+    ESP_LOGI(TAG, "btn: vlong %s", btn_name(bit));
     if (s_model.screen == SCR_MENU && s_menu_action[s_model.menu_sel] == MA_SLEEP) {
         ESP_LOGW(TAG, "menu: Sleep now confirmed -- not implemented (plan 07)");
         ui_exit_menu();
@@ -422,6 +435,7 @@ static void btn_vlong(uint8_t bit)
 static void btn_combo(void)
 {
     /* UP+DOWN held 2 s -> full refresh now (§20.8, ghost clearing). */
+    ESP_LOGI(TAG, "btn: combo UP+DOWN");
     s_wants_full = true;
     s_dirty      = true;
 }
