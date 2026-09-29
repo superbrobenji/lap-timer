@@ -75,7 +75,7 @@ Rendering is a pure function of the model; the ui's refresh policy (§20.3) is u
 └──────────────────────────────────────────────┘
 ```
 
-Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BOARD_COLS`) px on both canvases; the board shows the first three sectors and appends `+n` to the S3 label when the layout has more (up to `LAP_MAX_SECTORS`). Row 4 cells show `----` when `have_last_sector_delta[i]` is false — that gating is independent of `best_n_sectors` (ruling FR-2: no producer fills `best_n_sectors` yet, the best-lap sector times/theo wiring is roadmap follow-up #58). Last-lap sector deltas: the most recent delta per sector, overwritten as the new lap's gates arrive (ruling B7b-1, bench finding 1) — they are not cleared at the line, so row 4 keeps showing the lap that just finished until the next lap's `EV_SECTOR`s replace each cell in turn. `THEO` shows `-:--.--` until `have_theo`.
+Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BOARD_COLS`) px on both canvases; the board shows the first three sectors and appends `+n` to the S3 label when the layout has more (up to `LAP_MAX_SECTORS`). Row 4 cells show `----` when `have_last_sector_delta[i]` is false — that gating is independent of `best_n_sectors` (ruling FR-2: no producer fills `best_n_sectors` yet, the best-lap sector times/theo wiring is roadmap follow-up #79). Last-lap sector deltas: the most recent delta per sector, overwritten as the new lap's gates arrive (ruling B7b-1, bench finding 1) — they are not cleared at the line, so row 4 keeps showing the lap that just finished until the next lap's `EV_SECTOR`s replace each cell in turn. `THEO` shows `-:--.--` until `have_theo`.
 
 ## 6. LAP page 2 — stats grid
 
@@ -128,6 +128,6 @@ Menu, one-shots, fault-strip icons, the refresh policy, predictive lap time (nee
 
 ## 11. Bench acceptance
 
-On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the last-lap sector deltas (best sector times arrive with #58); page 2 the grid; DRAG page 0 `READY`/`ARMED` (via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.
+On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the last-lap sector deltas (best sector times arrive with #79); page 2 the grid; DRAG page 0 `READY`/`ARMED` (via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.
 
 Run 2026-09-28: passed (see the roadmap entry).
