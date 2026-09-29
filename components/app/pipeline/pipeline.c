@@ -541,24 +541,22 @@ static void pipeline_init(void)
     tb_init(&s_tb);
     fus_init(&s_fus, NULL, (uint8_t)(CFG_VARIANT_MOTO ? 1 : 0));
     lap_init(&s_lap, NULL);
-    {
-        /* Plan 7c T2: the engine runs on the user's saved gate table (benches/units/rollout),
-         * not the §11.1 defaults -- same load-with-fallback pattern as ui.c/cmd.c. */
-        cfg_t      uc;   /* pipeline task stack: cfg_t is a few hundred bytes; pipeline has ~4.8 KB free */
-        drag_cfg_t dc;
-        cfg_defaults(&uc);
-        (void)lt_cfg_load(&uc);              /* NVS copy; defaults on a missing/invalid blob */
-        drag_cfg_from_user(&uc, &dc);
-        drag_init(&s_drag, &dc);
-    }
-    /* T-D: cfg.mode is the single source of truth for the operating mode. The ui seeds its own
-     * s_mode from cfg.mode and persists a menu toggle there; the pipeline reads the same field
-     * here so screen and engine agree at boot (previously this hard-coded MODE_LAP, so a persisted
-     * DRAG cfg ran the lap engine until the first menu toggle inverted both). Fall back to the LAP
-     * default if the cfg blob can't be read (lt_cfg_load leaves cfg untouched on failure). */
-    cfg_t cfg;
+    /* Plan 7c T2 fix 1: one NVS cfg load feeds both consumers below -- the drag engine's
+     * user-derived gate table (benches/units/rollout) and cfg.mode, the single source of truth
+     * for the operating mode (T-D). Same load-with-fallback pattern as ui.c/cmd.c; defaults on a
+     * missing/invalid blob (lt_cfg_load leaves cfg untouched on failure). */
+    cfg_t cfg;   /* pipeline task stack: cfg_t is a few hundred bytes; pipeline has ~4.8 KB free */
     cfg_defaults(&cfg);
     (void)lt_cfg_load(&cfg);
+    {
+        drag_cfg_t dc;
+        drag_cfg_from_user(&cfg, &dc);
+        drag_init(&s_drag, &dc);
+    }
+    /* The ui seeds its own s_mode from cfg.mode and persists a menu toggle there; the pipeline
+     * reads the same field here so screen and engine agree at boot (previously this hard-coded
+     * MODE_LAP, so a persisted DRAG cfg ran the lap engine until the first menu toggle inverted
+     * both). */
     s_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);   /* valid engine mode from cfg */
     stats_reset();

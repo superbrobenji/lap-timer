@@ -2,7 +2,6 @@
 #include "core/cfg.h"
 #include "core/core.h"
 #include <stdio.h>
-#include <string.h>
 
 /* Builds the engine's drag_cfg_t from the user's saved cfg_t (spec §6.6/§11.4), and formats §6.6
  * gate names for the DRAG screens. Power of 10 rule 5: per-module assertion code. */
