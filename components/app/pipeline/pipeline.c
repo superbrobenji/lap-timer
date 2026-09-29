@@ -541,7 +541,16 @@ static void pipeline_init(void)
     tb_init(&s_tb);
     fus_init(&s_fus, NULL, (uint8_t)(CFG_VARIANT_MOTO ? 1 : 0));
     lap_init(&s_lap, NULL);
-    drag_init(&s_drag, NULL);
+    {
+        /* Plan 7c T2: the engine runs on the user's saved gate table (benches/units/rollout),
+         * not the §11.1 defaults -- same load-with-fallback pattern as ui.c/cmd.c. */
+        cfg_t      uc;   /* pipeline task stack: cfg_t is a few hundred bytes; pipeline has ~4.8 KB free */
+        drag_cfg_t dc;
+        cfg_defaults(&uc);
+        (void)lt_cfg_load(&uc);              /* NVS copy; defaults on a missing/invalid blob */
+        drag_cfg_from_user(&uc, &dc);
+        drag_init(&s_drag, &dc);
+    }
     /* T-D: cfg.mode is the single source of truth for the operating mode. The ui seeds its own
      * s_mode from cfg.mode and persists a menu toggle there; the pipeline reads the same field
      * here so screen and engine agree at boot (previously this hard-coded MODE_LAP, so a persisted
