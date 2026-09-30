@@ -134,8 +134,11 @@ static uint32_t storage_free_kb(void)
  * listing (sto_list_next_name, no stat()) so this stays O(n) instead of sto_list_next's O(n^2)
  * on LittleFS (Plan 5.6 T1 fix 3). Plan 5.6 T1 fix 4: vTaskDelay(1) every 16 entries blocks this
  * priority-8 task for one tick so IDLE0 (priority 0) runs and the task WDT is fed -- taskYIELD()
- * would not, it never schedules a lower-priority task. Called once at logger start (the only full listing
- * this file runs -- see status_cache_prime()); every later refresh is incremental. */
+ * would not, it never schedules a lower-priority task. Called once at logger start -- the only
+ * full listing this file ever runs, via status_cache_prime() (M7: delete_session used to also
+ * call status_cache_prime() and so this, on every delete; I2 replaced that with an in-place
+ * decrement, so this really is a one-time boot call now). Every later refresh (close_session,
+ * eviction_check, delete_session) is incremental. */
 static uint16_t session_count(void)
 {
     int c = 0;
@@ -267,7 +270,8 @@ static bool rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 }
 
 static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
-static void status_cache_prime(void);   /* forward decl: called from logger_task at boot and from handle_request (LOGGER_DELETE_SESSION) */
+static void status_cache_prime(void);   /* forward decl: called from logger_task at boot only -- I2 made
+                                          * delete_session's cache update incremental, not a rescan */
 
 static void open_session(const log_request_t *req)
 {
@@ -355,14 +359,15 @@ static void open_session(const log_request_t *req)
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
-/* Returns 0 always (nothing to report yet -- close only ever succeeds or has nothing open; a
- * future failure surface would return a negative rc here for logger_request_sync's caller). */
+/* Returns 0 when nothing was open (the routine "no-op" case) or once the close has completed;
+ * -1 if req was NULL or this task's own open-session state was invalid (M1: an asserted anomaly
+ * now reports failure to a synchronous caller, logger_request_sync, instead of a silent 0/ok). */
 static int close_session(const log_request_t *req)
 {
-    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, 0);
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);
     if (!s_open) return 0;
-    LT_ASSERT_RET(s_id[0] != '\0', LOG_ASSERT_CODE, 0);   /* valid session state: s_open implies a set id */
-    LT_ASSERT_RET(s_log_fd >= 0, LOG_ASSERT_CODE, 0);     /* valid session state: s_open implies an open fd */
+    LT_ASSERT_RET(s_id[0] != '\0', LOG_ASSERT_CODE, -1);   /* valid session state: s_open implies a set id */
+    LT_ASSERT_RET(s_log_fd >= 0, LOG_ASSERT_CODE, -1);     /* valid session state: s_open implies an open fd */
     do_write();
     uint8_t tmp[FRAME_TMP_CAP];
     int n = ses_encode_end(req->gps_us, req->reason, tmp, sizeof tmp);
@@ -431,7 +436,14 @@ static int delete_session(const log_request_t *req)
         int rc_sum = sto_unlink(path);
         if (rc == 0) rc = rc_sum;
     }
-    status_cache_prime();                            /* recount + fresh free_kb, on this task */
+    /* I2 (Ruling F-3): incremental update instead of a status_cache_prime() rescan -- a removed
+     * .sum is the only thing that changes the session count (a .log-only delete never counted
+     * toward it, see session_count()'s doc comment), so decrement in place and mirror
+     * close_session's cache-publish tail rather than re-listing /sessions. */
+    if (has_sum && s_sessions_cached > 0) s_sessions_cached--;
+    s_free_kb_cached = storage_free_kb();
+    s_bytes_since_info = 0;
+    status_cache_update(s_free_kb_cached, s_sessions_cached);
     return rc;
 }
 
@@ -441,7 +453,7 @@ static int delete_session(const log_request_t *req)
  * errlog_add inside), so they always return 0. DELETE_SESSION returns delete_session()'s rc. */
 static int handle_request(const log_request_t *req)
 {
-    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, 0);
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);   /* M1: an asserted anomaly reports failure, not 0/ok */
     switch (req->type) {
     case LOGGER_OPEN_SESSION:    open_session(req); return 0;
     case LOGGER_CLOSE_SESSION:   return close_session(req);
@@ -682,27 +694,41 @@ static void eviction_check(void)
     cache_publish_free(storage_free_kb());
 }
 
+/* T3 fix 1 (ruling P-7) + M2: pack rc into the notification the same way on every path -- req.seq
+ * into the top byte, rc into the low 24 bits -- so a waiter (logger_request_sync) can tell this
+ * reply apart from a stale one of its own. A NULL requester (no synchronous caller) is a no-op. */
+static void notify_requester(const log_request_t *req, int rc)
+{
+    if (req->requester == NULL) return;
+    uint32_t val = ((uint32_t)req->seq << 24) | ((uint32_t)rc & 0x00FFFFFFu);
+    (void)xTaskNotify(req->requester, val, eSetValueWithOverwrite);
+}
+
 /* Drain the logger's control queue (open/close/rebuild/evict/delete commands, §4.4). Pulled out
  * of logger_task's own loop (rather than inlined there, as it used to be) so its Rule 2 drain-
- * bound assertion can safely `return` out of a plain helper on trip, instead of out of the task
- * body. debt sweep A #59/#73: a non-NULL requester (only logger_request_sync sets one) gets
- * xTaskNotify'd with this request's rc once handle_request() has finished it -- the logger task
- * never waits on anything the requester holds, so this notify can never deadlock. T3 fix 1
- * (ruling P-7): the notification packs req.seq into the top byte (rc into the low 24 bits) so the
- * waiter can tell this reply apart from a stale one belonging to an earlier, already-timed-out
- * request of the same task -- see lt_ipc.h/lt_ipc.c's logger_request_sync doc comments. */
+ * bound trip can safely `return` out of a plain helper, instead of out of the task body.
+ * debt sweep A #59/#73: a non-NULL requester (only logger_request_sync sets one) gets notified
+ * with this request's rc once handle_request() has finished it -- the logger task never waits on
+ * anything the requester holds, so this notify can never deadlock. */
 static void drain_requests(void)
 {
     LT_ASSERT_VOID(g_log_req_q != NULL, LOG_ASSERT_CODE);   /* valid state: created by lt_ipc_init() at boot */
     log_request_t req;
     uint32_t n = 0;
     while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) {
-        LT_ASSERT_VOID(n++ < LOG_REQ_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
-        int rc = handle_request(&req);
-        if (req.requester != NULL) {
-            uint32_t val = ((uint32_t)req.seq << 24) | ((uint32_t)rc & 0x00FFFFFFu);
-            (void)xTaskNotify(req.requester, val, eSetValueWithOverwrite);
+        /* M2: doubled from LOG_REQ_Q_DEPTH -- a handler can yield mid-drain (e.g. storage I/O
+         * inside delete_session/eviction_check), letting producers refill the queue within this
+         * same call; still a bounded loop (rule 2), just against a less pessimistic worst case. */
+        if (n++ >= 2 * LOG_REQ_Q_DEPTH) {
+            core_assert_fail(LOG_ASSERT_CODE, __FILE__, __LINE__);
+            /* M2: the trip must not silently swallow this request's reply -- notify its requester
+             * (if any) with rc -1 so a synchronous caller times out cleanly instead of waiting out
+             * its full timeout for a reply that was never coming. */
+            notify_requester(&req, -1);
+            return;
         }
+        int rc = handle_request(&req);
+        notify_requester(&req, rc);
     }
 }
 
@@ -719,14 +745,17 @@ static void evict_if_due(uint32_t now)
 
 /* Plan 5.6 T1 fix 3: the only full session_count() scan this file ever runs (name-only, O(n),
  * yields every 16 entries -- see session_count()) is this ONE priming pass at logger start;
- * every later refresh is incremental (close_session/eviction_check) or a storage-free estimate
- * (status_cache_estimate). This is why open_session does NOT also call this: it neither closes a
- * session (no new .sum counted) nor is the storage owner's only chance to see one. Also the
- * LOGGER_DELETE_SESSION handler (delete_session, debt sweep A #73) -- a rescan is the only way
- * to see a session count that just went DOWN (close_session only ever increments it). Resets
- * s_bytes_since_info too: both callers just took a real storage_free_kb() reading, so
- * status_cache_estimate() must restart its between-refresh estimate from here, not from bytes
- * appended before this priming pass. */
+ * every later refresh is incremental (close_session/eviction_check/delete_session) or a
+ * storage-free estimate (status_cache_estimate). This is why open_session does NOT also call
+ * this: it neither closes a session (no new .sum counted) nor is the storage owner's only chance
+ * to see one. Resets s_bytes_since_info too: the only caller (logger_task, at boot) just took a
+ * real storage_free_kb() reading, so status_cache_estimate() must restart its between-refresh
+ * estimate from here, not from bytes appended before this priming pass.
+ *
+ * M7 (final review): this used to also be delete_session's (LOGGER_DELETE_SESSION, debt sweep A
+ * #73) only way to see a session count that just went DOWN (close_session only ever increments
+ * it) -- I2 replaced that full rescan with an in-place decrement (delete_session, above), since a
+ * removed .sum is the one thing this file already knows changed the count by exactly one. */
 static void status_cache_prime(void)
 {
     s_sessions_cached = session_count();
