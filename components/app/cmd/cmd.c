@@ -16,6 +16,7 @@
 #include "app/lt_err.h"
 #include "app/lt_ipc.h"           /* log_request_t/LOGGER_DELETE_SESSION/logger_request_sync -- DELETE (#73) */
 #include "app/lt_nvs.h"
+#include "app/lt_proto.h"         /* lt_session_id_ok -- validated before any path is built (#60) */
 #include "app/lt_sup.h"
 #include "app/ota.h"              /* OTA receive-side state machine (CMD_OTA_*, §19.4) */
 #include "app/status.h"           /* status_build() -- storage-free (Plan 5.6 T1 fix 1) */
@@ -248,7 +249,8 @@ static int op_delete(const uint8_t *payload, size_t len,
     memcpy(id, payload, idl);
     id[idl] = '\0';
     id[strcspn(id, " ")] = '\0';   /* drop any padding/trailing space */
-    /* Task 5 inserts the lt_session_id_ok() check here. */
+    if (!lt_session_id_ok(id, strlen(id)))
+        return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "bad id");
     log_request_t req = { .type = LOGGER_DELETE_SESSION };
     (void)snprintf(req.id, sizeof req.id, "%s", id);
     int rc = logger_request_sync(&req, 1000);
@@ -778,6 +780,8 @@ static int op_open(const uint8_t *payload, size_t len, cmd_emit_fn emit, void *c
     memcpy(id, payload, 10);
     id[10] = '\0';
     id[strcspn(id, " ")] = '\0';                  /* trim any padding/trailing space */
+    if (!lt_session_id_ok(id, strlen(id)))
+        return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "bad id");
     uint8_t fmt = payload[10];
     if (fmt > 4) return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "open: bad fmt");
 

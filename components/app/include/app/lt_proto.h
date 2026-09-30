@@ -31,12 +31,29 @@
 #ifndef APP_LT_PROTO_H
 #define APP_LT_PROTO_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
-/* Session id bound (§12.1: "S%05u_%03u", 10 chars). Debt sweep A #60's validator lands beside
- * this in Task 5; this define alone lands now so log_request_t (Task 3, #59) can size its id
- * field from it. */
+/* Session id bound (§12.1: "S%05u_%03u", 10 chars). */
 #define LT_SESSION_ID_MAX 10
+
+/* Debt sweep A #60: validated before any path is built from an id -- the lap-timer's op_open and
+ * op_delete (components/app/cmd/cmd.c) and the dev-kit's HTTP relay (do_session_download,
+ * devcontroller/components/webapi/webapi.c). 1..LT_SESSION_ID_MAX bytes of [A-Za-z0-9_] only, so
+ * a generated "S%05u_%03u" id always passes and nothing path-shaped (`..`, `/`, a bare `.`) ever
+ * does. static inline: both host harnesses and both firmwares include this header, and the
+ * function is short enough (< 20 lines) that Power-of-10 rule 10 needs no assert here. */
+static inline bool lt_session_id_ok(const char *id, size_t len)
+{
+    if (id == NULL || len == 0u || len > LT_SESSION_ID_MAX) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = id[i];
+        bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
 
 /* ---- §18.4 command-response framing markers ---- */
 #define LT_FRAME_BEGIN_FMT "---BEGIN %s %u---\r\n"   /* args: name, size */

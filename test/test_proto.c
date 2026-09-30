@@ -30,11 +30,33 @@ void test_status_rec_type_is_outside_ses_space(void) {
     TEST_ASSERT_NOT_EQUAL((int)LT_SES_T_EVENT, (int)LT_REC_STATUS);
 }
 
+/* lt_session_id_ok (§4/#60): validated before any path is built, on the lap-timer (op_open,
+ * op_delete) and the dev-kit relay (do_session_download). The same two cases are duplicated
+ * verbatim in devcontroller/test/test_session_id.c (P-2: each harness must compile the shared
+ * header on its own). */
+void test_session_id_accepts_real_ids(void) {
+    TEST_ASSERT_TRUE(lt_session_id_ok("S00001_001", 10));
+    TEST_ASSERT_TRUE(lt_session_id_ok("abc", 3));
+    TEST_ASSERT_TRUE(lt_session_id_ok("A_1", 3));
+}
+void test_session_id_rejects_traversal_and_shape(void) {
+    TEST_ASSERT_FALSE(lt_session_id_ok("", 0));
+    TEST_ASSERT_FALSE(lt_session_id_ok("S00001_0011", 11));
+    TEST_ASSERT_FALSE(lt_session_id_ok("..", 2));
+    TEST_ASSERT_FALSE(lt_session_id_ok("a/b", 3));
+    TEST_ASSERT_FALSE(lt_session_id_ok("a.b", 3));
+    TEST_ASSERT_FALSE(lt_session_id_ok("S00001_00 ", 10));
+    TEST_ASSERT_FALSE(lt_session_id_ok("-", 1));
+    TEST_ASSERT_FALSE(lt_session_id_ok(NULL, 3));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_stream_hdr_is_5_bytes);
     RUN_TEST(test_status_len_and_offsets);
     RUN_TEST(test_markers_present);
     RUN_TEST(test_status_rec_type_is_outside_ses_space);
+    RUN_TEST(test_session_id_accepts_real_ids);
+    RUN_TEST(test_session_id_rejects_traversal_and_shape);
     return UNITY_END();
 }

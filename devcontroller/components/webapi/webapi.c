@@ -47,6 +47,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "app/lt_proto.h"  /* lt_session_id_ok -- validated before any path is built (#60) */
 #include "config_diff.h"
 #include "flashctl.h"
 #include "image_desc.h"
@@ -392,6 +393,10 @@ static void do_session_download(httpd_req_t *req)
     char id[32];
     if (path_tail(req, "/api/session/", id, sizeof id) <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing session id");
+        return;
+    }
+    if (!lt_session_id_ok(id, strlen(id))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad session id");
         return;
     }
 
