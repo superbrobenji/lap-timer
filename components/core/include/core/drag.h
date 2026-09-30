@@ -79,10 +79,13 @@ typedef struct {
 } drag_cfg_t;
 
 void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {100,200,300}, rollout off, km/h */
-/* Build a drag_cfg_t from the user's saved cfg_t (spec §6.6/§11.4): starts from drag_cfg_defaults(),
- * then applies cfg->units, the configured bench list (benches_kmh or benches_mph depending on units)
- * into the SPEED_FROM0 gates' `a`, and cfg->drag.rollout. Gate ids never change; an empty bench list
- * leaves the defaults in place. */
+/* Build a drag_cfg_t from the user's saved cfg_t (spec §6.6/§11.4): starts from drag_cfg_defaults()
+ * and NEVER touches the gate table after that (gates[]/n_gates stay the defaults, Ruling R-6) --
+ * gate thresholds are km/h by this header's own contract, regardless of the display unit. out->units
+ * mirrors cfg->units (display only); out->rollout mirrors cfg->drag.rollout. The headline bench list
+ * (out->benches_kmh/n_benches) is always copied from cfg->drag.benches_kmh (km/h), clamped by both
+ * array sizes; cfg->drag.benches_mph is unused until a future mph-defined gate table (spec §10,
+ * follow-up issue). */
 void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
 /* §6.6 gate name for `g` into `buf` (cap >= 8 required). Returns strlen(buf) on success, -1 on a bad
  * kind, a NULL arg or too small a cap. buf is always NUL-terminated within cap. */

@@ -11,25 +11,22 @@ void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out)
 {
     CORE_ASSERT_VOID(cfg != NULL, DRAGCFG_ASSERT_CODE);
     CORE_ASSERT_VOID(out != NULL, DRAGCFG_ASSERT_CODE);
-    drag_cfg_defaults(out);
-    bool            mph = cfg->units == CFG_UNITS_MPH;
-    const uint16_t *src = mph ? cfg->drag.benches_mph : cfg->drag.benches_kmh;
-    uint8_t         n   = mph ? cfg->drag.n_mph : cfg->drag.n_kmh;
-    /* Clamp to the smaller of the two array sizes so a future change to either cannot overrun. */
-    uint8_t cfg_cap = (uint8_t)(mph ? sizeof(cfg->drag.benches_mph) / sizeof(cfg->drag.benches_mph[0])
-                                     : sizeof(cfg->drag.benches_kmh) / sizeof(cfg->drag.benches_kmh[0]));
+    drag_cfg_defaults(out);   /* Ruling R-6 (final review I1/I2): gates[]/n_gates are NEVER touched below */
+    out->units   = cfg->units;         /* display only -- core/drag.h's contract keeps gate a/b in km/h */
+    out->rollout = cfg->drag.rollout;
+    /* Headline bench list is always the km/h list, regardless of cfg->units: SPEED_FROM0 gate
+     * thresholds are km/h by core/drag.h's contract, and benches_kmh is what selects which of the
+     * default gates are "headline" benches (§11.4) -- it must never be read as mph numbers. Clamp
+     * to the smaller of the two array sizes so a future change to either cannot overrun.
+     * benches_mph is unused until spec §10's deferred mph-defined gate thresholds (follow-up issue). */
+    uint8_t cfg_cap = (uint8_t)(sizeof(cfg->drag.benches_kmh) / sizeof(cfg->drag.benches_kmh[0]));
     uint8_t out_cap = (uint8_t)(sizeof(out->benches_kmh) / sizeof(out->benches_kmh[0]));
     uint8_t cap     = cfg_cap < out_cap ? cfg_cap : out_cap;
+    uint8_t n       = cfg->drag.n_kmh;
     if (n > cap) n = cap;
-    out->units   = mph ? (uint8_t)DRAG_UNITS_MPH : (uint8_t)DRAG_UNITS_KMH;
-    out->rollout = cfg->drag.rollout;
-    if (n == 0u) return;                          /* no user list: defaults stand */
     out->n_benches = n;
-    for (uint8_t i = 0; i < n; i++) {
-        out->benches_kmh[i] = src[i];
-        if (i < out->n_gates && out->gates[i].kind == DRAG_SPEED_FROM0) out->gates[i].a = src[i];
-    }
-    CORE_ASSERT_VOID(out->n_gates <= DRAG_MAX_GATES, DRAGCFG_ASSERT_CODE);   /* untouched by the fill above */
+    for (uint8_t i = 0; i < n; i++) out->benches_kmh[i] = cfg->drag.benches_kmh[i];
+    CORE_ASSERT_VOID(out->n_gates <= DRAG_MAX_GATES, DRAGCFG_ASSERT_CODE);   /* untouched by drag_cfg_defaults */
 }
 
 static int put_num_pair(char *buf, size_t cap, unsigned a, const char *sep, unsigned b)   /* "<a><sep><b>" */
