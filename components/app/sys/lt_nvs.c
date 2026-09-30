@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "core/blob.h"       /* blob_wrap/blob_unwrap -- versioned + CRC16 record framing (Task 1) */
+#include "core/cfg_blob.h"   /* cfg_blob_wrap/cfg_blob_unwrap -- the cfg blob decision (final review C1) */
 #include "esp_log.h"
 #include "esp_system.h"      /* esp_reset_reason_t / ESP_RST_* */
 #include "esp_timer.h"
@@ -535,33 +536,24 @@ void lt_boot_record_reset(int reset_reason, uint32_t prev_uptime_s)
     }
 }
 
-/* ---- cfg blob (lt_cfg/cfg): framed via blob_wrap/blob_unwrap (Task 1). The payload is cfg_t
- * minus its own leading version byte ((const uint8_t *)c + 1, sizeof(cfg_t) - 1) with ver =
- * c->version, so the on-flash bytes [version][cfg_t sans version][crc16] are byte-for-byte what
- * today's hand-rolled framing already wrote (§15.1/§15.2): unchanged for a blob this firmware
- * itself saved. An older/unknown stored version is migrated via cfg_migrate(); unknown -> caller
- * keeps its defaults (<0). ---- */
+/* ---- cfg blob (lt_cfg/cfg): the framing + version/migrate/validate decision now lives in the
+ * pure, host-tested core/cfg_blob.h helper (debt sweep A final review, C1 / Ruling F-1) -- this
+ * is just the NVS I/O around it. cfg_blob_wrap/cfg_blob_unwrap reproduce exactly the on-flash
+ * bytes the old hand-rolled framing here always wrote (§15.1/§15.2): unchanged for a blob this
+ * firmware itself saved. ---- */
 int lt_cfg_load(cfg_t *c)
 {
     /* c is the caller's own cfg_t (ui.c/cmd.c/app_main.c each pass &local_var) -- always non-NULL
-     * before we unwrap into it. The size/CRC/version checks below validate the STORED blob, which
-     * is untrusted on-flash data the caller-visible cfg_t is not: those stay plain returns. */
+     * before we unwrap into it. The size/CRC/version checks live in cfg_blob_unwrap, which
+     * validates the STORED blob -- untrusted on-flash data the caller-visible cfg_t is not. */
     LT_ASSERT_RET(c != NULL, NVS_ASSERT_CODE, -1);
-    uint8_t buf[sizeof(cfg_t) + 2];                    /* [version][cfg_t minus its version][crc16]: today's bytes */
+    uint8_t buf[CFG_BLOB_LEN];
     size_t sz = 0;
     if (nvs_get_blob(s_h_cfg, K_CFG, NULL, &sz) != ESP_OK || sz != sizeof(buf)) return -1;
     if (nvs_get_blob(s_h_cfg, K_CFG, buf, &sz) != ESP_OK) return -1;
-    uint8_t stored = 0;
-    int rc = blob_unwrap(CFG_VERSION, buf, sz, (uint8_t *)c + 1, sizeof(cfg_t) - 1, &stored);
-    if (rc == -3) {                                    /* older/unknown version: migrate or defaults */
-        if (blob_unwrap(stored, buf, sz, (uint8_t *)c + 1, sizeof(cfg_t) - 1, NULL) != 0) return -1;
-        if (cfg_migrate(c, stored) != 0) { (void)errlog_add(E_SYS_CFG_RESET, stored); return -1; }
-    } else if (rc != 0) {
-        return -1;
-    }
-    c->version = CFG_VERSION;
-    LT_ASSERT_RET(c->version == CFG_VERSION, NVS_ASSERT_CODE, -1);   /* postcondition after migrate */
-    return cfg_validate(c);                            /* >=0 corrections; stored user settings win (§15.1) */
+    int rc = cfg_blob_unwrap(buf, sz, c);
+    if (rc == -3) (void)errlog_add(E_SYS_CFG_RESET, buf[0]);   /* unsupported stored version */
+    return rc;                                          /* c is untouched on -1/-3 (cfg_blob_unwrap's contract) */
 }
 
 int lt_cfg_save(const cfg_t *c)
@@ -571,8 +563,8 @@ int lt_cfg_save(const cfg_t *c)
      * caller bug could still hand in a stale/garbage one) must never be framed onto flash. */
     LT_ASSERT_RET(c != NULL, NVS_ASSERT_CODE, -1);
     LT_ASSERT_RET(c->version == CFG_VERSION, NVS_ASSERT_CODE, -1);
-    uint8_t buf[sizeof(cfg_t) + 2];
-    size_t len = blob_wrap(c->version, (const uint8_t *)c + 1, sizeof(cfg_t) - 1, buf, sizeof buf);
+    uint8_t buf[CFG_BLOB_LEN];
+    size_t len = cfg_blob_wrap(c, buf, sizeof buf);
     if (len != sizeof buf || nvs_set_blob(s_h_cfg, K_CFG, buf, len) != ESP_OK) return -1;
     (void)nvs_commit(s_h_cfg);
     return 0;

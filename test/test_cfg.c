@@ -1,6 +1,5 @@
 #include "unity.h"
 #include "core/cfg.h"
-#include "core/blob.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -174,21 +173,6 @@ static void test_migrate_v1_is_noop(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_migrate(&c, 0));
 }
 
-static void test_cfg_blob_older_version_path(void)
-{
-    /* lt_cfg_load's decision (Plan debt-sweep-A §3): unwrap at CFG_VERSION -> -3 with the stored
-     * version; re-unwrap at that version, then cfg_migrate(); unknown -> defaults. Version 0 is
-     * unknown today, so the migrate step must say -1. */
-    cfg_t c; cfg_defaults(&c);
-    uint8_t buf[sizeof(cfg_t) + BLOB_OVERHEAD]; uint8_t ver = 0xFF;
-    TEST_ASSERT_EQUAL_UINT(sizeof buf - 1, blob_wrap(0, (const uint8_t *)&c + 1, sizeof(cfg_t) - 1, buf, sizeof buf));
-    cfg_t d; memset(&d, 0, sizeof d);
-    TEST_ASSERT_EQUAL_INT(-3, blob_unwrap(CFG_VERSION, buf, sizeof buf - 1, (uint8_t *)&d + 1, sizeof(cfg_t) - 1, &ver));
-    TEST_ASSERT_EQUAL_UINT8(0, ver);
-    TEST_ASSERT_EQUAL_INT(0, blob_unwrap(ver, buf, sizeof buf - 1, (uint8_t *)&d + 1, sizeof(cfg_t) - 1, NULL));
-    TEST_ASSERT_EQUAL_INT(-1, cfg_migrate(&d, ver));
-}
-
 static void test_version_is_owned_by_firmware(void)
 {
     cfg_t c; cfg_defaults(&c);
@@ -298,7 +282,6 @@ int main(void)
     RUN_TEST(test_from_json_rejects_malformed);
     RUN_TEST(test_json_round_trip_is_lossless);
     RUN_TEST(test_migrate_v1_is_noop);
-    RUN_TEST(test_cfg_blob_older_version_path);
     RUN_TEST(test_version_is_owned_by_firmware);
     RUN_TEST(test_profile_defaults_apply);
     RUN_TEST(test_oversized_arrays_are_rejected);
