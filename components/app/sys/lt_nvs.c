@@ -90,22 +90,27 @@ static uint32_t       s_last_arg;
 static bool           s_last_valid;
 static int64_t        s_ring_persist_us;
 
-/* F1: serialise the shared error-ring RAM mirror (s_ring) + its NVS write. errlog_add is called
- * from the logger/supervisor/console (core 0) AND the pipeline via the core assert hook (core 1),
- * so the read-modify-write of s_ring races without this. Static allocation (no malloc after init),
- * task-context only (the assert hook runs in task context, never an ISR). */
-static SemaphoreHandle_t s_ring_lock;
-static StaticSemaphore_t s_ring_lock_buf;
+/* F1 (renamed/extended, fix round 2 #53/P-5): serializes s_blob_scratch and the error-ring RMW;
+ * never taken by save_framed/load_framed themselves -- callers hold it. errlog_add is called from
+ * the logger/supervisor/console (core 0) AND the pipeline via the core assert hook (core 1), so
+ * both the read-modify-write of s_ring and any concurrent use of the single shared s_blob_scratch
+ * buffer race without this. save_framed/load_framed never call blob_lock/blob_unlock themselves
+ * (the ring path already holds it inside errlog_add/lt_errlog_clear, and taking it again would
+ * deadlock on this non-recursive mutex); every OTHER caller -- persist_counters, lt_crashlog_push,
+ * and lt_nvs_init's boot-time loads -- takes it around its own call instead. Static allocation (no
+ * malloc after init), task-context only (the assert hook runs in task context, never an ISR). */
+static SemaphoreHandle_t s_blob_lock;
+static StaticSemaphore_t s_blob_lock_buf;
 
-static inline void ring_lock(void)   { if (s_ring_lock) xSemaphoreTake(s_ring_lock, portMAX_DELAY); }
-static inline void ring_unlock(void) { if (s_ring_lock) xSemaphoreGive(s_ring_lock); }
+static inline void blob_lock(void)   { if (s_blob_lock) xSemaphoreTake(s_blob_lock, portMAX_DELAY); }
+static inline void blob_unlock(void) { if (s_blob_lock) xSemaphoreGive(s_blob_lock); }
 
 static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
 /* ---- blob framing (Task 1 core/blob.h): per-blob versions + the framed-scratch size cap.
  * RAM mirrors (s_counters/s_ring/s_crash[]) stay their own packed on-flash layout, aligned and
- * unchanged; the framed [version][payload][crc16] bytes exist only in the scratch buffers below,
- * built/consumed at save/load. ---- */
+ * unchanged; the framed [version][payload][crc16] bytes exist only in the single shared scratch
+ * buffer below (s_blob_scratch, fix round 2), built/consumed at save/load. ---- */
 #define LT_CTR_VER   1u
 #define LT_RING_VER  1u
 #define LT_CRASH_VER 1u
@@ -115,52 +120,43 @@ static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 10
 _Static_assert(sizeof(lt_counters_t) == 36, "counters blob payload (§15.2)");
 _Static_assert(sizeof(err_ring_t) == 385, "error ring blob payload (§15.2)");
 _Static_assert(sizeof(crash_entry_t) * CRASH_LOG_LEN == 15, "crash log blob payload (§15.2)");
-#define BLOB_SCRATCH_MAX (sizeof(err_ring_t) + BLOB_OVERHEAD)   /* largest framed blob: load_framed's boot-only scratch */
+#define BLOB_SCRATCH_MAX (sizeof(err_ring_t) + BLOB_OVERHEAD)   /* largest framed blob: 388 B */
 
-/* Per-blob SAVE scratch (fix round 1, #53): static, not a shared stack buffer. save_framed is the
- * universal assert-report sink's write path (core_assert_report -> errlog_add -> errlog_persist ->
- * save_framed), so it is reachable from EVERY task in the firmware, including ui (~340 B of stack
- * headroom, #53) -- a 388 B stack frame there was not affordable. Each buffer belongs to exactly
- * one blob and is only ever touched while that blob's own serialization already holds:
- *  - s_scratch_ring: under s_ring_lock -- both callers of errlog_persist (errlog_add, holding the
- *    lock across its whole RMW; lt_errlog_clear, same) hold it across the save.
- *  - s_scratch_ctr: by boot-then-sup sequencing -- app_main calls persist_counters (via
- *    lt_counters_inc(..., true)/lt_counters_flush) only before sup_start(); every later call is
- *    from the sup task alone. Never both at once.
- *  - s_scratch_crash: single call site, lt_crashlog_push, itself called exactly once per boot from
- *    lt_boot_record_reset (app_main, before any other task starts).
- * The cfg blob keeps its own caller-stack buffer (lt_cfg_load/lt_cfg_save): it's called from
- * ui/cmd/boot only, with a small, already-existing frame -- not the sink's unbounded caller set. */
-static uint8_t s_scratch_ctr[sizeof(lt_counters_t) + BLOB_OVERHEAD];
-static uint8_t s_scratch_ring[sizeof(err_ring_t) + BLOB_OVERHEAD];
-static uint8_t s_scratch_crash[sizeof(crash_entry_t) * CRASH_LOG_LEN + BLOB_OVERHEAD];
+/* Single static blob scratch (fix round 2, #53/P-5): load_framed AND save_framed both frame into
+ * this ONE buffer -- fix round 1's four buffers (one static load scratch + three per-blob save
+ * scratches, 388+39+388+18 = 833 B) pushed moto_sim's free static DRAM under the 4 KB floor (#53);
+ * collapsing to one reclaims ~450 B. Every blob fits (largest is the 385 B ring). Safety is by
+ * s_blob_lock, not by ownership: load_framed's boot-time calls (lt_nvs_init, single-threaded,
+ * before any other task exists) are additionally wrapped in blob_lock/blob_unlock by lt_nvs_init
+ * itself (belt-and-braces, keeps the discipline uniform); save_framed's calls are always made
+ * with the lock already held by the caller (see the F1 comment above) -- so no two users of this
+ * buffer are ever concurrent. */
+static uint8_t s_blob_scratch[BLOB_SCRATCH_MAX];
 
-/* Load key into dst (expect bytes) through the framer. 0 ok; -1 size/CRC mismatch; -2 CRC;
- * -3 version; -4 key absent (fresh flash -- not corruption, see load_or_reset). `scratch` is
- * function-local static: safe only because lt_nvs_init (the sole caller, via load_or_reset) runs
- * once at boot, single-threaded, before any other task starts touching NVS. */
+/* Load key into dst (expect bytes) through the framer, via the shared s_blob_scratch. 0 ok;
+ * -1 size mismatch; -2 CRC; -3 version; -4 key absent (fresh flash -- not corruption, see
+ * load_or_reset). Does NOT take blob_lock itself -- its only caller (load_or_reset, from
+ * lt_nvs_init) takes it. */
 static int load_framed(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t expect)
 {
     LT_ASSERT_RET(key != NULL && dst != NULL, NVS_ASSERT_CODE, -1);
     LT_ASSERT_RET(expect > 0 && expect + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX, NVS_ASSERT_CODE, -1);
-    static uint8_t scratch[BLOB_SCRATCH_MAX];           /* boot-time only; lt_nvs_init runs before the tasks */
     size_t sz = 0;
     esp_err_t probe = nvs_get_blob(h, key, NULL, &sz);
     if (probe == ESP_ERR_NVS_NOT_FOUND) return -4;
     if (probe != ESP_OK || sz != expect + BLOB_OVERHEAD) return -1;
-    if (nvs_get_blob(h, key, scratch, &sz) != ESP_OK) return -1;
-    return blob_unwrap(ver, scratch, sz, dst, expect, NULL);
+    if (nvs_get_blob(h, key, s_blob_scratch, &sz) != ESP_OK) return -1;
+    return blob_unwrap(ver, s_blob_scratch, sz, dst, expect, NULL);
 }
 
-/* Save src (n bytes) under key through the framer, into the caller-owned `scratch` (capacity
- * `cap`) rather than a stack buffer -- see the static-scratch comment above for why. 0 ok. */
-static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n,
-                        uint8_t *scratch, size_t cap)
+/* Save src (n bytes) under key through the framer, via the shared s_blob_scratch. 0 ok. Does NOT
+ * take blob_lock itself -- see the F1 comment above for why, and which callers do. */
+static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n)
 {
-    LT_ASSERT_RET(key != NULL && src != NULL && scratch != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(n > 0 && cap >= BLOB_OVERHEAD && n <= cap - BLOB_OVERHEAD, NVS_ASSERT_CODE, -1);
-    size_t len = blob_wrap(ver, src, n, scratch, cap);
-    if (len == 0 || nvs_set_blob(h, key, scratch, len) != ESP_OK) return -1;
+    LT_ASSERT_RET(key != NULL && src != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(n > 0 && n <= BLOB_SCRATCH_MAX - BLOB_OVERHEAD, NVS_ASSERT_CODE, -1);
+    size_t len = blob_wrap(ver, src, n, s_blob_scratch, sizeof s_blob_scratch);
+    if (len == 0 || nvs_set_blob(h, key, s_blob_scratch, len) != ESP_OK) return -1;
     (void)nvs_commit(h);
     return 0;
 }
@@ -188,16 +184,17 @@ static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst
 int lt_nvs_init(void)
 {
     if (s_ready) return 0;
-    if (!s_ring_lock) s_ring_lock = xSemaphoreCreateMutexStatic(&s_ring_lock_buf);   /* F1 */
-    /* Postcondition: mutex creation over our own static s_ring_lock_buf must succeed -- without
-     * it, ring_lock()/ring_unlock() silently no-op (their own `if (s_ring_lock)` guard) and the
-     * F1 serialisation the error ring depends on would be silently absent. */
-    LT_ASSERT_RET(s_ring_lock != NULL, NVS_ASSERT_CODE, -1);
+    if (!s_blob_lock) s_blob_lock = xSemaphoreCreateMutexStatic(&s_blob_lock_buf);   /* F1 */
+    /* Postcondition: mutex creation over our own static s_blob_lock_buf must succeed -- without
+     * it, blob_lock()/blob_unlock() silently no-op (their own `if (s_blob_lock)` guard) and the
+     * F1 serialisation the error ring + s_blob_scratch depend on would be silently absent. */
+    LT_ASSERT_RET(s_blob_lock != NULL, NVS_ASSERT_CODE, -1);
     if (nvs_open(NS_SYS, NVS_READWRITE, &s_h_sys) != ESP_OK) return -1;
     if (nvs_open(NS_ERR, NVS_READWRITE, &s_h_err) != ESP_OK) return -1;
     if (nvs_open(NS_CFG, NVS_READWRITE, &s_h_cfg) != ESP_OK) return -1;
 
     if (nvs_get_u32(s_h_sys, K_BOOT, &s_boot_cnt) != ESP_OK) s_boot_cnt = 0;
+    blob_lock();          /* guards the shared s_blob_scratch across these boot-time loads too */
     (void)load_or_reset(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters), BLOB_TAG_CTR);
     (void)load_or_reset(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring), BLOB_TAG_RING);
     /* H2: head comes straight from the NVS blob (load_or_reset only checks size/version/CRC). A
@@ -206,6 +203,7 @@ int lt_nvs_init(void)
      * catch it -- see errlog_add). */
     if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
     (void)load_or_reset(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash), BLOB_TAG_CRASH);
+    blob_unlock();
 
     s_counters_last_us = esp_timer_get_time();
     s_ready = true;
@@ -228,8 +226,9 @@ uint32_t lt_nvs_boot_get(void) { return s_boot_cnt; }
 
 static void persist_counters(void)
 {
-    (void)save_framed(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters),
-                       s_scratch_ctr, sizeof s_scratch_ctr);
+    blob_lock();          /* save_framed doesn't lock itself -- serializes s_blob_scratch */
+    (void)save_framed(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters));
+    blob_unlock();
     s_counters_dirty = false;
     s_counters_last_us = esp_timer_get_time();
 }
@@ -253,12 +252,11 @@ int lt_counters_flush(bool force)
 
 const lt_counters_t *lt_counters(void) { return &s_counters; }
 
-/* Write the RAM ring to NVS and stamp the last-write time. Caller holds ring_lock. The stamp lets
+/* Write the RAM ring to NVS and stamp the last-write time. Caller holds blob_lock. The stamp lets
  * the H1 rate-limit cap how often a repeating (deduped) report is allowed to touch flash. */
 static void errlog_persist(void)
 {
-    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring),
-                       s_scratch_ring, sizeof s_scratch_ring);
+    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
     s_ring_persist_us = esp_timer_get_time();
 }
 
@@ -272,14 +270,14 @@ int errlog_add(uint16_t code, uint32_t arg)
      * slot and rate-limit the flash write so it cannot storm NVS; a distinct report persists at once
      * so genuine crash/stall records stay reliable. */
     if (code == 0) return -1;
-    ring_lock();                                /* F1: RMW of s_ring + its NVS write is not atomic */
+    blob_lock();                                /* F1: RMW of s_ring + its NVS write is not atomic */
     if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
     bool repeat = s_last_valid && code == s_last_code && arg == s_last_arg;
     if (repeat) {
         uint8_t newest = (uint8_t)((s_ring.head + ERR_RING_LEN - 1) % ERR_RING_LEN);
         s_ring.entry[newest].uptime_s = uptime_s_now();
         if (esp_timer_get_time() - s_ring_persist_us >= ERRLOG_MIN_PERSIST_US) errlog_persist();
-        ring_unlock();
+        blob_unlock();
         return 0;
     }
     err_entry_t *e = &s_ring.entry[s_ring.head];
@@ -287,7 +285,7 @@ int errlog_add(uint16_t code, uint32_t arg)
     s_ring.head = (uint8_t)((s_ring.head + 1) % ERR_RING_LEN);
     s_last_code = code; s_last_arg = arg; s_last_valid = true;
     errlog_persist();
-    ring_unlock();
+    blob_unlock();
     ESP_LOGW(TAG, "errlog 0x%04x arg=%u", code, (unsigned)arg);
     return 0;
 }
@@ -316,7 +314,7 @@ int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
     /* head is the next write slot, so slot `head` is the oldest surviving entry once the ring has
      * wrapped; before wrap those slots are still zero. Walking head..head+LEN-1 (mod LEN) yields
      * oldest->newest; a zero `code` marks an untouched slot (real codes are >= 0x0101, §17.7). */
-    ring_lock();                                /* F1: consistent copy vs. a concurrent errlog_add */
+    blob_lock();                                /* F1: consistent copy vs. a concurrent errlog_add */
     int n = 0;
     for (int i = 0; i < ERR_RING_LEN && n < cap; i++) {
         const err_entry_t *e = &s_ring.entry[(s_ring.head + i) % ERR_RING_LEN];
@@ -327,7 +325,7 @@ int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
         out[n].boot     = e->boot;
         n++;
     }
-    ring_unlock();
+    blob_unlock();
     return n;
 }
 
@@ -337,11 +335,11 @@ int lt_errlog_snapshot(lt_err_entry_t *out, int cap)
  * at out[i] for the same ring state. */
 int lt_errlog_count(void)
 {
-    ring_lock();
+    blob_lock();
     int n = 0;
     for (int i = 0; i < ERR_RING_LEN; i++)
         if (s_ring.entry[(s_ring.head + i) % ERR_RING_LEN].code != 0) n++;
-    ring_unlock();
+    blob_unlock();
     return n;
 }
 
@@ -349,7 +347,7 @@ int lt_errlog_at(int index, lt_err_entry_t *out)
 {
     LT_ASSERT_RET(out != NULL, NVS_ASSERT_CODE, -1);
     if (index < 0) return -1;                       /* out-of-range is routine input, not an anomaly */
-    ring_lock();                                    /* F1: consistent single-entry view vs. errlog_add */
+    blob_lock();                                    /* F1: consistent single-entry view vs. errlog_add */
     int n = 0, rc = -1;
     for (int i = 0; i < ERR_RING_LEN; i++) {
         const err_entry_t *e = &s_ring.entry[(s_ring.head + i) % ERR_RING_LEN];
@@ -361,19 +359,18 @@ int lt_errlog_at(int index, lt_err_entry_t *out)
         }
         n++;
     }
-    ring_unlock();
+    blob_unlock();
     return rc;
 }
 
 void lt_errlog_clear(void)
 {
-    ring_lock();                                /* F1: clear vs. a concurrent errlog_add */
+    blob_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
     s_last_valid = false;                       /* H1: drop dedup state so a post-clear repeat re-appends */
-    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring),
-                       s_scratch_ring, sizeof s_scratch_ring);
+    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
     s_ring_persist_us = esp_timer_get_time();
-    ring_unlock();
+    blob_unlock();
 }
 
 void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
@@ -382,8 +379,9 @@ void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
     s_crash[1] = s_crash[0];
     s_crash[0].reset_reason = reset_reason;
     s_crash[0].uptime_s = prev_uptime_s;
-    (void)save_framed(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash),
-                       s_scratch_crash, sizeof s_scratch_crash);
+    blob_lock();          /* save_framed doesn't lock itself -- serializes s_blob_scratch */
+    (void)save_framed(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash));
+    blob_unlock();
 }
 
 bool lt_reset_is_abnormal(int r)
