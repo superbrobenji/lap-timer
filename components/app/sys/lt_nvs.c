@@ -54,6 +54,7 @@ typedef struct __attribute__((packed)) {
 #define K_BOOT  "boot_cnt"
 #define K_CRASH "crash_log"
 #define K_SAFE  "safe_until"
+#define K_SAFELVL "safe_lvl"                    /* §17.5 recovery-mode amendment: 0/1/2 */
 #define K_RING  "ring"
 #define K_CTR   "ctr"
 #define K_CFG   "cfg"
@@ -427,11 +428,29 @@ int lt_safe_until_set(uint32_t boot_cnt)
     return 0;
 }
 
+uint8_t lt_safe_level_get(void)
+{
+    uint8_t v = 0;
+    (void)nvs_get_u8(s_h_sys, K_SAFELVL, &v);
+    return v > 2u ? 0u : v;                     /* corrupt/out-of-range stored value -> normal */
+}
+
+int lt_safe_level_set(uint8_t lvl)
+{
+    LT_ASSERT_RET(lvl <= 2u, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(s_ready, NVS_ASSERT_CODE, -1);   /* s_h_sys only valid once lt_nvs_init has run */
+    if (nvs_set_u8(s_h_sys, K_SAFELVL, lvl) != ESP_OK) return -1;
+    (void)nvs_commit(s_h_sys);
+    return 0;
+}
+
 void lt_safe_clear(void)
 {
     /* §17.5 uptime-based auto-clear: zero the gate so `boot_cnt <= lt_safe_until_get()` is false
-     * on every later boot (boot_cnt is >=1 from the first boot onward). */
+     * on every later boot (boot_cnt is >=1 from the first boot onward), and the level so a later
+     * boot starts at level 0 (normal) rather than re-entering recovery. */
     (void)lt_safe_until_set(0);
+    (void)lt_safe_level_set(0);
 }
 
 void lt_stall_flag_set(void)

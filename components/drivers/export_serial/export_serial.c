@@ -505,8 +505,10 @@ static int dbg_status(void)
     printf("counters   : boots=%u crashes=%u wdt=%u brownout=%u sto_format=%u\n",
            (unsigned)c->boots, (unsigned)c->crashes, (unsigned)c->wdt, (unsigned)c->brownout,
            (unsigned)c->sto_format);
-    printf("sys_flags  : 0x%08x%s\n", (unsigned)sys_flags_get(),
-           (sys_flags_get() & (1u << SYS_SAFE_MODE)) ? " [SAFE_MODE]" : "");
+    uint32_t flags = sys_flags_get();
+    printf("sys_flags  : 0x%08x%s%s\n", (unsigned)flags,
+           (flags & (1u << SYS_SAFE_MODE)) ? " [SAFE_MODE]" : "",
+           (flags & (1u << SYS_RECOVERY_MODE)) ? " [RECOVERY]" : "");
     for (int i = 0; i < HB_COUNT; i++) printf("hb[%d]      : %u\n", i, (unsigned)g_hb[i]);
     return 0;
 }
@@ -863,6 +865,26 @@ static int dbg_flag(int argc, char **argv)
     return 0;
 }
 
+/* ---- dbg safe clear (new: §17.5 recovery-mode amendment, debt sweep A #62) ----
+ *
+ * Bench-only manual clear of the safe/recovery gate: `dbg safe clear` clears both the persisted
+ * gate (lt_safe_clear -- safe_until AND the level) and both runtime sys_flags bits immediately,
+ * so the operator does not have to wait out SAFE_MODE_CLEAR_S (600 s) to get a normal reboot.
+ */
+static int dbg_safe(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc < 3 || strcmp(argv[2], "clear") != 0) {
+        printf("usage: dbg safe clear\n");
+        return 1;
+    }
+    lt_safe_clear();
+    sys_flags_clear(SYS_SAFE_MODE);
+    sys_flags_clear(SYS_RECOVERY_MODE);
+    printf("dbg: safe/recovery gate cleared (next boot normal)\n");
+    return 0;
+}
+
 /* ---- dbg dispatch ---- */
 static int cmd_dbg(int argc, char **argv)
 {
@@ -880,6 +902,7 @@ static int cmd_dbg(int argc, char **argv)
         if (strcmp(s, "mem")     == 0) return dbg_mem();
         if (strcmp(s, "btn")     == 0) return dbg_btn(argc, argv);
         if (strcmp(s, "flag")    == 0) return dbg_flag(argc, argv);
+        if (strcmp(s, "safe")    == 0) return dbg_safe(argc, argv);
         if (strcmp(s, "crash")   == 0) {
             printf("dbg: forcing a panic (abort) -> ESP_RST_PANIC\n");
             fflush(stdout);
@@ -900,6 +923,7 @@ static int cmd_dbg(int argc, char **argv)
     printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | crash | hang\n");
     printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection, Plan 7 T8)\n");
     printf("       dbg flag set|clear <bit 0..15>  (bench sys_flags injection, Plan 7 T8)\n");
+    printf("       dbg safe clear  (clear the safe/recovery gate now, debt sweep A #62/§17.5)\n");
     printf("       dbg gps raw <on|off> | imu raw <on|off> | power <..> | sim <on|off>  (not in plan 03)\n");
     return 1;
 }

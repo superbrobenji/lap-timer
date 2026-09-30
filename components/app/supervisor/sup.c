@@ -217,6 +217,23 @@ static void ota_lifecycle(uint32_t uptime_s)
     ota_try_validate(uptime_s);
 }
 
+/* §17.5 (+ recovery-mode amendment, debt sweep A #62): once safe OR recovery mode has been up for
+ * SAFE_MODE_CLEAR_S, clear the persisted gate/level and both runtime flags so the next -- and this
+ * -- boot run normally. Fires once per boot. Grouped here (same reason as ota_lifecycle above) so
+ * the task entry stays a thin dispatcher. */
+static void safe_recovery_clear_check(uint32_t uptime_s)
+{
+    if (s_safe_mode_cleared) return;
+    uint32_t f = sys_flags_get();
+    if (!(f & ((1u << SYS_SAFE_MODE) | (1u << SYS_RECOVERY_MODE)))) return;
+    if (uptime_s < SAFE_MODE_CLEAR_S) return;
+    lt_safe_clear();
+    sys_flags_clear(SYS_SAFE_MODE);
+    sys_flags_clear(SYS_RECOVERY_MODE);
+    (void)errlog_add(E_SYS_SAFE_MODE, 0);
+    s_safe_mode_cleared = true;
+}
+
 static void sup_task(void *arg)
 {
     (void)arg;
@@ -235,16 +252,7 @@ static void sup_task(void *arg)
         (void)lt_counters_flush(false);           /* persist if dirty and >=60 s (§15.2) */
 
         ota_lifecycle(uptime_s);                  /* §19.4: reboot / boot-decide / validate (see helper) */
-
-        /* §17.5: once safe mode has been up for SAFE_MODE_CLEAR_S, clear the persisted gate and
-         * the runtime flag so the next -- and this -- boot run normally. Fires once per boot. */
-        if (!s_safe_mode_cleared && (sys_flags_get() & (1u << SYS_SAFE_MODE)) &&
-            uptime_s >= SAFE_MODE_CLEAR_S) {
-            lt_safe_clear();
-            sys_flags_clear(SYS_SAFE_MODE);
-            (void)errlog_add(E_SYS_SAFE_MODE, 0);
-            s_safe_mode_cleared = true;
-        }
+        safe_recovery_clear_check(uptime_s);      /* §17.5: uptime auto-clear (see helper) */
 
         /* Ladders (GPS §7.5 / IMU §8.7 / storage §13) and heap/stack/temp checks: their
          * subsystems arrive in 3.3/3.4; wired here then. */
