@@ -90,14 +90,14 @@ Safe mode (level 1) stays exactly as §17.5 describes: pipeline, engines and dri
 
 ## 7. Tests and gates
 
-**Host:** `test_blob.c` (round trip; each failure code; cap too small; version mismatch leaves the payload untouched and reports the stored version), `test_proto.c` session-id cases, `test_cfg.c` gains one case: a `cfg_t` wrapped with version `CFG_VERSION - 1` unwraps with −3 and `ver_out == CFG_VERSION - 1`, and `cfg_migrate(c, CFG_VERSION - 1)` on it returns −1 (unknown) today — the exact decision `lt_cfg_load` now makes. Existing suites unchanged. Lint 0, gcc-16 sweep clean, three clean firmware builds 0 warnings, DRAM floor ≥ 4 KB on `moto_sim` (the request struct +64 B; recovery adds < 16 B).
+**Host:** `test_blob.c` (round trip; each failure code; cap too small; version mismatch leaves the payload untouched and reports the stored version), `test_proto.c` session-id cases, `test_cfg.c` gains one case: a `cfg_t` wrapped with version `CFG_VERSION - 1` unwraps with −3 and `ver_out == CFG_VERSION - 1`, and `cfg_migrate(c, CFG_VERSION - 1)` on it returns −1 (unknown) today — the exact decision `lt_cfg_load` now makes. Existing suites unchanged. Lint 0, gcc-16 sweep clean, three clean firmware builds 0 warnings, moto_sim free static DRAM stays ≥ 3.9 KB (P-6: 3960 B measured; the 388 B blob scratch is the recorded reclaim).
 
 **Bench `dsA-d1`** (same day as `p07c-d1`, moto_sim, dev-kit wired):
 1. #59: open a session (sim boot opens one), OTA-push a build → after the reboot the previous session's `.sum` exists and its END reason is `SES_END_RESTART` (read via `list`/`open`).
 2. #73: `delete <id>` while `dbg evict` (or the periodic eviction) is listing → reply `OK` within 1 s; a second `delete` of the same id → not-found; `list` sane; no `E (` lines.
 3. #60: `delete ../x` and `open ../x raw` → `ERR bad id`; dev-kit `GET /api/session/../x` → 400.
 4. #62: `dbg crash` ×3 within 60 s → SAFE MODE boot (level 1); `dbg crash` ×3 again → RECOVERY (no ui/pipeline tasks in `dbg status`, console alive, OTA push works); `dbg safe clear` → normal boot. The uptime clear is unchanged code and is not re-timed at the bench.
-5. #37: after the first boot on the new image the log shows the three one-time blob resets; a second boot shows none; `errlog` lists three `E_NVS_BLOB_RESET`.
+5. #37: on an UPGRADED device (existing NVS) the first boot logs three `nvs blob … reset` WARN lines and three `E_NVS_BLOB_RESET`; on an ERASED device it logs three `absent (fresh)` INFO lines and no errlog entries — either is a pass.
 6. #64/#66: one `status` round-trip decodes at the dev-kit; the live stream JSON shows sane fused/event fields.
 
 Tag `dsA-d1`; close the seven issues.
@@ -138,15 +138,21 @@ already-fixed issues this sweep closes by comment.
   helpers never take it themselves), to hold the 4 KB DRAM floor. Cost if wrong: a caller that
   reaches `errlog_add` while already holding the blob lock would deadlock; the implementer walked
   `persist_counters`/`lt_crashlog_push` and confirmed they call only `blob_wrap` + NVS under the
-  lock, never `errlog_add`.
+  lock, never `errlog_add`. **Correction (final review, Ruling F-2):** that walk missed the
+  framing helpers' own assertions — `save_framed`/`load_framed`/`load_or_reset` (`lt_nvs.c`) and
+  `blob_wrap`/`blob_unwrap` (`core/blob.c`) all ran under this lock while still carrying
+  `LT_ASSERT_RET`/`CORE_ASSERT_RET`s whose failure path is `core_assert_fail` →
+  `core_assert_report` → `errlog_add` → `blob_lock()`, a real deadlock on this non-recursive
+  mutex. Fixed by making all five helpers assert-free (plain guarded returns); see I1 and the
+  `s_blob_lock` comment in `lt_nvs.c`.
 - **P-6** (Task 2, accepted): 4024 B free (72 B under the literal 4096 B floor) is accepted for
   this sweep, because the remaining tasks add only ≈ 80 B more and the Plan 7c figure (4416 B) was
   the floor's *origin*, not a hardware limit. Cost if wrong: a later plan starts ~70 B short of the
   round number. Follow-up recorded below (§9.6).
 - **P-7** (Task 3): generation-tagged replies — `log_request_t._pad` becomes `uint8_t seq`
   (offsets unchanged, struct stays 32 B), the logger notifies `(seq << 24) | (rc & 0xFFFFFF)`, and
-  a waiter discards a reply whose generation doesn't match (bounded to ≤ 4 extra waits on the
-  remaining timeout) — safe regardless of the caller's priority relative to the logger. Cost if
+  a waiter discards a reply whose generation doesn't match (bounded to ≤ 3 discards plus the final
+  attempt) — safe regardless of the caller's priority relative to the logger. Cost if
   wrong: `rc` is limited to a 24-bit signed range, but every `rc` in use is a small negative
   number.
 - **Task 4** (existence probe, first pass): probe existence before calling `sto_unlink` (HAL
