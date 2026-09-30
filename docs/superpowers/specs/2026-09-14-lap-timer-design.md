@@ -1697,9 +1697,9 @@ Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc;
 | 0x0C | `TIME_MAP` | `mono_us i64, gps_us i64, quality u8` | 17 |
 | 0x0D | `VENUE` | `venue_id u16, layout_id u16, name char[32]` | 36 |
 | 0x0E | `POWER` | `mono_us i64, state u8, batt_mv u16` | 11 |
-| 0x7F | `END` | `gps_us i64, reason u8` | 9 |
+| 0x7F | `END` | `gps_us i64, reason u8: 0 NORMAL, 1 RESTART (planned/OTA), 2 STALL` | 9 |
 
-`FIX_DELTA` flags: bit0 valid, bit1 gnssFixOK, bit2 3D. `FUSED` flags = `fused_sample_t.flags`. `LAP` flags: bit0 GPS_LOST, bit1 PIT, bit2 INCOMPLETE, bit3 OUT_LAP, bit4 INTERRUPTED, bit5 TOO_LONG, bit6 VALID.
+`FIX_DELTA` flags: bit0 valid, bit1 gnssFixOK, bit2 3D. `FUSED` flags = `fused_sample_t.flags`. `LAP` flags: bit0 GPS_LOST, bit1 PIT, bit2 INCOMPLETE, bit3 OUT_LAP, bit4 INTERRUPTED, bit5 TOO_LONG, bit6 VALID. `END.reason` values mirror `core/ses.h`'s `SES_END_*` enum (`SES_END_NORMAL=0`, `SES_END_RESTART=1`, `SES_END_STALL=2`; debt sweep A #59): `RESTART` is sent by the OTA reboot path (`ota_reboot_check`, sup.c) and `STALL` by the supervisor's stall-restart path (`check_stalls`, sup.c), both via a synchronous `LOGGER_CLOSE_SESSION` request before the task restarts; existing callers (a normal PARK/SHUTDOWN or venue-change close) pass `NORMAL`.
 
 The `char[n]` fields above are exactly `n` bytes on the wire and are *not* required to be
 NUL-terminated there — a 16-character firmware version fills `fw char[16]` completely. The matching

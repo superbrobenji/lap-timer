@@ -105,3 +105,157 @@ Tag `dsA-d1`; close the seven issues.
 ## 8. Out of scope / follow-ups
 
 Migration of the three small blobs (reset is enough for dev-only flash); a cfg-change notification for the ui (#87); the power task that will send `LOGGER_CLOSE_SESSION` on shutdown (Plan 6); recovery-mode UI rendering (a "RECOVERY" screen needs the display driver, the very thing recovery avoids).
+
+## 9. Implementation notes
+
+Written after all seven tasks landed (head `f4f9ce0`), from the execution ledger
+(`.superpowers/sdd/2026-09-30-debt-sweep-a/progress.md`) — every ruling made along the way, the
+measured DRAM cost, the minors deferred rather than fixed, and the verification trail for the
+already-fixed issues this sweep closes by comment.
+
+### 9.1 Rulings (in ledger order)
+
+- **P-1** (pre-flight, T3/T4): `log_request_t.id` is `char id[LT_SESSION_ID_MAX + 1]` (11 B,
+  NUL-terminated) plus `_pad2[1]`, keeping `sizeof` 32 — a 10-char id needs the trailing NUL. Cost
+  if wrong: none (the struct stays 32 B either way).
+- **P-2** (pre-flight, T5): the session-id validation tests are deliberately duplicated in the
+  lap-timer and dev-kit host harnesses, because each harness must independently compile the
+  shared `lt_proto.h`. Cost if wrong: two 15-line files to keep in sync.
+- **P-3** (pre-flight, T3): `logger_request_sync` waits on task-notification index 0 of the
+  calling task; T3 confirmed by grepping `xTaskNotify`/`ulTaskNotifyTake` that neither the
+  supervisor nor the export_serial/cmd task uses that index for anything else. Cost if wrong: a
+  stray notification wakes the waiter early and its rc is misread.
+- **Task 1** (framing primitive): fix the `n + BLOB_OVERHEAD` overflow with subtract-form bounds
+  and a real postcondition, and add both the huge-`n` and zero-length tests — a framing primitive
+  must be safe for any caller. Cost if wrong: none.
+- **P-4** (Task 2, first pass): three static per-blob save scratches (the ring one under
+  `s_ring_lock`; counters serialized by boot-then-supervisor sequencing; the crash log written
+  once at boot only), the cfg blob keeps its caller-owned stack buffer; an absent key zeroes
+  silently at INFO with no reset report. Cost if wrong: +445 B `.bss`, and a future concurrent
+  counters writer would need its own lock (documented for that writer).
+- **P-5** (Task 2, superseding P-4): one static 388 B blob scratch shared by every load/save,
+  serialized by the existing ring mutex (renamed to the blob lock — callers hold it, the framing
+  helpers never take it themselves), to hold the 4 KB DRAM floor. Cost if wrong: a caller that
+  reaches `errlog_add` while already holding the blob lock would deadlock; the implementer walked
+  `persist_counters`/`lt_crashlog_push` and confirmed they call only `blob_wrap` + NVS under the
+  lock, never `errlog_add`.
+- **P-6** (Task 2, accepted): 4024 B free (72 B under the literal 4096 B floor) is accepted for
+  this sweep, because the remaining tasks add only ≈ 80 B more and the Plan 7c figure (4416 B) was
+  the floor's *origin*, not a hardware limit. Cost if wrong: a later plan starts ~70 B short of the
+  round number. Follow-up recorded below (§9.6).
+- **P-7** (Task 3): generation-tagged replies — `log_request_t._pad` becomes `uint8_t seq`
+  (offsets unchanged, struct stays 32 B), the logger notifies `(seq << 24) | (rc & 0xFFFFFF)`, and
+  a waiter discards a reply whose generation doesn't match (bounded to ≤ 4 extra waits on the
+  remaining timeout) — safe regardless of the caller's priority relative to the logger. Cost if
+  wrong: `rc` is limited to a 24-bit signed range, but every `rc` in use is a small negative
+  number.
+- **Task 4** (existence probe, first pass): probe existence before calling `sto_unlink` (HAL
+  `stat` where the backend has one, else open-for-read + close) rather than changing the HAL's
+  idempotent `unlink` itself. Cost if wrong: one extra open per delete.
+- **Task 4** (quiet probe, superseding the first pass): add a quiet `sto_exists(path)` HAL entry
+  point (stat-based, logs nothing on ENOENT) and probe with that instead — the normal not-found
+  path must never write an `E(` log line. Cost if wrong: one more HAL entry point to implement per
+  storage backend.
+- **Task 5**: fix the dev-kit's `/api/log/<id>` path-traversal bypass inside this task rather than
+  filing it separately — a validator matching the logstore's own id grammar, HTTP 400
+  `bad log id`, host-tested; same bug class as #60, three lines of code. Cost if wrong: a
+  legitimate log id containing an unexpected character would be rejected, but the validator is
+  derived mechanically from the id generator's own format.
+- **P-8** (Task 6): `ota_reboot_check()` clears the safe/recovery gate (`lt_safe_clear`) before the
+  OTA `esp_restart()`, so the newly-applied image boots normally and runs its own validation trial
+  — the *old* image stays the rollback target, and a crash-looping new image re-arms safe mode
+  from scratch on its own. The stall-restart path does not clear the gate (a stall is itself the
+  crash-loop signal). Cost if wrong: a bad image pushed while already in recovery gets one normal
+  boot before the loop detector catches it again (3 abnormal resets).
+
+### 9.2 DRAM budget (`.bss`, `moto_sim`)
+
+| Stage | `.bss` delta | Free remaining |
+|---|---|---|
+| Branch base (Plan 7c, commit `e37f66f`) | — | 4416 B |
+| Task 1 (blob framing primitive) | +0 B | 4416 B |
+| Task 2 (NVS blob framing, #37) | +392 B | 4024 B |
+| Task 3 (logger request/reply, #59) | +64 B | 3960 B |
+| Task 4 (delete-on-logger, #73) | +0 B | 3960 B |
+| Task 5 (session-id validation, #60) | +0 B | 3960 B |
+| Task 6 (recovery mode, #62) | +0 B | 3960 B |
+
+Per ruling P-6, 3960 B is accepted as within the sweep's intent even though it sits under the
+literal 4096 B (4 KB) floor: the floor's 4416 B origin was the Plan 7c measurement, not a hardware
+ceiling, and the remaining tasks landed at +0/+0/+0 B rather than the ≈ 80 B budgeted for them.
+Follow-up (file after the bench, §9.6): frame the ring mirror in place — a version byte + CRC tail
+stored inside `s_ring` itself — to drop Task 2's 388 B shared blob scratch and recover most of the
+difference.
+
+### 9.3 Known, deferred (minors)
+
+Carried forward verbatim from the ledger; none of these block the sweep or the bench gate.
+
+- Task 2: lt_cfg_load's migrate branch has no host-level test (lt_nvs.c has no harness; covered by
+  the test_cfg primitive case + bench).
+- Task 4 (pre-existing): status_cache_prime runs even when an attempted unlink errors.
+- Task 5 (theoretical): logstore_id_ok requires exactly 12 chars; the generator's %08u widens past
+  10^8 rotations in one boot — unreachable in practice.
+
+### 9.4 #63 — register evidence
+
+`python3 tools/lint/power_of_10.py --paths components/app/supervisor/sup.c
+components/app/sys/lt_nvs.c components/app/cmd/cmd.c --enforce-fnptr --json` (run 2026-09-30,
+against this branch's head `f4f9ce0`):
+
+```
+{"enforce_fnptr": true, "findings": [], "register_rows": 9,
+ "summary": {"components/app/cmd/cmd.c": {"rule5": 0, "rule9": 0, ...},
+             "components/app/supervisor/sup.c": {"rule5": 0, ...},
+             "components/app/sys/lt_nvs.c": {"rule5": 0, ...}}}
+```
+
+Decisive lines: `"findings": []`, and per-file `"rule5": 0` for all three files (`sup.c`,
+`lt_nvs.c`, `cmd.c`) and `"rule9": 0` for `cmd.c`. The rule-5 (assertion density) claim behind #63
+no longer reproduces — `check_stalls`, `lt_boot_record_reset` and `lt_nvs_init` all measure at or
+under the 20-code-line exemption today, as the fact sheet had already flagged. The rule-9 (`cw_t`)
+claim is real but structurally invisible to `--enforce-fnptr`: `cw_t.emit` is a typedef'd struct
+field (`cmd_emit_fn emit;`), not the raw `(*name)(` declarator the lint's `FNPTR_RE` matches, so it
+can never itself appear as a finding, registered or not — confirmed by re-running the lint with
+PD-7's file:symbol key pointed at `cmd.c:cw_t.emit` instead of the `cmd.h` typedef: the typedef
+then shows up as a new, unregistered rule-9 finding, proving the typedef is the only textually
+matchable site. The fix is therefore register-only: PD-7's rationale is amended
+(`docs/power-of-10-deviations.md`) to correct the old "never stored" claim and name the real
+storage site, while the table's file:symbol key stays on the `cmd_emit_fn` typedef
+(`components/app/include/app/cmd.h:21`) because that is the lint's one registered occurrence. #63
+closes on this register commit.
+
+### 9.5 #64/#66 — verification pointers
+
+Both already fixed in commit `884a108` ("Plan 5.5 followups: byte-exact framing (#64), first-call
+RX race (#65), stream-format contract (#66), NDJSON black-box logs (#67) (#70)", 2026-09-23) — two
+days after #64/#66 were filed by the whole-codebase review; the GitHub issues were simply never
+closed.
+
+- **#64**: `frame_tx_begin()`/`frame_tx_end()`
+  (`components/drivers/export_serial/export_serial.c:210-222`) bracket every framed response
+  (`run_cmd`, `run_stream`) in an LF-line-ending window — mutex held, `stdout` flushed,
+  `ESP_LINE_ENDINGS_LF` set at begin, flushed and restored to `ESP_LINE_ENDINGS_CRLF` at end, on
+  every exit path including early `ERR` returns.
+- **#66**: `LT_FUSED_OFF_*`/`LT_EVENT_OFF_*` (`components/app/include/app/lt_proto.h`) formalize
+  the stream-record layout the dev-kit decodes; `components/app/link/link.c` compile-checks them
+  with `_Static_assert(offsetof(...) == LT_*_OFF_*, ...)` against the real
+  `fused_sample_t`/`event_t` structs, so a struct-layout drift now fails the lap-timer build;
+  `devcontroller/test/test_stream_json.c` exercises the dev-kit decoder against the same
+  constants.
+
+Remaining: the bench spot-check at gate `dsA-d1` (spec §7 item 6) — one `status` round-trip
+decoded at the dev-kit, and the live stream JSON showing sane fused/event fields — has not yet
+run; #64/#66 close on that spot-check plus a comment naming this commit and these tests (spec §6,
+plan Step 3).
+
+### 9.6 Follow-ups to file after the bench
+
+- **Log-id width edge (theoretical)**: `logstore_id_ok` requires exactly the 12-char
+  `"log_%08u"` grammar; the dev-kit's id generator widens past that once a single boot rotates
+  through more than 10^8 log ids. Unreachable in practice at today's logging rates, but worth a
+  filed issue once the bench closes this sweep's issue list.
+- **Ring-mirror reclaim**: frame the error-ring mirror in place (a version byte + CRC tail stored
+  inside `s_ring` itself, mirroring the cfg blob's existing shape) to drop Task 2's 388 B shared
+  blob scratch (ruling P-6, §9.2) and take `moto_sim` back over the 4 KB free-DRAM floor before
+  Plan 6 needs the headroom.
