@@ -7,8 +7,10 @@
  * stable HAL-abstract bits the driver maps onto POSIX open() flags. All functions return int
  * (0 = OK, negative = -errno-style) unless noted and are not reentrant; mutations (sto_unlink,
  * writes, format) are called from the logger task only; cmd may list and read (debt sweep A,
- * #73). The concrete backend is components/drivers/storage_${STORAGE} (storage_internal =
- * LittleFS, §13.1).
+ * #73). sto_exists is the one exception to the 0/negative convention (see its own comment below)
+ * -- it is read-only, like list/read, and today is called only from the logger (delete_session's
+ * not-found check, debt sweep A T4 fix 2). The concrete backend is
+ * components/drivers/storage_${STORAGE} (storage_internal = LittleFS, §13.1).
  *
  * Paths are backend-relative: "/sessions/<id>.log", "/sessions/<id>.sum", "/tracks/user.bin".
  * The driver maps them onto its mount point (storage_internal -> /lfs/...). Callers never embed
@@ -46,6 +48,13 @@ int  sto_sync(sto_file_t f);
 int  sto_close(sto_file_t f);
 int  sto_rename(const char *from, const char *to);              /* atomic on LittleFS */
 int  sto_unlink(const char *path);
+/* Existence probe, read-only (debt sweep A T4 fix 2, #73): 1 = the path exists, 0 = it does not,
+ * <0 = -errno on any other stat() failure. Unlike sto_unlink (which returns 0 on ENOENT because
+ * "already gone" is success for a delete), this is the one HAL call whose whole job is to answer
+ * "does this exist", so a missing path is reported distinctly from a real error -- and, unlike
+ * sto_open's read-probe idiom, it never logs on a missing path (a missing path is an ordinary,
+ * expected outcome here, not a caller mistake worth an ESP_LOGE line). */
+int  sto_exists(const char *path);
 
 /* rule 9: no function pointers -- sto_list is a pull iterator (sto_list_open/_next/_close)
  * instead of a per-entry callback. STO_NAME_MAX comfortably covers the longest name any caller
