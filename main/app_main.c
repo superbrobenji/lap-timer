@@ -102,6 +102,10 @@ static void boot_reset_record(esp_reset_reason_t reason)
  * at the same level. */
 static uint32_t boot_safe_mode(uint8_t *level_out)
 {
+    /* M5: precondition first -- &level is always non-NULL (app_main's only caller), so there is
+     * no useful boot_cnt yet to return; 0u is the safe placeholder (the caller asserts
+     * boot_cnt >= 1, which never runs on this path since app_main() itself never passes NULL). */
+    CORE_ASSERT_RET(level_out != NULL, MAIN_ASSERT_CODE, 0u);
     uint32_t boot_cnt = lt_nvs_boot_inc();
     lt_counters_inc(LT_CTR_BOOTS, false);      /* batched with the rest */
     uint8_t level = 0;
@@ -118,8 +122,7 @@ static uint32_t boot_safe_mode(uint8_t *level_out)
     }
     if (level >= 1u) { sys_flags_set(SYS_SAFE_MODE); errlog_add(E_SYS_SAFE_MODE, boot_cnt); }
     if (level == 2u) { sys_flags_set(SYS_RECOVERY_MODE); errlog_add(E_SYS_RECOVERY_MODE, boot_cnt); }
-    CORE_ASSERT_RET(level_out != NULL, MAIN_ASSERT_CODE, boot_cnt);   /* &level, always non-NULL (app_main) */
-    CORE_ASSERT_RET(level <= 2u, MAIN_ASSERT_CODE, boot_cnt);
+    CORE_ASSERT_RET(level <= 2u, MAIN_ASSERT_CODE, boot_cnt);   /* postcondition: level is one of 0/1/2 */
     *level_out = level;
     return boot_cnt;
 }
