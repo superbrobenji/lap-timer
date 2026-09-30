@@ -26,6 +26,7 @@ enum {
     E_SYS_RTC_INVALID = 0x0507,
     E_SYS_CFG_RESET   = 0x0508,
     E_SYS_STACK_LOW   = 0x0509,
+    E_NVS_BLOB_RESET  = 0x050B,   /* arg = blob tag 1 ctr / 2 ring / 3 crash */
 
     /* connectivity / command protocol (§17.7, §18.1); land with the 3.5 serial console. */
     E_CONN_BLE_INIT   = 0x0701,

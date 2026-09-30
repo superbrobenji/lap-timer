@@ -11,7 +11,7 @@
 
 #include <string.h>
 
-#include "core/ses.h"        /* ses_crc16 -- the core CRC-16/CCITT, reused for the cfg blob */
+#include "core/blob.h"       /* blob_wrap/blob_unwrap -- versioned + CRC16 record framing (Task 1) */
 #include "esp_log.h"
 #include "esp_system.h"      /* esp_reset_reason_t / ESP_RST_* */
 #include "esp_timer.h"
@@ -77,6 +77,10 @@ static bool           s_counters_dirty;
 static int64_t        s_counters_last_us;
 static err_ring_t     s_ring;
 static crash_entry_t  s_crash[CRASH_LOG_LEN];
+/* Bit `tag` set when that boot's load_or_reset() reset blob `tag` (1 ctr / 2 ring / 3 crash); the
+ * §15.2 E_NVS_BLOB_RESET report for it is deferred until after s_ready = true (lt_nvs_init), once
+ * the ring itself is loaded and errlog_add can append to it. */
+static uint8_t         s_blob_reset_mask;
 
 /* H1 dedup + rate-limit state (errlog_add). s_last_* is the most recently ADDED (code,arg): an
  * immediate repeat is folded onto the newest ring slot instead of overwriting all 32 with one
@@ -98,18 +102,61 @@ static inline void ring_unlock(void) { if (s_ring_lock) xSemaphoreGive(s_ring_lo
 
 static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
-static int load_blob(nvs_handle_t h, const char *key, void *dst, size_t expect)
+/* ---- blob framing (Task 1 core/blob.h): per-blob versions + the framed-scratch size cap.
+ * RAM mirrors (s_counters/s_ring/s_crash[]) stay their own packed on-flash layout, aligned and
+ * unchanged; the framed [version][payload][crc16] bytes exist only in the scratch buffers below,
+ * built/consumed at save/load. ---- */
+#define LT_CTR_VER   1u
+#define LT_RING_VER  1u
+#define LT_CRASH_VER 1u
+#define BLOB_TAG_CTR   1u
+#define BLOB_TAG_RING  2u
+#define BLOB_TAG_CRASH 3u
+_Static_assert(sizeof(lt_counters_t) == 36, "counters blob payload (§15.2)");
+_Static_assert(sizeof(err_ring_t) == 385, "error ring blob payload (§15.2)");
+_Static_assert(sizeof(crash_entry_t) * CRASH_LOG_LEN == 15, "crash log blob payload (§15.2)");
+#define BLOB_SCRATCH_MAX (sizeof(err_ring_t) + BLOB_OVERHEAD)   /* largest framed blob: 388 B */
+
+/* Load key into dst (expect bytes) through the framer. 0 ok; -1 absent/size; -2 CRC; -3 version.
+ * `scratch` is function-local static: safe only because lt_nvs_init (the sole caller, via
+ * load_or_reset) runs once at boot, single-threaded, before any other task starts touching NVS. */
+static int load_framed(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t expect)
 {
-    /* Parameter validity: key/dst are the caller's own literals/RAM mirrors, never NULL, and
-     * expect is always a genuine sizeof(...) > 0. Whether the STORED blob's size matches `expect`
-     * is a separate, untrusted-on-flash-data question handled below by the plain `sz != expect`
-     * return -- that one stays a return, not an assertion. */
-    LT_ASSERT_RET(key != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(dst != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(expect > 0, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(key != NULL && dst != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(expect > 0 && expect + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX, NVS_ASSERT_CODE, -1);
+    static uint8_t scratch[BLOB_SCRATCH_MAX];           /* boot-time only; lt_nvs_init runs before the tasks */
     size_t sz = 0;
-    if (nvs_get_blob(h, key, NULL, &sz) != ESP_OK || sz != expect) return -1;
-    return nvs_get_blob(h, key, dst, &sz) == ESP_OK ? 0 : -1;
+    if (nvs_get_blob(h, key, NULL, &sz) != ESP_OK || sz != expect + BLOB_OVERHEAD) return -1;
+    if (nvs_get_blob(h, key, scratch, &sz) != ESP_OK) return -1;
+    return blob_unwrap(ver, scratch, sz, dst, expect, NULL);
+}
+
+/* Save src (n bytes) under key through the framer. 0 ok. `buf` is a 388 B stack transient: this
+ * runs on whichever task called in (logger/supervisor/cmd, or boot inside lt_nvs_init). */
+static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n)
+{
+    LT_ASSERT_RET(key != NULL && src != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(n > 0 && n + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX, NVS_ASSERT_CODE, -1);
+    uint8_t buf[BLOB_SCRATCH_MAX];                       /* 388 B on the caller's stack: sup/logger/cmd/boot only */
+    size_t len = blob_wrap(ver, src, n, buf, sizeof buf);
+    if (len == 0 || nvs_set_blob(h, key, buf, len) != ESP_OK) return -1;
+    (void)nvs_commit(h);
+    return 0;
+}
+
+/* Boot: a blob that fails size/CRC/version is reset to zero once and reported (dev-only firmware,
+ * no migration for these three). Returns the load rc for the log line. */
+static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t n, uint32_t tag)
+{
+    LT_ASSERT_RET(dst != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(tag >= BLOB_TAG_CTR && tag <= BLOB_TAG_CRASH, NVS_ASSERT_CODE, -1);
+    int rc = load_framed(h, key, ver, dst, n);
+    if (rc != 0) {
+        memset(dst, 0, n);
+        ESP_LOGW(TAG, "nvs blob %s reset (rc %d)", key, rc);
+        s_blob_reset_mask |= (uint8_t)(1u << tag);     /* errlog after the ring itself is loaded */
+    }
+    return rc;
 }
 
 int lt_nvs_init(void)
@@ -125,16 +172,22 @@ int lt_nvs_init(void)
     if (nvs_open(NS_CFG, NVS_READWRITE, &s_h_cfg) != ESP_OK) return -1;
 
     if (nvs_get_u32(s_h_sys, K_BOOT, &s_boot_cnt) != ESP_OK) s_boot_cnt = 0;
-    if (load_blob(s_h_err, K_CTR, &s_counters, sizeof(s_counters)) != 0) memset(&s_counters, 0, sizeof(s_counters));
-    if (load_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) != 0) memset(&s_ring, 0, sizeof(s_ring));
-    /* H2: head comes straight from the NVS blob (load_blob only checks size). A same-size blob from
-     * a different firmware/layout could carry head >= ERR_RING_LEN; clamp it here so errlog_add
-     * never indexes past s_ring.entry[] (and never needs an assertion to catch it -- see errlog_add). */
+    (void)load_or_reset(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters), BLOB_TAG_CTR);
+    (void)load_or_reset(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring), BLOB_TAG_RING);
+    /* H2: head comes straight from the NVS blob (load_or_reset only checks size/version/CRC). A
+     * same-size/version blob with a corrupted head could still carry head >= ERR_RING_LEN; clamp
+     * it here so errlog_add never indexes past s_ring.entry[] (and never needs an assertion to
+     * catch it -- see errlog_add). */
     if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
-    if (load_blob(s_h_sys, K_CRASH, s_crash, sizeof(s_crash)) != 0) memset(s_crash, 0, sizeof(s_crash));
+    (void)load_or_reset(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash), BLOB_TAG_CRASH);
 
     s_counters_last_us = esp_timer_get_time();
     s_ready = true;
+    /* Deferred from load_or_reset: the ring is loaded now, so errlog_add can append to it. Bounded
+     * 3-tag walk (BLOB_TAG_CTR..BLOB_TAG_CRASH), one report per blob actually reset this boot. */
+    for (uint32_t tag = BLOB_TAG_CTR; tag <= BLOB_TAG_CRASH; tag++) {
+        if (s_blob_reset_mask & (uint8_t)(1u << tag)) (void)errlog_add(E_NVS_BLOB_RESET, tag);
+    }
     return 0;
 }
 
@@ -149,7 +202,7 @@ uint32_t lt_nvs_boot_get(void) { return s_boot_cnt; }
 
 static void persist_counters(void)
 {
-    if (nvs_set_blob(s_h_err, K_CTR, &s_counters, sizeof(s_counters)) == ESP_OK) (void)nvs_commit(s_h_err);
+    (void)save_framed(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters));
     s_counters_dirty = false;
     s_counters_last_us = esp_timer_get_time();
 }
@@ -177,7 +230,7 @@ const lt_counters_t *lt_counters(void) { return &s_counters; }
  * the H1 rate-limit cap how often a repeating (deduped) report is allowed to touch flash. */
 static void errlog_persist(void)
 {
-    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
+    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
     s_ring_persist_us = esp_timer_get_time();
 }
 
@@ -289,7 +342,7 @@ void lt_errlog_clear(void)
     ring_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
     s_last_valid = false;                       /* H1: drop dedup state so a post-clear repeat re-appends */
-    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof(s_ring)) == ESP_OK) (void)nvs_commit(s_h_err);
+    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
     s_ring_persist_us = esp_timer_get_time();
     ring_unlock();
 }
@@ -300,7 +353,7 @@ void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
     s_crash[1] = s_crash[0];
     s_crash[0].reset_reason = reset_reason;
     s_crash[0].uptime_s = prev_uptime_s;
-    if (nvs_set_blob(s_h_sys, K_CRASH, s_crash, sizeof(s_crash)) == ESP_OK) (void)nvs_commit(s_h_sys);
+    (void)save_framed(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash));
 }
 
 bool lt_reset_is_abnormal(int r)
@@ -430,37 +483,45 @@ void lt_boot_record_reset(int reset_reason, uint32_t prev_uptime_s)
     }
 }
 
-/* ---- cfg blob (lt_cfg/cfg): packed cfg_t (leading version, §15.1) + trailing CRC16 (§15.2) ---- */
+/* ---- cfg blob (lt_cfg/cfg): framed via blob_wrap/blob_unwrap (Task 1). The payload is cfg_t
+ * minus its own leading version byte ((const uint8_t *)c + 1, sizeof(cfg_t) - 1) with ver =
+ * c->version, so the on-flash bytes [version][cfg_t sans version][crc16] are byte-for-byte what
+ * today's hand-rolled framing already wrote (§15.1/§15.2): unchanged for a blob this firmware
+ * itself saved. An older/unknown stored version is migrated via cfg_migrate(); unknown -> caller
+ * keeps its defaults (<0). ---- */
 int lt_cfg_load(cfg_t *c)
 {
     /* c is the caller's own cfg_t (ui.c/cmd.c/app_main.c each pass &local_var) -- always non-NULL
-     * before we memcpy into it. The size/CRC/version checks below validate the STORED blob, which
+     * before we unwrap into it. The size/CRC/version checks below validate the STORED blob, which
      * is untrusted on-flash data the caller-visible cfg_t is not: those stay plain returns. */
     LT_ASSERT_RET(c != NULL, NVS_ASSERT_CODE, -1);
-    uint8_t buf[sizeof(cfg_t) + 2];
+    uint8_t buf[sizeof(cfg_t) + 2];                    /* [version][cfg_t minus its version][crc16]: today's bytes */
     size_t sz = 0;
     if (nvs_get_blob(s_h_cfg, K_CFG, NULL, &sz) != ESP_OK || sz != sizeof(buf)) return -1;
     if (nvs_get_blob(s_h_cfg, K_CFG, buf, &sz) != ESP_OK) return -1;
-
-    uint16_t want = ses_crc16(buf, sizeof(cfg_t));
-    uint16_t got  = (uint16_t)(buf[sizeof(cfg_t)] | (buf[sizeof(cfg_t) + 1] << 8));
-    if (want != got) return -1;
-    if (buf[0] != CFG_VERSION) return -1;     /* leading version byte == cfg_t.version */
-
-    memcpy(c, buf, sizeof(cfg_t));
-    return cfg_validate(c);                   /* >=0 corrections; stored user settings win (§15.1) */
+    uint8_t stored = 0;
+    int rc = blob_unwrap(CFG_VERSION, buf, sz, (uint8_t *)c + 1, sizeof(cfg_t) - 1, &stored);
+    if (rc == -3) {                                    /* older/unknown version: migrate or defaults */
+        if (blob_unwrap(stored, buf, sz, (uint8_t *)c + 1, sizeof(cfg_t) - 1, NULL) != 0) return -1;
+        if (cfg_migrate(c, stored) != 0) { (void)errlog_add(E_SYS_CFG_RESET, stored); return -1; }
+    } else if (rc != 0) {
+        return -1;
+    }
+    c->version = CFG_VERSION;
+    LT_ASSERT_RET(c->version == CFG_VERSION, NVS_ASSERT_CODE, -1);   /* postcondition after migrate */
+    return cfg_validate(c);                            /* >=0 corrections; stored user settings win (§15.1) */
 }
 
 int lt_cfg_save(const cfg_t *c)
 {
-    /* c is the caller's own cfg_t -- memcpy'd from unconditionally below, so NULL would crash. */
+    /* c is the caller's own cfg_t -- its payload bytes are wrapped unconditionally below, so NULL
+     * would crash, and a c->version off the wire (cfg_from_json ignores "version", but a future
+     * caller bug could still hand in a stale/garbage one) must never be framed onto flash. */
     LT_ASSERT_RET(c != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(c->version == CFG_VERSION, NVS_ASSERT_CODE, -1);
     uint8_t buf[sizeof(cfg_t) + 2];
-    memcpy(buf, c, sizeof(cfg_t));
-    uint16_t crc = ses_crc16(buf, sizeof(cfg_t));
-    buf[sizeof(cfg_t)]     = (uint8_t)(crc & 0xFF);
-    buf[sizeof(cfg_t) + 1] = (uint8_t)(crc >> 8);
-    if (nvs_set_blob(s_h_cfg, K_CFG, buf, sizeof(buf)) != ESP_OK) return -1;
+    size_t len = blob_wrap(c->version, (const uint8_t *)c + 1, sizeof(cfg_t) - 1, buf, sizeof buf);
+    if (len != sizeof buf || nvs_set_blob(s_h_cfg, K_CFG, buf, len) != ESP_OK) return -1;
     (void)nvs_commit(s_h_cfg);
     return 0;
 }
