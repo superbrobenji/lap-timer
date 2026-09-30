@@ -37,7 +37,7 @@ extern QueueHandle_t g_evt_q;
  * Drop-newest on full (ui rendering is best-effort). */
 extern QueueHandle_t g_ui_evt_q;
 
-/* §4.4 log_req_q -- power/conn -> logger control channel (depth 4, log_request_t 16 B). */
+/* §4.4 log_req_q -- power/conn -> logger control channel (depth 4, log_request_t 32 B). */
 #define LOG_REQ_Q_DEPTH 4
 
 typedef enum {
@@ -51,14 +51,14 @@ typedef enum {
 
 /* debt sweep A #59/#73: a bounded request/reply. requester == NULL is fire-and-forget (today's
  * OPEN/RECOUNT callers, unchanged); non-NULL means the logger calls
- * xTaskNotify(requester, (uint32_t)(int32_t)rc, eSetValueWithOverwrite) once handle_request()
- * finishes this request (logger.c's drain loop) -- see logger_request_sync() below, the only
- * intended way to set it. */
+ * xTaskNotify(requester, ((uint32_t)req.seq << 24) | ((uint32_t)rc & 0x00FFFFFFu),
+ * eSetValueWithOverwrite) once handle_request() finishes this request (logger.c's drain loop) --
+ * see logger_request_sync() below, the only intended way to set requester/seq. */
 typedef struct {
     uint8_t      type;        /* log_req_type_t */
     uint8_t      mode;        /* OPEN: session mode (§12.1) */
     uint8_t      reason;      /* CLOSE: END.reason, core/ses.h SES_END_* (§12.3) */
-    uint8_t      _pad;
+    uint8_t      seq;         /* generation tag, set by logger_request_sync (T3 fix 1, ruling P-7) */
     uint16_t     venue_id;    /* OPEN: venue id for the .sum HDR/VENUE frame */
     uint16_t     layout_id;   /* OPEN: layout id */
     int64_t      gps_us;      /* OPEN: start_gps_us; CLOSE: END gps_us (0 if unknown) */
@@ -70,20 +70,31 @@ _Static_assert(sizeof(log_request_t) == 32, "log_request_t must be 32 B (§4.4, 
 
 extern QueueHandle_t g_log_req_q;
 
-/* Post req (requester is filled in with the calling task's own handle), wake the logger, and wait
- * up to timeout_ms for its rc. Returns the logger's rc (0 ok, <0 its error), -1 when the queue is
- * full, -2 on timeout. Waits on the CALLING task's own notification index 0 -- confirmed clear of
- * the two intended callers (supervisor, export_serial/console): a firmware-wide grep for task
- * notification calls before this landed found only logger.c and link.c, each notifying its OWN
- * task (a different task from either caller) -- see the debt sweep A T3 report. Never call from
- * the ui or pipeline task: both must never block on the logger, and neither has any reason to. */
+/* Post req (requester is filled in with the calling task's own handle, seq with a fresh per-
+ * request generation tag), wake the logger, and wait up to timeout_ms for its rc. Returns the
+ * logger's rc (0 ok, <0 its error), -1 when the queue is full, -2 on timeout. Waits on the
+ * CALLING task's own notification index 0 -- confirmed clear of the two intended callers
+ * (supervisor, export_serial/console): a firmware-wide grep for task notification calls before
+ * this landed found only logger.c and link.c, each notifying its OWN task (a different task from
+ * either caller) -- see the debt sweep A T3 report. Never call from the ui or pipeline task: both
+ * must never block on the logger, and neither has any reason to.
+ *
+ * T3 fix 1 (ruling P-7): the generation tag in the notification's top byte is what makes this
+ * helper safe for ANY caller priority or call pattern, not just a low-traffic one -- without it, a
+ * reply to an EARLIER call from this same task that timed out (and so was abandoned by its own
+ * logger_request_sync return) can still land on the notification word between this call's
+ * xTaskNotifyStateClear and its own xTaskNotifyWait, and would otherwise be misread as this call's
+ * answer. The helper discards any reply whose top byte does not match its own seq and keeps
+ * waiting for the remaining time, bounded to LOG_REQ_Q_DEPTH discards (the most stale backlog
+ * replies that can still be in flight ahead of this one). */
 int logger_request_sync(const log_request_t *req, uint32_t timeout_ms);
 
 /* result_q -- pipeline -> logger, full engine results (depth 4). The 3.3 logger could only build a
  * minimal LAP/DRAG_RUN from the EV_LAP_COMPLETE/EV_DRAG_DONE payload (§4.5); 3.4 hands it the whole
  * lap_result_t / drag_result_t (sectors + per-lap stats §9.4, gates) plus the real venue for the
  * VENUE record, so the logger writes complete LAP/SECTOR and DRAG_RUN/DRAG_GATE records (§12.3). A
- * queue (copy-by-value, cross-core safe) rather than log_request_t, which is frozen at 16 B. */
+ * queue (copy-by-value, cross-core safe) rather than log_request_t, which is no longer frozen at
+ * 16 B (it grew to 32 B in debt sweep A T3, #59/#73). */
 #define RESULT_Q_DEPTH 4
 
 typedef enum {

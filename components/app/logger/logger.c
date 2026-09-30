@@ -639,7 +639,10 @@ static void eviction_check(void)
  * bound assertion can safely `return` out of a plain helper on trip, instead of out of the task
  * body. debt sweep A #59/#73: a non-NULL requester (only logger_request_sync sets one) gets
  * xTaskNotify'd with this request's rc once handle_request() has finished it -- the logger task
- * never waits on anything the requester holds, so this notify can never deadlock. */
+ * never waits on anything the requester holds, so this notify can never deadlock. T3 fix 1
+ * (ruling P-7): the notification packs req.seq into the top byte (rc into the low 24 bits) so the
+ * waiter can tell this reply apart from a stale one belonging to an earlier, already-timed-out
+ * request of the same task -- see lt_ipc.h/lt_ipc.c's logger_request_sync doc comments. */
 static void drain_requests(void)
 {
     LT_ASSERT_VOID(g_log_req_q != NULL, LOG_ASSERT_CODE);   /* valid state: created by lt_ipc_init() at boot */
@@ -648,7 +651,10 @@ static void drain_requests(void)
     while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) {
         LT_ASSERT_VOID(n++ < LOG_REQ_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
         int rc = handle_request(&req);
-        if (req.requester != NULL) (void)xTaskNotify(req.requester, (uint32_t)(int32_t)rc, eSetValueWithOverwrite);
+        if (req.requester != NULL) {
+            uint32_t val = ((uint32_t)req.seq << 24) | ((uint32_t)rc & 0x00FFFFFFu);
+            (void)xTaskNotify(req.requester, val, eSetValueWithOverwrite);
+        }
     }
 }
 
