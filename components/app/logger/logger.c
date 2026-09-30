@@ -384,33 +384,34 @@ static int close_session(const log_request_t *req)
     return 0;
 }
 
-/* T4 fix 1: hal/storage.h has no sto_stat/sto_exists (grepped -- neither exists), and sto_unlink()
- * itself returns 0 on ENOENT (storage_internal.c: "if (errno == ENOENT) return 0"), so it cannot
- * by itself tell delete_session() "this file was never here". Probe via a read-only open instead
- * (no STO_CREATE, so this never creates the file) and close what it opened; read-only, no mutation
- * of its own. */
+/* T4 fix 2: sto_exists() (hal/storage.h) is the quiet existence probe -- unlike the T4 fix 1
+ * version of this helper (sto_open+sto_close), it never ESP_LOGE's on a missing path, so a
+ * `delete` of an already-gone id no longer prints anything (bench dsA-d1 item 2's "no E ( lines").
+ * A probe result of 1 (exists) or <0 (stat() itself failed -- exists unknown) both count as "try
+ * the unlink"; only an unambiguous 0 (definitely does not exist) counts as "skip it" -- see
+ * delete_session's own comment for how that feeds the -3 decision and, for the <0 case, how the
+ * eventual unlink's own rc becomes this request's rc. */
 static void session_files_exist(const char *id, bool *has_log, bool *has_sum)
 {
     LT_ASSERT_VOID(id != NULL, LOG_ASSERT_CODE);
     LT_ASSERT_VOID(has_log != NULL, LOG_ASSERT_CODE);
     LT_ASSERT_VOID(has_sum != NULL, LOG_ASSERT_CODE);
     char path[48];
-    sto_file_t f;
     (void)snprintf(path, sizeof path, "/sessions/%s.log", id);
-    *has_log = (sto_open(path, STO_RD, &f) == 0);
-    if (*has_log) { (void)sto_close(f); }
+    *has_log = (sto_exists(path) != 0);   /* 1 exists, or <0 unknown -> attempt the unlink either way */
     (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
-    *has_sum = (sto_open(path, STO_RD, &f) == 0);
-    if (*has_sum) { (void)sto_close(f); }
+    *has_sum = (sto_exists(path) != 0);
 }
 
 /* DELETE_SESSION (#73): the only unlink path -- runs on this task (the storage owner), so the
  * eviction listing's iterator (evict_scan_oldest) is never crossed by a foreign mutation. Refuses
  * the currently open session (its fd would be orphaned and the in-flight session's data lost) --
  * the sender's own fast-path check (cmd.c's old logger_open_session_id() guard) is gone; this is
- * now the sole authority. 0 ok; -3 neither file existed (T4 fix 1: checked BEFORE unlinking, via
- * session_files_exist -- sto_unlink's own rc cannot report this, see above); -4 the session is
- * open; else the first non-zero unlink rc. */
+ * now the sole authority. 0 ok; -3 neither file existed (T4 fix 2: both sto_exists probes returned
+ * a definite 0, checked BEFORE unlinking -- sto_unlink's own rc cannot report this on its own,
+ * since it returns 0 on ENOENT too); -4 the session is open; else the first non-zero unlink rc
+ * (an sto_exists probe that itself failed, <0, is treated as "try the unlink anyway" -- its rc,
+ * not the probe's, is what this returns). */
 static int delete_session(const log_request_t *req)
 {
     LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);

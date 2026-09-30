@@ -196,6 +196,22 @@ int sto_unlink(const char *path)
     return 0;
 }
 
+/* Existence probe (debt sweep A T4 fix 2, #73): stat() the mapped path directly -- no open()/
+ * close() pair, so this never logs (sto_open's ESP_LOGE on a missing path is right for a real
+ * open attempt, wrong for a routine "does this exist" check, which is exactly why delete_session
+ * needed this instead of the sto_open+sto_close probe it used before). ENOENT/ENOTDIR both mean
+ * "the path (or a directory component of it) is not there" -> 0, not an error; any other errno is
+ * a real failure -> -errno. */
+int sto_exists(const char *path)
+{
+    char full[STO_PATHMAX];
+    if (full_path(path, full, sizeof full) != 0) return -1;
+    struct stat st;
+    if (stat(full, &st) == 0) return 1;
+    if (errno == ENOENT || errno == ENOTDIR) return 0;
+    return -errno;
+}
+
 /* rule 9: pull iterator instead of a per-entry callback -- O(1) RAM (one sto_iter_t, no scratch
  * array) rather than array-fill's O(entries) buffer. sto_list_open resolves dir once; each
  * sto_list_next call reads exactly one more dirent. */
