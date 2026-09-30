@@ -24,6 +24,9 @@ void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out)
     uint8_t cap     = cfg_cap < out_cap ? cfg_cap : out_cap;
     uint8_t n       = cfg->drag.n_kmh;
     if (n > cap) n = cap;
+    /* Residual (final review re-review): an empty user bench list must leave drag_cfg_defaults()'s
+     * shipped benches (100/200/300) in place, not zero n_benches out from under them. */
+    if (n == 0u) return;
     out->n_benches = n;
     for (uint8_t i = 0; i < n; i++) out->benches_kmh[i] = cfg->drag.benches_kmh[i];
     CORE_ASSERT_VOID(out->n_gates <= DRAG_MAX_GATES, DRAGCFG_ASSERT_CODE);   /* untouched by drag_cfg_defaults */

@@ -10,6 +10,12 @@ static void test_defaults_when_no_benches(void)
     TEST_ASSERT_EQUAL_UINT8(11, d.n_gates);
     TEST_ASSERT_EQUAL_UINT8(0, d.units);
     TEST_ASSERT_EQUAL_UINT16(100, d.gates[1].a);   /* id 2 default 0-100 */
+    /* Residual (final review re-review): an empty user bench list must not discard the shipped
+     * default benches (drag_cfg_defaults()'s 100/200/300) by zeroing n_benches. */
+    TEST_ASSERT_EQUAL_UINT8(3, d.n_benches);
+    TEST_ASSERT_EQUAL_UINT16(100, d.benches_kmh[0]);
+    TEST_ASSERT_EQUAL_UINT16(200, d.benches_kmh[1]);
+    TEST_ASSERT_EQUAL_UINT16(300, d.benches_kmh[2]);
 }
 /* I1/I2 (final review, Ruling R-6): the bench list -- in ANY unit -- must never rewrite the gate
  * table. cfg.units = mph with a 2-entry mph bench list still yields a gate table byte-identical to
