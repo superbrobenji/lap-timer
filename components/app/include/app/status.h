@@ -11,10 +11,11 @@
  * The cache is kept fresh by the logger task (components/app/logger/logger.c), the storage
  * owner. sessions is name-only-counted once at logger start (status_cache_prime()); after that it
  * only moves on the two events that can actually change the on-flash .sum count: +1 on
- * close_session, once its .sum has landed, and a full recount on LOGGER_RECOUNT (posted by
- * cmd.c's DELETE after it unlinks a .sum -- close_session's increment alone would otherwise miss
- * every delete). free_kb is a real storage_free_kb() read at those same events (prime / close /
- * recount) plus every eviction pass (its own ~60 s tick, sooner if LOGGER_EVICT forces one), and
+ * close_session, once its .sum has landed, and a full recount inside LOGGER_DELETE_SESSION's own
+ * handler (delete_session, debt sweep A #73, run on the logger task like every other mutation --
+ * close_session's increment alone would otherwise miss every delete). free_kb is a real
+ * storage_free_kb() read at those same events (prime / close / delete) plus every eviction pass
+ * (its own ~60 s tick, sooner if LOGGER_EVICT forces one), and
  * is estimated from .log bytes appended since the last real read the rest of the time
  * (status_cache_estimate()). Either way, status_cache_update() runs every logger loop tick, so a
  * peer is never more than one loop tick behind whatever the cache last held -- not a fixed
@@ -34,7 +35,7 @@ void status_build(uint8_t out[LT_STATUS_LEN]);
 
 /* Refresh the free_kb/sessions cache status_build() reads (single-word atomics, no lock). Called
  * by the logger task -- the sole hal/storage.h owner -- every loop tick: with a real reading at
- * prime / close_session / eviction / recount (the events that can actually move either number,
+ * prime / close_session / eviction / delete (the events that can actually move either number,
  * see this file's header comment) and an estimate the rest of the time
  * (logger.c's status_cache_estimate()). */
 void status_cache_update(uint32_t free_kb, uint16_t sessions);

@@ -5,9 +5,10 @@
  * are added here so this is a self-contained, compilable header. The §5.1 excerpt names the
  * flags (STO_RD, STO_WR|STO_APPEND|STO_CREATE) but leaves their values to the header; they are
  * stable HAL-abstract bits the driver maps onto POSIX open() flags. All functions return int
- * (0 = OK, negative = -errno-style) unless noted; each is called from one task only (logger,
- * plus cmd for read-only listing/export in 3.5) and is not reentrant. The concrete backend is
- * components/drivers/storage_${STORAGE} (storage_internal = LittleFS, §13.1).
+ * (0 = OK, negative = -errno-style) unless noted and are not reentrant; mutations (sto_unlink,
+ * writes, format) are called from the logger task only; cmd may list and read (debt sweep A,
+ * #73). The concrete backend is components/drivers/storage_${STORAGE} (storage_internal =
+ * LittleFS, §13.1).
  *
  * Paths are backend-relative: "/sessions/<id>.log", "/sessions/<id>.sum", "/tracks/user.bin".
  * The driver maps them onto its mount point (storage_internal -> /lfs/...). Callers never embed

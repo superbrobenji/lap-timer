@@ -267,7 +267,7 @@ static bool rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 }
 
 static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
-static void status_cache_prime(void);   /* forward decl: called from logger_task at boot and from handle_request (LOGGER_RECOUNT) */
+static void status_cache_prime(void);   /* forward decl: called from logger_task at boot and from handle_request (LOGGER_DELETE_SESSION) */
 
 static void open_session(const log_request_t *req)
 {
@@ -384,10 +384,32 @@ static int close_session(const log_request_t *req)
     return 0;
 }
 
+/* DELETE_SESSION (#73): the only unlink path -- runs on this task (the storage owner), so the
+ * eviction listing's iterator (evict_scan_oldest) is never crossed by a foreign mutation. Refuses
+ * the currently open session (its fd would be orphaned and the in-flight session's data lost) --
+ * the sender's own fast-path check (cmd.c's old logger_open_session_id() guard) is gone; this is
+ * now the sole authority. 0 ok; -3 neither file existed; -4 the session is open; else the unlink's
+ * error. */
+static int delete_session(const log_request_t *req)
+{
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);
+    LT_ASSERT_RET(memchr(req->id, '\0', sizeof req->id) != NULL, LOG_ASSERT_CODE, -1);   /* id is NUL-terminated within its field */
+    if (s_open && strcmp(s_id, req->id) == 0) return -4;   /* session is open */
+    char path[48];
+    int rc_log, rc_sum;
+    (void)snprintf(path, sizeof path, "/sessions/%s.log", req->id);
+    rc_log = sto_unlink(path);
+    (void)snprintf(path, sizeof path, "/sessions/%s.sum", req->id);
+    rc_sum = sto_unlink(path);
+    if (rc_log != 0 && rc_sum != 0) return -3;
+    status_cache_prime();                            /* recount + fresh free_kb, on this task */
+    return 0;
+}
+
 /* Returns the rc this request's handling produced -- 0 ok, <0 an error -- so drain_requests can
- * notify a synchronous caller (logger_request_sync, debt sweep A #59/#73). OPEN/REBUILD/EVICT/
- * RECOUNT have no failure surface of their own yet (their own I/O failures are already recorded
- * by errlog_add inside), so they always return 0. */
+ * notify a synchronous caller (logger_request_sync, debt sweep A #59/#73). OPEN/REBUILD/EVICT
+ * have no failure surface of their own yet (their own I/O failures are already recorded by
+ * errlog_add inside), so they always return 0. DELETE_SESSION returns delete_session()'s rc. */
 static int handle_request(const log_request_t *req)
 {
     LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, 0);
@@ -397,10 +419,7 @@ static int handle_request(const log_request_t *req)
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
     case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
     case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; return 0;   /* force an eviction pass this loop */
-    /* cmd.c's DELETE posts this after unlinking a .sum: a delete is otherwise invisible to the
-     * status.h sessions count (only close_session ever increments it). status_cache_prime() reruns
-     * the name-only session_count() + a fresh storage_free_kb() read (Plan 5.6 final-review A I1). */
-    case LOGGER_RECOUNT:         status_cache_prime(); return 0;
+    case LOGGER_DELETE_SESSION:  return delete_session(req);
     default: return 0;
     }
 }
@@ -674,7 +693,7 @@ static void evict_if_due(uint32_t now)
  * every later refresh is incremental (close_session/eviction_check) or a storage-free estimate
  * (status_cache_estimate). This is why open_session does NOT also call this: it neither closes a
  * session (no new .sum counted) nor is the storage owner's only chance to see one. Also the
- * LOGGER_RECOUNT handler (cmd.c's DELETE, Plan 5.6 final-review A I1) -- a rescan is the only way
+ * LOGGER_DELETE_SESSION handler (delete_session, debt sweep A #73) -- a rescan is the only way
  * to see a session count that just went DOWN (close_session only ever increments it). Resets
  * s_bytes_since_info too: both callers just took a real storage_free_kb() reading, so
  * status_cache_estimate() must restart its between-refresh estimate from here, not from bytes

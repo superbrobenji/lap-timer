@@ -12,10 +12,9 @@
 
 #include "build_config.h"          /* CFG_FW_VERSION, CFG_HWID */
 
-#include "app/logger.h"           /* logger_open_session_id -- DELETE must skip the open session */
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
-#include "app/lt_ipc.h"           /* g_log_req_q/LOGGER_RECOUNT -- DELETE re-primes the status.h cache */
+#include "app/lt_ipc.h"           /* log_request_t/LOGGER_DELETE_SESSION/logger_request_sync -- DELETE (#73) */
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"              /* OTA receive-side state machine (CMD_OTA_*, §19.4) */
@@ -227,7 +226,17 @@ static int op_diag_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
     return emit_bytes(emit, ctx, tag, seq, (const uint8_t *)s_json, strlen(s_json), true);
 }
 
-/* DELETE (0x06) -> unlink <id>.log and <id>.sum; ack. Request payload is id char[10]. */
+/* DELETE (0x06) -> ask the logger (the storage owner) to unlink <id>.log/<id>.sum; the ack itself
+ * is unchanged (empty LAST chunk), but the ERROR chunk it can return instead is now mapped from
+ * the logger's rc (debt sweep A #73), with three new error texts: "session is open; close it
+ * first" (rc -4, the logger's own authority now -- this op no longer races it with its own
+ * logger_open_session_id() check), "no such session" (rc -3) and "delete timed out" (rc -2, new:
+ * a bounded wait can now time out where the old fire-and-forget unlink never did) plus a generic
+ * "delete failed" for any other error. Request payload is id char[10]. This runs on the console
+ * task while it holds the export_serial UART mutex for the whole framed reply; the wait below is
+ * bounded by logger_request_sync's own timeout (1000 ms), not an unbounded block, and every
+ * storage mutation now runs on the logger task alone, so the eviction listing's iterator is never
+ * crossed by this (or any other) foreign unlink. */
 static int op_delete(const uint8_t *payload, size_t len,
                      cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
@@ -239,32 +248,14 @@ static int op_delete(const uint8_t *payload, size_t len,
     memcpy(id, payload, idl);
     id[idl] = '\0';
     id[strcspn(id, " ")] = '\0';   /* drop any padding/trailing space */
-
-    /* F5: never unlink the session the logger currently has open for writing -- the fd would be
-     * orphaned and the in-flight session's data lost. Refuse it instead of racing the logger. */
-    const char *open_id = logger_open_session_id();
-    if (open_id && strcmp(open_id, id) == 0)
-        return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "session is open; close it first");
-
-    char path[48];
-    (void)snprintf(path, sizeof path, "/sessions/%s.log", id);
-    (void)sto_unlink(path);
-    (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
-    /* I1 (Plan 5.6 final-review A): session_count() only ever counts .sum files, and only
-     * close_session ever increments the status.h sessions cache -- a delete is otherwise
-     * invisible to it. On a successful unlink, ask the logger to re-prime the cache (name-only
-     * recount + a fresh free_kb read, both on the logger task, the storage owner). Non-blocking:
-     * a momentarily full queue is acceptable (the count self-heals at the next recount) but is
-     * still worth a report, mirrored on cmd.c's own CMD_ASSERT_CODE the way its own LT_ASSERT_*
-     * calls above do -- core_assert_fail() directly, not the LT_ASSERT_* macros, since those
-     * would `return` here and skip the ack this op still owes the caller. */
-    if (sto_unlink(path) == 0) {
-        log_request_t req = { .type = LOGGER_RECOUNT };
-        if (g_log_req_q) {
-            if (xQueueSend(g_log_req_q, &req, 0) == pdTRUE) logger_notify();
-            else core_assert_fail(CMD_ASSERT_CODE, __FILE__, __LINE__);
-        }
-    }
+    /* Task 5 inserts the lt_session_id_ok() check here. */
+    log_request_t req = { .type = LOGGER_DELETE_SESSION };
+    (void)snprintf(req.id, sizeof req.id, "%s", id);
+    int rc = logger_request_sync(&req, 1000);
+    if (rc == -4) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "session is open; close it first");
+    if (rc == -3) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "no such session");
+    if (rc == -2) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "delete timed out");
+    if (rc != 0)  return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "delete failed");
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
 }
 
