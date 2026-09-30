@@ -575,7 +575,9 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
      * the unit too (grid_cell already draws labels in FONT_SMALL, which has the lowercase glyphs
      * "km/h"/"mph" need -- FONT_MED has none). */
     p = put_uint(buf, speed_display(m->max_speed_cms, m->units)); *p = '\0';
-    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, unit_suffix(m->units)); *lp = '\0';
+    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, unit_suffix(m->units));
+    CORE_ASSERT_VOID((size_t)(lp - label) < sizeof label, UI_ASSERT_CODE);   /* M8: room left for the NUL */
+    *lp = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, label, buf);
     /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
      * to 99 before formatting so "L99 R99" is provably the widest this cell ever draws. */
@@ -701,7 +703,18 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL && title != NULL, UI_ASSERT_CODE);
-    fb_text(fb, &FONT_SMALL, DLIST_COL1_X, DLIST_HEADER_Y, title);
+    int end = fb_text(fb, &FONT_SMALL, DLIST_COL1_X, DLIST_HEADER_Y, title);
+    /* I3 (final review, ruling R-7): the list itself caps at 2*DLIST_ROWS rows; when more gates
+     * were hit than that, the header names the overflow count so nothing is silently dropped. */
+    if (m->drag_n > 2u * DLIST_ROWS) {
+        char  buf[8];
+        char *p = put_char(buf, '+');
+        p = put_uint(p, (unsigned)(m->drag_n - 2u * DLIST_ROWS));
+        *p = '\0';
+        CORE_ASSERT_VOID(end + DLIST_MORE_GAP + (int)strlen(buf) * FONT_SMALL.w <= CANVAS_VISIBLE_W,
+                          UI_ASSERT_CODE);
+        fb_text(fb, &FONT_SMALL, end + DLIST_MORE_GAP, DLIST_HEADER_Y, buf);
+    }
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     for (uint8_t i = 0; i < n && i < 2u * DLIST_ROWS; i++) {
         int col = i / DLIST_ROWS, row = i % DLIST_ROWS; /* left column fills first */

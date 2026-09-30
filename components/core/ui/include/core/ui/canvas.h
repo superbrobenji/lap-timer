@@ -194,6 +194,10 @@
 #define DLIST_COL1_X TEXT_MARGIN_X
 #define DLIST_UNIT_W 10     /* room reserved right of a distance value for its FONT_SMALL "m" */
 #define DLIST_UNIT_GAP 2    /* px between the distance digits and the FONT_SMALL "m" */
+/* I3 (final review, ruling R-7): px gap between the header title's last glyph and the "+<n>"
+ * overflow suffix drawn when more than 2*DLIST_ROWS gates were hit -- canvas-independent, like the
+ * other _GAP constants above. */
+#define DLIST_MORE_GAP 4
 
 /* ---- one-shot screens (spec §20.6) ---- */
 #if CANVAS_213

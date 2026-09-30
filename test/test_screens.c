@@ -483,6 +483,35 @@ static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, ev
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_best.pbm"), &s_fb));
 }
 
+static void test_drag_p1_overflow(void)   /* I3 (final review, ruling R-7): all 11 default gates hit */
+{
+    /* Every one of the §11.1 eleven default gates hit this run, in table order -- more than
+     * 2*DLIST_ROWS (8) fit the two-column list, so only the first eight rows draw and the header
+     * gains " +3" (11 - 8) after "LAST RUN". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90;
+    static const char *const label[11] = { "0-60", "0-100", "0-200", "0-300", "100-200",
+                                            "60ft", "330ft", "1/8", "1000ft", "1/4", "100-0" };
+    for (int i = 0; i < 11; i++) drag_gate(&m, label[i], (uint32_t)(1000 + i * 1000), 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_overflow.pbm"), &s_fb));   /* header "LAST RUN +3"; rows 0-60..1/4 (8 of 11) */
+}
+
+static void test_drag_p2_overflow(void)   /* I3 (final review, ruling R-7): nine session-best gates */
+{
+    /* Nine gates with a session best this session (first nine of the default table) -- header
+     * gains " +1" (9 - 8) after "SESSION BEST". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 2; m.batt_pct = 90;
+    static const char *const label[9] = { "0-60", "0-100", "0-200", "0-300", "100-200",
+                                           "60ft", "330ft", "1/8", "1000ft" };
+    for (int i = 0; i < 9; i++) drag_gate(&m, label[i], (uint32_t)(1000 + i * 1000), 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_overflow.pbm"), &s_fb));   /* header "SESSION BEST +1"; rows 0-60..1000ft (8 of 9) */
+}
+
 /* ---- one-shot screens (§20.6) ---- */
 
 static void test_oneshot_boot(void)
@@ -700,6 +729,8 @@ int main(void)
     RUN_TEST(test_drag_p0_armed_gates);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
+    RUN_TEST(test_drag_p1_overflow);
+    RUN_TEST(test_drag_p2_overflow);
     RUN_TEST(test_oneshot_boot);
     RUN_TEST(test_boot_four_lines);
     RUN_TEST(test_oneshot_venue);

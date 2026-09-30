@@ -174,6 +174,12 @@ static cfg_t   s_cfg;         /* ui's working config copy (cmd.c uses the same l
  * (drag_cfg_from_user) and rebuilt in menu_do_units() so a units change relabels the SPEED_FROM0
  * benches too. drag_rows_refill() below reads it for every row's label/kind. */
 static drag_cfg_t s_drag_cfg;
+/* M5 (final review): the trap (1/4-mile) gate is a RULE -- the DRAG_DIST gate with the largest
+ * distance `a` in s_drag_cfg -- not the hardcoded a==40234 literal (only true for the shipped
+ * default table). Recomputed by drag_rows_refill() below, from whichever gate table is live, every
+ * time it runs; row_from_gate() reads it. 0 = no DRAG_DIST gate configured (never hit by id, since
+ * gate ids start at 1). */
+static uint8_t s_trap_id;
 static uint8_t s_mode;        /* MODE_LAP / MODE_DRAG (mirrors s_model.mode) */
 static uint16_t s_gspeed_kmh; /* menu-lock proxy from EV_MOTION/EV_STILL (see handle_event) */
 static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the fault strip */
@@ -713,8 +719,15 @@ static void handle_lap_complete(const event_t *e)
     LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);   /* invariant on entry */
     /* Plan 7c T6 (design §4): every completed lap's own S/F crossing starts the clock for the lap
      * now beginning -- out-lap included (its crossing starts lap 1) -- so this is stamped before
-     * the out-lap check below, which makes handle_lap_result() an early-return for that case. */
+     * the out-lap check below, which makes handle_lap_result() an early-return for that case.
+     * M2 (final review): cur_ms/s_last_clock_us reset here too, else the card's CUR cell would go
+     * on showing the JUST-COMPLETED lap's final time for up to a whole second (clock_tick() only
+     * overwrites cur_ms once (now - s_last_clock_us) >= 1000000) -- zeroing s_last_clock_us makes
+     * the very next clock_tick() (whenever it next runs) land immediately instead of waiting out
+     * the rest of the previous lap's tick interval. */
     s_lap_start_mono_us = e->mono_us;
+    s_model.cur_ms      = 0;
+    s_last_clock_us     = 0;
     if ((e->flags & LAP_F_OUT_LAP) == 0) {
         handle_lap_result(e->arg32, e->flags, (int32_t)e->arg32b);
     }
@@ -762,15 +775,18 @@ static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_ga
     r->is_distance = g->kind == DRAG_BRAKE;
     r->dist_m      = (uint16_t)(res->dist_cm / 100u);
     r->t_ms        = res->time_ms;
-    r->has_trap    = (g->kind == DRAG_DIST && g->a == 40234u && res->speed_cms > 0u);
+    r->has_trap    = (g->id == s_trap_id && res->speed_cms > 0u);   /* M5: rule, not a literal */
     r->trap_cms    = res->speed_cms;
 }
 
-/* Pages 0/1 (design §3): both walk the current run's gates in table order and differ only in the
- * hit filter and the `present` value -- merged into one helper (Plan 7c T5 fix 1, review finding
- * 1). hit_only = true (page 0): keep only hit gates, present always true, drag_n = number hit
- * (table order == hit order for a normal forward-progressing run, same as the old append-only
- * behaviour). hit_only = false (page 1): keep every gate, present = hit. */
+/* Pages 0/1 (design §3, merged into one helper by Plan 7c T5 fix 1, review finding 1): walks the
+ * current run's gates in table order. hit_only = true: keep only hit gates, present always true,
+ * drag_n = number hit (table order == hit order for a normal forward-progressing run, same as the
+ * old append-only behaviour). I3 (final review, ruling R-7): both callers (drag_rows_refill's page
+ * 0 AND page 1 cases) now pass true -- page 1 used to pass false ("keep every gate, present = hit")
+ * but that "all gates, present/absent" listing is gone; the hit_only = false path stays here,
+ * exercised by neither caller today, as this helper's documented general contract rather than
+ * being cut down to a single fixed argument. */
 static void drag_fill_from_run(const drag_result_t *run, bool hit_only)
 {
     LT_ASSERT_VOID(run != NULL, UI_APP_ASSERT_CODE);
@@ -791,12 +807,16 @@ static void drag_fill_from_run(const drag_result_t *run, bool hit_only)
     s_model.drag_n = n;
 }
 
-/* Page 2 (design §3): one row per configured gate, present = have_best[id-1]. best_time_ms[id-1]
- * holds the session-best time_ms, EXCEPT for a BRAKE gate where it holds the best (shortest)
- * stopping dist_cm instead (§11.3, confirmed against pipeline.c's publish_drag_snapshot()) -- so
- * the synthetic gate_res_t below feeds the same value into both time_ms and dist_cm, and
- * row_from_gate's is_distance branch (g->kind == DRAG_BRAKE) picks the right one. speed_cms is
- * left 0: the session-best record carries no trap speed, so has_trap is always false here, which
+/* Page 2 (design §3, ruling R-7): one row per configured gate that has a session best
+ * (have_best[id-1]) -- a gate never hit this session is skipped entirely (I3: page 2 lists
+ * hit/best gates only, matching page 0/1's semantics), so `present` passed to row_from_gate is
+ * always true here. best_time_ms[id-1] holds the session-best time_ms, EXCEPT for a BRAKE gate
+ * where it holds the best (shortest) stopping dist_cm instead (§11.3, confirmed against
+ * pipeline.c's publish_drag_snapshot()) -- M9 (final review): the synthetic gate_res_t below feeds
+ * that value into ONLY the field the gate's kind actually uses (dist_cm for BRAKE, time_ms for
+ * everything else), never both, so row_from_gate's unused field for this row's kind stays a clean
+ * 0 rather than a stray time value reinterpreted as a distance or vice versa. speed_cms is left 0:
+ * the session-best record carries no trap speed, so has_trap is always false here, which
  * render_drag_gate_list (screens_moto.c) never reads anyway (only page 0's card does). */
 static void drag_fill_page2(const pipe_drag_t *d)
 {
@@ -808,12 +828,18 @@ static void drag_fill_page2(const pipe_drag_t *d)
         if (g->id < 1u || g->id > DRAG_MAX_GATES) {
             continue;   /* defensive: every id checked before indexing best_time_ms[]/have_best[] */
         }
-        uint8_t         idx = (uint8_t)(g->id - 1u);
+        uint8_t idx = (uint8_t)(g->id - 1u);
+        if (!d->have_best[idx]) {
+            continue;   /* I3: never hit this session -- not a row on page 2 */
+        }
         drag_gate_res_t res;
         memset(&res, 0, sizeof res);   /* row_from_gate reads g->id, not res.gate_id -- no dead store here */
-        res.time_ms = d->best_time_ms[idx];
-        res.dist_cm = d->best_time_ms[idx];
-        row_from_gate(&s_model.drag[n], g, &res, d->have_best[idx]);
+        if (g->kind == DRAG_BRAKE) {
+            res.dist_cm = d->best_time_ms[idx];
+        } else {
+            res.time_ms = d->best_time_ms[idx];
+        }
+        row_from_gate(&s_model.drag[n], g, &res, true);
         n++;
     }
     s_model.drag_n = n;
@@ -823,18 +849,33 @@ static void drag_fill_page2(const pipe_drag_t *d)
  * snapshot -- called on every drag event and on every DRAG page change (design §3). A snapshot
  * failure (pipeline_drag_snapshot() only ever returns 0 today, but the contract allows otherwise)
  * leaves the model's existing rows in place rather than clobbering them with a half-read, same
- * policy as copy_best_snapshot() above. */
+ * policy as copy_best_snapshot() above.
+ * I3 (final review, ruling R-7): pages 0 AND 1 now both list hit gates only (page 1 used to list
+ * every configured gate, present/absent) -- page 0's own card semantics are unchanged, it was
+ * always hit-only. M5: s_trap_id (the DRAG_DIST gate with the largest distance `a` in s_drag_cfg,
+ * 0 if none) is recomputed here, once per refill, from whichever gate table is live -- row_from_gate
+ * reads it instead of a hardcoded gate-10/40234 literal. */
 static void drag_rows_refill(void)
 {
     LT_ASSERT_VOID(s_model.page < 3u, UI_APP_ASSERT_CODE);   /* dispatches on it below */
+    LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    s_trap_id      = 0;
+    uint16_t trap_a = 0;
+    for (uint8_t i = 0; i < s_drag_cfg.n_gates && i < DRAG_MAX_GATES; i++) {
+        const drag_gate_def_t *g = &s_drag_cfg.gates[i];
+        if (g->kind == DRAG_DIST && g->a > trap_a) {
+            trap_a    = g->a;
+            s_trap_id = g->id;
+        }
+    }
     pipe_drag_t d;
     if (pipeline_drag_snapshot(&d) != 0) {
         return;
     }
     LT_ASSERT_VOID(d.current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
     switch (s_model.page) {
-    case 0: drag_fill_from_run(&d.current, true); break;
-    case 1: drag_fill_from_run(&d.current, false); break;
+    case 0:
+    case 1: drag_fill_from_run(&d.current, true); break;   /* I3: both list hit gates only */
     case 2: drag_fill_page2(&d); break;
     default: break;
     }
@@ -1062,11 +1103,14 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now, uint8_t *effective_mod
  * partial-consumed-the-window retry-as-full, not just this function's own partial_window_or_full()
  * fallback) -- a successful full (whether requested or the ladder's retry) resets s_partial_count,
  * stamps s_last_full_us and clears s_wants_full; a FAILED refresh updates none of that bookkeeping.
- * Plan 7c T6 (design §4 last bullet): a successful partial caused only by a clock tick (s_clock_tick)
- * does NOT bump s_partial_count/s_last_partial_us -- it still counts fully as a real full when the
- * policy or the fallback above promotes it to one, since that is a genuine full refresh regardless
- * of what triggered it. Reports the effective mode via *mode_out so the caller's log line reflects
- * what actually happened on the panel. */
+ * Plan 7c T6 (design §4 last bullet), amended by final review I4 (ruling R-8): a successful partial
+ * caused only by a clock tick (s_clock_tick) does NOT bump s_partial_count, but DOES stamp
+ * s_last_partial_us like any other successful partial -- so the 30 s temperature-throttle window
+ * (spec §20.3) measures real wall-clock time since the panel last actually refreshed, tick or not,
+ * rather than silently extending past 30 s while a string of ticks goes unaccounted. It still
+ * counts fully as a real full when the policy or the fallback above promotes it to one, since that
+ * is a genuine full refresh regardless of what triggered it. Reports the effective mode via
+ * *mode_out so the caller's log line reflects what actually happened on the panel. */
 static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
 {
     LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
@@ -1079,9 +1123,10 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
          * the next diff still covers the union of what changed then and what changes next. */
         memcpy(s_fb_prev_bits, s_fb_bits, sizeof s_fb_prev_bits);
         if (*mode_out == DISP_PARTIAL) {
+            /* I4 (ruling R-8): always stamp the timestamp; only the count stays tick-gated. */
+            s_last_partial_us = now;
             if (!s_clock_tick) {
-                s_partial_count   = (uint16_t)(s_partial_count + 1);
-                s_last_partial_us = now;
+                s_partial_count = (uint16_t)(s_partial_count + 1);
             }
         } else {
             s_partial_count = 0;
@@ -1262,11 +1307,12 @@ static void dead_retry(int64_t now)
  * is the screen actually showing, advances s_model.cur_ms/cur_running from the lap's start stamp
  * so the card footer's left cell shows a running CUR m:ss instead of LAST. A render this alone
  * causes is tentatively marked s_clock_tick (only when nothing else already made this iteration
- * dirty) so do_refresh() (above) keeps it out of the full-refresh ladder's
- * partial_count/last_partial_us accounting; s_wants_full is never touched here, so a clock tick
- * alone never forces a full. "Tentatively": this function cannot see whether ui_loop_iter's
- * throttle-pending branch (which fires independent of s_dirty) is about to consume this same
- * render to resolve an owed refresh -- that branch clears s_clock_tick itself before calling
+ * dirty) so do_refresh() (above) keeps it out of the full-refresh ladder's partial_count
+ * accounting (ruling R-8: it still stamps last_partial_us like any refresh, so the 30 s
+ * temperature throttle applies to it the same as any other); s_wants_full is never touched here,
+ * so a clock tick alone never forces a full. "Tentatively": this function cannot see whether
+ * ui_loop_iter's throttle-pending branch (which fires independent of s_dirty) is about to consume
+ * this same render to resolve an owed refresh -- that branch clears s_clock_tick itself before calling
  * render_and_refresh() (Plan 7c T6 fix round 1) so such a render is never wrongly exempted from
  * accounting. When the tick conditions stop holding, cur_running drops once (the cell reverts to
  * LAST) -- that transition is a real model change, not a clock-driven one, so it dirties
@@ -1289,6 +1335,13 @@ static void clock_tick(int64_t now)
         s_dirty             = true;
     }
 }
+
+/* M7 (final review): BOOT_SLOTS (app/lt_sup.h, the number of self-test slots reported into) must
+ * never exceed BOOT_MAX_LINES (core/ui/canvas.h, the renderer's line budget) -- boot_lines_format()
+ * below loops BOOT_SLOTS times writing s_model.boot_line[i], and render_oneshot_boot()
+ * (screens_moto.c) only ever draws up to BOOT_MAX_LINES of them. A build-time mismatch (either
+ * constant edited without the other) would silently drop a line or overrun the model's array. */
+_Static_assert(BOOT_SLOTS <= BOOT_MAX_LINES, "BOOT_SLOTS must fit BOOT_MAX_LINES");
 
 /* Plan 7c T8 (design §6): formats the four BOOT self-test lines from sup_boot_report()'s table --
  * STORAGE/DISPLAY/GPS/IMU, each "<LABEL> <STATUS>" ("--"/OK/FAIL/SIM). Called three times over
@@ -1390,8 +1443,10 @@ static void ui_loop_iter(QueueHandle_t btn_q)
      * Plan 7c T6 fix round 1 / T7: clock_tick() (above) tags s_clock_tick purely off !s_dirty, which
      * cannot see that THIS branch fires independent of s_dirty -- a tick due on the very iteration
      * the 30 s throttle window reopens must not get free-ridden into this call's do_refresh()
-     * bookkeeping (s_partial_count/s_last_partial_us), even though this render is resolving a real
-     * owed backlog, not "only a tick". render_and_refresh() (T7) now computes
+     * partial_count bookkeeping (I4/ruling R-8: s_last_partial_us itself is now stamped
+     * unconditionally on any successful partial, tick or not, so only partial_count is at stake
+     * here), even though this render is resolving a real owed backlog, not "only a tick".
+     * render_and_refresh() (T7) now computes
      * tick_only = s_clock_tick && !s_refresh_pending itself, at its own entry, so this branch no
      * longer clears s_clock_tick before calling it -- s_refresh_pending is true here (that is this
      * branch's own guard), so tick_only comes out false regardless of s_clock_tick's value. */
