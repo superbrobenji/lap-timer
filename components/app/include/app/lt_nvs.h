@@ -74,8 +74,13 @@ bool lt_crashlog_is_loop(void);
 /* Safe-mode gate (lt_sys/safe_until): boot counter through which safe mode applies (§17.5). */
 uint32_t lt_safe_until_get(void);
 int      lt_safe_until_set(uint32_t boot_cnt);
-/* Clears the persisted safe-mode gate (lt_sys/safe_until := 0) so a later boot is never held in
- * safe mode by it. Used by the supervisor's uptime-based auto-clear (§17.5). */
+/* Safe-mode level (lt_sys/safe_lvl, §17.5 recovery-mode amendment): 0 normal, 1 safe, 2 recovery.
+ * get clamps an out-of-range stored value back to 0. set persists (0..2 only; asserts s_ready). */
+uint8_t  lt_safe_level_get(void);
+int      lt_safe_level_set(uint8_t lvl);
+/* Clears the persisted safe-mode gate (lt_sys/safe_until := 0) and level (lt_sys/safe_lvl := 0) so
+ * a later boot is never held in safe/recovery mode by them. Used by the supervisor's uptime-based
+ * auto-clear and `dbg safe clear` (§17.5). */
 void     lt_safe_clear(void);
 
 /* Synthetic reset reason (§17.2/§17.5): a supervisor-forced restart after a pipeline stall reports

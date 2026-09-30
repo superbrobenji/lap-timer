@@ -26,6 +26,7 @@ enum {
     E_SYS_RTC_INVALID = 0x0507,
     E_SYS_CFG_RESET   = 0x0508,
     E_SYS_STACK_LOW   = 0x0509,
+    E_SYS_RECOVERY_MODE = 0x050A, /* arg = boot count (§17.5 recovery-mode amendment, debt sweep A #62) */
     E_NVS_BLOB_RESET  = 0x050B,   /* arg = blob tag 1 ctr / 2 ring / 3 crash */
     E_LOG_CLOSE_TIMEOUT = 0x050C, /* arg = END.reason (core/ses.h SES_END_*): supervisor-owned
                                     * restart proceeded without a clean session close (debt sweep A #59) */

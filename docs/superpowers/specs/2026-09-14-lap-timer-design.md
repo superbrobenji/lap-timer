@@ -2064,6 +2064,7 @@ hb[SUPERVISOR]++
 | 11 | `SYS_DISP_TEMP_THROTTLE` | thermometer |
 | 12 | `SYS_OTA_PENDING` | — |
 | 13 | `SYS_FUSION_DISAGREE` | lean "?" |
+| 14 | `SYS_RECOVERY_MODE` | — |
 
 ### 17.5 Crash-loop protection and safe mode
 
@@ -2071,6 +2072,7 @@ At boot, `crash_log` (last 3 entries) is shifted with `{reset_reason, previous u
 - Pipeline runs; lap and drag engines run; summaries are written.
 - No sample logging, no BLE, no WiFi, one full-screen "SAFE MODE" render then display idle.
 - Supervisor clears safe mode after `SAFE_MODE_CLEAR_S` of uptime (persisted), next boot is normal.
+- A crash loop detected while `boot_cnt <= safe_until` (the previous boot was already safe mode) escalates to **recovery mode** (`safe_lvl` = 2, `SYS_RECOVERY_MODE`): supervisor, link, logger and the console/OTA export start; pipeline, GPS power and ui do not. The same `SAFE_MODE_CLEAR_S` uptime rule clears both levels; `dbg safe clear` clears them immediately.
 
 ### 17.6 Boot self-test
 
