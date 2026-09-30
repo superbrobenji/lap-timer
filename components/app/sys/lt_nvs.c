@@ -104,7 +104,14 @@ static int64_t        s_ring_persist_us;
  * it is the universal assert-report sink -- which explicitly includes the ui task (~340 B of
  * stack headroom, #53); that reachable set is exactly why s_blob_scratch is a static buffer and
  * never a stack one. Static allocation (no malloc after init), task-context only (the assert hook
- * runs in task context, never an ISR). */
+ * runs in task context, never an ISR).
+ *
+ * I1 (final review, Ruling F-2): nothing that runs under this lock may reach core_assert_fail
+ * (its sink is errlog_add, which takes this same lock): the framing helpers -- save_framed,
+ * load_framed, load_or_reset below, and blob_wrap/blob_unwrap in core/blob.c -- are assert-free
+ * by design, not by oversight. A failing assertion macro in any of them would recurse
+ * core_assert_fail -> core_assert_report -> errlog_add -> blob_lock() while a caller already
+ * holds it: a real deadlock, not just the "walk every caller" audit P-5 originally relied on. */
 static SemaphoreHandle_t s_blob_lock;
 static StaticSemaphore_t s_blob_lock_buf;
 
@@ -145,8 +152,10 @@ static uint8_t s_blob_scratch[BLOB_SCRATCH_MAX];
  * lt_nvs_init) takes it. */
 static int load_framed(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t expect)
 {
-    LT_ASSERT_RET(key != NULL && dst != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(expect > 0 && expect + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX, NVS_ASSERT_CODE, -1);
+    /* I1 (Ruling F-2): plain guarded returns, not LT_ASSERT_RET -- see the s_blob_lock comment
+     * above for why nothing under that lock may reach core_assert_fail. */
+    if (key == NULL || dst == NULL) return -1;
+    if (expect == 0 || expect + BLOB_OVERHEAD > BLOB_SCRATCH_MAX) return -1;
     size_t sz = 0;
     esp_err_t probe = nvs_get_blob(h, key, NULL, &sz);
     if (probe == ESP_ERR_NVS_NOT_FOUND) return -4;
@@ -160,8 +169,10 @@ static int load_framed(nvs_handle_t h, const char *key, uint8_t ver, void *dst, 
  * -- see the F1 comment above for why, and which callers do. */
 static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n)
 {
-    LT_ASSERT_RET(key != NULL && src != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(n > 0 && n <= BLOB_SCRATCH_MAX - BLOB_OVERHEAD, NVS_ASSERT_CODE, -1);
+    /* I1 (Ruling F-2): plain guarded returns, not LT_ASSERT_RET -- see the s_blob_lock comment
+     * above for why nothing under that lock may reach core_assert_fail. */
+    if (key == NULL || src == NULL) return -1;
+    if (n == 0 || n > BLOB_SCRATCH_MAX - BLOB_OVERHEAD) return -1;
     size_t len = blob_wrap(ver, src, n, s_blob_scratch, sizeof s_blob_scratch);
     if (len == 0 || nvs_set_blob(h, key, s_blob_scratch, len) != ESP_OK) return -1;
     (void)nvs_commit(h);
@@ -174,8 +185,10 @@ static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void 
  * error ring with three boot-time entries. Returns the load rc for the log line. */
 static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t n, uint32_t tag)
 {
-    LT_ASSERT_RET(dst != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(tag >= BLOB_TAG_CTR && tag <= BLOB_TAG_CRASH, NVS_ASSERT_CODE, -1);
+    /* I1 (Ruling F-2): plain guarded returns, not LT_ASSERT_RET -- see the s_blob_lock comment
+     * above for why nothing under that lock may reach core_assert_fail. */
+    if (dst == NULL) return -1;
+    if (tag < BLOB_TAG_CTR || tag > BLOB_TAG_CRASH) return -1;
     int rc = load_framed(h, key, ver, dst, n);
     if (rc == -4) {
         memset(dst, 0, n);
@@ -424,6 +437,7 @@ uint32_t lt_safe_until_get(void)
 
 int lt_safe_until_set(uint32_t boot_cnt)
 {
+    if (!s_ready) return -1;   /* M9: symmetric with lt_safe_level_set -- s_h_sys only valid once lt_nvs_init has run */
     if (nvs_set_u32(s_h_sys, K_SAFE, boot_cnt) != ESP_OK) return -1;
     (void)nvs_commit(s_h_sys);
     return 0;
