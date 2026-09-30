@@ -12,8 +12,11 @@
 #include "app/lt_rtc.h"
 #include "app/lt_consts.h"
 #include "app/lt_assert.h"
+#include "app/lt_ipc.h"
 #include "app/ota.h"
 #include "app/pipeline.h"
+
+#include "core/ses.h"
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -99,6 +102,22 @@ TaskHandle_t sup_task_handle(uint8_t hb_id)
     return s_watch[hb_id].task;
 }
 
+/* Close the open session before a supervisor-owned restart (§17.2/§19.4, #59). Bounded: a
+ * logger that cannot answer in time must not block the restart -- timeout_ms is the hard cap on
+ * how long this call may hold up the caller (check_stalls: 500 ms, a stalled pipeline must not
+ * delay recovery; ota_reboot_check: 2000 ms), and the restart proceeds regardless of rc. */
+static void close_session_before_restart(uint8_t reason, uint32_t timeout_ms)
+{
+    LT_ASSERT_VOID(reason == SES_END_RESTART || reason == SES_END_STALL, SUP_ASSERT_CODE);
+    LT_ASSERT_VOID(timeout_ms > 0 && timeout_ms <= 5000, SUP_ASSERT_CODE);
+    log_request_t req = { .type = LOGGER_CLOSE_SESSION, .reason = reason, .gps_us = 0 };
+    int rc = logger_request_sync(&req, timeout_ms);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "session close before restart rc %d (reason %u)", rc, (unsigned)reason);
+        (void)errlog_add(E_LOG_CLOSE_TIMEOUT, (uint32_t)reason);
+    }
+}
+
 static void check_stalls(void)
 {
     for (int i = 0; i < HB_COUNT; i++) {
@@ -124,6 +143,7 @@ static void check_stalls(void)
                  * reset reason will be ESP_RST_SW (§17.5 normal), so leave a marker the next boot
                  * folds in as abnormal -- three consecutive stall-restarts within the window then
                  * trip the crash-loop -> SYS_SAFE_MODE instead of rebooting forever. */
+                close_session_before_restart(SES_END_STALL, 500);
                 (void)lt_counters_flush(true);
                 lt_stall_flag_set();
                 esp_restart();
@@ -137,6 +157,7 @@ static void check_stalls(void)
 static void ota_reboot_check(void)
 {
     if (!ota_reboot_due()) return;
+    close_session_before_restart(SES_END_RESTART, 2000);
     (void)lt_counters_flush(true);
     esp_restart();
 }

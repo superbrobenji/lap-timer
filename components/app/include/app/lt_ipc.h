@@ -12,7 +12,9 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 
+#include "app/lt_proto.h"    /* LT_SESSION_ID_MAX */
 #include "core/event.h"
 #include "core/ring.h"
 #include "core/types.h"
@@ -44,20 +46,38 @@ typedef enum {
     LOGGER_REBUILD_SUMMARY = 2,   /* force a .sum rewrite now */
     LOGGER_EVICT           = 3,   /* run the §12.7 eviction check now */
     LOGGER_RECOUNT         = 4,   /* re-prime the status.h cache now (cmd.c's DELETE, Plan 5.6 final-review A I1) */
+    LOGGER_DELETE_SESSION  = 5,   /* unlink .log + .sum for id, re-prime the cache (debt sweep A #73) */
 } log_req_type_t;
 
+/* debt sweep A #59/#73: a bounded request/reply. requester == NULL is fire-and-forget (today's
+ * OPEN/RECOUNT callers, unchanged); non-NULL means the logger calls
+ * xTaskNotify(requester, (uint32_t)(int32_t)rc, eSetValueWithOverwrite) once handle_request()
+ * finishes this request (logger.c's drain loop) -- see logger_request_sync() below, the only
+ * intended way to set it. */
 typedef struct {
-    uint8_t  type;        /* log_req_type_t */
-    uint8_t  mode;        /* OPEN: session mode (§12.1) */
-    uint8_t  reason;      /* CLOSE: END.reason (§12.3) */
-    uint8_t  _pad;
-    uint16_t venue_id;    /* OPEN: venue id for the .sum HDR/VENUE frame */
-    uint16_t layout_id;   /* OPEN: layout id */
-    int64_t  gps_us;      /* OPEN: start_gps_us; CLOSE: END gps_us (0 if unknown) */
+    uint8_t      type;        /* log_req_type_t */
+    uint8_t      mode;        /* OPEN: session mode (§12.1) */
+    uint8_t      reason;      /* CLOSE: END.reason, core/ses.h SES_END_* (§12.3) */
+    uint8_t      _pad;
+    uint16_t     venue_id;    /* OPEN: venue id for the .sum HDR/VENUE frame */
+    uint16_t     layout_id;   /* OPEN: layout id */
+    int64_t      gps_us;      /* OPEN: start_gps_us; CLOSE: END gps_us (0 if unknown) */
+    TaskHandle_t requester;   /* NULL = fire-and-forget; else notified with the rc when handled */
+    char         id[LT_SESSION_ID_MAX + 1];   /* DELETE_SESSION: NUL-terminated id, validated by the sender */
+    uint8_t      _pad2[1];
 } log_request_t;
-_Static_assert(sizeof(log_request_t) == 16, "log_request_t must be 16 B (§4.4)");
+_Static_assert(sizeof(log_request_t) == 32, "log_request_t must be 32 B (§4.4, debt sweep A)");
 
 extern QueueHandle_t g_log_req_q;
+
+/* Post req (requester is filled in with the calling task's own handle), wake the logger, and wait
+ * up to timeout_ms for its rc. Returns the logger's rc (0 ok, <0 its error), -1 when the queue is
+ * full, -2 on timeout. Waits on the CALLING task's own notification index 0 -- confirmed clear of
+ * the two intended callers (supervisor, export_serial/console): a firmware-wide grep for task
+ * notification calls before this landed found only logger.c and link.c, each notifying its OWN
+ * task (a different task from either caller) -- see the debt sweep A T3 report. Never call from
+ * the ui or pipeline task: both must never block on the logger, and neither has any reason to. */
+int logger_request_sync(const log_request_t *req, uint32_t timeout_ms);
 
 /* result_q -- pipeline -> logger, full engine results (depth 4). The 3.3 logger could only build a
  * minimal LAP/DRAG_RUN from the EV_LAP_COMPLETE/EV_DRAG_DONE payload (§4.5); 3.4 hands it the whole
