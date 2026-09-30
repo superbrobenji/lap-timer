@@ -39,8 +39,11 @@ Rendering is unchanged for both pages except the `have_best_sector` gate; 7b §5
 **Gate table, one source of truth.** A pure builder in `core/dragengine`:
 
 ```c
-/* Fill *out from the §11.1 default gate table and the user config: the bench list for the configured unit
- * (cfg->drag.benches_kmh / benches_mph) replaces the default SPEED_FROM0 benches; ids stay stable. */
+/* Fill *out from the §11.1 default gate table (drag_cfg_defaults()) and NEVER rewrite it (Ruling
+ * R-6, final review I1/I2): gate names/thresholds stay km/h regardless of cfg->units, since
+ * SPEED_FROM0 gate `a` is km/h by core/drag.h's own contract. out->units mirrors cfg->units for
+ * display only; the headline bench list (out->benches_kmh/n_benches) is always copied from
+ * cfg->drag.benches_kmh (km/h); benches_mph is unused until a future mph-defined gate table (§10). */
 void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
 ```
 
@@ -66,7 +69,7 @@ typedef struct {
 int pipeline_drag_snapshot(pipe_drag_t *out);
 ```
 
-The model has one `drag[]`/`drag_n` array shared by the three DRAG pages, so the ui fills it for the page being shown, from the snapshot, on every drag event and on every page change: page 0 = the current run's hit gates in hit order (as today), page 1 = all gates of the last run in table order with `present` flags, page 2 = the session best per gate (`have_best`). BRAKE rows take `is_distance = true`, `dist_m = dist_cm / 100` from the snapshot (the event carries only the speed). This replaces today's append-only handling, which only ever fed page 0. The renderer is unchanged.
+The model has one `drag[]`/`drag_n` array shared by the three DRAG pages, so the ui fills it for the page being shown, from the snapshot, on every drag event and on every page change: page 0 = the current run's hit gates in hit order (as today), page 1 = all gates of the last run in table order with `present` flags, page 2 = the session best per gate (`have_best`). BRAKE rows take `is_distance = true`, `dist_m = dist_cm / 100` from the snapshot (the event carries only the speed). This replaces today's append-only handling, which only ever fed page 0. The renderer is unchanged. **Superseded by final review I3 (ruling R-7):** page 1 lists hit gates only (same semantics as page 0, not "all gates with `present` flags"), and page 2 lists only gates with a session best (`have_best`), never an absent row; `drag_n` can therefore be up to eleven, and the renderer (`render_drag_gate_list`, unchanged claim above no longer holds) caps the drawn list at `2*DLIST_ROWS` (8) and appends `+<n>` to the header for the rest.
 
 **Units.** `screen_model_t` gains `uint8_t units` (`CFG_UNITS_KMH`/`CFG_UNITS_MPH`), set from `s_cfg.units` at boot and when the menu toggles it (`s_dirty = true`). One pure helper `uint16_t speed_display(uint16_t cms, uint8_t units)` (cm/s → whole km/h or mph, integer maths, rounded) is used by every speed on screen: page 2 `MAX SPD` and the DRAG trap row (gate times and distances are not speeds and never convert). The unit string (`km/h`/`mph`) is drawn in `FONT_SMALL` once per place: page 2 label becomes `MAX SPD km/h`; the DRAG trap row `@173` gains a small suffix at `DCARD_LABEL_X + FONT_SMALL.w + DCARD_AT_GAP + 3*FONT_MED.w + DCARD_UNIT_GAP` on the label baseline. Times are never converted. The model keeps `max_speed_cms` (raw) instead of `max_speed_kmh`.
 
@@ -76,7 +79,7 @@ The model has one `drag[]`/`drag_n` array shared by the three DRAG pages, so the
 - `screen_model_t` gains `uint32_t cur_ms` (running lap time) and `bool cur_running`; the reserved `cur_ms_at_gate` is removed.
 - Tick: in `ui_loop_iter()`, when `s_cfg.display.live_clock && s_lap_start_mono_us != 0 && screen == SCR_RIDING && page == 0 && mode == LAP` and at least 1000 ms passed since the last tick: `cur_ms = (now - s_lap_start_mono_us) / 1000`, `s_dirty = true`, and a flag `s_clock_tick = true` for the refresh bookkeeping.
 - Card rendering (amends 7b §4): while `cur_running` is set (the ui sets it only when the live clock is on and a lap is running) the LAST cell shows label `CUR` and value `m:ss` in `FONT_MED` (`fmt_time_s()`, whole seconds, ≤ 5 glyphs); LAST is not shown while the clock runs; BEST unchanged. With the clock off the card is exactly the 7b card.
-- Policy: a render triggered only by a clock tick is a partial that does **not** increment `partial_count` and never promotes to a full; it obeys `throttled` and `dead` like any refresh. Event-driven renders in the same iteration keep their normal accounting. Implementation: `ui.c` passes `dirty = true, wants_full = false` and, when `s_clock_tick` was the only cause, skips the counter/timestamp updates after a successful partial.
+- Policy: a render triggered only by a clock tick is a partial that does **not** increment `partial_count` and never promotes to a full; it obeys `throttled` and `dead` like any refresh. Event-driven renders in the same iteration keep their normal accounting. Implementation: `ui.c` passes `dirty = true, wants_full = false` and, when `s_clock_tick` was the only cause, skips only the `partial_count` increment after a successful partial. **Final review I4 (ruling R-8):** ticks do not increment `partial_count`; they DO stamp `last_partial_us`, so the 30 s thermal throttle applies to them like any refresh.
 
 ## 5. Dirty-region rendering (#84)
 
@@ -118,7 +121,7 @@ After two sim laps: page 1 shows sector times and THEO (photo); page 2 shows a n
 
 ## 10. Out of scope
 
-Real GPS/IMU health flags (Plan 8; #82 with them), mph-defined gate thresholds beyond the bench list, predictive lap time, sector-level ghosting tuning, the 2.9" on hardware.
+Real GPS/IMU health flags (Plan 8; #82 with them), mph-defined gate thresholds (bench list in mph) — follow-up issue, predictive lap time, sector-level ghosting tuning, the 2.9" on hardware.
 
 ## 11. Implementation notes (2026-09-29/30, `p7c-display-closure` T1–T8)
 
@@ -146,6 +149,7 @@ Full task-by-task detail lives in `.superpowers/sdd/2026-09-29-plan-7c-display-c
 
   Without the middle rows, an unchanged frame with `s_wants_full` set (e.g. the UP+DOWN ghost-clear combo while riding) fell through to `partial_window_or_full()`'s `LT_ASSERT_RET(s_diff.valid, ...)` on ordinary, reachable control flow (fix round 1), and a first attempt at the guard over-cleared `s_refresh_pending` on a throttled `RF_NONE`, dropping the "owed, not dropped" guarantee (fix round 2, corrected to `s_refresh_pending = (kind == RF_NONE) ? in.throttled : false`).
 - **Task 8 ruling (accepted deviation):** extracting `pipeline_init_drivers()` (the GPS/IMU bring-up block, moved out of `pipeline_init()` verbatim) was not in the original brief — adding the two `sup_boot_report()` calls inline pushed `pipeline_init()` from 59 to 61 code lines, past the lint tool's 60-line cap. The extraction is a verbatim relocation of an already-self-contained block (it touches none of `pipeline_init()`'s other locals) and was accepted on review as the same pattern the codebase already uses elsewhere (e.g. `sup.c`'s `ota_lifecycle()` grouping).
+- **R-6 (final review I1/I2, 2026-09-30):** `drag_cfg_from_user` never rewrites the gate table (`gates[]`/`n_gates` stay exactly `drag_cfg_defaults()`'s eleven) — gate names/thresholds stay km/h regardless of `cfg->units`, since `core/drag.h` documents SPEED_FROM0/SPEED_RANGE/BRAKE `a`/`b` as km/h unconditionally. `out->units` mirrors `cfg->units` for display only; the headline bench list (`benches_kmh`/`n_benches`) is always copied from `cfg->drag.benches_kmh` (km/h), clamped by both array sizes; `benches_mph` is unused until a future mph-defined gate table (§10, follow-up issue). Cost if wrong: before this fix, toggling to mph silently rewrote the SPEED_FROM0 gates' `a` from the mph bench-list numbers treated as km/h (e.g. a 60 mph bench turned the "0-60" gate into a 60 km/h gate) — a correctness bug in every mph session's DRAG results, not merely a label mismatch.
 
 ### Measured DRAM / `.bss`
 
@@ -169,6 +173,8 @@ Free static DRAM (`idf.py -B build/<env> size`, "Remain"), measured after T7's R
 | `moto_sim` (ws213v4) | 4440 B | yes (was 2776 B before R-5) |
 | `moto_neo6m` | 5768 B | yes |
 | `moto_sim_ws29v2` (`PANEL=ws29v2`, not owned hardware) | 2776 B | not gated |
+
+**M12 (final review) reconciliation:** non-framebuffer statics grew +664 B (T3 +504, T5 +112, T6 +24, T8 +24) against the plan's ≤ 160 B guideline (§7); the DRAM floor (≥ 4 KB on `moto_sim`) holds at 4440 B after R-5.
 
 ### Known, deferred (verbatim from the ledger)
 

@@ -97,7 +97,7 @@ Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BO
 └──────────────────────────────────────────────┘
 ```
 
-Two columns at x 4 and x 128. `MAX SPD`: the value is `km/h` today; unit conversion is a follow-up (nothing converts `max_speed_kmh`). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
+Two columns at x 4 and x 128. `MAX SPD`: the value is `km/h` today; unit conversion is a follow-up (nothing converts `max_speed_kmh`) — **amended by Plan 7c §3:** `speed_display(max_speed_cms, m->units)` converts at render time and the label carries the unit suffix (`MAX SPD km/h` / `MAX SPD mph`). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
 
 ## 7. DRAG pages
 
