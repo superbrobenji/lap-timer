@@ -45,4 +45,5 @@ int cfg_validate(cfg_t *c);                       /* clamps; returns number of c
 int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; "version" is ignored (owned by firmware); arrays longer than capacity are rejected; 0 ok / -1 error with err */
 int cfg_to_json(const cfg_t *c, char *out, size_t cap);                             /* bytes written or -1 */
 int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version */
+bool cfg_migrate_supported(uint8_t from_version);      /* true for exactly the versions cfg_migrate() accepts */
 #endif
