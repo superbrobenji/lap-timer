@@ -45,7 +45,9 @@ typedef enum {
     LOGGER_CLOSE_SESSION   = 1,   /* write END, finalise .sum, close .log */
     LOGGER_REBUILD_SUMMARY = 2,   /* force a .sum rewrite now */
     LOGGER_EVICT           = 3,   /* run the §12.7 eviction check now */
-    LOGGER_RECOUNT         = 4,   /* re-prime the status.h cache now (cmd.c's DELETE, Plan 5.6 final-review A I1) */
+    /* 4 was LOGGER_RECOUNT (re-prime the status.h cache); folded into LOGGER_DELETE_SESSION's own
+     * handler when op_delete became its only sender (debt sweep A #73) -- the value is retired,
+     * not reused, so a stray old build's request is never misread as something else. */
     LOGGER_DELETE_SESSION  = 5,   /* unlink .log + .sum for id, re-prime the cache (debt sweep A #73) */
 } log_req_type_t;
 
