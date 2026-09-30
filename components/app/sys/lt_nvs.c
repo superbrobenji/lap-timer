@@ -97,8 +97,12 @@ static int64_t        s_ring_persist_us;
  * buffer race without this. save_framed/load_framed never call blob_lock/blob_unlock themselves
  * (the ring path already holds it inside errlog_add/lt_errlog_clear, and taking it again would
  * deadlock on this non-recursive mutex); every OTHER caller -- persist_counters, lt_crashlog_push,
- * and lt_nvs_init's boot-time loads -- takes it around its own call instead. Static allocation (no
- * malloc after init), task-context only (the assert hook runs in task context, never an ISR). */
+ * and lt_nvs_init's boot-time loads -- takes it around its own call instead. errlog_add (and so
+ * save_framed, via errlog_persist) runs on ANY task that hits a failing CORE_ASSERT_/LT_ASSERT_ --
+ * it is the universal assert-report sink -- which explicitly includes the ui task (~340 B of
+ * stack headroom, #53); that reachable set is exactly why s_blob_scratch is a static buffer and
+ * never a stack one. Static allocation (no malloc after init), task-context only (the assert hook
+ * runs in task context, never an ISR). */
 static SemaphoreHandle_t s_blob_lock;
 static StaticSemaphore_t s_blob_lock_buf;
 
@@ -149,8 +153,9 @@ static int load_framed(nvs_handle_t h, const char *key, uint8_t ver, void *dst, 
     return blob_unwrap(ver, s_blob_scratch, sz, dst, expect, NULL);
 }
 
-/* Save src (n bytes) under key through the framer, via the shared s_blob_scratch. 0 ok. Does NOT
- * take blob_lock itself -- see the F1 comment above for why, and which callers do. */
+/* Save src (n bytes) under key through the framer, via the shared s_blob_scratch: no stack
+ * buffer -- reachable from every task via the assert sink. 0 ok. Does NOT take blob_lock itself
+ * -- see the F1 comment above for why, and which callers do. */
 static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n)
 {
     LT_ASSERT_RET(key != NULL && src != NULL, NVS_ASSERT_CODE, -1);
