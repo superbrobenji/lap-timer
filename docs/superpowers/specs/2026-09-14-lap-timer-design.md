@@ -2073,6 +2073,8 @@ At boot, `crash_log` (last 3 entries) is shifted with `{reset_reason, previous u
 - No sample logging, no BLE, no WiFi, one full-screen "SAFE MODE" render then display idle.
 - Supervisor clears safe mode after `SAFE_MODE_CLEAR_S` of uptime (persisted), next boot is normal.
 - A crash loop detected while `boot_cnt <= safe_until` (the previous boot was already safe mode) escalates to **recovery mode** (`safe_lvl` = 2, `SYS_RECOVERY_MODE`): supervisor, link, logger and the console/OTA export start; pipeline, GPS power and ui do not. The same `SAFE_MODE_CLEAR_S` uptime rule clears both levels; `dbg safe clear` clears them immediately.
+- A boot inside the window without a new loop resumes the persisted level (recovery stays recovery until cleared).
+- An OTA reboot clears the gate so the new image boots normally and runs its own validation trial; if it crash-loops, safe mode re-arms from scratch.
 
 ### 17.6 Boot self-test
 
