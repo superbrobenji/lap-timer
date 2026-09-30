@@ -1,6 +1,9 @@
 /* lt_ipc.c -- definitions + static storage for the §4.4 pipeline<->logger channels. */
 #include "app/lt_ipc.h"
 #include "app/lt_assert.h"
+#include "app/logger.h"      /* logger_notify() */
+
+#include "freertos/task.h"
 
 #define IPC_ASSERT_CODE 0x0B80
 
@@ -52,4 +55,25 @@ void lt_ipc_init(void)
     LT_ASSERT_VOID(g_log_req_q != NULL, IPC_ASSERT_CODE);
     LT_ASSERT_VOID(g_result_q != NULL, IPC_ASSERT_CODE);
     LT_ASSERT_VOID(g_cmd_q != NULL, IPC_ASSERT_CODE);
+}
+
+/* debt sweep A #59/#73: bounded request/reply over g_log_req_q (see lt_ipc.h's doc comment for
+ * the notification-index reasoning). Posts a copy of *req with requester overwritten to the
+ * calling task's own handle, wakes the logger, and blocks on this task's own notification (index
+ * 0) for the logger's rc. The stale-notification clear guards a caller that reused this helper
+ * after a previous call timed out: that earlier logger reply can still land after the timeout
+ * already returned -2, and would otherwise sit as a pending notification value that the NEXT
+ * logger_request_sync() call's xTaskNotifyWait would immediately (and wrongly) consume. */
+int logger_request_sync(const log_request_t *req, uint32_t timeout_ms)
+{
+    LT_ASSERT_RET(req != NULL, IPC_ASSERT_CODE, -1);
+    LT_ASSERT_RET(g_log_req_q != NULL, IPC_ASSERT_CODE, -1);
+    log_request_t r = *req;
+    r.requester = xTaskGetCurrentTaskHandle();
+    (void)xTaskNotifyStateClear(NULL);                       /* drop a stale notification from an earlier timeout */
+    if (xQueueSend(g_log_req_q, &r, 0) != pdTRUE) return -1;
+    logger_notify();
+    uint32_t val = 0;
+    if (xTaskNotifyWait(0, UINT32_MAX, &val, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return -2;
+    return (int)(int32_t)val;
 }

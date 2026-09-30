@@ -33,6 +33,11 @@
 
 #include <stdint.h>
 
+/* Session id bound (§12.1: "S%05u_%03u", 10 chars). Debt sweep A #60's validator lands beside
+ * this in Task 5; this define alone lands now so log_request_t (Task 3, #59) can size its id
+ * field from it. */
+#define LT_SESSION_ID_MAX 10
+
 /* ---- §18.4 command-response framing markers ---- */
 #define LT_FRAME_BEGIN_FMT "---BEGIN %s %u---\r\n"   /* args: name, size */
 #define LT_FRAME_END_FMT   "---END %08x---\r\n"       /* args: crc32 (hex, zero-padded) */

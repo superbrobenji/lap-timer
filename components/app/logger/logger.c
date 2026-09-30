@@ -355,12 +355,14 @@ static void open_session(const log_request_t *req)
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
-static void close_session(const log_request_t *req)
+/* Returns 0 always (nothing to report yet -- close only ever succeeds or has nothing open; a
+ * future failure surface would return a negative rc here for logger_request_sync's caller). */
+static int close_session(const log_request_t *req)
 {
-    LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
-    if (!s_open) return;
-    LT_ASSERT_VOID(s_id[0] != '\0', LOG_ASSERT_CODE);   /* valid session state: s_open implies a set id */
-    LT_ASSERT_VOID(s_log_fd >= 0, LOG_ASSERT_CODE);     /* valid session state: s_open implies an open fd */
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, 0);
+    if (!s_open) return 0;
+    LT_ASSERT_RET(s_id[0] != '\0', LOG_ASSERT_CODE, 0);   /* valid session state: s_open implies a set id */
+    LT_ASSERT_RET(s_log_fd >= 0, LOG_ASSERT_CODE, 0);     /* valid session state: s_open implies an open fd */
     do_write();
     uint8_t tmp[FRAME_TMP_CAP];
     int n = ses_encode_end(req->gps_us, req->reason, tmp, sizeof tmp);
@@ -379,22 +381,27 @@ static void close_session(const log_request_t *req)
     s_bytes_since_info = 0;
     status_cache_update(s_free_kb_cached, s_sessions_cached);
     ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
+    return 0;
 }
 
-static void handle_request(const log_request_t *req)
+/* Returns the rc this request's handling produced -- 0 ok, <0 an error -- so drain_requests can
+ * notify a synchronous caller (logger_request_sync, debt sweep A #59/#73). OPEN/REBUILD/EVICT/
+ * RECOUNT have no failure surface of their own yet (their own I/O failures are already recorded
+ * by errlog_add inside), so they always return 0. */
+static int handle_request(const log_request_t *req)
 {
-    LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, 0);
     switch (req->type) {
-    case LOGGER_OPEN_SESSION:    open_session(req); break;
-    case LOGGER_CLOSE_SESSION:   close_session(req); break;
+    case LOGGER_OPEN_SESSION:    open_session(req); return 0;
+    case LOGGER_CLOSE_SESSION:   return close_session(req);
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
-    case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); break;
-    case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; break;   /* force an eviction pass this loop */
+    case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
+    case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; return 0;   /* force an eviction pass this loop */
     /* cmd.c's DELETE posts this after unlinking a .sum: a delete is otherwise invisible to the
      * status.h sessions count (only close_session ever increments it). status_cache_prime() reruns
      * the name-only session_count() + a fresh storage_free_kb() read (Plan 5.6 final-review A I1). */
-    case LOGGER_RECOUNT:         status_cache_prime(); break;
-    default: break;
+    case LOGGER_RECOUNT:         status_cache_prime(); return 0;
+    default: return 0;
     }
 }
 
@@ -627,9 +634,12 @@ static void eviction_check(void)
     cache_publish_free(storage_free_kb());
 }
 
-/* Drain the logger's control queue (open/close/rebuild/evict commands, §4.4). Pulled out of
- * logger_task's own loop (rather than inlined there, as it used to be) so its Rule 2 drain-bound
- * assertion can safely `return` out of a plain helper on trip, instead of out of the task body. */
+/* Drain the logger's control queue (open/close/rebuild/evict/delete commands, §4.4). Pulled out
+ * of logger_task's own loop (rather than inlined there, as it used to be) so its Rule 2 drain-
+ * bound assertion can safely `return` out of a plain helper on trip, instead of out of the task
+ * body. debt sweep A #59/#73: a non-NULL requester (only logger_request_sync sets one) gets
+ * xTaskNotify'd with this request's rc once handle_request() has finished it -- the logger task
+ * never waits on anything the requester holds, so this notify can never deadlock. */
 static void drain_requests(void)
 {
     LT_ASSERT_VOID(g_log_req_q != NULL, LOG_ASSERT_CODE);   /* valid state: created by lt_ipc_init() at boot */
@@ -637,7 +647,8 @@ static void drain_requests(void)
     uint32_t n = 0;
     while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) {
         LT_ASSERT_VOID(n++ < LOG_REQ_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
-        handle_request(&req);
+        int rc = handle_request(&req);
+        if (req.requester != NULL) (void)xTaskNotify(req.requester, (uint32_t)(int32_t)rc, eSetValueWithOverwrite);
     }
 }
 
