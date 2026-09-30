@@ -427,20 +427,26 @@ static int delete_session(const log_request_t *req)
     if (!has_log && !has_sum) return -3;                    /* neither file existed */
     char path[48];
     int rc = 0;
+    int rc_sum = 0;
     if (has_log) {
         (void)snprintf(path, sizeof path, "/sessions/%s.log", req->id);
         rc = sto_unlink(path);
     }
     if (has_sum) {
         (void)snprintf(path, sizeof path, "/sessions/%s.sum", req->id);
-        int rc_sum = sto_unlink(path);
+        rc_sum = sto_unlink(path);
         if (rc == 0) rc = rc_sum;
     }
     /* I2 (Ruling F-3): incremental update instead of a status_cache_prime() rescan -- a removed
      * .sum is the only thing that changes the session count (a .log-only delete never counted
      * toward it, see session_count()'s doc comment), so decrement in place and mirror
-     * close_session's cache-publish tail rather than re-listing /sessions. */
-    if (has_sum && s_sessions_cached > 0) s_sessions_cached--;
+     * close_session's cache-publish tail rather than re-listing /sessions. Gated on rc_sum == 0
+     * (final residual, re-review): has_sum alone only means "a .sum existed and an unlink was
+     * attempted" -- a failed unlink leaves the file on disk but would still decrement the count,
+     * wrong until the next full rescan (boot only, now that this path is incremental). has_sum
+     * stays in the condition too, so a .sum that never existed (sto_unlink returns 0 on ENOENT)
+     * does not decrement either. */
+    if (has_sum && rc_sum == 0 && s_sessions_cached > 0) s_sessions_cached--;
     s_free_kb_cached = storage_free_kb();
     s_bytes_since_info = 0;
     status_cache_update(s_free_kb_cached, s_sessions_cached);
