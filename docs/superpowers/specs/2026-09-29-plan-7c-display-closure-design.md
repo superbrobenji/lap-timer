@@ -119,3 +119,63 @@ After two sim laps: page 1 shows sector times and THEO (photo); page 2 shows a n
 ## 10. Out of scope
 
 Real GPS/IMU health flags (Plan 8; #82 with them), mph-defined gate thresholds beyond the bench list, predictive lap time, sector-level ghosting tuning, the 2.9" on hardware.
+
+## 11. Implementation notes (2026-09-29/30, `p7c-display-closure` T1–T8)
+
+Full task-by-task detail lives in `.superpowers/sdd/2026-09-29-plan-7c-display-closure/` (`progress.md` ledger, `task-1-report.md`…`task-8-report.md`). This section records what a future reader needs without opening that directory.
+
+### Rulings
+
+- **R-1 (pre-flight, carried by T6):** `fmt_time_s` clamps at 99:59 (minutes ≥ 100 show `99:59`) — keeps the CUR cell ≤ 5 glyphs so it never collides with its label. Cost if wrong: a > 100-minute "lap" shows a frozen clock (irrelevant on track).
+- **R-2 (pre-flight, carried by T3):** T3 factors one static seqlock reader, `snap_read(kind, dst, size)`, selecting the source record by enum (laps ring / best / drag) with no function pointers; `pipeline_lap_at`/`pipeline_laps_snapshot` keep their existing loops unchanged. Avoids three verbatim copies without violating `--enforce-fnptr`. Cost if wrong: a slightly larger diff in `pipeline.c`.
+- **Task 3 ruling (coverage gap, accepted):** no host unit test exists for `publish_drag_snapshot`/`snap_read` — `pipeline.c` is FreeRTOS-bound and has no host harness. Coverage comes from the `p07c-d1` bench gate (a DRAG run on the sim → page 2 bests). Cost if wrong: a snapshot-mapping bug surfaces at the bench, not in CI.
+- **R-3 (T4):** the plan's assumption that "km/h goldens stay byte-identical" is wrong for any case that renders a speed — the page-2 label gains " km/h" and the DRAG trap row gains a "km/h" suffix, so `lap_p2_stats*` and the drag cases with a trap legitimately change on both canvases (re-dumped, eyeballed, promoted); every other golden stayed byte-identical. Cost if wrong: a silently changed unrelated golden would hide a regression — the implementer had to list every changed golden explicitly.
+- **R-4 (T4 fix 1):** reverses the plan's `trap_speed` deviation. `drag_row_t` carries the raw `trap_cms`; the renderer converts with `speed_display(trap_cms, m->units)` at render time. `handle_drag_gate` (and T5's row-fill helper) store the raw cm/s. This is spec-compliant (§3's "convert at render time only") and toggle-safe (a units change mid-session no longer mislabels an already-drawn row). Cost if wrong: none foreseen — the km/h goldens staying byte-identical verifies the digit mapping.
+- **R-5 (T7 pre-review fix):** size **both** framebuffers (`s_fb_bits` and the new `s_fb_prev_bits`) by the compile-time canvas (`FB_STRIDE = CANVAS_W/8`, `FB_H = CANVAS_H`: 3904 B on `ws213v4`, 4736 B on `ws29v2`) instead of the fixed 296×128 worst case. The "one build holds either panel" argument that motivated the worst-case sizing is stale since Plan 7 T3 made the canvas a `PANEL`-time constant, and `fb_init` already only ever touches the canvas-sized prefix. Recovers 1664 B on the 213 build (measured DRAM before/after below). Cost if wrong: a `ws29v2` build is unaffected either way; a 213 build with a mismatched driver stride would show at the bench gate (`disp_blit` uses the panel's own `ram_w`).
+- **Task 3 fix round 1 (ordering, both publish paths):** `s_laps[]`/`s_best` and `s_dragsnap` must be published *before* the event that announces them is enqueued, or a same-task consumer reacting to the event it just dequeued has no structural guarantee of seeing that data. Fixed on both paths: in `engine_cb()`, `on_lap_complete(ev->gps_us)` now runs before `emit_event(ev)` for `EV_LAP_COMPLETE` only (`EV_SECTOR`/`EV_DRAG_DONE` publish nothing a same-event consumer reads back, so their order is unchanged); in `on_raw()`'s `MODE_DRAG` block, `publish_drag_snapshot()` was hoisted to run immediately after `drag_on_fused()` returns, before the `engine_cb()` forwarding loop. Both confirmed safe by tracing `drag_on_fused()`/`update_best()`'s synchronous settlement before `emit()`.
+- **Task 6/7 tick-accounting rules — "a render that resolves something owed is never only a tick":** `render_and_refresh()` computes `tick_only = s_clock_tick && !s_refresh_pending` at function entry, before anything else can change `s_refresh_pending`, and folds it back into `s_clock_tick` so `do_refresh()`'s existing `if (!s_clock_tick)` partial-accounting gate reads the corrected value. T6 fix 1 closed a related gap: `ui_loop_iter()`'s throttle-pending branch (fires independent of `s_dirty` once the 30 s window reopens) now clears `s_clock_tick = false` before calling `render_and_refresh()`, so a throttled-backlog render always gets real `DISP_PARTIAL` accounting (`s_partial_count++`, `s_last_partial_us = now`) even if a clock tick happened to tag it moments earlier in the same iteration — otherwise the stamp never advances and the 30 s thermal rate limit is bypassed indefinitely. T7 added the unchanged-frame decision table for `render_and_refresh()` (an unchanged frame is `fb_diff_rect() == false`, i.e. `s_diff.valid == false`):
+
+  | `changed` | `wants_full` | policy `kind` | outcome |
+  |---|---|---|---|
+  | true | any | any | normal path (diff/refresh/accounting unaffected by this task) |
+  | false | false | (policy not asked) | early skip — no refresh, `s_refresh_pending = false`, `s_clock_tick = false` |
+  | false | true | `RF_FULL` | acted on normally (a full never calls `partial_window_or_full()`, so an invalid `s_diff` is never dereferenced) |
+  | false | true | `RF_PARTIAL` | skip — nothing to redraw on an unchanged frame; `s_refresh_pending = false` |
+  | false | true | `RF_NONE`, throttled | skip — owed; `s_refresh_pending = true` (the 30 s retry still fires) |
+  | false | true | `RF_NONE`, dead | skip — `s_refresh_pending = false` (dead re-arms on its own via `dead_retry()`) |
+
+  Without the middle rows, an unchanged frame with `s_wants_full` set (e.g. the UP+DOWN ghost-clear combo while riding) fell through to `partial_window_or_full()`'s `LT_ASSERT_RET(s_diff.valid, ...)` on ordinary, reachable control flow (fix round 1), and a first attempt at the guard over-cleared `s_refresh_pending` on a throttled `RF_NONE`, dropping the "owed, not dropped" guarantee (fix round 2, corrected to `s_refresh_pending = (kind == RF_NONE) ? in.throttled : false`).
+- **Task 8 ruling (accepted deviation):** extracting `pipeline_init_drivers()` (the GPS/IMU bring-up block, moved out of `pipeline_init()` verbatim) was not in the original brief — adding the two `sup_boot_report()` calls inline pushed `pipeline_init()` from 59 to 61 code lines, past the lint tool's 60-line cap. The extraction is a verbatim relocation of an already-self-contained block (it touches none of `pipeline_init()`'s other locals) and was accepted on review as the same pattern the codebase already uses elsewhere (e.g. `sup.c`'s `ota_lifecycle()` grouping).
+
+### Measured DRAM / `.bss`
+
+`moto_sim` (`xtensa-esp32-elf-size`), `.bss` by task, one build at a time, ccache disabled:
+
+| Point | `.bss` | Delta |
+|---|---|---|
+| After T1+T2 (base `8a730b1`, before T3) | 101009 B | — (pre-T1 baseline not separately measured) |
+| After T3 | 101513 B | +504 B |
+| After T4 | 101513 B | +0 B |
+| After T5 | 101625 B | +112 B |
+| After T6 | 101649 B | +24 B |
+| After T7, before ruling R-5 | 106409 B | +4760 B (worst-case 296×128 buffer sizing) |
+| After T7, ruling R-5 fix | 104745 B | −1664 B (canvas-sized buffers) |
+| After T8 (branch head, `e5f92fc`) | 104769 B | +24 B |
+
+Free static DRAM (`idf.py -B build/<env> size`, "Remain"), measured after T7's R-5 fix; T8's own `.bss` delta (+24 B, uniform across envs) was not re-measured per environment:
+
+| Env | Free DRAM | ≥ 4 KB floor? |
+|---|---|---|
+| `moto_sim` (ws213v4) | 4440 B | yes (was 2776 B before R-5) |
+| `moto_neo6m` | 5768 B | yes |
+| `moto_sim_ws29v2` (`PANEL=ws29v2`, not owned hardware) | 2776 B | not gated |
+
+### Known, deferred (verbatim from the ledger)
+
+- "stats_fold.c uses two CORE_ASSERT_VOID null checks; render.c fb_diff_rect combines three in one CORE_ASSERT_RET — house style only" (T1).
+- "render_and_refresh clears s_clock_tick on both exit paths — harmless duplication" (T6).
+- "with SYS_DISP_DEAD and SYS_DISP_TEMP_THROTTLE both set, RF_NONE is attributed to 'throttled' and s_refresh_pending retries every 30 s until dead_retry clears — benign" (T7).
+
+### Test names that differ from §8's list
+
+§8 above lists the tests as planned; the implemented names in `test/test_screens.c` and `test/test_drag_cfg.c` are `lap_p1_filled`, `lap_p2_stats_filled`, `lap_p2_stats_mph`, `drag_p0_trap_mph`, `lap_p0_cur_clock`, `boot_four_lines`. Of these, `lap_p1_filled`, `lap_p2_stats_mph`, `lap_p0_cur_clock`, and `boot_four_lines` match §8 verbatim. Two differ: `lap_p2_stats_filled` replaces the planned `lap_p2_stats_kmh` (same coverage — the model defaults to `units = 0`/km/h via `memset`, exercised alongside the new `lap_p2_stats_mph`). The planned `drag_p0_named_kmh`/`drag_p1_named_mph` were not implemented as separate named tests: names reach the renderer only as strings, so their coverage is `drag_p0_trap_mph` (the mph-unit-suffix case) plus `test_drag_cfg.c`'s `test_labels_for_every_default_gate` (every default gate's label string, at the pure-function level) — the pre-existing `test_drag_p0_gate_speed`/`test_drag_p0_distance`/`test_drag_p1_gates`/`test_drag_p2_best` (from Plan 7b) now also exercise real names end to end via T5's rewiring, unrenamed.
