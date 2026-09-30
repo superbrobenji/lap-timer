@@ -138,6 +138,14 @@ else()
     set(CFG_GPS_SIM 0)
 endif()
 
+# imu_sim bench build marker (Plan 7c T8, design §6): same idea as CFG_GPS_SIM above, so the
+# pipeline can report the BOOT screen's IMU slot as SIM instead of OK/FAIL.
+if(IMU STREQUAL "sim")
+    set(CFG_IMU_SIM 1)
+else()
+    set(CFG_IMU_SIM 0)
+endif()
+
 # device: the only JSON venue parsed on a firmware build is gps_sim's 330-byte capture venue
 # (~48 tokens); uploads of large venues are a host-tool path (512, trk_json.c's host fallback).
 set(CFG_TRK_JSON_TOKS 64)

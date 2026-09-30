@@ -43,7 +43,12 @@ typedef struct {
     char     label[8];   /* "0-100" / "1/4" / "60ft" / "100-0" / "100-200" / "1000ft" ... */
     uint32_t t_ms;        /* elapsed for the gate; 0 + !present => "--" (ignored if is_distance) */
     bool     present;     /* gate hit this run */
-    uint16_t trap_kmh;    /* trap speed for the 1/4 row (0 = none) */
+    uint16_t trap_cms;    /* trap speed for the 1/4 row (0 = none), raw cm/s straight from the gate
+                            * event (EV_DRAG_GATE's arg32b) -- the display unit conversion happens
+                            * at render time only (speed_display(trap_cms, m->units)), same rule as
+                            * every other speed on screen (design §3, ruling R-4, Plan 7c T4 fix 1):
+                            * freezing it in the display unit at event time would mislabel it after
+                            * a later units toggle. */
     bool     has_trap;
     /* #40: the 100-0 braking gate (DRAG_BRAKE, core/drag.h) is a stopping DISTANCE in metres, not
      * an elapsed time -- t_ms has no meaning for it. When is_distance is set, the renderer shows
@@ -56,10 +61,17 @@ typedef struct {
 typedef struct {
     uint8_t  mode; /* SCR_MODE_LAP / _DRAG (meaningful when screen == SCR_RIDING) */
     uint8_t  page; /* 0/1/2 */
+    uint8_t  units; /* Plan 7c T4 (design §3): 0 = km/h, 1 = mph (CFG_UNITS_KMH/CFG_UNITS_MPH); set
+                      * from s_cfg.units at boot and on every menu toggle -- every speed_display()
+                      * call on screen (LAP page 2 MAX SPD, the DRAG trap row) uses it */
 
     /* LAP page 0 */
     uint32_t best_ms, prev_ms;
-    uint32_t cur_ms_at_gate;   /* reserved: running CUR time for the live_clock follow-up -- no renderer reads it yet */
+    uint32_t cur_ms;           /* Plan 7c T6 (design §4): running lap-clock time while cur_running,
+                                 * fed once a second by ui.c's clock_tick(); rendered as the footer's
+                                 * CUR m:ss (fmt_time_s, screens_moto.c) in place of LAST */
+    bool     cur_running;      /* true while display.live_clock is on and a lap is in progress; set
+                                 * and cleared by ui.c's clock_tick() */
     uint8_t  cur_sector_idx;   /* sectors completed this lap (1-based); 0 = none yet */
     bool     have_best, have_prev, new_best;
 
@@ -74,12 +86,13 @@ typedef struct {
 
     /* LAP page 1 (best-lap detail) */
     uint32_t best_sector_ms[LAP_MAX_SECTORS + 1];
+    bool     have_best_sector[LAP_MAX_SECTORS + 1];   /* Plan 7c T3: gates the value row (design §2) */
     uint8_t  best_n_sectors;
     uint32_t theo_best_ms;
     bool     have_theo;
 
     /* LAP page 2 (session stats) */
-    uint16_t max_speed_kmh;
+    uint16_t max_speed_cms;   /* Plan 7c T3: raw cm/s; converted to the display unit at render (speed_display) */
     uint8_t  lean_l_deg, lean_r_deg;
     uint16_t lat_g_e2, acc_g_e2, brk_g_e2; /* g x 100 */
     uint16_t laps_total, laps_valid;

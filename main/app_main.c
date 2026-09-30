@@ -159,6 +159,10 @@ static void boot_config(void)
 static void boot_storage(void)
 {
     int mrc = sto_mount();
+    /* Plan 7c T8 (design §6): the BOOT screen's STORAGE slot, reported before the ui task even
+     * starts (boot_subsystems() -> ui_start() runs after this) so ui_task's first boot_lines_format()
+     * call already sees the real result. */
+    sup_boot_report(BOOT_STORAGE, mrc < 0 ? BOOT_FAIL : BOOT_OK);
     if (mrc < 0) {
         sys_flags_set(SYS_STORAGE_DEAD);
         errlog_add(E_STO_MOUNT, 0);

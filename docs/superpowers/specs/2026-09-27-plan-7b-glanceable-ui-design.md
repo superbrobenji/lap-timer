@@ -24,6 +24,8 @@ Width budget (250 px visible): `FONT_HUGE` fits six glyphs (234 px) with 4 px ma
 
 ## 3. Screen model additions (§20.4)
 
+**Amended by Plan 7c §2:** `max_speed_kmh` → `max_speed_cms`, `have_best_sector[]`; see `2026-09-29-plan-7c-display-closure-design.md` (also §3 for `units`, §4 for `cur_ms`/`cur_running`, §7 for the full field summary).
+
 ```c
 enum { BIG_NONE = 0, BIG_SECTOR_DELTA = 1, BIG_LAP_DELTA = 2 };
 uint8_t  big_kind;          /* what the big slot shows */
@@ -41,6 +43,8 @@ bool     have_last_sector_delta[LAP_MAX_SECTORS + 1];
 - Everything else in the model is unchanged; rendering stays a pure function of the model.
 
 ## 4. LAP page 0 — the event card (amends §20.5)
+
+**Amended by Plan 7c §4:** while a lap is running and the live clock is on, the LAST cell shows label `CUR` / value `m:ss` instead of the last-lap time; see `2026-09-29-plan-7c-display-closure-design.md`.
 
 Mockup at 2.13" scale (250×122):
 
@@ -66,6 +70,8 @@ Rendering is a pure function of the model; the ui's refresh policy (§20.3) is u
 
 ## 5. LAP page 1 — sector board
 
+**Amended by Plan 7c §2:** the value row gates on `have_best_sector[i]` (real best-sector data from the pipeline), not just `i < n`; see `2026-09-29-plan-7c-display-closure-design.md`.
+
 ```
 ┌──────────────────────────────────────────────┐
 │ BEST LAP 1:51.90              THEO 1:51.20   │  FONT_SMALL header, y 2 (right part right-aligned)
@@ -79,6 +85,8 @@ Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BO
 
 ## 6. LAP page 2 — stats grid
 
+**Amended by Plan 7c §3:** `MAX SPD` gains a `km/h`/`mph` unit label, converted from the raw `max_speed_cms` by `speed_display()`/`m->units`; see `2026-09-29-plan-7c-display-closure-design.md`.
+
 ```
 ┌──────────────────────────────────────────────┐
 │ MAX SPD                LEAN L/R              │  FONT_SMALL labels, y 2
@@ -89,9 +97,11 @@ Columns: `BOARD_COLS` = 3 columns of `BOARD_COL_W` (`(CANVAS_VISIBLE_W - 8) / BO
 └──────────────────────────────────────────────┘
 ```
 
-Two columns at x 4 and x 128. `MAX SPD`: the value is `km/h` today; unit conversion is a follow-up (nothing converts `max_speed_kmh`). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
+Two columns at x 4 and x 128. `MAX SPD`: the value is `km/h` today; unit conversion is a follow-up (nothing converts `max_speed_kmh`) — **amended by Plan 7c §3:** `speed_display(max_speed_cms, m->units)` converts at render time and the label carries the unit suffix (`MAX SPD km/h` / `MAX SPD mph`). `LAPS` shows `12 (10 valid)` with the parenthesis part in `FONT_SMALL` right after the number. That suffix degrades by width (ruling T3-R2): it draws `(N valid)` when that fits before `CANVAS_VISIBLE_W`, else the shorter `(N)`, else nothing — a large `laps_total`/`laps_valid` (e.g. a long track day, 100+ laps) can push the full suffix past the narrower 2.13" canvas's visible edge.
 
 ## 7. DRAG pages
+
+**Amended by Plan 7c §3:** real §6.6 gate labels replace `G<id>`, the trap-speed row gains a `km/h`/`mph` suffix, and `drag[]` rows on all three pages are rebuilt from the pipeline's `pipe_drag_t` snapshot on every event/page change (not just appended on page 0); see `2026-09-29-plan-7c-display-closure-design.md`.
 
 Page 0 (run in progress):
 

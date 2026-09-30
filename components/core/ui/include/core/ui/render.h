@@ -79,4 +79,11 @@ void fb_icon(fb_t *fb, uint8_t icon_id, int x, int y);
  * previously in the framebuffer. Clipped like fb_rect. */
 void fb_bar(fb_t *fb, int x, int y, int w, int h, uint8_t pct);
 
+/* Computes the bounding box of every differing byte between `prev` and `cur` (same geometry
+ * required: w, h and stride must match, else the mismatch is reported via UI_ASSERT_CODE and this
+ * returns false). x is quantised to byte boundaries (8px cells) since the comparison is byte-wise;
+ * y is exact. Returns false and sets out->valid = false when the two framebuffers are identical
+ * (or on the geometry-mismatch path) -- nothing to redraw. */
+bool fb_diff_rect(const fb_t *prev, const fb_t *cur, fb_rect_t *out);
+
 #endif

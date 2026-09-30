@@ -2,9 +2,11 @@
 #define CORE_DRAG_H
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "core/types.h"
 #include "core/consts.h"
 #include "core/event.h"
+#include "core/cfg.h"      /* cfg_t -- drag_cfg_from_user's input */
 
 /* Drag engine (spec §11, §6.6). Pure C11, no IDF, no allocation; all state lives in caller-owned
  * drag_t. Vehicle-agnostic (moto/car): it consumes only fused samples (100 Hz) and GPS fixes.
@@ -77,6 +79,17 @@ typedef struct {
 } drag_cfg_t;
 
 void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {100,200,300}, rollout off, km/h */
+/* Build a drag_cfg_t from the user's saved cfg_t (spec §6.6/§11.4): starts from drag_cfg_defaults()
+ * and NEVER touches the gate table after that (gates[]/n_gates stay the defaults, Ruling R-6) --
+ * gate thresholds are km/h by this header's own contract, regardless of the display unit. out->units
+ * mirrors cfg->units (display only); out->rollout mirrors cfg->drag.rollout. The headline bench list
+ * (out->benches_kmh/n_benches) is always copied from cfg->drag.benches_kmh (km/h), clamped by both
+ * array sizes; cfg->drag.benches_mph is unused until a future mph-defined gate table (spec §10,
+ * follow-up issue). */
+void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
+/* §6.6 gate name for `g` into `buf` (cap >= 8 required). Returns strlen(buf) on success, -1 on a bad
+ * kind, a NULL arg or too small a cap. buf is always NUL-terminated within cap. */
+int  drag_gate_label(const drag_gate_def_t *g, char *buf, size_t cap);
 
 /* Upper bound on the events drag_on_fused can append in a single call: at most one ARMED or LAUNCH or
  * DONE plus a full sweep of gates (DRAG_MAX_GATES) with headroom. Callers pass a buffer this large. */

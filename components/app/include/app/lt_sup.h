@@ -29,6 +29,15 @@ uint32_t sys_flags_get(void);
 void     sys_flags_set(uint8_t bit);
 void     sys_flags_clear(uint8_t bit);
 
+/* Boot self-test table (Plan 7c T8, design §6): one slot per init site, reported by that site
+ * as soon as it knows its own result (any task, before or after sup_start() -- plain statics, no
+ * init dependency). The ui reads the table into the BOOT screen's four lines (ui.c
+ * boot_lines_format()). */
+enum { BOOT_STORAGE = 0, BOOT_DISPLAY, BOOT_GPS, BOOT_IMU, BOOT_SLOTS };
+enum { BOOT_UNKNOWN = 0, BOOT_OK, BOOT_FAIL, BOOT_SIM };
+void    sup_boot_report(uint8_t slot, uint8_t status);
+uint8_t sup_boot_status(uint8_t slot);
+
 /* btn_q: button ISR -> ui (§4.4, depth 8, 4 B item). Created in boot step 11 by lt_queues_init();
  * the button_evt_t layout is finalised by the ui (3.4) -- 3.2 fixes only its 4-byte size. */
 typedef struct { uint8_t mask; uint8_t flags; uint16_t age_ms; } button_evt_t;

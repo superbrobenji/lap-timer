@@ -110,6 +110,20 @@ target_compile_options(test_screens_213 PRIVATE ${LAPTIMER_STRICT_FLAGS})
 target_link_libraries(test_screens_213 PRIVATE core unity m Threads::Threads)
 add_test(NAME test_screens_213 COMMAND test_screens_213)
 
+# test_fb_diff_213 (M10, final fix wave): the same test_fb_diff.c source, compiled with
+# -DCANVAS_FORCE_213=1, so its own CANVAS_W/CANVAS_H/CANVAS_VISIBLE_W (canvas.h) resolve to the
+# 213 canvas's values (256x122 buffer, 250 visible) -- same -DCANVAS_FORCE_213=1 technique as
+# test_screens_213 above. Unlike test_screens_213 this does not need its own screens_moto.c.o: the
+# code under test (fb_init/fb_rect/fb_diff_rect, core/ui/render.c) never references CANVAS_W/H --
+# it is parameterized entirely by fb_t's own runtime w/h/stride -- so the single `core` library
+# already built above (at the default 296 canvas) is safe to link unmodified; only this
+# translation unit's own compile-time macros need to be the 213 values.
+add_executable(test_fb_diff_213 test_fb_diff.c)
+target_compile_definitions(test_fb_diff_213 PRIVATE CANVAS_FORCE_213=1)
+target_compile_options(test_fb_diff_213 PRIVATE ${LAPTIMER_STRICT_FLAGS})
+target_link_libraries(test_fb_diff_213 PRIVATE core unity m Threads::Threads)
+add_test(NAME test_fb_diff_213 COMMAND test_fb_diff_213)
+
 # Host-only tools and their tests (spec §21.4, §22.2)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tools/replay ${CMAKE_CURRENT_BINARY_DIR}/tools/replay)
 
