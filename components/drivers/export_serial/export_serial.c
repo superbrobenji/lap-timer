@@ -28,7 +28,7 @@
 #include "app/logger.h"
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
-#include "app/lt_proto.h"    /* LT_FRAME_*_FMT -- the ---BEGIN/---END framing shared with a dev-controller peer */
+#include "app/lt_proto.h"    /* LT_FRAME_*_FMT (---BEGIN/---END framing) + lt_session_id_ok (M10, dbg sum/logck) */
 #include "app/lt_rtc.h"
 #include "app/lt_sup.h"
 #include "app/ota.h"         /* ota_begin/ota_data/ota_end/ota_abort -- the `ota recv` bench push (§19.6) */
@@ -683,6 +683,7 @@ static int read_through_ses(const char *id, const char *ext, tally_t *out)
 static int dbg_sum(int argc, char **argv)
 {
     if (argc < 3) { printf("usage: dbg sum <id>   (e.g. S00001_001)\n"); return 1; }
+    if (!lt_session_id_ok(argv[2], strlen(argv[2]))) { printf("bad id\n"); return 1; }   /* M10 */
     tally_t t;
     if (read_through_ses(argv[2], ".sum", &t) != 0) return 1;
     printf(".sum %s: HDR %s", argv[2], t.hdr ? "ok" : "MISSING");
@@ -698,6 +699,7 @@ static int dbg_sum(int argc, char **argv)
 static int dbg_logck(int argc, char **argv)
 {
     if (argc < 3) { printf("usage: dbg logck <id>   (e.g. S00001_001)\n"); return 1; }
+    if (!lt_session_id_ok(argv[2], strlen(argv[2]))) { printf("bad id\n"); return 1; }   /* M10 */
     tally_t t;
     if (read_through_ses(argv[2], ".log", &t) != 0) return 1;
     printf(".log %s: frames ok=%u bad=%u\n", argv[2],

@@ -243,10 +243,11 @@ static void safe_recovery_clear_check(uint32_t uptime_s)
     uint32_t f = sys_flags_get();
     if (!(f & ((1u << SYS_SAFE_MODE) | (1u << SYS_RECOVERY_MODE)))) return;
     if (uptime_s < SAFE_MODE_CLEAR_S) return;
+    bool was_recovery = (f & (1u << SYS_RECOVERY_MODE)) != 0;   /* M8: log the mode that was actually active */
     lt_safe_clear();
     sys_flags_clear(SYS_SAFE_MODE);
     sys_flags_clear(SYS_RECOVERY_MODE);
-    (void)errlog_add(E_SYS_SAFE_MODE, 0);
+    (void)errlog_add(was_recovery ? E_SYS_RECOVERY_MODE : E_SYS_SAFE_MODE, 0);
     s_safe_mode_cleared = true;
 }
 
