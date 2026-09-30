@@ -153,11 +153,27 @@ static void check_stalls(void)
 }
 
 /* §19.4: the applied image asked (via ota_end) for a reboot after its OTA_END ack; the supervisor
- * owns every system restart, so it performs this one too, flushing counters first. */
+ * owns every system restart, so it performs this one too, flushing counters first.
+ *
+ * §17.5 amendment (controller ruling P-8, debt sweep A T6 fix 1): clear the safe/recovery gate
+ * before rebooting into the NEW image, so it boots at level 0 and gets its own normal validation
+ * trial (ota_try_validate's `!SAFE_MODE && pipeline_gps_seen()` gate needs the pipeline running,
+ * which a resumed safe/recovery level would never start) -- without this, an OTA pushed while the
+ * device is inside a safe-mode window would resume the same level forever, never validate, and
+ * the bootloader would roll it back. The OLD image (this image, still running until esp_restart()
+ * below) remains the rollback target regardless; if the NEW image itself crash-loops, boot_safe_mode
+ * re-detects it from a clean crash_log/boot_cnt slate and re-arms safe mode from scratch -- this
+ * does not weaken crash-loop detection, only gives every newly-applied image a fair, un-gated first
+ * boot. The stall-restart path (check_stalls, same-image self-restart after a wedged pipeline) does
+ * NOT clear the gate: a stall IS the crash-loop signal safe/recovery mode exists to catch, and the
+ * running image is unchanged, so clearing there would erase the very evidence the next boot's
+ * lt_crashlog_is_loop() needs. */
 static void ota_reboot_check(void)
 {
     if (!ota_reboot_due()) return;
     close_session_before_restart(SES_END_RESTART, 2000);
+    lt_safe_clear();
+    ESP_LOGI(TAG, "OTA reboot: safe/recovery gate cleared for the new image");
     (void)lt_counters_flush(true);
     esp_restart();
 }

@@ -17,17 +17,17 @@ enum {
     E_STO_FULL        = 0x0404,
     E_STO_EVICT       = 0x0405,
 
-    E_SYS_WDT_RESET   = 0x0501,
-    E_SYS_PANIC       = 0x0502,
-    E_SYS_BROWNOUT    = 0x0503,
-    E_SYS_HEAP_LOW    = 0x0504,
-    E_SYS_SAFE_MODE   = 0x0505,
-    E_SYS_TASK_STALL  = 0x0506,
-    E_SYS_RTC_INVALID = 0x0507,
-    E_SYS_CFG_RESET   = 0x0508,
-    E_SYS_STACK_LOW   = 0x0509,
+    E_SYS_WDT_RESET     = 0x0501,
+    E_SYS_PANIC         = 0x0502,
+    E_SYS_BROWNOUT      = 0x0503,
+    E_SYS_HEAP_LOW      = 0x0504,
+    E_SYS_SAFE_MODE     = 0x0505,
+    E_SYS_TASK_STALL    = 0x0506,
+    E_SYS_RTC_INVALID   = 0x0507,
+    E_SYS_CFG_RESET     = 0x0508,
+    E_SYS_STACK_LOW     = 0x0509,
     E_SYS_RECOVERY_MODE = 0x050A, /* arg = boot count (§17.5 recovery-mode amendment, debt sweep A #62) */
-    E_NVS_BLOB_RESET  = 0x050B,   /* arg = blob tag 1 ctr / 2 ring / 3 crash */
+    E_NVS_BLOB_RESET    = 0x050B,   /* arg = blob tag 1 ctr / 2 ring / 3 crash */
     E_LOG_CLOSE_TIMEOUT = 0x050C, /* arg = END.reason (core/ses.h SES_END_*): supervisor-owned
                                     * restart proceeded without a clean session close (debt sweep A #59) */
 
