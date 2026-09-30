@@ -115,43 +115,69 @@ static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 10
 _Static_assert(sizeof(lt_counters_t) == 36, "counters blob payload (§15.2)");
 _Static_assert(sizeof(err_ring_t) == 385, "error ring blob payload (§15.2)");
 _Static_assert(sizeof(crash_entry_t) * CRASH_LOG_LEN == 15, "crash log blob payload (§15.2)");
-#define BLOB_SCRATCH_MAX (sizeof(err_ring_t) + BLOB_OVERHEAD)   /* largest framed blob: 388 B */
+#define BLOB_SCRATCH_MAX (sizeof(err_ring_t) + BLOB_OVERHEAD)   /* largest framed blob: load_framed's boot-only scratch */
 
-/* Load key into dst (expect bytes) through the framer. 0 ok; -1 absent/size; -2 CRC; -3 version.
- * `scratch` is function-local static: safe only because lt_nvs_init (the sole caller, via
- * load_or_reset) runs once at boot, single-threaded, before any other task starts touching NVS. */
+/* Per-blob SAVE scratch (fix round 1, #53): static, not a shared stack buffer. save_framed is the
+ * universal assert-report sink's write path (core_assert_report -> errlog_add -> errlog_persist ->
+ * save_framed), so it is reachable from EVERY task in the firmware, including ui (~340 B of stack
+ * headroom, #53) -- a 388 B stack frame there was not affordable. Each buffer belongs to exactly
+ * one blob and is only ever touched while that blob's own serialization already holds:
+ *  - s_scratch_ring: under s_ring_lock -- both callers of errlog_persist (errlog_add, holding the
+ *    lock across its whole RMW; lt_errlog_clear, same) hold it across the save.
+ *  - s_scratch_ctr: by boot-then-sup sequencing -- app_main calls persist_counters (via
+ *    lt_counters_inc(..., true)/lt_counters_flush) only before sup_start(); every later call is
+ *    from the sup task alone. Never both at once.
+ *  - s_scratch_crash: single call site, lt_crashlog_push, itself called exactly once per boot from
+ *    lt_boot_record_reset (app_main, before any other task starts).
+ * The cfg blob keeps its own caller-stack buffer (lt_cfg_load/lt_cfg_save): it's called from
+ * ui/cmd/boot only, with a small, already-existing frame -- not the sink's unbounded caller set. */
+static uint8_t s_scratch_ctr[sizeof(lt_counters_t) + BLOB_OVERHEAD];
+static uint8_t s_scratch_ring[sizeof(err_ring_t) + BLOB_OVERHEAD];
+static uint8_t s_scratch_crash[sizeof(crash_entry_t) * CRASH_LOG_LEN + BLOB_OVERHEAD];
+
+/* Load key into dst (expect bytes) through the framer. 0 ok; -1 size/CRC mismatch; -2 CRC;
+ * -3 version; -4 key absent (fresh flash -- not corruption, see load_or_reset). `scratch` is
+ * function-local static: safe only because lt_nvs_init (the sole caller, via load_or_reset) runs
+ * once at boot, single-threaded, before any other task starts touching NVS. */
 static int load_framed(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t expect)
 {
     LT_ASSERT_RET(key != NULL && dst != NULL, NVS_ASSERT_CODE, -1);
     LT_ASSERT_RET(expect > 0 && expect + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX, NVS_ASSERT_CODE, -1);
     static uint8_t scratch[BLOB_SCRATCH_MAX];           /* boot-time only; lt_nvs_init runs before the tasks */
     size_t sz = 0;
-    if (nvs_get_blob(h, key, NULL, &sz) != ESP_OK || sz != expect + BLOB_OVERHEAD) return -1;
+    esp_err_t probe = nvs_get_blob(h, key, NULL, &sz);
+    if (probe == ESP_ERR_NVS_NOT_FOUND) return -4;
+    if (probe != ESP_OK || sz != expect + BLOB_OVERHEAD) return -1;
     if (nvs_get_blob(h, key, scratch, &sz) != ESP_OK) return -1;
     return blob_unwrap(ver, scratch, sz, dst, expect, NULL);
 }
 
-/* Save src (n bytes) under key through the framer. 0 ok. `buf` is a 388 B stack transient: this
- * runs on whichever task called in (logger/supervisor/cmd, or boot inside lt_nvs_init). */
-static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n)
+/* Save src (n bytes) under key through the framer, into the caller-owned `scratch` (capacity
+ * `cap`) rather than a stack buffer -- see the static-scratch comment above for why. 0 ok. */
+static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void *src, size_t n,
+                        uint8_t *scratch, size_t cap)
 {
-    LT_ASSERT_RET(key != NULL && src != NULL, NVS_ASSERT_CODE, -1);
-    LT_ASSERT_RET(n > 0 && n + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX, NVS_ASSERT_CODE, -1);
-    uint8_t buf[BLOB_SCRATCH_MAX];                       /* 388 B on the caller's stack: sup/logger/cmd/boot only */
-    size_t len = blob_wrap(ver, src, n, buf, sizeof buf);
-    if (len == 0 || nvs_set_blob(h, key, buf, len) != ESP_OK) return -1;
+    LT_ASSERT_RET(key != NULL && src != NULL && scratch != NULL, NVS_ASSERT_CODE, -1);
+    LT_ASSERT_RET(n > 0 && cap >= BLOB_OVERHEAD && n <= cap - BLOB_OVERHEAD, NVS_ASSERT_CODE, -1);
+    size_t len = blob_wrap(ver, src, n, scratch, cap);
+    if (len == 0 || nvs_set_blob(h, key, scratch, len) != ESP_OK) return -1;
     (void)nvs_commit(h);
     return 0;
 }
 
 /* Boot: a blob that fails size/CRC/version is reset to zero once and reported (dev-only firmware,
- * no migration for these three). Returns the load rc for the log line. */
+ * no migration for these three). An ABSENT key (-4: fresh/erased flash) is not corruption -- the
+ * mirror is still zeroed but no E_NVS_BLOB_RESET is logged, so a fresh flash doesn't seed the
+ * error ring with three boot-time entries. Returns the load rc for the log line. */
 static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t n, uint32_t tag)
 {
     LT_ASSERT_RET(dst != NULL, NVS_ASSERT_CODE, -1);
     LT_ASSERT_RET(tag >= BLOB_TAG_CTR && tag <= BLOB_TAG_CRASH, NVS_ASSERT_CODE, -1);
     int rc = load_framed(h, key, ver, dst, n);
-    if (rc != 0) {
+    if (rc == -4) {
+        memset(dst, 0, n);
+        ESP_LOGI(TAG, "nvs blob %s absent (fresh)", key);
+    } else if (rc != 0) {
         memset(dst, 0, n);
         ESP_LOGW(TAG, "nvs blob %s reset (rc %d)", key, rc);
         s_blob_reset_mask |= (uint8_t)(1u << tag);     /* errlog after the ring itself is loaded */
@@ -202,7 +228,8 @@ uint32_t lt_nvs_boot_get(void) { return s_boot_cnt; }
 
 static void persist_counters(void)
 {
-    (void)save_framed(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters));
+    (void)save_framed(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters),
+                       s_scratch_ctr, sizeof s_scratch_ctr);
     s_counters_dirty = false;
     s_counters_last_us = esp_timer_get_time();
 }
@@ -230,7 +257,8 @@ const lt_counters_t *lt_counters(void) { return &s_counters; }
  * the H1 rate-limit cap how often a repeating (deduped) report is allowed to touch flash. */
 static void errlog_persist(void)
 {
-    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
+    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring),
+                       s_scratch_ring, sizeof s_scratch_ring);
     s_ring_persist_us = esp_timer_get_time();
 }
 
@@ -342,7 +370,8 @@ void lt_errlog_clear(void)
     ring_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
     s_last_valid = false;                       /* H1: drop dedup state so a post-clear repeat re-appends */
-    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
+    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring),
+                       s_scratch_ring, sizeof s_scratch_ring);
     s_ring_persist_us = esp_timer_get_time();
     ring_unlock();
 }
@@ -353,7 +382,8 @@ void lt_crashlog_push(uint8_t reset_reason, uint32_t prev_uptime_s)
     s_crash[1] = s_crash[0];
     s_crash[0].reset_reason = reset_reason;
     s_crash[0].uptime_s = prev_uptime_s;
-    (void)save_framed(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash));
+    (void)save_framed(s_h_sys, K_CRASH, LT_CRASH_VER, s_crash, sizeof(s_crash),
+                       s_scratch_crash, sizeof s_scratch_crash);
 }
 
 bool lt_reset_is_abnormal(int r)
