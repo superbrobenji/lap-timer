@@ -225,6 +225,10 @@ static void on_lap_complete(int64_t end_gps_us)
     if (!p) return;
     lap_result_t lr = *p;
     stats_finalise(&lr.stats);
+    /* M6 (final review): computed BEFORE seq_enter() -- lap_theoretical_best_ms() walks the
+     * engine's sector table and has no reason to run while s_laps_seq is held odd, extending the
+     * critical section every reader might have to retry against for no benefit. */
+    uint32_t theo = lap_theoretical_best_ms(&s_lap);
 
     /* F4 seqlock write: publish the lap slot + total and (Plan 7c T3, design §2) s_best -- the
      * engine's own best-sector table mirrored verbatim (it only updates on a valid lap, so a copy
@@ -238,7 +242,7 @@ static void on_lap_complete(int64_t end_gps_us)
     memcpy(s_best.best_sector_ms, s_lap.best_sector_ms, sizeof s_best.best_sector_ms);
     memcpy(s_best.have_best_sector, s_lap.have_best_sector, sizeof s_best.have_best_sector);
     s_best.n_sectors = s_lap.best_sector_count;
-    s_best.theo_ms   = lap_theoretical_best_ms(&s_lap);
+    s_best.theo_ms   = theo;
     seq_leave();
 
     s_resume_active = false;               /* F2: the resumed lap (if any) has completed; guard done */
@@ -593,11 +597,27 @@ static void handle_cmd(const command_t *cmd)
         break;
     case CMD_SET_LAYOUT:
         lap_force_layout(&s_lap, cmd->arg16);
+        /* M3 (final review, ruling R-9, pipeline part): a forced layout invalidates the previous
+         * layout's best sector splits/theoretical best, same as the venue-change clear in
+         * pipeline_init() below -- clear s_best under the same seqlock every other writer uses. */
+        seq_enter();
+        memset(&s_best, 0, sizeof s_best);
+        seq_leave();
         break;
     case CMD_RESET_ENGINE:
         lap_reset(&s_lap);
         drag_reset(&s_drag);
         stats_reset();
+        /* M3 (final review, ruling R-9, pipeline part): a dev-console reset must not leave the ui
+         * showing a stale best-sector/theoretical-best (from before the reset) or a stale drag
+         * "current run" snapshot -- clear s_best (same seqlock pattern as elsewhere) and republish
+         * s_dragsnap so its `current` reflects drag_reset()'s fresh IDLE state (drag_reset() itself
+         * intentionally keeps the session-best-per-gate table, core/drag.h's documented contract --
+         * publish_drag_snapshot() carries that forward unchanged, only `current` actually changes). */
+        seq_enter();
+        memset(&s_best, 0, sizeof s_best);
+        seq_leave();
+        publish_drag_snapshot();
         break;
     case CMD_IMU_MODE:
         (void)imu_set_mode(cmd->arg8);
@@ -699,7 +719,9 @@ static void pipeline_init(void)
             lap_set_venue(&s_lap, v);
             /* Plan 7c T3 (design §2): a venue/layout change invalidates the previous layout's best
              * sector splits/theoretical best -- clear s_best under the same seqlock every other
-             * writer of it uses. */
+             * writer of it uses. M3 (final review) note: this is the CFG_GPS_SIM-only venue path;
+             * when Plan 8 adds runtime (real-GPS-driven) venue detection, that code path must clear
+             * s_best here too, the same way -- it is not covered by this #if block. */
             seq_enter();
             memset(&s_best, 0, sizeof s_best);
             seq_leave();
@@ -828,7 +850,10 @@ int pipeline_lap_at(int index, lap_result_t *out)
         __atomic_thread_fence(__ATOMIC_ACQUIRE);         /* read above happens-before re-reading seq */
         stable = (seq0 == __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE));
     }
-    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, rc);   /* the retry cap is never reached in practice */
+    /* M1 (final review): on the (never-in-practice) retry-cap exhaustion, fail loudly with -1, not
+     * rc's last, possibly-torn copy -- rc could read 0 (success) from an iteration whose seq check
+     * afterwards found it unstable. The caller already treats non-zero as "leave the model alone". */
+    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, -1);
     return rc;
 }
 
@@ -864,7 +889,12 @@ static int snap_read(uint8_t kind, void *dst, size_t size)
         __atomic_thread_fence(__ATOMIC_ACQUIRE);           /* copy above happens-before re-reading seq */
         stable = (seq0 == __atomic_load_n(&s_laps_seq, __ATOMIC_ACQUIRE));
     }
-    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, rc);   /* the retry cap is never reached in practice */
+    /* M1 (final review): on the (never-in-practice) retry-cap exhaustion, fail loudly with -1, not
+     * rc's last, possibly-torn copy -- rc is unconditionally set to 0 above the stability check, so
+     * without this it could report success for a memcpy that just got proven torn. Both callers
+     * (pipeline_best_snapshot/pipeline_drag_snapshot) already treat non-zero as "leave the model
+     * alone". */
+    LT_ASSERT_RET(stable, PIPE_ASSERT_CODE, -1);
     return rc;
 }
 
