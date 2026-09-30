@@ -55,6 +55,7 @@
 #include "linkhost_proto.h"
 #include "linkstats.h"
 #include "logstore.h"
+#include "logstore_id.h"   /* logstore_id_ok -- validated before any path is built (#60 fix 1) */
 #include "logstore_rec.h"
 #include "multipart.h"
 #include "otastage.h"
@@ -555,6 +556,10 @@ static void do_log_download(httpd_req_t *req)
         return;
     }
     assert(id[0] != '\0');
+    if (!logstore_id_ok(id, strlen(id))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad log id");
+        return;
+    }
 
     char fmt[8] = "jsonl";                                     /* default: transcoded NDJSON */
     size_t qlen = httpd_req_get_url_query_len(req);

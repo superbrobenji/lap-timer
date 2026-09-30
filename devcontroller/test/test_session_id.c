@@ -23,6 +23,8 @@ void test_session_id_rejects_traversal_and_shape(void) {
     TEST_ASSERT_FALSE(lt_session_id_ok("S00001_00 ", 10));
     TEST_ASSERT_FALSE(lt_session_id_ok("-", 1));
     TEST_ASSERT_FALSE(lt_session_id_ok(NULL, 3));
+    TEST_ASSERT_FALSE(lt_session_id_ok("ab\0cd", 5));           /* NUL inside the counted range */
+    TEST_ASSERT_FALSE(lt_session_id_ok("\xC3\xA9", 2));         /* bytes >= 0x80 (UTF-8 "e") */
 }
 
 int main(void) {
