@@ -384,26 +384,54 @@ static int close_session(const log_request_t *req)
     return 0;
 }
 
+/* T4 fix 1: hal/storage.h has no sto_stat/sto_exists (grepped -- neither exists), and sto_unlink()
+ * itself returns 0 on ENOENT (storage_internal.c: "if (errno == ENOENT) return 0"), so it cannot
+ * by itself tell delete_session() "this file was never here". Probe via a read-only open instead
+ * (no STO_CREATE, so this never creates the file) and close what it opened; read-only, no mutation
+ * of its own. */
+static void session_files_exist(const char *id, bool *has_log, bool *has_sum)
+{
+    LT_ASSERT_VOID(id != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_VOID(has_log != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_VOID(has_sum != NULL, LOG_ASSERT_CODE);
+    char path[48];
+    sto_file_t f;
+    (void)snprintf(path, sizeof path, "/sessions/%s.log", id);
+    *has_log = (sto_open(path, STO_RD, &f) == 0);
+    if (*has_log) { (void)sto_close(f); }
+    (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
+    *has_sum = (sto_open(path, STO_RD, &f) == 0);
+    if (*has_sum) { (void)sto_close(f); }
+}
+
 /* DELETE_SESSION (#73): the only unlink path -- runs on this task (the storage owner), so the
  * eviction listing's iterator (evict_scan_oldest) is never crossed by a foreign mutation. Refuses
  * the currently open session (its fd would be orphaned and the in-flight session's data lost) --
  * the sender's own fast-path check (cmd.c's old logger_open_session_id() guard) is gone; this is
- * now the sole authority. 0 ok; -3 neither file existed; -4 the session is open; else the unlink's
- * error. */
+ * now the sole authority. 0 ok; -3 neither file existed (T4 fix 1: checked BEFORE unlinking, via
+ * session_files_exist -- sto_unlink's own rc cannot report this, see above); -4 the session is
+ * open; else the first non-zero unlink rc. */
 static int delete_session(const log_request_t *req)
 {
     LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);
     LT_ASSERT_RET(memchr(req->id, '\0', sizeof req->id) != NULL, LOG_ASSERT_CODE, -1);   /* id is NUL-terminated within its field */
     if (s_open && strcmp(s_id, req->id) == 0) return -4;   /* session is open */
+    bool has_log, has_sum;
+    session_files_exist(req->id, &has_log, &has_sum);
+    if (!has_log && !has_sum) return -3;                    /* neither file existed */
     char path[48];
-    int rc_log, rc_sum;
-    (void)snprintf(path, sizeof path, "/sessions/%s.log", req->id);
-    rc_log = sto_unlink(path);
-    (void)snprintf(path, sizeof path, "/sessions/%s.sum", req->id);
-    rc_sum = sto_unlink(path);
-    if (rc_log != 0 && rc_sum != 0) return -3;
+    int rc = 0;
+    if (has_log) {
+        (void)snprintf(path, sizeof path, "/sessions/%s.log", req->id);
+        rc = sto_unlink(path);
+    }
+    if (has_sum) {
+        (void)snprintf(path, sizeof path, "/sessions/%s.sum", req->id);
+        int rc_sum = sto_unlink(path);
+        if (rc == 0) rc = rc_sum;
+    }
     status_cache_prime();                            /* recount + fresh free_kb, on this task */
-    return 0;
+    return rc;
 }
 
 /* Returns the rc this request's handling produced -- 0 ok, <0 an error -- so drain_requests can
@@ -764,14 +792,6 @@ void logger_start(void)
 void logger_notify(void)
 {
     if (s_task) xTaskNotifyGive(s_task);
-}
-
-const char *logger_open_session_id(void)
-{
-    /* F5: the id the logger currently holds open for writing, or NULL if none. Read cross-task by
-     * the console's DELETE guard -- a benign race (the id only changes on open/close), enough to
-     * refuse unlinking a live session's .log/.sum. */
-    return s_open ? s_id : NULL;
 }
 
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily

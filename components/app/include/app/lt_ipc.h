@@ -52,7 +52,7 @@ typedef enum {
 } log_req_type_t;
 
 /* debt sweep A #59/#73: a bounded request/reply. requester == NULL is fire-and-forget (today's
- * OPEN/RECOUNT callers, unchanged); non-NULL means the logger calls
+ * OPEN/REBUILD/EVICT callers, unchanged); non-NULL means the logger calls
  * xTaskNotify(requester, ((uint32_t)req.seq << 24) | ((uint32_t)rc & 0x00FFFFFFu),
  * eSetValueWithOverwrite) once handle_request() finishes this request (logger.c's drain loop) --
  * see logger_request_sync() below, the only intended way to set requester/seq. */
