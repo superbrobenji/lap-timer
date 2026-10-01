@@ -94,25 +94,36 @@ static void boot_reset_record(esp_reset_reason_t reason)
     lt_boot_record_reset(record_reason, prev_uptime_s);
 }
 
-/* §4.7 step 3: boot counter + crash-loop check (§17.5). 3.2 only detects + flags safe
- * mode; the safe-mode behaviour tree is 3.5. */
-static uint32_t boot_safe_mode(bool *safe_out)
+/* §4.7 step 3: boot counter + crash-loop check (§17.5, debt sweep A #62 recovery-mode amendment).
+ * level 0 normal, 1 safe, 2 recovery: a crash loop detected while still inside a prior safe-mode
+ * window (boot_cnt <= lt_safe_until_get()) escalates to recovery instead of re-entering safe mode;
+ * a loop with no prior window is a plain safe-mode entry, as before. Level persists in NVS
+ * (lt_safe_level_get/set) alongside safe_until so a non-loop boot still inside the window resumes
+ * at the same level. */
+static uint32_t boot_safe_mode(uint8_t *level_out)
 {
+    /* M5: precondition first -- &level is always non-NULL (app_main's only caller), so there is
+     * no useful boot_cnt yet to return; 0u is the safe placeholder (the caller asserts
+     * boot_cnt >= 1, which never runs on this path since app_main() itself never passes NULL). */
+    CORE_ASSERT_RET(level_out != NULL, MAIN_ASSERT_CODE, 0u);
     uint32_t boot_cnt = lt_nvs_boot_inc();
     lt_counters_inc(LT_CTR_BOOTS, false);      /* batched with the rest */
-    bool safe = false;
+    uint8_t level = 0;
+    bool in_window = boot_cnt <= lt_safe_until_get();
     if (lt_crashlog_is_loop()) {
+        level = in_window ? 2u : 1u;           /* a loop inside a safe-mode window escalates (§17.5) */
         lt_safe_until_set(boot_cnt + 1);
-        safe = true;
-        ESP_LOGE(TAG, "crash loop: 3 abnormal resets < 60 s -> SAFE MODE");
-    } else if (boot_cnt <= lt_safe_until_get()) {
-        safe = true;                           /* still inside a prior safe-mode window */
+        (void)lt_safe_level_set(level);
+        ESP_LOGE(TAG, "crash loop: 3 abnormal resets < 60 s -> %s",
+                 level == 2u ? "RECOVERY MODE" : "SAFE MODE");
+    } else if (in_window) {
+        level = lt_safe_level_get();           /* still inside a prior window: same level */
+        if (level == 0u) level = 1u;
     }
-    if (safe) {
-        sys_flags_set(SYS_SAFE_MODE);
-        errlog_add(E_SYS_SAFE_MODE, boot_cnt);
-    }
-    *safe_out = safe;
+    if (level >= 1u) { sys_flags_set(SYS_SAFE_MODE); errlog_add(E_SYS_SAFE_MODE, boot_cnt); }
+    if (level == 2u) { sys_flags_set(SYS_RECOVERY_MODE); errlog_add(E_SYS_RECOVERY_MODE, boot_cnt); }
+    CORE_ASSERT_RET(level <= 2u, MAIN_ASSERT_CODE, boot_cnt);   /* postcondition: level is one of 0/1/2 */
+    *level_out = level;
     return boot_cnt;
 }
 
@@ -179,9 +190,15 @@ static void boot_storage(void)
     }
 }
 
-/* §4.7 steps 10-13: supervisor, static queues, IPC rings, and the logger/pipeline/ui tasks. */
-static void boot_subsystems(void)
+/* §4.7 steps 10-13: supervisor, static queues, IPC rings, and the logger/pipeline/ui tasks.
+ * level 2 (recovery, §17.5 amendment, debt sweep A #62): only the service tasks below start --
+ * pipeline and ui do not -- so a deterministic driver crash inside either converges to a
+ * serviceable device instead of looping. The panel keeps whatever it last rendered (no ui task
+ * to draw a RECOVERY screen); console/OTA stay reachable via export_serial_start() in app_main. */
+static void boot_subsystems(uint8_t level)
 {
+    CORE_ASSERT_VOID(level <= 2u, MAIN_ASSERT_CODE);
+
     /* §4.7 step 10: the task WDT is already enabled via sdkconfig; hb[]/sys_flags exist
      * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */
     sup_start();
@@ -204,6 +221,11 @@ static void boot_subsystems(void)
      * LOGGER_OPEN_SESSION request arrives (from the pipeline below on the sim build, the power
      * task later, or `dbg logtest`); with storage dead it stays idle (open fails gracefully). */
     logger_start();
+
+    if (level == 2u) {                                 /* recovery (§17.5): service tasks only */
+        ESP_LOGE(TAG, "RECOVERY MODE: pipeline, GPS power and ui not started");
+        return;
+    }
 
     /* §4.7 step 12 (pipeline): start the pipeline task (core 1, prio 20). It brings up the GPS/IMU
      * drivers, runs tb + fusion + lap/drag + per-lap stats (§9.1/§9.4), and on the moto_sim bench
@@ -234,19 +256,21 @@ void app_main(void)
     boot_nvs();
     boot_reset_record(reason);
 
-    bool safe = false;
-    uint32_t boot_cnt = boot_safe_mode(&safe);
+    uint8_t level = 0;
+    uint32_t boot_cnt = boot_safe_mode(&level);
     CORE_ASSERT_VOID(boot_cnt >= 1, MAIN_ASSERT_CODE);   /* boot counter was just incremented */
 
     boot_rtc_validate();
     boot_config();
 
-    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`). */
+    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`).
+     * Recovery (level 2, §17.5 amendment) skips GPS power -- the pipeline that would consume it
+     * never starts. */
     board_init();
-    board_gps_power(true);
+    if (level != 2u) board_gps_power(true);
 
     boot_storage();
-    boot_subsystems();
+    boot_subsystems(level);
 
     /* §4.7 step 12 (console): the §18.4 serial export console -- STATUS/CONFIG/ERRLOG/DIAG/
      * DELETE/CLOSE wired through app/cmd, plus the migrated `dbg` diagnostics verbs. Spawns its
@@ -255,8 +279,8 @@ void app_main(void)
     export_serial_start((int)reason);
 #endif
 
-    ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%d)", (unsigned)boot_cnt,
-             (long long)((esp_timer_get_time() - t_boot) / 1000), (int)safe);
+    ESP_LOGI(TAG, "boot #%u complete in %lld ms (safe_mode=%u)", (unsigned)boot_cnt,
+             (long long)((esp_timer_get_time() - t_boot) / 1000), (unsigned)level);
 #if CFG_HAS_EXPORT_SERIAL && !CFG_HAS_DEVUX
     /* §4.6 DEVUX=OFF: the interactive dbg UX is compiled out; the serial link is the
      * cmd + stream + OTA-receive transport only (Plan 5 sub-project A prod-slim). */

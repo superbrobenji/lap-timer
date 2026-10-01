@@ -14,6 +14,9 @@ enum {
     SES_T_VENUE = 0x0D, SES_T_POWER = 0x0E, SES_T_END = 0x7F
 };
 
+/* END.reason values (spec §12.3, debt sweep A #59). Existing callers pass 0 = NORMAL. */
+enum { SES_END_NORMAL = 0, SES_END_RESTART = 1, SES_END_STALL = 2 };
+
 #define SES_FRAME_OVERHEAD 5      /* sync + type + len + crc16 */
 
 uint16_t ses_crc16(const uint8_t *buf, size_t n);

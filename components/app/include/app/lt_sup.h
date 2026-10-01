@@ -24,6 +24,8 @@ enum {
     SYS_GPS_DEAD = 0, SYS_GPS_NOFIX, SYS_IMU_DEAD, SYS_IMU_SUSPECT, SYS_DISP_DEAD,
     SYS_STORAGE_DEAD, SYS_STORAGE_FULL, SYS_STORAGE_DEGRADED, SYS_BATT_LOW,
     SYS_SAFE_MODE, SYS_HEAP_LOW, SYS_DISP_TEMP_THROTTLE, SYS_OTA_PENDING, SYS_FUSION_DISAGREE,
+    SYS_RECOVERY_MODE,   /* bit 14 (§17.5 recovery-mode amendment): level-2 safe mode */
+    /* M11: bit 15 is the last STATUS-visible flag (status_build masks to u16). */
 };
 uint32_t sys_flags_get(void);
 void     sys_flags_set(uint8_t bit);

@@ -1697,9 +1697,9 @@ Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc;
 | 0x0C | `TIME_MAP` | `mono_us i64, gps_us i64, quality u8` | 17 |
 | 0x0D | `VENUE` | `venue_id u16, layout_id u16, name char[32]` | 36 |
 | 0x0E | `POWER` | `mono_us i64, state u8, batt_mv u16` | 11 |
-| 0x7F | `END` | `gps_us i64, reason u8` | 9 |
+| 0x7F | `END` | `gps_us i64, reason u8: 0 NORMAL, 1 RESTART (planned/OTA), 2 STALL` | 9 |
 
-`FIX_DELTA` flags: bit0 valid, bit1 gnssFixOK, bit2 3D. `FUSED` flags = `fused_sample_t.flags`. `LAP` flags: bit0 GPS_LOST, bit1 PIT, bit2 INCOMPLETE, bit3 OUT_LAP, bit4 INTERRUPTED, bit5 TOO_LONG, bit6 VALID.
+`FIX_DELTA` flags: bit0 valid, bit1 gnssFixOK, bit2 3D. `FUSED` flags = `fused_sample_t.flags`. `LAP` flags: bit0 GPS_LOST, bit1 PIT, bit2 INCOMPLETE, bit3 OUT_LAP, bit4 INTERRUPTED, bit5 TOO_LONG, bit6 VALID. `END.reason` values mirror `core/ses.h`'s `SES_END_*` enum (`SES_END_NORMAL=0`, `SES_END_RESTART=1`, `SES_END_STALL=2`; debt sweep A #59): `RESTART` is sent by the OTA reboot path (`ota_reboot_check`, sup.c) and `STALL` by the supervisor's stall-restart path (`check_stalls`, sup.c), both via a synchronous `LOGGER_CLOSE_SESSION` request before the task restarts; existing callers (a normal PARK/SHUTDOWN or venue-change close) pass `NORMAL`.
 
 The `char[n]` fields above are exactly `n` bytes on the wire and are *not* required to be
 NUL-terminated there — a 16-character firmware version fills `fw char[16]` completely. The matching
@@ -2064,6 +2064,7 @@ hb[SUPERVISOR]++
 | 11 | `SYS_DISP_TEMP_THROTTLE` | thermometer |
 | 12 | `SYS_OTA_PENDING` | — |
 | 13 | `SYS_FUSION_DISAGREE` | lean "?" |
+| 14 | `SYS_RECOVERY_MODE` | — |
 
 ### 17.5 Crash-loop protection and safe mode
 
@@ -2071,6 +2072,9 @@ At boot, `crash_log` (last 3 entries) is shifted with `{reset_reason, previous u
 - Pipeline runs; lap and drag engines run; summaries are written.
 - No sample logging, no BLE, no WiFi, one full-screen "SAFE MODE" render then display idle.
 - Supervisor clears safe mode after `SAFE_MODE_CLEAR_S` of uptime (persisted), next boot is normal.
+- A crash loop detected while `boot_cnt <= safe_until` (the previous boot was already safe mode) escalates to **recovery mode** (`safe_lvl` = 2, `SYS_RECOVERY_MODE`): supervisor, link, logger and the console/OTA export start; pipeline, GPS power and ui do not. The same `SAFE_MODE_CLEAR_S` uptime rule clears both levels; `dbg safe clear` clears them immediately.
+- A boot inside the window without a new loop resumes the persisted level (recovery stays recovery until cleared).
+- An OTA reboot clears the gate so the new image boots normally and runs its own validation trial; if it crash-loops, safe mode re-arms from scratch.
 
 ### 17.6 Boot self-test
 

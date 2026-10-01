@@ -47,6 +47,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "app/lt_proto.h"  /* lt_session_id_ok -- validated before any path is built (#60) */
 #include "config_diff.h"
 #include "flashctl.h"
 #include "image_desc.h"
@@ -54,6 +55,7 @@
 #include "linkhost_proto.h"
 #include "linkstats.h"
 #include "logstore.h"
+#include "logstore_id.h"   /* logstore_id_ok -- validated before any path is built (#60 fix 1) */
 #include "logstore_rec.h"
 #include "multipart.h"
 #include "otastage.h"
@@ -394,6 +396,10 @@ static void do_session_download(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing session id");
         return;
     }
+    if (!lt_session_id_ok(id, strlen(id))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad session id");
+        return;
+    }
 
     char fmt[8] = "vbo";                                       /* default per app.js links */
     size_t qlen = httpd_req_get_url_query_len(req);
@@ -550,6 +556,10 @@ static void do_log_download(httpd_req_t *req)
         return;
     }
     assert(id[0] != '\0');
+    if (!logstore_id_ok(id, strlen(id))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad log id");
+        return;
+    }
 
     char fmt[8] = "jsonl";                                     /* default: transcoded NDJSON */
     size_t qlen = httpd_req_get_url_query_len(req);
