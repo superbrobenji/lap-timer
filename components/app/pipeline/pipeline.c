@@ -597,7 +597,13 @@ static void pipeline_reload_cfg(void)
     (void)lt_cfg_load(&cfg);
     drag_cfg_from_user(&cfg, &dc);
     drag_init(&s_drag, &dc);
-    s_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    uint8_t new_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    /* fix round 1 (Important finding 1): CMD_SET_MODE resets stats on a mode flip (handle_cmd
+     * above) -- a reload that silently changes s_mode must do the same, else a mode change
+     * arriving mid-lap carries the old window's stats into the next lap. An unchanged mode (the
+     * common case -- most CONFIG_SET calls touch units/display, not mode) leaves stats alone. */
+    if (new_mode != s_mode) stats_reset();
+    s_mode = new_mode;
     publish_drag_snapshot();
     LT_ASSERT_VOID(s_drag.cfg.n_gates <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);
