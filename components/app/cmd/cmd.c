@@ -22,16 +22,20 @@
 #include "app/status.h"           /* status_build() -- storage-free (Plan 5.6 T1 fix 1) */
 
 #include "core/cfg.h"
+#include "core/event.h"           /* EV_CFG_CHANGED (#87, cfg_change_notify below) */
 #include "core/exp.h"              /* streaming exporter (vbo/nmea/json) */
 #include "core/ses.h"             /* .log/.sum frame reader + record codecs */
 #include "hal/storage.h"
 
+#include "esp_log.h"
 #include "esp_rom_crc.h"          /* esp_rom_crc32_le -- matches lt_rtc's on-device CRC */
 #include "esp_system.h"            /* esp_get_minimum_free_heap_size */
 #include "esp_timer.h"
 
 #include <stdio.h>
 #include <string.h>
+
+static const char *TAG = "cmd";
 
 #define CMD_ASSERT_CODE 0x0B40   /* Power of 10 rule 5 (app/lt_assert.h); cmd.c's own code */
 
@@ -142,6 +146,19 @@ static int op_config_get(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq
     return emit_bytes(emit, ctx, tag, seq, (const uint8_t *)s_json, (size_t)n, true);
 }
 
+/* #87: after a persisted CONFIG_SET, tell the pipeline (CMD_CONFIG_RELOAD) and the ui
+ * (EV_CFG_CHANGED, posted directly -- never emit_event(), so it is not logged or streamed).
+ * Non-blocking: a full queue is reported, not fatal (the next reload or reboot catches up). */
+static void cfg_change_notify(void)
+{
+    LT_ASSERT_VOID(g_cmd_q != NULL, CMD_ASSERT_CODE);
+    LT_ASSERT_VOID(g_ui_evt_q != NULL, CMD_ASSERT_CODE);
+    command_t c = { .type = CMD_CONFIG_RELOAD };
+    if (xQueueSend(g_cmd_q, &c, 0) != pdTRUE) ESP_LOGW(TAG, "config reload: cmd queue full");
+    event_t ev = { .type = EV_CFG_CHANGED, .mono_us = esp_timer_get_time() };
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "config changed: ui queue full");
+}
+
 /* CONFIG_SET (0x11) -> merge JSON, clamp, persist; ack, or ERROR with the parse message. */
 static int op_config_set(const uint8_t *payload, size_t len,
                          cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
@@ -157,6 +174,7 @@ static int op_config_set(const uint8_t *payload, size_t len,
     (void)cfg_validate(&s_cfg);                            /* clamps in place; returns corrections */
     if (lt_cfg_save(&s_cfg) != 0)
         return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "config save failed");
+    cfg_change_notify();                                    /* #87: pipeline + ui reload */
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true); /* ack */
 }
 

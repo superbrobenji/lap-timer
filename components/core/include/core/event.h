@@ -38,6 +38,12 @@ enum {
     EV_MOTION        = 12,  /* —                                                  (pipeline) */
     EV_STILL         = 13,  /* —                                                  (pipeline) */
     EV_CALIB_DONE    = 14,  /* arg16 = stage                                      (fusion) */
-    EV_FAULT         = 15   /* arg16 = error code                                 (supervisor) */
+    EV_FAULT         = 15,  /* arg16 = error code                                 (supervisor) */
+
+    /* #87: ui-only codes. Never passed to emit_event() -- posted straight to g_ui_evt_q with a
+     * direct xQueueSend() -- so, unlike every code above, they are never logged to an EVENT
+     * record and never streamed to a peer (only emit_event() reaches those sinks). */
+    EV_CFG_CHANGED   = 16,  /* ui-only: posted straight to g_ui_evt_q by cmd.c, never via emit_event(), never logged/streamed */
+    EV_LAP_RESET     = 17   /* ui-only: posted straight to g_ui_evt_q by the pipeline on CMD_RESET_ENGINE */
 };
 #endif
