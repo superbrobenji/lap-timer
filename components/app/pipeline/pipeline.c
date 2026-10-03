@@ -586,6 +586,55 @@ static void on_raw(const imu_raw_t *raw)
     LT_ASSERT_VOID(s_fused_ctr < (uint32_t)FUSED_DECIM, PIPE_ASSERT_CODE);   /* decimation counter wrapped */
 }
 
+/* #87: re-read the persisted cfg and rebuild what depends on it -- the drag engine's gate table
+ * (a units change redefines the mph gates: drag_init() is a fresh engine, session bests are
+ * dropped, documented in spec dsB §2) and the riding mode. The lap engine is untouched. */
+static void pipeline_reload_cfg(void)
+{
+    cfg_t      cfg;
+    drag_cfg_t dc;
+    cfg_defaults(&cfg);
+    (void)lt_cfg_load(&cfg);
+    drag_cfg_from_user(&cfg, &dc);
+    drag_init(&s_drag, &dc);
+    s_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    publish_drag_snapshot();
+    LT_ASSERT_VOID(s_drag.cfg.n_gates <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);
+    ESP_LOGI(TAG, "config reloaded (units %u, mode %u)", (unsigned)cfg.units, (unsigned)s_mode);
+}
+
+/* #87: tell the ui directly (never emit_event(): EV_LAP_RESET is ui-only, not logged/streamed)
+ * that a remote CMD_RESET_ENGINE just cleared the engines, so its running-lap clock stops too. */
+static void ui_post_lap_reset(void)
+{
+    LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
+    event_t ev = { .type = EV_LAP_RESET, .mono_us = esp_timer_get_time() };
+    LT_ASSERT_VOID(ev.type == EV_LAP_RESET, PIPE_ASSERT_CODE);
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "lap reset: ui queue full");
+}
+
+/* CMD_RESET_ENGINE's body, split out of handle_cmd's switch for RULE-4-COMPOUND (the #87 ui-post
+ * line pushed that switch over the 30-code-line compound-statement cap). M3 (final review, ruling
+ * R-9, pipeline part): a dev-console reset must not leave the ui showing a stale best-sector/
+ * theoretical-best (from before the reset) or a stale drag "current run" snapshot -- clear s_best
+ * (same seqlock pattern as elsewhere) and republish s_dragsnap so its `current` reflects
+ * drag_reset()'s fresh IDLE state (drag_reset() itself intentionally keeps the session-best-per-
+ * gate table, core/drag.h's documented contract -- publish_drag_snapshot() carries that forward
+ * unchanged, only `current` actually changes). #87: ui_post_lap_reset() additionally tells the ui
+ * directly so its running-lap clock stops too. */
+static void handle_reset_engine(void)
+{
+    lap_reset(&s_lap);
+    drag_reset(&s_drag);
+    stats_reset();
+    seq_enter();
+    memset(&s_best, 0, sizeof s_best);
+    seq_leave();
+    publish_drag_snapshot();
+    ui_post_lap_reset();
+}
+
 static void handle_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
@@ -605,19 +654,10 @@ static void handle_cmd(const command_t *cmd)
         seq_leave();
         break;
     case CMD_RESET_ENGINE:
-        lap_reset(&s_lap);
-        drag_reset(&s_drag);
-        stats_reset();
-        /* M3 (final review, ruling R-9, pipeline part): a dev-console reset must not leave the ui
-         * showing a stale best-sector/theoretical-best (from before the reset) or a stale drag
-         * "current run" snapshot -- clear s_best (same seqlock pattern as elsewhere) and republish
-         * s_dragsnap so its `current` reflects drag_reset()'s fresh IDLE state (drag_reset() itself
-         * intentionally keeps the session-best-per-gate table, core/drag.h's documented contract --
-         * publish_drag_snapshot() carries that forward unchanged, only `current` actually changes). */
-        seq_enter();
-        memset(&s_best, 0, sizeof s_best);
-        seq_leave();
-        publish_drag_snapshot();
+        handle_reset_engine();
+        break;
+    case CMD_CONFIG_RELOAD:
+        pipeline_reload_cfg();               /* #87: a peer's CONFIG_SET persisted a new cfg */
         break;
     case CMD_IMU_MODE:
         (void)imu_set_mode(cmd->arg8);
@@ -626,7 +666,7 @@ static void handle_cmd(const command_t *cmd)
         (void)gps_set_power_mode(cmd->arg8 ? GPS_PM_FULL : GPS_PM_BACKUP);
         break;
     default:
-        break;                              /* MARK_GATE / CALIB_ORIENT / CONFIG_RELOAD: later sessions */
+        break;                              /* MARK_GATE / CALIB_ORIENT: later sessions */
     }
 }
 

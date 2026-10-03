@@ -919,6 +919,33 @@ static void handle_layout_locked(const event_t *e, int64_t now)
     s_dirty = true;
 }
 
+/* #87: a peer CONFIG_SET persisted a new cfg -- reload the ui's working copy and everything
+ * derived from it (units suffixes, DRAG gate labels/benches, riding mode). */
+static void ui_reload_cfg(void)
+{
+    cfg_defaults(&s_cfg);
+    (void)lt_cfg_load(&s_cfg);
+    s_model.units = s_cfg.units;
+    s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    s_model.mode  = s_mode;
+    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
+    if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();
+    s_dirty = true;
+    LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.units <= 1u, UI_APP_ASSERT_CODE);
+}
+/* #87: the pipeline's engines were reset remotely -- the running-lap clock must not keep counting. */
+static void ui_lap_reset(void)
+{
+    s_lap_start_mono_us = 0;
+    s_last_clock_us     = 0;
+    s_model.cur_ms      = 0;
+    s_model.cur_running = false;
+    s_dirty             = true;
+}
+
 static void handle_event(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* model screen stays valid */
@@ -941,6 +968,9 @@ static void handle_event(const event_t *e, int64_t now)
     case EV_DRAG_LAUNCH: s_model.drag_armed = false; s_dirty = true; break;
     case EV_DRAG_GATE:   drag_rows_refill(); s_dirty = true; break;
     case EV_DRAG_DONE:   drag_rows_refill(); s_dirty = true; break;
+    /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
+    case EV_CFG_CHANGED: ui_reload_cfg(); break;
+    case EV_LAP_RESET:   ui_lap_reset();  break;
     default: break;
     }
 }
