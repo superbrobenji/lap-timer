@@ -58,6 +58,7 @@ enum {                              /* drag_state() values (§11.2) */
 };
 
 enum { DRAG_UNITS_KMH = 0, DRAG_UNITS_MPH = 1 };   /* cfg.units: display + bench-list selection only */
+#define DRAG_MPH_PER_KMH 1.609344   /* km/h per mph; mph bench values convert with lround(mph * DRAG_MPH_PER_KMH) */
 
 /* ≥ 1 s of fused samples at FUSION_HZ for the launch back-scan (§11.2). Rounded up past FUSION_HZ so a
  * full second of samples always fits with headroom; the newest DRAG_HIST_N entries are retained. */
@@ -91,7 +92,6 @@ void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {10
  * shipped defaults in place. out->units always mirrors cfg->units (display only); out->rollout
  * mirrors cfg->drag.rollout. */
 void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
-#define DRAG_MPH_PER_KMH 1.609344
 /* §6.6 gate name for `g` into `buf` (cap >= 8 required). units: DRAG_UNITS_KMH (0) prints every gate's
  * raw km/h/cm value as today; DRAG_UNITS_MPH (1) prints a DRAG_SPEED_FROM0 gate's `a` converted back to
  * mph (lround(a / DRAG_MPH_PER_KMH)) -- the inverse of drag_cfg_from_user's conversion, exact for every
