@@ -171,11 +171,44 @@ static void test_leading_noise_split_at_frame_boundary(void)
     assert_decoded_ok(&c, &s, json, json_len);
 }
 
+/* ---- a prompt glued to the header with NO '\n' anywhere before ---BEGIN (hardware-observed in
+ * dumb mode): "laptimer> ---BEGIN sessions <n>---\r\n<json>\r\n---END <crc>---\r\n". This differs
+ * from the three cases above, which all contain a '\n' somewhere before the real ---BEGIN line (the
+ * stray "\r\r\n" artifact, or the raw 0x0A byte inside the noise frame's binary payload) -- the gap
+ * those cases don't cover. The buffered small-frame parser (linkhost_parse_frame) was made
+ * mem_find-tolerant of a glued prompt in 5c1fdf0; dl_parse_begin (the streaming download parser
+ * lh_dl_* rides for GET /api/sessions) still required the strict prefix "---BEGIN " at column 0 of
+ * the accumulated line, so this glued-with-no-newline shape failed to parse (#65). Regression guard
+ * for that gap, fed byte-by-byte (the strictest feed pattern). */
+static void test_prompt_glued_to_begin_no_newline(void)
+{
+    static const char JSON[] =
+        "{\"sessions\":[{\"id\":\"S00003\",\"name\":\"Practice 3\"}]}";
+    size_t json_len = sizeof(JSON) - 1;
+    uint32_t crc = linkhost_crc32((const uint8_t *)JSON, json_len);
+
+    static uint8_t stream[STREAM_MAX];
+    memcpy(stream, "laptimer> ", 10);           /* no '\n' -- glued directly to ---BEGIN below */
+    size_t fl = build_frame(stream + 10, "sessions", JSON, json_len, crc);
+    size_t n = 10 + fl;
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(STREAM_MAX, n);
+
+    sink_t s = {0};
+    lh_dl_ctx_t c;
+    lh_dl_init(&c, /*is_binary*/false, sink_cb, &s);
+    for (size_t i = 0; i < n && c.state < LH_DL_DONE; i++) {   /* bounded by n */
+        lh_dl_feed(&c, stream + i, 1);
+    }
+
+    assert_decoded_ok(&c, &s, JSON, json_len);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_leading_noise_whole);
     RUN_TEST(test_leading_noise_byte_by_byte);
     RUN_TEST(test_leading_noise_split_at_frame_boundary);
+    RUN_TEST(test_prompt_glued_to_begin_no_newline);
     return UNITY_END();
 }
