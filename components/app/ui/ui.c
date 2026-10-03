@@ -920,7 +920,15 @@ static void handle_layout_locked(const event_t *e, int64_t now)
 }
 
 /* #87: a peer CONFIG_SET persisted a new cfg -- reload the ui's working copy and everything
- * derived from it (units suffixes, DRAG gate labels/benches, riding mode). */
+ * derived from it (units suffixes, DRAG gate labels/benches, riding mode). The ui actually has
+ * THREE dynamic menu labels (s_lbl_mode/s_lbl_units/s_lbl_disp, build_menu() above) -- all three
+ * are rebuilt here with the same snprintf build_menu() itself uses, rather than calling
+ * build_menu() directly: that function's other job, rebuilding s_model.menu_items[]/menu_n/
+ * s_menu_action[] via menu_add(), is a side effect well beyond "refresh three label strings" and
+ * is not needed here (the menu's item list/order never changes, only the label text).
+ * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived, but drag_init()
+ * (called by the pipeline's own reload) always drops ARMED -- clear the ui's mirror of it here
+ * too so a remote CONFIG_SET can't leave a stale "ARMED" indicator on screen. */
 static void ui_reload_cfg(void)
 {
     cfg_defaults(&s_cfg);
@@ -928,21 +936,26 @@ static void ui_reload_cfg(void)
     s_model.units = s_cfg.units;
     s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode  = s_mode;
+    s_model.drag_armed = false;
     drag_cfg_from_user(&s_cfg, &s_drag_cfg);
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
+    snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s", s_cfg.display.live_clock ? "on" : "off");
     if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();
     s_dirty = true;
     LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.units <= 1u, UI_APP_ASSERT_CODE);
 }
-/* #87: the pipeline's engines were reset remotely -- the running-lap clock must not keep counting. */
+/* #87: the pipeline's engines were reset remotely -- the running-lap clock must not keep counting.
+ * fix round 1 (minor finding 2): drag_reset() (called by the pipeline's own CMD_RESET_ENGINE
+ * handling) drops ARMED too -- clear the ui's mirror so a stale "ARMED" indicator can't survive. */
 static void ui_lap_reset(void)
 {
     s_lap_start_mono_us = 0;
     s_last_clock_us     = 0;
     s_model.cur_ms      = 0;
     s_model.cur_running = false;
+    s_model.drag_armed  = false;
     s_dirty             = true;
 }
 
