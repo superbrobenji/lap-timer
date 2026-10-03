@@ -13,6 +13,7 @@
 
 #include "core/blob.h"       /* blob_wrap/blob_unwrap -- versioned + CRC16 record framing (Task 1) */
 #include "core/cfg_blob.h"   /* cfg_blob_wrap/cfg_blob_unwrap -- the cfg blob decision (final review C1) */
+#include "core/ses.h"        /* ses_crc16 -- the ring frames itself in place (debt sweep B T3) */
 #include "esp_log.h"
 #include "esp_system.h"      /* esp_reset_reason_t / ESP_RST_* */
 #include "esp_timer.h"
@@ -38,10 +39,20 @@ typedef struct __attribute__((packed)) {
     uint32_t arg;
 } err_entry_t;                                   /* 12 B -> ring = 384 B (§15.2) */
 
+/* The ring mirror IS its own on-flash frame (debt sweep B T3): [ver][32 entries][head][crc16 LE],
+ * byte-identical to what blob_wrap(LT_RING_VER, &old_385B_{entry[32];head}_payload, ...) used to
+ * produce -- out[0]=ver, memcpy of the 385-byte payload, then a 2-byte LE CRC (core/blob.c's
+ * blob_wrap store order: out[n+1]=crc&0xFF, out[n+2]=crc>>8). A uint16_t field in a packed struct
+ * stores little-endian on Xtensa (ESP32 target) and on x86 (host build), so `crc` below lands in
+ * the same two bytes blob_wrap wrote: no migration, no byte-swap, no on-flash change. */
 typedef struct __attribute__((packed)) {
+    uint8_t     ver;                            /* frame version byte == LT_RING_VER (blob.h layout) */
     err_entry_t entry[ERR_RING_LEN];
     uint8_t     head;                           /* next write slot */
-} err_ring_t;                                    /* 385 B */
+    uint16_t    crc;                            /* LE crc16 over ver..head (blob.h layout) */
+} err_ring_t;                                   /* 388 B == the on-flash `ring` blob, byte for byte */
+_Static_assert(sizeof(err_ring_t) == 388, "error ring IS its on-flash frame: [ver][32 entries][head][crc16]");
+#define RING_CRC_SPAN (sizeof(err_ring_t) - 2u)     /* ver..head: everything before the crc field */
 
 typedef struct __attribute__((packed)) {
     uint8_t  reset_reason;
@@ -96,22 +107,25 @@ static int64_t        s_ring_persist_us;
  * never taken by save_framed/load_framed themselves -- callers hold it. errlog_add is called from
  * the logger/supervisor/console (core 0) AND the pipeline via the core assert hook (core 1), so
  * both the read-modify-write of s_ring and any concurrent use of the single shared s_blob_scratch
- * buffer race without this. save_framed/load_framed never call blob_lock/blob_unlock themselves
- * (the ring path already holds it inside errlog_add/lt_errlog_clear, and taking it again would
- * deadlock on this non-recursive mutex); every OTHER caller -- persist_counters, lt_crashlog_push,
- * and lt_nvs_init's boot-time loads -- takes it around its own call instead. errlog_add (and so
- * save_framed, via errlog_persist) runs on ANY task that hits a failing CORE_ASSERT_/LT_ASSERT_ --
- * it is the universal assert-report sink -- which explicitly includes the ui task (~340 B of
- * stack headroom, #53); that reachable set is exactly why s_blob_scratch is a static buffer and
- * never a stack one. Static allocation (no malloc after init), task-context only (the assert hook
- * runs in task context, never an ISR).
+ * buffer race without this. save_framed/load_framed/ring_save/ring_load never call
+ * blob_lock/blob_unlock themselves (the ring path already holds it inside
+ * errlog_add/lt_errlog_clear, and taking it again would deadlock on this non-recursive mutex);
+ * every OTHER caller -- persist_counters, lt_crashlog_push, and lt_nvs_init's boot-time loads --
+ * takes it around its own call instead. errlog_add (and so ring_save, via errlog_persist) runs on
+ * ANY task that hits a failing CORE_ASSERT_/LT_ASSERT_ -- it is the universal assert-report sink --
+ * which explicitly includes the ui task (~340 B of stack headroom, #53); that reachable set is
+ * exactly why s_blob_scratch is a static buffer and never a stack one (the ring, debt sweep B T3,
+ * carries the same reasoning even though it no longer uses this scratch: s_ring itself is static,
+ * not stack, for the identical reason). Static allocation (no malloc after init), task-context
+ * only (the assert hook runs in task context, never an ISR).
  *
  * I1 (final review, Ruling F-2): nothing that runs under this lock may reach core_assert_fail
  * (its sink is errlog_add, which takes this same lock): the framing helpers -- save_framed,
- * load_framed, load_or_reset below, and blob_wrap/blob_unwrap in core/blob.c -- are assert-free
- * by design, not by oversight. A failing assertion macro in any of them would recurse
- * core_assert_fail -> core_assert_report -> errlog_add -> blob_lock() while a caller already
- * holds it: a real deadlock, not just the "walk every caller" audit P-5 originally relied on. */
+ * load_framed, load_or_reset, ring_seal/ring_check/ring_save/ring_load below, and
+ * blob_wrap/blob_unwrap in core/blob.c -- are assert-free by design, not by oversight. A failing
+ * assertion macro in any of them would recurse core_assert_fail -> core_assert_report ->
+ * errlog_add -> blob_lock() while a caller already holds it: a real deadlock, not just the "walk
+ * every caller" audit P-5 originally relied on. */
 static SemaphoreHandle_t s_blob_lock;
 static StaticSemaphore_t s_blob_lock_buf;
 
@@ -121,9 +135,11 @@ static inline void blob_unlock(void) { if (s_blob_lock) xSemaphoreGive(s_blob_lo
 static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
 /* ---- blob framing (Task 1 core/blob.h): per-blob versions + the framed-scratch size cap.
- * RAM mirrors (s_counters/s_ring/s_crash[]) stay their own packed on-flash layout, aligned and
- * unchanged; the framed [version][payload][crc16] bytes exist only in the single shared scratch
- * buffer below (s_blob_scratch, fix round 2), built/consumed at save/load. ---- */
+ * RAM mirrors (s_counters/s_crash[]) stay their own packed on-flash layout, aligned and unchanged;
+ * the framed [version][payload][crc16] bytes exist only in the single shared scratch buffer below
+ * (s_blob_scratch, fix round 2), built/consumed at save/load. s_ring (debt sweep B T3) is its own
+ * on-flash frame -- see err_ring_t above and ring_seal/ring_check/ring_save/ring_load below -- and
+ * never touches this scratch at all. ---- */
 #define LT_CTR_VER   1u
 #define LT_RING_VER  1u
 #define LT_CRASH_VER 1u
@@ -131,14 +147,19 @@ static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 10
 #define BLOB_TAG_RING  2u
 #define BLOB_TAG_CRASH 3u
 _Static_assert(sizeof(lt_counters_t) == 36, "counters blob payload (§15.2)");
-_Static_assert(sizeof(err_ring_t) == 385, "error ring blob payload (§15.2)");
 _Static_assert(sizeof(crash_entry_t) * CRASH_LOG_LEN == 15, "crash log blob payload (§15.2)");
-#define BLOB_SCRATCH_MAX (sizeof(err_ring_t) + BLOB_OVERHEAD)   /* largest framed blob: 388 B */
+/* Debt sweep B T3: the ring no longer frames through the shared scratch, so the scratch only ever
+ * needs to hold the larger of the two blobs still routed through save_framed/load_framed. */
+#define BLOB_SCRATCH_MAX (sizeof(lt_counters_t) + BLOB_OVERHEAD)   /* counters (36) and crash log (15) only: 39 B */
+_Static_assert(sizeof(crash_entry_t) * CRASH_LOG_LEN + BLOB_OVERHEAD <= BLOB_SCRATCH_MAX,
+               "crash log fits the scratch");
 
-/* Single static blob scratch (fix round 2, #53/P-5): load_framed AND save_framed both frame into
- * this ONE buffer -- fix round 1's four buffers (one static load scratch + three per-blob save
- * scratches, 388+39+388+18 = 833 B) pushed moto_sim's free static DRAM under the 4 KB floor (#53);
- * collapsing to one reclaims ~450 B. Every blob fits (largest is the 385 B ring). Safety is by
+/* Single static blob scratch (fix round 2, #53/P-5; shrunk debt sweep B T3): load_framed AND
+ * save_framed both frame into this ONE buffer -- fix round 1's four buffers (one static load
+ * scratch + three per-blob save scratches, 388+39+388+18 = 833 B) pushed moto_sim's free static
+ * DRAM under the 4 KB floor (#53); collapsing to one reclaimed ~450 B. The ring (388 B) no longer
+ * routes through here at all -- it frames itself in place (err_ring_t/ring_seal above) -- so this
+ * buffer now only ever needs to hold counters or the crash log: 39 B, ≈346 B smaller. Safety is by
  * s_blob_lock, not by ownership: load_framed's boot-time calls (lt_nvs_init, single-threaded,
  * before any other task exists) are additionally wrapped in blob_lock/blob_unlock by lt_nvs_init
  * itself (belt-and-braces, keeps the discipline uniform); save_framed's calls are always made
@@ -180,9 +201,11 @@ static int save_framed(nvs_handle_t h, const char *key, uint8_t ver, const void 
 }
 
 /* Boot: a blob that fails size/CRC/version is reset to zero once and reported (dev-only firmware,
- * no migration for these three). An ABSENT key (-4: fresh/erased flash) is not corruption -- the
- * mirror is still zeroed but no E_NVS_BLOB_RESET is logged, so a fresh flash doesn't seed the
- * error ring with three boot-time entries. Returns the load rc for the log line. */
+ * no migration for ctr/crash -- the only two blobs still routed through this helper; the ring,
+ * framed in place since debt sweep B T3, applies the identical policy itself in ring_load below).
+ * An ABSENT key (-4: fresh/erased flash) is not corruption -- the mirror is still zeroed but no
+ * E_NVS_BLOB_RESET is logged, so a fresh flash doesn't seed the error ring with boot-time entries.
+ * Returns the load rc for the log line. */
 static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst, size_t n, uint32_t tag)
 {
     /* I1 (Ruling F-2): plain guarded returns, not LT_ASSERT_RET -- see the s_blob_lock comment
@@ -201,6 +224,59 @@ static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst
     return rc;
 }
 
+/* ---- error-ring direct framing (debt sweep B T3): s_ring IS its on-flash frame (err_ring_t
+ * above), so these read/write NVS straight out of/into it -- no s_blob_scratch copy. Assert-free
+ * (Ruling F-2): every caller below (errlog_persist via errlog_add/lt_errlog_clear, lt_nvs_init's
+ * boot load) already holds s_blob_lock, and that lock's own sink (errlog_add) cannot be
+ * re-entered from anything running under it -- so, like save_framed/load_framed, these take no
+ * lock themselves and use plain guarded returns, never an assert macro. */
+
+/* Seal the ring mirror in place: version byte + crc16 over everything before the crc field. */
+static void ring_seal(void)
+{
+    s_ring.ver = (uint8_t)LT_RING_VER;
+    uint16_t c = ses_crc16((const uint8_t *)&s_ring, RING_CRC_SPAN);
+    s_ring.crc = c;                              /* packed struct: little-endian store on this target */
+}
+
+/* Verify a ring read straight from NVS. 0 ok; -1 size; -2 crc; -3 version. */
+static int ring_check(size_t sz)
+{
+    if (sz != sizeof(s_ring)) return -1;
+    if (ses_crc16((const uint8_t *)&s_ring, RING_CRC_SPAN) != s_ring.crc) return -2;
+    if (s_ring.ver != (uint8_t)LT_RING_VER) return -3;
+    return 0;
+}
+
+/* Write the sealed mirror directly (no scratch). 0 ok. */
+static int ring_save(void)
+{
+    ring_seal();
+    if (nvs_set_blob(s_h_err, K_RING, &s_ring, sizeof s_ring) != ESP_OK) return -1;
+    (void)nvs_commit(s_h_err);
+    return 0;
+}
+
+/* Boot: read the ring directly; on absent -> zero quietly; on size/crc/version failure -> zero +
+ * mask (same reset/report semantics load_or_reset gives ctr/crash). -4 absent; -1 size; -2 crc;
+ * -3 version; 0 ok. */
+static int ring_load(void)
+{
+    size_t sz = 0;
+    esp_err_t probe = nvs_get_blob(s_h_err, K_RING, NULL, &sz);
+    int rc;
+    if (probe == ESP_ERR_NVS_NOT_FOUND) rc = -4;
+    else if (probe != ESP_OK || sz != sizeof s_ring) rc = -1;
+    else if (nvs_get_blob(s_h_err, K_RING, &s_ring, &sz) != ESP_OK) rc = -1;
+    else rc = ring_check(sz);
+    if (rc != 0) {
+        memset(&s_ring, 0, sizeof s_ring);
+        if (rc == -4) ESP_LOGI(TAG, "nvs blob ring absent (fresh)");
+        else { ESP_LOGW(TAG, "nvs blob ring reset (rc %d)", rc); s_blob_reset_mask |= (uint8_t)(1u << BLOB_TAG_RING); }
+    }
+    return rc;
+}
+
 int lt_nvs_init(void)
 {
     if (s_ready) return 0;
@@ -214,11 +290,11 @@ int lt_nvs_init(void)
     if (nvs_open(NS_CFG, NVS_READWRITE, &s_h_cfg) != ESP_OK) return -1;
 
     if (nvs_get_u32(s_h_sys, K_BOOT, &s_boot_cnt) != ESP_OK) s_boot_cnt = 0;
-    blob_lock();          /* guards the shared s_blob_scratch across these boot-time loads too */
+    blob_lock();          /* guards s_blob_scratch (ctr load below) and s_ring (ring_load) alike */
     (void)load_or_reset(s_h_err, K_CTR, LT_CTR_VER, &s_counters, sizeof(s_counters), BLOB_TAG_CTR);
-    (void)load_or_reset(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring), BLOB_TAG_RING);
-    /* H2: head comes straight from the NVS blob (load_or_reset only checks size/version/CRC). A
-     * same-size/version blob with a corrupted head could still carry head >= ERR_RING_LEN; clamp
+    (void)ring_load();
+    /* H2: head comes straight from the NVS blob (ring_load/ring_check only check size/version/CRC).
+     * A same-size/version blob with a corrupted head could still carry head >= ERR_RING_LEN; clamp
      * it here so errlog_add never indexes past s_ring.entry[] (and never needs an assertion to
      * catch it -- see errlog_add). */
     if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
@@ -276,7 +352,7 @@ const lt_counters_t *lt_counters(void) { return &s_counters; }
  * the H1 rate-limit cap how often a repeating (deduped) report is allowed to touch flash. */
 static void errlog_persist(void)
 {
-    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
+    (void)ring_save();
     s_ring_persist_us = esp_timer_get_time();
 }
 
@@ -388,7 +464,7 @@ void lt_errlog_clear(void)
     blob_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
     s_last_valid = false;                       /* H1: drop dedup state so a post-clear repeat re-appends */
-    (void)save_framed(s_h_err, K_RING, LT_RING_VER, &s_ring, sizeof(s_ring));
+    (void)ring_save();
     s_ring_persist_us = esp_timer_get_time();
     blob_unlock();
 }
