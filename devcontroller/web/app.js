@@ -686,26 +686,37 @@
     });
   }
 
+  var sessionsReq = 0;   /* request sequence token (fix 1): bumped on every loadSessions() entry so
+                           * a "Reload" click racing a still-pending 500 ms retry can't have the
+                           * stale request win the DOM -- both the retry's setTimeout and the
+                           * fetch's .then bail out once a newer request has superseded `my`. */
+
   function loadSessions() {
     var msg = $("#sessions-status");
     hideMsg(msg);
-    requestSessions(false);
+    var my = ++sessionsReq;
+    requestSessions(my, false);
   }
 
-  /* Fetches GET /api/sessions once. On a 502 (an early link failure before the response committed,
-   * #65 -- e.g. the first request right after connect racing the lap-timer's RX task) or a
-   * fetch-level rejection (res.networkError), retry exactly once after 500 ms before giving up and
-   * showing the real reason (res.data.error when the server sent one, else "bad response"). */
-  function requestSessions(isRetry) {
+  /* Fetches GET /api/sessions once for request token `my` (see sessionsReq above). On a 502 (an
+   * early link failure before the response committed, #65 -- e.g. the first request right after
+   * connect racing the lap-timer's RX task) or a fetch-level rejection (res.networkError), retry
+   * exactly once after 500 ms before giving up and showing the real reason (res.data.error when
+   * the server sent one, else "bad response"). */
+  function requestSessions(my, isRetry) {
     var msg = $("#sessions-status");
     fetchJson("/api/sessions").then(function (res) {
+      if (my !== sessionsReq) return;   /* superseded by a newer loadSessions() call */
       if (res.status === 503) {
         showMsg(msg, "err", "Lap-timer not connected — sessions unavailable.");
         renderSessionsTable([]);
         return;
       }
       if (!isRetry && (res.status === 502 || res.networkError)) {
-        setTimeout(function () { requestSessions(true); }, 500);
+        setTimeout(function () {
+          if (my !== sessionsReq) return;   /* superseded while the retry was pending */
+          requestSessions(my, true);
+        }, 500);
         return;
       }
       if (!res.data || !Array.isArray(res.data.sessions)) {

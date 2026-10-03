@@ -519,6 +519,10 @@ static int sessions_chunk_cb(void *ctx, const uint8_t *data, size_t n)
             s->transport_dead = true;
             return 1;                                           /* abort: the client disconnected */
         }
+        /* `started` is kept set here for dl_sink_t's shared contract with session_chunk_cb/
+         * do_session_download (fix 2) -- do_sessions_stream itself branches on `committed`, not
+         * this field, but another reader of a dl_sink_t (present or future) should still see
+         * "a body byte went out" reported consistently across both chunk callbacks. */
         s->started = true;
         s->committed = true;
         if (n == 0) return 0;
@@ -527,7 +531,7 @@ static int sessions_chunk_cb(void *ctx, const uint8_t *data, size_t n)
         s->transport_dead = true;
         return 1;                                              /* abort: the client disconnected */
     }
-    s->started = true;
+    s->started = true;   /* ditto -- see the comment above */
     return 0;
 }
 
