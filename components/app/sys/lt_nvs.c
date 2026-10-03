@@ -122,7 +122,8 @@ static int64_t        s_ring_persist_us;
  * I1 (final review, Ruling F-2): nothing that runs under this lock may reach core_assert_fail
  * (its sink is errlog_add, which takes this same lock): the framing helpers -- save_framed,
  * load_framed, load_or_reset, ring_seal/ring_check/ring_save/ring_load below, and
- * blob_wrap/blob_unwrap in core/blob.c -- are assert-free by design, not by oversight. A failing
+ * blob_wrap/blob_unwrap in core/blob.c -- are assert-free by design, not by oversight (ses_crc16's
+ * NULL/zero guard is statically unreachable from every caller under this lock). A failing
  * assertion macro in any of them would recurse core_assert_fail -> core_assert_report ->
  * errlog_add -> blob_lock() while a caller already holds it: a real deadlock, not just the "walk
  * every caller" audit P-5 originally relied on. */
@@ -229,7 +230,12 @@ static int load_or_reset(nvs_handle_t h, const char *key, uint8_t ver, void *dst
  * (Ruling F-2): every caller below (errlog_persist via errlog_add/lt_errlog_clear, lt_nvs_init's
  * boot load) already holds s_blob_lock, and that lock's own sink (errlog_add) cannot be
  * re-entered from anything running under it -- so, like save_framed/load_framed, these take no
- * lock themselves and use plain guarded returns, never an assert macro. */
+ * lock themselves and use plain guarded returns, never an assert macro. ring_seal/ring_check below
+ * call ses_crc16(&s_ring, RING_CRC_SPAN) -- that function carries its own
+ * CORE_ASSERT_RET(buf != NULL || n == 0, ...), but `&s_ring` is a fixed static address (never
+ * NULL) and RING_CRC_SPAN is the constant 386, so the guard is statically unreachable from every
+ * caller under this lock -- the same reasoning that already covers blob_wrap/blob_unwrap's calls
+ * into it from save_framed/load_framed. */
 
 /* Seal the ring mirror in place: version byte + crc16 over everything before the crc field. */
 static void ring_seal(void)
