@@ -689,14 +689,28 @@
   function loadSessions() {
     var msg = $("#sessions-status");
     hideMsg(msg);
+    requestSessions(false);
+  }
+
+  /* Fetches GET /api/sessions once. On a 502 (an early link failure before the response committed,
+   * #65 -- e.g. the first request right after connect racing the lap-timer's RX task) or a
+   * fetch-level rejection (res.networkError), retry exactly once after 500 ms before giving up and
+   * showing the real reason (res.data.error when the server sent one, else "bad response"). */
+  function requestSessions(isRetry) {
+    var msg = $("#sessions-status");
     fetchJson("/api/sessions").then(function (res) {
       if (res.status === 503) {
         showMsg(msg, "err", "Lap-timer not connected — sessions unavailable.");
         renderSessionsTable([]);
         return;
       }
+      if (!isRetry && (res.status === 502 || res.networkError)) {
+        setTimeout(function () { requestSessions(true); }, 500);
+        return;
+      }
       if (!res.data || !Array.isArray(res.data.sessions)) {
-        showMsg(msg, "err", "Could not load sessions (bad response).");
+        var detail = (res.data && res.data.error) ? res.data.error : "bad response";
+        showMsg(msg, "err", "Could not load sessions (" + detail + ").");
         renderSessionsTable([]);
         return;
       }
