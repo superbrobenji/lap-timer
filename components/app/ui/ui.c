@@ -768,7 +768,7 @@ static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_ga
     LT_ASSERT_VOID(r != NULL && g != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(res != NULL, UI_APP_ASSERT_CODE);
     memset(r, 0, sizeof *r);
-    if (drag_gate_label(g, r->label, sizeof r->label) < 0) {
+    if (drag_gate_label(g, s_model.units, r->label, sizeof r->label) < 0) {
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)g->id);   /* fallback: bounded */
     }
     r->present     = present;
