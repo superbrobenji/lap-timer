@@ -89,6 +89,10 @@
       <h2>Black-box logs</h2>
       <p class="hint">From <code>GET /api/logs</code>; download via
         <code>GET /api/log/&lt;id&gt;</code>.</p>
+      <p class="hint">NDJSON &mdash; one JSON object per line; <code>t</code> is
+        <code>fused</code>, <code>event</code> or <code>status</code>;
+        <code>rx_us</code> is the dev-kit receive time, <code>gps_us</code> the
+        lap-timer's GPS time.</p>
       <div id="logs-status" class="msg" hidden></div>
       <div class="table-wrap">
         <table id="logs-table">

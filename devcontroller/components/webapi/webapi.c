@@ -583,8 +583,10 @@ static void do_sessions_stream(httpd_req_t *req)
 _Static_assert(LOG_JSONL_BUF >= sizeof(logstore_rec_hdr_t) + LT_REC_MAX,
                "LOG_JSONL_BUF must hold at least one max-size logstore record");
 
-/* One transcoded record's JSON text; linkhost_stream_to_json's largest object (the fused-sample
- * line) is well under 200 B. */
+/* One transcoded record's JSON text: logstore_rec_to_json's "{\"rx_us\":...," prefix (<=30 B) plus
+ * linkhost_stream_to_json's largest inner object (the STATUS line, ~157 B) -- well under 256 B. A
+ * line that somehow overflowed this cap would come back LOGSTORE_JSON_SKIP (checked against
+ * out_cap, never a buffer overrun) and be dropped from the download, not corrupt it. */
 #define LOG_JSON_LINE_MAX 256u
 
 /* Defensive loop cap for stream_log_jsonl's outer for(;;): each pass either reads more bytes or
@@ -675,7 +677,7 @@ static void do_log_download(httpd_req_t *req)
 
     char disp[64];
     if (raw) {
-        snprintf(disp, sizeof disp, "attachment; filename=\"%s.log\"", id);
+        snprintf(disp, sizeof disp, "attachment; filename=\"%s.bin\"", id);
         httpd_resp_set_type(req, "application/octet-stream");
         httpd_resp_set_hdr(req, "Content-Disposition", disp);
 

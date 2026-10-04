@@ -62,6 +62,18 @@ static void make_event_payload(uint8_t *p, uint8_t code, uint8_t flags, uint16_t
     memcpy(p + LT_EVENT_OFF_ARG32B, &arg32b, 4);
 }
 
+/* Builds a LT_REC_STATUS payload (LT_STATUS_LEN bytes), fields at their LT_ST_OFF_* offsets --
+ * mirrors test_stream_json.c's test_status_record_to_json, minus the lt_stream_rec_t wrapper. */
+static void make_status_payload(uint8_t *p, uint8_t proto, uint8_t batt_pct, uint16_t sessions,
+                                 const char *fw)
+{
+    memset(p, 0, LT_STATUS_LEN);
+    p[LT_ST_OFF_PROTO]    = proto;
+    p[LT_ST_OFF_BATT_PCT] = batt_pct;
+    memcpy(p + LT_ST_OFF_SESS, &sessions, 2);
+    memcpy(p + LT_ST_OFF_FW, fw, 7);
+}
+
 void test_fused_record_transcodes(void)
 {
     uint8_t payload[LT_FUSED_REC_LEN];
@@ -79,6 +91,31 @@ void test_fused_record_transcodes(void)
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "\"t\":\"fused\""), out);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "\"seq\":7"), out);
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "\"lean_cdeg\":1234"), out);
+    /* issue #67: the dev-kit's own append timestamp (hdr.ts_us, set to 1234567890ULL by
+     * append_rec above) rides along as "rx_us" next to the payload's own gps_us. */
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "\"rx_us\":1234567890"), out);
+}
+
+/* issue #67: STATUS records (type LT_REC_STATUS) are stored on-flash like any other record and
+ * must transcode too -- linkhost_stream_to_json already renders them as "t":"status" (used
+ * verbatim by the live /api/stream SSE path); this pins that logstore_rec_to_json's on-flash
+ * unwrap reaches that same branch, with rx_us prefixed exactly like the fused/event cases. */
+void test_status_record_transcodes(void)
+{
+    uint8_t payload[LT_STATUS_LEN];
+    make_status_payload(payload, 1, 55, 12, "0.1.0-5");
+
+    uint8_t buf[128];
+    size_t total = append_rec(buf, 0, 3, 0, LT_REC_STATUS, payload, LT_STATUS_LEN);
+
+    char out[320];
+    size_t consumed = 0;
+    int n = logstore_rec_to_json(buf, total, out, sizeof out, &consumed);
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, n, out);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(sizeof(logstore_rec_hdr_t) + LT_STATUS_LEN),
+                              (uint32_t)consumed);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "\"t\":\"status\""), out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "\"rx_us\":1234567890"), out);
 }
 
 void test_event_record_transcodes(void)
@@ -182,6 +219,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_fused_record_transcodes);
+    RUN_TEST(test_status_record_transcodes);
     RUN_TEST(test_event_record_transcodes);
     RUN_TEST(test_unknown_type_skipped_and_consumed);
     RUN_TEST(test_truncated_tail_needs_more);
