@@ -101,7 +101,8 @@ Carried forward verbatim from the ledger; none block this sweep or the bench gat
 - Task 2 (polish): `pipeline_reload_cfg` declares `new_mode` mid-function.
 - Task 3 (observation): `ring_seal` writes `ver`/`crc` into the mirror before `nvs_set_blob` succeeds — no RAM consumer reads them.
 - Task 3 (follow-up, final review M9): the ring's byte equivalence has no host test (`err_ring_t` is file-static); bench §8.3 is the empirical check.
+- §8 item 6 verified by code trace: `/api/stream`'s SSE loop (`do_stream`/`s_sse_active`) depends only on the browser-facing send, never on peer presence, so the SSE stays OPEN when the lap-timer link drops and the `— stream stopped —` marker is reachable by pulling DETECT; item 6 stands as written.
 
 ### 10.5 Bench spot-checks that remain (§8)
 
-None of §8's six bench items have run yet — gate `dsB-d1` is pending (same day as `p07c-d1`/`dsA-d1`). All six remain: (1) §2 mph unit toggle + label flip + `reset-engine` clearing the CUR cell; (2) §3 mph benches firing gates 1–2 at 97/161 km/h; (3) §4 `errlog` surviving a reset with the ring framed in place; (4) §5 five reconnects, first `/api/sessions` 5/5 OK; (5) §6 a `.jsonl` download showing `rx_us`/`gps_us`/a `status` line with the right filename; (6) §7 pulling DETECT shows `— stream stopped —` within ~3 s and replugging shows `— stream resumed —`.
+None of §8's six bench items have run yet — gate `dsB-d1` is pending (same day as `p07c-d1`/`dsA-d1`). All six remain: (1) §2 mph unit toggle + label flip + `dbg reset` clearing the CUR cell; (2) §3 mph benches firing gates 1–2 at 97/161 km/h; (3) §4 `errlog` surviving a reset with the ring framed in place; (4) §5 five reconnects, first `/api/sessions` 5/5 OK; (5) §6 a `.jsonl` download showing `rx_us`/`gps_us`/a `status` line with the right filename; (6) §7 pulling DETECT shows `— stream stopped —` within ~3 s and replugging shows `— stream resumed —`.
