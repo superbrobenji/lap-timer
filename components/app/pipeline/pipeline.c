@@ -616,7 +616,6 @@ static void ui_post_lap_reset(void)
 {
     LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
     event_t ev = { .type = EV_LAP_RESET, .mono_us = esp_timer_get_time() };
-    LT_ASSERT_VOID(ev.type == EV_LAP_RESET, PIPE_ASSERT_CODE);
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "lap reset: ui queue full");
 }
 

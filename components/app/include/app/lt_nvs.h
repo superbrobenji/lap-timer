@@ -102,7 +102,10 @@ bool lt_ota_pending_get(void);      /* true iff the flag is set */
 void lt_ota_pending_clear(void);    /* clear + commit */
 
 /* cfg blob (lt_cfg/cfg): load validates version+CRC16 then cfg_validate (returns corrections,
- * <0 => absent/corrupt so the caller keeps its defaults). save packs + CRC16 + writes. */
+ * <0 => absent/corrupt so the caller keeps its defaults). save packs + CRC16 + writes.
+ * I1 (final review, ruling B-5): a runtime save of any field that feeds the drag gate table
+ * (units, benches) or the mode must notify the pipeline (CMD_CONFIG_RELOAD) and, if saved outside
+ * the ui task, the ui (EV_CFG_CHANGED) -- see ui.c menu_do_units / cmd.c cfg_change_notify. */
 int  lt_cfg_load(cfg_t *c);
 int  lt_cfg_save(const cfg_t *c);
 
