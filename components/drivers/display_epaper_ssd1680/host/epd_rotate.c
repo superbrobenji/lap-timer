@@ -69,8 +69,13 @@ bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16
      * not a genuine anomaly). x + w is bounded by the panel's VISIBLE width (logical_w, ==
      * native_h), not by fb_w: fb_w may be padded past the panel's real column count (e.g. 256
      * vs. the 2.13" panel's 250), so a rect that fits the padded buffer but spills past column
-     * logical_w must still be rejected -- it would never actually land on the panel. */
-    if (w == 0 || h == 0 || x + w > p->logical_w || y + h > fb_h) {
+     * logical_w must still be rejected -- it would never actually land on the panel. M2 (bench-fix
+     * review): symmetrically, y + h is bounded by the panel's VISIBLE height (logical_h ==
+     * native_w), not just by fb_h -- fb_h is the buffer's height and may legitimately exceed the
+     * panel's real row count (epd_pure.h documents fb_w as padded past the visible width; a
+     * height-padded canvas is the same idea applied to the other axis), so a rect that fits a
+     * taller buffer but spills past logical_h must still be rejected, same as the x + w case. */
+    if (w == 0 || h == 0 || x + w > p->logical_w || y + h > p->logical_h || y + h > fb_h) {
         return false;
     }
 
@@ -79,11 +84,15 @@ bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16
      * so the rect's landscape rows y..y+h-1 land at RAM columns native_w-(y+h) .. native_w-1-y --
      * the HIGH end of the row range maps to the LOW end of the column range, and vice versa.
      * xb0 is the byte holding the lowest such column (native_w-(y+h)); xb1 is one past the byte
-     * holding the highest (native_w-1-y), i.e. ceil((native_w-y)/8) -- clamped to ram_w/8 since y
-     * can be 0, which would otherwise ask for a byte past the panel's RAM whenever native_w <
-     * ram_w (ws213v4: native_w=122, ram_w=128 -- the 122..127 tail epd_rotate_line already
-     * forces white, so clamping here just avoids sending that padding byte as part of the
-     * window). x/w are untouched: panel RAM rows map to the landscape x 1:1, no mirror there. */
+     * holding the highest (native_w-1-y), i.e. ceil((native_w-y)/8). M3 (bench-fix review): the
+     * xb1 > ram_bytes clamp just below is UNREACHABLE with today's panel table -- ceil(native_w/8)
+     * <= ram_w/8 whenever native_w <= ram_w, which holds for both rows (ws213v4: 122 <= 128;
+     * ws29v2: 128 == 128) -- it is kept per ruling B-10 purely as a guard for a hypothetical future
+     * panel row with native_w > ram_w. The last RAM byte legitimately covers the forced-white
+     * padding tail where native_w < ram_w (ws213v4 columns 122..127, epd_rotate_line's own
+     * header/body comments) and IS sent as part of the window for y <= 1; the clamp is not what
+     * keeps that byte out. x/w are untouched: panel RAM rows map to the landscape x 1:1, no mirror
+     * there. */
     uint16_t ram_bytes = (uint16_t)(p->ram_w / 8);
     out->xb0 = (uint16_t)((p->native_w - (y + h)) / 8);
     out->xb1 = (uint16_t)((p->native_w - y + 7) / 8);

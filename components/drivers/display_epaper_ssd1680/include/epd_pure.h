@@ -66,11 +66,15 @@ typedef struct {
  * above), rounded up to a multiple of 8 and possibly wider than the panel's
  * VISIBLE width (epd_panel()->logical_w, == native_h) -- x + w is bounded by that visible width,
  * not by fb_w, so a rect that fits the padded buffer but spills past the panel's real column
- * count is still rejected. Fills `*out` and returns true on success. On ANY rejection -- the rect
- * is empty (w == 0 || h == 0), out of the panel's visible range (x + w > logical_w ||
- * y + h > fb_h), `fb_w` is not a multiple of 8 (a buffer-shape bug, checked as an assertion, not
- * a rect-shape one), or `out` is NULL -- `*out` is left completely untouched and the function
- * returns false; the caller must not read `*out` after a false return. */
+ * count is still rejected. M2 (bench-fix review): symmetrically, the row range y..y+h-1 is bounded
+ * by the panel's VISIBLE height (epd_panel()->logical_h, == native_w), not just by fb_h -- fb_h is
+ * the BUFFER height and may likewise exceed the panel's real row count on a hypothetical
+ * height-padded canvas, so y + h > logical_h is rejected even when y + h <= fb_h. Fills `*out` and
+ * returns true on success. On ANY rejection -- the rect is empty (w == 0 || h == 0), out of the
+ * panel's visible range (x + w > logical_w || y + h > logical_h || y + h > fb_h), `fb_w` is not a
+ * multiple of 8 (a buffer-shape bug, checked as an assertion, not a rect-shape one), or `out` is
+ * NULL -- `*out` is left completely untouched and the function returns false; the caller must not
+ * read `*out` after a false return. */
 bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t fb_w,
                            uint16_t fb_h, epd_window_t *out);
 

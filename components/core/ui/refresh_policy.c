@@ -27,7 +27,10 @@ rf_kind_t ui_refresh_decide(const rf_in_t *in)
     if (in->dead) {
         return RF_NONE;
     }
-    if (!in->dirty && !in->wants_full) {
+    if (!in->dirty && !in->wants_full && !in->screen_changed) {
+        /* M1 (review fix round): screen_changed must not be dropped here -- rule 3b below is the
+         * one that promotes it to RF_FULL on its own, mirroring ui.c's own render_and_refresh()
+         * guard, which already treats screen_changed exactly like wants_full. */
         return RF_NONE;
     }
     if (in->throttled) {

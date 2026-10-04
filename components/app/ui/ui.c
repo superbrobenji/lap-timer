@@ -351,6 +351,14 @@ static void ui_apply_mode(uint8_t new_mode)
     s_mode        = new_mode;
     s_model.mode  = s_mode;
     s_model.page  = 0; /* §22.6: a mode switch resets the screen */
+    s_wants_full     = true; /* I1 (bench-fix review): whole-screen replacement + page change
+                               * (§20.3) -- covers BOTH callers: the local menu toggle
+                               * (menu_do_mode) and a remote CONFIG_SET mode flip
+                               * (ui_reload_cfg -> EV_CFG_CHANGED), neither of which previously
+                               * requested a full here. */
+    s_screen_changed = true; /* ruling B-9: never a partial, regardless of motion -- the riding
+                               * screen's LAP<->DRAG swap + page-0 reset is exactly the kind of
+                               * whole-screen replacement B-9 forbids as a dirty-rect partial. */
     if (s_mode == MODE_DRAG) {
         s_lap_start_mono_us = 0;
         s_model.cur_running = false;
@@ -625,6 +633,10 @@ static void show_venue_oneshot(int64_t now)
     s_model.screen     = SCR_ONESHOT;
     s_model.oneshot    = ONESHOT_VENUE;
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
+    s_wants_full       = true; /* M5 (bench-fix review): keep a full owed for the next still
+                                 * moment if a throttled downgrade only yields a partial here --
+                                 * matches the other four replacement sites, none of which set
+                                 * screen_changed without also setting wants_full. */
     s_screen_changed   = true; /* riding -> one-shot: whole-screen replacement (ruling B-9) */
 }
 
@@ -1541,8 +1553,12 @@ static void ui_loop_iter(QueueHandle_t btn_q)
      * that replaces the whole screen content (one-shot -> riding, menu enter/exit, page change)
      * requests a full, same as ui_exit_menu()'s manual dismissal path. Bench B-F1, ruling B-9:
      * s_screen_changed (not just s_wants_full) forces that full even while the bike is moving --
-     * the still-gated wants_full path otherwise left this as a partial, ghosting rows outside the
-     * dirty rect. */
+     * the still-gated wants_full path otherwise left this as a partial, and a partial LUT's
+     * ghosting/contrast is visible across a whole-screen content change even when the dirty
+     * rectangle itself is computed correctly. Correction (review M4): the stale TOP ROWS actually
+     * seen on the bench were a separate bug, B-F2 (the un-mirrored RAM-byte window, now fixed) --
+     * not rows left outside a correct dirty rect by this partial-vs-full choice; B-9 stands on its
+     * own real justification above, not on that symptom. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
         s_oneshot_until_us = 0;
         s_model.screen     = SCR_RIDING;

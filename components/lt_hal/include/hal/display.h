@@ -24,7 +24,7 @@ typedef struct {
 
 int  disp_init(const disp_caps_t **caps);            /* hw reset + init + one full refresh of the current blit (boot screen); 0 or -EIO/-ETIMEDOUT */
 int  disp_blit(const uint8_t *fb);                   /* full framebuffer, 1 bpp, row-major, MSB = leftmost, 0 = black (core/ui convention) */
-int  disp_set_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h); /* dirty rect for the next DISP_PARTIAL; x/w rounded outward to 8-px columns */
+int  disp_set_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h); /* dirty rect for the next DISP_PARTIAL; y/h rounded outward to whole 8-px RAM byte columns (and mirrored, ruling B-10); x/w map one-to-one to RAM rows */
 int  disp_refresh(uint8_t mode);                     /* DISP_PARTIAL / DISP_FULL; blocks until BUSY clears or timeout (returns -ETIMEDOUT) */
 int  disp_sleep(void);
 int  disp_wake(void);

@@ -31,7 +31,9 @@ typedef struct {
 
 /* Rules, in this order (spec §20.3):
  *   1. `dead`                                        -> RF_NONE (display is not usable)
- *   2. `!dirty && !wants_full`                        -> RF_NONE (nothing to show)
+ *   2. `!dirty && !wants_full && !screen_changed`      -> RF_NONE (nothing to show; M1 review fix:
+ *      screen_changed must not be dropped here the way dirty/wants_full are -- rule 3b below is
+ *      the one that promotes a lone screen_changed to RF_FULL)
  *   3. `throttled`                                    -> RF_PARTIAL if now - last_partial_us >=
  *      30 s, else RF_NONE; fulls are never issued while throttled, so a `wants_full` (or
  *      `screen_changed`, rule 3b below) request is downgraded to (at most) a partial rather than
