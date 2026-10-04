@@ -314,7 +314,8 @@ static int epd_write_partial_frame(uint8_t cmd)
 }
 
 /* §20.1 "Partial refresh": border hold, window, the rect into 0x24, lut_partial, activate, wait
- * (~0.3-0.5 s), the same rect into 0x26 (diff baseline for the next partial), border restore.
+ * (~0.3-0.5 s), window + cursor again, the same rect into 0x26 (diff baseline for the next partial),
+ * border restore.
  *
  * Fix 1 (review round 1): every exit path must restore the border and clear s_win_set -- a
  * failure partway through must not leave the border held or the window marked pending. Power-of-10
@@ -343,6 +344,13 @@ static int epd_partial_refresh(void)
     if (rc == 0) rc = epd_data(lut, sizeof lut);
     if (rc == 0) rc = epd_cmd(0x20);
     if (rc == 0) rc = epd_wait_busy();
+    /* Bench B-F3 (ruling B-14): re-issue the window AND the cursor before the baseline copy. The
+     * 0x24 write above walked the address counter through the whole window and the update ran in
+     * between, so the counter is not back at (xb0, r0) for a sub-rectangle window; without this the
+     * baseline bytes landed at the wrong RAM address, the previous caret row kept a white baseline,
+     * and the next partial never drove it back to white (carets accumulated in the menu). A
+     * full-window partial (pre-7c T7) hid this because the counter wrapped to the window origin. */
+    if (rc == 0) rc = epd_set_partial_window();
     if (rc == 0) rc = epd_write_partial_frame(0x26);
 
     (void)epd_cmd(0x3C);
