@@ -94,6 +94,32 @@ static void test_wants_full_alone_refreshes(void)
     TEST_ASSERT_EQUAL_INT(RF_PARTIAL, ui_refresh_decide(&i));
 }
 
+/* Bench fix 1 (B-9): a whole-screen replacement forces a full even while moving -- the bug this
+ * fix addresses was that `wants_full` alone (test_wants_full_deferred_while_moving) is deferred to
+ * a partial until `still`, which is correct for the still-gated triggers but wrong for a screen
+ * replacement (one-shot -> riding, menu enter/exit, page change): those must never go out as a
+ * partial, which left ghosting outside the dirty rect. */
+static void test_screen_change_forces_full_even_when_moving(void)
+{
+    rf_in_t i = base();
+    i.still          = false;
+    i.partial_count  = 0;
+    i.screen_changed = true;
+    TEST_ASSERT_EQUAL_INT(RF_FULL, ui_refresh_decide(&i));
+}
+
+/* Bench fix 1 (B-9): the throttle rule is still checked before screen_changed (rule 3 before rule
+ * 3b), so a throttled screen replacement is downgraded to a partial, same as any other throttled
+ * refresh, once the 30 s minimum spacing has elapsed. */
+static void test_screen_change_still_partial_when_throttled(void)
+{
+    rf_in_t i = base();
+    i.throttled       = true;
+    i.screen_changed  = true;
+    i.last_partial_us = i.now_us - 30000000LL;
+    TEST_ASSERT_EQUAL_INT(RF_PARTIAL, ui_refresh_decide(&i));
+}
+
 /* Coverage gap 2: full_every == 0 is a caller bug guarded by the second CORE_ASSERT_RET, which
  * reports the fault and returns the conservative RF_NONE. Only the return value is asserted here
  * (this suite does not link assert_support.c, unlike test_smoke/test_ses_frame/test_ses_records). */
@@ -122,6 +148,8 @@ int main(void)
     RUN_TEST(test_wants_full_deferred_while_moving);
     RUN_TEST(test_throttle_limits_partials_and_blocks_full);
     RUN_TEST(test_wants_full_alone_refreshes);
+    RUN_TEST(test_screen_change_forces_full_even_when_moving);
+    RUN_TEST(test_screen_change_still_partial_when_throttled);
     RUN_TEST(test_full_every_zero_is_none);
     RUN_TEST(test_null_input_is_none);
     return UNITY_END();

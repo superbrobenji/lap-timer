@@ -202,6 +202,9 @@ static int64_t  s_next_reinit_us;  /* next allowed disp_reinit() probe while SYS
 static uint16_t s_partial_count;   /* partials issued since the last full */
 static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
 static bool     s_wants_full;      /* next render should be a full refresh (page/menu/combo/etc) */
+static bool     s_screen_changed;  /* the next render replaces the whole screen (one-shot<->riding,
+                                     * menu enter/exit, page change) -- never a partial, regardless
+                                     * of motion (bench B-F1, ruling B-9) */
 static bool     s_refresh_pending; /* fix round 2 (Important #2): RF_NONE returned while throttled
                                      * -- a refresh is owed once the 30 s throttle window elapses */
 
@@ -309,6 +312,7 @@ static void ui_open_menu(void)
         s_model.menu_top = 0;
         s_last_input_us  = esp_timer_get_time();
         s_wants_full     = true; /* menu entry: full refresh (§20.3 full-refresh triggers) */
+        s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
         s_dirty          = true;
     } else {
         /* §20.7: above the lock speed the menu is ignored (a lock-icon flash). No lock glyph exists
@@ -321,9 +325,10 @@ static void ui_open_menu(void)
 static void ui_exit_menu(void)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* leaving a valid screen */
-    s_model.screen = SCR_RIDING;
-    s_wants_full   = true; /* menu/one-shot exit: full refresh (§20.3 full-refresh triggers) */
-    s_dirty        = true;
+    s_model.screen   = SCR_RIDING;
+    s_wants_full     = true; /* menu/one-shot exit: full refresh (§20.3 full-refresh triggers) */
+    s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
+    s_dirty          = true;
 }
 
 /* Every UI-driven cfg change is a read-modify-write (T-D): reload the blob from NVS immediately
@@ -481,13 +486,15 @@ static void btn_short(uint8_t bit)
     } else if (s_model.screen == SCR_RIDING) {
         LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);   /* page wrap math assumes 0..2 */
         if (bit == BTN_UP) {
-            s_model.page = (uint8_t)((s_model.page + 2) % 3); /* previous page (wrap) */
-            s_wants_full = true; /* page change: full refresh (§20.3 full-refresh triggers) */
-            s_dirty      = true;
+            s_model.page     = (uint8_t)((s_model.page + 2) % 3); /* previous page (wrap) */
+            s_wants_full     = true; /* page change: full refresh (§20.3 full-refresh triggers) */
+            s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
+            s_dirty          = true;
         } else if (bit == BTN_DOWN) {
-            s_model.page = (uint8_t)((s_model.page + 1) % 3); /* next page (wrap) */
-            s_wants_full = true;
-            s_dirty      = true;
+            s_model.page     = (uint8_t)((s_model.page + 1) % 3); /* next page (wrap) */
+            s_wants_full     = true;
+            s_screen_changed = true;
+            s_dirty          = true;
         }
         if ((bit == BTN_UP || bit == BTN_DOWN) && s_model.mode == SCR_MODE_DRAG) {
             /* Plan 7c T5 (design §3): DRAG rows are filled per page -- rebuild for the new one. */
@@ -618,6 +625,7 @@ static void show_venue_oneshot(int64_t now)
     s_model.screen     = SCR_ONESHOT;
     s_model.oneshot    = ONESHOT_VENUE;
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
+    s_screen_changed   = true; /* riding -> one-shot: whole-screen replacement (ruling B-9) */
 }
 
 /* Clears the page 1 row 4 sector-delta cache (spec 7b §3). Ruling B7b-1 (bench finding 1): called
@@ -1096,6 +1104,7 @@ static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
     uint32_t flags     = sys_flags_get();
     in.dirty           = true; /* called from render_and_refresh(): a dirty render or the deferred (throttled) refresh */
     in.wants_full      = s_wants_full;
+    in.screen_changed  = s_screen_changed; /* bench B-F1, ruling B-9: screen replacement -> never a partial */
     in.still           = s_gspeed_kmh < MENU_LOCK_SPEED_KMH;
     in.throttled       = (flags & (1u << SYS_DISP_TEMP_THROTTLE)) != 0;
     in.dead            = (flags & (1u << SYS_DISP_DEAD)) != 0;
@@ -1208,7 +1217,12 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now, uint8_t *effective_mod
  * rather than silently extending past 30 s while a string of ticks goes unaccounted. It still
  * counts fully as a real full when the policy or the fallback above promotes it to one, since that
  * is a genuine full refresh regardless of what triggered it. Reports the effective mode via
- * *mode_out so the caller's log line reflects what actually happened on the panel. */
+ * *mode_out so the caller's log line reflects what actually happened on the panel.
+ * Bench B-F1, ruling B-9: s_screen_changed clears on ANY successful refresh, full or partial --
+ * unlike s_wants_full just below, which only clears on a full. A throttled screen replacement's
+ * successful partial already painted the new screen content, so there is nothing left for a later
+ * full to do on its behalf; leaving s_screen_changed set would otherwise force a second, redundant
+ * full once the throttle lifts. */
 static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
 {
     LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
@@ -1220,6 +1234,7 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
          * refresh s_fb_prev_bits so the next diff is against reality. Left untouched on failure so
          * the next diff still covers the union of what changed then and what changes next. */
         memcpy(s_fb_prev_bits, s_fb_bits, sizeof s_fb_prev_bits);
+        s_screen_changed = false; /* satisfied by this refresh, whichever mode actually ran */
         if (*mode_out == DISP_PARTIAL) {
             /* I4 (ruling R-8): always stamp the timestamp; only the count stays tick-gated. */
             s_last_partial_us = now;
@@ -1309,6 +1324,12 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
  *     policy returns RF_NONE, not throttled -> skip (dead); s_refresh_pending clears -- dead
  *                                               re-arms on its own via dead_retry().
  *   Every "skip" row leaves s_wants_full set so a later render asks again.
+ *   changed=false, screen_changed=true (bench B-F1, ruling B-9): the row above is unchanged by
+ *     name -- s_screen_changed is treated exactly like s_wants_full by the guard just below, so a
+ *     whole-screen replacement whose rendered frame happens to be byte-identical to what the panel
+ *     already shows still asks the policy (rule 3b forces RF_FULL unless throttled, in which case
+ *     rule 3 still answers first) instead of being silently dropped; every "skip" outcome above
+ *     leaves s_screen_changed set, same as s_wants_full, so a later render asks again.
  * Plan 7c T6 (fix round 1) ruling, carried here: a render that starts with s_refresh_pending
  * already true is never "only a clock tick". tick_only is computed once, at entry -- before
  * anything below can change s_refresh_pending -- as s_clock_tick && !s_refresh_pending, and folded
@@ -1332,7 +1353,7 @@ static void render_and_refresh(void)
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE); /* esp_timer stamp feeds the policy's now_us */
 
     bool changed = fb_diff_rect(&s_fb_prev, &s_fb, &s_diff);
-    if (!changed && !s_wants_full) {
+    if (!changed && !s_wants_full && !s_screen_changed) {
         /* The panel already shows this frame -- no policy call, no bookkeeping of any kind. */
         log_refresh(false, DISP_PARTIAL, 0);
         s_refresh_pending = false;
@@ -1351,9 +1372,10 @@ static void render_and_refresh(void)
     rf_kind_t kind = ui_refresh_decide(&in);
 
     if (!changed && kind != RF_FULL) {
-        /* Fix round 1: an unchanged frame only reaches here with wants_full set, asking the policy
-         * for a forced full; anything but RF_FULL means "not yet" -- skip exactly like the
-         * wants_full=false case above, never handing an invalid s_diff to do_refresh().
+        /* Fix round 1: an unchanged frame only reaches here with wants_full (or, bench B-F1,
+         * screen_changed) set, asking the policy for a forced full; anything but RF_FULL means
+         * "not yet" -- skip exactly like the wants_full=false/screen_changed=false case above,
+         * never handing an invalid s_diff to do_refresh().
          * Fix round 2: a throttled RF_NONE is still owed a retry (spec §20.3, Important #2) -- only
          * RF_PARTIAL (nothing to redraw) or a non-throttled RF_NONE (dead, which re-arms on its
          * own via dead_retry()) clear s_refresh_pending outright. */
@@ -1517,11 +1539,15 @@ static void ui_loop_iter(QueueHandle_t btn_q)
 
     /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. Ruling T7-R9: every transition
      * that replaces the whole screen content (one-shot -> riding, menu enter/exit, page change)
-     * requests a full, same as ui_exit_menu()'s manual dismissal path. */
+     * requests a full, same as ui_exit_menu()'s manual dismissal path. Bench B-F1, ruling B-9:
+     * s_screen_changed (not just s_wants_full) forces that full even while the bike is moving --
+     * the still-gated wants_full path otherwise left this as a partial, ghosting rows outside the
+     * dirty rect. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
         s_oneshot_until_us = 0;
         s_model.screen     = SCR_RIDING;
         s_wants_full       = true;
+        s_screen_changed   = true;
         s_dirty            = true;
     }
     /* Menu idle auto-exit (§20.7). */
