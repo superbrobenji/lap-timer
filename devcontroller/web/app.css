@@ -241,6 +241,9 @@ table a:hover { text-decoration: underline; }
 .monitor-pane div { border-bottom: 1px dashed var(--border); padding: 2px 0; }
 .monitor-pane div:last-child { border-bottom: none; }
 
+/* issue #68: stream stopped/resumed marker rows */
+.monitor-pane .marker { color: var(--warn); font-style: italic; }
+
 /* --- flash progress --- */
 
 .progress {

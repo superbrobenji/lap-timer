@@ -740,6 +740,15 @@
   var monitorRowCount = 0;
   var MONITOR_MAX_ROWS = 200;
 
+  // issue #68: freshness cue. lastMsgAt is the wall-clock time of the most recent record (SSE
+  // message, not a plain info row); stalled flips true once a 1 s timer (freshTimer, started in
+  // startMonitor, cleared in stopMonitor) notices no record in > MONITOR_STALE_MS while the
+  // EventSource is still open, and back to false on the next record.
+  var lastMsgAt = 0;
+  var stalled = false;
+  var freshTimer = null;
+  var MONITOR_STALE_MS = 3000;
+
   var i32 = function (u) { return u > 0x7fffffff ? u - 0x100000000 : u; };  // uint32 -> signed
   var signMs = function (ms) { return (ms >= 0 ? "+" : "") + (ms / 1000).toFixed(3) + "s"; };
 
@@ -782,8 +791,33 @@
     return ts + "  " + JSON.stringify(parsed);
   }
 
-  function appendMonitorRow(rawData) {
+  // Appends one row to the monitor pane and trims it to MONITOR_MAX_ROWS, without touching
+  // monitorRowCount — shared by appendMonitorRow (real records) and the #68 stalled/resumed
+  // marker rows below, which must NOT count as records.
+  function appendMonitorPaneRow(node) {
     var pane = $("#monitor-pane");
+    pane.appendChild(node);
+    while (pane.childNodes.length > MONITOR_MAX_ROWS) {
+      pane.removeChild(pane.firstChild);
+    }
+    pane.scrollTop = pane.scrollHeight;
+  }
+
+  function appendMonitorMarker(text) {
+    appendMonitorPaneRow(el("div", { className: "marker", text: text }));
+  }
+
+  function updateMonitorCount() {
+    var age = lastMsgAt ? Math.round((Date.now() - lastMsgAt) / 1000) + "s ago" : "—";
+    $("#monitor-count").textContent = monitorRowCount + " records · last " + age;
+  }
+
+  function appendMonitorRow(rawData) {
+    lastMsgAt = Date.now();
+    if (stalled) {
+      appendMonitorMarker("— stream resumed —");
+      stalled = false;
+    }
     var ts = new Date().toLocaleTimeString();
     var text;
     try {
@@ -796,13 +830,21 @@
     } catch (e) {
       text = ts + "  " + rawData;
     }
-    pane.appendChild(el("div", { text: text }));
+    appendMonitorPaneRow(el("div", { text: text }));
     monitorRowCount++;
-    while (pane.childNodes.length > MONITOR_MAX_ROWS) {
-      pane.removeChild(pane.firstChild);
+    updateMonitorCount();
+  }
+
+  // #68: 1 s tick (started in startMonitor, cleared in stopMonitor) — marks the stream stalled
+  // once a record hasn't arrived in MONITOR_STALE_MS while the EventSource is still open, and
+  // always refreshes the "last Ns ago" freshness text (appendMonitorRow refreshes it immediately
+  // on a new record; this tick is what advances it between records).
+  function monitorFreshTick() {
+    if (monitorSource && lastMsgAt && !stalled && Date.now() - lastMsgAt > MONITOR_STALE_MS) {
+      appendMonitorMarker("— stream stopped —");
+      stalled = true;
     }
-    pane.scrollTop = pane.scrollHeight;
-    $("#monitor-count").textContent = monitorRowCount + " rows";
+    updateMonitorCount();
   }
 
   function stopMonitor() {
@@ -810,6 +852,10 @@
       monitorSource.close();
       monitorSource = null;
     }
+    clearInterval(freshTimer);
+    freshTimer = null;
+    lastMsgAt = 0;
+    stalled = false;
     $("#monitor-toggle").textContent = "Start";
   }
 
@@ -817,6 +863,7 @@
     if (monitorSource) return;
     var lastErrorAt = 0;
     monitorSource = new EventSource("/api/stream");
+    freshTimer = setInterval(monitorFreshTick, 1000);
     monitorSource.onopen = function () { appendMonitorRow('{"info":"stream connected"}'); };
     monitorSource.onmessage = function (evt) { appendMonitorRow(evt.data); };
     monitorSource.onerror = function () {
