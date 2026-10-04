@@ -71,3 +71,36 @@ Tag `dsB-d1`; close #86 #87 #65 #67 #68; note the DRAM reclaim in the roadmap.
 ## 9. Out of scope / follow-ups
 
 Dev-kit UART two-task race (bench-decided); VBO/NMEA black-box export (needs FIX records on the stream — a future stream-contract change); mph for range/brake gates (not user-defined today).
+
+## 10. Implementation notes
+
+Written after all seven tasks landed (code head `7fcd4fe`; this is Task 7), from the execution ledger (`.superpowers/sdd/2026-10-03-debt-sweep-b/progress.md`) — every ruling made along the way, the measured DRAM cost, the minors deferred rather than fixed, and the bench spot-checks that remain.
+
+### 10.1 Spec corrections (amendments to §6)
+
+- The transcoder's type key is `"t"`, not `"rec"` — every bullet in §6 that reads `"rec":"fused"` / `"event"` / `"status"` should read `"t":"fused"` / `"event"` / `"status"`.
+- §6's third bullet ("STATUS records (stored, currently skipped) are transcoded") was already satisfied before Task 5 started — the transcoder already emitted `"t":"status"` with the `LT_ST_OFF_*` fields. Task 5 added `rx_us` and the `Content-Disposition` filename/format note; it did not add STATUS transcoding.
+
+### 10.2 Rulings (in ledger order)
+
+- **B-1** (pre-flight, carried by T4): the dev-kit's first-chunk download buffer lives in `dl_sink_t` as a `static` rather than a stack local. One HTTP download at a time is already enforced by the download path's single-reader design; T4 confirmed `linkhost_download_cmd` is serialized by `s_req_mtx` (held `portMAX_DELAY`) plus a single `async_worker`, so the static carries no concurrency risk. Cost if wrong: 512 B of dev-kit DRAM (not constrained like the lap-timer).
+- **B-2** (pre-flight, carried by T2): `EV_CFG_CHANGED`/`EV_LAP_RESET` take values 16/17 in the stable `EV_*` enum even though they are never logged or streamed — keeps one enum rather than a parallel ui-only one; the comment marks them ui-only. Cost if wrong: two reserved codes.
+- **Task 2 ruling** (post-review): fix all three review findings outright — `stats_reset` fires when the reloaded mode differs, `drag_armed` is cleared in both ui handlers, the third menu label is rebuilt on reload — rather than deferring any of them; bugs are fixed, not parked. Cost if wrong: none.
+- **Task 4 ruling** (post-review, accepted): adding `rc`/`where` to the pre-existing REMOTE 502 branch too (not only the new early-failure 502) is accepted as additive, since the SPA only ever reads the `error` field.
+- **B-3** (mid-sweep): Tasks 5 and 6 are batched into one dispatch — both are small, disjoint-file dev-kit edits (webapi/logstore/index.html vs app.js/app.css) — for one review surface covering two features. Cost if wrong: a single review covers two features.
+
+### 10.3 DRAM budget
+
+`moto_sim`, apples-to-apples build-pair comparison (base `710bcd8` vs. post-T3): `.bss` delta **−352 B** (105225 → 104873 B); free static DRAM **3960 B → 4312 B**. This is 6 B beyond the brief's naive structural estimate of −346 B (`(388+39) − (385+388) = −346`); the two resized symbols (`s_ring` 388 B, `s_blob_scratch` 39 B) individually measure exactly as specified, so the extra 6 B is ordinary `.bss`-section alignment/layout shift from `s_ring` growing from an odd 385 B to an even 388 B, not a missed or additional reclaim. Tasks 1, 2, and 4–6 all measured `.bss` delta 0 B.
+
+### 10.4 Known, deferred (minors)
+
+Carried forward verbatim from the ledger; none block this sweep or the bench gate.
+
+- Task 1 (pre-existing): `drag_cfg_t.benches_kmh`/`n_benches` ("headline benches", §11.4) has no reader in `components/app` or `core/ui` — a display consumer or removal is a later decision.
+- Task 2 (polish): `pipeline_reload_cfg` declares `new_mode` mid-function.
+- Task 3 (observation): `ring_seal` writes `ver`/`crc` into the mirror before `nvs_set_blob` succeeds — no RAM consumer reads them.
+
+### 10.5 Bench spot-checks that remain (§8)
+
+None of §8's six bench items have run yet — gate `dsB-d1` is pending (same day as `p07c-d1`/`dsA-d1`). All six remain: (1) §2 mph unit toggle + label flip + `reset-engine` clearing the CUR cell; (2) §3 mph benches firing gates 1–2 at 97/161 km/h; (3) §4 `errlog` surviving a reset with the ring framed in place; (4) §5 five reconnects, first `/api/sessions` 5/5 OK; (5) §6 a `.jsonl` download showing `rx_us`/`gps_us`/a `status` line with the right filename; (6) §7 pulling DETECT shows `— stream stopped —` within ~3 s and replugging shows `— stream resumed —`.

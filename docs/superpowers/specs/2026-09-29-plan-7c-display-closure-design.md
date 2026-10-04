@@ -123,6 +123,8 @@ After two sim laps: page 1 shows sector times and THEO (photo); page 2 shows a n
 
 Real GPS/IMU health flags (Plan 8; #82 with them), mph-defined gate thresholds (bench list in mph) — follow-up issue, predictive lap time, sector-level ghosting tuning, the 2.9" on hardware.
 
+**mph-defined gate thresholds are no longer deferred (2026-10-04):** landed in Debt sweep B §3 (#86) — `drag_cfg_from_user` converts mph benches to km/h `SPEED_FROM0` gate thresholds and `drag_gate_label` prints the mph value back; see `docs/superpowers/specs/2026-10-03-debt-sweep-b-design.md` §3.
+
 ## 11. Implementation notes (2026-09-29/30, `p7c-display-closure` T1–T8)
 
 Full task-by-task detail lives in `.superpowers/sdd/2026-09-29-plan-7c-display-closure/` (`progress.md` ledger, `task-1-report.md`…`task-8-report.md`). This section records what a future reader needs without opening that directory.
