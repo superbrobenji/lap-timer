@@ -887,6 +887,26 @@ static int dbg_safe(int argc, char **argv)
     return 0;
 }
 
+/* ---- dbg reset (B-4, final review: spec defect fix) ----
+ *
+ * #87/CMD_RESET_ENGINE has had a pipeline handler and a ui EV_LAP_RESET consumer since Plan
+ * debt-sweep-B Task 2, but no console path ever posted the command itself -- the design spec's
+ * §2/§8 assumed a "reset-engine" command that no code anywhere implements. This is that producer,
+ * reachable from the lap-timer's own console (`lt shell`), posted the same non-blocking way
+ * cmd.c's cfg_change_notify() posts CMD_CONFIG_RELOAD.
+ */
+static int dbg_reset(void)
+{
+    CORE_ASSERT_RET(g_cmd_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    command_t c = { .type = CMD_RESET_ENGINE };
+    if (xQueueSend(g_cmd_q, &c, 0) != pdTRUE) {
+        printf("dbg: cmd queue full\n");
+        return 1;
+    }
+    printf("dbg: reset-engine posted\n");
+    return 0;
+}
+
 /* ---- dbg dispatch ---- */
 static int cmd_dbg(int argc, char **argv)
 {
@@ -905,6 +925,7 @@ static int cmd_dbg(int argc, char **argv)
         if (strcmp(s, "btn")     == 0) return dbg_btn(argc, argv);
         if (strcmp(s, "flag")    == 0) return dbg_flag(argc, argv);
         if (strcmp(s, "safe")    == 0) return dbg_safe(argc, argv);
+        if (strcmp(s, "reset")   == 0) return dbg_reset();
         if (strcmp(s, "crash")   == 0) {
             printf("dbg: forcing a panic (abort) -> ESP_RST_PANIC\n");
             fflush(stdout);
@@ -1186,7 +1207,7 @@ void export_serial_start(int reset_reason)
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
 #if CFG_HAS_DEVUX
-    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn <n> [ms]|flag set|clear <b>|crash|hang", cmd_dbg);
+    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn <n> [ms]|flag set|clear <b>|reset|crash|hang", cmd_dbg);
     register_cmd("ota",    "ota recv <size> <sha256_hex> <ver> <hwid>  (dev bench image push, §19.6)", cmd_ota);
 #endif
 
