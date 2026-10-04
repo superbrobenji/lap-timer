@@ -15,8 +15,8 @@ Today `op_config_set` (cmd.c) saves to NVS and acks; the pipeline reads cfg once
 - **Trigger.** `op_config_set`, after a successful `lt_cfg_save`, posts `command_t{ .type = CMD_CONFIG_RELOAD }` to `g_cmd_q` (non-blocking; a full queue is logged, not fatal) and posts `event_t{ .type = EV_CFG_CHANGED }` straight to `g_ui_evt_q` with `xQueueSend(..., 0)` — never through `emit_event()`, so the event is neither logged to the session EVENT record nor streamed to the dev-kit.
 - **Event codes.** `core/event.h` gains `EV_CFG_CHANGED = 16` and `EV_LAP_RESET = 17`, commented "ui-only: posted directly to g_ui_evt_q, never emitted through the pipeline's emit_event(), never written to an EVENT record". `link.c`'s stream and the logger never see them by construction (only `emit_event` reaches those sinks).
 - **Pipeline.** `handle_cmd` `CMD_CONFIG_RELOAD`: `cfg_defaults` + `lt_cfg_load` (defaults on failure, as at boot) → `drag_cfg_from_user` → `drag_init(&s_drag, &dc)` (a fresh engine: the current run is dropped, session bests are NOT kept — `drag_init` zeroes them; documented, since a units change redefines the mph gates) → `s_mode` re-derived → `publish_drag_snapshot()`. Lap engine untouched.
-- **ui.** `handle_event` `EV_CFG_CHANGED`: reload `s_cfg` (defaults on failure), `s_model.units = s_cfg.units`, rebuild `s_drag_cfg`, `s_mode` re-derived, `drag_rows_refill()` if DRAG rows are showing, `s_dirty = true`. `EV_LAP_RESET`: `s_lap_start_mono_us = 0; s_model.cur_ms = 0; s_model.cur_running = false; s_last_clock_us = 0; s_dirty = true`.
-- **Reset.** `handle_cmd` `CMD_RESET_ENGINE` additionally posts `EV_LAP_RESET` to `g_ui_evt_q` (direct send) after its existing work.
+- **ui.** `handle_event` `EV_CFG_CHANGED`: reload `s_cfg` (defaults on failure), `s_model.units = s_cfg.units`, rebuild `s_drag_cfg`, `s_mode` re-derived — when it differs from the current mode, I2 (final review, ruling B-6) runs the same page-reset/lap-clock-stop `ui_apply_mode()` helper `menu_do_mode()`'s own local toggle uses, not a silent relabel — `drag_rows_refill()` if DRAG rows are showing, `s_dirty = true`. `EV_LAP_RESET`: `s_lap_start_mono_us = 0; s_model.cur_ms = 0; s_model.cur_running = false; s_last_clock_us = 0`; I4 (final review, ruling B-6) additionally clears the ui's PREV/BEST/session-stats/best-sector mirror (`best_ms`, `prev_ms`, `have_best`, `have_prev`, `laps_total`, `laps_valid`, `theo_best_ms`/`have_theo`, `best_n_sectors`, `best_sector_ms[]`/`have_best_sector[]`, the last-sector deltas, `big_kind = BIG_NONE`, `lap_no = 1`, the session-max accumulator) and refills the DRAG rows, mirroring `ui_task()`'s own fresh-session init field-for-field; `s_dirty = true`.
+- **Reset.** `dbg reset` (lap-timer console, via `lt shell`) posts `command_t{ .type = CMD_RESET_ENGINE }` to `g_cmd_q` (B-4, final review: the console producer this spec originally assumed existed as a dev-kit "reset-engine" command — no code anywhere implemented one until this fix wave). `handle_cmd` `CMD_RESET_ENGINE` additionally posts `EV_LAP_RESET` to `g_ui_evt_q` (direct send) after its existing work.
 - **Ordering.** The pipeline and the ui each reload cfg from NVS independently (no shared copy); both see the saved blob because `lt_cfg_save` committed before either post.
 
 ## 3. #86 — mph-defined SPEED_FROM0 gates
@@ -59,8 +59,8 @@ The header already shows "connected · stream idle" from `stream_age_ms` (Plan 5
 **Host:** `test_drag_cfg` (§3 cases), `test_dl_leading_noise` (§5 glued-no-newline case), `test_logstore_json` (§6 cases); `test_blob`/`test_cfg_blob` unchanged. Both harnesses warning-free; lint 0; gcc-16 sweep clean; clean `moto_sim`, `moto_neo6m`, `PANEL=ws29v2` and dev-kit builds 0 warnings; `moto_sim` `.bss` delta and DRAM remain reported (expect ≈ +0 for §2/§3, ≈ −345 B for §4).
 
 **Bench `dsB-d1`** (same day as `p07c-d1`/`dsA-d1`, moto_sim + dev-kit):
-1. §2: `lt config set {"units":"mph"}` from the dev-kit → the LAP page 2 label flips to `mph` without a reboot; DRAG page 1 labels read `0-60`…; `lt config set {"units":"kmh"}` flips back; `reset-engine` (dev-kit console) → the CUR cell clears to LAST.
-2. §3: in mph with benches {60,100}: `dbg status`/DRAG page 2 show gates 1–2 as `0-60`, `0-100`; the sim's drag run (if any) fires them at 97/161 km/h (log line).
+1. §2: `lt config set {"units":"mph"}` from the dev-kit → the LAP page 2 label flips to `mph` without a reboot; DRAG page 1 labels read `0-60`…; `lt config set {"units":"kmh"}` flips back; `dbg reset` (lap-timer console via `lt shell`) → the CUR cell clears to LAST; toggle units from the DEVICE menu too: DRAG page 1 labels and the engine agree (I1).
+2. §3: in mph with benches {60,100}: DRAG page 2 show gates 1–2 as `0-60`, `0-100`; the sim's drag run (if any) fires them at 97/161 km/h (log line).
 3. §4: `errlog` lists entries from before a reset after the reset (ring survives in place); boot log shows no `nvs blob ring reset`.
 4. §5: disconnect/reconnect the dev-kit link five times; the Sessions tab lists sessions on the first load each time (5/5); any failure's rc goes into a follow-up.
 5. §6: download a log as `.jsonl` → the browser saves `log_000000NN.jsonl`; first lines show `rec`, `rx_us`, `gps_us`; a `status` line appears.
@@ -74,7 +74,7 @@ Dev-kit UART two-task race (bench-decided); VBO/NMEA black-box export (needs FIX
 
 ## 10. Implementation notes
 
-Written after all seven tasks landed (code head `7fcd4fe`; this is Task 7), from the execution ledger (`.superpowers/sdd/2026-10-03-debt-sweep-b/progress.md`) — every ruling made along the way, the measured DRAM cost, the minors deferred rather than fixed, and the bench spot-checks that remain.
+Written after all seven tasks landed (code head `35b45e1` plus the fix-wave commits), from the execution ledger (`.superpowers/sdd/2026-10-03-debt-sweep-b/progress.md`) — every ruling made along the way, the measured DRAM cost, the minors deferred rather than fixed, and the bench spot-checks that remain.
 
 ### 10.1 Spec corrections (amendments to §6)
 
@@ -100,6 +100,7 @@ Carried forward verbatim from the ledger; none block this sweep or the bench gat
 - Task 1 (pre-existing): `drag_cfg_t.benches_kmh`/`n_benches` ("headline benches", §11.4) has no reader in `components/app` or `core/ui` — a display consumer or removal is a later decision.
 - Task 2 (polish): `pipeline_reload_cfg` declares `new_mode` mid-function.
 - Task 3 (observation): `ring_seal` writes `ver`/`crc` into the mirror before `nvs_set_blob` succeeds — no RAM consumer reads them.
+- Task 3 (follow-up, final review M9): the ring's byte equivalence has no host test (`err_ring_t` is file-static); bench §8.3 is the empirical check.
 
 ### 10.5 Bench spot-checks that remain (§8)
 

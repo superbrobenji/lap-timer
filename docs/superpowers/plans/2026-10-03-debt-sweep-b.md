@@ -402,7 +402,7 @@ fix(devcontroller): streaming list parser tolerates a glued prompt; first-chunk 
 
 - [ ] **Step 3: Implement** — `logstore_rec_to_json`: after `linkhost_stream_to_json` returns `n > 0`, insert `"rx_us":<hdr.ts_us>` after the opening `{`: build into a local `char tmp[LT_JSON_MAX]`? No — avoid a second buffer: call `linkhost_stream_to_json(&rec, out + k, out_cap - k)` where `k = snprintf(out, out_cap, "{\"rx_us\":%llu,", (unsigned long long)hdr.ts_us)` and then overwrite the inner object's leading `{` by shifting: simplest correct form — emit the prefix with `snprintf`, call the inner transcoder into `out + k`, then `memmove(out + k, out + k + 1, (size_t)n)` to drop the inner `{` (bounded by `n`), return `k + n - 1`. Guard every length against `out_cap`. (Document that the inner JSON always starts with `{`.) `webapi.c` `do_log_download`: `httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"<id>.jsonl\"")` for jsonl and `.bin` for bin — the `dl_sink_t`'s `disp` pattern at `webapi.c:371-377` is the model (a function-local `char disp[64]` is fine: this is the HTTP task). `logstore_rec.h` + `index.html` Logs tab: the one-paragraph format note from spec §6 with `t` (not `rec`).
 
-- [ ] **Step 4: Verify** — dev-kit `ctest` green (8/8 in the file); dev-kit firmware build 0 warnings.
+- [ ] **Step 4: Verify** — dev-kit `ctest` green (7/7 in the file); dev-kit firmware build 0 warnings.
 
 - [ ] **Step 5: Commit**
 
