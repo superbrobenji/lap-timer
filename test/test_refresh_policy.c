@@ -120,6 +120,21 @@ static void test_screen_change_still_partial_when_throttled(void)
     TEST_ASSERT_EQUAL_INT(RF_PARTIAL, ui_refresh_decide(&i));
 }
 
+/* Bench-fix review M1: rule 2 (`!dirty && !wants_full`) ignores `screen_changed`, contradicting
+ * rule 3b (test_screen_change_forces_full_even_when_moving above) and ui.c's own first guard
+ * (render_and_refresh(): `if (!changed && !s_wants_full && !s_screen_changed)`), which treats the
+ * two flags identically. A `dirty=false, wants_full=false, screen_changed=true` input must still
+ * refresh, mirroring test_wants_full_alone_refreshes for the third flag. */
+static void test_screen_change_alone_refreshes(void)
+{
+    rf_in_t i = base();
+    i.dirty          = false;
+    i.wants_full     = false;
+    i.screen_changed = true;
+    i.still          = false;
+    TEST_ASSERT_EQUAL_INT(RF_FULL, ui_refresh_decide(&i));
+}
+
 /* Coverage gap 2: full_every == 0 is a caller bug guarded by the second CORE_ASSERT_RET, which
  * reports the fault and returns the conservative RF_NONE. Only the return value is asserted here
  * (this suite does not link assert_support.c, unlike test_smoke/test_ses_frame/test_ses_records). */
@@ -150,6 +165,7 @@ int main(void)
     RUN_TEST(test_wants_full_alone_refreshes);
     RUN_TEST(test_screen_change_forces_full_even_when_moving);
     RUN_TEST(test_screen_change_still_partial_when_throttled);
+    RUN_TEST(test_screen_change_alone_refreshes);
     RUN_TEST(test_full_every_zero_is_none);
     RUN_TEST(test_null_input_is_none);
     return UNITY_END();
