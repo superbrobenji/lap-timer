@@ -332,20 +332,34 @@ static void ui_exit_menu(void)
  * load failure s_cfg keeps its last-known-good value (lt_cfg_load leaves it untouched), which is
  * the same fall-back the boot seed uses. */
 
-/* MA_MODE: toggle Lap/Drag, reset the page (§22.6), persist cfg.mode, push the mode command,
- * refresh the label. (Split verbatim out of menu_select for rule 4.) */
-static void menu_do_mode(void)
+/* Applies a new riding mode to s_mode/s_model.mode, resets the screen to page 0 (§22.6), and --
+ * when leaving LAP mode -- stops the live lap clock. Shared by menu_do_mode (local MA_MODE toggle)
+ * and ui_reload_cfg (I2, final review ruling B-6: a remote CONFIG_SET's mode flip must behave
+ * identically, not just relabel the menu while page 0 keeps a stale LAP clock on a now-DRAG
+ * screen). Plan 7c T6 (design §4): leaving LAP mode means no lap is running any more -- the ui
+ * learns this directly here (no EV_* reaches it for a venue/layout loss or a lap reset), so stop
+ * the stopwatch now rather than let a later switch back to LAP resume ticking from a stale start
+ * stamp; clock_tick() itself already gates on mode == SCR_MODE_LAP. */
+static void ui_apply_mode(uint8_t new_mode)
 {
-    s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
+    LT_ASSERT_VOID(new_mode == MODE_LAP || new_mode == MODE_DRAG, UI_APP_ASSERT_CODE);
+    s_mode        = new_mode;
     s_model.mode  = s_mode;
     s_model.page  = 0; /* §22.6: a mode switch resets the screen */
     if (s_mode == MODE_DRAG) {
-        /* Plan 7c T6 (design §4): leaving LAP mode means no lap is running any more -- the ui
-         * learns this directly here (no EV_* reaches it for a venue/layout loss or a lap reset),
-         * so stop the stopwatch now rather than let a later switch back to LAP resume ticking
-         * from a stale start stamp; clock_tick() itself already gates on mode == SCR_MODE_LAP. */
         s_lap_start_mono_us = 0;
+        s_model.cur_running = false;
+        s_model.cur_ms      = 0;
     }
+    LT_ASSERT_VOID(s_model.mode == s_mode, UI_APP_ASSERT_CODE);
+}
+
+/* MA_MODE: toggle Lap/Drag (ui_apply_mode), persist cfg.mode, push the mode command, refresh the
+ * label. (Split verbatim out of menu_select for rule 4.) */
+static void menu_do_mode(void)
+{
+    uint8_t new_mode = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
+    ui_apply_mode(new_mode);
     (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
     s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
     (void)lt_cfg_save(&s_cfg);
@@ -369,6 +383,11 @@ static void menu_do_units(void)
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
     (void)lt_cfg_save(&s_cfg);
+    /* I1 (final review, ruling B-5): units feed the pipeline's own drag gate table
+     * (SPEED_FROM0 benches, design §3) -- a local toggle must reload it exactly like a remote
+     * CONFIG_SET does (cmd.c cfg_change_notify posts the same command), or the engine keeps
+     * firing the old unit's gates until the next reboot. */
+    ui_send_cmd(CMD_CONFIG_RELOAD, 0, 0);
     s_model.units = s_cfg.units;
     s_dirty       = true;
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
@@ -928,14 +947,21 @@ static void handle_layout_locked(const event_t *e, int64_t now)
  * is not needed here (the menu's item list/order never changes, only the label text).
  * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived, but drag_init()
  * (called by the pipeline's own reload) always drops ARMED -- clear the ui's mirror of it here
- * too so a remote CONFIG_SET can't leave a stale "ARMED" indicator on screen. */
+ * too so a remote CONFIG_SET can't leave a stale "ARMED" indicator on screen.
+ * I2 (final review, ruling B-6): a remote mode flip must mirror menu_do_mode's own reset
+ * (ui_apply_mode above) -- page 0 reset to §22.6 and the live lap clock stopped when leaving LAP
+ * -- not just a relabelled menu while the riding screen keeps showing stale LAP state under a
+ * now-DRAG mode. Only applied when the mode actually changed: most CONFIG_SET calls touch
+ * units/display, and those must NOT reset the current page/clock. */
 static void ui_reload_cfg(void)
 {
     cfg_defaults(&s_cfg);
     (void)lt_cfg_load(&s_cfg);
     s_model.units = s_cfg.units;
-    s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
-    s_model.mode  = s_mode;
+    uint8_t new_mode = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    if (new_mode != s_mode) {
+        ui_apply_mode(new_mode);
+    }
     s_model.drag_armed = false;
     drag_cfg_from_user(&s_cfg, &s_drag_cfg);
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
@@ -948,7 +974,14 @@ static void ui_reload_cfg(void)
 }
 /* #87: the pipeline's engines were reset remotely -- the running-lap clock must not keep counting.
  * fix round 1 (minor finding 2): drag_reset() (called by the pipeline's own CMD_RESET_ENGINE
- * handling) drops ARMED too -- clear the ui's mirror so a stale "ARMED" indicator can't survive. */
+ * handling) drops ARMED too -- clear the ui's mirror so a stale "ARMED" indicator can't survive.
+ * I4 (final review, ruling B-6): lap_init()/drag_init() (also called by the pipeline's own
+ * CMD_RESET_ENGINE handling, pipeline.c) drop the engines back to a fresh session -- the ui's
+ * mirror of PREV/BEST/session stats/best-sector board must follow the same way, or a stale
+ * BEST/MAX SPD/best-sector detail from before the reset survives on screen into a session the
+ * engine itself now considers new. Mirrors ui_task()'s own fresh-session init (~1507-1528)
+ * field-for-field; drag_rows_refill() re-reads the just-reset pipeline snapshot so DRAG rows
+ * reflect the clear immediately rather than waiting for the next EV_DRAG_* event. */
 static void ui_lap_reset(void)
 {
     s_lap_start_mono_us = 0;
@@ -956,7 +989,28 @@ static void ui_lap_reset(void)
     s_model.cur_ms      = 0;
     s_model.cur_running = false;
     s_model.drag_armed  = false;
-    s_dirty             = true;
+
+    s_model.best_ms        = 0;
+    s_model.prev_ms        = 0;
+    s_model.have_best      = false;
+    s_model.have_prev      = false;
+    s_model.laps_total     = 0;
+    s_model.laps_valid     = 0;
+    s_model.theo_best_ms   = 0;
+    s_model.have_theo      = false;
+    s_model.best_n_sectors = 0;
+    memset(s_model.best_sector_ms, 0, sizeof s_model.best_sector_ms);
+    memset(s_model.have_best_sector, 0, sizeof s_model.have_best_sector);
+    clear_last_sector_deltas();
+    s_model.big_kind = (uint8_t)BIG_NONE;
+    s_model.lap_no   = 1;
+    memset(&s_session_max, 0, sizeof s_session_max);
+    drag_rows_refill();
+
+    s_dirty = true;
+
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.lap_no == 1 && s_model.big_kind == (uint8_t)BIG_NONE, UI_APP_ASSERT_CODE);
 }
 
 static void handle_event(const event_t *e, int64_t now)
