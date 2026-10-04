@@ -57,8 +57,13 @@ typedef struct {
 /* Rounds a logical (landscape) dirty rect {x,y,w,h} within an fb_w x fb_h framebuffer outward to
  * whole 8-px columns of panel RAM. After the 90-degree rotation the panel's RAM columns are the
  * logical y, so the rect's y range must snap outward to multiples of 8 (whole RAM bytes) while
- * the logical x range maps one-to-one to panel rows. fb_w is the BUFFER width (see
- * epd_rotate_line above), rounded up to a multiple of 8 and possibly wider than the panel's
+ * the logical x range maps one-to-one to panel rows (x/w pass straight through to r0/r1 -- no
+ * mirror there). The y -> RAM-column snap IS mirrored, the same way epd_rotate_line above maps
+ * panel column c to logical row y = native_w-1-c: rows y..y+h-1 land at RAM columns
+ * native_w-(y+h)..native_w-1-y, so the HIGH end of the row range produces the LOW end of the
+ * byte range and vice versa (ruling B-10 -- a naive un-mirrored y/8 snap sends the wrong RAM
+ * bytes for every sub-rect partial refresh). fb_w is the BUFFER width (see epd_rotate_line
+ * above), rounded up to a multiple of 8 and possibly wider than the panel's
  * VISIBLE width (epd_panel()->logical_w, == native_h) -- x + w is bounded by that visible width,
  * not by fb_w, so a rect that fits the padded buffer but spills past the panel's real column
  * count is still rejected. Fills `*out` and returns true on success. On ANY rejection -- the rect
