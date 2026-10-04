@@ -740,10 +740,12 @@
   var monitorRowCount = 0;
   var MONITOR_MAX_ROWS = 200;
 
-  // issue #68: freshness cue. lastMsgAt is the wall-clock time of the most recent record (SSE
-  // message, not a plain info row); stalled flips true once a 1 s timer (freshTimer, started in
-  // startMonitor, cleared in stopMonitor) notices no record in > MONITOR_STALE_MS while the
-  // EventSource is still open, and back to false on the next record.
+  // issue #68: freshness cue. lastMsgAt is the wall-clock time of the most recent record that
+  // reached appendMonitorRow (onmessage only -- a connection-lifecycle notice goes through
+  // appendMonitorInfo instead, I3 final review, and never touches lastMsgAt/stalled); stalled
+  // flips true once a 1 s timer (freshTimer, started in startMonitor, cleared in stopMonitor)
+  // notices no record in > MONITOR_STALE_MS while the EventSource is still open, and back to
+  // false on the next record.
   var lastMsgAt = 0;
   var stalled = false;
   var freshTimer = null;
@@ -807,6 +809,19 @@
     appendMonitorPaneRow(el("div", { className: "marker", text: text }));
   }
 
+  // I3 (final review, ruling B-7): a connection-lifecycle notice ("stream connected",
+  // "stream reconnecting…", "stream closed…") is not a decoded /api/stream record. Routing it
+  // through appendMonitorRow made it masquerade as one: it bumped monitorRowCount, stamped
+  // lastMsgAt (silencing the stalled timer even though no data was actually flowing), and could
+  // clear `stalled` on its own. appendMonitorInfo renders the same "ts  text" line via
+  // appendMonitorPaneRow ONLY -- no lastMsgAt, no monitorRowCount, no stalled change -- so these
+  // notices stay visible without perturbing the freshness/record-count bookkeeping that
+  // appendMonitorRow (onmessage) owns exclusively.
+  function appendMonitorInfo(text) {
+    var ts = new Date().toLocaleTimeString();
+    appendMonitorPaneRow(el("div", { text: ts + "  " + text }));
+  }
+
   function updateMonitorCount() {
     var age = lastMsgAt ? Math.round((Date.now() - lastMsgAt) / 1000) + "s ago" : "—";
     $("#monitor-count").textContent = monitorRowCount + " records · last " + age;
@@ -856,6 +871,7 @@
     freshTimer = null;
     lastMsgAt = 0;
     stalled = false;
+    updateMonitorCount();   // M2: refresh "#monitor-count" immediately (age -> "—"), not stale text
     $("#monitor-toggle").textContent = "Start";
   }
 
@@ -864,13 +880,13 @@
     var lastErrorAt = 0;
     monitorSource = new EventSource("/api/stream");
     freshTimer = setInterval(monitorFreshTick, 1000);
-    monitorSource.onopen = function () { appendMonitorRow('{"info":"stream connected"}'); };
+    monitorSource.onopen = function () { appendMonitorInfo("stream connected"); };
     monitorSource.onmessage = function (evt) { appendMonitorRow(evt.data); };
     monitorSource.onerror = function () {
       if (monitorSource && monitorSource.readyState === EventSource.CLOSED) {
         // Server rejected the request (e.g. 503, lap-timer not connected) —
         // the browser will not retry on its own; reset the UI.
-        appendMonitorRow('{"info":"stream closed (lap-timer not connected?)"}');
+        appendMonitorInfo("stream closed (lap-timer not connected?)");
         stopMonitor();
         return;
       }
@@ -878,7 +894,7 @@
       // a row on every retry attempt.
       var now = Date.now();
       if (now - lastErrorAt > 5000) {
-        appendMonitorRow('{"info":"stream reconnecting…"}');
+        appendMonitorInfo("stream reconnecting…");
         lastErrorAt = now;
       }
     };
