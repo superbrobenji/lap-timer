@@ -264,4 +264,6 @@ plan Step 3).
 - **Ring-mirror reclaim**: frame the error-ring mirror in place (a version byte + CRC tail stored
   inside `s_ring` itself, mirroring the cfg blob's existing shape) to drop Task 2's 388 B shared
   blob scratch (ruling P-6, §9.2) and take `moto_sim` back over the 4 KB free-DRAM floor before
-  Plan 6 needs the headroom.
+  Plan 6 needs the headroom. **Done (2026-10-04):** see Debt sweep B §4
+  (`docs/superpowers/specs/2026-10-03-debt-sweep-b-design.md`) — measured `.bss` delta −352 B,
+  `moto_sim` free static DRAM 3960 B → 4312 B.
