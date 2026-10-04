@@ -1015,6 +1015,7 @@ static void ui_lap_reset(void)
     s_model.prev_ms        = 0;
     s_model.have_best      = false;
     s_model.have_prev      = false;
+    s_model.new_best       = false; /* bench B-F4: the inverted BEST tag otherwise outlives the reset */
     s_model.laps_total     = 0;
     s_model.laps_valid     = 0;
     s_model.theo_best_ms   = 0;
@@ -1031,7 +1032,8 @@ static void ui_lap_reset(void)
     s_dirty = true;
 
     LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(s_model.lap_no == 1 && s_model.big_kind == (uint8_t)BIG_NONE, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.lap_no == 1 && s_model.big_kind == (uint8_t)BIG_NONE && !s_model.new_best,
+                   UI_APP_ASSERT_CODE);
 }
 
 static void handle_event(const event_t *e, int64_t now)
