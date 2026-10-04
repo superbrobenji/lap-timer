@@ -979,9 +979,10 @@ static void ui_reload_cfg(void)
  * CMD_RESET_ENGINE handling, pipeline.c) drop the engines back to a fresh session -- the ui's
  * mirror of PREV/BEST/session stats/best-sector board must follow the same way, or a stale
  * BEST/MAX SPD/best-sector detail from before the reset survives on screen into a session the
- * engine itself now considers new. Mirrors ui_task()'s own fresh-session init (~1507-1528)
- * field-for-field; drag_rows_refill() re-reads the just-reset pipeline snapshot so DRAG rows
- * reflect the clear immediately rather than waiting for the next EV_DRAG_* event. */
+ * engine itself now considers new. Mirrors ui_task()'s own fresh-session init (search
+ * clear_last_sector_deltas()) field-for-field; drag_rows_refill() re-reads the just-reset pipeline
+ * snapshot so DRAG rows reflect the clear immediately rather than waiting for the next EV_DRAG_*
+ * event. */
 static void ui_lap_reset(void)
 {
     s_lap_start_mono_us = 0;

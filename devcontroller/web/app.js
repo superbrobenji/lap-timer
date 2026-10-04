@@ -837,11 +837,7 @@
     var text;
     try {
       var parsed = JSON.parse(rawData);
-      if (parsed && typeof parsed.info === "string") {
-        text = ts + "  " + parsed.info;
-      } else {
-        text = formatStreamRecord(ts, parsed);
-      }
+      text = formatStreamRecord(ts, parsed);
     } catch (e) {
       text = ts + "  " + rawData;
     }
