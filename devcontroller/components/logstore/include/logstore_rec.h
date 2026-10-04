@@ -67,7 +67,12 @@ enum {
  *                            still advanced past it (nothing written to out) so the caller makes
  *                            forward progress.
  *   LOGSTORE_JSON_ERR        malformed (hdr.len > LT_REC_MAX); *consumed = 0, caller should stop.
- * Bounded (no loops), no heap. */
+ * Bounded (no loops), no heap.
+ *
+ * Format (issue #67): NDJSON -- one JSON object per line; "t" is "fused", "event" or "status";
+ * "rx_us" is the dev-kit's own receive/append time (this header's ts_us), "gps_us" the
+ * lap-timer's GPS time -- the same two clocks, always together, so a line's age can be judged
+ * either way. */
 int logstore_rec_to_json(const uint8_t *buf, size_t avail, char *out, size_t out_cap,
                           size_t *consumed);
 
