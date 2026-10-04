@@ -1125,6 +1125,44 @@ static void test_lap_across_gps_outage_not_clean_valid(void)
     TEST_ASSERT_FALSE(l2->flags & LAP_F_VALID);              /* so lap 2 is not a clean VALID lap */
 }
 
+/* Bench B-F5 (debt sweep B, `dbg reset` -> CMD_RESET_ENGINE -> lap_reset()): a reset mid-session must
+ * not strand the engine. After lap_reset() the venue is re-found on the next valid fix, the S/F gate
+ * re-arms, and laps complete again with fresh numbering (prev/best from before survive, §10.3). */
+static void test_reset_mid_session_then_laps_resume(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));                 /* scan_for_venue must be able to re-find it */
+    lap_t L; lap_init(&L, NULL);
+    arm_at_start(&L, lat0, lon0, 0, NULL);                     /* found by the scan + armed */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
+
+    int64_t t = 0;
+    forward_lap(&L, lat0, lon0, t, 40000000, NULL); t += 40000000;   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, t, 50000000, NULL); t += 50000000;   /* lap 1 = 50 s */
+    forward_lap(&L, lat0, lon0, t, 45000000, NULL); t += 45000000;   /* lap 2 = 45 s */
+    forward_lap(&L, lat0, lon0, t, 42000000, NULL); t += 42000000;   /* lap 2 completes */
+    TEST_ASSERT_NOT_NULL(lap_prev(&L));
+    TEST_ASSERT_EQUAL_UINT16(2, lap_prev(&L)->lap_no);
+    TEST_ASSERT_UINT32_WITHIN(2, 45000, lap_prev(&L)->time_ms);
+
+    lap_reset(&L);
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+
+    t += 1000000;
+    arm_at_start(&L, lat0, lon0, t, NULL);                     /* re-found + armed on the next fix */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
+    forward_lap(&L, lat0, lon0, t, 40000000, NULL); t += 40000000;   /* out-lap again (lap 0, no time) */
+    forward_lap(&L, lat0, lon0, t, 48000000, NULL); t += 48000000;   /* lap 1 = 48 s */
+    forward_lap(&L, lat0, lon0, t, 47000000, NULL); t += 47000000;   /* lap 1 completes; lap 2 = 47 s */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+    TEST_ASSERT_EQUAL_UINT16(1, lap_prev(&L)->lap_no);
+    TEST_ASSERT_UINT32_WITHIN(2, 48000, lap_prev(&L)->time_ms);
+    forward_lap(&L, lat0, lon0, t, 42000000, NULL); t += 42000000;   /* lap 2 completes */
+    TEST_ASSERT_EQUAL_UINT16(2, lap_prev(&L)->lap_no);
+    TEST_ASSERT_UINT32_WITHIN(2, 47000, lap_prev(&L)->time_ms);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1154,6 +1192,7 @@ int main(void)
     RUN_TEST(test_predictive_delta);
     RUN_TEST(test_predictive_table_cap);
     RUN_TEST(test_predictive_disabled_returns_no_delta);
+    RUN_TEST(test_reset_mid_session_then_laps_resume);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);
