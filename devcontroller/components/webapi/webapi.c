@@ -387,30 +387,6 @@ typedef struct {
     bool         headers_set;
     bool         started;         /* a body chunk was actually sent -> the point of no return */
     bool         transport_dead;  /* httpd_resp_send_chunk failed -> the socket is already gone */
-
-    /* ---- GET /api/sessions early-failure buffering (#65). Used only by sessions_chunk_cb/
-     * do_sessions_stream -- session_chunk_cb/do_session_download never touch these three fields
-     * (they stay zero there). The first LH_DL_CHUNK decoded bytes are held here, UNCOMMITTED,
-     * until either the buffer fills (more body is coming -- commit now) or the transfer completes
-     * having delivered just this one (possibly short) chunk; only once committed do headers go out
-     * and bytes actually reach the browser. A link failure spotted before that point can still
-     * answer a clean 502 (send_stream_error) instead of a truncated chunked body.
-     *
-     * B-1 (debt sweep B task 4): do_sessions_stream keeps its dl_sink_t in a STATIC local rather
-     * than this struct's normal stack placement. That is safe -- not a new sharing hazard -- only
-     * because GET /api/sessions transfers are already serialized two different ways: webapi's
-     * async_worker is a single task (one async job, of any kind, runs at a time -- see
-     * webapi_register), and linkhost_download_cmd (linkhost.c) itself takes linkhost's one
-     * request-in-flight mutex (s_req_mtx) with a blocking, non-timed wait before it ever touches
-     * UART1, so a second /api/sessions download can never be "in flight" concurrently with this
-     * one. Moving the 512 B buffer off the worker task's stack and into .bss costs nothing and
-     * removes any doubt about stack headroom under the nested do_sessions_stream ->
-     * linkhost_download_cmd -> lh_dl_ctx_t call chain (that chain's own stack-resident buffers are
-     * unchanged by this struct's growth, since do_session_download's sink stays a normal stack
-     * local and merely carries these three fields unused/zeroed). */
-    uint8_t      first[LH_DL_CHUNK];
-    size_t       first_len;
-    bool         committed;
 } dl_sink_t;
 
 /* Commits the download headers exactly once, before the first chunk goes out (chunked responses
@@ -495,11 +471,41 @@ static void do_session_download(httpd_req_t *req)
  *
  * #65: the first call is held back (uncommitted) instead of going straight to the browser, so an
  * early parse/CRC failure can still answer a clean 502 instead of a truncated chunked body -- see
- * dl_sink_t's doc comment above. lh_dl's own chunk buffer never flushes more than LH_DL_CHUNK bytes
- * at a time (dl_emit/dl_flush_chunk), so every call here carries at most one buffer's worth. */
+ * sessions_sink_t's doc comment below. lh_dl's own chunk buffer never flushes more than LH_DL_CHUNK
+ * bytes at a time (dl_emit/dl_flush_chunk), so every call here carries at most one buffer's worth. */
+
+/* M1 (final review): the early-failure buffer below is used only by sessions_chunk_cb/
+ * do_sessions_stream -- session_chunk_cb/do_session_download (the general session-download path
+ * just above) never needed it, yet used to carry it (zeroed) in every dl_sink_t regardless. Moving
+ * it into this /api/sessions-only wrapper shrinks do_session_download's stack dl_sink_t back down
+ * by ~520 B (LH_DL_CHUNK's uint8_t[512] plus first_len/committed).
+ *
+ * The first LH_DL_CHUNK decoded bytes are held in `first`, UNCOMMITTED, until either the buffer
+ * fills (more body is coming -- commit now) or the transfer completes having delivered just this
+ * one (possibly short) chunk; only once committed do headers go out and bytes actually reach the
+ * browser. A link failure spotted before that point can still answer a clean 502
+ * (send_stream_error) instead of a truncated chunked body.
+ *
+ * B-1 (debt sweep B task 4): do_sessions_stream keeps its sessions_sink_t in a STATIC local rather
+ * than this struct's normal stack placement. That is safe -- not a new sharing hazard -- only
+ * because GET /api/sessions transfers are already serialized two different ways: webapi's
+ * async_worker is a single task (one async job, of any kind, runs at a time -- see
+ * webapi_register), and linkhost_download_cmd (linkhost.c) itself takes linkhost's one
+ * request-in-flight mutex (s_req_mtx) with a blocking, non-timed wait before it ever touches
+ * UART1, so a second /api/sessions download can never be "in flight" concurrently with this one.
+ * Moving the 512 B buffer off the worker task's stack and into .bss costs nothing and removes any
+ * doubt about stack headroom under the nested do_sessions_stream -> linkhost_download_cmd ->
+ * lh_dl_ctx_t call chain. */
+typedef struct {
+    dl_sink_t base;
+    uint8_t   first[LH_DL_CHUNK];
+    size_t    first_len;
+    bool      committed;
+} sessions_sink_t;
+
 static int sessions_chunk_cb(void *ctx, const uint8_t *data, size_t n)
 {
-    dl_sink_t *s = (dl_sink_t *)ctx;
+    sessions_sink_t *s = (sessions_sink_t *)ctx;
     assert(s != NULL);
     assert(n <= LH_DL_CHUNK);
     if (!s->committed) {
@@ -514,39 +520,39 @@ static int sessions_chunk_cb(void *ctx, const uint8_t *data, size_t n)
             data = NULL;
             n = 0;          /* this call's bytes are now `first` in full -- nothing extra to send */
         }
-        httpd_resp_set_type(s->req, "application/json");
-        if (httpd_resp_send_chunk(s->req, (const char *)s->first, (ssize_t)s->first_len) != ESP_OK) {
-            s->transport_dead = true;
+        httpd_resp_set_type(s->base.req, "application/json");
+        if (httpd_resp_send_chunk(s->base.req, (const char *)s->first, (ssize_t)s->first_len) != ESP_OK) {
+            s->base.transport_dead = true;
             return 1;                                           /* abort: the client disconnected */
         }
         /* `started` is kept set here for dl_sink_t's shared contract with session_chunk_cb/
          * do_session_download (fix 2) -- do_sessions_stream itself branches on `committed`, not
          * this field, but another reader of a dl_sink_t (present or future) should still see
          * "a body byte went out" reported consistently across both chunk callbacks. */
-        s->started = true;
+        s->base.started = true;
         s->committed = true;
         if (n == 0) return 0;
     }
-    if (httpd_resp_send_chunk(s->req, (const char *)data, (ssize_t)n) != ESP_OK) {
-        s->transport_dead = true;
+    if (httpd_resp_send_chunk(s->base.req, (const char *)data, (ssize_t)n) != ESP_OK) {
+        s->base.transport_dead = true;
         return 1;                                              /* abort: the client disconnected */
     }
-    s->started = true;   /* ditto -- see the comment above */
+    s->base.started = true;   /* ditto -- see the comment above */
     return 0;
 }
 
 static void do_sessions_stream(httpd_req_t *req)
 {
     assert(req != NULL);
-    static dl_sink_t s_sink;   /* B-1: static, not stack -- see dl_sink_t's doc comment above */
+    static sessions_sink_t s_sink;   /* B-1: static, not stack -- see sessions_sink_t's doc comment */
     memset(&s_sink, 0, sizeof s_sink);
-    s_sink.req = req;
+    s_sink.base.req = req;
     assert(!s_sink.committed);           /* fresh after the memset just above */
 
     linkhost_remote_err_t rerr;
     int rc = linkhost_download_cmd(LT_CMD_LIST, /*is_binary*/false, sessions_chunk_cb, &s_sink, &rerr);
 
-    if (s_sink.transport_dead) {
+    if (s_sink.base.transport_dead) {
         ESP_LOGW(TAG, "sessions: client disconnected mid-stream");
         return;
     }
