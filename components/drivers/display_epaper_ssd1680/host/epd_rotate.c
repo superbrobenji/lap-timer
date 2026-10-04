@@ -74,9 +74,23 @@ bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16
         return false;
     }
 
-    out->xb0 = (uint16_t)(y / 8);
-    out->xb1 = (uint16_t)((y + h + 7) / 8);
-    out->r0  = x;
-    out->r1  = (uint16_t)(x + w);
+    /* Mirrored, not a direct y/8 snap (bench B-F2, ruling B-10): epd_rotate_line puts landscape
+     * row y at panel RAM column c = native_w-1-y (MIRRORED -- see its own header comment above),
+     * so the rect's landscape rows y..y+h-1 land at RAM columns native_w-(y+h) .. native_w-1-y --
+     * the HIGH end of the row range maps to the LOW end of the column range, and vice versa.
+     * xb0 is the byte holding the lowest such column (native_w-(y+h)); xb1 is one past the byte
+     * holding the highest (native_w-1-y), i.e. ceil((native_w-y)/8) -- clamped to ram_w/8 since y
+     * can be 0, which would otherwise ask for a byte past the panel's RAM whenever native_w <
+     * ram_w (ws213v4: native_w=122, ram_w=128 -- the 122..127 tail epd_rotate_line already
+     * forces white, so clamping here just avoids sending that padding byte as part of the
+     * window). x/w are untouched: panel RAM rows map to the landscape x 1:1, no mirror there. */
+    uint16_t ram_bytes = (uint16_t)(p->ram_w / 8);
+    out->xb0 = (uint16_t)((p->native_w - (y + h)) / 8);
+    out->xb1 = (uint16_t)((p->native_w - y + 7) / 8);
+    if (out->xb1 > ram_bytes) {
+        out->xb1 = ram_bytes;
+    }
+    out->r0 = x;
+    out->r1 = (uint16_t)(x + w);
     return true;
 }
