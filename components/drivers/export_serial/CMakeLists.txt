@@ -3,6 +3,9 @@
 # to EXTRA_COMPONENT_DIRS only when EXPORT_SERIAL is ON. It wires the §18.1 ops through app/cmd
 # and carries the migrated dbg verbs, so it requires `app` (cmd_dispatch, logger, lt_nvs, lt_rtc,
 # pipeline, ipc), lt_hal (hal/storage.h), core (ses/types/event) and the IDF `console` component.
+# `dbg sim` (Task 3) reads SIM_SC_* from app/lt_ipc.h (already pulled in by `app` above) -- no
+# sim_common REQUIRES here: this file never calls into sim_common, only builds a command_t
+# (fix round 1, M2; sim_common is still REQUIRES'd by `app`, gps_sim and imu_sim directly).
 idf_component_register(
     SRCS "export_serial.c"
     INCLUDE_DIRS "include"

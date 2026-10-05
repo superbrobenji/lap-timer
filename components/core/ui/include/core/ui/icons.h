@@ -20,6 +20,8 @@ typedef enum {
     ICON_THERMOMETER,/* SYS_DISP_TEMP_THROTTLE */
     ICON_BLE,        /* BLE connected/advertising */
     ICON_SAFE,       /* safe mode */
+    ICON_SIM,        /* simulated GPS/IMU inputs (strip bit SCR_UI_SIM) */
+    ICON_MOVING,     /* menu motion-locked, bike moving (strip bit SCR_UI_MOVING) */
     ICON_COUNT
 } icon_id_t;
 

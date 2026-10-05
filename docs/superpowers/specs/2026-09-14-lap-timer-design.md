@@ -383,6 +383,8 @@ Defined in `core/event.h` with the stable `EV_*` codes (logged verbatim in the E
 
 `GPS=sim` and `IMU=sim` select bench drivers (`gps_sim`, `imu_sim`) that implement the HAL by replaying a capture file from LittleFS (`/sim/gps.ubx`, `/sim/imu.bin`) at real-time rate, or generating a synthetic circuit when no file exists. They exist so the whole firmware can be developed and bench-tested before the physical sensors are available. They are never part of a release build (`sign_release.sh` refuses them).
 
+The lap-timer console's `dbg sim drag | laps <n> | park` (sim build only, `CMD_SIM_SCENARIO`) switches between the three scenarios one shared profile (`components/drivers/sim_common`) drives into both sims: `laps <n>` replays the committed capture n times before parking (today's default behaviour when n = 1), with a 6 s standstill between repeats so each wrap reads as a real stop-and-restart rather than a teleport; `drag` feeds a standing-start acceleration/brake run (straight-line GPS position/speed and matching IMU body-X g) so DRAG mode can be exercised without hardware, and `park` freezes the current position immediately. A scenario switch keeps one monotonic GPS time base across the whole sequence: the next scenario's first fix always lands strictly after the last fix actually delivered (and, for `drag`, continues from that same position too), so `dbg sim <scenario>` never rewinds the clock the pipeline's §6.5 validity rule tracks.
+
 Validation in CMake: `moto` requires `DISPLAY` ∈ {epaper_ssd1680, oled_ssd1309}; `car` requires `oled_ssd1309`; `CONN_BLE_RC=ON` requires `CONN` containing `ble`; `GPS=m10` enables PPS handling. Invalid combinations fail configuration with a message.
 
 Generated `build_config.h`:
@@ -2273,7 +2275,7 @@ OTA_END                       → verify SHA-256 == sha; esp_ota_end (signature 
                                 any panic/WDT/brownout before that → bootloader rolls back (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) → E_OTA_ROLLBACK logged on next boot
 ```
 
-Progress is shown on the display every 10 % (partial refresh) and in `status.state = STATE_OTA`.
+While an image is being received the ui shows the `OTA` one-shot (§20.6), updated every 5 %, then VERIFYING and REBOOTING; an aborted transfer returns to the riding screen. The `OTA` one-shot is persistent — buttons cannot dismiss it (long/very-long MODE are guarded while it shows) — and is left only by `REBOOTING`'s reboot, an aborted transfer, or `OTA_STALE_MS` (60 s) without an `EV_OTA` update, which reverts to riding on the assumption the push died with no terminal event ever posted. After a bootloader revert the supervisor tells the ui (`EV_OTA` ROLLED_BACK), and which screen the revert produces depends on what is showing when that post lands: deferred until the `BOOT` one-shot expires if `BOOT` is up (then the `UPDATE FAILED, REVERTED` one-shot shows for 3 s), shown immediately otherwise (riding, menu, or any other screen replaced outright), and dropped (errlog `E_OTA_ROLLBACK` only, no screen) while the persistent `SAFE MODE` one-shot is up — the operator reads the rollback from the errlog, not a screen that would otherwise evict SAFE MODE's own warning. (`status.state = STATE_OTA` while any of this is in flight.)
 
 ### 19.5 Preconditions (checked at `OTA_BEGIN`, re-checked at `OTA_END`)
 - Power state `CONNECTED`, `fus_is_still`, `EV_MOTION` not seen for 30 s.
@@ -2364,16 +2366,16 @@ Labels in `FONT_SMALL` at x=4. Times right-aligned at x=200. New best: the ΔS r
 **DRAG page 1**: all gates of the last run (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0).
 **DRAG page 2**: best per gate this session.
 
-Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a strip at bottom-right; `SYS_BATT_LOW` shows a battery icon with `%`. `SYS_GPS_NOFIX` shows the hollow GPS icon.
+Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a strip at bottom-right; `SYS_BATT_LOW` shows a battery icon with `%`. `SYS_GPS_NOFIX` shows the hollow GPS icon. Two ui-level glyphs share the strip, drawn after the §17.4 icons: `SIM` (a bold S) whenever the firmware feeds simulated GPS or IMU inputs (`CFG_GPS_SIM`/`CFG_IMU_SIM`), and `MOVING` (a double chevron) whenever the menu is motion-locked (§20.7); `MOVING` disappears once the bike is parked, which is the operator's cue that a sim run has finished and the menu is usable.
 
 **Font reconciliation (session 4.2, from rendered PBM goldens at 296×128).** The generated `FONT_MED` covers only `0-9 : . - + A-Z` and `FONT_BIG` only `0-9 : . - + S`, so labels containing `/` or lowercase (`1/4`, `60ft`, `1000ft`) render in `FONT_SMALL`; the riding-screen VALUES (times) use `FONT_BIG`/`FONT_MED`, the LABELS use `FONT_SMALL`. The LAP `dS` value row is `FONT_SMALL` (a `FONT_MED` glyph at y=112 clips past the 128-px frame). The empty time placeholder is `-:--.--` (7 chars, matching the `M:SS.cc` shape) so it does not overlap the left labels. DRAG pages 1/2 use a two-column gate grid. These are the byte-exact golden layouts under `test/snapshots/`.
 
 ### 20.6 One-shot screens
-`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (progress bar), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` ("Cross S/F, press MODE").
+`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` ("Cross S/F, press MODE").
 
 ### 20.7 Menu
 
-Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignored (short flash of a lock icon). Items (UP/DOWN move, MODE select, long MODE back/exit, auto-exit after 30 s idle):
+Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignored (the `MOVING` glyph in the fault-icon strip (§20.5) stays on while the lock holds). Items (UP/DOWN move, MODE select, long MODE back/exit, auto-exit after 30 s idle):
 
 1. Mode: Lap / Drag
 2. Layout: list of the current venue's layouts + `Auto`

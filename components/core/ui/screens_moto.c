@@ -198,8 +198,9 @@ static void fmt_time_s(char *buf, uint32_t ms)
  * "--" bits (SYS_DISP_DEAD, SYS_HEAP_LOW, SYS_OTA_PENDING) plus SYS_IMU_DEAD and
  * SYS_FUSION_DISAGREE, neither of which has a matching bitmap in icons.h (only ICON_IMU_Q exists,
  * no IMU strike-through / lean "?" icon). SYS_STORAGE_DEAD has no disk-strike bitmap either, so it
- * falls back to the plain ICON_DISK glyph. */
-static const int8_t FAULT_ICON_FOR_BIT[14] = {
+ * falls back to the plain ICON_DISK glyph. Bits 14/15 are ui-level (SCR_UI_SIM/SCR_UI_MOVING,
+ * model.h), not §17.4 sys flags -- they always draw. */
+static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     (int8_t)ICON_GPS_STRIKE,    /* 0  SYS_GPS_DEAD */
     (int8_t)ICON_GPS_STRIKE,    /* 1  SYS_GPS_NOFIX */
     -1,                         /* 2  SYS_IMU_DEAD */
@@ -214,6 +215,8 @@ static const int8_t FAULT_ICON_FOR_BIT[14] = {
     (int8_t)ICON_THERMOMETER,   /* 11 SYS_DISP_TEMP_THROTTLE */
     -1,                         /* 12 SYS_OTA_PENDING */
     -1,                         /* 13 SYS_FUSION_DISAGREE */
+    (int8_t)ICON_SIM,           /* 14 SCR_UI_SIM (ui-level, model.h) */
+    (int8_t)ICON_MOVING,        /* 15 SCR_UI_MOVING (ui-level, model.h) */
 };
 
 /* Shared by fault_strip() and fault_strip_left_x() (PF-4): the icon (icons.h) for `bit`
@@ -223,7 +226,7 @@ static const int8_t FAULT_ICON_FOR_BIT[14] = {
 static int fault_icon_for_bit(int bit)
 {
     CORE_ASSERT_RET(bit >= 0, UI_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(bit < 14, UI_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(bit < SCR_STRIP_BITS, UI_ASSERT_CODE, -1);
     return (int)FAULT_ICON_FOR_BIT[bit];
 }
 
@@ -238,7 +241,7 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
     int       x = FAULT_STRIP_X0;
     int       y = FAULT_STRIP_Y;
 
-    for (int bit = 0; bit < 14; bit++) {
+    for (int bit = 0; bit < SCR_STRIP_BITS; bit++) {
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
@@ -293,7 +296,7 @@ static int fault_strip_left_x(uint32_t flags)
     int       left = CANVAS_VISIBLE_W;
     CORE_ASSERT_RET(FAULT_STRIP_X0 + ICON_W <= CANVAS_VISIBLE_W, UI_ASSERT_CODE, CANVAS_VISIBLE_W); /* Plan 7b T3 fix 1: the strip's own anchor stays on-canvas -- a real precondition, replacing the tautological loop-index check the for-condition already guarantees */
 
-    for (int bit = 0; bit < 14; bit++) {
+    for (int bit = 0; bit < SCR_STRIP_BITS; bit++) {
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
@@ -838,12 +841,24 @@ static const char ONESHOT_LAYOUT_LABEL[]    = "LAYOUT";
 static const char ONESHOT_SAFE_TEXT[]       = "SAFE MODE";
 static const char ONESHOT_LOWBATT_TITLE[]   = "LOW BATT";
 static const char ONESHOT_OTA_TITLE[]       = "UPDATING";
+static const char ONESHOT_OTA_RECEIVING[]   = "RECEIVING";
+static const char ONESHOT_OTA_VERIFYING[]   = "VERIFYING";
+static const char ONESHOT_OTA_REBOOTING[]   = "REBOOTING";
 static const char ONESHOT_OTAFAIL_LINE1[]   = "UPDATE FAILED";
 static const char ONESHOT_OTAFAIL_LINE2[]   = "REVERTED";
 static const char ONESHOT_CALIBRATE_TITLE[] = "CALIBRATE";
 static const char ONESHOT_CALIBRATE_SUB[]   = "Hold upright, press MODE";
 static const char ONESHOT_NEWTRACK_TITLE[]  = "NEW TRACK";
 static const char ONESHOT_NEWTRACK_SUB[]    = "Cross S/F, press MODE";
+
+/* Status line for the OTA one-shot (spec §20.6): any unknown phase reads as RECEIVING, the
+ * phase the screen is first shown in. */
+const char *ota_phase_label(uint8_t phase)
+{
+    if (phase == OTA_PHASE_VERIFYING) return ONESHOT_OTA_VERIFYING;
+    if (phase == OTA_PHASE_REBOOTING) return ONESHOT_OTA_REBOOTING;
+    return ONESHOT_OTA_RECEIVING;
+}
 
 /* BOOT (§20.6, §17.6): name + version banner, then up to 4 pre-formatted self-test lines
  * ("<check>  OK"/"FAIL", caller's job to pad/format -- boot_line is plain text, not a table). */
@@ -926,6 +941,9 @@ static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
     *p = '\0';
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), OTA_PCT_Y, buf);
+
+    const char *st = ota_phase_label(m->ota_phase);
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, st), OTA_STATUS_Y, st);
 }
 
 static void render_oneshot_ota_fail(fb_t *fb, const screen_model_t *m)

@@ -116,6 +116,9 @@ static const char *TAG = "ui";
  * to land -- and be seen -- before the one-shot auto-reverts to riding. */
 #define ONESHOT_BOOT_MS  3000
 #define ONESHOT_VENUE_MS 2000
+#define ONESHOT_OTAFAIL_MS 3000   /* §19.4: "UPDATE FAILED, REVERTED" for 3 s after the BOOT one-shot */
+#define OTA_STALE_MS 60000   /* fix round 1 (Important #2): no EV_OTA for 60 s (>> the ~5 %-step
+                               * cadence) while UPDATING shows -> the push died; revert to riding */
 
 /* ---- display refresh ladder (spec §20.3, Plan 7 Task 7) ----
  * DISP_FAIL_STREAK_MAX consecutive disp_refresh()/disp_reinit()-retry failures mark the panel
@@ -185,6 +188,9 @@ static uint16_t s_gspeed_kmh; /* menu-lock proxy from EV_MOTION/EV_STILL (see ha
 static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the fault strip */
 static bool    s_dirty;       /* model changed since last render -> render once (§20.3) */
 static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot (BOOT/VENUE); 0 = none */
+static bool    s_rollback_pending; /* EV_OTA ROLLED_BACK seen before/while BOOT showed: show OTA_FAIL next */
+static int64_t s_ota_seen_us;      /* fix round 1 (Important #2): esp_timer stamp of the last non-
+                                     * terminal EV_OTA; ui_loop_iter() reverts a stale OTA screen */
 static int64_t s_last_input_us;    /* last button activity -> menu idle timeout */
 /* Plan 7c T8 (design §6): s_boot_arm_us is the esp_timer stamp the BOOT one-shot was armed at (0 =
  * not BOOT, e.g. SAFE mode); boot_refmt_check() (below) uses it to fire its +1 s re-format exactly
@@ -237,7 +243,7 @@ static char    s_lbl_disp[20];
 
 static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
 {
-    LT_ASSERT_VOID(type <= CMD_IMU_MODE, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type */
+    LT_ASSERT_VOID(type <= CMD_TYPE_LAST, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type (M1); the ui never actually posts CMD_SIM_SCENARIO (sim-only), it just shares pipeline.c's bound */
     if (g_cmd_q == NULL) {
         return;
     }
@@ -315,8 +321,9 @@ static void ui_open_menu(void)
         s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
         s_dirty          = true;
     } else {
-        /* §20.7: above the lock speed the menu is ignored (a lock-icon flash). No lock glyph exists
-         * in icons.h yet, so log it -- the flash arrives with the display driver. */
+        /* §20.7: above the lock speed the menu is ignored; the SCR_UI_MOVING bit (update_flags(),
+         * ICON_MOVING in the fault-icon strip) is already on while this holds, so no extra glyph
+         * work is needed here -- just log it. */
         ESP_LOGI(TAG, "menu locked (gspeed proxy %u >= %u km/h)", s_gspeed_kmh,
                  (unsigned)MENU_LOCK_SPEED_KMH);
     }
@@ -435,15 +442,15 @@ static void menu_select(void)
     case MA_UNITS:   menu_do_units();   break;
     case MA_DISPLAY: menu_do_display(); break;
     /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
-    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (venue layout list TBD)"); break;
+    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (per-venue layout list: issue #98)"); break;
     /* pipeline drops CMD_CALIB_ORIENT until the calib session lands. */
     case MA_CALIBRATE: ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT"); break;
-    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (plan 05)"); break;
+    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (issue #97)"); break;
     case MA_EXPORT:   ESP_LOGW(TAG, "menu: Export (BLE) not implemented (plan 06)"); break;
     case MA_LIVE:     ESP_LOGW(TAG, "menu: Live to phone not implemented (plan 06)"); break;
     case MA_DIAG:     ESP_LOGW(TAG, "menu: Diagnostics export not implemented (§17.10, plan 05)"); break;
     case MA_SESSIONS: ESP_LOGW(TAG, "menu: Sessions ops not implemented (plan 05)"); break;
-    case MA_SLEEP:    ESP_LOGW(TAG, "menu: Sleep now -- hold MODE 3 s to confirm (not implemented, plan 07)"); break;
+    case MA_SLEEP:    ESP_LOGW(TAG, "menu: Sleep now -- hold MODE 3 s to confirm (not implemented, Plan 6.2 power states)"); break;
     default: break;
     }
     s_dirty = true;
@@ -526,6 +533,7 @@ static void btn_long(uint8_t bit)
             ui_exit_menu();
         }
     } else if (s_model.screen == SCR_ONESHOT) {
+        if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
         s_oneshot_until_us = 0;
         ui_exit_menu();
     } else { /* SCR_RIDING */
@@ -541,6 +549,13 @@ static void btn_vlong(uint8_t bit)
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* dispatches on it below */
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
     ESP_LOGI(TAG, "btn: vlong %s", btn_name(bit));
+    /* fix round 1 (Important #3): screen-correct guard -- s_model.oneshot is only meaningful while
+     * screen == SCR_ONESHOT (model.h), and it is never cleared on the way out of one, so testing it
+     * unconditionally (as the SCR_MENU branch below used to) reads a stale ONESHOT_OTA left behind
+     * by an earlier update and silently swallows a real "Sleep now" confirm. btn_long's one-shot
+     * branch already makes SCR_MENU-while-OTA unreachable, so this can never fire today; it mirrors
+     * btn_long's own guard so the invariant holds if that ever changes. */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA) return;
     if (s_model.screen == SCR_MENU && s_menu_action[s_model.menu_sel] == MA_SLEEP) {
         ESP_LOGW(TAG, "menu: Sleep now confirmed -- not implemented (plan 07)");
         ui_exit_menu();
@@ -638,6 +653,59 @@ static void show_venue_oneshot(int64_t now)
                                  * matches the other four replacement sites, none of which set
                                  * screen_changed without also setting wants_full. */
     s_screen_changed   = true; /* riding -> one-shot: whole-screen replacement (ruling B-9) */
+}
+
+/* EV_OTA (ui-only). Non-terminal phases show/update the persistent OTA one-shot (no auto-revert:
+ * the supervisor reboots 2 s after REBOOTING; ABORTED returns to riding; a stale screen with no
+ * update for OTA_STALE_MS also reverts, see ui_loop_iter()). ROLLED_BACK's screen depends on what
+ * is showing when it arrives (fix round 1, Critical #1 ruling): deferred to OTA_FAIL right after
+ * BOOT finishes if BOOT is up now; dropped silently (the errlog already has E_OTA_ROLLBACK) while
+ * the persistent SAFE one-shot is up; shown immediately otherwise (riding, menu, or any other
+ * screen), replacing whatever was there.
+ *
+ * M2 (final review): the same SAFE guard now also covers the non-terminal path, below -- a push
+ * that starts (or is already running) while SAFE MODE is showing must not evict it for a progress
+ * bar the operator does not need in SAFE mode. Computed once, up top, since both branches need it.
+ * This also closes the ABORTED/stale-revert gap M2 found for free: once the screen never becomes
+ * ONESHOT_OTA, `on_ota` below is never true while SAFE is up, so EV_OTA_ABORTED's
+ * `if (on_ota) ui_exit_menu()` and ui_loop_iter()'s own OTA_STALE_MS check (gated on
+ * oneshot == ONESHOT_OTA) can never fire against it either -- neither needs its own guard. */
+static void handle_ota(const event_t *e, int64_t now)
+{
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    uint8_t phase   = e->flags;
+    uint8_t pct     = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
+    bool    on_safe = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE;
+    if (phase == EV_OTA_ROLLED_BACK) {
+        bool on_boot = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT;
+        if (on_boot) { s_rollback_pending = true; return; }   /* defer to the BOOT expiry */
+        if (on_safe) return;                /* persistent safety screen outranks it */
+        s_model.screen     = SCR_ONESHOT;
+        s_model.oneshot    = ONESHOT_OTA_FAIL;
+        s_oneshot_until_us = now + (int64_t)ONESHOT_OTAFAIL_MS * 1000;
+        s_wants_full       = true;
+        s_screen_changed   = true;          /* whole-screen replacement (ruling B-9) */
+        s_dirty            = true;
+        return;
+    }
+    if (on_safe) return;                    /* M2: SAFE outranks a non-terminal update too */
+    bool on_ota = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA;
+    if (phase == EV_OTA_ABORTED) {
+        if (on_ota) ui_exit_menu();       /* -> SCR_RIDING, full refresh (ruling B-9) */
+        return;
+    }
+    s_ota_seen_us     = now;              /* I2 (fix round 1): staleness stamp, non-terminal only */
+    s_model.ota_pct   = pct;
+    s_model.ota_phase = phase;
+    if (!on_ota) {
+        s_model.screen     = SCR_ONESHOT;
+        s_model.oneshot    = ONESHOT_OTA;
+        s_oneshot_until_us = 0;           /* persistent: no auto-revert */
+        s_wants_full       = true;
+        s_screen_changed   = true;        /* whole-screen replacement (ruling B-9) */
+    }
+    s_dirty = true;
 }
 
 /* Clears the page 1 row 4 sector-delta cache (spec 7b §3). Ruling B7b-1 (bench finding 1): called
@@ -1061,6 +1129,7 @@ static void handle_event(const event_t *e, int64_t now)
     /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
     case EV_CFG_CHANGED: ui_reload_cfg(); break;
     case EV_LAP_RESET:   ui_lap_reset();  break;
+    case EV_OTA:         handle_ota(e, now); break;
     default: break;
     }
 }
@@ -1069,7 +1138,11 @@ static void handle_event(const event_t *e, int64_t now)
  * no-fix bit; re-render only when the strip actually changes. */
 static void update_flags(void)
 {
-    uint32_t f = sys_flags_get();
+    uint32_t f = sys_flags_get() & SCR_SYS_BITS_MASK;
+#if CFG_GPS_SIM || CFG_IMU_SIM
+    f |= 1u << SCR_UI_SIM;
+#endif
+    if (s_gspeed_kmh >= MENU_LOCK_SPEED_KMH) f |= 1u << SCR_UI_MOVING;
     if (s_fix_lost) {
         f |= (1u << SCR_SYS_GPS_NOFIX);
     } else {
@@ -1562,11 +1635,25 @@ static void ui_loop_iter(QueueHandle_t btn_q)
      * not rows left outside a correct dirty rect by this partial-vs-full choice; B-9 stands on its
      * own real justification above, not on that symptom. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
-        s_oneshot_until_us = 0;
-        s_model.screen     = SCR_RIDING;
-        s_wants_full       = true;
-        s_screen_changed   = true;
-        s_dirty            = true;
+        if (s_model.oneshot == ONESHOT_BOOT && s_rollback_pending) {
+            s_rollback_pending = false;
+            s_model.oneshot    = ONESHOT_OTA_FAIL;   /* one-shot -> one-shot: still a replacement */
+            s_oneshot_until_us = now + (int64_t)ONESHOT_OTAFAIL_MS * 1000;
+        } else {
+            s_oneshot_until_us = 0;
+            s_model.screen     = SCR_RIDING;
+        }
+        s_wants_full     = true;
+        s_screen_changed = true;
+        s_dirty          = true;
+    }
+    /* I2 (fix round 1): a stale OTA screen (no EV_OTA for OTA_STALE_MS) means the push died with
+     * no terminal event ever posted -- escape back to riding rather than block the device forever.
+     * A live transfer posts at least every 5 %, far inside this window on any real link. */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA &&
+        now - s_ota_seen_us >= (int64_t)OTA_STALE_MS * 1000) {
+        ESP_LOGW(TAG, "ota screen: stale, reverting");
+        ui_exit_menu();
     }
     /* Menu idle auto-exit (§20.7). */
     if (s_model.screen == SCR_MENU && (now - s_last_input_us) >= (int64_t)MENU_IDLE_MS * 1000) {
@@ -1654,7 +1741,11 @@ static void ui_task(void *arg)
          * window would already be expired by the time the BOOT screen is first visible and the LAP
          * page would replace it immediately. */
     }
-    s_model.flags = f0;
+    /* M1 (final review): mask to SCR_SYS_BITS_MASK here too -- update_flags() already does (its
+     * own comment explains why: bit 14, SYS_RECOVERY_MODE, must never alias SCR_UI_SIM). Harmless
+     * today (recovery mode returns before ui_start(), app_main.c, so bit 14 cannot be set yet) but
+     * leaves the masking invariant correct in both places instead of one. */
+    s_model.flags = f0 & SCR_SYS_BITS_MASK;
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);        /* first screen valid */
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);  /* one-shot selector valid */
     render_fb();

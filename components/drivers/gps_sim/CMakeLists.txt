@@ -3,7 +3,7 @@
 idf_component_register(
     SRCS "gps_sim.c"
     INCLUDE_DIRS "."
-    REQUIRES lt_hal core esp_timer)
+    REQUIRES lt_hal core sim_common esp_timer)
 
 # build_config.h (CFG_* flags) from the build tree (§21.1).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

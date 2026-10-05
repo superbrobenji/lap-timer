@@ -14,7 +14,7 @@ idf_component_register(
     INCLUDE_DIRS include
     REQUIRES core lt_hal nvs_flash esp_timer esp_system console
              app_update esp_app_format esp_partition spi_flash mbedtls
-             esp_driver_gpio
+             esp_driver_gpio sim_common
              gps_$ENV{LT_GPS} imu_$ENV{LT_IMU} display_$ENV{LT_DISPLAY})
 # The pipeline (globbed into `app`) calls the GPS/IMU HAL (hal/gps.h, hal/imu.h), so the selected
 # gps_${GPS}/imu_${IMU} driver is a real dependency of `app`: declaring it here places the driver
@@ -30,6 +30,11 @@ idf_component_register(
 # LT_GPS/LT_IMU/LT_DISPLAY are exported into the environment by the top-level CMakeLists (a
 # flag-derived component name cannot be read from the cache during IDF's early-expansion pass, but
 # the environment is inherited); main also requires them so the driver is pulled into the image.
+#
+# sim_common (Task 3, 2026-10-05-ota-screen-and-glyphs): pipeline.c calls sim_scenario_set() under
+# #if CFG_GPS_SIM for CMD_SIM_SCENARIO. Unlike gps_${GPS}/imu_${IMU} this REQUIRES is unconditional
+# -- sim_common has no GPS/IMU-specific code, so it links fine (and costs nothing but the link
+# edge) into a non-sim env too, where the #if just never calls into it.
 
 # §6 peer connector detect line (board_devkit_v1): GPIO4, free + internal-pull-up capable +
 # non-strapping. link.c enables its (active-low) detect path once this is >= 0. See

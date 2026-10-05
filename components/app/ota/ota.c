@@ -17,10 +17,14 @@
 #include "app/lt_assert.h"
 #include "app/lt_consts.h"
 #include "app/lt_err.h"
+#include "app/lt_ipc.h"             /* g_ui_evt_q (ota_ui_post, ui-only EV_OTA) */
 #include "app/lt_nvs.h"
 #include "app/lt_sup.h"
 
 #include "build_config.h"          /* CFG_HWID */
+
+#include "core/event.h"            /* EV_OTA, EV_OTA_ABORTED */
+#include "core/ui/model.h"         /* OTA_PHASE_RECEIVING/VERIFYING/REBOOTING */
 
 #include "esp_app_desc.h"          /* esp_app_get_description, esp_app_desc_t */
 #include "esp_err.h"
@@ -28,6 +32,9 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #include "hal/board.h"             /* board_charger_present, board_battery_read_mv */
 
@@ -70,10 +77,27 @@ static uint8_t                s_sha_want[OTA_SHA_LEN];
 static mbedtls_sha256_context s_sha;
 static bool                   s_hwid_ok;             /* the §19.3 target check has passed */
 static int64_t                s_reboot_at_us = INT64_MAX;   /* armed by ota_end; INT64_MAX = not due (reboot-arm race) */
+static uint8_t s_ui_pct_step;          /* last pct/5 step posted to the ui (throttle, ota_ui_post) */
 
 static uint32_t rd_u32le(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Tell the ui (ui-only EV_OTA, never emit_event(): not logged, not streamed -- same contract as
+ * EV_CFG_CHANGED). Non-blocking: a full ui queue drops the update, the next one catches up. */
+static void ota_ui_post(uint8_t phase, uint8_t pct)
+{
+    LT_ASSERT_VOID(pct <= 100u, OTA_ASSERT_CODE);
+    if (g_ui_evt_q == NULL) return;    /* ui not started (recovery mode) */
+    event_t ev = { .type = EV_OTA, .flags = phase, .arg16 = pct, .mono_us = esp_timer_get_time() };
+    /* M2 (fix round 1): every caller here (ota_begin/data/end/fail/abort) runs inside an `ota recv`
+     * or a framed CMD_OTA_* transfer, both of which quiet logging to ESP_LOG_ERROR for the duration
+     * (export_serial.c) -- an unsuppressed line mid-transfer would inject bytes into the OTA token/
+     * frame stream on the same UART, so WARN never prints here. A drop is therefore silent on the
+     * bench by design -- not a bug to chase -- and kept at WARN (not ERROR) so it still surfaces
+     * normally from any future caller that runs outside a quiesced transfer. */
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "ota ui: queue full");
 }
 
 /* §19.5 battery precondition: OTA proceeds on the charger, or at >= BATT_OTA_MIN_MV (a stand-in
@@ -104,6 +128,7 @@ static void ota_reset(void)
  * idempotent, so this is safe even if the context was already finished. */
 static int ota_fail(int code)
 {
+    ota_ui_post(EV_OTA_ABORTED, 0);
     if (s_handle != 0) (void)esp_ota_abort(s_handle);
     mbedtls_sha256_free(&s_sha);
     ota_reset();
@@ -149,6 +174,8 @@ int ota_begin(const uint8_t *payload, size_t len)
     s_hwid_ok = false;
     s_state = OTA_RECV;
     sys_flags_set(SYS_OTA_PENDING);
+    s_ui_pct_step = 0;
+    ota_ui_post(OTA_PHASE_RECEIVING, 0);
     ESP_LOGI(TAG, "begin %u B -> %s", (unsigned)size, s_target->label);
     return 0;
 }
@@ -169,6 +196,9 @@ int ota_data(const uint8_t *payload, size_t len)
     (void)mbedtls_sha256_update(&s_sha, data, n);
     s_recv += (uint32_t)n;
     LT_ASSERT_RET(s_recv <= s_size, OTA_ASSERT_CODE, E_OTA_WRITE);  /* bound maintained */
+    uint8_t pct  = (uint8_t)((uint64_t)s_recv * 100u / s_size);   /* s_size > 0 while OTA_RECV */
+    uint8_t step = (uint8_t)(pct / 5u);
+    if (step != s_ui_pct_step) { s_ui_pct_step = step; ota_ui_post(OTA_PHASE_RECEIVING, pct); }
     if (!s_hwid_ok && s_recv >= OTA_HWID_CHECK_AT) {
         int hrc = ota_verify_hwid();
         if (hrc != 0) return ota_fail(hrc);
@@ -187,11 +217,18 @@ int ota_end(void)
     uint8_t got[OTA_SHA_LEN];
     (void)mbedtls_sha256_finish(&s_sha, got);
     mbedtls_sha256_free(&s_sha);
-    if (memcmp(got, s_sha_want, OTA_SHA_LEN) != 0) { (void)esp_ota_abort(s_handle); ota_reset(); return E_OTA_WRITE; }
-    if (ota_batt_ok() != 0) { (void)esp_ota_abort(s_handle); ota_reset(); return E_OTA_PRECOND; }  /* §19.5 re-check */
+    if (memcmp(got, s_sha_want, OTA_SHA_LEN) != 0) {
+        ota_ui_post(EV_OTA_ABORTED, 0); (void)esp_ota_abort(s_handle); ota_reset(); return E_OTA_WRITE;
+    }
+    if (ota_batt_ok() != 0) {  /* §19.5 re-check */
+        ota_ui_post(EV_OTA_ABORTED, 0); (void)esp_ota_abort(s_handle); ota_reset(); return E_OTA_PRECOND;
+    }
+    ota_ui_post(OTA_PHASE_VERIFYING, 100);
     esp_err_t e = esp_ota_end(s_handle);                          /* ECDSA signature verify */
     s_handle = 0;                                                 /* esp_ota_end frees the handle regardless */
-    if (e != ESP_OK) { ota_reset(); ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(e)); return E_OTA_SIG; }
+    if (e != ESP_OK) {
+        ota_ui_post(EV_OTA_ABORTED, 0); ota_reset(); ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(e)); return E_OTA_SIG;
+    }
     /* §19.4 (H3): persist the pending-verify flag BEFORE arming the boot slot, and treat a persist
      * failure as fatal for the update. esp_ota_end already froze the slot; simply not calling
      * set_boot leaves the running image in place, so aborting here is safe. If the flag cannot be
@@ -200,8 +237,12 @@ int ota_end(void)
      * supervisor's real authority (it validates/rolls back on that state unconditionally), so a
      * flag lost to a power-cut in the tiny window below still resolves correctly; keeping the flag
      * ahead of set_boot only tightens the fail-closed guarantee. */
-    if (lt_ota_pending_set() != 0) { ESP_LOGE(TAG, "ota_pending persist failed"); ota_reset(); return E_OTA_WRITE; }
-    if (esp_ota_set_boot_partition(s_target) != ESP_OK) { lt_ota_pending_clear(); ota_reset(); return E_OTA_WRITE; }
+    if (lt_ota_pending_set() != 0) {
+        ota_ui_post(EV_OTA_ABORTED, 0); ESP_LOGE(TAG, "ota_pending persist failed"); ota_reset(); return E_OTA_WRITE;
+    }
+    if (esp_ota_set_boot_partition(s_target) != ESP_OK) {
+        ota_ui_post(EV_OTA_ABORTED, 0); lt_ota_pending_clear(); ota_reset(); return E_OTA_WRITE;
+    }
     /* Arm the deadline FIRST, then publish OTA_REBOOT with a release store: the supervisor's
      * ota_reboot_due() pairs an acquire load of s_state with this release, so it can never observe
      * OTA_REBOOT while s_reboot_at_us still holds its INT64_MAX init (which would reboot instantly,
@@ -209,12 +250,14 @@ int ota_end(void)
     s_reboot_at_us = esp_timer_get_time() + (int64_t)OTA_REBOOT_DELAY_S * 1000000;
     __atomic_store_n(&s_state, OTA_REBOOT, __ATOMIC_RELEASE);
     ESP_LOGW(TAG, "image applied; supervisor reboots in %d s", OTA_REBOOT_DELAY_S);
+    ota_ui_post(OTA_PHASE_REBOOTING, 100);
     return 0;
 }
 
 int ota_abort(void)
 {
     if (s_state != OTA_RECV) return 0;      /* IDLE: nothing in flight; REBOOT: already applied */
+    ota_ui_post(EV_OTA_ABORTED, 0);
     if (s_handle != 0) (void)esp_ota_abort(s_handle);
     mbedtls_sha256_free(&s_sha);
     ota_reset();                            /* running image untouched (§19.6) */
