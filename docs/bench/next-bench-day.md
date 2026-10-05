@@ -32,11 +32,11 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   version in the banner, `sup: OTA image rolled back by the bootloader`, errlog `E_OTA_ROLLBACK`
   (0x0806), and the `UPDATE FAILED / REVERTED` one-shot for 3 s right after the BOOT screen (plan
   `2026-10-05-ota-screen-and-glyphs` Task 2). Then push the image again normally and let it validate.
-- [ ] **3. OTA push while in recovery mode** (debt sweep A P-8, spec §17.5 amendment). Enter recovery
+- [x] **3. OTA push while in recovery mode** (debt sweep A P-8, spec §17.5 amendment). Enter recovery
   (`gate_dsA.py safe` up to the RECOVERY boot, or 5× `dbg crash` 12 s apart), then push a signed
   image. Expect: the push succeeds (console alive in recovery), `sup: OTA reboot: safe/recovery gate
   cleared for the new image`, the new image boots NORMALLY (safe_mode=0) and validates at 30 s.
-- [ ] **4. Long soak ≥ 35 min with the live clock on.** `gate_p07c.py clock` then a 35-minute read-only
+- [x] **4. Long soak ≥ 35 min with the live clock on.** `gate_p07c.py clock` then a 35-minute read-only
   capture (`gate_p07c.py soak` is 10 min — run it 4× back to back or extend). Expect exactly one
   age-out full (`kind=F` ~30 min after the previous full), 1 Hz cell-sized partials otherwise, 0 W/E,
   no WDT/reset. Moving-cap full (`partial_count >= 2*full_every` while moving): needs continuous
@@ -44,17 +44,12 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   `kind=F` while the sim is still lapping. Note (fix round 1, I1): each repeat ends with a 6 s
   standstill (parked at the capture's last position) before the next one starts — expect a clean
   STILL/MOTION pair at every lap boundary, not a flicker.
-- [ ] **5. Menu paths never exercised.** With the sim parked: Sleep now (3 s MODE hold on the item →
-  sleep; wake by a button → BOOT screen, session continues/new), Calibrate — **blocked on #93** (the
-  menu item is a no-op today: `CMD_CALIB_ORIENT` has no handler, `pipeline.c`'s `handle_cmd`
-  `default: break;`); confirm only that the one-shot renders, New track (CREATE mode: the NEW TRACK
-  one-shot, cross S/F twice with `dbg sim laps`, press MODE → a user venue appears in `lt list`/`trk`),
-  layout override (forced layout id → the VENUE one-shot shows the forced name).
+- [ ] **5. Menu paths never exercised** — checked 2026-10-05: all four are STUBS today, so this item stays open until they land. Sleep now → Plan 6.2 (power state machine, light/deep sleep, button wake); Calibrate → Plan 8.4 (#93: the fusion calibration is never invoked); New track → #97 (CREATE-mode wiring: NEW TRACK one-shot, MODE marks S/F, venue saved); Layout override → #98 (per-venue layout list). Re-test each when its owner lands: Sleep now (3 s MODE hold → sleep; wake by a button → BOOT), Calibrate ("Hold upright, press MODE" → `EV_CALIB_DONE`), New track (NEW TRACK one-shot, cross S/F with `dbg sim laps 1`, MODE → a user venue appears in `lt list`), layout override (forced layout id → the VENUE one-shot shows the forced name).
 - [ ] **6. Real-GPS smoke (`moto_neo6m` image).** Flash the neo6m build (USB with the dev-kit held in
   reset, or OTA if the hwid matches — check `CFG_HWID`). Indoors: BOOT line `GPS OK`, the NOFIX
   icon in the strip, `EV_FIX_LOST` after FIX_LOST_COUNT invalid fixes; outdoors: fix, speed on the
   card, no SIM glyph. (Venue detection on a real track is a ride test, not a bench item.)
-- [ ] **7. Storage full as a planned gate.** Leave the sim lapping (`dbg sim laps 200`) until
+- [x] **7. Storage full as a planned gate.** Leave the sim lapping (`dbg sim laps 200`) until
   `E_STO_EVICT`/`E_STO_FULL` appear (~2-3 h at 10 Hz fused logging; or pre-fill the fs with
   `dbg logtest`). Expect: eviction keeps a reserve, the open session keeps writing, `lt list`
   answers within the dev-kit's 12 s first-byte window (#91 measures the cost), no WDT, no fs deadlock.

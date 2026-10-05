@@ -442,15 +442,15 @@ static void menu_select(void)
     case MA_UNITS:   menu_do_units();   break;
     case MA_DISPLAY: menu_do_display(); break;
     /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
-    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (venue layout list TBD)"); break;
+    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (per-venue layout list: issue #98)"); break;
     /* pipeline drops CMD_CALIB_ORIENT until the calib session lands. */
     case MA_CALIBRATE: ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT"); break;
-    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (plan 05)"); break;
+    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (issue #97)"); break;
     case MA_EXPORT:   ESP_LOGW(TAG, "menu: Export (BLE) not implemented (plan 06)"); break;
     case MA_LIVE:     ESP_LOGW(TAG, "menu: Live to phone not implemented (plan 06)"); break;
     case MA_DIAG:     ESP_LOGW(TAG, "menu: Diagnostics export not implemented (§17.10, plan 05)"); break;
     case MA_SESSIONS: ESP_LOGW(TAG, "menu: Sessions ops not implemented (plan 05)"); break;
-    case MA_SLEEP:    ESP_LOGW(TAG, "menu: Sleep now -- hold MODE 3 s to confirm (not implemented, plan 07)"); break;
+    case MA_SLEEP:    ESP_LOGW(TAG, "menu: Sleep now -- hold MODE 3 s to confirm (not implemented, Plan 6.2 power states)"); break;
     default: break;
     }
     s_dirty = true;
