@@ -12,8 +12,11 @@
 #include "app/lt_rtc.h"
 #include "app/lt_consts.h"
 #include "app/lt_assert.h"
+#include "app/lt_ipc.h"
 #include "app/ota.h"
 #include "app/pipeline.h"
+
+#include "core/ses.h"
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -99,6 +102,22 @@ TaskHandle_t sup_task_handle(uint8_t hb_id)
     return s_watch[hb_id].task;
 }
 
+/* Close the open session before a supervisor-owned restart (§17.2/§19.4, #59). Bounded: a
+ * logger that cannot answer in time must not block the restart -- timeout_ms is the hard cap on
+ * how long this call may hold up the caller (check_stalls: 500 ms, a stalled pipeline must not
+ * delay recovery; ota_reboot_check: 2000 ms), and the restart proceeds regardless of rc. */
+static void close_session_before_restart(uint8_t reason, uint32_t timeout_ms)
+{
+    LT_ASSERT_VOID(reason == SES_END_RESTART || reason == SES_END_STALL, SUP_ASSERT_CODE);
+    LT_ASSERT_VOID(timeout_ms > 0 && timeout_ms <= 5000, SUP_ASSERT_CODE);
+    log_request_t req = { .type = LOGGER_CLOSE_SESSION, .reason = reason, .gps_us = 0 };
+    int rc = logger_request_sync(&req, timeout_ms);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "session close before restart rc %d (reason %u)", rc, (unsigned)reason);
+        (void)errlog_add(E_LOG_CLOSE_TIMEOUT, (uint32_t)reason);
+    }
+}
+
 static void check_stalls(void)
 {
     for (int i = 0; i < HB_COUNT; i++) {
@@ -124,6 +143,7 @@ static void check_stalls(void)
                  * reset reason will be ESP_RST_SW (§17.5 normal), so leave a marker the next boot
                  * folds in as abnormal -- three consecutive stall-restarts within the window then
                  * trip the crash-loop -> SYS_SAFE_MODE instead of rebooting forever. */
+                close_session_before_restart(SES_END_STALL, 500);
                 (void)lt_counters_flush(true);
                 lt_stall_flag_set();
                 esp_restart();
@@ -133,10 +153,27 @@ static void check_stalls(void)
 }
 
 /* §19.4: the applied image asked (via ota_end) for a reboot after its OTA_END ack; the supervisor
- * owns every system restart, so it performs this one too, flushing counters first. */
+ * owns every system restart, so it performs this one too, flushing counters first.
+ *
+ * §17.5 amendment (controller ruling P-8, debt sweep A T6 fix 1): clear the safe/recovery gate
+ * before rebooting into the NEW image, so it boots at level 0 and gets its own normal validation
+ * trial (ota_try_validate's `!SAFE_MODE && pipeline_gps_seen()` gate needs the pipeline running,
+ * which a resumed safe/recovery level would never start) -- without this, an OTA pushed while the
+ * device is inside a safe-mode window would resume the same level forever, never validate, and
+ * the bootloader would roll it back. The OLD image (this image, still running until esp_restart()
+ * below) remains the rollback target regardless; if the NEW image itself crash-loops, boot_safe_mode
+ * re-detects it from a clean crash_log/boot_cnt slate and re-arms safe mode from scratch -- this
+ * does not weaken crash-loop detection, only gives every newly-applied image a fair, un-gated first
+ * boot. The stall-restart path (check_stalls, same-image self-restart after a wedged pipeline) does
+ * NOT clear the gate: a stall IS the crash-loop signal safe/recovery mode exists to catch, and the
+ * running image is unchanged, so clearing there would erase the very evidence the next boot's
+ * lt_crashlog_is_loop() needs. */
 static void ota_reboot_check(void)
 {
     if (!ota_reboot_due()) return;
+    close_session_before_restart(SES_END_RESTART, 2000);
+    lt_safe_clear();
+    ESP_LOGI(TAG, "OTA reboot: safe/recovery gate cleared for the new image");
     (void)lt_counters_flush(true);
     esp_restart();
 }
@@ -196,6 +233,24 @@ static void ota_lifecycle(uint32_t uptime_s)
     ota_try_validate(uptime_s);
 }
 
+/* §17.5 (+ recovery-mode amendment, debt sweep A #62): once safe OR recovery mode has been up for
+ * SAFE_MODE_CLEAR_S, clear the persisted gate/level and both runtime flags so the next -- and this
+ * -- boot run normally. Fires once per boot. Grouped here (same reason as ota_lifecycle above) so
+ * the task entry stays a thin dispatcher. */
+static void safe_recovery_clear_check(uint32_t uptime_s)
+{
+    if (s_safe_mode_cleared) return;
+    uint32_t f = sys_flags_get();
+    if (!(f & ((1u << SYS_SAFE_MODE) | (1u << SYS_RECOVERY_MODE)))) return;
+    if (uptime_s < SAFE_MODE_CLEAR_S) return;
+    bool was_recovery = (f & (1u << SYS_RECOVERY_MODE)) != 0;   /* M8: log the mode that was actually active */
+    lt_safe_clear();
+    sys_flags_clear(SYS_SAFE_MODE);
+    sys_flags_clear(SYS_RECOVERY_MODE);
+    (void)errlog_add(was_recovery ? E_SYS_RECOVERY_MODE : E_SYS_SAFE_MODE, 0);
+    s_safe_mode_cleared = true;
+}
+
 static void sup_task(void *arg)
 {
     (void)arg;
@@ -214,16 +269,7 @@ static void sup_task(void *arg)
         (void)lt_counters_flush(false);           /* persist if dirty and >=60 s (§15.2) */
 
         ota_lifecycle(uptime_s);                  /* §19.4: reboot / boot-decide / validate (see helper) */
-
-        /* §17.5: once safe mode has been up for SAFE_MODE_CLEAR_S, clear the persisted gate and
-         * the runtime flag so the next -- and this -- boot run normally. Fires once per boot. */
-        if (!s_safe_mode_cleared && (sys_flags_get() & (1u << SYS_SAFE_MODE)) &&
-            uptime_s >= SAFE_MODE_CLEAR_S) {
-            lt_safe_clear();
-            sys_flags_clear(SYS_SAFE_MODE);
-            (void)errlog_add(E_SYS_SAFE_MODE, 0);
-            s_safe_mode_cleared = true;
-        }
+        safe_recovery_clear_check(uptime_s);      /* §17.5: uptime auto-clear (see helper) */
 
         /* Ladders (GPS §7.5 / IMU §8.7 / storage §13) and heap/stack/temp checks: their
          * subsystems arrive in 3.3/3.4; wired here then. */

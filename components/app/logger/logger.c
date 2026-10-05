@@ -134,8 +134,11 @@ static uint32_t storage_free_kb(void)
  * listing (sto_list_next_name, no stat()) so this stays O(n) instead of sto_list_next's O(n^2)
  * on LittleFS (Plan 5.6 T1 fix 3). Plan 5.6 T1 fix 4: vTaskDelay(1) every 16 entries blocks this
  * priority-8 task for one tick so IDLE0 (priority 0) runs and the task WDT is fed -- taskYIELD()
- * would not, it never schedules a lower-priority task. Called once at logger start (the only full listing
- * this file runs -- see status_cache_prime()); every later refresh is incremental. */
+ * would not, it never schedules a lower-priority task. Called once at logger start -- the only
+ * full listing this file ever runs, via status_cache_prime() (M7: delete_session used to also
+ * call status_cache_prime() and so this, on every delete; I2 replaced that with an in-place
+ * decrement, so this really is a one-time boot call now). Every later refresh (close_session,
+ * eviction_check, delete_session) is incremental. */
 static uint16_t session_count(void)
 {
     int c = 0;
@@ -267,7 +270,8 @@ static bool rebuild_sum(bool closing, int64_t end_gps_us, uint8_t end_reason)
 }
 
 static void eviction_check(void);   /* forward decl: called from open_session (§12.7 "at session start") and the main loop */
-static void status_cache_prime(void);   /* forward decl: called from logger_task at boot and from handle_request (LOGGER_RECOUNT) */
+static void status_cache_prime(void);   /* forward decl: called from logger_task at boot only -- I2 made
+                                          * delete_session's cache update incremental, not a rescan */
 
 static void open_session(const log_request_t *req)
 {
@@ -355,12 +359,15 @@ static void open_session(const log_request_t *req)
     ESP_LOGI(TAG, "session %s open", s_id);
 }
 
-static void close_session(const log_request_t *req)
+/* Returns 0 when nothing was open (the routine "no-op" case) or once the close has completed;
+ * -1 if req was NULL or this task's own open-session state was invalid (M1: an asserted anomaly
+ * now reports failure to a synchronous caller, logger_request_sync, instead of a silent 0/ok). */
+static int close_session(const log_request_t *req)
 {
-    LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
-    if (!s_open) return;
-    LT_ASSERT_VOID(s_id[0] != '\0', LOG_ASSERT_CODE);   /* valid session state: s_open implies a set id */
-    LT_ASSERT_VOID(s_log_fd >= 0, LOG_ASSERT_CODE);     /* valid session state: s_open implies an open fd */
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);
+    if (!s_open) return 0;
+    LT_ASSERT_RET(s_id[0] != '\0', LOG_ASSERT_CODE, -1);   /* valid session state: s_open implies a set id */
+    LT_ASSERT_RET(s_log_fd >= 0, LOG_ASSERT_CODE, -1);     /* valid session state: s_open implies an open fd */
     do_write();
     uint8_t tmp[FRAME_TMP_CAP];
     int n = ses_encode_end(req->gps_us, req->reason, tmp, sizeof tmp);
@@ -379,22 +386,88 @@ static void close_session(const log_request_t *req)
     s_bytes_since_info = 0;
     status_cache_update(s_free_kb_cached, s_sessions_cached);
     ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
+    return 0;
 }
 
-static void handle_request(const log_request_t *req)
+/* T4 fix 2: sto_exists() (hal/storage.h) is the quiet existence probe -- unlike the T4 fix 1
+ * version of this helper (sto_open+sto_close), it never ESP_LOGE's on a missing path, so a
+ * `delete` of an already-gone id no longer prints anything (bench dsA-d1 item 2's "no E ( lines").
+ * A probe result of 1 (exists) or <0 (stat() itself failed -- exists unknown) both count as "try
+ * the unlink"; only an unambiguous 0 (definitely does not exist) counts as "skip it" -- see
+ * delete_session's own comment for how that feeds the -3 decision and, for the <0 case, how the
+ * eventual unlink's own rc becomes this request's rc. */
+static void session_files_exist(const char *id, bool *has_log, bool *has_sum)
 {
-    LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_VOID(id != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_VOID(has_log != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_VOID(has_sum != NULL, LOG_ASSERT_CODE);
+    char path[48];
+    (void)snprintf(path, sizeof path, "/sessions/%s.log", id);
+    *has_log = (sto_exists(path) != 0);   /* 1 exists, or <0 unknown -> attempt the unlink either way */
+    (void)snprintf(path, sizeof path, "/sessions/%s.sum", id);
+    *has_sum = (sto_exists(path) != 0);
+}
+
+/* DELETE_SESSION (#73): the only unlink path -- runs on this task (the storage owner), so the
+ * eviction listing's iterator (evict_scan_oldest) is never crossed by a foreign mutation. Refuses
+ * the currently open session (its fd would be orphaned and the in-flight session's data lost) --
+ * the sender's own fast-path check (cmd.c's old logger_open_session_id() guard) is gone; this is
+ * now the sole authority. 0 ok; -3 neither file existed (T4 fix 2: both sto_exists probes returned
+ * a definite 0, checked BEFORE unlinking -- sto_unlink's own rc cannot report this on its own,
+ * since it returns 0 on ENOENT too); -4 the session is open; else the first non-zero unlink rc
+ * (an sto_exists probe that itself failed, <0, is treated as "try the unlink anyway" -- its rc,
+ * not the probe's, is what this returns). */
+static int delete_session(const log_request_t *req)
+{
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);
+    LT_ASSERT_RET(memchr(req->id, '\0', sizeof req->id) != NULL, LOG_ASSERT_CODE, -1);   /* id is NUL-terminated within its field */
+    if (s_open && strcmp(s_id, req->id) == 0) return -4;   /* session is open */
+    bool has_log, has_sum;
+    session_files_exist(req->id, &has_log, &has_sum);
+    if (!has_log && !has_sum) return -3;                    /* neither file existed */
+    char path[48];
+    int rc = 0;
+    int rc_sum = 0;
+    if (has_log) {
+        (void)snprintf(path, sizeof path, "/sessions/%s.log", req->id);
+        rc = sto_unlink(path);
+    }
+    if (has_sum) {
+        (void)snprintf(path, sizeof path, "/sessions/%s.sum", req->id);
+        rc_sum = sto_unlink(path);
+        if (rc == 0) rc = rc_sum;
+    }
+    /* I2 (Ruling F-3): incremental update instead of a status_cache_prime() rescan -- a removed
+     * .sum is the only thing that changes the session count (a .log-only delete never counted
+     * toward it, see session_count()'s doc comment), so decrement in place and mirror
+     * close_session's cache-publish tail rather than re-listing /sessions. Gated on rc_sum == 0
+     * (final residual, re-review): has_sum alone only means "a .sum existed and an unlink was
+     * attempted" -- a failed unlink leaves the file on disk but would still decrement the count,
+     * wrong until the next full rescan (boot only, now that this path is incremental). has_sum
+     * stays in the condition too, so a .sum that never existed (sto_unlink returns 0 on ENOENT)
+     * does not decrement either. */
+    if (has_sum && rc_sum == 0 && s_sessions_cached > 0) s_sessions_cached--;
+    s_free_kb_cached = storage_free_kb();
+    s_bytes_since_info = 0;
+    status_cache_update(s_free_kb_cached, s_sessions_cached);
+    return rc;
+}
+
+/* Returns the rc this request's handling produced -- 0 ok, <0 an error -- so drain_requests can
+ * notify a synchronous caller (logger_request_sync, debt sweep A #59/#73). OPEN/REBUILD/EVICT
+ * have no failure surface of their own yet (their own I/O failures are already recorded by
+ * errlog_add inside), so they always return 0. DELETE_SESSION returns delete_session()'s rc. */
+static int handle_request(const log_request_t *req)
+{
+    LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);   /* M1: an asserted anomaly reports failure, not 0/ok */
     switch (req->type) {
-    case LOGGER_OPEN_SESSION:    open_session(req); break;
-    case LOGGER_CLOSE_SESSION:   close_session(req); break;
+    case LOGGER_OPEN_SESSION:    open_session(req); return 0;
+    case LOGGER_CLOSE_SESSION:   return close_session(req);
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
-    case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); break;
-    case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; break;   /* force an eviction pass this loop */
-    /* cmd.c's DELETE posts this after unlinking a .sum: a delete is otherwise invisible to the
-     * status.h sessions count (only close_session ever increments it). status_cache_prime() reruns
-     * the name-only session_count() + a fresh storage_free_kb() read (Plan 5.6 final-review A I1). */
-    case LOGGER_RECOUNT:         status_cache_prime(); break;
-    default: break;
+    case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
+    case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; return 0;   /* force an eviction pass this loop */
+    case LOGGER_DELETE_SESSION:  return delete_session(req);
+    default: return 0;
     }
 }
 
@@ -627,17 +700,41 @@ static void eviction_check(void)
     cache_publish_free(storage_free_kb());
 }
 
-/* Drain the logger's control queue (open/close/rebuild/evict commands, §4.4). Pulled out of
- * logger_task's own loop (rather than inlined there, as it used to be) so its Rule 2 drain-bound
- * assertion can safely `return` out of a plain helper on trip, instead of out of the task body. */
+/* T3 fix 1 (ruling P-7) + M2: pack rc into the notification the same way on every path -- req.seq
+ * into the top byte, rc into the low 24 bits -- so a waiter (logger_request_sync) can tell this
+ * reply apart from a stale one of its own. A NULL requester (no synchronous caller) is a no-op. */
+static void notify_requester(const log_request_t *req, int rc)
+{
+    if (req->requester == NULL) return;
+    uint32_t val = ((uint32_t)req->seq << 24) | ((uint32_t)rc & 0x00FFFFFFu);
+    (void)xTaskNotify(req->requester, val, eSetValueWithOverwrite);
+}
+
+/* Drain the logger's control queue (open/close/rebuild/evict/delete commands, §4.4). Pulled out
+ * of logger_task's own loop (rather than inlined there, as it used to be) so its Rule 2 drain-
+ * bound trip can safely `return` out of a plain helper, instead of out of the task body.
+ * debt sweep A #59/#73: a non-NULL requester (only logger_request_sync sets one) gets notified
+ * with this request's rc once handle_request() has finished it -- the logger task never waits on
+ * anything the requester holds, so this notify can never deadlock. */
 static void drain_requests(void)
 {
     LT_ASSERT_VOID(g_log_req_q != NULL, LOG_ASSERT_CODE);   /* valid state: created by lt_ipc_init() at boot */
     log_request_t req;
     uint32_t n = 0;
     while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) {
-        LT_ASSERT_VOID(n++ < LOG_REQ_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
-        handle_request(&req);
+        /* M2: doubled from LOG_REQ_Q_DEPTH -- a handler can yield mid-drain (e.g. storage I/O
+         * inside delete_session/eviction_check), letting producers refill the queue within this
+         * same call; still a bounded loop (rule 2), just against a less pessimistic worst case. */
+        if (n++ >= 2 * LOG_REQ_Q_DEPTH) {
+            core_assert_fail(LOG_ASSERT_CODE, __FILE__, __LINE__);
+            /* M2: the trip must not silently swallow this request's reply -- notify its requester
+             * (if any) with rc -1 so a synchronous caller times out cleanly instead of waiting out
+             * its full timeout for a reply that was never coming. */
+            notify_requester(&req, -1);
+            return;
+        }
+        int rc = handle_request(&req);
+        notify_requester(&req, rc);
     }
 }
 
@@ -654,14 +751,17 @@ static void evict_if_due(uint32_t now)
 
 /* Plan 5.6 T1 fix 3: the only full session_count() scan this file ever runs (name-only, O(n),
  * yields every 16 entries -- see session_count()) is this ONE priming pass at logger start;
- * every later refresh is incremental (close_session/eviction_check) or a storage-free estimate
- * (status_cache_estimate). This is why open_session does NOT also call this: it neither closes a
- * session (no new .sum counted) nor is the storage owner's only chance to see one. Also the
- * LOGGER_RECOUNT handler (cmd.c's DELETE, Plan 5.6 final-review A I1) -- a rescan is the only way
- * to see a session count that just went DOWN (close_session only ever increments it). Resets
- * s_bytes_since_info too: both callers just took a real storage_free_kb() reading, so
- * status_cache_estimate() must restart its between-refresh estimate from here, not from bytes
- * appended before this priming pass. */
+ * every later refresh is incremental (close_session/eviction_check/delete_session) or a
+ * storage-free estimate (status_cache_estimate). This is why open_session does NOT also call
+ * this: it neither closes a session (no new .sum counted) nor is the storage owner's only chance
+ * to see one. Resets s_bytes_since_info too: the only caller (logger_task, at boot) just took a
+ * real storage_free_kb() reading, so status_cache_estimate() must restart its between-refresh
+ * estimate from here, not from bytes appended before this priming pass.
+ *
+ * M7 (final review): this used to also be delete_session's (LOGGER_DELETE_SESSION, debt sweep A
+ * #73) only way to see a session count that just went DOWN (close_session only ever increments
+ * it) -- I2 replaced that full rescan with an in-place decrement (delete_session, above), since a
+ * removed .sum is the one thing this file already knows changed the count by exactly one. */
 static void status_cache_prime(void)
 {
     s_sessions_cached = session_count();
@@ -728,14 +828,6 @@ void logger_start(void)
 void logger_notify(void)
 {
     if (s_task) xTaskNotifyGive(s_task);
-}
-
-const char *logger_open_session_id(void)
-{
-    /* F5: the id the logger currently holds open for writing, or NULL if none. Read cross-task by
-     * the console's DELETE guard -- a benign race (the id only changes on open/close), enough to
-     * refuse unlinking a live session's .log/.sum. */
-    return s_open ? s_id : NULL;
 }
 
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily

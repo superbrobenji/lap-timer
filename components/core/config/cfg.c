@@ -89,11 +89,21 @@ int cfg_validate(cfg_t *c)
     return n;
 }
 
+/* The single source of truth for which stored versions cfg_migrate() accepts -- cfg_migrate()
+ * itself is implemented in terms of this (below) so the two can never diverge (debt sweep A
+ * final review, C1 / Ruling F-1: core/cfg_blob.h's cfg_blob_unwrap() calls this to decide
+ * whether an unrecognised stored version is worth re-unwrapping at all). */
+bool cfg_migrate_supported(uint8_t from_version)
+{
+    return from_version == 1;
+}
+
 int cfg_migrate(cfg_t *c, uint8_t from_version)
 {
     CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
-    if (from_version == 1) { c->version = CFG_VERSION; return 0; }
-    return -1;
+    if (!cfg_migrate_supported(from_version)) return -1;
+    c->version = CFG_VERSION;
+    return 0;
 }
 
 int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
