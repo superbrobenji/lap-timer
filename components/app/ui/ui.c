@@ -661,16 +661,24 @@ static void show_venue_oneshot(int64_t now)
  * is showing when it arrives (fix round 1, Critical #1 ruling): deferred to OTA_FAIL right after
  * BOOT finishes if BOOT is up now; dropped silently (the errlog already has E_OTA_ROLLBACK) while
  * the persistent SAFE one-shot is up; shown immediately otherwise (riding, menu, or any other
- * screen), replacing whatever was there. */
+ * screen), replacing whatever was there.
+ *
+ * M2 (final review): the same SAFE guard now also covers the non-terminal path, below -- a push
+ * that starts (or is already running) while SAFE MODE is showing must not evict it for a progress
+ * bar the operator does not need in SAFE mode. Computed once, up top, since both branches need it.
+ * This also closes the ABORTED/stale-revert gap M2 found for free: once the screen never becomes
+ * ONESHOT_OTA, `on_ota` below is never true while SAFE is up, so EV_OTA_ABORTED's
+ * `if (on_ota) ui_exit_menu()` and ui_loop_iter()'s own OTA_STALE_MS check (gated on
+ * oneshot == ONESHOT_OTA) can never fire against it either -- neither needs its own guard. */
 static void handle_ota(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
-    uint8_t phase = e->flags;
-    uint8_t pct   = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
+    uint8_t phase   = e->flags;
+    uint8_t pct     = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
+    bool    on_safe = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE;
     if (phase == EV_OTA_ROLLED_BACK) {
         bool on_boot = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT;
-        bool on_safe = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE;
         if (on_boot) { s_rollback_pending = true; return; }   /* defer to the BOOT expiry */
         if (on_safe) return;                /* persistent safety screen outranks it */
         s_model.screen     = SCR_ONESHOT;
@@ -681,6 +689,7 @@ static void handle_ota(const event_t *e, int64_t now)
         s_dirty            = true;
         return;
     }
+    if (on_safe) return;                    /* M2: SAFE outranks a non-terminal update too */
     bool on_ota = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA;
     if (phase == EV_OTA_ABORTED) {
         if (on_ota) ui_exit_menu();       /* -> SCR_RIDING, full refresh (ruling B-9) */
@@ -1732,7 +1741,11 @@ static void ui_task(void *arg)
          * window would already be expired by the time the BOOT screen is first visible and the LAP
          * page would replace it immediately. */
     }
-    s_model.flags = f0;
+    /* M1 (final review): mask to SCR_SYS_BITS_MASK here too -- update_flags() already does (its
+     * own comment explains why: bit 14, SYS_RECOVERY_MODE, must never alias SCR_UI_SIM). Harmless
+     * today (recovery mode returns before ui_start(), app_main.c, so bit 14 cannot be set yet) but
+     * leaves the masking invariant correct in both places instead of one. */
+    s_model.flags = f0 & SCR_SYS_BITS_MASK;
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);        /* first screen valid */
     LT_ASSERT_VOID(s_model.oneshot <= ONESHOT_NEWTRACK, UI_APP_ASSERT_CODE);  /* one-shot selector valid */
     render_fb();

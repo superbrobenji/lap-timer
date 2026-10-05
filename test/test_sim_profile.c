@@ -38,8 +38,14 @@ static void test_drag_profile_shape(void)
 }
 
 /* The profile satisfies the drag engine end to end (ARMED -> LAUNCH -> every default gate up to
- * the 1/4 trap -> DONE) when fed the way the pipeline feeds it: fused samples at FUSION_HZ with
- * g_lon = a/9.81 and FUS_STILL while standing, GPS fixes at 5 Hz with the profile speed. */
+ * the 1/4 trap -> DONE) when fed the way the pipeline ACTUALLY feeds it (final review I1/F-2):
+ * fused samples at FUSION_HZ with g_lon = |a|/9.81 -- the un-oriented fallback fus_step() emits in
+ * production (fus.c:274, g_lon = sqrtf(a[0]^2+a[1]^2)), since CMD_CALIB_ORIENT has no handler
+ * (issue #93) and orient_ok/forward_ok never go true -- and GPS fixes at 5 Hz marked valid only
+ * when gps_us is strictly greater than the last valid one, the §6.5 monotonic rule
+ * compute_validity() (pipeline.c) enforces. The original version fed the SIGNED a/9.81 (never
+ * true on-device) and f.valid = 1 unconditionally (bypassing §6.5 entirely) -- exactly what let
+ * the Critical C1 gps_us-rewind regression (gps_sim.c) go unnoticed by this suite. */
 static drag_t D;
 static int    s_hits[16];
 static int    s_launch, s_done;
@@ -56,11 +62,12 @@ static void test_drag_profile_drives_the_engine(void)
     drag_init(&D, NULL);
     memset(s_hits, 0, sizeof s_hits); s_launch = 0; s_done = 0;
     const int64_t dt = 1000000 / FUSION_HZ;
+    int64_t last_valid_gps_us = -1;   /* §6.5: "gps_us > the last valid gps_us", mirrored here */
     for (int64_t t = 0; t <= 30000000; t += dt) {
         sim_drag_state_t s; sim_drag_at(t, &s);
         fused_sample_t fs; memset(&fs, 0, sizeof fs);
         fs.gps_us = t; fs.mono_us = t;
-        fs.g_lon  = (float)(s.accel_mps2 / 9.81);
+        fs.g_lon  = fabsf((float)(s.accel_mps2 / 9.81));   /* I1/F-2: un-oriented |g_lon| fallback */
         fs.flags  = (s.speed_mps == 0.0 && s.accel_mps2 == 0.0) ? FUS_STILL : 0;
         event_t evs[DRAG_EVT_MAX]; int nev = 0;
         drag_on_fused(&D, &fs, evs, DRAG_EVT_MAX, &nev);
@@ -68,7 +75,9 @@ static void test_drag_profile_drives_the_engine(void)
         if (t % 200000 == 0) {                       /* 5 Hz GPS */
             gps_fix_t f; memset(&f, 0, sizeof f);
             f.gps_us = t; f.mono_us = t; f.gspeed_mms = (int32_t)(s.speed_mps * 1000.0);
-            f.fix_type = 3; f.sats = 9; f.flags = GPS_FLAG_FIXOK; f.valid = 1;
+            f.fix_type = 3; f.sats = 9; f.flags = GPS_FLAG_FIXOK;
+            f.valid = (f.gps_us > last_valid_gps_us) ? 1 : 0;   /* I1/F-2: §6.5 monotonic rule */
+            if (f.valid) last_valid_gps_us = f.gps_us;
             drag_on_fix(&D, &f);
         }
         if (s_done) break;

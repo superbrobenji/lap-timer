@@ -59,14 +59,17 @@ endfunction()
 # is also held back: it needs the display_epaper_ssd1680 driver's two host/*.c sources and its
 # include/ dir, so it is added explicitly at the end of this file instead. test_sim_profile (Task
 # 3, sim scenarios) is held back the same way: it needs the sim_common component's host/
-# sim_profile.c source and its include/ dir.
+# sim_profile.c source and its include/ dir. test_sim_clock (final review, ruling F-1) is held
+# back identically: it needs the sim_common component's host/sim_clock.c source and its include/
+# dir.
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
   if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens"
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
      AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
-     AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile")
+     AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile"
+     AND NOT name STREQUAL "test_sim_clock")
     add_core_test(${name})
   endif()
 endforeach()
@@ -167,3 +170,11 @@ set(SIM_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/sim_common)
 set(LT_HAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/lt_hal)
 add_core_test(test_sim_profile ${SIM_COMMON_DIR}/host/sim_profile.c)
 target_include_directories(test_sim_profile PRIVATE ${SIM_COMMON_DIR}/include ${LT_HAL_DIR}/include)
+
+# test_sim_clock (final review, ruling F-1 / Critical C1): sim_common's pure gps_us bookkeeping
+# (sim_clock.h/.c, no IDF, no allocation, no statics of its own) that gps_sim.c's deliver_*()
+# functions now delegate to for every scenario's delivered timestamp. Same pattern as
+# test_sim_profile just above -- links the host sim_clock.c source directly via add_core_test's
+# ARGN; no lt_hal needed (this suite never touches gps_fix_t).
+add_core_test(test_sim_clock ${SIM_COMMON_DIR}/host/sim_clock.c)
+target_include_directories(test_sim_clock PRIVATE ${SIM_COMMON_DIR}/include)

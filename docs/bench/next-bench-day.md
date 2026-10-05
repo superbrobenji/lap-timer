@@ -19,7 +19,11 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   via `lt shell`. Expect: the card shows the launch and gate hits as they happen (sub-rect partials,
   log `ui: refresh ... kind=P`), `pipe:` lines for `EV_DRAG_LAUNCH`/`EV_DRAG_GATE`/`EV_DRAG_DONE`,
   DRAG page 1 LAST RUN lists the hit gates by NAME with times (0-60, 0-100, 60ft, 330ft, 1/8 ...),
-  page 2 SESSION BEST filled, a second run updates bests only where faster. Repeat once with
+  page 2 SESSION BEST filled, a second run updates bests only where faster. Note (final review M4):
+  the 100-0 brake gate is the only gate that depends on the GPS Doppler anchor rather than pure IMU
+  integration — production fusion is never oriented (issue #93), so it reports un-oriented `|g_lon|`
+  (`fus.c:274`), and only the 5 Hz GPS re-anchor (`drag_on_fix`) makes `v_est` actually fall; a
+  missing 100-0 row is expected-ish today, not a defect. Repeat once with
   `config set {"units":"mph","drag":{"n_mph":2,"benches_mph":[60,100]}}` (#86): labels 0-60 / 0-100
   in mph, thresholds converted (the 100 mph gate fires at ~161 km/h in the log). Session log carries
   the EVENT records (`dbg sum <id>`).
@@ -41,10 +45,11 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   standstill (parked at the capture's last position) before the next one starts — expect a clean
   STILL/MOTION pair at every lap boundary, not a flicker.
 - [ ] **5. Menu paths never exercised.** With the sim parked: Sleep now (3 s MODE hold on the item →
-  sleep; wake by a button → BOOT screen, session continues/new), Calibrate ("Hold upright, press
-  MODE" one-shot → `EV_CALIB_DONE` in the log), New track (CREATE mode: the NEW TRACK one-shot, cross
-  S/F twice with `dbg sim laps`, press MODE → a user venue appears in `lt list`/`trk`), layout
-  override (forced layout id → the VENUE one-shot shows the forced name).
+  sleep; wake by a button → BOOT screen, session continues/new), Calibrate — **blocked on #93** (the
+  menu item is a no-op today: `CMD_CALIB_ORIENT` has no handler, `pipeline.c`'s `handle_cmd`
+  `default: break;`); confirm only that the one-shot renders, New track (CREATE mode: the NEW TRACK
+  one-shot, cross S/F twice with `dbg sim laps`, press MODE → a user venue appears in `lt list`/`trk`),
+  layout override (forced layout id → the VENUE one-shot shows the forced name).
 - [ ] **6. Real-GPS smoke (`moto_neo6m` image).** Flash the neo6m build (USB with the dev-kit held in
   reset, or OTA if the hwid matches — check `CFG_HWID`). Indoors: BOOT line `GPS OK`, the NOFIX
   icon in the strip, `EV_FIX_LOST` after FIX_LOST_COUNT invalid fixes; outdoors: fix, speed on the
@@ -55,7 +60,10 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   answers within the dev-kit's 12 s first-byte window (#91 measures the cost), no WDT, no fs deadlock.
 - [ ] **8. OTA progress screen** (plan `2026-10-05-ota-screen-and-glyphs`). During a push: UPDATING,
   bar + percent climbing every 5 %, then VERIFYING, then REBOOTING, then the new image's BOOT screen.
-  An aborted push (`flash abort` on the dev-kit mid-transfer) returns to the riding screen.
+  Abort (final review I2: `tools/devkit.py` has no `flash abort` verb): interrupt the host push
+  (Ctrl-C during `devkit.py flash`) and let `ota recv`'s chunk read time out — expect `OTA-ERR
+  timeout` on the console and the riding screen back. Second escape: leave the push stalled > 60 s
+  and the OTA screen reverts on its own (`ui: ota screen: stale, reverting`, `OTA_STALE_MS`).
 - [ ] **9. SIM + MOVING glyphs** (same plan). Sim build: SIM glyph always present in the strip; MOVING
   glyph present while the sim laps, gone once parked; the menu opens only once MOVING is gone.
 - [ ] **10. #91 list cost** (if the lap-timer fix has landed): `lt list` round trip on the dev-kit
