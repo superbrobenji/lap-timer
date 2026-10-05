@@ -14,7 +14,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
 
 ## Open items
 
-- [ ] **1. Drag mode end-to-end** (prerequisite: `dbg sim drag` — plan `2026-10-05-ota-screen-and-glyphs` Task 3).
+- [x] **1. Drag mode end-to-end** (prerequisite: `dbg sim drag` — plan `2026-10-05-ota-screen-and-glyphs` Task 3).
   Procedure: `config set {"mode":"drag"}` + reset (or the menu), wait for READY/ARMED, then `dbg sim drag`
   via `lt shell`. Expect: the card shows the launch and gate hits as they happen (sub-rect partials,
   log `ui: refresh ... kind=P`), `pipe:` lines for `EV_DRAG_LAUNCH`/`EV_DRAG_GATE`/`EV_DRAG_DONE`,
@@ -27,7 +27,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   `config set {"units":"mph","drag":{"n_mph":2,"benches_mph":[60,100]}}` (#86): labels 0-60 / 0-100
   in mph, thresholds converted (the 100 mph gate fires at ~161 km/h in the log). Session log carries
   the EVENT records (`dbg sum <id>`).
-- [ ] **2. OTA rollback path.** Push any signed image; at ~10 s after its boot (inside the 30 s trial
+- [x] **2. OTA rollback path.** Push any signed image; at ~10 s after its boot (inside the 30 s trial
   window, before `sup: OTA image validated`) send `dbg crash`. Expect on the next boot: the PREVIOUS
   version in the banner, `sup: OTA image rolled back by the bootloader`, errlog `E_OTA_ROLLBACK`
   (0x0806), and the `UPDATE FAILED / REVERTED` one-shot for 3 s right after the BOOT screen (plan
@@ -58,13 +58,13 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   `E_STO_EVICT`/`E_STO_FULL` appear (~2-3 h at 10 Hz fused logging; or pre-fill the fs with
   `dbg logtest`). Expect: eviction keeps a reserve, the open session keeps writing, `lt list`
   answers within the dev-kit's 12 s first-byte window (#91 measures the cost), no WDT, no fs deadlock.
-- [ ] **8. OTA progress screen** (plan `2026-10-05-ota-screen-and-glyphs`). During a push: UPDATING,
+- [x] **8. OTA progress screen** (plan `2026-10-05-ota-screen-and-glyphs`). During a push: UPDATING,
   bar + percent climbing every 5 %, then VERIFYING, then REBOOTING, then the new image's BOOT screen.
   Abort (final review I2: `tools/devkit.py` has no `flash abort` verb): interrupt the host push
   (Ctrl-C during `devkit.py flash`) and let `ota recv`'s chunk read time out — expect `OTA-ERR
   timeout` on the console and the riding screen back. Second escape: leave the push stalled > 60 s
   and the OTA screen reverts on its own (`ui: ota screen: stale, reverting`, `OTA_STALE_MS`).
-- [ ] **9. SIM + MOVING glyphs** (same plan). Sim build: SIM glyph always present in the strip; MOVING
+- [x] **9. SIM + MOVING glyphs** (same plan). Sim build: SIM glyph always present in the strip; MOVING
   glyph present while the sim laps, gone once parked; the menu opens only once MOVING is gone.
 - [ ] **10. #91 list cost** (if the lap-timer fix has landed): `lt list` round trip on the dev-kit
   console (`-- rt N ms`) with ≥ 40 sessions, before/after.
