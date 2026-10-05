@@ -91,6 +91,12 @@ static void ota_ui_post(uint8_t phase, uint8_t pct)
     LT_ASSERT_VOID(pct <= 100u, OTA_ASSERT_CODE);
     if (g_ui_evt_q == NULL) return;    /* ui not started (recovery mode) */
     event_t ev = { .type = EV_OTA, .flags = phase, .arg16 = pct, .mono_us = esp_timer_get_time() };
+    /* M2 (fix round 1): every caller here (ota_begin/data/end/fail/abort) runs inside an `ota recv`
+     * or a framed CMD_OTA_* transfer, both of which quiet logging to ESP_LOG_ERROR for the duration
+     * (export_serial.c) -- an unsuppressed line mid-transfer would inject bytes into the OTA token/
+     * frame stream on the same UART, so WARN never prints here. A drop is therefore silent on the
+     * bench by design -- not a bug to chase -- and kept at WARN (not ERROR) so it still surfaces
+     * normally from any future caller that runs outside a quiesced transfer. */
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "ota ui: queue full");
 }
 

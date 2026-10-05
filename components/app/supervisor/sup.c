@@ -50,6 +50,8 @@ static StackType_t  s_stack[SUP_STACK_WORDS];
 static bool         s_safe_mode_cleared;   /* guards the §17.5 uptime auto-clear to fire once */
 static bool         s_ota_boot_checked;    /* §19.4: the boot-time OTA validate-vs-rollback decision ran once */
 static bool         s_ota_awaiting;        /* §19.4: a pending image booted and is on trial, awaiting the health gate */
+static bool         s_ota_rollback_pending; /* fix round 1 (Critical #1): a revert was detected but
+                                              * not yet posted -- g_ui_evt_q may not exist yet */
 
 /* Boot self-test table (Plan 7c T8, design §6): one relaxed atomic byte per BOOT_* slot, zero-
  * initialised to BOOT_UNKNOWN. Plain statics (no init dependency) so any init site -- app_main
@@ -203,8 +205,21 @@ static void ota_boot_decide(void)
     lt_counters_inc(LT_CTR_OTA_ROLLBACK, true);
     lt_ota_pending_clear();
     ESP_LOGW(TAG, "OTA image rolled back by the bootloader");
+    /* fix round 1 (Critical #1): sup_start() runs before app_main's lt_ipc_init(), so g_ui_evt_q is
+     * still NULL on this, the supervisor's very first tick -- a direct xQueueSend here is always
+     * dropped. Latch instead; ota_rollback_post_retry() (called every tick from ota_lifecycle())
+     * posts it once the queue exists. */
+    s_ota_rollback_pending = true;
+}
+
+/* fix round 1 (Critical #1): retried every supervisor tick until g_ui_evt_q exists and the send
+ * lands -- see the latch comment in ota_boot_decide() above. A no-op once posted or when nothing
+ * is pending. */
+static void ota_rollback_post_retry(void)
+{
+    if (!s_ota_rollback_pending || g_ui_evt_q == NULL) return;
     event_t ev = { .type = EV_OTA, .flags = EV_OTA_ROLLED_BACK, .arg16 = 0, .mono_us = esp_timer_get_time() };
-    if (g_ui_evt_q != NULL && xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "ota rollback: ui queue full");
+    if (xQueueSend(g_ui_evt_q, &ev, 0) == pdTRUE) s_ota_rollback_pending = false;
 }
 
 /* §19.4: mark a pending image valid (cancel rollback) once self-test passed (not SAFE_MODE), a GPS
@@ -226,12 +241,14 @@ static void ota_try_validate(uint32_t uptime_s)
 }
 
 /* §19.4 OTA lifecycle, driven once per supervisor loop: perform the applied image's reboot; on the
- * first loop decide validate-vs-rollback; then mark a pending image valid once it proves healthy.
+ * first loop decide validate-vs-rollback; retry a latched rollback ui-post every tick until it
+ * lands; then mark a pending image valid once it proves healthy.
  * Grouped here so the task entry (which must not assert-early-return) stays a thin dispatcher. */
 static void ota_lifecycle(uint32_t uptime_s)
 {
     ota_reboot_check();
     if (!s_ota_boot_checked) { s_ota_boot_checked = true; ota_boot_decide(); }
+    ota_rollback_post_retry();
     ota_try_validate(uptime_s);
 }
 

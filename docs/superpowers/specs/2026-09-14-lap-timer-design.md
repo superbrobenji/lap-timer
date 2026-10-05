@@ -2275,7 +2275,7 @@ OTA_END                       → verify SHA-256 == sha; esp_ota_end (signature 
                                 any panic/WDT/brownout before that → bootloader rolls back (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) → E_OTA_ROLLBACK logged on next boot
 ```
 
-The supervisor tells the ui (`EV_OTA` ROLLED_BACK) and the ui shows the one-shot for 3 s right after BOOT. While an image is being received the ui shows the `OTA` one-shot (§20.6), updated every 5 %, then VERIFYING and REBOOTING; an aborted transfer returns to the riding screen. (`status.state = STATE_OTA` while any of this is in flight.)
+While an image is being received the ui shows the `OTA` one-shot (§20.6), updated every 5 %, then VERIFYING and REBOOTING; an aborted transfer returns to the riding screen. After a bootloader revert the supervisor tells the ui (`EV_OTA` ROLLED_BACK) and the `UPDATE FAILED, REVERTED` one-shot (§20.6) shows for 3 s right after BOOT. (`status.state = STATE_OTA` while any of this is in flight.)
 
 ### 19.5 Preconditions (checked at `OTA_BEGIN`, re-checked at `OTA_END`)
 - Power state `CONNECTED`, `fus_is_still`, `EV_MOTION` not seen for 30 s.

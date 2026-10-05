@@ -117,6 +117,8 @@ static const char *TAG = "ui";
 #define ONESHOT_BOOT_MS  3000
 #define ONESHOT_VENUE_MS 2000
 #define ONESHOT_OTAFAIL_MS 3000   /* §19.4: "UPDATE FAILED, REVERTED" for 3 s after the BOOT one-shot */
+#define OTA_STALE_MS 60000   /* fix round 1 (Important #2): no EV_OTA for 60 s (>> the ~5 %-step
+                               * cadence) while UPDATING shows -> the push died; revert to riding */
 
 /* ---- display refresh ladder (spec §20.3, Plan 7 Task 7) ----
  * DISP_FAIL_STREAK_MAX consecutive disp_refresh()/disp_reinit()-retry failures mark the panel
@@ -187,6 +189,8 @@ static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the faul
 static bool    s_dirty;       /* model changed since last render -> render once (§20.3) */
 static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot (BOOT/VENUE); 0 = none */
 static bool    s_rollback_pending; /* EV_OTA ROLLED_BACK seen before/while BOOT showed: show OTA_FAIL next */
+static int64_t s_ota_seen_us;      /* fix round 1 (Important #2): esp_timer stamp of the last non-
+                                     * terminal EV_OTA; ui_loop_iter() reverts a stale OTA screen */
 static int64_t s_last_input_us;    /* last button activity -> menu idle timeout */
 /* Plan 7c T8 (design §6): s_boot_arm_us is the esp_timer stamp the BOOT one-shot was armed at (0 =
  * not BOOT, e.g. SAFE mode); boot_refmt_check() (below) uses it to fire its +1 s re-format exactly
@@ -317,8 +321,9 @@ static void ui_open_menu(void)
         s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
         s_dirty          = true;
     } else {
-        /* §20.7: above the lock speed the menu is ignored (a lock-icon flash). No lock glyph exists
-         * in icons.h yet, so log it -- the flash arrives with the display driver. */
+        /* §20.7: above the lock speed the menu is ignored; the SCR_UI_MOVING bit (update_flags(),
+         * ICON_MOVING in the fault-icon strip) is already on while this holds, so no extra glyph
+         * work is needed here -- just log it. */
         ESP_LOGI(TAG, "menu locked (gspeed proxy %u >= %u km/h)", s_gspeed_kmh,
                  (unsigned)MENU_LOCK_SPEED_KMH);
     }
@@ -544,8 +549,14 @@ static void btn_vlong(uint8_t bit)
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* dispatches on it below */
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
     ESP_LOGI(TAG, "btn: vlong %s", btn_name(bit));
+    /* fix round 1 (Important #3): screen-correct guard -- s_model.oneshot is only meaningful while
+     * screen == SCR_ONESHOT (model.h), and it is never cleared on the way out of one, so testing it
+     * unconditionally (as the SCR_MENU branch below used to) reads a stale ONESHOT_OTA left behind
+     * by an earlier update and silently swallows a real "Sleep now" confirm. btn_long's one-shot
+     * branch already makes SCR_MENU-while-OTA unreachable, so this can never fire today; it mirrors
+     * btn_long's own guard so the invariant holds if that ever changes. */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA) return;
     if (s_model.screen == SCR_MENU && s_menu_action[s_model.menu_sel] == MA_SLEEP) {
-        if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
         ESP_LOGW(TAG, "menu: Sleep now confirmed -- not implemented (plan 07)");
         ui_exit_menu();
     }
@@ -645,20 +656,37 @@ static void show_venue_oneshot(int64_t now)
 }
 
 /* EV_OTA (ui-only). Non-terminal phases show/update the persistent OTA one-shot (no auto-revert:
- * the supervisor reboots 2 s after REBOOTING; ABORTED returns to riding). ROLLED_BACK at boot is
- * deferred until the BOOT one-shot expires, then OTA_FAIL shows for ONESHOT_OTAFAIL_MS. */
-static void handle_ota(const event_t *e)
+ * the supervisor reboots 2 s after REBOOTING; ABORTED returns to riding; a stale screen with no
+ * update for OTA_STALE_MS also reverts, see ui_loop_iter()). ROLLED_BACK's screen depends on what
+ * is showing when it arrives (fix round 1, Critical #1 ruling): deferred to OTA_FAIL right after
+ * BOOT finishes if BOOT is up now; dropped silently (the errlog already has E_OTA_ROLLBACK) while
+ * the persistent SAFE one-shot is up; shown immediately otherwise (riding, menu, or any other
+ * screen), replacing whatever was there. */
+static void handle_ota(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
     uint8_t phase = e->flags;
     uint8_t pct   = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
-    if (phase == EV_OTA_ROLLED_BACK) { s_rollback_pending = true; return; }
+    if (phase == EV_OTA_ROLLED_BACK) {
+        bool on_boot = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_BOOT;
+        bool on_safe = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE;
+        if (on_boot) { s_rollback_pending = true; return; }   /* defer to the BOOT expiry */
+        if (on_safe) return;                /* persistent safety screen outranks it */
+        s_model.screen     = SCR_ONESHOT;
+        s_model.oneshot    = ONESHOT_OTA_FAIL;
+        s_oneshot_until_us = now + (int64_t)ONESHOT_OTAFAIL_MS * 1000;
+        s_wants_full       = true;
+        s_screen_changed   = true;          /* whole-screen replacement (ruling B-9) */
+        s_dirty            = true;
+        return;
+    }
     bool on_ota = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA;
     if (phase == EV_OTA_ABORTED) {
         if (on_ota) ui_exit_menu();       /* -> SCR_RIDING, full refresh (ruling B-9) */
         return;
     }
+    s_ota_seen_us     = now;              /* I2 (fix round 1): staleness stamp, non-terminal only */
     s_model.ota_pct   = pct;
     s_model.ota_phase = phase;
     if (!on_ota) {
@@ -1092,7 +1120,7 @@ static void handle_event(const event_t *e, int64_t now)
     /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
     case EV_CFG_CHANGED: ui_reload_cfg(); break;
     case EV_LAP_RESET:   ui_lap_reset();  break;
-    case EV_OTA:         handle_ota(e);   break;
+    case EV_OTA:         handle_ota(e, now); break;
     default: break;
     }
 }
@@ -1609,6 +1637,14 @@ static void ui_loop_iter(QueueHandle_t btn_q)
         s_wants_full     = true;
         s_screen_changed = true;
         s_dirty          = true;
+    }
+    /* I2 (fix round 1): a stale OTA screen (no EV_OTA for OTA_STALE_MS) means the push died with
+     * no terminal event ever posted -- escape back to riding rather than block the device forever.
+     * A live transfer posts at least every 5 %, far inside this window on any real link. */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA &&
+        now - s_ota_seen_us >= (int64_t)OTA_STALE_MS * 1000) {
+        ESP_LOGW(TAG, "ota screen: stale, reverting");
+        ui_exit_menu();
     }
     /* Menu idle auto-exit (§20.7). */
     if (s_model.screen == SCR_MENU && (now - s_last_input_us) >= (int64_t)MENU_IDLE_MS * 1000) {
