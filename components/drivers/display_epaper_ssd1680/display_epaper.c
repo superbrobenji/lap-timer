@@ -252,7 +252,11 @@ static int epd_full_refresh(void)
     if (epd_set_full_window() != 0) {
         return -EIO;
     }
-    if (epd_write_full_frame(0x24) != 0 || epd_write_full_frame(0x26) != 0) {
+    /* Both banks get identical bytes, which keeps the "both banks hold the displayed frame"
+     * invariant (see epd_partial_refresh) and makes any bank swap a no-op. The window + cursor are
+     * re-issued before the second bank (B-F3 review, finding 3) instead of relying on the address
+     * counter wrapping to the origin after exactly filling the window. */
+    if (epd_write_full_frame(0x24) != 0 || epd_set_full_window() != 0 || epd_write_full_frame(0x26) != 0) {
         return -EIO;
     }
 
@@ -314,7 +318,8 @@ static int epd_write_partial_frame(uint8_t cmd)
 }
 
 /* §20.1 "Partial refresh": border hold, window, the rect into 0x24, lut_partial, activate, wait
- * (~0.3-0.5 s), the same rect into 0x26 (diff baseline for the next partial), border restore.
+ * (~0.3-0.5 s), then the same rect into BOTH 0x24 and 0x26 (window + cursor re-issued before each;
+ * the controller ping-pongs the banks after a partial update), border restore.
  *
  * Fix 1 (review round 1): every exit path must restore the border and clear s_win_set -- a
  * failure partway through must not leave the border held or the window marked pending. Power-of-10
@@ -343,6 +348,22 @@ static int epd_partial_refresh(void)
     if (rc == 0) rc = epd_data(lut, sizeof lut);
     if (rc == 0) rc = epd_cmd(0x20);
     if (rc == 0) rc = epd_wait_busy();
+    /* Bench B-F3 (rulings B-14/B-15): after a display-mode-2 (partial) update the controller either
+     * swaps the roles of its two image RAMs ("ping-pong": the bank just displayed becomes the old
+     * image and the bank that held the PREVIOUS old image becomes the new one) or leaves them in
+     * place -- a per-device quirk (Zephyr ssd16xx.c's partial_keeps_ram); this panel's bench
+     * behaviour is consistent only with a swap. The update (0x20) drives every pixel where the two
+     * banks differ REGARDLESS of the RAM window. A full-window partial never
+     * noticed (the whole frame is rewritten every time), but a sub-rectangle write leaves the rest
+     * of the now-new bank two updates stale, and the next update drives those stale differences
+     * (bench: menu carets re-appearing on every second row). Restore the invariant "both banks hold
+     * the displayed frame" by copying the rectangle into BOTH banks, re-issuing the window and the
+     * cursor before each write (the 0x24 write above walked the address counter through the window
+     * and the update ran in between). Correct under either reading of the controller: without a
+     * swap the 0x24 copy is a harmless rewrite and the 0x26 copy is the diff baseline. */
+    if (rc == 0) rc = epd_set_partial_window();
+    if (rc == 0) rc = epd_write_partial_frame(0x24);
+    if (rc == 0) rc = epd_set_partial_window();
     if (rc == 0) rc = epd_write_partial_frame(0x26);
 
     (void)epd_cmd(0x3C);

@@ -58,6 +58,7 @@ enum {                              /* drag_state() values (§11.2) */
 };
 
 enum { DRAG_UNITS_KMH = 0, DRAG_UNITS_MPH = 1 };   /* cfg.units: display + bench-list selection only */
+#define DRAG_MPH_PER_KMH 1.609344   /* km/h per mph; mph bench values convert with lround(mph * DRAG_MPH_PER_KMH) */
 
 /* ≥ 1 s of fused samples at FUSION_HZ for the launch back-scan (§11.2). Rounded up past FUSION_HZ so a
  * full second of samples always fits with headroom; the newest DRAG_HIST_N entries are retained. */
@@ -79,17 +80,25 @@ typedef struct {
 } drag_cfg_t;
 
 void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {100,200,300}, rollout off, km/h */
-/* Build a drag_cfg_t from the user's saved cfg_t (spec §6.6/§11.4): starts from drag_cfg_defaults()
- * and NEVER touches the gate table after that (gates[]/n_gates stay the defaults, Ruling R-6) --
- * gate thresholds are km/h by this header's own contract, regardless of the display unit. out->units
- * mirrors cfg->units (display only); out->rollout mirrors cfg->drag.rollout. The headline bench list
- * (out->benches_kmh/n_benches) is always copied from cfg->drag.benches_kmh (km/h), clamped by both
- * array sizes; cfg->drag.benches_mph is unused until a future mph-defined gate table (spec §10,
- * follow-up issue). */
+/* Build a drag_cfg_t from the user's saved cfg_t (spec §6.6/§11.4): starts from drag_cfg_defaults().
+ * km/h mode (cfg->units == CFG_UNITS_KMH): unchanged -- gates[]/n_gates stay the defaults; the
+ * headline bench list (out->benches_kmh/n_benches) is copied from cfg->drag.benches_kmh, clamped by
+ * both array sizes; an empty list leaves the shipped defaults (100/200/300) in place.
+ * mph mode (cfg->units == CFG_UNITS_MPH, #86, spec dsB §3): the first min(n_mph, 4) gates of kind
+ * DRAG_SPEED_FROM0 in table order (ids 1..4) get `a` and benches_kmh[i] set to
+ * lround(cfg->drag.benches_mph[i] * DRAG_MPH_PER_KMH) -- a CONVERSION to the engine's km/h unit, not
+ * a raw copy (Ruling R-6 rolled back writing mph numbers as km/h unconverted); n_benches = n. Every
+ * other gate kind, and every gate id, is untouched. An empty mph list (n_mph == 0) also leaves the
+ * shipped defaults in place. out->units always mirrors cfg->units (display only); out->rollout
+ * mirrors cfg->drag.rollout. */
 void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
-/* §6.6 gate name for `g` into `buf` (cap >= 8 required). Returns strlen(buf) on success, -1 on a bad
- * kind, a NULL arg or too small a cap. buf is always NUL-terminated within cap. */
-int  drag_gate_label(const drag_gate_def_t *g, char *buf, size_t cap);
+/* §6.6 gate name for `g` into `buf` (cap >= 8 required). units: DRAG_UNITS_KMH (0) prints every gate's
+ * raw km/h/cm value as today; DRAG_UNITS_MPH (1) prints a DRAG_SPEED_FROM0 gate's `a` converted back to
+ * mph (lround(a / DRAG_MPH_PER_KMH)) -- the inverse of drag_cfg_from_user's conversion, exact for every
+ * integer mph 1..300 (spec dsB §3) -- while SPEED_RANGE/DIST/BRAKE still print their raw km/h/cm values
+ * in both units (they are not user-defined in mph). Returns strlen(buf) on success, -1 on a bad kind, a
+ * NULL arg, an out-of-range units or too small a cap. buf is always NUL-terminated within cap. */
+int  drag_gate_label(const drag_gate_def_t *g, uint8_t units, char *buf, size_t cap);
 
 /* Upper bound on the events drag_on_fused can append in a single call: at most one ARMED or LAUNCH or
  * DONE plus a full sweep of gates (DRAG_MAX_GATES) with headroom. Callers pass a buffer this large. */

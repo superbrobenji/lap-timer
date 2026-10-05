@@ -202,6 +202,9 @@ static int64_t  s_next_reinit_us;  /* next allowed disp_reinit() probe while SYS
 static uint16_t s_partial_count;   /* partials issued since the last full */
 static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
 static bool     s_wants_full;      /* next render should be a full refresh (page/menu/combo/etc) */
+static bool     s_screen_changed;  /* the next render replaces the whole screen (one-shot<->riding,
+                                     * menu enter/exit, page change) -- never a partial, regardless
+                                     * of motion (bench B-F1, ruling B-9) */
 static bool     s_refresh_pending; /* fix round 2 (Important #2): RF_NONE returned while throttled
                                      * -- a refresh is owed once the 30 s throttle window elapses */
 
@@ -309,6 +312,7 @@ static void ui_open_menu(void)
         s_model.menu_top = 0;
         s_last_input_us  = esp_timer_get_time();
         s_wants_full     = true; /* menu entry: full refresh (§20.3 full-refresh triggers) */
+        s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
         s_dirty          = true;
     } else {
         /* §20.7: above the lock speed the menu is ignored (a lock-icon flash). No lock glyph exists
@@ -321,9 +325,10 @@ static void ui_open_menu(void)
 static void ui_exit_menu(void)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* leaving a valid screen */
-    s_model.screen = SCR_RIDING;
-    s_wants_full   = true; /* menu/one-shot exit: full refresh (§20.3 full-refresh triggers) */
-    s_dirty        = true;
+    s_model.screen   = SCR_RIDING;
+    s_wants_full     = true; /* menu/one-shot exit: full refresh (§20.3 full-refresh triggers) */
+    s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
+    s_dirty          = true;
 }
 
 /* Every UI-driven cfg change is a read-modify-write (T-D): reload the blob from NVS immediately
@@ -332,20 +337,42 @@ static void ui_exit_menu(void)
  * load failure s_cfg keeps its last-known-good value (lt_cfg_load leaves it untouched), which is
  * the same fall-back the boot seed uses. */
 
-/* MA_MODE: toggle Lap/Drag, reset the page (§22.6), persist cfg.mode, push the mode command,
- * refresh the label. (Split verbatim out of menu_select for rule 4.) */
-static void menu_do_mode(void)
+/* Applies a new riding mode to s_mode/s_model.mode, resets the screen to page 0 (§22.6), and --
+ * when leaving LAP mode -- stops the live lap clock. Shared by menu_do_mode (local MA_MODE toggle)
+ * and ui_reload_cfg (I2, final review ruling B-6: a remote CONFIG_SET's mode flip must behave
+ * identically, not just relabel the menu while page 0 keeps a stale LAP clock on a now-DRAG
+ * screen). Plan 7c T6 (design §4): leaving LAP mode means no lap is running any more -- the ui
+ * learns this directly here (no EV_* reaches it for a venue/layout loss or a lap reset), so stop
+ * the stopwatch now rather than let a later switch back to LAP resume ticking from a stale start
+ * stamp; clock_tick() itself already gates on mode == SCR_MODE_LAP. */
+static void ui_apply_mode(uint8_t new_mode)
 {
-    s_mode        = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
+    LT_ASSERT_VOID(new_mode == MODE_LAP || new_mode == MODE_DRAG, UI_APP_ASSERT_CODE);
+    s_mode        = new_mode;
     s_model.mode  = s_mode;
     s_model.page  = 0; /* §22.6: a mode switch resets the screen */
+    s_wants_full     = true; /* I1 (bench-fix review): whole-screen replacement + page change
+                               * (§20.3) -- covers BOTH callers: the local menu toggle
+                               * (menu_do_mode) and a remote CONFIG_SET mode flip
+                               * (ui_reload_cfg -> EV_CFG_CHANGED), neither of which previously
+                               * requested a full here. */
+    s_screen_changed = true; /* ruling B-9: never a partial, regardless of motion -- the riding
+                               * screen's LAP<->DRAG swap + page-0 reset is exactly the kind of
+                               * whole-screen replacement B-9 forbids as a dirty-rect partial. */
     if (s_mode == MODE_DRAG) {
-        /* Plan 7c T6 (design §4): leaving LAP mode means no lap is running any more -- the ui
-         * learns this directly here (no EV_* reaches it for a venue/layout loss or a lap reset),
-         * so stop the stopwatch now rather than let a later switch back to LAP resume ticking
-         * from a stale start stamp; clock_tick() itself already gates on mode == SCR_MODE_LAP. */
         s_lap_start_mono_us = 0;
+        s_model.cur_running = false;
+        s_model.cur_ms      = 0;
     }
+    LT_ASSERT_VOID(s_model.mode == s_mode, UI_APP_ASSERT_CODE);
+}
+
+/* MA_MODE: toggle Lap/Drag (ui_apply_mode), persist cfg.mode, push the mode command, refresh the
+ * label. (Split verbatim out of menu_select for rule 4.) */
+static void menu_do_mode(void)
+{
+    uint8_t new_mode = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
+    ui_apply_mode(new_mode);
     (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
     s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
     (void)lt_cfg_save(&s_cfg);
@@ -369,6 +396,11 @@ static void menu_do_units(void)
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
     (void)lt_cfg_save(&s_cfg);
+    /* I1 (final review, ruling B-5): units feed the pipeline's own drag gate table
+     * (SPEED_FROM0 benches, design §3) -- a local toggle must reload it exactly like a remote
+     * CONFIG_SET does (cmd.c cfg_change_notify posts the same command), or the engine keeps
+     * firing the old unit's gates until the next reboot. */
+    ui_send_cmd(CMD_CONFIG_RELOAD, 0, 0);
     s_model.units = s_cfg.units;
     s_dirty       = true;
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
@@ -462,13 +494,15 @@ static void btn_short(uint8_t bit)
     } else if (s_model.screen == SCR_RIDING) {
         LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);   /* page wrap math assumes 0..2 */
         if (bit == BTN_UP) {
-            s_model.page = (uint8_t)((s_model.page + 2) % 3); /* previous page (wrap) */
-            s_wants_full = true; /* page change: full refresh (§20.3 full-refresh triggers) */
-            s_dirty      = true;
+            s_model.page     = (uint8_t)((s_model.page + 2) % 3); /* previous page (wrap) */
+            s_wants_full     = true; /* page change: full refresh (§20.3 full-refresh triggers) */
+            s_screen_changed = true; /* whole-screen replacement (ruling B-9): never a partial */
+            s_dirty          = true;
         } else if (bit == BTN_DOWN) {
-            s_model.page = (uint8_t)((s_model.page + 1) % 3); /* next page (wrap) */
-            s_wants_full = true;
-            s_dirty      = true;
+            s_model.page     = (uint8_t)((s_model.page + 1) % 3); /* next page (wrap) */
+            s_wants_full     = true;
+            s_screen_changed = true;
+            s_dirty          = true;
         }
         if ((bit == BTN_UP || bit == BTN_DOWN) && s_model.mode == SCR_MODE_DRAG) {
             /* Plan 7c T5 (design §3): DRAG rows are filled per page -- rebuild for the new one. */
@@ -599,6 +633,11 @@ static void show_venue_oneshot(int64_t now)
     s_model.screen     = SCR_ONESHOT;
     s_model.oneshot    = ONESHOT_VENUE;
     s_oneshot_until_us = now + (int64_t)ONESHOT_VENUE_MS * 1000;
+    s_wants_full       = true; /* M5 (bench-fix review): keep a full owed for the next still
+                                 * moment if a throttled downgrade only yields a partial here --
+                                 * matches the other four replacement sites, none of which set
+                                 * screen_changed without also setting wants_full. */
+    s_screen_changed   = true; /* riding -> one-shot: whole-screen replacement (ruling B-9) */
 }
 
 /* Clears the page 1 row 4 sector-delta cache (spec 7b §3). Ruling B7b-1 (bench finding 1): called
@@ -768,7 +807,7 @@ static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_ga
     LT_ASSERT_VOID(r != NULL && g != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(res != NULL, UI_APP_ASSERT_CODE);
     memset(r, 0, sizeof *r);
-    if (drag_gate_label(g, r->label, sizeof r->label) < 0) {
+    if (drag_gate_label(g, s_model.units, r->label, sizeof r->label) < 0) {
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)g->id);   /* fallback: bounded */
     }
     r->present     = present;
@@ -919,6 +958,84 @@ static void handle_layout_locked(const event_t *e, int64_t now)
     s_dirty = true;
 }
 
+/* #87: a peer CONFIG_SET persisted a new cfg -- reload the ui's working copy and everything
+ * derived from it (units suffixes, DRAG gate labels/benches, riding mode). The ui actually has
+ * THREE dynamic menu labels (s_lbl_mode/s_lbl_units/s_lbl_disp, build_menu() above) -- all three
+ * are rebuilt here with the same snprintf build_menu() itself uses, rather than calling
+ * build_menu() directly: that function's other job, rebuilding s_model.menu_items[]/menu_n/
+ * s_menu_action[] via menu_add(), is a side effect well beyond "refresh three label strings" and
+ * is not needed here (the menu's item list/order never changes, only the label text).
+ * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived, but drag_init()
+ * (called by the pipeline's own reload) always drops ARMED -- clear the ui's mirror of it here
+ * too so a remote CONFIG_SET can't leave a stale "ARMED" indicator on screen.
+ * I2 (final review, ruling B-6): a remote mode flip must mirror menu_do_mode's own reset
+ * (ui_apply_mode above) -- page 0 reset to §22.6 and the live lap clock stopped when leaving LAP
+ * -- not just a relabelled menu while the riding screen keeps showing stale LAP state under a
+ * now-DRAG mode. Only applied when the mode actually changed: most CONFIG_SET calls touch
+ * units/display, and those must NOT reset the current page/clock. */
+static void ui_reload_cfg(void)
+{
+    cfg_defaults(&s_cfg);
+    (void)lt_cfg_load(&s_cfg);
+    s_model.units = s_cfg.units;
+    uint8_t new_mode = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
+    if (new_mode != s_mode) {
+        ui_apply_mode(new_mode);
+    }
+    s_model.drag_armed = false;
+    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
+    snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s", s_cfg.display.live_clock ? "on" : "off");
+    if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();
+    s_dirty = true;
+    LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.units <= 1u, UI_APP_ASSERT_CODE);
+}
+/* #87: the pipeline's engines were reset remotely -- the running-lap clock must not keep counting.
+ * fix round 1 (minor finding 2): drag_reset() (called by the pipeline's own CMD_RESET_ENGINE
+ * handling) drops ARMED too -- clear the ui's mirror so a stale "ARMED" indicator can't survive.
+ * I4 (final review, ruling B-6): lap_init()/drag_init() (also called by the pipeline's own
+ * CMD_RESET_ENGINE handling, pipeline.c) drop the engines back to a fresh session -- the ui's
+ * mirror of PREV/BEST/session stats/best-sector board must follow the same way, or a stale
+ * BEST/MAX SPD/best-sector detail from before the reset survives on screen into a session the
+ * engine itself now considers new. Mirrors ui_task()'s own fresh-session init (search
+ * clear_last_sector_deltas()) field-for-field; drag_rows_refill() re-reads the just-reset pipeline
+ * snapshot so DRAG rows reflect the clear immediately rather than waiting for the next EV_DRAG_*
+ * event. */
+static void ui_lap_reset(void)
+{
+    s_lap_start_mono_us = 0;
+    s_last_clock_us     = 0;
+    s_model.cur_ms      = 0;
+    s_model.cur_running = false;
+    s_model.drag_armed  = false;
+
+    s_model.best_ms        = 0;
+    s_model.prev_ms        = 0;
+    s_model.have_best      = false;
+    s_model.have_prev      = false;
+    s_model.new_best       = false; /* bench B-F4: the inverted BEST tag otherwise outlives the reset */
+    s_model.laps_total     = 0;
+    s_model.laps_valid     = 0;
+    s_model.theo_best_ms   = 0;
+    s_model.have_theo      = false;
+    s_model.best_n_sectors = 0;
+    memset(s_model.best_sector_ms, 0, sizeof s_model.best_sector_ms);
+    memset(s_model.have_best_sector, 0, sizeof s_model.have_best_sector);
+    clear_last_sector_deltas();
+    s_model.big_kind = (uint8_t)BIG_NONE;
+    s_model.lap_no   = 1;
+    memset(&s_session_max, 0, sizeof s_session_max);
+    drag_rows_refill();
+
+    s_dirty = true;
+
+    LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.lap_no == 1 && s_model.big_kind == (uint8_t)BIG_NONE && !s_model.new_best,
+                   UI_APP_ASSERT_CODE);
+}
+
 static void handle_event(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* model screen stays valid */
@@ -941,6 +1058,9 @@ static void handle_event(const event_t *e, int64_t now)
     case EV_DRAG_LAUNCH: s_model.drag_armed = false; s_dirty = true; break;
     case EV_DRAG_GATE:   drag_rows_refill(); s_dirty = true; break;
     case EV_DRAG_DONE:   drag_rows_refill(); s_dirty = true; break;
+    /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
+    case EV_CFG_CHANGED: ui_reload_cfg(); break;
+    case EV_LAP_RESET:   ui_lap_reset();  break;
     default: break;
     }
 }
@@ -998,6 +1118,7 @@ static rf_in_t build_rf_in(int64_t now, uint8_t full_every)
     uint32_t flags     = sys_flags_get();
     in.dirty           = true; /* called from render_and_refresh(): a dirty render or the deferred (throttled) refresh */
     in.wants_full      = s_wants_full;
+    in.screen_changed  = s_screen_changed; /* bench B-F1, ruling B-9: screen replacement -> never a partial */
     in.still           = s_gspeed_kmh < MENU_LOCK_SPEED_KMH;
     in.throttled       = (flags & (1u << SYS_DISP_TEMP_THROTTLE)) != 0;
     in.dead            = (flags & (1u << SYS_DISP_DEAD)) != 0;
@@ -1110,7 +1231,12 @@ static int disp_refresh_ladder(uint8_t mode, int64_t now, uint8_t *effective_mod
  * rather than silently extending past 30 s while a string of ticks goes unaccounted. It still
  * counts fully as a real full when the policy or the fallback above promotes it to one, since that
  * is a genuine full refresh regardless of what triggered it. Reports the effective mode via
- * *mode_out so the caller's log line reflects what actually happened on the panel. */
+ * *mode_out so the caller's log line reflects what actually happened on the panel.
+ * Bench B-F1, ruling B-9: s_screen_changed clears on ANY successful refresh, full or partial --
+ * unlike s_wants_full just below, which only clears on a full. A throttled screen replacement's
+ * successful partial already painted the new screen content, so there is nothing left for a later
+ * full to do on its behalf; leaving s_screen_changed set would otherwise force a second, redundant
+ * full once the throttle lifts. */
 static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
 {
     LT_ASSERT_RET(kind == RF_PARTIAL || kind == RF_FULL, UI_APP_ASSERT_CODE, -1);
@@ -1122,6 +1248,7 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
          * refresh s_fb_prev_bits so the next diff is against reality. Left untouched on failure so
          * the next diff still covers the union of what changed then and what changes next. */
         memcpy(s_fb_prev_bits, s_fb_bits, sizeof s_fb_prev_bits);
+        s_screen_changed = false; /* satisfied by this refresh, whichever mode actually ran */
         if (*mode_out == DISP_PARTIAL) {
             /* I4 (ruling R-8): always stamp the timestamp; only the count stays tick-gated. */
             s_last_partial_us = now;
@@ -1211,6 +1338,12 @@ static void log_refresh(bool attempted, uint8_t mode, int rc)
  *     policy returns RF_NONE, not throttled -> skip (dead); s_refresh_pending clears -- dead
  *                                               re-arms on its own via dead_retry().
  *   Every "skip" row leaves s_wants_full set so a later render asks again.
+ *   changed=false, screen_changed=true (bench B-F1, ruling B-9): the row above is unchanged by
+ *     name -- s_screen_changed is treated exactly like s_wants_full by the guard just below, so a
+ *     whole-screen replacement whose rendered frame happens to be byte-identical to what the panel
+ *     already shows still asks the policy (rule 3b forces RF_FULL unless throttled, in which case
+ *     rule 3 still answers first) instead of being silently dropped; every "skip" outcome above
+ *     leaves s_screen_changed set, same as s_wants_full, so a later render asks again.
  * Plan 7c T6 (fix round 1) ruling, carried here: a render that starts with s_refresh_pending
  * already true is never "only a clock tick". tick_only is computed once, at entry -- before
  * anything below can change s_refresh_pending -- as s_clock_tick && !s_refresh_pending, and folded
@@ -1234,7 +1367,7 @@ static void render_and_refresh(void)
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE); /* esp_timer stamp feeds the policy's now_us */
 
     bool changed = fb_diff_rect(&s_fb_prev, &s_fb, &s_diff);
-    if (!changed && !s_wants_full) {
+    if (!changed && !s_wants_full && !s_screen_changed) {
         /* The panel already shows this frame -- no policy call, no bookkeeping of any kind. */
         log_refresh(false, DISP_PARTIAL, 0);
         s_refresh_pending = false;
@@ -1253,9 +1386,10 @@ static void render_and_refresh(void)
     rf_kind_t kind = ui_refresh_decide(&in);
 
     if (!changed && kind != RF_FULL) {
-        /* Fix round 1: an unchanged frame only reaches here with wants_full set, asking the policy
-         * for a forced full; anything but RF_FULL means "not yet" -- skip exactly like the
-         * wants_full=false case above, never handing an invalid s_diff to do_refresh().
+        /* Fix round 1: an unchanged frame only reaches here with wants_full (or, bench B-F1,
+         * screen_changed) set, asking the policy for a forced full; anything but RF_FULL means
+         * "not yet" -- skip exactly like the wants_full=false/screen_changed=false case above,
+         * never handing an invalid s_diff to do_refresh().
          * Fix round 2: a throttled RF_NONE is still owed a retry (spec §20.3, Important #2) -- only
          * RF_PARTIAL (nothing to redraw) or a non-throttled RF_NONE (dead, which re-arms on its
          * own via dead_retry()) clear s_refresh_pending outright. */
@@ -1419,11 +1553,19 @@ static void ui_loop_iter(QueueHandle_t btn_q)
 
     /* Transient one-shot expiry (BOOT/VENUE) -> back to riding. Ruling T7-R9: every transition
      * that replaces the whole screen content (one-shot -> riding, menu enter/exit, page change)
-     * requests a full, same as ui_exit_menu()'s manual dismissal path. */
+     * requests a full, same as ui_exit_menu()'s manual dismissal path. Bench B-F1, ruling B-9:
+     * s_screen_changed (not just s_wants_full) forces that full even while the bike is moving --
+     * the still-gated wants_full path otherwise left this as a partial, and a partial LUT's
+     * ghosting/contrast is visible across a whole-screen content change even when the dirty
+     * rectangle itself is computed correctly. Correction (review M4): the stale TOP ROWS actually
+     * seen on the bench were a separate bug, B-F2 (the un-mirrored RAM-byte window, now fixed) --
+     * not rows left outside a correct dirty rect by this partial-vs-full choice; B-9 stands on its
+     * own real justification above, not on that symptom. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
         s_oneshot_until_us = 0;
         s_model.screen     = SCR_RIDING;
         s_wants_full       = true;
+        s_screen_changed   = true;
         s_dirty            = true;
     }
     /* Menu idle auto-exit (§20.7). */

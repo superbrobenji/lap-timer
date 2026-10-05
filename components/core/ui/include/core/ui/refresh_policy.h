@@ -16,6 +16,9 @@ typedef enum { RF_NONE = 0, RF_PARTIAL = 1, RF_FULL = 2 } rf_kind_t;
 typedef struct {
     bool     dirty;              /* something changed this batch */
     bool     wants_full;         /* event asked for a full (page/menu entry, wake, UP+DOWN combo) */
+    bool     screen_changed;     /* the frame replaces the whole screen: one-shot <-> riding, menu
+                                   * enter/exit, page change — never partial-refreshed, regardless
+                                   * of motion (ruling B-9) */
     bool     still;              /* gspeed below MENU_LOCK_SPEED_KMH */
     bool     throttled;          /* SYS_DISP_TEMP_THROTTLE set */
     bool     dead;               /* SYS_DISP_DEAD set */
@@ -28,10 +31,16 @@ typedef struct {
 
 /* Rules, in this order (spec §20.3):
  *   1. `dead`                                        -> RF_NONE (display is not usable)
- *   2. `!dirty && !wants_full`                        -> RF_NONE (nothing to show)
+ *   2. `!dirty && !wants_full && !screen_changed`      -> RF_NONE (nothing to show; M1 review fix:
+ *      screen_changed must not be dropped here the way dirty/wants_full are -- rule 3b below is
+ *      the one that promotes a lone screen_changed to RF_FULL)
  *   3. `throttled`                                    -> RF_PARTIAL if now - last_partial_us >=
- *      30 s, else RF_NONE; fulls are never issued while throttled, so a `wants_full` request is
- *      downgraded to (at most) a partial rather than promoted.
+ *      30 s, else RF_NONE; fulls are never issued while throttled, so a `wants_full` (or
+ *      `screen_changed`, rule 3b below) request is downgraded to (at most) a partial rather than
+ *      promoted — ruling B-9: a throttled screen replacement still only gets a partial.
+ *   3b. `screen_changed`                              -> RF_FULL (a whole-screen replacement —
+ *      one-shot <-> riding, menu enter/exit, page change — is never partial-refreshed, regardless
+ *      of motion; checked after rule 3, so the throttle above still wins).
  *   4. Otherwise RF_FULL if any of: (`wants_full` && `still`); (`partial_count >= full_every` &&
  *      `still`); `now_us - last_full_us >= 30 min`; or `partial_count >= 2 * full_every` (the
  *      moving cap — fires even while still moving, unlike the other still-gated full triggers).

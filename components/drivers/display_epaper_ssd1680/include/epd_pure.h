@@ -57,15 +57,24 @@ typedef struct {
 /* Rounds a logical (landscape) dirty rect {x,y,w,h} within an fb_w x fb_h framebuffer outward to
  * whole 8-px columns of panel RAM. After the 90-degree rotation the panel's RAM columns are the
  * logical y, so the rect's y range must snap outward to multiples of 8 (whole RAM bytes) while
- * the logical x range maps one-to-one to panel rows. fb_w is the BUFFER width (see
- * epd_rotate_line above), rounded up to a multiple of 8 and possibly wider than the panel's
+ * the logical x range maps one-to-one to panel rows (x/w pass straight through to r0/r1 -- no
+ * mirror there). The y -> RAM-column snap IS mirrored, the same way epd_rotate_line above maps
+ * panel column c to logical row y = native_w-1-c: rows y..y+h-1 land at RAM columns
+ * native_w-(y+h)..native_w-1-y, so the HIGH end of the row range produces the LOW end of the
+ * byte range and vice versa (ruling B-10 -- a naive un-mirrored y/8 snap sends the wrong RAM
+ * bytes for every sub-rect partial refresh). fb_w is the BUFFER width (see epd_rotate_line
+ * above), rounded up to a multiple of 8 and possibly wider than the panel's
  * VISIBLE width (epd_panel()->logical_w, == native_h) -- x + w is bounded by that visible width,
  * not by fb_w, so a rect that fits the padded buffer but spills past the panel's real column
- * count is still rejected. Fills `*out` and returns true on success. On ANY rejection -- the rect
- * is empty (w == 0 || h == 0), out of the panel's visible range (x + w > logical_w ||
- * y + h > fb_h), `fb_w` is not a multiple of 8 (a buffer-shape bug, checked as an assertion, not
- * a rect-shape one), or `out` is NULL -- `*out` is left completely untouched and the function
- * returns false; the caller must not read `*out` after a false return. */
+ * count is still rejected. M2 (bench-fix review): symmetrically, the row range y..y+h-1 is bounded
+ * by the panel's VISIBLE height (epd_panel()->logical_h, == native_w), not just by fb_h -- fb_h is
+ * the BUFFER height and may likewise exceed the panel's real row count on a hypothetical
+ * height-padded canvas, so y + h > logical_h is rejected even when y + h <= fb_h. Fills `*out` and
+ * returns true on success. On ANY rejection -- the rect is empty (w == 0 || h == 0), out of the
+ * panel's visible range (x + w > logical_w || y + h > logical_h || y + h > fb_h), `fb_w` is not a
+ * multiple of 8 (a buffer-shape bug, checked as an assertion, not a rect-shape one), or `out` is
+ * NULL -- `*out` is left completely untouched and the function returns false; the caller must not
+ * read `*out` after a false return. */
 bool epd_window_from_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t fb_w,
                            uint16_t fb_h, epd_window_t *out);
 

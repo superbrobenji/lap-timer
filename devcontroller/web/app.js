@@ -108,6 +108,18 @@
     });
   }
 
+  /* Picks the message for a 503 by body shape (bench B-F8): webapi answers either
+   * {"error":"link busy, retry"} while a slow `list`/other request holds the link mutex, or
+   * {"connected":false} when the lap-timer link is actually down. Shared by requestSessions and
+   * loadConfig so the two read the same wording. */
+  function link503Msg(res, notConnectedMsg) {
+    var err = res.data && res.data.error;
+    if (typeof err === "string" && err.indexOf("busy") !== -1) {
+      return "Lap-timer link busy — retry shortly.";
+    }
+    return notConnectedMsg;
+  }
+
   /* ---------- tabs ---------- */
 
   function initTabs() {
@@ -582,13 +594,34 @@
     return arrayify(root);
   }
 
+  var configReq = 0;   /* request sequence token (B-F8 review, Important): bumped on every loadConfig()
+                        * entry so a Reload click during the 1 s 503-retry window cannot let the
+                        * older chain's retry overwrite the newer, already-rendered form */
+
   function loadConfig() {
     var msg = $("#config-status");
     hideMsg(msg);
     $("#config-fields").innerHTML = '<p class="muted">Loading&hellip;</p>';
+    requestConfig(++configReq, false);
+  }
+
+  /* Fetches GET /api/config once for request token `my` (see configReq above). On a 503 (either body -- link busy mid-`list`, or genuinely not
+   * connected) retries exactly once after 1000 ms before showing the real reason, mirroring
+   * requestSessions' single retry (bench B-F8: a slow `list` holding the link mutex is a transient
+   * 503, not a real disconnect). */
+  function requestConfig(my, isRetry) {
+    var msg = $("#config-status");
     fetchJson("/api/config").then(function (res) {
+      if (my !== configReq) return;   /* superseded by a newer loadConfig() call */
       if (res.status === 503) {
-        showMsg(msg, "err", "Lap-timer not connected — config unavailable.");
+        if (!isRetry) {
+          setTimeout(function () {
+            if (my !== configReq) return;   /* superseded while the retry was pending */
+            requestConfig(my, true);
+          }, 1000);
+          return;
+        }
+        showMsg(msg, "err", link503Msg(res, "Lap-timer not connected — config unavailable."));
         $("#config-fields").innerHTML = '<p class="muted">Not connected.</p>';
         return;
       }
@@ -686,17 +719,54 @@
     });
   }
 
+  var sessionsReq = 0;   /* request sequence token (fix 1): bumped on every loadSessions() entry so
+                           * a "Reload" click racing a still-pending 500 ms retry can't have the
+                           * stale request win the DOM -- both the retry's setTimeout and the
+                           * fetch's .then bail out once a newer request has superseded `my`. */
+
   function loadSessions() {
     var msg = $("#sessions-status");
     hideMsg(msg);
+    var my = ++sessionsReq;
+    requestSessions(my, false);
+  }
+
+  /* Fetches GET /api/sessions once for request token `my` (see sessionsReq above). Two transient
+   * cases each get exactly one retry before giving up and showing the real reason:
+   *  - 502 (an early link failure before the response committed, #65 -- e.g. the first request
+   *    right after connect racing the lap-timer's RX task) or a fetch-level rejection
+   *    (res.networkError): retry after 500 ms.
+   *  - 503 (bench B-F8: a slow `list` -- ~80 ms/session scanning summaries before the header can
+   *    be sent -- holding the link mutex answers {"error":"link busy, retry"}; a genuinely down
+   *    link answers {"connected":false}): retry after 1000 ms, then pick the message by body
+   *    shape (link503Msg).
+   * Only one retry total happens (whichever branch fires first sets isRetry). */
+  function requestSessions(my, isRetry) {
+    var msg = $("#sessions-status");
     fetchJson("/api/sessions").then(function (res) {
+      if (my !== sessionsReq) return;   /* superseded by a newer loadSessions() call */
       if (res.status === 503) {
-        showMsg(msg, "err", "Lap-timer not connected — sessions unavailable.");
+        if (!isRetry) {
+          setTimeout(function () {
+            if (my !== sessionsReq) return;   /* superseded while the retry was pending */
+            requestSessions(my, true);
+          }, 1000);
+          return;
+        }
+        showMsg(msg, "err", link503Msg(res, "Lap-timer not connected — sessions unavailable."));
         renderSessionsTable([]);
         return;
       }
+      if (!isRetry && (res.status === 502 || res.networkError)) {
+        setTimeout(function () {
+          if (my !== sessionsReq) return;   /* superseded while the retry was pending */
+          requestSessions(my, true);
+        }, 500);
+        return;
+      }
       if (!res.data || !Array.isArray(res.data.sessions)) {
-        showMsg(msg, "err", "Could not load sessions (bad response).");
+        var detail = (res.data && res.data.error) ? res.data.error : "bad response";
+        showMsg(msg, "err", "Could not load sessions (" + detail + ").");
         renderSessionsTable([]);
         return;
       }
@@ -714,6 +784,17 @@
   var monitorSource = null;
   var monitorRowCount = 0;
   var MONITOR_MAX_ROWS = 200;
+
+  // issue #68: freshness cue. lastMsgAt is the wall-clock time of the most recent record that
+  // reached appendMonitorRow (onmessage only -- a connection-lifecycle notice goes through
+  // appendMonitorInfo instead, I3 final review, and never touches lastMsgAt/stalled); stalled
+  // flips true once a 1 s timer (freshTimer, started in startMonitor, cleared in stopMonitor)
+  // notices no record in > MONITOR_STALE_MS while the EventSource is still open, and back to
+  // false on the next record.
+  var lastMsgAt = 0;
+  var stalled = false;
+  var freshTimer = null;
+  var MONITOR_STALE_MS = 3000;
 
   var i32 = function (u) { return u > 0x7fffffff ? u - 0x100000000 : u; };  // uint32 -> signed
   var signMs = function (ms) { return (ms >= 0 ? "+" : "") + (ms / 1000).toFixed(3) + "s"; };
@@ -757,27 +838,69 @@
     return ts + "  " + JSON.stringify(parsed);
   }
 
-  function appendMonitorRow(rawData) {
+  // Appends one row to the monitor pane and trims it to MONITOR_MAX_ROWS, without touching
+  // monitorRowCount — shared by appendMonitorRow (real records) and the #68 stalled/resumed
+  // marker rows below, which must NOT count as records.
+  function appendMonitorPaneRow(node) {
     var pane = $("#monitor-pane");
-    var ts = new Date().toLocaleTimeString();
-    var text;
-    try {
-      var parsed = JSON.parse(rawData);
-      if (parsed && typeof parsed.info === "string") {
-        text = ts + "  " + parsed.info;
-      } else {
-        text = formatStreamRecord(ts, parsed);
-      }
-    } catch (e) {
-      text = ts + "  " + rawData;
-    }
-    pane.appendChild(el("div", { text: text }));
-    monitorRowCount++;
+    pane.appendChild(node);
     while (pane.childNodes.length > MONITOR_MAX_ROWS) {
       pane.removeChild(pane.firstChild);
     }
     pane.scrollTop = pane.scrollHeight;
-    $("#monitor-count").textContent = monitorRowCount + " rows";
+  }
+
+  function appendMonitorMarker(text) {
+    appendMonitorPaneRow(el("div", { className: "marker", text: text }));
+  }
+
+  // I3 (final review, ruling B-7): a connection-lifecycle notice ("stream connected",
+  // "stream reconnecting…", "stream closed…") is not a decoded /api/stream record. Routing it
+  // through appendMonitorRow made it masquerade as one: it bumped monitorRowCount, stamped
+  // lastMsgAt (silencing the stalled timer even though no data was actually flowing), and could
+  // clear `stalled` on its own. appendMonitorInfo renders the same "ts  text" line via
+  // appendMonitorPaneRow ONLY -- no lastMsgAt, no monitorRowCount, no stalled change -- so these
+  // notices stay visible without perturbing the freshness/record-count bookkeeping that
+  // appendMonitorRow (onmessage) owns exclusively.
+  function appendMonitorInfo(text) {
+    var ts = new Date().toLocaleTimeString();
+    appendMonitorPaneRow(el("div", { text: ts + "  " + text }));
+  }
+
+  function updateMonitorCount() {
+    var age = lastMsgAt ? Math.round((Date.now() - lastMsgAt) / 1000) + "s ago" : "—";
+    $("#monitor-count").textContent = monitorRowCount + " records · last " + age;
+  }
+
+  function appendMonitorRow(rawData) {
+    lastMsgAt = Date.now();
+    if (stalled) {
+      appendMonitorMarker("— stream resumed —");
+      stalled = false;
+    }
+    var ts = new Date().toLocaleTimeString();
+    var text;
+    try {
+      var parsed = JSON.parse(rawData);
+      text = formatStreamRecord(ts, parsed);
+    } catch (e) {
+      text = ts + "  " + rawData;
+    }
+    appendMonitorPaneRow(el("div", { text: text }));
+    monitorRowCount++;
+    updateMonitorCount();
+  }
+
+  // #68: 1 s tick (started in startMonitor, cleared in stopMonitor) — marks the stream stalled
+  // once a record hasn't arrived in MONITOR_STALE_MS while the EventSource is still open, and
+  // always refreshes the "last Ns ago" freshness text (appendMonitorRow refreshes it immediately
+  // on a new record; this tick is what advances it between records).
+  function monitorFreshTick() {
+    if (monitorSource && lastMsgAt && !stalled && Date.now() - lastMsgAt > MONITOR_STALE_MS) {
+      appendMonitorMarker("— stream stopped —");
+      stalled = true;
+    }
+    updateMonitorCount();
   }
 
   function stopMonitor() {
@@ -785,6 +908,11 @@
       monitorSource.close();
       monitorSource = null;
     }
+    clearInterval(freshTimer);
+    freshTimer = null;
+    lastMsgAt = 0;
+    stalled = false;
+    updateMonitorCount();   // M2: refresh "#monitor-count" immediately (age -> "—"), not stale text
     $("#monitor-toggle").textContent = "Start";
   }
 
@@ -792,13 +920,14 @@
     if (monitorSource) return;
     var lastErrorAt = 0;
     monitorSource = new EventSource("/api/stream");
-    monitorSource.onopen = function () { appendMonitorRow('{"info":"stream connected"}'); };
+    freshTimer = setInterval(monitorFreshTick, 1000);
+    monitorSource.onopen = function () { appendMonitorInfo("stream connected"); };
     monitorSource.onmessage = function (evt) { appendMonitorRow(evt.data); };
     monitorSource.onerror = function () {
       if (monitorSource && monitorSource.readyState === EventSource.CLOSED) {
         // Server rejected the request (e.g. 503, lap-timer not connected) —
         // the browser will not retry on its own; reset the UI.
-        appendMonitorRow('{"info":"stream closed (lap-timer not connected?)"}');
+        appendMonitorInfo("stream closed (lap-timer not connected?)");
         stopMonitor();
         return;
       }
@@ -806,7 +935,7 @@
       // a row on every retry attempt.
       var now = Date.now();
       if (now - lastErrorAt > 5000) {
-        appendMonitorRow('{"info":"stream reconnecting…"}');
+        appendMonitorInfo("stream reconnecting…");
         lastErrorAt = now;
       }
     };

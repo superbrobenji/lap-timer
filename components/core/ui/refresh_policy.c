@@ -27,7 +27,10 @@ rf_kind_t ui_refresh_decide(const rf_in_t *in)
     if (in->dead) {
         return RF_NONE;
     }
-    if (!in->dirty && !in->wants_full) {
+    if (!in->dirty && !in->wants_full && !in->screen_changed) {
+        /* M1 (review fix round): screen_changed must not be dropped here -- rule 3b below is the
+         * one that promotes it to RF_FULL on its own, mirroring ui.c's own render_and_refresh()
+         * guard, which already treats screen_changed exactly like wants_full. */
         return RF_NONE;
     }
     if (in->throttled) {
@@ -35,6 +38,12 @@ rf_kind_t ui_refresh_decide(const rf_in_t *in)
             return RF_PARTIAL;
         }
         return RF_NONE;
+    }
+    if (in->screen_changed) {
+        /* Rule 3b (ruling B-9): a whole-screen replacement is never a partial, regardless of
+         * motion -- checked after the throttle rule above, so a throttled screen change still
+         * only gets (at most) a partial. */
+        return RF_FULL;
     }
 
     bool moving_cap = in->partial_count >= (uint16_t)(2u * in->full_every);

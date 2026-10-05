@@ -64,10 +64,16 @@ enum {
  *   LOGSTORE_JSON_NEED_MORE  avail doesn't yet hold a full record; *consumed = 0. Caller should
  *                            buffer more bytes and retry (unless already at EOF).
  *   LOGSTORE_JSON_SKIP       a complete record whose type the decoder can't render; *consumed is
- *                            still advanced past it (nothing written to out) so the caller makes
- *                            forward progress.
+ *                            still advanced past it so the caller makes forward progress. The
+ *                            contents of `out` are unspecified on SKIP (a prefix may already have
+ *                            been written before the failure that triggered the skip).
  *   LOGSTORE_JSON_ERR        malformed (hdr.len > LT_REC_MAX); *consumed = 0, caller should stop.
- * Bounded (no loops), no heap. */
+ * Bounded (no loops), no heap.
+ *
+ * Format (issue #67): NDJSON -- one JSON object per line; "t" is "fused", "event" or "status";
+ * "rx_us" is the dev-kit's own receive/append time (this header's ts_us), "gps_us" the
+ * lap-timer's GPS time -- the same two clocks, always together, so a line's age can be judged
+ * either way. */
 int logstore_rec_to_json(const uint8_t *buf, size_t avail, char *out, size_t out_cap,
                           size_t *consumed);
 

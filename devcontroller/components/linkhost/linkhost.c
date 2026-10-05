@@ -50,8 +50,18 @@ static const char *TAG = "linkhost";
 #define OTA_READY_TMO_MS   3000
 #define OTA_DONE_TMO_MS    10000                 /* lap-timer aborts after ~9 s without bytes */
 #define OTA_CHUNK          512
-#define DL_IDLE_TMO_MS     3000                  /* abort a download after this long with no bytes */
-#define DL_HARD_MIN_MS     15000                 /* floor on the absolute download cap (small files) */
+#define DL_IDLE_TMO_MS     3000                  /* no-bytes abort once the header has parsed (state
+                                                   * >= LH_DL_BODY) */
+#define DL_FIRST_TMO_MS    12000                 /* no-bytes abort BEFORE the header parses (bench
+                                                   * B-F8, ruling B-18): the lap-timer frames its
+                                                   * reply with the body length, so `list` must scan
+                                                   * every session summary first -- ~80 ms each on
+                                                   * littlefs, 42 sessions ~= 3.5 s; 12 s covers
+                                                   * ~150 sessions */
+#define DL_HARD_MIN_MS     15000                 /* floor on the absolute download cap (small files);
+                                                   * the floor itself sits DL_FIRST_TMO_MS past `start`
+                                                   * so it can never fire before the first-byte
+                                                   * deadline does */
 #define DL_HARD_MARGIN_US  (5 * 1000 * 1000)     /* slack added on top of the size-scaled transfer time */
 #define RX_PARK_TMO_MS     200                   /* bounded wait for rx_task to park before flush (#65) */
 #define RX_PARK_POLL_MS    5
@@ -401,29 +411,42 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
 
     static uint8_t buf[LINK_RX_CHUNK];
     int64_t start    = esp_timer_get_time();
-    int64_t idle_dl  = start + (int64_t)DL_IDLE_TMO_MS * 1000;   /* reset on every read */
-    int64_t hard_dl  = start + (int64_t)DL_HARD_MIN_MS * 1000;   /* floor; scaled once size is known */
+    int64_t idle_dl  = start + (int64_t)DL_FIRST_TMO_MS * 1000;  /* no bytes yet: the longer
+                                                                   * first-byte allowance (B-F8)
+                                                                   * applies until the header parses */
+    int64_t hard_dl  = start + (int64_t)(DL_FIRST_TMO_MS + DL_HARD_MIN_MS) * 1000;   /* floor shifted
+                                                                   * out by DL_FIRST_TMO_MS so it can't
+                                                                   * fire before the first-byte
+                                                                   * deadline; scaled once size is known */
+    int64_t t_header = 0;                          /* esp_timer_get_time() when the header parsed
+                                                       (state >= LH_DL_BODY); 0 == not yet seen */
     bool    scaled   = false;
-    bool    hdr_traced = false;                   /* `link trace`: log the header exactly once */
     lh_dl_state_t st = dl.state;
     while (st < LH_DL_DONE) {                     /* bounded by hard_dl / idle_dl */
         int64_t t = esp_timer_get_time();
         if (t >= hard_dl || t >= idle_dl) break;                    /* timeout -> incomplete */
         int n = uart_read_bytes(DC_LINK_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
-            idle_dl = esp_timer_get_time() + (int64_t)DL_IDLE_TMO_MS * 1000;
             st = lh_dl_feed(&dl, buf, (size_t)n);
+            /* Evaluate the state AFTER lh_dl_feed: a read that completes the header mid-call must
+             * already get the shorter steady-state gap, not one more DL_FIRST_TMO_MS window. */
+            idle_dl = esp_timer_get_time() +
+                      (int64_t)lh_dl_gap_ms(dl.state, DL_FIRST_TMO_MS, DL_IDLE_TMO_MS) * 1000;
         }
-        if (s_trace && !hdr_traced && dl.state >= LH_DL_BODY) {
-            ESP_LOGI(TAG, "trace: dl header '%s' size=%u", dl.name, (unsigned)dl.body_size);
-            hdr_traced = true;
+        if (t_header == 0 && dl.state >= LH_DL_BODY && dl.state != LH_DL_ERR) {   /* a real header, not a parse error */
+            t_header = esp_timer_get_time();
+            if (s_trace)
+                ESP_LOGI(TAG, "trace: dl header '%s' size=%u", dl.name, (unsigned)dl.body_size);
         }
         /* Scale the absolute cap to the announced body once the header parses (M5): a fixed 120 s
          * was < a 1 MB .log (~1.37 MB base64 ~= 119 s at this baud). transfer_us = size*10/baud;
-         * cap = start + 1.5*transfer + margin, never below the floor. */
+         * cap = t_header + 1.5*transfer + margin -- from the time the header was SEEN, not `start`
+         * (B-F8: a slow `list` header can arrive seconds into the call; measuring from `start`
+         * would clip the scaled cap by however long the header took to show up), never below the
+         * floor. */
         if (!scaled && dl.state >= LH_DL_BODY && dl.body_size > 0) {
             int64_t xfer_us = (int64_t)dl.body_size * 10 * 1000000 / DC_LINK_BAUD;
-            int64_t cap = start + xfer_us + xfer_us / 2 + DL_HARD_MARGIN_US;
+            int64_t cap = t_header + xfer_us + xfer_us / 2 + DL_HARD_MARGIN_US;
             if (cap > hard_dl) hard_dl = cap;
             scaled = true;
         }

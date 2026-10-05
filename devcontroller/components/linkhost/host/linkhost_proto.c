@@ -366,7 +366,14 @@ static bool dl_parse_begin(const char *line, size_t len, char *name, size_t name
     assert(size_out != NULL);
     static const char PFX[] = LT_FRAME_BEGIN_PFX;          /* "---BEGIN " */
     size_t pl = sizeof(PFX) - 1;
-    if (len < pl || memcmp(line, PFX, pl) != 0) return false;
+    /* mem_find, not a strict prefix match: mirrors linkhost_parse_frame's 5c1fdf0 tolerance for a
+     * prompt glued to the marker with no newline before it (e.g. "laptimer> ---BEGIN ..."), the gap
+     * test_dl_leading_noise's glued-no-newline case (#65) exercises for the streaming parser. */
+    const uint8_t *b = mem_find((const uint8_t *)line, len, PFX, pl);
+    if (b == NULL) return false;
+    size_t off = (size_t)(b - (const uint8_t *)line);
+    line += off;
+    len  -= off;
 
     size_t i = pl, ns = 0;
     while (i < len && line[i] != ' ' && ns + 1 < name_cap) name[ns++] = line[i++];  /* bounded by len */
@@ -561,6 +568,11 @@ int lh_dl_result(const lh_dl_ctx_t *c)
     case LH_DL_ERR:  return c->result;
     default:         return LINKHOST_E_TIMEOUT;   /* still HDR/BODY/TAIL: incomplete */
     }
+}
+
+int lh_dl_gap_ms(lh_dl_state_t state, int first_ms, int idle_ms)
+{
+    return (state >= LH_DL_BODY) ? idle_ms : first_ms;
 }
 
 /* ================================================================================================

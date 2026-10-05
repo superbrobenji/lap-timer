@@ -109,22 +109,44 @@ static esp_err_t send_not_connected(httpd_req_t *req)
     return send_json(req, "503 Service Unavailable", "{\"connected\":false}");
 }
 
-/* Sends {"error":"<msg>"} with `status`, escaping the message (control chars dropped, JSON
- * metacharacters escaped) so an odd remote message can't break the JSON handed to the SPA. */
-static esp_err_t send_error_json(httpd_req_t *req, const char *status, const char *msg)
+/* Escapes `msg` into `esc[esc_cap]` for embedding as a JSON string value: drops control/non-ASCII
+ * bytes, backslash-escapes '"'/'\\'. Always NUL-terminates. Shared by send_error_json and
+ * send_stream_error_502's rc/where body (#65) so the two JSON builders never drift apart. */
+static void json_escape_msg(const char *msg, char *esc, size_t esc_cap)
 {
-    char esc[LINKHOST_ERRMSG_MAX * 2 + 1];
     size_t o = 0;
-    for (const char *p = msg; p && *p && o + 2u < sizeof esc; p++) {
+    for (const char *p = msg; p && *p && o + 2u < esc_cap; p++) {
         unsigned char c = (unsigned char)*p;
         if (c == '"' || c == '\\') { esc[o++] = '\\'; esc[o++] = (char)c; }
         else if (c >= 0x20 && c < 0x7F) esc[o++] = (char)c;   /* drop control / non-ASCII */
     }
-    esc[o] = '\0';
+    if (esc_cap > 0) esc[o] = '\0';
+}
+
+/* Sends {"error":"<msg>"} with `status`, escaping the message so an odd remote message can't break
+ * the JSON handed to the SPA. */
+static esp_err_t send_error_json(httpd_req_t *req, const char *status, const char *msg)
+{
+    char esc[LINKHOST_ERRMSG_MAX * 2 + 1];
+    json_escape_msg(msg, esc, sizeof esc);
     char body[LINKHOST_ERRMSG_MAX * 2 + 32];
     int n = snprintf(body, sizeof body, "{\"error\":\"%s\"}", esc);
     if (n < 0 || (size_t)n >= sizeof body) return ESP_FAIL;
     return send_json(req, status, body);
+}
+
+/* Sends a 502 {"error":"<msg>","rc":<rc>,"where":"pre-commit"} (#65): send_stream_error is only
+ * ever reached before any body byte has streamed (do_sessions_stream/do_session_download both
+ * guard it behind their own `started`/`committed` check), so "pre-commit" always holds here. `rc`
+ * is the LINKHOST_E_* code the SPA can show next to the message instead of a bare "bad response". */
+static void send_stream_error_502(httpd_req_t *req, const char *msg, int rc)
+{
+    char esc[LINKHOST_ERRMSG_MAX * 2 + 1];
+    json_escape_msg(msg, esc, sizeof esc);
+    char body[LINKHOST_ERRMSG_MAX * 2 + 64];
+    int n = snprintf(body, sizeof body, "{\"error\":\"%s\",\"rc\":%d,\"where\":\"pre-commit\"}", esc, rc);
+    send_json(req, "502 Bad Gateway",
+              (n > 0 && (size_t)n < sizeof body) ? body : "{\"error\":\"read failed\"}");
 }
 
 /* Response mapping for the small fixed linkhost_cmd ops (config get/set, status): a remote
@@ -146,10 +168,11 @@ static esp_err_t send_cmd_link_error(httpd_req_t *req, int rc, const linkhost_fr
 static void send_stream_error(httpd_req_t *req, int rc, const linkhost_remote_err_t *rerr)
 {
     if (rc == LINKHOST_E_REMOTE) {
-        const char *status = ((rerr->code & 0xFF00u) == 0x0400u) ? "502 Bad Gateway" : "404 Not Found";
-        send_error_json(req, status, rerr->msg[0] ? rerr->msg : "lap-timer error");
+        const char *msg = rerr->msg[0] ? rerr->msg : "lap-timer error";
+        if ((rerr->code & 0xFF00u) == 0x0400u) send_stream_error_502(req, msg, rc);
+        else                                   send_error_json(req, "404 Not Found", msg);
     } else if (rc == LINKHOST_E_CRC || rc == LINKHOST_E_PROTO) {
-        send_json(req, "502 Bad Gateway", "{\"error\":\"read failed\"}");
+        send_stream_error_502(req, "read failed", rc);
     } else if (rc == LINKHOST_E_BUSY) {
         send_json(req, "503 Service Unavailable", "{\"error\":\"link busy, retry\"}");
     } else {
@@ -444,39 +467,115 @@ static void do_session_download(httpd_req_t *req)
 /* ---------- async: GET /api/sessions (stream `list` JSON) ----------
  * `list` is JSON but its frame (measured 3662 B on hardware, growing with session count) overflows
  * the buffered linkhost_cmd/LINKHOST_ASM_MAX path -> it used to 503 past ~6 sessions. Stream it
- * through lh_dl_* exactly like a session download (raw text, not base64). */
+ * through lh_dl_* exactly like a session download (raw text, not base64).
+ *
+ * #65: the first call is held back (uncommitted) instead of going straight to the browser, so an
+ * early parse/CRC failure can still answer a clean 502 instead of a truncated chunked body -- see
+ * sessions_sink_t's doc comment below. lh_dl's own chunk buffer never flushes more than LH_DL_CHUNK
+ * bytes at a time (dl_emit/dl_flush_chunk), so every call here carries at most one buffer's worth. */
+
+/* M1 (final review): the early-failure buffer below is used only by sessions_chunk_cb/
+ * do_sessions_stream -- session_chunk_cb/do_session_download (the general session-download path
+ * just above) never needed it, yet used to carry it (zeroed) in every dl_sink_t regardless. Moving
+ * it into this /api/sessions-only wrapper shrinks do_session_download's stack dl_sink_t back down
+ * by ~520 B (LH_DL_CHUNK's uint8_t[512] plus first_len/committed).
+ *
+ * The first LH_DL_CHUNK decoded bytes are held in `first`, UNCOMMITTED, until either the buffer
+ * fills (more body is coming -- commit now) or the transfer completes having delivered just this
+ * one (possibly short) chunk; only once committed do headers go out and bytes actually reach the
+ * browser. A link failure spotted before that point can still answer a clean 502
+ * (send_stream_error) instead of a truncated chunked body.
+ *
+ * B-1 (debt sweep B task 4): do_sessions_stream keeps its sessions_sink_t in a STATIC local rather
+ * than this struct's normal stack placement. That is safe -- not a new sharing hazard -- only
+ * because GET /api/sessions transfers are already serialized two different ways: webapi's
+ * async_worker is a single task (one async job, of any kind, runs at a time -- see
+ * webapi_register), and linkhost_download_cmd (linkhost.c) itself takes linkhost's one
+ * request-in-flight mutex (s_req_mtx) with a blocking, non-timed wait before it ever touches
+ * UART1, so a second /api/sessions download can never be "in flight" concurrently with this one.
+ * Moving the 512 B buffer off the worker task's stack and into .bss costs nothing and removes any
+ * doubt about stack headroom under the nested do_sessions_stream -> linkhost_download_cmd ->
+ * lh_dl_ctx_t call chain. */
+typedef struct {
+    dl_sink_t base;
+    uint8_t   first[LH_DL_CHUNK];
+    size_t    first_len;
+    bool      committed;
+} sessions_sink_t;
+
 static int sessions_chunk_cb(void *ctx, const uint8_t *data, size_t n)
 {
-    dl_sink_t *s = (dl_sink_t *)ctx;
-    if (!s->headers_set) { httpd_resp_set_type(s->req, "application/json"); s->headers_set = true; }
-    if (httpd_resp_send_chunk(s->req, (const char *)data, (ssize_t)n) != ESP_OK) {
-        s->transport_dead = true;
+    sessions_sink_t *s = (sessions_sink_t *)ctx;
+    assert(s != NULL);
+    assert(n <= LH_DL_CHUNK);
+    if (!s->committed) {
+        if (s->first_len < LH_DL_CHUNK) {
+            /* first call ever: lh_dl only ever flushes a partial (<LH_DL_CHUNK) chunk as the FINAL
+             * call for a transfer (dl_emit/dl_feed_body), so reaching here with first_len already
+             * nonzero-but-short would mean this branch ran twice for one transfer -- it must not. */
+            assert(s->first_len == 0);
+            memcpy(s->first, data, n);
+            s->first_len = n;
+            if (s->first_len < LH_DL_CHUNK) return 0;   /* short body: might be the only chunk */
+            data = NULL;
+            n = 0;          /* this call's bytes are now `first` in full -- nothing extra to send */
+        }
+        httpd_resp_set_type(s->base.req, "application/json");
+        if (httpd_resp_send_chunk(s->base.req, (const char *)s->first, (ssize_t)s->first_len) != ESP_OK) {
+            s->base.transport_dead = true;
+            return 1;                                           /* abort: the client disconnected */
+        }
+        /* `started` is kept set here for dl_sink_t's shared contract with session_chunk_cb/
+         * do_session_download (fix 2) -- do_sessions_stream itself branches on `committed`, not
+         * this field, but another reader of a dl_sink_t (present or future) should still see
+         * "a body byte went out" reported consistently across both chunk callbacks. */
+        s->base.started = true;
+        s->committed = true;
+        if (n == 0) return 0;
+    }
+    if (httpd_resp_send_chunk(s->base.req, (const char *)data, (ssize_t)n) != ESP_OK) {
+        s->base.transport_dead = true;
         return 1;                                              /* abort: the client disconnected */
     }
-    s->started = true;
+    s->base.started = true;   /* ditto -- see the comment above */
     return 0;
 }
 
 static void do_sessions_stream(httpd_req_t *req)
 {
-    dl_sink_t sink = { .req = req };
-    linkhost_remote_err_t rerr;
-    int rc = linkhost_download_cmd(LT_CMD_LIST, /*is_binary*/false, sessions_chunk_cb, &sink, &rerr);
+    assert(req != NULL);
+    static sessions_sink_t s_sink;   /* B-1: static, not stack -- see sessions_sink_t's doc comment */
+    memset(&s_sink, 0, sizeof s_sink);
+    s_sink.base.req = req;
+    assert(!s_sink.committed);           /* fresh after the memset just above */
 
-    if (sink.transport_dead) {
+    linkhost_remote_err_t rerr;
+    int rc = linkhost_download_cmd(LT_CMD_LIST, /*is_binary*/false, sessions_chunk_cb, &s_sink, &rerr);
+
+    if (s_sink.base.transport_dead) {
         ESP_LOGW(TAG, "sessions: client disconnected mid-stream");
         return;
     }
     if (rc == 0) {
-        if (!sink.headers_set) httpd_resp_set_type(req, "application/json");  /* empty list */
-        httpd_resp_send_chunk(req, NULL, 0);
+        if (!s_sink.committed) {
+            /* The whole (possibly empty) body fit in the first chunk and parsed cleanly: commit now. */
+            httpd_resp_set_type(req, "application/json");
+            if (s_sink.first_len > 0 &&
+                httpd_resp_send_chunk(req, (const char *)s_sink.first, (ssize_t)s_sink.first_len) != ESP_OK) {
+                return;                                         /* client vanished; nothing more to do */
+            }
+        }
+        httpd_resp_send_chunk(req, NULL, 0);                    /* terminate the chunked response */
         return;
     }
-    if (sink.started) {
-        ESP_LOGW(TAG, "sessions rc=%d after streaming -> abort socket", rc);
+    if (s_sink.committed) {
+        /* Headers (and possibly some body) already went out -- the failure cannot be un-sent as a
+         * clean error response, so abort the socket like do_session_download's post-stream case. */
+        ESP_LOGW(TAG, "sessions rc=%d post-commit -> abort socket", rc);
         httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
         return;
     }
+    /* Nothing committed yet -> a clean error response is still possible (404/502/503). */
     send_stream_error(req, rc, &rerr);
 }
 
@@ -490,8 +589,12 @@ static void do_sessions_stream(httpd_req_t *req)
 _Static_assert(LOG_JSONL_BUF >= sizeof(logstore_rec_hdr_t) + LT_REC_MAX,
                "LOG_JSONL_BUF must hold at least one max-size logstore record");
 
-/* One transcoded record's JSON text; linkhost_stream_to_json's largest object (the fused-sample
- * line) is well under 200 B. */
+/* One transcoded record's JSON text: logstore_rec_to_json's "{\"rx_us\":...," prefix (<=30 B)
+ * plus linkhost_stream_to_json's inner object. Worst case per type, every field at its max
+ * width: STATUS 148 B inner / 177 B with the prefix; FUSED (the largest) 179 B inner / 208 B
+ * with the prefix -- both well under 256 B. A line that somehow overflowed this cap would come
+ * back LOGSTORE_JSON_SKIP (checked against out_cap, never a buffer overrun) and be dropped from
+ * the download, not corrupt it. */
 #define LOG_JSON_LINE_MAX 256u
 
 /* Defensive loop cap for stream_log_jsonl's outer for(;;): each pass either reads more bytes or
@@ -582,7 +685,7 @@ static void do_log_download(httpd_req_t *req)
 
     char disp[64];
     if (raw) {
-        snprintf(disp, sizeof disp, "attachment; filename=\"%s.log\"", id);
+        snprintf(disp, sizeof disp, "attachment; filename=\"%s.bin\"", id);
         httpd_resp_set_type(req, "application/octet-stream");
         httpd_resp_set_hdr(req, "Content-Disposition", disp);
 
