@@ -44,6 +44,13 @@ enum {
      * direct xQueueSend() -- so, unlike every code above, they are never logged to an EVENT
      * record and never streamed to a peer (only emit_event() reaches those sinks). */
     EV_CFG_CHANGED   = 16,  /* ui-only: posted straight to g_ui_evt_q by cmd.c, never via emit_event(), never logged/streamed */
-    EV_LAP_RESET     = 17   /* ui-only: posted straight to g_ui_evt_q by the pipeline on CMD_RESET_ENGINE */
+    EV_LAP_RESET     = 17,  /* ui-only: posted straight to g_ui_evt_q by the pipeline on CMD_RESET_ENGINE */
+    EV_OTA           = 18   /* ui-only: posted straight to g_ui_evt_q by ota.c / the supervisor.
+                             * flags = phase: OTA_PHASE_RECEIVING/VERIFYING/REBOOTING (core/ui/model.h)
+                             * or EV_OTA_ABORTED / EV_OTA_ROLLED_BACK below; arg16 = percent 0..100 */
 };
+/* Terminal EV_OTA phases (never rendered as a status line): the transfer failed/was aborted, or
+ * the bootloader reverted the previous image (spec §19.4: "UPDATE FAILED, REVERTED" for 3 s). */
+#define EV_OTA_ABORTED     3u
+#define EV_OTA_ROLLED_BACK 4u
 #endif

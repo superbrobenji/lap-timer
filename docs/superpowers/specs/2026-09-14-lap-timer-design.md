@@ -2273,7 +2273,7 @@ OTA_END                       → verify SHA-256 == sha; esp_ota_end (signature 
                                 any panic/WDT/brownout before that → bootloader rolls back (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) → E_OTA_ROLLBACK logged on next boot
 ```
 
-Progress is shown on the display every 10 % (partial refresh) and in `status.state = STATE_OTA`.
+The supervisor tells the ui (`EV_OTA` ROLLED_BACK) and the ui shows the one-shot for 3 s right after BOOT. While an image is being received the ui shows the `OTA` one-shot (§20.6), updated every 5 %, then VERIFYING and REBOOTING; an aborted transfer returns to the riding screen. (`status.state = STATE_OTA` while any of this is in flight.)
 
 ### 19.5 Preconditions (checked at `OTA_BEGIN`, re-checked at `OTA_END`)
 - Power state `CONNECTED`, `fus_is_still`, `EV_MOTION` not seen for 30 s.
@@ -2373,7 +2373,7 @@ Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a stri
 
 ### 20.7 Menu
 
-Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignored (short flash of a lock icon). Items (UP/DOWN move, MODE select, long MODE back/exit, auto-exit after 30 s idle):
+Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignored (the `MOVING` glyph in the fault-icon strip (§20.5) stays on while the lock holds). Items (UP/DOWN move, MODE select, long MODE back/exit, auto-exit after 30 s idle):
 
 1. Mode: Lap / Drag
 2. Layout: list of the current venue's layouts + `Auto`

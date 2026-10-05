@@ -203,6 +203,8 @@ static void ota_boot_decide(void)
     lt_counters_inc(LT_CTR_OTA_ROLLBACK, true);
     lt_ota_pending_clear();
     ESP_LOGW(TAG, "OTA image rolled back by the bootloader");
+    event_t ev = { .type = EV_OTA, .flags = EV_OTA_ROLLED_BACK, .arg16 = 0, .mono_us = esp_timer_get_time() };
+    if (g_ui_evt_q != NULL && xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "ota rollback: ui queue full");
 }
 
 /* §19.4: mark a pending image valid (cancel rollback) once self-test passed (not SAFE_MODE), a GPS

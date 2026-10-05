@@ -116,6 +116,7 @@ static const char *TAG = "ui";
  * to land -- and be seen -- before the one-shot auto-reverts to riding. */
 #define ONESHOT_BOOT_MS  3000
 #define ONESHOT_VENUE_MS 2000
+#define ONESHOT_OTAFAIL_MS 3000   /* §19.4: "UPDATE FAILED, REVERTED" for 3 s after the BOOT one-shot */
 
 /* ---- display refresh ladder (spec §20.3, Plan 7 Task 7) ----
  * DISP_FAIL_STREAK_MAX consecutive disp_refresh()/disp_reinit()-retry failures mark the panel
@@ -185,6 +186,7 @@ static uint16_t s_gspeed_kmh; /* menu-lock proxy from EV_MOTION/EV_STILL (see ha
 static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the fault strip */
 static bool    s_dirty;       /* model changed since last render -> render once (§20.3) */
 static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot (BOOT/VENUE); 0 = none */
+static bool    s_rollback_pending; /* EV_OTA ROLLED_BACK seen before/while BOOT showed: show OTA_FAIL next */
 static int64_t s_last_input_us;    /* last button activity -> menu idle timeout */
 /* Plan 7c T8 (design §6): s_boot_arm_us is the esp_timer stamp the BOOT one-shot was armed at (0 =
  * not BOOT, e.g. SAFE mode); boot_refmt_check() (below) uses it to fire its +1 s re-format exactly
@@ -526,6 +528,7 @@ static void btn_long(uint8_t bit)
             ui_exit_menu();
         }
     } else if (s_model.screen == SCR_ONESHOT) {
+        if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
         s_oneshot_until_us = 0;
         ui_exit_menu();
     } else { /* SCR_RIDING */
@@ -542,6 +545,7 @@ static void btn_vlong(uint8_t bit)
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);  /* indexes s_menu_action[] */
     ESP_LOGI(TAG, "btn: vlong %s", btn_name(bit));
     if (s_model.screen == SCR_MENU && s_menu_action[s_model.menu_sel] == MA_SLEEP) {
+        if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
         ESP_LOGW(TAG, "menu: Sleep now confirmed -- not implemented (plan 07)");
         ui_exit_menu();
     }
@@ -638,6 +642,33 @@ static void show_venue_oneshot(int64_t now)
                                  * matches the other four replacement sites, none of which set
                                  * screen_changed without also setting wants_full. */
     s_screen_changed   = true; /* riding -> one-shot: whole-screen replacement (ruling B-9) */
+}
+
+/* EV_OTA (ui-only). Non-terminal phases show/update the persistent OTA one-shot (no auto-revert:
+ * the supervisor reboots 2 s after REBOOTING; ABORTED returns to riding). ROLLED_BACK at boot is
+ * deferred until the BOOT one-shot expires, then OTA_FAIL shows for ONESHOT_OTAFAIL_MS. */
+static void handle_ota(const event_t *e)
+{
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    uint8_t phase = e->flags;
+    uint8_t pct   = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
+    if (phase == EV_OTA_ROLLED_BACK) { s_rollback_pending = true; return; }
+    bool on_ota = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_OTA;
+    if (phase == EV_OTA_ABORTED) {
+        if (on_ota) ui_exit_menu();       /* -> SCR_RIDING, full refresh (ruling B-9) */
+        return;
+    }
+    s_model.ota_pct   = pct;
+    s_model.ota_phase = phase;
+    if (!on_ota) {
+        s_model.screen     = SCR_ONESHOT;
+        s_model.oneshot    = ONESHOT_OTA;
+        s_oneshot_until_us = 0;           /* persistent: no auto-revert */
+        s_wants_full       = true;
+        s_screen_changed   = true;        /* whole-screen replacement (ruling B-9) */
+    }
+    s_dirty = true;
 }
 
 /* Clears the page 1 row 4 sector-delta cache (spec 7b §3). Ruling B7b-1 (bench finding 1): called
@@ -1061,6 +1092,7 @@ static void handle_event(const event_t *e, int64_t now)
     /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
     case EV_CFG_CHANGED: ui_reload_cfg(); break;
     case EV_LAP_RESET:   ui_lap_reset();  break;
+    case EV_OTA:         handle_ota(e);   break;
     default: break;
     }
 }
@@ -1069,7 +1101,11 @@ static void handle_event(const event_t *e, int64_t now)
  * no-fix bit; re-render only when the strip actually changes. */
 static void update_flags(void)
 {
-    uint32_t f = sys_flags_get();
+    uint32_t f = sys_flags_get() & SCR_SYS_BITS_MASK;
+#if CFG_GPS_SIM || CFG_IMU_SIM
+    f |= 1u << SCR_UI_SIM;
+#endif
+    if (s_gspeed_kmh >= MENU_LOCK_SPEED_KMH) f |= 1u << SCR_UI_MOVING;
     if (s_fix_lost) {
         f |= (1u << SCR_SYS_GPS_NOFIX);
     } else {
@@ -1562,11 +1598,17 @@ static void ui_loop_iter(QueueHandle_t btn_q)
      * not rows left outside a correct dirty rect by this partial-vs-full choice; B-9 stands on its
      * own real justification above, not on that symptom. */
     if (s_model.screen == SCR_ONESHOT && s_oneshot_until_us != 0 && now >= s_oneshot_until_us) {
-        s_oneshot_until_us = 0;
-        s_model.screen     = SCR_RIDING;
-        s_wants_full       = true;
-        s_screen_changed   = true;
-        s_dirty            = true;
+        if (s_model.oneshot == ONESHOT_BOOT && s_rollback_pending) {
+            s_rollback_pending = false;
+            s_model.oneshot    = ONESHOT_OTA_FAIL;   /* one-shot -> one-shot: still a replacement */
+            s_oneshot_until_us = now + (int64_t)ONESHOT_OTAFAIL_MS * 1000;
+        } else {
+            s_oneshot_until_us = 0;
+            s_model.screen     = SCR_RIDING;
+        }
+        s_wants_full     = true;
+        s_screen_changed = true;
+        s_dirty          = true;
     }
     /* Menu idle auto-exit (§20.7). */
     if (s_model.screen == SCR_MENU && (now - s_last_input_us) >= (int64_t)MENU_IDLE_MS * 1000) {
