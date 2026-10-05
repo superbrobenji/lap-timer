@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Show the spec's `UPDATING` one-shot (bar + percentage + a status line) while an OTA image is being received, verified and applied; show the spec's `UPDATE FAILED / REVERTED` one-shot after a bootloader rollback; and add two header glyphs — `SIM` (permanent on a sim build) and `MOVING` (shown whenever the menu is motion-locked, gone once parked) — so a bench operator can see when a sim run has finished and the lap-timer accepts input again.
+**Goal:** (Tasks 1-2) Show the spec's `UPDATING` one-shot (bar + percentage + a status line) while an OTA image is being received, verified and applied; show the spec's `UPDATE FAILED / REVERTED` one-shot after a bootloader rollback; and add two header glyphs — `SIM` (permanent on a sim build) and `MOVING` (shown whenever the menu is motion-locked, gone once parked) — so a bench operator can see when a sim run has finished and the lap-timer accepts input again. (Task 3, added 2026-10-05 from the bench checklist) Give the sim build runtime scenarios — `dbg sim drag | laps <n> | park` — so drag mode and long continuous motion can finally be exercised on the bench.
 
 **Architecture:** Pure first, wiring second. Task 1 changes only `components/core/ui` (host-tested, golden-compared on both canvases): a status line on the OTA one-shot driven by a new `ota_phase` model field, two 12×12 icons, and two ui-level bits (14, 15) in the existing fault-icon strip. Task 2 wires the firmware: a new ui-only event `EV_OTA` (posted straight to `g_ui_evt_q`, never via `emit_event()`, exactly like `EV_CFG_CHANGED`) from `ota.c` and the supervisor's rollback detection, and the ui's handling (enter/update/leave the one-shot, ignore buttons while it is up, fold the two glyph bits into the strip mask).
 
@@ -42,7 +42,8 @@
 | `components/app/ota/ota.c` | posts `EV_OTA` at begin / every 5 % / verifying / rebooting / aborted | 2 |
 | `components/app/supervisor/sup.c` | posts `EV_OTA` ROLLED_BACK when the bootloader reverted an image | 2 |
 | `components/app/ui/ui.c` | `handle_ota()`: enter/update/leave `ONESHOT_OTA`, deferred `ONESHOT_OTA_FAIL` for 3 s after BOOT, buttons ignored on the OTA one-shot, SIM/MOVING bits in `update_flags()` | 2 |
-| `docs/superpowers/specs/2026-09-14-lap-timer-design.md` | §19.4, §20.5, §20.6, §20.7 text | 1, 2 |
+| `docs/superpowers/specs/2026-09-14-lap-timer-design.md` | §19.4, §20.5, §20.6, §20.7 text; §4.6 sim scenarios | 1, 2, 3 |
+| `components/drivers/sim_common/*`, `gps_sim.c`, `imu_sim.c`, `lt_ipc.h`, `pipeline.c`, `export_serial.c`, `test/test_sim_profile.c` | sim scenarios `dbg sim drag / laps <n> / park` (Task 3) | 3 |
 
 ---
 
@@ -435,3 +436,285 @@ git add components/core/include/core/event.h components/app/ota/ota.c components
 git commit -m "feat(ui,ota): UPDATING one-shot driven by EV_OTA (begin/5 %/verifying/rebooting/aborted), rollback one-shot after BOOT, SIM and MOVING glyphs in the strip"
 ```
 (append the trailer). Bench check on the next flash day: a dev-kit OTA push shows UPDATING → bar/percent → VERIFYING → REBOOTING → the new image boots; a sim run shows SIM + MOVING while lapping and SIM alone once parked; the menu opens then.
+
+---
+
+### Task 3: Sim scenarios — `dbg sim drag | laps <n> | park` (one shared profile drives the GPS and IMU sims)
+
+**Why (bench checklist `docs/bench/next-bench-day.md` item 1):** the sim build replays one recorded lap capture (601 fixes at 5 Hz, ~120 s) and then parks, so DRAG mode has never seen a standing-start run on hardware and the moving-cap full refresh has never been reached. The drag engine launches on the fused longitudinal g (`drag_on_fused`, IMU path) and re-anchors speed/distance on GPS fixes (`drag_on_fix`), so a drag scenario must feed BOTH sims from one profile: the GPS sim gets position/speed along a straight line, the IMU sim gets the matching body-X acceleration.
+
+**Design:** a new component `components/drivers/sim_common` owns the scenario: a pure profile (`host/sim_profile.c`, host-tested) and a tiny runtime switch (`sim_scenario.c`: current scenario + anchor time, lap replay count). `gps_sim.c` and `imu_sim.c` ask it what to deliver. The lap-timer console verb `dbg sim ...` posts `CMD_SIM_SCENARIO` (new command type 8) to the pipeline, which owns the drivers and calls `sim_scenario_set()` under `#if CFG_GPS_SIM`. On a non-sim build the verb prints "not a sim build".
+
+**Profile (all times from the scenario anchor, straight line heading north from the capture's first fix):**
+- `SIM_DRAG_HOLD_US 3000000` standstill (v = 0, a = 0) — lets the drag engine ARM (stillness window 2 s).
+- accelerate at `SIM_DRAG_ACCEL_MPS2 6.0` (0-100 km/h in 4.6 s, 0-200 in 9.3 s at 257 m) until `SIM_DRAG_VMAX_MPS 62.0` (223 km/h, reached at 10.3 s / 320 m), cruise until `SIM_DRAG_RUN_M 450.0` (past the 1/4-mile trap at 402.3 m),
+- brake at `SIM_DRAG_BRAKE_MPS2 8.0` to a stop (7.75 s, 240 m, stops at 690 m), then park there (v = 0, a = 0, fixed position, gps_us keeps ticking at 5 Hz).
+- `laps <n>`: replay the capture n times back to back (n ≥ 1; gps_us offset by k × (capture span + 200 ms) per repeat so time stays monotonic), then park. `park`: park immediately at the current position.
+
+**Files:**
+- Create: `components/drivers/sim_common/CMakeLists.txt`, `components/drivers/sim_common/include/sim_profile.h`, `components/drivers/sim_common/host/sim_profile.c` (pure), `components/drivers/sim_common/include/sim_scenario.h`, `components/drivers/sim_common/sim_scenario.c`
+- Modify: `components/drivers/gps_sim/CMakeLists.txt` (REQUIRES sim_common), `components/drivers/gps_sim/gps_sim.c` (`gps_poll`: scenario dispatch), `components/drivers/imu_sim/CMakeLists.txt` (REQUIRES sim_common), `components/drivers/imu_sim/imu_sim.c` (`imu_read_fifo`: ax from the profile)
+- Modify: `components/app/include/app/lt_ipc.h` (`CMD_SIM_SCENARIO = 8`, arg8 = scenario, arg16 = laps), `components/app/pipeline/pipeline.c` (`handle_cmd` case + the `cmd->type <= CMD_IMU_MODE` assert → `<= CMD_SIM_SCENARIO`), `components/drivers/export_serial/export_serial.c` (`dbg sim` verb at ~line 941 + usage line ~950)
+- Create: `test/test_sim_profile.c` (pure profile + drag-engine integration); Modify: `test/CMakeLists.txt` (link `components/drivers/sim_common/host/sim_profile.c` the way `test_epd_pure` links the epd host sources at ~line 146)
+- Modify: `docs/bench/next-bench-day.md` item 1/4 wording if the verbs differ; `docs/superpowers/specs/2026-09-14-lap-timer-design.md` §4.6 (sim build: scenarios)
+
+**Interfaces:**
+- Produces: `sim_profile.h`:
+  ```c
+  typedef struct { double dist_m; double speed_mps; double accel_mps2; bool parked; } sim_drag_state_t;
+  /* Pure: the drag profile at t_us after the anchor (t_us >= 0). */
+  void sim_drag_at(int64_t t_us, sim_drag_state_t *out);
+  ```
+  `sim_scenario.h`:
+  ```c
+  enum { SIM_SC_LAPS = 0, SIM_SC_DRAG = 1, SIM_SC_PARK = 2 };
+  void     sim_scenario_set(uint8_t scenario, uint16_t laps, int64_t now_us);   /* re-anchors; laps >= 1 for SIM_SC_LAPS */
+  uint8_t  sim_scenario_get(void);
+  int64_t  sim_scenario_anchor_us(void);
+  uint16_t sim_scenario_laps(void);
+  ```
+  `lt_ipc.h`: `CMD_SIM_SCENARIO = 8` (arg8 = SIM_SC_*, arg16 = laps).
+- Consumes: the capture's first fix for the drag start point (`SIM_FIXES[0]` lat/lon/alt in `sim_capture.h` — the gps_sim keeps that private; expose `gps_sim_capture_origin(int32_t *lat_e7, int32_t *lon_e7, int32_t *alt_mm)` inside gps_sim.c for its own use), `IMU_SIM_1G_LSB 2048`, `drag_on_fused`/`drag_on_fix`/`drag_init`/`drag_state`/`DRAG_EVT_MAX` (core/drag.h), `FUS_STILL` (core/types.h), the default gate ids 1 (0-60), 2 (0-100), 3 (0-200), 6 (60 ft), 7 (330 ft), 8 (1/8), 9 (1000 ft), 10 (1/4, trap) from `drag.c:31-40`.
+
+- [ ] **Step 1: Pure profile — failing test first**
+
+`test/test_sim_profile.c`:
+```c
+#include "unity.h"
+#include "sim_profile.h"
+#include "core/drag.h"
+#include "core/event.h"
+#include "core/types.h"
+#include "hal/gps.h"
+#include <math.h>
+#include <string.h>
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* Standstill for the hold, then monotonic distance, 0-100 km/h inside 5 s of launch, the 1/4 mile
+ * (402.3 m) crossed before braking starts, a full stop, then parked. */
+static void test_drag_profile_shape(void)
+{
+    sim_drag_state_t s;
+    sim_drag_at(0, &s);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, s.speed_mps);
+    TEST_ASSERT_FALSE(s.parked);
+    sim_drag_at(2999999, &s);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, s.dist_m);
+    sim_drag_at(3000000 + 4700000, &s);                 /* 4.7 s after launch */
+    TEST_ASSERT_TRUE(s.speed_mps * 3.6 >= 100.0);
+    double last = -1.0; bool crossed_quarter_while_accel_or_cruise = false;
+    for (int64_t t = 0; t <= 40000000; t += 200000) {
+        sim_drag_at(t, &s);
+        TEST_ASSERT_TRUE(s.dist_m >= last);           /* monotonic */
+        TEST_ASSERT_TRUE(s.speed_mps >= 0.0);
+        if (s.dist_m >= 402.336 && s.accel_mps2 >= 0.0) crossed_quarter_while_accel_or_cruise = true;
+        last = s.dist_m;
+    }
+    TEST_ASSERT_TRUE(crossed_quarter_while_accel_or_cruise);
+    sim_drag_at(40000000, &s);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, s.speed_mps);
+    TEST_ASSERT_TRUE(s.parked);
+    TEST_ASSERT_TRUE(s.dist_m > 600.0 && s.dist_m < 800.0);
+}
+
+/* The profile satisfies the drag engine end to end (ARMED -> LAUNCH -> every default gate up to
+ * the 1/4 trap -> DONE) when fed the way the pipeline feeds it: fused samples at FUSION_HZ with
+ * g_lon = a/9.81 and FUS_STILL while standing, GPS fixes at 5 Hz with the profile speed. */
+static drag_t D;
+static int    s_hits[16];
+static int    s_launch, s_done;
+static void feed_events(const event_t *evs, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (evs[i].type == EV_DRAG_LAUNCH) s_launch++;
+        else if (evs[i].type == EV_DRAG_DONE) s_done++;
+        else if (evs[i].type == EV_DRAG_GATE && evs[i].arg16 < 16) s_hits[evs[i].arg16]++;
+    }
+}
+static void test_drag_profile_drives_the_engine(void)
+{
+    drag_init(&D, NULL);
+    memset(s_hits, 0, sizeof s_hits); s_launch = 0; s_done = 0;
+    const int64_t dt = 1000000 / FUSION_HZ;
+    for (int64_t t = 0; t <= 30000000; t += dt) {
+        sim_drag_state_t s; sim_drag_at(t, &s);
+        fused_sample_t fs; memset(&fs, 0, sizeof fs);
+        fs.gps_us = t; fs.mono_us = t;
+        fs.g_lon  = (float)(s.accel_mps2 / 9.81);
+        fs.flags  = (s.speed_mps == 0.0 && s.accel_mps2 == 0.0) ? FUS_STILL : 0;
+        event_t evs[DRAG_EVT_MAX]; int nev = 0;
+        drag_on_fused(&D, &fs, evs, DRAG_EVT_MAX, &nev);
+        feed_events(evs, nev);
+        if (t % 200000 == 0) {                       /* 5 Hz GPS */
+            gps_fix_t f; memset(&f, 0, sizeof f);
+            f.gps_us = t; f.mono_us = t; f.gspeed_mms = (int32_t)(s.speed_mps * 1000.0);
+            f.fix_type = 3; f.sats = 9; f.flags = GPS_FLAG_FIXOK; f.valid = 1;
+            drag_on_fix(&D, &f);
+        }
+        if (s_done) break;
+    }
+    TEST_ASSERT_EQUAL_INT(1, s_launch);
+    TEST_ASSERT_EQUAL_INT(1, s_done);
+    const uint8_t want[] = { 1, 2, 3, 6, 7, 8, 9, 10 };   /* 0-60, 0-100, 0-200, 60ft, 330ft, 1/8, 1000ft, 1/4 */
+    for (size_t i = 0; i < sizeof want; i++) TEST_ASSERT_EQUAL_INT_MESSAGE(1, s_hits[want[i]], "gate id missed");
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_drag_profile_shape);
+    RUN_TEST(test_drag_profile_drives_the_engine);
+    return UNITY_END();
+}
+```
+Register it in `test/CMakeLists.txt` the way `test_epd_pure` is (held back from the generic loop, linking `components/drivers/sim_common/host/sim_profile.c` plus the core library; add `components/drivers/sim_common/include` to its include dirs). If `EV_DRAG_GATE.arg16` is not the gate id, read `drag.c`'s emit site and adapt the test's field (say so in the report). If the engine's launch needs more than `g_lon`/`FUS_STILL` (read `drag_on_fused`), feed exactly what it needs and document it.
+
+- [ ] **Step 2: Run — expect a build failure (no sim_profile.h yet)**
+
+Run: `cmake -S test -B test/build -DCMAKE_BUILD_TYPE=Debug > /dev/null; cmake --build test/build --target test_sim_profile 2>&1 | grep -E 'error' | head -3`
+Expected: `sim_profile.h: No such file or directory`.
+
+- [ ] **Step 3: Pure profile**
+
+`components/drivers/sim_common/include/sim_profile.h`:
+```c
+#ifndef SIM_PROFILE_H
+#define SIM_PROFILE_H
+#include <stdbool.h>
+#include <stdint.h>
+/* Standing-start drag profile for the sim build (spec §4.6, bench checklist item 1). Pure: no state,
+ * no allocation, built for the host harness and the ESP32 alike. Times are microseconds after the
+ * scenario anchor; distance is along a straight line from the start point. */
+#define SIM_DRAG_HOLD_US     3000000LL   /* standstill first: the drag engine ARMs on 2 s of stillness */
+#define SIM_DRAG_ACCEL_MPS2  6.0         /* 0-100 km/h in 4.6 s, 0-200 km/h in 9.3 s (257 m) */
+#define SIM_DRAG_VMAX_MPS    62.0        /* 223 km/h: past every default SPEED_FROM0 gate but 0-300 */
+#define SIM_DRAG_RUN_M       450.0       /* keep going past the 1/4-mile trap (402.336 m) before braking */
+#define SIM_DRAG_BRAKE_MPS2  8.0
+typedef struct { double dist_m; double speed_mps; double accel_mps2; bool parked; } sim_drag_state_t;
+void sim_drag_at(int64_t t_us, sim_drag_state_t *out);
+#endif
+```
+`components/drivers/sim_common/host/sim_profile.c`:
+```c
+#include "sim_profile.h"
+#include "core/core.h"
+#include <stddef.h>
+#define SIM_PROFILE_ASSERT_CODE 0x0C70
+
+void sim_drag_at(int64_t t_us, sim_drag_state_t *out)
+{
+    CORE_ASSERT_VOID(out != NULL, SIM_PROFILE_ASSERT_CODE);
+    CORE_ASSERT_VOID(t_us >= 0, SIM_PROFILE_ASSERT_CODE);
+    const double a    = SIM_DRAG_ACCEL_MPS2, vmax = SIM_DRAG_VMAX_MPS, b = SIM_DRAG_BRAKE_MPS2;
+    const double t_v  = vmax / a;                       /* accel phase length (s) */
+    const double d_v  = 0.5 * a * t_v * t_v;            /* distance at vmax */
+    const double t_cr = (SIM_DRAG_RUN_M > d_v) ? (SIM_DRAG_RUN_M - d_v) / vmax : 0.0;   /* cruise (s) */
+    const double t_b  = vmax / b;                       /* brake phase length (s) */
+    const double d_b  = 0.5 * vmax * t_b;               /* braking distance */
+    double t = (double)(t_us - SIM_DRAG_HOLD_US) / 1e6; /* seconds since launch; < 0 while holding */
+    out->parked = false;
+    if (t < 0.0) {
+        out->dist_m = 0.0; out->speed_mps = 0.0; out->accel_mps2 = 0.0;
+    } else if (t < t_v) {
+        out->dist_m = 0.5 * a * t * t; out->speed_mps = a * t; out->accel_mps2 = a;
+    } else if (t < t_v + t_cr) {
+        out->dist_m = d_v + vmax * (t - t_v); out->speed_mps = vmax; out->accel_mps2 = 0.0;
+    } else if (t < t_v + t_cr + t_b) {
+        double tb = t - t_v - t_cr;
+        out->dist_m = d_v + vmax * t_cr + vmax * tb - 0.5 * b * tb * tb;
+        out->speed_mps = vmax - b * tb; out->accel_mps2 = -b;
+    } else {
+        out->dist_m = d_v + vmax * t_cr + d_b; out->speed_mps = 0.0; out->accel_mps2 = 0.0;
+        out->parked = true;
+    }
+}
+```
+(`core/core.h` provides `CORE_ASSERT_VOID` on both targets; if the sim_common component cannot see it, REQUIRE `core` in its CMakeLists.)
+
+- [ ] **Step 4: Run the pure test — expect `test_drag_profile_shape` PASS, the engine test red or green (report which)**
+
+Run: `cmake --build test/build --target test_sim_profile 2>&1 | grep -E 'error|warning'; ./test/build/test_sim_profile | tail -4`
+If `test_drag_profile_drives_the_engine` fails, read `drag_on_fused`'s launch condition and `drag_on_fix`'s distance integration in `components/core/dragengine/drag.c` and adjust ONLY how the test feeds the engine (never the profile constants unless a gate is physically unreachable — then say so). Both PASS before Step 5.
+
+- [ ] **Step 5: Scenario switch + the sim drivers**
+
+`components/drivers/sim_common/include/sim_scenario.h`:
+```c
+#ifndef SIM_SCENARIO_H
+#define SIM_SCENARIO_H
+#include <stdint.h>
+enum { SIM_SC_LAPS = 0, SIM_SC_DRAG = 1, SIM_SC_PARK = 2 };   /* CMD_SIM_SCENARIO arg8 */
+void     sim_scenario_set(uint8_t scenario, uint16_t laps, int64_t now_us);   /* re-anchors; laps >= 1 for LAPS */
+uint8_t  sim_scenario_get(void);
+int64_t  sim_scenario_anchor_us(void);
+uint16_t sim_scenario_laps(void);
+#endif
+```
+`components/drivers/sim_common/sim_scenario.c`: three statics (`s_scenario` default `SIM_SC_LAPS`, `s_anchor_us` 0, `s_laps` 1) with those accessors; `sim_scenario_set` clamps `laps` to `>= 1`, rejects an unknown scenario (assert + ignore).
+
+`gps_sim.c` `gps_poll()`:
+- `SIM_SC_DRAG`: `t = now - sim_scenario_anchor_us()`; deliver at 5 Hz (`SIM_PARK_PERIOD_US / 5` → add `#define SIM_DRAG_PERIOD_US 200000`): `sim_drag_at(t, &s)`; `lat_e7 = lat0 + (int32_t)(s.dist_m * 1e7 / 111320.0)`, `lon_e7 = lon0`, `alt_mm = alt0`, `gspeed_mms = (int32_t)(s.speed_mps * 1000.0)`, `head_e5 = 0`, quality fields copied from `SIM_FIXES[0]`, `gps_us = SIM_FIXES[0].gps_us + t`. The anchor's `lat0/lon0/alt0` are `SIM_FIXES[0]`'s. Keep `s_frames_ok` counting.
+- `SIM_SC_LAPS`: today's replay, but when `s_idx >= SIM_FIX_COUNT` and fewer than `sim_scenario_laps()` repeats have been delivered, wrap `s_idx = 0` and add `repeat * (span + 200000)` to `gps_us` and to the due-time arithmetic (span = `SIM_FIXES[last].gps_us - SIM_FIXES[0].gps_us`); after the last repeat park as today.
+- `SIM_SC_PARK`: `deliver_parked()` at the last delivered position.
+- `sim_scenario_set()` re-anchoring must also reset `s_idx = 0; s_started = false; s_parked = 0;` — expose `void gps_sim_rearm(void)` from gps_sim.c and call it from the pipeline right after `sim_scenario_set()` (the pipeline owns both drivers; see Step 6).
+
+`imu_sim.c` `imu_read_fifo()`: for each generated sample at mono time `ts`, when `sim_scenario_get() == SIM_SC_DRAG`: `sim_drag_at(ts - sim_scenario_anchor_us(), &s)`; `r->ax = (int16_t)(s.accel_mps2 / 9.81 * IMU_SIM_1G_LSB)` (body +X = forward), else `ax = 0`; `az = IMU_SIM_1G_LSB` always. Clamp before the cast.
+
+- [ ] **Step 6: Command + console verb**
+
+`lt_ipc.h`: `CMD_SIM_SCENARIO = 8,   /* arg8 = SIM_SC_* (sim build only), arg16 = laps */`. `pipeline.c` `handle_cmd()`: the assert becomes `cmd->type <= CMD_SIM_SCENARIO`; add
+```c
+    case CMD_SIM_SCENARIO:
+#if CFG_GPS_SIM
+        sim_scenario_set(cmd->arg8, cmd->arg16, esp_timer_get_time());
+        gps_sim_rearm();
+        ESP_LOGI(TAG, "sim scenario %u (laps %u)", (unsigned)cmd->arg8, (unsigned)cmd->arg16);
+#else
+        ESP_LOGW(TAG, "sim scenario: not a sim build");
+#endif
+        break;
+```
+(declare `void gps_sim_rearm(void);` next to the existing `extern const char *gps_sim_venue_json(void);` under `#if CFG_GPS_SIM`). The `app` component already links the selected gps driver; add `sim_common` to its REQUIRES only if the include is needed outside the `#if` (keep the include inside `#if CFG_GPS_SIM` and add `sim_common` to the REQUIRES list unconditionally — a build-time-empty dependency is fine).
+
+`export_serial.c` `dbg sim`: replace the stub branch for `"sim"` with
+```c
+        if (strcmp(s, "sim") == 0) return dbg_sim(argc, argv);
+```
+and
+```c
+/* dbg sim drag | laps <n> | park -> CMD_SIM_SCENARIO to the pipeline (sim build; a real build logs a
+ * warning there). `laps <n>` replays the capture n times (n >= 1) before parking. */
+static int dbg_sim(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    CORE_ASSERT_RET(g_cmd_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc < 3) { printf("usage: dbg sim drag | laps <n> | park\n"); return 1; }
+    command_t c = { .type = CMD_SIM_SCENARIO, .arg8 = SIM_SC_PARK, .arg16 = 1 };
+    if (strcmp(argv[2], "drag") == 0)      c.arg8 = SIM_SC_DRAG;
+    else if (strcmp(argv[2], "laps") == 0) {
+        long n = (argc >= 4) ? strtol(argv[3], NULL, 10) : 1;
+        if (n < 1) n = 1;
+        if (n > 1000) n = 1000;
+        c.arg8 = SIM_SC_LAPS; c.arg16 = (uint16_t)n;
+    } else if (strcmp(argv[2], "park") != 0) { printf("usage: dbg sim drag | laps <n> | park\n"); return 1; }
+    if (xQueueSend(g_cmd_q, &c, 0) != pdTRUE) { printf("dbg: cmd queue full\n"); return 1; }
+    printf("dbg: sim scenario posted (%s)\n", argv[2]);
+    return 0;
+}
+```
+`SIM_SC_*` come from `sim_scenario.h` — include it unconditionally (the header is enum-only; add `sim_common` to export_serial's REQUIRES). Update the usage lines (~950) accordingly.
+
+- [ ] **Step 7: Gates**
+
+Run (one build at a time): the clean ccache-disabled `moto_sim`, `moto_neo6m` (proves the `#else` path and that a non-sim build links without the sim drivers), and `PANEL=ws29v2 moto_sim` builds → `0` warnings each, rc 0; lint 0; `ctest` (now 46 executables) 100 %; gcc-16 sweep 0.
+
+- [ ] **Step 8: Docs + commit**
+
+`docs/bench/next-bench-day.md`: items 1, 4, 5, 7 already name `dbg sim drag` / `dbg sim laps <n>`; add the note "the first drag launch after a boot may only teach the fusion its forward axis (`forward_ok`); run `dbg sim drag` twice and judge the second run". Spec §4.6: one sentence listing the three scenarios. Commit:
+```bash
+git add components/drivers/sim_common components/drivers/gps_sim components/drivers/imu_sim components/app/include/app/lt_ipc.h components/app/pipeline/pipeline.c components/drivers/export_serial/export_serial.c test/test_sim_profile.c test/CMakeLists.txt docs/
+git commit -m "feat(sim): dbg sim drag | laps <n> | park -- one shared profile drives the GPS and IMU sims; drag profile host-tested against the drag engine (bench checklist item 1)"
+```
+(append the trailer).
