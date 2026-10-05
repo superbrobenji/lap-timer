@@ -44,6 +44,8 @@
 #include "core/ses.h"
 #include "core/types.h"
 
+#include "sim_scenario.h"    /* SIM_SC_* -- `dbg sim drag | laps <n> | park` (Task 3); enum-only, builds on every env */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -907,6 +909,29 @@ static int dbg_reset(void)
     return 0;
 }
 
+/* ---- dbg sim (Task 3, 2026-10-05-ota-screen-and-glyphs) ----
+ *
+ * dbg sim drag | laps <n> | park -> CMD_SIM_SCENARIO to the pipeline (sim build; a real build logs a
+ * warning there). `laps <n>` replays the capture n times (n >= 1) before parking.
+ */
+static int dbg_sim(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    CORE_ASSERT_RET(g_cmd_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc < 3) { printf("usage: dbg sim drag | laps <n> | park\n"); return 1; }
+    command_t c = { .type = CMD_SIM_SCENARIO, .arg8 = SIM_SC_PARK, .arg16 = 1 };
+    if (strcmp(argv[2], "drag") == 0)      c.arg8 = SIM_SC_DRAG;
+    else if (strcmp(argv[2], "laps") == 0) {
+        long n = (argc >= 4) ? strtol(argv[3], NULL, 10) : 1;
+        if (n < 1) n = 1;
+        if (n > 1000) n = 1000;
+        c.arg8 = SIM_SC_LAPS; c.arg16 = (uint16_t)n;
+    } else if (strcmp(argv[2], "park") != 0) { printf("usage: dbg sim drag | laps <n> | park\n"); return 1; }
+    if (xQueueSend(g_cmd_q, &c, 0) != pdTRUE) { printf("dbg: cmd queue full\n"); return 1; }
+    printf("dbg: sim scenario posted (%s)\n", argv[2]);
+    return 0;
+}
+
 /* ---- dbg dispatch ---- */
 static int cmd_dbg(int argc, char **argv)
 {
@@ -937,9 +962,9 @@ static int cmd_dbg(int argc, char **argv)
             (void)esp_task_wdt_add(NULL);   /* a subscribed task that never resets trips the WDT deterministically (an unpinned busy-loop only migrates and never starves either idle for 5s) */
             for (;;) { }
         }
-        if (strcmp(s, "gps") == 0 || strcmp(s, "imu") == 0 ||
-            strcmp(s, "power") == 0 || strcmp(s, "sim") == 0) {
-            printf("dbg %s: not in plan 03 (GPS/IMU raw, power states and sim control land later)\n", s);
+        if (strcmp(s, "sim") == 0) return dbg_sim(argc, argv);
+        if (strcmp(s, "gps") == 0 || strcmp(s, "imu") == 0 || strcmp(s, "power") == 0) {
+            printf("dbg %s: not in plan 03 (GPS/IMU raw and power states land later)\n", s);
             return 0;
         }
     }
@@ -947,7 +972,8 @@ static int cmd_dbg(int argc, char **argv)
     printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection, Plan 7 T8)\n");
     printf("       dbg flag set|clear <bit 0..15>  (bench sys_flags injection, Plan 7 T8)\n");
     printf("       dbg safe clear  (clear the safe/recovery gate now, debt sweep A #62/§17.5)\n");
-    printf("       dbg gps raw <on|off> | imu raw <on|off> | power <..> | sim <on|off>  (not in plan 03)\n");
+    printf("       dbg gps raw <on|off> | imu raw <on|off> | power <..>  (not in plan 03)\n");
+    printf("       dbg sim drag | laps <n> | park  (bench scenarios, Task 3; sim build only)\n");
     return 1;
 }
 

@@ -1,7 +1,7 @@
 # imu_sim -- hal/imu.h synthesising a deterministic 100 Hz stream (spec §4.6 IMU=sim). Bench driver.
 idf_component_register(
     SRCS "imu_sim.c"
-    REQUIRES lt_hal core)
+    REQUIRES lt_hal core sim_common)
 
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")
 target_compile_options(${COMPONENT_LIB} PRIVATE

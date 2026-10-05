@@ -22,7 +22,8 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   page 2 SESSION BEST filled, a second run updates bests only where faster. Repeat once with
   `config set {"units":"mph","drag":{"n_mph":2,"benches_mph":[60,100]}}` (#86): labels 0-60 / 0-100
   in mph, thresholds converted (the 100 mph gate fires at ~161 km/h in the log). Session log carries
-  the EVENT records (`dbg sum <id>`).
+  the EVENT records (`dbg sum <id>`). Note: the first drag launch after a boot may only teach the
+  fusion its forward axis (`forward_ok`); run `dbg sim drag` twice and judge the second run.
 - [ ] **2. OTA rollback path.** Push any signed image; at ~10 s after its boot (inside the 30 s trial
   window, before `sup: OTA image validated`) send `dbg crash`. Expect on the next boot: the PREVIOUS
   version in the banner, `sup: OTA image rolled back by the bootloader`, errlog `E_OTA_ROLLBACK`

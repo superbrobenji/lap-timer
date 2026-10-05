@@ -383,6 +383,8 @@ Defined in `core/event.h` with the stable `EV_*` codes (logged verbatim in the E
 
 `GPS=sim` and `IMU=sim` select bench drivers (`gps_sim`, `imu_sim`) that implement the HAL by replaying a capture file from LittleFS (`/sim/gps.ubx`, `/sim/imu.bin`) at real-time rate, or generating a synthetic circuit when no file exists. They exist so the whole firmware can be developed and bench-tested before the physical sensors are available. They are never part of a release build (`sign_release.sh` refuses them).
 
+The lap-timer console's `dbg sim drag | laps <n> | park` (sim build only, `CMD_SIM_SCENARIO`) switches between the three scenarios one shared profile (`components/drivers/sim_common`) drives into both sims: `laps <n>` replays the committed capture n times before parking (today's default behaviour when n = 1), `drag` feeds a standing-start acceleration/brake run (straight-line GPS position/speed and matching IMU body-X g) so DRAG mode can be exercised without hardware, and `park` freezes the current position immediately.
+
 Validation in CMake: `moto` requires `DISPLAY` ∈ {epaper_ssd1680, oled_ssd1309}; `car` requires `oled_ssd1309`; `CONN_BLE_RC=ON` requires `CONN` containing `ble`; `GPS=m10` enables PPS handling. Invalid combinations fail configuration with a message.
 
 Generated `build_config.h`:

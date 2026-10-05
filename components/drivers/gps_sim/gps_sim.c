@@ -18,6 +18,8 @@
  */
 #include "hal/gps.h"
 #include "sim_capture.h"
+#include "sim_profile.h"
+#include "sim_scenario.h"
 #include "core/core.h"
 
 #include "esp_timer.h"
@@ -31,6 +33,9 @@
 /* Parked-phase cadence once the capture is exhausted (ruling T9-R2): 1 Hz, independent of the
  * capture's own SIM_FIX_RATE_HZ. */
 #define SIM_PARK_PERIOD_US 1000000
+/* SIM_SC_DRAG delivery cadence (Task 3): 5 Hz, matching the capture's own SIM_FIX_RATE_HZ so a
+ * `dbg sim drag` run looks like any other capture replay to the pipeline. */
+#define SIM_DRAG_PERIOD_US 200000
 
 static const gps_profile_t s_profile = {
     .max_rate_hz = SIM_FIX_RATE_HZ,
@@ -39,12 +44,13 @@ static const gps_profile_t s_profile = {
     .name        = "sim",
 };
 
-static uint32_t s_idx;            /* next capture fix to deliver */
+static uint32_t s_idx;            /* next capture fix to deliver (SIM_SC_LAPS); next drag frame (SIM_SC_DRAG) */
 static bool     s_started;        /* the playback clock has been anchored */
 static int64_t  s_t0_mono_us;     /* device mono time mapped to SIM_FIXES[0].gps_us */
 static int64_t  s_last_frame_us;  /* mono time of the last delivered fix */
 static uint32_t s_frames_ok;
 static uint32_t s_parked;         /* count of delivered parked fixes; saturates at UINT32_MAX */
+static uint16_t s_repeat;         /* SIM_SC_LAPS: capture replays completed so far (0-based) */
 
 int gps_init(const gps_profile_t **out_profile)
 {
@@ -53,6 +59,7 @@ int gps_init(const gps_profile_t **out_profile)
     s_last_frame_us = 0;
     s_frames_ok = 0;
     s_parked = 0;
+    s_repeat = 0;
     if (out_profile) *out_profile = &s_profile;
     return 0;
 }
@@ -63,7 +70,29 @@ int gps_configure(uint8_t rate_hz)
     s_idx = 0;
     s_started = false;
     s_parked = 0;
+    s_repeat = 0;
     return 0;
+}
+
+/* The drag scenario's start point: SIM_FIXES[0]'s position. Kept private to this file (the
+ * capture itself, sim_capture.h, is never included outside gps_sim.c). */
+static void gps_sim_capture_origin(int32_t *lat_e7, int32_t *lon_e7, int32_t *alt_mm)
+{
+    CORE_ASSERT_VOID(lat_e7 != NULL && lon_e7 != NULL, GPS_SIM_ASSERT_CODE);
+    CORE_ASSERT_VOID(alt_mm != NULL, GPS_SIM_ASSERT_CODE);
+    *lat_e7 = SIM_FIXES[0].lat_e7;
+    *lon_e7 = SIM_FIXES[0].lon_e7;
+    *alt_mm = SIM_FIXES[0].alt_mm;
+}
+
+/* Re-anchor every scenario's playback state so a `dbg sim drag | laps <n> | park` switch starts
+ * clean on the next gps_poll() (Task 3, pipeline.c calls this right after sim_scenario_set()). */
+void gps_sim_rearm(void)
+{
+    s_idx = 0;
+    s_started = false;
+    s_parked = 0;
+    s_repeat = 0;
 }
 
 /* Once the capture is exhausted, deliver the last capture fix again as a parked bike: same
@@ -104,24 +133,32 @@ static int deliver_parked(gps_fix_t *out, int64_t now)
     return 1;
 }
 
-int gps_poll(gps_fix_t *out)
+/* SIM_SC_LAPS (today's default): replay the capture, and once exhausted, wrap back to its first
+ * fix and replay again until sim_scenario_laps() repeats have been delivered (Task 3), then park.
+ * `off` offsets gps_us (and the due-time arithmetic) by repeat * (capture span + 200 ms) so GPS
+ * time stays monotonic across the seam between one repeat's last fix and the next one's first. */
+static int deliver_laps(gps_fix_t *out, int64_t now)
 {
     CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
+    const int64_t span = SIM_FIXES[SIM_FIX_COUNT - 1].gps_us - SIM_FIXES[0].gps_us;
 
-    int64_t now = esp_timer_get_time();
-    if (!s_started) { s_started = true; s_t0_mono_us = now; }
+    if (s_idx >= SIM_FIX_COUNT) {
+        if ((uint32_t)s_repeat + 1u >= sim_scenario_laps()) return deliver_parked(out, now);
+        s_repeat++;
+        s_idx = 0;
+    }
 
-    if (s_idx >= SIM_FIX_COUNT) return deliver_parked(out, now);  /* capture exhausted: park */
-
-    /* Fix s_idx is due once real elapsed time has reached its offset from the first fix. */
-    int64_t due_us = SIM_FIXES[s_idx].gps_us - SIM_FIXES[0].gps_us;
+    /* Fix s_idx (this repeat) is due once real elapsed time has reached its offset from the first
+     * fix, pushed out by every earlier repeat's span + inter-repeat gap. */
+    const int64_t off = (int64_t)s_repeat * (span + 200000);
+    const int64_t due_us = SIM_FIXES[s_idx].gps_us - SIM_FIXES[0].gps_us + off;
     if (now - s_t0_mono_us < due_us) return 0;
 
     /* Index invariant the array access below assumes: s_idx must stay within the capture. */
     CORE_ASSERT_RET(s_idx < SIM_FIX_COUNT, GPS_SIM_ASSERT_CODE, 0);
     const sim_fix_t *s = &SIM_FIXES[s_idx];
     memset(out, 0, sizeof *out);
-    out->gps_us     = s->gps_us;
+    out->gps_us     = s->gps_us + off;
     out->mono_us    = now;                                /* real arrival time on this board */
     out->lat_e7     = s->lat_e7;
     out->lon_e7     = s->lon_e7;
@@ -140,6 +177,63 @@ int gps_poll(gps_fix_t *out)
     s_idx++;
     s_frames_ok++;
     return 1;
+}
+
+/* SIM_SC_DRAG (Task 3): the shared drag profile as a straight-line GPS fix at 5 Hz (sim_drag_at,
+ * sim_profile.h), anchored on sim_scenario_anchor_us() -- the device mono time `dbg sim drag`
+ * posted CMD_SIM_SCENARIO at. Heading due north from the capture's first fix: lat advances with
+ * dist_m (1 deg lat ~= 111320 m), lon/alt/quality fields stay at the anchor's. s_idx is reused
+ * here as a plain frame counter (gps_sim_rearm() already resets it to 0 on every scenario switch). */
+static int deliver_drag(gps_fix_t *out, int64_t now)
+{
+    CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
+    int64_t t = now - sim_scenario_anchor_us();
+    if (t < 0) t = 0;
+    CORE_ASSERT_RET(t >= 0, GPS_SIM_ASSERT_CODE, 0);   /* invariant sim_drag_at() requires */
+    if (t < (int64_t)s_idx * SIM_DRAG_PERIOD_US) return 0;
+
+    sim_drag_state_t s;
+    sim_drag_at(t, &s);
+    int32_t lat0, lon0, alt0;
+    gps_sim_capture_origin(&lat0, &lon0, &alt0);
+    const sim_fix_t *s0 = &SIM_FIXES[0];
+
+    memset(out, 0, sizeof *out);
+    out->gps_us     = s0->gps_us + t;
+    out->mono_us    = now;                                /* real arrival time on this board */
+    out->lat_e7     = lat0 + (int32_t)(s.dist_m * 1e7 / 111320.0);
+    out->lon_e7     = lon0;
+    out->alt_mm     = alt0;
+    out->gspeed_mms = (int32_t)(s.speed_mps * 1000.0);
+    out->head_e5    = 0;                                  /* due north, by construction */
+    out->hacc_mm    = s0->hacc_mm;
+    out->sacc_mms   = s0->sacc_mms;
+    out->pdop_e2    = s0->pdop_e2;
+    out->fix_type   = s0->fix_type;
+    out->sats       = s0->sats;
+    out->flags      = s0->flags;
+    out->valid      = 0;                                  /* pipeline applies the §6.5 rule */
+
+    s_last_frame_us = now;
+    s_idx++;
+    s_frames_ok++;
+    return 1;
+}
+
+int gps_poll(gps_fix_t *out)
+{
+    CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
+
+    int64_t now = esp_timer_get_time();
+    if (!s_started) { s_started = true; s_t0_mono_us = now; }
+
+    uint8_t sc = sim_scenario_get();
+    if (sc == SIM_SC_DRAG) return deliver_drag(out, now);
+    if (sc == SIM_SC_PARK) {
+        s_idx = SIM_FIX_COUNT;   /* deliver_parked()'s precondition; "park at the last position" */
+        return deliver_parked(out, now);
+    }
+    return deliver_laps(out, now);   /* SIM_SC_LAPS (default) */
 }
 
 /* The sim path never ingests UART bytes; these are no-ops sufficient for the pipeline. */

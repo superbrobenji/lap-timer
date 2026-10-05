@@ -57,14 +57,16 @@ endfunction()
 # and test_screens (session 4.2, moto LAP screens, §20.4-20.5) both link pbm.c (§20.2's PBM
 # snapshot writer/comparator, test/pbm.h) alongside core/unity/m. test_epd_pure (Plan 7 Task 4)
 # is also held back: it needs the display_epaper_ssd1680 driver's two host/*.c sources and its
-# include/ dir, so it is added explicitly at the end of this file instead.
+# include/ dir, so it is added explicitly at the end of this file instead. test_sim_profile (Task
+# 3, sim scenarios) is held back the same way: it needs the sim_common component's host/
+# sim_profile.c source and its include/ dir.
 file(GLOB CORE_TEST_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.c)
 foreach(src ${CORE_TEST_SRCS})
   get_filename_component(name ${src} NAME_WE)
   if(NOT name STREQUAL "test_lap" AND NOT name STREQUAL "test_ui" AND NOT name STREQUAL "test_screens"
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
      AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
-     AND NOT name STREQUAL "test_epd_pure_29")
+     AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile")
     add_core_test(${name})
   endif()
 endforeach()
@@ -154,3 +156,14 @@ target_compile_definitions(test_epd_pure PRIVATE EPD_FORCE_PANEL_213=1)
 add_core_test(test_epd_pure_29 ${EPD_DIR}/host/epd_panel.c ${EPD_DIR}/host/epd_rotate.c)
 target_include_directories(test_epd_pure_29 PRIVATE ${EPD_DIR}/include)
 target_compile_definitions(test_epd_pure_29 PRIVATE EPD_FORCE_PANEL_29=1)
+
+# test_sim_profile (Task 3: dbg sim drag | laps <n> | park): the sim_common component's pure drag
+# profile (sim_profile.h/.c, no IDF, no allocation) plus a drag-engine integration case against
+# components/core/dragengine/drag.c. Links the host sim_profile.c source directly via
+# add_core_test's ARGN, the same pattern test_epd_pure uses for its driver's host/*.c sources. The
+# engine-integration case also needs hal/gps.h (gps_fix_t's GPS_FLAG_*) -- no host target has
+# needed the lt_hal include root before this, so it is added explicitly here.
+set(SIM_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/sim_common)
+set(LT_HAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/lt_hal)
+add_core_test(test_sim_profile ${SIM_COMMON_DIR}/host/sim_profile.c)
+target_include_directories(test_sim_profile PRIVATE ${SIM_COMMON_DIR}/include ${LT_HAL_DIR}/include)

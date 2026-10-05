@@ -102,6 +102,10 @@ static bool        s_resume_active;         /* F2: a resumed lap is running; gua
 static int64_t     s_resumed_lap_start_us;  /* F2: resumed lap start; a later fix below it = rewind */
 
 #if CFG_GPS_SIM
+/* sim_scenario_set() (CMD_SIM_SCENARIO, Task 3: dbg sim drag|laps|park) and gps_sim_rearm()'s
+ * prototype (declared there -- every sim_scenario_set() caller must call it right after, so
+ * sim_scenario.h itself carries the contract; see that header). */
+#include "sim_scenario.h"
 /* No local trk_venue_t static here (Plan 7 Task 1 DRAM reclaim): pipeline_init below parses the
  * sim capture's venue JSON straight into the trk user table via trk_user_add_json, so the venue
  * lives in exactly one place -- the table entry lap_set_venue then points at. */
@@ -640,10 +644,31 @@ static void handle_reset_engine(void)
     ui_post_lap_reset();
 }
 
+/* CMD_SIM_SCENARIO's body (Task 3: `dbg sim drag | laps <n> | park`), split out of handle_cmd's
+ * switch for RULE-4-COMPOUND, the same reason CMD_RESET_ENGINE's body was (#87, above). Sim build
+ * only: hands the scenario straight to sim_scenario_set(), then rearms the gps_sim driver so the
+ * new scenario re-anchors (s_idx/s_started/s_parked reset) on its very next gps_poll(). A non-sim
+ * build has neither sim_common's state nor the gps_sim driver linked in, so it just logs. */
+#if CFG_GPS_SIM
+static void handle_sim_scenario(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    sim_scenario_set(cmd->arg8, cmd->arg16, esp_timer_get_time());
+    gps_sim_rearm();
+    ESP_LOGI(TAG, "sim scenario %u (laps %u)", (unsigned)cmd->arg8, (unsigned)cmd->arg16);
+}
+#else
+static void handle_sim_scenario(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    ESP_LOGW(TAG, "sim scenario: not a sim build");
+}
+#endif
+
 static void handle_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
-    LT_ASSERT_VOID(cmd->type <= CMD_IMU_MODE, PIPE_ASSERT_CODE);   /* valid §4.4 command type */
+    LT_ASSERT_VOID(cmd->type <= CMD_SIM_SCENARIO, PIPE_ASSERT_CODE);   /* valid §4.4 command type */
     switch (cmd->type) {
     case CMD_SET_MODE:
         s_mode = (cmd->arg8 == MODE_DRAG) ? MODE_DRAG : MODE_LAP;
@@ -669,6 +694,9 @@ static void handle_cmd(const command_t *cmd)
         break;
     case CMD_GPS_POWER:
         (void)gps_set_power_mode(cmd->arg8 ? GPS_PM_FULL : GPS_PM_BACKUP);
+        break;
+    case CMD_SIM_SCENARIO:
+        handle_sim_scenario(cmd);
         break;
     default:
         break;                              /* MARK_GATE / CALIB_ORIENT: later sessions */

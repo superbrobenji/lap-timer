@@ -184,7 +184,11 @@ configure_file(main/build_config.h.in "${CMAKE_BINARY_DIR}/build_config.h" @ONLY
 #        by the app component), so no separate dir is needed for it.
 #   Plan 7  components/drivers/display_${DISPLAY} (hal/display.h; display_epaper_ssd1680 is the
 #           only implementation so far -- display_oled_ssd1309 lands with the car variant).
-set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal components/drivers/gps_${GPS} components/drivers/imu_${IMU} components/drivers/display_${DISPLAY})
+#   Task 3 (2026-10-05-ota-screen-and-glyphs) components/drivers/sim_common: the `dbg sim drag |
+#           laps <n> | park` scenario switch gps_sim/imu_sim poll and app/pipeline.c drives.
+#           Unconditional (not gps_${GPS}/imu_${IMU}-gated): app and export_serial REQUIRE it on
+#           every env, including a non-sim build, where it costs nothing but a link edge.
+set(EXTRA_COMPONENT_DIRS components/core components/lt_hal components/app components/drivers/board_devkit_v1 components/drivers/storage_internal components/drivers/sim_common components/drivers/gps_${GPS} components/drivers/imu_${IMU} components/drivers/display_${DISPLAY})
 
 # 3.5  components/drivers/export_serial (§18.4 serial console), gated by the EXPORT_SERIAL flag
 # (§4.6). Appended like the gps_${GPS}/imu_${IMU} dirs above; the flag is exported into the

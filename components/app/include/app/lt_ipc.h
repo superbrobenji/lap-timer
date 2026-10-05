@@ -140,6 +140,7 @@ typedef enum {
     CMD_CONFIG_RELOAD = 5,
     CMD_GPS_POWER     = 6,   /* arg8 = 0/1 */
     CMD_IMU_MODE      = 7,   /* arg8 = IMU_FULL / IMU_LOWPOWER */
+    CMD_SIM_SCENARIO  = 8,   /* arg8 = SIM_SC_* (sim build only), arg16 = laps */
 } command_type_t;
 
 enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_MODE_*) */
