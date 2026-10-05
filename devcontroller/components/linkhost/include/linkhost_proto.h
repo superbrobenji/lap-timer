@@ -218,6 +218,12 @@ lh_dl_state_t lh_dl_feed(lh_dl_ctx_t *c, const uint8_t *bytes, size_t n);
 /* Terminal result: 0 (complete + CRC ok), LINKHOST_E_CRC / LINKHOST_E_PROTO, or LINKHOST_E_TIMEOUT
  * while still incomplete (not yet terminal). */
 int lh_dl_result(const lh_dl_ctx_t *c);
+/* Which no-bytes gap linkhost.c's IDF timeout loop should allow next, given the parser's CURRENT
+ * `state` (bench B-F8, ruling B-18): before the header parses (state < LH_DL_BODY) the lap-timer
+ * can go quiet for a long time -- `list` scans every session summary before it can emit the
+ * length-prefixed header -- so `first_ms` applies; once the header is in (state >= LH_DL_BODY) the
+ * shorter steady-state `idle_ms` applies. Pure so the policy is host-testable without the UART loop. */
+int lh_dl_gap_ms(lh_dl_state_t state, int first_ms, int idle_ms);
 
 /* ---- cmd-OTA flash (Task 6): the OTA-token parser + a pure, injectable state machine. ---- */
 /* Mapped codes for the named OTA-ERR reasons (a bare 0x%04x reason passes through unchanged). */

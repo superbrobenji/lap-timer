@@ -570,6 +570,11 @@ int lh_dl_result(const lh_dl_ctx_t *c)
     }
 }
 
+int lh_dl_gap_ms(lh_dl_state_t state, int first_ms, int idle_ms)
+{
+    return (state >= LH_DL_BODY) ? idle_ms : first_ms;
+}
+
 /* ================================================================================================
  *  Raw reply capture (Plan 5.6 Task 9's `selftest framing`) -- see linkhost_rawcap_set's doc in
  *  linkhost_proto.h. Independent module-global state (not part of s_dx below): a separate static,

@@ -126,7 +126,14 @@ int linkhost_download(const char *id, const char *fmt, lh_dl_chunk_cb chunk_cb, 
  * exactly like linkhost_download, but for an arbitrary command. Used for `list`, whose response
  * (measured at 3.6 KB on hardware) overflows linkhost_cmd's LINKHOST_ASM_MAX buffer. `is_binary`
  * selects on-the-fly base64 decoding (false for the raw-text `list`/session JSON). `rerr`
- * (nullable) is filled on LINKHOST_E_REMOTE. Returns 0 or LINKHOST_E_*. */
+ * (nullable) is filled on LINKHOST_E_REMOTE. Returns 0 or LINKHOST_E_*.
+ *
+ * No-bytes timeout is two-phase (bench B-F8, ruling B-18): `list` must scan every session summary
+ * before it can emit the length-prefixed header, so the longer DL_FIRST_TMO_MS allowance applies
+ * until the header parses; the shorter steady-state DL_IDLE_TMO_MS applies after. The absolute
+ * hard cap floor is shifted out by DL_FIRST_TMO_MS so it can never fire before the first-byte
+ * deadline, and its size-scaled form is measured from when the header was seen, not from the call
+ * start. */
 int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_cb, void *ctx,
                           linkhost_remote_err_t *rerr);
 
