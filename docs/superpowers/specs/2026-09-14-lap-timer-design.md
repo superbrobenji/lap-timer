@@ -2364,12 +2364,12 @@ Labels in `FONT_SMALL` at x=4. Times right-aligned at x=200. New best: the ΔS r
 **DRAG page 1**: all gates of the last run (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0).
 **DRAG page 2**: best per gate this session.
 
-Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a strip at bottom-right; `SYS_BATT_LOW` shows a battery icon with `%`. `SYS_GPS_NOFIX` shows the hollow GPS icon.
+Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a strip at bottom-right; `SYS_BATT_LOW` shows a battery icon with `%`. `SYS_GPS_NOFIX` shows the hollow GPS icon. Two ui-level glyphs share the strip, drawn after the §17.4 icons: `SIM` (a bold S) whenever the firmware feeds simulated GPS or IMU inputs (`CFG_GPS_SIM`/`CFG_IMU_SIM`), and `MOVING` (a double chevron) whenever the menu is motion-locked (§20.7); `MOVING` disappears once the bike is parked, which is the operator's cue that a sim run has finished and the menu is usable.
 
 **Font reconciliation (session 4.2, from rendered PBM goldens at 296×128).** The generated `FONT_MED` covers only `0-9 : . - + A-Z` and `FONT_BIG` only `0-9 : . - + S`, so labels containing `/` or lowercase (`1/4`, `60ft`, `1000ft`) render in `FONT_SMALL`; the riding-screen VALUES (times) use `FONT_BIG`/`FONT_MED`, the LABELS use `FONT_SMALL`. The LAP `dS` value row is `FONT_SMALL` (a `FONT_MED` glyph at y=112 clips past the 128-px frame). The empty time placeholder is `-:--.--` (7 chars, matching the `M:SS.cc` shape) so it does not overlap the left labels. DRAG pages 1/2 use a two-column gate grid. These are the byte-exact golden layouts under `test/snapshots/`.
 
 ### 20.6 One-shot screens
-`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (progress bar), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` ("Cross S/F, press MODE").
+`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` ("Cross S/F, press MODE").
 
 ### 20.7 Menu
 

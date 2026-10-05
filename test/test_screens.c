@@ -12,6 +12,7 @@
 #include "unity.h"
 
 #include "core/ui/canvas.h"
+#include "core/ui/icons.h"
 #include "core/ui/model.h"
 #include "pbm.h"
 
@@ -69,6 +70,20 @@ static int fb_max_ink_col(const fb_t *fb)
         }
     }
     return max_col;
+}
+
+/* true if (x, y) holds ink (a 0 bit, same convention as fb_max_ink_col() above) in fb, false if
+ * out of bounds or background. Used to probe for a specific icon's ink inside the fault strip
+ * without reaching into screens_moto.c's file-static fault_strip_left_x(). */
+static bool px(const fb_t *fb, int x, int y)
+{
+    if (x < 0 || y < 0 || x >= (int)fb->w || y >= (int)fb->h) {
+        return false;
+    }
+    const uint8_t *row = fb->bits + (size_t)y * fb->stride;
+    uint8_t        b = row[x / 8];
+    uint8_t        mask = (uint8_t)(0x80u >> (x % 8));
+    return (b & mask) == 0u; /* 0 = ink */
 }
 
 /* ---- LAP page 0: the event card (spec 7b §3-4) ---- */
@@ -603,11 +618,55 @@ static void test_oneshot_ota(void)
     m.screen = SCR_ONESHOT;
     m.oneshot = ONESHOT_OTA;
     m.ota_pct = 63;
+    m.ota_phase = OTA_PHASE_RECEIVING;
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota.pbm"), &s_fb));
+}
+
+/* OTA status line (spec §20.6): the label for each phase, and a defensive default. */
+static void test_ota_phase_label(void)
+{
+    TEST_ASSERT_EQUAL_STRING("RECEIVING", ota_phase_label(OTA_PHASE_RECEIVING));
+    TEST_ASSERT_EQUAL_STRING("VERIFYING", ota_phase_label(OTA_PHASE_VERIFYING));
+    TEST_ASSERT_EQUAL_STRING("REBOOTING", ota_phase_label(OTA_PHASE_REBOOTING));
+    TEST_ASSERT_EQUAL_STRING("RECEIVING", ota_phase_label(200));
+}
+
+/* 100 % + REBOOTING: the bar is full and the status line changes -- its own golden. */
+static void test_oneshot_ota_rebooting(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_OTA;
+    m.ota_pct = 100;
+    m.ota_phase = OTA_PHASE_REBOOTING;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota_rebooting.pbm"), &s_fb));
+}
+
+/* Strip bits 14/15 (SIM, MOVING) render as two extra icons on the LAP card and reserve two slots. */
+static void test_strip_sim_and_moving(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_RIDING;
+    m.mode = SCR_MODE_LAP;
+    m.page = 0;
+    m.flags = (1u << SCR_UI_SIM) | (1u << SCR_UI_MOVING);
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("strip_sim_moving.pbm"), &s_fb));
+    /* two icons at the strip pitch: ink inside the second slot left of the anchor (the rightmost
+     * slot is bit 15 MOVING, the next one bit 14 SIM -- fault_strip() walks bits ascending, so
+     * SIM lands at FAULT_STRIP_X0 and MOVING one slot further left); fault_strip_left_x() is
+     * static, so probe pixels instead: the MOVING chevron's middle row has ink at its slot. */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - (ICON_W + 2) + 4, FAULT_STRIP_Y + 5));
 }
 
 static void test_oneshot_ota_fail(void)
@@ -738,6 +797,9 @@ int main(void)
     RUN_TEST(test_oneshot_lowbatt);
     RUN_TEST(test_oneshot_ota);
     RUN_TEST(test_oneshot_ota_fail);
+    RUN_TEST(test_ota_phase_label);
+    RUN_TEST(test_oneshot_ota_rebooting);
+    RUN_TEST(test_strip_sim_and_moving);
     RUN_TEST(test_oneshot_calibrate);
     RUN_TEST(test_oneshot_newtrack);
     RUN_TEST(test_menu_top);

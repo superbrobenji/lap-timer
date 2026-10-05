@@ -58,6 +58,9 @@ typedef struct {
     bool     is_distance;
 } drag_row_t;
 
+/* OTA one-shot status line (spec §20.6). Carried on EV_OTA.flags by the app (Task 2). */
+enum { OTA_PHASE_RECEIVING = 0, OTA_PHASE_VERIFYING = 1, OTA_PHASE_REBOOTING = 2 };
+
 typedef struct {
     uint8_t  mode; /* SCR_MODE_LAP / _DRAG (meaningful when screen == SCR_RIDING) */
     uint8_t  page; /* 0/1/2 */
@@ -120,6 +123,7 @@ typedef struct {
 
     /* OTA one-shot (§20.6): progress bar percentage 0..100. */
     uint8_t ota_pct;
+    uint8_t ota_phase;  /* OTA_PHASE_* -- the status line under the percentage (spec §20.6) */
 
     /* MENU (§20.7): a titled, scrollable list of up to 12 items. */
     uint8_t     menu_sel;       /* selected item index */
@@ -148,7 +152,14 @@ enum {
     SCR_SYS_DISP_TEMP_THROTTLE,
     SCR_SYS_OTA_PENDING,
     SCR_SYS_FUSION_DISAGREE,
+    /* ui-level strip bits (not sys flags): folded into screen_model_t.flags by the ui task after
+     * masking the sys snapshot with SCR_SYS_BITS_MASK, so SYS_RECOVERY_MODE (bit 14 in lt_sup.h,
+     * never reaches the ui -- recovery mode does not start it) can never alias SCR_UI_SIM. */
+    SCR_UI_SIM    = 14,   /* ICON_SIM: this firmware feeds simulated GPS/IMU (CFG_GPS_SIM || CFG_IMU_SIM) */
+    SCR_UI_MOVING = 15,   /* ICON_MOVING: the menu is motion-locked (gspeed >= MENU_LOCK_SPEED_KMH, §20.7) */
 };
+#define SCR_SYS_BITS_MASK 0x3FFFu   /* bits 0..13: the sys_flags snapshot the strip may show */
+#define SCR_STRIP_BITS    16        /* bits 0..15: everything fault_strip() walks */
 
 /* Draws the shared fault-icon strip (spec §20.5 + §17.4): for each set bit in `flags` that maps
  * to an icon, draws its 12x12 icon right-to-left along the bottom-right of the frame. Bits with
@@ -156,6 +167,10 @@ enum {
  * SYS_FUSION_DISAGREE, which have no matching bitmap in icons.h) draw nothing. Exposed so the
  * DRAG renderer (Task 2) reuses it. */
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct);
+
+/* Status line under the OTA one-shot's percentage (spec §20.6): any phase value other than the
+ * three OTA_PHASE_* enumerators reads as RECEIVING, the phase the screen is first shown in. */
+const char *ota_phase_label(uint8_t phase);
 
 /* Renders the moto riding screens: dispatches on m->mode + m->page, clears the fb, draws the
  * screen and leaves fb->dirty as the changed region (the whole frame for a full screen render).

@@ -237,19 +237,21 @@
 #endif
 
 #if CANVAS_213
-#define OTA_TITLE_Y 8
-#define OTA_BAR_X   25
-#define OTA_BAR_Y   46
-#define OTA_BAR_W   200
-#define OTA_BAR_H   18
-#define OTA_PCT_Y   74
+#define OTA_TITLE_Y  8
+#define OTA_BAR_X    25
+#define OTA_BAR_Y    46
+#define OTA_BAR_W    200
+#define OTA_BAR_H    18
+#define OTA_PCT_Y    74
+#define OTA_STATUS_Y 92     /* 213 canvas: FONT_SMALL (12 px) below OTA_PCT_Y 74 + 12 + 6 gap; ends at 104 < 122 */
 #else
-#define OTA_TITLE_Y 16
-#define OTA_BAR_X   48
-#define OTA_BAR_Y   56
-#define OTA_BAR_W   200
-#define OTA_BAR_H   20
-#define OTA_PCT_Y   84
+#define OTA_TITLE_Y  16
+#define OTA_BAR_X    48
+#define OTA_BAR_Y    56
+#define OTA_BAR_W    200
+#define OTA_BAR_H    20
+#define OTA_PCT_Y    84
+#define OTA_STATUS_Y 102    /* below OTA_PCT_Y 84 + 12 + 6 gap; ends at 114 < 128 */
 #endif
 
 #if CANVAS_213
