@@ -26,10 +26,19 @@
 static int64_t s_last_us;              /* mono time of the last generated sample */
 static bool    s_have_last;
 
-/* SIM_SC_DRAG (Task 3): the shared drag profile's longitudinal accel as body +X, the IMU's
+/* SIM_SCENARIO_DRAG (Task 3): the shared drag profile's longitudinal accel as body +X, the IMU's
  * forward axis, scaled to raw LSB at the same +/-16 g / 2048 LSB-per-g the board sits at upright
  * (IMU_SIM_1G_LSB). Clamped to int16_t range before the cast -- the profile's accel is at most
- * SIM_DRAG_BRAKE_MPS2 (~0.8 g) so this never actually saturates, but the cast must stay well-defined. */
+ * SIM_DRAG_BRAKE_MPS2 (~0.8 g) so this never actually saturates, but the cast must stay well-defined.
+ *
+ * Fix round 1, I3 (Task 3 review, fusion analysis): DRAG LAUNCH fires correctly on the very first
+ * `dbg sim drag` after boot -- not because the fusion learns anything (CMD_CALIB_ORIENT is a
+ * production no-op, so orient_ok/forward_ok stay false forever, fus.c), but because its un-oriented
+ * g_lon = sqrt(ax^2+ay^2) fallback happens to equal this signed ax during acceleration (ay is
+ * always 0 here, R stays identity). The same fallback loses the sign during braking, so a
+ * bench-day note that running `dbg sim drag` twice changes anything is unfounded -- see
+ * docs/bench/next-bench-day.md item 1 and the review for the full trace; this driver is not the
+ * place to fix the sign loss, only to document why LAUNCH is reliable anyway. */
 static int16_t drag_ax_lsb(int64_t t_us)
 {
     if (t_us < 0) t_us = 0;
@@ -65,7 +74,7 @@ int imu_read_fifo(imu_raw_t *out, size_t max, size_t *n_read, int64_t read_mono_
         s_last_us = read_mono_us - IMU_SIM_PERIOD_US;
     }
 
-    bool    drag   = (sim_scenario_get() == SIM_SC_DRAG);
+    bool    drag   = (sim_scenario_get() == SIM_SCENARIO_DRAG);
     int64_t anchor = drag ? sim_scenario_anchor_us() : 0;
     while (n < max && s_last_us + IMU_SIM_PERIOD_US <= read_mono_us) {
         s_last_us += IMU_SIM_PERIOD_US;

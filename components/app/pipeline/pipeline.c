@@ -106,6 +106,15 @@ static int64_t     s_resumed_lap_start_us;  /* F2: resumed lap start; a later fi
  * prototype (declared there -- every sim_scenario_set() caller must call it right after, so
  * sim_scenario.h itself carries the contract; see that header). */
 #include "sim_scenario.h"
+/* Fix round 1, M2: this is the one file that includes both app/lt_ipc.h (unconditionally, above)
+ * and sim_scenario.h (here) -- the only place sim_scenario.h's driver-local SIM_SCENARIO_* mirror
+ * and lt_ipc.h's canonical SIM_SC_* can ever drift apart unnoticed. Catch that at compile time.
+ * Cast to (int): GCC's -Wenum-compare (-Werror here) flags a direct comparison between two
+ * different anonymous enum types even though both are just int constants. */
+_Static_assert((int)SIM_SC_LAPS == (int)SIM_SCENARIO_LAPS &&
+               (int)SIM_SC_DRAG == (int)SIM_SCENARIO_DRAG &&
+               (int)SIM_SC_PARK == (int)SIM_SCENARIO_PARK,
+               "lt_ipc.h SIM_SC_* and sim_scenario.h SIM_SCENARIO_* must stay numerically identical");
 /* No local trk_venue_t static here (Plan 7 Task 1 DRAM reclaim): pipeline_init below parses the
  * sim capture's venue JSON straight into the trk user table via trk_user_add_json, so the venue
  * lives in exactly one place -- the table entry lap_set_venue then points at. */
@@ -668,7 +677,7 @@ static void handle_sim_scenario(const command_t *cmd)
 static void handle_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
-    LT_ASSERT_VOID(cmd->type <= CMD_SIM_SCENARIO, PIPE_ASSERT_CODE);   /* valid §4.4 command type */
+    LT_ASSERT_VOID(cmd->type <= CMD_TYPE_LAST, PIPE_ASSERT_CODE);   /* valid §4.4 command type (M1) */
     switch (cmd->type) {
     case CMD_SET_MODE:
         s_mode = (cmd->arg8 == MODE_DRAG) ? MODE_DRAG : MODE_LAP;

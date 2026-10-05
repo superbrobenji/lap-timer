@@ -44,7 +44,9 @@
 #include "core/ses.h"
 #include "core/types.h"
 
-#include "sim_scenario.h"    /* SIM_SC_* -- `dbg sim drag | laps <n> | park` (Task 3); enum-only, builds on every env */
+/* `dbg sim drag | laps <n> | park` (Task 3) gets SIM_SC_* from app/lt_ipc.h (already included
+ * above, next to MODE_LAP/MODE_DRAG) -- fix round 1, M2: no sim_scenario.h include/REQUIRES needed
+ * here at all, since this file never calls into sim_common, only builds a command_t. */
 
 #include <stdio.h>
 #include <stdlib.h>

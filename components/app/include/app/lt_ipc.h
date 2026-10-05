@@ -142,8 +142,18 @@ typedef enum {
     CMD_IMU_MODE      = 7,   /* arg8 = IMU_FULL / IMU_LOWPOWER */
     CMD_SIM_SCENARIO  = 8,   /* arg8 = SIM_SC_* (sim build only), arg16 = laps */
 } command_type_t;
+/* Fix round 1, M1: the single bound every `cmd->type <= ...` check (pipeline.c's handle_cmd,
+ * ui.c's ui_send_cmd) must use, instead of a literal last enumerator that silently goes stale the
+ * next time a command is added. */
+#define CMD_TYPE_LAST CMD_SIM_SCENARIO
 
 enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_MODE_*) */
+/* Fix round 1, M2: CMD_SIM_SCENARIO's arg8 contract, same precedent as MODE_LAP/MODE_DRAG above.
+ * components/drivers/sim_common/include/sim_scenario.h carries a driver-local mirror of these
+ * three values under different names (SIM_SCENARIO_*) -- gps_sim/imu_sim are drivers `app` itself
+ * depends on, so they must not #include this FreeRTOS-laden header (see sim_scenario.h for why);
+ * pipeline.c _Static_asserts the two numeric sets agree. */
+enum { SIM_SC_LAPS = 0, SIM_SC_DRAG = 1, SIM_SC_PARK = 2 };   /* CMD_SIM_SCENARIO arg8 (sim build only) */
 
 extern QueueHandle_t g_cmd_q;
 

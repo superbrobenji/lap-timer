@@ -22,8 +22,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   page 2 SESSION BEST filled, a second run updates bests only where faster. Repeat once with
   `config set {"units":"mph","drag":{"n_mph":2,"benches_mph":[60,100]}}` (#86): labels 0-60 / 0-100
   in mph, thresholds converted (the 100 mph gate fires at ~161 km/h in the log). Session log carries
-  the EVENT records (`dbg sum <id>`). Note: the first drag launch after a boot may only teach the
-  fusion its forward axis (`forward_ok`); run `dbg sim drag` twice and judge the second run.
+  the EVENT records (`dbg sum <id>`).
 - [ ] **2. OTA rollback path.** Push any signed image; at ~10 s after its boot (inside the 30 s trial
   window, before `sup: OTA image validated`) send `dbg crash`. Expect on the next boot: the PREVIOUS
   version in the banner, `sup: OTA image rolled back by the bootloader`, errlog `E_OTA_ROLLBACK`
@@ -38,7 +37,9 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   age-out full (`kind=F` ~30 min after the previous full), 1 Hz cell-sized partials otherwise, 0 W/E,
   no WDT/reset. Moving-cap full (`partial_count >= 2*full_every` while moving): needs continuous
   motion for > 2×full_every partials — use `dbg sim laps <n>` with n ≥ 20 (Task 3) and watch for a
-  `kind=F` while the sim is still lapping.
+  `kind=F` while the sim is still lapping. Note (fix round 1, I1): each repeat ends with a 6 s
+  standstill (parked at the capture's last position) before the next one starts — expect a clean
+  STILL/MOTION pair at every lap boundary, not a flicker.
 - [ ] **5. Menu paths never exercised.** With the sim parked: Sleep now (3 s MODE hold on the item →
   sleep; wake by a button → BOOT screen, session continues/new), Calibrate ("Hold upright, press
   MODE" one-shot → `EV_CALIB_DONE` in the log), New track (CREATE mode: the NEW TRACK one-shot, cross

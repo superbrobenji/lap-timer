@@ -243,7 +243,7 @@ static char    s_lbl_disp[20];
 
 static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
 {
-    LT_ASSERT_VOID(type <= CMD_IMU_MODE, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type */
+    LT_ASSERT_VOID(type <= CMD_TYPE_LAST, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type (M1); the ui never actually posts CMD_SIM_SCENARIO (sim-only), it just shares pipeline.c's bound */
     if (g_cmd_q == NULL) {
         return;
     }
