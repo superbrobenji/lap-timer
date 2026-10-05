@@ -10,7 +10,9 @@ file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
 # by the host `test/` build only. test_epd_pure (Plan 7 Task 4) links the display_epaper_ssd1680
 # driver's host/*.c sources directly (test/CMakeLists.txt), which this lightweight core-only
 # selftest does not have on its path, so it is excluded here too.
-list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*)\\.c$")
+# test_sim_profile / test_sim_clock (OTA-screen plan Task 3) link the sim_common driver's host/*.c
+# sources and headers the same way test_epd_pure does, so they are host-only too.
+list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*|sim_profile|sim_clock)\\.c$")
 set(SUITES "")
 foreach(f ${TEST_SRCS})
   get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
