@@ -155,6 +155,20 @@ static void test_lap_p0_fault(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_fault.pbm"), &s_fb));
 }
 
+static void test_lap_p0_cur_clock(void)
+{
+    /* Live lap clock (design §4, Plan 7c T6): while cur_running the footer's LEFT cell shows CUR
+     * m:ss (fmt_time_s) in place of LAST; BEST is unchanged. 83400 ms -> "1:23". */
+    screen_model_t m;
+    lap_model_base(&m);
+    m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = -320; m.big_sector_idx = 2;
+    m.cur_running = true; m.cur_ms = 83400;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_cur_clock.pbm"), &s_fb));
+}
+
 /* ---- LAP page 1 (sector board, spec 7b §5) ---- */
 
 static void test_lap_p1_sectors(void)
@@ -166,6 +180,7 @@ static void test_lap_p1_sectors(void)
     lap_model_base(&m); m.page = 1;
     m.best_n_sectors = 3;
     m.best_sector_ms[0] = 32100; m.best_sector_ms[1] = 41000; m.best_sector_ms[2] = 39240;
+    m.have_best_sector[0] = true; m.have_best_sector[1] = true; m.have_best_sector[2] = true;
     m.have_theo = true; m.theo_best_ms = 111200;
     m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
     m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
@@ -184,7 +199,7 @@ static void test_lap_p1_many_sectors(void)
     screen_model_t m;
     lap_model_base(&m); m.page = 1;
     m.best_n_sectors = 5;
-    for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
+    for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_best_sector[i] = true; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
     m.have_theo = false;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
@@ -210,6 +225,24 @@ static void test_lap_p1_deltas_only(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_deltas_only.pbm"), &s_fb));
 }
 
+static void test_lap_p1_filled(void)
+{
+    /* Real pipeline data (Plan 7c T3, design §2): S1/S2 have a best-lap sector time on record, S3
+     * does not yet (have_best_sector[2] false) -- its value cell must show "--.--" even though i <
+     * n, not m.best_sector_ms[2]'s (unset, 0) value. THEO is on record too. */
+    screen_model_t m; lap_model_base(&m); m.page = 1;
+    m.best_n_sectors = 3;
+    m.best_sector_ms[0] = 32100; m.best_sector_ms[1] = 41000; m.best_sector_ms[2] = 39240;
+    m.have_best_sector[0] = true; m.have_best_sector[1] = true; m.have_best_sector[2] = false;   /* S3 not yet */
+    m.have_theo = true; m.theo_best_ms = 111200;
+    m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
+    m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_filled.pbm"), &s_fb));   /* S1 32.10 / S2 41.00 / S3 --.-- ; deltas -0.12 +0.40 ---- ; THEO 1:51.20 */
+}
+
 /* ---- LAP page 2 (2x2 stats grid, spec 7b §6) ---- */
 
 static void test_lap_p2_stats(void)
@@ -217,7 +250,7 @@ static void test_lap_p2_stats(void)
     /* Values taken straight from spec 7b §6's own worked example. */
     screen_model_t m;
     lap_model_base(&m); m.page = 2;
-    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.max_speed_cms = 5944; m.lean_l_deg = 52; m.lean_r_deg = 55;
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
@@ -234,7 +267,7 @@ static void test_lap_p2_stats_many_laps(void)
      * the wider 296 canvas still fits the full "(118 valid)". */
     screen_model_t m;
     lap_model_base(&m); m.page = 2;
-    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.max_speed_cms = 5944; m.lean_l_deg = 52; m.lean_r_deg = 55;
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 120; m.laps_valid = 118;
     screens_moto_render(&s_fb, &m);
@@ -252,7 +285,7 @@ static void test_lap_p2_stats_huge_laps(void)
      * limit x 292) "(11999 valid)" still does not fit but "(11999)" does, so it draws that. */
     screen_model_t m;
     lap_model_base(&m); m.page = 2;
-    m.max_speed_kmh = 214; m.lean_l_deg = 52; m.lean_r_deg = 55;
+    m.max_speed_cms = 5944; m.lean_l_deg = 52; m.lean_r_deg = 55;
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12000; m.laps_valid = 11999;
     screens_moto_render(&s_fb, &m);
@@ -261,16 +294,53 @@ static void test_lap_p2_stats_huge_laps(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_huge_laps.pbm"), &s_fb));   /* 213: nothing after "12000"; 296: "(11999)" */
 }
 
+static void test_lap_p2_stats_filled(void)
+{
+    /* Real pipeline data (Plan 7c T3, design §2): max_speed_cms is the raw session-max value the
+     * pipeline folds from lap_stats_t; the renderer converts it to km/h at render time
+     * (speed_display, core/ui/units.h) -- 5944 cm/s -> 214 km/h, the same value test_lap_p2_stats
+     * used to set directly, so this and the three cases above keep the same MAX SPD value; Plan 7c
+     * T4 (design §3) puts the unit in the label ("MAX SPD km/h") on every one of them since m.units
+     * defaults to 0 (km/h) via memset -- see test_lap_p2_stats_mph below for the mph label/value. */
+    screen_model_t m; lap_model_base(&m); m.page = 2;
+    m.max_speed_cms = 5944;   /* 214 km/h */
+    m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12; m.laps_valid = 10;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_filled.pbm"), &s_fb));
+}
+
+static void test_lap_p2_stats_mph(void)
+{
+    /* Plan 7c T4 (design §3): same model as test_lap_p2_stats_filled but m.units = 1 (mph) -- the
+     * label reads "MAX SPD mph" and the value converts to 133 (5944 cm/s -> 133 mph, speed_display
+     * rounds to nearest; see units.c). */
+    screen_model_t m; lap_model_base(&m); m.page = 2;
+    m.units = 1;
+    m.max_speed_cms = 5944;   /* 133 mph */
+    m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
+    m.laps_total = 12; m.laps_valid = 10;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_mph.pbm"), &s_fb));
+}
+
 /* ---- DRAG page 0 (spec 7b §7): the run card ---- */
 
 /* Appends one gate to m->drag[]/drag_n (present=true; the two `false, 0` distance params are
- * overridden in the caller when a case needs a distance gate). */
-static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint16_t trap, bool dist, uint16_t dist_m)
+ * overridden in the caller when a case needs a distance gate). trap_cms is raw cm/s (Plan 7c T4
+ * fix 1, ruling R-4) -- the renderer converts it with speed_display(trap_cms, m->units) at render
+ * time, so callers pass whatever cm/s value renders to the digits they want, not the digits
+ * themselves. */
+static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint16_t trap_cms, bool dist, uint16_t dist_m)
 {
     drag_row_t *r = &m->drag[m->drag_n++];
     memset(r, 0, sizeof *r);
     strcpy(r->label, label); r->t_ms = t_ms; r->present = true;
-    r->trap_kmh = trap; r->has_trap = trap != 0; r->is_distance = dist; r->dist_m = dist_m;
+    r->trap_cms = trap_cms; r->has_trap = trap_cms != 0; r->is_distance = dist; r->dist_m = dist_m;
 }
 
 static void test_drag_p0_ready(void)
@@ -287,15 +357,31 @@ static void test_drag_p0_ready(void)
 static void test_drag_p0_gate_speed(void)
 {
     /* Four gates hit, newest ("1/4") carries a trap speed: big slot shows "12.84" (FONT_HUGE),
-     * "@173" row below it (FONT_MED), footer lists the three earlier gates "60ft 2.01   330ft
-     * 5.43   1/8 8.29" in hit order. */
+     * "@173" + "km/h" row below it (FONT_MED digits, FONT_SMALL unit suffix -- Plan 7c T4, design
+     * §3; m.units defaults to 0/km/h via memset). trap_cms is raw cm/s (ruling R-4, fix round 1):
+     * 4806 cm/s -> 173 km/h (speed_display: (4806*36 + 500) / 1000 = 173). Footer lists the three
+     * earlier gates "60ft 2.01   330ft 5.43   1/8 8.29" in hit order. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
-    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4806, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173 km/h" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
+}
+
+static void test_drag_p0_trap_mph(void)
+{
+    /* Plan 7c T4 (design §3): same layout as test_drag_p0_gate_speed but m.units = 1 (mph) and a
+     * trap_cms that converts to 107 mph at render time (ruling R-4, fix round 1): 4783 cm/s -> 107
+     * mph (speed_display: (4783*22369 + 500000) / 1000000 = 107): "@107" + "mph". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.units = 1;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4783, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_trap_mph.pbm"), &s_fb));   /* big 12.84, "@107 mph" row */
 }
 
 static void test_drag_p0_distance(void)
@@ -316,11 +402,13 @@ static void test_drag_p0_fault(void)
     /* Finding 5: PF-2's footer clip and fault_strip_left_x() with a bit set were untested on DRAG
      * page 0 -- same four gates as test_drag_p0_gate_speed, plus GPS no-fix and a low battery. The
      * footer must stop clear of the fault icons (PF-2), and the battery label/icon must both be
-     * fully legible (finding 17's overprint fix). */
+     * fully legible (finding 17's overprint fix). The trap row also gains the "km/h" suffix (Plan
+     * 7c T4, design §3; m.units defaults to 0 via memset), same as test_drag_p0_gate_speed --
+     * trap_cms 4806 -> 173 km/h (ruling R-4, fix round 1; same value, see that test's comment). */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 14;
     m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW);
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
-    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4806, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -370,7 +458,7 @@ static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this r
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
     m.drag[3].present = false;
-    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
     drag_gate(&m, "100-200", 12340, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
@@ -386,13 +474,42 @@ static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, ev
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 2; m.batt_pct = 90;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
-    drag_gate(&m, "1/4", 12840, 173, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
     drag_gate(&m, "100-200", 6120, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_best.pbm"), &s_fb));
+}
+
+static void test_drag_p1_overflow(void)   /* I3 (final review, ruling R-7): all 11 default gates hit */
+{
+    /* Every one of the §11.1 eleven default gates hit this run, in table order -- more than
+     * 2*DLIST_ROWS (8) fit the two-column list, so only the first eight rows draw and the header
+     * gains " +3" (11 - 8) after "LAST RUN". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90;
+    static const char *const label[11] = { "0-60", "0-100", "0-200", "0-300", "100-200",
+                                            "60ft", "330ft", "1/8", "1000ft", "1/4", "100-0" };
+    for (int i = 0; i < 11; i++) drag_gate(&m, label[i], (uint32_t)(1000 + i * 1000), 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_overflow.pbm"), &s_fb));   /* header "LAST RUN +3"; rows 0-60..1/4 (8 of 11) */
+}
+
+static void test_drag_p2_overflow(void)   /* I3 (final review, ruling R-7): nine session-best gates */
+{
+    /* Nine gates with a session best this session (first nine of the default table) -- header
+     * gains " +1" (9 - 8) after "SESSION BEST". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 2; m.batt_pct = 90;
+    static const char *const label[9] = { "0-60", "0-100", "0-200", "0-300", "100-200",
+                                           "60ft", "330ft", "1/8", "1000ft" };
+    for (int i = 0; i < 9; i++) drag_gate(&m, label[i], (uint32_t)(1000 + i * 1000), 0, false, 0);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_overflow.pbm"), &s_fb));   /* header "SESSION BEST +1"; rows 0-60..1000ft (8 of 9) */
 }
 
 /* ---- one-shot screens (§20.6) ---- */
@@ -416,6 +533,28 @@ static void test_oneshot_boot(void)
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot.pbm"), &s_fb));
+}
+
+static void test_boot_four_lines(void)
+{
+    /* Plan 7c T8 (design §6): the exact content boot_lines_format() produces from
+     * sup_boot_report()'s table on a moto_sim boot -- STORAGE/DISPLAY already known, GPS SIM (the
+     * sim driver), IMU not yet reported ("--", the pipeline hasn't landed its report yet). */
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_BOOT;
+    strcpy(m.boot_name, "LAPTIMER");
+    strcpy(m.boot_ver, "v0.1.0-77-gabcdef0");
+    m.boot_n_lines = 4;
+    strcpy(m.boot_line[0], "STORAGE OK");
+    strcpy(m.boot_line[1], "DISPLAY OK");
+    strcpy(m.boot_line[2], "GPS SIM");
+    strcpy(m.boot_line[3], "IMU --");
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot_four_lines.pbm"), &s_fb));
 }
 
 static void test_oneshot_venue(void)
@@ -571,21 +710,29 @@ int main(void)
     RUN_TEST(test_lap_p0_lap_delta_wide);
     RUN_TEST(test_lap_p0_new_best);
     RUN_TEST(test_lap_p0_fault);
+    RUN_TEST(test_lap_p0_cur_clock);
     RUN_TEST(test_lap_p1_sectors);
     RUN_TEST(test_lap_p1_many_sectors);
     RUN_TEST(test_lap_p1_deltas_only);
+    RUN_TEST(test_lap_p1_filled);
     RUN_TEST(test_lap_p2_stats);
     RUN_TEST(test_lap_p2_stats_many_laps);
     RUN_TEST(test_lap_p2_stats_huge_laps);
+    RUN_TEST(test_lap_p2_stats_filled);
+    RUN_TEST(test_lap_p2_stats_mph);
     RUN_TEST(test_drag_p0_ready);
     RUN_TEST(test_drag_p0_gate_speed);
+    RUN_TEST(test_drag_p0_trap_mph);
     RUN_TEST(test_drag_p0_distance);
     RUN_TEST(test_drag_p0_fault);
     RUN_TEST(test_drag_p0_footer_scroll);
     RUN_TEST(test_drag_p0_armed_gates);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p2_best);
+    RUN_TEST(test_drag_p1_overflow);
+    RUN_TEST(test_drag_p2_overflow);
     RUN_TEST(test_oneshot_boot);
+    RUN_TEST(test_boot_four_lines);
     RUN_TEST(test_oneshot_venue);
     RUN_TEST(test_oneshot_safe);
     RUN_TEST(test_oneshot_lowbatt);

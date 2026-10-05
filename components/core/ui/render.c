@@ -271,3 +271,27 @@ void fb_bar(fb_t *fb, int x, int y, int w, int h, uint8_t pct)
         fb_rect(fb, x + 1 + fill_w, y + 1, iw - fill_w, ih, 0, true);
     }
 }
+
+bool fb_diff_rect(const fb_t *prev, const fb_t *cur, fb_rect_t *out)
+{
+    CORE_ASSERT_RET(prev != NULL && cur != NULL && out != NULL, UI_ASSERT_CODE, false);
+    out->valid = false;
+    CORE_ASSERT_RET(prev->w == cur->w && prev->h == cur->h && prev->stride == cur->stride, UI_ASSERT_CODE, false);
+    int bx0 = (int)cur->stride, bx1 = -1, y0 = (int)cur->h, y1 = -1;
+    for (int y = 0; y < (int)cur->h; y++) {
+        const uint8_t *pa = prev->bits + (size_t)y * prev->stride;
+        const uint8_t *pb = cur->bits + (size_t)y * cur->stride;
+        for (int i = 0; i < (int)cur->stride; i++) {
+            if (pa[i] == pb[i]) continue;
+            if (i < bx0) bx0 = i;
+            if (i > bx1) bx1 = i;
+            if (y < y0) y0 = y;
+            y1 = y;
+        }
+    }
+    if (bx1 < 0) return false;
+    out->x0 = (uint16_t)(bx0 * 8); out->x1 = (uint16_t)((bx1 + 1) * 8);
+    out->y0 = (uint16_t)y0;        out->y1 = (uint16_t)(y1 + 1);
+    out->valid = true;
+    return true;
+}

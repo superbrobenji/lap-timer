@@ -14,6 +14,10 @@
  * pipeline reads the sim venue from gps_sim only when this is set (§4.6, 3.4). */
 #define CFG_GPS_SIM        @CFG_GPS_SIM@
 
+/* 1 on the bench build whose IMU driver is imu_sim (Plan 7c T8, design §6): the pipeline reports
+ * the BOOT screen's IMU slot as SIM rather than OK/FAIL when this is set, same as CFG_GPS_SIM. */
+#define CFG_IMU_SIM        @CFG_IMU_SIM@
+
 #define CFG_PANEL_WS213V4  @CFG_PANEL_WS213V4@
 #define CFG_PANEL_WS29V2   @CFG_PANEL_WS29V2@
 

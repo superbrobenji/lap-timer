@@ -8,6 +8,7 @@
  */
 #include "core/ui/canvas.h"
 #include "core/ui/model.h"
+#include "core/ui/units.h"
 #include "core/core.h"
 
 #include <string.h>
@@ -167,6 +168,30 @@ static void fmt_secs_ms(char *buf, uint32_t ms)
     CORE_ASSERT_VOID(strlen(buf) <= 5u, UI_ASSERT_CODE);
 }
 
+/* M:SS (no centiseconds) for the live lap clock (design §4, Plan 7c T6, ruling R-1): clamps at
+ * 99:59 (minutes >= 100 show 99:59) so the value is never more than 5 glyphs no matter how long
+ * the current lap runs -- unlike fmt_time_ms above, which shows hundredths and has no such
+ * ceiling. `buf` must be >= 6 bytes ("99:59\0"). */
+static void fmt_time_s(char *buf, uint32_t ms)
+{
+    CORE_ASSERT_VOID(buf != NULL, UI_ASSERT_CODE);
+    unsigned s = (unsigned)((ms / 1000u) % 60u);
+    unsigned m = (unsigned)(ms / 60000u);
+    if (m >= 100u) {
+        m = 99u;
+        s = 59u;
+    }
+    char *p = buf;
+    p = put_uint(p, m);
+    p = put_char(p, ':');
+    if (s < 10u) {
+        p = put_char(p, '0');
+    }
+    p = put_uint(p, s);
+    CORE_ASSERT_VOID((size_t)(p - buf) <= 5u, UI_ASSERT_CODE); /* ruling R-1: never more than 5 glyphs */
+    *p = '\0';
+}
+
 /* ---- shared fault-icon strip (spec §20.5 + §17.4) ---- */
 
 /* Bit position (SCR_SYS_*, model.h) -> icon (icons.h), or -1 for a bit with no icon: the §17.4
@@ -306,6 +331,14 @@ static void fmt_delta_clamped(char *buf, int32_t dms, int32_t max_ms)
     CORE_ASSERT_VOID(strlen(buf) <= 6u, UI_ASSERT_CODE); /* sign + up to "99.99": never wider than the 6-glyph budget */
 }
 
+/* Plan 7c T4 (design §3): the FONT_SMALL unit string for every speed_display() value on screen --
+ * shared by LAP page 2's "MAX SPD" label and the DRAG trap row's suffix (fix round 1: factored out
+ * of the two call sites' duplicated ternary). */
+static const char *unit_suffix(uint8_t units)
+{
+    return units ? "mph" : "km/h";
+}
+
 /* Renders the 64 px big slot (FONT_HUGE): BIG_SECTOR_DELTA/BIG_LAP_DELTA show the signed delta,
  * clamped to CARD_DELTA_CLAMP_MS; BIG_NONE (no best lap yet) falls back to "LAP n" in FONT_MED,
  * since FONT_HUGE has no letters. Returns the pen x after the drawn text (CARD_BIG_X itself for
@@ -358,21 +391,22 @@ static void render_card_tag(fb_t *fb, int x, int y)
     fb_text_inv(fb, &FONT_SMALL, x + CARD_TAG_PAD_X, y + CARD_TAG_PAD_Y, "BEST");
 }
 
-/* Footer: "LAST"/"BEST" labels (FONT_SMALL) over their right-aligned FONT_MED values, both fixed
- * columns (spec 7b §4). Plan 7b T2 fix 1 (ruling T2-R1): CARD_LABEL_Y/CARD_VALUE_Y now sit the
- * whole footer row band above FAULT_STRIP_Y on both canvases (canvas.h), so BEST no longer needs
- * to retract on x to clear the fault strip -- it always right-aligns at CARD_RIGHT_RIGHT_X, same
- * as LAST always right-aligns at CARD_LEFT_RIGHT_X. The assertion below is the geometry proof
- * that backs this: LAST's value ends at CARD_LEFT_RIGHT_X and BEST's (7-glyph FONT_MED, the
- * widest EMPTY_TIME/fmt_time_ms ever produces for these fields) starts no further left than
- * CARD_RIGHT_RIGHT_X - 7*FONT_MED.w, so the two columns cannot meet on either canvas. */
-static void render_card_footer(fb_t *fb, const screen_model_t *m)
+/* Footer LEFT cell (spec 7b §4, amended design §4/Plan 7c T6): while m->cur_running (the live
+ * clock is on and a lap is in progress) shows label "CUR" over the running fmt_time_s(cur_ms);
+ * otherwise the "LAST" label over prev_ms exactly as before. Both right-align the same FONT_MED
+ * value at CARD_LEFT_RIGHT_X, so the geometry render_card_footer proves below still holds either
+ * way. Split out of render_card_footer to keep it under the function-length cap. */
+static void render_footer_left(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(CARD_RIGHT_RIGHT_X - 7 * (int)FONT_MED.w >= CARD_LEFT_RIGHT_X, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
-
+    if (m->cur_running) {
+        fb_text(fb, &FONT_SMALL, CARD_LEFT_LABEL_X, CARD_LABEL_Y, "CUR");
+        fmt_time_s(buf, m->cur_ms);
+        fb_text_right(fb, &FONT_MED, CARD_LEFT_RIGHT_X, CARD_VALUE_Y, buf);
+        return;
+    }
     fb_text(fb, &FONT_SMALL, CARD_LEFT_LABEL_X, CARD_LABEL_Y, "LAST");
     if (m->have_prev) {
         fmt_time_ms(buf, m->prev_ms);
@@ -381,7 +415,25 @@ static void render_card_footer(fb_t *fb, const screen_model_t *m)
         *p = '\0';
     }
     fb_text_right(fb, &FONT_MED, CARD_LEFT_RIGHT_X, CARD_VALUE_Y, buf);
+}
 
+/* Footer: LEFT cell (render_footer_left, above: LAST or, while the live clock ticks, CUR) beside
+ * the "BEST" label (FONT_SMALL) over its right-aligned FONT_MED value, both fixed columns (spec
+ * 7b §4). Plan 7b T2 fix 1 (ruling T2-R1): CARD_LABEL_Y/CARD_VALUE_Y now sit the whole footer row
+ * band above FAULT_STRIP_Y on both canvases (canvas.h), so BEST no longer needs to retract on x to
+ * clear the fault strip -- it always right-aligns at CARD_RIGHT_RIGHT_X, same as the left cell
+ * always right-aligns at CARD_LEFT_RIGHT_X. The assertion below is the geometry proof that backs
+ * this: the left cell's value ends at CARD_LEFT_RIGHT_X and BEST's (7-glyph FONT_MED, the widest
+ * EMPTY_TIME/fmt_time_ms ever produces for these fields) starts no further left than
+ * CARD_RIGHT_RIGHT_X - 7*FONT_MED.w, so the two columns cannot meet on either canvas. */
+static void render_card_footer(fb_t *fb, const screen_model_t *m)
+{
+    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(CARD_RIGHT_RIGHT_X - 7 * (int)FONT_MED.w >= CARD_LEFT_RIGHT_X, UI_ASSERT_CODE);
+    render_footer_left(fb, m);
+
+    char buf[TIME_BUF_LEN];
     fb_text(fb, &FONT_SMALL, CARD_RIGHT_LABEL_X, CARD_LABEL_Y, "BEST");
     if (m->have_best) {
         fmt_time_ms(buf, m->best_ms);
@@ -454,12 +506,16 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
         if (i == BOARD_COLS - 1 && n > BOARD_COLS) { p = put_str(p, " +"); p = put_uint(p, (unsigned)(n - BOARD_COLS)); }
         *p = '\0';
         fb_text(fb, &FONT_SMALL, x, BOARD_LABEL_Y, buf);
-        if (i < n) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
+        /* Plan 7c T3 (design §2): a sector's best time shows only once the pipeline has one on
+         * record (have_best_sector[i]) -- i < n alone is not enough, since best_n_sectors reports
+         * the locked layout's split count before every sector has completed a valid lap yet. */
+        if (i < n && m->have_best_sector[i]) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_VALUE_Y, buf);
         /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i] (spec §5 literal),
-         * not on best_n_sectors -- no producer fills best_n_sectors yet (the best-lap sector
-         * times/theo wiring is roadmap follow-up #58), so gating the delta on `i < n` as well would
-         * always show "----" here on target. */
+         * never on best_n_sectors -- ui.c's copy_best_snapshot() (Plan 7c T3, #79) is the producer
+         * that fills best_n_sectors now, but the delta row is a different signal (this lap's live
+         * sector splits vs. the locked layout's best-sector count) and must not be gated on it: a
+         * lap can cross sector i before the pipeline has ever recorded a best time for it. */
         if (m->have_last_sector_delta[i]) { fmt_delta_clamped(buf, m->last_sector_delta_ms[i], BOARD_DELTA_CLAMP_MS); }
         else { p = put_str(buf, "----"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_DELTA_Y, buf);
@@ -512,9 +568,17 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char  buf[48];
+    char  label[16];
     char *p;
-    p = put_uint(buf, m->max_speed_kmh); *p = '\0';
-    grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, "MAX SPD", buf);
+    /* Plan 7c T4 (design §3): max_speed_cms is the raw session-max the pipeline folds; the display
+     * unit conversion happens here, at render, using the model's units toggle. The label carries
+     * the unit too (grid_cell already draws labels in FONT_SMALL, which has the lowercase glyphs
+     * "km/h"/"mph" need -- FONT_MED has none). */
+    p = put_uint(buf, speed_display(m->max_speed_cms, m->units)); *p = '\0';
+    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, unit_suffix(m->units));
+    CORE_ASSERT_VOID((size_t)(lp - label) < sizeof label, UI_ASSERT_CODE);   /* M8: room left for the NUL */
+    *lp = '\0';
+    grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, label, buf);
     /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
      * to 99 before formatting so "L99 R99" is provably the widest this cell ever draws. */
     uint8_t lean_l = m->lean_l_deg > 99u ? 99u : m->lean_l_deg;
@@ -537,11 +601,13 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
  * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
  * stopping DISTANCE in metres, not an elapsed time) -- the distance as a plain integer in
  * FONT_HUGE followed by a FONT_SMALL "m" (FONT_HUGE has no lowercase, so the unit itself must use
- * a different font). A gate with has_trap set also draws its trap speed as "@<trap_kmh>" on the
- * row below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading
- * character draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows
- * "@173" this way and the model has no units field yet for a suffix (follow-up). */
-static void render_dcard_value(fb_t *fb, const drag_row_t *r)
+ * a different font). A gate with has_trap set also draws its trap speed as "@<trap>" on the row
+ * below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading character
+ * draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows "@173" this
+ * way. Plan 7c T4 fix 1 (ruling R-4): trap_cms is raw cm/s -- converted to the display unit HERE,
+ * at render time, same as every other speed on screen (freezing it at event time would mislabel a
+ * run after a later units toggle); a FONT_SMALL unit suffix follows the digits. */
+static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(r != NULL, UI_ASSERT_CODE);
@@ -560,9 +626,11 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r)
          * hugging the FONT_MED speed digits' baseline, and the speed itself (no '@') in FONT_MED
          * beside it. */
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_SPEED_Y + DCARD_AT_DY, "@");
-        char *p = put_uint(buf, r->trap_kmh);
+        char *p = put_uint(buf, speed_display(r->trap_cms, units));
         *p = '\0';
-        fb_text(fb, &FONT_MED, DCARD_LABEL_X + (int)FONT_SMALL.w + DCARD_AT_GAP, DCARD_SPEED_Y, buf);
+        int end = fb_text(fb, &FONT_MED, DCARD_LABEL_X + (int)FONT_SMALL.w + DCARD_AT_GAP, DCARD_SPEED_Y, buf);
+        /* Same FONT_SMALL baseline as the "@" above (DCARD_SPEED_Y + DCARD_AT_DY, T4-R1). */
+        fb_text(fb, &FONT_SMALL, end + DCARD_SPEED_UNIT_GAP, DCARD_SPEED_Y + DCARD_AT_DY, unit_suffix(units));
     }
 }
 
@@ -612,7 +680,7 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
         fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, "READY");
     } else {
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);
-        render_dcard_value(fb, &m->drag[n - 1u]);
+        render_dcard_value(fb, &m->drag[n - 1u], m->units);
         render_dcard_footer(fb, m, n);
     }
     if (m->drag_armed) {
@@ -635,7 +703,18 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL && title != NULL, UI_ASSERT_CODE);
-    fb_text(fb, &FONT_SMALL, DLIST_COL1_X, DLIST_HEADER_Y, title);
+    int end = fb_text(fb, &FONT_SMALL, DLIST_COL1_X, DLIST_HEADER_Y, title);
+    /* I3 (final review, ruling R-7): the list itself caps at 2*DLIST_ROWS rows; when more gates
+     * were hit than that, the header names the overflow count so nothing is silently dropped. */
+    if (m->drag_n > 2u * DLIST_ROWS) {
+        char  buf[8];
+        char *p = put_char(buf, '+');
+        p = put_uint(p, (unsigned)(m->drag_n - 2u * DLIST_ROWS));
+        *p = '\0';
+        CORE_ASSERT_VOID(end + DLIST_MORE_GAP + (int)strlen(buf) * FONT_SMALL.w <= CANVAS_VISIBLE_W,
+                          UI_ASSERT_CODE);
+        fb_text(fb, &FONT_SMALL, end + DLIST_MORE_GAP, DLIST_HEADER_Y, buf);
+    }
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     for (uint8_t i = 0; i < n && i < 2u * DLIST_ROWS; i++) {
         int col = i / DLIST_ROWS, row = i % DLIST_ROWS; /* left column fills first */
@@ -772,6 +851,10 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
+    /* Plan 7c T8 (design §6): all BOOT_MAX_LINES self-test lines must sit above CANVAS_H --
+     * 44 + 3*14 + 12 = 98 < 122 (213 canvas), 56 + 3*16 + 12 = 116 < 128 (296x128 canvas). */
+    CORE_ASSERT_VOID(BOOT_LINE_Y0 + (BOOT_MAX_LINES - 1) * BOOT_LINE_H + FONT_SMALL.h <= CANVAS_H,
+                     UI_ASSERT_CODE);
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, m->boot_name), BOOT_NAME_Y, m->boot_name);
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, m->boot_ver), BOOT_VER_Y, m->boot_ver);
 
