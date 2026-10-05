@@ -45,10 +45,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   standstill (parked at the capture's last position) before the next one starts — expect a clean
   STILL/MOTION pair at every lap boundary, not a flicker.
 - [ ] **5. Menu paths never exercised** — checked 2026-10-05: all four are STUBS today, so this item stays open until they land. Sleep now → Plan 6.2 (power state machine, light/deep sleep, button wake); Calibrate → Plan 8.4 (#93: the fusion calibration is never invoked); New track → #97 (CREATE-mode wiring: NEW TRACK one-shot, MODE marks S/F, venue saved); Layout override → #98 (per-venue layout list). Re-test each when its owner lands: Sleep now (3 s MODE hold → sleep; wake by a button → BOOT), Calibrate ("Hold upright, press MODE" → `EV_CALIB_DONE`), New track (NEW TRACK one-shot, cross S/F with `dbg sim laps 1`, MODE → a user venue appears in `lt list`), layout override (forced layout id → the VENUE one-shot shows the forced name).
-- [ ] **6. Real-GPS smoke (`moto_neo6m` image).** Flash the neo6m build (USB with the dev-kit held in
-  reset, or OTA if the hwid matches — check `CFG_HWID`). Indoors: BOOT line `GPS OK`, the NOFIX
-  icon in the strip, `EV_FIX_LOST` after FIX_LOST_COUNT invalid fixes; outdoors: fix, speed on the
-  card, no SIM glyph. (Venue detection on a real track is a ride test, not a bench item.)
+- [ ] **6. Real-GPS smoke (`moto_neo6m` image)** — deferred 2026-10-05: waits for Plan 8 (real sensors) and the neo6m board on the bench. Then: flash over USB (dev-kit held in reset / BOOT), indoors BOOT line `GPS OK`, NOFIX icon, `EV_FIX_LOST`; outdoors a fix, speed on the card, no SIM glyph.
 - [x] **7. Storage full as a planned gate.** Leave the sim lapping (`dbg sim laps 200`) until
   `E_STO_EVICT`/`E_STO_FULL` appear (~2-3 h at 10 Hz fused logging; or pre-fill the fs with
   `dbg logtest`). Expect: eviction keeps a reserve, the open session keeps writing, `lt list`
@@ -61,12 +58,15 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   and the OTA screen reverts on its own (`ui: ota screen: stale, reverting`, `OTA_STALE_MS`).
 - [x] **9. SIM + MOVING glyphs** (same plan). Sim build: SIM glyph always present in the strip; MOVING
   glyph present while the sim laps, gone once parked; the menu opens only once MOVING is gone.
-- [ ] **10. #91 list cost** (if the lap-timer fix has landed): `lt list` round trip on the dev-kit
+- [x] **10. #91 list cost** (if the lap-timer fix has landed): `lt list` round trip on the dev-kit
   console (`-- rt N ms`) with ≥ 40 sessions, before/after.
-- [ ] **11. Dev-kit first-load after a cold boot** (#65 regression check): power-cycle both boards,
+- [x] **11. Dev-kit first-load after a cold boot** (#65 regression check): power-cycle both boards,
   open Sessions and Config fresh 5× each — 10/10 without Reload.
 
-## Closed on 2026-10-04/05 (for reference)
+## Closed on 2026-10-05 (bench day 3)
+items 1, 2, 3, 4, 7, 8, 9, 10, 11 (11 = the #65 re-test on 2026-10-05: 4/4 list relays clean, fresh loads without Reload). Open: 5 (menu stubs — Plan 6.2, Plan 8.4/#93, #97, #98) and 6 (Plan 8 + hardware).
+
+## Closed on 2026-10-04/05 (bench day 2, for reference)
 boot lines; lap pages 0/1/2; mph via menu; menu/caret; live clock 1 Hz; 10-min soak; drag READY/ARMED
 card; blob resets; OTA session close + summary; delete/bad-id; SAFE → RECOVERY → clear; link status;
 config reload (menu + remote); engine reset; config ring; #67 download; #68 stream indication; #65
