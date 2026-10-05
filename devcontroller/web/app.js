@@ -108,6 +108,18 @@
     });
   }
 
+  /* Picks the message for a 503 by body shape (bench B-F8): webapi answers either
+   * {"error":"link busy, retry"} while a slow `list`/other request holds the link mutex, or
+   * {"connected":false} when the lap-timer link is actually down. Shared by requestSessions and
+   * loadConfig so the two read the same wording. */
+  function link503Msg(res, notConnectedMsg) {
+    var err = res.data && res.data.error;
+    if (typeof err === "string" && err.indexOf("busy") !== -1) {
+      return "Lap-timer link busy — retry shortly.";
+    }
+    return notConnectedMsg;
+  }
+
   /* ---------- tabs ---------- */
 
   function initTabs() {
@@ -586,9 +598,22 @@
     var msg = $("#config-status");
     hideMsg(msg);
     $("#config-fields").innerHTML = '<p class="muted">Loading&hellip;</p>';
+    requestConfig(false);
+  }
+
+  /* Fetches GET /api/config once. On a 503 (either body -- link busy mid-`list`, or genuinely not
+   * connected) retries exactly once after 1000 ms before showing the real reason, mirroring
+   * requestSessions' single retry (bench B-F8: a slow `list` holding the link mutex is a transient
+   * 503, not a real disconnect). */
+  function requestConfig(isRetry) {
+    var msg = $("#config-status");
     fetchJson("/api/config").then(function (res) {
       if (res.status === 503) {
-        showMsg(msg, "err", "Lap-timer not connected — config unavailable.");
+        if (!isRetry) {
+          setTimeout(function () { requestConfig(true); }, 1000);
+          return;
+        }
+        showMsg(msg, "err", link503Msg(res, "Lap-timer not connected — config unavailable."));
         $("#config-fields").innerHTML = '<p class="muted">Not connected.</p>';
         return;
       }
@@ -698,17 +723,29 @@
     requestSessions(my, false);
   }
 
-  /* Fetches GET /api/sessions once for request token `my` (see sessionsReq above). On a 502 (an
-   * early link failure before the response committed, #65 -- e.g. the first request right after
-   * connect racing the lap-timer's RX task) or a fetch-level rejection (res.networkError), retry
-   * exactly once after 500 ms before giving up and showing the real reason (res.data.error when
-   * the server sent one, else "bad response"). */
+  /* Fetches GET /api/sessions once for request token `my` (see sessionsReq above). Two transient
+   * cases each get exactly one retry before giving up and showing the real reason:
+   *  - 502 (an early link failure before the response committed, #65 -- e.g. the first request
+   *    right after connect racing the lap-timer's RX task) or a fetch-level rejection
+   *    (res.networkError): retry after 500 ms.
+   *  - 503 (bench B-F8: a slow `list` -- ~80 ms/session scanning summaries before the header can
+   *    be sent -- holding the link mutex answers {"error":"link busy, retry"}; a genuinely down
+   *    link answers {"connected":false}): retry after 1000 ms, then pick the message by body
+   *    shape (link503Msg).
+   * Only one retry total happens (whichever branch fires first sets isRetry). */
   function requestSessions(my, isRetry) {
     var msg = $("#sessions-status");
     fetchJson("/api/sessions").then(function (res) {
       if (my !== sessionsReq) return;   /* superseded by a newer loadSessions() call */
       if (res.status === 503) {
-        showMsg(msg, "err", "Lap-timer not connected — sessions unavailable.");
+        if (!isRetry) {
+          setTimeout(function () {
+            if (my !== sessionsReq) return;   /* superseded while the retry was pending */
+            requestSessions(my, true);
+          }, 1000);
+          return;
+        }
+        showMsg(msg, "err", link503Msg(res, "Lap-timer not connected — sessions unavailable."));
         renderSessionsTable([]);
         return;
       }
