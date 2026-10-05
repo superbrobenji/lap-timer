@@ -594,23 +594,31 @@
     return arrayify(root);
   }
 
+  var configReq = 0;   /* request sequence token (B-F8 review, Important): bumped on every loadConfig()
+                        * entry so a Reload click during the 1 s 503-retry window cannot let the
+                        * older chain's retry overwrite the newer, already-rendered form */
+
   function loadConfig() {
     var msg = $("#config-status");
     hideMsg(msg);
     $("#config-fields").innerHTML = '<p class="muted">Loading&hellip;</p>';
-    requestConfig(false);
+    requestConfig(++configReq, false);
   }
 
-  /* Fetches GET /api/config once. On a 503 (either body -- link busy mid-`list`, or genuinely not
+  /* Fetches GET /api/config once for request token `my` (see configReq above). On a 503 (either body -- link busy mid-`list`, or genuinely not
    * connected) retries exactly once after 1000 ms before showing the real reason, mirroring
    * requestSessions' single retry (bench B-F8: a slow `list` holding the link mutex is a transient
    * 503, not a real disconnect). */
-  function requestConfig(isRetry) {
+  function requestConfig(my, isRetry) {
     var msg = $("#config-status");
     fetchJson("/api/config").then(function (res) {
+      if (my !== configReq) return;   /* superseded by a newer loadConfig() call */
       if (res.status === 503) {
         if (!isRetry) {
-          setTimeout(function () { requestConfig(true); }, 1000);
+          setTimeout(function () {
+            if (my !== configReq) return;   /* superseded while the retry was pending */
+            requestConfig(my, true);
+          }, 1000);
           return;
         }
         showMsg(msg, "err", link503Msg(res, "Lap-timer not connected — config unavailable."));

@@ -433,7 +433,7 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
             idle_dl = esp_timer_get_time() +
                       (int64_t)lh_dl_gap_ms(dl.state, DL_FIRST_TMO_MS, DL_IDLE_TMO_MS) * 1000;
         }
-        if (t_header == 0 && dl.state >= LH_DL_BODY) {
+        if (t_header == 0 && dl.state >= LH_DL_BODY && dl.state != LH_DL_ERR) {   /* a real header, not a parse error */
             t_header = esp_timer_get_time();
             if (s_trace)
                 ESP_LOGI(TAG, "trace: dl header '%s' size=%u", dl.name, (unsigned)dl.body_size);
