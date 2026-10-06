@@ -13,10 +13,13 @@
 #include "core/ui/canvas.h"
 #include "core/ui/fonts.h"
 #include "core/ui/icons.h"
+#include "core/ui/model.h" /* ui_layout_label (menu_labels.c, #98); also trk_venue_t */
 #include "core/ui/render.h"
 #include "pbm.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #ifndef TEST_DIR
 #error "TEST_DIR (test/CMakeLists.txt) must name this file's source directory"
@@ -219,6 +222,32 @@ static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
     TEST_ASSERT_TRUE(s_fb.dirty.y1 <= s_fb.h);
 }
 
+/* ---- ui_layout_label (core/ui/menu_labels.c, #98) ---- */
+
+static void test_ui_layout_label(void)
+{
+    char buf[32];
+    TEST_ASSERT_EQUAL_INT(12, ui_layout_label(NULL, 0, buf, sizeof buf));   /* NULL venue -> Auto */
+    TEST_ASSERT_EQUAL_STRING("Layout: Auto", buf);
+
+    trk_venue_t v;
+    memset(&v, 0, sizeof v);
+    v.n_layouts = 2;
+    snprintf(v.layouts[0].name, sizeof v.layouts[0].name, "Long");
+    snprintf(v.layouts[1].name, sizeof v.layouts[1].name, "Short");
+
+    TEST_ASSERT_EQUAL_INT(13, ui_layout_label(&v, 2, buf, sizeof buf));     /* choice 2 -> layouts[1] */
+    TEST_ASSERT_EQUAL_STRING("Layout: Short", buf);
+
+    TEST_ASSERT_EQUAL_INT(12, ui_layout_label(&v, 9, buf, sizeof buf));     /* out-of-range -> Auto */
+    TEST_ASSERT_EQUAL_STRING("Layout: Auto", buf);
+
+    char small[16];
+    snprintf(v.layouts[1].name, sizeof v.layouts[1].name, "ReallyLongLayoutName12");   /* 22 chars */
+    TEST_ASSERT_EQUAL_INT(-1, ui_layout_label(&v, 2, small, sizeof small)); /* truncates */
+    TEST_ASSERT_TRUE(strlen(small) < sizeof small);                        /* NUL-terminated, no overflow */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -233,5 +262,6 @@ int main(void)
     RUN_TEST(test_icons_and_bar);
     RUN_TEST(test_composite_lap_screen);
     RUN_TEST(test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds);
+    RUN_TEST(test_ui_layout_label);
     return UNITY_END();
 }

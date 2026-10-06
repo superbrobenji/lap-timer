@@ -5,6 +5,7 @@
 
 #include "core/types.h" /* LAP_MAX_SECTORS, DRAG_MAX_GATES */
 #include "core/ui/render.h"
+#include "core/trk.h" /* trk_venue_t (ui_layout_label, #98) -- also pulls in <stddef.h> for size_t below */
 
 /* Screen model + moto riding/one-shot/menu screens (spec §20.4-20.7, §17.4). Pure C11, same
  * constraints as the rest of core/ui (no ESP-IDF/FreeRTOS/malloc/float/libm) — screens_moto.c
@@ -172,6 +173,13 @@ enum {
  * SYS_FUSION_DISAGREE, which have no matching bitmap in icons.h) draw nothing. Exposed so the
  * DRAG renderer (Task 2) reuses it. */
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct);
+
+/* "Layout: Auto" or "Layout: <name>" for the Layout menu item (spec §20.7, #98): choice 0 is
+ * Auto, choice i (1..venue->n_layouts) is venue->layouts[i-1].name. A NULL venue or a choice
+ * outside that range reads "Layout: Auto". Returns the formatted length (excluding the NUL), or
+ * -1 if it did not fit in `cap` (buf is still left NUL-terminated, same contract as
+ * drag_gate_label). Pure (menu_labels.c). */
+int ui_layout_label(const trk_venue_t *venue, uint8_t choice, char *buf, size_t cap);
 
 /* Status line under the OTA one-shot's percentage (spec §20.6): any phase value other than the
  * three OTA_PHASE_* enumerators reads as RECEIVING, the phase the screen is first shown in. */

@@ -2383,7 +2383,7 @@ Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a stri
 Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignored (the `MOVING` glyph in the fault-icon strip (§20.5) stays on while the lock holds). Items (UP/DOWN move, MODE select, long MODE back/exit, auto-exit after 30 s idle):
 
 1. Mode: Lap / Drag
-2. Layout: list of the current venue's layouts + `Auto`
+2. Layout: cycles the current venue's layouts, `Auto` first — MODE on this item advances Auto → L1 → L2 → ... → Ln → Auto (the venue's layout list, by table order) and sends `CMD_SET_LAYOUT` (0 = Auto, else the chosen layout's id; the pipeline's `lap_force_layout()` also clears the best-sector snapshot). The choice is a per-venue manual override, runtime-only — not persisted — and resets to `Auto` the next time a venue is found. The VENUE one-shot (§20.6) shows the forced layout's real name once it locks (#98); venue/layout names throughout the ui are resolved from the track table (`trk_get`), not placeholder ids.
 3. New track (§10.9)
 4. Calibrate (orientation capture; shows result)
 5. Units: km/h / mph

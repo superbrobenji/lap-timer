@@ -34,8 +34,9 @@
 #include "core/cfg.h"
 #include "core/drag.h" /* drag_cfg_t/drag_gate_def_t/drag_cfg_from_user/drag_gate_label (Plan 7c T2/T5) */
 #include "core/event.h"
+#include "core/trk.h" /* trk_get/trk_venue_t: venue/layout names resolved from the track table (#98) */
 #include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H/MENU_VISIBLE_ROWS: compile-time by PANEL (Plan 7 T3) */
-#include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
+#include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc.; ui_layout_label (#98) */
 #include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
 #include "core/ui/stats_fold.h" /* session_max_t / session_max_fold (Plan 7c T1/T3) */
 
@@ -241,6 +242,14 @@ static char    s_lbl_mode[16];
 static char    s_lbl_units[16];
 static char    s_lbl_dist[16];
 static char    s_lbl_disp[20];
+static char    s_lbl_layout[32];
+
+/* Layout menu item (#98): the current venue (set by the last EV_VENUE_FOUND) and the user's
+ * manual cycle position into its layout list (0 = Auto, i = venue->layouts[i-1]). Runtime-only --
+ * not persisted -- and reset to Auto on the next EV_VENUE_FOUND (spec §20.7: a per-venue manual
+ * override, not a sticky preference). */
+static uint16_t s_venue_id;
+static uint8_t  s_layout_choice;
 
 /* ---- helpers ---- */
 
@@ -281,9 +290,14 @@ static void build_menu(void)
     snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
+    /* #98: recomputed from the source of truth (s_venue_id/s_layout_choice, armed by
+     * handle_venue_found()), same pattern as the other dynamic labels above -- so the menu always
+     * opens showing the right choice even if menu_do_layout()'s own live update (below) was never
+     * reached this venue (e.g. the venue was just found and the menu has not been cycled yet). */
+    (void)ui_layout_label(trk_get(s_venue_id), s_layout_choice, s_lbl_layout, sizeof s_lbl_layout);
 
     menu_add(&n, s_lbl_mode, MA_MODE);
-    menu_add(&n, "Layout", MA_LAYOUT);
+    menu_add(&n, s_lbl_layout, MA_LAYOUT);
     menu_add(&n, "New track", MA_NEWTRACK);
     menu_add(&n, "Calibrate", MA_CALIBRATE);
     menu_add(&n, s_lbl_units, MA_UNITS);
@@ -456,6 +470,25 @@ static void menu_do_display(void)
     s_dirty = true;
 }
 
+/* MA_LAYOUT (#98): cycle the Layout menu item through the current venue's layouts, Auto first --
+ * Auto, L1, L2, ..., Ln, Auto, ... s_venue_id/s_layout_choice are the per-venue, runtime-only
+ * state handle_venue_found() arms (reset to Auto there, not persisted). Sends CMD_SET_LAYOUT (0 =
+ * Auto -> lap_force_layout() in the pipeline, which also clears the best snapshot) and refreshes
+ * s_lbl_layout immediately for live feedback while the menu stays open (same pattern as
+ * menu_do_units()/menu_do_dist() above). */
+static void menu_do_layout(void)
+{
+    const trk_venue_t *v = trk_get(s_venue_id);
+    uint8_t n = (v != NULL) ? v->n_layouts : 0u;
+    LT_ASSERT_VOID(n <= TRK_MAX_LAYOUTS, UI_APP_ASSERT_CODE);
+    s_layout_choice = (uint8_t)((s_layout_choice + 1u) % (n + 1u));          /* Auto, L1, L2, ..., Auto */
+    uint16_t id = (s_layout_choice == 0u || v == NULL) ? 0u : v->layouts[s_layout_choice - 1u].id;
+    ui_send_cmd(CMD_SET_LAYOUT, 0, id);                                       /* 0 = Auto (lap_force_layout) */
+    (void)ui_layout_label(v, s_layout_choice, s_lbl_layout, sizeof s_lbl_layout);
+    ESP_LOGI(TAG, "menu: layout choice %u -> id %u", (unsigned)s_layout_choice, (unsigned)id);
+    s_dirty = true;
+}
+
 static void menu_select(void)
 {
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* indexes s_menu_action[] */
@@ -467,8 +500,7 @@ static void menu_select(void)
     case MA_UNITS:   menu_do_units();   break;
     case MA_DIST:    menu_do_dist();    break;
     case MA_DISPLAY: menu_do_display(); break;
-    /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
-    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (per-venue layout list: issue #98)"); break;
+    case MA_LAYOUT:    menu_do_layout();    break;
     /* pipeline drops CMD_CALIB_ORIENT until the calib session lands. */
     case MA_CALIBRATE: ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT"); break;
     case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (issue #97)"); break;
@@ -1035,19 +1067,41 @@ static void handle_sector(const event_t *e)
     s_dirty          = true;
 }
 
-/* EV_VENUE_FOUND -> model (split verbatim out of handle_event for rule 4). */
+/* EV_VENUE_FOUND -> model (split verbatim out of handle_event for rule 4). #98: resolves the real
+ * venue name through the track table (replaces the "V%u" placeholder) and arms the Layout menu
+ * item for this venue -- s_layout_choice resets to Auto; build_menu() picks up s_venue_id the next
+ * time the menu opens (ui_layout_label(trk_get(s_venue_id), s_layout_choice, ...), same pattern as
+ * s_lbl_units/s_lbl_dist), so the label reads "Layout: Auto" without this handler touching it. */
 static void handle_venue_found(const event_t *e, int64_t now)
 {
-    snprintf(s_model.venue_name, sizeof s_model.venue_name, "V%u", (unsigned)e->arg16);
+    s_venue_id      = e->arg16;
+    s_layout_choice = 0;
+    const trk_venue_t *v = trk_get(e->arg16);
+    snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s", v != NULL ? v->name : "VENUE");
     s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
     show_venue_oneshot(now);
     s_dirty = true;
 }
 
-/* EV_LAYOUT_LOCKED -> model (split verbatim out of handle_event for rule 4). */
+/* EV_LAYOUT_LOCKED -> model (split verbatim out of handle_event for rule 4). #98: resolves the
+ * locked layout's real name within the current venue (trk_get(s_venue_id), set by the last
+ * EV_VENUE_FOUND); an unknown venue or layout id falls back to "L%u" (e.g. a forced layout id a
+ * venue change has not caught up with yet). */
 static void handle_layout_locked(const event_t *e, int64_t now)
 {
-    snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
+    const trk_venue_t *v = trk_get(s_venue_id);
+    const char        *name = NULL;
+    if (v != NULL) {
+        LT_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, UI_APP_ASSERT_CODE);   /* indexes layouts[] */
+        for (uint8_t i = 0; i < v->n_layouts; i++) {
+            if (v->layouts[i].id == e->arg16) { name = v->layouts[i].name; break; }
+        }
+    }
+    if (name != NULL) {
+        snprintf(s_model.layout_name, sizeof s_model.layout_name, "%s", name);
+    } else {
+        snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
+    }
     show_venue_oneshot(now); /* layout phase: render shows layout_name (non-empty) */
     s_dirty = true;
 }
