@@ -157,6 +157,13 @@ enum {
     MA_DISPLAY,
     MA_SLEEP,
 };
+/* M-7 (final review): one menu_add() call per action above, so MA_SLEEP + 1 (the enum's own item
+ * count, 0-based) is the real row count build_menu() produces today -- ties UI_MENU_MAX's own
+ * _Static_assert (above, against menu_items[]'s array capacity) to the actual number of items,
+ * not just the array size, so a future action added here without a matching capacity bump trips
+ * at COMPILE time instead of menu_add()'s runtime LT_ASSERT_VOID, which only fires the first time
+ * the menu is ever opened. */
+_Static_assert(MA_SLEEP + 1 <= UI_MENU_MAX, "one row per MA_* action must fit menu_items[]/UI_MENU_MAX");
 
 /* ---- static storage (no malloc after init, §17.9) ---- */
 static StaticTask_t s_tcb;
@@ -267,18 +274,23 @@ static uint8_t s_create_next_gate;
 
 /* ---- helpers ---- */
 
-static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
+/* Final review I-3: returns whether the post actually landed on g_cmd_q -- every existing caller
+ * still just fires-and-forgets (the return value is unused C, not an error), but btn_long()'s
+ * NEWTRACK/long-MODE case (below) needs to know a dropped CMD_CREATE_CANCEL from a momentarily-
+ * full queue so it can escape the one-shot locally instead of waiting forever for an
+ * EV_CREATE_CANCELLED that was never sent in the first place. */
+static bool ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
 {
-    LT_ASSERT_VOID(type <= CMD_TYPE_LAST, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type (M1); the ui never actually posts CMD_SIM_SCENARIO (sim-only), it just shares pipeline.c's bound */
+    LT_ASSERT_RET(type <= CMD_TYPE_LAST, UI_APP_ASSERT_CODE, false);   /* a valid §4.4 command type (M1); the ui never actually posts CMD_SIM_SCENARIO (sim-only), it just shares pipeline.c's bound */
     if (g_cmd_q == NULL) {
-        return;
+        return false;
     }
     command_t c;
     memset(&c, 0, sizeof c);
     c.type  = type;
     c.arg8  = arg8;
     c.arg16 = arg16;
-    (void)xQueueSend(g_cmd_q, &c, 0);
+    return xQueueSend(g_cmd_q, &c, 0) == pdTRUE;
 }
 
 /* Append one row (label + action) to the parallel menu arrays and advance the count; the label
@@ -499,6 +511,17 @@ static void menu_do_layout(void)
     uint16_t id = (s_layout_choice == 0u || v == NULL) ? 0u : v->layouts[s_layout_choice - 1u].id;
     ui_send_cmd(CMD_SET_LAYOUT, 0, id);                                       /* 0 = Auto (lap_force_layout) */
     (void)ui_layout_label(v, s_layout_choice, s_lbl_layout, sizeof s_lbl_layout);
+    /* M-10 (final review): lap_force_layout() (pipeline.c) posts no EV_LAYOUT_LOCKED, so without
+     * this s_model.layout_name -- used only by the VENUE one-shot's "layout locked" phase
+     * (render_oneshot_venue(), screens_moto.c) -- would keep whatever the PREVIOUS real lock last
+     * set while the menu label (s_lbl_layout, just updated above) already shows the newly forced
+     * choice. Keep the model in step directly from the same source handle_layout_locked() itself
+     * reads, rather than waiting for an event a forced choice never generates. */
+    if (s_layout_choice == 0u || v == NULL) {
+        s_model.layout_name[0] = '\0';   /* Auto: no layout is "locked" -- venue phase */
+    } else {
+        snprintf(s_model.layout_name, sizeof s_model.layout_name, "%s", v->layouts[s_layout_choice - 1u].name);
+    }
     ESP_LOGI(TAG, "menu: layout choice %u -> id %u", (unsigned)s_layout_choice, (unsigned)id);
     s_dirty = true;
 }
@@ -616,9 +639,17 @@ static void btn_long(uint8_t bit)
         if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
         /* #97 (§10.9): long MODE cancels creation -- CMD_CREATE_CANCEL, not an immediate
          * ui_exit_menu(): the screen leaves only once EV_CREATE_CANCELLED confirms the engine
-         * actually left CREATE mode, so the engine state and the screen never fall out of step. */
+         * actually left CREATE mode, so the engine state and the screen never fall out of step.
+         * Final review I-3: EXCEPT when the post itself never landed (g_cmd_q momentarily full) --
+         * then no EV_CREATE_CANCELLED is ever coming (the pipeline never saw the request), so
+         * waiting for one would strand this screen with no recovery at all. Exit locally in that
+         * one case; the pipeline-side fix (handle_create_cancel()) makes every request that DOES
+         * land answer unconditionally, so this is purely the "never even sent" backstop. */
         if (s_model.oneshot == ONESHOT_NEWTRACK) {
-            ui_send_cmd(CMD_CREATE_CANCEL, 0, 0);
+            if (!ui_send_cmd(CMD_CREATE_CANCEL, 0, 0)) {
+                s_oneshot_until_us = 0;
+                ui_exit_menu();
+            }
             return;
         }
         s_oneshot_until_us = 0;
@@ -1116,13 +1147,19 @@ static void handle_sector(const event_t *e)
  * venue name through the track table (replaces the "V%u" placeholder) and arms the Layout menu
  * item for this venue -- s_layout_choice resets to Auto; build_menu() picks up s_venue_id the next
  * time the menu opens (ui_layout_label(trk_get(s_venue_id), s_layout_choice, ...), same pattern as
- * s_lbl_units/s_lbl_dist), so the label reads "Layout: Auto" without this handler touching it. */
+ * s_lbl_units/s_lbl_dist), so the label reads "Layout: Auto" without this handler touching it.
+ * Final review M-6: trk_validate_venue() does not require a non-empty name (only its own NUL
+ * termination), so an uploaded/JSON venue with an empty name string is structurally valid --
+ * falls back to the old "VENUE" placeholder rather than rendering a blank one-shot. Created
+ * venues always get a real "Track_YYYYMMDD..." name (lap.c's finalize_create()), so this only
+ * ever bites an uploaded/JSON venue. */
 static void handle_venue_found(const event_t *e, int64_t now)
 {
     s_venue_id      = e->arg16;
     s_layout_choice = 0;
     const trk_venue_t *v = trk_get(e->arg16);
-    snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s", v != NULL ? v->name : "VENUE");
+    snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s",
+             (v != NULL && v->name[0] != '\0') ? v->name : "VENUE");
     s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
     show_venue_oneshot(now);
     s_dirty = true;
@@ -1257,6 +1294,11 @@ static void handle_create(const event_t *e)
         }
         break;
     case EV_CREATE_GATE_SET:
+        /* M-9 (final review): every other handler in this file bounds its event payload; the
+         * pipeline only ever sends 0..LAP_MAX_SECTORS (handle_create_cmd's s_create_next_gate),
+         * so arg16 == 255 wrapping s_create_next_gate to 0 below is unreachable today -- asserted
+         * anyway rather than left as the one unbounded payload read here. */
+        LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);
         s_create_next_gate  = (uint8_t)(e->arg16 + 1u);
         s_model.create_step = s_create_next_gate;      /* 1 after S/F, k+1 after sector k */
         break;

@@ -24,8 +24,8 @@
  * 250, giving a (256/8)*122 = 3904-byte framebuffer (32-byte stride) -- exactly the "3904 bytes of
  * the 4736-byte buffer" the plan's own gate criterion names, confirming 256 (not the panel's raw
  * 250) is the intended CANVAS_W. Every layout constant below that must land flush against the
- * panel's real right/bottom edge (the fault-icon strip, DRAG's ARMED label, the OTA bar's
- * centering) is still anchored to the true 250-wide/122-tall visible area, not CANVAS_W itself --
+ * panel's real right/bottom edge (the fault-icon strip, the OTA bar's centering) is still
+ * anchored to the true 250-wide/122-tall visible area, not CANVAS_W itself --
  * columns 250..255 are simply never drawn into, the same way a real ws213v4 driver pads its SPI
  * row buffer past the panel's visible pixels. CANVAS_H (122) needs no such padding: fb_init only
  * constrains width, since bits are packed horizontally within a row.

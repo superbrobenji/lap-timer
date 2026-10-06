@@ -118,7 +118,14 @@ static bool         s_ready;                      /* published last in link_star
 static _Atomic bool s_detect_asserted;            /* GPIO detect line state: written by link_task
                                                     * (core 0), read cross-core by stream_push ->
                                                     * link_peer_present() on the pipeline task
-                                                    * (core 1) -- must be atomic (I3). */
+                                                    * (core 1) -- must be atomic (I3). Final review
+                                                    * M-8: since #99, link_peer_present() also has
+                                                    * a second cross-core reader, the ui task
+                                                    * (core 0, update_flags() -> the LINK glyph,
+                                                    * every ui_loop_iter()) -- still correct (an
+                                                    * atomic load, ~2 instructions, negligible per
+                                                    * loop), just a second name this comment used
+                                                    * to omit. */
 static _Atomic uint32_t s_last_cmd_ms;            /* last cmd heartbeat (link_now_ms units) */
 static _Atomic bool     s_cmd_seen;               /* a cmd request has arrived at least once */
 
@@ -161,8 +168,9 @@ static void link_poll_detect(void)
      * internal pull-up, so level 0 = present. Debounce: a level must hold for LINK_DETECT_STABLE
      * consecutive polls before it flips s_detect_asserted, so a bouncy connector/jumper does not
      * flap the stream on/off. detect_run/detect_cand are drain-task-only (link_task) state, so no
-     * synchronization on THEM; s_detect_asserted itself is read cross-core (link_peer_present() on
-     * the pipeline task) and is `_Atomic` for that reason (I3). */
+     * synchronization on THEM; s_detect_asserted itself is read cross-core (link_peer_present(),
+     * on both the pipeline task and -- since #99 -- the ui task, final review M-8) and is
+     * `_Atomic` for that reason (I3). */
     static uint8_t detect_run;               /* consecutive reads equal to detect_cand */
     static bool    detect_cand;              /* the candidate level being counted toward */
     bool raw = (gpio_get_level((gpio_num_t)LINK_DETECT_GPIO) == 0);

@@ -26,7 +26,7 @@
 
 #include "core/event.h"
 #include "core/ses.h"
-#include "core/trk.h"         /* trk_user_save/trk_user_load (#97, §10.9) */
+#include "core/trk.h"         /* trk_user_save_venue/trk_user_load_venue/trk_user_id_at/trk_user_count (#97, §10.9) */
 #include "core/types.h"
 
 #include "build_config.h"
@@ -59,13 +59,13 @@ static const char *TAG = "log";
  * only the number of sto_write chunks can change, never the concatenated file content. */
 #define BATCH_CAP        3840
 #define BATCH_FLUSH_B    3584          /* write when the batch reaches this */
-/* #97 (§10.9): the persisted user track table (tracks_save/tracks_load below). Paths are
- * backend-relative (hal/storage.h); storage_internal.c's mount ladder already creates /tracks.
- * Review fix round 1 (T5-R4): the save writes TRACKS_USER_TMP_PATH then sto_rename()s it over
- * TRACKS_USER_PATH (hal/storage.h:49 documents the rename as atomic on LittleFS) so a power cut
- * mid-save leaves the OLD file intact instead of a half-written one. File format: TRACKS_FILE_MAGIC
- * + u8 version + u8 count, then count x length-prefixed, CRC16-trailed trk_user_save_venue()
- * records (core/trk.h) -- see tracks_save()/tracks_load() below. */
+/* #97 (§10.9): the persisted user track table (tracks_save()/logger_load_tracks() below). Paths
+ * are backend-relative (hal/storage.h); storage_internal.c's mount ladder already creates
+ * /tracks. Review fix round 1 (T5-R4): the save writes TRACKS_USER_TMP_PATH then sto_rename()s it
+ * over TRACKS_USER_PATH (hal/storage.h:49 documents the rename as atomic on LittleFS) so a power
+ * cut mid-save leaves the OLD file intact instead of a half-written one. File format:
+ * TRACKS_FILE_MAGIC + u8 version + u8 count, then count x length-prefixed, CRC16-trailed
+ * trk_user_save_venue() records (core/trk.h) -- see tracks_save()/logger_load_tracks() below. */
 #define TRACKS_USER_PATH     "/tracks/user.bin"
 #define TRACKS_USER_TMP_PATH "/tracks/user.tmp"
 #define TRACKS_FILE_MAGIC    "LTRK"
@@ -502,7 +502,19 @@ static bool tracks_save_record(sto_file_t f, uint8_t i)
  * unwritten .log bytes; s_batch_len stays logically empty afterward, same as right after a flush
  * (tracks_save_record() never touches it). M2: every failure path below is errlog_add()'d --
  * with a fire-and-forget requester (the pipeline's own call, create_finish_if_active()) the rc
- * itself goes nowhere, so this is the only on-device trace a save failed. */
+ * itself goes nowhere, so this is the only on-device trace a save failed.
+ *
+ * Final review M-2: a failed save used to leave /tracks/user.tmp behind -- harmless
+ * (STO_WR|STO_CREATE self-heals it on the next save) but it sits on a filesystem with a hard 5%
+ * reserve (STO_RESERVE_PCT) until then, so every failure return below now unlinks it first.
+ *
+ * Final review F-5/I-5: the sim capture's own venue (TRK_SIM_VENUE_ID, reserved -- core/trk.h) is
+ * never written here -- it is re-registered fresh from gps_sim_venue_json() every sim boot
+ * (pipeline_init()), so persisting it would be redundant at best and, the bug this closes, at
+ * worst silently overwrite a real-build venue that happens to land in the same table slot across
+ * a sim/real image swap. write_count (and so the header's own count byte) reflects only what is
+ * actually written, computed via trk_user_id_at() before the header is written, since the header
+ * precedes the records it describes. */
 static int tracks_save(void)
 {
     if (s_batch_len != 0) {
@@ -513,6 +525,9 @@ static int tracks_save(void)
 
     int count = trk_user_count();
     LT_ASSERT_RET(count >= 0 && count <= TRK_MAX_USER, LOG_ASSERT_CODE, -1);
+    uint8_t write_count = 0;
+    for (int i = 0; i < count; i++) if (trk_user_id_at((uint8_t)i) != TRK_SIM_VENUE_ID) write_count++;
+
     sto_file_t f;
     if (sto_open(TRACKS_USER_TMP_PATH, STO_WR | STO_CREATE, &f) != 0) {
         (void)errlog_add(E_STO_WRITE, 0);
@@ -521,13 +536,21 @@ static int tracks_save(void)
     uint8_t hdr[6];
     memcpy(hdr, TRACKS_FILE_MAGIC, 4);
     hdr[4] = (uint8_t)TRACKS_FILE_VERSION;
-    hdr[5] = (uint8_t)count;
+    hdr[5] = write_count;
     bool ok = sto_write(f, hdr, sizeof hdr) == 0;
-    for (int i = 0; ok && i < count; i++) ok = tracks_save_record(f, (uint8_t)i);
+    for (int i = 0; ok && i < count; i++) {
+        if (trk_user_id_at((uint8_t)i) == TRK_SIM_VENUE_ID) continue;   /* F-5: never persisted */
+        ok = tracks_save_record(f, (uint8_t)i);
+    }
     (void)sto_close(f);
-    if (!ok) { (void)errlog_add(E_STO_WRITE, 0); return -1; }
+    if (!ok) {
+        (void)errlog_add(E_STO_WRITE, 0);
+        (void)sto_unlink(TRACKS_USER_TMP_PATH);   /* M-2: do not leave a half-written tmp behind */
+        return -1;
+    }
     if (sto_rename(TRACKS_USER_TMP_PATH, TRACKS_USER_PATH) != 0) {
         (void)errlog_add(E_STO_WRITE, 0);
+        (void)sto_unlink(TRACKS_USER_TMP_PATH);   /* M-2: rename failed -- the tmp is still ours to clean up */
         return -1;
     }
     return 0;
@@ -537,8 +560,11 @@ static int tracks_save(void)
  * short/truncated read (the rest of the file, if any, is unreachable without it -- the caller
  * stops the loop there). A CRC mismatch is NOT a false here: it is reported true (keep reading)
  * with just that record skipped, so one corrupt record never costs every record after it (review
- * fix round 1, T5-R4 refinement 3) -- a sharp contrast with the whole-table trk_user_load() this
- * replaces, which wipes the entire table on any single defect. */
+ * fix round 1, T5-R4 refinement 3) -- a sharp contrast with a whole-table load (the earlier
+ * trk_user_load(), deleted in the final review fix wave, M-3, since #97 made it dead code) which
+ * would wipe the entire table on any single defect. trk_user_load_venue() itself additionally
+ * refuses (final review F-5/I-5) a record carrying the sim's reserved id -- never installed even
+ * if one somehow made it into a committed file. */
 static bool tracks_load_record(sto_file_t f)
 {
     LT_ASSERT_RET(sizeof s_batch == BATCH_CAP, LOG_ASSERT_CODE, false);   /* the scratch buffer this streams through */
@@ -555,14 +581,20 @@ static bool tracks_load_record(sto_file_t f)
     return true;
 }
 
-/* #97 (§10.9), review fix round 1 (T5-R2): load /tracks/user.bin into the user track table.
- * Called ONCE, directly (no request/reply, no queue) from logger_task()'s own boot init, before
- * its task loop -- see core/trk.h's ownership comment for why that placement, not a request the
- * pipeline sends, is what makes this boot-time write safe with no lock. s_batch is asserted empty
- * (nothing buffered yet at boot, not just assumed). A missing file (sto_exists() != 1: absent, or
- * the probe itself failed) or a header that fails its magic/version check is not treated as a
- * crash -- a fresh device, or a foreign/corrupt file, just loads nothing, same as before #97. */
-static int tracks_load(void)
+/* #97 (§10.9), review fix round 1 (T5-R2) + final review (F-4/I-4): load /tracks/user.bin into
+ * the user track table. Declared in app/logger.h and called ONCE, directly (no request/reply, no
+ * queue), from main/app_main.c's boot_subsystems() -- right after trk_init() and strictly BEFORE
+ * logger_start() creates the logger task a few lines later -- see core/trk.h's ownership comment
+ * for why that placement needs no concurrency premise at all (previously this ran inside
+ * logger_task()'s own boot init instead, on a safety argument that rested on two unstated
+ * premises -- same-core task affinity, and this function never yielding -- the final review
+ * moved it here rather than shoring up that proof). Stays in THIS file (not app_main.c) because
+ * it only reads the format logger.c owns writing (tracks_save() above); it is simply no longer
+ * called from the task that owns writing it. s_batch is asserted empty (nothing has run yet at
+ * this point in boot, not just assumed). A missing file (sto_exists() != 1: absent, or the probe
+ * itself failed) or a header that fails its magic/version check is not treated as a crash -- a
+ * fresh device, or a foreign/corrupt file, just loads nothing, same as before #97. */
+int logger_load_tracks(void)
 {
     LT_ASSERT_RET(s_batch_len == 0, LOG_ASSERT_CODE, -1);   /* boot: nothing buffered yet */
     if (sto_exists(TRACKS_USER_PATH) != 1) return 0;        /* no file: nothing to load */
@@ -598,8 +630,9 @@ static int handle_request(const log_request_t *req)
     case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; return 0;   /* force an eviction pass this loop */
     case LOGGER_DELETE_SESSION:  return delete_session(req);
     case LOGGER_SAVE_TRACKS:     return tracks_save();
-    /* LOGGER_LOAD_TRACKS retired (review fix round 1, T5-R2) -- tracks_load() is called once
-     * from logger_task()'s own boot init, below, never via a request. */
+    /* LOGGER_LOAD_TRACKS retired (review fix round 1, T5-R2) -- logger_load_tracks() is called
+     * once from main/app_main.c's boot sequence (final review F-4/I-4), before this task even
+     * exists, never via a request. */
     default: return 0;
     }
 }
@@ -917,16 +950,9 @@ static void status_cache_estimate(void)
 static void logger_task(void *arg)
 {
     (void)arg; sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
-    /* #97 (§10.9), review fix round 1 (T5-R2): load any on-device-created venues persisted from a
-     * previous boot, directly -- no request, no queue -- before this task's first blocking wait
-     * (the ulTaskNotifyTake below the for(;;) a few lines down). main/app_main.c calls trk_init()
-     * once, right before logger_start() creates this task, so the table is freshly empty here and
-     * this is its very first writer; app_main() (lower priority) cannot reach pipeline_start() and
-     * create the pipeline task -- the only OTHER writer -- until this task hits that first
-     * blocking wait, so there is nothing yet for this to race (core/trk.h's ownership comment has
-     * the full argument). Storage is already mounted (boot_storage(), before boot_subsystems()'s
-     * logger_start()), same precondition status_cache_prime() below relies on. */
-    if (tracks_load() != 0) ESP_LOGW(TAG, "user tracks: load failed or none persisted");
+    /* #97 (§10.9): the user track table is no longer loaded here (final review F-4/I-4) --
+     * logger_load_tracks() now runs on app_main's own task, before this task is even created (see
+     * that function's doc comment and core/trk.h's ownership comment for why). */
     /* Prime the status.h cache HERE (logger task, storage already mounted by boot_storage()
      * before boot_subsystems()'s logger_start(), app_main.c) so a STATUS built before any
      * session ever opens or closes reports the real free_kb/sessions, not a cold 0/0 (Plan 5.6

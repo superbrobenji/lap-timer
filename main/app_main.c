@@ -218,20 +218,26 @@ static void boot_subsystems(uint8_t level)
      * leak-free with none. */
     link_start();
 
-    /* #97 (§10.9), review fix round 1 (T5-R2): clear the user track table ONCE, here, before
-     * logger_start() creates the logger task -- the logger loads any persisted venues
-     * (/tracks/user.bin) directly, inside its own boot init, immediately after that task is
-     * created (and, since it preempts this lower-priority task the instant it is created, before
-     * app_main() can reach pipeline_start() a few lines down and create the pipeline task -- the
-     * only other writer of this table). trk_init()/trk_get() etc. need core/trk.h; the pipeline no
-     * longer touches this table at boot at all (see core/trk.h's ownership comment for the full
-     * ordering argument this rests on). */
+    /* #97 (§10.9), final review F-4/I-4: clear the user track table, then load any venues
+     * persisted from a previous boot (/tracks/user.bin) -- BOTH here, on app_main's own task, in
+     * that order, strictly BEFORE logger_start() creates the logger task a few lines below and
+     * well before pipeline_start() creates the pipeline task further down still. Previously the
+     * load ran inside logger_task()'s own boot init instead, on a safety argument (the logger
+     * task preempts app_main the instant it is created) that rested on two premises the old
+     * comment never stated and nothing in the tree enforced -- same-core task affinity, and the
+     * load never yielding. Running both writes here, before either task that could ever race them
+     * exists, needs no concurrency premise at all: ordinary single-threaded sequencing (see
+     * core/trk.h's ownership comment for the full argument). trk_init()/trk_get() etc. need
+     * core/trk.h; logger_load_tracks() is the read-only helper that stays in logger.c (app/
+     * logger.h) since it only reads the file tracks_save() (also logger.c) owns writing. The
+     * pipeline no longer touches this table at boot at all. */
     trk_init();
+    if (logger_load_tracks() != 0) ESP_LOGW(TAG, "user tracks: load failed or none persisted");
 
-    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). Loads the user track table
-     * (above) as part of its own boot init, then idles until a LOGGER_OPEN_SESSION request
-     * arrives (from the pipeline below on the sim build, the power task later, or `dbg logtest`);
-     * with storage dead it stays idle (open/load both fail gracefully). */
+    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8); idles until a
+     * LOGGER_OPEN_SESSION request arrives (from the pipeline below on the sim build, the power
+     * task later, or `dbg logtest`); with storage dead it stays idle (open/load both fail
+     * gracefully). */
     logger_start();
 
     if (level == 2u) {                                 /* recovery (§17.5): service tasks only */

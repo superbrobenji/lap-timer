@@ -247,6 +247,32 @@ static void seq_leave(void)
     LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE); /* left cleanly */
 }
 
+/* #87: tell the ui directly (never emit_event(): EV_LAP_RESET is ui-only, not logged/streamed)
+ * that the running-lap clock must stop. Forward-declared here (real definition is below, after
+ * pipeline_reload_cfg()) so reset_best_and_stats()/create_finish_if_active() -- both textually
+ * earlier in the file -- can call it. */
+static void ui_post_lap_reset(void);
+
+/* Final review F-2/I-2: the stats_reset() + seqlocked s_best clear every engine-resetting or
+ * venue/layout-changing path in this file already does (handle_reset_engine below;
+ * handle_set_layout's forced-layout clear; pipeline_init()'s own venue-set clear) -- factored out
+ * here so entering/finishing an on-device creation (handle_create_cmd's CMD_CREATE_BEGIN branch,
+ * create_finish_if_active() above) can run the identical bookkeeping. A creation changes the
+ * venue/layout under the engine's feet exactly the way those other paths do, so the ui must not
+ * keep showing the PREVIOUS venue's stale best-sector/theoretical-best board across it -- that
+ * stale-state class is exactly what EV_LAP_RESET/ui_lap_reset() (ui.c) exists to clear, which is
+ * why every caller of this helper also posts EV_LAP_RESET (ui_post_lap_reset()) itself right
+ * after, rather than having it bundled in here: handle_reset_engine() must post it only AFTER
+ * publish_drag_snapshot() (ordering ui_lap_reset()'s own drag_rows_refill() relies on), so each
+ * caller controls exactly where in its own sequence the post lands. */
+static void reset_best_and_stats(void)
+{
+    stats_reset();
+    seq_enter();
+    memset(&s_best, 0, sizeof s_best);
+    seq_leave();
+}
+
 /* Freeze the just-completed lap (lap_prev) + the accumulated stats, store + submit + print. */
 static void on_lap_complete(int64_t end_gps_us)
 {
@@ -352,11 +378,18 @@ static void publish_drag_snapshot(void)
  * dropped the just-created venue on a momentarily-full queue, with only an ESP_LOGW to say so --
  * now also errlog_add()'d, so the drop leaves a trace the device itself keeps). A normal
  * (non-CREATE) venue scan also emits EV_VENUE_FOUND, but s_create_active is false then (only
- * CMD_CREATE_BEGIN sets it), so this is a no-op outside creation. */
+ * CMD_CREATE_BEGIN sets it), so this is a no-op outside creation.
+ * Final review F-2/I-2: finalize_create() just called lap_set_venue() on the new venue -- a venue
+ * change exactly like the ones handle_reset_engine()/handle_set_layout()/pipeline_init() already
+ * clear s_best for -- so this finish runs the same reset_best_and_stats() + ui_post_lap_reset()
+ * bookkeeping those paths do, or the riding screen would come back showing the PREVIOUS venue's
+ * stale BEST/PREV/theoretical-best/best-sector board under the newly-created venue. */
 static void create_finish_if_active(void)
 {
     if (!s_create_active) return;
     s_create_active = false;
+    reset_best_and_stats();
+    ui_post_lap_reset();
     log_request_t req = { .type = LOGGER_SAVE_TRACKS };
     if (g_log_req_q != NULL && xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) == pdTRUE) {
         logger_notify();
@@ -749,10 +782,7 @@ static void handle_reset_engine(void)
     cancel_active_create();   /* I2: a reset must not strand an in-progress creation */
     lap_reset(&s_lap);
     drag_reset(&s_drag);
-    stats_reset();
-    seq_enter();
-    memset(&s_best, 0, sizeof s_best);
-    seq_leave();
+    reset_best_and_stats();   /* F-2 (final review): the shared bookkeeping, also reused on CREATE begin/finish */
     publish_drag_snapshot();
     ui_post_lap_reset();
 }
@@ -810,20 +840,61 @@ static void handle_set_mode(const command_t *cmd)
  * counter -- CMD_MARK_GATE never trusts cmd->arg8 (the ui's own mirror, sent only for its log
  * line), it always marks the gate THIS task expects next, so a dropped/duplicate command can
  * never desync the two. */
+/* CMD_CREATE_BEGIN's body, split out of handle_create_cmd (below) for RULE-4-COMPOUND -- the
+ * M-1/F-2 fixes pushed that if-chain over the compound-statement cap. */
+static void handle_create_begin(void)
+{
+    /* M-1 (final review, N1): DRAG mode never calls lap_on_fix(), so neither the engine's own
+     * finish (finalize_create()) nor create_cancel_if_orphaned() could ever fire -- a creation
+     * begun here would sit until a long MODE, with no recovery of its own. Refuse before arming
+     * anything; the ui never shows the one-shot (it only opens on EV_CREATE_BEGUN, never on
+     * CANCELLED/FAILED). */
+    if (s_mode != MODE_LAP) {
+        ui_post_create(EV_CREATE_CANCELLED, 0);
+        return;
+    }
+    lap_create_begin(&s_lap);
+    s_create_active     = true;
+    s_create_next_gate  = 0;
+    /* F-2 (final review, I-2): entering CREATE changes the venue under the engine's feet
+     * (lap_create_begin() -> reset_to_no_venue()) exactly like CMD_RESET_ENGINE/a forced layout
+     * do -- run the same bookkeeping so the ui is not left showing the PREVIOUS venue's stale
+     * best-sector/theoretical-best board while NEW TRACK is up. */
+    reset_best_and_stats();
+    ui_post_lap_reset();
+    ui_post_create(EV_CREATE_BEGUN, 0);
+}
+
+/* CMD_CREATE_CANCEL's body, split out of handle_create_cmd (below) for the same RULE-4-COMPOUND
+ * reason as handle_create_begin() above. Final review I-3: a cancel REQUEST always gets an
+ * answer, whether or not a creation was active -- cancel_active_create() (still used by the three
+ * AUTOMATIC paths: CMD_RESET_ENGINE, CMD_SET_MODE, a mode-changing CMD_CONFIG_RELOAD) stays silent
+ * when nothing is active, which is right for those, but the user's own cancel request must not
+ * depend on s_create_active: if any EARLIER EV_CREATE_CANCELLED post was ever dropped
+ * (ui_post_create()'s queue send is 0-tick, drop-newest, and the ui-side screen is still showing
+ * the one-shot either way), s_create_active is already false with no other event ever coming to
+ * free the screen (short MODE/CMD_MARK_GATE is also a silent no-op once !s_create_active). A
+ * second long MODE must always answer. */
+static void handle_create_cancel(void)
+{
+    if (s_create_active) {
+        lap_create_cancel(&s_lap);
+        s_create_active = false;
+    }
+    ui_post_create(EV_CREATE_CANCELLED, 0);
+}
+
 static void handle_create_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(cmd->type == CMD_CREATE_BEGIN || cmd->type == CMD_CREATE_CANCEL ||
                    cmd->type == CMD_MARK_GATE, PIPE_ASSERT_CODE);
     if (cmd->type == CMD_CREATE_BEGIN) {
-        lap_create_begin(&s_lap);
-        s_create_active     = true;
-        s_create_next_gate  = 0;
-        ui_post_create(EV_CREATE_BEGUN, 0);
+        handle_create_begin();
         return;
     }
     if (cmd->type == CMD_CREATE_CANCEL) {
-        cancel_active_create();
+        handle_create_cancel();
         return;
     }
     /* CMD_MARK_GATE: a no-op outside CREATE mode (e.g. a stale/duplicate press after CANCEL).
@@ -945,15 +1016,14 @@ static void pipeline_init(void)
      * in place at boot step 4; if one is present, keep it and import on the first valid fix.
      * Anything else -> start clean.
      *
-     * #97 (§10.9), review fix round 1 (T5-R2): the user track table itself is no longer touched
-     * here at all. main/app_main.c calls trk_init() once, right before logger_start(), and the
-     * logger loads any persisted venues (/tracks/user.bin) directly inside its own boot init
-     * (logger_task(), before its task loop) -- both run, in that order, before this task (or any
-     * task lower-priority than the logger) can even be created; see core/trk.h's ownership
-     * comment for the full ordering argument. By the time pipeline_init() runs, the table already
-     * holds whatever survived the reboot, and the CFG_GPS_SIM block below (which registers the
-     * sim capture's own venue, always id TRK_USER_ID_BASE) runs against it unchanged -- see that
-     * block's own comment for why registering into an already-populated table is still correct. */
+     * #97 (§10.9), final review F-4/I-4: the user track table itself is no longer touched here at
+     * all. main/app_main.c calls trk_init() then logger_load_tracks() (app/logger.h), in that
+     * order, on its own task, before logger_start() creates the logger task and well before this
+     * task is created; see core/trk.h's ownership comment for the full ordering argument. By the
+     * time pipeline_init() runs, the table already holds whatever survived the reboot, and the
+     * CFG_GPS_SIM block below (which registers the sim capture's own venue, at the RESERVED
+     * TRK_SIM_VENUE_ID -- final review F-5/I-5, never a real on-device-created venue's id) runs
+     * against it unchanged -- see that block's own comment. */
     int id_len = snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
     LT_ASSERT_VOID(id_len > 0 && (size_t)id_len < sizeof s_session_id, PIPE_ASSERT_CODE);   /* fit, not truncated */
     if (lt_rtc_validate(&s_resume) == RTC_VALID) {
@@ -975,25 +1045,26 @@ static void pipeline_init(void)
      * table -- rather than a local trk_venue_t -- means lap_set_venue's stored pointer (lap.h)
      * points at stable, permanent storage, never a stack/static temporary (Plan 7 Task 1).
      *
-     * #97 (§10.9), review fix round 1 (T5-R2, "confirm the sim venue registration cannot
-     * duplicate an id the boot load already placed"): confirmed -- no guard needed. The sim
-     * capture's venue id is always TRK_USER_ID_BASE (1000, sim_capture.h), the exact id an
-     * on-device-created venue would also land at on its FIRST creation (trk_next_user_id()
-     * returns TRK_USER_ID_BASE when the table is empty). If a previous boot's persisted table
-     * already holds id 1000 (loaded above, before this runs), trk_user_add_json() -> trk_user_add()
-     * takes its existing same-id "replace" branch (trk.c) and overwrites that slot in place --
-     * user_n is unchanged, no duplicate, and every OTHER loaded venue (any created at id 1001+)
-     * is untouched. Skipping this call when trk_get(TRK_USER_ID_BASE) already exists was
-     * considered and rejected: the call does far more than add a trk_user_add -- lap_set_venue(),
-     * the s_best clear, and the LOGGER_OPEN_SESSION request below all need to run every boot
-     * regardless of whether the venue row already existed, so skipping based on existence would
-     * silently drop those. */
+     * Final review F-5/I-5 (#97, deferred note N2): sim_capture.h's SIM_VENUE_JSON now carries id
+     * TRK_SIM_VENUE_ID (core/trk.h), reserved OUTSIDE trk_next_user_id()'s range -- never the same
+     * id a real on-device creation could ever be assigned. Before this fix the sim capture used
+     * plain TRK_USER_ID_BASE, the exact id a FIRST real creation also gets: booting moto_sim on a
+     * device already holding a real venue persisted at that id took trk_user_add()'s same-id
+     * "replace" branch and silently overwrote it in the live table -- then the next
+     * LOGGER_SAVE_TRACKS wrote that loss to /tracks/user.bin permanently (this project's normal
+     * bench workflow flips between moto_sim and moto_neo6m on one board). With a reserved id, this
+     * trk_user_add_json() call can never collide with anything the boot load
+     * (app_main.c/logger_load_tracks()) just restored: tracks_save()/trk_user_load_venue()
+     * (logger.c/trk.c) additionally skip/reject this id outright, so it is never persisted and
+     * never reloaded -- every sim boot registers it fresh, always via trk_user_add()'s "new entry"
+     * append branch, never "replace" (the table never already holds this id when this runs). */
     {
         const char *vj = gps_sim_venue_json();
         uint16_t vid = 0; char err[96];
         if (vj && trk_user_add_json(vj, strlen(vj), &vid, err, sizeof err) == 0) {
             const trk_venue_t *v = trk_get(vid);
             LT_ASSERT_VOID(v != NULL, PIPE_ASSERT_CODE);
+            LT_ASSERT_VOID(v->id == TRK_SIM_VENUE_ID, PIPE_ASSERT_CODE);   /* F-5: sim_capture.h's reserved id */
             LT_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, PIPE_ASSERT_CODE);   /* indexes layouts[] */
             lap_set_venue(&s_lap, v);
             /* Plan 7c T3 (design §2): a venue/layout change invalidates the previous layout's best
