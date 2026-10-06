@@ -112,6 +112,14 @@ static const char *TAG = "ui";
 #define MENU_LOCK_SPEED_KMH 10    /* menu entry gated below this (§20.7 / Appendix A) */
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
 #define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
+/* Review finding m7 (Task 3 fix round 1): the menu is now exactly at capacity (12 items with
+ * CFG_HAS_BLE_RC, #96's Dist: item made it so) and the two sides of that capacity -- this #define
+ * and model.h's screen_model_t.menu_items[] -- used to be tied only by comment. This ties them
+ * for real (not just to the same literal 12): a future change to either that the other doesn't
+ * follow is a build error here, not a runtime LT_ASSERT_VOID overrun caught only on-device. */
+_Static_assert(UI_MENU_MAX == (int)(sizeof(((screen_model_t *)0)->menu_items) /
+                                     sizeof(((screen_model_t *)0)->menu_items[0])),
+               "UI_MENU_MAX must match model.h's screen_model_t.menu_items[] capacity");
 
 /* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2-3 s) ---- */
 /* Plan 7c T8 (design §6): 2000 -> 3000 so the +1 s boot_refmt_check() re-format (below) has time

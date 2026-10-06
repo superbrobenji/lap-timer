@@ -47,11 +47,26 @@ typedef struct {
      * i.e. every v1 device in DRAG mode would silently come back as LAP after this update, with
      * cfg_validate() reporting zero corrections (mode=0 is in-range). Appending here instead means
      * v1's byte image is an exact prefix of v2's (same probe: offsetof(imu) unchanged, sizeof
-     * unchanged -- this field lands on the struct's own *trailing* alignment pad, also always
-     * zero/CFG_DIST_M on a real v1 blob) -- no other field's offset moves, so nothing upstream of
-     * it can be corrupted by the migrate path. See the Task 3 report's blob-migration analysis. */
+     * unchanged -- this field lands on the struct's own *trailing* alignment pad) -- no other
+     * field's offset moves, so nothing upstream of it can be corrupted by the migrate path.
+     * Review finding m6 (Task 3 fix round 1): the trailing pad byte's CONTENT is not why this is
+     * safe -- C leaves padding content unspecified, it only reads as zero here because
+     * cfg_defaults()'s memset put it there. The actual reason the stored byte is irrelevant is
+     * that cfg_migrate() (cfg.c) writes dist_units unconditionally on every v1->v2 migrate,
+     * regardless of what was sitting in that byte. See the Task 3 report's blob-migration
+     * analysis, and the _Static_assert just below for the layout guarantee itself. */
     uint8_t dist_units;            /* CFG_DIST_*: DIST gate labels only; 1/8 and 1/4 mile keep their names */
 } cfg_t;
+
+/* Review finding I1 (Task 3 fix round 1): the comment above is an argument; this is the
+ * compile-time proof of the one fact it rests on. Checked by every host build AND the ESP32
+ * selftest app build (xtensa ABI, not just the host probe this was originally verified with). If
+ * a future field ever needs to grow cfg_t again, keep appending after this one -- anything that
+ * moves dist_units off the last byte breaks the v1->v2 migrate path's byte-for-byte-prefix
+ * guarantee and this assert catches it at build time instead of silently on a real device. */
+_Static_assert(offsetof(cfg_t, dist_units) == sizeof(cfg_t) - 1u,
+               "dist_units must be cfg_t's LAST byte: a stored v1 blob's payload has to stay a "
+               "byte-for-byte prefix of v2's for cfg_blob_unwrap's raw memcpy migrate (#96)");
 
 /* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
  * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */

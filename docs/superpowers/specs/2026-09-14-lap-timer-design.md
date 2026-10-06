@@ -1640,7 +1640,7 @@ Default gate list (`drag_cfg_t.gates`, up to `DRAG_MAX_GATES = 16`), km/h units 
 | 10 | DIST | 40234 | — | 1/4 (trap) | 1/4 (trap) |
 | 11 | BRAKE | 100 | 0 | 100-0 | 100-0 |
 
-The two mile gates (1/8, 1/4) keep the same name in both unit modes. A custom DIST gate (any `a` other than the four presets above) always prints `<a/100>m` rounded to the nearest metre, in both modes (`drag_gate_label()`, core/drag.h).
+The two mile gates (1/8, 1/4) keep the same name in both unit modes. A custom DIST gate (any `a` other than the five presets above) always prints `<a/100>m` rounded to the nearest metre, in both modes (`drag_gate_label()`, core/drag.h).
 
 `benches` for the riding screen = the `SPEED_FROM0` gates whose `a` is in `cfg.drag.benches_kmh` (default {100, 200, 300}); 0-60 is logged but not a headline bench by default.
 
@@ -1904,7 +1904,7 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 | Namespace | Key | Type | Content |
 |-----------|-----|------|---------|
-| `lt_cfg` | `cfg` | blob | packed `cfg_t` with leading `version u8`, trailing CRC16; `CFG_VERSION` is 2 as of #96 (`dist_units` field) — `lt_cfg_load`/`cfg_blob_unwrap` migrate a stored v1 blob via `cfg_migrate` (sets `dist_units = CFG_DIST_M`) rather than resetting; the v2 field is appended at the end of `cfg_t`, not inserted next to `units`, specifically so `sizeof(cfg_t)` and every other field's on-flash offset are unchanged from v1 (byte-for-byte prefix) |
+| `lt_cfg` | `cfg` | blob | packed `cfg_t` with leading `version u8`, trailing CRC16; `CFG_VERSION` is 2 as of #96 (`dist_units` field) — `lt_cfg_load`/`cfg_blob_unwrap` migrate a stored v1 blob via `cfg_migrate` (sets `dist_units = CFG_DIST_M`) rather than resetting; the v2 field is appended at the end of `cfg_t`, not inserted next to `units`, specifically so `sizeof(cfg_t)` and every other field's on-flash offset are unchanged from v1 (byte-for-byte prefix). Forward migration is one-way: once a v2 blob has been written, an OTA rollback to a pre-#96 image (`cfg_migrate_supported(2)` is false there) resets the stored config to profile defaults on that image's next boot (review finding I2) |
 | `lt_cal` | `fus` | blob | `fus_calib_t` |
 | `lt_cal` | `mag` | blob | QMC hard-iron offsets (M10 only) |
 | `lt_err` | `ring` | blob | 32 × `{code u16, uptime_s u32, boot u16, arg u32}` = 384 B, plus `head u8` |

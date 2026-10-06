@@ -108,7 +108,11 @@ int cfg_migrate(cfg_t *c, uint8_t from_version)
                                                    * end (core/cfg.h) so this is the only field a v1
                                                    * blob's raw byte image could possibly disagree
                                                    * with -- everything else is already correct. */
-    default: break;
+    default: return -1;   /* m3 (Task 3 fix round 1): unreachable today (cfg_migrate_supported()
+                            * admits only 1), but a loud failure here -- not a silent c->version
+                            * bump with a stale new field -- is the right default for a future
+                            * version added to cfg_migrate_supported() without a matching case;
+                            * cfg_blob.c already maps a non-zero return here to -3. */
     }
     c->version = CFG_VERSION;
     return 0;

@@ -32,6 +32,8 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   version in the banner, `sup: OTA image rolled back by the bootloader`, errlog `E_OTA_ROLLBACK`
   (0x0806), and the `UPDATE FAILED / REVERTED` one-shot for 3 s right after the BOOT screen (plan
   `2026-10-05-ota-screen-and-glyphs` Task 2). Then push the image again normally and let it validate.
+  Note (#96, review finding I2): a rollback across a cfg-version bump resets the config to
+  defaults (forward migration is one-way) — re-check Units/Dist/mode after one.
 - [x] **3. OTA push while in recovery mode** (debt sweep A P-8, spec §17.5 amendment). Enter recovery
   (`gate_dsA.py safe` up to the RECOVERY boot, or 5× `dbg crash` 12 s apart), then push a signed
   image. Expect: the push succeeds (console alive in recovery), `sup: OTA reboot: safe/recovery gate

@@ -96,12 +96,20 @@ static void test_cfg_migrate_supported_versions(void)
  * frame's version byte, so this is the real on-flash shape a device upgrading from the previous
  * firmware actually has -- not the synthetic "unsupported version" case test (2) above already
  * covers. mode is deliberately DRAG (not the zero/default value) to prove the migrate path does
- * not silently reset it: cfg_t.dist_units is APPENDED at the struct's end (core/cfg.h comment)
- * specifically so a v1 byte image is a byte-for-byte PREFIX of a v2 one and no other field's
- * offset moves -- inserting it next to `units` instead (the layout this test would catch) would
- * have the v1 "mode" byte reinterpreted as "dist_units" and the v1 struct's own trailing
- * alignment pad reinterpreted as "mode", silently flipping every DRAG-mode v1 device back to LAP
- * after this update. */
+ * not silently reset it.
+ *
+ * Review finding I1 (Task 3 fix round 1): this test frames its "v1 image" from the CURRENT cfg_t
+ * (cfg_defaults on today's struct, reinterpreted at today's offsets on both the wrap and unwrap
+ * side), so it is layout-consistent by construction and CANNOT fail on a struct-layout regression
+ * -- if dist_units were moved back next to `units`, this same test would still pass, because
+ * `mode` would be written and read back at the same (now-different) offset on both sides. It does
+ * not "catch" an insert-next-to-units layout, despite what an earlier version of this comment
+ * claimed. What it still legitimately proves: a v1-tagged frame takes the migrate path, returns
+ * >= 0, bumps version, defaults dist_units, and leaves every other field exactly as the v1
+ * firmware wrote it -- i.e. cfg_migrate()/cfg_blob_unwrap()'s *logic* is correct. The layout
+ * guarantee this logic depends on (dist_units is cfg_t's last byte, so a v1 payload really is a
+ * byte-for-byte prefix of v2's) is proven separately and at compile time by the
+ * _Static_assert in core/cfg.h, which a target build enforces on the real xtensa ABI too. */
 static void test_v1_blob_migrates_without_corrupting_other_fields(void)
 {
     cfg_t v1; cfg_defaults(&v1);
@@ -118,7 +126,7 @@ static void test_v1_blob_migrates_without_corrupting_other_fields(void)
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, rc);              /* migrated (+validated), not rejected */
     TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);      /* bumped to the firmware's version */
     TEST_ASSERT_EQUAL_UINT8(CFG_DIST_M, c.dist_units);    /* new field: defaulted, not garbage */
-    TEST_ASSERT_EQUAL_UINT8(CFG_MODE_DRAG, c.mode);       /* untouched -- the field this layout protects */
+    TEST_ASSERT_EQUAL_UINT8(CFG_MODE_DRAG, c.mode);       /* untouched by cfg_migrate()'s logic */
     TEST_ASSERT_EQUAL_UINT16(33, c.lap.min_lap_s);        /* untouched -- every field past the header */
     TEST_ASSERT_EQUAL_STRING("LapTimer-V1", c.ble.name);  /* untouched */
 }
