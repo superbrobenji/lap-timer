@@ -1605,24 +1605,32 @@ Entered from menu "New track" → engine in `CREATE` sub-mode (state `NO_VENUE` 
 4. A reverse layout (id 2, name `Layout 1 Reverse`, `dir_sign` negated, sectors reversed) is generated automatically.
 5. Long MODE cancels creation.
 
-**App-side wiring (#97, Task 5).** The menu's "New track" item sends `CMD_CREATE_BEGIN`; the
-pipeline calls `lap_create_begin()` and posts the ui-only `EV_CREATE` event (`EV_CREATE_BEGUN`),
-which opens the persistent `NEW TRACK` one-shot (§20.6). Each short MODE press on it sends
-`CMD_MARK_GATE`; the pipeline marks the next gate the engine itself expects (never trusting the
-ui's own mirror of that count) and posts `EV_CREATE_GATE_SET` on success or `EV_CREATE_FAILED` on
-refusal (no valid fix, not moving, or out of order). Long MODE sends `CMD_CREATE_CANCEL`
-(`lap_create_cancel()`); the one-shot leaves only once `EV_CREATE_CANCELLED` confirms the engine
-actually left CREATE mode. The engine's own finish (step 3 above, the closing S/F crossing) is a
-real `EV_VENUE_FOUND`, not an `EV_CREATE_*` phase: the pipeline, seeing it while still in CREATE
-mode, asks the logger (`LOGGER_SAVE_TRACKS`, fire-and-forget) to serialise the user track table
-(`trk_user_save`) into `/tracks/user.bin`, and the ui's existing `EV_VENUE_FOUND` handling replaces
-the `NEW TRACK` one-shot with the `VENUE` one-shot showing the new `Track_YYYYMMDD`. At boot, right
-after `trk_init()`, the pipeline asks the logger (`LOGGER_LOAD_TRACKS`, synchronous) to load
-`/tracks/user.bin` back into the table before any venue (sim or scanned) is registered, so a
-created venue survives a reboot. The logger reuses its own session-batch scratch buffer for both
-requests (no new buffer); that buffer is sized for a single persisted user venue, not the track
-store's full capacity — see the logger's `tracks_save()`/`tracks_load()` comments for the measured
-bound and what happens beyond it.
+**App-side wiring (#97, Task 5; persistence redesigned in the Task 5 review's fix round 1,
+T5-R2/T5-R4).** The menu's "New track" item sends `CMD_CREATE_BEGIN`; the pipeline calls
+`lap_create_begin()` and posts the ui-only `EV_CREATE` event (`EV_CREATE_BEGUN`), which opens the
+persistent `NEW TRACK` one-shot (§20.6). Each short MODE press on it sends `CMD_MARK_GATE`; the
+pipeline marks the next gate the engine itself expects (never trusting the ui's own mirror of that
+count) and posts `EV_CREATE_GATE_SET` on success or `EV_CREATE_FAILED` on refusal (no valid/fresh
+fix, or the table is already full — "out of order" cannot happen, since the pipeline only ever
+marks the gate it itself expects next). Long MODE sends `CMD_CREATE_CANCEL` (`lap_create_cancel()`);
+the one-shot leaves only once `EV_CREATE_CANCELLED` confirms the engine actually left CREATE mode
+— which also now happens if the engine leaves CREATE on its own (e.g. a full user table) or a
+`CMD_RESET_ENGINE`/`CMD_SET_MODE`/mode-changing `CMD_CONFIG_RELOAD` interrupts it, so the screen
+can never strand the rider on a one-shot that will never finish. The engine's own finish (step 3
+above, the closing S/F crossing) is a real `EV_VENUE_FOUND`, not an `EV_CREATE_*` phase: the
+pipeline, seeing it while still in CREATE mode, asks the logger (`LOGGER_SAVE_TRACKS`,
+fire-and-forget) to persist the user track table to `/tracks/user.bin`, and the ui's existing
+`EV_VENUE_FOUND` handling replaces the `NEW TRACK` one-shot with the `VENUE` one-shot showing the
+new `Track_YYYYMMDD`. The table is written one venue at a time (`core/trk.h`'s
+`trk_user_save_venue`/`trk_user_load_venue`, a variable-length per-venue record — only a venue's
+actual layout/sector counts are written, not every unused slot), streamed through the logger's
+existing scratch batch (no new buffer; every record is well within it, independent of how many
+venues the table holds) to a `.tmp` file and renamed into place atomically, so every one of
+`TRK_MAX_USER` venues persists, not just one. At boot, before `logger_start()` creates the logger
+task, `main/app_main.c` clears the table once (`trk_init()`); the logger then loads
+`/tracks/user.bin` back into it itself, directly, inside its own boot init — no request from the
+pipeline, which no longer touches this table at boot at all — before any venue (sim or scanned) is
+registered, so every created venue survives a reboot.
 
 ### 10.10 RTC continuity
 
@@ -2395,7 +2403,7 @@ Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a stri
 **Font reconciliation (session 4.2, from rendered PBM goldens at 296×128).** The generated `FONT_MED` covers only `0-9 : . - + A-Z` and `FONT_BIG` only `0-9 : . - + S`, so labels containing `/` or lowercase (`1/4`, `60ft`, `1000ft`) render in `FONT_SMALL`; the riding-screen VALUES (times) use `FONT_BIG`/`FONT_MED`, the LABELS use `FONT_SMALL`. The LAP `dS` value row is `FONT_SMALL` (a `FONT_MED` glyph at y=112 clips past the 128-px frame). The empty time placeholder is `-:--.--` (7 chars, matching the `M:SS.cc` shape) so it does not overlap the left labels. DRAG pages 1/2 use a two-column gate grid. These are the byte-exact golden layouts under `test/snapshots/`.
 
 ### 20.6 One-shot screens
-`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` (persistent, no auto-revert; §10.9/#97). `NEW TRACK`'s sub-line follows the creation step: `"Cross S/F, press MODE"` before the S/F gate is marked; `"S/F set. MODE: sector k"` (k = the next sector number, 1..`LAP_MAX_SECTORS`) once S/F is set and fewer than `LAP_MAX_SECTORS` sectors are marked; `"Cross S/F to finish"` once every sector is marked; `"No fix / not moving"` for one beat after a refused `CMD_MARK_GATE` (no valid fix, not moving, or out of order), until the next gate event overwrites it.
+`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` (persistent, no auto-revert; §10.9/#97). `NEW TRACK`'s sub-line follows the creation step: `"Cross S/F, press MODE"` before the S/F gate is marked; `"S/F set. MODE: sector k"` (k = the next sector number, 1..`LAP_MAX_SECTORS`) once S/F is set and fewer than `LAP_MAX_SECTORS` sectors are marked; `"Cross S/F to finish"` once every sector is marked; `"No fix / not moving"` for one beat after a `CMD_MARK_GATE` refused for no valid/fresh fix, until the next gate event overwrites it. A `CMD_MARK_GATE` refused because the table is already full leaves the sub-line unchanged — `"Cross S/F to finish"` already says the right thing, so pressing MODE once more after the last sector is a harmless no-op, not a wrong message.
 
 ### 20.7 Menu
 

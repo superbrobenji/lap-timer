@@ -50,7 +50,12 @@ typedef enum {
      * not reused, so a stray old build's request is never misread as something else. */
     LOGGER_DELETE_SESSION  = 5,   /* unlink .log + .sum for id, re-prime the cache (debt sweep A #73) */
     LOGGER_SAVE_TRACKS     = 6,   /* serialise the user track table into /tracks/user.bin (requester notified with rc) */
-    LOGGER_LOAD_TRACKS     = 7,   /* load /tracks/user.bin into the user track table (boot; requester notified) */
+    /* 7 was LOGGER_LOAD_TRACKS. Retired in Task 5's review fix round 1 (#97, T5-R2): the logger now
+     * loads /tracks/user.bin itself, directly (logger.c's tracks_load(), called from logger_task()'s
+     * own boot init, before its task loop), not via a request the pipeline sends -- see
+     * logger_request_sync()'s doc comment below for why that cross-task request existed only
+     * briefly and why removing it was the fix, not a workaround. Value retired, not reused, same
+     * as 4 above. */
 } log_req_type_t;
 
 /* debt sweep A #59/#73: a bounded request/reply. requester == NULL is fire-and-forget (today's
@@ -80,13 +85,17 @@ extern QueueHandle_t g_log_req_q;
  * CALLING task's own notification index 0 -- confirmed clear of the two intended callers
  * (supervisor, export_serial/console): a firmware-wide grep for task notification calls before
  * this landed found only logger.c and link.c, each notifying its OWN task (a different task from
- * either caller) -- see the debt sweep A T3 report. Never call from the ui task: it must never
- * block on the logger (every render-loop iteration matters). The pipeline task must likewise
- * never call this from its main loop -- but #97 (§10.9) adds the ONE narrow exception: a single
- * LOGGER_LOAD_TRACKS call from pipeline_init(), before pipeline_task() enters its loop (and so
- * before any g_hb[HB_PIPELINE] heartbeat is due) -- a one-time, bounded (2000 ms) boot stall, well
- * inside the supervisor's PIPE_STALL_S window, same order of cost as the driver bring-up already
- * running at that point in pipeline_init(). No other pipeline call site may use this helper.
+ * either caller) -- see the debt sweep A T3 report. Never call from the ui or pipeline task: both
+ * must never block on the logger, and neither has any reason to. (#97, §10.9, review fix round 1,
+ * T5-R2/I1/I3: an earlier revision of this task had the pipeline call this once at boot for
+ * LOGGER_LOAD_TRACKS -- removed, not kept as an exception, because a timed-out reply left the
+ * request live on g_log_req_q with no way to cancel it, so the logger could still run
+ * trk_user_load_venue() -- an unlocked cross-task write into a live table -- well after the
+ * pipeline had moved on and the ui might already hold an id; the 2 s wait also ate up to 40% of
+ * PIPE_STALL_S with no benefit over the fix actually shipped. The logger now loads the table
+ * itself, inside its own boot init, before anything else can touch it -- see core/trk.h/.c's
+ * ownership comment for the ordering argument that makes this safe with no lock and no request at
+ * all.)
  *
  * T3 fix 1 (ruling P-7): the generation tag in the notification's top byte is what makes this
  * helper safe for ANY caller priority or call pattern, not just a low-traffic one -- without it, a

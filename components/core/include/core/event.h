@@ -58,12 +58,22 @@ enum {
 #define EV_OTA_ROLLED_BACK 4u
 
 /* EV_CREATE phases (#97, §10.9): CMD_CREATE_BEGIN armed the engine (BEGUN), a short-MODE
- * CMD_MARK_GATE landed (GATE_SET, arg16 = the gate index just set) or was refused (FAILED -- no
- * valid fix, not moving, or out of order), or CMD_CREATE_CANCEL aborted (CANCELLED). The engine's
+ * CMD_MARK_GATE landed (GATE_SET, arg16 = the gate index just set) or was refused (FAILED --
+ * arg16 = EV_CREATE_FAIL_* reason below), or CMD_CREATE_CANCEL aborted (CANCELLED). The engine's
  * own finish (the next S/F crossing after every gate is marked) is EV_VENUE_FOUND, not one of
  * these -- ui.c's existing EV_VENUE_FOUND handling closes the NEW TRACK one-shot. */
 #define EV_CREATE_BEGUN     0u
 #define EV_CREATE_GATE_SET  1u
 #define EV_CREATE_FAILED    2u
 #define EV_CREATE_CANCELLED 3u
+
+/* EV_CREATE_FAILED's arg16 (review fix round 1, M5): pipeline.c determines the reason from its
+ * own s_create_next_gate counter, not from lap_mark_gate()'s plain 0/-1 (the engine exposes no
+ * reason code). FULL means every sector is already marked -- the ui leaves create_step untouched
+ * rather than clobbering the already-correct "Cross S/F to finish" sub-line with "No fix / not
+ * moving" (core/ui/screens_moto.c's newtrack_subline()). "Out of order" never reaches the ui as a
+ * distinct reason: the pipeline always marks the gate index it itself expects next (never trusts
+ * a command's own arg8), so that lap_mark_gate() refusal is structurally unreachable here. */
+#define EV_CREATE_FAIL_NOFIX 0u
+#define EV_CREATE_FAIL_FULL  1u
 #endif

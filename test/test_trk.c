@@ -427,6 +427,149 @@ static void test_user_add_json_full_table_rejected_and_unchanged(void)
     }
 }
 
+/* ---------------------------------------------------- #97 (§10.9), review fix round 1: M7
+ * per-venue record API (trk_user_save_venue/trk_user_load_venue, core/trk.h) -- the logger's
+ * actual persistence format since T5-R4. The whole-table trk_user_save/trk_user_load tests above
+ * only ever exercised ONE venue against a 16 KB buffer, never the logger's real 3840 B
+ * (BATCH_CAP) scratch batch -- exactly why the whole-table blob's cap defect (2 + n *
+ * sizeof(trk_venue_t) + 2 overflowing BATCH_CAP at just 2 venues) went unnoticed. These tests
+ * drive the real invariant instead: every record stays within TRK_USER_REC_MAX (the bound
+ * logger.c's own _Static_assert checks against BATCH_CAP) for 1..TRK_MAX_USER venues, a save-then-
+ * later-load round trip (not a same-pass one, matching the logger's own boot-vs-session lifecycle)
+ * preserves every venue, and ids never collide after a reload. */
+
+/* Fills v->layouts[0..n_layouts) with n_sectors sectors each, reusing v->layouts[0]'s S/F line
+ * shape (already set by mk_venue) for every layout -- good enough for a structurally-valid,
+ * serialisable venue; this suite does not care whether the gates are physically sensible, only
+ * whether the record format round-trips every field. */
+static void fill_layouts(trk_venue_t *v, uint8_t n_layouts, uint8_t n_sectors)
+{
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(TRK_MAX_LAYOUTS, n_layouts);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(LAP_MAX_SECTORS, n_sectors);
+    v->n_layouts = n_layouts;
+    for (uint8_t i = 0; i < n_layouts; i++) {
+        trk_layout_t *L = &v->layouts[i];
+        *L = v->layouts[0];
+        L->id        = (uint16_t)(i + 1);
+        L->n_sectors = n_sectors;
+        for (uint8_t s = 0; s < n_sectors; s++) {
+            L->sectors[s].p1.lat = -26.002 - (double)s * 0.001; L->sectors[s].p1.lon = 28.0;
+            L->sectors[s].p2.lat = -26.002 - (double)s * 0.001; L->sectors[s].p2.lon = 28.0003;
+        }
+    }
+}
+
+/* 1..TRK_MAX_USER single-layout venues: save every record (s_blob holds all of them at once,
+ * TRK_MAX_USER * TRK_USER_REC_MAX well within its 16 KB), trk_init() (drop the live table, as a
+ * reboot would), then load every record back and confirm the table matches -- and that
+ * trk_next_user_id() picks up past every reloaded id, never reusing one. */
+static void test_user_save_venue_load_venue_round_trip_1_to_max(void)
+{
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(sizeof s_blob, (size_t)TRK_MAX_USER * TRK_USER_REC_MAX);
+    size_t lens[TRK_MAX_USER];
+    for (uint8_t count = 1; count <= TRK_MAX_USER; count++) {
+        trk_init();
+        for (uint8_t i = 0; i < count; i++) {
+            mk_venue(&s_v, (uint16_t)(2000 + i));
+            TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+        }
+        TEST_ASSERT_EQUAL_INT(count, trk_user_count());
+        for (uint8_t i = 0; i < count; i++) {
+            size_t n = 0;
+            TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(i, s_blob + (size_t)i * TRK_USER_REC_MAX,
+                                                          TRK_USER_REC_MAX, &n));
+            TEST_ASSERT_TRUE(n <= TRK_USER_REC_MAX);
+            lens[i] = n;
+        }
+
+        trk_init();
+        TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+        for (uint8_t i = 0; i < count; i++) {
+            TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob + (size_t)i * TRK_USER_REC_MAX, lens[i]));
+        }
+        TEST_ASSERT_EQUAL_INT(count, trk_user_count());
+        for (uint8_t i = 0; i < count; i++) {
+            const trk_venue_t *v = trk_get((uint16_t)(2000 + i));
+            TEST_ASSERT_NOT_NULL(v);
+            TEST_ASSERT_EQUAL_STRING("User", v->name);
+            TEST_ASSERT_EQUAL_UINT8(1, v->n_layouts);
+        }
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)(2000 + count), trk_next_user_id());   /* no id reuse */
+    }
+}
+
+/* The literal worst case trk_user_save_venue()'s TRK_USER_REC_MAX bound is computed for: every
+ * layout slot full, TRK_MAX_LAYOUTS layouts x LAP_MAX_SECTORS sectors each. Asserts EXACT equality
+ * (not just <=) -- the encoder never pads or wastes a byte, so this is the strongest proof the
+ * bound is both sufficient and tight, not just generously oversized. */
+static void test_user_save_venue_max_size_is_exactly_rec_max(void)
+{
+    trk_init();
+    mk_venue(&s_v, 3000);
+    fill_layouts(&s_v, TRK_MAX_LAYOUTS, LAP_MAX_SECTORS);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    TEST_ASSERT_EQUAL_UINT(TRK_USER_REC_MAX, n);
+    size_t n_short = 0;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_save_venue(0, s_blob, n - 1, &n_short));   /* one byte short: refused */
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    const trk_venue_t *v = trk_get(3000);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_UINT8(TRK_MAX_LAYOUTS, v->n_layouts);
+    TEST_ASSERT_EQUAL_UINT8(LAP_MAX_SECTORS, v->layouts[TRK_MAX_LAYOUTS - 1].n_sectors);
+}
+
+/* The review's literal example: a 4-layout, 8-sector venue round-trips (a realistic multi-layout
+ * upload, short of the absolute TRK_MAX_LAYOUTS worst case the test above already covers). */
+static void test_user_save_venue_four_layouts_eight_sectors_round_trip(void)
+{
+    trk_init();
+    mk_venue(&s_v, 5000);
+    fill_layouts(&s_v, 4, LAP_MAX_SECTORS);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    TEST_ASSERT_TRUE(n <= TRK_USER_REC_MAX);
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    const trk_venue_t *v = trk_get(5000);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_UINT8(4, v->n_layouts);
+    for (uint8_t i = 0; i < 4; i++) TEST_ASSERT_EQUAL_UINT8(LAP_MAX_SECTORS, v->layouts[i].n_sectors);
+}
+
+/* T5-R4 refinement 3: a truncated/malformed record is refused cleanly (nothing partially
+ * installed), and does not disturb an already-loaded venue or block loading a later, valid one --
+ * the core-level primitive the logger's tracks_load_record() "skip just this record, keep
+ * reading" behaviour (components/app/logger/logger.c) relies on. That loop itself is firmware-
+ * only (FreeRTOS/hal/storage.h) and not host-testable; this is the pure-core proof underneath it,
+ * documented as such in the Task 5 fix-round-1 report rather than left unverified. */
+static void test_user_load_venue_rejects_truncated_record(void)
+{
+    trk_init();
+    mk_venue(&s_v, 4000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n - 1));   /* one byte short */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());                     /* nothing installed */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, 0));       /* empty */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+
+    /* the truncated attempts above left the table untouched -- a second, valid record still loads */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    TEST_ASSERT_EQUAL_INT(1, trk_user_count());
+    TEST_ASSERT_NOT_NULL(trk_get(4000));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -448,5 +591,9 @@ int main(void)
     RUN_TEST(test_user_add_json_rejects_malformed);
     RUN_TEST(test_user_add_json_replaces_same_id);
     RUN_TEST(test_user_add_json_full_table_rejected_and_unchanged);
+    RUN_TEST(test_user_save_venue_load_venue_round_trip_1_to_max);
+    RUN_TEST(test_user_save_venue_max_size_is_exactly_rec_max);
+    RUN_TEST(test_user_save_venue_four_layouts_eight_sectors_round_trip);
+    RUN_TEST(test_user_load_venue_rejects_truncated_record);
     return UNITY_END();
 }

@@ -12,6 +12,7 @@
 
 #include "core/cfg.h"
 #include "core/core.h"
+#include "core/trk.h"   /* trk_init() -- #97, §10.9, review fix round 1 (T5-R2) */
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -217,9 +218,20 @@ static void boot_subsystems(uint8_t level)
      * leak-free with none. */
     link_start();
 
-    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). It idles until a
-     * LOGGER_OPEN_SESSION request arrives (from the pipeline below on the sim build, the power
-     * task later, or `dbg logtest`); with storage dead it stays idle (open fails gracefully). */
+    /* #97 (§10.9), review fix round 1 (T5-R2): clear the user track table ONCE, here, before
+     * logger_start() creates the logger task -- the logger loads any persisted venues
+     * (/tracks/user.bin) directly, inside its own boot init, immediately after that task is
+     * created (and, since it preempts this lower-priority task the instant it is created, before
+     * app_main() can reach pipeline_start() a few lines down and create the pipeline task -- the
+     * only other writer of this table). trk_init()/trk_get() etc. need core/trk.h; the pipeline no
+     * longer touches this table at boot at all (see core/trk.h's ownership comment for the full
+     * ordering argument this rests on). */
+    trk_init();
+
+    /* §4.7 step 12 (logger): start the logger task (core 0, prio 8). Loads the user track table
+     * (above) as part of its own boot init, then idles until a LOGGER_OPEN_SESSION request
+     * arrives (from the pipeline below on the sim build, the power task later, or `dbg logtest`);
+     * with storage dead it stays idle (open/load both fail gracefully). */
     logger_start();
 
     if (level == 2u) {                                 /* recovery (§17.5): service tasks only */

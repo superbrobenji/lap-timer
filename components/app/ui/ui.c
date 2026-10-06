@@ -767,6 +767,16 @@ static void handle_ota(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    /* M4 (review fix round 1, #97 §10.9): every branch below can replace the screen unconditionally
+     * while NEW TRACK is showing -- tell the pipeline to leave CREATE mode too, so an aborted/
+     * failed push does not strand the engine in CREATE (no venue scan, no laps) with no screen
+     * left to finish it from. Sent before any eviction branch so it covers both the terminal
+     * ROLLED_BACK path and the ordinary progress path; handle_create()'s own EV_CREATE_CANCELLED
+     * handler is a no-op by the time it arrives, since this function has already moved the screen
+     * off NEW TRACK (on_nt there reads false). */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK) {
+        ui_send_cmd(CMD_CREATE_CANCEL, 0, 0);
+    }
     uint8_t phase   = e->flags;
     uint8_t pct     = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
     bool    on_safe = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE;
@@ -1251,7 +1261,13 @@ static void handle_create(const event_t *e)
         s_model.create_step = s_create_next_gate;      /* 1 after S/F, k+1 after sector k */
         break;
     case EV_CREATE_FAILED:
-        s_model.create_step = 0xFF;                    /* sub-line: "No fix / not moving" until the next event */
+        /* M5 (review fix round 1): EV_CREATE_FAIL_FULL means every sector is already marked --
+         * create_step is already > LAP_MAX_SECTORS from the last successful GATE_SET, which
+         * already reads "Cross S/F to finish" (newtrack_subline(), screens_moto.c), the correct
+         * message for this press. Only EV_CREATE_FAIL_NOFIX overwrites it with 0xFF ("No fix /
+         * not moving"); leaving create_step untouched for FULL avoids a second, redundant
+         * sub-line string for a case the existing one already describes accurately. */
+        if (e->arg16 == EV_CREATE_FAIL_NOFIX) s_model.create_step = 0xFF;
         break;
     case EV_CREATE_CANCELLED:
         if (on_nt) ui_exit_menu();                     /* -> riding, full */

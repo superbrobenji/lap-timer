@@ -853,21 +853,28 @@ static const char ONESHOT_CALIBRATE_TITLE[] = "CALIBRATE";
 static const char ONESHOT_CALIBRATE_SUB[]   = "Hold upright, press MODE";
 static const char ONESHOT_NEWTRACK_TITLE[]  = "NEW TRACK";
 /* NEW TRACK sub-line text (#97, §10.9): the step-0 and FAIL/finish strings are fixed; the 1..
- * LAP_MAX_SECTORS case ("S/F set. MODE: sector k") is built by newtrack_subline() below into a
- * function-local static buffer, the same non-reentrant-but-single-threaded-renderer pattern this
- * file already uses for scratch text (put_uint/put_str above) -- screens_render() only ever runs
- * on the ui task, one render at a time. */
+ * LAP_MAX_SECTORS case ("S/F set. MODE: sector k") is built by newtrack_subline() below into the
+ * CALLER's own buffer (render_oneshot_newtrack()'s stack -- M6, review fix round 1: no static
+ * scratch storage, no non-reentrancy footnote). */
 static const char NEWTRACK_SUB_SF[]     = "Cross S/F, press MODE";
 static const char NEWTRACK_SUB_FINISH[] = "Cross S/F to finish";
 static const char NEWTRACK_SUB_FAIL[]   = "No fix / not moving";
 
+/* "S/F set. MODE: sector " is 22 chars; LAP_MAX_SECTORS < 10 keeps the sector number a single
+ * digit, so NEWTRACK_SUB_BUF_CAP (22 + 1 digit + NUL = 24) is an exact fit, not just a sufficient
+ * one -- asserted at compile time (M6) so a future LAP_MAX_SECTORS bump cannot silently truncate
+ * the text instead of failing a build. */
+#define NEWTRACK_SUB_BUF_CAP 24
+_Static_assert(LAP_MAX_SECTORS < 10, "newtrack_subline's buffer assumes a single-digit sector number");
+
 /* Table-driven sub-line choice for the NEW TRACK one-shot, keyed on screen_model_t.create_step:
- * 0 = waiting for S/F, 1..LAP_MAX_SECTORS = "S/F set. MODE: sector k", > LAP_MAX_SECTORS = every
- * gate set (waiting for the closing crossing), 0xFF = the last mark was refused. Pure; the only
- * state is the scratch buffer used to format the dynamic 1..LAP_MAX_SECTORS case. */
-static const char *newtrack_subline(uint8_t step)
+ * 0 = waiting for S/F, 1..LAP_MAX_SECTORS = "S/F set. MODE: sector k" (built into the caller's
+ * buf), > LAP_MAX_SECTORS = every gate set (waiting for the closing crossing), 0xFF = the last
+ * mark was refused. buf/cap: caller-owned scratch, at least NEWTRACK_SUB_BUF_CAP bytes. */
+static const char *newtrack_subline(uint8_t step, char *buf, size_t cap)
 {
-    static char buf[24];
+    CORE_ASSERT_RET(buf != NULL, UI_ASSERT_CODE, NEWTRACK_SUB_FAIL);
+    CORE_ASSERT_RET(cap >= NEWTRACK_SUB_BUF_CAP, UI_ASSERT_CODE, NEWTRACK_SUB_FAIL);
     if (step == 0) {
         return NEWTRACK_SUB_SF;
     }
@@ -880,7 +887,7 @@ static const char *newtrack_subline(uint8_t step)
     char *p = buf;
     p = put_str(p, "S/F set. MODE: sector ");
     p = put_uint(p, step);
-    CORE_ASSERT_RET((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE, NEWTRACK_SUB_FINISH);
+    CORE_ASSERT_RET((size_t)(p - buf) < cap, UI_ASSERT_CODE, NEWTRACK_SUB_FINISH);
     *p = '\0';
     return buf;
 }
@@ -1008,7 +1015,8 @@ static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_NEWTRACK_TITLE), NEWTRACK_TITLE_Y,
              ONESHOT_NEWTRACK_TITLE);
-    const char *sub = newtrack_subline(m->create_step);
+    char        buf[NEWTRACK_SUB_BUF_CAP];
+    const char *sub = newtrack_subline(m->create_step, buf, sizeof buf);
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, sub), NEWTRACK_SUB_Y, sub);
 }
 

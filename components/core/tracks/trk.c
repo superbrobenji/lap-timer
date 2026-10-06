@@ -15,22 +15,23 @@
 
 /* Not reentrant: the user store below is module-static, shared by every trk_* entry point.
  *
- * Writers: trk_init() runs on the pipeline task (core 1), at boot, inside pipeline_init() --
- * before pipeline_task()'s event loop starts, so no id has been surfaced to any reader yet.
- * trk_user_load() then runs ONCE, also at boot, but -- since #97, §10.9 -- on the LOGGER task
- * (core 0), not the pipeline task: pipeline_init() asks for it right after trk_init() returns with
- * a synchronous LOGGER_LOAD_TRACKS request (logger_request_sync(), app/lt_ipc.h, which handles the
- * request as tracks_load(), components/app/logger/logger.c), and BLOCKS the pipeline task until
- * the logger's reply arrives. That blocking round trip is what makes a write from a DIFFERENT task
- * safe here with no lock: the pipeline task cannot be calling trk_init()/trk_user_add()/trk_get()
- * while it is parked waiting for this reply, so the two boot-time writers never actually run
- * concurrently -- the same "a FreeRTOS queue send/receive is a full memory barrier" argument used
- * below for the ui's reads, just between two tasks instead of across the one EV_VENUE_FOUND event.
- * trk_user_add() -- invoked directly by lap.c's finalize_create() on a CREATE-mode S/F crossing,
- * and indirectly via trk_user_add_json() for the CFG_GPS_SIM venue registration at
- * pipeline_init() -- is back on the pipeline task (core 1), and always completes before the event
- * that announces its id: each call site's emit(..., EV_VENUE_FOUND, ...) is sequential code a few
- * lines later in the same function, same task.
+ * Writers: trk_init() runs ONCE, at boot, on whichever task calls app_main() (main/app_main.c's
+ * boot_subsystems(), right before logger_start()) -- before the logger task even exists, so
+ * trivially before any id has been surfaced to any reader. trk_user_load_venue() (looped by the
+ * logger's tracks_load()) then runs, also at boot, but -- since #97, §10.9, review fix round 1
+ * (T5-R2) -- directly on the newly-created LOGGER task, inside logger_task()'s own init, before
+ * that task's first blocking wait. No request, no queue, no lock needed: app_main() is lower
+ * priority than the logger task it just created, so the instant xTaskCreateStaticPinnedToCore()
+ * (logger_start()) returns control to the scheduler, the logger task preempts it and runs to its
+ * first blocking wait -- well before app_main() can resume and reach pipeline_start() a few lines
+ * later, which is the only thing that could create the pipeline task, the ONLY other writer of
+ * this table. So every boot-time writer (trk_init(), then every trk_user_load_venue()) completes
+ * before the pipeline task -- the only other writer -- even exists; there is nothing yet for it to
+ * race. trk_user_add() -- invoked directly by lap.c's finalize_create() on a CREATE-mode S/F
+ * crossing, and indirectly via trk_user_add_json() for the CFG_GPS_SIM venue registration at
+ * pipeline_init() -- is on the pipeline task (core 1), after boot, and always completes before the
+ * event that announces its id: each call site's emit(..., EV_VENUE_FOUND, ...) is sequential code
+ * a few lines later in the same function, same task.
  *
  * Readers: the pipeline task itself (already ordered above, same task, no barrier needed), and --
  * since #98 -- the ui task (core 0), through trk_get() in handle_venue_found()/
@@ -279,4 +280,198 @@ int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
     blob[need - 2] = (uint8_t)crc; blob[need - 1] = (uint8_t)(crc >> 8);
     *n_out = need;
     return 0;
+}
+
+/* ---- per-venue variable-length record (review fix round 1, #97, T5-R4) ----
+ *
+ * Small bounds-checked append/consume cursor helpers, shared by trk_user_save_venue (rec_put_*)
+ * and trk_user_load_venue (rec_get_*): each advances *off by the field width and fails (false)
+ * rather than writing/reading past cap/n, so a short destination buffer or a truncated/corrupt
+ * record is caught at the point of the overrun, not after. f64 fields are copied via memcpy of
+ * the double's raw bytes (same build-local-representation contract trk_user_save's canon_venue
+ * already relies on -- this blob was never claimed portable across builds, only across reboots of
+ * the same image). */
+static bool rec_put_u8(uint8_t *buf, size_t cap, size_t *off, uint8_t v)
+{
+    if (*off + 1u > cap) return false;
+    buf[*off] = v;
+    *off += 1u;
+    return true;
+}
+static bool rec_put_u16(uint8_t *buf, size_t cap, size_t *off, uint16_t v)
+{
+    if (*off + 2u > cap) return false;
+    buf[*off] = (uint8_t)v;
+    buf[*off + 1u] = (uint8_t)(v >> 8);
+    *off += 2u;
+    return true;
+}
+static bool rec_put_u32(uint8_t *buf, size_t cap, size_t *off, uint32_t v)
+{
+    if (*off + 4u > cap) return false;
+    for (int i = 0; i < 4; i++) buf[*off + (size_t)i] = (uint8_t)(v >> (8 * i));
+    *off += 4u;
+    return true;
+}
+static bool rec_put_f64(uint8_t *buf, size_t cap, size_t *off, double v)
+{
+    if (*off + 8u > cap) return false;
+    memcpy(buf + *off, &v, 8u);
+    *off += 8u;
+    return true;
+}
+static bool rec_put_bytes(uint8_t *buf, size_t cap, size_t *off, const void *src, size_t n)
+{
+    CORE_ASSERT_RET(src != NULL, TRK_ASSERT_CODE, false);
+    if (*off + n > cap) return false;
+    memcpy(buf + *off, src, n);
+    *off += n;
+    return true;
+}
+static bool rec_get_u8(const uint8_t *buf, size_t n, size_t *off, uint8_t *out)
+{
+    if (*off + 1u > n) return false;
+    *out = buf[*off];
+    *off += 1u;
+    return true;
+}
+static bool rec_get_i8(const uint8_t *buf, size_t n, size_t *off, int8_t *out)
+{
+    uint8_t raw;
+    if (!rec_get_u8(buf, n, off, &raw)) return false;
+    *out = (int8_t)raw;
+    return true;
+}
+static bool rec_get_u16(const uint8_t *buf, size_t n, size_t *off, uint16_t *out)
+{
+    if (*off + 2u > n) return false;
+    *out = (uint16_t)(buf[*off] | ((uint16_t)buf[*off + 1u] << 8));
+    *off += 2u;
+    return true;
+}
+static bool rec_get_u32(const uint8_t *buf, size_t n, size_t *off, uint32_t *out)
+{
+    if (*off + 4u > n) return false;
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)buf[*off + (size_t)i] << (8 * i);
+    *out = v;
+    *off += 4u;
+    return true;
+}
+static bool rec_get_f64(const uint8_t *buf, size_t n, size_t *off, double *out)
+{
+    if (*off + 8u > n) return false;
+    memcpy(out, buf + *off, 8u);
+    *off += 8u;
+    return true;
+}
+static bool rec_get_bytes(const uint8_t *buf, size_t n, size_t *off, void *dst, size_t len)
+{
+    CORE_ASSERT_RET(dst != NULL, TRK_ASSERT_CODE, false);
+    if (*off + len > n) return false;
+    memcpy(dst, buf + *off, len);
+    *off += len;
+    return true;
+}
+
+/* One layout's record (id, name, sf, dir_sign, n_sectors, its sectors, length_m -- the field
+ * order the header comment documents). Shared by the save and load sides below. */
+static bool rec_put_layout(uint8_t *buf, size_t cap, size_t *off, const trk_layout_t *l)
+{
+    CORE_ASSERT_RET(l != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(l->n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE, false);
+    if (!rec_put_u16(buf, cap, off, l->id)) return false;
+    if (!rec_put_bytes(buf, cap, off, l->name, sizeof l->name)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p1.lat)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p1.lon)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p2.lat)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p2.lon)) return false;
+    if (!rec_put_u8(buf, cap, off, (uint8_t)l->dir_sign)) return false;
+    if (!rec_put_u8(buf, cap, off, l->n_sectors)) return false;
+    for (uint8_t s = 0; s < l->n_sectors; s++) {
+        const trk_line_t *ln = &l->sectors[s];
+        if (!rec_put_f64(buf, cap, off, ln->p1.lat)) return false;
+        if (!rec_put_f64(buf, cap, off, ln->p1.lon)) return false;
+        if (!rec_put_f64(buf, cap, off, ln->p2.lat)) return false;
+        if (!rec_put_f64(buf, cap, off, ln->p2.lon)) return false;
+    }
+    return rec_put_u32(buf, cap, off, l->length_m);
+}
+
+static bool rec_get_layout(const uint8_t *buf, size_t n, size_t *off, trk_layout_t *out)
+{
+    CORE_ASSERT_RET(out != NULL, TRK_ASSERT_CODE, false);
+    memset(out, 0, sizeof *out);
+    int8_t  dir = 0;
+    uint8_t n_sectors = 0;
+    if (!rec_get_u16(buf, n, off, &out->id)) return false;
+    if (!rec_get_bytes(buf, n, off, out->name, sizeof out->name)) return false;
+    out->name[sizeof out->name - 1] = '\0';             /* defensive: trk_validate_venue requires it */
+    if (!rec_get_f64(buf, n, off, &out->sf.p1.lat)) return false;
+    if (!rec_get_f64(buf, n, off, &out->sf.p1.lon)) return false;
+    if (!rec_get_f64(buf, n, off, &out->sf.p2.lat)) return false;
+    if (!rec_get_f64(buf, n, off, &out->sf.p2.lon)) return false;
+    if (!rec_get_i8(buf, n, off, &dir)) return false;
+    if (!rec_get_u8(buf, n, off, &n_sectors)) return false;
+    if (n_sectors > LAP_MAX_SECTORS) return false;
+    CORE_ASSERT_RET(n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE, false);   /* postcondition of the check above */
+    out->dir_sign  = dir;
+    out->n_sectors = n_sectors;
+    for (uint8_t s = 0; s < n_sectors; s++) {
+        trk_line_t *ln = &out->sectors[s];
+        if (!rec_get_f64(buf, n, off, &ln->p1.lat)) return false;
+        if (!rec_get_f64(buf, n, off, &ln->p1.lon)) return false;
+        if (!rec_get_f64(buf, n, off, &ln->p2.lat)) return false;
+        if (!rec_get_f64(buf, n, off, &ln->p2.lon)) return false;
+    }
+    return rec_get_u32(buf, n, off, &out->length_m);
+}
+
+int trk_user_save_venue(uint8_t index, uint8_t *buf, size_t cap, size_t *n_out)
+{
+    CORE_ASSERT_RET(buf != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(n_out != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, -1);
+    if (index >= user_n) return -1;
+    const trk_venue_t *v = &user[index];
+    CORE_ASSERT_RET(v->n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE, -1);
+    size_t off = 0;
+    if (!rec_put_u16(buf, cap, &off, v->id)) return -1;
+    if (!rec_put_bytes(buf, cap, &off, v->name, sizeof v->name)) return -1;
+    if (!rec_put_f64(buf, cap, &off, v->lat)) return -1;
+    if (!rec_put_f64(buf, cap, &off, v->lon)) return -1;
+    if (!rec_put_u32(buf, cap, &off, v->radius_m)) return -1;
+    if (!rec_put_u8(buf, cap, &off, v->flags)) return -1;
+    if (!rec_put_u8(buf, cap, &off, v->n_layouts)) return -1;
+    for (uint8_t i = 0; i < v->n_layouts; i++) {
+        if (!rec_put_layout(buf, cap, &off, &v->layouts[i])) return -1;
+    }
+    *n_out = off;
+    return 0;
+}
+
+int trk_user_load_venue(const uint8_t *buf, size_t n)
+{
+    CORE_ASSERT_RET(buf != NULL, TRK_ASSERT_CODE, -1);
+    trk_venue_t v;
+    memset(&v, 0, sizeof v);
+    size_t  off = 0;
+    uint8_t n_layouts = 0;
+    if (!rec_get_u16(buf, n, &off, &v.id)) return -1;
+    if (!rec_get_bytes(buf, n, &off, v.name, sizeof v.name)) return -1;
+    v.name[sizeof v.name - 1] = '\0';                   /* defensive: trk_validate_venue requires it */
+    if (!rec_get_f64(buf, n, &off, &v.lat)) return -1;
+    if (!rec_get_f64(buf, n, &off, &v.lon)) return -1;
+    if (!rec_get_u32(buf, n, &off, &v.radius_m)) return -1;
+    if (!rec_get_u8(buf, n, &off, &v.flags)) return -1;
+    if (!rec_get_u8(buf, n, &off, &n_layouts)) return -1;
+    if (n_layouts > TRK_MAX_LAYOUTS) return -1;
+    CORE_ASSERT_RET(n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE, -1);   /* postcondition of the check above */
+    v.n_layouts = n_layouts;
+    for (uint8_t i = 0; i < n_layouts; i++) {
+        if (!rec_get_layout(buf, n, &off, &v.layouts[i])) return -1;
+    }
+    if (off != n) return -1;                            /* no trailing garbage in the record */
+    if (trk_validate_venue(&v) != 0) return -1;
+    return trk_user_add(&v);   /* replace-same-id dedupe + the TRK_MAX_USER bound, reused not duplicated */
 }
