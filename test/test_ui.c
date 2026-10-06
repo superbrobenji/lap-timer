@@ -242,6 +242,15 @@ static void test_ui_layout_label(void)
     TEST_ASSERT_EQUAL_INT(12, ui_layout_label(&v, 9, buf, sizeof buf));     /* out-of-range -> Auto */
     TEST_ASSERT_EQUAL_STRING("Layout: Auto", buf);
 
+    /* Review finding M1 (#98 fix round 1): a corrupted venue (n_layouts > TRK_MAX_LAYOUTS, never
+     * true for anything that passed trk_validate_venue) must not let an in-range-looking `choice`
+     * index past layouts[TRK_MAX_LAYOUTS-1] -- the helper bounds this itself and falls back to
+     * Auto, same as the other anomaly asserts above. */
+    v.n_layouts = (uint8_t)(TRK_MAX_LAYOUTS + 1u);
+    TEST_ASSERT_EQUAL_INT(12, ui_layout_label(&v, 1, buf, sizeof buf));
+    TEST_ASSERT_EQUAL_STRING("Layout: Auto", buf);
+    v.n_layouts = 2;   /* restore for the truncation case below */
+
     char small[16];
     snprintf(v.layouts[1].name, sizeof v.layouts[1].name, "ReallyLongLayoutName12");   /* 22 chars */
     TEST_ASSERT_EQUAL_INT(-1, ui_layout_label(&v, 2, small, sizeof small)); /* truncates */

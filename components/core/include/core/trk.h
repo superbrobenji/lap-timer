@@ -32,7 +32,9 @@ typedef struct {
 extern const trk_venue_t trk_bundled[];
 extern const uint16_t    trk_bundled_count;
 
-/* The user store is module-static and not protected by a lock (see trk.c). */
+/* The user store is module-static and not protected by a lock -- see trk.c for the full
+ * writer/reader ownership rules this relies on (pipeline task writes; both the pipeline task and,
+ * since #98, the ui task read via trk_get() after EV_VENUE_FOUND/EV_LAYOUT_LOCKED). */
 void               trk_init(void);                                   /* clears the user store */
 int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */

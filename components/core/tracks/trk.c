@@ -14,8 +14,31 @@
 #define TRK_ASSERT_CODE 0x0A80
 
 /* Not reentrant: the user store below is module-static, shared by every trk_* entry point.
- * Only the conn task adds/loads/saves venues and only the pipeline task reads them, and the two
- * never overlap (an upload is applied between sessions), so no lock is taken. */
+ *
+ * Writers, all on the pipeline task (core 1): trk_init() and trk_user_load() run at boot, before
+ * pipeline_task()'s event loop starts -- no id has been surfaced to any reader yet. trk_user_add()
+ * -- invoked directly by lap.c's finalize_create() on a CREATE-mode S/F crossing, and indirectly
+ * via trk_user_add_json() for the CFG_GPS_SIM venue registration at pipeline_init() -- always
+ * completes before the event that announces its id: each call site's emit(..., EV_VENUE_FOUND,
+ * ...) is sequential code a few lines later in the same function, same task.
+ *
+ * Readers: the pipeline task itself (already ordered above, same task, no barrier needed), and --
+ * since #98 -- the ui task (core 0), through trk_get() in handle_venue_found()/
+ * handle_layout_locked()/build_menu()/menu_do_layout() (components/app/ui/ui.c). The ui only calls
+ * trk_get() on an id after receiving the EV_VENUE_FOUND/EV_LAYOUT_LOCKED event that names it; the
+ * FreeRTOS cross-core queue (g_ui_evt_q) send/receive is a full memory barrier, so every write
+ * above is guaranteed visible by the time the ui's read runs. No lock is taken.
+ *
+ * This rests on one invariant the API itself does NOT enforce: no writer may rewrite or remove an
+ * id the ui may already hold. trk_user_add()'s same-id "replace" branch is real and live -- it is
+ * only safe today because every live call site supplies either a boot-time id (before any id is
+ * surfaced to a reader) or a fresh one (lap.c's trk_next_user_id(), always one past every existing
+ * id, so it can never collide with an id already seen). A future writer that could replace an id
+ * already surfaced to the ui in the same session (a second track load after boot, a revived BLE
+ * upload, ...) must run strictly before that id's first EV_VENUE_FOUND/EV_LAYOUT_LOCKED of the
+ * session, or take a lock/seqlock (pipeline.c's seq_enter()/seq_leave() around s_best is the
+ * existing pattern for this shape of problem) -- "no lock is taken" above holds only as long as
+ * that ordering does. */
 static trk_venue_t user[TRK_MAX_USER];
 static uint8_t     user_n;
 
