@@ -852,7 +852,38 @@ static const char ONESHOT_OTAFAIL_LINE2[]   = "REVERTED";
 static const char ONESHOT_CALIBRATE_TITLE[] = "CALIBRATE";
 static const char ONESHOT_CALIBRATE_SUB[]   = "Hold upright, press MODE";
 static const char ONESHOT_NEWTRACK_TITLE[]  = "NEW TRACK";
-static const char ONESHOT_NEWTRACK_SUB[]    = "Cross S/F, press MODE";
+/* NEW TRACK sub-line text (#97, §10.9): the step-0 and FAIL/finish strings are fixed; the 1..
+ * LAP_MAX_SECTORS case ("S/F set. MODE: sector k") is built by newtrack_subline() below into a
+ * function-local static buffer, the same non-reentrant-but-single-threaded-renderer pattern this
+ * file already uses for scratch text (put_uint/put_str above) -- screens_render() only ever runs
+ * on the ui task, one render at a time. */
+static const char NEWTRACK_SUB_SF[]     = "Cross S/F, press MODE";
+static const char NEWTRACK_SUB_FINISH[] = "Cross S/F to finish";
+static const char NEWTRACK_SUB_FAIL[]   = "No fix / not moving";
+
+/* Table-driven sub-line choice for the NEW TRACK one-shot, keyed on screen_model_t.create_step:
+ * 0 = waiting for S/F, 1..LAP_MAX_SECTORS = "S/F set. MODE: sector k", > LAP_MAX_SECTORS = every
+ * gate set (waiting for the closing crossing), 0xFF = the last mark was refused. Pure; the only
+ * state is the scratch buffer used to format the dynamic 1..LAP_MAX_SECTORS case. */
+static const char *newtrack_subline(uint8_t step)
+{
+    static char buf[24];
+    if (step == 0) {
+        return NEWTRACK_SUB_SF;
+    }
+    if (step == 0xFFu) {
+        return NEWTRACK_SUB_FAIL;
+    }
+    if (step > (uint8_t)LAP_MAX_SECTORS) {
+        return NEWTRACK_SUB_FINISH;
+    }
+    char *p = buf;
+    p = put_str(p, "S/F set. MODE: sector ");
+    p = put_uint(p, step);
+    CORE_ASSERT_RET((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE, NEWTRACK_SUB_FINISH);
+    *p = '\0';
+    return buf;
+}
 
 /* Status line for the OTA one-shot (spec §20.6): any unknown phase reads as RECEIVING, the
  * phase the screen is first shown in. */
@@ -975,11 +1006,10 @@ static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    (void)m;
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_NEWTRACK_TITLE), NEWTRACK_TITLE_Y,
              ONESHOT_NEWTRACK_TITLE);
-    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, ONESHOT_NEWTRACK_SUB), NEWTRACK_SUB_Y,
-             ONESHOT_NEWTRACK_SUB);
+    const char *sub = newtrack_subline(m->create_step);
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, sub), NEWTRACK_SUB_Y, sub);
 }
 
 static void render_oneshot(fb_t *fb, const screen_model_t *m)

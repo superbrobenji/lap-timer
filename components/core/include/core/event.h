@@ -45,12 +45,25 @@ enum {
      * record and never streamed to a peer (only emit_event() reaches those sinks). */
     EV_CFG_CHANGED   = 16,  /* ui-only: posted straight to g_ui_evt_q by cmd.c, never via emit_event(), never logged/streamed */
     EV_LAP_RESET     = 17,  /* ui-only: posted straight to g_ui_evt_q by the pipeline on CMD_RESET_ENGINE */
-    EV_OTA           = 18   /* ui-only: posted straight to g_ui_evt_q by ota.c / the supervisor.
+    EV_OTA           = 18,  /* ui-only: posted straight to g_ui_evt_q by ota.c / the supervisor.
                              * flags = phase: OTA_PHASE_RECEIVING/VERIFYING/REBOOTING (core/ui/model.h)
                              * or EV_OTA_ABORTED / EV_OTA_ROLLED_BACK below; arg16 = percent 0..100 */
+    EV_CREATE        = 19   /* ui-only: posted straight to g_ui_evt_q by the pipeline (#97, §10.9).
+                             * flags = EV_CREATE_* phase below; arg16 = gate index (GATE_SET) or
+                             * reason (FAILED, always 0 today) */
 };
 /* Terminal EV_OTA phases (never rendered as a status line): the transfer failed/was aborted, or
  * the bootloader reverted the previous image (spec §19.4: "UPDATE FAILED, REVERTED" for 3 s). */
 #define EV_OTA_ABORTED     3u
 #define EV_OTA_ROLLED_BACK 4u
+
+/* EV_CREATE phases (#97, §10.9): CMD_CREATE_BEGIN armed the engine (BEGUN), a short-MODE
+ * CMD_MARK_GATE landed (GATE_SET, arg16 = the gate index just set) or was refused (FAILED -- no
+ * valid fix, not moving, or out of order), or CMD_CREATE_CANCEL aborted (CANCELLED). The engine's
+ * own finish (the next S/F crossing after every gate is marked) is EV_VENUE_FOUND, not one of
+ * these -- ui.c's existing EV_VENUE_FOUND handling closes the NEW TRACK one-shot. */
+#define EV_CREATE_BEGUN     0u
+#define EV_CREATE_GATE_SET  1u
+#define EV_CREATE_FAILED    2u
+#define EV_CREATE_CANCELLED 3u
 #endif

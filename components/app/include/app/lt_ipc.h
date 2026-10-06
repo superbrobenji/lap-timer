@@ -49,6 +49,8 @@ typedef enum {
      * handler when op_delete became its only sender (debt sweep A #73) -- the value is retired,
      * not reused, so a stray old build's request is never misread as something else. */
     LOGGER_DELETE_SESSION  = 5,   /* unlink .log + .sum for id, re-prime the cache (debt sweep A #73) */
+    LOGGER_SAVE_TRACKS     = 6,   /* serialise the user track table into /tracks/user.bin (requester notified with rc) */
+    LOGGER_LOAD_TRACKS     = 7,   /* load /tracks/user.bin into the user track table (boot; requester notified) */
 } log_req_type_t;
 
 /* debt sweep A #59/#73: a bounded request/reply. requester == NULL is fire-and-forget (today's
@@ -78,8 +80,13 @@ extern QueueHandle_t g_log_req_q;
  * CALLING task's own notification index 0 -- confirmed clear of the two intended callers
  * (supervisor, export_serial/console): a firmware-wide grep for task notification calls before
  * this landed found only logger.c and link.c, each notifying its OWN task (a different task from
- * either caller) -- see the debt sweep A T3 report. Never call from the ui or pipeline task: both
- * must never block on the logger, and neither has any reason to.
+ * either caller) -- see the debt sweep A T3 report. Never call from the ui task: it must never
+ * block on the logger (every render-loop iteration matters). The pipeline task must likewise
+ * never call this from its main loop -- but #97 (§10.9) adds the ONE narrow exception: a single
+ * LOGGER_LOAD_TRACKS call from pipeline_init(), before pipeline_task() enters its loop (and so
+ * before any g_hb[HB_PIPELINE] heartbeat is due) -- a one-time, bounded (2000 ms) boot stall, well
+ * inside the supervisor's PIPE_STALL_S window, same order of cost as the driver bring-up already
+ * running at that point in pipeline_init(). No other pipeline call site may use this helper.
  *
  * T3 fix 1 (ruling P-7): the generation tag in the notification's top byte is what makes this
  * helper safe for ANY caller priority or call pattern, not just a low-traffic one -- without it, a
@@ -141,11 +148,13 @@ typedef enum {
     CMD_GPS_POWER     = 6,   /* arg8 = 0/1 */
     CMD_IMU_MODE      = 7,   /* arg8 = IMU_FULL / IMU_LOWPOWER */
     CMD_SIM_SCENARIO  = 8,   /* arg8 = SIM_SC_* (sim build only), arg16 = laps */
+    CMD_CREATE_BEGIN  = 9,   /* menu New track: lap_create_begin */
+    CMD_CREATE_CANCEL = 10,  /* long MODE on the NEW TRACK one-shot: lap_create_cancel */
 } command_type_t;
 /* Fix round 1, M1: the single bound every `cmd->type <= ...` check (pipeline.c's handle_cmd,
  * ui.c's ui_send_cmd) must use, instead of a literal last enumerator that silently goes stale the
  * next time a command is added. */
-#define CMD_TYPE_LAST CMD_SIM_SCENARIO
+#define CMD_TYPE_LAST CMD_CREATE_CANCEL
 
 enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_MODE_*) */
 /* Fix round 1, M2: CMD_SIM_SCENARIO's arg8 contract, same precedent as MODE_LAP/MODE_DRAG above.

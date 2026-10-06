@@ -259,6 +259,12 @@ static char    s_lbl_layout[32];
 static uint16_t s_venue_id;
 static uint8_t  s_layout_choice;
 
+/* #97 (§10.9): the ui's own mirror of the next gate index, for the arg8 CMD_MARK_GATE carries --
+ * the pipeline (its own s_create_next_gate, pipeline.c) is the AUTHORITATIVE counter and never
+ * trusts this value, so a dropped/duplicate press can only ever cost this task a stale display,
+ * never desync the engine. Reset to 0 on EV_CREATE_BEGUN, advanced on EV_CREATE_GATE_SET. */
+static uint8_t s_create_next_gate;
+
 /* ---- helpers ---- */
 
 static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
@@ -511,7 +517,7 @@ static void menu_select(void)
     case MA_LAYOUT:    menu_do_layout();    break;
     /* pipeline drops CMD_CALIB_ORIENT until the calib session lands. */
     case MA_CALIBRATE: ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT"); break;
-    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (issue #97)"); break;
+    case MA_NEWTRACK: ui_send_cmd(CMD_CREATE_BEGIN, 0, 0); ESP_LOGI(TAG, "menu: New track -> CMD_CREATE_BEGIN"); break;
     case MA_EXPORT:   ESP_LOGW(TAG, "menu: Export (BLE) not implemented (plan 06)"); break;
     case MA_LIVE:     ESP_LOGW(TAG, "menu: Live to phone not implemented (plan 06)"); break;
     case MA_DIAG:     ESP_LOGW(TAG, "menu: Diagnostics export not implemented (§17.10, plan 05)"); break;
@@ -545,6 +551,14 @@ static void btn_short(uint8_t bit)
         (s_model.oneshot == ONESHOT_BOOT || s_model.oneshot == ONESHOT_VENUE)) {
         s_oneshot_until_us = 0;
         ui_exit_menu(); /* -> SCR_RIDING */
+        return;
+    }
+
+    /* #97 (§10.9): a short MODE on the NEW TRACK one-shot marks the next gate; UP/DOWN are
+     * ignored. The one-shot itself is persistent (no auto-revert) -- it only leaves on
+     * EV_CREATE_CANCELLED (long MODE, below) or EV_VENUE_FOUND (the engine's own finish). */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK) {
+        if (bit == BTN_MODE) ui_send_cmd(CMD_MARK_GATE, s_create_next_gate, 0);
         return;
     }
 
@@ -600,6 +614,13 @@ static void btn_long(uint8_t bit)
         }
     } else if (s_model.screen == SCR_ONESHOT) {
         if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
+        /* #97 (§10.9): long MODE cancels creation -- CMD_CREATE_CANCEL, not an immediate
+         * ui_exit_menu(): the screen leaves only once EV_CREATE_CANCELLED confirms the engine
+         * actually left CREATE mode, so the engine state and the screen never fall out of step. */
+        if (s_model.oneshot == ONESHOT_NEWTRACK) {
+            ui_send_cmd(CMD_CREATE_CANCEL, 0, 0);
+            return;
+        }
         s_oneshot_until_us = 0;
         ui_exit_menu();
     } else { /* SCR_RIDING */
@@ -708,7 +729,13 @@ static void show_venue_oneshot(int64_t now)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* gated on it below */
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);   /* stamp for the one-shot revert timer */
-    if (s_model.screen != SCR_RIDING) {
+    /* #97 (§10.9): the ONE other screen allowed to be replaced here is the NEW TRACK one-shot
+     * finishing creation (the engine's own EV_VENUE_FOUND on the closing S/F crossing) -- every
+     * other one-shot/menu still blocks this (s_model.oneshot is stale/meaningless outside
+     * SCR_ONESHOT, so it is only read when screen == SCR_ONESHOT, same guard style as the
+     * ONESHOT_OTA checks elsewhere in this file). */
+    bool on_newtrack = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK;
+    if (s_model.screen != SCR_RIDING && !on_newtrack) {
         return; /* don't interrupt the menu or another one-shot */
     }
     s_model.screen     = SCR_ONESHOT;
@@ -1194,6 +1221,46 @@ static void ui_lap_reset(void)
                    UI_APP_ASSERT_CODE);
 }
 
+/* EV_CREATE -> model (#97, §10.9; split verbatim out of handle_event for rule 4). BEGUN opens the
+ * NEW TRACK one-shot (persistent, no auto-revert) UNLESS it is already showing (e.g. this device
+ * never left it); GATE_SET/FAILED just drive the sub-line while it stays up; CANCELLED returns to
+ * riding (ui_exit_menu()) only if still showing it -- a stale CANCELLED after the screen already
+ * moved on (should not happen, but see the stale-ONESHOT_OTA precedent in btn_vlong above) must
+ * not evict whatever is showing now. The engine's own finish (the next S/F crossing) is a real
+ * EV_VENUE_FOUND, not one of these -- handled entirely by handle_venue_found()/show_venue_oneshot()
+ * earlier in this file, which this event never touches. */
+static void handle_create(const event_t *e)
+{
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    bool on_nt = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK;
+    switch (e->flags) {
+    case EV_CREATE_BEGUN:
+        s_model.create_step = 0;
+        s_create_next_gate  = 0;
+        if (!on_nt) {                       /* menu -> one-shot: whole-screen replacement (B-9) */
+            s_model.screen     = SCR_ONESHOT;
+            s_model.oneshot    = ONESHOT_NEWTRACK;
+            s_oneshot_until_us = 0;         /* persistent until finished/cancelled */
+            s_wants_full       = true;
+            s_screen_changed   = true;
+        }
+        break;
+    case EV_CREATE_GATE_SET:
+        s_create_next_gate  = (uint8_t)(e->arg16 + 1u);
+        s_model.create_step = s_create_next_gate;      /* 1 after S/F, k+1 after sector k */
+        break;
+    case EV_CREATE_FAILED:
+        s_model.create_step = 0xFF;                    /* sub-line: "No fix / not moving" until the next event */
+        break;
+    case EV_CREATE_CANCELLED:
+        if (on_nt) ui_exit_menu();                     /* -> riding, full */
+        break;
+    default: break;
+    }
+    s_dirty = true;
+}
+
 static void handle_event(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* model screen stays valid */
@@ -1220,6 +1287,7 @@ static void handle_event(const event_t *e, int64_t now)
     case EV_CFG_CHANGED: ui_reload_cfg(); break;
     case EV_LAP_RESET:   ui_lap_reset();  break;
     case EV_OTA:         handle_ota(e, now); break;
+    case EV_CREATE:      handle_create(e); break;
     default: break;
     }
 }

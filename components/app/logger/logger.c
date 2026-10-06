@@ -26,6 +26,7 @@
 
 #include "core/event.h"
 #include "core/ses.h"
+#include "core/trk.h"         /* trk_user_save/trk_user_load (#97, §10.9) */
 #include "core/types.h"
 
 #include "build_config.h"
@@ -58,6 +59,9 @@ static const char *TAG = "log";
  * only the number of sto_write chunks can change, never the concatenated file content. */
 #define BATCH_CAP        3840
 #define BATCH_FLUSH_B    3584          /* write when the batch reaches this */
+/* #97 (§10.9): the persisted user track table (tracks_save/tracks_load below). Paths are
+ * backend-relative (hal/storage.h); storage_internal.c's mount ladder already creates /tracks. */
+#define TRACKS_USER_PATH "/tracks/user.bin"
 #define WRITE_INTERVAL_MS 1000
 #define SYNC_INTERVAL_MS  2000
 #define EVICT_INTERVAL_MS 60000
@@ -453,6 +457,64 @@ static int delete_session(const log_request_t *req)
     return rc;
 }
 
+/* #97 (§10.9) blob-size proof: trk_user_save()'s blob is a fixed-stride format (core/trk.c's
+ * canon_venue() always writes sizeof(trk_venue_t) bytes per venue, regardless of how many of its
+ * layouts/sectors are actually in use), so its output is exactly
+ * 2 + user_n * sizeof(trk_venue_t) + 2 for whatever user_n happens to be at save time. The only
+ * case provable at compile time is the single-venue one, asserted below -- the true worst case
+ * (TRK_MAX_USER == 4 full entries) is 2 + 4*sizeof(trk_venue_t) + 2, which on this build is far
+ * over BATCH_CAP; even TWO entries already overflow it (e.g. a CFG_GPS_SIM bench build, where the
+ * sim capture's own venue already occupies one user slot before any on-device creation runs).
+ * trk_user_save() returns -1 (cap < need) rather than overrunning s_batch when that happens, and
+ * tracks_save() below just propagates it -- a device (or bench build) that has accumulated more
+ * than one user-created venue silently stops being able to persist the table until it has fewer
+ * again. This is a real, reported limitation of reusing s_batch for this (Task 5 report, #97): it
+ * is not fixed here -- BATCH_CAP is sized for the .log/.sum batching contract documented above
+ * and must not grow for this; trk.c's fixed-stride blob format and TRK_MAX_USER are a different
+ * module's contract, not Task 5's to redesign. */
+_Static_assert(2 + 1 * sizeof(trk_venue_t) + 2 <= BATCH_CAP,
+               "a single persisted user venue must fit the logger's scratch batch");
+
+/* #97 (§10.9): serialise the user track table into /tracks/user.bin, reusing s_batch as scratch
+ * (no new buffer) -- any pending session-log batch is flushed first (do_write()) so this never
+ * clobbers unwritten .log bytes; s_batch_len is 0 again once trk_user_save() has filled it (it
+ * does not itself touch s_batch_len, so the session batch stays logically empty afterward, same
+ * as right after a flush). See the size-proof comment above for trk_user_save()'s failure mode
+ * beyond a single venue. */
+static int tracks_save(void)
+{
+    if (s_batch_len != 0) {
+        LT_ASSERT_RET(s_open, LOG_ASSERT_CODE, -1);   /* invariant: a non-empty batch implies an open session */
+        do_write();
+    }
+    LT_ASSERT_RET(s_batch_len == 0, LOG_ASSERT_CODE, -1);   /* postcondition: s_batch is free to reuse */
+    size_t n = 0;
+    if (trk_user_save(s_batch, sizeof s_batch, &n) != 0) return -1;
+    sto_file_t f;
+    if (sto_open(TRACKS_USER_PATH, STO_WR | STO_CREATE, &f) != 0) return -1;
+    int rc = sto_write(f, s_batch, n);
+    (void)sto_close(f);
+    if (rc != 0) (void)errlog_add(E_STO_WRITE, (uint32_t)n);
+    return rc;
+}
+
+/* #97 (§10.9): load /tracks/user.bin into the user track table. Boot-only (pipeline_init(), via
+ * logger_request_sync(), before any session is open), so s_batch is guaranteed empty on entry --
+ * asserted, not just assumed. A missing file (sto_exists() != 1: absent, or the probe itself
+ * failed) is not an error -- a fresh device, or one that never persisted a venue, has nothing to
+ * load. */
+static int tracks_load(void)
+{
+    LT_ASSERT_RET(s_batch_len == 0, LOG_ASSERT_CODE, -1);   /* boot: nothing buffered yet */
+    if (sto_exists(TRACKS_USER_PATH) != 1) return 0;        /* no file: nothing to load */
+    sto_file_t f; size_t n = 0;
+    if (sto_open(TRACKS_USER_PATH, STO_RD, &f) != 0) return -1;
+    int rc = sto_read(f, s_batch, sizeof s_batch, &n);
+    (void)sto_close(f);
+    if (rc != 0) return -1;
+    return trk_user_load(s_batch, n);
+}
+
 /* Returns the rc this request's handling produced -- 0 ok, <0 an error -- so drain_requests can
  * notify a synchronous caller (logger_request_sync, debt sweep A #59/#73). OPEN/REBUILD/EVICT
  * have no failure surface of their own yet (their own I/O failures are already recorded by
@@ -467,6 +529,8 @@ static int handle_request(const log_request_t *req)
     case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
     case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; return 0;   /* force an eviction pass this loop */
     case LOGGER_DELETE_SESSION:  return delete_session(req);
+    case LOGGER_SAVE_TRACKS:     return tracks_save();
+    case LOGGER_LOAD_TRACKS:     return tracks_load();
     default: return 0;
     }
 }

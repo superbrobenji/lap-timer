@@ -32,9 +32,20 @@ typedef struct {
 extern const trk_venue_t trk_bundled[];
 extern const uint16_t    trk_bundled_count;
 
-/* The user store is module-static and not protected by a lock -- see trk.c for the full
- * writer/reader ownership rules this relies on (pipeline task writes; both the pipeline task and,
- * since #98, the ui task read via trk_get() after EV_VENUE_FOUND/EV_LAYOUT_LOCKED). */
+/* The user store is module-static and not protected by a lock.
+ *
+ * Readers: the pipeline task (core 1) and -- since #98 -- the ui task (core 0), both only through
+ * trk_get(); the ui calls it only after receiving the EV_VENUE_FOUND/EV_LAYOUT_LOCKED event that
+ * names the id.
+ *
+ * Writers: trk_init()/trk_user_load() at boot, before the ui holds any id (today, since #97,
+ * trk_user_load() itself runs once at boot on the logger task, as part of the pipeline's own
+ * synchronous LOGGER_LOAD_TRACKS request -- see trk.c for why that still needs no lock); and
+ * trk_user_add() on the pipeline task, which always completes before the event that surfaces its
+ * id is emitted -- the FreeRTOS event queue (g_ui_evt_q) send/receive is the barrier that makes
+ * the write visible to the ui task without a lock. One invariant the API itself does not enforce:
+ * no writer may rewrite or remove an id the ui may already hold (trk.c has the full reasoning and
+ * every live call site's compliance). */
 void               trk_init(void);                                   /* clears the user store */
 int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */

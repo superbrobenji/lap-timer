@@ -690,6 +690,29 @@ static void test_create_cancel(void)
     TEST_ASSERT_EQUAL_INT(0, trk_user_count());                    /* nothing saved */
 }
 
+/* #97/Task 5: lap_mark_gate refuses a sector gate pressed out of order -- gate_idx 2 ("sector 2")
+ * before gate_idx 1 ("sector 1") has ever been marked -- and the refusal leaves the engine's own
+ * gate-count state untouched (still waiting for sector 1), so a subsequent in-order press at
+ * gate_idx 1 still succeeds (the pipeline's EV_CREATE_FAILED/s_create_next_gate handling, Task 5,
+ * relies on exactly this: a refused mark never advances the next-gate counter). */
+static void test_create_mark_gate_sector_out_of_order(void)
+{
+    const double lat0 = -34.0, lon0 = 18.7;
+    lap_t L; lap_init(&L, NULL);
+    lap_create_begin(&L);
+    gps_fix_t sf = fix_ll(lat_of(lat0, 0.0), lon_of(lon0, lat0, 0.0), 1000000, SPD_MMS, true);
+    sf.head_e5 = 0;
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 0, &sf, NULL));      /* S/F set; next expected is 1 */
+
+    gps_fix_t s2 = fix_ll(lat_of(lat0, 100.0), lon_of(lon0, lat0, 0.0), 3000000, SPD_MMS, true);
+    s2.head_e5 = 0;
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 2, &s2, NULL));     /* sector 2 before sector 1: refused */
+
+    trk_layout_t built;
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 1, &s2, &built));    /* sector 1 still accepted */
+    TEST_ASSERT_EQUAL_UINT8(1, built.n_sectors);
+}
+
 /* ---------------------------------------------------- session 2.5 RTC continuity (§10.10) */
 
 /* §10.10: export mid-lap, restore into a fresh engine → LAP_RUNNING + LAP_F_INTERRUPTED with the
@@ -1187,6 +1210,7 @@ int main(void)
     RUN_TEST(test_ugate_union_saturates_at_lap_max_ugates);
     RUN_TEST(test_create_track_saves_valid_venue);
     RUN_TEST(test_create_cancel);
+    RUN_TEST(test_create_mark_gate_sector_out_of_order);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);
     RUN_TEST(test_rtc_import_unknown_venue_fails);
     RUN_TEST(test_predictive_delta);

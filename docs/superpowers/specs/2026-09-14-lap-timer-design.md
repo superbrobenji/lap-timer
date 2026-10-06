@@ -1605,6 +1605,25 @@ Entered from menu "New track" → engine in `CREATE` sub-mode (state `NO_VENUE` 
 4. A reverse layout (id 2, name `Layout 1 Reverse`, `dir_sign` negated, sectors reversed) is generated automatically.
 5. Long MODE cancels creation.
 
+**App-side wiring (#97, Task 5).** The menu's "New track" item sends `CMD_CREATE_BEGIN`; the
+pipeline calls `lap_create_begin()` and posts the ui-only `EV_CREATE` event (`EV_CREATE_BEGUN`),
+which opens the persistent `NEW TRACK` one-shot (§20.6). Each short MODE press on it sends
+`CMD_MARK_GATE`; the pipeline marks the next gate the engine itself expects (never trusting the
+ui's own mirror of that count) and posts `EV_CREATE_GATE_SET` on success or `EV_CREATE_FAILED` on
+refusal (no valid fix, not moving, or out of order). Long MODE sends `CMD_CREATE_CANCEL`
+(`lap_create_cancel()`); the one-shot leaves only once `EV_CREATE_CANCELLED` confirms the engine
+actually left CREATE mode. The engine's own finish (step 3 above, the closing S/F crossing) is a
+real `EV_VENUE_FOUND`, not an `EV_CREATE_*` phase: the pipeline, seeing it while still in CREATE
+mode, asks the logger (`LOGGER_SAVE_TRACKS`, fire-and-forget) to serialise the user track table
+(`trk_user_save`) into `/tracks/user.bin`, and the ui's existing `EV_VENUE_FOUND` handling replaces
+the `NEW TRACK` one-shot with the `VENUE` one-shot showing the new `Track_YYYYMMDD`. At boot, right
+after `trk_init()`, the pipeline asks the logger (`LOGGER_LOAD_TRACKS`, synchronous) to load
+`/tracks/user.bin` back into the table before any venue (sim or scanned) is registered, so a
+created venue survives a reboot. The logger reuses its own session-batch scratch buffer for both
+requests (no new buffer); that buffer is sized for a single persisted user venue, not the track
+store's full capacity — see the logger's `tracks_save()`/`tracks_load()` comments for the measured
+bound and what happens beyond it.
+
 ### 10.10 RTC continuity
 
 The pipeline mirrors `{ venue_id, layout_id (0 if not locked), lap_no, lap_start_gps_us, sector_idx, gate_times[], best, prev, mode }` into `rtc_state_t` (CRC32, version) after every S/F or sector event. On boot with valid RTC state younger than `RTC_RESUME_MAX_S` and matching venue (first fix within `radius_m`), the engine restores directly into `LAP_RUNNING` with the flag `LAP_INTERRUPTED` set on the current lap.
@@ -2376,7 +2395,7 @@ Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a stri
 **Font reconciliation (session 4.2, from rendered PBM goldens at 296×128).** The generated `FONT_MED` covers only `0-9 : . - + A-Z` and `FONT_BIG` only `0-9 : . - + S`, so labels containing `/` or lowercase (`1/4`, `60ft`, `1000ft`) render in `FONT_SMALL`; the riding-screen VALUES (times) use `FONT_BIG`/`FONT_MED`, the LABELS use `FONT_SMALL`. The LAP `dS` value row is `FONT_SMALL` (a `FONT_MED` glyph at y=112 clips past the 128-px frame). The empty time placeholder is `-:--.--` (7 chars, matching the `M:SS.cc` shape) so it does not overlap the left labels. DRAG pages 1/2 use a two-column gate grid. These are the byte-exact golden layouts under `test/snapshots/`.
 
 ### 20.6 One-shot screens
-`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` ("Cross S/F, press MODE").
+`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` (persistent, no auto-revert; §10.9/#97). `NEW TRACK`'s sub-line follows the creation step: `"Cross S/F, press MODE"` before the S/F gate is marked; `"S/F set. MODE: sector k"` (k = the next sector number, 1..`LAP_MAX_SECTORS`) once S/F is set and fewer than `LAP_MAX_SECTORS` sectors are marked; `"Cross S/F to finish"` once every sector is marked; `"No fix / not moving"` for one beat after a refused `CMD_MARK_GATE` (no valid fix, not moving, or out of order), until the next gate event overwrites it.
 
 ### 20.7 Menu
 
@@ -2384,7 +2403,7 @@ Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignore
 
 1. Mode: Lap / Drag
 2. Layout: cycles the current venue's layouts, `Auto` first — MODE on this item advances Auto → L1 → L2 → ... → Ln → Auto (the venue's layout list, by table order) and sends `CMD_SET_LAYOUT` (0 = Auto, else the chosen layout's id; the pipeline's `lap_force_layout()` also clears the best-sector snapshot). The choice is a per-venue manual override, runtime-only — not persisted — and resets to `Auto` the next time a venue is found. The VENUE one-shot (§20.6) shows the forced layout's real name once it locks (#98); venue/layout names throughout the ui are resolved from the track table (`trk_get`), not placeholder ids.
-3. New track (§10.9)
+3. New track (§10.9, #97): `CMD_CREATE_BEGIN` arms the engine and opens the `NEW TRACK` one-shot (§20.6). Each short MODE on it marks the next gate (`CMD_MARK_GATE`); long MODE cancels (`CMD_CREATE_CANCEL`) back to riding. The engine finishes on its own, on the next S/F crossing, with a real `EV_VENUE_FOUND` (not a menu action) — the pipeline then asks the logger to persist the user track table to `/tracks/user.bin`, and the ui's normal venue handling replaces `NEW TRACK` with the `VENUE` one-shot showing the new `Track_YYYYMMDD`.
 4. Calibrate (orientation capture; shows result)
 5. Units: km/h / mph
 6. Dist: m / ft — DRAG DIST-gate label unit only (§6.6/§11.1); the two mile gates keep their name either way (#96)

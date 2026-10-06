@@ -760,7 +760,9 @@ static void test_oneshot_calibrate(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("calibrate.pbm"), &s_fb));
 }
 
-static void test_oneshot_newtrack(void)
+/* #97 (§10.9): create_step == 0 (the zero-initialised default) -- "Cross S/F, press MODE". Same
+ * golden (newtrack.pbm) as before Task 5: m.create_step was always implicitly 0 here. */
+static void test_oneshot_newtrack_step0(void)
 {
     screen_model_t m = {0};
     m.screen = SCR_ONESHOT;
@@ -770,6 +772,48 @@ static void test_oneshot_newtrack(void)
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack.pbm"), &s_fb));
+}
+
+/* create_step == 1 (S/F set, next gate is sector 1) -- "S/F set. MODE: sector 1". */
+static void test_oneshot_newtrack_step1(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+    m.create_step = 1;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_step1.pbm"), &s_fb));
+}
+
+/* create_step == 3 (S/F + 2 sectors set, next gate is sector 3) -- "S/F set. MODE: sector 3". */
+static void test_oneshot_newtrack_step3(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+    m.create_step = 3;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_step3.pbm"), &s_fb));
+}
+
+/* create_step == 0xFF -- the last CMD_MARK_GATE was refused: "No fix / not moving". */
+static void test_oneshot_newtrack_fail(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+    m.create_step = 0xFF;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_fail.pbm"), &s_fb));
 }
 
 /* ---- menu (§20.7) ---- */
@@ -872,7 +916,10 @@ int main(void)
     RUN_TEST(test_strip_sim_and_moving);
     RUN_TEST(test_strip_link);
     RUN_TEST(test_oneshot_calibrate);
-    RUN_TEST(test_oneshot_newtrack);
+    RUN_TEST(test_oneshot_newtrack_step0);
+    RUN_TEST(test_oneshot_newtrack_step1);
+    RUN_TEST(test_oneshot_newtrack_step3);
+    RUN_TEST(test_oneshot_newtrack_fail);
     RUN_TEST(test_menu_top);
     RUN_TEST(test_menu_scrolled);
     return UNITY_END();

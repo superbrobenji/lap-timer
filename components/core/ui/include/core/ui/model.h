@@ -119,6 +119,13 @@ typedef struct {
     uint8_t screen;  /* SCR_RIDING / SCR_MENU / SCR_ONESHOT */
     uint8_t oneshot; /* ONESHOT_* when screen == SCR_ONESHOT */
 
+    /* NEW TRACK one-shot sub-line selector (#97, §10.9), meaningful when oneshot ==
+     * ONESHOT_NEWTRACK: 0 = waiting for the S/F press; k (1..LAP_MAX_SECTORS) = k gates set (S/F
+     * + k-1 sectors), sub-line names sector k next; k > LAP_MAX_SECTORS = every gate set, waiting
+     * for the closing S/F crossing; 0xFF = the last CMD_MARK_GATE was refused (shown until the
+     * next EV_CREATE event overwrites it). */
+    uint8_t create_step;
+
     /* BOOT one-shot (§20.6, §17.6): name + version banner, up to 4 self-test "OK"/"FAIL" lines
      * (the caller pre-formats each line, e.g. "IMU     OK"). */
     char    boot_name[16];

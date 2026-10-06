@@ -170,6 +170,16 @@ static uint32_t          s_laps_seq;       /* even = stable, odd = writer mid-up
 static pipe_best_t       s_best;
 static pipe_drag_t       s_dragsnap;
 
+/* §10.9 on-device track creation (#97): CMD_CREATE_BEGIN/CMD_MARK_GATE/CMD_CREATE_CANCEL state.
+ * s_create_next_gate is the AUTHORITATIVE next gate index -- the ui mirrors its own copy (for the
+ * arg8 it sends) only as a display aid; a dropped or duplicate CMD_MARK_GATE can never desync the
+ * engine because this task always marks the gate it itself expects next, never trusting cmd->arg8.
+ * s_last_fix is the latest VALID fix (copied in on_fix() below, the one allowed extra static of
+ * this task, 56 B -- CMD_MARK_GATE carries no fix of its own, so lap_mark_gate() needs this). */
+static bool      s_create_active;
+static uint8_t   s_create_next_gate;
+static gps_fix_t s_last_fix;
+
 /* ---------------- helpers ---------------- */
 
 static void stats_reset(void)
@@ -326,6 +336,26 @@ static void publish_drag_snapshot(void)
  * event type keeps the original emit-then-handle order -- EV_SECTOR/EV_DRAG_DONE's handlers don't
  * publish anything a same-event consumer reads back (on_drag_done() only hands the result to the
  * logger via its own queue; s_dragsnap is published separately by publish_drag_snapshot(), fix 2). */
+/* #97 (§10.9 step 3): the engine finishes CREATE on its own -- finalize_create() (lap.c) calls
+ * trk_user_add() and THEN emits this same EV_VENUE_FOUND, both on this task, sequentially, before
+ * engine_cb ever sees the event (ruling T5-R0: trk.c's writer-ordering contract), so the user
+ * track table already holds the new venue by the time this runs. Ask the logger to persist it so
+ * it survives a reboot; fire-and-forget (requester NULL), same queue-send pattern as the
+ * CFG_GPS_SIM venue registration's own LOGGER_OPEN_SESSION request in pipeline_init() below. A
+ * normal (non-CREATE) venue scan also emits EV_VENUE_FOUND, but s_create_active is false then
+ * (only CMD_CREATE_BEGIN sets it), so this is a no-op outside creation. */
+static void create_finish_if_active(void)
+{
+    if (!s_create_active) return;
+    s_create_active = false;
+    log_request_t req = { .type = LOGGER_SAVE_TRACKS };
+    if (g_log_req_q != NULL && xQueueSend(g_log_req_q, &req, 0) == pdTRUE) {
+        logger_notify();
+    } else {
+        ESP_LOGW(TAG, "create: save-tracks request dropped (queue full)");
+    }
+}
+
 static void engine_cb(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
@@ -342,7 +372,8 @@ static void engine_cb(const event_t *ev)
                  (unsigned long)ev->arg32, (long)(int32_t)ev->arg32b);
         s_rtc_save_due = true;     /* §15.3: the crossed sector is now the resume point */
         break;
-    case EV_DRAG_DONE:    on_drag_done(); break;
+    case EV_DRAG_DONE:     on_drag_done(); break;
+    case EV_VENUE_FOUND:   create_finish_if_active(); break;   /* #97: persist a just-created venue */
     default: break;               /* EV_LAP_COMPLETE handled above, before emit_event() */
     }
 }
@@ -480,6 +511,7 @@ static void on_fix(gps_fix_t *fix)
     if (valid) {
         tb_on_fix(&s_tb, fix->gps_us, fix->mono_us, 0);   /* sim: no serial transmit time */
         s_cur_speed_cms = fix->gspeed_mms / 10;
+        s_last_fix = *fix;   /* §10.9: CMD_MARK_GATE's fix (lap_mark_gate needs a valid, current one) */
     }
     fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
                       (float)fix->head_e5 / 1e5f, fix->mono_us, valid);
@@ -632,6 +664,18 @@ static void ui_post_lap_reset(void)
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "lap reset: ui queue full");
 }
 
+/* #97 (§10.9): tell the ui directly (never emit_event(): EV_CREATE is ui-only, not logged/
+ * streamed, same reason as EV_LAP_RESET above) that CREATE-mode state changed -- BEGUN/GATE_SET/
+ * FAILED/CANCELLED. The engine's own finish (the closing S/F crossing) is a real EV_VENUE_FOUND,
+ * handled by engine_cb()/emit_event() below, not this helper. */
+static void ui_post_create(uint8_t phase, uint16_t arg)
+{
+    LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(phase <= EV_CREATE_CANCELLED, PIPE_ASSERT_CODE);   /* a real EV_CREATE_* phase */
+    event_t ev = { .type = EV_CREATE, .flags = phase, .arg16 = arg, .mono_us = esp_timer_get_time() };
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "create: ui queue full");
+}
+
 /* CMD_RESET_ENGINE's body, split out of handle_cmd's switch for RULE-4-COMPOUND (the #87 ui-post
  * line pushed that switch over the 30-code-line compound-statement cap). M3 (final review, ruling
  * R-9, pipeline part): a dev-console reset must not leave the ui showing a stale best-sector/
@@ -674,6 +718,58 @@ static void handle_sim_scenario(const command_t *cmd)
 }
 #endif
 
+/* CMD_SET_LAYOUT's body, split out of handle_cmd's switch for RULE-4-COMPOUND (#97 below pushed
+ * the switch over the 30-code-line compound cap; same reason CMD_RESET_ENGINE/CMD_SIM_SCENARIO's
+ * bodies were split out, above). */
+static void handle_set_layout(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    lap_force_layout(&s_lap, cmd->arg16);
+    /* M3 (final review, ruling R-9, pipeline part): a forced layout invalidates the previous
+     * layout's best sector splits/theoretical best, same as the venue-change clear in
+     * pipeline_init() below -- clear s_best under the same seqlock every other writer uses. */
+    seq_enter();
+    memset(&s_best, 0, sizeof s_best);
+    seq_leave();
+}
+
+/* CMD_CREATE_BEGIN/CMD_CREATE_CANCEL/CMD_MARK_GATE bodies (#97, §10.9), split out of handle_cmd's
+ * switch for RULE-4-COMPOUND, the same reason CMD_RESET_ENGINE/CMD_SIM_SCENARIO's bodies were
+ * (#87/Task 3, above). s_create_next_gate (declared above) is this task's own authoritative
+ * counter -- CMD_MARK_GATE never trusts cmd->arg8 (the ui's own mirror, sent only for its log
+ * line), it always marks the gate THIS task expects next, so a dropped/duplicate command can
+ * never desync the two. */
+static void handle_create_cmd(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(cmd->type == CMD_CREATE_BEGIN || cmd->type == CMD_CREATE_CANCEL ||
+                   cmd->type == CMD_MARK_GATE, PIPE_ASSERT_CODE);
+    if (cmd->type == CMD_CREATE_BEGIN) {
+        lap_create_begin(&s_lap);
+        s_create_active     = true;
+        s_create_next_gate  = 0;
+        ui_post_create(EV_CREATE_BEGUN, 0);
+        return;
+    }
+    if (cmd->type == CMD_CREATE_CANCEL) {
+        if (s_create_active) {
+            lap_create_cancel(&s_lap);
+            s_create_active = false;
+            ui_post_create(EV_CREATE_CANCELLED, 0);
+        }
+        return;
+    }
+    /* CMD_MARK_GATE: a no-op outside CREATE mode (e.g. a stale/duplicate press after CANCEL). */
+    if (!s_create_active) return;
+    uint8_t idx = s_create_next_gate;
+    if (lap_mark_gate(&s_lap, idx, &s_last_fix, NULL) == 0) {
+        s_create_next_gate = (uint8_t)(idx + 1u);
+        ui_post_create(EV_CREATE_GATE_SET, idx);
+    } else {
+        ui_post_create(EV_CREATE_FAILED, 0);
+    }
+}
+
 static void handle_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
@@ -684,13 +780,7 @@ static void handle_cmd(const command_t *cmd)
         stats_reset();
         break;
     case CMD_SET_LAYOUT:
-        lap_force_layout(&s_lap, cmd->arg16);
-        /* M3 (final review, ruling R-9, pipeline part): a forced layout invalidates the previous
-         * layout's best sector splits/theoretical best, same as the venue-change clear in
-         * pipeline_init() below -- clear s_best under the same seqlock every other writer uses. */
-        seq_enter();
-        memset(&s_best, 0, sizeof s_best);
-        seq_leave();
+        handle_set_layout(cmd);
         break;
     case CMD_RESET_ENGINE:
         handle_reset_engine();
@@ -707,8 +797,13 @@ static void handle_cmd(const command_t *cmd)
     case CMD_SIM_SCENARIO:
         handle_sim_scenario(cmd);
         break;
+    case CMD_MARK_GATE:
+    case CMD_CREATE_BEGIN:
+    case CMD_CREATE_CANCEL:
+        handle_create_cmd(cmd);
+        break;
     default:
-        break;                              /* MARK_GATE / CALIB_ORIENT: later sessions */
+        break;                              /* CALIB_ORIENT: later sessions */
     }
 }
 
@@ -771,6 +866,21 @@ static void pipeline_init(void)
      * in place at boot step 4; if one is present, keep it and import on the first valid fix.
      * Anything else -> start clean. */
     trk_init();   /* clear the user track store before the sim venue is registered (§15.3 resume needs trk_get) */
+    /* #97 (§10.9): load any on-device-created venues persisted from a previous boot, before the
+     * CFG_GPS_SIM block below registers the sim capture's venue and before any id is surfaced to
+     * a reader (ruling T5-R0 -- trk_init() just cleared the table above, so this is the very
+     * first writer). Boot order (main/app_main.c): sup_start() :204, logger_start() :223,
+     * pipeline_start() :234, ui_start() :240 -- pipeline_init() runs INSIDE pipeline_task(),
+     * which pipeline_start() only creates (and so only gets scheduled) after logger_start() has
+     * already created the logger task, so the logger is already up by the time this call blocks
+     * on it; logger_request_sync() itself would simply wait out its timeout otherwise. This is
+     * the one pipeline call site lt_ipc.h's logger_request_sync() doc comment carves out (see
+     * there for why a one-time boot block here is safe). */
+    {
+        log_request_t req = { .type = LOGGER_LOAD_TRACKS };
+        int rc = logger_request_sync(&req, 2000);
+        if (rc != 0) ESP_LOGW(TAG, "user tracks: load rc=%d", rc);
+    }
     int id_len = snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
     LT_ASSERT_VOID(id_len > 0 && (size_t)id_len < sizeof s_session_id, PIPE_ASSERT_CODE);   /* fit, not truncated */
     if (lt_rtc_validate(&s_resume) == RTC_VALID) {

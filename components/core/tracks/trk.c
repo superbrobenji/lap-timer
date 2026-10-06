@@ -15,12 +15,22 @@
 
 /* Not reentrant: the user store below is module-static, shared by every trk_* entry point.
  *
- * Writers, all on the pipeline task (core 1): trk_init() and trk_user_load() run at boot, before
- * pipeline_task()'s event loop starts -- no id has been surfaced to any reader yet. trk_user_add()
- * -- invoked directly by lap.c's finalize_create() on a CREATE-mode S/F crossing, and indirectly
- * via trk_user_add_json() for the CFG_GPS_SIM venue registration at pipeline_init() -- always
- * completes before the event that announces its id: each call site's emit(..., EV_VENUE_FOUND,
- * ...) is sequential code a few lines later in the same function, same task.
+ * Writers: trk_init() runs on the pipeline task (core 1), at boot, inside pipeline_init() --
+ * before pipeline_task()'s event loop starts, so no id has been surfaced to any reader yet.
+ * trk_user_load() then runs ONCE, also at boot, but -- since #97, §10.9 -- on the LOGGER task
+ * (core 0), not the pipeline task: pipeline_init() asks for it right after trk_init() returns with
+ * a synchronous LOGGER_LOAD_TRACKS request (logger_request_sync(), app/lt_ipc.h, which handles the
+ * request as tracks_load(), components/app/logger/logger.c), and BLOCKS the pipeline task until
+ * the logger's reply arrives. That blocking round trip is what makes a write from a DIFFERENT task
+ * safe here with no lock: the pipeline task cannot be calling trk_init()/trk_user_add()/trk_get()
+ * while it is parked waiting for this reply, so the two boot-time writers never actually run
+ * concurrently -- the same "a FreeRTOS queue send/receive is a full memory barrier" argument used
+ * below for the ui's reads, just between two tasks instead of across the one EV_VENUE_FOUND event.
+ * trk_user_add() -- invoked directly by lap.c's finalize_create() on a CREATE-mode S/F crossing,
+ * and indirectly via trk_user_add_json() for the CFG_GPS_SIM venue registration at
+ * pipeline_init() -- is back on the pipeline task (core 1), and always completes before the event
+ * that announces its id: each call site's emit(..., EV_VENUE_FOUND, ...) is sequential code a few
+ * lines later in the same function, same task.
  *
  * Readers: the pipeline task itself (already ordered above, same task, no barrier needed), and --
  * since #98 -- the ui task (core 0), through trk_get() in handle_venue_found()/
