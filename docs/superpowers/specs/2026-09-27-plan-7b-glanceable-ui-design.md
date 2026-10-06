@@ -103,18 +103,20 @@ Two columns at x 4 and x 128. `MAX SPD`: the value is `km/h` today; unit convers
 
 **Amended by Plan 7c §3:** real §6.6 gate labels replace `G<id>`, the trap-speed row gains a `km/h`/`mph` suffix, and `drag[]` rows on all three pages are rebuilt from the pipeline's `pipe_drag_t` snapshot on every event/page change (not just appended on page 0); see `2026-09-29-plan-7c-display-closure-design.md`.
 
+**Amended by #95:** the card reads `NOT READY` until the drag engine arms, then `READY`; launching clears `drag_armed` (back to `NOT READY` once the big slot returns to the pre-gate state). The separate top-right `ARMED` label is gone — it duplicated the same meaning `READY` now carries.
+
 Page 0 (run in progress):
 
 ```
 ┌──────────────────────────────────────────────┐
-│ 1/4                                   ARMED  │  FONT_SMALL latest-gate label; ARMED top-right (FONT_MED) until launch
+│ 1/4                                          │  FONT_SMALL latest-gate label
 │  12.84                                       │  FONT_HUGE latest gate time (s.hh; `ss.hh` up to 6 glyphs)
 │ @173                                         │  `@` in FONT_SMALL, digits in FONT_MED (ruling T4-R1: FONT_MED has no `@` glyph); trap speed row when the gate carries a speed (no unit: the model has no units field — follow-up)
 │ 60ft 2.01   330ft 5.43   1/8 8.29            │  FONT_SMALL earlier gates of this run, in order
 └──────────────────────────────────────────────┘
 ```
 
-- Before launch: big slot shows `READY` in `FONT_MED` (no letters in `FONT_HUGE`), `ARMED` top-right while `drag_armed`; footer empty.
+- Before launch: the big slot shows `NOT READY` in `FONT_MED` until the drag engine arms, then `READY` (no letters in `FONT_HUGE`); footer empty.
 - As gates hit (`EV_DRAG_GATE`), the newest gate takes the big slot (label above it, time in `FONT_HUGE`, speed row when `arg32b` speed is non-zero), and the previous gates of the run join the footer in hit order (label + time in `FONT_SMALL`, up to six entries, then the oldest scroll off the left).
 - The existing `drag_row_t` rows and `drag_n` remain the source; the renderer derives "newest" as `drag[drag_n - 1]`.
 - Distance gates (`is_distance`) show metres in the big slot as an integer (`38` for 100-0) with a `FONT_SMALL` `m` after it (`FONT_HUGE` and `FONT_MED` have no lowercase). The trap-speed row is `@173`: the leading `@` draws in `FONT_SMALL` (ruling T4-R1: `FONT_MED` has no `@` glyph) and the digits beside it in `FONT_MED`; a unit suffix waits for a units field in the model (follow-up). A distance gate never draws a trap row, even if `has_trap` happens to be set — the renderer returns right after the distance+unit draw.
@@ -128,7 +130,7 @@ All positions above are for the 2.13" canvas (`CANVAS_213`). The 2.9" (296×128)
 ## 9. Tests
 
 - `test/test_screens.c` cases, each with goldens on both canvases (`test/snapshots/*.pbm` and `test/snapshots/213/*.pbm`), plus the existing ink-column check (`fb_max_ink_col() < CANVAS_VISIBLE_W`):
-  `lap_p0_first_lap` (BIG_NONE, `LAP 1`, dashes), `lap_p0_sector_delta` (`-0.32`, `L7 S2`, LAST/BEST), `lap_p0_lap_delta_wide` (`+12.50`, marker relocated to the footer gap), `lap_p0_new_best` (BEST tag), `lap_p0_fault` (footer sits above the fault strip, ruling T2-R1: BEST needs no retraction), `lap_p1_sectors` (3 sectors + deltas, one `----`), `lap_p1_many_sectors` (5 sectors → both canvases show `S3 +2`), `lap_p2_stats`, `lap_p2_stats_many_laps` (ruling T3-R2: a 3-digit `laps_total`/`laps_valid` degrades the `LAPS` suffix from `(N valid)` to `(N)` to nothing as each in turn fails to fit before `CANVAS_VISIBLE_W` on the 2.13"), `drag_p0_ready` (READY + ARMED), `drag_p0_gate_speed` (`12.84`, `@173`, three footer gates), `drag_p0_distance` (`38 m`), `drag_p1_gates`, `drag_p2_best`.
+  `lap_p0_first_lap` (BIG_NONE, `LAP 1`, dashes), `lap_p0_sector_delta` (`-0.32`, `L7 S2`, LAST/BEST), `lap_p0_lap_delta_wide` (`+12.50`, marker relocated to the footer gap), `lap_p0_new_best` (BEST tag), `lap_p0_fault` (footer sits above the fault strip, ruling T2-R1: BEST needs no retraction), `lap_p1_sectors` (3 sectors + deltas, one `----`), `lap_p1_many_sectors` (5 sectors → both canvases show `S3 +2`), `lap_p2_stats`, `lap_p2_stats_many_laps` (ruling T3-R2: a 3-digit `laps_total`/`laps_valid` degrades the `LAPS` suffix from `(N valid)` to `(N)` to nothing as each in turn fails to fit before `CANVAS_VISIBLE_W` on the 2.13"), `dragcard_notready`/`dragcard_ready` (NOT READY / READY, #95: the ARMED label is gone), `drag_p0_gate_speed` (`12.84`, `@173`, three footer gates), `drag_p0_distance` (`38 m`), `drag_p1_gates`, `drag_p2_best`.
 - Golden review: each regenerated PBM is rendered to PNG and eyeballed before promotion (as in Plan 7 T3); the reviewer confirms nothing draws past `CANVAS_VISIBLE_W` and no two fields overlap (a new helper `fb_overlap_check` is **not** added — overlap is judged from the goldens).
 - Model wiring in `ui.c` is target-only; verified on the bench (photos: sector delta, lap delta, new best, drag ready).
 
@@ -138,6 +140,6 @@ Menu, one-shots, fault-strip icons, the refresh policy, predictive lap time (nee
 
 ## 11. Bench acceptance
 
-On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the last-lap sector deltas (best sector times arrive with #79); page 2 the grid; DRAG page 0 `READY`/`ARMED` (via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.
+On the 2.13" panel with `moto_sim`: page 0 shows `LAP 1` before the first lap; sector deltas appear in the big slot at each gate; the lap delta and the `BEST` tag appear at the line; page 1 shows the last-lap sector deltas (best sector times arrive with #79); page 2 the grid; DRAG page 0 `NOT READY`→`READY` (#95, via `dbg`/config mode switch) — photos into the ledger. Tag `p07b-done`.
 
 Run 2026-09-28: passed (see the roadmap entry).

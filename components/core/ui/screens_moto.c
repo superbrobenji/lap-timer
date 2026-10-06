@@ -596,9 +596,10 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 }
 
 /* ---- DRAG page 0 (spec 7b §7): the run card -- the newest gate's value fills the 64 px big
- * slot, the earlier gates of this run join a FONT_SMALL footer in hit order, and ARMED/the fault
- * strip sit as before. Before the first gate the big slot shows "READY" (FONT_MED: FONT_HUGE has
- * no letters at all). ---- */
+ * slot, the earlier gates of this run join a FONT_SMALL footer in hit order, and the fault strip
+ * sits as before. Before the first gate the big slot shows "NOT READY" until the drag engine has
+ * armed, then "READY" (FONT_MED: FONT_HUGE has no letters at all) -- #95: READY now means armed,
+ * so the separate top-right ARMED label that used to duplicate this is gone. ---- */
 
 /* The newest gate's big value (spec 7b §7): a normal gate's elapsed time in FONT_HUGE
  * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
@@ -680,14 +681,15 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     if (n == 0u) {
-        fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, "READY");
+        /* #95: READY now means armed. Until the engine has armed (2 s of stillness) the card says
+         * NOT READY, so a rider never launches on a card that is not timing. The separate
+         * right-hand ARMED label is gone for the same reason (it duplicated READY's new meaning). */
+        const char *ready = m->drag_armed ? "READY" : "NOT READY";
+        fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, ready);
     } else {
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);
         render_dcard_value(fb, &m->drag[n - 1u], m->units);
         render_dcard_footer(fb, m, n);
-    }
-    if (m->drag_armed) {
-        fb_text_right(fb, &FONT_MED, DCARD_ARMED_RIGHT_X, DCARD_ARMED_Y, "ARMED");
     }
 
     /* Mirrors LAP page 0 (the other primary in-ride screen): only the page-0 riding view shows the

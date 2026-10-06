@@ -358,15 +358,28 @@ static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint1
     r->trap_cms = trap_cms; r->has_trap = trap_cms != 0; r->is_distance = dist; r->dist_m = dist_m;
 }
 
-static void test_drag_p0_ready(void)
+static void test_dragcard_notready(void)
 {
-    /* Before the first gate: big slot reads "READY" (FONT_MED, no letters in FONT_HUGE), ARMED
-     * top-right while drag_armed, footer empty. */
+    /* #95: before the drag engine has armed, the big slot reads "NOT READY" (FONT_MED, no letters
+     * in FONT_HUGE), not "READY" -- a rider must not treat an unarmed card as timing. drag_armed
+     * is false here (the default from {0}); there is no ARMED label either way, since it's gone. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_notready.pbm"), &s_fb));
+}
+
+static void test_dragcard_ready(void)
+{
+    /* #95: once the drag engine has armed, the big slot reads "READY" (FONT_MED, no letters in
+     * FONT_HUGE) -- READY now means armed, so the separate right-hand ARMED label this test used
+     * to also check for is gone (it duplicated the same meaning). Footer still empty (no gates). */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_armed = true; m.batt_pct = 90;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_ready.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_ready.pbm"), &s_fb));
 }
 
 static void test_drag_p0_gate_speed(void)
@@ -449,9 +462,12 @@ static void test_drag_p0_footer_scroll(void)
 
 static void test_drag_p0_armed_gates(void)
 {
-    /* Test gap (finding 13d): drag_armed stays true (re-armed for the next run) while gates from
-     * the run just completed are still on screen -- ARMED top-right must coexist with the newest
-     * gate's label/huge value/footer rather than the two being mutually exclusive. */
+    /* Test gap (finding 13d), updated for #95: drag_armed stays true (re-armed for the next run)
+     * while gates from the run just completed are still on screen. The right-hand ARMED label
+     * this test used to also check for is gone (READY now means armed, and the big slot already
+     * shows the newest gate's value, not READY/NOT READY, whenever n > 0) -- this case now just
+     * confirms drag_armed being true draws nothing extra over the newest gate's label/huge
+     * value/footer. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_armed = true;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     screens_moto_render(&s_fb, &m);
@@ -779,7 +795,8 @@ int main(void)
     RUN_TEST(test_lap_p2_stats_huge_laps);
     RUN_TEST(test_lap_p2_stats_filled);
     RUN_TEST(test_lap_p2_stats_mph);
-    RUN_TEST(test_drag_p0_ready);
+    RUN_TEST(test_dragcard_notready);
+    RUN_TEST(test_dragcard_ready);
     RUN_TEST(test_drag_p0_gate_speed);
     RUN_TEST(test_drag_p0_trap_mph);
     RUN_TEST(test_drag_p0_distance);

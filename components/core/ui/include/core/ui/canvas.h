@@ -144,16 +144,12 @@
 #define DCARD_READY_Y       40
 #define DCARD_SPEED_Y       80
 #define DCARD_FOOTER_Y      108
-#define DCARD_ARMED_RIGHT_X 246
-#define DCARD_ARMED_Y       2
 #else
 #define DCARD_LABEL_Y       2
 #define DCARD_BIG_Y         16
 #define DCARD_READY_Y       42
 #define DCARD_SPEED_Y       84
 #define DCARD_FOOTER_Y      114
-#define DCARD_ARMED_RIGHT_X 292
-#define DCARD_ARMED_Y       2
 #endif
 #define DCARD_LABEL_X    TEXT_MARGIN_X
 #define DCARD_BIG_X      TEXT_MARGIN_X
