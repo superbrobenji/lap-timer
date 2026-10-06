@@ -157,9 +157,10 @@ enum {
      * never reaches the ui -- recovery mode does not start it) can never alias SCR_UI_SIM. */
     SCR_UI_SIM    = 14,   /* ICON_SIM: this firmware feeds simulated GPS/IMU (CFG_GPS_SIM || CFG_IMU_SIM) */
     SCR_UI_MOVING = 15,   /* ICON_MOVING: the menu is motion-locked (gspeed >= MENU_LOCK_SPEED_KMH, §20.7) */
+    SCR_UI_LINK   = 16,   /* ICON_LINK: the dev-kit (or a BLE peer) is connected -- link_peer_present() */
 };
 #define SCR_SYS_BITS_MASK 0x3FFFu   /* bits 0..13: the sys_flags snapshot the strip may show */
-#define SCR_STRIP_BITS    16        /* bits 0..15: everything fault_strip() walks */
+#define SCR_STRIP_BITS    17        /* bits 0..16: everything fault_strip() walks */
 
 /* Draws the shared fault-icon strip (spec §20.5 + §17.4): for each set bit in `flags` that maps
  * to an icon, draws its 12x12 icon right-to-left along the bottom-right of the frame. Bits with

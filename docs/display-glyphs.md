@@ -18,6 +18,7 @@ table `FAULT_ICON_FOR_BIT` in `components/core/ui/screens_moto.c`.
 | Padlock | padlock | Safe mode (`SYS_SAFE_MODE`): the device crashed three times in a row, so sample logging, BLE and WiFi are off; a crash loop inside safe mode escalates to recovery mode (console only, no screen). | Read the errlog on the dev-kit; `dbg safe clear` on the lap-timer console clears the gate, an OTA update also clears it. |
 | `S` | bold S | Simulated inputs: this firmware is a sim build (`moto_sim`), its GPS and IMU are fake. Always on in a sim build. | Never ride with this image. |
 | `>>` | double chevron | Moving: the menu is motion-locked (speed above the lock threshold, §20.7). On the bench it is the "sim run in progress" cue — it disappears once the sim parks, and the menu opens again. | Stop (or wait for the sim to park) before pressing MODE for the menu. |
+| Chain links | two linked loops | LINK: the dev-kit (or a BLE peer) is connected; disappears a few seconds after the link goes quiet. | Informational only — plug in the dev-kit (or connect a BLE peer) to see it. |
 
 Conditions with no icon (they appear in the errlog / dev-kit instead): `SYS_IMU_DEAD`,
 `SYS_DISP_DEAD` (the display itself is gone), `SYS_HEAP_LOW`, `SYS_OTA_PENDING` (an update is on

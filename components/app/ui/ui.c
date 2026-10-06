@@ -39,6 +39,7 @@
 #include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
 #include "core/ui/stats_fold.h" /* session_max_t / session_max_fold (Plan 7c T1/T3) */
 
+#include "app/link.h" /* link_peer_present() (#99): the LINK strip glyph */
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
 #include "app/lt_ipc.h"
@@ -1143,6 +1144,7 @@ static void update_flags(void)
     f |= 1u << SCR_UI_SIM;
 #endif
     if (s_gspeed_kmh >= MENU_LOCK_SPEED_KMH) f |= 1u << SCR_UI_MOVING;
+    if (link_peer_present()) f |= 1u << SCR_UI_LINK;   /* #99: the dev-kit / a BLE peer is talking to us */
     if (s_fix_lost) {
         f |= (1u << SCR_SYS_GPS_NOFIX);
     } else {

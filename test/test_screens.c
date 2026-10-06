@@ -685,6 +685,19 @@ static void test_strip_sim_and_moving(void)
     TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - (ICON_W + 2) + 4, FAULT_STRIP_Y + 5));
 }
 
+/* Strip bit 16 (LINK: the dev-kit is connected) draws ICON_LINK; with SIM+MOVING it is the third slot. */
+static void test_strip_link(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_RIDING; m.mode = SCR_MODE_LAP; m.page = 0;
+    m.flags = (1u << SCR_UI_SIM) | (1u << SCR_UI_MOVING) | (1u << SCR_UI_LINK);
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("strip_link.pbm"), &s_fb));
+    /* three slots: ink in the third slot left of the anchor (LINK is bit 16, drawn last, leftmost) */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * (ICON_W + 2) + 6, FAULT_STRIP_Y + 6));
+}
+
 static void test_oneshot_ota_fail(void)
 {
     screen_model_t m = {0};
@@ -817,6 +830,7 @@ int main(void)
     RUN_TEST(test_ota_phase_label);
     RUN_TEST(test_oneshot_ota_rebooting);
     RUN_TEST(test_strip_sim_and_moving);
+    RUN_TEST(test_strip_link);
     RUN_TEST(test_oneshot_calibrate);
     RUN_TEST(test_oneshot_newtrack);
     RUN_TEST(test_menu_top);

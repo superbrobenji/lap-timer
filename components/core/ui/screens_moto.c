@@ -198,8 +198,8 @@ static void fmt_time_s(char *buf, uint32_t ms)
  * "--" bits (SYS_DISP_DEAD, SYS_HEAP_LOW, SYS_OTA_PENDING) plus SYS_IMU_DEAD and
  * SYS_FUSION_DISAGREE, neither of which has a matching bitmap in icons.h (only ICON_IMU_Q exists,
  * no IMU strike-through / lean "?" icon). SYS_STORAGE_DEAD has no disk-strike bitmap either, so it
- * falls back to the plain ICON_DISK glyph. Bits 14/15 are ui-level (SCR_UI_SIM/SCR_UI_MOVING,
- * model.h), not §17.4 sys flags -- they always draw. */
+ * falls back to the plain ICON_DISK glyph. Bits 14/15/16 are ui-level (SCR_UI_SIM/SCR_UI_MOVING/
+ * SCR_UI_LINK, model.h), not §17.4 sys flags -- they always draw. */
 static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     (int8_t)ICON_GPS_STRIKE,    /* 0  SYS_GPS_DEAD */
     (int8_t)ICON_GPS_STRIKE,    /* 1  SYS_GPS_NOFIX */
@@ -217,6 +217,7 @@ static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     -1,                         /* 13 SYS_FUSION_DISAGREE */
     (int8_t)ICON_SIM,           /* 14 SCR_UI_SIM (ui-level, model.h) */
     (int8_t)ICON_MOVING,        /* 15 SCR_UI_MOVING (ui-level, model.h) */
+    (int8_t)ICON_LINK,          /* 16 SCR_UI_LINK (ui-level, model.h) */
 };
 
 /* Shared by fault_strip() and fault_strip_left_x() (PF-4): the icon (icons.h) for `bit`
