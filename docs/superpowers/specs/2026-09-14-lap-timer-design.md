@@ -1187,6 +1187,8 @@ The drag engine runs at 100 Hz on fused samples, re-anchored by GPS fixes:
 
 Expected error: IMU bias over 200 ms at 0.01 g contributes 2 cm/s, negligible; timing resolution 10 ms with linear interpolation, ±5 ms.
 
+Display names for the DIST gates (§11.1) depend on `cfg.dist_units` (`m`/`ft`, default `m`, #96) — this is a UI-only relabelling, not a wire-value change: `a`/`b` stay in cm regardless, and `drag_gate_label()`'s `dist_units` argument never reaches the engine's own gate-crossing math above. See §11.1's table for the metres/feet names.
+
 ### 6.7 Expected accuracy
 
 | GPS | Rate | Lap/gate accuracy | Notes |
@@ -1624,19 +1626,21 @@ which is what the e-paper build does since its UI ignores it.
 
 Default gate list (`drag_cfg_t.gates`, up to `DRAG_MAX_GATES = 16`), km/h units (mph list in §15.2):
 
-| id | kind | a | b | Display name |
-|----|------|---|---|--------------|
-| 1 | SPEED_FROM0 | 60 | — | 0-60 |
-| 2 | SPEED_FROM0 | 100 | — | 0-100 |
-| 3 | SPEED_FROM0 | 200 | — | 0-200 |
-| 4 | SPEED_FROM0 | 300 | — | 0-300 |
-| 5 | SPEED_RANGE | 100 | 200 | 100-200 |
-| 6 | DIST | 1829 (cm) | — | 60ft |
-| 7 | DIST | 10058 | — | 330ft |
-| 8 | DIST | 20117 | — | 1/8 |
-| 9 | DIST | 30480 | — | 1000ft |
-| 10 | DIST | 40234 | — | 1/4 (trap) |
-| 11 | BRAKE | 100 | 0 | 100-0 |
+| id | kind | a | b | Display name (`dist_units=ft`) | Display name (`dist_units=m`, #96) |
+|----|------|---|---|--------------------------------|-------------------------------------|
+| 1 | SPEED_FROM0 | 60 | — | 0-60 | 0-60 |
+| 2 | SPEED_FROM0 | 100 | — | 0-100 | 0-100 |
+| 3 | SPEED_FROM0 | 200 | — | 0-200 | 0-200 |
+| 4 | SPEED_FROM0 | 300 | — | 0-300 | 0-300 |
+| 5 | SPEED_RANGE | 100 | 200 | 100-200 | 100-200 |
+| 6 | DIST | 1829 (cm) | — | 60ft | 18m |
+| 7 | DIST | 10058 | — | 330ft | 101m |
+| 8 | DIST | 20117 | — | 1/8 | 1/8 |
+| 9 | DIST | 30480 | — | 1000ft | 305m |
+| 10 | DIST | 40234 | — | 1/4 (trap) | 1/4 (trap) |
+| 11 | BRAKE | 100 | 0 | 100-0 | 100-0 |
+
+The two mile gates (1/8, 1/4) keep the same name in both unit modes. A custom DIST gate (any `a` other than the four presets above) always prints `<a/100>m` rounded to the nearest metre, in both modes (`drag_gate_label()`, core/drag.h).
 
 `benches` for the riding screen = the `SPEED_FROM0` gates whose `a` is in `cfg.drag.benches_kmh` (default {100, 200, 300}); 0-60 is logged but not a headline bench by default.
 
@@ -1859,12 +1863,13 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 ## 15. Configuration and NVS
 
-### 15.1 Config struct and JSON schema (version 1)
+### 15.1 Config struct and JSON schema (version 2, #96)
 
 | JSON path | C field | Type | Range | Default | Notes |
 |-----------|---------|------|-------|---------|-------|
-| `version` | `version` | u8 | 1 | 1 | schema version; owned by firmware — ignored on CONFIG_SET, forced by cfg_validate |
+| `version` | `version` | u8 | 1–2 | 2 | schema version; owned by firmware — ignored on CONFIG_SET, forced by cfg_validate |
 | `units` | `units` | enum | `kmh`,`mph` | `kmh` | display + bench list selection |
+| `dist_units` | `dist_units` | enum | `m`,`ft` | `m` | DRAG DIST-gate display name only (§6.6/§11.1); the two mile gates (1/8, 1/4) are unaffected — added in v2 (#96), appended at the end of `cfg_t` (not grouped with `units`) so a stored v1 blob migrates byte-for-byte without shifting any other field; see §15.2 |
 | `mode` | `mode` | enum | `lap`,`drag` | `lap` | persisted last mode |
 | `lap.min_lap_s` | `lap.min_lap_s` | u16 | 5–600 | 20 | |
 | `lap.max_lap_s` | `lap.max_lap_s` | u16 | 60–3600 | 1800 | |
@@ -1899,7 +1904,7 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 | Namespace | Key | Type | Content |
 |-----------|-----|------|---------|
-| `lt_cfg` | `cfg` | blob | packed `cfg_t` with leading `version u8`, trailing CRC16 |
+| `lt_cfg` | `cfg` | blob | packed `cfg_t` with leading `version u8`, trailing CRC16; `CFG_VERSION` is 2 as of #96 (`dist_units` field) — `lt_cfg_load`/`cfg_blob_unwrap` migrate a stored v1 blob via `cfg_migrate` (sets `dist_units = CFG_DIST_M`) rather than resetting; the v2 field is appended at the end of `cfg_t`, not inserted next to `units`, specifically so `sizeof(cfg_t)` and every other field's on-flash offset are unchanged from v1 (byte-for-byte prefix) |
 | `lt_cal` | `fus` | blob | `fus_calib_t` |
 | `lt_cal` | `mag` | blob | QMC hard-iron offsets (M10 only) |
 | `lt_err` | `ring` | blob | 32 × `{code u16, uptime_s u32, boot u16, arg u32}` = 384 B, plus `head u8` |
@@ -2382,12 +2387,13 @@ Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignore
 3. New track (§10.9)
 4. Calibrate (orientation capture; shows result)
 5. Units: km/h / mph
-6. Export (BLE) — enters CONNECTED, shows name + countdown
-7. Live to phone (only with `CFG_HAS_BLE_RC`)
-8. Diagnostics (§17.10)
-9. Sessions: list, per-session delete, delete all logs (keep summaries)
-10. Display: live clock on/off, full refresh now
-11. Sleep now (long-hold MODE 3 s to confirm)
+6. Dist: m / ft — DRAG DIST-gate label unit only (§6.6/§11.1); the two mile gates keep their name either way (#96)
+7. Export (BLE) — enters CONNECTED, shows name + countdown
+8. Live to phone (only with `CFG_HAS_BLE_RC`)
+9. Diagnostics (§17.10)
+10. Sessions: list, per-session delete, delete all logs (keep summaries)
+11. Display: live clock on/off, full refresh now
+12. Sleep now (long-hold MODE 3 s to confirm)
 
 ### 20.8 Buttons (`app/ui/ui_buttons.c`)
 

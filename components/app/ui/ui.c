@@ -140,6 +140,7 @@ enum {
     MA_NEWTRACK,
     MA_CALIBRATE,
     MA_UNITS,
+    MA_DIST,
     MA_EXPORT,
     MA_LIVE,
     MA_DIAG,
@@ -238,6 +239,7 @@ static bool    s_combo_fired;
 static uint8_t s_menu_action[12];
 static char    s_lbl_mode[16];
 static char    s_lbl_units[16];
+static char    s_lbl_dist[16];
 static char    s_lbl_disp[20];
 
 /* ---- helpers ---- */
@@ -271,10 +273,12 @@ static void build_menu(void)
 {
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);                     /* label depends on it */
     LT_ASSERT_VOID(s_cfg.units <= CFG_UNITS_MPH, UI_APP_ASSERT_CODE);           /* label depends on it */
+    LT_ASSERT_VOID(s_cfg.dist_units <= CFG_DIST_FT, UI_APP_ASSERT_CODE);        /* label depends on it */
     uint8_t n = 0;
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
 
@@ -283,6 +287,7 @@ static void build_menu(void)
     menu_add(&n, "New track", MA_NEWTRACK);
     menu_add(&n, "Calibrate", MA_CALIBRATE);
     menu_add(&n, s_lbl_units, MA_UNITS);
+    menu_add(&n, s_lbl_dist, MA_DIST);
     menu_add(&n, "Export (BLE)", MA_EXPORT);
 #if CFG_HAS_BLE_RC
     menu_add(&n, "Live to phone", MA_LIVE);
@@ -419,6 +424,25 @@ static void menu_do_units(void)
     }
 }
 
+/* MA_DIST (#96): toggle the DIST-gate label unit (m <-> ft), persist, refresh the label and the
+ * model, and -- when DRAG is the current riding mode -- refill the rows now so they already show
+ * the new unit once the menu exits (same pattern as menu_do_units() above). This does not touch
+ * s_drag_cfg: dist_units only renames DIST gates for display (drag_gate_label), it never changes
+ * which gates fire or their a/b values, unlike a units (km/h<->mph) toggle. */
+static void menu_do_dist(void)
+{
+    (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
+    s_cfg.dist_units = (s_cfg.dist_units == CFG_DIST_FT) ? (uint8_t)CFG_DIST_M : (uint8_t)CFG_DIST_FT;
+    (void)lt_cfg_save(&s_cfg);
+    ui_send_cmd(CMD_CONFIG_RELOAD, 0, 0);   /* the pipeline mirrors cfg; labels are ui-side */
+    s_model.dist_units = s_cfg.dist_units;
+    s_dirty            = true;
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+    }
+}
+
 /* MA_DISPLAY: toggle the live clock, persist, refresh the label. (Split verbatim out of
  * menu_select.) s_dirty is set explicitly here (Plan 7c T6, design §4), not left to menu_select()'s
  * own trailing set, so the card re-renders with/without CUR the moment riding resumes. */
@@ -441,6 +465,7 @@ static void menu_select(void)
     switch (act) {
     case MA_MODE:    menu_do_mode();    break;
     case MA_UNITS:   menu_do_units();   break;
+    case MA_DIST:    menu_do_dist();    break;
     case MA_DISPLAY: menu_do_display(); break;
     /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
     case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (per-venue layout list: issue #98)"); break;
@@ -876,7 +901,7 @@ static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_ga
     LT_ASSERT_VOID(r != NULL && g != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(res != NULL, UI_APP_ASSERT_CODE);
     memset(r, 0, sizeof *r);
-    if (drag_gate_label(g, s_model.units, r->label, sizeof r->label) < 0) {
+    if (drag_gate_label(g, s_model.units, s_model.dist_units, r->label, sizeof r->label) < 0) {
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)g->id);   /* fallback: bounded */
     }
     r->present     = present;
@@ -1046,7 +1071,8 @@ static void ui_reload_cfg(void)
 {
     cfg_defaults(&s_cfg);
     (void)lt_cfg_load(&s_cfg);
-    s_model.units = s_cfg.units;
+    s_model.units      = s_cfg.units;
+    s_model.dist_units = s_cfg.dist_units;
     uint8_t new_mode = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     if (new_mode != s_mode) {
         ui_apply_mode(new_mode);
@@ -1054,6 +1080,7 @@ static void ui_reload_cfg(void)
     s_model.drag_armed = false;
     drag_cfg_from_user(&s_cfg, &s_drag_cfg);
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s", s_cfg.display.live_clock ? "on" : "off");
     if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();
@@ -1704,6 +1731,7 @@ static void ui_task(void *arg)
     s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode  = s_mode;
     s_model.units = s_cfg.units; /* Plan 7c T4 (design §3): every speed_display() call on screen uses it */
+    s_model.dist_units = s_cfg.dist_units; /* #96: DIST-gate naming only, consumed by row_from_gate */
     drag_cfg_from_user(&s_cfg, &s_drag_cfg); /* Plan 7c T5: gate table for DRAG row labels/benches */
     /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
      * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0.

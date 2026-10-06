@@ -38,9 +38,9 @@ static void test_mph_benches_define_speed_gates(void)
     TEST_ASSERT_EQUAL_UINT8(2, d.n_benches);
     TEST_ASSERT_EQUAL_UINT16(97, d.benches_kmh[0]); TEST_ASSERT_EQUAL_UINT16(161, d.benches_kmh[1]);
     char buf[8];
-    TEST_ASSERT_EQUAL_INT(4, drag_gate_label(&d.gates[0], 1, buf, sizeof buf)); TEST_ASSERT_EQUAL_STRING("0-60", buf);
-    TEST_ASSERT_EQUAL_INT(5, drag_gate_label(&d.gates[1], 1, buf, sizeof buf)); TEST_ASSERT_EQUAL_STRING("0-100", buf);
-    TEST_ASSERT_EQUAL_INT(7, drag_gate_label(&d.gates[4], 1, buf, sizeof buf)); TEST_ASSERT_EQUAL_STRING("100-200", buf);   /* range: raw km/h */
+    TEST_ASSERT_EQUAL_INT(4, drag_gate_label(&d.gates[0], 1, CFG_DIST_FT, buf, sizeof buf)); TEST_ASSERT_EQUAL_STRING("0-60", buf);
+    TEST_ASSERT_EQUAL_INT(5, drag_gate_label(&d.gates[1], 1, CFG_DIST_FT, buf, sizeof buf)); TEST_ASSERT_EQUAL_STRING("0-100", buf);
+    TEST_ASSERT_EQUAL_INT(7, drag_gate_label(&d.gates[4], 1, CFG_DIST_FT, buf, sizeof buf)); TEST_ASSERT_EQUAL_STRING("100-200", buf);   /* range: raw km/h */
 }
 /* #86: an empty mph bench list (n_mph == 0) must leave drag_cfg_defaults()'s gate table and km/h
  * benches in place, exactly like the existing empty-km/h-list case above. */
@@ -60,7 +60,7 @@ static void test_mph_round_trip_is_exact(void)
         drag_gate_def_t g = { 1, DRAG_SPEED_FROM0, (uint16_t)lround((double)m * DRAG_MPH_PER_KMH), 0 };
         char buf[8], want[8];
         (void)snprintf(want, sizeof want, "0-%u", m);
-        TEST_ASSERT_TRUE(drag_gate_label(&g, 1, buf, sizeof buf) > 0);
+        TEST_ASSERT_TRUE(drag_gate_label(&g, 1, CFG_DIST_FT, buf, sizeof buf) > 0);
         TEST_ASSERT_EQUAL_STRING(want, buf);
     }
 }
@@ -81,7 +81,7 @@ static void test_shipped_defaults_keep_table(void)
     TEST_ASSERT_EQUAL_UINT16(200, d.benches_kmh[1]);
     TEST_ASSERT_EQUAL_UINT16(300, d.benches_kmh[2]);
     char labels[11][8];
-    for (int i = 0; i < 11; i++) TEST_ASSERT_TRUE(drag_gate_label(&d.gates[i], 0, labels[i], sizeof labels[i]) > 0);
+    for (int i = 0; i < 11; i++) TEST_ASSERT_TRUE(drag_gate_label(&d.gates[i], 0, CFG_DIST_FT, labels[i], sizeof labels[i]) > 0);
     TEST_ASSERT_EQUAL_STRING("0-60", labels[0]);   /* id 1 */
     for (int i = 0; i < 11; i++) {
         for (int j = i + 1; j < 11; j++) {
@@ -92,7 +92,7 @@ static void test_shipped_defaults_keep_table(void)
 static void check_label(const drag_gate_def_t *g, const char *want)
 {
     char buf[8];
-    TEST_ASSERT_EQUAL_INT((int)strlen(want), drag_gate_label(g, 0, buf, sizeof buf));
+    TEST_ASSERT_EQUAL_INT((int)strlen(want), drag_gate_label(g, 0, CFG_DIST_FT, buf, sizeof buf));
     TEST_ASSERT_EQUAL_STRING(want, buf);
 }
 static void test_labels_for_every_default_gate(void)
@@ -106,8 +106,25 @@ static void test_custom_distance_and_bad_cap(void)
     drag_gate_def_t g = { 12, DRAG_DIST, 12000, 0 };
     check_label(&g, "120m");
     char small[4];
-    TEST_ASSERT_EQUAL_INT(-1, drag_gate_label(&g, 0, small, sizeof small));
+    TEST_ASSERT_EQUAL_INT(-1, drag_gate_label(&g, 0, CFG_DIST_FT, small, sizeof small));
     drag_gate_def_t bad = { 13, 9, 1, 0 }; char buf[8];
-    TEST_ASSERT_EQUAL_INT(-1, drag_gate_label(&bad, 0, buf, sizeof buf));
+    TEST_ASSERT_EQUAL_INT(-1, drag_gate_label(&bad, 0, CFG_DIST_FT, buf, sizeof buf));
 }
-int main(void) { UNITY_BEGIN(); RUN_TEST(test_defaults_when_no_benches); RUN_TEST(test_mph_benches_define_speed_gates); RUN_TEST(test_mph_empty_list_keeps_defaults); RUN_TEST(test_mph_round_trip_is_exact); RUN_TEST(test_shipped_defaults_keep_table); RUN_TEST(test_labels_for_every_default_gate); RUN_TEST(test_custom_distance_and_bad_cap); return UNITY_END(); }
+/* #96: DIST gates print feet or metres by dist_units; 1/8 and 1/4 mile keep their names in both. */
+static void test_gate_label_dist_units(void)
+{
+    char b[16];
+    const drag_gate_def_t ft60   = { 6, DRAG_DIST, 1829,  0 };
+    const drag_gate_def_t ft330  = { 7, DRAG_DIST, 10058, 0 };
+    const drag_gate_def_t eighth = { 8, DRAG_DIST, 20117, 0 };
+    const drag_gate_def_t ft1000 = { 9, DRAG_DIST, 30480, 0 };
+    const drag_gate_def_t quarter= { 10, DRAG_DIST, 40234, 0 };
+    TEST_ASSERT_TRUE(drag_gate_label(&ft60, DRAG_UNITS_KMH, CFG_DIST_FT, b, sizeof b) > 0); TEST_ASSERT_EQUAL_STRING("60ft", b);
+    TEST_ASSERT_TRUE(drag_gate_label(&ft60, DRAG_UNITS_KMH, CFG_DIST_M, b, sizeof b) > 0);  TEST_ASSERT_EQUAL_STRING("18m", b);
+    TEST_ASSERT_TRUE(drag_gate_label(&ft330, DRAG_UNITS_MPH, CFG_DIST_M, b, sizeof b) > 0); TEST_ASSERT_EQUAL_STRING("101m", b);
+    TEST_ASSERT_TRUE(drag_gate_label(&ft1000, DRAG_UNITS_KMH, CFG_DIST_M, b, sizeof b) > 0);TEST_ASSERT_EQUAL_STRING("305m", b);
+    TEST_ASSERT_TRUE(drag_gate_label(&eighth, DRAG_UNITS_KMH, CFG_DIST_M, b, sizeof b) > 0); TEST_ASSERT_EQUAL_STRING("1/8", b);
+    TEST_ASSERT_TRUE(drag_gate_label(&quarter, DRAG_UNITS_KMH, CFG_DIST_FT, b, sizeof b) > 0);TEST_ASSERT_EQUAL_STRING("1/4", b);
+    TEST_ASSERT_TRUE(drag_gate_label(&ft60, DRAG_UNITS_KMH, 2, b, sizeof b) < 0);   /* invalid dist_units rejected */
+}
+int main(void) { UNITY_BEGIN(); RUN_TEST(test_defaults_when_no_benches); RUN_TEST(test_mph_benches_define_speed_gates); RUN_TEST(test_mph_empty_list_keeps_defaults); RUN_TEST(test_mph_round_trip_is_exact); RUN_TEST(test_shipped_defaults_keep_table); RUN_TEST(test_labels_for_every_default_gate); RUN_TEST(test_custom_distance_and_bad_cap); RUN_TEST(test_gate_label_dist_units); return UNITY_END(); }

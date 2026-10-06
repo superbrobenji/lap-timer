@@ -67,6 +67,10 @@ typedef struct {
     uint8_t  units; /* Plan 7c T4 (design §3): 0 = km/h, 1 = mph (CFG_UNITS_KMH/CFG_UNITS_MPH); set
                       * from s_cfg.units at boot and on every menu toggle -- every speed_display()
                       * call on screen (LAP page 2 MAX SPD, the DRAG trap row) uses it */
+    uint8_t  dist_units; /* #96: 0 = m, 1 = ft (CFG_DIST_M/CFG_DIST_FT); set from s_cfg.dist_units at
+                           * boot and on every menu toggle -- consumed only by ui.c's row_from_gate
+                           * (drag_gate_label's DIST-gate naming), not by the renderer: row labels
+                           * arrive here already formatted strings (drag_row_t.label) */
 
     /* LAP page 0 */
     uint32_t best_ms, prev_ms;

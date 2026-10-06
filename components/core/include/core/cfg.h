@@ -4,8 +4,9 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define CFG_VERSION 1
+#define CFG_VERSION 2
 enum { CFG_UNITS_KMH = 0, CFG_UNITS_MPH = 1 };
+enum { CFG_DIST_M = 0, CFG_DIST_FT = 1 };
 enum { CFG_MODE_LAP = 0, CFG_MODE_DRAG = 1 };
 #define CFG_MAX_DEFAULT_LAYOUTS 8
 #define CFG_MAX_BENCHES 4
@@ -33,6 +34,23 @@ typedef struct {
     struct { uint8_t fused_hz; } log;
     struct { uint8_t dyn_model, rate_hz; } gps;
     struct { uint8_t mot_thr, mot_dur_ms; } imu;
+    /* #96, v2: deliberately APPENDED, not grouped next to `units` above -- cfg_t is the on-flash
+     * blob payload (core/cfg_blob.h) and blob_unwrap() repopulates every field by a single raw
+     * memcpy at fixed offsets. Confirmed by sizeof/offsetof probe: today's cfg_t already carries
+     * one byte of compiler padding (alignment of `lap`'s first uint16_t forces the 3-byte
+     * version/units/mode header out to 4), so inserting a field ANYWHERE before `mode` does not
+     * grow sizeof(cfg_t) at all -- it just eats that padding byte -- which means lt_cfg_load's
+     * `sz != sizeof(buf)` guard would NOT catch a real v1-saved blob, and cfg_blob_unwrap's
+     * version-mismatch migrate path WOULD run on it. Inserted there, the raw memcpy would then
+     * silently shift every byte from the insertion point through `mode` by one: `mode`'s stored
+     * value lands in the new field instead, and the always-zero padding byte lands in `mode` --
+     * i.e. every v1 device in DRAG mode would silently come back as LAP after this update, with
+     * cfg_validate() reporting zero corrections (mode=0 is in-range). Appending here instead means
+     * v1's byte image is an exact prefix of v2's (same probe: offsetof(imu) unchanged, sizeof
+     * unchanged -- this field lands on the struct's own *trailing* alignment pad, also always
+     * zero/CFG_DIST_M on a real v1 blob) -- no other field's offset moves, so nothing upstream of
+     * it can be corrupted by the migrate path. See the Task 3 report's blob-migration analysis. */
+    uint8_t dist_units;            /* CFG_DIST_*: DIST gate labels only; 1/8 and 1/4 mile keep their names */
 } cfg_t;
 
 /* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
@@ -44,6 +62,6 @@ int cfg_defaults(cfg_t *c);
 int cfg_validate(cfg_t *c);                       /* clamps; returns number of corrected fields */
 int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; "version" is ignored (owned by firmware); arrays longer than capacity are rejected; 0 ok / -1 error with err */
 int cfg_to_json(const cfg_t *c, char *out, size_t cap);                             /* bytes written or -1 */
-int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version */
+int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version; v1->v2 sets dist_units = CFG_DIST_M (#96) */
 bool cfg_migrate_supported(uint8_t from_version);      /* true for exactly the versions cfg_migrate() accepts */
 #endif

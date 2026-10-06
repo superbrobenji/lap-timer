@@ -67,20 +67,25 @@ static int put_num_pair(char *buf, size_t cap, unsigned a, const char *sep, unsi
     return (n < 0 || (size_t)n >= cap) ? -1 : n;
 }
 
-int drag_gate_label(const drag_gate_def_t *g, uint8_t units, char *buf, size_t cap)
+int drag_gate_label(const drag_gate_def_t *g, uint8_t units, uint8_t dist_units, char *buf, size_t cap)
 {
     CORE_ASSERT_RET(g != NULL && buf != NULL, DRAGCFG_ASSERT_CODE, -1);
     CORE_ASSERT_RET(cap >= 8u, DRAGCFG_ASSERT_CODE, -1);
     CORE_ASSERT_RET(units <= 1u, DRAGCFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(dist_units <= 1u, DRAGCFG_ASSERT_CODE, -1);
     switch (g->kind) {
     case DRAG_SPEED_FROM0: return put_num_pair(buf, cap, 0u, "-", units ? kmh_to_mph(g->a) : g->a);
     case DRAG_SPEED_RANGE: return put_num_pair(buf, cap, g->a, "-", g->b);
     case DRAG_BRAKE:       return put_num_pair(buf, cap, g->a, "-", 0u);
     case DRAG_DIST: {
-        const char *name = g->a == 1829u ? "60ft" : g->a == 10058u ? "330ft" : g->a == 20117u ? "1/8"
-                         : g->a == 30480u ? "1000ft" : g->a == 40234u ? "1/4" : NULL;
+        /* #96: the two mile gates keep their name in both unit modes; the three feet presets
+         * (60ft/330ft/1000ft) rename to metres (rounded) when dist_units == CFG_DIST_M; any other
+         * DIST `a` (a custom gate) always prints "<a/100>m" rounded, regardless of dist_units. */
+        const char *name = g->a == 20117u ? "1/8" : g->a == 40234u ? "1/4" : NULL;
+        if (name == NULL && dist_units == CFG_DIST_FT)
+            name = g->a == 1829u ? "60ft" : g->a == 10058u ? "330ft" : g->a == 30480u ? "1000ft" : NULL;
         if (name != NULL) { int n = snprintf(buf, cap, "%s", name); return (n < 0 || (size_t)n >= cap) ? -1 : n; }
-        int n = snprintf(buf, cap, "%um", (unsigned)(g->a / 100u));
+        int n = snprintf(buf, cap, "%um", (unsigned)((g->a + 50u) / 100u));   /* metres, rounded */
         return (n < 0 || (size_t)n >= cap) ? -1 : n;
     }
     default: buf[0] = '\0'; return -1;

@@ -11,6 +11,7 @@
  */
 #include "unity.h"
 
+#include "core/cfg.h"       /* CFG_DIST_M/CFG_DIST_FT (#96) -- documents the two dist-units goldens */
 #include "core/ui/canvas.h"
 #include "core/ui/icons.h"
 #include "core/ui/model.h"
@@ -498,6 +499,43 @@ static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this r
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
 }
 
+/* #96: the three feet-preset DIST gates (60ft/330ft/1000ft) keep their ft names when
+ * dist_units == CFG_DIST_FT -- today's look, same seven-row layout as test_drag_p1_gates (the
+ * renderer itself never reads m->dist_units; row labels arrive pre-formatted, so m.dist_units is
+ * set here purely to document the scenario, as ui.c's row_from_gate would have produced these
+ * exact strings in FT mode). */
+static void test_drag_p1_dist_ft(void)
+{
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90; m.dist_units = CFG_DIST_FT;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
+    drag_gate(&m, "100-200", 12340, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_dist_ft.pbm"), &s_fb));
+}
+
+/* #96: same seven gates, dist_units == CFG_DIST_M -- the three feet presets rename to "18m"/
+ * "101m"/"305m" (rounded metres); the two mile gates ("1/8"/"1/4") and the non-DIST gates
+ * ("100-200"/"100-0") are unchanged, same as drag_gate_label's contract (core/drag.h). Shorter
+ * label strings than the FT case, so this also exercises the list layout with narrower labels. */
+static void test_drag_p1_dist_m(void)
+{
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90; m.dist_units = CFG_DIST_M;
+    drag_gate(&m, "18m", 2010, 0, false, 0); drag_gate(&m, "101m", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0); drag_gate(&m, "305m", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
+    drag_gate(&m, "100-200", 12340, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_dist_m.pbm"), &s_fb));
+}
+
 static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, every gate present */
 {
     /* Session-best per gate (title "SESSION BEST"): same seven rows as test_drag_p1_gates, but
@@ -817,6 +855,8 @@ int main(void)
     RUN_TEST(test_drag_p0_footer_scroll);
     RUN_TEST(test_drag_p0_armed_gates);
     RUN_TEST(test_drag_p1_gates);
+    RUN_TEST(test_drag_p1_dist_ft);
+    RUN_TEST(test_drag_p1_dist_m);
     RUN_TEST(test_drag_p2_best);
     RUN_TEST(test_drag_p1_overflow);
     RUN_TEST(test_drag_p2_overflow);

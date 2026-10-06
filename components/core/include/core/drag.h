@@ -96,9 +96,14 @@ void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
  * raw km/h/cm value as today; DRAG_UNITS_MPH (1) prints a DRAG_SPEED_FROM0 gate's `a` converted back to
  * mph (lround(a / DRAG_MPH_PER_KMH)) -- the inverse of drag_cfg_from_user's conversion, exact for every
  * integer mph 1..300 (spec dsB §3) -- while SPEED_RANGE/DIST/BRAKE still print their raw km/h/cm values
- * in both units (they are not user-defined in mph). Returns strlen(buf) on success, -1 on a bad kind, a
- * NULL arg, an out-of-range units or too small a cap. buf is always NUL-terminated within cap. */
-int  drag_gate_label(const drag_gate_def_t *g, uint8_t units, char *buf, size_t cap);
+ * in both units (they are not user-defined in mph). dist_units (CFG_DIST_*, #96) selects DIST-gate
+ * naming only: CFG_DIST_FT (1) names the three feet presets (a == 1829/10058/30480 cm) "60ft"/"330ft"/
+ * "1000ft"; CFG_DIST_M (0) names those same three "18m"/"101m"/"305m" (rounded to the nearest metre);
+ * the two mile gates (a == 20117/40234, 1/8 and 1/4) print their mile name in BOTH modes; any other
+ * DIST `a` always prints "<a/100>m" rounded, in both modes. Returns strlen(buf) on success, -1 on a bad
+ * kind, a NULL arg, an out-of-range units/dist_units or too small a cap. buf is always NUL-terminated
+ * within cap. */
+int  drag_gate_label(const drag_gate_def_t *g, uint8_t units, uint8_t dist_units, char *buf, size_t cap);
 
 /* Upper bound on the events drag_on_fused can append in a single call: at most one ARMED or LAUNCH or
  * DONE plus a full sweep of gates (DRAG_MAX_GATES) with headroom. Callers pass a buffer this large. */
