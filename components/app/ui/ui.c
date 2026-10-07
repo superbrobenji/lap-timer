@@ -113,7 +113,7 @@ static const char *TAG = "ui";
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
 #define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
 /* Review finding m7 (Task 3 fix round 1): the menu is now exactly at capacity (12 items with
- * CFG_HAS_BLE_RC, #96's Dist: item made it so) and the two sides of that capacity -- this #define
+ * CFG_HAS_BLE_RC, #96's Distance: item made it so) and the two sides of that capacity -- this #define
  * and model.h's screen_model_t.menu_items[] -- used to be tied only by comment. This ties them
  * for real (not just to the same literal 12): a future change to either that the other doesn't
  * follow is a build error here, not a runtime LT_ASSERT_VOID overrun caught only on-device. */
@@ -311,9 +311,9 @@ static void build_menu(void)
     LT_ASSERT_VOID(s_cfg.dist_units <= CFG_DIST_FT, UI_APP_ASSERT_CODE);        /* label depends on it */
     uint8_t n = 0;
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
-    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
-    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
     /* #98: recomputed from the source of truth (s_venue_id/s_layout_choice, armed by
@@ -478,7 +478,7 @@ static void menu_do_units(void)
     ui_send_cmd(CMD_CONFIG_RELOAD, 0, 0);
     s_model.units = s_cfg.units;
     s_dirty       = true;
-    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
     drag_cfg_from_user(&s_cfg, &s_drag_cfg);
     if (s_model.mode == SCR_MODE_DRAG) {
@@ -486,11 +486,13 @@ static void menu_do_units(void)
     }
 }
 
-/* MA_DIST (#96): toggle the DIST-gate label unit (m <-> ft), persist, refresh the label and the
- * model, and -- when DRAG is the current riding mode -- refill the rows now so they already show
- * the new unit once the menu exits (same pattern as menu_do_units() above). This does not touch
- * s_drag_cfg: dist_units only renames DIST gates for display (drag_gate_label), it never changes
- * which gates fire or their a/b values, unlike a units (km/h<->mph) toggle.
+/* MA_DIST (#96): toggle the display distance unit (m <-> ft), persist, refresh the label (now
+ * "Distance: m/ft", bench B4-F6) and the model, and -- when DRAG is the current riding mode --
+ * refill the rows now so they already show the new unit once the menu exits (same pattern as
+ * menu_do_units() above). This does not touch s_drag_cfg: dist_units only changes DISPLAY (the
+ * DIST-gate LABEL via drag_gate_label, and, since bench B4-F5, the gate list's distance-row VALUE
+ * via screens_moto.c's dist_display()) -- it never changes which gates fire or their a/b values,
+ * unlike a units (km/h<->mph) toggle.
  * Bench B4-F2 (#96): no longer posts CMD_CONFIG_RELOAD -- the pipeline has no use for dist_units
  * at all (it never reads the field; investigation-cfg-reload.md §3), so the round trip through the
  * pipeline queue bought nothing and, before the pipeline-side fix, destroyed the run on every
@@ -505,7 +507,7 @@ static void menu_do_dist(void)
     (void)lt_cfg_save(&s_cfg);
     s_model.dist_units = s_cfg.dist_units;
     s_dirty            = true;
-    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     if (s_model.mode == SCR_MODE_DRAG) {
         drag_rows_refill();
     }
@@ -1266,8 +1268,8 @@ static void ui_reload_cfg(void)
     }
     s_model.drag_run_state = DRAG_ST_IDLE;
     drag_cfg_from_user(&s_cfg, &s_drag_cfg);
-    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
-    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s", s_cfg.display.live_clock ? "on" : "off");
     if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();

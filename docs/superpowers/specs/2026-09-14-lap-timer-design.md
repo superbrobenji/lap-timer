@@ -2417,8 +2417,8 @@ Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignore
 2. Layout: cycles the current venue's layouts, `Auto` first — MODE on this item advances Auto → L1 → L2 → ... → Ln → Auto (the venue's layout list, by table order) and sends `CMD_SET_LAYOUT` (0 = Auto, else the chosen layout's id; the pipeline's `lap_force_layout()` also clears the best-sector snapshot). The choice is a per-venue manual override, runtime-only — not persisted — and resets to `Auto` the next time a venue is found. The VENUE one-shot (§20.6) shows the forced layout's real name once it locks (#98); venue/layout names throughout the ui are resolved from the track table (`trk_get`), not placeholder ids.
 3. New track (§10.9, #97): `CMD_CREATE_BEGIN` arms the engine and opens the `NEW TRACK` one-shot (§20.6). Each short MODE on it marks the next gate (`CMD_MARK_GATE`); long MODE cancels (`CMD_CREATE_CANCEL`) back to riding. The engine finishes on its own, on the next S/F crossing, with a real `EV_VENUE_FOUND` (not a menu action) — the pipeline then asks the logger to persist the user track table to `/tracks/user.bin`, and the ui's normal venue handling replaces `NEW TRACK` with the `VENUE` one-shot showing the new `Track_YYYYMMDD`.
 4. Calibrate (orientation capture; shows result)
-5. Units: km/h / mph
-6. Dist: m / ft — DRAG DIST-gate label unit only (§6.6/§11.1); the two mile gates keep their name either way (#96)
+5. Speed: km/h / mph (renamed from `Units:`, bench B4-F6, #96)
+6. Distance: m / ft (renamed from `Dist:`, bench B4-F6, #96) — governs the DRAG DIST-gate label (§6.6/§11.1; the two mile gates keep their name either way) and, since bench B4-F5, the gate-list's distance-row VALUE (§7's pages 1/2 list, the 100-0 braking gate)
 7. Export (BLE) — enters CONNECTED, shows name + countdown
 8. Live to phone (only with `CFG_HAS_BLE_RC`)
 9. Diagnostics (§17.10)

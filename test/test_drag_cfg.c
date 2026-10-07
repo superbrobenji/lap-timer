@@ -127,9 +127,11 @@ static void test_gate_label_dist_units(void)
     TEST_ASSERT_TRUE(drag_gate_label(&quarter, DRAG_UNITS_KMH, CFG_DIST_FT, b, sizeof b) > 0);TEST_ASSERT_EQUAL_STRING("1/4", b);
     TEST_ASSERT_TRUE(drag_gate_label(&ft60, DRAG_UNITS_KMH, 2, b, sizeof b) < 0);   /* invalid dist_units rejected */
 }
-/* Bench regression 2026-10-07 (#96): dist_units is DIST-gate NAMING only -- it must not reach the
- * engine's drag_cfg_t at all, so a Dist: m|ft toggle can never be mistaken for a table change
- * (which is what made pipeline_reload_cfg() drop a completed run and the session bests). */
+/* Bench regression 2026-10-07 (#96): dist_units is DISPLAY only (the DIST-gate label naming here,
+ * and since bench B4-F5 the gate list's distance-row value too, screens_moto.c/core/ui/units.c)
+ * -- it must not reach the engine's drag_cfg_t at all, so a Distance: m|ft toggle can never be
+ * mistaken for a table change (which is what made pipeline_reload_cfg() drop a completed run and
+ * the session bests). */
 static void test_dist_units_does_not_touch_engine_cfg(void)
 {
     cfg_t m; cfg_defaults(&m); m.dist_units = CFG_DIST_M;

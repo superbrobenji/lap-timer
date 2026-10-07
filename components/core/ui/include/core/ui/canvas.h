@@ -168,7 +168,13 @@
 #define DCARD_SPEED_UNIT_GAP 4 /* px between the trap-speed digits and the FONT_SMALL unit suffix */
 /* ---- Plan 7b DRAG pages 1/2: gate list (spec 7b §7) ---- */
 #define DLIST_ROWS 4
-#define DLIST_LABEL_DY 6
+/* Bench B4-F4: the label (FONT_SMALL, 12px tall) and the value (FONT_MED, 24px tall) share one
+ * visual baseline -- the bottom edge of their glyph cells, the only "baseline" a fixed-height
+ * bitmap font with no descenders has -- rather than the old vertical-centre offset (6 = (24-12)/2)
+ * that left the label floating clear of its value and reading as paired with the neighbouring
+ * column's label instead. 12 = FONT_MED.h(24) - FONT_SMALL.h(12): with the value's top at the
+ * row's y and the label's top at y + 12, both cells' bottoms land at y + 24. */
+#define DLIST_LABEL_DY 12
 #if CANVAS_213
 #define DLIST_HEADER_Y     2
 #define DLIST_COL2_X       126
@@ -179,6 +185,14 @@
 #define DLIST_COL2_RIGHT_X 246
 #define DLIST_ROW_Y0       16
 #define DLIST_ROW_H        26
+/* Bench B4-F4: a 1px rule under the header (fb_hline, same idiom as render_menu's MENU_SEP_Y) and
+ * a 1px vertical divider between the two columns (fb_rect -- there is no fb_vline), so a value's
+ * owner is never ambiguous even when a row only fills one column. DLIST_RULE_Y sits right at the
+ * header's own bottom edge (DLIST_HEADER_Y(2) + FONT_SMALL.h(12), no extra gap, same convention as
+ * MENU_SEP_Y). DLIST_DIVIDER_X is the midpoint of the gap between DLIST_COL1_RIGHT_X and
+ * DLIST_COL2_X. */
+#define DLIST_RULE_Y       14
+#define DLIST_DIVIDER_X    125
 #else
 #define DLIST_HEADER_Y     2
 #define DLIST_COL2_X       152
@@ -186,10 +200,19 @@
 #define DLIST_COL2_RIGHT_X 292
 #define DLIST_ROW_Y0       18
 #define DLIST_ROW_H        26
+#define DLIST_RULE_Y       14
+#define DLIST_DIVIDER_X    149
 #endif
 #define DLIST_COL1_X TEXT_MARGIN_X
-#define DLIST_UNIT_W 10     /* room reserved right of a distance value for its FONT_SMALL "m" */
-#define DLIST_UNIT_GAP 2    /* px between the distance digits and the FONT_SMALL "m" */
+/* Bench B4-F5: room reserved right of a distance value for its FONT_SMALL unit suffix -- "m" (one
+ * glyph) or "ft" (two glyphs) once the value follows dist_units, sized for the wider of the two
+ * (canvas-independent, like DLIST_UNIT_GAP below, so one shared constant covers both canvas
+ * blocks above). Widened from 10 (fit for "m" alone: DLIST_UNIT_GAP(2) + 1*FONT_SMALL.w(7) + 1px
+ * margin) to 17 (fit for "ft": DLIST_UNIT_GAP(2) + 2*FONT_SMALL.w(14) + 1px margin), since the
+ * reserve must fit the wider unit in either dist_units mode -- the layout is a compile-time
+ * constant, not conditioned on the current toggle. */
+#define DLIST_UNIT_W 17
+#define DLIST_UNIT_GAP 2    /* px between the distance digits and the FONT_SMALL unit suffix */
 /* I3 (final review, ruling R-7): px gap between the header title's last glyph and the "+<n>"
  * overflow suffix drawn when more than 2*DLIST_ROWS gates were hit -- canvas-independent, like the
  * other _GAP constants above. */

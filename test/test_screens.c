@@ -891,7 +891,7 @@ static void test_menu_top(void)
 /* §20.7's own item list verbatim: lowercase and '/' throughout, so every row exercises the
  * item_fits_font_med(false) / FONT_SMALL fallback path. */
 static const char *const MENU_ITEMS_FULL[] = {
-    "Mode: Lap / Drag", "Layout: Auto", "New track",     "Calibrate", "Units: km/h / mph",
+    "Mode: Lap / Drag", "Layout: Auto", "New track",     "Calibrate", "Speed: km/h / mph",
     "Export (BLE)",     "Live to phone", "Diagnostics",  "Sessions",  "Display",
     "Sleep now",
 };

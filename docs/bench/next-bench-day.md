@@ -79,16 +79,27 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   then moving past the arm threshold — or `dbg sim drag`'s own arm phase): the big slot switches to
   `READY`. Expect no separate ARMED label anywhere on the card — the top-right slot that used to
   show it (`DCARD_ARMED_RIGHT_X/Y`) is gone; `READY` alone is the arm indicator now.
-- [ ] **13. `Dist: m/ft` menu item + remote config (#96, final review I-6).** Procedure: open the
-  menu, confirm the item reads `Dist: m` by default (fresh NVS, or after a v1→v2 cfg migration);
-  press MODE on it to toggle `Dist: ft` and back; confirm bench item 1's drag-card distance-gate
-  labels follow the toggle live. Then from the dev-kit (or `lt shell`): `lt config set
-  {"dist_units":"ft"}`, confirm the device menu label updates to `Dist: ft` with no manual reload,
-  and `lt config get` echoes `"dist_units":"ft"` back.
+- [ ] **13. `Speed:`/`Distance:` menu items (renamed from `Units:`/`Dist:`, bench B4-F6) + remote
+  config (#96, final review I-6).** Procedure: open the menu, confirm the speed item reads
+  `Speed: km/h` and the distance item reads `Distance: m` by default (fresh NVS, or after a
+  v1→v2 cfg migration); press MODE on the distance item to toggle `Distance: ft` and back; confirm
+  bench item 1's drag-card distance-gate labels follow the toggle live. Then from the dev-kit (or
+  `lt shell`): `lt config set {"dist_units":"ft"}`, confirm the device menu label updates to
+  `Distance: ft` with no manual reload, and `lt config get` echoes `"dist_units":"ft"` back.
 - [ ] **14. LINK glyph timing (#99, final review I-6).** Procedure: with the lap-timer running and
   the dev-kit unplugged, confirm the LINK glyph is absent from the fault-icon strip. Plug the
   dev-kit in: the glyph must appear within about 1 s of the connection (the detect-pin debounce,
   `LINK_DETECT_STABLE`, is sized for this). Unplug it: the glyph must disappear within about 3 s.
+- [ ] **15. DRAG gate-list pairing + distance-row unit (bench B4-F4/B4-F5, #96).** Procedure: run a
+  drag session that hits the 100-0 braking gate (`dbg sim drag`, which arms/launches/brakes on its
+  own) and open DRAG page 1 (LAST RUN) or page 2 (SESSION BEST). Expect: every row reads as one
+  line — each FONT_SMALL label's text sits immediately above its own FONT_MED value's baseline,
+  not the next column's label's; a thin horizontal line separates the `LAST RUN`/`SESSION BEST`
+  header from the rows, and a thin vertical line separates the two columns for the full height of
+  the rows (not across the header). The 100-0 row's value reads `<n> m` with `Distance: m` set and
+  `<n> ft` with `Distance: ft` set (toggle item 13's distance setting and confirm this value — not
+  just the DIST-gate labels in item 1 — follows it; before this fix the value stayed in metres
+  regardless of the setting).
 
 ## Closed on 2026-10-05 (bench day 3)
 items 1, 2, 3, 4, 7, 8, 9, 10, 11 (11 = the #65 re-test on 2026-10-05: 4/4 list relays clean, fresh loads without Reload). Open: 5 (menu stubs — Plan 6.2, Plan 8.4/#93; New track (#97) and Layout override (#98) are code-complete, pending this bench day), 6 (Plan 8 + hardware), and 12/13/14 (#95/#96/#99, added in the final review fix wave, I-6 — card text, `dist_units` menu+remote, and LINK glyph timing never had their own bench item before).

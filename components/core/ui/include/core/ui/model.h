@@ -69,9 +69,13 @@ typedef struct {
                       * from s_cfg.units at boot and on every menu toggle -- every speed_display()
                       * call on screen (LAP page 2 MAX SPD, the DRAG trap row) uses it */
     uint8_t  dist_units; /* #96: 0 = m, 1 = ft (CFG_DIST_M/CFG_DIST_FT); set from s_cfg.dist_units at
-                           * boot and on every menu toggle -- consumed only by ui.c's row_from_gate
-                           * (drag_gate_label's DIST-gate naming), not by the renderer: row labels
-                           * arrive here already formatted strings (drag_row_t.label) */
+                           * boot and on every menu toggle. Two consumers: ui.c's row_from_gate
+                           * (drag_gate_label's DIST-gate LABEL naming -- row labels arrive here
+                           * already formatted strings, drag_row_t.label) and, since bench B4-F5,
+                           * screens_moto.c's render_drag_gate_list (dist_display(), core/ui/
+                           * units.c), which converts a distance row's VALUE (drag_row_t.dist_m) at
+                           * render time -- the renderer does read this field after all, just not
+                           * for the label side. */
 
     /* LAP page 0 */
     uint32_t best_ms, prev_ms;

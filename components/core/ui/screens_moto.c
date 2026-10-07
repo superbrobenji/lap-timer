@@ -714,9 +714,16 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
 /* ---- DRAG pages 1/2 (spec 7b §7): all seven gates of the last run / best-per-gate this session
  * -- same row set (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0), just different values, so one
  * list layout serves both; they differ only in the title drawn and in which values the caller
- * populated m->drag[] with. Two columns of DLIST_ROWS rows each (the left column fills first):
- * each cell is a FONT_SMALL label at the column's left edge and a FONT_MED value right-aligned at
- * the column's right edge, "--.--" for a gate not hit this run/session. ---- */
+ * populated m->drag[] with. Two columns of DLIST_ROWS rows each (the left column fills first).
+ *
+ * Bench B4-F4 (pairing): each cell's FONT_SMALL label and FONT_MED value now share one visual
+ * baseline (DLIST_LABEL_DY, canvas.h) -- label at the column's left edge, value right-aligned at
+ * the column's right edge, "--.--" for a gate not hit this run/session -- and a 1px rule sits
+ * under the header with a 1px divider between the two columns (spanning only the rows, not the
+ * header) so a value's owner is never ambiguous, even when a row only fills one column. Bench
+ * B4-F5 (unit): a distance row's (is_distance) value now follows m->dist_units via dist_display()
+ * (core/ui/units.c) -- metres as stored, or feet with the matching suffix -- the value-side
+ * counterpart to drag_gate_label's label-side renaming (core/dragengine/drag_cfg.c). ---- */
 
 static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char *title)
 {
@@ -734,6 +741,14 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
                           UI_ASSERT_CODE);
         fb_text(fb, &FONT_SMALL, end + DLIST_MORE_GAP, DLIST_HEADER_Y, buf);
     }
+    /* B4-F4: the header rule (fb_hline, same idiom as render_menu's MENU_SEP_Y) and the column
+     * divider (fb_rect -- there is no fb_vline), drawn before the rows so neither overdraws them.
+     * The divider spans only the rows' vertical extent (DLIST_ROW_Y0 to the last row's FONT_MED
+     * content bottom), not the header above it. */
+    fb_hline(fb, 0, DLIST_RULE_Y, CANVAS_VISIBLE_W, 1);
+    int div_h = (int)((DLIST_ROWS - 1) * DLIST_ROW_H) + (int)FONT_MED.h;
+    fb_rect(fb, DLIST_DIVIDER_X, DLIST_ROW_Y0, 1, div_h, 1, true);
+
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     for (uint8_t i = 0; i < n && i < 2u * DLIST_ROWS; i++) {
         int col = i / DLIST_ROWS, row = i % DLIST_ROWS; /* left column fills first */
@@ -742,16 +757,22 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
         int y = DLIST_ROW_Y0 + row * DLIST_ROW_H;
         const drag_row_t *r = &m->drag[i];
         char buf[TIME_BUF_LEN];
+        /* B4-F4: DLIST_LABEL_DY now bottom-aligns the label's cell to the value's (see canvas.h),
+         * instead of the old vertical-centre offset that read as paired with the next column. */
         fb_text(fb, &FONT_SMALL, x, y + DLIST_LABEL_DY, r->label);
         if (!r->present) {
             char *p = put_str(buf, "--.--");
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr, y, buf);
         } else if (r->is_distance) {
-            char *p = put_uint(buf, r->dist_m);
+            /* B4-F5: dist_display() converts to the display unit at render time (the same rule as
+             * every other unit on screen, ruling R-4) -- never freeze dist_m in the display unit
+             * at event time, or a later Distance: toggle would mislabel an already-finished run. */
+            char *p = put_uint(buf, dist_display(r->dist_m, m->dist_units));
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr - DLIST_UNIT_W, y, buf);
-            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + DLIST_UNIT_GAP, y + DLIST_LABEL_DY, "m");
+            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + DLIST_UNIT_GAP, y + DLIST_LABEL_DY,
+                    m->dist_units == CFG_DIST_FT ? "ft" : "m");
         } else {
             fmt_secs_ms(buf, r->t_ms);
             fb_text_right(fb, &FONT_MED, xr, y, buf);
