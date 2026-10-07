@@ -773,6 +773,70 @@ static void test_rtc_import_unknown_venue_fails(void)
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
 }
 
+/* #98 bench defect (Layout: stuck on Auto, 2026-10-07): the ui learns the current venue ONLY from
+ * EV_VENUE_FOUND (handle_venue_found(), ui.c -- the single writer of s_venue_id). This pins down
+ * which of the four venue-acquisition paths announce it and which are silent by construction, so a
+ * silent one is known to REQUIRE an announcer in its caller (pipeline.c's ui_post_venue(), posted
+ * ui-only and never through engine_cb()). lap_export_rtc() is the observation seam for "which venue
+ * does the engine hold" -- it reports L->venue->id directly. */
+static void test_venue_acquisition_paths_announce_or_are_silent(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+
+    lap_rtc_t snap;
+
+    /* (1) the §10.3 scan ANNOUNCES: the ui is informed on real GPS cold boot. */
+    lap_t L1; lap_init(&L1, NULL);
+    evlog_t log1; memset(&log1, 0, sizeof log1);
+    gps_fix_t f = fix_ll(lat_of(lat0, -500.0), lon0, 1000000, 0, true);
+    drive_fix(&L1, &f, &log1);
+    TEST_ASSERT_EQUAL_INT(1, count_type(&log1, EV_VENUE_FOUND));
+    lap_export_rtc(&L1, &snap);
+    TEST_ASSERT_EQUAL_UINT16(v.id, snap.venue_id);
+
+    /* (2) lap_set_venue() is SILENT BY CONSTRUCTION -- its signature (lap.h) carries no event
+     * buffer, so it CANNOT announce. Every direct caller must: the §10.3 scan and the §10.9 CREATE
+     * finalize both emit on the next line inside lap.c; pipeline.c's CFG_GPS_SIM boot venue did
+     * not before this fix, which was the defect. The engine holds the venue, yet nothing
+     * observable was produced. */
+    lap_t L2; lap_init(&L2, NULL);
+    lap_set_venue(&L2, &v);
+    lap_export_rtc(&L2, &snap);
+    TEST_ASSERT_EQUAL_UINT16(v.id, snap.venue_id);        /* engine: informed */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_VENUE_FOUND, lap_state(&L2));
+
+    /* (3) lap_import_rtc() is SILENT for the same reason (no out/cap/n parameters) AND skips the
+     * scan for the rest of the venue visit: it lands in LAP_ST_RUNNING, while scan_for_venue()'s
+     * precondition is LAP_ST_NO_VENUE. So a §15.3 resume on real GPS never produces a venue event
+     * at all -- pipeline.c's caller must announce. It restores the engine's own layout lock
+     * silently too: no EV_LAYOUT_LOCKED either. */
+    lap_rtc_t rtc;
+    memset(&rtc, 0, sizeof rtc);
+    rtc.venue_id = v.id;
+    rtc.layout_id = v.layouts[0].id;
+    rtc.lap_no = 3;
+    rtc.lap_start_gps_us = 1000000;
+    lap_t L3; lap_init(&L3, NULL);
+    TEST_ASSERT_EQUAL_INT(0, lap_import_rtc(&L3, &rtc));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L3));
+    lap_export_rtc(&L3, &snap);
+    TEST_ASSERT_EQUAL_UINT16(v.id, snap.venue_id);        /* engine: informed */
+    TEST_ASSERT_EQUAL_UINT16(v.layouts[0].id, snap.layout_id);   /* and locked, silently */
+    /* and the scan can never re-announce it: not NO_VENUE, so scan_for_venue() never runs. */
+    evlog_t log3; memset(&log3, 0, sizeof log3);
+    gps_fix_t f3 = fix_ll(lat_of(lat0, -400.0), lon0, 2000000, 0, true);
+    drive_fix(&L3, &f3, &log3);
+    TEST_ASSERT_EQUAL_INT(0, count_type(&log3, EV_VENUE_FOUND));
+    TEST_ASSERT_EQUAL_INT(0, count_type(&log3, EV_LAYOUT_LOCKED));
+
+    /* (4) id 0 can never resolve, so a blind ui is permanently blind, not merely late:
+     * trk_validate_venue() rejects id 0, so no table entry can carry it. This is the exact NULL
+     * that made menu_do_layout()'s n_layouts 0 and wrapped the choice 0 -> 0. */
+    TEST_ASSERT_NULL(trk_get(0));
+}
+
 /* ---------------------------------------------------- session 2.5 predictive delta (§10.11) */
 
 /* §10.11: with a recorded best lap, lap_live_delta_ms(dist) = elapsed - t_ref(dist). At a distance the
@@ -1213,6 +1277,7 @@ int main(void)
     RUN_TEST(test_create_mark_gate_sector_out_of_order);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);
     RUN_TEST(test_rtc_import_unknown_venue_fails);
+    RUN_TEST(test_venue_acquisition_paths_announce_or_are_silent);
     RUN_TEST(test_predictive_delta);
     RUN_TEST(test_predictive_table_cap);
     RUN_TEST(test_predictive_disabled_returns_no_delta);

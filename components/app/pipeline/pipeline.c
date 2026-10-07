@@ -253,6 +253,19 @@ static void seq_leave(void)
  * earlier in the file -- can call it. */
 static void ui_post_lap_reset(void);
 
+/* #98 bench fix (B4-F3, issue #98): tell the ui directly -- never through emit_event()/
+ * engine_cb() -- that a venue was set OUTSIDE the engine's own scan (lap.c's scan_for_venue())/
+ * create-finalize (lap.c's finalize_create()) announcements: the CFG_GPS_SIM boot venue
+ * (pipeline_init(), below) and the §15.3 RTC resume (on_fix_try_resume(), textually earlier in
+ * this file) both call lap_set_venue()/lap_import_rtc() directly from this task, and neither can
+ * announce for itself -- core/lap.h's lap_set_venue() signature carries no event buffer, and
+ * lap_import_rtc() has no out/cap/n parameters at all. Without this the ui's s_venue_id (ui.c)
+ * stays 0 forever: trk_get(0) is always NULL (trk_validate_venue() rejects id 0, trk.c), so the
+ * Layout menu item is a dead "Auto" that still posts CMD_SET_LAYOUT id 0 on every press, wiping
+ * s_best under the seqlock for no reason (handle_set_layout(), below). Forward-declared here
+ * (real definition is below, after ui_post_create()) so on_fix_try_resume() can call it. */
+static void ui_post_venue(uint16_t venue_id, int64_t gps_us);
+
 /* Final review F-2/I-2: the stats_reset() + seqlocked s_best clear every engine-resetting or
  * venue/layout-changing path in this file already does (handle_reset_engine below;
  * handle_set_layout's forced-layout clear; pipeline_init()'s own venue-set clear) -- factored out
@@ -494,6 +507,9 @@ static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
                 s_resumed_lap_start_us = s_resume.lap_start_gps_us;
                 ESP_LOGI(TAG, "rtc resume: lap %u venue %u continued (interrupted)",
                          (unsigned)lr.lap_no, (unsigned)lr.venue_id);
+                /* #98: lap_import_rtc() above cannot announce for itself -- tell the ui directly
+                 * (ui_post_venue(), never through engine_cb(): s_create_active can be true here). */
+                ui_post_venue(lr.venue_id, fix->gps_us);
             } else {
                 /* Unknown venue: keep the cold engine state (sim already set the venue at init; on
                  * real hardware the engine keeps scanning for it). */
@@ -761,6 +777,36 @@ static void ui_post_create(uint8_t phase, uint16_t arg)
     LT_ASSERT_VOID(phase <= EV_CREATE_CANCELLED, PIPE_ASSERT_CODE);   /* a real EV_CREATE_* phase */
     event_t ev = { .type = EV_CREATE, .flags = phase, .arg16 = arg, .mono_us = esp_timer_get_time() };
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "create: ui queue full");
+}
+
+/* #98 bench fix (B4-F3, issue #98): the ui learns the current venue ONLY from EV_VENUE_FOUND
+ * (handle_venue_found(), ui.c) -- it sets s_venue_id, resets the Layout choice to Auto, resolves
+ * the venue name through trk_get() and opens the §20.6 VENUE one-shot. The ENGINE emits that
+ * event only from its own acquisitions (scan_for_venue()/finalize_create(), lap.c); every venue
+ * THIS task sets directly -- the CFG_GPS_SIM capture venue in pipeline_init() and the §15.3 RTC
+ * resume in on_fix_try_resume() -- would otherwise leave the ui blind (see the forward
+ * declaration above for the full argument).
+ *
+ * Posted straight to g_ui_evt_q, NEVER through emit_event()/engine_cb(): engine_cb() reads
+ * EV_VENUE_FOUND as "an on-device creation just finished" (create_finish_if_active(), above), and
+ * s_create_active CAN be true at the resume site -- the user may have selected New track before
+ * the first valid fix (handle_create_begin() requires only MODE_LAP, no fix, no venue). Routing
+ * this event through engine_cb() there would run create_finish_if_active()'s
+ * reset_best_and_stats() + ui_post_lap_reset() + a spurious LOGGER_SAVE_TRACKS for a creation
+ * that produced nothing, AND make create_cancel_if_orphaned()'s real EV_CREATE_CANCELLED a no-op
+ * (s_create_active already false by then) -- the NEW TRACK one-shot would read as "track saved"
+ * when it was in fact discarded. ui-only like EV_LAP_RESET/EV_CREATE above: the logger and the
+ * §18 peer stream already learn the venue through their own channel at the sim site
+ * (LOGGER_OPEN_SESSION/logger_set_venue, pipeline_init()); the resume site needs nothing extra
+ * there -- the logger's venue was already set for this session when it was first armed. */
+static void ui_post_venue(uint16_t venue_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(venue_id != 0, PIPE_ASSERT_CODE);   /* trk_get(0) is always NULL (trk.c) */
+    LT_ASSERT_VOID(gps_us >= 0, PIPE_ASSERT_CODE);
+    event_t ev = { .type = EV_VENUE_FOUND, .arg16 = venue_id,
+                   .gps_us = gps_us, .mono_us = esp_timer_get_time() };
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "venue: ui queue full");
 }
 
 /* I2 (review fix round 1, #97 §10.9): cancel an in-progress on-device creation and tell the ui --
@@ -1095,6 +1141,12 @@ static void pipeline_init(void)
             if (g_log_req_q) { (void)xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)); logger_notify(); }
             logger_set_venue(v->id, layout_id, v->name);
             ESP_LOGI(TAG, "venue \"%s\" (id %u) armed from sim capture", v->name, (unsigned)v->id);
+            /* #98: lap_set_venue() above cannot announce for itself -- tell the ui directly
+             * (ui_post_venue(), never through engine_cb()). Harmless at boot: pipeline_init()
+             * precedes any handle_cmd(), so s_create_active cannot be true yet (see
+             * ui_post_venue()'s comment above) -- and show_venue_oneshot() (ui.c) returns early
+             * while BOOT is still up, so this never races the BOOT one-shot either. */
+            ui_post_venue(v->id, 0);
         } else {
             ESP_LOGW(TAG, "sim venue parse failed: %s", err);
         }

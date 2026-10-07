@@ -1565,6 +1565,8 @@ Line endpoint convention: `p1` is the **left** end and `p2` the **right** end of
 
 `lap_reset` returns to `NO_VENUE` but keeps best/prev results of the session unless `CMD_RESET_ENGINE` with `arg8 = 1` (clear session).
 
+Any venue set directly by the pipeline outside this scan (the `CFG_GPS_SIM` boot venue; the §15.3/§10.10 RTC resume) is announced to the ui with its own `EV_VENUE_FOUND`, since `lap_set_venue`/`lap_import_rtc` carry no event buffer and cannot announce for themselves (#98).
+
 ### 10.4 Lap completion
 
 On accepted S/F crossing at `t_cross`:
@@ -1965,7 +1967,7 @@ typedef struct {
 } rtc_state_t;
 ```
 
-Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`.
+Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`. A successful resume (§10.10) restores the engine's venue directly (`lap_import_rtc`), which cannot itself announce it — the pipeline posts the ui's `EV_VENUE_FOUND` for it, exactly as the §10.3 scan does (#98).
 
 ---
 

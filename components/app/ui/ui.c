@@ -535,8 +535,18 @@ static void menu_do_layout(void)
     const trk_venue_t *v = trk_get(s_venue_id);
     uint8_t n = (v != NULL) ? v->n_layouts : 0u;
     LT_ASSERT_VOID(n <= TRK_MAX_LAYOUTS, UI_APP_ASSERT_CODE);
+    /* #98 bench fix (B4-F3): an unresolved venue (s_venue_id == 0 -- the ui never received
+     * EV_VENUE_FOUND, bench finding B4-F3) or a resolved one with no layouts has nothing to
+     * cycle. Previously this fell through and posted CMD_SET_LAYOUT id 0 anyway: a true no-op for
+     * the engine (already Auto), but handle_set_layout() (pipeline.c) still clears s_best under
+     * the seqlock on every single press -- wiping the rider's best-sector splits and theoretical
+     * best for no gain. Stay on Auto and do nothing instead. */
+    if (v == NULL || n == 0u) {
+        ESP_LOGD(TAG, "menu: layout press ignored, no venue/layouts (venue %u)", (unsigned)s_venue_id);
+        return;
+    }
     s_layout_choice = (uint8_t)((s_layout_choice + 1u) % (n + 1u));          /* Auto, L1, L2, ..., Auto */
-    uint16_t id = (s_layout_choice == 0u || v == NULL) ? 0u : v->layouts[s_layout_choice - 1u].id;
+    uint16_t id = (s_layout_choice == 0u) ? 0u : v->layouts[s_layout_choice - 1u].id;
     ui_send_cmd(CMD_SET_LAYOUT, 0, id);                                       /* 0 = Auto (lap_force_layout) */
     (void)ui_layout_label(v, s_layout_choice, s_lbl_layout, sizeof s_lbl_layout);
     /* M-10 (final review): lap_force_layout() (pipeline.c) posts no EV_LAYOUT_LOCKED, so without
@@ -545,7 +555,7 @@ static void menu_do_layout(void)
      * set while the menu label (s_lbl_layout, just updated above) already shows the newly forced
      * choice. Keep the model in step directly from the same source handle_layout_locked() itself
      * reads, rather than waiting for an event a forced choice never generates. */
-    if (s_layout_choice == 0u || v == NULL) {
+    if (s_layout_choice == 0u) {
         s_model.layout_name[0] = '\0';   /* Auto: no layout is "locked" -- venue phase */
     } else {
         snprintf(s_model.layout_name, sizeof s_model.layout_name, "%s", v->layouts[s_layout_choice - 1u].name);
