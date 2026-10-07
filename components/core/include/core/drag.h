@@ -92,6 +92,20 @@ void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {10
  * shipped defaults in place. out->units always mirrors cfg->units (display only); out->rollout
  * mirrors cfg->drag.rollout. */
 void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
+/* Bench B4-F2 (#96): true when `a` and `b` differ in a way that invalidates recorded results or
+ * in-flight state -- the gate table (how many gates, and each gate's id/kind/a/b -- cur.gates[]/
+ * best.gates[] are laid out in that order, drag.c reset_run/init_best) or the rollout rule that
+ * defines t0 (drag.c, "if (D->cfg.rollout && !D->rollout_done ...)"). benches_kmh[]/n_benches and
+ * units are display/bench-list selection only -- the engine never reads them (drag.c reads only
+ * cfg.gates/cfg.n_gates and cfg.rollout) -- and dist_units (#96) is not a drag_cfg_t field at all,
+ * so neither can make this return true on its own. A km/h<->mph flip still reports true whenever
+ * it actually moved a SPEED_FROM0 gate's `a` (apply_mph_benches, drag_cfg.c), because this compares
+ * the BUILT table, not the user's unit setting: with an empty mph bench list the flip changes no
+ * gate and the session legitimately survives. Both pointers must be non-NULL (asserted). Used by
+ * pipeline_reload_cfg() (pipeline.c) to decide whether a config reload may call drag_init() (which
+ * clears the run, the session bests, the run number and the armed state) or must instead just
+ * adopt the new cfg in place. */
+bool drag_cfg_engine_differs(const drag_cfg_t *a, const drag_cfg_t *b);
 /* §6.6 gate name for `g` into `buf` (cap >= 8 required). units: DRAG_UNITS_KMH (0) prints every gate's
  * raw km/h/cm value as today; DRAG_UNITS_MPH (1) prints a DRAG_SPEED_FROM0 gate's `a` converted back to
  * mph (lround(a / DRAG_MPH_PER_KMH)) -- the inverse of drag_cfg_from_user's conversion, exact for every

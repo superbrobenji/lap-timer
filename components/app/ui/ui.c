@@ -478,13 +478,19 @@ static void menu_do_units(void)
  * model, and -- when DRAG is the current riding mode -- refill the rows now so they already show
  * the new unit once the menu exits (same pattern as menu_do_units() above). This does not touch
  * s_drag_cfg: dist_units only renames DIST gates for display (drag_gate_label), it never changes
- * which gates fire or their a/b values, unlike a units (km/h<->mph) toggle. */
+ * which gates fire or their a/b values, unlike a units (km/h<->mph) toggle.
+ * Bench B4-F2 (#96): no longer posts CMD_CONFIG_RELOAD -- the pipeline has no use for dist_units
+ * at all (it never reads the field; investigation-cfg-reload.md §3), so the round trip through the
+ * pipeline queue bought nothing and, before the pipeline-side fix, destroyed the run on every
+ * toggle. menu_do_display() (below) is the established precedent for a display-only menu item that
+ * posts nothing. The remote path (any CONFIG_SET key, cmd.c cfg_change_notify) still reaches
+ * pipeline_reload_cfg() for every key -- that is why the pipeline fix (drag_cfg_engine_differs(),
+ * drag.h/pipeline.c) is the mandatory half; this ui-side skip is the belt that goes with it. */
 static void menu_do_dist(void)
 {
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.dist_units = (s_cfg.dist_units == CFG_DIST_FT) ? (uint8_t)CFG_DIST_M : (uint8_t)CFG_DIST_FT;
     (void)lt_cfg_save(&s_cfg);
-    ui_send_cmd(CMD_CONFIG_RELOAD, 0, 0);   /* the pipeline mirrors cfg; labels are ui-side */
     s_model.dist_units = s_cfg.dist_units;
     s_dirty            = true;
     snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
@@ -1209,10 +1215,18 @@ static void handle_layout_locked(const event_t *e, int64_t now)
  * build_menu() directly: that function's other job, rebuilding s_model.menu_items[]/menu_n/
  * s_menu_action[] via menu_add(), is a side effect well beyond "refresh three label strings" and
  * is not needed here (the menu's item list/order never changes, only the label text).
- * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived, but drag_init()
- * (called by the pipeline's own reload) always drops back to IDLE -- clear the ui's mirror of it
- * here too so a remote CONFIG_SET can't leave a stale "ARMED"/"LAUNCHED"/"DONE" indicator on
- * screen (#95, bench B4-F1: drag_run_state replaces the old one-bit drag_armed, same reasoning).
+ * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived. Bench B4-F2 (#96):
+ * since pipeline_reload_cfg() no longer always calls drag_init() (it only re-inits when
+ * drag_cfg_engine_differs() says the gate table/rollout actually moved -- see drag.h/pipeline.c),
+ * the DRAG_ST_IDLE written below is a default, not a fact: the engine may still be ARMED/LAUNCHED/
+ * DONE on a display-only reload. It is immediately superseded by drag_rows_refill()'s own
+ * re-derive (s_model.drag_run_state = d.state, from the just-reloaded pipeline snapshot) a few
+ * lines down whenever DRAG rows are the ones showing -- the only case this field is ever rendered
+ * (screens_moto.c's render_drag_page0 is reached only in DRAG mode). When riding mode stays LAP
+ * the default is never visible either, so it is harmless either way; it exists only so a remote
+ * CONFIG_SET can never leave a stale "ARMED"/"LAUNCHED"/"DONE" indicator mirrored here with
+ * nothing below to correct it (#95, bench B4-F1: drag_run_state replaces the old one-bit
+ * drag_armed, same reasoning).
  * I2 (final review, ruling B-6): a remote mode flip must mirror menu_do_mode's own reset
  * (ui_apply_mode above) -- page 0 reset to §22.6 and the live lap clock stopped when leaving LAP
  * -- not just a relabelled menu while the riding screen keeps showing stale LAP state under a

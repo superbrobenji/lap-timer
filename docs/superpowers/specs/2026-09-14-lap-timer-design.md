@@ -1943,6 +1943,8 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 NVS writes are batched: config and calibration only on change; error ring entries immediately (they are rare); counters at most once per 60 s except crash paths.
 
+Bench B4-F2 (#96): every persisted `CONFIG_SET` posts `CMD_CONFIG_RELOAD` to the pipeline, for every key, including purely cosmetic ones such as `dist_units`. The reload does **not** unconditionally re-init the drag engine: `pipeline_reload_cfg()` calls `drag_init()` (which drops the current run, the per-gate session bests, the armed state and resets `run_no` to 0 — the last one would otherwise renumber the next run 1 again mid-session and corrupt the DRAG_GATE records in the `.log`/`.sum`) only when `drag_cfg_engine_differs()` finds the built gate table or `rollout` actually changed; a display-only key (`dist_units`, or a `units` flip whose mph bench list is empty) adopts the new config in place and the run/bests/run-number survive.
+
 ### 15.3 RTC memory (`RTC_DATA_ATTR rtc_state_t`)
 
 ```c

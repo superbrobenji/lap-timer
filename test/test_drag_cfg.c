@@ -127,4 +127,50 @@ static void test_gate_label_dist_units(void)
     TEST_ASSERT_TRUE(drag_gate_label(&quarter, DRAG_UNITS_KMH, CFG_DIST_FT, b, sizeof b) > 0);TEST_ASSERT_EQUAL_STRING("1/4", b);
     TEST_ASSERT_TRUE(drag_gate_label(&ft60, DRAG_UNITS_KMH, 2, b, sizeof b) < 0);   /* invalid dist_units rejected */
 }
-int main(void) { UNITY_BEGIN(); RUN_TEST(test_defaults_when_no_benches); RUN_TEST(test_mph_benches_define_speed_gates); RUN_TEST(test_mph_empty_list_keeps_defaults); RUN_TEST(test_mph_round_trip_is_exact); RUN_TEST(test_shipped_defaults_keep_table); RUN_TEST(test_labels_for_every_default_gate); RUN_TEST(test_custom_distance_and_bad_cap); RUN_TEST(test_gate_label_dist_units); return UNITY_END(); }
+/* Bench regression 2026-10-07 (#96): dist_units is DIST-gate NAMING only -- it must not reach the
+ * engine's drag_cfg_t at all, so a Dist: m|ft toggle can never be mistaken for a table change
+ * (which is what made pipeline_reload_cfg() drop a completed run and the session bests). */
+static void test_dist_units_does_not_touch_engine_cfg(void)
+{
+    cfg_t m; cfg_defaults(&m); m.dist_units = CFG_DIST_M;
+    cfg_t f; cfg_defaults(&f); f.dist_units = CFG_DIST_FT;
+    drag_cfg_t dm, df;
+    drag_cfg_from_user(&m, &dm);
+    drag_cfg_from_user(&f, &df);
+    TEST_ASSERT_EQUAL_MEMORY(&dm, &df, sizeof dm);          /* byte-identical: no dist_units member */
+    TEST_ASSERT_FALSE(drag_cfg_engine_differs(&dm, &df));
+}
+
+/* The comparison must key off the BUILT table, not the user's unit byte: with the shipped mph
+ * bench list a km/h<->mph flip really does move gates 1..3 (apply_mph_benches), but with an empty
+ * mph list it moves nothing and the session must survive. Rollout defines t0, so it counts. */
+static void test_engine_differs_only_on_table_or_rollout(void)
+{
+    cfg_t k; cfg_defaults(&k);                              /* km/h, n_mph = 3 (60/120/180) */
+    drag_cfg_t dk; drag_cfg_from_user(&k, &dk);
+
+    cfg_t mph = k; mph.units = CFG_UNITS_MPH;               /* non-empty mph list -> table moves */
+    drag_cfg_t dmph; drag_cfg_from_user(&mph, &dmph);
+    TEST_ASSERT_EQUAL_UINT16(97, dmph.gates[0].a);          /* 60 mph, proof the table moved */
+    TEST_ASSERT_TRUE(drag_cfg_engine_differs(&dk, &dmph));
+
+    cfg_t mph0 = k; mph0.units = CFG_UNITS_MPH; mph0.drag.n_mph = 0;   /* empty list -> no move */
+    drag_cfg_t dmph0; drag_cfg_from_user(&mph0, &dmph0);
+    TEST_ASSERT_EQUAL_UINT8(CFG_UNITS_MPH, dmph0.units);    /* display byte DID change ... */
+    TEST_ASSERT_FALSE(drag_cfg_engine_differs(&dk, &dmph0)); /* ... but the engine's view did not */
+
+    cfg_t bench = k; bench.drag.n_kmh = 2;                  /* km/h bench list: benches only */
+    bench.drag.benches_kmh[0] = 80; bench.drag.benches_kmh[1] = 160;
+    drag_cfg_t dbench; drag_cfg_from_user(&bench, &dbench);
+    TEST_ASSERT_EQUAL_UINT8(2, dbench.n_benches);
+    TEST_ASSERT_FALSE(drag_cfg_engine_differs(&dk, &dbench));
+
+    cfg_t ro = k; ro.drag.rollout = !k.drag.rollout;        /* rollout redefines t0 */
+    drag_cfg_t dro; drag_cfg_from_user(&ro, &dro);
+    TEST_ASSERT_TRUE(drag_cfg_engine_differs(&dk, &dro));
+
+    drag_cfg_t fewer = dk; fewer.n_gates = (uint8_t)(dk.n_gates - 1u);   /* table size */
+    TEST_ASSERT_TRUE(drag_cfg_engine_differs(&dk, &fewer));
+}
+
+int main(void) { UNITY_BEGIN(); RUN_TEST(test_defaults_when_no_benches); RUN_TEST(test_mph_benches_define_speed_gates); RUN_TEST(test_mph_empty_list_keeps_defaults); RUN_TEST(test_mph_round_trip_is_exact); RUN_TEST(test_shipped_defaults_keep_table); RUN_TEST(test_labels_for_every_default_gate); RUN_TEST(test_custom_distance_and_bad_cap); RUN_TEST(test_gate_label_dist_units); RUN_TEST(test_dist_units_does_not_touch_engine_cfg); RUN_TEST(test_engine_differs_only_on_table_or_rollout); return UNITY_END(); }

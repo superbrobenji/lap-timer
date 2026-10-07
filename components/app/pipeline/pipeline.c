@@ -707,8 +707,18 @@ static void on_raw(const imu_raw_t *raw)
 static void cancel_active_create(void);
 
 /* #87: re-read the persisted cfg and rebuild what depends on it -- the drag engine's gate table
- * (a units change redefines the mph gates: drag_init() is a fresh engine, session bests are
- * dropped, documented in spec dsB §2) and the riding mode. The lap engine is untouched. */
+ * and the riding mode. The lap engine is untouched.
+ * Bench B4-F2 (#96): drag_init() is destructive (clears the run, the per-gate session bests, the
+ * armed state AND run_no -- core/drag.h's documented "clears results" contract) and
+ * cfg_change_notify() (cmd.c) posts this reload for EVERY persisted key, display-only ones
+ * included (dist_units, display.live_clock, ble.name, ...), so re-initing unconditionally wiped a
+ * completed run on a cosmetic toggle and silently renumbered the next run 1 again mid-session
+ * (corrupting the DRAG_GATE records in the .log/.sum, logger.c ses_encode_drag_gate). drag_init()
+ * is now run ONLY when drag_cfg_engine_differs() says the built gate table or rollout actually
+ * moved -- the one case where cur.gates[]/best.gates[] (laid out in cfg.gates order) stop meaning
+ * what they say. Otherwise the new cfg is adopted in place: gates[]/n_gates/rollout are identical,
+ * so quarter_idx and both result layouts stay valid, and units/benches (display/bench-list
+ * selection only) come along for free. */
 static void pipeline_reload_cfg(void)
 {
     cfg_t      cfg;
@@ -716,7 +726,8 @@ static void pipeline_reload_cfg(void)
     cfg_defaults(&cfg);
     (void)lt_cfg_load(&cfg);
     drag_cfg_from_user(&cfg, &dc);
-    drag_init(&s_drag, &dc);
+    if (drag_cfg_engine_differs(&dc, &s_drag.cfg)) drag_init(&s_drag, &dc);
+    else                                           s_drag.cfg = dc;
     uint8_t new_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     /* fix round 1 (Important finding 1): CMD_SET_MODE resets stats on a mode flip (handle_cmd
      * above) -- a reload that silently changes s_mode must do the same, else a mode change

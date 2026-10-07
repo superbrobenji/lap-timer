@@ -548,6 +548,49 @@ static void test_gps_reanchor_does_not_hide_speed_gate(void)
     TEST_ASSERT_INT_WITHIN(3, 2778, (int)g100->speed_cms);   /* recorded at the 100 km/h threshold */
 }
 
+/* Bench regression 2026-10-07: a results-PRESERVING config swap -- what pipeline_reload_cfg() now
+ * does when drag_cfg_engine_differs() says the table did not move (a display-only change: Dist:
+ * m|ft, Units: with an empty mph list, a bench-list edit, any unrelated remote CONFIG_SET key) --
+ * must keep the frozen run, the session bests and the run counter. Adopting cfg in place is only
+ * sound because gates[]/n_gates are identical, which is exactly what the helper proves. The
+ * drag_init() half of the branch is asserted too, so the destructive contract stays documented. */
+static void test_display_only_cfg_swap_keeps_results(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);                  /* 0-100 ~5665 ms, 1/4 ~12810 ms */
+
+    const drag_result_t *before = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(before);
+    uint32_t q_ms  = gate_by_id(before, 10)->time_ms;
+    uint16_t run_no = D.run_no;
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 2));
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 10));
+
+    /* display-only change: same gate table + rollout, different display bytes */
+    drag_cfg_t disp = D.cfg;
+    disp.units = (uint8_t)(D.cfg.units == DRAG_UNITS_KMH ? DRAG_UNITS_MPH : DRAG_UNITS_KMH);
+    disp.benches_kmh[0] = 80;
+    TEST_ASSERT_FALSE(drag_cfg_engine_differs(&disp, &D.cfg));
+    D.cfg = disp;                                   /* the fixed reload's non-destructive branch */
+
+    const drag_result_t *after = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(after);                    /* the run is still on the card */
+    TEST_ASSERT_EQUAL_UINT16(run_no, D.run_no);     /* and the session log keeps numbering runs */
+    TEST_ASSERT_EQUAL_UINT32(q_ms, gate_by_id(after, 10)->time_ms);
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 2));         /* session bests survive */
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 10));
+
+    /* the other branch: a real table change DOES clear results (core/drag.h's documented contract) */
+    drag_cfg_t moved = D.cfg;
+    moved.gates[0].a = (uint16_t)(moved.gates[0].a + 1u);
+    TEST_ASSERT_TRUE(drag_cfg_engine_differs(&moved, &D.cfg));
+    drag_init(&D, &moved);
+    TEST_ASSERT_NULL(drag_current(&D));
+    TEST_ASSERT_NULL(drag_best(&D, 10));
+    TEST_ASSERT_EQUAL_UINT16(0, D.run_no);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -568,5 +611,6 @@ int main(void)
     RUN_TEST(test_bench_visibility_180_vs_320);
     RUN_TEST(test_bench_drop_lowest_when_over_four);
     RUN_TEST(test_best_per_gate_two_runs);
+    RUN_TEST(test_display_only_cfg_swap_keeps_results);
     return UNITY_END();
 }
