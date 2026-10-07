@@ -90,16 +90,20 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   the dev-kit unplugged, confirm the LINK glyph is absent from the fault-icon strip. Plug the
   dev-kit in: the glyph must appear within about 1 s of the connection (the detect-pin debounce,
   `LINK_DETECT_STABLE`, is sized for this). Unplug it: the glyph must disappear within about 3 s.
-- [ ] **15. DRAG gate-list pairing + distance-row unit (bench B4-F4/B4-F5, #96).** Procedure: run a
-  drag session that hits the 100-0 braking gate (`dbg sim drag`, which arms/launches/brakes on its
-  own) and open DRAG page 1 (LAST RUN) or page 2 (SESSION BEST). Expect: every row reads as one
-  line — each FONT_SMALL label's text sits immediately above its own FONT_MED value's baseline,
-  not the next column's label's; a thin horizontal line separates the `LAST RUN`/`SESSION BEST`
-  header from the rows, and a thin vertical line separates the two columns for the full height of
-  the rows (not across the header). The 100-0 row's value reads `<n> m` with `Distance: m` set and
-  `<n> ft` with `Distance: ft` set (toggle item 13's distance setting and confirm this value — not
-  just the DIST-gate labels in item 1 — follows it; before this fix the value stayed in metres
-  regardless of the setting).
+- [ ] **15. DRAG gate-list pairing + distance-row unit, list AND card/footer (bench
+  B4-F4/B4-F5/B4-R5, #96).** Procedure: run a drag session that hits the 100-0 braking gate
+  (`dbg sim drag`, which arms/launches/brakes on its own). On DRAG page 1 (LAST RUN) or page 2
+  (SESSION BEST): every row reads as one line — each FONT_SMALL label's text sits immediately
+  above its own FONT_MED value's baseline, not the next column's label's; a thin horizontal line
+  separates the `LAST RUN`/`SESSION BEST` header from the rows, and a thin vertical line separates
+  the two columns for the full height of the rows (not across the header). The 100-0 row's value
+  reads `<n> m` with `Distance: m` set and `<n> ft` with `Distance: ft` set (toggle item 13's
+  distance setting and confirm this value — not just the DIST-gate labels in item 1 — follows it;
+  before B4-F5 the value stayed in metres regardless of the setting). Then, on DRAG page 0 (the
+  run card, while the 100-0 gate is the newest hit or sits in the footer): confirm BOTH the big
+  64 px slot's distance value and the footer's "100-0 <n><unit>" entry also follow `Distance:`
+  the same way (ruling B4-R5, Task 4 review round 1) — before this fix page 0 hardcoded `m`
+  regardless of the setting, even though the list had already been fixed.
 
 ## Closed on 2026-10-05 (bench day 3)
 items 1, 2, 3, 4, 7, 8, 9, 10, 11 (11 = the #65 re-test on 2026-10-05: 4/4 list relays clean, fresh loads without Reload). Open: 5 (menu stubs — Plan 6.2, Plan 8.4/#93; New track (#97) and Layout override (#98) are code-complete, pending this bench day), 6 (Plan 8 + hardware), and 12/13/14 (#95/#96/#99, added in the final review fix wave, I-6 — card text, `dist_units` menu+remote, and LINK glyph timing never had their own bench item before).

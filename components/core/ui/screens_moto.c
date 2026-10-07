@@ -344,6 +344,16 @@ static const char *unit_suffix(uint8_t units)
     return units ? "mph" : "km/h";
 }
 
+/* Task 4 review round 1 (ruling B4-R5): the FONT_SMALL unit string for every dist_display() value
+ * on screen -- shared by the gate list's distance rows (render_drag_gate_list), the DRAG card's
+ * big-slot distance value and its footer's distance entries (render_dcard_value/
+ * render_dcard_footer) -- same reasoning as unit_suffix() above, factored out once a third call
+ * site needed the identical ternary. */
+static const char *dist_unit_suffix(uint8_t dist_units)
+{
+    return dist_units == CFG_DIST_FT ? "ft" : "m";
+}
+
 /* Renders the 64 px big slot (FONT_HUGE): BIG_SECTOR_DELTA/BIG_LAP_DELTA show the signed delta,
  * clamped to CARD_DELTA_CLAMP_MS; BIG_NONE (no best lap yet) falls back to "LAP n" in FONT_MED,
  * since FONT_HUGE has no letters. Returns the pen x after the drawn text (CARD_BIG_X itself for
@@ -606,23 +616,28 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 /* The newest gate's big value (spec 7b §7): a normal gate's elapsed time in FONT_HUGE
  * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
  * stopping DISTANCE in metres, not an elapsed time) -- the distance as a plain integer in
- * FONT_HUGE followed by a FONT_SMALL "m" (FONT_HUGE has no lowercase, so the unit itself must use
- * a different font). A gate with has_trap set also draws its trap speed as "@<trap>" on the row
- * below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading character
- * draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows "@173" this
- * way. Plan 7c T4 fix 1 (ruling R-4): trap_cms is raw cm/s -- converted to the display unit HERE,
- * at render time, same as every other speed on screen (freezing it at event time would mislabel a
- * run after a later units toggle); a FONT_SMALL unit suffix follows the digits. */
-static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
+ * FONT_HUGE followed by a FONT_SMALL unit suffix (FONT_HUGE has no lowercase, so the unit itself
+ * must use a different font). A gate with has_trap set also draws its trap speed as "@<trap>" on
+ * the row below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading
+ * character draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows
+ * "@173" this way. Plan 7c T4 fix 1 (ruling R-4): trap_cms is raw cm/s -- converted to the display
+ * unit HERE, at render time, same as every other speed on screen (freezing it at event time would
+ * mislabel a run after a later units toggle); a FONT_SMALL unit suffix follows the digits.
+ * Task 4 review round 1 (ruling B4-R5): dist_units threads through the same way -- the distance
+ * branch used to hardcode "m" regardless of the Distance: menu setting, the same defect B4-F5
+ * fixed in the gate list; dist_display() (core/ui/units.c) is the one named conversion, shared with
+ * the list and the footer below. */
+static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units, uint8_t dist_units)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(r != NULL, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
     if (r->is_distance) {
-        char *p = put_uint(buf, r->dist_m);
+        char *p = put_uint(buf, dist_display(r->dist_m, dist_units));
         *p = '\0';
         int end = fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
-        fb_text(fb, &FONT_SMALL, end + DCARD_UNIT_GAP, DCARD_BIG_Y + DCARD_UNIT_DY, "m");
+        fb_text(fb, &FONT_SMALL, end + DCARD_UNIT_GAP, DCARD_BIG_Y + DCARD_UNIT_DY,
+                dist_unit_suffix(dist_units));
         return; /* a distance gate never draws a trap row, even if has_trap happened to be set */
     }
     fmt_secs_ms(buf, r->t_ms);
@@ -642,10 +657,13 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
 
 /* The run-card footer (spec 7b §7): gates 0..n-2 (every gate of this run except the newest, which
  * already fills the big slot), oldest first, up to DCARD_FOOTER_MAX entries -- older ones scroll
- * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist_m>m" for the
- * distance gate), joined by DCARD_FOOTER_SEP. PF-2: the row stops before it would draw under the
- * fault strip -- its right limit is fault_strip_left_x(m->flags) - DCARD_FAULT_GAP, which is always
- * <= CANVAS_VISIBLE_W, so this also never draws past the visible edge. */
+ * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist> <unit>" for the
+ * distance gate, dist_display()/dist_unit_suffix() -- Task 4 review round 1, ruling B4-R5: this
+ * used to hardcode a trailing 'm' regardless of m->dist_units, the identical B4-F5 defect the gate
+ * list had, even though this function already receives the full screen_model_t and m->dist_units
+ * was sitting right there unused), joined by DCARD_FOOTER_SEP. PF-2: the row stops before it would
+ * draw under the fault strip -- its right limit is fault_strip_left_x(m->flags) - DCARD_FAULT_GAP,
+ * which is always <= CANVAS_VISIBLE_W, so this also never draws past the visible edge. */
 static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /* gates 0..n-2 */
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -659,8 +677,8 @@ static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /*
         char *p = put_str(buf, r->label);
         p = put_char(p, ' ');
         if (r->is_distance) {
-            p = put_uint(p, r->dist_m);
-            p = put_char(p, 'm');
+            p = put_uint(p, dist_display(r->dist_m, m->dist_units));
+            p = put_str(p, dist_unit_suffix(m->dist_units));
         } else {
             char t[TIME_BUF_LEN];
             fmt_secs_ms(t, r->t_ms);
@@ -702,7 +720,7 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
         fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, ready);
     } else {
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);
-        render_dcard_value(fb, &m->drag[n - 1u], m->units);
+        render_dcard_value(fb, &m->drag[n - 1u], m->units, m->dist_units);
         render_dcard_footer(fb, m, n);
     }
 
@@ -772,7 +790,7 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr - DLIST_UNIT_W, y, buf);
             fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + DLIST_UNIT_GAP, y + DLIST_LABEL_DY,
-                    m->dist_units == CFG_DIST_FT ? "ft" : "m");
+                    dist_unit_suffix(m->dist_units));
         } else {
             fmt_secs_ms(buf, r->t_ms);
             fb_text_right(fb, &FONT_MED, xr, y, buf);

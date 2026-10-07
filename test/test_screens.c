@@ -459,13 +459,32 @@ static void test_drag_p0_distance(void)
 {
     /* Newest gate is the 100-0 braking distance (#40): big slot shows "38" (FONT_HUGE) + a small
      * "m" (FONT_SMALL, since FONT_HUGE has no lowercase); footer shows the one earlier gate,
-     * "100-200 6.12". */
+     * "100-200 6.12". m.dist_units defaults to 0 (CFG_DIST_M) via memset -- dist_display() is a
+     * pass-through in this unit, so this golden is unchanged by Task 4 review round 1 (ruling
+     * B4-R5): confirmed byte-identical, not re-promoted. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     drag_gate(&m, "100-200", 6120, 0, false, 0); drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance.pbm"), &s_fb));     /* big "38" + small "m"; footer "100-200 6.12" */
+}
+
+static void test_drag_p0_distance_ft(void)
+{
+    /* Task 4 review round 1 (ruling B4-R5): the big slot AND the footer must both honour
+     * Distance: ft, not just the gate list (B4-F5 fixed that; this is the identical defect class
+     * in render_dcard_value/render_dcard_footer, screens_moto.c). Two distance gates -- an earlier
+     * one (goes to the footer) and the newest (fills the big slot) -- so both functions' distance
+     * branches are exercised in CFG_DIST_FT in one golden: 38 m -> 125 ft (footer, "100-0"), 64 m
+     * -> 210 ft (big slot, "150-0"), dist_display()'s exact 1250/381 conversion (core/ui/units.c,
+     * cross-checked by test_units.c's test_dist_ft). Before this fix both would have read "...m". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.dist_units = CFG_DIST_FT;
+    drag_gate(&m, "100-0", 0, 0, true, 38); drag_gate(&m, "150-0", 0, 0, true, 64);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance_ft.pbm"), &s_fb));  /* big "210"+"ft"; footer "100-0 125ft" */
 }
 
 static void test_drag_p0_fault(void)
@@ -941,6 +960,7 @@ int main(void)
     RUN_TEST(test_drag_p0_gate_speed);
     RUN_TEST(test_drag_p0_trap_mph);
     RUN_TEST(test_drag_p0_distance);
+    RUN_TEST(test_drag_p0_distance_ft);
     RUN_TEST(test_drag_p0_fault);
     RUN_TEST(test_drag_p0_footer_scroll);
     RUN_TEST(test_drag_p0_armed_gates);
