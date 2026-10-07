@@ -104,7 +104,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y cppcheck clang-tidy
       - name: power_of_10.py linter (BLOCKING; rules 3/4/4-compound/5/8/9)
         run: python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation
-      - name: venue-announce check (BLOCKING; #98 -- every direct venue set announces to the ui)
+      - name: "venue-announce check (BLOCKING; #98 -- every direct venue set announces to the ui)"
         run: python3 tools/lint/venue_announce.py --fail-on-violation
       - name: cppcheck (warning+style+portability; design §5 second analyser, rule 10)
         continue-on-error: true

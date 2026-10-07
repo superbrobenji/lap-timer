@@ -11,10 +11,22 @@ the ui's s_venue_id stayed 0, trk_get(0) is always NULL (trk_validate_venue() re
 `Layout:` was a dead item that still cleared s_best on every press.
 
 Rule: in app/ and main/, every lap_set_venue() / lap_import_rtc() call must be accompanied, inside
-the SAME function body, by a venue announcement to the ui (ui_post_venue(...) or an event_t whose
-type is EV_VENUE_FOUND). Deliberately conservative: one announcement per function satisfies it, so
-a loop over several venues is not double-counted, and an announcement in a HELPER called from the
-same function is not detected -- announce at the set site, next to it, the way lap.c does.
+the SAME function body, by an actual CALL to ui_post_venue(...) -- not merely a mention of
+EV_VENUE_FOUND. Deliberately conservative: one call per function satisfies it, so a loop over
+several venues is not double-counted, and a call in a HELPER invoked from the same function is not
+detected -- announce at the set site, next to it, the way lap.c does.
+
+Fix round 1 (review Minor 2/3, #98): the first cut's ANNOUNCE_RE also matched the bare token
+EV_VENUE_FOUND anywhere in the function body, so a dispatcher that merely NAMES the code (e.g.
+`case EV_VENUE_FOUND:` in engine_cb(), pipeline.c) satisfied the rule with no post at all --
+exactly the bypass this linter exists to prevent. It also carried a trailing `\b` across the whole
+alternation, which false-positived on an ordinary wrapped call (`ui_post_venue(\n    id, 0)` or
+`ui_post_venue( id, 0 )`): the character after `(` is whitespace, not a word character, so no
+boundary exists there and the match silently failed. ANNOUNCE_RE now requires only the call token
+`ui_post_venue(` (optional whitespace before the paren, no trailing boundary assertion) -- a real
+call, wrapped or not, always matches; a bare mention of the event code never does. Comments and
+string literals are already blanked by strip_comments_and_literals() before either regex runs, so
+neither regex ever sees inside one.
 """
 import argparse
 import os
@@ -28,9 +40,14 @@ from power_of_10 import (  # reuse the one C scanner in the tree
     strip_comments_and_literals,
 )
 
-DEFAULT_PATHS = ["components/app", "main"]
+# Fix round 1 (review Minor 8, #98): widened to match power_of_10.py's own DEFAULT_PATHS exactly
+# (components/core, components/app, components/drivers, main) -- components/core/lapengine/ is
+# still exempt below (that is where the contract is correctly implemented), but a future blind
+# venue-set path elsewhere in core/ or in drivers/ is now in scope too, at no cost (verified: 0
+# violations with the widened scan on this tree).
+DEFAULT_PATHS = ["components/core", "components/app", "components/drivers", "main"]
 ACQUIRE_RE = re.compile(r"\b(lap_set_venue|lap_import_rtc)\s*\(")
-ANNOUNCE_RE = re.compile(r"\b(ui_post_venue\s*\(|EV_VENUE_FOUND)\b")
+ANNOUNCE_RE = re.compile(r"\bui_post_venue\s*\(")
 SCANNED = (".c",)
 
 # core/lapengine (lap.c) is the engine's own source: scan_for_venue()/finalize_create() announce
@@ -63,8 +80,8 @@ def check_file(path, relpath):
         name, open_idx, close_idx = body
         if ANNOUNCE_RE.search(stripped, open_idx, close_idx):
             continue
-        findings.append("%s:%d: %s() in %s() acquires a venue with no EV_VENUE_FOUND announcement "
-                        "to the ui -- see tools/lint/venue_announce.py" %
+        findings.append("%s:%d: %s() in %s() acquires a venue with no ui_post_venue() call "
+                        "to announce it to the ui -- see tools/lint/venue_announce.py" %
                         (relpath, lidx.line_of(m.start()), m.group(1), name))
     return findings
 

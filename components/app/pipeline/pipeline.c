@@ -795,16 +795,27 @@ static void ui_post_create(uint8_t phase, uint16_t arg)
  * reset_best_and_stats() + ui_post_lap_reset() + a spurious LOGGER_SAVE_TRACKS for a creation
  * that produced nothing, AND make create_cancel_if_orphaned()'s real EV_CREATE_CANCELLED a no-op
  * (s_create_active already false by then) -- the NEW TRACK one-shot would read as "track saved"
- * when it was in fact discarded. ui-only like EV_LAP_RESET/EV_CREATE above: the logger and the
- * §18 peer stream already learn the venue through their own channel at the sim site
- * (LOGGER_OPEN_SESSION/logger_set_venue, pipeline_init()); the resume site needs nothing extra
- * there -- the logger's venue was already set for this session when it was first armed. */
+ * when it was in fact discarded. ui-only like EV_LAP_RESET/EV_CREATE above: the logger learns the
+ * venue through its own channel at the sim site (LOGGER_OPEN_SESSION/logger_set_venue,
+ * pipeline_init()); on real GPS it currently does not learn it at all (neither at this resume
+ * site nor anywhere else on moto_neo6m) -- a separate, adjacent gap, out of scope here.
+ *
+ * Fix round 1 (review Important 1, #98): the pipeline-layer trap above is closed structurally
+ * (this function never reaches engine_cb()), but the SAME event still reaches handle_venue_found()
+ * (ui.c), whose show_venue_oneshot() call has one door that lets a real creation-finish
+ * EV_VENUE_FOUND replace the persistent NEW TRACK one-shot. An announce-only post (this function)
+ * must not take that door -- if it did, a resume announcement arriving while NEW TRACK is up would
+ * show a misleading "venue found" card AND make create_cancel_if_orphaned()'s real
+ * EV_CREATE_CANCELLED a no-op (ui.c's on_nt would already read false by the time it is handled).
+ * flags = EV_VENUE_ANNOUNCE_ONLY (core/event.h) marks every post from here so
+ * handle_venue_found() can tell the two kinds of EV_VENUE_FOUND apart; the engine's own emission
+ * always leaves flags 0, so today's creation-finish behaviour is exactly unchanged. */
 static void ui_post_venue(uint16_t venue_id, int64_t gps_us)
 {
     LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(venue_id != 0, PIPE_ASSERT_CODE);   /* trk_get(0) is always NULL (trk.c) */
     LT_ASSERT_VOID(gps_us >= 0, PIPE_ASSERT_CODE);
-    event_t ev = { .type = EV_VENUE_FOUND, .arg16 = venue_id,
+    event_t ev = { .type = EV_VENUE_FOUND, .flags = EV_VENUE_ANNOUNCE_ONLY, .arg16 = venue_id,
                    .gps_us = gps_us, .mono_us = esp_timer_get_time() };
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "venue: ui queue full");
 }

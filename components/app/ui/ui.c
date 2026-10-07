@@ -796,7 +796,7 @@ static void check_held(int64_t now)
 
 /* ---- event -> model (§20.3 / §20.4) ---- */
 
-static void show_venue_oneshot(int64_t now)
+static void show_venue_oneshot(int64_t now, bool announce_only)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* gated on it below */
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);   /* stamp for the one-shot revert timer */
@@ -804,8 +804,21 @@ static void show_venue_oneshot(int64_t now)
      * finishing creation (the engine's own EV_VENUE_FOUND on the closing S/F crossing) -- every
      * other one-shot/menu still blocks this (s_model.oneshot is stale/meaningless outside
      * SCR_ONESHOT, so it is only read when screen == SCR_ONESHOT, same guard style as the
-     * ONESHOT_OTA checks elsewhere in this file). */
+     * ONESHOT_OTA checks elsewhere in this file).
+     *
+     * #98 fix round 1 (review Important 1): `announce_only` is true only for the pipeline's own
+     * ui-only venue post (flags == EV_VENUE_ANNOUNCE_ONLY, core/event.h) -- a venue it set itself
+     * at boot or on a §15.3 resume, NOT a finished on-device creation. Such a post must never take
+     * the on_newtrack door: at the resume site s_create_active can be true (New track needs no
+     * fix, no venue, so a user can select it before the first valid fix), and replacing the
+     * persistent NEW TRACK one-shot here would both show a misleading "venue found" card and make
+     * the real EV_CREATE_CANCELLED a no-op (its own on_nt, ui.c, would already read false by the
+     * time it is handled). The persistent OTA one-shot is equally protected in principle -- it is
+     * already structurally unreachable here (screen != SCR_RIDING and oneshot != ONESHOT_NEWTRACK
+     * both fail while OTA is up), but announce_only forecloses it explicitly rather than relying
+     * on that happening to stay true. */
     bool on_newtrack = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK;
+    if (announce_only) on_newtrack = false;
     if (s_model.screen != SCR_RIDING && !on_newtrack) {
         return; /* don't interrupt the menu or another one-shot */
     }
@@ -1196,7 +1209,12 @@ static void handle_sector(const event_t *e)
  * termination), so an uploaded/JSON venue with an empty name string is structurally valid --
  * falls back to the old "VENUE" placeholder rather than rendering a blank one-shot. Created
  * venues always get a real "Track_YYYYMMDD..." name (lap.c's finalize_create()), so this only
- * ever bites an uploaded/JSON venue. */
+ * ever bites an uploaded/JSON venue.
+ *
+ * #98 fix round 1 (Important 1): the model updates above run UNCONDITIONALLY regardless of which
+ * of the two EV_VENUE_FOUND kinds this is (core/event.h) -- the Layout item and the venue name
+ * must work either way. Only whether this is allowed to interrupt a PERSISTENT one-shot (NEW
+ * TRACK) depends on provenance -- see show_venue_oneshot()'s announce_only parameter. */
 static void handle_venue_found(const event_t *e, int64_t now)
 {
     s_venue_id      = e->arg16;
@@ -1205,7 +1223,7 @@ static void handle_venue_found(const event_t *e, int64_t now)
     snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s",
              (v != NULL && v->name[0] != '\0') ? v->name : "VENUE");
     s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
-    show_venue_oneshot(now);
+    show_venue_oneshot(now, e->flags == EV_VENUE_ANNOUNCE_ONLY);
     s_dirty = true;
 }
 
@@ -1228,7 +1246,9 @@ static void handle_layout_locked(const event_t *e, int64_t now)
     } else {
         snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
     }
-    show_venue_oneshot(now); /* layout phase: render shows layout_name (non-empty) */
+    /* #98 fix round 1: EV_LAYOUT_LOCKED is always the engine's own lock -- never an announce-only
+     * post (only EV_VENUE_FOUND ever carries that flag) -- so announce_only is always false here. */
+    show_venue_oneshot(now, false); /* layout phase: render shows layout_name (non-empty) */
     s_dirty = true;
 }
 

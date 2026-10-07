@@ -22,7 +22,20 @@ typedef struct {
 /* Stable EV_* codes (§4.5). Explicit values: they are logged and must never change. */
 enum {
     EV_NONE          = 0,
-    EV_VENUE_FOUND   = 1,   /* arg16 = venue id                                   (lapengine) */
+    EV_VENUE_FOUND   = 1,   /* arg16 = venue id. Two distinct producers (#98, fix round 1):
+                              * (1) the engine's OWN acquisition (scan_for_venue()/
+                              * finalize_create(), lapengine) -- emitted through emit_event(), so
+                              * it is logged to the .sum EVENT record AND streamed to a §18 peer,
+                              * as every code below 16 is. (2) the pipeline's ui-only "I set this
+                              * venue myself, without the engine ever announcing it" post
+                              * (ui_post_venue(), pipeline.c -- the CFG_GPS_SIM boot venue, the
+                              * §15.3 RTC resume): posted straight to g_ui_evt_q, carrying
+                              * flags = EV_VENUE_ANNOUNCE_ONLY (below), NEVER through emit_event()
+                              * -- so a log/stream consumer must not assume parity with what the ui
+                              * saw: kind (2) exists in the ui's model only. handle_venue_found()
+                              * (ui.c) reads the flag to tell the two apart: a kind-(2) post must
+                              * not be mistaken for a finished on-device creation the way a real
+                              * kind-(1) EV_VENUE_FOUND from finalize_create() is allowed to be. */
     EV_LAYOUT_LOCKED = 2,   /* arg16 = layout id                                  (lapengine, 2.5) */
     EV_ARMED         = 3,   /* —                                                  (lapengine/dragengine) */
     EV_SECTOR        = 4,   /* arg16 = sector idx, arg32 = split ms, arg32b delta (lapengine, 2.5).
@@ -42,7 +55,12 @@ enum {
 
     /* #87: ui-only codes. Never passed to emit_event() -- posted straight to g_ui_evt_q with a
      * direct xQueueSend() -- so, unlike every code above, they are never logged to an EVENT
-     * record and never streamed to a peer (only emit_event() reaches those sinks). */
+     * record and never streamed to a peer (only emit_event() reaches those sinks).
+     *
+     * Exception (#98, fix round 1, Minor 6): EV_VENUE_FOUND (code 1, above) is the one code below
+     * 16 that can ALSO travel this ui-only route -- see its own comment for the two producers and
+     * the EV_VENUE_ANNOUNCE_ONLY flag that distinguishes them. A log/stream consumer sees only the
+     * engine's own emissions of it; the ui additionally sees the pipeline's direct-set announces. */
     EV_CFG_CHANGED   = 16,  /* ui-only: posted straight to g_ui_evt_q by cmd.c, never via emit_event(), never logged/streamed */
     EV_LAP_RESET     = 17,  /* ui-only: posted straight to g_ui_evt_q by the pipeline on CMD_RESET_ENGINE */
     EV_OTA           = 18,  /* ui-only: posted straight to g_ui_evt_q by ota.c / the supervisor.
@@ -52,6 +70,18 @@ enum {
                              * flags = EV_CREATE_* phase below; arg16 = gate index (GATE_SET) or
                              * reason (FAILED, always 0 today) */
 };
+/* EV_VENUE_FOUND's flags (#98, fix round 1, Important 1): set ONLY by the pipeline's own ui-only
+ * announce posts (ui_post_venue(), pipeline.c) -- the engine's real emission (scan_for_venue()/
+ * finalize_create(), lapengine) always leaves flags 0. Tells handle_venue_found() (ui.c) that
+ * this EV_VENUE_FOUND is NOT a finished on-device creation, so it must not take the one door
+ * show_venue_oneshot() opens for a real creation finish: replacing a PERSISTENT one-shot (NEW
+ * TRACK; equally OTA, though that one is already unreachable here by construction). Without this
+ * a resume announcement arriving while the user has a NEW TRACK one-shot up (s_create_active can
+ * be true at that site -- New track needs no fix, no venue) would show a misleading "venue found"
+ * card over a creation the pipeline is about to cancel, AND make the real EV_CREATE_CANCELLED a
+ * no-op by the time the ui handles it (its own on_nt would already read false). */
+#define EV_VENUE_ANNOUNCE_ONLY 1u
+
 /* Terminal EV_OTA phases (never rendered as a status line): the transfer failed/was aborted, or
  * the bootloader reverted the previous image (spec §19.4: "UPDATE FAILED, REVERTED" for 3 s). */
 #define EV_OTA_ABORTED     3u

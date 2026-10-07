@@ -795,6 +795,13 @@ static void test_venue_acquisition_paths_announce_or_are_silent(void)
     TEST_ASSERT_EQUAL_INT(1, count_type(&log1, EV_VENUE_FOUND));
     lap_export_rtc(&L1, &snap);
     TEST_ASSERT_EQUAL_UINT16(v.id, snap.venue_id);
+    /* #98 fix round 1 (review Important 1): the engine's own emission always leaves flags 0 --
+     * the exact invariant handle_venue_found() (ui.c) relies on to tell a real creation-finish/
+     * scan-hit EV_VENUE_FOUND apart from the pipeline's ui-only announce-only post, which sets
+     * flags = EV_VENUE_ANNOUNCE_ONLY (core/event.h) so it cannot replace a persistent one-shot. */
+    for (int i = 0; i < log1.n; i++) {
+        if (log1.type[i] == EV_VENUE_FOUND) TEST_ASSERT_EQUAL_UINT8(0, log1.flags[i]);
+    }
 
     /* (2) lap_set_venue() is SILENT BY CONSTRUCTION -- its signature (lap.h) carries no event
      * buffer, so it CANNOT announce. Every direct caller must: the §10.3 scan and the §10.9 CREATE

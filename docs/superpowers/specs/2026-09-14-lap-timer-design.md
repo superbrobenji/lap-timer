@@ -1967,7 +1967,7 @@ typedef struct {
 } rtc_state_t;
 ```
 
-Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`. A successful resume (§10.10) restores the engine's venue directly (`lap_import_rtc`), which cannot itself announce it — the pipeline posts the ui's `EV_VENUE_FOUND` for it, exactly as the §10.3 scan does (#98).
+Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`. A successful resume (§10.10) restores the engine's venue directly (`lap_import_rtc`), which cannot itself announce it — the pipeline posts the ui's `EV_VENUE_FOUND` for it (ui queue only — unlike the scan's, this copy is not logged or streamed, and carries `EV_VENUE_ANNOUNCE_ONLY` so the ui does not mistake it for a finished on-device creation) (#98).
 
 ---
 
