@@ -12,6 +12,7 @@
 #include "unity.h"
 
 #include "core/cfg.h"       /* CFG_DIST_M/CFG_DIST_FT (#96) -- documents the two dist-units goldens */
+#include "core/drag.h"      /* DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (#95) -- screen_model_t.drag_run_state values */
 #include "core/ui/canvas.h"
 #include "core/ui/icons.h"
 #include "core/ui/model.h"
@@ -361,10 +362,14 @@ static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint1
 
 static void test_dragcard_notready(void)
 {
-    /* #95: before the drag engine has armed, the big slot reads "NOT READY" (FONT_MED, no letters
-     * in FONT_HUGE), not "READY" -- a rider must not treat an unarmed card as timing. drag_armed
-     * is false here (the default from {0}); there is no ARMED label either way, since it's gone. */
+    /* #95 (bench B4-F1): before the drag engine has armed, the big slot reads "NOT READY"
+     * (FONT_MED, no letters in FONT_HUGE), not "READY" -- a rider must not treat an unarmed card
+     * as timing. The big slot is now driven by drag_run_state, the engine's own four-value state
+     * (DRAG_ST_IDLE/ARMED/LAUNCHED/DONE, core/drag.h) carried through pipe_drag_t.state, not a
+     * one-bit mirror of a single event -- DRAG_ST_IDLE reads NOT READY. There is no separate
+     * ARMED label either way, since it's gone. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    m.drag_run_state = DRAG_ST_IDLE;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
@@ -373,14 +378,51 @@ static void test_dragcard_notready(void)
 
 static void test_dragcard_ready(void)
 {
-    /* #95: once the drag engine has armed, the big slot reads "READY" (FONT_MED, no letters in
-     * FONT_HUGE) -- READY now means armed, so the separate right-hand ARMED label this test used
-     * to also check for is gone (it duplicated the same meaning). Footer still empty (no gates). */
-    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_armed = true; m.batt_pct = 90;
+    /* #95: once the drag engine has armed (DRAG_ST_ARMED), the big slot reads "READY" (FONT_MED,
+     * no letters in FONT_HUGE) -- READY now means armed, so the separate right-hand ARMED label
+     * this test used to also check for is gone (it duplicated the same meaning). Footer still
+     * empty (no gates). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    m.drag_run_state = DRAG_ST_ARMED;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_ready.pbm"), &s_fb));
+}
+
+static void test_dragcard_launched(void)
+{
+    /* #95 regression (bench 2026-10-07): the launch window -- a run in flight with no gate hit yet
+     * -- must not render the same card as "the engine has not armed". drag.c's do_launch() calls
+     * reset_run(), so drag_n is 0 from ARMED right through to the first EV_DRAG_GATE; only the
+     * engine's own state tells the two apart. The memcmp is the real regression guard: it fails on
+     * any build where LAUNCHED and IDLE collapse onto one text, golden or no golden. */
+    screen_model_t m = {0};
+    m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+
+    m.drag_run_state = DRAG_ST_IDLE;
+    screens_moto_render(&s_fb, &m);
+    uint8_t idle[sizeof s_bits];
+    memcpy(idle, s_bits, sizeof idle);
+
+    m.drag_run_state = DRAG_ST_LAUNCHED;
+    fb_init(&s_fb, s_bits, CANVAS_W, CANVAS_H);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_NOT_EQUAL(0, memcmp(idle, s_bits, sizeof idle));
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);   /* T3-R1 */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_launched.pbm"), &s_fb));
+}
+
+static void test_dragcard_done_no_gates(void)
+{
+    /* A run that stopped or faded before 60 ft finishes with zero hit gates (drag.c's enter_done
+     * from `stopped || faded`), so drag_n is 0 on a DONE engine -- the card must say DONE, not
+     * fall back to NOT READY as if nothing had ever happened. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_run_state = DRAG_ST_DONE;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_done.pbm"), &s_fb));
 }
 
 static void test_drag_p0_gate_speed(void)
@@ -463,13 +505,15 @@ static void test_drag_p0_footer_scroll(void)
 
 static void test_drag_p0_armed_gates(void)
 {
-    /* Test gap (finding 13d), updated for #95: drag_armed stays true (re-armed for the next run)
-     * while gates from the run just completed are still on screen. The right-hand ARMED label
-     * this test used to also check for is gone (READY now means armed, and the big slot already
-     * shows the newest gate's value, not READY/NOT READY, whenever n > 0) -- this case now just
-     * confirms drag_armed being true draws nothing extra over the newest gate's label/huge
-     * value/footer. */
-    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_armed = true;
+    /* Test gap (finding 13d), retargeted for #95's state-mirror fix (bench B4-F1): a run in
+     * progress (DRAG_ST_LAUNCHED) is the state that actually coexists with gates on screen --
+     * DRAG_ST_ARMED cannot, since arming resets drag_n to 0 (reset_run(), drag.c). The right-hand
+     * ARMED label this test used to also check for is gone (READY now means armed, and the big
+     * slot already shows the newest gate's value, not READY/NOT READY/LAUNCHED/DONE, whenever n >
+     * 0) -- this case now just confirms drag_run_state draws nothing extra over the newest gate's
+     * label/huge value/footer: the n > 0 branch never reads it, so the golden is unchanged. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    m.drag_run_state = DRAG_ST_LAUNCHED;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
@@ -892,6 +936,8 @@ int main(void)
     RUN_TEST(test_lap_p2_stats_mph);
     RUN_TEST(test_dragcard_notready);
     RUN_TEST(test_dragcard_ready);
+    RUN_TEST(test_dragcard_launched);
+    RUN_TEST(test_dragcard_done_no_gates);
     RUN_TEST(test_drag_p0_gate_speed);
     RUN_TEST(test_drag_p0_trap_mph);
     RUN_TEST(test_drag_p0_distance);

@@ -6,6 +6,7 @@
  * screen_model_t and the PBM goldens in test/snapshots/ are byte-identical across clang and
  * gcc-16.
  */
+#include "core/drag.h"       /* DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (#95) -- drag_run_state's values */
 #include "core/ui/canvas.h"
 #include "core/ui/model.h"
 #include "core/ui/units.h"
@@ -682,10 +683,22 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     if (n == 0u) {
-        /* #95: READY now means armed. Until the engine has armed (2 s of stillness) the card says
-         * NOT READY, so a rider never launches on a card that is not timing. The separate
-         * right-hand ARMED label is gone for the same reason (it duplicated READY's new meaning). */
-        const char *ready = m->drag_armed ? "READY" : "NOT READY";
+        /* #95 (bench B4-F1): the big slot follows the engine's own four-value drag_run_state, not
+         * a one-bit armed mirror -- a run in flight with no gate hit yet (LAUNCHED) is a different
+         * situation from never having armed (IDLE) and from a just-finished run with nothing to
+         * show (DONE), even though all three share drag_n == 0 (arming AND launching both reset
+         * the run, drag.c reset_run()). Until the engine has armed the card says NOT READY, so a
+         * rider never launches on a card that is not timing; any unrecognised value also falls
+         * back to NOT READY (defensive). The separate right-hand ARMED label stays gone -- READY
+         * already carries that meaning. */
+        const char *ready;
+        switch (m->drag_run_state) {
+        case DRAG_ST_ARMED:    ready = "READY";     break;
+        case DRAG_ST_LAUNCHED: ready = "LAUNCHED";  break;
+        case DRAG_ST_DONE:     ready = "DONE";      break;
+        case DRAG_ST_IDLE:     /* fall through */
+        default:               ready = "NOT READY"; break;
+        }
         fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, ready);
     } else {
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);

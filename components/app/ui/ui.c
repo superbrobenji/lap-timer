@@ -417,6 +417,16 @@ static void ui_apply_mode(uint8_t new_mode)
         s_model.cur_running = false;
         s_model.cur_ms      = 0;
     }
+    /* #95 (bench B4-F1): a mode switch is a whole-screen replacement (above) -- the DRAG card must
+     * never render a stale READY/LAUNCHED/DONE left over from before the switch. menu_do_mode's
+     * own caller, CMD_SET_MODE, resets neither the engine nor this mirror (handle_set_mode(),
+     * pipeline.c -- a deliberate, documented gap, not this defect), so nothing else guarantees a
+     * fresh read here on that path; ui_reload_cfg() below does refill immediately after when the
+     * new mode is DRAG, so this is belt-and-suspenders there, but it is the ONLY correction on the
+     * local-menu path. Defaulting to NOT READY rather than carrying the old value forward is the
+     * same safe-direction choice as the rest of this fix: never show a state more confident than
+     * IDLE until a real EV_DRAG_* snapshot earns it. */
+    s_model.drag_run_state = DRAG_ST_IDLE;
     LT_ASSERT_VOID(s_model.mode == s_mode, UI_APP_ASSERT_CODE);
 }
 
@@ -1114,6 +1124,10 @@ static void drag_rows_refill(void)
         return;
     }
     LT_ASSERT_VOID(d.current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    /* #95 (bench B4-F1): re-derive the card's state from this same snapshot on every refill --
+     * there is no independently-ageing mirror left. Every EV_DRAG_* case and every cfg/mode/reset
+     * path that calls this function gets the engine's current state for free. */
+    s_model.drag_run_state = d.state;
     switch (s_model.page) {
     case 0:
     case 1: drag_fill_from_run(&d.current, true); break;   /* I3: both list hit gates only */
@@ -1196,8 +1210,9 @@ static void handle_layout_locked(const event_t *e, int64_t now)
  * s_menu_action[] via menu_add(), is a side effect well beyond "refresh three label strings" and
  * is not needed here (the menu's item list/order never changes, only the label text).
  * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived, but drag_init()
- * (called by the pipeline's own reload) always drops ARMED -- clear the ui's mirror of it here
- * too so a remote CONFIG_SET can't leave a stale "ARMED" indicator on screen.
+ * (called by the pipeline's own reload) always drops back to IDLE -- clear the ui's mirror of it
+ * here too so a remote CONFIG_SET can't leave a stale "ARMED"/"LAUNCHED"/"DONE" indicator on
+ * screen (#95, bench B4-F1: drag_run_state replaces the old one-bit drag_armed, same reasoning).
  * I2 (final review, ruling B-6): a remote mode flip must mirror menu_do_mode's own reset
  * (ui_apply_mode above) -- page 0 reset to §22.6 and the live lap clock stopped when leaving LAP
  * -- not just a relabelled menu while the riding screen keeps showing stale LAP state under a
@@ -1213,7 +1228,7 @@ static void ui_reload_cfg(void)
     if (new_mode != s_mode) {
         ui_apply_mode(new_mode);
     }
-    s_model.drag_armed = false;
+    s_model.drag_run_state = DRAG_ST_IDLE;
     drag_cfg_from_user(&s_cfg, &s_drag_cfg);
     snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
     snprintf(s_lbl_dist, sizeof s_lbl_dist, "Dist: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
@@ -1234,14 +1249,15 @@ static void ui_reload_cfg(void)
  * engine itself now considers new. Mirrors ui_task()'s own fresh-session init (search
  * clear_last_sector_deltas()) field-for-field; drag_rows_refill() re-reads the just-reset pipeline
  * snapshot so DRAG rows reflect the clear immediately rather than waiting for the next EV_DRAG_*
- * event. */
+ * event. #95 (bench B4-F1): drag_run_state replaces the old one-bit drag_armed here too -- the
+ * reset engine is IDLE, so that is the value set below pending the refill's own re-derive. */
 static void ui_lap_reset(void)
 {
     s_lap_start_mono_us = 0;
     s_last_clock_us     = 0;
     s_model.cur_ms      = 0;
     s_model.cur_running = false;
-    s_model.drag_armed  = false;
+    s_model.drag_run_state = DRAG_ST_IDLE;
 
     s_model.best_ms        = 0;
     s_model.prev_ms        = 0;
@@ -1335,12 +1351,19 @@ static void handle_event(const event_t *e, int64_t now)
     case EV_MOTION: s_gspeed_kmh = MENU_LOCK_SPEED_KMH; break;
     case EV_STILL:  s_gspeed_kmh = 0; break;
     /* Plan 7c T5 (design §3): drag_rows_refill() re-derives drag_n from the snapshot itself, so
-     * EV_DRAG_ARMED must NOT zero it first -- doing so would race a refill that reads the still-
-     * frozen previous run before the engine's own ARMED reset lands in the next snapshot. */
-    case EV_DRAG_ARMED:  s_model.drag_armed = true; drag_rows_refill(); s_dirty = true; break;
-    case EV_DRAG_LAUNCH: s_model.drag_armed = false; s_dirty = true; break;
-    case EV_DRAG_GATE:   drag_rows_refill(); s_dirty = true; break;
-    case EV_DRAG_DONE:   drag_rows_refill(); s_dirty = true; break;
+     * these cases must NOT assign drag_n/drag_run_state by hand first -- doing so would race a
+     * refill that reads the still-frozen previous run before the engine's own reset lands in the
+     * next snapshot. #95 (bench B4-F1): all four drag events now share this one body --
+     * drag_run_state is re-derived from the snapshot every time (drag_rows_refill() above), so
+     * EV_DRAG_LAUNCH gains the refill it lacked before (its old one-bit-mirror clear could not
+     * tell LAUNCHED apart from IDLE, which is the launch-window defect #95 fixes). */
+    case EV_DRAG_ARMED:
+    case EV_DRAG_LAUNCH:
+    case EV_DRAG_GATE:
+    case EV_DRAG_DONE:
+        drag_rows_refill();
+        s_dirty = true;
+        break;
     /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
     case EV_CFG_CHANGED: ui_reload_cfg(); break;
     case EV_LAP_RESET:   ui_lap_reset();  break;

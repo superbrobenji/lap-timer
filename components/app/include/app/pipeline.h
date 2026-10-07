@@ -50,6 +50,10 @@ typedef struct {
     drag_result_t current;                          /* zeroed n_gates when no run yet */
     uint32_t      best_time_ms[DRAG_MAX_GATES];      /* index = gate id - 1; BRAKE: stopping dist_cm */
     bool          have_best[DRAG_MAX_GATES];
+    uint8_t       state;                             /* drag_state(&s_drag) (DRAG_ST_*, core/drag.h)
+                                                       * at the instant this snapshot was published --
+                                                       * the engine's own state, not a ui-side mirror
+                                                       * (#95, bench B4-F1) */
 } pipe_drag_t;
 /* Copy the current drag run/session-best record into *out. Safe to call from another task. Returns
  * 0 on success (always succeeds; s_dragsnap is valid, if all-zero, before the first drag sample). */

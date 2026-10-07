@@ -108,7 +108,14 @@ typedef struct {
     /* DRAG rows (p0 benches / p1 all gates / p2 best per gate) */
     drag_row_t drag[DRAG_MAX_GATES];
     uint8_t    drag_n;
-    bool       drag_armed;
+    /* #95 (bench B4-F1): the big slot's "not ready"/"ready"/... text when drag_n == 0 must follow
+     * the engine's own four-value state, not a one-bit mirror of a single event -- a bool cannot
+     * distinguish IDLE from LAUNCHED, and both legitimately occur with drag_n == 0 (arming AND
+     * launching both reset the run). Mirrors pipe_drag_t.state (app/pipeline.h), itself
+     * drag_state()'s return value: DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (core/drag.h). Set only from a
+     * snapshot refill (drag_rows_refill(), ui.c) or to DRAG_ST_IDLE at the handful of sites that
+     * used to clear the old bool -- never derived from which event last arrived. */
+    uint8_t    drag_run_state;
 
     /* venue + status */
     char     venue_name[33], layout_name[25];

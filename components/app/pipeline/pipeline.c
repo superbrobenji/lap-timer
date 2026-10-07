@@ -338,6 +338,8 @@ static void publish_drag_snapshot(void)
     memset(&snap, 0, sizeof snap);
     const drag_result_t *cur = drag_current(&s_drag);
     if (cur) snap.current = *cur;   /* else stays zeroed: n_gates 0 == "no run yet" */
+    snap.state = drag_state(&s_drag);   /* #95: the engine's own state, read under this same local
+                                          * build so it can never be stale relative to snap.current */
     for (uint8_t j = 0; j < s_drag.cfg.n_gates; j++) {
         uint8_t id = s_drag.cfg.gates[j].id;
         LT_ASSERT_VOID(id >= 1u && id <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);   /* 1-based, indexes best_time_ms[id-1] */
