@@ -390,6 +390,12 @@ static void ui_exit_menu(void)
  * load failure s_cfg keeps its last-known-good value (lt_cfg_load leaves it untouched), which is
  * the same fall-back the boot seed uses. */
 
+/* Forward decl: menu_do_mode() (below) and ui_reload_cfg() (further down) both need to re-derive
+ * the DRAG card's state immediately after a mode flip (Task 1 review round 1, finding I1) --
+ * drag_rows_refill() itself is defined further down next to the other DRAG row-building helpers
+ * (Plan 7c T5). */
+static void drag_rows_refill(void);
+
 /* Applies a new riding mode to s_mode/s_model.mode, resets the screen to page 0 (§22.6), and --
  * when leaving LAP mode -- stops the live lap clock. Shared by menu_do_mode (local MA_MODE toggle)
  * and ui_reload_cfg (I2, final review ruling B-6: a remote CONFIG_SET's mode flip must behave
@@ -436,18 +442,24 @@ static void menu_do_mode(void)
 {
     uint8_t new_mode = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
     ui_apply_mode(new_mode);
+    /* Task 1 review round 1, finding I1: ui_apply_mode()'s forced DRAG_ST_IDLE write has no
+     * corrective refill on THIS caller -- CMD_SET_MODE's handler (handle_set_mode(), pipeline.c)
+     * resets neither the drag engine nor anything else that would reach the ui, so a genuinely
+     * ARMED/LAUNCHED/DONE engine frozen across a local LAP<->DRAG toggle would otherwise leave the
+     * card reading NOT READY indefinitely -- no event re-arms it, and ui_task() is purely
+     * event/button driven with no periodic re-sync. Same one-line pattern already used by
+     * menu_do_units()/menu_do_dist() below and by ui_reload_cfg(): re-derive the true state from
+     * the snapshot the instant it's known, rather than leaving the pessimistic IDLE default to
+     * stand uncorrected. Costs nothing when leaving DRAG (guard is false). */
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+    }
     (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
     s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
     (void)lt_cfg_save(&s_cfg);
     ui_send_cmd(CMD_SET_MODE, s_mode, 0);
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
 }
-
-/* Forward decl: menu_do_units() (below) rebuilds the DRAG gate table on a units change and, if the
- * DRAG screen's rows are the ones showing, refills them immediately so labels/benches follow the
- * new setting the moment riding resumes; drag_rows_refill() itself is defined further down next to
- * the other DRAG row-building helpers (Plan 7c T5). */
-static void drag_rows_refill(void);
 
 /* MA_UNITS: toggle km/h<->mph, persist, refresh the label and the model (the menu is showing, so
  * the change appears on screen the moment riding resumes -- Plan 7c T4, design §3). Plan 7c T5:
