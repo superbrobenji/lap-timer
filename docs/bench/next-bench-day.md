@@ -55,7 +55,11 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   STILL/MOTION pair at every lap boundary, not a flicker.
 - [ ] **5. Menu paths never exercised** — checked 2026-10-05: four stubs then; New track landed 2026-10-06 (Task 5, #97), code-complete, procedure below. Layout override landed 2026-10-06 (#98) and WAS exercised on bench day 4 (2026-10-07): it failed — the sim-boot and RTC-resume venue paths never announced to the ui (`lap_set_venue`/`lap_import_rtc` carry no event buffer and neither caller told the ui directly), so `Layout:` stayed a dead item (`menu: layout choice 0 -> id 0`) that also wiped `s_best` on every press (B4-F3). Fixed by this plan (a ui-only announce at both call sites, plus the `venue_announce.py` structural linter); re-check is item 17 below, not this item. Sleep now → Plan 6.2 (power state machine, light/deep sleep, button wake); Calibrate → Plan 8.4 (#93: the fusion calibration is never invoked). Re-test Sleep now (3 s MODE hold → sleep; wake by a button → BOOT) and Calibrate ("Hold upright, press MODE" → `EV_CALIB_DONE`) when each lands.
   New track procedure (#97, Task 5; persistence redesigned in the review's fix round 1, T5-R4; cancel/DRAG-mode paths hardened in the final review, I2/I3/M1): menu "New track" → `NEW TRACK` one-shot, sub-line "Cross S/F, press MODE"; `dbg sim laps 2`; press MODE while the sim moves (sub-line → "S/F set. MODE: sector 1"), MODE once more (sub-line → "S/F set. MODE: sector 2"); wait for the sim to cross S/F again → the engine finishes on its own, `VENUE` one-shot `Track_2026…`; `lt list`/`trk` shows the new venue; reset → BOTH the sim capture's own venue AND the created venue are still there (the logger persists every venue in the table, one record at a time, not a single-venue-only blob), and the riding screen's BEST/PREV/theoretical-best/best-sector board reads fresh (zeroed), not the previous venue's stale values (final review I2). Also: press MODE one more time after the last sector it allows (sub-line should stay "Cross S/F to finish", not switch to "No fix / not moving" — M5); long MODE on the one-shot cancels back to riding, and a second long MODE immediately after always works too, even on a repeat (final review I3); switching to `Mode: Drag` first and then opening "New track" must be refused silently — no one-shot ever shows (final review M1); interrupt a creation with an OTA push or `dbg crash` (`CMD_RESET_ENGINE`) and confirm the ride resumes normally afterward (no stuck NEW TRACK screen, no dead engine still waiting in CREATE — I2/M4).
-  Layout procedure (#98, landed): menu → "Layout: Auto" item; MODE (short, on that item) cycles Auto → L1 → L2 → ... → Auto, the menu label updating live on every press; pick a non-Auto choice and exit the menu (long MODE) back to riding — the engine is now locked to that forced layout (`CMD_SET_LAYOUT`), and the next `VENUE` one-shot (a fresh venue found, or the engine's own next layout lock) shows the forced layout's real name, never a stale previously-locked one (final review M-10).
+  Layout procedure (#98, landed): menu → "Layout: Auto" item; MODE (short, on that item) cycles
+  through the venue's real layout names and back to `Auto` (on the sim capture's single-layout
+  venue: `Auto → Full → Auto`; `ui_layout_label()` renders each layout's real name, never a
+  generic `L%u` — that form only appears for an unresolved id, i.e. a broken state), the menu label
+  updating live on every press; pick a non-Auto choice and exit the menu (long MODE) back to riding — the engine is now locked to that forced layout (`CMD_SET_LAYOUT`), and the next `VENUE` one-shot (a fresh venue found, or the engine's own next layout lock) shows the forced layout's real name, never a stale previously-locked one (final review M-10).
 - [ ] **6. Real-GPS smoke (`moto_neo6m` image)** — deferred 2026-10-05: waits for Plan 8 (real sensors) and the neo6m board on the bench. Then: flash over USB (dev-kit held in reset / BOOT), indoors BOOT line `GPS OK`, NOFIX icon, `EV_FIX_LOST`; outdoors a fix, speed on the card, no SIM glyph.
 - [x] **7. Storage full as a planned gate.** Leave the sim lapping (`dbg sim laps 200`) until
   `E_STO_EVICT`/`E_STO_FULL` appear (~2-3 h at 10 Hz fused logging; or pre-fill the fs with
@@ -85,10 +89,13 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   this plan. Let a run finish: the big slot reads `DONE` for ~5 s, including the zero-gate case (a
   run that stops or fades before the first gate) — it must still read `DONE`, not `NOT READY`.
   Toggle-while-armed (final review I1): with the card reading `READY` (parked, armed, no run on
-  screen), open the menu, toggle `Speed:` or `Distance:`, exit — the card must read `NOT READY` or
-  `READY` according to whether the engine actually re-armed, and must NEVER read `READY` once a
-  following `dbg sim drag` shows the engine had actually dropped to IDLE. Item 16 below is the
-  stronger version of this same check, with a completed run already on screen.
+  screen), open the menu and toggle `Distance:` — exit and confirm the card stays `READY`
+  throughout (no reload is posted at all, ui.c:513-529). Then toggle `Speed:` instead (shipped
+  benches, `n_mph = 3`, so this moves the table) — exit and confirm the card reads `NOT READY` the
+  instant the menu closes, then `READY` again once the engine re-arms (the
+  `DRAG_ARM_STILL_S` still window later); a `dbg sim drag` run started once `READY` returns must
+  launch normally (big slot reaches `LAUNCHED`, never `NOT READY`). Item 16 below is the stronger
+  version of this same check, with a completed run already on screen.
 - [ ] **13. `Speed:`/`Distance:` menu items (renamed from `Units:`/`Dist:`, bench B4-F6) + remote
   config (#96, final review I-6).** Procedure: open the menu, confirm the speed item reads
   `Speed: km/h` and the distance item reads `Distance: m` by default (fresh NVS, or after a
@@ -116,7 +123,9 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   regardless of the setting, even though the list had already been fixed.
 - [ ] **16. Config-reload vs. a run on screen (final review I1; B4-F2,
   `investigation-cfg-reload.md` §6.3).** Procedure: `dbg sim drag` to a completed run (page 0
-  shows the last run, page 2 SESSION BEST filled, note the run number via `dbg sum <id>`). From the
+  shows the last run, page 2 SESSION BEST filled, note the run number from the console's
+  `DRAG run <n> ...` log line printed when the run completes — `dbg sum <id>` does not print the
+  run number). From the
   menu, toggle `Distance:` (m ↔ ft) and exit: the card, DRAG page 1 (LAST RUN), page 2 (SESSION
   BEST) and the run number are all UNCHANGED (`Distance:` is display-only — it never reaches the
   engine). Re-arm and repeat the same check with a remote `lt config set` of an unrelated key
@@ -128,23 +137,37 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   (final review I1: a `READY` card on an engine the reload just dropped to IDLE invites an untimed
   launch). Repeat the `Speed:` check once from the remote `CONFIG_SET` path
   (`lt config set {"units":"mph"}`).
-- [ ] **17. Venue announce on sim boot + a mid-session reset (final review I1/B4-F3, the venue
-  half of #98).** Procedure (sim boot): fresh boot on a sim build — the VENUE one-shot shows the
-  sim capture's real venue name (never a blank/placeholder), and the menu's `Layout:` item cycles
-  Auto → L1 → L2 → ... → Auto through that venue's REAL layouts, not a dead single choice (the
-  logged symptom was `menu: layout choice 0 -> id 0`). Procedure (mid-session reset): run
-  `dbg sim laps <n>` until at least one lap completes (so the best-sector board is non-empty), then
-  `dbg crash` mid-lap, inside the RTC resume window (`RTC_RESUME_MAX_S`); on the next boot's first
-  fix, confirm the log shows `rtc resume: lap N venue M continued`, the VENUE one-shot again shows
-  the correct venue name, and `Layout:` cycles the real layouts the same way. In both cases: press
-  `Layout:` once (cycling to a non-Auto choice) and confirm the best-sector board still shows its
-  PRE-press values — a `Layout:` press must never silently wipe the best-lap snapshot.
+- [ ] **17. Venue announce on sim boot — `Layout:` cycles the real layouts, a post-reset VENUE
+  one-shot names them correctly, and neither wipes BEST (final review I1/B4-F3, the venue half of
+  #98; rescoped by the merge re-review's N1 — the original text described observables the shipped
+  code does not, and cannot, produce on this build).** Procedure: a normal sim boot shows NO VENUE
+  card — that is correct, not a failure (ruling B4-R2: the boot announce is deliberately
+  announce-only, precisely so it can never replace a persistent screen; the card only appears
+  later, on the engine's own layout lock). Open the menu: the `Layout:` item must step through the
+  venue's REAL layout names, `Auto → Full → Auto` (never stuck on `Auto`, never the `L%u`
+  fallback — the logged symptom before this fix was `menu: layout choice 0 -> id 0`). `dbg reset`:
+  the engine re-finds the sim venue on its very next fix, and the VENUE one-shot this produces
+  must show the real name (`Synthetic`/`Full`), never a fallback. Note the card's BEST (footer)
+  value, cycle `Layout:` once more to a non-Auto choice, and confirm BEST still reads the value
+  noted before the press — a `Layout:` press must never silently wipe the best-lap snapshot.
+  **Not testable on `moto_sim`:** the mid-session RTC-resume half of this fix — `dbg crash`
+  mid-lap, then on the next boot's first fix confirm the log reads `rtc resume: lap N venue M
+  continued`. The §15.3 freshness gate (`age = fix->gps_us - saved_gps_us`, must be `> 0`,
+  pipeline.c:492-493) always clears the snapshot on this build, because `gps_init()` restarts the
+  capture's time base from `SIM_FIXES[0].gps_us` on every boot (`sim_clock_init()`,
+  `components/drivers/gps_sim/gps_sim.c:124`) — the first fix after any reset predates the saved
+  snapshot, so `lap_import_rtc()` is never reached and the resume-site `ui_post_venue()` never
+  runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
+  (`test_lap.c`'s `lap_import_rtc`-is-silent contract test) and real hardware, once item 6
+  (`moto_neo6m`) is on the bench and GPS RTC carry-over exists.
 
 ## Closed on 2026-10-07 (bench day 4)
 Image `v0.1.0-37-g4153025`. Re-run of items 1 (drag run), 2 (OTA rollback), 3 (OTA push in
 recovery), 4 (soak), 7 (storage full), 8 (OTA progress screen), 9 (SIM/MOVING glyphs) and 10 (#91
 list timing) all passed (hence their day-3 ticks above still stand). Item 5's Layout half (#98)
-and the as-yet-unwritten items 12/13/15 checks together surfaced four defects, logged as
+and items 12/13/15's checks — 12 and 13 were already written (final review fix wave, see the
+day-3 section below) but had not yet been run on hardware; only 15 was newly written for this
+plan — together surfaced four defects, logged as
 B4-F1..F6 and root-caused in `.superpowers/sdd/2026-10-07-bench-day-4-fixes/`:
 B4-F1 (the drag card collapses IDLE/LAUNCHED onto one `NOT READY` text, #95), B4-F2 (a display-only
 config reload could still drop a live run and corrupt the run numbering, #96), B4-F3 (the sim-boot

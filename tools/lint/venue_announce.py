@@ -35,8 +35,11 @@ vacuous: 0 violations, rc 0, indistinguishable from a tree where every call site
 correctly. main() now also counts how many ACQUIRE_RE matches landed inside a real function body
 (the same test check_file() already does per-match to decide whether it is a violation) and fails
 -- regardless of --fail-on-violation -- the moment that total is 0: a floor of "the rule must have
-found something to check" that costs nothing on a tree which always has >= 2 such call sites
-(lap.c's scan_for_venue()/finalize_create()) and is the only thing that catches this rename.
+found something to check" that costs nothing on a tree which always has >= 2 such call sites. Not
+lap.c's -- is_exempt() drops components/core/lapengine/ before check_file() ever runs, so
+scan_for_venue()/finalize_create() contribute zero; the two that actually keep the floor non-zero
+are pipeline.c's app-layer acquisitions, lap_import_rtc() (pipeline.c:505) and lap_set_venue()
+(pipeline.c:1139). This floor is the only thing that catches this rename.
 """
 import argparse
 import os
