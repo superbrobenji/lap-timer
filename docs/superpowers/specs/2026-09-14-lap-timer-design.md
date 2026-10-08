@@ -1898,7 +1898,7 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 |-----------|---------|------|-------|---------|-------|
 | `version` | `version` | u8 | 1–2 | 2 | schema version; owned by firmware — ignored on CONFIG_SET, forced by cfg_validate |
 | `units` | `units` | enum | `kmh`,`mph` | `kmh` | display + bench list selection |
-| `dist_units` | `dist_units` | enum | `m`,`ft` | `m` | DRAG DIST-gate display name only (§6.6/§11.1); the two mile gates (1/8, 1/4) are unaffected — added in v2 (#96), appended at the end of `cfg_t` (not grouped with `units`) so a stored v1 blob migrates byte-for-byte without shifting any other field; see §15.2 |
+| `dist_units` | `dist_units` | enum | `m`,`ft` | `m` | display only, never reaches the engine (§6.6/§11.1): the DRAG DIST-gate NAME, and — since bench B4-F5/#96 — the gate-list and card distance-row VALUE too; the two mile gates (1/8, 1/4) are unaffected — added in v2 (#96), appended at the end of `cfg_t` (not grouped with `units`) so a stored v1 blob migrates byte-for-byte without shifting any other field; see §15.2 |
 | `mode` | `mode` | enum | `lap`,`drag` | `lap` | persisted last mode |
 | `lap.min_lap_s` | `lap.min_lap_s` | u16 | 5–600 | 20 | |
 | `lap.max_lap_s` | `lap.max_lap_s` | u16 | 60–3600 | 1800 | |

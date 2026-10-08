@@ -7,6 +7,10 @@
  * gcc-16.
  */
 #include "core/drag.h"       /* DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (#95) -- drag_run_state's values */
+#include "core/cfg.h"        /* M6 (final review): CFG_DIST_FT/CFG_DIST_M for dist_unit_suffix()
+                               * below -- reachable transitively via core/drag.h's own include of
+                               * this header, but that makes this file depend on drag.h's include
+                               * list staying exactly as-is; include it directly instead. */
 #include "core/ui/canvas.h"
 #include "core/ui/model.h"
 #include "core/ui/units.h"
@@ -657,7 +661,7 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units, uin
 
 /* The run-card footer (spec 7b §7): gates 0..n-2 (every gate of this run except the newest, which
  * already fills the big slot), oldest first, up to DCARD_FOOTER_MAX entries -- older ones scroll
- * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist> <unit>" for the
+ * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist><unit>" for the
  * distance gate, dist_display()/dist_unit_suffix() -- Task 4 review round 1, ruling B4-R5: this
  * used to hardcode a trailing 'm' regardless of m->dist_units, the identical B4-F5 defect the gate
  * list had, even though this function already receives the full screen_model_t and m->dist_units

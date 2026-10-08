@@ -53,8 +53,9 @@ typedef struct {
     bool     has_trap;
     /* #40: the 100-0 braking gate (DRAG_BRAKE, core/drag.h) is a stopping DISTANCE in metres, not
      * an elapsed time -- t_ms has no meaning for it. When is_distance is set, the renderer shows
-     * "<dist_m> m" instead of formatting t_ms as a time. present still means "gate hit this run"
-     * for both kinds of row. */
+     * dist_display(dist_m, dist_units) followed by dist_unit_suffix(dist_units) ("m" or "ft",
+     * bench B4-F5/#96) instead of formatting t_ms as a time. present still means "gate hit this
+     * run" for both kinds of row. */
     uint16_t dist_m;
     bool     is_distance;
 } drag_row_t;

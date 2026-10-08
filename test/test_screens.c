@@ -908,26 +908,31 @@ static void test_menu_top(void)
 }
 
 /* §20.7's own item list verbatim: lowercase and '/' throughout, so every row exercises the
- * item_fits_font_med(false) / FONT_SMALL fallback path. */
+ * item_fits_font_med(false) / FONT_SMALL fallback path. M5 (final review): this held only 11 of
+ * §20.7's 12 items -- "Distance: m / ft" (added by #96/bench B4-F6) was missing -- and
+ * test_menu_scrolled()'s menu_top scrolled the one renamed item it did carry ("Speed: km/h / mph",
+ * index 4) off-screen, so no menu golden in the tree ever rendered either renamed label. */
 static const char *const MENU_ITEMS_FULL[] = {
-    "Mode: Lap / Drag", "Layout: Auto", "New track",     "Calibrate", "Speed: km/h / mph",
-    "Export (BLE)",     "Live to phone", "Diagnostics",  "Sessions",  "Display",
-    "Sleep now",
+    "Mode: Lap / Drag", "Layout: Auto",    "New track",     "Calibrate",
+    "Speed: km/h / mph", "Distance: m / ft", "Export (BLE)", "Live to phone",
+    "Diagnostics",       "Sessions",        "Display",      "Sleep now",
 };
 
 static void test_menu_scrolled(void)
 {
-    /* A lower item ("Diagnostics", index 7) selected with the list scrolled so it is visible
-     * (menu_top = 6 -> visible rows are indices 6..9): exercises scrolling + the marker on a
-     * non-first visible row together. */
+    /* M5 (final review): menu_top = 2 puts both renamed items ("Speed: km/h / mph" index 4,
+     * "Distance: m / ft" index 5) inside the visible window on BOTH canvases (rows 2..5 of 4 on
+     * the 296 canvas, 2..7 of 6 on the 213 canvas) -- still scrolled (menu_top != 0) and the
+     * marker still lands on a non-first visible row (index 5, selected below), same as the
+     * original "Diagnostics" case this replaces. */
     screen_model_t m = {0};
     m.screen = SCR_MENU;
     m.menu_n = (uint8_t)(sizeof(MENU_ITEMS_FULL) / sizeof(MENU_ITEMS_FULL[0]));
     for (uint8_t i = 0; i < m.menu_n; i++) {
         m.menu_items[i] = MENU_ITEMS_FULL[i];
     }
-    m.menu_sel = 7;
-    m.menu_top = 6;
+    m.menu_sel = 5;
+    m.menu_top = 2;
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));

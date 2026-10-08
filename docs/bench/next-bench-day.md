@@ -53,7 +53,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   `kind=F` while the sim is still lapping. Note (fix round 1, I1): each repeat ends with a 6 s
   standstill (parked at the capture's last position) before the next one starts — expect a clean
   STILL/MOTION pair at every lap boundary, not a flicker.
-- [ ] **5. Menu paths never exercised** — checked 2026-10-05: four stubs then; New track landed 2026-10-06 (Task 5, #97) and Layout override landed 2026-10-06 (#98), both now code-complete pending this bench day. Sleep now → Plan 6.2 (power state machine, light/deep sleep, button wake); Calibrate → Plan 8.4 (#93: the fusion calibration is never invoked). Re-test Sleep now (3 s MODE hold → sleep; wake by a button → BOOT) and Calibrate ("Hold upright, press MODE" → `EV_CALIB_DONE`) when each lands.
+- [ ] **5. Menu paths never exercised** — checked 2026-10-05: four stubs then; New track landed 2026-10-06 (Task 5, #97), code-complete, procedure below. Layout override landed 2026-10-06 (#98) and WAS exercised on bench day 4 (2026-10-07): it failed — the sim-boot and RTC-resume venue paths never announced to the ui (`lap_set_venue`/`lap_import_rtc` carry no event buffer and neither caller told the ui directly), so `Layout:` stayed a dead item (`menu: layout choice 0 -> id 0`) that also wiped `s_best` on every press (B4-F3). Fixed by this plan (a ui-only announce at both call sites, plus the `venue_announce.py` structural linter); re-check is item 17 below, not this item. Sleep now → Plan 6.2 (power state machine, light/deep sleep, button wake); Calibrate → Plan 8.4 (#93: the fusion calibration is never invoked). Re-test Sleep now (3 s MODE hold → sleep; wake by a button → BOOT) and Calibrate ("Hold upright, press MODE" → `EV_CALIB_DONE`) when each lands.
   New track procedure (#97, Task 5; persistence redesigned in the review's fix round 1, T5-R4; cancel/DRAG-mode paths hardened in the final review, I2/I3/M1): menu "New track" → `NEW TRACK` one-shot, sub-line "Cross S/F, press MODE"; `dbg sim laps 2`; press MODE while the sim moves (sub-line → "S/F set. MODE: sector 1"), MODE once more (sub-line → "S/F set. MODE: sector 2"); wait for the sim to cross S/F again → the engine finishes on its own, `VENUE` one-shot `Track_2026…`; `lt list`/`trk` shows the new venue; reset → BOTH the sim capture's own venue AND the created venue are still there (the logger persists every venue in the table, one record at a time, not a single-venue-only blob), and the riding screen's BEST/PREV/theoretical-best/best-sector board reads fresh (zeroed), not the previous venue's stale values (final review I2). Also: press MODE one more time after the last sector it allows (sub-line should stay "Cross S/F to finish", not switch to "No fix / not moving" — M5); long MODE on the one-shot cancels back to riding, and a second long MODE immediately after always works too, even on a repeat (final review I3); switching to `Mode: Drag` first and then opening "New track" must be refused silently — no one-shot ever shows (final review M1); interrupt a creation with an OTA push or `dbg crash` (`CMD_RESET_ENGINE`) and confirm the ride resumes normally afterward (no stuck NEW TRACK screen, no dead engine still waiting in CREATE — I2/M4).
   Layout procedure (#98, landed): menu → "Layout: Auto" item; MODE (short, on that item) cycles Auto → L1 → L2 → ... → Auto, the menu label updating live on every press; pick a non-Auto choice and exit the menu (long MODE) back to riding — the engine is now locked to that forced layout (`CMD_SET_LAYOUT`), and the next `VENUE` one-shot (a fresh venue found, or the engine's own next layout lock) shows the forced layout's real name, never a stale previously-locked one (final review M-10).
 - [ ] **6. Real-GPS smoke (`moto_neo6m` image)** — deferred 2026-10-05: waits for Plan 8 (real sensors) and the neo6m board on the bench. Then: flash over USB (dev-kit held in reset / BOOT), indoors BOOT line `GPS OK`, NOFIX icon, `EV_FIX_LOST`; outdoors a fix, speed on the card, no SIM glyph.
@@ -73,12 +73,22 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   console (`-- rt N ms`) with ≥ 40 sessions, before/after.
 - [x] **11. Dev-kit first-load after a cold boot** (#65 regression check): power-cycle both boards,
   open Sessions and Config fresh 5× each — 10/10 without Reload.
-- [ ] **12. DRAG card NOT READY/READY (#95, final review I-6).** Procedure:
+- [ ] **12. DRAG card NOT READY/READY/LAUNCHED/DONE (#95, final review I-6 + I1).** Procedure:
   `config set {"mode":"drag"}` + reset, observe the big slot before anything arms the drag engine:
   reads `NOT READY` (FONT_MED — FONT_HUGE has no letters). Arm it (the usual condition — stationary
   then moving past the arm threshold — or `dbg sim drag`'s own arm phase): the big slot switches to
   `READY`. Expect no separate ARMED label anywhere on the card — the top-right slot that used to
   show it (`DCARD_ARMED_RIGHT_X/Y`) is gone; `READY` alone is the arm indicator now.
+  Launch it (`dbg sim drag` continues on its own): between the launch and the first gate value the
+  big slot must read `LAUNCHED`, never fall back to `NOT READY` — this was the original bug report
+  (#95): a run is live and timing for that whole window, and the bench saw `NOT READY` there before
+  this plan. Let a run finish: the big slot reads `DONE` for ~5 s, including the zero-gate case (a
+  run that stops or fades before the first gate) — it must still read `DONE`, not `NOT READY`.
+  Toggle-while-armed (final review I1): with the card reading `READY` (parked, armed, no run on
+  screen), open the menu, toggle `Speed:` or `Distance:`, exit — the card must read `NOT READY` or
+  `READY` according to whether the engine actually re-armed, and must NEVER read `READY` once a
+  following `dbg sim drag` shows the engine had actually dropped to IDLE. Item 16 below is the
+  stronger version of this same check, with a completed run already on screen.
 - [ ] **13. `Speed:`/`Distance:` menu items (renamed from `Units:`/`Dist:`, bench B4-F6) + remote
   config (#96, final review I-6).** Procedure: open the menu, confirm the speed item reads
   `Speed: km/h` and the distance item reads `Distance: m` by default (fresh NVS, or after a
@@ -104,6 +114,45 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   64 px slot's distance value and the footer's "100-0 <n><unit>" entry also follow `Distance:`
   the same way (ruling B4-R5, Task 4 review round 1) — before this fix page 0 hardcoded `m`
   regardless of the setting, even though the list had already been fixed.
+- [ ] **16. Config-reload vs. a run on screen (final review I1; B4-F2,
+  `investigation-cfg-reload.md` §6.3).** Procedure: `dbg sim drag` to a completed run (page 0
+  shows the last run, page 2 SESSION BEST filled, note the run number via `dbg sum <id>`). From the
+  menu, toggle `Distance:` (m ↔ ft) and exit: the card, DRAG page 1 (LAST RUN), page 2 (SESSION
+  BEST) and the run number are all UNCHANGED (`Distance:` is display-only — it never reaches the
+  engine). Re-arm and repeat the same check with a remote `lt config set` of an unrelated key
+  (e.g. `{"display":{"live_clock":false}}`). Then, with another completed run on screen, toggle
+  `Speed:` (km/h ↔ mph) — with the shipped benches (`n_mph = 3`) this moves gates 1–3, so the
+  engine legitimately drops the run: the card, LAST RUN, SESSION BEST and the run number ARE
+  cleared (`run_no` resets to 0, so the next run does not corrupt the `.log`/`.sum` with a repeated
+  number) — but the card must read `NOT READY`, **never `READY`**, the moment the menu closes
+  (final review I1: a `READY` card on an engine the reload just dropped to IDLE invites an untimed
+  launch). Repeat the `Speed:` check once from the remote `CONFIG_SET` path
+  (`lt config set {"units":"mph"}`).
+- [ ] **17. Venue announce on sim boot + a mid-session reset (final review I1/B4-F3, the venue
+  half of #98).** Procedure (sim boot): fresh boot on a sim build — the VENUE one-shot shows the
+  sim capture's real venue name (never a blank/placeholder), and the menu's `Layout:` item cycles
+  Auto → L1 → L2 → ... → Auto through that venue's REAL layouts, not a dead single choice (the
+  logged symptom was `menu: layout choice 0 -> id 0`). Procedure (mid-session reset): run
+  `dbg sim laps <n>` until at least one lap completes (so the best-sector board is non-empty), then
+  `dbg crash` mid-lap, inside the RTC resume window (`RTC_RESUME_MAX_S`); on the next boot's first
+  fix, confirm the log shows `rtc resume: lap N venue M continued`, the VENUE one-shot again shows
+  the correct venue name, and `Layout:` cycles the real layouts the same way. In both cases: press
+  `Layout:` once (cycling to a non-Auto choice) and confirm the best-sector board still shows its
+  PRE-press values — a `Layout:` press must never silently wipe the best-lap snapshot.
+
+## Closed on 2026-10-07 (bench day 4)
+Image `v0.1.0-37-g4153025`. Re-run of items 1 (drag run), 2 (OTA rollback), 3 (OTA push in
+recovery), 4 (soak), 7 (storage full), 8 (OTA progress screen), 9 (SIM/MOVING glyphs) and 10 (#91
+list timing) all passed (hence their day-3 ticks above still stand). Item 5's Layout half (#98)
+and the as-yet-unwritten items 12/13/15 checks together surfaced four defects, logged as
+B4-F1..F6 and root-caused in `.superpowers/sdd/2026-10-07-bench-day-4-fixes/`:
+B4-F1 (the drag card collapses IDLE/LAUNCHED onto one `NOT READY` text, #95), B4-F2 (a display-only
+config reload could still drop a live run and corrupt the run numbering, #96), B4-F3 (the sim-boot
+and RTC-resume venue paths never announced to the ui, so `Layout:` was dead and wiped `s_best`,
+#98), and B4-F4/F5/F6 (the gate-list's label/value pairing, the distance-row unit and the menu's
+renamed items, #96). All four are fixed by this plan (`glyphs-drag-menu-closure`, PR #101); items
+12/13/15 above are their dedicated re-checks, and item 16/17 above are two further gaps the fix
+wave's own final review (I1/I2) found in those re-checks themselves.
 
 ## Closed on 2026-10-05 (bench day 3)
 items 1, 2, 3, 4, 7, 8, 9, 10, 11 (11 = the #65 re-test on 2026-10-05: 4/4 list relays clean, fresh loads without Reload). Open: 5 (menu stubs — Plan 6.2, Plan 8.4/#93; New track (#97) and Layout override (#98) are code-complete, pending this bench day), 6 (Plan 8 + hardware), and 12/13/14 (#95/#96/#99, added in the final review fix wave, I-6 — card text, `dist_units` menu+remote, and LINK glyph timing never had their own bench item before).

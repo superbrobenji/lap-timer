@@ -55,7 +55,9 @@ typedef struct {
      * that cfg_migrate() (cfg.c) writes dist_units unconditionally on every v1->v2 migrate,
      * regardless of what was sitting in that byte. See the Task 3 report's blob-migration
      * analysis, and the _Static_assert just below for the layout guarantee itself. */
-    uint8_t dist_units;            /* CFG_DIST_*: DIST gate labels only; 1/8 and 1/4 mile keep their names */
+    uint8_t dist_units;            /* CFG_DIST_*: display only -- never reaches the engine. Governs
+                                     * the DIST gate NAME (1/8, 1/4 mile keep theirs either way) and,
+                                     * since bench B4-F5/#96, the gate-list/card distance-row VALUE too */
 } cfg_t;
 
 /* Review finding I1 (Task 3 fix round 1): the comment above is an argument; this is the

@@ -27,6 +27,16 @@ boundary exists there and the match silently failed. ANNOUNCE_RE now requires on
 call, wrapped or not, always matches; a bare mention of the event code never does. Comments and
 string literals are already blanked by strip_comments_and_literals() before either regex runs, so
 neither regex ever sees inside one.
+
+Final review M4: every failure mode probed above fails LOUD (more violations, or a new one) except
+one -- renaming the acquisition API itself (lap_set_venue -> anything else, lap_import_rtc ->
+anything else) makes ACQUIRE_RE match nothing anywhere in scope, so the whole rule goes silently
+vacuous: 0 violations, rc 0, indistinguishable from a tree where every call site announces
+correctly. main() now also counts how many ACQUIRE_RE matches landed inside a real function body
+(the same test check_file() already does per-match to decide whether it is a violation) and fails
+-- regardless of --fail-on-violation -- the moment that total is 0: a floor of "the rule must have
+found something to check" that costs nothing on a tree which always has >= 2 such call sites
+(lap.c's scan_for_venue()/finalize_create()) and is the only thing that catches this rename.
 """
 import argparse
 import os
@@ -72,18 +82,20 @@ def check_file(path, relpath):
     lidx = LineIndex(stripped)
     funcs = find_top_level_functions(stripped)
     findings = []
+    sites = 0
     for m in ACQUIRE_RE.finditer(stripped):
         body = next(((name, o, c) for name, _ns, o, c, _po, _pc in funcs
                      if o < m.start() < c), None)
         if body is None:
             continue                      # a declaration, not a call
+        sites += 1                        # M4 (final review): a real acquisition call site
         name, open_idx, close_idx = body
         if ANNOUNCE_RE.search(stripped, open_idx, close_idx):
             continue
         findings.append("%s:%d: %s() in %s() acquires a venue with no ui_post_venue() call "
                         "to announce it to the ui -- see tools/lint/venue_announce.py" %
                         (relpath, lidx.line_of(m.start()), m.group(1), name))
-    return findings
+    return findings, sites
 
 
 def main(argv=None):
@@ -93,6 +105,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     base = os.getcwd()
     findings = []
+    total_sites = 0
     for root in args.paths:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "build"]
@@ -102,10 +115,22 @@ def main(argv=None):
                     relpath = os.path.relpath(p, base)
                     if is_exempt(relpath):
                         continue
-                    findings += check_file(p, relpath)
+                    file_findings, file_sites = check_file(p, relpath)
+                    findings += file_findings
+                    total_sites += file_sites
     for f in sorted(findings):
         print(f)
     print("venue-announce: %d violation(s)" % len(findings))
+    # M4 (final review): a rename of the acquisition API itself (lap_set_venue/lap_import_rtc)
+    # makes ACQUIRE_RE match nothing anywhere in scope -- 0 violations, rc 0, silently vacuous.
+    # Fail unconditionally (not gated on --fail-on-violation: this is a self-check that the rule
+    # found anything to examine at all, not a lint violation) the moment the real tree -- which
+    # always has >= 2 acquisition call sites -- reports none.
+    if total_sites == 0:
+        print("venue-announce: 0 lap_set_venue()/lap_import_rtc() call sites found anywhere in "
+              "scope -- has the acquisition API been renamed? update ACQUIRE_RE "
+              "(tools/lint/venue_announce.py)")
+        return 1
     return 1 if (findings and args.fail_on_violation) else 0
 
 

@@ -480,9 +480,26 @@ static void menu_do_units(void)
     s_dirty       = true;
     snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
-    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
+    /* Final review I1: the CMD_CONFIG_RELOAD just sent runs on the pipeline task, asynchronously
+     * -- pipeline_reload_cfg() only calls drag_init() (dropping the run, the session bests and the
+     * armed state) when drag_cfg_engine_differs() says the built gate table/rollout actually
+     * moved. That task may not have run yet by the time drag_rows_refill() below reads the
+     * pipeline snapshot, so the refill can read a PRE-reload snapshot and re-derive a stale
+     * ARMED/LAUNCHED/DONE that the reload is about to invalidate. Compute the pipeline's own
+     * verdict here, against the OLD s_drag_cfg, BEFORE it is overwritten -- rather than trusting
+     * whatever the refill happens to read -- and force the pessimistic value after the refill when
+     * it is true, so it wins over the stale read until the pipeline republishes (same shape in
+     * ui_reload_cfg() below, for the remote CONFIG_SET path). */
+    drag_cfg_t nc;
+    drag_cfg_from_user(&s_cfg, &nc);
+    bool table_moved = drag_cfg_engine_differs(&nc, &s_drag_cfg);
+    s_drag_cfg = nc;
     if (s_model.mode == SCR_MODE_DRAG) {
         drag_rows_refill();
+        if (table_moved) {
+            s_model.drag_run_state = DRAG_ST_IDLE;
+            s_model.drag_n         = 0;    /* drag_init() dropped the run and the session bests */
+        }
     }
 }
 
@@ -1223,7 +1240,11 @@ static void handle_venue_found(const event_t *e, int64_t now)
     snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s",
              (v != NULL && v->name[0] != '\0') ? v->name : "VENUE");
     s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
-    show_venue_oneshot(now, e->flags == EV_VENUE_ANNOUNCE_ONLY);
+    /* M3 (final review): a bit test, not an equality test -- flags == EV_VENUE_ANNOUNCE_ONLY is
+     * correct only while that is the single bit ever set (every engine emit passes literal 0,
+     * test_lap.c's flags-are-0 loop pins it); it breaks silently the day a second EV_VENUE_FOUND
+     * flag bit is defined alongside it. */
+    show_venue_oneshot(now, (e->flags & EV_VENUE_ANNOUNCE_ONLY) != 0u);
     s_dirty = true;
 }
 
@@ -1262,20 +1283,24 @@ static void handle_layout_locked(const event_t *e, int64_t now)
  * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived. Bench B4-F2 (#96):
  * since pipeline_reload_cfg() no longer always calls drag_init() (it only re-inits when
  * drag_cfg_engine_differs() says the gate table/rollout actually moved -- see drag.h/pipeline.c),
- * the DRAG_ST_IDLE written below is a default, not a fact: the engine may still be ARMED/LAUNCHED/
- * DONE on a display-only reload. It is immediately superseded by drag_rows_refill()'s own
- * re-derive (s_model.drag_run_state = d.state, from the just-reloaded pipeline snapshot) a few
- * lines down whenever DRAG rows are the ones showing -- the only case this field is ever rendered
- * (screens_moto.c's render_drag_page0 is reached only in DRAG mode). When riding mode stays LAP
- * the default is never visible either, so it is harmless either way; it exists only so a remote
- * CONFIG_SET can never leave a stale "ARMED"/"LAUNCHED"/"DONE" indicator mirrored here with
- * nothing below to correct it (#95, bench B4-F1: drag_run_state replaces the old one-bit
- * drag_armed, same reasoning).
+ * the engine may still be ARMED/LAUNCHED/DONE on a display-only reload -- drag_rows_refill()'s own
+ * re-derive (s_model.drag_run_state = d.state, from the just-reloaded pipeline snapshot) is what
+ * normally picks that up, whenever DRAG rows are the ones showing (the only case this field is
+ * ever rendered: screens_moto.c's render_drag_page0 is reached only in DRAG mode).
  * I2 (final review, ruling B-6): a remote mode flip must mirror menu_do_mode's own reset
  * (ui_apply_mode above) -- page 0 reset to §22.6 and the live lap clock stopped when leaving LAP
  * -- not just a relabelled menu while the riding screen keeps showing stale LAP state under a
  * now-DRAG mode. Only applied when the mode actually changed: most CONFIG_SET calls touch
- * units/display, and those must NOT reset the current page/clock. */
+ * units/display, and those must NOT reset the current page/clock.
+ * Final review I1: the refill above races pipeline_reload_cfg() exactly like menu_do_units()'s
+ * does -- EV_CFG_CHANGED and CMD_CONFIG_RELOAD are two separate posts from cfg_change_notify()
+ * (cmd.c) with no ordering between the ui and pipeline tasks, so the refill below can read a
+ * PRE-reload snapshot and re-derive a stale ARMED/LAUNCHED/DONE. The unconditional
+ * `s_model.drag_run_state = DRAG_ST_IDLE;` this function used to write right after
+ * drag_cfg_from_user() is gone -- it bought nothing (the refill overwrites it unconditionally a
+ * few lines down) and, worse, looked like the fix. The real fix is the same shape as
+ * menu_do_units(): compute the pipeline's own verdict against the OLD s_drag_cfg BEFORE
+ * overwriting it, and force the pessimistic value AFTER the refill so it wins over a stale read. */
 static void ui_reload_cfg(void)
 {
     cfg_defaults(&s_cfg);
@@ -1286,13 +1311,21 @@ static void ui_reload_cfg(void)
     if (new_mode != s_mode) {
         ui_apply_mode(new_mode);
     }
-    s_model.drag_run_state = DRAG_ST_IDLE;
-    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
+    drag_cfg_t nc;
+    drag_cfg_from_user(&s_cfg, &nc);
+    bool table_moved = drag_cfg_engine_differs(&nc, &s_drag_cfg);
+    s_drag_cfg = nc;
     snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
     snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s", s_cfg.display.live_clock ? "on" : "off");
-    if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+        if (table_moved) {
+            s_model.drag_run_state = DRAG_ST_IDLE;
+            s_model.drag_n         = 0;    /* drag_init() dropped the run and the session bests */
+        }
+    }
     s_dirty = true;
     LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.units <= 1u, UI_APP_ASSERT_CODE);

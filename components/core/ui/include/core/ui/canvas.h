@@ -153,8 +153,8 @@
 #endif
 #define DCARD_LABEL_X    TEXT_MARGIN_X
 #define DCARD_BIG_X      TEXT_MARGIN_X
-#define DCARD_UNIT_GAP   4     /* px between the huge distance digits and the FONT_SMALL "m" */
-#define DCARD_UNIT_DY    48    /* the "m" sits this far below the huge cell's top (near the baseline) */
+#define DCARD_UNIT_GAP   4     /* px between the huge distance digits and the FONT_SMALL "m"/"ft" */
+#define DCARD_UNIT_DY    48    /* the "m"/"ft" suffix sits this far below the huge cell's top (near the baseline) */
 #define DCARD_FOOTER_MAX 6     /* earlier gates listed in the footer, newest last */
 #define DCARD_FOOTER_SEP "   "
 /* T4-R1 (Plan 7b T4 fix 1): FONT_MED has no '@' glyph, so the trap row's '@' is drawn in
