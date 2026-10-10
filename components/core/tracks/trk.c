@@ -14,12 +14,43 @@
 #define TRK_ASSERT_CODE 0x0A80
 
 /* Not reentrant: the user store below is module-static, shared by every trk_* entry point.
- * Only the conn task adds/loads/saves venues and only the pipeline task reads them, and the two
- * never overlap (an upload is applied between sessions), so no lock is taken. */
+ *
+ * Writers at boot, same task, strictly sequenced, no concurrency premise needed (final review
+ * F-4/I-4, #97): main/app_main.c's boot_subsystems() calls trk_init() and then
+ * logger_load_tracks() (app/logger.h -- implemented here, in logger.c, since it only reads) one
+ * after the other, on app_main's own task, BEFORE logger_start() creates the logger task a few
+ * lines later and well before pipeline_start() creates the pipeline task further down still. This
+ * is ordinary single-threaded sequencing, not a scheduler-preemption argument: neither task
+ * exists yet when either write runs, so there is nothing to race. (The previous version of this
+ * comment relied on the logger task preempting app_main the instant xTaskCreateStaticPinnedToCore()
+ * returned, which rested on two premises the comment never stated and nothing in the tree
+ * enforced -- same-core task affinity, and the load helper never yielding -- so the final review
+ * moved the load here instead of shoring up that proof; see logger.c's logger_load_tracks() for
+ * where it now runs.) trk_user_add() -- invoked directly by lap.c's finalize_create() on a
+ * CREATE-mode S/F crossing, and indirectly via trk_user_add_json() for the CFG_GPS_SIM venue
+ * registration at pipeline_init() -- is on the pipeline task (core 1), after boot, and always
+ * completes before the event that announces its id: each call site's emit(..., EV_VENUE_FOUND,
+ * ...) is sequential code a few lines later in the same function, same task.
+ *
+ * Readers: the pipeline task itself (already ordered above, same task, no barrier needed), and --
+ * since #98 -- the ui task (core 0), through trk_get() in handle_venue_found()/
+ * handle_layout_locked()/build_menu()/menu_do_layout() (components/app/ui/ui.c). The ui only calls
+ * trk_get() on an id after receiving the EV_VENUE_FOUND/EV_LAYOUT_LOCKED event that names it; the
+ * FreeRTOS cross-core queue (g_ui_evt_q) send/receive is a full memory barrier, so every write
+ * above is guaranteed visible by the time the ui's read runs. No lock is taken.
+ *
+ * This rests on one invariant the API itself does NOT enforce: no writer may rewrite or remove an
+ * id the ui may already hold. trk_user_add()'s same-id "replace" branch is real and live -- it is
+ * only safe today because every live call site supplies either a boot-time id (before any id is
+ * surfaced to a reader) or a fresh one (lap.c's trk_next_user_id(), always one past every existing
+ * id, so it can never collide with an id already seen). A future writer that could replace an id
+ * already surfaced to the ui in the same session (a second track load after boot, a revived BLE
+ * upload, ...) must run strictly before that id's first EV_VENUE_FOUND/EV_LAYOUT_LOCKED of the
+ * session, or take a lock/seqlock (pipeline.c's seq_enter()/seq_leave() around s_best is the
+ * existing pattern for this shape of problem) -- "no lock is taken" above holds only as long as
+ * that ordering does. */
 static trk_venue_t user[TRK_MAX_USER];
 static uint8_t     user_n;
-
-#define BLOB_VERSION 2
 
 void trk_init(void) { user_n = 0; memset(user, 0, sizeof user); }
 
@@ -41,9 +72,9 @@ static bool line_finite(const trk_line_t *l)
 }
 
 #define MIN_GATE_LEN_M 1.0        /* a line shorter than this cannot define a crossing direction (§6.4) */
-/* Shared by both entry points that can install a venue (trk_from_json, via the final
- * trk_validate_venue() call, and trk_user_load()/trk_user_add(), via this function directly), so
- * the two never disagree about what a valid gate line is. */
+/* Shared by every entry point that can install a venue (trk_from_json and trk_user_add(), both
+ * via the final trk_validate_venue() call), so they never disagree about what a valid gate line
+ * is. */
 static bool line_ok(const trk_line_t *l)
 {
     CORE_ASSERT_RET(l != NULL, TRK_ASSERT_CODE, false);
@@ -133,8 +164,20 @@ uint16_t trk_next_user_id(void)
 {
     CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, TRK_USER_ID_BASE);
     uint16_t id = TRK_USER_ID_BASE;
-    for (uint8_t i = 0; i < user_n; i++) if (user[i].id >= id) id = (uint16_t)(user[i].id + 1);
+    for (uint8_t i = 0; i < user_n; i++) {
+        if (user[i].id == TRK_SIM_VENUE_ID) continue;   /* F-5: reserved -- never counts toward the next id */
+        if (user[i].id >= id) id = (uint16_t)(user[i].id + 1);
+    }
+    if (id == TRK_SIM_VENUE_ID) id++;                    /* F-5: never hand out the reserved id itself */
     return id;
+}
+
+/* See core/trk.h's doc comment (F-5/I-5). */
+uint16_t trk_user_id_at(uint8_t index)
+{
+    CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, 0);
+    if (index >= user_n) return 0;
+    return user[index].id;
 }
 
 static void consider(const trk_venue_t *v, double lat, double lon, const trk_venue_t **best, double *best_d)
@@ -160,90 +203,213 @@ const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out
     return best;
 }
 
-/* Blob v2: u8 version=2 | u8 count | trk_venue_t[count] | u16 crc16 (LE) over every preceding byte.
- * The struct is copied raw, so the blob is only valid for this build; the CRC catches NVS bit rot
- * and every venue is re-validated before it reaches the store. Any failure leaves the store empty. */
-int trk_user_load(const uint8_t *blob, size_t n)
+/* ---- per-venue variable-length record (review fix round 1, #97, T5-R4) ----
+ *
+ * Small bounds-checked append/consume cursor helpers, shared by trk_user_save_venue (rec_put_*)
+ * and trk_user_load_venue (rec_get_*): each advances *off by the field width and fails (false)
+ * rather than writing/reading past cap/n, so a short destination buffer or a truncated/corrupt
+ * record is caught at the point of the overrun, not after. f64 fields are copied via memcpy of
+ * the double's raw bytes (a build-local-representation contract -- this blob was never claimed
+ * portable across builds, only across reboots of the same image). */
+static bool rec_put_u8(uint8_t *buf, size_t cap, size_t *off, uint8_t v)
 {
-    CORE_ASSERT_RET(blob != NULL, TRK_ASSERT_CODE, -1);
-    trk_init();
-    if (n < 4 || blob[0] != BLOB_VERSION) return -1;
-    uint8_t cnt = blob[1];
-    if (cnt > TRK_MAX_USER) return -1;
-    size_t need = 2 + (size_t)cnt * sizeof(trk_venue_t) + 2;
-    if (n != need) return -1;
-    uint16_t want = (uint16_t)(blob[need - 2] | ((uint16_t)blob[need - 1] << 8));
-    if (ses_crc16(blob, need - 2) != want) return -1;
-    for (uint8_t i = 0; i < cnt; i++) {
-        memcpy(&user[i], blob + 2 + (size_t)i * sizeof(trk_venue_t), sizeof(trk_venue_t));
-        if (trk_validate_venue(&user[i]) != 0) { trk_init(); return -1; }
+    if (*off + 1u > cap) return false;
+    buf[*off] = v;
+    *off += 1u;
+    return true;
+}
+static bool rec_put_u16(uint8_t *buf, size_t cap, size_t *off, uint16_t v)
+{
+    if (*off + 2u > cap) return false;
+    buf[*off] = (uint8_t)v;
+    buf[*off + 1u] = (uint8_t)(v >> 8);
+    *off += 2u;
+    return true;
+}
+static bool rec_put_u32(uint8_t *buf, size_t cap, size_t *off, uint32_t v)
+{
+    if (*off + 4u > cap) return false;
+    for (int i = 0; i < 4; i++) buf[*off + (size_t)i] = (uint8_t)(v >> (8 * i));
+    *off += 4u;
+    return true;
+}
+static bool rec_put_f64(uint8_t *buf, size_t cap, size_t *off, double v)
+{
+    if (*off + 8u > cap) return false;
+    memcpy(buf + *off, &v, 8u);
+    *off += 8u;
+    return true;
+}
+static bool rec_put_bytes(uint8_t *buf, size_t cap, size_t *off, const void *src, size_t n)
+{
+    CORE_ASSERT_RET(src != NULL, TRK_ASSERT_CODE, false);
+    if (*off + n > cap) return false;
+    memcpy(buf + *off, src, n);
+    *off += n;
+    return true;
+}
+static bool rec_get_u8(const uint8_t *buf, size_t n, size_t *off, uint8_t *out)
+{
+    if (*off + 1u > n) return false;
+    *out = buf[*off];
+    *off += 1u;
+    return true;
+}
+static bool rec_get_i8(const uint8_t *buf, size_t n, size_t *off, int8_t *out)
+{
+    uint8_t raw;
+    if (!rec_get_u8(buf, n, off, &raw)) return false;
+    *out = (int8_t)raw;
+    return true;
+}
+static bool rec_get_u16(const uint8_t *buf, size_t n, size_t *off, uint16_t *out)
+{
+    if (*off + 2u > n) return false;
+    *out = (uint16_t)(buf[*off] | ((uint16_t)buf[*off + 1u] << 8));
+    *off += 2u;
+    return true;
+}
+static bool rec_get_u32(const uint8_t *buf, size_t n, size_t *off, uint32_t *out)
+{
+    if (*off + 4u > n) return false;
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)buf[*off + (size_t)i] << (8 * i);
+    *out = v;
+    *off += 4u;
+    return true;
+}
+static bool rec_get_f64(const uint8_t *buf, size_t n, size_t *off, double *out)
+{
+    if (*off + 8u > n) return false;
+    memcpy(out, buf + *off, 8u);
+    *off += 8u;
+    return true;
+}
+static bool rec_get_bytes(const uint8_t *buf, size_t n, size_t *off, void *dst, size_t len)
+{
+    CORE_ASSERT_RET(dst != NULL, TRK_ASSERT_CODE, false);
+    if (*off + len > n) return false;
+    memcpy(dst, buf + *off, len);
+    *off += len;
+    return true;
+}
+
+/* One layout's record (id, name, sf, dir_sign, n_sectors, its sectors, length_m -- the field
+ * order the header comment documents). Shared by the save and load sides below. */
+static bool rec_put_layout(uint8_t *buf, size_t cap, size_t *off, const trk_layout_t *l)
+{
+    CORE_ASSERT_RET(l != NULL, TRK_ASSERT_CODE, false);
+    CORE_ASSERT_RET(l->n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE, false);
+    if (!rec_put_u16(buf, cap, off, l->id)) return false;
+    if (!rec_put_bytes(buf, cap, off, l->name, sizeof l->name)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p1.lat)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p1.lon)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p2.lat)) return false;
+    if (!rec_put_f64(buf, cap, off, l->sf.p2.lon)) return false;
+    if (!rec_put_u8(buf, cap, off, (uint8_t)l->dir_sign)) return false;
+    if (!rec_put_u8(buf, cap, off, l->n_sectors)) return false;
+    for (uint8_t s = 0; s < l->n_sectors; s++) {
+        const trk_line_t *ln = &l->sectors[s];
+        if (!rec_put_f64(buf, cap, off, ln->p1.lat)) return false;
+        if (!rec_put_f64(buf, cap, off, ln->p1.lon)) return false;
+        if (!rec_put_f64(buf, cap, off, ln->p2.lat)) return false;
+        if (!rec_put_f64(buf, cap, off, ln->p2.lon)) return false;
     }
-    user_n = cnt;
-    return 0;
+    return rec_put_u32(buf, cap, off, l->length_m);
 }
 
-/* Copies `len` bytes from `src` to `dst + off`. A thin, type-erased wrapper around memcpy so each
- * call site below can express "write this field at its offsetof" without a logic-bearing macro;
- * the offset/pointer/length are computed at the call site (offsetof(T, f), &(src)->f, sizeof
- * (src)->f), so this helper needs no knowledge of the surrounding struct types. */
-static inline void put_field(uint8_t *dst, size_t off, const void *src, size_t len)
+static bool rec_get_layout(const uint8_t *buf, size_t n, size_t *off, trk_layout_t *out)
 {
-    memcpy(dst + off, src, len);
-}
-
-/* Field-by-field copy into an already-zeroed destination: struct assignment (or a raw memcpy of the
- * whole struct) also copies the source's compiler-inserted padding bytes verbatim, which the
- * language never promises are zero, so two structurally identical venues could otherwise CRC
- * differently (§10.1's blob is declared build-specific but should still be deterministic within one
- * build). dst points directly at the destination blob bytes (uint8_t *, possibly unaligned), so each
- * field is written with memcpy at its offsetof rather than through a typed pointer; every named field
- * is written explicitly, and nothing else touches dst, so the gaps between fields stay at the memset
- * zero. */
-static void canon_venue(uint8_t *dst, const trk_venue_t *src)
-{
-    CORE_ASSERT_VOID(dst != NULL, TRK_ASSERT_CODE);
-    CORE_ASSERT_VOID(src != NULL, TRK_ASSERT_CODE);
-    CORE_ASSERT_VOID(src->n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE); /* every stored venue was already trk_validate_venue()-checked */
-    memset(dst, 0, sizeof *src);
-    put_field(dst, offsetof(trk_venue_t, id), &src->id, sizeof src->id);
-    put_field(dst, offsetof(trk_venue_t, name), &src->name, sizeof src->name);
-    put_field(dst, offsetof(trk_venue_t, lat), &src->lat, sizeof src->lat);
-    put_field(dst, offsetof(trk_venue_t, lon), &src->lon, sizeof src->lon);
-    put_field(dst, offsetof(trk_venue_t, radius_m), &src->radius_m, sizeof src->radius_m);
-    put_field(dst, offsetof(trk_venue_t, flags), &src->flags, sizeof src->flags);
-    put_field(dst, offsetof(trk_venue_t, n_layouts), &src->n_layouts, sizeof src->n_layouts);
-    /* Only the active layouts/sectors (src has already passed trk_validate_venue, so n_layouts and
-     * every n_sectors are in range) are copied; slots beyond them are left at the memset zero rather
-     * than carrying through whatever unused array content src happened to hold. */
-    for (uint8_t i = 0; i < src->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
-        const trk_layout_t *sl = &src->layouts[i];
-        uint8_t *ld = dst + offsetof(trk_venue_t, layouts) + (size_t)i * sizeof(trk_layout_t);
-        put_field(ld, offsetof(trk_layout_t, id), &sl->id, sizeof sl->id);
-        put_field(ld, offsetof(trk_layout_t, name), &sl->name, sizeof sl->name);
-        put_field(ld, offsetof(trk_layout_t, sf), &sl->sf, sizeof sl->sf);   /* trk_line_t is four packed doubles: no internal padding */
-        put_field(ld, offsetof(trk_layout_t, dir_sign), &sl->dir_sign, sizeof sl->dir_sign);
-        put_field(ld, offsetof(trk_layout_t, n_sectors), &sl->n_sectors, sizeof sl->n_sectors);
-        CORE_ASSERT_VOID(sl->n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE); /* the sectors[] array's own bound */
-        for (uint8_t s = 0; s < sl->n_sectors && s < LAP_MAX_SECTORS; s++) {
-            uint8_t *sd = ld + offsetof(trk_layout_t, sectors) + (size_t)s * sizeof(trk_line_t);
-            memcpy(sd, &sl->sectors[s], sizeof sl->sectors[s]);
-        }
-        put_field(ld, offsetof(trk_layout_t, length_m), &sl->length_m, sizeof sl->length_m);
+    CORE_ASSERT_RET(out != NULL, TRK_ASSERT_CODE, false);
+    memset(out, 0, sizeof *out);
+    int8_t  dir = 0;
+    uint8_t n_sectors = 0;
+    if (!rec_get_u16(buf, n, off, &out->id)) return false;
+    if (!rec_get_bytes(buf, n, off, out->name, sizeof out->name)) return false;
+    out->name[sizeof out->name - 1] = '\0';             /* defensive: trk_validate_venue requires it */
+    if (!rec_get_f64(buf, n, off, &out->sf.p1.lat)) return false;
+    if (!rec_get_f64(buf, n, off, &out->sf.p1.lon)) return false;
+    if (!rec_get_f64(buf, n, off, &out->sf.p2.lat)) return false;
+    if (!rec_get_f64(buf, n, off, &out->sf.p2.lon)) return false;
+    if (!rec_get_i8(buf, n, off, &dir)) return false;
+    if (!rec_get_u8(buf, n, off, &n_sectors)) return false;
+    if (n_sectors > LAP_MAX_SECTORS) return false;
+    CORE_ASSERT_RET(n_sectors <= LAP_MAX_SECTORS, TRK_ASSERT_CODE, false);   /* postcondition of the check above */
+    out->dir_sign  = dir;
+    out->n_sectors = n_sectors;
+    for (uint8_t s = 0; s < n_sectors; s++) {
+        trk_line_t *ln = &out->sectors[s];
+        if (!rec_get_f64(buf, n, off, &ln->p1.lat)) return false;
+        if (!rec_get_f64(buf, n, off, &ln->p1.lon)) return false;
+        if (!rec_get_f64(buf, n, off, &ln->p2.lat)) return false;
+        if (!rec_get_f64(buf, n, off, &ln->p2.lon)) return false;
     }
+    return rec_get_u32(buf, n, off, &out->length_m);
 }
 
-int trk_user_save(uint8_t *blob, size_t cap, size_t *n_out)
+int trk_user_save_venue(uint8_t index, uint8_t *buf, size_t cap, size_t *n_out)
 {
-    CORE_ASSERT_RET(blob != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(buf != NULL, TRK_ASSERT_CODE, -1);
     CORE_ASSERT_RET(n_out != NULL, TRK_ASSERT_CODE, -1);
     CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, -1);
-    size_t need = 2 + (size_t)user_n * sizeof(trk_venue_t) + 2;
-    CORE_ASSERT_RET(need >= 4, TRK_ASSERT_CODE, -1); /* version + count + crc16, even with zero venues */
-    if (cap < need) return -1;
-    blob[0] = BLOB_VERSION; blob[1] = user_n;
-    for (uint8_t i = 0; i < user_n; i++) canon_venue(blob + 2 + (size_t)i * sizeof(trk_venue_t), &user[i]);
-    uint16_t crc = ses_crc16(blob, need - 2);
-    blob[need - 2] = (uint8_t)crc; blob[need - 1] = (uint8_t)(crc >> 8);
-    *n_out = need;
+    if (index >= user_n) return -1;
+    const trk_venue_t *v = &user[index];
+    CORE_ASSERT_RET(v->n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE, -1);
+    size_t off = 0;
+    if (!rec_put_u16(buf, cap, &off, v->id)) return -1;
+    if (!rec_put_bytes(buf, cap, &off, v->name, sizeof v->name)) return -1;
+    if (!rec_put_f64(buf, cap, &off, v->lat)) return -1;
+    if (!rec_put_f64(buf, cap, &off, v->lon)) return -1;
+    if (!rec_put_u32(buf, cap, &off, v->radius_m)) return -1;
+    if (!rec_put_u8(buf, cap, &off, v->flags)) return -1;
+    if (!rec_put_u8(buf, cap, &off, v->n_layouts)) return -1;
+    for (uint8_t i = 0; i < v->n_layouts; i++) {
+        if (!rec_put_layout(buf, cap, &off, &v->layouts[i])) return -1;
+    }
+    *n_out = off;
     return 0;
+}
+
+/* Final review I-1: decodes straight into the module-static landing slot
+ * user_slot_for_parse() already hands trk_user_add_json() -- never through an on-stack
+ * trk_venue_t (~2.7 KB; this is the exact pattern trk.h:137's rule documents and trk_user_add_json
+ * already follows). Power-of-10 rule 1 forbids a goto to a shared cleanup label, so this is the
+ * same straight-line `if (ok) ok = step(...)` chain epd_partial_refresh() (display_epaper.c) uses
+ * for the same reason: only the FIRST failure survives into `ok`, and a single unconditional
+ * cleanup (memset the slot on any failure) runs once at the end instead of being repeated at N
+ * early returns. */
+int trk_user_load_venue(const uint8_t *buf, size_t n)
+{
+    CORE_ASSERT_RET(buf != NULL, TRK_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, -1);
+    trk_venue_t *slot = user_slot_for_parse();
+    if (slot == NULL) return -1;
+    memset(slot, 0, sizeof *slot);
+
+    size_t  off = 0;
+    uint8_t n_layouts = 0;
+    bool ok = rec_get_u16(buf, n, &off, &slot->id);
+    /* F-5 (final review, I-5): a persisted record is never allowed to carry the sim's reserved
+     * id -- tracks_save() (logger.c) never writes one, so seeing one here means a corrupt/foreign
+     * file, not a legitimate user venue. */
+    if (ok && slot->id == TRK_SIM_VENUE_ID) ok = false;
+    if (ok) ok = rec_get_bytes(buf, n, &off, slot->name, sizeof slot->name);
+    if (ok) slot->name[sizeof slot->name - 1] = '\0';   /* defensive: trk_validate_venue requires it */
+    if (ok) ok = rec_get_f64(buf, n, &off, &slot->lat);
+    if (ok) ok = rec_get_f64(buf, n, &off, &slot->lon);
+    if (ok) ok = rec_get_u32(buf, n, &off, &slot->radius_m);
+    if (ok) ok = rec_get_u8(buf, n, &off, &slot->flags);
+    if (ok) ok = rec_get_u8(buf, n, &off, &n_layouts);
+    if (ok && n_layouts > TRK_MAX_LAYOUTS) ok = false;
+    if (ok) CORE_ASSERT_RET(n_layouts <= TRK_MAX_LAYOUTS, TRK_ASSERT_CODE, -1);   /* postcondition: ok implies the check above passed */
+    if (ok) {
+        slot->n_layouts = n_layouts;
+        for (uint8_t i = 0; i < n_layouts && ok; i++) ok = rec_get_layout(buf, n, &off, &slot->layouts[i]);
+    }
+    if (ok && off != n) ok = false;                     /* no trailing garbage in the record */
+    if (ok && trk_validate_venue(slot) != 0) ok = false;
+    /* replace-same-id dedupe + the TRK_MAX_USER bound, reused not duplicated */
+    if (ok) ok = (trk_user_add(slot) == 0);
+    if (!ok) memset(slot, 0, sizeof *slot);
+    return ok ? 0 : -1;
 }

@@ -211,6 +211,14 @@
     { title: "General", fields: [
       { path: ["units"], label: "Speed units", control: "segmented", rerenderOnChange: true,
         options: [["kmh", "km/h"], ["mph", "mph"]] },
+      /* m8 (Task 3 fix round 1, #96): dist_units already round-trips correctly without this --
+       * CONFIG_SECTIONS only covers known paths for a friendlier control; anything else falls
+       * through to the generic "Advanced" renderer (below) -- but a free-text "Advanced" field
+       * invites a typo the lap-timer's cfg_from_json only catches server-side. Matches how
+       * "units" above is handled. */
+      { path: ["dist_units"], label: "Distance units", control: "segmented",
+        options: [["m", "m"], ["ft", "ft"]],
+        help: "DRAG distance-gate labels only (60ft/330ft/1000ft <-> 18m/101m/305m); 1/8 and 1/4 mile keep their name either way." },
       { path: ["mode"], label: "Mode", control: "segmented",
         options: [["lap", "Lap timer"], ["drag", "Drag"]] }
     ] },

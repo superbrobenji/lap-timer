@@ -20,6 +20,7 @@
 #include "app/lt_sup.h"
 #include "app/lt_rtc.h"
 #include "app/lt_nvs.h"
+#include "app/lt_err.h"      /* E_STO_WRITE -- M1/M2 (review fix round 1, #97): errlog a dropped/failed save */
 #include "app/lt_assert.h"
 #include "app/link.h"        /* stream_push -- fan the fused-log/event stream to an attached peer (§18) */
 #include "app/lt_proto.h"    /* LT_REC_STATUS / LT_STATUS_REC_LEN -- STATUS stream-record wire contract */
@@ -73,6 +74,11 @@ static const char *TAG = "pipe";
 #define TEMP_POLL_US     1000000                             /* ~1 Hz imu temperature (§9.2) */
 #define PIPE_LAPS_KEEP   24
 #define MMS_TO_KMH       0.0036                              /* mm/s -> km/h; mirrors tools/replay MMS_TO_KMH */
+/* M3 (review fix round 1, #97 §10.9): s_last_fix is never invalidated on its own -- without this,
+ * a GPS dropout would leave the last valid fix sitting there indefinitely, letting a MARK_GATE
+ * press place a gate at a position from minutes ago. CMD_MARK_GATE requires s_last_fix to be both
+ * valid AND younger than this. */
+#define CREATE_MARK_FRESH_US (2LL * 1000000)
 
 /* Rule 2 explicit static loop bounds: drains that were textually unbounded while(...) loops backed
  * by a "the queue/driver is finite" argument in a comment only. Each cap is far above the worst
@@ -170,6 +176,16 @@ static uint32_t          s_laps_seq;       /* even = stable, odd = writer mid-up
 static pipe_best_t       s_best;
 static pipe_drag_t       s_dragsnap;
 
+/* §10.9 on-device track creation (#97): CMD_CREATE_BEGIN/CMD_MARK_GATE/CMD_CREATE_CANCEL state.
+ * s_create_next_gate is the AUTHORITATIVE next gate index -- the ui mirrors its own copy (for the
+ * arg8 it sends) only as a display aid; a dropped or duplicate CMD_MARK_GATE can never desync the
+ * engine because this task always marks the gate it itself expects next, never trusting cmd->arg8.
+ * s_last_fix is the latest VALID fix (copied in on_fix() below, the one allowed extra static of
+ * this task, 56 B -- CMD_MARK_GATE carries no fix of its own, so lap_mark_gate() needs this). */
+static bool      s_create_active;
+static uint8_t   s_create_next_gate;
+static gps_fix_t s_last_fix;
+
 /* ---------------- helpers ---------------- */
 
 static void stats_reset(void)
@@ -229,6 +245,45 @@ static void seq_leave(void)
 {
     __atomic_fetch_add(&s_laps_seq, 1u, __ATOMIC_ACQ_REL);   /* leave: seq -> even */
     LT_ASSERT_VOID((__atomic_load_n(&s_laps_seq, __ATOMIC_RELAXED) & 1u) == 0u, PIPE_ASSERT_CODE); /* left cleanly */
+}
+
+/* #87: tell the ui directly (never emit_event(): EV_LAP_RESET is ui-only, not logged/streamed)
+ * that the running-lap clock must stop. Forward-declared here (real definition is below, after
+ * pipeline_reload_cfg()) so reset_best_and_stats()/create_finish_if_active() -- both textually
+ * earlier in the file -- can call it. */
+static void ui_post_lap_reset(void);
+
+/* #98 bench fix (B4-F3, issue #98): tell the ui directly -- never through emit_event()/
+ * engine_cb() -- that a venue was set OUTSIDE the engine's own scan (lap.c's scan_for_venue())/
+ * create-finalize (lap.c's finalize_create()) announcements: the CFG_GPS_SIM boot venue
+ * (pipeline_init(), below) and the §15.3 RTC resume (on_fix_try_resume(), textually earlier in
+ * this file) both call lap_set_venue()/lap_import_rtc() directly from this task, and neither can
+ * announce for itself -- core/lap.h's lap_set_venue() signature carries no event buffer, and
+ * lap_import_rtc() has no out/cap/n parameters at all. Without this the ui's s_venue_id (ui.c)
+ * stays 0 forever: trk_get(0) is always NULL (trk_validate_venue() rejects id 0, trk.c), so the
+ * Layout menu item is a dead "Auto" that still posts CMD_SET_LAYOUT id 0 on every press, wiping
+ * s_best under the seqlock for no reason (handle_set_layout(), below). Forward-declared here
+ * (real definition is below, after ui_post_create()) so on_fix_try_resume() can call it. */
+static void ui_post_venue(uint16_t venue_id, int64_t gps_us);
+
+/* Final review F-2/I-2: the stats_reset() + seqlocked s_best clear every engine-resetting or
+ * venue/layout-changing path in this file already does (handle_reset_engine below;
+ * handle_set_layout's forced-layout clear; pipeline_init()'s own venue-set clear) -- factored out
+ * here so entering/finishing an on-device creation (handle_create_cmd's CMD_CREATE_BEGIN branch,
+ * create_finish_if_active() above) can run the identical bookkeeping. A creation changes the
+ * venue/layout under the engine's feet exactly the way those other paths do, so the ui must not
+ * keep showing the PREVIOUS venue's stale best-sector/theoretical-best board across it -- that
+ * stale-state class is exactly what EV_LAP_RESET/ui_lap_reset() (ui.c) exists to clear, which is
+ * why every caller of this helper also posts EV_LAP_RESET (ui_post_lap_reset()) itself right
+ * after, rather than having it bundled in here: handle_reset_engine() must post it only AFTER
+ * publish_drag_snapshot() (ordering ui_lap_reset()'s own drag_rows_refill() relies on), so each
+ * caller controls exactly where in its own sequence the post lands. */
+static void reset_best_and_stats(void)
+{
+    stats_reset();
+    seq_enter();
+    memset(&s_best, 0, sizeof s_best);
+    seq_leave();
 }
 
 /* Freeze the just-completed lap (lap_prev) + the accumulated stats, store + submit + print. */
@@ -296,6 +351,8 @@ static void publish_drag_snapshot(void)
     memset(&snap, 0, sizeof snap);
     const drag_result_t *cur = drag_current(&s_drag);
     if (cur) snap.current = *cur;   /* else stays zeroed: n_gates 0 == "no run yet" */
+    snap.state = drag_state(&s_drag);   /* #95: the engine's own state, read under this same local
+                                          * build so it can never be stale relative to snap.current */
     for (uint8_t j = 0; j < s_drag.cfg.n_gates; j++) {
         uint8_t id = s_drag.cfg.gates[j].id;
         LT_ASSERT_VOID(id >= 1u && id <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);   /* 1-based, indexes best_time_ms[id-1] */
@@ -326,6 +383,37 @@ static void publish_drag_snapshot(void)
  * event type keeps the original emit-then-handle order -- EV_SECTOR/EV_DRAG_DONE's handlers don't
  * publish anything a same-event consumer reads back (on_drag_done() only hands the result to the
  * logger via its own queue; s_dragsnap is published separately by publish_drag_snapshot(), fix 2). */
+/* #97 (§10.9 step 3): the engine finishes CREATE on its own -- finalize_create() (lap.c) calls
+ * trk_user_add() and THEN emits this same EV_VENUE_FOUND, both on this task, sequentially, before
+ * engine_cb ever sees the event (ruling T5-R0: trk.c's writer-ordering contract), so the user
+ * track table already holds the new venue by the time this runs. Ask the logger to persist it so
+ * it survives a reboot; fire-and-forget (requester NULL), same pdMS_TO_TICKS(100) queue-send
+ * pattern as the CFG_GPS_SIM venue registration's own LOGGER_OPEN_SESSION request in
+ * pipeline_init() below (M1, review fix round 1: was a non-blocking 0-tick send that silently
+ * dropped the just-created venue on a momentarily-full queue, with only an ESP_LOGW to say so --
+ * now also errlog_add()'d, so the drop leaves a trace the device itself keeps). A normal
+ * (non-CREATE) venue scan also emits EV_VENUE_FOUND, but s_create_active is false then (only
+ * CMD_CREATE_BEGIN sets it), so this is a no-op outside creation.
+ * Final review F-2/I-2: finalize_create() just called lap_set_venue() on the new venue -- a venue
+ * change exactly like the ones handle_reset_engine()/handle_set_layout()/pipeline_init() already
+ * clear s_best for -- so this finish runs the same reset_best_and_stats() + ui_post_lap_reset()
+ * bookkeeping those paths do, or the riding screen would come back showing the PREVIOUS venue's
+ * stale BEST/PREV/theoretical-best/best-sector board under the newly-created venue. */
+static void create_finish_if_active(void)
+{
+    if (!s_create_active) return;
+    s_create_active = false;
+    reset_best_and_stats();
+    ui_post_lap_reset();
+    log_request_t req = { .type = LOGGER_SAVE_TRACKS };
+    if (g_log_req_q != NULL && xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) == pdTRUE) {
+        logger_notify();
+    } else {
+        (void)errlog_add(E_STO_WRITE, 0);   /* M1: the save never ran -- leave a trace, not just a log line */
+        ESP_LOGW(TAG, "create: save-tracks request dropped (queue full)");
+    }
+}
+
 static void engine_cb(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
@@ -342,7 +430,8 @@ static void engine_cb(const event_t *ev)
                  (unsigned long)ev->arg32, (long)(int32_t)ev->arg32b);
         s_rtc_save_due = true;     /* §15.3: the crossed sector is now the resume point */
         break;
-    case EV_DRAG_DONE:    on_drag_done(); break;
+    case EV_DRAG_DONE:     on_drag_done(); break;
+    case EV_VENUE_FOUND:   create_finish_if_active(); break;   /* #97: persist a just-created venue */
     default: break;               /* EV_LAP_COMPLETE handled above, before emit_event() */
     }
 }
@@ -418,6 +507,9 @@ static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
                 s_resumed_lap_start_us = s_resume.lap_start_gps_us;
                 ESP_LOGI(TAG, "rtc resume: lap %u venue %u continued (interrupted)",
                          (unsigned)lr.lap_no, (unsigned)lr.venue_id);
+                /* #98: lap_import_rtc() above cannot announce for itself -- tell the ui directly
+                 * (ui_post_venue(), never through engine_cb(): s_create_active can be true here). */
+                ui_post_venue(lr.venue_id, fix->gps_us);
             } else {
                 /* Unknown venue: keep the cold engine state (sim already set the venue at init; on
                  * real hardware the engine keeps scanning for it). */
@@ -427,6 +519,31 @@ static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
             lt_rtc_clear();
             ESP_LOGI(TAG, "rtc resume: snapshot not fresh (age %lld us), cleared", (long long)age);
         }
+    }
+}
+
+/* I2 (review fix round 1, #97 §10.9): the engine can leave CREATE mode entirely on its own, with
+ * NO event at all -- finalize_create()'s full-table-or-invalid abort (lap.c) calls
+ * reset_to_no_venue(), dropping L->mode back to LAP_MODE_NORMAL without ever posting
+ * EV_VENUE_FOUND. Without this, s_create_active would stay true forever: the NEW TRACK one-shot
+ * has no revert timer, and every further MODE press just re-refuses (lap_mark_gate's own
+ * mode != LAP_MODE_CREATE early return) until a long MODE finally escapes. Called once per
+ * lap_on_fix() dispatch batch (on_fix_run_engine, below -- the one call site that can change
+ * L->mode out from under CREATE): a successful finish would already have cleared
+ * s_create_active (create_finish_if_active(), above, runs inside the very engine_cb() loop this
+ * follows, same dispatch batch), so reaching here with s_create_active still true means the
+ * engine left CREATE silently. Tell the ui so the screen does not strand the user on it.
+ * CMD_RESET_ENGINE/CMD_SET_MODE/a mode-changing CMD_CONFIG_RELOAD cover the other three ways the
+ * engine can leave CREATE (cancel_active_create(), below -- those three never call lap_on_fix()
+ * first, so this check alone would never see them: CMD_SET_MODE -> DRAG in particular means
+ * lap_on_fix() is never called again at all). ui_post_create() is defined below (after
+ * pipeline_reload_cfg()); forward-declared here since this runs well before it textually. */
+static void ui_post_create(uint8_t phase, uint16_t arg);
+static void create_cancel_if_orphaned(void)
+{
+    if (s_create_active && s_lap.mode != LAP_MODE_CREATE) {
+        s_create_active = false;
+        ui_post_create(EV_CREATE_CANCELLED, 0);
     }
 }
 
@@ -453,6 +570,7 @@ static void on_fix_run_engine(const gps_fix_t *fix, bool valid)
         int nev = 0;
         lap_on_fix(&s_lap, fix, s_have_fused ? &s_latest_fused : NULL, evs, LAP_EVT_MAX, &nev);
         for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
+        create_cancel_if_orphaned();   /* I2: catch a silent CREATE abort this dispatch batch may have caused */
         /* §15.3 save-on-gate: if this fix crossed an S/F or sector line, snapshot the engine's
          * (now-updated) resumable state so the most-recent gate becomes the resume point after any
          * reset. On EV_LAP_COMPLETE the engine has already opened the next lap, so the export
@@ -480,6 +598,7 @@ static void on_fix(gps_fix_t *fix)
     if (valid) {
         tb_on_fix(&s_tb, fix->gps_us, fix->mono_us, 0);   /* sim: no serial transmit time */
         s_cur_speed_cms = fix->gspeed_mms / 10;
+        s_last_fix = *fix;   /* §10.9: CMD_MARK_GATE's fix (lap_mark_gate needs a valid, current one) */
     }
     fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
                       (float)fix->head_e5 / 1e5f, fix->mono_us, valid);
@@ -599,9 +718,23 @@ static void on_raw(const imu_raw_t *raw)
     LT_ASSERT_VOID(s_fused_ctr < (uint32_t)FUSED_DECIM, PIPE_ASSERT_CODE);   /* decimation counter wrapped */
 }
 
+/* #97 (§10.9), review fix round 1 (I2): cancel_active_create() is defined below (after
+ * ui_post_create()); forward-declared here for pipeline_reload_cfg()'s mode-changed branch. */
+static void cancel_active_create(void);
+
 /* #87: re-read the persisted cfg and rebuild what depends on it -- the drag engine's gate table
- * (a units change redefines the mph gates: drag_init() is a fresh engine, session bests are
- * dropped, documented in spec dsB §2) and the riding mode. The lap engine is untouched. */
+ * and the riding mode. The lap engine is untouched.
+ * Bench B4-F2 (#96): drag_init() is destructive (clears the run, the per-gate session bests, the
+ * armed state AND run_no -- core/drag.h's documented "clears results" contract) and
+ * cfg_change_notify() (cmd.c) posts this reload for EVERY persisted key, display-only ones
+ * included (dist_units, display.live_clock, ble.name, ...), so re-initing unconditionally wiped a
+ * completed run on a cosmetic toggle and silently renumbered the next run 1 again mid-session
+ * (corrupting the DRAG_GATE records in the .log/.sum, logger.c ses_encode_drag_gate). drag_init()
+ * is now run ONLY when drag_cfg_engine_differs() says the built gate table or rollout actually
+ * moved -- the one case where cur.gates[]/best.gates[] (laid out in cfg.gates order) stop meaning
+ * what they say. Otherwise the new cfg is adopted in place: gates[]/n_gates/rollout are identical,
+ * so quarter_idx and both result layouts stay valid, and units/benches (display/bench-list
+ * selection only) come along for free. */
 static void pipeline_reload_cfg(void)
 {
     cfg_t      cfg;
@@ -609,13 +742,15 @@ static void pipeline_reload_cfg(void)
     cfg_defaults(&cfg);
     (void)lt_cfg_load(&cfg);
     drag_cfg_from_user(&cfg, &dc);
-    drag_init(&s_drag, &dc);
+    if (drag_cfg_engine_differs(&dc, &s_drag.cfg)) drag_init(&s_drag, &dc);
+    else                                           s_drag.cfg = dc;
     uint8_t new_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     /* fix round 1 (Important finding 1): CMD_SET_MODE resets stats on a mode flip (handle_cmd
      * above) -- a reload that silently changes s_mode must do the same, else a mode change
      * arriving mid-lap carries the old window's stats into the next lap. An unchanged mode (the
-     * common case -- most CONFIG_SET calls touch units/display, not mode) leaves stats alone. */
-    if (new_mode != s_mode) stats_reset();
+     * common case -- most CONFIG_SET calls touch units/display, not mode) leaves stats alone.
+     * I2 (review fix round 1, #97): and must not strand an in-progress creation either. */
+    if (new_mode != s_mode) { stats_reset(); cancel_active_create(); }
     s_mode = new_mode;
     publish_drag_snapshot();
     LT_ASSERT_VOID(s_drag.cfg.n_gates <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);
@@ -632,6 +767,77 @@ static void ui_post_lap_reset(void)
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "lap reset: ui queue full");
 }
 
+/* #97 (§10.9): tell the ui directly (never emit_event(): EV_CREATE is ui-only, not logged/
+ * streamed, same reason as EV_LAP_RESET above) that CREATE-mode state changed -- BEGUN/GATE_SET/
+ * FAILED/CANCELLED. The engine's own finish (the closing S/F crossing) is a real EV_VENUE_FOUND,
+ * handled by engine_cb()/emit_event() below, not this helper. */
+static void ui_post_create(uint8_t phase, uint16_t arg)
+{
+    LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(phase <= EV_CREATE_CANCELLED, PIPE_ASSERT_CODE);   /* a real EV_CREATE_* phase */
+    event_t ev = { .type = EV_CREATE, .flags = phase, .arg16 = arg, .mono_us = esp_timer_get_time() };
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "create: ui queue full");
+}
+
+/* #98 bench fix (B4-F3, issue #98): the ui learns the current venue ONLY from EV_VENUE_FOUND
+ * (handle_venue_found(), ui.c) -- it sets s_venue_id, resets the Layout choice to Auto, resolves
+ * the venue name through trk_get() and opens the §20.6 VENUE one-shot. The ENGINE emits that
+ * event only from its own acquisitions (scan_for_venue()/finalize_create(), lap.c); every venue
+ * THIS task sets directly -- the CFG_GPS_SIM capture venue in pipeline_init() and the §15.3 RTC
+ * resume in on_fix_try_resume() -- would otherwise leave the ui blind (see the forward
+ * declaration above for the full argument).
+ *
+ * Posted straight to g_ui_evt_q, NEVER through emit_event()/engine_cb(): engine_cb() reads
+ * EV_VENUE_FOUND as "an on-device creation just finished" (create_finish_if_active(), above), and
+ * s_create_active CAN be true at the resume site -- the user may have selected New track before
+ * the first valid fix (handle_create_begin() requires only MODE_LAP, no fix, no venue). Routing
+ * this event through engine_cb() there would run create_finish_if_active()'s
+ * reset_best_and_stats() + ui_post_lap_reset() + a spurious LOGGER_SAVE_TRACKS for a creation
+ * that produced nothing, AND make create_cancel_if_orphaned()'s real EV_CREATE_CANCELLED a no-op
+ * (s_create_active already false by then) -- the NEW TRACK one-shot would read as "track saved"
+ * when it was in fact discarded. ui-only like EV_LAP_RESET/EV_CREATE above: the logger learns the
+ * venue through its own channel at the sim site (LOGGER_OPEN_SESSION/logger_set_venue,
+ * pipeline_init()); on real GPS it currently does not learn it at all (neither at this resume
+ * site nor anywhere else on moto_neo6m) -- a separate, adjacent gap, out of scope here.
+ *
+ * Fix round 1 (review Important 1, #98): the pipeline-layer trap above is closed structurally
+ * (this function never reaches engine_cb()), but the SAME event still reaches handle_venue_found()
+ * (ui.c), whose show_venue_oneshot() call has one door that lets a real creation-finish
+ * EV_VENUE_FOUND replace the persistent NEW TRACK one-shot. An announce-only post (this function)
+ * must not take that door -- if it did, a resume announcement arriving while NEW TRACK is up would
+ * show a misleading "venue found" card AND make create_cancel_if_orphaned()'s real
+ * EV_CREATE_CANCELLED a no-op (ui.c's on_nt would already read false by the time it is handled).
+ * flags = EV_VENUE_ANNOUNCE_ONLY (core/event.h) marks every post from here so
+ * handle_venue_found() can tell the two kinds of EV_VENUE_FOUND apart; the engine's own emission
+ * always leaves flags 0, so today's creation-finish behaviour is exactly unchanged. */
+static void ui_post_venue(uint16_t venue_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(venue_id != 0, PIPE_ASSERT_CODE);   /* trk_get(0) is always NULL (trk.c) */
+    LT_ASSERT_VOID(gps_us >= 0, PIPE_ASSERT_CODE);
+    event_t ev = { .type = EV_VENUE_FOUND, .flags = EV_VENUE_ANNOUNCE_ONLY, .arg16 = venue_id,
+                   .gps_us = gps_us, .mono_us = esp_timer_get_time() };
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "venue: ui queue full");
+}
+
+/* I2 (review fix round 1, #97 §10.9): cancel an in-progress on-device creation and tell the ui --
+ * used by every command path that can take the engine out of CREATE mode WITHOUT the engine's own
+ * normal exits (a finished EV_VENUE_FOUND, create_finish_if_active(); or the user's own
+ * CMD_CREATE_CANCEL, handle_create_cmd()): CMD_RESET_ENGINE, CMD_SET_MODE, and a
+ * CMD_CONFIG_RELOAD that flips the mode. create_cancel_if_orphaned() (above) catches the fourth
+ * way (the engine leaving CREATE on its own, e.g. finalize_create()'s full-table abort) -- that
+ * one only runs after a lap_on_fix() dispatch, so it can never see CMD_SET_MODE -> DRAG (no more
+ * lap_on_fix() calls at all once in DRAG) or the synchronous CMD_RESET_ENGINE/CONFIG_RELOAD
+ * commands, which is exactly why those three call this directly instead. A no-op when no
+ * creation is active. */
+static void cancel_active_create(void)
+{
+    if (!s_create_active) return;
+    lap_create_cancel(&s_lap);
+    s_create_active = false;
+    ui_post_create(EV_CREATE_CANCELLED, 0);
+}
+
 /* CMD_RESET_ENGINE's body, split out of handle_cmd's switch for RULE-4-COMPOUND (the #87 ui-post
  * line pushed that switch over the 30-code-line compound-statement cap). M3 (final review, ruling
  * R-9, pipeline part): a dev-console reset must not leave the ui showing a stale best-sector/
@@ -643,12 +849,10 @@ static void ui_post_lap_reset(void)
  * directly so its running-lap clock stops too. */
 static void handle_reset_engine(void)
 {
+    cancel_active_create();   /* I2: a reset must not strand an in-progress creation */
     lap_reset(&s_lap);
     drag_reset(&s_drag);
-    stats_reset();
-    seq_enter();
-    memset(&s_best, 0, sizeof s_best);
-    seq_leave();
+    reset_best_and_stats();   /* F-2 (final review): the shared bookkeeping, also reused on CREATE begin/finish */
     publish_drag_snapshot();
     ui_post_lap_reset();
 }
@@ -674,23 +878,129 @@ static void handle_sim_scenario(const command_t *cmd)
 }
 #endif
 
+/* CMD_SET_LAYOUT's body, split out of handle_cmd's switch for RULE-4-COMPOUND (#97 below pushed
+ * the switch over the 30-code-line compound cap; same reason CMD_RESET_ENGINE/CMD_SIM_SCENARIO's
+ * bodies were split out, above). */
+static void handle_set_layout(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    lap_force_layout(&s_lap, cmd->arg16);
+    /* M3 (final review, ruling R-9, pipeline part): a forced layout invalidates the previous
+     * layout's best sector splits/theoretical best, same as the venue-change clear in
+     * pipeline_init() below -- clear s_best under the same seqlock every other writer uses. */
+    seq_enter();
+    memset(&s_best, 0, sizeof s_best);
+    seq_leave();
+}
+
+/* CMD_SET_MODE's body, split out of handle_cmd's switch (I2, review fix round 1, #97): a mode
+ * switch must not strand an in-progress creation (CMD_SET_MODE -> DRAG in particular means
+ * lap_on_fix() -- and so create_cancel_if_orphaned() -- is never called again at all). */
+static void handle_set_mode(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    cancel_active_create();
+    s_mode = (cmd->arg8 == MODE_DRAG) ? MODE_DRAG : MODE_LAP;
+    stats_reset();
+}
+
+/* CMD_CREATE_BEGIN/CMD_CREATE_CANCEL/CMD_MARK_GATE bodies (#97, §10.9), split out of handle_cmd's
+ * switch for RULE-4-COMPOUND, the same reason CMD_RESET_ENGINE/CMD_SIM_SCENARIO's bodies were
+ * (#87/Task 3, above). s_create_next_gate (declared above) is this task's own authoritative
+ * counter -- CMD_MARK_GATE never trusts cmd->arg8 (the ui's own mirror, sent only for its log
+ * line), it always marks the gate THIS task expects next, so a dropped/duplicate command can
+ * never desync the two. */
+/* CMD_CREATE_BEGIN's body, split out of handle_create_cmd (below) for RULE-4-COMPOUND -- the
+ * M-1/F-2 fixes pushed that if-chain over the compound-statement cap. */
+static void handle_create_begin(void)
+{
+    /* M-1 (final review, N1): DRAG mode never calls lap_on_fix(), so neither the engine's own
+     * finish (finalize_create()) nor create_cancel_if_orphaned() could ever fire -- a creation
+     * begun here would sit until a long MODE, with no recovery of its own. Refuse before arming
+     * anything; the ui never shows the one-shot (it only opens on EV_CREATE_BEGUN, never on
+     * CANCELLED/FAILED). */
+    if (s_mode != MODE_LAP) {
+        ui_post_create(EV_CREATE_CANCELLED, 0);
+        return;
+    }
+    lap_create_begin(&s_lap);
+    s_create_active     = true;
+    s_create_next_gate  = 0;
+    /* F-2 (final review, I-2): entering CREATE changes the venue under the engine's feet
+     * (lap_create_begin() -> reset_to_no_venue()) exactly like CMD_RESET_ENGINE/a forced layout
+     * do -- run the same bookkeeping so the ui is not left showing the PREVIOUS venue's stale
+     * best-sector/theoretical-best board while NEW TRACK is up. */
+    reset_best_and_stats();
+    ui_post_lap_reset();
+    ui_post_create(EV_CREATE_BEGUN, 0);
+}
+
+/* CMD_CREATE_CANCEL's body, split out of handle_create_cmd (below) for the same RULE-4-COMPOUND
+ * reason as handle_create_begin() above. Final review I-3: a cancel REQUEST always gets an
+ * answer, whether or not a creation was active -- cancel_active_create() (still used by the three
+ * AUTOMATIC paths: CMD_RESET_ENGINE, CMD_SET_MODE, a mode-changing CMD_CONFIG_RELOAD) stays silent
+ * when nothing is active, which is right for those, but the user's own cancel request must not
+ * depend on s_create_active: if any EARLIER EV_CREATE_CANCELLED post was ever dropped
+ * (ui_post_create()'s queue send is 0-tick, drop-newest, and the ui-side screen is still showing
+ * the one-shot either way), s_create_active is already false with no other event ever coming to
+ * free the screen (short MODE/CMD_MARK_GATE is also a silent no-op once !s_create_active). A
+ * second long MODE must always answer. */
+static void handle_create_cancel(void)
+{
+    if (s_create_active) {
+        lap_create_cancel(&s_lap);
+        s_create_active = false;
+    }
+    ui_post_create(EV_CREATE_CANCELLED, 0);
+}
+
+static void handle_create_cmd(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(cmd->type == CMD_CREATE_BEGIN || cmd->type == CMD_CREATE_CANCEL ||
+                   cmd->type == CMD_MARK_GATE, PIPE_ASSERT_CODE);
+    if (cmd->type == CMD_CREATE_BEGIN) {
+        handle_create_begin();
+        return;
+    }
+    if (cmd->type == CMD_CREATE_CANCEL) {
+        handle_create_cancel();
+        return;
+    }
+    /* CMD_MARK_GATE: a no-op outside CREATE mode (e.g. a stale/duplicate press after CANCEL).
+     * M3 (review fix round 1): s_last_fix is never invalidated on its own, so also require it to
+     * be recent (CREATE_MARK_FRESH_US) as well as valid -- a stale fix (GPS dropout) is refused
+     * the same as no fix at all, rather than placing a gate at a position from minutes ago. At
+     * boot s_last_fix is zeroed (mono_us == 0), so this is always stale until the first valid fix
+     * arrives, correctly refusing a press before then.
+     * M5: lap_mark_gate() exposes no reason for a refusal, but s_create_next_gate (this task's own
+     * authoritative counter) already tells full-table apart from everything else: idx beyond
+     * LAP_MAX_SECTORS can only mean every sector is already marked (lap_mark_gate's own
+     * n_sectors >= LAP_MAX_SECTORS check, lap.c) -- "out of order" is structurally unreachable
+     * here since this always marks the gate it itself expects next. */
+    if (!s_create_active) return;
+    uint8_t idx   = s_create_next_gate;
+    bool    fresh = s_last_fix.valid != 0 &&
+                    (esp_timer_get_time() - s_last_fix.mono_us) < CREATE_MARK_FRESH_US;
+    if (fresh && lap_mark_gate(&s_lap, idx, &s_last_fix, NULL) == 0) {
+        s_create_next_gate = (uint8_t)(idx + 1u);
+        ui_post_create(EV_CREATE_GATE_SET, idx);
+    } else {
+        uint8_t reason = (idx > (uint8_t)LAP_MAX_SECTORS) ? EV_CREATE_FAIL_FULL : EV_CREATE_FAIL_NOFIX;
+        ui_post_create(EV_CREATE_FAILED, reason);
+    }
+}
+
 static void handle_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(cmd->type <= CMD_TYPE_LAST, PIPE_ASSERT_CODE);   /* valid §4.4 command type (M1) */
     switch (cmd->type) {
     case CMD_SET_MODE:
-        s_mode = (cmd->arg8 == MODE_DRAG) ? MODE_DRAG : MODE_LAP;
-        stats_reset();
+        handle_set_mode(cmd);
         break;
     case CMD_SET_LAYOUT:
-        lap_force_layout(&s_lap, cmd->arg16);
-        /* M3 (final review, ruling R-9, pipeline part): a forced layout invalidates the previous
-         * layout's best sector splits/theoretical best, same as the venue-change clear in
-         * pipeline_init() below -- clear s_best under the same seqlock every other writer uses. */
-        seq_enter();
-        memset(&s_best, 0, sizeof s_best);
-        seq_leave();
+        handle_set_layout(cmd);
         break;
     case CMD_RESET_ENGINE:
         handle_reset_engine();
@@ -707,8 +1017,13 @@ static void handle_cmd(const command_t *cmd)
     case CMD_SIM_SCENARIO:
         handle_sim_scenario(cmd);
         break;
+    case CMD_MARK_GATE:
+    case CMD_CREATE_BEGIN:
+    case CMD_CREATE_CANCEL:
+        handle_create_cmd(cmd);
+        break;
     default:
-        break;                              /* MARK_GATE / CALIB_ORIENT: later sessions */
+        break;                              /* CALIB_ORIENT: later sessions */
     }
 }
 
@@ -769,8 +1084,16 @@ static void pipeline_init(void)
     /* §15.3 RTC continuity: derive a boot-scoped session identity for the snapshots (diagnostic
      * only -- not consumed by the resume path), then arm resume. app_main leaves a VALID snapshot
      * in place at boot step 4; if one is present, keep it and import on the first valid fix.
-     * Anything else -> start clean. */
-    trk_init();   /* clear the user track store before the sim venue is registered (§15.3 resume needs trk_get) */
+     * Anything else -> start clean.
+     *
+     * #97 (§10.9), final review F-4/I-4: the user track table itself is no longer touched here at
+     * all. main/app_main.c calls trk_init() then logger_load_tracks() (app/logger.h), in that
+     * order, on its own task, before logger_start() creates the logger task and well before this
+     * task is created; see core/trk.h's ownership comment for the full ordering argument. By the
+     * time pipeline_init() runs, the table already holds whatever survived the reboot, and the
+     * CFG_GPS_SIM block below (which registers the sim capture's own venue, at the RESERVED
+     * TRK_SIM_VENUE_ID -- final review F-5/I-5, never a real on-device-created venue's id) runs
+     * against it unchanged -- see that block's own comment. */
     int id_len = snprintf(s_session_id, sizeof s_session_id, "S%05u", (unsigned)(lt_nvs_boot_get() & 0xFFFFu));
     LT_ASSERT_VOID(id_len > 0 && (size_t)id_len < sizeof s_session_id, PIPE_ASSERT_CODE);   /* fit, not truncated */
     if (lt_rtc_validate(&s_resume) == RTC_VALID) {
@@ -790,13 +1113,28 @@ static void pipeline_init(void)
      * a resumed lap can rebuild this venue). Same JSON + same parser => the device venue == the
      * replay venue, so the lap engine starts ARMED against the identical S/F line. Parsing into the
      * table -- rather than a local trk_venue_t -- means lap_set_venue's stored pointer (lap.h)
-     * points at stable, permanent storage, never a stack/static temporary (Plan 7 Task 1). */
+     * points at stable, permanent storage, never a stack/static temporary (Plan 7 Task 1).
+     *
+     * Final review F-5/I-5 (#97, deferred note N2): sim_capture.h's SIM_VENUE_JSON now carries id
+     * TRK_SIM_VENUE_ID (core/trk.h), reserved OUTSIDE trk_next_user_id()'s range -- never the same
+     * id a real on-device creation could ever be assigned. Before this fix the sim capture used
+     * plain TRK_USER_ID_BASE, the exact id a FIRST real creation also gets: booting moto_sim on a
+     * device already holding a real venue persisted at that id took trk_user_add()'s same-id
+     * "replace" branch and silently overwrote it in the live table -- then the next
+     * LOGGER_SAVE_TRACKS wrote that loss to /tracks/user.bin permanently (this project's normal
+     * bench workflow flips between moto_sim and moto_neo6m on one board). With a reserved id, this
+     * trk_user_add_json() call can never collide with anything the boot load
+     * (app_main.c/logger_load_tracks()) just restored: tracks_save()/trk_user_load_venue()
+     * (logger.c/trk.c) additionally skip/reject this id outright, so it is never persisted and
+     * never reloaded -- every sim boot registers it fresh, always via trk_user_add()'s "new entry"
+     * append branch, never "replace" (the table never already holds this id when this runs). */
     {
         const char *vj = gps_sim_venue_json();
         uint16_t vid = 0; char err[96];
         if (vj && trk_user_add_json(vj, strlen(vj), &vid, err, sizeof err) == 0) {
             const trk_venue_t *v = trk_get(vid);
             LT_ASSERT_VOID(v != NULL, PIPE_ASSERT_CODE);
+            LT_ASSERT_VOID(v->id == TRK_SIM_VENUE_ID, PIPE_ASSERT_CODE);   /* F-5: sim_capture.h's reserved id */
             LT_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, PIPE_ASSERT_CODE);   /* indexes layouts[] */
             lap_set_venue(&s_lap, v);
             /* Plan 7c T3 (design §2): a venue/layout change invalidates the previous layout's best
@@ -814,6 +1152,12 @@ static void pipeline_init(void)
             if (g_log_req_q) { (void)xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)); logger_notify(); }
             logger_set_venue(v->id, layout_id, v->name);
             ESP_LOGI(TAG, "venue \"%s\" (id %u) armed from sim capture", v->name, (unsigned)v->id);
+            /* #98: lap_set_venue() above cannot announce for itself -- tell the ui directly
+             * (ui_post_venue(), never through engine_cb()). Harmless at boot: pipeline_init()
+             * precedes any handle_cmd(), so s_create_active cannot be true yet (see
+             * ui_post_venue()'s comment above) -- and show_venue_oneshot() (ui.c) returns early
+             * while BOOT is still up, so this never races the BOOT one-shot either. */
+            ui_post_venue(v->id, 0);
         } else {
             ESP_LOGW(TAG, "sim venue parse failed: %s", err);
         }

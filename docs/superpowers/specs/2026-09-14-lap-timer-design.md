@@ -1187,6 +1187,8 @@ The drag engine runs at 100 Hz on fused samples, re-anchored by GPS fixes:
 
 Expected error: IMU bias over 200 ms at 0.01 g contributes 2 cm/s, negligible; timing resolution 10 ms with linear interpolation, ±5 ms.
 
+Display names for the DIST gates (§11.1) depend on `cfg.dist_units` (`m`/`ft`, default `m`, #96) — this is a UI-only relabelling, not a wire-value change: `a`/`b` stay in cm regardless, and `drag_gate_label()`'s `dist_units` argument never reaches the engine's own gate-crossing math above. See §11.1's table for the metres/feet names.
+
 ### 6.7 Expected accuracy
 
 | GPS | Rate | Lap/gate accuracy | Notes |
@@ -1563,6 +1565,8 @@ Line endpoint convention: `p1` is the **left** end and `p2` the **right** end of
 
 `lap_reset` returns to `NO_VENUE` but keeps best/prev results of the session unless `CMD_RESET_ENGINE` with `arg8 = 1` (clear session).
 
+Any venue set directly by the pipeline outside this scan (the `CFG_GPS_SIM` boot venue; the §15.3/§10.10 RTC resume) is announced to the ui with its own `EV_VENUE_FOUND`, since `lap_set_venue`/`lap_import_rtc` carry no event buffer and cannot announce for themselves (#98).
+
 ### 10.4 Lap completion
 
 On accepted S/F crossing at `t_cross`:
@@ -1603,6 +1607,33 @@ Entered from menu "New track" → engine in `CREATE` sub-mode (state `NO_VENUE` 
 4. A reverse layout (id 2, name `Layout 1 Reverse`, `dir_sign` negated, sectors reversed) is generated automatically.
 5. Long MODE cancels creation.
 
+**App-side wiring (#97, Task 5; persistence redesigned in the Task 5 review's fix round 1,
+T5-R2/T5-R4).** The menu's "New track" item sends `CMD_CREATE_BEGIN`; the pipeline calls
+`lap_create_begin()` and posts the ui-only `EV_CREATE` event (`EV_CREATE_BEGUN`), which opens the
+persistent `NEW TRACK` one-shot (§20.6). Each short MODE press on it sends `CMD_MARK_GATE`; the
+pipeline marks the next gate the engine itself expects (never trusting the ui's own mirror of that
+count) and posts `EV_CREATE_GATE_SET` on success or `EV_CREATE_FAILED` on refusal (no valid/fresh
+fix, or the table is already full — "out of order" cannot happen, since the pipeline only ever
+marks the gate it itself expects next). Long MODE sends `CMD_CREATE_CANCEL` (`lap_create_cancel()`);
+the one-shot leaves only once `EV_CREATE_CANCELLED` confirms the engine actually left CREATE mode
+— which also now happens if the engine leaves CREATE on its own (e.g. a full user table) or a
+`CMD_RESET_ENGINE`/`CMD_SET_MODE`/mode-changing `CMD_CONFIG_RELOAD` interrupts it, so the screen
+can never strand the rider on a one-shot that will never finish. The engine's own finish (step 3
+above, the closing S/F crossing) is a real `EV_VENUE_FOUND`, not an `EV_CREATE_*` phase: the
+pipeline, seeing it while still in CREATE mode, asks the logger (`LOGGER_SAVE_TRACKS`,
+fire-and-forget) to persist the user track table to `/tracks/user.bin`, and the ui's existing
+`EV_VENUE_FOUND` handling replaces the `NEW TRACK` one-shot with the `VENUE` one-shot showing the
+new `Track_YYYYMMDD`. The table is written one venue at a time (`core/trk.h`'s
+`trk_user_save_venue`/`trk_user_load_venue`, a variable-length per-venue record — only a venue's
+actual layout/sector counts are written, not every unused slot), streamed through the logger's
+existing scratch batch (no new buffer; every record is well within it, independent of how many
+venues the table holds) to a `.tmp` file and renamed into place atomically, so every one of
+`TRK_MAX_USER` venues persists, not just one. At boot, before `logger_start()` creates the logger
+task, `main/app_main.c` clears the table once (`trk_init()`); the logger then loads
+`/tracks/user.bin` back into it itself, directly, inside its own boot init — no request from the
+pipeline, which no longer touches this table at boot at all — before any venue (sim or scanned) is
+registered, so every created venue survives a reboot.
+
 ### 10.10 RTC continuity
 
 The pipeline mirrors `{ venue_id, layout_id (0 if not locked), lap_no, lap_start_gps_us, sector_idx, gate_times[], best, prev, mode }` into `rtc_state_t` (CRC32, version) after every S/F or sector event. On boot with valid RTC state younger than `RTC_RESUME_MAX_S` and matching venue (first fix within `radius_m`), the engine restores directly into `LAP_RUNNING` with the flag `LAP_INTERRUPTED` set on the current lap.
@@ -1624,19 +1655,21 @@ which is what the e-paper build does since its UI ignores it.
 
 Default gate list (`drag_cfg_t.gates`, up to `DRAG_MAX_GATES = 16`), km/h units (mph list in §15.2):
 
-| id | kind | a | b | Display name |
-|----|------|---|---|--------------|
-| 1 | SPEED_FROM0 | 60 | — | 0-60 |
-| 2 | SPEED_FROM0 | 100 | — | 0-100 |
-| 3 | SPEED_FROM0 | 200 | — | 0-200 |
-| 4 | SPEED_FROM0 | 300 | — | 0-300 |
-| 5 | SPEED_RANGE | 100 | 200 | 100-200 |
-| 6 | DIST | 1829 (cm) | — | 60ft |
-| 7 | DIST | 10058 | — | 330ft |
-| 8 | DIST | 20117 | — | 1/8 |
-| 9 | DIST | 30480 | — | 1000ft |
-| 10 | DIST | 40234 | — | 1/4 (trap) |
-| 11 | BRAKE | 100 | 0 | 100-0 |
+| id | kind | a | b | Display name (`dist_units=ft`) | Display name (`dist_units=m`, #96) |
+|----|------|---|---|--------------------------------|-------------------------------------|
+| 1 | SPEED_FROM0 | 60 | — | 0-60 | 0-60 |
+| 2 | SPEED_FROM0 | 100 | — | 0-100 | 0-100 |
+| 3 | SPEED_FROM0 | 200 | — | 0-200 | 0-200 |
+| 4 | SPEED_FROM0 | 300 | — | 0-300 | 0-300 |
+| 5 | SPEED_RANGE | 100 | 200 | 100-200 | 100-200 |
+| 6 | DIST | 1829 (cm) | — | 60ft | 18m |
+| 7 | DIST | 10058 | — | 330ft | 101m |
+| 8 | DIST | 20117 | — | 1/8 | 1/8 |
+| 9 | DIST | 30480 | — | 1000ft | 305m |
+| 10 | DIST | 40234 | — | 1/4 (trap) | 1/4 (trap) |
+| 11 | BRAKE | 100 | 0 | 100-0 | 100-0 |
+
+The two mile gates (1/8, 1/4) keep the same name in both unit modes. A custom DIST gate (any `a` other than the five presets above) always prints `<a/100>m` rounded to the nearest metre, in both modes (`drag_gate_label()`, core/drag.h).
 
 `benches` for the riding screen = the `SPEED_FROM0` gates whose `a` is in `cfg.drag.benches_kmh` (default {100, 200, 300}); 0-60 is logged but not a headline bench by default.
 
@@ -1859,12 +1892,13 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 ## 15. Configuration and NVS
 
-### 15.1 Config struct and JSON schema (version 1)
+### 15.1 Config struct and JSON schema (version 2, #96)
 
 | JSON path | C field | Type | Range | Default | Notes |
 |-----------|---------|------|-------|---------|-------|
-| `version` | `version` | u8 | 1 | 1 | schema version; owned by firmware — ignored on CONFIG_SET, forced by cfg_validate |
+| `version` | `version` | u8 | 1–2 | 2 | schema version; owned by firmware — ignored on CONFIG_SET, forced by cfg_validate |
 | `units` | `units` | enum | `kmh`,`mph` | `kmh` | display + bench list selection |
+| `dist_units` | `dist_units` | enum | `m`,`ft` | `m` | display only, never reaches the engine (§6.6/§11.1): the DRAG DIST-gate NAME, and — since bench B4-F5/#96 — the gate-list and card distance-row VALUE too; the two mile gates (1/8, 1/4) are unaffected — added in v2 (#96), appended at the end of `cfg_t` (not grouped with `units`) so a stored v1 blob migrates byte-for-byte without shifting any other field; see §15.2 |
 | `mode` | `mode` | enum | `lap`,`drag` | `lap` | persisted last mode |
 | `lap.min_lap_s` | `lap.min_lap_s` | u16 | 5–600 | 20 | |
 | `lap.max_lap_s` | `lap.max_lap_s` | u16 | 60–3600 | 1800 | |
@@ -1899,7 +1933,7 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 
 | Namespace | Key | Type | Content |
 |-----------|-----|------|---------|
-| `lt_cfg` | `cfg` | blob | packed `cfg_t` with leading `version u8`, trailing CRC16 |
+| `lt_cfg` | `cfg` | blob | packed `cfg_t` with leading `version u8`, trailing CRC16; `CFG_VERSION` is 2 as of #96 (`dist_units` field) — `lt_cfg_load`/`cfg_blob_unwrap` migrate a stored v1 blob via `cfg_migrate` (sets `dist_units = CFG_DIST_M`) rather than resetting; the v2 field is appended at the end of `cfg_t`, not inserted next to `units`, specifically so `sizeof(cfg_t)` and every other field's on-flash offset are unchanged from v1 (byte-for-byte prefix). Forward migration is one-way: once a v2 blob has been written, an OTA rollback to a pre-#96 image (`cfg_migrate_supported(2)` is false there) resets the stored config to profile defaults on that image's next boot (review finding I2) |
 | `lt_cal` | `fus` | blob | `fus_calib_t` |
 | `lt_cal` | `mag` | blob | QMC hard-iron offsets (M10 only) |
 | `lt_err` | `ring` | blob | 32 × `{code u16, uptime_s u32, boot u16, arg u32}` = 384 B, plus `head u8` |
@@ -1910,6 +1944,8 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 | `lt_sys` | `ota_pending` | u8 | 1 while a new image awaits validation (belt-and-braces beside otadata) |
 
 NVS writes are batched: config and calibration only on change; error ring entries immediately (they are rare); counters at most once per 60 s except crash paths.
+
+Bench B4-F2 (#96): every persisted `CONFIG_SET` posts `CMD_CONFIG_RELOAD` to the pipeline, for every key, including purely cosmetic ones such as `dist_units`. The reload does **not** unconditionally re-init the drag engine: `pipeline_reload_cfg()` calls `drag_init()` (which drops the current run, the per-gate session bests, the armed state and resets `run_no` to 0 — the last one would otherwise renumber the next run 1 again mid-session and corrupt the DRAG_GATE records in the `.log`/`.sum`) only when `drag_cfg_engine_differs()` finds the built gate table or `rollout` actually changed; a display-only key (`dist_units`, or a `units` flip whose mph bench list is empty) adopts the new config in place and the run/bests/run-number survive.
 
 ### 15.3 RTC memory (`RTC_DATA_ATTR rtc_state_t`)
 
@@ -1931,7 +1967,7 @@ typedef struct {
 } rtc_state_t;
 ```
 
-Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`.
+Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`. A successful resume (§10.10) restores the engine's venue directly (`lap_import_rtc`), which cannot itself announce it — the pipeline posts the ui's `EV_VENUE_FOUND` for it (ui queue only — unlike the scan's, this copy is not logged or streamed, and carries `EV_VENUE_ANNOUNCE_ONLY` so the ui does not mistake it for a finished on-device creation) (#98).
 
 ---
 
@@ -2366,28 +2402,29 @@ Labels in `FONT_SMALL` at x=4. Times right-aligned at x=200. New best: the ΔS r
 **DRAG page 1**: all gates of the last run (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0).
 **DRAG page 2**: best per gate this session.
 
-Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a strip at bottom-right; `SYS_BATT_LOW` shows a battery icon with `%`. `SYS_GPS_NOFIX` shows the hollow GPS icon. Two ui-level glyphs share the strip, drawn after the §17.4 icons: `SIM` (a bold S) whenever the firmware feeds simulated GPS or IMU inputs (`CFG_GPS_SIM`/`CFG_IMU_SIM`), and `MOVING` (a double chevron) whenever the menu is motion-locked (§20.7); `MOVING` disappears once the bike is parked, which is the operator's cue that a sim run has finished and the menu is usable.
+Fault icons: drawn only when the corresponding `sys_flags` bit is set, in a strip at bottom-right; `SYS_BATT_LOW` shows a battery icon with `%`. `SYS_GPS_NOFIX` shows the hollow GPS icon. Three ui-level glyphs share the strip, drawn after the §17.4 icons: `SIM` (a bold S) whenever the firmware feeds simulated GPS or IMU inputs (`CFG_GPS_SIM`/`CFG_IMU_SIM`), `MOVING` (a double chevron) whenever the menu is motion-locked (§20.7) — it disappears once the bike is parked, which is the operator's cue that a sim run has finished and the menu is usable — and `LINK` (two chain links, #99) whenever the dev-kit (or a BLE peer) is connected (`link_peer_present()`), the leftmost of the three.
 
 **Font reconciliation (session 4.2, from rendered PBM goldens at 296×128).** The generated `FONT_MED` covers only `0-9 : . - + A-Z` and `FONT_BIG` only `0-9 : . - + S`, so labels containing `/` or lowercase (`1/4`, `60ft`, `1000ft`) render in `FONT_SMALL`; the riding-screen VALUES (times) use `FONT_BIG`/`FONT_MED`, the LABELS use `FONT_SMALL`. The LAP `dS` value row is `FONT_SMALL` (a `FONT_MED` glyph at y=112 clips past the 128-px frame). The empty time placeholder is `-:--.--` (7 chars, matching the `M:SS.cc` shape) so it does not overlap the left labels. DRAG pages 1/2 use a two-column gate grid. These are the byte-exact golden layouts under `test/snapshots/`.
 
 ### 20.6 One-shot screens
-`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` ("Cross S/F, press MODE").
+`BOOT` (name, version, self-test lines), `VENUE` ("KILLARNEY" then "FULL" once locked, 2 s each, then back to page 0), `SAFE MODE`, `LOW BATT`, `OTA` (title, progress bar, percentage and a status line: RECEIVING / VERIFYING / REBOOTING), `UPDATE FAILED, REVERTED`, `CALIBRATE` ("Hold upright, press MODE"), `NEW TRACK` (persistent, no auto-revert; §10.9/#97). `NEW TRACK`'s sub-line follows the creation step: `"Cross S/F, press MODE"` before the S/F gate is marked; `"S/F set. MODE: sector k"` (k = the next sector number, 1..`LAP_MAX_SECTORS`) once S/F is set and fewer than `LAP_MAX_SECTORS` sectors are marked; `"Cross S/F to finish"` once every sector is marked; `"No fix / not moving"` for one beat after a `CMD_MARK_GATE` refused for no valid/fresh fix, until the next gate event overwrites it. A `CMD_MARK_GATE` refused because the table is already full leaves the sub-line unchanged — `"Cross S/F to finish"` already says the right thing, so pressing MODE once more after the last sector is a harmless no-op, not a wrong message.
 
 ### 20.7 Menu
 
 Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignored (the `MOVING` glyph in the fault-icon strip (§20.5) stays on while the lock holds). Items (UP/DOWN move, MODE select, long MODE back/exit, auto-exit after 30 s idle):
 
 1. Mode: Lap / Drag
-2. Layout: list of the current venue's layouts + `Auto`
-3. New track (§10.9)
+2. Layout: cycles the current venue's layouts, `Auto` first — MODE on this item advances Auto → L1 → L2 → ... → Ln → Auto (the venue's layout list, by table order) and sends `CMD_SET_LAYOUT` (0 = Auto, else the chosen layout's id; the pipeline's `lap_force_layout()` also clears the best-sector snapshot). The choice is a per-venue manual override, runtime-only — not persisted — and resets to `Auto` the next time a venue is found. The VENUE one-shot (§20.6) shows the forced layout's real name once it locks (#98); venue/layout names throughout the ui are resolved from the track table (`trk_get`), not placeholder ids.
+3. New track (§10.9, #97): `CMD_CREATE_BEGIN` arms the engine and opens the `NEW TRACK` one-shot (§20.6). Each short MODE on it marks the next gate (`CMD_MARK_GATE`); long MODE cancels (`CMD_CREATE_CANCEL`) back to riding. The engine finishes on its own, on the next S/F crossing, with a real `EV_VENUE_FOUND` (not a menu action) — the pipeline then asks the logger to persist the user track table to `/tracks/user.bin`, and the ui's normal venue handling replaces `NEW TRACK` with the `VENUE` one-shot showing the new `Track_YYYYMMDD`.
 4. Calibrate (orientation capture; shows result)
-5. Units: km/h / mph
-6. Export (BLE) — enters CONNECTED, shows name + countdown
-7. Live to phone (only with `CFG_HAS_BLE_RC`)
-8. Diagnostics (§17.10)
-9. Sessions: list, per-session delete, delete all logs (keep summaries)
-10. Display: live clock on/off, full refresh now
-11. Sleep now (long-hold MODE 3 s to confirm)
+5. Speed: km/h / mph (renamed from `Units:`, bench B4-F6, #96)
+6. Distance: m / ft (renamed from `Dist:`, bench B4-F6, #96) — governs the DRAG DIST-gate label (§6.6/§11.1; the two mile gates keep their name either way) and, since bench B4-F5, the gate-list's distance-row VALUE (§7's pages 1/2 list, the 100-0 braking gate)
+7. Export (BLE) — enters CONNECTED, shows name + countdown
+8. Live to phone (only with `CFG_HAS_BLE_RC`)
+9. Diagnostics (§17.10)
+10. Sessions: list, per-session delete, delete all logs (keep summaries)
+11. Display: live clock on/off, full refresh now
+12. Sleep now (long-hold MODE 3 s to confirm)
 
 ### 20.8 Buttons (`app/ui/ui_buttons.c`)
 

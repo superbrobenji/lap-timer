@@ -34,11 +34,13 @@
 #include "core/cfg.h"
 #include "core/drag.h" /* drag_cfg_t/drag_gate_def_t/drag_cfg_from_user/drag_gate_label (Plan 7c T2/T5) */
 #include "core/event.h"
+#include "core/trk.h" /* trk_get/trk_venue_t: venue/layout names resolved from the track table (#98) */
 #include "core/ui/canvas.h" /* CANVAS_W/CANVAS_H/MENU_VISIBLE_ROWS: compile-time by PANEL (Plan 7 T3) */
-#include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc. */
+#include "core/ui/model.h" /* pulls in core/ui/render.h: fb_t, fb_init, screens_render, SCR_*, etc.; ui_layout_label (#98) */
 #include "core/ui/refresh_policy.h" /* ui_refresh_decide (Plan 7 Task 6): pure partial/full/none decision */
 #include "core/ui/stats_fold.h" /* session_max_t / session_max_fold (Plan 7c T1/T3) */
 
+#include "app/link.h" /* link_peer_present() (#99): the LINK strip glyph */
 #include "app/lt_assert.h"
 #include "app/lt_err.h"
 #include "app/lt_ipc.h"
@@ -110,6 +112,14 @@ static const char *TAG = "ui";
 #define MENU_LOCK_SPEED_KMH 10    /* menu entry gated below this (§20.7 / Appendix A) */
 #define MENU_IDLE_MS        30000 /* auto-exit after 30 s idle (MENU_IDLE_S) */
 #define UI_MENU_MAX         12    /* capacity of s_menu_action[]/s_model.menu_items[] (§20.7) */
+/* Review finding m7 (Task 3 fix round 1): the menu is now exactly at capacity (12 items with
+ * CFG_HAS_BLE_RC, #96's Distance: item made it so) and the two sides of that capacity -- this #define
+ * and model.h's screen_model_t.menu_items[] -- used to be tied only by comment. This ties them
+ * for real (not just to the same literal 12): a future change to either that the other doesn't
+ * follow is a build error here, not a runtime LT_ASSERT_VOID overrun caught only on-device. */
+_Static_assert(UI_MENU_MAX == (int)(sizeof(((screen_model_t *)0)->menu_items) /
+                                     sizeof(((screen_model_t *)0)->menu_items[0])),
+               "UI_MENU_MAX must match model.h's screen_model_t.menu_items[] capacity");
 
 /* ---- one-shots (spec §20.6, §17.6: boot + venue banners show ~2-3 s) ---- */
 /* Plan 7c T8 (design §6): 2000 -> 3000 so the +1 s boot_refmt_check() re-format (below) has time
@@ -139,6 +149,7 @@ enum {
     MA_NEWTRACK,
     MA_CALIBRATE,
     MA_UNITS,
+    MA_DIST,
     MA_EXPORT,
     MA_LIVE,
     MA_DIAG,
@@ -146,6 +157,13 @@ enum {
     MA_DISPLAY,
     MA_SLEEP,
 };
+/* M-7 (final review): one menu_add() call per action above, so MA_SLEEP + 1 (the enum's own item
+ * count, 0-based) is the real row count build_menu() produces today -- ties UI_MENU_MAX's own
+ * _Static_assert (above, against menu_items[]'s array capacity) to the actual number of items,
+ * not just the array size, so a future action added here without a matching capacity bump trips
+ * at COMPILE time instead of menu_add()'s runtime LT_ASSERT_VOID, which only fires the first time
+ * the menu is ever opened. */
+_Static_assert(MA_SLEEP + 1 <= UI_MENU_MAX, "one row per MA_* action must fit menu_items[]/UI_MENU_MAX");
 
 /* ---- static storage (no malloc after init, §17.9) ---- */
 static StaticTask_t s_tcb;
@@ -237,22 +255,42 @@ static bool    s_combo_fired;
 static uint8_t s_menu_action[12];
 static char    s_lbl_mode[16];
 static char    s_lbl_units[16];
+static char    s_lbl_dist[16];
 static char    s_lbl_disp[20];
+static char    s_lbl_layout[32];
+
+/* Layout menu item (#98): the current venue (set by the last EV_VENUE_FOUND) and the user's
+ * manual cycle position into its layout list (0 = Auto, i = venue->layouts[i-1]). Runtime-only --
+ * not persisted -- and reset to Auto on the next EV_VENUE_FOUND (spec §20.7: a per-venue manual
+ * override, not a sticky preference). */
+static uint16_t s_venue_id;
+static uint8_t  s_layout_choice;
+
+/* #97 (§10.9): the ui's own mirror of the next gate index, for the arg8 CMD_MARK_GATE carries --
+ * the pipeline (its own s_create_next_gate, pipeline.c) is the AUTHORITATIVE counter and never
+ * trusts this value, so a dropped/duplicate press can only ever cost this task a stale display,
+ * never desync the engine. Reset to 0 on EV_CREATE_BEGUN, advanced on EV_CREATE_GATE_SET. */
+static uint8_t s_create_next_gate;
 
 /* ---- helpers ---- */
 
-static void ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
+/* Final review I-3: returns whether the post actually landed on g_cmd_q -- every existing caller
+ * still just fires-and-forgets (the return value is unused C, not an error), but btn_long()'s
+ * NEWTRACK/long-MODE case (below) needs to know a dropped CMD_CREATE_CANCEL from a momentarily-
+ * full queue so it can escape the one-shot locally instead of waiting forever for an
+ * EV_CREATE_CANCELLED that was never sent in the first place. */
+static bool ui_send_cmd(uint8_t type, uint8_t arg8, uint16_t arg16)
 {
-    LT_ASSERT_VOID(type <= CMD_TYPE_LAST, UI_APP_ASSERT_CODE);   /* a valid §4.4 command type (M1); the ui never actually posts CMD_SIM_SCENARIO (sim-only), it just shares pipeline.c's bound */
+    LT_ASSERT_RET(type <= CMD_TYPE_LAST, UI_APP_ASSERT_CODE, false);   /* a valid §4.4 command type (M1); the ui never actually posts CMD_SIM_SCENARIO (sim-only), it just shares pipeline.c's bound */
     if (g_cmd_q == NULL) {
-        return;
+        return false;
     }
     command_t c;
     memset(&c, 0, sizeof c);
     c.type  = type;
     c.arg8  = arg8;
     c.arg16 = arg16;
-    (void)xQueueSend(g_cmd_q, &c, 0);
+    return xQueueSend(g_cmd_q, &c, 0) == pdTRUE;
 }
 
 /* Append one row (label + action) to the parallel menu arrays and advance the count; the label
@@ -270,18 +308,26 @@ static void build_menu(void)
 {
     LT_ASSERT_VOID(s_mode <= MODE_DRAG, UI_APP_ASSERT_CODE);                     /* label depends on it */
     LT_ASSERT_VOID(s_cfg.units <= CFG_UNITS_MPH, UI_APP_ASSERT_CODE);           /* label depends on it */
+    LT_ASSERT_VOID(s_cfg.dist_units <= CFG_DIST_FT, UI_APP_ASSERT_CODE);        /* label depends on it */
     uint8_t n = 0;
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
-    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
+    /* #98: recomputed from the source of truth (s_venue_id/s_layout_choice, armed by
+     * handle_venue_found()), same pattern as the other dynamic labels above -- so the menu always
+     * opens showing the right choice even if menu_do_layout()'s own live update (below) was never
+     * reached this venue (e.g. the venue was just found and the menu has not been cycled yet). */
+    (void)ui_layout_label(trk_get(s_venue_id), s_layout_choice, s_lbl_layout, sizeof s_lbl_layout);
 
     menu_add(&n, s_lbl_mode, MA_MODE);
-    menu_add(&n, "Layout", MA_LAYOUT);
+    menu_add(&n, s_lbl_layout, MA_LAYOUT);
     menu_add(&n, "New track", MA_NEWTRACK);
     menu_add(&n, "Calibrate", MA_CALIBRATE);
     menu_add(&n, s_lbl_units, MA_UNITS);
+    menu_add(&n, s_lbl_dist, MA_DIST);
     menu_add(&n, "Export (BLE)", MA_EXPORT);
 #if CFG_HAS_BLE_RC
     menu_add(&n, "Live to phone", MA_LIVE);
@@ -344,6 +390,12 @@ static void ui_exit_menu(void)
  * load failure s_cfg keeps its last-known-good value (lt_cfg_load leaves it untouched), which is
  * the same fall-back the boot seed uses. */
 
+/* Forward decl: menu_do_mode() (below) and ui_reload_cfg() (further down) both need to re-derive
+ * the DRAG card's state immediately after a mode flip (Task 1 review round 1, finding I1) --
+ * drag_rows_refill() itself is defined further down next to the other DRAG row-building helpers
+ * (Plan 7c T5). */
+static void drag_rows_refill(void);
+
 /* Applies a new riding mode to s_mode/s_model.mode, resets the screen to page 0 (§22.6), and --
  * when leaving LAP mode -- stops the live lap clock. Shared by menu_do_mode (local MA_MODE toggle)
  * and ui_reload_cfg (I2, final review ruling B-6: a remote CONFIG_SET's mode flip must behave
@@ -371,6 +423,16 @@ static void ui_apply_mode(uint8_t new_mode)
         s_model.cur_running = false;
         s_model.cur_ms      = 0;
     }
+    /* #95 (bench B4-F1): a mode switch is a whole-screen replacement (above) -- the DRAG card must
+     * never render a stale READY/LAUNCHED/DONE left over from before the switch. menu_do_mode's
+     * own caller, CMD_SET_MODE, resets neither the engine nor this mirror (handle_set_mode(),
+     * pipeline.c -- a deliberate, documented gap, not this defect), so nothing else guarantees a
+     * fresh read here on that path; ui_reload_cfg() below does refill immediately after when the
+     * new mode is DRAG, so this is belt-and-suspenders there, but it is the ONLY correction on the
+     * local-menu path. Defaulting to NOT READY rather than carrying the old value forward is the
+     * same safe-direction choice as the rest of this fix: never show a state more confident than
+     * IDLE until a real EV_DRAG_* snapshot earns it. */
+    s_model.drag_run_state = DRAG_ST_IDLE;
     LT_ASSERT_VOID(s_model.mode == s_mode, UI_APP_ASSERT_CODE);
 }
 
@@ -380,18 +442,24 @@ static void menu_do_mode(void)
 {
     uint8_t new_mode = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
     ui_apply_mode(new_mode);
+    /* Task 1 review round 1, finding I1: ui_apply_mode()'s forced DRAG_ST_IDLE write has no
+     * corrective refill on THIS caller -- CMD_SET_MODE's handler (handle_set_mode(), pipeline.c)
+     * resets neither the drag engine nor anything else that would reach the ui, so a genuinely
+     * ARMED/LAUNCHED/DONE engine frozen across a local LAP<->DRAG toggle would otherwise leave the
+     * card reading NOT READY indefinitely -- no event re-arms it, and ui_task() is purely
+     * event/button driven with no periodic re-sync. Same one-line pattern already used by
+     * menu_do_units()/menu_do_dist() below and by ui_reload_cfg(): re-derive the true state from
+     * the snapshot the instant it's known, rather than leaving the pessimistic IDLE default to
+     * stand uncorrected. Costs nothing when leaving DRAG (guard is false). */
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+    }
     (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
     s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
     (void)lt_cfg_save(&s_cfg);
     ui_send_cmd(CMD_SET_MODE, s_mode, 0);
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
 }
-
-/* Forward decl: menu_do_units() (below) rebuilds the DRAG gate table on a units change and, if the
- * DRAG screen's rows are the ones showing, refills them immediately so labels/benches follow the
- * new setting the moment riding resumes; drag_rows_refill() itself is defined further down next to
- * the other DRAG row-building helpers (Plan 7c T5). */
-static void drag_rows_refill(void);
 
 /* MA_UNITS: toggle km/h<->mph, persist, refresh the label and the model (the menu is showing, so
  * the change appears on screen the moment riding resumes -- Plan 7c T4, design §3). Plan 7c T5:
@@ -410,9 +478,53 @@ static void menu_do_units(void)
     ui_send_cmd(CMD_CONFIG_RELOAD, 0, 0);
     s_model.units = s_cfg.units;
     s_dirty       = true;
-    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s",
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s",
              s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
-    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
+    /* Final review I1: the CMD_CONFIG_RELOAD just sent runs on the pipeline task, asynchronously
+     * -- pipeline_reload_cfg() only calls drag_init() (dropping the run, the session bests and the
+     * armed state) when drag_cfg_engine_differs() says the built gate table/rollout actually
+     * moved. That task may not have run yet by the time drag_rows_refill() below reads the
+     * pipeline snapshot, so the refill can read a PRE-reload snapshot and re-derive a stale
+     * ARMED/LAUNCHED/DONE that the reload is about to invalidate. Compute the pipeline's own
+     * verdict here, against the OLD s_drag_cfg, BEFORE it is overwritten -- rather than trusting
+     * whatever the refill happens to read -- and force the pessimistic value after the refill when
+     * it is true, so it wins over the stale read until the pipeline republishes (same shape in
+     * ui_reload_cfg() below, for the remote CONFIG_SET path). */
+    drag_cfg_t nc;
+    drag_cfg_from_user(&s_cfg, &nc);
+    bool table_moved = drag_cfg_engine_differs(&nc, &s_drag_cfg);
+    s_drag_cfg = nc;
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+        if (table_moved) {
+            s_model.drag_run_state = DRAG_ST_IDLE;
+            s_model.drag_n         = 0;    /* drag_init() dropped the run and the session bests */
+        }
+    }
+}
+
+/* MA_DIST (#96): toggle the display distance unit (m <-> ft), persist, refresh the label (now
+ * "Distance: m/ft", bench B4-F6) and the model, and -- when DRAG is the current riding mode --
+ * refill the rows now so they already show the new unit once the menu exits (same pattern as
+ * menu_do_units() above). This does not touch s_drag_cfg: dist_units only changes DISPLAY (the
+ * DIST-gate LABEL via drag_gate_label, and, since bench B4-F5, the gate list's distance-row VALUE
+ * via screens_moto.c's dist_display()) -- it never changes which gates fire or their a/b values,
+ * unlike a units (km/h<->mph) toggle.
+ * Bench B4-F2 (#96): no longer posts CMD_CONFIG_RELOAD -- the pipeline has no use for dist_units
+ * at all (it never reads the field; investigation-cfg-reload.md §3), so the round trip through the
+ * pipeline queue bought nothing and, before the pipeline-side fix, destroyed the run on every
+ * toggle. menu_do_display() (below) is the established precedent for a display-only menu item that
+ * posts nothing. The remote path (any CONFIG_SET key, cmd.c cfg_change_notify) still reaches
+ * pipeline_reload_cfg() for every key -- that is why the pipeline fix (drag_cfg_engine_differs(),
+ * drag.h/pipeline.c) is the mandatory half; this ui-side skip is the belt that goes with it. */
+static void menu_do_dist(void)
+{
+    (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
+    s_cfg.dist_units = (s_cfg.dist_units == CFG_DIST_FT) ? (uint8_t)CFG_DIST_M : (uint8_t)CFG_DIST_FT;
+    (void)lt_cfg_save(&s_cfg);
+    s_model.dist_units = s_cfg.dist_units;
+    s_dirty            = true;
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     if (s_model.mode == SCR_MODE_DRAG) {
         drag_rows_refill();
     }
@@ -431,6 +543,46 @@ static void menu_do_display(void)
     s_dirty = true;
 }
 
+/* MA_LAYOUT (#98): cycle the Layout menu item through the current venue's layouts, Auto first --
+ * Auto, L1, L2, ..., Ln, Auto, ... s_venue_id/s_layout_choice are the per-venue, runtime-only
+ * state handle_venue_found() arms (reset to Auto there, not persisted). Sends CMD_SET_LAYOUT (0 =
+ * Auto -> lap_force_layout() in the pipeline, which also clears the best snapshot) and refreshes
+ * s_lbl_layout immediately for live feedback while the menu stays open (same pattern as
+ * menu_do_units()/menu_do_dist() above). */
+static void menu_do_layout(void)
+{
+    const trk_venue_t *v = trk_get(s_venue_id);
+    uint8_t n = (v != NULL) ? v->n_layouts : 0u;
+    LT_ASSERT_VOID(n <= TRK_MAX_LAYOUTS, UI_APP_ASSERT_CODE);
+    /* #98 bench fix (B4-F3): an unresolved venue (s_venue_id == 0 -- the ui never received
+     * EV_VENUE_FOUND, bench finding B4-F3) or a resolved one with no layouts has nothing to
+     * cycle. Previously this fell through and posted CMD_SET_LAYOUT id 0 anyway: a true no-op for
+     * the engine (already Auto), but handle_set_layout() (pipeline.c) still clears s_best under
+     * the seqlock on every single press -- wiping the rider's best-sector splits and theoretical
+     * best for no gain. Stay on Auto and do nothing instead. */
+    if (v == NULL || n == 0u) {
+        ESP_LOGD(TAG, "menu: layout press ignored, no venue/layouts (venue %u)", (unsigned)s_venue_id);
+        return;
+    }
+    s_layout_choice = (uint8_t)((s_layout_choice + 1u) % (n + 1u));          /* Auto, L1, L2, ..., Auto */
+    uint16_t id = (s_layout_choice == 0u) ? 0u : v->layouts[s_layout_choice - 1u].id;
+    ui_send_cmd(CMD_SET_LAYOUT, 0, id);                                       /* 0 = Auto (lap_force_layout) */
+    (void)ui_layout_label(v, s_layout_choice, s_lbl_layout, sizeof s_lbl_layout);
+    /* M-10 (final review): lap_force_layout() (pipeline.c) posts no EV_LAYOUT_LOCKED, so without
+     * this s_model.layout_name -- used only by the VENUE one-shot's "layout locked" phase
+     * (render_oneshot_venue(), screens_moto.c) -- would keep whatever the PREVIOUS real lock last
+     * set while the menu label (s_lbl_layout, just updated above) already shows the newly forced
+     * choice. Keep the model in step directly from the same source handle_layout_locked() itself
+     * reads, rather than waiting for an event a forced choice never generates. */
+    if (s_layout_choice == 0u) {
+        s_model.layout_name[0] = '\0';   /* Auto: no layout is "locked" -- venue phase */
+    } else {
+        snprintf(s_model.layout_name, sizeof s_model.layout_name, "%s", v->layouts[s_layout_choice - 1u].name);
+    }
+    ESP_LOGI(TAG, "menu: layout choice %u -> id %u", (unsigned)s_layout_choice, (unsigned)id);
+    s_dirty = true;
+}
+
 static void menu_select(void)
 {
     LT_ASSERT_VOID(s_model.menu_sel < UI_MENU_MAX, UI_APP_ASSERT_CODE);   /* indexes s_menu_action[] */
@@ -440,12 +592,12 @@ static void menu_select(void)
     switch (act) {
     case MA_MODE:    menu_do_mode();    break;
     case MA_UNITS:   menu_do_units();   break;
+    case MA_DIST:    menu_do_dist();    break;
     case MA_DISPLAY: menu_do_display(); break;
-    /* The venue's layout list is not plumbed to the ui yet; select "Auto" (layout id 0). */
-    case MA_LAYOUT:    ui_send_cmd(CMD_SET_LAYOUT, 0, 0); ESP_LOGI(TAG, "menu: Layout -> Auto (per-venue layout list: issue #98)"); break;
+    case MA_LAYOUT:    menu_do_layout();    break;
     /* pipeline drops CMD_CALIB_ORIENT until the calib session lands. */
     case MA_CALIBRATE: ui_send_cmd(CMD_CALIB_ORIENT, 0, 0); ESP_LOGI(TAG, "menu: Calibrate -> CMD_CALIB_ORIENT"); break;
-    case MA_NEWTRACK: ESP_LOGW(TAG, "menu: New track not implemented (issue #97)"); break;
+    case MA_NEWTRACK: ui_send_cmd(CMD_CREATE_BEGIN, 0, 0); ESP_LOGI(TAG, "menu: New track -> CMD_CREATE_BEGIN"); break;
     case MA_EXPORT:   ESP_LOGW(TAG, "menu: Export (BLE) not implemented (plan 06)"); break;
     case MA_LIVE:     ESP_LOGW(TAG, "menu: Live to phone not implemented (plan 06)"); break;
     case MA_DIAG:     ESP_LOGW(TAG, "menu: Diagnostics export not implemented (§17.10, plan 05)"); break;
@@ -479,6 +631,14 @@ static void btn_short(uint8_t bit)
         (s_model.oneshot == ONESHOT_BOOT || s_model.oneshot == ONESHOT_VENUE)) {
         s_oneshot_until_us = 0;
         ui_exit_menu(); /* -> SCR_RIDING */
+        return;
+    }
+
+    /* #97 (§10.9): a short MODE on the NEW TRACK one-shot marks the next gate; UP/DOWN are
+     * ignored. The one-shot itself is persistent (no auto-revert) -- it only leaves on
+     * EV_CREATE_CANCELLED (long MODE, below) or EV_VENUE_FOUND (the engine's own finish). */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK) {
+        if (bit == BTN_MODE) ui_send_cmd(CMD_MARK_GATE, s_create_next_gate, 0);
         return;
     }
 
@@ -534,6 +694,21 @@ static void btn_long(uint8_t bit)
         }
     } else if (s_model.screen == SCR_ONESHOT) {
         if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
+        /* #97 (§10.9): long MODE cancels creation -- CMD_CREATE_CANCEL, not an immediate
+         * ui_exit_menu(): the screen leaves only once EV_CREATE_CANCELLED confirms the engine
+         * actually left CREATE mode, so the engine state and the screen never fall out of step.
+         * Final review I-3: EXCEPT when the post itself never landed (g_cmd_q momentarily full) --
+         * then no EV_CREATE_CANCELLED is ever coming (the pipeline never saw the request), so
+         * waiting for one would strand this screen with no recovery at all. Exit locally in that
+         * one case; the pipeline-side fix (handle_create_cancel()) makes every request that DOES
+         * land answer unconditionally, so this is purely the "never even sent" backstop. */
+        if (s_model.oneshot == ONESHOT_NEWTRACK) {
+            if (!ui_send_cmd(CMD_CREATE_CANCEL, 0, 0)) {
+                s_oneshot_until_us = 0;
+                ui_exit_menu();
+            }
+            return;
+        }
         s_oneshot_until_us = 0;
         ui_exit_menu();
     } else { /* SCR_RIDING */
@@ -638,11 +813,30 @@ static void check_held(int64_t now)
 
 /* ---- event -> model (§20.3 / §20.4) ---- */
 
-static void show_venue_oneshot(int64_t now)
+static void show_venue_oneshot(int64_t now, bool announce_only)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* gated on it below */
     LT_ASSERT_VOID(now >= 0, UI_APP_ASSERT_CODE);   /* stamp for the one-shot revert timer */
-    if (s_model.screen != SCR_RIDING) {
+    /* #97 (§10.9): the ONE other screen allowed to be replaced here is the NEW TRACK one-shot
+     * finishing creation (the engine's own EV_VENUE_FOUND on the closing S/F crossing) -- every
+     * other one-shot/menu still blocks this (s_model.oneshot is stale/meaningless outside
+     * SCR_ONESHOT, so it is only read when screen == SCR_ONESHOT, same guard style as the
+     * ONESHOT_OTA checks elsewhere in this file).
+     *
+     * #98 fix round 1 (review Important 1): `announce_only` is true only for the pipeline's own
+     * ui-only venue post (flags == EV_VENUE_ANNOUNCE_ONLY, core/event.h) -- a venue it set itself
+     * at boot or on a §15.3 resume, NOT a finished on-device creation. Such a post must never take
+     * the on_newtrack door: at the resume site s_create_active can be true (New track needs no
+     * fix, no venue, so a user can select it before the first valid fix), and replacing the
+     * persistent NEW TRACK one-shot here would both show a misleading "venue found" card and make
+     * the real EV_CREATE_CANCELLED a no-op (its own on_nt, ui.c, would already read false by the
+     * time it is handled). The persistent OTA one-shot is equally protected in principle -- it is
+     * already structurally unreachable here (screen != SCR_RIDING and oneshot != ONESHOT_NEWTRACK
+     * both fail while OTA is up), but announce_only forecloses it explicitly rather than relying
+     * on that happening to stay true. */
+    bool on_newtrack = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK;
+    if (announce_only) on_newtrack = false;
+    if (s_model.screen != SCR_RIDING && !on_newtrack) {
         return; /* don't interrupt the menu or another one-shot */
     }
     s_model.screen     = SCR_ONESHOT;
@@ -674,6 +868,16 @@ static void handle_ota(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    /* M4 (review fix round 1, #97 §10.9): every branch below can replace the screen unconditionally
+     * while NEW TRACK is showing -- tell the pipeline to leave CREATE mode too, so an aborted/
+     * failed push does not strand the engine in CREATE (no venue scan, no laps) with no screen
+     * left to finish it from. Sent before any eviction branch so it covers both the terminal
+     * ROLLED_BACK path and the ordinary progress path; handle_create()'s own EV_CREATE_CANCELLED
+     * handler is a no-op by the time it arrives, since this function has already moved the screen
+     * off NEW TRACK (on_nt there reads false). */
+    if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK) {
+        ui_send_cmd(CMD_CREATE_CANCEL, 0, 0);
+    }
     uint8_t phase   = e->flags;
     uint8_t pct     = e->arg16 > 100u ? 100u : (uint8_t)e->arg16;
     bool    on_safe = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE;
@@ -875,7 +1079,7 @@ static void row_from_gate(drag_row_t *r, const drag_gate_def_t *g, const drag_ga
     LT_ASSERT_VOID(r != NULL && g != NULL, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(res != NULL, UI_APP_ASSERT_CODE);
     memset(r, 0, sizeof *r);
-    if (drag_gate_label(g, s_model.units, r->label, sizeof r->label) < 0) {
+    if (drag_gate_label(g, s_model.units, s_model.dist_units, r->label, sizeof r->label) < 0) {
         snprintf(r->label, sizeof r->label, "G%u", (unsigned)g->id);   /* fallback: bounded */
     }
     r->present     = present;
@@ -980,6 +1184,10 @@ static void drag_rows_refill(void)
         return;
     }
     LT_ASSERT_VOID(d.current.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
+    /* #95 (bench B4-F1): re-derive the card's state from this same snapshot on every refill --
+     * there is no independently-ageing mirror left. Every EV_DRAG_* case and every cfg/mode/reset
+     * path that calls this function gets the engine's current state for free. */
+    s_model.drag_run_state = d.state;
     switch (s_model.page) {
     case 0:
     case 1: drag_fill_from_run(&d.current, true); break;   /* I3: both list hit gates only */
@@ -1009,20 +1217,59 @@ static void handle_sector(const event_t *e)
     s_dirty          = true;
 }
 
-/* EV_VENUE_FOUND -> model (split verbatim out of handle_event for rule 4). */
+/* EV_VENUE_FOUND -> model (split verbatim out of handle_event for rule 4). #98: resolves the real
+ * venue name through the track table (replaces the "V%u" placeholder) and arms the Layout menu
+ * item for this venue -- s_layout_choice resets to Auto; build_menu() picks up s_venue_id the next
+ * time the menu opens (ui_layout_label(trk_get(s_venue_id), s_layout_choice, ...), same pattern as
+ * s_lbl_units/s_lbl_dist), so the label reads "Layout: Auto" without this handler touching it.
+ * Final review M-6: trk_validate_venue() does not require a non-empty name (only its own NUL
+ * termination), so an uploaded/JSON venue with an empty name string is structurally valid --
+ * falls back to the old "VENUE" placeholder rather than rendering a blank one-shot. Created
+ * venues always get a real "Track_YYYYMMDD..." name (lap.c's finalize_create()), so this only
+ * ever bites an uploaded/JSON venue.
+ *
+ * #98 fix round 1 (Important 1): the model updates above run UNCONDITIONALLY regardless of which
+ * of the two EV_VENUE_FOUND kinds this is (core/event.h) -- the Layout item and the venue name
+ * must work either way. Only whether this is allowed to interrupt a PERSISTENT one-shot (NEW
+ * TRACK) depends on provenance -- see show_venue_oneshot()'s announce_only parameter. */
 static void handle_venue_found(const event_t *e, int64_t now)
 {
-    snprintf(s_model.venue_name, sizeof s_model.venue_name, "V%u", (unsigned)e->arg16);
+    s_venue_id      = e->arg16;
+    s_layout_choice = 0;
+    const trk_venue_t *v = trk_get(e->arg16);
+    snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s",
+             (v != NULL && v->name[0] != '\0') ? v->name : "VENUE");
     s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
-    show_venue_oneshot(now);
+    /* M3 (final review): a bit test, not an equality test -- flags == EV_VENUE_ANNOUNCE_ONLY is
+     * correct only while that is the single bit ever set (every engine emit passes literal 0,
+     * test_lap.c's flags-are-0 loop pins it); it breaks silently the day a second EV_VENUE_FOUND
+     * flag bit is defined alongside it. */
+    show_venue_oneshot(now, (e->flags & EV_VENUE_ANNOUNCE_ONLY) != 0u);
     s_dirty = true;
 }
 
-/* EV_LAYOUT_LOCKED -> model (split verbatim out of handle_event for rule 4). */
+/* EV_LAYOUT_LOCKED -> model (split verbatim out of handle_event for rule 4). #98: resolves the
+ * locked layout's real name within the current venue (trk_get(s_venue_id), set by the last
+ * EV_VENUE_FOUND); an unknown venue or layout id falls back to "L%u" (e.g. a forced layout id a
+ * venue change has not caught up with yet). */
 static void handle_layout_locked(const event_t *e, int64_t now)
 {
-    snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
-    show_venue_oneshot(now); /* layout phase: render shows layout_name (non-empty) */
+    const trk_venue_t *v = trk_get(s_venue_id);
+    const char        *name = NULL;
+    if (v != NULL) {
+        LT_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, UI_APP_ASSERT_CODE);   /* indexes layouts[] */
+        for (uint8_t i = 0; i < v->n_layouts; i++) {
+            if (v->layouts[i].id == e->arg16) { name = v->layouts[i].name; break; }
+        }
+    }
+    if (name != NULL) {
+        snprintf(s_model.layout_name, sizeof s_model.layout_name, "%s", name);
+    } else {
+        snprintf(s_model.layout_name, sizeof s_model.layout_name, "L%u", (unsigned)e->arg16);
+    }
+    /* #98 fix round 1: EV_LAYOUT_LOCKED is always the engine's own lock -- never an announce-only
+     * post (only EV_VENUE_FOUND ever carries that flag) -- so announce_only is always false here. */
+    show_venue_oneshot(now, false); /* layout phase: render shows layout_name (non-empty) */
     s_dirty = true;
 }
 
@@ -1033,29 +1280,52 @@ static void handle_layout_locked(const event_t *e, int64_t now)
  * build_menu() directly: that function's other job, rebuilding s_model.menu_items[]/menu_n/
  * s_menu_action[] via menu_add(), is a side effect well beyond "refresh three label strings" and
  * is not needed here (the menu's item list/order never changes, only the label text).
- * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived, but drag_init()
- * (called by the pipeline's own reload) always drops ARMED -- clear the ui's mirror of it here
- * too so a remote CONFIG_SET can't leave a stale "ARMED" indicator on screen.
+ * fix round 1 (minor finding 2): drag_armed is engine state, not cfg-derived. Bench B4-F2 (#96):
+ * since pipeline_reload_cfg() no longer always calls drag_init() (it only re-inits when
+ * drag_cfg_engine_differs() says the gate table/rollout actually moved -- see drag.h/pipeline.c),
+ * the engine may still be ARMED/LAUNCHED/DONE on a display-only reload -- drag_rows_refill()'s own
+ * re-derive (s_model.drag_run_state = d.state, from the just-reloaded pipeline snapshot) is what
+ * normally picks that up, whenever DRAG rows are the ones showing (the only case this field is
+ * ever rendered: screens_moto.c's render_drag_page0 is reached only in DRAG mode).
  * I2 (final review, ruling B-6): a remote mode flip must mirror menu_do_mode's own reset
  * (ui_apply_mode above) -- page 0 reset to §22.6 and the live lap clock stopped when leaving LAP
  * -- not just a relabelled menu while the riding screen keeps showing stale LAP state under a
  * now-DRAG mode. Only applied when the mode actually changed: most CONFIG_SET calls touch
- * units/display, and those must NOT reset the current page/clock. */
+ * units/display, and those must NOT reset the current page/clock.
+ * Final review I1: the refill above races pipeline_reload_cfg() exactly like menu_do_units()'s
+ * does -- EV_CFG_CHANGED and CMD_CONFIG_RELOAD are two separate posts from cfg_change_notify()
+ * (cmd.c) with no ordering between the ui and pipeline tasks, so the refill below can read a
+ * PRE-reload snapshot and re-derive a stale ARMED/LAUNCHED/DONE. The unconditional
+ * `s_model.drag_run_state = DRAG_ST_IDLE;` this function used to write right after
+ * drag_cfg_from_user() is gone -- it bought nothing (the refill overwrites it unconditionally a
+ * few lines down) and, worse, looked like the fix. The real fix is the same shape as
+ * menu_do_units(): compute the pipeline's own verdict against the OLD s_drag_cfg BEFORE
+ * overwriting it, and force the pessimistic value AFTER the refill so it wins over a stale read. */
 static void ui_reload_cfg(void)
 {
     cfg_defaults(&s_cfg);
     (void)lt_cfg_load(&s_cfg);
-    s_model.units = s_cfg.units;
+    s_model.units      = s_cfg.units;
+    s_model.dist_units = s_cfg.dist_units;
     uint8_t new_mode = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     if (new_mode != s_mode) {
         ui_apply_mode(new_mode);
     }
-    s_model.drag_armed = false;
-    drag_cfg_from_user(&s_cfg, &s_drag_cfg);
-    snprintf(s_lbl_units, sizeof s_lbl_units, "Units: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    drag_cfg_t nc;
+    drag_cfg_from_user(&s_cfg, &nc);
+    bool table_moved = drag_cfg_engine_differs(&nc, &s_drag_cfg);
+    s_drag_cfg = nc;
+    snprintf(s_lbl_units, sizeof s_lbl_units, "Speed: %s", s_cfg.units == CFG_UNITS_MPH ? "mph" : "km/h");
+    snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s", s_cfg.display.live_clock ? "on" : "off");
-    if (s_model.mode == SCR_MODE_DRAG) drag_rows_refill();
+    if (s_model.mode == SCR_MODE_DRAG) {
+        drag_rows_refill();
+        if (table_moved) {
+            s_model.drag_run_state = DRAG_ST_IDLE;
+            s_model.drag_n         = 0;    /* drag_init() dropped the run and the session bests */
+        }
+    }
     s_dirty = true;
     LT_ASSERT_VOID(s_drag_cfg.n_gates <= DRAG_MAX_GATES, UI_APP_ASSERT_CODE);
     LT_ASSERT_VOID(s_model.units <= 1u, UI_APP_ASSERT_CODE);
@@ -1070,14 +1340,15 @@ static void ui_reload_cfg(void)
  * engine itself now considers new. Mirrors ui_task()'s own fresh-session init (search
  * clear_last_sector_deltas()) field-for-field; drag_rows_refill() re-reads the just-reset pipeline
  * snapshot so DRAG rows reflect the clear immediately rather than waiting for the next EV_DRAG_*
- * event. */
+ * event. #95 (bench B4-F1): drag_run_state replaces the old one-bit drag_armed here too -- the
+ * reset engine is IDLE, so that is the value set below pending the refill's own re-derive. */
 static void ui_lap_reset(void)
 {
     s_lap_start_mono_us = 0;
     s_last_clock_us     = 0;
     s_model.cur_ms      = 0;
     s_model.cur_running = false;
-    s_model.drag_armed  = false;
+    s_model.drag_run_state = DRAG_ST_IDLE;
 
     s_model.best_ms        = 0;
     s_model.prev_ms        = 0;
@@ -1104,6 +1375,57 @@ static void ui_lap_reset(void)
                    UI_APP_ASSERT_CODE);
 }
 
+/* EV_CREATE -> model (#97, §10.9; split verbatim out of handle_event for rule 4). BEGUN opens the
+ * NEW TRACK one-shot (persistent, no auto-revert) UNLESS it is already showing (e.g. this device
+ * never left it); GATE_SET/FAILED just drive the sub-line while it stays up; CANCELLED returns to
+ * riding (ui_exit_menu()) only if still showing it -- a stale CANCELLED after the screen already
+ * moved on (should not happen, but see the stale-ONESHOT_OTA precedent in btn_vlong above) must
+ * not evict whatever is showing now. The engine's own finish (the next S/F crossing) is a real
+ * EV_VENUE_FOUND, not one of these -- handled entirely by handle_venue_found()/show_venue_oneshot()
+ * earlier in this file, which this event never touches. */
+static void handle_create(const event_t *e)
+{
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);
+    bool on_nt = s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_NEWTRACK;
+    switch (e->flags) {
+    case EV_CREATE_BEGUN:
+        s_model.create_step = 0;
+        s_create_next_gate  = 0;
+        if (!on_nt) {                       /* menu -> one-shot: whole-screen replacement (B-9) */
+            s_model.screen     = SCR_ONESHOT;
+            s_model.oneshot    = ONESHOT_NEWTRACK;
+            s_oneshot_until_us = 0;         /* persistent until finished/cancelled */
+            s_wants_full       = true;
+            s_screen_changed   = true;
+        }
+        break;
+    case EV_CREATE_GATE_SET:
+        /* M-9 (final review): every other handler in this file bounds its event payload; the
+         * pipeline only ever sends 0..LAP_MAX_SECTORS (handle_create_cmd's s_create_next_gate),
+         * so arg16 == 255 wrapping s_create_next_gate to 0 below is unreachable today -- asserted
+         * anyway rather than left as the one unbounded payload read here. */
+        LT_ASSERT_VOID(e->arg16 <= LAP_MAX_SECTORS, UI_APP_ASSERT_CODE);
+        s_create_next_gate  = (uint8_t)(e->arg16 + 1u);
+        s_model.create_step = s_create_next_gate;      /* 1 after S/F, k+1 after sector k */
+        break;
+    case EV_CREATE_FAILED:
+        /* M5 (review fix round 1): EV_CREATE_FAIL_FULL means every sector is already marked --
+         * create_step is already > LAP_MAX_SECTORS from the last successful GATE_SET, which
+         * already reads "Cross S/F to finish" (newtrack_subline(), screens_moto.c), the correct
+         * message for this press. Only EV_CREATE_FAIL_NOFIX overwrites it with 0xFF ("No fix /
+         * not moving"); leaving create_step untouched for FULL avoids a second, redundant
+         * sub-line string for a case the existing one already describes accurately. */
+        if (e->arg16 == EV_CREATE_FAIL_NOFIX) s_model.create_step = 0xFF;
+        break;
+    case EV_CREATE_CANCELLED:
+        if (on_nt) ui_exit_menu();                     /* -> riding, full */
+        break;
+    default: break;
+    }
+    s_dirty = true;
+}
+
 static void handle_event(const event_t *e, int64_t now)
 {
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* model screen stays valid */
@@ -1120,16 +1442,24 @@ static void handle_event(const event_t *e, int64_t now)
     case EV_MOTION: s_gspeed_kmh = MENU_LOCK_SPEED_KMH; break;
     case EV_STILL:  s_gspeed_kmh = 0; break;
     /* Plan 7c T5 (design §3): drag_rows_refill() re-derives drag_n from the snapshot itself, so
-     * EV_DRAG_ARMED must NOT zero it first -- doing so would race a refill that reads the still-
-     * frozen previous run before the engine's own ARMED reset lands in the next snapshot. */
-    case EV_DRAG_ARMED:  s_model.drag_armed = true; drag_rows_refill(); s_dirty = true; break;
-    case EV_DRAG_LAUNCH: s_model.drag_armed = false; s_dirty = true; break;
-    case EV_DRAG_GATE:   drag_rows_refill(); s_dirty = true; break;
-    case EV_DRAG_DONE:   drag_rows_refill(); s_dirty = true; break;
+     * these cases must NOT assign drag_n/drag_run_state by hand first -- doing so would race a
+     * refill that reads the still-frozen previous run before the engine's own reset lands in the
+     * next snapshot. #95 (bench B4-F1): all four drag events now share this one body --
+     * drag_run_state is re-derived from the snapshot every time (drag_rows_refill() above), so
+     * EV_DRAG_LAUNCH gains the refill it lacked before (its old one-bit-mirror clear could not
+     * tell LAUNCHED apart from IDLE, which is the launch-window defect #95 fixes). */
+    case EV_DRAG_ARMED:
+    case EV_DRAG_LAUNCH:
+    case EV_DRAG_GATE:
+    case EV_DRAG_DONE:
+        drag_rows_refill();
+        s_dirty = true;
+        break;
     /* #87: ui-only codes (never emit_event()'d) -- CONFIG_SET-triggered reload, remote lap reset. */
     case EV_CFG_CHANGED: ui_reload_cfg(); break;
     case EV_LAP_RESET:   ui_lap_reset();  break;
     case EV_OTA:         handle_ota(e, now); break;
+    case EV_CREATE:      handle_create(e); break;
     default: break;
     }
 }
@@ -1143,6 +1473,7 @@ static void update_flags(void)
     f |= 1u << SCR_UI_SIM;
 #endif
     if (s_gspeed_kmh >= MENU_LOCK_SPEED_KMH) f |= 1u << SCR_UI_MOVING;
+    if (link_peer_present()) f |= 1u << SCR_UI_LINK;   /* #99: the dev-kit / a BLE peer is talking to us */
     if (s_fix_lost) {
         f |= (1u << SCR_SYS_GPS_NOFIX);
     } else {
@@ -1702,6 +2033,7 @@ static void ui_task(void *arg)
     s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode  = s_mode;
     s_model.units = s_cfg.units; /* Plan 7c T4 (design §3): every speed_display() call on screen uses it */
+    s_model.dist_units = s_cfg.dist_units; /* #96: DIST-gate naming only, consumed by row_from_gate */
     drag_cfg_from_user(&s_cfg, &s_drag_cfg); /* Plan 7c T5: gate table for DRAG row labels/benches */
     /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
      * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0.

@@ -22,6 +22,7 @@ typedef enum {
     ICON_SAFE,       /* safe mode */
     ICON_SIM,        /* simulated GPS/IMU inputs (strip bit SCR_UI_SIM) */
     ICON_MOVING,     /* menu motion-locked, bike moving (strip bit SCR_UI_MOVING) */
+    ICON_LINK,       /* dev-kit / peer connected (strip bit SCR_UI_LINK) */
     ICON_COUNT
 } icon_id_t;
 

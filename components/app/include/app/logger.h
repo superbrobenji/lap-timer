@@ -16,6 +16,17 @@
 void logger_start(void);    /* create + start the task (boot step 12) */
 void logger_notify(void);   /* wake the logger (task notification); safe from any task */
 
+/* #97 (§10.9), final review F-4/I-4: load /tracks/user.bin into the core/trk.h user track table.
+ * Implemented in logger.c (the file that also writes it, tracks_save()) since it only reads, but
+ * called from main/app_main.c's boot sequence -- right after trk_init() and strictly BEFORE
+ * logger_start() creates the logger task -- not from inside the logger task's own boot init as
+ * before: running both writes on app_main's own task, before any task that could race them even
+ * exists, needs no concurrency premise at all (core/trk.h's ownership comment has the full
+ * argument). Storage must already be mounted (boot_storage(), before boot_subsystems()). 0 ok
+ * (including "no file -- nothing to load", a fresh device's normal case); -1 on an unexpected
+ * open/read failure once the file was confirmed to exist. */
+int  logger_load_tracks(void);
+
 /* Pipeline -> logger, full engine results (3.4, resolving the 3.3 deferral). Each copies the result
  * onto result_q (cross-core safe) and wakes the logger; the logger writes the complete LAP (+ SECTOR)
  * / DRAG_RUN (+ DRAG_GATE) records (§12.3) and the real VENUE record. Safe from the pipeline task;
