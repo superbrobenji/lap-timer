@@ -54,7 +54,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   standstill (parked at the capture's last position) before the next one starts — expect a clean
   STILL/MOTION pair at every lap boundary, not a flicker.
 - [ ] **5. Menu paths never exercised** — checked 2026-10-05: four stubs then; New track landed 2026-10-06 (Task 5, #97), code-complete, procedure below. Layout override landed 2026-10-06 (#98) and WAS exercised on bench day 4 (2026-10-07): it failed — the sim-boot and RTC-resume venue paths never announced to the ui (`lap_set_venue`/`lap_import_rtc` carry no event buffer and neither caller told the ui directly), so `Layout:` stayed a dead item (`menu: layout choice 0 -> id 0`) that also wiped `s_best` on every press (B4-F3). Fixed by this plan (a ui-only announce at both call sites, plus the `venue_announce.py` structural linter); re-check is item 17 below, not this item. Sleep now → Plan 6.2 (power state machine, light/deep sleep, button wake); Calibrate → Plan 8.4 (#93: the fusion calibration is never invoked). Re-test Sleep now (3 s MODE hold → sleep; wake by a button → BOOT) and Calibrate ("Hold upright, press MODE" → `EV_CALIB_DONE`) when each lands.
-  New track procedure (#97, Task 5; persistence redesigned in the review's fix round 1, T5-R4; cancel/DRAG-mode paths hardened in the final review, I2/I3/M1): menu "New track" → `NEW TRACK` one-shot, sub-line "Cross S/F, press MODE"; `dbg sim laps 2`; press MODE while the sim moves (sub-line → "S/F set. MODE: sector 1"), MODE once more (sub-line → "S/F set. MODE: sector 2"); wait for the sim to cross S/F again → the engine finishes on its own, `VENUE` one-shot `Track_2026…`; `lt list`/`trk` shows the new venue; reset → BOTH the sim capture's own venue AND the created venue are still there (the logger persists every venue in the table, one record at a time, not a single-venue-only blob), and the riding screen's BEST/PREV/theoretical-best/best-sector board reads fresh (zeroed), not the previous venue's stale values (final review I2). Also: press MODE one more time after the last sector it allows (sub-line should stay "Cross S/F to finish", not switch to "No fix / not moving" — M5); long MODE on the one-shot cancels back to riding, and a second long MODE immediately after always works too, even on a repeat (final review I3); switching to `Mode: Drag` first and then opening "New track" must be refused silently — no one-shot ever shows (final review M1); interrupt a creation with an OTA push or `dbg crash` (`CMD_RESET_ENGINE`) and confirm the ride resumes normally afterward (no stuck NEW TRACK screen, no dead engine still waiting in CREATE — I2/M4).
+  New track procedure (#97, Task 5; persistence redesigned in the review's fix round 1, T5-R4; cancel/DRAG-mode paths hardened in the final review, I2/I3/M1; rewritten after bench day 5, 2026-10-10, to what a `moto_sim` bench can observe): park the sim (the menu is motion-locked), menu "New track" (two DOWNs from the top) → `NEW TRACK` one-shot, sub-line "Cross S/F, press MODE"; then `dbg sim laps 1` and press MODE while the sim moves (sub-line → "S/F set. MODE: sector 1"), MODE again (→ "MODE: sector 2"). **Timing:** the sim loop is ~28 s, so the engine finishes on the FIRST re-crossing of the marked S/F, ~28-30 s after the S/F press, with however many sectors were marked by then (day 5: marks 9 s apart landed S/F + one sector, the third press fell after the finish and hit the card; `lap 0 ... splits[16779 11252]` = a 1-sector layout proves the created venue went live). **The `VENUE` one-shot for the new venue reads `Track_20260915`** (the capture's first fix is 2026-09-15 UTC; `finalize_create()` names from `create_gps_us`), holds only 2 s and lands straight after the crossing — read it live. A second VENUE one-shot ~28 s later is the new venue's own layout lock. **Readback:** there is NO console readback of the track table (#107): `lt list` is the session list and `moto_sim` never rotates its boot session, so it keeps naming `Synthetic`; `dbg fs` lists `/sessions` only. **After `dbg reset`** the rescan may legitimately re-lock onto `Synthetic`: `trk_find_nearest()` picks the nearest centre among venues whose radius contains the fix, and Synthetic's 2000 m radius contains the whole loop — a two-choice `Layout:` cycle (`Auto → Full`) means Synthetic won, a three-choice one (`Auto → Layout 1 → Layout 1 Reverse`, the two layouts every created venue stores) means the created venue did; neither is a defect. Still open sub-checks: the riding screen's BEST/PREV/theoretical-best/best-sector board reads fresh after the creation (final review I2); press MODE one more time after the last sector it allows (sub-line stays "Cross S/F to finish", not "No fix / not moving" — M5); long MODE on the one-shot cancels back to riding, and a second long MODE immediately after always works too, even on a repeat (final review I3); `Mode: Drag` first and then "New track" must be refused silently — no one-shot ever shows (final review M1); interrupt a creation with an OTA push or `dbg crash` (`CMD_RESET_ENGINE`) and confirm the ride resumes normally afterward (no stuck NEW TRACK screen, no dead engine still waiting in CREATE — I2/M4).
   Layout procedure (#98, landed): menu → "Layout: Auto" item; MODE (short, on that item) cycles
   through the venue's real layout names and back to `Auto` (on the sim capture's single-layout
   venue: `Auto → Full → Auto`; `ui_layout_label()` renders each layout's real name, never a
@@ -137,7 +137,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   (final review I1: a `READY` card on an engine the reload just dropped to IDLE invites an untimed
   launch). Repeat the `Speed:` check once from the remote `CONFIG_SET` path
   (`lt config set {"units":"mph"}`).
-- [ ] **17. Venue announce on sim boot — `Layout:` cycles the real layouts, a post-reset VENUE
+- [x] **17. Venue announce on sim boot — `Layout:` cycles the real layouts, a post-reset VENUE
   one-shot names them correctly, and neither wipes BEST (final review I1/B4-F3, the venue half of
   #98; rescoped by the merge re-review's N1 — the original text described observables the shipped
   code does not, and cannot, produce on this build).** Procedure: a normal sim boot shows NO VENUE
@@ -159,7 +159,26 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   snapshot, so `lap_import_rtc()` is never reached and the resume-site `ui_post_venue()` never
   runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
   (`test_lap.c`'s `lap_import_rtc`-is-silent contract test) and real hardware, once item 6
-  (`moto_neo6m`) is on the bench and GPS RTC carry-over exists.
+  (`moto_neo6m`) is on the bench and GPS RTC carry-over exists. **Sim-boot half PASSED on bench day 5 (2026-10-10):** `Auto → Full → Auto` in words, the post-reset VENUE one-shot read `Synthetic` / `Full`, the footer BEST survived the cycling (a real layout change clears only the page-1 best-sector board, by design, ruling R-9).
+
+## Closed on 2026-10-10 (bench day 5)
+Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4
+fixes on hardware: **item 12** (the four card states, #95/B4-F1) PASS; **item 15** (list pairing,
+units, menu names, B4-F4/F6) PASS; **item 13** (B4-F2: a `Distance:` flip keeps the run; a `Speed:`
+flip clears it and the card reads `NOT READY`, never `READY`) PASS — the second half needed a
+discriminating test, because on a parked sim the engine re-arms after ~2 s and `READY` is then the
+honest end state: flipped `Speed:` remotely (`lt config set {"units":"mph"}`) while the sim was
+MOVING, where the engine cannot arm, and the card read `NOT READY` and stayed so; **item 17**
+(sim-boot venue announce, #98/B4-F3) PASS, see the item. **Item 5's #97 main path** passed on the
+log (one-shot opens, advances per mark, the engine finishes on the closing S/F crossing and times
+laps on the created 1-sector layout); its on-screen name and the sub-checks listed in the item are
+still open, and its "appears in `lt list` / survives a reset" wording was rewritten (see the item
+and #107). **Item 5's #99 LINK glyph was not run** (needs the operator to unplug the connector).
+Side findings, all pre-existing and filed, none from this branch: #104 (`free_kb` read 0 with one
+open session, 472 KB after a remount; the append path has no reserve guard), #105 (an orphaned
+zero-byte `.sum.tmp` is never reaped), #106 (console INFO logging went silent mid-session until a
+restart). A stale `storage flags: FULL` with 43 % free cleared with `dbg flag clear 6` and stayed
+clear — a leftover bench injection, not a latch.
 
 ## Closed on 2026-10-07 (bench day 4)
 Image `v0.1.0-37-g4153025`. Re-run of items 1 (drag run), 2 (OTA rollback), 3 (OTA push in
