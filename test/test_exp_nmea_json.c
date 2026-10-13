@@ -208,6 +208,41 @@ static void test_finish_refuses_while_a_drag_run_is_mid_emission(void)
     TEST_ASSERT_EQUAL_INT(DRAG_MAX_GATES, toks[gates].size);
 }
 
+static void test_json_header_with_control_chars_still_emits_every_lap(void)
+{
+    /* io:C2: session_id (10) + fw (16) + venue (32) all control chars expand 1 -> 6 () in
+     * jw_str, so the header is 113 + 6*58 + 34 = 495 bytes -- over the old buf[400]. The old code
+     * flipped json_stage BEFORE emit(), so the whole LAP array was dropped and exp_finish returned
+     * 0 (SUCCESS) on a 12-byte fragment: [],"runs":[]}]. */
+    exp_meta_t m; memset(&m, 0, sizeof m); memset(m.session_id, 0x01, 10);
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[4096]; size_t at = 0;
+    ses_hdr_t h; memset(&h, 0, sizeof h);
+    memset(h.session_id, 0x01, 10); memset(h.fw, 0x01, 16); memset(h.hwid, 'h', 24);
+    h.venue_id = 65535; h.layout_id = 65535; h.gps_hz = 25; h.fused_hz = 25;
+    h.start_gps_us = 1789640100000000LL;
+    uint8_t fr[256]; int n = ses_encode_hdr(&h, fr, sizeof fr);
+    feed_frame(&e, out, &at, fr, n);
+    char nm[33]; memset(nm, 0x01, 32); nm[32] = '\0';          /* 32 control bytes (Task 4) */
+    n = ses_encode_venue(65535, 65535, nm, fr, sizeof fr);
+    feed_frame(&e, out, &at, fr, n);
+    lap_result_t lap; memset(&lap, 0, sizeof lap);
+    lap.lap_no = 1; lap.time_ms = 112341; lap.flags = LAP_F_VALID;
+    lap.n_sectors = 1; lap.sector_ms[0] = 50000;
+    n = ses_encode_lap(&lap, fr, sizeof fr);
+    feed_frame(&e, out, &at, fr, n);
+    int fin; while ((fin = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, fin);
+    at = drain(&e, out, at);
+    jsmntok_t toks[512];
+    int cnt = json_parse(out, at, toks, 512);
+    TEST_ASSERT_GREATER_THAN(0, cnt);                          /* a whole, parseable document */
+    int laps = json_obj_get(out, toks, cnt, 0, "laps");
+    TEST_ASSERT_GREATER_THAN(0, laps);
+    TEST_ASSERT_EQUAL_INT(1, toks[laps].size);                 /* the LAP was NOT dropped */
+    TEST_ASSERT_EQUAL_UINT16(0, e.skipped);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -218,5 +253,6 @@ int main(void)
     RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);
     RUN_TEST(test_json_header_strings_using_every_wire_byte_are_emitted_whole);
     RUN_TEST(test_finish_refuses_while_a_drag_run_is_mid_emission);
+    RUN_TEST(test_json_header_with_control_chars_still_emits_every_lap);
     return UNITY_END();
 }
