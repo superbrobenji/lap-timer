@@ -147,7 +147,7 @@ F5's plan document is written after the fix wave's bench day (it depends on what
 | #95 NOT READY card | fixed by PR #101 (bench day 5 pass) | PR body | closes at F0 merge |
 | #96 m/ft distance units | fixed by PR #101 (bench day 5 pass) | PR body | closes at F0 merge |
 | #97 New track | fixed by PR #101; main path bench-passed; sub-checks and the on-screen name reading remain | PR body | closes at F0 merge; sub-checks → bench day |
-| #98 Layout override | fixed by PR #101 (bench day 5 pass); the RTC-resume contradiction (pr:M4) is a new finding → F2b | PR body | closes at F0 merge |
+| #98 Layout override | fixed by PR #101 (bench day 5 pass); the RTC-resume contradiction (pr:M4 (#109)) is a new finding → F2b | PR body | closes at F0 merge |
 | #99 LINK glyph | fixed by PR #101; the unplug check is still unrun | PR body | closes at F0 merge; check → bench day |
 | #100 sim venue id via synth | valid | — | F5 |
 | #102 silent drag transitions | fixed by F0 Task 2 (publish on `drag_state()` change) | pr:M1 | F0 |

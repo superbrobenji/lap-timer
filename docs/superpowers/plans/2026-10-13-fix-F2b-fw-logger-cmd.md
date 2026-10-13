@@ -1980,7 +1980,7 @@ gh pr create --base main --head fix-fw-logger-cmd \
   --body-file .superpowers/sdd/2026-10-13-fix-F2b/pr-body.md
 ```
 
-The PR body must carry: the gate results from Step 1 verbatim, the DRAM table from Step 2 with the **measured** figures, the finding ids closed (app:M2 M3 M4 M6 M11 M13 L1 L2 L7 L9-noted, drv:H4 M7 L15 L16 L27, pr:M3 M4, audit §3.3 #20–#25), the rulings applied (R4 R5 R8 R10 R11 R20), the spec amendments, the bench checklist items added, and the four issues handed to F4. No claim without a pasted command result (`superpowers:verification-before-completion`).
+The PR body must carry: the gate results from Step 1 verbatim, the DRAM table from Step 2 with the **measured** figures, the finding ids closed (app:M2 M3 M4 M6 M11 M13 L1 L2 L7 L9-noted, drv:H4 M7 L15 L16 L27, pr:M3 (#108) M4, audit §3.3 #20–#25), the rulings applied (R4 R5 R8 R10 R11 R20), the spec amendments, the bench checklist items added, and the four issues handed to F4. No claim without a pasted command result (`superpowers:verification-before-completion`).
 
 - [ ] **CHECKPOINT** — ledger line written to `.superpowers/sdd/2026-10-13-fix-F2b/progress.md` ("Task 9 complete <sha>"), branch pushed, and this exact resume prompt recorded in the ledger: "Resume plan docs/superpowers/plans/2026-10-13-fix-F2b-fw-logger-cmd.md at Task 10 — none remain; the plan is complete and PR <url> is open awaiting review + bench gate f2b-d1 (ledger .superpowers/sdd/2026-10-13-fix-F2b/progress.md); worktree <path>; branch fix-fw-logger-cmd."
 

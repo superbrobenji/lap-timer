@@ -2682,7 +2682,7 @@ and these are skipped:
 gh issue comment 95  --body "fixed by PR #101 — the DRAG card reads NOT READY/READY/LAUNCHED/DONE from the engine's real state; bench day 5 (2026-10-10) pass. Closes at that merge. $T"
 gh issue comment 96  --body "fixed by PR #101 — \`dist_units\` m|ft with cfg blob v2 migration; bench day 5 pass. Closes at that merge. $T"
 gh issue comment 97  --body "fixed by PR #101 — main path bench-passed on day 5; the on-screen \`Track_YYYYMMDD\` reading and the item's sub-checks remain for the next bench day. Closes at that merge. $T"
-gh issue comment 98  --body "fixed by PR #101 — Layout cycling with real names; bench day 5 pass. The RTC-resume contradiction found in review (pr:M4 — the menu reads Auto on a layout-locked lap) is a NEW finding, owned by F2b, not this issue. Closes at that merge. $T"
+gh issue comment 98  --body "fixed by PR #101 — Layout cycling with real names; bench day 5 pass. The RTC-resume contradiction found in review (pr:M4 (#109) — the menu reads Auto on a layout-locked lap) is a NEW finding, owned by F2b, not this issue. Closes at that merge. $T"
 gh issue comment 99  --body "fixed by PR #101 — the LINK strip glyph from \`link_peer_present()\`; the unplug check is still unrun and moves to the next bench day. Closes at that merge. $T"
 gh issue comment 102 --body "fixed by F0 Task 2 — the drag snapshot is published whenever \`drag_state()\` changes (a \`s_last_pub_state\` compare in \`on_raw\`), so a false start no longer leaves the card reading LAUNCHED. Owner: F0. $T"
 ```
@@ -3099,8 +3099,8 @@ Final ledger line: `F4 complete <sha> — PR #<n> open, protection command hande
 | drv:FC-9/10/11/12 — §4.6 PANEL/flags/sample, §21.2, §19.1/§21.3, §17.8 | 9 |
 | io:FC-8 — §5.2 blocks regenerated, the method defined and CI-gated | 3, 9 |
 | app:L8 — §4.8 `cmd.c` statics + the link ring | 9 |
-| pr:M5 — the venue linter accepted an off-path announce | 2 |
-| pr:M6 — corrupt-blob coverage (record level here; file level filed) | 6, 14 |
+| pr:M5 (#110) — the venue linter accepted an off-path announce | 2 |
+| pr:M6 (#111) — corrupt-blob coverage (record level here; file level filed) | 6, 14 |
 | audit §3.1 item 4 — the memory STATE block | 14 (Step 3) |
 | audit §3.3 items 27/29/30, §2 Plan 5.2 row — spec sections F4 does not own | 14 (issues), 10 (roadmap owners) |
 | design §4 gates (host, linters, four firmware builds, DRAM report, bench items) | 14 |
