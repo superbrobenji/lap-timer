@@ -50,9 +50,10 @@ static void test_cap_arithmetic(void)
     /* the ceiling binds at a low baud: 2 MiB at 9600 would be 36 min */
     TEST_ASSERT_EQUAL_INT64((int64_t)LH_DL_HARD_MAX_MS * 1000, lh_dl_cap_us(LH_DL_BODY_MAX, 0, 9600));
     /* an impossible size can never widen the window either (belt and braces to the header check):
-     * clamped to LH_DL_BODY_MAX, at the same slow baud, it hits the identical ceiling -- not a
-     * wildly larger value an unclamped 0xFFFFFFFF*10 would overflow/scale to. */
-    TEST_ASSERT_EQUAL_INT64((int64_t)LH_DL_HARD_MAX_MS * 1000, lh_dl_cap_us(0xFFFFFFFFu, 0, 9600));
+     * at 115200 baud it must clamp to the LH_DL_BODY_MAX value above (278066666), not to the hard
+     * ceiling -- the ceiling alone would hit 1200000000 regardless of whether the size clamp ran,
+     * so matching the clamped value (not the ceiling) is what actually proves the clamp fired. */
+    TEST_ASSERT_EQUAL_INT64(278066666, lh_dl_cap_us(0xFFFFFFFFu, 0, 115200));
 }
 
 /* dk:M1's second half -- the idle timer must be fed ONLY by body bytes before ---END. Noise in
