@@ -4,20 +4,28 @@
 Design authority: docs/superpowers/specs/2026-09-17-power-of-10-compliance-design.md (§1/§3/§4).
 Plan: docs/superpowers/plans/2026-09-17-plan-4.5-power-of-10.md, Session 4.5.1 Task 1.
 
-Scans the in-scope on-device C (default: components/core components/app components/drivers
-main) for the project-specific gates that generic analysers (clang-tidy/cppcheck) do not cover
-well:
+Scans the in-scope on-device C (default: components/core components/app components/drivers main
+devcontroller) for the project-specific gates that generic analysers (clang-tidy/cppcheck) do not
+cover well:
 
+  RULE-1  direct recursion: a function body that calls its own name (indirect recursion stays
+          with the review checklist; clang-tidy misc-no-recursion is advisory).
   RULE-4  function length > 60 code lines (blank/comment-only/brace-only lines excluded), plus
           RULE-4-COMPOUND: a compound-statement body (if/else/for/while/switch/do) nested inside
           a function that is itself > 30 code lines (MAX_COMPOUND_LINES) -- Holzmann's refined
-          rule 4 pins a separate, stricter figure for individual compound-statement bodies.
+          rule 4 pins a separate, stricter figure for individual compound-statement bodies. A
+          body's size is max(physical code lines, top-level statements), so packing statements
+          onto fewer physical lines cannot evade this or RULE-5.
   RULE-5  Holzmann's REFINED per-function form (N=2, M=20): a function of > 20 code lines must
           contain >= 2 assertions (CORE_ASSERT_RET/CORE_ASSERT_VOID/LT_ASSERT_RET/LT_ASSERT_VOID
           invocations); functions of <= 20 code lines are exempt regardless of assertion count.
           The per-component average assertions/function is still computed and printed, but only
-          as an informational health metric -- it is no longer itself a violation.
-  RULE-3  any malloc/calloc/realloc/free/strdup/aligned_alloc call (no dynamic memory after init).
+          as an informational health metric -- it is no longer itself a violation. Code inside an
+          `#if 0` region is blanked before any of this counting; its `#else` branch (if any) is
+          live and counts normally.
+  RULE-3  any heap API call tree-wide (no dynamic memory after init): malloc/calloc/realloc/
+          reallocarray/free/strdup/strndup/asprintf/vasprintf/aligned_alloc,
+          heap_caps_*alloc/heap_caps_*free, pvPortMalloc, vPortFree. Blocking.
   RULE-8  '##' token-paste, '#' stringisation-as-logic, '#undef' (rule 8b -- not permitted in
           shipped code), or a function-like macro `#define NAME(` defined in a .c file (rule 8c
           -- logic-bearing macros belong in headers; object-like constant #defines in .c are
@@ -25,17 +33,20 @@ well:
           non-include-guard conditional-compilation directives (#ifdef/#ifndef/#if defined/
           #elif defined) versus the number of in-scope header files, printed as one summary line.
   RULE-9  (only with --enforce-fnptr) a function-pointer typedef/param/variable whose
-          file:symbol is not listed in the deviation register. INERT by default -- the design
-          (§3 rule 9) has this gate land last, in session 4.5.5; until then existing function
-          pointers are tolerated even with --enforce-fnptr unless newly introduced (this script
-          does not track "new" vs "existing"; --enforce-fnptr simply is not passed before 4.5.5).
+          file:symbol is not listed in the deviation register, OR a function passed by value to
+          a known sink (FNPTR_SINKS: qsort/bsearch/xTaskCreate*/esp_timer_create/
+          gpio_isr_handler_add/esp_console_cmd_register/spi_bus_add_device), OR a function stored
+          into a struct field or variable -- the registered symbol is the function's own name.
 
 Pure Python 3 standard library only, no third-party dependencies.
 
 Default mode is REPORT-ONLY: findings are printed and the process always exits 0. Pass
---fail-on-violation to exit 1 when an unregistered RULE-4, RULE-4-COMPOUND, RULE-5, RULE-8, or
-RULE-9 finding exists (NOT used by CI/the task runner until the retrofit is complete -- see plan
-Session 4.5.6).
+--fail-on-violation to exit 1 when an unregistered RULE-1, RULE-3, RULE-4, RULE-4-COMPOUND,
+RULE-5, RULE-8, or RULE-9 finding exists, UNLESS the finding is graced: --report-only-paths
+(default: devcontroller/ -- a sibling ESP-IDF project never retrofitted), --report-only-sites (a
+rollout grace list of `path:symbol:RULE` triples; a triple matching nothing prints a GRACE-STALE
+line), or --report-only-rules all mark matching findings "[report-only]" and exempt them from the
+exit code -- grace is always scoped to a path/site/rule, never a global switch.
 """
 import argparse
 import json
@@ -47,7 +58,11 @@ import sys
 # Scope (design §1): default in-scope roots, and paths that are exempt even inside them.
 # --------------------------------------------------------------------------------------------
 
-DEFAULT_PATHS = ["components/core", "components/app", "components/drivers", "main"]
+DEFAULT_PATHS = ["components/core", "components/app", "components/drivers", "main", "devcontroller"]
+
+# Paths scanned but never able to fail the build (LG-7): the dev-kit firmware is a sibling
+# ESP-IDF project that was never retrofitted. Findings print with a "[report-only]" marker.
+DEFAULT_REPORT_ONLY_PATHS = ["devcontroller/"]
 
 # Directory *names* pruned wherever they occur during the walk.
 EXCLUDE_DIR_NAMES = {"managed_components", "build", ".git", ".venv", "__pycache__"}
@@ -58,6 +73,9 @@ EXCLUDE_DIR_NAMES = {"managed_components", "build", ".git", ".venv", "__pycache_
 EXEMPT_PATH_FRAGMENTS = (
     "/test/unity/",
     "test/unity/",
+    "devcontroller/components/webapi/host/jsmn.",
+    "devcontroller/managed_components/",
+    "devcontroller/test/",
 )
 
 SCANNED_EXTENSIONS = (".c", ".h")
@@ -186,6 +204,34 @@ def strip_comments_and_literals(text):
         out.append(c)
         i += 1
     return "".join(out)
+
+
+_IF0_RE = re.compile(r"^[ \t]*#[ \t]*if[ \t]+0\b")
+_DIRECTIVE_RE = re.compile(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b")
+
+
+def blank_dead_regions(text):
+    """LG-4: blank every line inside an `#if 0` region (and anything nested under it) so
+    assertions, statements and code lines in dead code are not counted. The `#else` branch of an
+    `#if 0` IS live and is kept. Character offsets and line numbers are preserved: a dead line
+    becomes the same number of spaces. This also fixes LG-7's brace desync, whose only known cause
+    is an unbalanced brace inside such a region."""
+    out = []
+    stack = []          # one entry per open conditional: True while that branch is dead
+    for line in text.split("\n"):
+        m = _DIRECTIVE_RE.match(line)
+        kw = m.group(1) if m else None
+        dead_before = any(stack)
+        if kw in ("if", "ifdef", "ifndef"):
+            stack.append(bool(_IF0_RE.match(line)))
+        elif kw in ("else", "elif") and stack:
+            if stack[-1]:
+                stack[-1] = False   # the #else of an `#if 0` is live code
+        elif kw == "endif" and stack:
+            stack.pop()
+        dead = dead_before or any(stack)
+        out.append(" " * len(line) if (dead and kw is None) else line)
+    return "\n".join(out)
 
 
 class LineIndex:
@@ -339,6 +385,29 @@ def count_code_lines(stripped_lines, line_start, line_end):
     return count
 
 
+def count_statements(body):
+    """LG-5: top-level statements in a body span -- ';' at parenthesis depth 0, so a
+    `for (i = 0; i < n; i++)` header contributes nothing and `a; b; c;` on one physical line
+    counts 3."""
+    n = 0
+    depth = 0
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = depth - 1 if depth > 0 else 0
+        elif ch == ";" and depth == 0:
+            n += 1
+    return n
+
+
+def effective_lines(stripped, stripped_lines, lidx, open_idx, close_idx):
+    """LG-5: a body's size is max(physical code lines, top-level statements), so packing
+    statements onto fewer physical lines cannot evade rules 4/5."""
+    phys = count_code_lines(stripped_lines, lidx.line_of(open_idx), lidx.line_of(close_idx))
+    return max(phys, count_statements(stripped[open_idx:close_idx]))
+
+
 # --------------------------------------------------------------------------------------------
 # Compound-statement bodies (RULE-4-COMPOUND, Holzmann's refined rule 4): a '{' at brace-depth
 # > 0 (nested inside a function body, not the function body itself -- that is depth 0 and
@@ -423,9 +492,100 @@ def find_compound_blocks(stripped):
 # Rule checks
 # --------------------------------------------------------------------------------------------
 
-RULE3_RE = re.compile(r"\b(malloc|calloc|realloc|free|strdup|aligned_alloc)\s*\(")
+RULE3_RE = re.compile(
+    r"(?<![A-Za-z0-9_])("
+    r"heap_caps_[a-z_]*(?:alloc|free)|pvPortMalloc|vPortFree|"
+    r"malloc|calloc|realloc|reallocarray|free|strdup|strndup|asprintf|vasprintf|aligned_alloc"
+    r")\s*\("
+)
 ASSERT_RE = re.compile(r"\b(CORE_ASSERT_RET|CORE_ASSERT_VOID|LT_ASSERT_RET|LT_ASSERT_VOID)\s*\(")
 FNPTR_RE = re.compile(r"\(\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\(")
+
+
+# LG-3: rule 9 part 2 -- APIs that take a function BY VALUE. The value is the 0-based index of
+# every function-valued parameter.
+FNPTR_SINKS = {
+    "qsort": [3], "bsearch": [4],
+    "xTaskCreate": [0], "xTaskCreateStatic": [0],
+    "xTaskCreatePinnedToCore": [0], "xTaskCreateStaticPinnedToCore": [0],
+    "esp_timer_create": [0],
+    "gpio_isr_handler_add": [1],
+    "esp_console_cmd_register": [0],
+    "spi_bus_add_device": [1],
+}
+_SINK_RE = re.compile(r"(?<![A-Za-z0-9_])(%s)\s*\(" % "|".join(sorted(FNPTR_SINKS)))
+# `.field = fn` / `= fn;` where fn is a function defined in this file (LG-3's struct-field case).
+_FNVAL_ASSIGN_RE = re.compile(r"=\s*&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,;}]")
+_IDENT_ONLY_RE = re.compile(r"^\s*&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+
+def _arg_spans(stripped, open_paren_idx):
+    """Split one call's argument list into raw text slices at top-level commas; [] if unterminated."""
+    depth = 0
+    args = []
+    start = open_paren_idx + 1
+    i = open_paren_idx
+    n = len(stripped)
+    while i < n:
+        c = stripped[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+            if depth == 0:
+                args.append(stripped[start:i])
+                return args
+        elif c == "," and depth == 1:
+            args.append(stripped[start:i])
+            start = i + 1
+        i += 1
+    return []
+
+
+def check_rule9_sinks(stripped, relpath, lidx, findings, register, funcs):
+    """RULE-9 (LG-3): a function passed by value to a known sink, or stored into a struct field /
+    variable, must be registered. The registered symbol is the function's own name."""
+    local_fns = {f[0] for f in funcs}
+    for m in _SINK_RE.finditer(stripped):
+        sink = m.group(1)
+        args = _arg_spans(stripped, m.end() - 1)
+        for idx in FNPTR_SINKS[sink]:
+            if idx >= len(args):
+                continue
+            im = _IDENT_ONLY_RE.match(args[idx])
+            if not im:
+                continue
+            symbol = im.group(1)
+            if symbol not in local_fns:
+                continue          # a parameter or an extern: not a function this file defines
+            if register.is_registered(9, relpath, symbol):
+                continue
+            findings.append({"file": relpath, "line": lidx.line_of(m.start()), "rule": "RULE-9",
+                             "symbol": symbol,
+                             "message": "unregistered function '%s' passed to %s() "
+                                        "(rule 9: no function pointers outside the register)"
+                                        % (symbol, sink)})
+    for m in _FNVAL_ASSIGN_RE.finditer(stripped):
+        symbol = m.group(1)
+        if symbol not in local_fns or register.is_registered(9, relpath, symbol):
+            continue
+        findings.append({"file": relpath, "line": lidx.line_of(m.start()), "rule": "RULE-9",
+                         "symbol": symbol,
+                         "message": "unregistered function '%s' stored as a value "
+                                    "(rule 9: no function pointers outside the register)" % symbol})
+
+
+def check_rule1_recursion(stripped, relpath, lidx, findings, register, funcs):
+    """RULE-1 (LG-6): direct recursion -- a function body that calls its own name. Indirect
+    recursion stays with the review checklist (clang-tidy misc-no-recursion is advisory)."""
+    for name, _name_start, open_idx, close_idx, _po, _pc in funcs:
+        body = stripped[open_idx:close_idx]
+        m = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"\s*\(").search(body)
+        if m is None or register.is_registered(1, relpath, name):
+            continue
+        findings.append({"file": relpath, "line": lidx.line_of(open_idx + m.start()),
+                         "rule": "RULE-1", "symbol": name,
+                         "message": "function '%s' calls itself (rule 1: no recursion)" % name})
 
 
 def check_rule3_heap(stripped, relpath, lidx, findings):
@@ -477,8 +637,7 @@ def check_rule4_length(stripped, relpath, lidx, register, funcs, max_lines=60):
     stripped_lines = stripped.split("\n")
     for name, name_start, open_idx, close_idx, _param_open, _param_close in funcs:
         line_open = lidx.line_of(open_idx)
-        line_close = lidx.line_of(close_idx)
-        n_lines = count_code_lines(stripped_lines, line_open, line_close)
+        n_lines = effective_lines(stripped, stripped_lines, lidx, open_idx, close_idx)
         if n_lines > max_lines:
             name_line = lidx.line_of(name_start) if name_start is not None else line_open
             if register.is_registered(4, relpath, name):
@@ -499,8 +658,7 @@ def check_rule4_compound(stripped, relpath, lidx, register, funcs, max_lines=MAX
     stripped_lines = stripped.split("\n")
     for kind, open_idx, close_idx in find_compound_blocks(stripped):
         line_open = lidx.line_of(open_idx)
-        line_close = lidx.line_of(close_idx)
-        n_lines = count_code_lines(stripped_lines, line_open, line_close)
+        n_lines = effective_lines(stripped, stripped_lines, lidx, open_idx, close_idx)
         if n_lines > max_lines:
             symbol = _enclosing_function_name(funcs, open_idx)
             if symbol is None:
@@ -527,8 +685,7 @@ def check_rule5_assertions(stripped, relpath, lidx, register, funcs,
     stripped_lines = stripped.split("\n")
     for name, name_start, open_idx, close_idx, _param_open, _param_close in funcs:
         line_open = lidx.line_of(open_idx)
-        line_close = lidx.line_of(close_idx)
-        n_lines = count_code_lines(stripped_lines, line_open, line_close)
+        n_lines = effective_lines(stripped, stripped_lines, lidx, open_idx, close_idx)
         if n_lines <= min_lines:
             continue
         body = stripped[open_idx:close_idx]
@@ -637,7 +794,7 @@ class Register:
 # --------------------------------------------------------------------------------------------
 
 
-def run(paths, register_path, enforce_fnptr, base_dir):
+def run(paths, register_path, enforce_fnptr, base_dir, report_only_paths=()):
     register = Register()
     register.load(register_path)
 
@@ -645,24 +802,26 @@ def run(paths, register_path, enforce_fnptr, base_dir):
 
     all_findings = []
     per_component = {}  # component -> {"functions":N, "assertions":N, "files":N,
-    #                                    "rule3":N, "rule4":N, "rule4_compound":N, "rule5":N,
-    #                                    "rule8":N, "rule9":N}
+    #                                    "rule1":N, "rule3":N, "rule4":N, "rule4_compound":N,
+    #                                    "rule5":N, "rule8":N, "rule9":N}
     rule8a_directives = 0
     rule8a_headers = 0
 
     for component, filepath, relpath in files:
         comp = per_component.setdefault(component, {
-            "functions": 0, "assertions": 0, "files": 0,
+            "functions": 0, "assertions": 0, "files": 0, "rule1": 0,
             "rule3": 0, "rule4": 0, "rule4_compound": 0, "rule5": 0, "rule8": 0, "rule9": 0,
         })
         comp["files"] += 1
+        n_before = len(all_findings)
         posix_relpath = relpath.replace(os.sep, "/")
         if posix_relpath.endswith(".h"):
             rule8a_headers += 1
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
-        stripped = strip_comments_and_literals(text)
+        stripped = blank_dead_regions(strip_comments_and_literals(text))
         lidx = LineIndex(stripped)
+        ro = any(posix_relpath.startswith(pfx) for pfx in report_only_paths)
         funcs = find_top_level_functions(stripped)
 
         rule4_findings, n_funcs = check_rule4_length(stripped, relpath, lidx, register, funcs)
@@ -695,11 +854,21 @@ def run(paths, register_path, enforce_fnptr, base_dir):
 
         rule8a_directives += count_rule8a_conditionals(stripped)
 
+        rule1_findings = []
+        check_rule1_recursion(stripped, relpath, lidx, rule1_findings, register, funcs)
+        comp["rule1"] += len(rule1_findings)
+        all_findings.extend(rule1_findings)
+
         if enforce_fnptr:
             rule9_findings = []
             check_rule9_fnptr(stripped, relpath, lidx, rule9_findings, register, funcs)
+            check_rule9_sinks(stripped, relpath, lidx, rule9_findings, register, funcs)
             comp["rule9"] += len(rule9_findings)
             all_findings.extend(rule9_findings)
+
+        if ro:
+            for f in all_findings[n_before:]:
+                f["report_only"] = True
 
     all_findings.sort(key=lambda f: (f["file"], f["line"], f["rule"]))
 
@@ -714,10 +883,11 @@ def run(paths, register_path, enforce_fnptr, base_dir):
     return all_findings, summary, register, rule8a
 
 
-def render_text(findings, summary, enforce_fnptr, rule8a):
+def render_text(findings, summary, enforce_fnptr, rule8a, report_only_rules=()):
     lines = []
     for f in findings:
-        lines.append("%s:%d: %s: %s" % (f["file"], f["line"], f["rule"], f["message"]))
+        mark = " [report-only]" if (f.get("report_only") or f["rule"] in report_only_rules) else ""
+        lines.append("%s:%d: %s: %s%s" % (f["file"], f["line"], f["rule"], f["message"], mark))
 
     lines.append("")
     lines.append("-- power_of_10.py summary (report-only) --")
@@ -734,6 +904,7 @@ def render_text(findings, summary, enforce_fnptr, rule8a):
                  "violations: >20-code-line functions with <2 assertions; rule4cmpd = "
                  "RULE-4-COMPOUND: if/else/for/while/switch/do bodies > 30 code lines)")
 
+    total_rule1 = sum(s["rule1"] for s in summary.values())
     total_rule3 = sum(s["rule3"] for s in summary.values())
     total_rule4 = sum(s["rule4"] for s in summary.values())
     total_rule4_compound = sum(s["rule4_compound"] for s in summary.values())
@@ -741,6 +912,7 @@ def render_text(findings, summary, enforce_fnptr, rule8a):
     total_rule8 = sum(s["rule8"] for s in summary.values())
     total_rule9 = sum(s["rule9"] for s in summary.values())
     lines.append("")
+    lines.append("totals: rule1(recursion)=%d" % total_rule1)
     lines.append("totals: rule3(heap)=%d rule4(over-60)=%d rule4-compound(over-30)=%d "
                  "rule5(per-fn<2)=%d rule8(preprocessor)=%d rule9(fnptr)=%s" % (
         total_rule3, total_rule4, total_rule4_compound, total_rule5, total_rule8,
@@ -760,13 +932,35 @@ def main(argv=None):
                      help="Enable RULE-9 (no unregistered function pointer). INERT unless passed; "
                           "not used before plan Session 4.5.5.")
     ap.add_argument("--fail-on-violation", action="store_true",
-                     help="Exit 1 if any unregistered RULE-4/RULE-4-COMPOUND/RULE-5/RULE-8/RULE-9 "
-                          "finding exists. NOT used before plan Session 4.5.6 (report-only rollout).")
+                     help="Exit 1 if any unregistered RULE-1/RULE-3/RULE-4/RULE-4-COMPOUND/RULE-5/"
+                          "RULE-8/RULE-9 finding exists (outside any report-only path/site/rule).")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    ap.add_argument("--report-only-paths", nargs="*", default=list(DEFAULT_REPORT_ONLY_PATHS),
+                     help="Path prefixes scanned but never able to fail the build "
+                          "(default: %s)" % " ".join(DEFAULT_REPORT_ONLY_PATHS))
+    ap.add_argument("--report-only-sites", default="",
+                     help="Comma-separated `path:symbol:RULE` triples (symbol may be empty) that "
+                          "are reported but never fail the build: the rollout grace list for a "
+                          "newly added check whose known sites belong to another plan's files. "
+                          "A triple that matches nothing prints a GRACE-STALE line.")
+    ap.add_argument("--report-only-rules", default="",
+                     help="Comma-separated rule ids reported but never failing the build.")
     args = ap.parse_args(argv)
 
     base_dir = os.getcwd()
-    findings, summary, register, rule8a = run(args.paths, args.register, args.enforce_fnptr, base_dir)
+    report_only_rules = tuple(r.strip() for r in args.report_only_rules.split(",") if r.strip())
+    grace = []
+    for raw in args.report_only_sites.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = raw.split(":")
+        if len(parts) != 3:
+            print("bad --report-only-sites entry %r (want path:symbol:RULE)" % raw)
+            return 2
+        grace.append(tuple(parts))
+    findings, summary, register, rule8a = run(args.paths, args.register, args.enforce_fnptr,
+                                               base_dir, tuple(args.report_only_paths))
 
     if args.json:
         print(json.dumps({
@@ -777,14 +971,35 @@ def main(argv=None):
             "rule8a": rule8a,
         }, indent=2, sort_keys=True))
     else:
-        print(render_text(findings, summary, args.enforce_fnptr, rule8a))
+        print(render_text(findings, summary, args.enforce_fnptr, rule8a, report_only_rules))
         print("\nregister: %d row(s) loaded from %s" % (len(register.rows), args.register))
         print("mode: %s" % ("fail-on-violation" if args.fail_on_violation else "report-only (always exit 0 unless --fail-on-violation)"))
 
     if args.fail_on_violation:
-        blocking_rules = ("RULE-4", "RULE-4-COMPOUND", "RULE-5", "RULE-8", "RULE-9")
-        blocking = [f for f in findings if f["rule"] in blocking_rules]
+        blocking_rules = ("RULE-1", "RULE-3", "RULE-4", "RULE-4-COMPOUND", "RULE-5", "RULE-8",
+                          "RULE-9")
+
+        def graced(f):
+            for path, symbol, rule in grace:
+                if f["file"] == path and f["rule"] == rule and (symbol in ("", f.get("symbol", ""))):
+                    return True
+            return False
+
+        for f in findings:
+            if graced(f):
+                f["report_only"] = True
+        used = {(p, sy, r) for (p, sy, r) in grace for f in findings
+                if f["file"] == p and f["rule"] == r and (sy in ("", f.get("symbol", "")))}
+        for entry in grace:
+            if entry not in used:
+                print("GRACE-STALE: %s matches no finding -- remove it from the CI invocation"
+                      % ":".join(entry))
+        blocking = [f for f in findings
+                    if f["rule"] in blocking_rules
+                    and f["rule"] not in report_only_rules
+                    and not f.get("report_only")]
         if blocking:
+            print("\nBLOCKING: %d violation(s)" % len(blocking))
             return 1
     return 0
 
