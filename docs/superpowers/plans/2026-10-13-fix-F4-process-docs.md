@@ -3128,3 +3128,10 @@ names and the ten graced site keys are spelled identically everywhere they appea
 **Deviation register:** no new rows. One existing row (PD-6) has its `file:symbol` key moved to the
 site the tightened rule-9 check resolves. The check is
 `python3 tools/lint/power_of_10.py --enforce-fnptr --json | python3 -c "import json,sys; print(json.load(sys.stdin)['register_rows'])"` → `9` before and after.
+
+
+## Addendum 2026-10-13 — R35 hardware confirmation (folds into Task 7 and Task 9)
+
+- Task 7 (`docs/hardware/bom.md`): row 2 → `G28U7FTTL-P GPS module (u-blox 7-class UBX-G7020; label 2408U0003297)`, status `owned`; row 3 → `GY-521 (MPU-6050)`, status `owned`. Remove "ordered, ~mid-Oct 2026" from both.
+- Task 9 (spec): §3.1 GPS row → the module above with the u-blox 7 notes (NAV-PVT available, protocol ≥ 14, max nav rate 10 Hz, 9600 baud NMEA default, legacy `CFG-*` set); §2.4 "Keep NEO-6M for prototype" → "u-blox 7-class G28U7FTTL-P in the neo6m driver slot"; §3.5 prototype driver column unchanged (driver name stays `gps_neo6m`, profile `max_rate_hz` set after `MON-VER`); §25 items 2 and 5 → "hardware in hand — verify on the Plan 8 bench".
+- Task 10 (roadmap): hardware window C → "in hand (2026-10-13)"; Plan 8 status → "unblocked, starts after the fix wave".
