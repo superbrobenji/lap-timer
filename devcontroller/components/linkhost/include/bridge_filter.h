@@ -25,8 +25,8 @@ extern "C" {
  * SKIP=2, discarding payload) -- kept as a plain uint8_t so this header has no dependency beyond
  * stdint. skip: while st==HDR, header bytes still needed (counts down from 4 to the len byte);
  * while st==SKIP, payload bytes still to discard. frames: whole stream frames filtered out. bad:
- * frames abandoned because their header's len exceeded LT_REC_MAX (linkhost_proto.h) -- the lone
- * 0xFF byte that looked like a tag is dropped, not forwarded and not re-scanned as text. */
+ * frames abandoned because their header's len exceeded LT_REC_MAX + 1 (linkhost_proto.h) -- the
+ * lone 0xFF byte that looked like a tag is dropped, not forwarded and not re-scanned as text. */
 typedef struct {
     uint8_t  st;
     uint16_t skip;
@@ -40,13 +40,13 @@ void bridge_filter_reset(bridge_filter_t *f);
 
 /* Copies the non-frame bytes of in[0..n) to out (cap bytes), skipping whole stream frames
  * (0xFF | seq16 | flags | len | payload[len]); frames may straddle calls. A header whose len byte
- * exceeds LT_REC_MAX cannot be a real stream frame (the largest §14 record is LT_REC_MAX bytes) --
- * f->bad is incremented, the tag+header bytes already consumed are dropped (never forwarded), and
- * classification resumes on the very next input byte as text; a genuine frame instead increments
- * f->frames once its payload has been fully skipped. Never writes past cap: once cap output bytes
- * have been written, further would-be-text bytes are simply dropped, but the rest of `in` is still
- * scanned (frame detection/counting keeps working past a full output buffer). Returns the number
- * of bytes written to out (<= cap). */
+ * exceeds `LT_REC_MAX + 1` (the demux's own largest legal len: one type byte plus `LT_REC_MAX`
+ * payload) cannot be a real stream frame -- f->bad is incremented, the tag+header bytes already
+ * consumed are dropped (never forwarded), and classification resumes on the very next input byte
+ * as text; a genuine frame instead increments f->frames once its payload has been fully skipped.
+ * Never writes past cap: once cap output bytes have been written, further would-be-text bytes are
+ * simply dropped, but the rest of `in` is still scanned (frame detection/counting keeps working
+ * past a full output buffer). Returns the number of bytes written to out (<= cap). */
 size_t bridge_filter_run(bridge_filter_t *f, const uint8_t *in, size_t n, uint8_t *out, size_t cap);
 
 #ifdef __cplusplus

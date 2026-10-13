@@ -464,6 +464,7 @@ static void dl_feed_hdr(lh_dl_ctx_t *c, uint8_t b)
     c->line[len] = '\0';
     uint32_t size = 0;
     if (len > 0 && dl_parse_begin(c->line, len, c->name, sizeof c->name, &size)) {
+        if (size > LH_DL_BODY_MAX) { dl_fail(c, LINKHOST_E_PROTO); return; }   /* dk:M1 */
         c->body_size = size;
         c->body_got  = 0;
         c->b64_len   = 0;
@@ -573,6 +574,23 @@ int lh_dl_result(const lh_dl_ctx_t *c)
 int lh_dl_gap_ms(lh_dl_state_t state, int first_ms, int idle_ms)
 {
     return (state >= LH_DL_BODY) ? idle_ms : first_ms;
+}
+
+uint32_t lh_dl_progress(const lh_dl_ctx_t *c)
+{
+    assert(c != NULL);
+    return c->body_got;            /* 0 in LH_DL_HDR; frozen at body_size from LH_DL_TAIL on */
+}
+
+int64_t lh_dl_cap_us(uint32_t body_size, int64_t t_header_us, uint32_t baud)
+{
+    assert(baud > 0);
+    if (t_header_us < 0) t_header_us = 0;
+    uint32_t sz = (body_size > LH_DL_BODY_MAX) ? LH_DL_BODY_MAX : body_size;
+    int64_t xfer_us = (int64_t)sz * 10 * 1000000 / (int64_t)baud;   /* 8N1: 10 bits per byte */
+    int64_t cap  = t_header_us + xfer_us + xfer_us / 2 + LH_DL_MARGIN_US;
+    int64_t hard = t_header_us + (int64_t)LH_DL_HARD_MAX_MS * 1000;
+    return (cap > hard) ? hard : cap;
 }
 
 /* ================================================================================================
@@ -686,6 +704,28 @@ void linkhost_reset(void)
     memset(&s_rawcap, 0, sizeof(s_rawcap));   /* off, empty -- matches linkhost_rawcap_set's doc */
 }
 
+/* Every PARSER field of s_dx (its struct is at linkhost_proto.c:668-698), and nothing else: the
+ * line/frame/sh/sp byte arrays need no clearing because their *_len / *_got counters gate every read
+ * of them, and the ring (ring/ring_head/ring_tail/ring_hw) plus the rawcap are deliberately
+ * untouched -- a bridge session must not lose the stream records already queued for
+ * stream_consumer, nor the high-water figure `stream stats` reports. resp_ready is cleared because
+ * a half-parsed or unpopped response from before the bridge is stale by definition (the bridge
+ * held s_req_mtx, so no caller is waiting on one). */
+void linkhost_demux_resync(void)
+{
+    s_dx.state       = DX_SCAN;
+    s_dx.line_len    = 0;
+    s_dx.frame_len   = 0;
+    s_dx.body_need   = 0;
+    s_dx.body_got    = 0;
+    s_dx.tail_off    = 0;
+    s_dx.sh_got      = 0;
+    s_dx.sp_need     = 0;
+    s_dx.sp_got      = 0;
+    s_dx.resp_status = 0;
+    s_dx.resp_ready  = false;
+}
+
 /* SES_T_* range known to the current lap-timer (core/ses.h: 0x01..0x0E, plus 0x7F END), plus the
  * out-of-band LT_REC_STATUS (0x40) push (Plan 5.6 Task 1). Unknown types are still consumed
  * length-first, then dropped -- the demux stays synced regardless.
@@ -750,6 +790,11 @@ static void stream_emit(void)
     uint8_t type = s_dx.sp[0];
     uint32_t datalen = (uint32_t)len - 1u;
     if (!stream_type_known(type) || datalen > LT_REC_MAX) return;  /* consume + drop */
+    /* dk:L8: STATUS is a FIXED-length record (§18.2). A 0xFF byte corrupting a base64 body can
+     * synthesize a header whose type byte is a legal base64 char ('@' == LT_REC_STATUS); without a
+     * length check, 20 bytes of body garbage reached linkstats' STATUS cache and /api/status
+     * reported fabricated battery/free-space/fw as connected:true. */
+    if (type == LT_REC_STATUS && datalen != LT_STATUS_LEN) return;
     lt_stream_rec_t r;
     r.seq   = (uint16_t)(s_dx.sh[1] | ((uint16_t)s_dx.sh[2] << 8));
     r.flags = s_dx.sh[3];
@@ -891,6 +936,10 @@ size_t linkhost_feed(const uint8_t *bytes, size_t n)
         case DX_STREAM_HDR:
             s_dx.sh[s_dx.sh_got++] = b;         /* length-driven: read exactly 5 header bytes */
             if (s_dx.sh_got >= 5) {
+                /* dk:L3: a len that cannot be a real record (stream_emit's datalen = len - 1 is
+                 * bounded by LT_REC_MAX) means those five bytes were not a frame header at all --
+                 * drop them and resync on the next byte instead of swallowing up to 255 more. */
+                if (s_dx.sh[4] > (uint8_t)(LT_REC_MAX + 1u)) { s_dx.state = DX_SCAN; break; }
                 s_dx.sp_need = s_dx.sh[4];
                 s_dx.sp_got = 0;
                 if (s_dx.sp_need == 0) { stream_emit(); s_dx.state = DX_SCAN; }
