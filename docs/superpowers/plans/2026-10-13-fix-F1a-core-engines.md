@@ -1342,7 +1342,7 @@ Run: `./test/build/test_lap` → compile error (`pred_stride` undeclared); after
      if (d < 0.0) d = 0.0; else if (d > (double)UINT16_MAX) d = (double)UINT16_MAX;
      uint16_t d16 = (uint16_t)llround(d);
 -    L->pred_rec_fixes++;
- 
+
      if (L->pred_rec_n >= L->pred_cap) {                  /* full: keep every 2nd entry, then continue */
          uint16_t m = 0;
 -        for (uint16_t i = 0; i < L->pred_rec_n; i += 2) {
@@ -1446,7 +1446,7 @@ Run: `./test/build/test_lap` → FAIL, `lap_mark_gate` returns 0 for `head_e5 = 
 ```c
      if (L->mode != LAP_MODE_CREATE) return -1;
      if (!fix || fix->valid == 0 || fix->gspeed_mms <= 0) return -1;   /* need a heading of motion */
- 
+
      const double lat = (double)fix->lat_e7 / 1e7;
      const double lon = (double)fix->lon_e7 / 1e7;
      const double heading_deg = (double)fix->head_e5 / 1e5;
@@ -1579,7 +1579,7 @@ In `step_launched`, hoist `stopped` and make the abort unconditional on `v_peak`
      if (D->v_est > D->v_peak) D->v_peak = D->v_est;
      gate_step(D, out, cap, n, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
      brake_step(D, out, cap, n, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
- 
+
 -    /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm.
 -     * Guarded on v_peak having already cleared the threshold once: a sustained low-g launch is
 -     * itself briefly under 1 km/h just after t0 (v_est is still climbing from 0), and that is not
@@ -1602,7 +1602,7 @@ In `step_launched`, hoist `stopped` and make the abort unconditional on `v_peak`
 +        abort_to_armed(D, out, cap, n, now, fs->mono_us);
 +        return;
 +    }
- 
+
      /* DONE (§11.2): the 1/4 gate is hit; a full stop; or v below half-peak with no gate for the
       * timeout. */
      bool quarter = (D->quarter_idx != DRAG_NO_GATE && D->cur.gates[D->quarter_idx].hit);
