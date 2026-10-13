@@ -893,9 +893,9 @@ static void test_force_layout_unknown_id_is_refused(void)
     TEST_ASSERT_EQUAL_INT(0, lap_force_layout(&L, 1));   /* the real id is accepted */
 
     arm_at_start(&L, lat0, lon0, 0, &log);
-    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap completes: 1 completion */
-    forward_lap(&L, lat0, lon0, 40000000, 50000000, &log);   /* lap 0 opens but doesn't complete */
-    forward_lap(&L, lat0, lon0, 90000000, 50000000, &log);   /* lap 1 completes: 2 completions total */
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* crossing #1: out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 50000000, &log);   /* crossing #2: out-lap completes, lap 1 opens */
+    forward_lap(&L, lat0, lon0, 90000000, 50000000, &log);   /* crossing #3: lap 1 completes -> 2 completions */
     TEST_ASSERT_EQUAL_INT(2, count_type(&log, EV_LAP_COMPLETE));   /* laps still complete */
     const lap_result_t *p1 = lap_prev(&L);
     TEST_ASSERT_EQUAL_UINT16(1, p1->lap_no);
