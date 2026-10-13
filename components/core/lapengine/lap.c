@@ -46,6 +46,7 @@ void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg)
     if (L->cfg.min_lap_s == 0)    L->cfg.min_lap_s    = (uint16_t)MIN_LAP_S;
     if (L->cfg.max_lap_s == 0)    L->cfg.max_lap_s    = (uint16_t)MAX_LAP_S;
     if (L->cfg.gate_rearm_m == 0) L->cfg.gate_rearm_m = (uint16_t)GATE_REARM_DIST_M;
+    if (L->cfg.pit_speed_kmh == 0) L->cfg.pit_speed_kmh = (uint8_t)PIT_SPEED_KMH;
     if (L->cfg.pit_time_s == 0)   L->cfg.pit_time_s   = (uint8_t)PIT_TIME_S;
     if (L->cfg.n_default_layout > LAP_MAX_DEFAULT_LAYOUTS)
         L->cfg.n_default_layout = LAP_MAX_DEFAULT_LAYOUTS;   /* rule 2: bounds every map scan */
