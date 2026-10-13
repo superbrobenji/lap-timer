@@ -675,6 +675,39 @@ static void test_create_track_saves_valid_venue(void)
     TEST_ASSERT_TRUE(v->layouts[0].length_m > 0);
 }
 
+/* pr:M2 — finalize_create() now builds the venue in trk_user_scratch()'s module-static slot instead
+ * of a 2752 B trk_venue_t on the 8 KB pipeline-task stack, so it has a new failure branch: the slot
+ * is NULL once the user table is full. That must fail exactly as the old trk_user_add() rejection
+ * did -- back to NO_VENUE, nothing saved, no EV_VENUE_FOUND, and the table it could not join left
+ * untouched. (test_create_track_saves_valid_venue above is the unchanged-venue guard.) */
+static void test_create_refuses_when_user_table_full(void)
+{
+    const double lat0 = -34.0, lon0 = 18.7;
+    for (uint8_t i = 0; i < TRK_MAX_USER; i++) {
+        trk_venue_t filler; build_venue_2layout(&filler, lat0 + 1.0 + (double)i, lon0);
+        filler.id = (uint16_t)(TRK_USER_ID_BASE + i);   /* build_venue_2layout always uses the base id */
+        TEST_ASSERT_EQUAL_INT(0, trk_user_add(&filler));
+    }
+    TEST_ASSERT_EQUAL_INT(TRK_MAX_USER, trk_user_count());
+    TEST_ASSERT_NULL(trk_user_scratch());
+
+    lap_t L; lap_init(&L, NULL);
+    lap_create_begin(&L);
+    gps_fix_t sf = fix_ll(lat_of(lat0, 0.0), lon_of(lon0, lat0, 0.0), 1000000, SPD_MMS, true);
+    sf.head_e5 = 0;
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 0, &sf, NULL));
+    evlog_t log; memset(&log, 0, sizeof log);
+    feed_hdg(&L, lat0, lon0,   0.0, 300.0,  8000000,  0.0,   NULL);
+    feed_hdg(&L, lat0, lon0, 400.0, 300.0,  15000000, 90.0,  NULL);
+    feed_hdg(&L, lat0, lon0, 400.0,-100.0,  25000000, 180.0, NULL);   /* > MIN_LAP_S now */
+    feed_hdg(&L, lat0, lon0,   0.0,-100.0,  30000000, 270.0, NULL);
+    feed_hdg(&L, lat0, lon0,   0.0,  50.0,  35000000, 0.0,   &log);   /* S/F crossing -> finalise */
+
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+    TEST_ASSERT_EQUAL_INT(0, count_type(&log, EV_VENUE_FOUND));
+    TEST_ASSERT_EQUAL_INT(TRK_MAX_USER, trk_user_count());
+}
+
 /* §10.9 step 5: a long MODE press cancels creation and returns to NO_VENUE with nothing saved. */
 static void test_create_cancel(void)
 {
@@ -1280,6 +1313,7 @@ int main(void)
     RUN_TEST(test_disambiguation_locks_short_layout);
     RUN_TEST(test_ugate_union_saturates_at_lap_max_ugates);
     RUN_TEST(test_create_track_saves_valid_venue);
+    RUN_TEST(test_create_refuses_when_user_table_full);
     RUN_TEST(test_create_cancel);
     RUN_TEST(test_create_mark_gate_sector_out_of_order);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);

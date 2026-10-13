@@ -50,7 +50,8 @@
  * fact (2) if it were ever aimed at a live id.
  *
  * This rests on one invariant the API itself does NOT enforce: no writer may rewrite or remove an
- * id the ui may already hold, or that the logger may be mid-serialising. trk_user_add()'s same-id "replace" branch is real and live -- it is
+ * id the ui may already hold, or that the logger may be mid-serialising. trk_user_add()'s same-id
+ * "replace" branch is real and live -- it is
  * only safe today because every live call site supplies either a boot-time id (before any id is
  * surfaced to a reader) or a fresh one (lap.c's trk_next_user_id(), always one past every existing
  * id, so it can never collide with an id already seen). A future writer that could replace an id
@@ -150,6 +151,8 @@ static trk_venue_t *user_slot_for_parse(void)
     CORE_ASSERT_RET(user_n <= TRK_MAX_USER, TRK_ASSERT_CODE, NULL);
     return (user_n < TRK_MAX_USER) ? &user[user_n] : NULL;
 }
+
+trk_venue_t *trk_user_scratch(void) { return user_slot_for_parse(); }
 
 int trk_user_add_json(const char *json, size_t n, uint16_t *venue_id_out, char *err, size_t err_cap)
 {

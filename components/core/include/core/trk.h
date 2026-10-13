@@ -96,6 +96,14 @@ uint16_t           trk_next_user_id(void);
  * user venue without decoding a full record first, so it can skip persisting it. 0 if index is
  * out of range (no real venue id is ever 0, trk_validate_venue requires id != 0). */
 uint16_t           trk_user_id_at(uint8_t index);
+/* The module-static landing slot (user[user_n]) that trk_user_add_json() and trk_user_load_venue()
+ * already build/decode into, so a ~2.7 KB trk_venue_t never passes through a task stack (final
+ * review I-1; pr:M2 for the pipeline-side twin, lap.c's finalize_create()). NULL once the table is
+ * full. The caller memsets it before building and on every failure path, then hands it to
+ * trk_user_add(), whose "new entry" branch copies the slot onto itself (harmless) before bumping
+ * user_n. Not reentrant, like the rest of this module, and -- like every other entry point -- only
+ * legitimate on the task that owns writing (the pipeline task, after boot). */
+trk_venue_t       *trk_user_scratch(void);
 
 /* Per-venue variable-length record (review fix round 1, #97, T5-R4): the logger's actual
  * persistence format (components/app/logger/logger.c tracks_save/tracks_load), streamed one
