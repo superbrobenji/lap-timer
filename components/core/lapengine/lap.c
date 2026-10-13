@@ -634,7 +634,8 @@ static void evaluate_locked_sectors(lap_t *L, geo_enu_t cur, const gps_fix_t *fi
     CORE_ASSERT_VOID(L->n_sec <= LAP_CROSS_MAX, LAP_ASSERT_CODE);   /* loop / fired[] bound */
     const int64_t now  = fix->gps_us;
     const double  v1   = (double)fix->gspeed_mms / 1000.0;
-    const int8_t  want = L->locked_layout->dir_sign;   /* rule 9: one dereference level per expression */
+    const trk_layout_t *ly = L->locked_layout;   /* rule 9: one dereference level per expression */
+    const int8_t  want = ly->dir_sign;
     CORE_ASSERT_VOID(v1 >= 0.0, LAP_ASSERT_CODE);                   /* ground speed non-negative */
     lap_cross_t fired[LAP_CROSS_MAX];
     uint8_t     nf = 0;
@@ -1071,15 +1072,17 @@ static void process_segment(lap_t *L, geo_enu_t cur, const gps_fix_t *fix, event
         double t = 0.0;
         int    dir = 0;
         if (!geo_segment_cross(L->prev_enu, cur, c->sf_p, c->sf_q, &t, &dir)) continue;
-        const int8_t want = c->layout->dir_sign;   /* rule 9: one dereference level per expression */
+        const trk_layout_t *ly = c->layout;   /* rule 9: one dereference level per expression */
+        const int8_t want = ly->dir_sign;
         if (dir != want) continue;                 /* only the layout's own crossing direction */
         matched[i] = true;
         hit = true;
         if (t < t_earliest) t_earliest = t;
     }
     const int64_t t_sf = hit ? cross_time(L, cur, v1, t_earliest, now) : INT64_MAX;
-    /* R22: a chord is unreliable either because it is long (absent fixes) or because it spans a
-     * fix the §6.5 validator rejected (audit core:C1). */
+    /* R22: a chord is unreliable either because it is long (absent fixes) or because it spans
+     * a fix the §6.5 validator rejected -- a 2.8 s dropout is under LAP_SEG_GAP_US and was
+     * silently accepted before (audit core:C1). */
     const bool seg_gap = ((now - L->prev_gps_us) > LAP_SEG_GAP_US) || L->seg_has_invalid;
 
     evaluate_gates(L, cur, fix, INT64_MIN, t_sf, out, cap, n);     /* crossings before the S/F */
