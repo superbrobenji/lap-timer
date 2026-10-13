@@ -243,11 +243,76 @@ static void test_json_header_with_control_chars_still_emits_every_lap(void)
     TEST_ASSERT_EQUAL_UINT16(0, e.skipped);
 }
 
+static int one_fix_frame(uint8_t *fr, size_t cap)         /* 101500.00, 66.66 kn, 8 sats */
+{
+    ses_fix_state_t fs; ses_fix_state_init(&fs);
+    gps_fix_t f; memset(&f, 0, sizeof f);
+    f.gps_us = 1789380900LL * 1000000LL; f.lat_e7 = -338567000; f.lon_e7 = 185170000;
+    f.alt_mm = 45000; f.gspeed_mms = 34292; f.head_e5 = 9012000;
+    f.pdop_e2 = 120; f.fix_type = 3; f.sats = 8;
+    f.flags = GPS_FLAG_FIXOK | GPS_FLAG_TIME | GPS_FLAG_DATE; f.valid = 1;
+    return ses_encode_fix(&fs, &f, fr, cap);
+}
+
+/* exp_win_free ignores win_pos, so padding is the only way to hit the boundary deterministically. */
+static void pad_window_to_free(exp_t *e, int want)
+{
+    char pad[EXP_WINDOW];
+    size_t n = (size_t)(EXP_WINDOW - want);
+    memset(pad, 'x', n); pad[n] = '\0';
+    TEST_ASSERT_EQUAL_INT(0, exp_win_puts(e, pad));
+    TEST_ASSERT_EQUAL_INT(want, exp_win_free(e));
+}
+
+static void test_nmea_reserve_bounds_both_sentences(void)
+{
+    /* io:M5: the old 200-byte reserve let the first sentence in and then failed the second's
+     * exp_win_puts, returning -1 with one orphan sentence already in the window. */
+    exp_meta_t m; memset(&m, 0, sizeof m);
+    uint8_t fr[64]; int n = one_fix_frame(fr, sizeof fr);
+    uint8_t len = (uint8_t)(n - SES_FRAME_OVERHEAD);
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_NMEA, &m));
+    pad_window_to_free(&e, 231);                              /* one below the reserve */
+    size_t before = e.win_len;
+    TEST_ASSERT_EQUAL_INT(EXP_FULL, exp_feed(&e, fr[1], fr + 3, len));
+    TEST_ASSERT_EQUAL_UINT(before, e.win_len);                /* nothing written, no orphan */
+
+    exp_t e2; TEST_ASSERT_EQUAL_INT(0, exp_open(&e2, EXP_NMEA, &m));
+    pad_window_to_free(&e2, 232);                             /* exactly the reserve */
+    TEST_ASSERT_EQUAL_INT(0, exp_feed(&e2, fr[1], fr + 3, len));
+    char out[EXP_WINDOW + 1]; size_t at = drain(&e2, out, 0);
+    TEST_ASSERT_GREATER_THAN(0, at);
+    TEST_ASSERT_NOT_NULL(strstr(out, "$GPRMC,101500.00"));
+    TEST_ASSERT_NOT_NULL(strstr(out, "$GPGGA,101500.00"));    /* both sentences made it */
+}
+
+static void test_pull_with_a_cap_smaller_than_the_window_streams_then_resets(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m);
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_NMEA, &m));
+    uint8_t fr[64]; int n = one_fix_frame(fr, sizeof fr);
+    TEST_ASSERT_EQUAL_INT(0, exp_feed(&e, fr[1], fr + 3, (uint8_t)(n - SES_FRAME_OVERHEAD)));
+    size_t len = e.win_len, total = 0, got = 0;
+    uint8_t buf[16];
+    TEST_ASSERT_GREATER_THAN(sizeof buf, len);
+    while (total < len) {
+        TEST_ASSERT_EQUAL_INT(0, exp_pull(&e, buf, sizeof buf, &got));
+        TEST_ASSERT_TRUE(got > 0 && got <= sizeof buf);
+        total += got;
+    }
+    TEST_ASSERT_EQUAL_UINT(len, total);
+    TEST_ASSERT_EQUAL_UINT(0, e.win_len);                     /* a full drain resets the window */
+    TEST_ASSERT_EQUAL_INT(0, exp_pull(&e, buf, sizeof buf, &got));
+    TEST_ASSERT_EQUAL_UINT(0, got);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_nmea_sentences_and_checksums);
     RUN_TEST(test_nmea_drops_a_record_with_a_bad_timestamp_and_counts_it);
+    RUN_TEST(test_nmea_reserve_bounds_both_sentences);
+    RUN_TEST(test_pull_with_a_cap_smaller_than_the_window_streams_then_resets);
     RUN_TEST(test_json_summary_structure);
     RUN_TEST(test_json_summary_reports_skipped_records);
     RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);

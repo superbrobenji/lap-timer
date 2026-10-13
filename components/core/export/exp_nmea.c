@@ -6,6 +6,11 @@
 
 #define EXP_ASSERT_CODE 0x0A60
 
+/* io:M5: put_sentence writes at most 115 bytes ('$' + body[110]'s 109 chars + '*' + 2 hex +
+ * "\r\n") and exp_nmea_feed writes TWO sentences per fix, so the reserve must be 230 -- the old
+ * 200 let the first through and failed the second. 232 keeps 2 bytes of slack. */
+#define EXP_NMEA_RESERVE 232
+
 int exp_nmea_open(exp_t *e) { (void)e; return 0; }
 
 static void latlon_fields(int32_t lat_e7, int32_t lon_e7, char *lat, char *ns, char *lon, char *ew)
@@ -38,7 +43,7 @@ int exp_nmea_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (type != SES_T_FIX_KEY && type != SES_T_FIX_DELTA) return 0;
-    if (exp_win_free(e) < 200) return EXP_FULL;
+    if (exp_win_free(e) < EXP_NMEA_RESERVE) return EXP_FULL;
     gps_fix_t f;
     if (ses_decode_fix(&e->fix_st, type, p, len, &f) != 1) { exp_skip_record(e); return 0; }
     int y; unsigned mo, d, hh, mm, ss, cs;
