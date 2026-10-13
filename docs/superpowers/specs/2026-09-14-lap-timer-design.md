@@ -1540,11 +1540,13 @@ n_layouts × { u16 id | char name[24] | 4 × f64 sf | i8 dir_sign | u8 n_sectors
               n_sectors × (4 × f64 sector line) | u32 length_m }
 ```
 
+All payload scalars are little-endian; `f64` is IEEE-754 binary64, little-endian (the same raw byte image the build's `double` uses, which is why a blob is only valid for the build that wrote it).
+
 so an on-device-created venue (`n_layouts == 2`) costs well under a third of `TRK_USER_REC_MAX`, the worst-case payload the logger's scratch batch is proven to hold. The reserved sim venue id (`TRK_SIM_VENUE_ID`) is never written, is excluded from `count`, and a record carrying it is refused on load.
 
 A save writes `/tracks/user.tmp` and `sto_rename`s it over `/tracks/user.bin` only once every record landed (atomic on LittleFS), so a power cut mid-save leaves the previous file intact; every failure path unlinks the `.tmp`.
 
-A load is **per-record and fail-soft, not all-or-nothing**. A header whose magic or version byte does not match loads nothing and returns `-1`. Otherwise the first `min(count, TRK_MAX_USER)` records are read in turn and:
+A load is **per-record and fail-soft, not all-or-nothing**. A missing `/tracks/user.bin` loads nothing and returns `0` (nothing to load, not an error). A header that cannot be read in full (shorter than the 6-byte header) or whose magic or version byte does not match also loads nothing, but returns `-1`. Otherwise the first `min(count, TRK_MAX_USER)` records are read in turn and:
 
 - a record whose length prefix, payload or CRC trailer cannot be read in full, or whose `len` is `0` or above `TRK_USER_REC_MAX`, **stops** the loop — the rest of the file is unreachable without it;
 - a record whose CRC does not match is **skipped and reading continues**, so one corrupt record never costs the records after it;

@@ -98,6 +98,7 @@ Default: where the spec describes product behaviour, the code implements it; whe
 | `POWER` records, `LOW BATT` one-shot, Sleep now | — | Plan 6 |
 | PR #101 M3–M6 (creation while storage dead, resume Layout contradiction, linter regex, file-level corrupt-blob tests) | new ×4 | F2b picks up M3/M4; M5/M6 → F4 |
 | 2.9" panel verification | existing [VERIFY] | hardware |
+| PR-101 LOW findings pr:L5–L11: L5 (unbounded `drag_run_state` assign in ui.c drag_rows_refill) → F2b; L6 (`Track_YYYYMMDD` UTC/non-unique per day) → F5; L7 (`lap_mark_gate` accepts 1 mm/s as moving) → F1a (its lap_mark_gate task); L8 (custom DIST gate label prints metres under ft) → F1b; L9 ("New track" silently dead in DRAG mode) → F2b; L10 (missing step-overflow golden) → F1b; L11 (`cfg.h` `_Static_assert` does not pin `sizeof(cfg_t)`) → F1b | new ×7 | F1a / F1b / F2b / F5 |
 
 ## 6. Cleanup inventory (R34 — checked off by F4's final task)
 

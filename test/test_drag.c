@@ -457,7 +457,8 @@ static void test_done_to_idle_settle_is_silent(void)
     arm_engine(true);
     double a = 0.5 * G_MPS2, ab = 2.0 * G_MPS2, vpk = 0.0;
     int64_t tpk = 0;
-    for (int k = LAUNCH_K; k <= 3000; k++) {
+    int k;
+    for (k = LAUNCH_K; k <= 3000; k++) {
         int64_t t = (int64_t)k * DT_US;
         double gl, v;
         if (drag_state(&D) != DRAG_ST_DONE) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); vpk = v; tpk = t; }
@@ -469,9 +470,22 @@ static void test_done_to_idle_settle_is_silent(void)
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
     const int ev_before = EV.n;
-    for (int k = 3001; k <= 3001 + (DRAG_DONE_SETTLE_S + 1) * FUSION_HZ; k++) {
+    /* #102 final review, finding 8: this used to restart the follow-up loop at a hardcoded
+     * k = 3001, jumping the sim clock ahead of wherever brake_done actually landed -- a ~12 s
+     * jump on this run -- so the settle fired on the very first follow-up sample and the
+     * DRAG_DONE_SETTLE_S boundary this loop exists to exercise was never actually crossed.
+     * Continuing from k (left at the brake-done sample by the `break` above) keeps the clock
+     * continuous, so the boundary is genuinely crossed sample by sample. */
+    const int k_done = k;
+    /* The settle clock runs from D.done_gps_us (when DONE was entered, at the quarter), not from
+     * k_done (when braking finished, ~3.2 s later) -- so the "still DONE" checkpoint below is
+     * anchored to done_gps_us, DRAG_DONE_SETTLE_S - 1 s after it (one second shy of the 5 s
+     * boundary, with margin either side of k_done). */
+    const int k_still_done = (int)(D.done_gps_us / DT_US) + (DRAG_DONE_SETTLE_S - 1) * FUSION_HZ;
+    for (; k <= k_done + (DRAG_DONE_SETTLE_S + 1) * FUSION_HZ; k++) {
         fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, 0);
         drive_fused(&fs, true);
+        if (k == k_still_done) TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
     TEST_ASSERT_EQUAL_INT(ev_before, EV.n);       /* no event announced the settle */

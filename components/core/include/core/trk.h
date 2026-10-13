@@ -52,10 +52,12 @@ extern const uint16_t    trk_bundled_count;
  * in principle run. Three facts, not a lock, make that safe; a change breaking any one of them must
  * add a lock or move the work:
  *   (1) the save captures trk_user_count() ONCE, up front, and only touches indices < that count;
- *   (2) the writer is append-only inside that range -- trk_user_add() fills user[user_n] and only
- *       then bumps user_n -- so it never writes a byte the save can be reading (its same-id
- *       "replace" branch is the exception, and the invariant closing this comment is what keeps
- *       that branch off any id a reader may hold);
+ *   (2) the writer is append-only inside that range -- every post-boot caller passes
+ *       trk_user_scratch(), so v == &user[user_n] and the slot is already fully built before the
+ *       add runs; user[user_n++] = *v is then a self-assignment onto that same slot, so the
+ *       sequencing of the increment cannot matter, and the save never reads a byte the add
+ *       touches (its same-id "replace" branch is the exception, and the invariant closing this
+ *       comment is what keeps that branch off any id a reader may hold);
  *   (3) the xQueueSend(g_log_req_q, ...) asking for the save is issued by the pipeline task AFTER
  *       the add returns (pipeline.c's create_finish_if_active()), so the queue send/receive pair
  *       orders the add before the save it triggers -- no other barrier needed.

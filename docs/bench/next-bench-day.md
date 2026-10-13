@@ -160,7 +160,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
   (`test_lap.c`'s `lap_import_rtc`-is-silent contract test) and real hardware, once item 6
   (`moto_neo6m`) is on the bench and GPS RTC carry-over exists. **Sim-boot half PASSED on bench day 5 (2026-10-10):** `Auto → Full → Auto` in words, the post-reset VENUE one-shot read `Synthetic` / `Full`, the footer BEST survived the cycling (a real layout change clears only the page-1 best-sector board, by design, ruling R-9).
-- [ ] **F0/#102 — DRAG card on a silent transition.** In DRAG mode with the sim: `dbg sim drag`, then stall the run within 2 s of launch so the engine false-starts. The card must fall back to `NOT READY` within one refresh instead of staying on `LAUNCHED`. Then let a full run reach `DONE` and wait > 5 s stationary: the card must read `NOT READY`, not `DONE`.
+- [ ] **F0/#102 — DRAG card on a silent transition.** In DRAG mode with the sim: `dbg sim drag`, then stall the run within 2 s of launch so the engine false-starts. Then let a full run reach `DONE` and wait > 5 s stationary: the card must stop reading `LAUNCHED` (false start) / `DONE` (settle) within one refresh — expect `READY` (the engine re-arms); `NOT READY` only in the short IDLE window right after the settle.
 
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4

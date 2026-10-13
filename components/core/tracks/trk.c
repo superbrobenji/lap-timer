@@ -43,23 +43,23 @@
  * serialises the whole store on every LOGGER_SAVE_TRACKS -- trk_user_count() once, then
  * trk_user_id_at() and trk_user_save_venue() per index (logger.c's tracks_save()) -- with no lock,
  * and with the pipeline task's trk_user_add() able in principle to run. Unlike the ui, no event
- * orders this read: the argument is the captured count, the append-only writer (user[user_n] filled
- * before user_n is bumped, so reader and writer never touch the same byte), and the xQueueSend()
- * requesting the save being issued after the add returns. core/trk.h states all three in full; all
- * three must hold for any future change, and the replace branch below is the one that would break
- * fact (2) if it were ever aimed at a live id.
+ * orders this read: the argument is the captured count, the append-only writer (every post-boot
+ * call passes trk_user_scratch(), so v == &user[user_n] and the slot is already fully built before
+ * the add runs -- user[user_n++] = *v is a self-assignment, so reader and writer never touch a byte
+ * the other is using), and the xQueueSend() requesting the save being issued after the add returns.
+ * core/trk.h states all three in full; all three must hold for any future change, and the replace
+ * branch below is the one that would break fact (2) if it were ever aimed at a live id.
  *
  * This rests on one invariant the API itself does NOT enforce: no writer may rewrite or remove an
  * id the ui may already hold, or that the logger may be mid-serialising. trk_user_add()'s same-id
- * "replace" branch is real and live -- it is
- * only safe today because every live call site supplies either a boot-time id (before any id is
- * surfaced to a reader) or a fresh one (lap.c's trk_next_user_id(), always one past every existing
- * id, so it can never collide with an id already seen). A future writer that could replace an id
- * already surfaced to the ui in the same session (a second track load after boot, a revived BLE
- * upload, ...) must run strictly before that id's first EV_VENUE_FOUND/EV_LAYOUT_LOCKED of the
- * session, or take a lock/seqlock (pipeline.c's seq_enter()/seq_leave() around s_best is the
- * existing pattern for this shape of problem) -- "no lock is taken" above holds only as long as
- * that ordering does. */
+ * "replace" branch is real and live -- it is only safe today because every live call site supplies
+ * either a boot-time id (before any id is surfaced to a reader) or a fresh one (lap.c's
+ * trk_next_user_id(), always one past every existing id, so it can never collide with an id already
+ * seen). A future writer that could replace an id already surfaced to the ui in the same session (a
+ * second track load after boot, a revived BLE upload, ...) must run strictly before that id's first
+ * EV_VENUE_FOUND/EV_LAYOUT_LOCKED of the session, or take a lock/seqlock (pipeline.c's
+ * seq_enter()/seq_leave() around s_best is the existing pattern for this shape of problem) -- "no
+ * lock is taken" above holds only as long as that ordering does. */
 static trk_venue_t user[TRK_MAX_USER];
 static uint8_t     user_n;
 

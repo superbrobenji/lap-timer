@@ -2035,7 +2035,7 @@ static void ui_task(void *arg)
     s_mode        = (s_cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     s_model.mode  = s_mode;
     s_model.units = s_cfg.units; /* Plan 7c T4 (design §3): every speed_display() call on screen uses it */
-    s_model.dist_units = s_cfg.dist_units; /* #96: DIST-gate naming only, consumed by row_from_gate */
+    s_model.dist_units = s_cfg.dist_units; /* #96: DIST-gate names and every distance the list, card and footer show (B4-F5) */
     drag_cfg_from_user(&s_cfg, &s_drag_cfg); /* Plan 7c T5: gate table for DRAG row labels/benches */
     /* Event card (spec 7b §3): session/first-lap state -- no delta to show yet, lap 1 in progress.
      * The rest of s_model is zero-initialised static storage, which is already BIG_NONE/0.
