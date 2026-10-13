@@ -290,6 +290,25 @@ static void test_decode_fix_rejects_non_positive_gps_us(void)
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_KEY, p, 39, &f));
 }
 
+static void test_decode_delta_rejects_a_non_positive_reconstruction_without_corrupting_the_anchor(void)
+{
+    /* io:C1/R26 fix round 1: the DELTA branch must reject before it writes through st->prev, so a
+     * rejected frame leaves the anchor exactly as it was for whatever is fed next. */
+    ses_fix_state_t st; ses_fix_state_init(&st);
+    st.have_prev = true;
+    st.prev.gps_us = -1000000;              /* already non-positive; dt=0 keeps the sum <= 0 */
+    st.prev.lat_e7 = 123456789;             /* recognisable: must be untouched by the rejected delta */
+
+    uint8_t p[15]; bw_t w; bw_init(&w, p, sizeof p);
+    bw_u16(&w, 0);                          /* dt = 0 */
+    bw_i16(&w, 42); bw_i16(&w, -17); bw_i16(&w, 5);   /* dlat, dlon, dalt: would mutate if applied */
+    bw_u16(&w, 300); bw_u16(&w, 9000); bw_u8(&w, 25); bw_u8(&w, 9); bw_u8(&w, 0x07);
+    gps_fix_t f;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_DELTA, p, 15, &f));
+    TEST_ASSERT_EQUAL_INT64(-1000000, st.prev.gps_us);     /* anchor's gps_us untouched */
+    TEST_ASSERT_EQUAL_INT32(123456789, st.prev.lat_e7);    /* anchor's lat_e7 untouched */
+}
+
 static void test_utc_parts_clamps_a_negative_timestamp(void)
 {
     int y; unsigned mo, d, hh, mm, ss, cs;
@@ -466,6 +485,7 @@ int main(void)
     RUN_TEST(test_small_record_round_trips);
     RUN_TEST(test_calib_round_trip);
     RUN_TEST(test_decode_fix_rejects_non_positive_gps_us);
+    RUN_TEST(test_decode_delta_rejects_a_non_positive_reconstruction_without_corrupting_the_anchor);
     RUN_TEST(test_utc_parts_clamps_a_negative_timestamp);
     RUN_TEST(test_decoders_reject_malformed_payloads);
     RUN_TEST(test_empty_json_and_config_are_rejected_without_a_fault);

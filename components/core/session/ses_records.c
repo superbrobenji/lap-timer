@@ -122,12 +122,16 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         uint16_t dt = br_u16(&r); int16_t dlat = br_i16(&r); int16_t dlon = br_i16(&r); int16_t dalt = br_i16(&r);
         uint16_t v = br_u16(&r); uint16_t head = br_u16(&r); uint8_t hacc = br_u8(&r); uint8_t sats = br_u8(&r); uint8_t fl = br_u8(&r);
         gps_fix_t *p = &st->prev;
-        p->gps_us += (int64_t)dt * 1000; p->lat_e7 += dlat; p->lon_e7 += dlon; p->alt_mm += (int32_t)dalt * 100;
+        /* io:C1/R26: reject the reconstructed timestamp before the anchor is mutated -- the KEY
+         * branch checks before it touches st->prev, and a rejected DELTA must not leave a corrupt
+         * anchor for the frames that follow. */
+        int64_t gps_us = p->gps_us + (int64_t)dt * 1000;
+        if (gps_us <= 0) return -1;
+        p->gps_us = gps_us; p->lat_e7 += dlat; p->lon_e7 += dlon; p->alt_mm += (int32_t)dalt * 100;
         p->gspeed_mms = (int32_t)v * 10; p->head_e5 = (int32_t)head * 1000; p->hacc_mm = (uint32_t)hacc * 100u; p->sats = sats;
         p->sacc_mms = 0; p->pdop_e2 = 0;
         p->fix_type = (fl & 0x04) ? 3 : 2; p->valid = fl & 0x01;
         p->flags = (uint8_t)(((fl & 0x02) ? GPS_FLAG_FIXOK : 0) | GPS_FLAG_TIME | GPS_FLAG_DATE);
-        if (p->gps_us <= 0) return -1;     /* same rule on the reconstructed timestamp */
         st->prev_valid = p->valid != 0;
         *out = *p;
         return 1;
