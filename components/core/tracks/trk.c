@@ -39,8 +39,18 @@
  * FreeRTOS cross-core queue (g_ui_evt_q) send/receive is a full memory barrier, so every write
  * above is guaranteed visible by the time the ui's read runs. No lock is taken.
  *
+ * Third reader, post-boot and unlocked (#97, review finding pr:H2): the logger task (core 0)
+ * serialises the whole store on every LOGGER_SAVE_TRACKS -- trk_user_count() once, then
+ * trk_user_id_at() and trk_user_save_venue() per index (logger.c's tracks_save()) -- with no lock,
+ * and with the pipeline task's trk_user_add() able in principle to run. Unlike the ui, no event
+ * orders this read: the argument is the captured count, the append-only writer (user[user_n] filled
+ * before user_n is bumped, so reader and writer never touch the same byte), and the xQueueSend()
+ * requesting the save being issued after the add returns. core/trk.h states all three in full; all
+ * three must hold for any future change, and the replace branch below is the one that would break
+ * fact (2) if it were ever aimed at a live id.
+ *
  * This rests on one invariant the API itself does NOT enforce: no writer may rewrite or remove an
- * id the ui may already hold. trk_user_add()'s same-id "replace" branch is real and live -- it is
+ * id the ui may already hold, or that the logger may be mid-serialising. trk_user_add()'s same-id "replace" branch is real and live -- it is
  * only safe today because every live call site supplies either a boot-time id (before any id is
  * surfaced to a reader) or a fresh one (lap.c's trk_next_user_id(), always one past every existing
  * id, so it can never collide with an id already seen). A future writer that could replace an id

@@ -45,7 +45,22 @@ extern const uint16_t    trk_bundled_count;
  *
  * Readers: the pipeline task (core 1) and -- since #98 -- the ui task (core 0), both only through
  * trk_get(); the ui calls it only after receiving the EV_VENUE_FOUND/EV_LAYOUT_LOCKED event that
- * names the id.
+ * names the id. Since #97 the LOGGER task (core 0) is a third reader, and the only one no event
+ * orders: on every LOGGER_SAVE_TRACKS it serialises the store through trk_user_count(),
+ * trk_user_id_at() and trk_user_save_venue() (logger.c's tracks_save()), unlocked, while the one
+ * post-boot writer -- trk_user_add() from lap.c's finalize_create(), pipeline task, core 1 -- could
+ * in principle run. Three facts, not a lock, make that safe; a change breaking any one of them must
+ * add a lock or move the work:
+ *   (1) the save captures trk_user_count() ONCE, up front, and only touches indices < that count;
+ *   (2) the writer is append-only inside that range -- trk_user_add() fills user[user_n] and only
+ *       then bumps user_n -- so it never writes a byte the save can be reading (its same-id
+ *       "replace" branch is the exception, and the invariant closing this comment is what keeps
+ *       that branch off any id a reader may hold);
+ *   (3) the xQueueSend(g_log_req_q, ...) asking for the save is issued by the pipeline task AFTER
+ *       the add returns (pipeline.c's create_finish_if_active()), so the queue send/receive pair
+ *       orders the add before the save it triggers -- no other barrier needed.
+ * The window a future change could open is a second creation landing inside one save; today two
+ * creations cannot be closer than MIN_LAP_S apart, so it is unreachable, not merely narrow.
  *
  * Writers: trk_init() then logger_load_tracks() (app/logger.h; the implementation stays in
  * logger.c, the file it reads -- it only reads) run in that exact order, BOTH on app_main's own
@@ -60,8 +75,9 @@ extern const uint16_t    trk_bundled_count;
  * the CFG_GPS_SIM venue) is on the pipeline task, after boot, and always completes before the
  * event that surfaces its id is emitted -- the FreeRTOS event queue (g_ui_evt_q) send/receive is
  * the barrier that makes the write visible to the ui task without a lock. One invariant the API
- * itself does not enforce: no writer may rewrite or remove an id the ui may already hold (trk.c
- * has the full reasoning and every live call site's compliance). */
+ * itself does not enforce: no writer may rewrite or remove an id the ui may already hold, or that
+ * the logger may be mid-serialising (trk.c has the full reasoning and every live call site's
+ * compliance). */
 void               trk_init(void);                                   /* clears the user store */
 int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
