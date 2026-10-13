@@ -388,6 +388,8 @@ static void test_false_start_abort(void)
         drive_fused(&fs, true);
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    const int ev_before_abort = EV.n;   /* #102/pr:M1: abort_to_armed() emits NOTHING, so the only
+                                         * way a consumer can see LAUNCHED -> ARMED is drag_state() */
     fused_sample_t s216 = fused((int64_t)216 * DT_US, 0.0f, 0);
     drive_fused(&s216, true);
     gps_fix_t stall = gfix((int64_t)216 * DT_US, 0, true);        /* Doppler: stopped */
@@ -396,6 +398,7 @@ static void test_false_start_abort(void)
     drive_fused(&s217, true);
 
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));       /* re-armed, run discarded */
+    TEST_ASSERT_EQUAL_INT(ev_before_abort, EV.n);   /* no event announced the abort */
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));
     TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
 }
@@ -435,6 +438,58 @@ static void test_done_then_brake(void)
     int brake_i = ev_gate_index(11);
     TEST_ASSERT_TRUE(done_i >= 0 && brake_i >= 0);
     TEST_ASSERT_TRUE(brake_i > done_i);
+}
+
+/* #102 / pr:M1 — the DONE -> IDLE settle (go_idle_keep_result, drag.c:603, DRAG_DONE_SETTLE_S after
+ * DONE) is the engine's second SILENT transition: drag_state() changes and no event is emitted, so
+ * a publisher that refreshes only on a step that produced events keeps showing DONE until the next
+ * arm. That is why pipeline.c's on_raw compares drag_state() against the state it last published.
+ * DEVIATION FROM BRIEF (verified on this checkout, see task-2-report.md): run_quarter_then_brake's
+ * fixed 0.5 g launch / 1 g brake decelerates from the quarter's ~226 km/h peak in ~6.4 s, which is
+ * already past DRAG_DONE_SETTLE_S (5 s) by the time brake_pending() clears -- so go_idle_keep_result()
+ * fires inside that same helper call and the engine is already IDLE before this test can observe it
+ * in DONE. This local copy brakes at 2 g instead (~3.2 s to a stop) so brake_pending() clears with
+ * time to spare and DONE is still the state we observe; the follow-up samples carry flags 0, NOT
+ * FUS_STILL, so the engine cannot re-arm and emit EV_DRAG_ARMED while we are counting events. */
+static void test_done_to_idle_settle_is_silent(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(true);
+    double a = 0.5 * G_MPS2, ab = 2.0 * G_MPS2, vpk = 0.0;
+    int64_t tpk = 0;
+    int k;
+    for (k = LAUNCH_K; k <= 3000; k++) {
+        int64_t t = (int64_t)k * DT_US;
+        double gl, v;
+        if (drag_state(&D) != DRAG_ST_DONE) { gl = 0.5;  v = a * ((double)(t - T_LAUNCH_US) / 1e6); vpk = v; tpk = t; }
+        else                                { gl = -2.0; double tb = (double)(t - tpk) / 1e6; v = vpk - ab * tb; if (v < 0) v = 0; }
+        fused_sample_t fs = fused(t, (float)gl, 0);
+        drive_fused(&fs, true);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, (int32_t)(v * 1000.0), true); drag_on_fix(&D, &f); }
+        if (D.brake_done) break;
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    const int ev_before = EV.n;
+    /* #102 final review, finding 8: this used to restart the follow-up loop at a hardcoded
+     * k = 3001, jumping the sim clock ahead of wherever brake_done actually landed -- a ~12 s
+     * jump on this run -- so the settle fired on the very first follow-up sample and the
+     * DRAG_DONE_SETTLE_S boundary this loop exists to exercise was never actually crossed.
+     * Continuing from k (left at the brake-done sample by the `break` above) keeps the clock
+     * continuous, so the boundary is genuinely crossed sample by sample. */
+    const int k_done = k;
+    /* The settle clock runs from D.done_gps_us (when DONE was entered, at the quarter), not from
+     * k_done (when braking finished, ~3.2 s later) -- so the "still DONE" checkpoint below is
+     * anchored to done_gps_us, DRAG_DONE_SETTLE_S - 1 s after it (one second shy of the 5 s
+     * boundary, with margin either side of k_done). */
+    const int k_still_done = (int)(D.done_gps_us / DT_US) + (DRAG_DONE_SETTLE_S - 1) * FUSION_HZ;
+    for (; k <= k_done + (DRAG_DONE_SETTLE_S + 1) * FUSION_HZ; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.0f, 0);
+        drive_fused(&fs, true);
+        if (k == k_still_done) TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_IDLE, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(ev_before, EV.n);       /* no event announced the settle */
+    TEST_ASSERT_NOT_NULL(drag_current(&D));       /* the frozen result is kept (go_idle_keep_result) */
 }
 
 /* §11.4 bench visibility: a peak-180 run hits only the 100 bench (rows = {100, 1/4}); a peak-320 run
@@ -548,6 +603,49 @@ static void test_gps_reanchor_does_not_hide_speed_gate(void)
     TEST_ASSERT_INT_WITHIN(3, 2778, (int)g100->speed_cms);   /* recorded at the 100 km/h threshold */
 }
 
+/* Bench regression 2026-10-07: a results-PRESERVING config swap -- what pipeline_reload_cfg() now
+ * does when drag_cfg_engine_differs() says the table did not move (a display-only change: Dist:
+ * m|ft, Units: with an empty mph list, a bench-list edit, any unrelated remote CONFIG_SET key) --
+ * must keep the frozen run, the session bests and the run counter. Adopting cfg in place is only
+ * sound because gates[]/n_gates are identical, which is exactly what the helper proves. The
+ * drag_init() half of the branch is asserted too, so the destructive contract stays documented. */
+static void test_display_only_cfg_swap_keeps_results(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(false);
+    run_const_g(0.5, 1700, false);                  /* 0-100 ~5665 ms, 1/4 ~12810 ms */
+
+    const drag_result_t *before = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(before);
+    uint32_t q_ms  = gate_by_id(before, 10)->time_ms;
+    uint16_t run_no = D.run_no;
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 2));
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 10));
+
+    /* display-only change: same gate table + rollout, different display bytes */
+    drag_cfg_t disp = D.cfg;
+    disp.units = (uint8_t)(D.cfg.units == DRAG_UNITS_KMH ? DRAG_UNITS_MPH : DRAG_UNITS_KMH);
+    disp.benches_kmh[0] = 80;
+    TEST_ASSERT_FALSE(drag_cfg_engine_differs(&disp, &D.cfg));
+    D.cfg = disp;                                   /* the fixed reload's non-destructive branch */
+
+    const drag_result_t *after = drag_current(&D);
+    TEST_ASSERT_NOT_NULL(after);                    /* the run is still on the card */
+    TEST_ASSERT_EQUAL_UINT16(run_no, D.run_no);     /* and the session log keeps numbering runs */
+    TEST_ASSERT_EQUAL_UINT32(q_ms, gate_by_id(after, 10)->time_ms);
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 2));         /* session bests survive */
+    TEST_ASSERT_NOT_NULL(drag_best(&D, 10));
+
+    /* the other branch: a real table change DOES clear results (core/drag.h's documented contract) */
+    drag_cfg_t moved = D.cfg;
+    moved.gates[0].a = (uint16_t)(moved.gates[0].a + 1u);
+    TEST_ASSERT_TRUE(drag_cfg_engine_differs(&moved, &D.cfg));
+    drag_init(&D, &moved);
+    TEST_ASSERT_NULL(drag_current(&D));
+    TEST_ASSERT_NULL(drag_best(&D, 10));
+    TEST_ASSERT_EQUAL_UINT16(0, D.run_no);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -565,8 +663,10 @@ int main(void)
     RUN_TEST(test_false_start_abort);
     RUN_TEST(test_low_g_launch_no_false_start);
     RUN_TEST(test_done_then_brake);
+    RUN_TEST(test_done_to_idle_settle_is_silent);
     RUN_TEST(test_bench_visibility_180_vs_320);
     RUN_TEST(test_bench_drop_lowest_when_over_four);
     RUN_TEST(test_best_per_gate_two_runs);
+    RUN_TEST(test_display_only_cfg_swap_keeps_results);
     return UNITY_END();
 }

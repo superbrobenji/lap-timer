@@ -626,9 +626,21 @@ static const sim_fix_t SIM_FIXES[SIM_FIX_COUNT] = {
     { 1789466520000000LL, -340294986, 187310980, 100000, 19940, 15590768, 1500u, 50u, 180u, 3, 9, 0x07u },
 };
 
-/* Venue as JSON; the pipeline parses it with trk_from_json (same as replay --venue-json). */
+/* Venue as JSON; the pipeline parses it with trk_from_json (same as replay --venue-json).
+ *
+ * Final review F-5/I-5 (#97): the id is 1004 == TRK_SIM_VENUE_ID (core/trk.h:
+ * TRK_USER_ID_BASE + TRK_MAX_USER == 1000 + 4), a reserved id OUTSIDE the range
+ * trk_next_user_id() ever hands out to an on-device creation. Before this fix the sim capture
+ * used plain 1000 (TRK_USER_ID_BASE) -- the exact id a FIRST real creation would also get -- so
+ * booting moto_sim on a device already holding a real venue persisted at that id silently
+ * overwrote it (trk_user_add()'s same-id "replace" branch) and the next save made the loss
+ * permanent. See pipeline.c's CFG_GPS_SIM block for the full argument.
+ *
+ * MAINTENANCE: tools/sim/gen_sim_capture.sh regenerates this file from a `synth`-produced venue
+ * JSON (tools/replay) whose id is plain 1000 -- a regeneration will revert this edit; change
+ * "id":1000 back to "id":1004 (and re-diff the rest) before committing a refreshed capture. */
 static const char SIM_VENUE_JSON[] =
-    "{\"id\":1000,\"name\":\"Synthetic\",\"lat\":-34.0300000,\"lon\":18.7300000,\"radius_m\":2000,\"verified\":false,\"layouts\":[{\"id\":1,\"name\":\"Full\",\"dir\":1,\"length_m\":700,\"sf\":[[-34.0290010,18.7304749],[-34.0292346,18.7303121]],\"sectors\":[[[-34.0308403,18.7308065],[-34.0306067,18.7306438]],[[-34.0301587,18.7287186],[-34.0301587,18.7290441]]]}]}";
+    "{\"id\":1004,\"name\":\"Synthetic\",\"lat\":-34.0300000,\"lon\":18.7300000,\"radius_m\":2000,\"verified\":false,\"layouts\":[{\"id\":1,\"name\":\"Full\",\"dir\":1,\"length_m\":700,\"sf\":[[-34.0290010,18.7304749],[-34.0292346,18.7303121]],\"sectors\":[[[-34.0308403,18.7308065],[-34.0306067,18.7306438]],[[-34.0301587,18.7287186],[-34.0301587,18.7290441]]]}]}";
 
 /* Defined in gps_sim.c (returns SIM_VENUE_JSON above); declared here -- the one header
  * gps_sim.c and its cross-component caller (pipeline.c) can both see -- so the definition

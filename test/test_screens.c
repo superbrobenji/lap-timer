@@ -11,6 +11,8 @@
  */
 #include "unity.h"
 
+#include "core/cfg.h"       /* CFG_DIST_M/CFG_DIST_FT (#96) -- documents the two dist-units goldens */
+#include "core/drag.h"      /* DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (#95) -- screen_model_t.drag_run_state values */
 #include "core/ui/canvas.h"
 #include "core/ui/icons.h"
 #include "core/ui/model.h"
@@ -358,15 +360,69 @@ static void drag_gate(screen_model_t *m, const char *label, uint32_t t_ms, uint1
     r->trap_cms = trap_cms; r->has_trap = trap_cms != 0; r->is_distance = dist; r->dist_m = dist_m;
 }
 
-static void test_drag_p0_ready(void)
+static void test_dragcard_notready(void)
 {
-    /* Before the first gate: big slot reads "READY" (FONT_MED, no letters in FONT_HUGE), ARMED
-     * top-right while drag_armed, footer empty. */
-    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_armed = true; m.batt_pct = 90;
+    /* #95 (bench B4-F1): before the drag engine has armed, the big slot reads "NOT READY"
+     * (FONT_MED, no letters in FONT_HUGE), not "READY" -- a rider must not treat an unarmed card
+     * as timing. The big slot is now driven by drag_run_state, the engine's own four-value state
+     * (DRAG_ST_IDLE/ARMED/LAUNCHED/DONE, core/drag.h) carried through pipe_drag_t.state, not a
+     * one-bit mirror of a single event -- DRAG_ST_IDLE reads NOT READY. There is no separate
+     * ARMED label either way, since it's gone. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    m.drag_run_state = DRAG_ST_IDLE;
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
-    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_ready.pbm"), &s_fb));
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_notready.pbm"), &s_fb));
+}
+
+static void test_dragcard_ready(void)
+{
+    /* #95: once the drag engine has armed (DRAG_ST_ARMED), the big slot reads "READY" (FONT_MED,
+     * no letters in FONT_HUGE) -- READY now means armed, so the separate right-hand ARMED label
+     * this test used to also check for is gone (it duplicated the same meaning). Footer still
+     * empty (no gates). */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    m.drag_run_state = DRAG_ST_ARMED;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_ready.pbm"), &s_fb));
+}
+
+static void test_dragcard_launched(void)
+{
+    /* #95 regression (bench 2026-10-07): the launch window -- a run in flight with no gate hit yet
+     * -- must not render the same card as "the engine has not armed". drag.c's do_launch() calls
+     * reset_run(), so drag_n is 0 from ARMED right through to the first EV_DRAG_GATE; only the
+     * engine's own state tells the two apart. The memcmp is the real regression guard: it fails on
+     * any build where LAUNCHED and IDLE collapse onto one text, golden or no golden. */
+    screen_model_t m = {0};
+    m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+
+    m.drag_run_state = DRAG_ST_IDLE;
+    screens_moto_render(&s_fb, &m);
+    uint8_t idle[sizeof s_bits];
+    memcpy(idle, s_bits, sizeof idle);
+
+    m.drag_run_state = DRAG_ST_LAUNCHED;
+    fb_init(&s_fb, s_bits, CANVAS_W, CANVAS_H);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_NOT_EQUAL(0, memcmp(idle, s_bits, sizeof idle));
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);   /* T3-R1 */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_launched.pbm"), &s_fb));
+}
+
+static void test_dragcard_done_no_gates(void)
+{
+    /* A run that stopped or faded before 60 ft finishes with zero hit gates (drag.c's enter_done
+     * from `stopped || faded`), so drag_n is 0 on a DONE engine -- the card must say DONE, not
+     * fall back to NOT READY as if nothing had ever happened. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_run_state = DRAG_ST_DONE;
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_done.pbm"), &s_fb));
 }
 
 static void test_drag_p0_gate_speed(void)
@@ -403,13 +459,32 @@ static void test_drag_p0_distance(void)
 {
     /* Newest gate is the 100-0 braking distance (#40): big slot shows "38" (FONT_HUGE) + a small
      * "m" (FONT_SMALL, since FONT_HUGE has no lowercase); footer shows the one earlier gate,
-     * "100-200 6.12". */
+     * "100-200 6.12". m.dist_units defaults to 0 (CFG_DIST_M) via memset -- dist_display() is a
+     * pass-through in this unit, so this golden is unchanged by Task 4 review round 1 (ruling
+     * B4-R5): confirmed byte-identical, not re-promoted. */
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     drag_gate(&m, "100-200", 6120, 0, false, 0); drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance.pbm"), &s_fb));     /* big "38" + small "m"; footer "100-200 6.12" */
+}
+
+static void test_drag_p0_distance_ft(void)
+{
+    /* Task 4 review round 1 (ruling B4-R5): the big slot AND the footer must both honour
+     * Distance: ft, not just the gate list (B4-F5 fixed that; this is the identical defect class
+     * in render_dcard_value/render_dcard_footer, screens_moto.c). Two distance gates -- an earlier
+     * one (goes to the footer) and the newest (fills the big slot) -- so both functions' distance
+     * branches are exercised in CFG_DIST_FT in one golden: 38 m -> 125 ft (footer, "100-0"), 64 m
+     * -> 210 ft (big slot, "150-0"), dist_display()'s exact 1250/381 conversion (core/ui/units.c,
+     * cross-checked by test_units.c's test_dist_ft). Before this fix both would have read "...m". */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.dist_units = CFG_DIST_FT;
+    drag_gate(&m, "100-0", 0, 0, true, 38); drag_gate(&m, "150-0", 0, 0, true, 64);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance_ft.pbm"), &s_fb));  /* big "210"+"ft"; footer "100-0 125ft" */
 }
 
 static void test_drag_p0_fault(void)
@@ -449,10 +524,15 @@ static void test_drag_p0_footer_scroll(void)
 
 static void test_drag_p0_armed_gates(void)
 {
-    /* Test gap (finding 13d): drag_armed stays true (re-armed for the next run) while gates from
-     * the run just completed are still on screen -- ARMED top-right must coexist with the newest
-     * gate's label/huge value/footer rather than the two being mutually exclusive. */
-    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.drag_armed = true;
+    /* Test gap (finding 13d), retargeted for #95's state-mirror fix (bench B4-F1): a run in
+     * progress (DRAG_ST_LAUNCHED) is the state that actually coexists with gates on screen --
+     * DRAG_ST_ARMED cannot, since arming resets drag_n to 0 (reset_run(), drag.c). The right-hand
+     * ARMED label this test used to also check for is gone (READY now means armed, and the big
+     * slot already shows the newest gate's value, not READY/NOT READY/LAUNCHED/DONE, whenever n >
+     * 0) -- this case now just confirms drag_run_state draws nothing extra over the newest gate's
+     * label/huge value/footer: the n > 0 branch never reads it, so the golden is unchanged. */
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
+    m.drag_run_state = DRAG_ST_LAUNCHED;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
@@ -480,6 +560,43 @@ static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this r
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
+}
+
+/* #96: the three feet-preset DIST gates (60ft/330ft/1000ft) keep their ft names when
+ * dist_units == CFG_DIST_FT -- today's look, same seven-row layout as test_drag_p1_gates (the
+ * renderer itself never reads m->dist_units; row labels arrive pre-formatted, so m.dist_units is
+ * set here purely to document the scenario, as ui.c's row_from_gate would have produced these
+ * exact strings in FT mode). */
+static void test_drag_p1_dist_ft(void)
+{
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90; m.dist_units = CFG_DIST_FT;
+    drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1000ft", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
+    drag_gate(&m, "100-200", 12340, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_dist_ft.pbm"), &s_fb));
+}
+
+/* #96: same seven gates, dist_units == CFG_DIST_M -- the three feet presets rename to "18m"/
+ * "101m"/"305m" (rounded metres); the two mile gates ("1/8"/"1/4") and the non-DIST gates
+ * ("100-200"/"100-0") are unchanged, same as drag_gate_label's contract (core/drag.h). Shorter
+ * label strings than the FT case, so this also exercises the list layout with narrower labels. */
+static void test_drag_p1_dist_m(void)
+{
+    screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 1; m.batt_pct = 90; m.dist_units = CFG_DIST_M;
+    drag_gate(&m, "18m", 2010, 0, false, 0); drag_gate(&m, "101m", 5430, 0, false, 0);
+    drag_gate(&m, "1/8", 8290, 0, false, 0); drag_gate(&m, "305m", 10900, 0, false, 0);
+    drag_gate(&m, "1/4", 12840, 4806, false, 0);
+    drag_gate(&m, "100-200", 12340, 0, false, 0);
+    drag_gate(&m, "100-0", 0, 0, true, 38);
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_dist_m.pbm"), &s_fb));
 }
 
 static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, every gate present */
@@ -669,6 +786,19 @@ static void test_strip_sim_and_moving(void)
     TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - (ICON_W + 2) + 4, FAULT_STRIP_Y + 5));
 }
 
+/* Strip bit 16 (LINK: the dev-kit is connected) draws ICON_LINK; with SIM+MOVING it is the third slot. */
+static void test_strip_link(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_RIDING; m.mode = SCR_MODE_LAP; m.page = 0;
+    m.flags = (1u << SCR_UI_SIM) | (1u << SCR_UI_MOVING) | (1u << SCR_UI_LINK);
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("strip_link.pbm"), &s_fb));
+    /* three slots: ink in the third slot left of the anchor (LINK is bit 16, drawn last, leftmost) */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * (ICON_W + 2) + 6, FAULT_STRIP_Y + 6));
+}
+
 static void test_oneshot_ota_fail(void)
 {
     screen_model_t m = {0};
@@ -693,7 +823,9 @@ static void test_oneshot_calibrate(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("calibrate.pbm"), &s_fb));
 }
 
-static void test_oneshot_newtrack(void)
+/* #97 (§10.9): create_step == 0 (the zero-initialised default) -- "Cross S/F, press MODE". Same
+ * golden (newtrack.pbm) as before Task 5: m.create_step was always implicitly 0 here. */
+static void test_oneshot_newtrack_step0(void)
 {
     screen_model_t m = {0};
     m.screen = SCR_ONESHOT;
@@ -703,6 +835,48 @@ static void test_oneshot_newtrack(void)
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack.pbm"), &s_fb));
+}
+
+/* create_step == 1 (S/F set, next gate is sector 1) -- "S/F set. MODE: sector 1". */
+static void test_oneshot_newtrack_step1(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+    m.create_step = 1;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_step1.pbm"), &s_fb));
+}
+
+/* create_step == 3 (S/F + 2 sectors set, next gate is sector 3) -- "S/F set. MODE: sector 3". */
+static void test_oneshot_newtrack_step3(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+    m.create_step = 3;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_step3.pbm"), &s_fb));
+}
+
+/* create_step == 0xFF -- the last CMD_MARK_GATE was refused: "No fix / not moving". */
+static void test_oneshot_newtrack_fail(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_ONESHOT;
+    m.oneshot = ONESHOT_NEWTRACK;
+    m.create_step = 0xFF;
+
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_fail.pbm"), &s_fb));
 }
 
 /* ---- menu (§20.7) ---- */
@@ -734,26 +908,31 @@ static void test_menu_top(void)
 }
 
 /* §20.7's own item list verbatim: lowercase and '/' throughout, so every row exercises the
- * item_fits_font_med(false) / FONT_SMALL fallback path. */
+ * item_fits_font_med(false) / FONT_SMALL fallback path. M5 (final review): this held only 11 of
+ * §20.7's 12 items -- "Distance: m / ft" (added by #96/bench B4-F6) was missing -- and
+ * test_menu_scrolled()'s menu_top scrolled the one renamed item it did carry ("Speed: km/h / mph",
+ * index 4) off-screen, so no menu golden in the tree ever rendered either renamed label. */
 static const char *const MENU_ITEMS_FULL[] = {
-    "Mode: Lap / Drag", "Layout: Auto", "New track",     "Calibrate", "Units: km/h / mph",
-    "Export (BLE)",     "Live to phone", "Diagnostics",  "Sessions",  "Display",
-    "Sleep now",
+    "Mode: Lap / Drag", "Layout: Auto",    "New track",     "Calibrate",
+    "Speed: km/h / mph", "Distance: m / ft", "Export (BLE)", "Live to phone",
+    "Diagnostics",       "Sessions",        "Display",      "Sleep now",
 };
 
 static void test_menu_scrolled(void)
 {
-    /* A lower item ("Diagnostics", index 7) selected with the list scrolled so it is visible
-     * (menu_top = 6 -> visible rows are indices 6..9): exercises scrolling + the marker on a
-     * non-first visible row together. */
+    /* M5 (final review): menu_top = 2 puts both renamed items ("Speed: km/h / mph" index 4,
+     * "Distance: m / ft" index 5) inside the visible window on BOTH canvases (rows 2..5 of 4 on
+     * the 296 canvas, 2..7 of 6 on the 213 canvas) -- still scrolled (menu_top != 0) and the
+     * marker still lands on a non-first visible row (index 5, selected below), same as the
+     * original "Diagnostics" case this replaces. */
     screen_model_t m = {0};
     m.screen = SCR_MENU;
     m.menu_n = (uint8_t)(sizeof(MENU_ITEMS_FULL) / sizeof(MENU_ITEMS_FULL[0]));
     for (uint8_t i = 0; i < m.menu_n; i++) {
         m.menu_items[i] = MENU_ITEMS_FULL[i];
     }
-    m.menu_sel = 7;
-    m.menu_top = 6;
+    m.menu_sel = 5;
+    m.menu_top = 2;
 
     screens_render(&s_fb, &m);
     TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
@@ -779,14 +958,20 @@ int main(void)
     RUN_TEST(test_lap_p2_stats_huge_laps);
     RUN_TEST(test_lap_p2_stats_filled);
     RUN_TEST(test_lap_p2_stats_mph);
-    RUN_TEST(test_drag_p0_ready);
+    RUN_TEST(test_dragcard_notready);
+    RUN_TEST(test_dragcard_ready);
+    RUN_TEST(test_dragcard_launched);
+    RUN_TEST(test_dragcard_done_no_gates);
     RUN_TEST(test_drag_p0_gate_speed);
     RUN_TEST(test_drag_p0_trap_mph);
     RUN_TEST(test_drag_p0_distance);
+    RUN_TEST(test_drag_p0_distance_ft);
     RUN_TEST(test_drag_p0_fault);
     RUN_TEST(test_drag_p0_footer_scroll);
     RUN_TEST(test_drag_p0_armed_gates);
     RUN_TEST(test_drag_p1_gates);
+    RUN_TEST(test_drag_p1_dist_ft);
+    RUN_TEST(test_drag_p1_dist_m);
     RUN_TEST(test_drag_p2_best);
     RUN_TEST(test_drag_p1_overflow);
     RUN_TEST(test_drag_p2_overflow);
@@ -800,8 +985,12 @@ int main(void)
     RUN_TEST(test_ota_phase_label);
     RUN_TEST(test_oneshot_ota_rebooting);
     RUN_TEST(test_strip_sim_and_moving);
+    RUN_TEST(test_strip_link);
     RUN_TEST(test_oneshot_calibrate);
-    RUN_TEST(test_oneshot_newtrack);
+    RUN_TEST(test_oneshot_newtrack_step0);
+    RUN_TEST(test_oneshot_newtrack_step1);
+    RUN_TEST(test_oneshot_newtrack_step3);
+    RUN_TEST(test_oneshot_newtrack_fail);
     RUN_TEST(test_menu_top);
     RUN_TEST(test_menu_scrolled);
     return UNITY_END();

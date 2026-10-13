@@ -26,6 +26,17 @@ static bool get_u8(const char *js, const jsmntok_t *t, uint8_t *out)
     int64_t v; if (!json_tok_int(js, t, &v) || v < 0 || v > 255) return false; *out = (uint8_t)v; return true;
 }
 
+/* units/dist_units/mode are all the same shape: a token matching one of two strings sets *out to
+ * the paired enum value; anything else is a type error. RULE-4 (apply() below, 60-line cap). */
+static int get_enum2(const char *js, const jsmntok_t *t, const char *str_a, uint8_t a, const char *str_b, uint8_t b, uint8_t *out)
+{
+    CORE_ASSERT_RET(js != NULL && t != NULL, CFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(str_a != NULL && str_b != NULL && out != NULL, CFG_ASSERT_CODE, -1);
+    if (json_tok_eq(js, t, str_a)) { *out = a; return 0; }
+    if (json_tok_eq(js, t, str_b)) { *out = b; return 0; }
+    return -1;
+}
+
 /* returns 0 ok, -1 type error */
 static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, const char *path, int v)
 {
@@ -35,16 +46,9 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, con
      * ntoks as a parameter precisely so it can check its own input rather than trust the caller. */
     CORE_ASSERT_RET(v >= 0 && v < ntoks, CFG_ASSERT_CODE, -1);
     const jsmntok_t *t = &toks[v];
-    if (!strcmp(path, "units")) {
-        if (json_tok_eq(js, t, "kmh")) { c->units = CFG_UNITS_KMH; return 0; }
-        if (json_tok_eq(js, t, "mph")) { c->units = CFG_UNITS_MPH; return 0; }
-        return -1;
-    }
-    if (!strcmp(path, "mode")) {
-        if (json_tok_eq(js, t, "lap")) { c->mode = CFG_MODE_LAP; return 0; }
-        if (json_tok_eq(js, t, "drag")) { c->mode = CFG_MODE_DRAG; return 0; }
-        return -1;
-    }
+    if (!strcmp(path, "units")) return get_enum2(js, t, "kmh", CFG_UNITS_KMH, "mph", CFG_UNITS_MPH, &c->units);
+    if (!strcmp(path, "dist_units")) return get_enum2(js, t, "m", CFG_DIST_M, "ft", CFG_DIST_FT, &c->dist_units);
+    if (!strcmp(path, "mode")) return get_enum2(js, t, "lap", CFG_MODE_LAP, "drag", CFG_MODE_DRAG, &c->mode);
     if (!strcmp(path, "lap.min_lap_s")) return get_u16(js, t, &c->lap.min_lap_s) ? 0 : -1;
     if (!strcmp(path, "lap.max_lap_s")) return get_u16(js, t, &c->lap.max_lap_s) ? 0 : -1;
     if (!strcmp(path, "lap.gate_rearm_m")) return get_u16(js, t, &c->lap.gate_rearm_m) ? 0 : -1;
@@ -154,6 +158,7 @@ int cfg_to_json(const cfg_t *c, char *out, size_t cap)
     jw_obj_open(&w);
     jw_key(&w, "version"); jw_uint(&w, c->version);
     jw_key(&w, "units"); jw_str(&w, c->units == CFG_UNITS_MPH ? "mph" : "kmh");
+    jw_key(&w, "dist_units"); jw_str(&w, c->dist_units == CFG_DIST_FT ? "ft" : "m");
     jw_key(&w, "mode"); jw_str(&w, c->mode == CFG_MODE_DRAG ? "drag" : "lap");
     jw_key(&w, "lap"); jw_obj_open(&w);
       jw_key(&w, "min_lap_s"); jw_uint(&w, c->lap.min_lap_s);

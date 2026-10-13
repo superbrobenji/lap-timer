@@ -8,7 +8,7 @@ int cfg_defaults(cfg_t *c)
 {
     CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
     memset(c, 0, sizeof *c);
-    c->version = CFG_VERSION; c->units = CFG_UNITS_KMH; c->mode = CFG_MODE_LAP;
+    c->version = CFG_VERSION; c->units = CFG_UNITS_KMH; c->dist_units = CFG_DIST_M; c->mode = CFG_MODE_LAP;
     c->lap.min_lap_s = 20; c->lap.max_lap_s = 1800; c->lap.gate_rearm_m = 50; c->lap.pit_speed_kmh = 5; c->lap.pit_time_s = 10;
     c->drag.benches_kmh[0] = 100; c->drag.benches_kmh[1] = 200; c->drag.benches_kmh[2] = 300; c->drag.n_kmh = 3;
     c->drag.benches_mph[0] = 60; c->drag.benches_mph[1] = 120; c->drag.benches_mph[2] = 180; c->drag.n_mph = 3;
@@ -45,6 +45,7 @@ int cfg_validate(cfg_t *c)
     int n = 0;
     if (c->version != CFG_VERSION) { c->version = CFG_VERSION; n++; }
     if (c->units > CFG_UNITS_MPH) { c->units = CFG_UNITS_KMH; n++; }
+    if (c->dist_units > CFG_DIST_FT) { c->dist_units = CFG_DIST_M; n++; }
     if (c->mode > CFG_MODE_DRAG) { c->mode = CFG_MODE_LAP; n++; }
     n += clamp_u16(&c->lap.min_lap_s, 5, 600);
     n += clamp_u16(&c->lap.max_lap_s, 60, 3600);
@@ -102,6 +103,17 @@ int cfg_migrate(cfg_t *c, uint8_t from_version)
 {
     CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
     if (!cfg_migrate_supported(from_version)) return -1;
+    switch (from_version) {
+    case 1: c->dist_units = CFG_DIST_M; break;   /* field added in v2 (#96); appended at the struct's
+                                                   * end (core/cfg.h) so this is the only field a v1
+                                                   * blob's raw byte image could possibly disagree
+                                                   * with -- everything else is already correct. */
+    default: return -1;   /* m3 (Task 3 fix round 1): unreachable today (cfg_migrate_supported()
+                            * admits only 1), but a loud failure here -- not a silent c->version
+                            * bump with a stale new field -- is the right default for a future
+                            * version added to cfg_migrate_supported() without a matching case;
+                            * cfg_blob.c already maps a non-zero return here to -3. */
+    }
     c->version = CFG_VERSION;
     return 0;
 }

@@ -20,6 +20,7 @@ static void test_defaults_are_valid(void)
     TEST_ASSERT_EQUAL_INT(0, cfg_validate(&c));
     TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);
     TEST_ASSERT_EQUAL_UINT8(CFG_UNITS_KMH, c.units);
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_M, c.dist_units);
     TEST_ASSERT_EQUAL_UINT16(20, c.lap.min_lap_s);
     TEST_ASSERT_EQUAL_UINT16(100, c.drag.benches_kmh[0]);
     TEST_ASSERT_EQUAL_UINT8(3, c.drag.n_kmh);
@@ -85,9 +86,10 @@ static void test_validate_clamps_each_out_of_range_field(void)
     }
     /* the non-clamp corrections: enums, rotation and the fused-rate whitelist */
     cfg_t c; cfg_defaults(&c);
-    c.units = 9; c.mode = 9; c.display.rotation = 90; c.log.fused_hz = 7; c.ble.name[0] = '\0';
-    TEST_ASSERT_EQUAL_INT(5, cfg_validate(&c));
+    c.units = 9; c.dist_units = 2; c.mode = 9; c.display.rotation = 90; c.log.fused_hz = 7; c.ble.name[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(6, cfg_validate(&c));
     TEST_ASSERT_EQUAL_UINT8(CFG_UNITS_KMH, c.units);
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_M, c.dist_units);
     TEST_ASSERT_EQUAL_UINT8(CFG_MODE_LAP, c.mode);
     TEST_ASSERT_EQUAL_UINT8(0, c.display.rotation);
     TEST_ASSERT_EQUAL_UINT8(10, c.log.fused_hz);
@@ -150,13 +152,38 @@ static void test_from_json_rejects_malformed(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, "{\"units\":\"furlongs\"}", 20, err, sizeof err));
 }
 
+/* #96: dist_units parses/serialises "m"/"ft" exactly like units does "kmh"/"mph", same error path
+ * for an unknown string. */
+static void test_dist_units_json(void)
+{
+    cfg_t c; cfg_defaults(&c);
+    char err[64];
+    const char *js_ft = "{\"dist_units\":\"ft\"}";
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&c, js_ft, strlen(js_ft), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_FT, c.dist_units);
+    const char *js_m = "{\"dist_units\":\"m\"}";
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&c, js_m, strlen(js_m), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_M, c.dist_units);
+    const char *js_bad = "{\"dist_units\":\"yd\"}";
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, js_bad, strlen(js_bad), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_M, c.dist_units);   /* rejected: untouched */
+
+    cfg_t ft; cfg_defaults(&ft); ft.dist_units = CFG_DIST_FT;
+    static char js[1024];
+    int n = cfg_to_json(&ft, js, sizeof js);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    cfg_t back; cfg_defaults(&back);
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&back, js, (size_t)n, err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_FT, back.dist_units);
+}
+
 static void test_json_round_trip_is_lossless(void)
 {
     static cfg_t a; cfg_defaults(&a);
     a.lap.min_lap_s = 33; a.drag.n_mph = 2; a.drag.benches_mph[0] = 60; a.drag.benches_mph[1] = 100;
     a.lap.n_default_layout = 1; a.lap.default_layout[0].venue = 6; a.lap.default_layout[0].layout = 2;
     a.battery.adc_mv[0] = 1500; a.battery.true_mv[0] = 3510; a.battery.adc_mv[1] = 2000; a.battery.true_mv[1] = 4180;
-    strcpy(a.ble.name, "LapTimer-AB12"); a.display.live_clock = true;
+    strcpy(a.ble.name, "LapTimer-AB12"); a.display.live_clock = true; a.dist_units = CFG_DIST_FT;
     static char js[1024];
     int n = cfg_to_json(&a, js, sizeof js);
     TEST_ASSERT_GREATER_THAN(0, n);
@@ -166,11 +193,26 @@ static void test_json_round_trip_is_lossless(void)
     TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof a);
 }
 
+/* #96: cfg_migrate(c, 1) is the v1->v2 path -- dist_units did not exist in v1, so migrate sets it
+ * to the default (CFG_DIST_M) regardless of whatever byte was sitting there; every other field is
+ * untouched (cfg_t.dist_units is appended at the struct's end, core/cfg.h, precisely so this is
+ * true -- see the Task 3 report's blob-migration analysis). cfg_migrate_supported() is exactly
+ * {1}: the version this firmware can receive from NVS; 0 and CFG_VERSION (2, i.e. "migrate to
+ * itself") are both unsupported (cfg_migrate_supported_versions in test_cfg_blob.c covers this
+ * too, from the blob layer's side). */
 static void test_migrate_v1_is_noop(void)
 {
     cfg_t c; cfg_defaults(&c);
+    c.mode = CFG_MODE_DRAG;       /* a real stored field: migrate must not touch it */
+    c.dist_units = 0xAAu;         /* simulates whatever byte a v1 image left there -- must not survive */
     TEST_ASSERT_EQUAL_INT(0, cfg_migrate(&c, 1));
+    TEST_ASSERT_EQUAL_UINT8(CFG_VERSION, c.version);
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_M, c.dist_units);
+    TEST_ASSERT_EQUAL_UINT8(CFG_MODE_DRAG, c.mode);
     TEST_ASSERT_EQUAL_INT(-1, cfg_migrate(&c, 0));
+    TEST_ASSERT_FALSE(cfg_migrate_supported(0));
+    TEST_ASSERT_TRUE(cfg_migrate_supported(1));
+    TEST_ASSERT_FALSE(cfg_migrate_supported(CFG_VERSION));
 }
 
 static void test_version_is_owned_by_firmware(void)
@@ -280,6 +322,7 @@ int main(void)
     RUN_TEST(test_validate_clamps_each_out_of_range_field);
     RUN_TEST(test_from_json_merges_only_given_keys_and_ignores_unknown);
     RUN_TEST(test_from_json_rejects_malformed);
+    RUN_TEST(test_dist_units_json);
     RUN_TEST(test_json_round_trip_is_lossless);
     RUN_TEST(test_migrate_v1_is_noop);
     RUN_TEST(test_version_is_owned_by_firmware);

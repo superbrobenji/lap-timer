@@ -8,15 +8,23 @@
 
 /* core_selftest runs every test/test_*.c on-target and Unity runs one test at a time, so this
  * suite's scratch fixtures are shared file-scope statics rather than per-test function-statics:
- * 15 separate function-static trk_venue_t plus several 16 KB/8 KB scratch arrays would otherwise
- * all land permanently in .bss (they did -- ~110 KB of it, overflowing dram0_0_seg). Each test
- * still memsets/re-populates its slice before reading it (mk_venue/mk_dirty_venue/trk_from_json
- * all memset their destination internally), so reuse is safe. Only two trk_venue_t slots are
- * needed: every test uses one except the JSON round-trip (input v + decoded v2) and the blob-v2
- * CRC test (the venue under test + a second "bad" venue injected into a copy of the blob) which
- * each need two live at once. s_blob/s_copy double as the two-buffer pair for the one test
- * (padding-garbage) that must compare two saved blobs simultaneously. s_toks backs the two tests
- * that call json_parse() directly on a maximal document. */
+ * separate function-static trk_venue_t plus several 16 KB/8 KB scratch arrays would otherwise all
+ * land permanently in .bss (they did -- ~110 KB of it, overflowing dram0_0_seg). Each test still
+ * memsets/re-populates its slice before reading it (mk_venue/trk_from_json all memset their
+ * destination internally), so reuse is safe. Only two trk_venue_t slots are needed: every test
+ * uses one except the JSON round-trip (input v + decoded v2) and the final review's I-1
+ * malformed-mid-record test (the venue under test + a second "bad" venue whose n_layouts
+ * corrupts a copy of the first's record) which each need two live at once. s_blob/s_copy double
+ * as the two-buffer pair for the tests that must compare/combine two saved per-venue records at
+ * once (the I-1 same-id-replace-via-load_venue and malformed-mid-record tests below). s_toks
+ * backs the two tests that call json_parse() directly on a maximal document.
+ *
+ * Final review M-3: the whole-table trk_user_save()/trk_user_load()/canon_venue() codec (and this
+ * suite's own tests of it -- the same-id-persists, blob-v2-rejects-bad-*, and
+ * padding-garbage/mk_dirty_venue tests that used to live here) were deleted: zero production
+ * callers since #97's T5-R4 per-venue record redesign (confirmed gc-sectioned out of
+ * build/moto_sim/laptimer.elf), honouring the plan's original rejection of that whole-table
+ * design. */
 static trk_venue_t s_v, s_v2;
 static uint8_t s_blob[16384];
 static uint8_t s_copy[16384];
@@ -50,7 +58,13 @@ static void test_nearest_inside_and_outside_radius(void)
     TEST_ASSERT_NULL(trk_find_nearest(-33.8567 + 0.03, 18.5170, &d));         /* ~3.3 km: outside 2 km radius */
 }
 
-static void test_user_venue_wins_on_id_clash_and_persists(void)
+/* Final review M-3: the persistence half of this test (save as the whole-table blob, trk_init(),
+ * reload, confirm the user entry survives and still shadows the bundled one) drove
+ * trk_user_save()/trk_user_load(), deleted with the rest of that codec -- the per-venue record
+ * API's own same-id-replace-across-a-reload path is covered instead by
+ * test_user_load_venue_replaces_same_id() below. What is left here (a user entry at a bundled
+ * venue's own id winning trk_get()) is independent of either persistence format. */
+static void test_user_venue_wins_on_id_clash(void)
 {
     memset(&s_v, 0, sizeof s_v);
     s_v.id = 6; strcpy(s_v.name, "Killarney (mine)"); s_v.lat = -33.8567; s_v.lon = 18.5170; s_v.radius_m = 2000; s_v.n_layouts = 1;
@@ -58,14 +72,7 @@ static void test_user_venue_wins_on_id_clash_and_persists(void)
     s_v.layouts[0].sf.p1.lat = -33.8567; s_v.layouts[0].sf.p1.lon = 18.5170;
     s_v.layouts[0].sf.p2.lat = -33.8567; s_v.layouts[0].sf.p2.lon = 18.5173;    /* a real S/F line, not the degenerate default */
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
-    TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
-    size_t n;
-    TEST_ASSERT_EQUAL_INT(0, trk_user_save(s_blob, sizeof s_blob, &n));
-    trk_init();
-    TEST_ASSERT_EQUAL_STRING("Killarney", trk_get(6)->name);
-    TEST_ASSERT_EQUAL_INT(0, trk_user_load(s_blob, n));
-    TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);
-    TEST_ASSERT_EQUAL_UINT16(1000, trk_next_user_id());
+    TEST_ASSERT_EQUAL_STRING("Killarney (mine)", trk_get(6)->name);   /* the user entry shadows the bundled one at the same id */
 }
 
 static void test_user_store_is_bounded(void)
@@ -77,7 +84,14 @@ static void test_user_store_is_bounded(void)
     for (int i = 0; i < TRK_MAX_USER; i++) { s_v.id = (uint16_t)(1000 + i); TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v)); }
     s_v.id = 1000 + TRK_MAX_USER;
     TEST_ASSERT_EQUAL_INT(-1, trk_user_add(&s_v));
-    TEST_ASSERT_EQUAL_UINT16(1000 + TRK_MAX_USER, trk_next_user_id());
+    /* Final review F-5/I-5: TRK_SIM_VENUE_ID is defined as exactly TRK_USER_ID_BASE +
+     * TRK_MAX_USER (core/trk.h) -- the one "next id" value a completely full, sim-free table of
+     * sequential real ids would otherwise compute here -- so trk_next_user_id()'s own reserved-id
+     * guard bumps past it even in this edge case (the table is already full either way, so the
+     * exact value is otherwise moot: this just confirms the guard fires unconditionally, not only
+     * when a sim venue happens to be present). */
+    TEST_ASSERT_EQUAL_UINT16(TRK_SIM_VENUE_ID, (uint16_t)(1000 + TRK_MAX_USER));   /* the two coincide by construction */
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)(TRK_SIM_VENUE_ID + 1), trk_next_user_id());
 }
 
 static void test_json_round_trip_with_same_and_reverse_expansion(void)
@@ -140,110 +154,6 @@ static void test_user_add_rejects_invalid_venue(void)
     TEST_ASSERT_EQUAL_INT(0, trk_user_count());                    /* nothing was stored */
     mk_venue(&s_v, 1000);
     TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
-}
-
-static void test_user_blob_v2_rejects_bad_version_count_crc_and_venue(void)
-{
-    mk_venue(&s_v, 1000);
-    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
-    size_t n;
-    TEST_ASSERT_EQUAL_INT(0, trk_user_save(s_blob, sizeof s_blob, &n));
-    TEST_ASSERT_EQUAL_UINT8(2, s_blob[0]);
-    TEST_ASSERT_EQUAL_UINT(2 + sizeof(trk_venue_t) + 2, n);      /* version, count, venue, crc16 */
-
-    memcpy(s_copy, s_blob, n);
-    TEST_ASSERT_EQUAL_INT(0, trk_user_load(s_copy, n));          /* round trip */
-    TEST_ASSERT_EQUAL_INT(1, trk_user_count());
-
-    memcpy(s_copy, s_blob, n); s_copy[0] = 1;                    /* old version */
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));
-    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
-
-    memcpy(s_copy, s_blob, n); s_copy[1] = TRK_MAX_USER + 1;     /* count over capacity */
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));
-    memcpy(s_copy, s_blob, n);
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n - 1));     /* size mismatch */
-    memcpy(s_copy, s_blob, n); s_copy[40] ^= 0x01;               /* one flipped payload bit */
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));
-    memcpy(s_copy, s_blob, n); s_copy[n - 1] ^= 0x80;            /* flipped CRC byte */
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));
-    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
-
-    /* a structurally impossible venue (bit rot that survives no CRC, so re-CRC it) */
-    mk_venue(&s_v2, 1000); s_v2.n_layouts = 200;
-    memcpy(s_copy, s_blob, n);
-    memcpy(s_copy + 2, &s_v2, sizeof s_v2);
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));         /* CRC catches it first */
-    trk_init();
-    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
-    TEST_ASSERT_EQUAL_INT(0, trk_user_save(s_blob, sizeof s_blob, &n));
-    memcpy(s_copy, s_blob, n); memcpy(s_copy + 2, &s_v2, sizeof s_v2);
-    uint16_t crc = ses_crc16(s_copy, n - 2);                      /* recompute so only validation can reject */
-    s_copy[n - 2] = (uint8_t)crc; s_copy[n - 1] = (uint8_t)(crc >> 8);
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));
-    TEST_ASSERT_EQUAL_INT(0, trk_user_count());                  /* store left empty */
-    TEST_ASSERT_NULL(trk_get(1000));
-}
-
-static void test_user_blob_rejects_sub_metre_gate_line(void)
-{
-    mk_venue(&s_v, 1000);
-    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
-    size_t n;                                                    /* one venue's worth, not the 16 KB multi-venue headroom */
-    TEST_ASSERT_EQUAL_INT(0, trk_user_save(s_blob, sizeof(trk_venue_t) + 16, &n));
-
-    /* structurally valid except the S/F line is under the 1 m gate rule (trk_from_json's rule,
-     * shared via trk_validate_venue -- the loader must enforce it too). s_v is done being read
-     * by trk_user_save above, so it is reused here instead of a second venue slot. */
-    mk_venue(&s_v, 1000);
-    s_v.layouts[0].sf.p2.lat = s_v.layouts[0].sf.p1.lat;
-    s_v.layouts[0].sf.p2.lon = s_v.layouts[0].sf.p1.lon;
-    memcpy(s_copy, s_blob, n);
-    memcpy(s_copy + 2, &s_v, sizeof s_v);
-    uint16_t crc = ses_crc16(s_copy, n - 2);                      /* recompute so only validation can reject */
-    s_copy[n - 2] = (uint8_t)crc; s_copy[n - 1] = (uint8_t)(crc >> 8);
-    TEST_ASSERT_EQUAL_INT(-1, trk_user_load(s_copy, n));
-    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
-    TEST_ASSERT_NULL(trk_get(1000));
-}
-
-/* Same named fields as mk_venue, built on top of a struct pre-filled with `fill` so any byte the
- * assignments below do not touch (compiler padding between fields) keeps the fill pattern instead
- * of being zero, unlike mk_venue which memsets to 0 first. */
-static void mk_dirty_venue(trk_venue_t *v, uint16_t id, uint8_t fill)
-{
-    memset(v, (int)fill, sizeof *v);
-    v->id = id;
-    memset(v->name, 0, sizeof v->name); strcpy(v->name, "User");
-    v->lat = -26.0; v->lon = 28.0; v->radius_m = 1500; v->flags = 0; v->n_layouts = 1;
-    trk_layout_t *L = &v->layouts[0];
-    L->id = 1;
-    memset(L->name, 0, sizeof L->name); strcpy(L->name, "Full");
-    L->dir_sign = 1; L->n_sectors = 0; L->length_m = 0;
-    L->sf.p1.lat = -26.001; L->sf.p1.lon = 28.0;
-    L->sf.p2.lat = -26.001; L->sf.p2.lon = 28.0003;
-}
-
-static void test_save_produces_identical_blobs_regardless_of_padding_garbage(void)
-{
-    /* a and b are used one at a time (never simultaneously live), so one shared venue slot -- kept
-     * off the stack for the same 6 KB task-stack reason as the rest of this suite -- is reused for
-     * both fill patterns instead of allocating two. blob_a/blob_b, however, must stay live together
-     * for the final comparison, so they borrow the s_blob/s_copy pair instead of a third buffer. */
-    trk_init();
-    mk_dirty_venue(&s_v, 1000, 0xAA);
-    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));          /* struct assignment carries v's padding into the store */
-    size_t n_a;
-    TEST_ASSERT_EQUAL_INT(0, trk_user_save(s_blob, sizeof(trk_venue_t) + 16, &n_a));
-
-    trk_init();
-    mk_dirty_venue(&s_v, 1000, 0x55);                       /* same fields, different padding garbage */
-    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
-    size_t n_b;
-    TEST_ASSERT_EQUAL_INT(0, trk_user_save(s_copy, sizeof(trk_venue_t) + 16, &n_b));
-
-    TEST_ASSERT_EQUAL_UINT(n_a, n_b);
-    TEST_ASSERT_EQUAL_MEMORY(s_blob, s_copy, n_a);          /* including the CRC: identical bytes throughout */
 }
 
 static void test_json_rejects_degenerate_line_and_duplicate_layout_ids(void)
@@ -427,19 +337,254 @@ static void test_user_add_json_full_table_rejected_and_unchanged(void)
     }
 }
 
+/* ---------------------------------------------------- #97 (§10.9), review fix round 1: M7
+ * per-venue record API (trk_user_save_venue/trk_user_load_venue, core/trk.h) -- the logger's
+ * actual persistence format since T5-R4. The whole-table trk_user_save/trk_user_load codec this
+ * replaced only ever exercised ONE venue against a 16 KB buffer in its own tests (deleted, final
+ * review M-3), never the logger's real 3840 B (BATCH_CAP) scratch batch -- exactly why that
+ * blob's cap defect (2 + n * sizeof(trk_venue_t) + 2 overflowing BATCH_CAP at just 2 venues) went
+ * unnoticed. These tests drive the real invariant instead: every record stays within
+ * TRK_USER_REC_MAX (the bound logger.c's own _Static_assert checks against BATCH_CAP) for
+ * 1..TRK_MAX_USER venues, a save-then-later-load round trip (not a same-pass one, matching the
+ * logger's own boot-vs-session lifecycle) preserves every venue, and ids never collide after a
+ * reload. */
+
+/* Fills v->layouts[0..n_layouts) with n_sectors sectors each, reusing v->layouts[0]'s S/F line
+ * shape (already set by mk_venue) for every layout -- good enough for a structurally-valid,
+ * serialisable venue; this suite does not care whether the gates are physically sensible, only
+ * whether the record format round-trips every field. */
+static void fill_layouts(trk_venue_t *v, uint8_t n_layouts, uint8_t n_sectors)
+{
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(TRK_MAX_LAYOUTS, n_layouts);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(LAP_MAX_SECTORS, n_sectors);
+    v->n_layouts = n_layouts;
+    for (uint8_t i = 0; i < n_layouts; i++) {
+        trk_layout_t *L = &v->layouts[i];
+        *L = v->layouts[0];
+        L->id        = (uint16_t)(i + 1);
+        L->n_sectors = n_sectors;
+        for (uint8_t s = 0; s < n_sectors; s++) {
+            L->sectors[s].p1.lat = -26.002 - (double)s * 0.001; L->sectors[s].p1.lon = 28.0;
+            L->sectors[s].p2.lat = -26.002 - (double)s * 0.001; L->sectors[s].p2.lon = 28.0003;
+        }
+    }
+}
+
+/* 1..TRK_MAX_USER single-layout venues: save every record (s_blob holds all of them at once,
+ * TRK_MAX_USER * TRK_USER_REC_MAX well within its 16 KB), trk_init() (drop the live table, as a
+ * reboot would), then load every record back and confirm the table matches -- and that
+ * trk_next_user_id() picks up past every reloaded id, never reusing one. */
+static void test_user_save_venue_load_venue_round_trip_1_to_max(void)
+{
+    TEST_ASSERT_LESS_OR_EQUAL_UINT(sizeof s_blob, (size_t)TRK_MAX_USER * TRK_USER_REC_MAX);
+    size_t lens[TRK_MAX_USER];
+    for (uint8_t count = 1; count <= TRK_MAX_USER; count++) {
+        trk_init();
+        for (uint8_t i = 0; i < count; i++) {
+            mk_venue(&s_v, (uint16_t)(2000 + i));
+            TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+        }
+        TEST_ASSERT_EQUAL_INT(count, trk_user_count());
+        for (uint8_t i = 0; i < count; i++) {
+            size_t n = 0;
+            TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(i, s_blob + (size_t)i * TRK_USER_REC_MAX,
+                                                          TRK_USER_REC_MAX, &n));
+            TEST_ASSERT_TRUE(n <= TRK_USER_REC_MAX);
+            lens[i] = n;
+        }
+
+        trk_init();
+        TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+        for (uint8_t i = 0; i < count; i++) {
+            TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob + (size_t)i * TRK_USER_REC_MAX, lens[i]));
+        }
+        TEST_ASSERT_EQUAL_INT(count, trk_user_count());
+        for (uint8_t i = 0; i < count; i++) {
+            const trk_venue_t *v = trk_get((uint16_t)(2000 + i));
+            TEST_ASSERT_NOT_NULL(v);
+            TEST_ASSERT_EQUAL_STRING("User", v->name);
+            TEST_ASSERT_EQUAL_UINT8(1, v->n_layouts);
+        }
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)(2000 + count), trk_next_user_id());   /* no id reuse */
+    }
+}
+
+/* The literal worst case trk_user_save_venue()'s TRK_USER_REC_MAX bound is computed for: every
+ * layout slot full, TRK_MAX_LAYOUTS layouts x LAP_MAX_SECTORS sectors each. Asserts EXACT equality
+ * (not just <=) -- the encoder never pads or wastes a byte, so this is the strongest proof the
+ * bound is both sufficient and tight, not just generously oversized. */
+static void test_user_save_venue_max_size_is_exactly_rec_max(void)
+{
+    trk_init();
+    mk_venue(&s_v, 3000);
+    fill_layouts(&s_v, TRK_MAX_LAYOUTS, LAP_MAX_SECTORS);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    TEST_ASSERT_EQUAL_UINT(TRK_USER_REC_MAX, n);
+    size_t n_short = 0;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_save_venue(0, s_blob, n - 1, &n_short));   /* one byte short: refused */
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    const trk_venue_t *v = trk_get(3000);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_UINT8(TRK_MAX_LAYOUTS, v->n_layouts);
+    TEST_ASSERT_EQUAL_UINT8(LAP_MAX_SECTORS, v->layouts[TRK_MAX_LAYOUTS - 1].n_sectors);
+}
+
+/* The review's literal example: a 4-layout, 8-sector venue round-trips (a realistic multi-layout
+ * upload, short of the absolute TRK_MAX_LAYOUTS worst case the test above already covers). */
+static void test_user_save_venue_four_layouts_eight_sectors_round_trip(void)
+{
+    trk_init();
+    mk_venue(&s_v, 5000);
+    fill_layouts(&s_v, 4, LAP_MAX_SECTORS);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    TEST_ASSERT_TRUE(n <= TRK_USER_REC_MAX);
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    const trk_venue_t *v = trk_get(5000);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_UINT8(4, v->n_layouts);
+    for (uint8_t i = 0; i < 4; i++) TEST_ASSERT_EQUAL_UINT8(LAP_MAX_SECTORS, v->layouts[i].n_sectors);
+}
+
+/* T5-R4 refinement 3: a truncated/malformed record is refused cleanly (nothing partially
+ * installed), and does not disturb an already-loaded venue or block loading a later, valid one --
+ * the core-level primitive the logger's tracks_load_record() "skip just this record, keep
+ * reading" behaviour (components/app/logger/logger.c) relies on. That loop itself is firmware-
+ * only (FreeRTOS/hal/storage.h) and not host-testable; this is the pure-core proof underneath it,
+ * documented as such in the Task 5 fix-round-1 report rather than left unverified. */
+static void test_user_load_venue_rejects_truncated_record(void)
+{
+    trk_init();
+    mk_venue(&s_v, 4000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n - 1));   /* one byte short */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());                     /* nothing installed */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, 0));       /* empty */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+
+    /* the truncated attempts above left the table untouched -- a second, valid record still loads */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    TEST_ASSERT_EQUAL_INT(1, trk_user_count());
+    TEST_ASSERT_NOT_NULL(trk_get(4000));
+}
+
+/* Final review I-1: trk_user_load_venue() now decodes directly into the module-static landing
+ * slot (user_slot_for_parse(), the same one trk_user_add_json() already uses) instead of a
+ * ~2.7 KB on-stack trk_venue_t temporary -- the fix for the logger task's near-exhausted 4 KB
+ * stack on the first reboot after a creation. This is the pure-core behavioural proof the slot-
+ * based decode still reuses trk_user_add()'s same-id replace path -- driven through
+ * trk_user_load_venue() ITSELF (every other same-id replace test above drives trk_user_add()/
+ * trk_user_add_json() directly), confirming the slot the SECOND load decodes into (the same
+ * index, since the id already matches) replaces the first rather than appending a duplicate. */
+static void test_user_load_venue_replaces_same_id(void)
+{
+    trk_init();
+    mk_venue(&s_v, 6000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));   /* the original "User" record */
+
+    strcpy(s_v.name, "Replaced");
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));                                    /* same id: direct replace, to derive the second record's bytes */
+    size_t n2 = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_copy, TRK_USER_REC_MAX, &n2));  /* the "Replaced" record */
+
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));     /* install the ORIGINAL record first */
+    TEST_ASSERT_EQUAL_INT(1, trk_user_count());
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_copy, n2));    /* then load the "Replaced" record under the SAME id */
+    TEST_ASSERT_EQUAL_INT(1, trk_user_count());                   /* replaced, not appended */
+    TEST_ASSERT_EQUAL_STRING("Replaced", trk_get(6000)->name);
+}
+
+/* Final review I-1: a record that decodes its header fine but then fails the n_layouts bound
+ * check (a corrupt/malformed byte well inside the record, not a short/truncated read --
+ * test_user_load_venue_rejects_truncated_record above already covers truncation) must leave the
+ * landing slot it used fully clean (memset), not a half-written venue sitting in user[user_n] for
+ * the NEXT parse into that same slot to be corrupted by -- confirmed below by loading the
+ * ORIGINAL, valid record right after the rejected one and getting it back byte-for-byte, not
+ * merged with any of the corrupted attempt's fields. */
+static void test_user_load_venue_cleans_up_a_failed_decode_mid_record(void)
+{
+    trk_init();
+    mk_venue(&s_v, 7000);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    trk_init();   /* drop the live table -- user_slot_for_parse() now returns user[0] again */
+
+    /* n_layouts is the venue header's last byte (TRK_USER_VENUE_HDR_LEN - 1, core/trk.h's payload
+     * layout comment); corrupt it past TRK_MAX_LAYOUTS -- id/name/lat/lon/radius_m/flags have
+     * already landed in the slot by the time this field is read. */
+    memcpy(s_copy, s_blob, n);
+    s_copy[TRK_USER_VENUE_HDR_LEN - 1] = 200;
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_copy, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));   /* the original, valid record still loads cleanly */
+    TEST_ASSERT_EQUAL_INT(1, trk_user_count());
+    const trk_venue_t *v = trk_get(7000);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_STRING("User", v->name);
+    TEST_ASSERT_EQUAL_UINT8(1, v->n_layouts);
+}
+
+/* Final review F-5/I-5: the sim capture's venue now registers at the reserved TRK_SIM_VENUE_ID
+ * (core/trk.h), never a real on-device creation's id -- this is the core-level proof backing all
+ * three parts of the ruling. */
+static void test_sim_reserved_id_excluded_from_save_and_rejected_on_load(void)
+{
+    trk_init();
+    mk_venue(&s_v, TRK_SIM_VENUE_ID);              /* the sim's own reserved registration, same id every boot */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+    mk_venue(&s_v, 2000);                          /* one real user venue */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+    TEST_ASSERT_EQUAL_INT(2, trk_user_count());
+
+    /* "a table with the sim venue + one user venue saves exactly one record" -- mirrors
+     * logger.c's tracks_save() skip loop using the same index->id accessor it uses, since
+     * tracks_save() itself is firmware-only (FreeRTOS/hal/storage.h) and not host-testable. */
+    int write_count = 0;
+    for (uint8_t i = 0; i < (uint8_t)trk_user_count(); i++)
+        if (trk_user_id_at(i) != TRK_SIM_VENUE_ID) write_count++;
+    TEST_ASSERT_EQUAL_INT(1, write_count);
+
+    /* trk_next_user_id() never hands out the reserved id, even with it already in the table */
+    TEST_ASSERT_NOT_EQUAL_UINT16(TRK_SIM_VENUE_ID, trk_next_user_id());
+
+    /* "the load never sees it": a record that explicitly carries the reserved id is refused by
+     * trk_user_load_venue() itself, even though it is otherwise a perfectly well-formed venue --
+     * not just the logger's save-side skip above. Index 0 is the sim venue added first. */
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    trk_init();
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n));
+    TEST_ASSERT_EQUAL_INT(0, trk_user_count());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_bundled_contains_killarney_with_four_layouts);
     RUN_TEST(test_nearest_inside_and_outside_radius);
-    RUN_TEST(test_user_venue_wins_on_id_clash_and_persists);
+    RUN_TEST(test_user_venue_wins_on_id_clash);
     RUN_TEST(test_user_store_is_bounded);
     RUN_TEST(test_json_round_trip_with_same_and_reverse_expansion);
     RUN_TEST(test_json_rejects_bad_line);
     RUN_TEST(test_user_add_rejects_invalid_venue);
-    RUN_TEST(test_user_blob_v2_rejects_bad_version_count_crc_and_venue);
-    RUN_TEST(test_user_blob_rejects_sub_metre_gate_line);
-    RUN_TEST(test_save_produces_identical_blobs_regardless_of_padding_garbage);
     RUN_TEST(test_json_rejects_degenerate_line_and_duplicate_layout_ids);
     RUN_TEST(test_json_rejects_document_deeper_than_the_depth_cap);
     RUN_TEST(test_json_max_venue_token_bound);
@@ -448,5 +593,12 @@ int main(void)
     RUN_TEST(test_user_add_json_rejects_malformed);
     RUN_TEST(test_user_add_json_replaces_same_id);
     RUN_TEST(test_user_add_json_full_table_rejected_and_unchanged);
+    RUN_TEST(test_user_save_venue_load_venue_round_trip_1_to_max);
+    RUN_TEST(test_user_save_venue_max_size_is_exactly_rec_max);
+    RUN_TEST(test_user_save_venue_four_layouts_eight_sectors_round_trip);
+    RUN_TEST(test_user_load_venue_rejects_truncated_record);
+    RUN_TEST(test_user_load_venue_replaces_same_id);
+    RUN_TEST(test_user_load_venue_cleans_up_a_failed_decode_mid_record);
+    RUN_TEST(test_sim_reserved_id_excluded_from_save_and_rejected_on_load);
     return UNITY_END();
 }

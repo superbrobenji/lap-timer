@@ -848,27 +848,37 @@ static void finalize_create(lap_t *L, int64_t t_cross, int64_t mono, event_t *ou
     CORE_ASSERT_VOID(L->lap_dist_m >= 0.0, LAP_ASSERT_CODE);   /* integrated distance non-negative */
     L->create_layout.length_m = (uint32_t)llround(L->lap_dist_m);
 
-    trk_venue_t nv;
-    memset(&nv, 0, sizeof nv);
-    nv.id = L->create_venue_id;
-    int y; unsigned mo, d, hh, mm, ss, cs;
-    exp_utc_parts(L->create_gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
-    snprintf(nv.name, sizeof nv.name, "Track_%04d%02u%02u", y, mo, d);
-    nv.lat = L->create_lat;
-    nv.lon = L->create_lon;
-    nv.radius_m = VENUE_RADIUS_DEFAULT_M;
-    nv.flags = 0;                                /* on-device creation is the most-confirmed case, not
-                                                   * TRK_F_UNVERIFIED (§10.1/§10.9) */
-    nv.n_layouts = 2;
-    nv.layouts[0] = L->create_layout;                          /* id 1, "Layout 1" */
-    lap_layout_reverse(&L->create_layout, &nv.layouts[1]);     /* id 2, "Layout 1 Reverse" (§10.9 step 4) */
-
-    if (trk_user_add(&nv) != 0) {                /* store full or invalid: abort creation */
+    /* pr:M2: build the new venue in the track module's static landing slot, not in a 2752 B
+     * trk_venue_t on this task's 8 KB stack (PIPE_STACK_BYTES) -- the rule core/trk.h states for
+     * trk_user_load_venue()/trk_user_add_json(), now applied to the pipeline-side twin. */
+    trk_venue_t *nv = trk_user_scratch();
+    if (nv == NULL) {                            /* store full: abort creation, same as before */
         reset_to_no_venue(L);
         return;
     }
-    lap_set_venue(L, trk_get(nv.id));            /* → VENUE_FOUND on the saved venue (mode = NORMAL) */
-    emit(out, cap, n, EV_VENUE_FOUND, 0, nv.id, t_cross, mono, 0, 0);
+    memset(nv, 0, sizeof *nv);
+    nv->id = L->create_venue_id;
+    int y; unsigned mo, d, hh, mm, ss, cs;
+    exp_utc_parts(L->create_gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
+    snprintf(nv->name, sizeof nv->name, "Track_%04d%02u%02u", y, mo, d);
+    nv->lat = L->create_lat;
+    nv->lon = L->create_lon;
+    nv->radius_m = VENUE_RADIUS_DEFAULT_M;
+    nv->flags = 0;                               /* on-device creation is the most-confirmed case, not
+                                                  * TRK_F_UNVERIFIED (§10.1/§10.9) */
+    nv->n_layouts = 2;
+    nv->layouts[0] = L->create_layout;                          /* id 1, "Layout 1" */
+    lap_layout_reverse(&L->create_layout, &nv->layouts[1]);     /* id 2, "Layout 1 Reverse" (§10.9 step 4) */
+
+    const uint16_t new_id = nv->id;              /* read before the add, which may copy nv elsewhere */
+    if (trk_user_add(nv) != 0) {                 /* invalid venue: abort creation */
+        memset(nv, 0, sizeof *nv);               /* leave the slot clean, as trk_user_load_venue does */
+        reset_to_no_venue(L);
+        return;
+    }
+    CORE_ASSERT_VOID(trk_get(new_id) != NULL, LAP_ASSERT_CODE);   /* postcondition: the add is visible */
+    lap_set_venue(L, trk_get(new_id));           /* → VENUE_FOUND on the saved venue (mode = NORMAL) */
+    emit(out, cap, n, EV_VENUE_FOUND, 0, new_id, t_cross, mono, 0, 0);
 }
 
 /* §10.9 CREATE sub-mode: no venue scan; integrate distance and watch for the S/F crossing that closes

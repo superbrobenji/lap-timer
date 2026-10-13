@@ -6,6 +6,11 @@
  * screen_model_t and the PBM goldens in test/snapshots/ are byte-identical across clang and
  * gcc-16.
  */
+#include "core/drag.h"       /* DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (#95) -- drag_run_state's values */
+#include "core/cfg.h"        /* M6 (final review): CFG_DIST_FT/CFG_DIST_M for dist_unit_suffix()
+                               * below -- reachable transitively via core/drag.h's own include of
+                               * this header, but that makes this file depend on drag.h's include
+                               * list staying exactly as-is; include it directly instead. */
 #include "core/ui/canvas.h"
 #include "core/ui/model.h"
 #include "core/ui/units.h"
@@ -198,8 +203,8 @@ static void fmt_time_s(char *buf, uint32_t ms)
  * "--" bits (SYS_DISP_DEAD, SYS_HEAP_LOW, SYS_OTA_PENDING) plus SYS_IMU_DEAD and
  * SYS_FUSION_DISAGREE, neither of which has a matching bitmap in icons.h (only ICON_IMU_Q exists,
  * no IMU strike-through / lean "?" icon). SYS_STORAGE_DEAD has no disk-strike bitmap either, so it
- * falls back to the plain ICON_DISK glyph. Bits 14/15 are ui-level (SCR_UI_SIM/SCR_UI_MOVING,
- * model.h), not §17.4 sys flags -- they always draw. */
+ * falls back to the plain ICON_DISK glyph. Bits 14/15/16 are ui-level (SCR_UI_SIM/SCR_UI_MOVING/
+ * SCR_UI_LINK, model.h), not §17.4 sys flags -- they always draw. */
 static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     (int8_t)ICON_GPS_STRIKE,    /* 0  SYS_GPS_DEAD */
     (int8_t)ICON_GPS_STRIKE,    /* 1  SYS_GPS_NOFIX */
@@ -217,6 +222,7 @@ static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     -1,                         /* 13 SYS_FUSION_DISAGREE */
     (int8_t)ICON_SIM,           /* 14 SCR_UI_SIM (ui-level, model.h) */
     (int8_t)ICON_MOVING,        /* 15 SCR_UI_MOVING (ui-level, model.h) */
+    (int8_t)ICON_LINK,          /* 16 SCR_UI_LINK (ui-level, model.h) */
 };
 
 /* Shared by fault_strip() and fault_strip_left_x() (PF-4): the icon (icons.h) for `bit`
@@ -340,6 +346,16 @@ static void fmt_delta_clamped(char *buf, int32_t dms, int32_t max_ms)
 static const char *unit_suffix(uint8_t units)
 {
     return units ? "mph" : "km/h";
+}
+
+/* Task 4 review round 1 (ruling B4-R5): the FONT_SMALL unit string for every dist_display() value
+ * on screen -- shared by the gate list's distance rows (render_drag_gate_list), the DRAG card's
+ * big-slot distance value and its footer's distance entries (render_dcard_value/
+ * render_dcard_footer) -- same reasoning as unit_suffix() above, factored out once a third call
+ * site needed the identical ternary. */
+static const char *dist_unit_suffix(uint8_t dist_units)
+{
+    return dist_units == CFG_DIST_FT ? "ft" : "m";
 }
 
 /* Renders the 64 px big slot (FONT_HUGE): BIG_SECTOR_DELTA/BIG_LAP_DELTA show the signed delta,
@@ -596,30 +612,36 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
 }
 
 /* ---- DRAG page 0 (spec 7b §7): the run card -- the newest gate's value fills the 64 px big
- * slot, the earlier gates of this run join a FONT_SMALL footer in hit order, and ARMED/the fault
- * strip sit as before. Before the first gate the big slot shows "READY" (FONT_MED: FONT_HUGE has
- * no letters at all). ---- */
+ * slot, the earlier gates of this run join a FONT_SMALL footer in hit order, and the fault strip
+ * sits as before. Before the first gate the big slot shows "NOT READY" until the drag engine has
+ * armed, then "READY" (FONT_MED: FONT_HUGE has no letters at all) -- #95: READY now means armed,
+ * so the separate top-right ARMED label that used to duplicate this is gone. ---- */
 
 /* The newest gate's big value (spec 7b §7): a normal gate's elapsed time in FONT_HUGE
  * (fmt_secs_ms, <= 5 glyphs), or -- for the 100-0 braking gate (#40: DRAG_BRAKE, core/drag.h, is a
  * stopping DISTANCE in metres, not an elapsed time) -- the distance as a plain integer in
- * FONT_HUGE followed by a FONT_SMALL "m" (FONT_HUGE has no lowercase, so the unit itself must use
- * a different font). A gate with has_trap set also draws its trap speed as "@<trap>" on the row
- * below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading character
- * draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows "@173" this
- * way. Plan 7c T4 fix 1 (ruling R-4): trap_cms is raw cm/s -- converted to the display unit HERE,
- * at render time, same as every other speed on screen (freezing it at event time would mislabel a
- * run after a later units toggle); a FONT_SMALL unit suffix follows the digits. */
-static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
+ * FONT_HUGE followed by a FONT_SMALL unit suffix (FONT_HUGE has no lowercase, so the unit itself
+ * must use a different font). A gate with has_trap set also draws its trap speed as "@<trap>" on
+ * the row below in FONT_MED -- FONT_MED has no '@' glyph (fonts.c FONT_MED_MAP), so that leading
+ * character draws as a blank cell per render.h's no-glyph contract; spec 7b §7's own mock shows
+ * "@173" this way. Plan 7c T4 fix 1 (ruling R-4): trap_cms is raw cm/s -- converted to the display
+ * unit HERE, at render time, same as every other speed on screen (freezing it at event time would
+ * mislabel a run after a later units toggle); a FONT_SMALL unit suffix follows the digits.
+ * Task 4 review round 1 (ruling B4-R5): dist_units threads through the same way -- the distance
+ * branch used to hardcode "m" regardless of the Distance: menu setting, the same defect B4-F5
+ * fixed in the gate list; dist_display() (core/ui/units.c) is the one named conversion, shared with
+ * the list and the footer below. */
+static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units, uint8_t dist_units)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(r != NULL, UI_ASSERT_CODE);
     char buf[TIME_BUF_LEN];
     if (r->is_distance) {
-        char *p = put_uint(buf, r->dist_m);
+        char *p = put_uint(buf, dist_display(r->dist_m, dist_units));
         *p = '\0';
         int end = fb_text(fb, &FONT_HUGE, DCARD_BIG_X, DCARD_BIG_Y, buf);
-        fb_text(fb, &FONT_SMALL, end + DCARD_UNIT_GAP, DCARD_BIG_Y + DCARD_UNIT_DY, "m");
+        fb_text(fb, &FONT_SMALL, end + DCARD_UNIT_GAP, DCARD_BIG_Y + DCARD_UNIT_DY,
+                dist_unit_suffix(dist_units));
         return; /* a distance gate never draws a trap row, even if has_trap happened to be set */
     }
     fmt_secs_ms(buf, r->t_ms);
@@ -639,10 +661,13 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units)
 
 /* The run-card footer (spec 7b §7): gates 0..n-2 (every gate of this run except the newest, which
  * already fills the big slot), oldest first, up to DCARD_FOOTER_MAX entries -- older ones scroll
- * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist_m>m" for the
- * distance gate), joined by DCARD_FOOTER_SEP. PF-2: the row stops before it would draw under the
- * fault strip -- its right limit is fault_strip_left_x(m->flags) - DCARD_FAULT_GAP, which is always
- * <= CANVAS_VISIBLE_W, so this also never draws past the visible edge. */
+ * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist><unit>" for the
+ * distance gate, dist_display()/dist_unit_suffix() -- Task 4 review round 1, ruling B4-R5: this
+ * used to hardcode a trailing 'm' regardless of m->dist_units, the identical B4-F5 defect the gate
+ * list had, even though this function already receives the full screen_model_t and m->dist_units
+ * was sitting right there unused), joined by DCARD_FOOTER_SEP. PF-2: the row stops before it would
+ * draw under the fault strip -- its right limit is fault_strip_left_x(m->flags) - DCARD_FAULT_GAP,
+ * which is always <= CANVAS_VISIBLE_W, so this also never draws past the visible edge. */
 static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /* gates 0..n-2 */
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -656,8 +681,8 @@ static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /*
         char *p = put_str(buf, r->label);
         p = put_char(p, ' ');
         if (r->is_distance) {
-            p = put_uint(p, r->dist_m);
-            p = put_char(p, 'm');
+            p = put_uint(p, dist_display(r->dist_m, m->dist_units));
+            p = put_str(p, dist_unit_suffix(m->dist_units));
         } else {
             char t[TIME_BUF_LEN];
             fmt_secs_ms(t, r->t_ms);
@@ -680,14 +705,27 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     if (n == 0u) {
-        fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, "READY");
+        /* #95 (bench B4-F1): the big slot follows the engine's own four-value drag_run_state, not
+         * a one-bit armed mirror -- a run in flight with no gate hit yet (LAUNCHED) is a different
+         * situation from never having armed (IDLE) and from a just-finished run with nothing to
+         * show (DONE), even though all three share drag_n == 0 (arming AND launching both reset
+         * the run, drag.c reset_run()). Until the engine has armed the card says NOT READY, so a
+         * rider never launches on a card that is not timing; any unrecognised value also falls
+         * back to NOT READY (defensive). The separate right-hand ARMED label stays gone -- READY
+         * already carries that meaning. */
+        const char *ready;
+        switch (m->drag_run_state) {
+        case DRAG_ST_ARMED:    ready = "READY";     break;
+        case DRAG_ST_LAUNCHED: ready = "LAUNCHED";  break;
+        case DRAG_ST_DONE:     ready = "DONE";      break;
+        case DRAG_ST_IDLE:     /* fall through */
+        default:               ready = "NOT READY"; break;
+        }
+        fb_text(fb, &FONT_MED, DCARD_BIG_X, DCARD_READY_Y, ready);
     } else {
         fb_text(fb, &FONT_SMALL, DCARD_LABEL_X, DCARD_LABEL_Y, m->drag[n - 1u].label);
-        render_dcard_value(fb, &m->drag[n - 1u], m->units);
+        render_dcard_value(fb, &m->drag[n - 1u], m->units, m->dist_units);
         render_dcard_footer(fb, m, n);
-    }
-    if (m->drag_armed) {
-        fb_text_right(fb, &FONT_MED, DCARD_ARMED_RIGHT_X, DCARD_ARMED_Y, "ARMED");
     }
 
     /* Mirrors LAP page 0 (the other primary in-ride screen): only the page-0 riding view shows the
@@ -698,9 +736,16 @@ static void render_drag_page0(fb_t *fb, const screen_model_t *m)
 /* ---- DRAG pages 1/2 (spec 7b §7): all seven gates of the last run / best-per-gate this session
  * -- same row set (60ft, 330ft, 1/8, 1000ft, 1/4, 100-200, 100-0), just different values, so one
  * list layout serves both; they differ only in the title drawn and in which values the caller
- * populated m->drag[] with. Two columns of DLIST_ROWS rows each (the left column fills first):
- * each cell is a FONT_SMALL label at the column's left edge and a FONT_MED value right-aligned at
- * the column's right edge, "--.--" for a gate not hit this run/session. ---- */
+ * populated m->drag[] with. Two columns of DLIST_ROWS rows each (the left column fills first).
+ *
+ * Bench B4-F4 (pairing): each cell's FONT_SMALL label and FONT_MED value now share one visual
+ * baseline (DLIST_LABEL_DY, canvas.h) -- label at the column's left edge, value right-aligned at
+ * the column's right edge, "--.--" for a gate not hit this run/session -- and a 1px rule sits
+ * under the header with a 1px divider between the two columns (spanning only the rows, not the
+ * header) so a value's owner is never ambiguous, even when a row only fills one column. Bench
+ * B4-F5 (unit): a distance row's (is_distance) value now follows m->dist_units via dist_display()
+ * (core/ui/units.c) -- metres as stored, or feet with the matching suffix -- the value-side
+ * counterpart to drag_gate_label's label-side renaming (core/dragengine/drag_cfg.c). ---- */
 
 static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char *title)
 {
@@ -718,6 +763,14 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
                           UI_ASSERT_CODE);
         fb_text(fb, &FONT_SMALL, end + DLIST_MORE_GAP, DLIST_HEADER_Y, buf);
     }
+    /* B4-F4: the header rule (fb_hline, same idiom as render_menu's MENU_SEP_Y) and the column
+     * divider (fb_rect -- there is no fb_vline), drawn before the rows so neither overdraws them.
+     * The divider spans only the rows' vertical extent (DLIST_ROW_Y0 to the last row's FONT_MED
+     * content bottom), not the header above it. */
+    fb_hline(fb, 0, DLIST_RULE_Y, CANVAS_VISIBLE_W, 1);
+    int div_h = (int)((DLIST_ROWS - 1) * DLIST_ROW_H) + (int)FONT_MED.h;
+    fb_rect(fb, DLIST_DIVIDER_X, DLIST_ROW_Y0, 1, div_h, 1, true);
+
     uint8_t n = m->drag_n > DRAG_MAX_GATES ? (uint8_t)DRAG_MAX_GATES : m->drag_n;
     for (uint8_t i = 0; i < n && i < 2u * DLIST_ROWS; i++) {
         int col = i / DLIST_ROWS, row = i % DLIST_ROWS; /* left column fills first */
@@ -726,16 +779,22 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
         int y = DLIST_ROW_Y0 + row * DLIST_ROW_H;
         const drag_row_t *r = &m->drag[i];
         char buf[TIME_BUF_LEN];
+        /* B4-F4: DLIST_LABEL_DY now bottom-aligns the label's cell to the value's (see canvas.h),
+         * instead of the old vertical-centre offset that read as paired with the next column. */
         fb_text(fb, &FONT_SMALL, x, y + DLIST_LABEL_DY, r->label);
         if (!r->present) {
             char *p = put_str(buf, "--.--");
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr, y, buf);
         } else if (r->is_distance) {
-            char *p = put_uint(buf, r->dist_m);
+            /* B4-F5: dist_display() converts to the display unit at render time (the same rule as
+             * every other unit on screen, ruling R-4) -- never freeze dist_m in the display unit
+             * at event time, or a later Distance: toggle would mislabel an already-finished run. */
+            char *p = put_uint(buf, dist_display(r->dist_m, m->dist_units));
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr - DLIST_UNIT_W, y, buf);
-            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + DLIST_UNIT_GAP, y + DLIST_LABEL_DY, "m");
+            fb_text(fb, &FONT_SMALL, xr - DLIST_UNIT_W + DLIST_UNIT_GAP, y + DLIST_LABEL_DY,
+                    dist_unit_suffix(m->dist_units));
         } else {
             fmt_secs_ms(buf, r->t_ms);
             fb_text_right(fb, &FONT_MED, xr, y, buf);
@@ -849,7 +908,45 @@ static const char ONESHOT_OTAFAIL_LINE2[]   = "REVERTED";
 static const char ONESHOT_CALIBRATE_TITLE[] = "CALIBRATE";
 static const char ONESHOT_CALIBRATE_SUB[]   = "Hold upright, press MODE";
 static const char ONESHOT_NEWTRACK_TITLE[]  = "NEW TRACK";
-static const char ONESHOT_NEWTRACK_SUB[]    = "Cross S/F, press MODE";
+/* NEW TRACK sub-line text (#97, §10.9): the step-0 and FAIL/finish strings are fixed; the 1..
+ * LAP_MAX_SECTORS case ("S/F set. MODE: sector k") is built by newtrack_subline() below into the
+ * CALLER's own buffer (render_oneshot_newtrack()'s stack -- M6, review fix round 1: no static
+ * scratch storage, no non-reentrancy footnote). */
+static const char NEWTRACK_SUB_SF[]     = "Cross S/F, press MODE";
+static const char NEWTRACK_SUB_FINISH[] = "Cross S/F to finish";
+static const char NEWTRACK_SUB_FAIL[]   = "No fix / not moving";
+
+/* "S/F set. MODE: sector " is 22 chars; LAP_MAX_SECTORS < 10 keeps the sector number a single
+ * digit, so NEWTRACK_SUB_BUF_CAP (22 + 1 digit + NUL = 24) is an exact fit, not just a sufficient
+ * one -- asserted at compile time (M6) so a future LAP_MAX_SECTORS bump cannot silently truncate
+ * the text instead of failing a build. */
+#define NEWTRACK_SUB_BUF_CAP 24
+_Static_assert(LAP_MAX_SECTORS < 10, "newtrack_subline's buffer assumes a single-digit sector number");
+
+/* Table-driven sub-line choice for the NEW TRACK one-shot, keyed on screen_model_t.create_step:
+ * 0 = waiting for S/F, 1..LAP_MAX_SECTORS = "S/F set. MODE: sector k" (built into the caller's
+ * buf), > LAP_MAX_SECTORS = every gate set (waiting for the closing crossing), 0xFF = the last
+ * mark was refused. buf/cap: caller-owned scratch, at least NEWTRACK_SUB_BUF_CAP bytes. */
+static const char *newtrack_subline(uint8_t step, char *buf, size_t cap)
+{
+    CORE_ASSERT_RET(buf != NULL, UI_ASSERT_CODE, NEWTRACK_SUB_FAIL);
+    CORE_ASSERT_RET(cap >= NEWTRACK_SUB_BUF_CAP, UI_ASSERT_CODE, NEWTRACK_SUB_FAIL);
+    if (step == 0) {
+        return NEWTRACK_SUB_SF;
+    }
+    if (step == 0xFFu) {
+        return NEWTRACK_SUB_FAIL;
+    }
+    if (step > (uint8_t)LAP_MAX_SECTORS) {
+        return NEWTRACK_SUB_FINISH;
+    }
+    char *p = buf;
+    p = put_str(p, "S/F set. MODE: sector ");
+    p = put_uint(p, step);
+    CORE_ASSERT_RET((size_t)(p - buf) < cap, UI_ASSERT_CODE, NEWTRACK_SUB_FINISH);
+    *p = '\0';
+    return buf;
+}
 
 /* Status line for the OTA one-shot (spec §20.6): any unknown phase reads as RECEIVING, the
  * phase the screen is first shown in. */
@@ -972,11 +1069,11 @@ static void render_oneshot_newtrack(fb_t *fb, const screen_model_t *m)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
-    (void)m;
     fb_text(fb, &FONT_MED, center_x(fb, &FONT_MED, ONESHOT_NEWTRACK_TITLE), NEWTRACK_TITLE_Y,
              ONESHOT_NEWTRACK_TITLE);
-    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, ONESHOT_NEWTRACK_SUB), NEWTRACK_SUB_Y,
-             ONESHOT_NEWTRACK_SUB);
+    char        buf[NEWTRACK_SUB_BUF_CAP];
+    const char *sub = newtrack_subline(m->create_step, buf, sizeof buf);
+    fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, sub), NEWTRACK_SUB_Y, sub);
 }
 
 static void render_oneshot(fb_t *fb, const screen_model_t *m)

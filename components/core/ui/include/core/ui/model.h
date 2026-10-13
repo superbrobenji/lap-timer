@@ -5,6 +5,7 @@
 
 #include "core/types.h" /* LAP_MAX_SECTORS, DRAG_MAX_GATES */
 #include "core/ui/render.h"
+#include "core/trk.h" /* trk_venue_t (ui_layout_label, #98) -- also pulls in <stddef.h> for size_t below */
 
 /* Screen model + moto riding/one-shot/menu screens (spec §20.4-20.7, §17.4). Pure C11, same
  * constraints as the rest of core/ui (no ESP-IDF/FreeRTOS/malloc/float/libm) — screens_moto.c
@@ -52,8 +53,9 @@ typedef struct {
     bool     has_trap;
     /* #40: the 100-0 braking gate (DRAG_BRAKE, core/drag.h) is a stopping DISTANCE in metres, not
      * an elapsed time -- t_ms has no meaning for it. When is_distance is set, the renderer shows
-     * "<dist_m> m" instead of formatting t_ms as a time. present still means "gate hit this run"
-     * for both kinds of row. */
+     * dist_display(dist_m, dist_units) followed by dist_unit_suffix(dist_units) ("m" or "ft",
+     * bench B4-F5/#96) instead of formatting t_ms as a time. present still means "gate hit this
+     * run" for both kinds of row. */
     uint16_t dist_m;
     bool     is_distance;
 } drag_row_t;
@@ -67,6 +69,14 @@ typedef struct {
     uint8_t  units; /* Plan 7c T4 (design §3): 0 = km/h, 1 = mph (CFG_UNITS_KMH/CFG_UNITS_MPH); set
                       * from s_cfg.units at boot and on every menu toggle -- every speed_display()
                       * call on screen (LAP page 2 MAX SPD, the DRAG trap row) uses it */
+    uint8_t  dist_units; /* #96: 0 = m, 1 = ft (CFG_DIST_M/CFG_DIST_FT); set from s_cfg.dist_units at
+                           * boot and on every menu toggle. Two consumers: ui.c's row_from_gate
+                           * (drag_gate_label's DIST-gate LABEL naming -- row labels arrive here
+                           * already formatted strings, drag_row_t.label) and, since bench B4-F5,
+                           * screens_moto.c's render_drag_gate_list (dist_display(), core/ui/
+                           * units.c), which converts a distance row's VALUE (drag_row_t.dist_m) at
+                           * render time -- the renderer does read this field after all, just not
+                           * for the label side. */
 
     /* LAP page 0 */
     uint32_t best_ms, prev_ms;
@@ -103,7 +113,14 @@ typedef struct {
     /* DRAG rows (p0 benches / p1 all gates / p2 best per gate) */
     drag_row_t drag[DRAG_MAX_GATES];
     uint8_t    drag_n;
-    bool       drag_armed;
+    /* #95 (bench B4-F1): the big slot's "not ready"/"ready"/... text when drag_n == 0 must follow
+     * the engine's own four-value state, not a one-bit mirror of a single event -- a bool cannot
+     * distinguish IDLE from LAUNCHED, and both legitimately occur with drag_n == 0 (arming AND
+     * launching both reset the run). Mirrors pipe_drag_t.state (app/pipeline.h), itself
+     * drag_state()'s return value: DRAG_ST_IDLE/ARMED/LAUNCHED/DONE (core/drag.h). Set only from a
+     * snapshot refill (drag_rows_refill(), ui.c) or to DRAG_ST_IDLE at the handful of sites that
+     * used to clear the old bool -- never derived from which event last arrived. */
+    uint8_t    drag_run_state;
 
     /* venue + status */
     char     venue_name[33], layout_name[25];
@@ -113,6 +130,13 @@ typedef struct {
     /* ---- top-level screen selector (spec §20.6-20.7) ---- */
     uint8_t screen;  /* SCR_RIDING / SCR_MENU / SCR_ONESHOT */
     uint8_t oneshot; /* ONESHOT_* when screen == SCR_ONESHOT */
+
+    /* NEW TRACK one-shot sub-line selector (#97, §10.9), meaningful when oneshot ==
+     * ONESHOT_NEWTRACK: 0 = waiting for the S/F press; k (1..LAP_MAX_SECTORS) = k gates set (S/F
+     * + k-1 sectors), sub-line names sector k next; k > LAP_MAX_SECTORS = every gate set, waiting
+     * for the closing S/F crossing; 0xFF = the last CMD_MARK_GATE was refused (shown until the
+     * next EV_CREATE event overwrites it). */
+    uint8_t create_step;
 
     /* BOOT one-shot (§20.6, §17.6): name + version banner, up to 4 self-test "OK"/"FAIL" lines
      * (the caller pre-formats each line, e.g. "IMU     OK"). */
@@ -157,9 +181,10 @@ enum {
      * never reaches the ui -- recovery mode does not start it) can never alias SCR_UI_SIM. */
     SCR_UI_SIM    = 14,   /* ICON_SIM: this firmware feeds simulated GPS/IMU (CFG_GPS_SIM || CFG_IMU_SIM) */
     SCR_UI_MOVING = 15,   /* ICON_MOVING: the menu is motion-locked (gspeed >= MENU_LOCK_SPEED_KMH, §20.7) */
+    SCR_UI_LINK   = 16,   /* ICON_LINK: the dev-kit (or a BLE peer) is connected -- link_peer_present() */
 };
 #define SCR_SYS_BITS_MASK 0x3FFFu   /* bits 0..13: the sys_flags snapshot the strip may show */
-#define SCR_STRIP_BITS    16        /* bits 0..15: everything fault_strip() walks */
+#define SCR_STRIP_BITS    17        /* bits 0..16: everything fault_strip() walks */
 
 /* Draws the shared fault-icon strip (spec §20.5 + §17.4): for each set bit in `flags` that maps
  * to an icon, draws its 12x12 icon right-to-left along the bottom-right of the frame. Bits with
@@ -167,6 +192,13 @@ enum {
  * SYS_FUSION_DISAGREE, which have no matching bitmap in icons.h) draw nothing. Exposed so the
  * DRAG renderer (Task 2) reuses it. */
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct);
+
+/* "Layout: Auto" or "Layout: <name>" for the Layout menu item (spec §20.7, #98): choice 0 is
+ * Auto, choice i (1..venue->n_layouts) is venue->layouts[i-1].name. A NULL venue or a choice
+ * outside that range reads "Layout: Auto". Returns the formatted length (excluding the NUL), or
+ * -1 if it did not fit in `cap` (buf is still left NUL-terminated, same contract as
+ * drag_gate_label). Pure (menu_labels.c). */
+int ui_layout_label(const trk_venue_t *venue, uint8_t choice, char *buf, size_t cap);
 
 /* Status line under the OTA one-shot's percentage (spec §20.6): any phase value other than the
  * three OTA_PHASE_* enumerators reads as RECEIVING, the phase the screen is first shown in. */

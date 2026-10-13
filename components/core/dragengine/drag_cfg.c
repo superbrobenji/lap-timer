@@ -61,26 +61,51 @@ void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out)
     CORE_ASSERT_VOID(out->n_gates <= DRAG_MAX_GATES, DRAGCFG_ASSERT_CODE);   /* untouched by drag_cfg_defaults */
 }
 
+/* Bench B4-F2 (#96): the comparison pipeline_reload_cfg() (pipeline.c) needs to decide whether a
+ * config reload may call drag_init() (destructive) or must instead adopt the new cfg in place
+ * (non-destructive) -- see the contract comment at drag.h's declaration. Field-wise rather than
+ * memcmp: it compares only the first n_gates entries (slots past n_gates are stale and must not
+ * count) and does not rely on drag_gate_def_t being padding-free. */
+bool drag_cfg_engine_differs(const drag_cfg_t *a, const drag_cfg_t *b)
+{
+    CORE_ASSERT_RET(a != NULL && b != NULL, DRAGCFG_ASSERT_CODE, true);   /* unknown -> rebuild */
+    CORE_ASSERT_RET(a->n_gates <= DRAG_MAX_GATES && b->n_gates <= DRAG_MAX_GATES,
+                     DRAGCFG_ASSERT_CODE, true);                          /* loop bound */
+    if (a->n_gates != b->n_gates || a->rollout != b->rollout) return true;
+    for (uint8_t i = 0; i < a->n_gates; i++) {                            /* only the live prefix */
+        if (a->gates[i].id   != b->gates[i].id)   return true;
+        if (a->gates[i].kind != b->gates[i].kind) return true;
+        if (a->gates[i].a    != b->gates[i].a)    return true;
+        if (a->gates[i].b    != b->gates[i].b)    return true;
+    }
+    return false;
+}
+
 static int put_num_pair(char *buf, size_t cap, unsigned a, const char *sep, unsigned b)   /* "<a><sep><b>" */
 {
     int n = snprintf(buf, cap, "%u%s%u", a, sep, b);
     return (n < 0 || (size_t)n >= cap) ? -1 : n;
 }
 
-int drag_gate_label(const drag_gate_def_t *g, uint8_t units, char *buf, size_t cap)
+int drag_gate_label(const drag_gate_def_t *g, uint8_t units, uint8_t dist_units, char *buf, size_t cap)
 {
     CORE_ASSERT_RET(g != NULL && buf != NULL, DRAGCFG_ASSERT_CODE, -1);
     CORE_ASSERT_RET(cap >= 8u, DRAGCFG_ASSERT_CODE, -1);
     CORE_ASSERT_RET(units <= 1u, DRAGCFG_ASSERT_CODE, -1);
+    CORE_ASSERT_RET(dist_units <= 1u, DRAGCFG_ASSERT_CODE, -1);
     switch (g->kind) {
     case DRAG_SPEED_FROM0: return put_num_pair(buf, cap, 0u, "-", units ? kmh_to_mph(g->a) : g->a);
     case DRAG_SPEED_RANGE: return put_num_pair(buf, cap, g->a, "-", g->b);
     case DRAG_BRAKE:       return put_num_pair(buf, cap, g->a, "-", 0u);
     case DRAG_DIST: {
-        const char *name = g->a == 1829u ? "60ft" : g->a == 10058u ? "330ft" : g->a == 20117u ? "1/8"
-                         : g->a == 30480u ? "1000ft" : g->a == 40234u ? "1/4" : NULL;
+        /* #96: the two mile gates keep their name in both unit modes; the three feet presets
+         * (60ft/330ft/1000ft) rename to metres (rounded) when dist_units == CFG_DIST_M; any other
+         * DIST `a` (a custom gate) always prints "<a/100>m" rounded, regardless of dist_units. */
+        const char *name = g->a == 20117u ? "1/8" : g->a == 40234u ? "1/4" : NULL;
+        if (name == NULL && dist_units == CFG_DIST_FT)
+            name = g->a == 1829u ? "60ft" : g->a == 10058u ? "330ft" : g->a == 30480u ? "1000ft" : NULL;
         if (name != NULL) { int n = snprintf(buf, cap, "%s", name); return (n < 0 || (size_t)n >= cap) ? -1 : n; }
-        int n = snprintf(buf, cap, "%um", (unsigned)(g->a / 100u));
+        int n = snprintf(buf, cap, "%um", (unsigned)((g->a + 50u) / 100u));   /* metres, rounded */
         return (n < 0 || (size_t)n >= cap) ? -1 : n;
     }
     default: buf[0] = '\0'; return -1;
