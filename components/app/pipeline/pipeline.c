@@ -175,6 +175,10 @@ static volatile uint32_t s_lap_total;
 static uint32_t          s_laps_seq;       /* even = stable, odd = writer mid-update (F4 seqlock) */
 static pipe_best_t       s_best;
 static pipe_drag_t       s_dragsnap;
+/* #102 (pr:M1): drag_state() as of the last publish_drag_snapshot(). on_raw compares against it so
+ * the two engine transitions that emit NO event -- abort_to_armed() (false start) and the DONE ->
+ * IDLE settle (both core/dragengine/drag.c) -- still refresh the card. 1 B, pipeline task only. */
+static uint8_t           s_last_pub_state = DRAG_ST_IDLE;
 
 /* §10.9 on-device track creation (#97): CMD_CREATE_BEGIN/CMD_MARK_GATE/CMD_CREATE_CANCEL state.
  * s_create_next_gate is the AUTHORITATIVE next gate index -- the ui mirrors its own copy (for the
@@ -368,6 +372,7 @@ static void publish_drag_snapshot(void)
     seq_enter();
     s_dragsnap = snap;
     seq_leave();
+    s_last_pub_state = snap.state;   /* #102: every publish site updates the compare base, not just on_raw */
 }
 
 /* Engine callback (lap_on_fix / drag_on_fused). Forward every event to evt_q, and on completion
@@ -682,7 +687,12 @@ static void on_raw(const imu_raw_t *raw)
          * -> update_best() (drag.c ~601) both run synchronously inside this same drag_on_fused()
          * call, well before any event reaches a queue. One call here still covers ARMED/LAUNCH/
          * GATE/DONE uniformly (>= 1 event this step), same as before. */
-        if (nev > 0) publish_drag_snapshot();
+        /* #102 (pr:M1): nev > 0 alone misses abort_to_armed() (LAUNCHED -> ARMED on a §11.2 false
+         * start) and go_idle_keep_result() (DONE -> IDLE, DRAG_DONE_SETTLE_S later) -- both change
+         * drag_state() and emit nothing, so the card used to keep reading LAUNCHED indefinitely
+         * after a clutch-dump stall. Publishing on a state change too costs one byte compare per
+         * fused sample and leaves the >= 1-event path exactly as it was. */
+        if (nev > 0 || drag_state(&s_drag) != s_last_pub_state) publish_drag_snapshot();
         for (int i = 0; i < nev; i++) engine_cb(&evs[i]);
     }
 
