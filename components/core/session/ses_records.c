@@ -110,6 +110,8 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         out->gspeed_mms = br_i32(&r); out->head_e5 = br_i32(&r); out->hacc_mm = br_u32(&r); out->sacc_mms = br_u16(&r);
         out->pdop_e2 = br_u16(&r); out->fix_type = br_u8(&r); out->sats = br_u8(&r);
         uint8_t fl = br_u8(&r);
+        if (out->gps_us <= 0) return -1;   /* R26/io:C1: a frame admitted by the §12.2 CRC resync
+                                            * must not reach the exporters */
         out->valid = fl & 0x01; out->flags = (uint8_t)(((fl & 0x02) ? GPS_FLAG_FIXOK : 0) | GPS_FLAG_TIME | GPS_FLAG_DATE);
         st->prev = *out; st->have_prev = true; st->last_key_gps_us = out->gps_us; st->prev_valid = out->valid != 0;
         return 1;
@@ -125,6 +127,7 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         p->sacc_mms = 0; p->pdop_e2 = 0;
         p->fix_type = (fl & 0x04) ? 3 : 2; p->valid = fl & 0x01;
         p->flags = (uint8_t)(((fl & 0x02) ? GPS_FLAG_FIXOK : 0) | GPS_FLAG_TIME | GPS_FLAG_DATE);
+        if (p->gps_us <= 0) return -1;     /* same rule on the reconstructed timestamp */
         st->prev_valid = p->valid != 0;
         *out = *p;
         return 1;

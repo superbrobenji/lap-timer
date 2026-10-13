@@ -22,6 +22,12 @@ int exp_win_puts(exp_t *e, const char *s)
     return 0;
 }
 
+void exp_skip_record(exp_t *e)
+{
+    CORE_ASSERT_VOID(e != NULL, EXP_ASSERT_CODE);
+    if (e->skipped < 0xFFFFu) e->skipped++;
+}
+
 void exp_civil_from_days(int64_t z, int *y, unsigned *m, unsigned *d)
 {
     CORE_ASSERT_VOID(y != NULL, EXP_ASSERT_CODE);
@@ -48,12 +54,15 @@ void exp_utc_parts(int64_t gps_us, int *y, unsigned *mo, unsigned *d, unsigned *
     CORE_ASSERT_VOID(mm != NULL, EXP_ASSERT_CODE);
     CORE_ASSERT_VOID(ss != NULL, EXP_ASSERT_CODE);
     CORE_ASSERT_VOID(cs != NULL, EXP_ASSERT_CODE);
-    int64_t total_cs = (gps_us + 5000) / 10000;           /* round to centiseconds */
+    /* io:C1: a negative wire value must not make sod negative -- hh/mm/ss/cs are unsigned casts. */
+    int64_t total_cs = ((gps_us > 0 ? gps_us : 0) + 5000) / 10000;   /* round to centiseconds */
     int64_t secs = total_cs / 100;
     *cs = (unsigned)(total_cs % 100);
     int64_t days = secs / 86400; int64_t sod = secs % 86400;
     exp_civil_from_days(days, y, mo, d);
     *hh = (unsigned)(sod / 3600); *mm = (unsigned)((sod % 3600) / 60); *ss = (unsigned)(sod % 60);
+    CORE_ASSERT_VOID(*hh < 24u && *mm < 60u && *ss < 60u && *cs < 100u, EXP_ASSERT_CODE);
+    /* postcondition of the clamp: a real civil time, not a cast of a negative second-of-day */
 }
 
 int exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta)

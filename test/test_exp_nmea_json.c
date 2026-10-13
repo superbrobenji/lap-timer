@@ -1,6 +1,7 @@
 #include "unity.h"
 #include "core/exp.h"
 #include "core/ses.h"
+#include "core/bw.h"
 #include "core/json.h"
 #include <string.h>
 #include <stdio.h>
@@ -45,6 +46,26 @@ static void test_nmea_sentences_and_checksums(void)
     TEST_ASSERT_NOT_NULL(strstr(out, "\r\n$GPGGA"));
 }
 
+/* The bad FIX_KEY payload all three exporter cases feed (same bytes as above). */
+static void bad_fix_payload(uint8_t *p)
+{
+    bw_t w; bw_init(&w, p, 39);
+    bw_i64(&w, -1000000000000LL); bw_i32(&w, -338561234); bw_i32(&w, 185123456);
+    bw_i32(&w, 45000); bw_i32(&w, 18500); bw_i32(&w, 9012000); bw_u32(&w, 100);
+    bw_u16(&w, 10); bw_u16(&w, 120); bw_u8(&w, 3); bw_u8(&w, 8); bw_u8(&w, 0x07);
+}
+
+static void test_nmea_drops_a_record_with_a_bad_timestamp_and_counts_it(void)
+{
+    /* io:C1: this used to emit "$GPRMC,4294967283429496725..." with a VALID checksum. */
+    exp_meta_t m; memset(&m, 0, sizeof m);
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_NMEA, &m));
+    uint8_t p[39]; bad_fix_payload(p);
+    TEST_ASSERT_EQUAL_INT(0, exp_feed(&e, SES_T_FIX_KEY, p, 39));   /* skipped, not an abort */
+    TEST_ASSERT_EQUAL_UINT16(1, e.skipped);
+    TEST_ASSERT_EQUAL_UINT(0, e.win_len);                           /* nothing emitted */
+}
+
 static void test_json_summary_structure(void)
 {
     exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_001");
@@ -78,6 +99,20 @@ static void test_json_summary_structure(void)
     int lap1 = laps + 1; int ms = json_obj_get(out, toks, cnt, lap1, "ms"); int64_t v; json_tok_int(out, &toks[ms], &v); TEST_ASSERT_EQUAL_INT64(112341, v);
     int sectors = json_obj_get(out, toks, cnt, lap1, "sectors"); TEST_ASSERT_EQUAL_INT(2, toks[sectors].size);
     int valid = json_obj_get(out, toks, cnt, lap1, "valid"); bool b; json_tok_bool(out, &toks[valid], &b); TEST_ASSERT_TRUE(b);
+}
+
+static void test_json_summary_reports_skipped_records(void)
+{
+    exp_meta_t m; memset(&m, 0, sizeof m); strcpy(m.session_id, "S00042_001");
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_JSON, &m));
+    char out[2048]; size_t at = 0;
+    uint8_t lp[30]; memset(lp, 0, sizeof lp);
+    TEST_ASSERT_EQUAL_INT(0, exp_feed(&e, SES_T_LAP, lp, 7));       /* wrong len -> decode fails */
+    TEST_ASSERT_EQUAL_UINT16(1, e.skipped);
+    int fin; while ((fin = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
+    TEST_ASSERT_EQUAL_INT(0, fin);
+    at = drain(&e, out, at);
+    TEST_ASSERT_NOT_NULL(strstr(out, "\"skipped\":1}"));
 }
 
 static void test_json_sixteen_gate_run_streams_across_pulls(void)
@@ -177,7 +212,9 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_nmea_sentences_and_checksums);
+    RUN_TEST(test_nmea_drops_a_record_with_a_bad_timestamp_and_counts_it);
     RUN_TEST(test_json_summary_structure);
+    RUN_TEST(test_json_summary_reports_skipped_records);
     RUN_TEST(test_json_sixteen_gate_run_streams_across_pulls);
     RUN_TEST(test_json_header_strings_using_every_wire_byte_are_emitted_whole);
     RUN_TEST(test_finish_refuses_while_a_drag_run_is_mid_emission);

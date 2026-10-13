@@ -1,5 +1,7 @@
 #include "unity.h"
 #include "core/ses.h"
+#include "core/exp.h"
+#include "core/bw.h"
 #include "core/json.h"
 #include "core/cfg.h"
 #include "assert_support.h"   /* T-A: decoding untrusted input must NOT fire the fault hook */
@@ -271,6 +273,33 @@ static void test_calib_round_trip(void)
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(buf + 3, 26, &out));
 }
 
+static void test_decode_fix_rejects_non_positive_gps_us(void)
+{
+    /* io:C1 (R26): §12.2's resync accepts any frame whose CRC16 matches, so a damaged log can
+     * admit one mis-framed FIX_KEY; a negative gps_us then produced ~4.29e9 UTC fields. */
+    uint8_t p[39]; bw_t w; bw_init(&w, p, sizeof p);
+    bw_i64(&w, -1000000000000LL);                       /* the reviewer's reproducer value */
+    bw_i32(&w, -338561234); bw_i32(&w, 185123456); bw_i32(&w, 45000);
+    bw_i32(&w, 18500); bw_i32(&w, 9012000); bw_u32(&w, 100); bw_u16(&w, 10);
+    bw_u16(&w, 120); bw_u8(&w, 3); bw_u8(&w, 8); bw_u8(&w, 0x07);
+    ses_fix_state_t st; ses_fix_state_init(&st);
+    gps_fix_t f;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_KEY, p, 39, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_DELTA, p, 15, &f));  /* no anchor set */
+    bw_t w0; bw_init(&w0, p, sizeof p); bw_i64(&w0, 0);                /* R26: <= 0, so 0 too */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_KEY, p, 39, &f));
+}
+
+static void test_utc_parts_clamps_a_negative_timestamp(void)
+{
+    int y; unsigned mo, d, hh, mm, ss, cs;
+    exp_utc_parts(-1000000000000LL, &y, &mo, &d, &hh, &mm, &ss, &cs);
+    TEST_ASSERT_EQUAL_INT(1970, y);
+    TEST_ASSERT_EQUAL_UINT(1u, mo); TEST_ASSERT_EQUAL_UINT(1u, d);
+    TEST_ASSERT_EQUAL_UINT(0u, hh); TEST_ASSERT_EQUAL_UINT(0u, mm);
+    TEST_ASSERT_EQUAL_UINT(0u, ss); TEST_ASSERT_EQUAL_UINT(0u, cs);
+}
+
 static void test_decoders_reject_malformed_payloads(void)
 {
     lt_test_assert_reset();                       /* T-A: every rejection below must be a plain return, not a fault */
@@ -278,6 +307,10 @@ static void test_decoders_reject_malformed_payloads(void)
     gps_fix_t f; lap_result_t lap; drag_result_t run; ses_hdr_t hdr; fused_sample_t fs;
     ses_fix_state_t fst; ses_fix_state_init(&fst);
     ses_fused_state_t ust; ses_fused_state_init(&ust);
+
+    /* io:C1/R26: ses_decode_fix now rejects gps_us <= 0, so this reused all-zero buffer needs a
+     * positive gps_us in its first 8 bytes before the "now a reference exists" FIX_KEY decode below. */
+    bw_t gw; bw_init(&gw, p, 8); bw_i64(&gw, 1000000000LL);
 
     /* FIX_KEY / FIX_DELTA: exact lengths only */
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 38, &f));
@@ -432,6 +465,8 @@ int main(void)
     RUN_TEST(test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated);
     RUN_TEST(test_small_record_round_trips);
     RUN_TEST(test_calib_round_trip);
+    RUN_TEST(test_decode_fix_rejects_non_positive_gps_us);
+    RUN_TEST(test_utc_parts_clamps_a_negative_timestamp);
     RUN_TEST(test_decoders_reject_malformed_payloads);
     RUN_TEST(test_empty_json_and_config_are_rejected_without_a_fault);
     RUN_TEST(test_fuzz_ten_thousand_fix_random_walk_round_trips);

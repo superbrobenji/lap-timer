@@ -75,7 +75,7 @@ static int feed_lap(exp_t *e, const uint8_t *p, uint8_t len)
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (e->json_stage != 1) return 0;                     /* laps after runs began: ignore (log order guarantees this never happens) */
     if (exp_win_free(e) < 400) return EXP_FULL;
-    lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) return -1;
+    lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) { exp_skip_record(e); return 0; }
     CORE_ASSERT_RET(lap.n_sectors <= LAP_MAX_SECTORS + 1, EXP_ASSERT_CODE, -1);  /* rule 2: explicit bound on the loop below */
     char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
     if (e->laps > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
@@ -154,7 +154,7 @@ static int feed_drag_run(exp_t *e, const uint8_t *p, uint8_t len)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
-    drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) return -1;
+    drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) { exp_skip_record(e); return 0; }
     if (!e->run_pending) {
         int r = feed_drag_run_open(e, &run);
         if (r != 0) return r;
@@ -193,6 +193,10 @@ int exp_json_finish(exp_t *e)
         CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
         e->json_stage = 2;
     }
-    CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
+    char tail[32];
+    int tn = snprintf(tail, sizeof tail, "],\"skipped\":%u}", (unsigned)e->skipped);
+    CORE_ASSERT_RET(tn > 0 && (size_t)tn < sizeof tail, EXP_ASSERT_CODE, -1);  /* §14.3 tail fits */
+    int wr = exp_win_puts(e, tail);
+    CORE_ASSERT_RET(wr == 0, 0x0A01, -1);
     return 0;
 }
