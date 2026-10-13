@@ -1088,18 +1088,28 @@ typedef struct {
 extern const trk_venue_t trk_bundled[];
 extern const uint16_t    trk_bundled_count;
 
-/* The user store is module-static and not protected by a lock (see trk.c). */
+/* The user store is module-static and not protected by a lock: boot writers run on app_main's task
+ * before any consumer task exists; the pipeline task is the only post-boot writer; the ui and
+ * logger tasks are unlocked readers (core/trk.h and trk.c carry the full ordering argument). */
 void               trk_init(void);                                   /* clears the user store */
 int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
 const trk_venue_t *trk_get(uint16_t venue_id);
-int                trk_user_add(const trk_venue_t *v);              /* replaces same id; -1 if full or invalid */
+int                trk_user_add(const trk_venue_t *v);               /* replaces same id; -1 if full or invalid */
+int                trk_user_add_json(const char *json, size_t n, uint16_t *venue_id_out,
+                                     char *err, size_t err_cap);     /* parses into the landing slot */
 int                trk_user_count(void);
 uint16_t           trk_next_user_id(void);
-/* Blob v2: u8 version(2) | u8 count | trk_venue_t[count] | u16 crc16 LE. Load rejects a wrong
- * version, count, size or CRC and any venue failing trk_validate_venue, leaving the store empty. */
-int                trk_user_load(const uint8_t *blob, size_t n);
-int                trk_user_save(uint8_t *blob, size_t cap, size_t *n_out);
+uint16_t           trk_user_id_at(uint8_t index);   /* live in-RAM order, NOT an id; 0 if out of range */
+trk_venue_t       *trk_user_scratch(void);          /* the module-static landing slot every ~2.7 KB venue
+                                                     * is built/decoded in instead of on a task stack;
+                                                     * NULL when the table is full */
+/* Per-venue variable-length record (§10.1). index is 0..trk_user_count()-1, not a venue id.
+ * trk_user_load_venue decodes into trk_user_scratch()'s slot, validates, then trk_user_add()s. */
+int                trk_user_save_venue(uint8_t index, uint8_t *buf, size_t cap, size_t *n_out);
+int                trk_user_load_venue(const uint8_t *buf, size_t n);
+#define TRK_USER_REC_MAX /* worst-case record payload (every slot full); the logger's BATCH_CAP must
+                          * exceed TRK_USER_REC_MAX + 4 (a _Static_assert there proves it) */
 int                trk_from_json(trk_venue_t *out, const char *json, size_t n, char *err, size_t err_cap);
 int                trk_to_json(const trk_venue_t *v, char *out, size_t cap);
 ```
@@ -1520,9 +1530,29 @@ typedef struct {
 
 Bundled venues are generated from `tools/tracks/*.json` (schema §10.2) by `gen_tracks.py` into `trk_bundled.c` as a `const` array in flash. Initial set (start/finish coordinates approximate until verified on site **[VERIFY]**): Kyalami (Full), Zwartkops (Full, Short), Red Star Raceway (Full, Short), Phakisa (Full), Aldo Scribante (Full), Killarney (Full, Full Reverse, Short, Short Reverse), Dezzi Raceway (Full), East London Grand Prix Circuit (Full), Midvaal (Full). Kart venues are added as data arrives.
 
-User venues: `/tracks/user.bin` blob version 2 = `u8 version = 2 | u8 count | trk_venue_t[count] | u16 crc16 (LE)`, where the CRC is `ses_crc16` (CRC-16/CCITT-FALSE, §12.2) over every preceding byte. The venue structs are copied raw, so a blob is only valid for the build that wrote it. Max `TRK_MAX_USER` = 4 user venues (each venue struct is 2752 B; the store is 11,008 B of static RAM). Loaded at boot; lookup merges bundled and user, user wins on id clash.
+User venues live in `/tracks/user.bin`, written and read by the logger **one venue at a time** — never as one whole-table blob (`components/app/logger/logger.c`: `tracks_save()`, `logger_load_tracks()`). File layout: `char magic[4]` = `"LTRK"` (`TRACKS_FILE_MAGIC`) │ `u8 version` = `1` (`TRACKS_FILE_VERSION`) │ `u8 count` │ then `count` records, each `u16 len` (LE) │ `len` payload bytes │ `u16 crc16` (LE).
 
-`trk_user_load` rejects a blob whose version is not 2, whose count exceeds `TRK_MAX_USER`, whose size is not `2 + count·sizeof(trk_venue_t) + 2`, or whose CRC does not match, and additionally re-validates every venue it contains. The validation rule (`trk_validate_venue`, also applied by `trk_user_add` and by `trk_from_json` after parsing) requires:
+`crc16` is `ses_crc16` (CRC-16/CCITT-FALSE, §12.2) over **the record's `len` payload bytes only** — not the 6-byte header, not the length prefix. The payload is one `trk_user_save_venue` record (`core/trk.h`), carrying only a venue's actual `n_layouts` layouts and each layout's actual `n_sectors` sectors:
+
+```
+u16 id | char name[32] | f64 lat | f64 lon | u32 radius_m | u8 flags | u8 n_layouts |
+n_layouts × { u16 id | char name[24] | 4 × f64 sf | i8 dir_sign | u8 n_sectors |
+              n_sectors × (4 × f64 sector line) | u32 length_m }
+```
+
+so an on-device-created venue (`n_layouts == 2`) costs well under a third of `TRK_USER_REC_MAX`, the worst-case payload the logger's scratch batch is proven to hold. The reserved sim venue id (`TRK_SIM_VENUE_ID`) is never written, is excluded from `count`, and a record carrying it is refused on load.
+
+A save writes `/tracks/user.tmp` and `sto_rename`s it over `/tracks/user.bin` only once every record landed (atomic on LittleFS), so a power cut mid-save leaves the previous file intact; every failure path unlinks the `.tmp`.
+
+A load is **per-record and fail-soft, not all-or-nothing**. A header whose magic or version byte does not match loads nothing and returns `-1`. Otherwise the first `min(count, TRK_MAX_USER)` records are read in turn and:
+
+- a record whose length prefix, payload or CRC trailer cannot be read in full, or whose `len` is `0` or above `TRK_USER_REC_MAX`, **stops** the loop — the rest of the file is unreachable without it;
+- a record whose CRC does not match is **skipped and reading continues**, so one corrupt record never costs the records after it;
+- a record that decodes but has trailing bytes, fails `trk_validate_venue`, carries `TRK_SIM_VENUE_ID`, or arrives at a full table is **dropped** by `trk_user_load_venue` (its landing slot left fully `memset`) and reading continues.
+
+A load therefore degrades to "the venues that survived", never to an emptied store. Max `TRK_MAX_USER` = 4 user venues; the in-RAM store is `4 × sizeof(trk_venue_t)` = 11,008 B of static RAM, while the on-flash cost is only what each venue actually uses. Lookup merges bundled and user; user wins on id clash.
+
+The validation rule (`trk_validate_venue`, also applied by `trk_user_add` and by `trk_from_json` after parsing) requires:
 
 - `id != 0`; `radius_m` in 100..50000; `n_layouts` in 1..`TRK_MAX_LAYOUTS`
 - every layout: `id != 0`, `dir_sign ∈ {+1, −1}`, `n_sectors ≤ LAP_MAX_SECTORS`
@@ -1530,7 +1560,7 @@ User venues: `/tracks/user.bin` blob version 2 = `u8 version = 2 | u8 count | tr
 - venue `lat`/`lon` finite and within ±90 / ±180
 - both endpoints of every line (S/F and each sector) finite
 
-On any failure the store is left empty and `-1` returned, so corrupted NVS degrades to "no user venues" rather than to out-of-range loop bounds. `trk_from_json` additionally rejects a line whose two endpoints are closer than 1 m (no crossing direction can be derived from it) and two layouts in one venue sharing an `id`; `gen_tracks.py` enforces the same two rules on the bundled sources.
+`trk_from_json` additionally rejects a line whose two endpoints are closer than 1 m (no crossing direction can be derived from it) and two layouts in one venue sharing an `id`; `gen_tracks.py` enforces the same two rules on the bundled sources.
 
 ### 10.2 Track JSON schema (tools and upload)
 
@@ -1628,11 +1658,7 @@ new `Track_YYYYMMDD`. The table is written one venue at a time (`core/trk.h`'s
 actual layout/sector counts are written, not every unused slot), streamed through the logger's
 existing scratch batch (no new buffer; every record is well within it, independent of how many
 venues the table holds) to a `.tmp` file and renamed into place atomically, so every one of
-`TRK_MAX_USER` venues persists, not just one. At boot, before `logger_start()` creates the logger
-task, `main/app_main.c` clears the table once (`trk_init()`); the logger then loads
-`/tracks/user.bin` back into it itself, directly, inside its own boot init — no request from the
-pipeline, which no longer touches this table at boot at all — before any venue (sim or scanned) is
-registered, so every created venue survives a reboot.
+`TRK_MAX_USER` venues persists, not just one. At boot, `main/app_main.c`'s `boot_subsystems()` clears the table once (`trk_init()`) and then calls `logger_load_tracks()` — declared in `app/logger.h`, implemented in `logger.c` because that file owns the format — **both on app_main's own task**, strictly before `logger_start()` creates the logger task and well before `pipeline_start()` creates the pipeline task. Neither write can race a reader (neither task exists yet), no request/reply is involved, and the table is complete before any venue (sim or scanned) is registered, so every created venue survives a reboot.
 
 ### 10.10 RTC continuity
 
