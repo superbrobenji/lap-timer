@@ -252,7 +252,9 @@ static int64_t s_combo_start_us;
 static bool    s_combo_fired;
 
 /* menu labels + action map (menu_items[] point at these caller-owned buffers) */
-static uint8_t s_menu_action[12];
+static uint8_t s_menu_action[UI_MENU_MAX];   /* pr:L4: tied to the same capacity every bound assert
+                                              * (menu_add, menu_select, the long-press paths) checks,
+                                              * so bumping UI_MENU_MAX alone can no longer overrun it */
 static char    s_lbl_mode[16];
 static char    s_lbl_units[16];
 static char    s_lbl_dist[16];

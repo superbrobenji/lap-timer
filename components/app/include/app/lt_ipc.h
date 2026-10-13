@@ -50,9 +50,11 @@ typedef enum {
      * not reused, so a stray old build's request is never misread as something else. */
     LOGGER_DELETE_SESSION  = 5,   /* unlink .log + .sum for id, re-prime the cache (debt sweep A #73) */
     LOGGER_SAVE_TRACKS     = 6,   /* serialise the user track table into /tracks/user.bin (requester notified with rc) */
-    /* 7 was LOGGER_LOAD_TRACKS. Retired in Task 5's review fix round 1 (#97, T5-R2): the logger now
-     * loads /tracks/user.bin itself, directly (logger.c's tracks_load(), called from logger_task()'s
-     * own boot init, before its task loop), not via a request the pipeline sends -- see
+    /* 7 was LOGGER_LOAD_TRACKS. Retired in Task 5's review fix round 1 (#97, T5-R2) and the final
+     * review (F-4/I-4): the table is loaded by logger_load_tracks() (declared in app/logger.h,
+     * implemented in logger.c because that file owns the format) called ONCE from app_main's own
+     * task, in main/app_main.c's boot_subsystems(), before this task exists -- not from
+     * logger_task()'s boot init and not via a request the pipeline sends. See
      * logger_request_sync()'s doc comment below for why that cross-task request existed only
      * briefly and why removing it was the fix, not a workaround. Value retired, not reused, same
      * as 4 above. */
@@ -92,10 +94,10 @@ extern QueueHandle_t g_log_req_q;
  * request live on g_log_req_q with no way to cancel it, so the logger could still run
  * trk_user_load_venue() -- an unlocked cross-task write into a live table -- well after the
  * pipeline had moved on and the ui might already hold an id; the 2 s wait also ate up to 40% of
- * PIPE_STALL_S with no benefit over the fix actually shipped. The logger now loads the table
- * itself, inside its own boot init, before anything else can touch it -- see core/trk.h/.c's
- * ownership comment for the ordering argument that makes this safe with no lock and no request at
- * all.)
+ * PIPE_STALL_S with no benefit over the fix actually shipped. The table is now loaded on app_main's
+ * own task, inside main/app_main.c's boot_subsystems(), before the logger or pipeline task exists --
+ * see core/trk.h/.c's ownership comment for the ordering argument that makes this safe with no lock
+ * and no request at all.)
  *
  * T3 fix 1 (ruling P-7): the generation tag in the notification's top byte is what makes this
  * helper safe for ANY caller priority or call pattern, not just a low-traffic one -- without it, a
