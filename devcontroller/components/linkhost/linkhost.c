@@ -34,7 +34,7 @@ static const char *TAG = "linkhost";
 #define LINK_RX_CHUNK      256
 #define LINK_CMD_TIMEOUT_MS 2000
 #define LINK_CMD_RETRIES    2
-#define LINK_ABSENT_TMO_MS  500                  /* one short attempt when no peer heartbeat is seen */
+#define LINK_ABSENT_TMO_MS  500                  /* one short attempt when no peer link traffic is seen */
 #define LINK_REQ_MTX_MS     400                  /* bounded s_req_mtx take: never park the httpd task */
 #define LINK_FLASH_MTX_MS   5000                 /* bounded s_req_mtx take for linkhost_flash (I4,
                                                    * final review): a `lt shell` bridge can hold
@@ -291,8 +291,9 @@ int linkhost_cmd_timed(const char *cmd, linkhost_frame_t *out, linkhost_cmd_stat
         return LINKHOST_E_BUSY;
     }
 
-    /* No heartbeat seen -> the peer is (probably) absent: one short attempt instead of 3x2 s, so a
-     * disconnected link fails fast rather than freezing the UI for 6 s per request. */
+    /* No link traffic seen (linkhost_peer_present() false) -> the peer is (probably) absent: one
+     * short attempt instead of 3x2 s, so a disconnected link fails fast rather than freezing the
+     * UI for 6 s per request. */
     const char *want = expected_frame_name(cmd);
     bool present = linkhost_peer_present();
     int  attempts = present ? (LINK_CMD_RETRIES + 1) : 1;

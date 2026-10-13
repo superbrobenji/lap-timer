@@ -8,7 +8,7 @@
  * value types (lt_status_t / lt_stream_rec_t / linkhost_frame_t / LINKHOST_E_*) and the pure
  * entry points (linkhost_status_decode / linkhost_parse_frame / linkhost_feed / linkhost_stream_pop)
  * have a single source of truth. THIS header adds only the IDF glue: UART1 lifecycle + the
- * request/response, status, heartbeat and flash transports (linkhost.c).
+ * request/response, status and flash transports (linkhost.c).
  */
 #ifndef LINKHOST_H
 #define LINKHOST_H
