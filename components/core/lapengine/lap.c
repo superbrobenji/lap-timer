@@ -64,6 +64,27 @@ static void reset_lap_sectors(lap_t *L)
     memset(L->sec_last_cross_us, 0, sizeof L->sec_last_cross_us);
 }
 
+/* §10.8: the best-sector table and the theoretical best belong to ONE (venue, layout) pair.
+ * Carrying them across a venue or layout change reports a lap nobody drove (audit core:H2). */
+static void clear_best_sectors(lap_t *L)
+{
+    CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
+    memset(L->best_sector_ms, 0, sizeof L->best_sector_ms);
+    memset(L->have_best_sector, 0, sizeof L->have_best_sector);
+    L->best_sector_count = 0;
+}
+
+/* Does the venue carry this layout id? Forcing or resuming an id it lacks armed ZERO candidates:
+ * no S/F gate, no error, lap timing dead for the session (audit core:H3). */
+static bool venue_has_layout(const trk_venue_t *v, uint16_t layout_id)
+{
+    CORE_ASSERT_RET(v != NULL, LAP_ASSERT_CODE, false);
+    const uint8_t n = v->n_layouts;                /* rule 9: one dereference level per expression */
+    CORE_ASSERT_RET(n <= TRK_MAX_LAYOUTS, LAP_ASSERT_CODE, false);   /* loop bound */
+    for (uint8_t i = 0; i < n; i++) if (v->layouts[i].id == layout_id) return true;
+    return false;
+}
+
 static void reset_to_no_venue(lap_t *L)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
@@ -82,7 +103,7 @@ static void reset_to_no_venue(lap_t *L)
     L->locked_layout = NULL;
     L->n_sec = 0;
     L->n_ugate = 0;
-    L->best_sector_count = 0;
+    clear_best_sectors(L);                  /* R25: a reset drops the venue, so §10.8 goes with it */
     L->sec_next = 1;
     memset(L->gate_times, 0, sizeof L->gate_times);
     L->have_prev_fix = false;
@@ -96,10 +117,10 @@ static void reset_to_no_venue(lap_t *L)
     L->create_have_sf = false;
     L->pred_rec_n = 0;
     L->pred_rec_fixes = 0;
-    /* best/prev results, best_sector table, the predictive reference table and cfg are preserved
-     * across a reset (§10.3); best_sector_count must still be within the best_sector_ms[]/
-     * have_best_sector[] arrays it indexes elsewhere, or a later read would run past them. */
-    CORE_ASSERT_VOID(L->best_sector_count <= LAP_MAX_SECTORS + 1, LAP_ASSERT_CODE);
+    /* best/prev lap results, the predictive reference table and cfg are preserved across a reset
+     * (§10.3). The §10.8 best-sector table is NOT: it is per (venue, layout) and the reset drops
+     * both, so keeping it would mix two tracks' splits (R25, audit core:H2). */
+    CORE_ASSERT_VOID(L->best_sector_count == 0, LAP_ASSERT_CODE);   /* clear_best_sectors ran */
 }
 
 void lap_init(lap_t *L, const lap_cfg_t *cfg)
@@ -146,6 +167,8 @@ void lap_set_venue(lap_t *L, const trk_venue_t *v)
         return;
     }
     CORE_ASSERT_VOID(v->n_layouts <= TRK_MAX_LAYOUTS, LAP_ASSERT_CODE);   /* venue layout count */
+    if (L->forced_layout_id != 0 && !venue_has_layout(v, L->forced_layout_id))
+        L->forced_layout_id = 0;        /* H3: never arm zero candidates -- fall back to Auto */
     geo_origin_set(&L->origin, v->lat, v->lon);
     L->state = LAP_ST_VENUE_FOUND;
     L->mode = LAP_MODE_NORMAL;
@@ -157,6 +180,7 @@ void lap_set_venue(lap_t *L, const trk_venue_t *v)
     L->locked_layout = NULL;
     L->n_sec = 0;
     L->n_ugate = 0;
+    clear_best_sectors(L);              /* R25: a new venue starts a new §10.8 table */
     reset_lap_sectors(L);
     L->have_prev_fix = false;
     L->seg_has_invalid = false;
@@ -170,11 +194,17 @@ void lap_set_venue(lap_t *L, const trk_venue_t *v)
     arm_candidates(L);
 }
 
-void lap_force_layout(lap_t *L, uint16_t layout_id)
+int lap_force_layout(lap_t *L, uint16_t layout_id)
 {
-    CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
-    L->forced_layout_id = layout_id;   /* §10.5: lock to this layout and re-arm its S/F */
+    CORE_ASSERT_RET(L != NULL, LAP_ASSERT_CODE, -1);
+    if (layout_id != 0 && L->venue != NULL && !venue_has_layout(L->venue, layout_id))
+        return -1;                       /* R25: refuse, and leave the forced id where it was */
+    if (layout_id == L->forced_layout_id) return 0;          /* no change: keep the lap and §10.8 */
+    L->forced_layout_id = layout_id;     /* §10.5: lock to this layout and re-arm its S/F */
+    clear_best_sectors(L);               /* R25: a layout change invalidates §10.8 */
     if (L->venue) arm_candidates(L);
+    CORE_ASSERT_RET(L->venue == NULL || L->n_cand > 0, LAP_ASSERT_CODE, -1);   /* H3 postcondition */
+    return 0;
 }
 
 /* ---- queries ---- */
@@ -293,6 +323,7 @@ void lap_export_rtc(const lap_t *L, lap_rtc_t *out)
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(out != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(!L->locked || L->locked_layout != NULL, LAP_ASSERT_CODE);   /* locked implies a layout to read */
+    CORE_ASSERT_VOID(L->sec_next >= 1 && L->sec_next <= LAP_MAX_SECTORS + 1, LAP_ASSERT_CODE);
     memset(out, 0, sizeof *out);
     out->venue_id         = L->venue ? L->venue->id : 0;
     out->layout_id        = L->locked ? L->locked_layout->id : 0;
@@ -305,15 +336,14 @@ void lap_export_rtc(const lap_t *L, lap_rtc_t *out)
     out->prev             = L->prev;
 }
 
-/* Restore the mirrored state into LAP_RUNNING with LAP_F_INTERRUPTED (§10.10). Unconditional: the
- * CRC32/version container and the RTC_RESUME_MAX_S freshness gate are the pipeline's job (plan 03).
- * Returns -1 only if the venue id is unknown to the track store. */
 int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
 {
     CORE_ASSERT_RET(L != NULL, LAP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(s != NULL, LAP_ASSERT_CODE, -1);
     const trk_venue_t *v = trk_get(s->venue_id);
     if (!v) return -1;
+    if (s->layout_id != 0 && !venue_has_layout(v, s->layout_id)) return -2;   /* R25/core:H3 */
+    if (s->sector_idx > LAP_MAX_SECTORS) return -3;                           /* R25/core:M3 */
 
     L->venue = v;
     geo_origin_set(&L->origin, v->lat, v->lon);
@@ -324,7 +354,7 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
     L->locked = false;
     L->locked_layout = NULL;
     L->n_sec = 0;
-    L->best_sector_count = 0;
+    clear_best_sectors(L);
     if (s->layout_id != 0) {
         for (uint8_t i = 0; i < L->n_cand; i++)
             if (L->cand[i].layout->id == s->layout_id) {
@@ -337,14 +367,19 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
             }
     }
 
-    L->state = LAP_ST_RUNNING;
+    /* R25: a snapshot that claims a lap number but no locked layout cannot resume sector timing
+     * or §10.8 -- disambiguate_and_lock is only reachable at lap_no == 0 -- so it resumes ARMED
+     * and the next S/F crossing opens a fresh out-lap. An out-lap snapshot resumes RUNNING. */
+    const bool resume_running = (s->layout_id != 0 || s->lap_no == 0);
+    L->state = resume_running ? LAP_ST_RUNNING : LAP_ST_ARMED;
     L->mode = LAP_MODE_NORMAL;
-    L->lap_no = s->lap_no;
-    L->lap_start_gps_us = s->lap_start_gps_us;
-    L->lap_flags = LAP_F_INTERRUPTED;        /* §10.10 / §10.4 step 3 */
+    L->lap_no = resume_running ? s->lap_no : 0u;
+    L->lap_start_gps_us = resume_running ? s->lap_start_gps_us : 0;
+    L->lap_flags = resume_running ? (uint8_t)LAP_F_INTERRUPTED : 0u;   /* §10.10 / §10.4 step 3 */
     L->lap_dist_m = 0.0;
     memcpy(L->gate_times, s->gate_times, sizeof L->gate_times);
     L->sec_next = (uint8_t)(s->sector_idx + 1);
+    CORE_ASSERT_RET(L->sec_next <= LAP_MAX_SECTORS + 1, LAP_ASSERT_CODE, -3);   /* indexes gate_times[] */
     L->best = s->best;
     L->have_best = (s->best.flags & LAP_F_VALID) != 0;
     L->prev = s->prev;
@@ -490,6 +525,7 @@ static void lock_layout(lap_t *L, uint8_t idx, int64_t t, int64_t mono, event_t 
     L->locked_layout = L->cand[idx].layout;
     L->cand[0] = L->cand[idx];
     L->n_cand = 1;
+    clear_best_sectors(L);              /* R25: the locked layout owns the §10.8 table */
     project_locked_sectors(L);
     emit(out, cap, n, EV_LAYOUT_LOCKED, 0, L->locked_layout->id, t, mono, 0, 0);
 }

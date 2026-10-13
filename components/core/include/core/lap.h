@@ -188,7 +188,8 @@ typedef struct {
 void     lap_init(lap_t *L, const lap_cfg_t *cfg);           /* cfg NULL -> defaults; clears best/prev */
 void     lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);        /* apply to a live engine; no state reset */
 void     lap_set_venue(lap_t *L, const trk_venue_t *v);      /* enters VENUE_FOUND, arms candidates */
-void     lap_force_layout(lap_t *L, uint16_t layout_id);     /* restrict candidates to this layout id */
+int      lap_force_layout(lap_t *L, uint16_t layout_id);     /* 0 applied, -1 the venue has no such layout
+                                                               * (forced id left untouched) */
 void     lap_reset(lap_t *L);                                /* back to NO_VENUE; keeps best/prev (§10.3) */
 /* Feed one fix (valid or not) and the current fused stats. Events for this fix are appended to out[]
  * (a caller-owned buffer of at least LAP_EVT_MAX entries); *n_out is set to 0 on entry and left holding
@@ -211,8 +212,14 @@ void     lap_create_begin(lap_t *L);
 int      lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
 void     lap_create_cancel(lap_t *L);
 
-/* §10.10 RTC continuity. Export mirrors the resumable state into a POD; import restores it into
- * LAP_RUNNING with LAP_F_INTERRUPTED and returns 0, or -1 if the venue id is unknown. */
+/* §10.10 RTC continuity. Export mirrors the resumable state into a POD. Import validates the
+ * snapshot and returns 0, -1 (the venue id is unknown to the track store), -2 (the venue has no
+ * such layout_id -- restoring it would arm zero candidates and kill lap timing for the session) or
+ * -3 (sector_idx > LAP_MAX_SECTORS, which would put sec_next outside gate_times[]). On success a
+ * snapshot with a locked layout_id, or an out-lap (lap_no == 0), restores into LAP_RUNNING with
+ * LAP_F_INTERRUPTED; a snapshot with lap_no > 0 and NO locked layout restores into LAP_ST_ARMED
+ * with lap_no 0 instead -- sector timing and §10.8 cannot be resumed without a layout, and
+ * disambiguation is only reachable at lap_no == 0 (audit fix wave R25). */
 void     lap_export_rtc(const lap_t *L, lap_rtc_t *out);
 int      lap_import_rtc(lap_t *L, const lap_rtc_t *s);
 

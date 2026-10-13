@@ -845,6 +845,84 @@ static void test_rtc_import_unknown_venue_fails(void)
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
 }
 
+/* H2/R25 (§10.8): best_sector_ms[] / the theoretical best belong to one (venue, layout) pair.
+ * Venue A runs 50 s laps, venue B 100 s laps in the same session; the reviewer's repro_bestsec.c
+ * showed B reporting A's splits, i.e. an unattainable theoretical best. */
+static void test_best_sectors_cleared_on_venue_change(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    const double north[1] = { 35.0 };                   /* one sector gate, within the forward_lap reach */
+    trk_venue_t a; build_venue_sec(&a, lat0, lon0, 1, north);
+    trk_venue_t b; build_venue_sec(&b, lat0, lon0, 1, north);
+    b.id = (uint16_t)(TRK_USER_ID_BASE + 1u);
+
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &a);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    int64_t t = 0;
+    for (int i = 0; i < 4; i++) { forward_lap(&L, lat0, lon0, t, 50000000, NULL); t += 50000000; }
+    const uint32_t best_a = lap_theoretical_best_ms(&L);
+    TEST_ASSERT_TRUE(best_a > 0);
+    TEST_ASSERT_TRUE(best_a <= 50500);
+
+    lap_set_venue(&L, &b);                               /* venue change inside the session */
+    TEST_ASSERT_EQUAL_UINT32(0, lap_theoretical_best_ms(&L));   /* FIX: nothing carried over */
+    TEST_ASSERT_EQUAL_UINT8(0, L.best_sector_count);
+
+    arm_at_start(&L, lat0, lon0, t, NULL);
+    for (int i = 0; i < 4; i++) { forward_lap(&L, lat0, lon0, t, 100000000, NULL); t += 100000000; }
+    const uint32_t best_b = lap_theoretical_best_ms(&L);
+    TEST_ASSERT_TRUE(best_b > 90000);                    /* B's own splits, not A's 50 s ones */
+}
+
+/* H3/R25: lap_force_layout with an id the venue does not have must be refused. Before the fix
+ * arm_candidates() matched nothing, n_cand went to 0, no S/F gate was armed and lap timing was
+ * silently dead for the whole session -- reachable from CMD_SET_LAYOUT's arbitrary arg16. */
+static void test_force_layout_unknown_id_is_refused(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    TEST_ASSERT_EQUAL_INT(-1, lap_force_layout(&L, 99));
+    TEST_ASSERT_EQUAL_UINT16(0, L.forced_layout_id);     /* still Auto */
+    TEST_ASSERT_EQUAL_UINT8(1, L.n_cand);                /* the venue's layout is still armed */
+    TEST_ASSERT_EQUAL_INT(0, lap_force_layout(&L, 1));   /* the real id is accepted */
+
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);
+    forward_lap(&L, lat0, lon0, 40000000, 50000000, &log);
+    TEST_ASSERT_EQUAL_INT(2, count_type(&log, EV_LAP_COMPLETE));   /* laps still complete */
+}
+
+/* H3/M3/R25: lap_import_rtc validates the layout id and the sector index, and a snapshot that
+ * claims a lap but no locked layout resumes ARMED -- RUNNING with n_sec == 0 left §10.5/§10.8
+ * dead for the rest of the session while laps still completed VALID with n_sectors == 0. */
+static void test_import_rtc_rejects_bad_layout_and_sector_idx(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+
+    lap_t L; lap_init(&L, NULL);
+    lap_rtc_t s; memset(&s, 0, sizeof s);
+    s.venue_id = TRK_USER_ID_BASE; s.layout_id = 42; s.lap_no = 3; s.lap_start_gps_us = 1000000;
+    TEST_ASSERT_EQUAL_INT(-2, lap_import_rtc(&L, &s));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+
+    memset(&s, 0, sizeof s);
+    s.venue_id = TRK_USER_ID_BASE; s.layout_id = 1; s.lap_no = 3; s.sector_idx = 255;
+    TEST_ASSERT_EQUAL_INT(-3, lap_import_rtc(&L, &s));
+
+    memset(&s, 0, sizeof s);                              /* lap_no > 0 but no locked layout */
+    s.venue_id = TRK_USER_ID_BASE; s.layout_id = 0; s.lap_no = 3; s.lap_start_gps_us = 1000000;
+    TEST_ASSERT_EQUAL_INT(0, lap_import_rtc(&L, &s));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
+    TEST_ASSERT_EQUAL_UINT16(0, L.lap_no);
+    TEST_ASSERT_EQUAL_UINT8(1, L.n_cand);                 /* the S/F gate IS armed */
+}
+
 /* #98 bench defect (Layout: stuck on Auto, 2026-10-07): the ui learns the current venue ONLY from
  * EV_VENUE_FOUND (handle_venue_found(), ui.c -- the single writer of s_venue_id). This pins down
  * which of the four venue-acquisition paths announce it and which are silent by construction, so a
@@ -1508,6 +1586,9 @@ int main(void)
     RUN_TEST(test_create_mark_gate_sector_out_of_order);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);
     RUN_TEST(test_rtc_import_unknown_venue_fails);
+    RUN_TEST(test_best_sectors_cleared_on_venue_change);
+    RUN_TEST(test_force_layout_unknown_id_is_refused);
+    RUN_TEST(test_import_rtc_rejects_bad_layout_and_sector_idx);
     RUN_TEST(test_venue_acquisition_paths_announce_or_are_silent);
     RUN_TEST(test_predictive_delta);
     RUN_TEST(test_predictive_table_cap);
