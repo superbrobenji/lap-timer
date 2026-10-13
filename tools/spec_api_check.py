@@ -36,16 +36,28 @@ _DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _decls(text):
-    """Every depth-0 `;`-terminated declaration, whitespace-normalised; preprocessor lines are
-    removed and their macro names returned separately."""
+    """Every depth-0 `;`-terminated declaration, whitespace-normalised; preprocessor lines --
+    whole multi-line macros, backslash-continuation and all -- are removed and their macro names
+    returned separately. Comments are stripped FIRST, over the untouched original text, so a
+    multi-line comment that happens to start on a `#define` line cannot be orphaned by blanking
+    that line out from under its own `/*`; the directive blanking then runs on the already
+    comment-free text and follows a trailing `\\` onto each continuation line so a macro's value
+    never bleeds into the declaration that follows it."""
     macros = set()
+    stripped = strip_comments_and_literals(text)
     kept = []
-    for line in text.split("\n"):
-        m = _DEFINE_RE.match(line)
-        if m:
-            macros.add(m.group(1))
-        kept.append("" if line.lstrip().startswith("#") else line)
-    body = strip_comments_and_literals("\n".join(kept))
+    continuing = False
+    for line in stripped.split("\n"):
+        if not continuing and not line.lstrip().startswith("#"):
+            kept.append(line)
+            continue
+        if not continuing:
+            m = _DEFINE_RE.match(line)
+            if m:
+                macros.add(m.group(1))
+        kept.append("")
+        continuing = line.rstrip().endswith("\\")
+    body = "\n".join(kept)
     out = []
     depth = 0
     start = 0
