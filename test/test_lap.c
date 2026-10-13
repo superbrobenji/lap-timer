@@ -499,6 +499,45 @@ static void test_sector_resync_after_skip(void)
     TEST_ASSERT_TRUE(found);
 }
 
+/* H1/R23 (§6.4): a sector gate in the SAME previous->current segment as the S/F. §6.4's own
+ * example is "an S/F line and the first sector line within 11 m at 200 km/h on a 5 Hz module".
+ * Geometry lifted from the reviewer's repro_lap.c: gate 1 sits 6 m past the S/F, so the
+ * (0,-40) -> (0,40) chord crosses the S/F at t_frac 0.5 and gate 1 at t_frac 0.575 -- the gate
+ * belongs to the lap the S/F just opened. Before R23 sectors were evaluated first, the gate was
+ * disarmed, dropped by handle_sector_cross (k < sec_next), and re-armed past the car: one lap in
+ * three came out INCOMPLETE and was excluded from best and best_sector_ms. */
+static void test_sector_just_past_sf_in_the_same_segment(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    const double north[1] = { 6.0 };
+    trk_venue_t v; build_venue_sec(&v, lat0, lon0, 1, north);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap opens; gate 1 at +150 ms */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* out-lap completes; lap 1 opens */
+    forward_lap(&L, lat0, lon0, 80000000, 40000000, &log);   /* lap 1 completes */
+
+    const lap_result_t *l1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, l1->lap_no);
+    TEST_ASSERT_EQUAL_UINT8(2, l1->n_sectors);               /* split 0 (S/F->gate 1) + split 1 */
+    TEST_ASSERT_FALSE(l1->flags & LAP_F_INCOMPLETE);
+    TEST_ASSERT_TRUE(l1->flags & LAP_F_VALID);
+    TEST_ASSERT_EQUAL_UINT32(l1->time_ms, l1->sector_ms[0] + l1->sector_ms[1]);
+    TEST_ASSERT_TRUE(l1->sector_ms[0] <= 1000);              /* 6 m at 40 m/s = 150 ms */
+
+    /* ordering is observable in the event stream: on the fix that carries both crossings the
+     * EV_LAP_COMPLETE (t_frac 0.5) precedes the EV_SECTOR (t_frac 0.575). */
+    int i_complete = -1, i_sector = -1;
+    for (int i = 0; i < log.n && i < 64; i++) {
+        if (log.type[i] == EV_LAP_COMPLETE && log.arg16[i] == 0) i_complete = i;
+        if (log.type[i] == EV_SECTOR && i_complete >= 0 && i_sector < 0) i_sector = i;
+    }
+    TEST_ASSERT_TRUE(i_complete >= 0);
+    TEST_ASSERT_TRUE(i_sector > i_complete);
+}
+
 /* §10.7: at a sector hit in a later lap the EV_SECTOR delta equals split - best_lap.sector_ms[idx]. */
 static void test_sector_delta_vs_best(void)
 {
@@ -1458,6 +1497,7 @@ int main(void)
     RUN_TEST(test_sector_splits_sum_to_lap_time);
     RUN_TEST(test_incomplete_flag_when_sector_skipped);
     RUN_TEST(test_sector_resync_after_skip);
+    RUN_TEST(test_sector_just_past_sf_in_the_same_segment);
     RUN_TEST(test_sector_delta_vs_best);
     RUN_TEST(test_disambiguation_locks_full_layout);
     RUN_TEST(test_disambiguation_locks_short_layout);
