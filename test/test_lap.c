@@ -851,7 +851,9 @@ static void test_rtc_import_unknown_venue_fails(void)
 static void test_best_sectors_cleared_on_venue_change(void)
 {
     const double lat0 = -45.0, lon0 = 170.0;
-    const double north[1] = { 35.0 };                   /* one sector gate, within the forward_lap reach */
+    const double north[1] = { 35.0 };                   /* one sector gate at 35 m: forward_lap's trajectory
+                                                        * never goes north of 40 m, so the brief's 600 m gate
+                                                        * was unreachable (controller ruling, F1a T4) */
     trk_venue_t a; build_venue_sec(&a, lat0, lon0, 1, north);
     trk_venue_t b; build_venue_sec(&b, lat0, lon0, 1, north);
     b.id = (uint16_t)(TRK_USER_ID_BASE + 1u);
@@ -891,9 +893,13 @@ static void test_force_layout_unknown_id_is_refused(void)
     TEST_ASSERT_EQUAL_INT(0, lap_force_layout(&L, 1));   /* the real id is accepted */
 
     arm_at_start(&L, lat0, lon0, 0, &log);
-    forward_lap(&L, lat0, lon0, 0,        40000000, &log);
-    forward_lap(&L, lat0, lon0, 40000000, 50000000, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap completes: 1 completion */
+    forward_lap(&L, lat0, lon0, 40000000, 50000000, &log);   /* lap 0 opens but doesn't complete */
+    forward_lap(&L, lat0, lon0, 90000000, 50000000, &log);   /* lap 1 completes: 2 completions total */
     TEST_ASSERT_EQUAL_INT(2, count_type(&log, EV_LAP_COMPLETE));   /* laps still complete */
+    const lap_result_t *p1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, p1->lap_no);
+    TEST_ASSERT_TRUE(p1->time_ms > 0);
 }
 
 /* H3/M3/R25: lap_import_rtc validates the layout id and the sector index, and a snapshot that
