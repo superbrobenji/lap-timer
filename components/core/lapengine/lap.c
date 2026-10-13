@@ -27,7 +27,29 @@
 void lap_cfg_defaults(lap_cfg_t *c)
 {
     CORE_ASSERT_VOID(c != NULL, LAP_ASSERT_CODE);
-    c->default_layout_id = 0;
+    memset(c, 0, sizeof *c);
+    c->min_lap_s     = (uint16_t)MIN_LAP_S;
+    c->max_lap_s     = (uint16_t)MAX_LAP_S;
+    c->gate_rearm_m  = (uint16_t)GATE_REARM_DIST_M;
+    c->pit_speed_kmh = (uint8_t)PIT_SPEED_KMH;
+    c->pit_time_s    = (uint8_t)PIT_TIME_S;
+}
+
+/* §15.2 reload: apply a cfg to a live engine. Never touches lap/venue/best state -- the pipeline
+ * calls this on CMD_CONFIG_RELOAD while a lap may be in progress (R24). A zero in any threshold
+ * field would disable the guard it controls, so each one falls back to its consts.h default. */
+void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg)
+{
+    CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
+    if (cfg == NULL) { lap_cfg_defaults(&L->cfg); return; }
+    L->cfg = *cfg;
+    if (L->cfg.min_lap_s == 0)    L->cfg.min_lap_s    = (uint16_t)MIN_LAP_S;
+    if (L->cfg.max_lap_s == 0)    L->cfg.max_lap_s    = (uint16_t)MAX_LAP_S;
+    if (L->cfg.gate_rearm_m == 0) L->cfg.gate_rearm_m = (uint16_t)GATE_REARM_DIST_M;
+    if (L->cfg.pit_time_s == 0)   L->cfg.pit_time_s   = (uint8_t)PIT_TIME_S;
+    if (L->cfg.n_default_layout > LAP_MAX_DEFAULT_LAYOUTS)
+        L->cfg.n_default_layout = LAP_MAX_DEFAULT_LAYOUTS;   /* rule 2: bounds every map scan */
+    CORE_ASSERT_VOID(L->cfg.min_lap_s < L->cfg.max_lap_s, LAP_ASSERT_CODE);   /* a lap window exists */
 }
 
 /* Clear the per-lap sector accumulation (§10.4 step 5): gate crossing times and the next-expected
@@ -82,8 +104,7 @@ void lap_init(lap_t *L, const lap_cfg_t *cfg)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     memset(L, 0, sizeof *L);
-    if (cfg) L->cfg = *cfg;
-    else lap_cfg_defaults(&L->cfg);
+    lap_set_cfg(L, cfg);
     L->state = LAP_ST_NO_VENUE;
 }
 
@@ -516,9 +537,9 @@ static void rearm_sf(lap_t *L, geo_enu_t cur, int64_t now)
         lap_cand_t *c = &L->cand[i];
         if (c->sf_armed) continue;
         double d = geo_dist_point_segment(cur, c->sf_p, c->sf_q);
-        if (d > GATE_REARM_DIST_M &&
+        if (d > (double)L->cfg.gate_rearm_m &&
             now - c->sf_last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000 &&
-            now - c->sf_last_cross_us > (int64_t)MIN_LAP_S * 1000000)     /* S/F needs MIN_LAP_S too */
+            now - c->sf_last_cross_us > (int64_t)L->cfg.min_lap_s * 1000000)     /* S/F needs min_lap_s too */
             c->sf_armed = true;
     }
 }
@@ -531,7 +552,7 @@ static void rearm_sectors(lap_t *L, geo_enu_t cur, int64_t now)
     for (uint8_t j = 0; j < L->n_sec; j++) {
         if (L->sec_armed[j]) continue;
         double d = geo_dist_point_segment(cur, L->sec_p[j], L->sec_q[j]);
-        if (d > GATE_REARM_DIST_M && now - L->sec_last_cross_us[j] > (int64_t)GATE_REARM_MIN_S * 1000000)
+        if (d > (double)L->cfg.gate_rearm_m && now - L->sec_last_cross_us[j] > (int64_t)GATE_REARM_MIN_S * 1000000)
             L->sec_armed[j] = true;
     }
 }
@@ -544,7 +565,7 @@ static void rearm_ugates(lap_t *L, geo_enu_t cur, int64_t now)
         lap_ugate_t *g = &L->ugate[gi];
         if (g->armed) continue;
         double d = geo_dist_point_segment(cur, g->p, g->q);
-        if (d > GATE_REARM_DIST_M && now - g->last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000)
+        if (d > (double)L->cfg.gate_rearm_m && now - g->last_cross_us > (int64_t)GATE_REARM_MIN_S * 1000000)
             g->armed = true;
     }
 }
@@ -645,13 +666,26 @@ static void evaluate_union(lap_t *L, geo_enu_t cur, const gps_fix_t *fix)
     }
 }
 
+/* §10.5 tie-break key: the configured default layout id for the current venue, 0 = none. */
+static uint16_t default_layout_for_venue(const lap_t *L)
+{
+    CORE_ASSERT_RET(L != NULL, LAP_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(L->cfg.n_default_layout <= LAP_MAX_DEFAULT_LAYOUTS, LAP_ASSERT_CODE, 0);
+    const trk_venue_t *v = L->venue;              /* rule 9: one dereference level per expression */
+    if (v == NULL) return 0;
+    const uint16_t vid = v->id;
+    for (uint8_t i = 0; i < L->cfg.n_default_layout; i++)   /* rule 2: <= LAP_MAX_DEFAULT_LAYOUTS */
+        if (L->cfg.default_layout[i].venue == vid) return L->cfg.default_layout[i].layout;
+    return 0;
+}
+
 /* §10.5 tie-break: the venue's default layout wins, else the lowest layout id. */
 static bool tiebreak_better(const lap_t *L, const trk_layout_t *a, const trk_layout_t *b)
 {
     CORE_ASSERT_RET(L != NULL, LAP_ASSERT_CODE, false);
     CORE_ASSERT_RET(a != NULL, LAP_ASSERT_CODE, false);
     CORE_ASSERT_RET(b != NULL, LAP_ASSERT_CODE, false);
-    uint16_t def = L->cfg.default_layout_id;
+    uint16_t def = default_layout_for_venue(L);
     bool ad = (a->id == def), bd = (b->id == def);
     if (ad != bd) return ad;
     return a->id < b->id;
@@ -784,7 +818,7 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, bool seg_ga
     const bool is_out = (L->lap_no == 0);
 
     /* §10.4 step 2 debounce guard (should not fire after §6.4 step 5 on the S/F). */
-    if (!is_out && time_ms < (uint32_t)MIN_LAP_S * 1000) return;
+    if (!is_out && time_ms < (uint32_t)L->cfg.min_lap_s * 1000u) return;
 
     uint32_t sector_ms[LAP_MAX_SECTORS + 1];
     uint8_t  n_splits;
@@ -794,7 +828,7 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, bool seg_ga
 
     uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT / INCOMPLETE in-lap */
     if (is_out) flags |= LAP_F_OUT_LAP;
-    if (time_ms > (uint32_t)MAX_LAP_S * 1000) flags |= LAP_F_TOO_LONG;
+    if (time_ms > (uint32_t)L->cfg.max_lap_s * 1000u) flags |= LAP_F_TOO_LONG;
     if (inc) flags |= LAP_F_INCOMPLETE;                            /* a locked sector went unrecorded */
     const bool valid = !(flags & (LAP_F_GPS_LOST | LAP_F_PIT | LAP_F_INCOMPLETE |
                                   LAP_F_OUT_LAP | LAP_F_TOO_LONG));
@@ -900,7 +934,7 @@ static void handle_create_mode(lap_t *L, const gps_fix_t *fix, event_t *out, int
         const double seg_dt = (double)(now - L->prev_gps_us) / 1e6;
         if (seg_dt > 0.0) L->lap_dist_m += 0.5 * (L->prev_speed_mps + v1) * seg_dt;
         double t; int dir;
-        if (now - L->create_gps_us >= (int64_t)MIN_LAP_S * 1000000 &&
+        if (now - L->create_gps_us >= (int64_t)L->cfg.min_lap_s * 1000000 &&
             geo_segment_cross(L->prev_enu, cur, L->create_sf_p, L->create_sf_q, &t, &dir) &&
             dir == L->create_layout.dir_sign) {
             int64_t t_cross = cross_time(L, cur, v1, t, now);
@@ -1031,11 +1065,11 @@ static void update_running_progress(lap_t *L, const gps_fix_t *fix)
     const int64_t now = fix->gps_us;
     const double  v1  = (double)fix->gspeed_mms / 1000.0;
     const double  kmh = (double)fix->gspeed_mms * 0.0036;      /* mm/s → km/h */
-    if (kmh < (double)PIT_SPEED_KMH) {
+    if (kmh < (double)L->cfg.pit_speed_kmh) {
         if (!L->pit_slow) {
             L->pit_slow = true;
             L->pit_since_us = now;
-        } else if (now - L->pit_since_us >= (int64_t)PIT_TIME_S * 1000000) {
+        } else if (now - L->pit_since_us >= (int64_t)L->cfg.pit_time_s * 1000000) {
             L->lap_flags |= LAP_F_PIT;
         }
     } else {

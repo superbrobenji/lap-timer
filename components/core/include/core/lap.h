@@ -51,10 +51,18 @@ enum {                              /* lap_t.mode: normal running vs. on-device 
  * gates are deduplicated, so LAP_MAX_UGATES is a safe upper bound on distinct gates. */
 #define LAP_MAX_UGATES (TRK_MAX_LAYOUTS * LAP_MAX_SECTORS)
 
+#define LAP_MAX_DEFAULT_LAYOUTS 8      /* == CFG_MAX_DEFAULT_LAYOUTS (lap_cfg.c _Static_asserts) */
 typedef struct {
-    uint16_t default_layout_id;     /* §10.5 tie-break, 0 = none */
+    uint16_t min_lap_s;        /* §10.4 step 2 debounce + S/F re-arm window (default MIN_LAP_S) */
+    uint16_t max_lap_s;        /* §10.4 LAP_F_TOO_LONG threshold           (default MAX_LAP_S) */
+    uint16_t gate_rearm_m;     /* §6.4 step 5 re-arm distance              (default GATE_REARM_DIST_M) */
+    uint8_t  pit_speed_kmh;    /* §10.6                                    (default PIT_SPEED_KMH) */
+    uint8_t  pit_time_s;       /* §10.6                                    (default PIT_TIME_S) */
+    uint8_t  n_default_layout; /* entries used in default_layout[] */
+    struct { uint16_t venue, layout; } default_layout[LAP_MAX_DEFAULT_LAYOUTS];   /* §10.5 tie-break */
 } lap_cfg_t;
-void lap_cfg_defaults(lap_cfg_t *c);   /* default_layout_id = 0 */
+/* every field = its consts.h default, map empty */
+void lap_cfg_defaults(lap_cfg_t *c);
 
 /* Per-candidate S/F gate arm/debounce state (§6.4 step 5) plus its disambiguation score (§10.5). The
  * S/F endpoints are pre-projected into the ENU frame once, when the venue is set, because the origin
@@ -175,6 +183,7 @@ typedef struct {
 } lap_t;
 
 void     lap_init(lap_t *L, const lap_cfg_t *cfg);           /* cfg NULL -> defaults; clears best/prev */
+void     lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);        /* apply to a live engine; no state reset */
 void     lap_set_venue(lap_t *L, const trk_venue_t *v);      /* enters VENUE_FOUND, arms candidates */
 void     lap_force_layout(lap_t *L, uint16_t layout_id);     /* restrict candidates to this layout id */
 void     lap_reset(lap_t *L);                                /* back to NO_VENUE; keeps best/prev (§10.3) */

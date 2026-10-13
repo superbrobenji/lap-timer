@@ -1290,6 +1290,97 @@ static void test_reset_mid_session_then_laps_resume(void)
     TEST_ASSERT_UINT32_WITHIN(2, 47000, lap_prev(&L)->time_ms);
 }
 
+/* H4/R24 (§15.1): cfg.lap.min_lap_s reaches the engine. With min_lap_s = 60 the S/F gate stays
+ * disarmed (§6.4 step 5) through a 45 s lap, so nothing completes; the same drive under the
+ * defaults (MIN_LAP_S = 20) completes the out-lap. Before R24 both engines behaved identically. */
+static void test_cfg_min_lap_s_reaches_the_engine(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+
+    lap_cfg_t c; lap_cfg_defaults(&c); c.min_lap_s = 60;
+    lap_t L; lap_init(&L, &c);
+    evlog_t slow; memset(&slow, 0, sizeof slow);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &slow);
+    forward_lap(&L, lat0, lon0, 0, 40000000, &slow);                  /* out-lap opens at t = 1 s */
+    feed(&L, lat0, lon0, 0.0, 40.0, 46000000, SPD_MMS, true, &slow);  /* 45 s later: gate still disarmed */
+    TEST_ASSERT_EQUAL_INT(0, count_type(&slow, EV_LAP_COMPLETE));
+    TEST_ASSERT_EQUAL_UINT16(0, L.lap_no);
+
+    lap_t D; lap_init(&D, NULL);                                      /* control: shipped defaults */
+    evlog_t fast; memset(&fast, 0, sizeof fast);
+    lap_set_venue(&D, &v);
+    arm_at_start(&D, lat0, lon0, 0, &fast);
+    forward_lap(&D, lat0, lon0, 0, 40000000, &fast);
+    feed(&D, lat0, lon0, 0.0, 40.0, 46000000, SPD_MMS, true, &fast);
+    TEST_ASSERT_EQUAL_INT(1, count_type(&fast, EV_LAP_COMPLETE));
+    TEST_ASSERT_EQUAL_UINT16(1, D.lap_no);
+}
+
+/* H4/R24 (§10.5): with two candidates tied on score, the venue's configured default layout wins.
+ * The out-lap below crosses no sector gate of either layout and matches neither length (|1.4 km −
+ * 2.5 km| > 15 %), so both score 0 and only the tie-break decides. Wholly untested before R24. */
+static void test_default_layout_map_breaks_the_tie(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue_2layout(&v, lat0, lon0);              /* ids 1 "Full", 2 "Short" */
+
+    lap_cfg_t c; lap_cfg_defaults(&c);
+    c.n_default_layout = 1;
+    c.default_layout[0].venue  = TRK_USER_ID_BASE;
+    c.default_layout[0].layout = 2;                                  /* prefer "Short" at this venue */
+    lap_t L; lap_init(&L, &c);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, &log);   /* S/F -> out-lap, union */
+    feed(&L, lat0, lon0, 400.0,  40.0, 10000000, SPD_MMS, true, &log);   /* east of every gate */
+    feed(&L, lat0, lon0, 400.0, 360.0, 18000000, SPD_MMS, true, &log);   /* north, crosses nothing */
+    feed(&L, lat0, lon0, 400.0, -40.0, 30000000, SPD_MMS, true, &log);   /* south, re-arms S/F */
+    feed(&L, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, &log);   /* S/F -> disambiguate */
+    TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_LAYOUT_LOCKED));
+    TEST_ASSERT_EQUAL_UINT16(2, last_locked_id(&log));               /* the configured default */
+
+    lap_t A; lap_init(&A, NULL);                                     /* control: no map -> lowest id */
+    evlog_t alog; memset(&alog, 0, sizeof alog);
+    lap_set_venue(&A, &v);
+    arm_at_start(&A, lat0, lon0, 0, &alog);
+    feed(&A, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0, 400.0,  40.0, 10000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0, 400.0, 360.0, 18000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0, 400.0, -40.0, 30000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, &alog);
+    TEST_ASSERT_EQUAL_UINT16(1, last_locked_id(&alog));
+}
+
+/* R24: CMD_CONFIG_RELOAD applies a new lap cfg to a RUNNING engine without resetting it
+ * (pipeline_reload_cfg calls lap_set_cfg, never lap_init). */
+static void test_set_cfg_applies_without_resetting(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL);
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL);           /* lap 1 in progress */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);
+
+    lap_cfg_t c; lap_cfg_defaults(&c); c.pit_speed_kmh = 30; c.pit_time_s = 3;
+    lap_set_cfg(&L, &c);
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));          /* state survives the reload */
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);
+    TEST_ASSERT_EQUAL_UINT8(30, L.cfg.pit_speed_kmh);
+    /* and the new pit thresholds are the ones in force: 20 km/h for 4 s is now a pit */
+    feed(&L, lat0, lon0, 300.0, -40.0, 85000000, 5555, true, NULL);  /* 20 km/h */
+    feed(&L, lat0, lon0, 300.0, -41.0, 89000000, 5555, true, NULL);
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_PIT);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1323,6 +1414,9 @@ int main(void)
     RUN_TEST(test_predictive_table_cap);
     RUN_TEST(test_predictive_disabled_returns_no_delta);
     RUN_TEST(test_reset_mid_session_then_laps_resume);
+    RUN_TEST(test_cfg_min_lap_s_reaches_the_engine);
+    RUN_TEST(test_default_layout_map_breaks_the_tie);
+    RUN_TEST(test_set_cfg_applies_without_resetting);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);
