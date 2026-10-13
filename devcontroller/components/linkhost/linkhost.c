@@ -69,8 +69,10 @@ static const char *TAG = "linkhost";
                                       * SAFE: SHA-256 + ECDSA gate esp_ota_end). Host and device
                                       * count the same bytes from 0, so pausing 25 ms at each
                                       * OTA_PACE_BYTES boundary -- the moment the device is in that
-                                      * write -- covers the deficit with 7 ms of margin. Cost: 147
-                                      * pauses on a 600 KB image = 3.7 s on a ~55 s push (+6.7 %).
+                                      * write -- covers the deficit with 7 ms of margin. Cost:
+                                      * floor((size-1)/4096) = 146 pauses on a 600,000 B image (the
+                                      * same decimal-KB "600 KB" the erase-sector estimate above
+                                      * uses) = 146 * 25 ms = 3.65 s added to a ~55 s push (+6.6 %).
                                       * Far below the lap-timer's own 3 s per-read stall window
                                       * (OTA_RECV_READ_MS), so it can never look like a stall. No
                                       * feedback, no retry: #57 (per-chunk ACK) remains the fix. */
