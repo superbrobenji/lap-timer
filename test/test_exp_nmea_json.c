@@ -157,7 +157,7 @@ static void test_json_header_strings_using_every_wire_byte_are_emitted_whole(voi
     h.venue_id = 6; h.layout_id = 1; h.gps_hz = 5; h.fused_hz = 10; h.start_gps_us = 1789640100000000LL;
     uint8_t fr[256]; int n = ses_encode_hdr(&h, fr, sizeof fr);
     feed_frame(&e, out, &at, fr, n);
-    n = ses_encode_venue(6, 1, "0123456789012345678901234567890", fr, sizeof fr);   /* 31 chars + NUL */
+    n = ses_encode_venue(6, 1, "01234567890123456789012345678901", fr, sizeof fr);   /* 32 chars */
     feed_frame(&e, out, &at, fr, n);
     int fin;
     while ((fin = exp_finish(&e)) == EXP_FULL) at = drain(&e, out, at);
@@ -171,7 +171,7 @@ static void test_json_header_strings_using_every_wire_byte_are_emitted_whole(voi
     int fw = json_obj_get(out, toks, cnt, hdr, "fw");
     TEST_ASSERT_TRUE(json_tok_eq(out, &toks[fw], "v0.3.1-abcdefghi"));      /* no spill, no truncation */
     int venue = json_obj_get(out, toks, cnt, hdr, "venue");
-    TEST_ASSERT_TRUE(json_tok_eq(out, &toks[venue], "0123456789012345678901234567890"));
+    TEST_ASSERT_TRUE(json_tok_eq(out, &toks[venue], "01234567890123456789012345678901"));
 }
 
 static void test_finish_refuses_while_a_drag_run_is_mid_emission(void)

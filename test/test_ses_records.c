@@ -234,9 +234,9 @@ static void test_small_record_round_trips(void)
     TEST_ASSERT_EQUAL_UINT16(6, vn.venue_id); TEST_ASSERT_EQUAL_UINT16(1, vn.layout_id);
     TEST_ASSERT_EQUAL_STRING("Killarney", vn.name);
     /* a name filling all 32 wire bytes still decodes NUL-terminated */
-    w = ses_encode_venue(9, 2, "0123456789012345678901234567890123", buf, sizeof buf);
+    w = ses_encode_venue(9, 2, "01234567890123456789012345678901", buf, sizeof buf);
     TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &vn));
-    TEST_ASSERT_EQUAL_UINT(31, strlen(vn.name));    /* encoder keeps a NUL inside the 32-byte field */
+    TEST_ASSERT_EQUAL_UINT(32, strlen(vn.name));    /* full 32-byte field is now used */
 
     w = ses_encode_power(77, 3, 3900, buf, sizeof buf);
     ses_power_t pw;
@@ -470,6 +470,23 @@ static void test_fuzz_ten_thousand_fix_random_walk_round_trips(void)
     TEST_ASSERT_EQUAL_UINT32(0, r.frames_bad);
 }
 
+static void test_encode_venue_carries_all_32_wire_bytes(void)
+{
+    /* io:M9: strncpy(nm, name, sizeof nm - 1) capped the §12.3 32-byte field at 31, while
+     * ses_encode_hdr in the same file uses bw_bytes for the full width of fw/hwid. */
+    char full[33]; memset(full, 'X', 32); full[32] = '\0';
+    uint8_t out[64];
+    int n = ses_encode_venue(7, 1, full, out, sizeof out);
+    TEST_ASSERT_EQUAL_INT(41, n);                               /* 36 payload + 5 framing */
+    ses_venue_t v;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(out + 3, (uint8_t)(n - SES_FRAME_OVERHEAD), &v));
+    TEST_ASSERT_EQUAL_UINT(32u, strlen(v.name));
+    TEST_ASSERT_EQUAL_MEMORY(full, v.name, 32);
+    n = ses_encode_venue(7, 1, "Killarney", out, sizeof out);   /* short name still zero-pads */
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(out + 3, (uint8_t)(n - SES_FRAME_OVERHEAD), &v));
+    TEST_ASSERT_EQUAL_STRING("Killarney", v.name);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -490,5 +507,6 @@ int main(void)
     RUN_TEST(test_decoders_reject_malformed_payloads);
     RUN_TEST(test_empty_json_and_config_are_rejected_without_a_fault);
     RUN_TEST(test_fuzz_ten_thousand_fix_random_walk_round_trips);
+    RUN_TEST(test_encode_venue_carries_all_32_wire_bytes);
     return UNITY_END();
 }

@@ -347,7 +347,13 @@ int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, ui
     CORE_ASSERT_RET(name != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[36]; bw_t w; bw_init(&w, p, sizeof p);
-    char nm[32]; memset(nm, 0, sizeof nm); strncpy(nm, name, sizeof nm - 1);
+    /* io:M9: §12.3's name field is exactly 32 bytes, zero-padded and NOT required to be
+     * NUL-terminated -- so copy up to 32, not strncpy's 31. The length scan is bounded by the
+     * destination (rule 2); strnlen is avoided (unused elsewhere in the tree). */
+    char nm[32]; memset(nm, 0, sizeof nm);
+    size_t ln = 0;
+    while (ln < sizeof nm && name[ln] != '\0') ln++;
+    memcpy(nm, name, ln);
     bw_u16(&w, venue_id); bw_u16(&w, layout_id); bw_bytes(&w, nm, sizeof nm);
     return finish(SES_T_VENUE, &w, out, cap);
 }
