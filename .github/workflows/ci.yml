@@ -94,8 +94,9 @@ jobs:
     # 8/9 gate and FAILS the job on any un-graced violation. Together with the build jobs' -Werror
     # set (the rule-6 -Wmissing-prototypes/-declarations, -Wshadow, -Wconversion) this gates the
     # ten rules. clang-tidy and cppcheck stay `continue-on-error: true` (advisory second analysers,
-    # rule 10) -- see design §5. `static-analysis` IS a branch-protection required check as of the
-    # audit fix wave (ruling R13).
+    # rule 10) -- see design §5. Ruling R13 (2026-10-13 audit fix wave) designates `static-analysis`
+    # as one of the nine required checks Task 14 will enable in branch protection; it is not yet
+    # enforced there as of this commit.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
