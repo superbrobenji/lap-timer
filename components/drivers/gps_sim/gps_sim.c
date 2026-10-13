@@ -38,11 +38,15 @@
  * updated in exactly one place (gps_poll(), below) so every delivery path -- laps, wrap pause, drag,
  * explicit park -- keeps it current without each function needing its own hook. The drag profile's
  * start position also now continues from s_last_fix instead of re-anchoring on the capture's own
- * origin (deliver_drag(), below), so a switch is continuous in position as well as time.
+ * origin (deliver_drag(), below), so a switch is continuous in position as well as time. R29:
+ * deliver_drag() reads the latched s_drag_origin; the file header's claim that a switch is
+ * "continuous in position" is true of the first frame AND of every later step only because of
+ * that latch.
  */
 #include "hal/gps.h"
 #include "sim_capture.h"
 #include "sim_clock.h"
+#include "sim_drag_pos.h"
 #include "sim_profile.h"
 #include "sim_scenario.h"
 #include "core/core.h"
@@ -89,6 +93,11 @@ static sim_clock_t s_clock;        /* final review C1/F-1: the one monotonic gps
 static int64_t  s_last_delivered_gps_us; /* gps_us of whatever gps_poll() last ACTUALLY delivered,
                                            * in any scenario -- gps_sim_rearm()'s and
                                            * deliver_parked()'s own re-anchor both read this */
+/* R29 (drv:H2): the DRAG run's position origin, latched ONCE per run by gps_sim_rearm() (and by
+ * gps_init/gps_configure) -- never s_last_fix, which deliver_drag() itself advances every frame.
+ * 12 B: only the three fields a due-north straight line needs. */
+static struct { int32_t lat_e7; int32_t lon_e7; int32_t alt_mm; } s_drag_origin;
+static void latch_drag_origin(void);   /* defined below, next to remember_last_fix */
 
 /* Seed s_last_fix from SIM_FIXES[0] (cold boot only). Gives SIM_SCENARIO_PARK a sane "nothing has
  * moved yet" default before any fix is ever delivered. Scenario switches (gps_sim_rearm(), below)
@@ -121,6 +130,7 @@ int gps_init(const gps_profile_t **out_profile)
     s_repeat = 0;
     s_wrap_tick = 0;
     reset_last_fix_to_start();
+    latch_drag_origin();
     sim_clock_init(&s_clock, SIM_FIXES[0].gps_us);   /* cold boot: fix 0 keeps its own timestamp */
     s_last_delivered_gps_us = SIM_FIXES[0].gps_us;
     if (out_profile) *out_profile = &s_profile;
@@ -129,7 +139,16 @@ int gps_init(const gps_profile_t **out_profile)
 
 int gps_configure(uint8_t rate_hz)
 {
-    (void)rate_hz;                /* the capture rate is fixed; nothing to push to a receiver */
+    (void)rate_hz;                /* the capture rate is fixed; nothing to push to a receiver -- but
+                                     * the clock still needs re-anchoring and the drag origin still
+                                     * needs latching below (drv:L23), same as any other scenario
+                                     * start */
+    /* drv:L23: resetting s_idx/s_started without re-anchoring the clock reintroduces the exact
+     * gps_us rewind C1/F-1 fixed for gps_sim_rearm() -- the pipeline's §6.5 "last valid"
+     * watermark is never reset, so a rewound fix is invalid for as long as the rewind lasts.
+     * Re-anchor the same way gps_sim_rearm() does, and latch the drag origin with it (R29). */
+    sim_clock_rearm(&s_clock, s_last_delivered_gps_us, SIM_DRAG_PERIOD_US);
+    latch_drag_origin();
     s_idx = 0;
     s_started = false;
     s_parked = 0;
@@ -149,6 +168,17 @@ static void remember_last_fix(const gps_fix_t *f)
     s_last_fix = *f;
 }
 
+/* Latch the current position as the next DRAG run's origin (R29). Called from gps_init(),
+ * gps_configure() and gps_sim_rearm() -- every path that starts a scenario -- so a `dbg sim drag`
+ * run's origin is exactly where the vehicle was when the command landed, and stays there for the
+ * whole run. */
+static void latch_drag_origin(void)
+{
+    s_drag_origin.lat_e7 = s_last_fix.lat_e7;
+    s_drag_origin.lon_e7 = s_last_fix.lon_e7;
+    s_drag_origin.alt_mm = s_last_fix.alt_mm;
+}
+
 /* Re-anchor every scenario's playback state so a `dbg sim drag | laps <n> | park` switch starts
  * clean on the next gps_poll() (Task 3, pipeline.c calls this right after sim_scenario_set()).
  * Deliberately leaves s_last_fix untouched (fix round 1, I2): "the current position" a
@@ -156,10 +186,13 @@ static void remember_last_fix(const gps_fix_t *f)
  * start. Final review C1/F-1: ALSO re-anchors the gps_us clock (sim_clock_rearm()) to
  * s_last_delivered_gps_us + SIM_DRAG_PERIOD_US -- the one monotonic clock across every switch --
  * before resetting the per-scenario counters, so whichever scenario comes next (including a
- * `dbg sim laps` re-issue) starts its own gps_us strictly after the last fix actually delivered. */
+ * `dbg sim laps` re-issue) starts its own gps_us strictly after the last fix actually delivered,
+ * and latches the DRAG run's position origin (R29): deliver_drag() reads s_drag_origin, not
+ * s_last_fix, so the origin cannot move under the run. */
 void gps_sim_rearm(void)
 {
     sim_clock_rearm(&s_clock, s_last_delivered_gps_us, SIM_DRAG_PERIOD_US);
+    latch_drag_origin();
     s_idx = 0;
     s_started = false;
     s_parked = 0;
@@ -314,12 +347,14 @@ static int deliver_laps(gps_fix_t *out, int64_t now)
  * issued after a drag run has finished therefore freezes at the drag run's own end position, not
  * the capture's unrelated end fix.
  *
- * Final review C1/F-1 (points 2 and 3 of the review's fix): the position origin is s_last_fix --
- * the last fix any scenario actually delivered -- instead of the capture's own fixed SIM_FIXES[0]
- * origin, so at t=0 (dist_m == 0.0, sim_profile.h's contract) the first drag fix is
- * byte-identical in position to the last delivered one: zero jump, a switch is continuous in
- * position as well as time. gps_us is now sim_clock_drag_us() (base_us + t) rather than the
- * capture's fixed SIM_FIXES[0].gps_us + t, so it is continuous in time too. */
+ * Final review C1/F-1 + R29 (drv:H2): the position origin is s_drag_origin -- s_last_fix as it
+ * stood when gps_sim_rearm() latched it, i.e. the last fix any scenario had delivered when the
+ * switch landed -- and it does NOT move for the rest of the run. At t=0 (dist_m == 0.0,
+ * sim_profile.h's contract) the first drag fix is byte-identical in position to the last delivered
+ * one (zero jump), and every later frame steps by dist(t) - dist(t-200ms) <= 12.4 m, inside the
+ * §6.5 jump filter's 70 m. Reading s_last_fix here instead made the origin move every frame via
+ * remember_last_fix() below, so each step equalled the whole cumulative distance. gps_us is
+ * sim_clock_drag_us() (base_us + t), so the switch is continuous in time too. */
 static int deliver_drag(gps_fix_t *out, int64_t now)
 {
     CORE_ASSERT_RET(out != NULL, GPS_SIM_ASSERT_CODE, -1);
@@ -330,13 +365,14 @@ static int deliver_drag(gps_fix_t *out, int64_t now)
     sim_drag_state_t s;
     sim_drag_at(t, &s);
     CORE_ASSERT_RET(s.dist_m >= 0.0, GPS_SIM_ASSERT_CODE, 0);   /* sim_profile.h's own contract */
-    const int32_t lat0 = s_last_fix.lat_e7, lon0 = s_last_fix.lon_e7, alt0 = s_last_fix.alt_mm;
+    const int32_t lat0 = s_drag_origin.lat_e7, lon0 = s_drag_origin.lon_e7,
+                  alt0 = s_drag_origin.alt_mm;
     const sim_fix_t *s0 = &SIM_FIXES[0];
 
     memset(out, 0, sizeof *out);
     out->gps_us     = sim_clock_drag_us(&s_clock, t);
     out->mono_us    = now;                                /* real arrival time on this board */
-    out->lat_e7     = lat0 + (int32_t)(s.dist_m * 1e7 / 111320.0);
+    out->lat_e7     = sim_drag_lat_e7(lat0, s.dist_m);
     out->lon_e7     = lon0;
     out->alt_mm     = alt0;
     out->gspeed_mms = (int32_t)(s.speed_mps * 1000.0);
