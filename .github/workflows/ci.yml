@@ -17,6 +17,8 @@ jobs:
           ! git ls-files | grep -E '^test/build(-gcc)?/|\.pem$' | grep -v 'laptimer_pub\.pem$'
       - name: ESP-IDF container tag matches .idf-version
         run: grep -q "espressif/idf:$(cat .idf-version)$" .github/workflows/firmware.yml
+      - name: spec §5.2 API blocks match components/core/include/core/*.h
+        run: python3 tools/spec_api_check.py
 
   host-tests:
     runs-on: ubuntu-latest
@@ -67,34 +69,33 @@ jobs:
         run: echo "devcontroller/test/CMakeLists.txt not present yet"
 
   tools-tests:
-    # Python unit tests for tools/ host CLIs (Plan 5.6 closeout: tools/devkit.py). Stdlib only --
-    # pyserial is imported lazily inside devkit.py (only where a real port is opened), so this
-    # exercises devkit.py's pure helpers (read_json/send_cmd/stage_image/push_and_wait) against a
-    # FakeSerial double with no install step needed.
+    # Python/bash unit tests for tools/ host CLIs and linters. Stdlib only -- pyserial is imported
+    # lazily inside devkit.py (only where a real port is opened), so none of this needs an install
+    # step, and no test here needs ESP-IDF, a board, or a signing key.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Probe inputs
-        id: probe
-        run: echo "present=$([ -f tools/test_devkit.py ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - name: python3 -m unittest tools/test_devkit.py
-        if: steps.probe.outputs.present == 'true'
-        run: python3 -m unittest tools/test_devkit.py
-      - name: Nothing to do
-        if: steps.probe.outputs.present != 'true'
-        run: echo "tools/test_devkit.py not present yet"
+        with:
+          fetch-depth: 0
+      - name: python3 -m unittest (devkit, linters, spec API, track generator)
+        run: |
+          python3 -m unittest -v \
+            tools/test_devkit.py \
+            tools/lint/test_power_of_10.py \
+            tools/lint/test_venue_announce.py \
+            tools/test_spec_api_check.py \
+            tools/tracks/test_gen_tracks.py
+      - name: sign_release.sh guard harness (dry-run; no IDF, no key)
+        run: bash tools/test_sign_release.sh
 
   static-analysis:
-    # Power of 10 (Holzmann/JPL) static analysis -- design §5, plan Session 4.5.6 (blocking flip).
-    # BLOCKING as of plan-4.5-done: the custom linter (the authoritative rule 3/4/4-compound/5/8/9
-    # gate) FAILS the job on any violation. Together with the build jobs' -Werror set (the rule-6
-    # -Wmissing-prototypes/-declarations, -Wshadow, -Wconversion) this precisely and comprehensively
-    # gates the ten rules. clang-tidy and cppcheck stay `continue-on-error: true` (advisory second
-    # analysers, rule 10 "preferably more than one"): their output is largely non-Power-of-10 and,
-    # for the runner's clang-tidy, a version-dependent flood that does not reproduce locally, so
-    # gating merges on them is unreliable/disproportionate -- see design §5.
-    # To make this a merge gate, add `static-analysis` to the branch-protection required checks
-    # (a GitHub repo setting, not expressible here).
+    # Power of 10 (Holzmann/JPL) static analysis -- design §5, amended by the 2026-10-13 audit fix
+    # wave (ruling R12). BLOCKING: the custom linter is the authoritative rule 1/3/4/4-compound/5/
+    # 8/9 gate and FAILS the job on any un-graced violation. Together with the build jobs' -Werror
+    # set (the rule-6 -Wmissing-prototypes/-declarations, -Wshadow, -Wconversion) this gates the
+    # ten rules. clang-tidy and cppcheck stay `continue-on-error: true` (advisory second analysers,
+    # rule 10) -- see design §5. `static-analysis` IS a branch-protection required check as of the
+    # audit fix wave (ruling R13).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,8 +103,17 @@ jobs:
           submodules: recursive
       - name: Install cppcheck + clang-tidy
         run: sudo apt-get update && sudo apt-get install -y cppcheck clang-tidy
-      - name: power_of_10.py linter (BLOCKING; rules 3/4/4-compound/5/8/9)
-        run: python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation
+      # ROLLOUT GRACE (ruling R12, two-step): the tightened checks land before the plans that own
+      # the offending files. Each entry names a finding that belongs to another plan in the
+      # 2026-10-13 wave; the linter prints GRACE-STALE for any entry that stops matching, and the
+      # whole flag is deleted by F4's final task once every owner has merged. Owners:
+      #   cfg_json.c:walk            RULE-1           -> F1b (ruling R27, walk becomes two loops)
+      #   board.c:cmp_int            RULE-9           -> F2a (ruling R19, bounded insertion sort)
+      #   the remaining five         RULE-4/5         -> issue filed by F4 (statement counting)
+      - name: power_of_10.py linter (BLOCKING; rules 1/3/4/4-compound/5/8/9)
+        run: |
+          python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation \
+            --report-only-sites "components/app/sys/lt_nvs.c:errlog_add:RULE-5,components/core/config/cfg.c:cfg_defaults:RULE-5,components/core/config/cfg_json.c:walk:RULE-1,components/core/config/cfg_json.c:cfg_to_json:RULE-4,components/drivers/board_devkit_v1/board.c:cmp_int:RULE-9,components/drivers/export_serial/export_serial.c:fmt_from_str:RULE-5,components/drivers/export_serial/export_serial.c:tally_cb:RULE-5"
       - name: "venue-announce check (BLOCKING; #98 -- every direct venue set announces to the ui)"
         run: python3 tools/lint/venue_announce.py --fail-on-violation
       - name: cppcheck (warning+style+portability; design §5 second analyser, rule 10)
@@ -133,8 +143,7 @@ jobs:
       # runs over components/core (host DB) only, for now.
       # TODO(4.5.x): add clang-tidy over components/app, components/drivers and main via the IDF
       # compile database once an IDF-container step exists in this job (or firmware.yml uploads
-      # its compile_commands.json for this job to consume) -- likely alongside the rule 9
-      # (Session 4.5.5) or blocking-flip (Session 4.5.6) work.
+      # its compile_commands.json for this job to consume).
       - name: clang-tidy over components/core (host compile DB; advisory)
         if: steps.probe.outputs.present == 'true'
         continue-on-error: true
@@ -167,3 +176,36 @@ jobs:
       - name: Nothing to do
         if: steps.probe.outputs.present != 'true'
         run: echo "tools/tracks/gen_tracks.py not present yet"
+
+  coverage:
+    # §22.1's "≥ 90 % lines in core/ (gcov in CI)" had no job at all (audit §3.3 item 28). This is
+    # the ADVISORY line-coverage report the amended §22.1 describes: it never fails the build and
+    # is not a required check -- it prints the percentage so a drop is visible in the PR.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install gcovr
+        run: sudo apt-get update && sudo apt-get install -y gcovr
+      - name: Configure + build + run the host suite with --coverage
+        run: |
+          cmake -S test -B test/build-cov -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_C_FLAGS="--coverage -O0" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake --build test/build-cov --parallel
+          ctest --test-dir test/build-cov --output-on-failure
+      - name: gcovr over components/core
+        run: |
+          gcovr --root . --filter 'components/core/' \
+                --exclude 'components/core/util/jsmn.c' \
+                --exclude 'components/core/ui/fonts.c' \
+                --exclude 'components/core/ui/icons.c' \
+                --print-summary --xml-pretty -o coverage.xml | tee cov.txt
+          echo "### core/ line coverage" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^lines:' cov.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-core
+          path: coverage.xml
+          if-no-files-found: ignore
