@@ -1252,6 +1252,63 @@ static void test_lap_across_gps_outage_not_clean_valid(void)
     TEST_ASSERT_FALSE(l2->flags & LAP_F_VALID);              /* so lap 2 is not a clean VALID lap */
 }
 
+/* C1/R22 (§6.4 step 1): a GPS dropout SHORTER than LAP_SEG_GAP_US that the S/F chord spans must
+ * flag BOTH laps. The chord's t_cross is interpolated straight across the outage -- the reviewer's
+ * repro_gap.c measured 227 ms of error on a 2.8 s dropout and the next lap still came out VALID,
+ * eligible for best and best_sector. Only the >5 s case was covered before. */
+static void test_short_dropout_chord_flags_the_opened_lap(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* out-lap completes; lap 1 runs */
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);                   /* prev valid fix = (0,-40) @ 80 s */
+
+    /* a 2 s dropout (< LAP_SEG_GAP_US = 5 s) straddling the S/F, then the first valid fix north */
+    feed(&L, lat0, lon0, 0.0, -20.0, 80500000, 0, false, &log);
+    feed(&L, lat0, lon0, 0.0,  20.0, 81500000, 0, false, &log);
+    feed(&L, lat0, lon0, 0.0,  40.0, 82000000, SPD_MMS, true, &log);
+
+    TEST_ASSERT_EQUAL_UINT16(2, L.lap_no);                   /* lap 1 completed over the gap chord */
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_GPS_LOST);          /* FIX: the OPENED lap is flagged */
+
+    /* lap 2 then runs on clean fixes and must still not be reported VALID */
+    feed(&L, lat0, lon0, 300.0,  40.0, 112000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0, 300.0, -40.0, 117000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0, -40.0, 127000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 129000000, SPD_MMS, true, &log);
+    const lap_result_t *l2 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(2, l2->lap_no);
+    TEST_ASSERT_TRUE(l2->flags & LAP_F_GPS_LOST);
+    TEST_ASSERT_FALSE(l2->flags & LAP_F_VALID);
+}
+
+/* R22: a chord longer than LAP_SEG_GAP_US made of ABSENT fixes (never invalid ones, so the
+ * in-lap GPS_LOST path never fires) must flag the COMPLETING lap too -- its end time is the
+ * interpolation across the gap. Before R22 only the opened lap was flagged. */
+static void test_long_absent_gap_flags_the_completing_lap(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* lap 1 runs; prev fix @ 80 s */
+    TEST_ASSERT_FALSE(L.lap_flags & LAP_F_GPS_LOST);         /* clean so far */
+    feed(&L, lat0, lon0, 0.0, 40.0, 88000000, SPD_MMS, true, &log);   /* 8 s chord, no fix between */
+    const lap_result_t *l1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, l1->lap_no);
+    TEST_ASSERT_TRUE(l1->flags & LAP_F_GPS_LOST);            /* FIX: the completing lap too */
+    TEST_ASSERT_FALSE(l1->flags & LAP_F_VALID);
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_GPS_LOST);          /* and the opened one (pre-existing) */
+}
+
 /* Bench B-F5 (debt sweep B, `dbg reset` -> CMD_RESET_ENGINE -> lap_reset()): a reset mid-session must
  * not strand the engine. After lap_reset() the venue is re-found on the next valid fix, the S/F gate
  * re-arms, and laps complete again with fresh numbering (prev/best from before survive, §10.3). */
@@ -1396,6 +1453,8 @@ int main(void)
     RUN_TEST(test_pit_flag_on_slow_section);
     RUN_TEST(test_gps_lost_flag_on_invalid_fix);
     RUN_TEST(test_lap_across_gps_outage_not_clean_valid);
+    RUN_TEST(test_short_dropout_chord_flags_the_opened_lap);
+    RUN_TEST(test_long_absent_gap_flags_the_completing_lap);
     RUN_TEST(test_sector_splits_sum_to_lap_time);
     RUN_TEST(test_incomplete_flag_when_sector_skipped);
     RUN_TEST(test_sector_resync_after_skip);

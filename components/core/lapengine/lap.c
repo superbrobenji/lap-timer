@@ -86,6 +86,7 @@ static void reset_to_no_venue(lap_t *L)
     L->sec_next = 1;
     memset(L->gate_times, 0, sizeof L->gate_times);
     L->have_prev_fix = false;
+    L->seg_has_invalid = false;
     L->prev_gps_us = 0;
     L->prev_speed_mps = 0.0;
     L->pit_slow = false;
@@ -158,6 +159,7 @@ void lap_set_venue(lap_t *L, const trk_venue_t *v)
     L->n_ugate = 0;
     reset_lap_sectors(L);
     L->have_prev_fix = false;
+    L->seg_has_invalid = false;
     L->pit_slow = false;
     L->pit_since_us = 0;
     L->leaving = false;
@@ -349,6 +351,7 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
     L->have_prev_result = (s->prev.flags != 0);
 
     L->have_prev_fix = false;                /* the next fix re-establishes the segment origin */
+    L->seg_has_invalid = false;
     L->pit_slow = false;
     L->pit_since_us = 0;
     L->leaving = false;
@@ -828,6 +831,7 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, bool seg_ga
     CORE_ASSERT_VOID(n_splits <= LAP_MAX_SECTORS + 1, LAP_ASSERT_CODE);   /* sector_ms[] / result bound */
 
     uint8_t flags = L->lap_flags;                                  /* GPS_LOST / PIT / INCOMPLETE in-lap */
+    if (seg_gap) flags |= LAP_F_GPS_LOST;    /* R22: this lap's END is interpolated over the gap */
     if (is_out) flags |= LAP_F_OUT_LAP;
     if (time_ms > (uint32_t)L->cfg.max_lap_s * 1000u) flags |= LAP_F_TOO_LONG;
     if (inc) flags |= LAP_F_INCOMPLETE;                            /* a locked sector went unrecorded */
@@ -1050,7 +1054,10 @@ static void process_segment(lap_t *L, geo_enu_t cur, const gps_fix_t *fix, event
 
     if (hit) {
         const int64_t t_cross = cross_time(L, cur, v1, t_earliest, now);
-        const bool    seg_gap = (now - L->prev_gps_us) > LAP_SEG_GAP_US;   /* H5: chord spans a GPS gap */
+        /* R22: a chord is unreliable either because it is long (absent fixes) or because it spans
+         * a fix the §6.5 validator rejected -- a 2.8 s dropout is under LAP_SEG_GAP_US and was
+         * silently accepted before (audit core:C1). */
+        const bool    seg_gap = ((now - L->prev_gps_us) > LAP_SEG_GAP_US) || L->seg_has_invalid;
         process_sf_crossing(L, fix, t_cross, seg_gap, matched, out, cap, n);
     }
 }
@@ -1112,6 +1119,11 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, event_
     /* An invalid fix while a venue is held only sets the GPS-lost flag if a lap is running (§6.4
      * step 1); its position is unusable, so no crossing, distance, prev or leave-timer update. */
     if (!valid) {
+        /* R22: remember that the next chord spans this outage. §6.4 step 1's literal "no crossing
+         * is evaluated" cannot be implemented by dropping the crossing -- that would merge two
+         * laps into one -- so the crossing is still evaluated and both laps it touches carry
+         * LAP_F_GPS_LOST (see the amended §6.4 step 1). */
+        L->seg_has_invalid = true;
         if (L->state == LAP_ST_RUNNING) L->lap_flags |= LAP_F_GPS_LOST;
         return;
     }
@@ -1140,4 +1152,5 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, event_
     L->prev_gps_us = now;
     L->prev_speed_mps = v1;
     L->have_prev_fix = true;
+    L->seg_has_invalid = false;    /* this valid fix starts a clean segment (R22) */
 }

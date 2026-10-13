@@ -146,6 +146,9 @@ typedef struct {
 
     /* previous VALID fix, for segment crossing (§6.4) and distance integration */
     bool               have_prev_fix;
+    bool               seg_has_invalid;     /* R22/§6.4 step 1: at least one invalid fix has been
+                                             * skipped since the last valid one, so the chord the
+                                             * next valid fix forms spans a GPS outage */
     geo_enu_t          prev_enu;
     int64_t            prev_gps_us;
     double             prev_speed_mps;
