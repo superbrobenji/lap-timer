@@ -45,11 +45,35 @@ static const char *TAG = "linkhost";
                                                    * still short next to a `lt shell` session, so a
                                                    * push queued behind one fails fast (LINKHOST_E_BUSY)
                                                    * instead of hanging until the shell exits. */
-#define LINK_PRESENT_US    (3 * 1000 * 1000)     /* peer_present window (<3 s, §Task 3 Step 7) */
+#define LINK_PRESENT_MS    3000                  /* peer_present window (<3 s, §Task 3 Step 7) */
 #define LINK_STATUS_STALE_MS 3000                /* §4.2: a STATUS older than this = not connected */
-#define OTA_READY_TMO_MS   3000
+#define OTA_READY_TMO_MS   15000     /* dk:M11: OTA-READY is printed only AFTER the lap-timer's
+                                      * ota_begin -> esp_ota_begin(s_target, size, ...), which
+                                      * erases ceil(size/4096) sectors of the target slot: ~147
+                                      * sectors for a 600 KB image at ~25-40 ms worst case each =
+                                      * up to ~5.9 s, before any of ota_begin's own checks. The old
+                                      * 3000 ms left no margin at all -- a slow erase returned
+                                      * LINKHOST_E_TIMEOUT ("flash result link -1") while the
+                                      * lap-timer then sat waiting for image bytes and aborted 9 s
+                                      * later. 15 s is ~2.5x the measured worst case and still far
+                                      * below the operator-visible OTA_DONE_TMO_MS path. */
 #define OTA_DONE_TMO_MS    10000                 /* lap-timer aborts after ~9 s without bytes */
 #define OTA_CHUNK          512
+#define OTA_PACE_BYTES     4096u     /* the lap-timer's own OTA_RECV_CHUNK (export_serial.c:995) */
+#define OTA_PACE_MS        25        /* dk:H2/drv:M8 MITIGATION, not the fix (#57 is). The
+                                      * lap-timer's console RX ring is a fixed 256 B (IDF
+                                      * esp_console, no Kconfig) = ~22 ms at 115200, and it blocks
+                                      * in esp_ota_write for ~10-40 ms once per 4096 B chunk; a
+                                      * worst-case write therefore overruns the ring by ~18 ms of
+                                      * wire time (~200 B) and the image is corrupted (it fails
+                                      * SAFE: SHA-256 + ECDSA gate esp_ota_end). Host and device
+                                      * count the same bytes from 0, so pausing 25 ms at each
+                                      * OTA_PACE_BYTES boundary -- the moment the device is in that
+                                      * write -- covers the deficit with 7 ms of margin. Cost: 147
+                                      * pauses on a 600 KB image = 3.7 s on a ~55 s push (+6.7 %).
+                                      * Far below the lap-timer's own 3 s per-read stall window
+                                      * (OTA_RECV_READ_MS), so it can never look like a stall. No
+                                      * feedback, no retry: #57 (per-chunk ACK) remains the fix. */
 #define DL_IDLE_TMO_MS     3000                  /* no-bytes abort once the header has parsed (state
                                                    * >= LH_DL_BODY) */
 #define DL_FIRST_TMO_MS    12000                 /* no-bytes abort BEFORE the header parses (bench
@@ -57,12 +81,15 @@ static const char *TAG = "linkhost";
                                                    * reply with the body length, so `list` must scan
                                                    * every session summary first -- ~80 ms each on
                                                    * littlefs, 42 sessions ~= 3.5 s; 12 s covers
-                                                   * ~150 sessions */
+                                                   * ~150 sessions. With dk:M1's progress rule, the
+                                                   * 12 s first-byte allowance is now measured from
+                                                   * the request and is not extended by noise --
+                                                   * which is what this constant always claimed
+                                                   * ("no bytes yet"). */
 #define DL_HARD_MIN_MS     15000                 /* floor on the absolute download cap (small files);
                                                    * the floor itself sits DL_FIRST_TMO_MS past `start`
                                                    * so it can never fire before the first-byte
                                                    * deadline does */
-#define DL_HARD_MARGIN_US  (5 * 1000 * 1000)     /* slack added on top of the size-scaled transfer time */
 #define RX_PARK_TMO_MS     200                   /* bounded wait for rx_task to park before flush (#65) */
 #define RX_PARK_POLL_MS    5
 #define RX_DRAIN_TMO_MS    10                    /* per-iteration read timeout while draining to quiet */
@@ -70,7 +97,12 @@ static const char *TAG = "linkhost";
 
 static SemaphoreHandle_t s_req_mtx;              /* one request in flight (§18.1) */
 static TaskHandle_t      s_rx_task;
-static volatile int64_t  s_last_activity_us;     /* stamped by the RX task on any link traffic */
+/* dk:L6: a 64-bit read on a 32-bit core is not atomic -- rx_task writes this while the httpd task
+ * reads it in linkhost_peer_present, so the old int64 µs stamp could tear (worst case: one wrong
+ * fast-fail/retry decision). A 32-bit millisecond stamp is read and written atomically; the
+ * unsigned difference below is wrap-correct, so the 49.7-day rollover needs no special case. */
+static volatile uint32_t s_last_activity_ms;
+static volatile bool     s_activity_seen;
 static volatile bool     s_rx_paused;            /* pauses the demux RX task while flash/download owns UART1 */
 static volatile bool     s_rx_parked;            /* true only while rx_task is in the paused-sleep, i.e.
                                                    * provably NOT inside uart_read_bytes (#65 handshake) */
@@ -84,8 +116,9 @@ static volatile bool     s_trace;                  /* `link trace on|off` (Plan 
 
 /* Guards the linkstats module's global state (Plan 5.6 T3 fix 1): writer = stream_consumer
  * (main.c, an unpinned FreeRTOS task) via linkhost_stats_on_record; readers = the httpd request
- * task via linkhost_status/linkhost_peer_present (linkstats_status_fresh) and webapi's api_status
- * via linkhost_stats_snapshot. On the dual-core ESP32 writer and readers can run concurrently on
+ * task via linkhost_status (linkstats_status_fresh) and webapi's api_status via
+ * linkhost_stats_snapshot. (linkhost_peer_present reads the dk:L6 activity stamp instead -- no
+ * lock needed, see its own comment.) On the dual-core ESP32 writer and readers can run concurrently on
  * either core, so the struct copy in linkstats_snapshot (and its 20-byte status_rec memcpy) can
  * tear without a lock. linkstats.c itself stays IDF-free/unlocked -- every access from the IDF
  * glue layer goes through this spinlock instead. */
@@ -110,7 +143,8 @@ static void rx_task(void *arg)
         s_rx_parked = false;                      /* about to own UART1 again */
         int n = uart_read_bytes(DC_LINK_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
-            s_last_activity_us = esp_timer_get_time();
+            s_last_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            s_activity_seen = true;
             (void)linkhost_feed(buf, (size_t)n);
         }
     }
@@ -370,14 +404,9 @@ int64_t linkhost_stats_age_ms(int64_t last_us, int64_t now_us)
 
 bool linkhost_peer_present(void)
 {
-    lt_status_t st;
-    int64_t now = esp_timer_get_time();
-    portENTER_CRITICAL(&s_stats_mux);
-    bool fresh = linkstats_status_fresh(now, LINK_STATUS_STALE_MS, &st);
-    portEXIT_CRITICAL(&s_stats_mux);
-    if (fresh) return true;
-    int64_t last = s_last_activity_us;                 /* transitional fallback: any traffic < 3 s */
-    return last != 0 && (esp_timer_get_time() - last) < LINK_PRESENT_US;
+    if (!s_activity_seen) return false;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    return (uint32_t)(now_ms - s_last_activity_ms) < LINK_PRESENT_MS;
 }
 
 /* ---- streaming session download ---- */
@@ -402,7 +431,12 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
     lh_dl_ctx_t dl;
     lh_dl_init(&dl, is_binary, chunk_cb, ctx);
 
-    xSemaphoreTake(s_req_mtx, portMAX_DELAY);    /* worker task: OK to wait for the link (not httpd) */
+    /* dk:M2: spec §7 says a busy link answers BUSY via the BOUNDED take -> 503. The old
+     * portMAX_DELAY here (justified as "worker task: OK to wait") parked the single async_worker
+     * behind a `lt shell` bridge for up to its own 10-minute cap with the browser socket open and
+     * the SPA's spinner never resolving, and then answered later jobs "download queue full" --
+     * the wrong diagnosis. Same bound as linkhost_cmd_timed/linkhost_bridge_begin. */
+    if (xSemaphoreTake(s_req_mtx, pdMS_TO_TICKS(LINK_REQ_MTX_MS)) != pdTRUE) return LINKHOST_E_BUSY;
     s_rx_paused = true;                          /* the demux RX task must not steal these bytes */
     rx_park_and_drain();                         /* wait for rx_task to park, then flush + drain (#65) */
 
@@ -421,17 +455,29 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
     int64_t t_header = 0;                          /* esp_timer_get_time() when the header parsed
                                                        (state >= LH_DL_BODY); 0 == not yet seen */
     bool    scaled   = false;
-    lh_dl_state_t st = dl.state;
+    uint32_t      prog = 0;              /* lh_dl_progress at the last idle-deadline refresh */
+    lh_dl_state_t seen = dl.state;       /* parser state at the last idle-deadline refresh */
+    lh_dl_state_t st   = dl.state;
     while (st < LH_DL_DONE) {                     /* bounded by hard_dl / idle_dl */
         int64_t t = esp_timer_get_time();
         if (t >= hard_dl || t >= idle_dl) break;                    /* timeout -> incomplete */
         int n = uart_read_bytes(DC_LINK_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
             st = lh_dl_feed(&dl, buf, (size_t)n);
-            /* Evaluate the state AFTER lh_dl_feed: a read that completes the header mid-call must
-             * already get the shorter steady-state gap, not one more DL_FIRST_TMO_MS window. */
-            idle_dl = esp_timer_get_time() +
-                      (int64_t)lh_dl_gap_ms(dl.state, DL_FIRST_TMO_MS, DL_IDLE_TMO_MS) * 1000;
+            /* dk:M1: refresh the no-bytes deadline only on REAL progress -- the parser advancing a
+             * state, or consuming body bytes before ---END. Refreshing it on every received byte
+             * (as this did) means the lap-timer's own resumed 10 Hz 0xFF stream keeps the deadline
+             * alive forever while s_req_mtx is held: the reproducer's garbled BEGIN held the link
+             * for the full scaled cap with /api/config, `lt *` and `flash push` all answering BUSY.
+             * Evaluated AFTER the feed so a read that completes the header gets the shorter
+             * steady-state gap immediately, not one more DL_FIRST_TMO_MS window. */
+            uint32_t p = lh_dl_progress(&dl);
+            if (p != prog || dl.state != seen) {
+                prog = p;
+                seen = dl.state;
+                idle_dl = esp_timer_get_time() +
+                          (int64_t)lh_dl_gap_ms(dl.state, DL_FIRST_TMO_MS, DL_IDLE_TMO_MS) * 1000;
+            }
         }
         if (t_header == 0 && dl.state >= LH_DL_BODY && dl.state != LH_DL_ERR) {   /* a real header, not a parse error */
             t_header = esp_timer_get_time();
@@ -439,14 +485,10 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
                 ESP_LOGI(TAG, "trace: dl header '%s' size=%u", dl.name, (unsigned)dl.body_size);
         }
         /* Scale the absolute cap to the announced body once the header parses (M5): a fixed 120 s
-         * was < a 1 MB .log (~1.37 MB base64 ~= 119 s at this baud). transfer_us = size*10/baud;
-         * cap = t_header + 1.5*transfer + margin -- from the time the header was SEEN, not `start`
-         * (B-F8: a slow `list` header can arrive seconds into the call; measuring from `start`
-         * would clip the scaled cap by however long the header took to show up), never below the
-         * floor. */
+         * was < a 1 MB .log (~1.37 MB base64 ~= 119 s at this baud). lh_dl_cap_us (dk:M1) holds the
+         * formula now -- measured from when the header was SEEN, never below the floor. */
         if (!scaled && dl.state >= LH_DL_BODY && dl.body_size > 0) {
-            int64_t xfer_us = (int64_t)dl.body_size * 10 * 1000000 / DC_LINK_BAUD;
-            int64_t cap = t_header + xfer_us + xfer_us / 2 + DL_HARD_MARGIN_US;
+            int64_t cap = lh_dl_cap_us(dl.body_size, t_header, DC_LINK_BAUD);   /* dk:M1 */
             if (cap > hard_dl) hard_dl = cap;
             scaled = true;
         }
@@ -560,6 +602,7 @@ int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
             }
             uart_write_bytes(DC_LINK_UART, chunk, want);
             sent += want;
+            if ((sent % OTA_PACE_BYTES) == 0u && sent < size) vTaskDelay(pdMS_TO_TICKS(OTA_PACE_MS));
             if (cb) cb(sent, size, ctx);
             /* opportunistically drain a mid-stream OTA-ERR without stalling the feed */
             uint8_t rb[64];
@@ -597,8 +640,13 @@ int linkhost_bridge_begin(void)
 
 void linkhost_bridge_end(void)
 {
-    s_rx_paused = false;                         /* rx_task clears s_rx_parked on its next non-paused
-                                                   * iteration (before it reads again) -- no need to
-                                                   * clear it here too. */
+    /* dk:M6 + spec §5.2/§6/§7 ("resyncs on exit", "drains-to-quiet on exit"): this used to only
+     * clear s_rx_paused and give the mutex back, so the demux resumed mid-byte-stream in whatever
+     * state the bridge's own reads left behind (it recovered on the next '\n' or 0xFF, but the
+     * specified handshake was simply absent). s_rx_paused is still true here and rx_task is still
+     * parked, so this is the only UART1 reader -- rx_park_and_drain's documented precondition. */
+    rx_park_and_drain();            /* bounded: RX_PARK_TMO_MS + RX_DRAIN_CAP * RX_DRAIN_TMO_MS */
+    linkhost_demux_resync();        /* parser state only; the record ring and linkstats survive */
+    s_rx_paused = false;
     xSemaphoreGive(s_req_mtx);
 }

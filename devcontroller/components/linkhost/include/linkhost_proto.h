@@ -30,7 +30,8 @@ extern "C" {
 /* ---- negative returns from linkhost_status/linkhost_cmd/linkhost_flash/linkhost_parse_frame ---- */
 enum {
     LINKHOST_E_TIMEOUT = -1,   /* no/incomplete response within the link timeout */
-    LINKHOST_E_NOTCONN = -2,   /* no lap-timer peer detected (no heartbeat / not yet wired) */
+    LINKHOST_E_NOTCONN = -2,   /* no lap-timer peer detected (no UART1 traffic within
+                                * LINK_PRESENT_MS / not yet wired) */
     LINKHOST_E_CRC     = -3,   /* decoded body CRC did not match the ---END crc32 */
     LINKHOST_E_PROTO   = -4,   /* malformed framing / oversize body / unexpected token */
     LINKHOST_E_REMOTE  = -5,   /* the lap-timer answered `ERR 0x<code>: <msg>` (see err_code/err_msg) */

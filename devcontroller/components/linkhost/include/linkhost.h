@@ -73,7 +73,8 @@ int64_t linkhost_stats_age_ms(int64_t last_us, int64_t now_us);
  * rather than blocking the httpd task. Returns 0, or
  * LINKHOST_E_TIMEOUT/_NOTCONN/_CRC/_PROTO/_REMOTE/_BUSY. */
 int linkhost_cmd(const char *cmd, linkhost_frame_t *out);
-/* True when link activity (a `status` heartbeat / stream frame) has been seen within a few seconds. */
+/* True when ANY UART1 byte has been seen within LINK_PRESENT_MS. Plan 5.6 §4.2 deleted the status
+ * heartbeat (it never touched UART1) -- the signal is raw link traffic, not a heartbeat. */
 bool linkhost_peer_present(void);
 
 /* ---- round-trip timing (Plan 5.6 Task 5, the `lt` console relay) ---- */
@@ -143,7 +144,10 @@ int linkhost_download_cmd(const char *cmd, bool is_binary, lh_dl_chunk_cb chunk_
  * `OTA-END 0x0000`, else the `OTA-ERR` code (or a LINKHOST_E_* on timeout/protocol failure). The
  * request-owning mutex is taken with a bounded timeout (I4, final review): a `lt shell` bridge can
  * hold it for up to its own 10-minute cap, so a busy link here returns LINKHOST_E_BUSY rather than
- * blocking the push task for the shell's whole duration. */
+ * blocking the push task for the shell's whole duration. Paced at the lap-timer's 4096 B chunk
+ * boundary (OTA_PACE_MS) -- a mitigation for its fixed 256 B console RX ring; the per-chunk ACK
+ * handshake `export_serial.c` assigns to "the dev-controller integration step" is issue #57 and is
+ * NOT implemented here. */
 int linkhost_flash(const char *ver, const char *hwid, uint32_t size,
                    const uint8_t sha256[32], flash_progress_cb cb, void *ctx);
 
