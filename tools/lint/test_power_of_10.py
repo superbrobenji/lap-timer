@@ -4,6 +4,7 @@
 """
 import io
 import contextlib
+import json
 import os
 import sys
 import unittest
@@ -110,6 +111,46 @@ class Rollout(unittest.TestCase):
                        FIX + "/lg6_recursion.c:walk:RULE-1," + FIX + "/lg6_recursion.c:gone:RULE-1"])
         self.assertIn("GRACE-STALE: " + FIX + "/lg6_recursion.c:gone:RULE-1", out)
         self.assertEqual(0, rc)
+
+
+class GraceVisibility(unittest.TestCase):
+    """Fix round 1, Important finding: site-/rule-based grace must be baked into findings[]
+    before either renderer runs, so it shows up in text mode's [report-only] marker AND in
+    --json's report_only field -- not only in the exit code."""
+
+    def test_site_graced_finding_is_marked_report_only_in_text_mode_and_does_not_block(self):
+        rc, out = run(["--paths", FIX + "/lg6_recursion.c", "--register", NONE,
+                       "--fail-on-violation", "--report-only-sites",
+                       FIX + "/lg6_recursion.c:walk:RULE-1"])
+        self.assertIn(
+            "RULE-1: function 'walk' calls itself (rule 1: no recursion) [report-only]", out)
+        self.assertEqual(0, rc)
+
+    def test_site_graced_finding_carries_report_only_true_in_json(self):
+        rc, out = run(["--paths", FIX + "/lg6_recursion.c", "--register", NONE,
+                       "--fail-on-violation", "--report-only-sites",
+                       FIX + "/lg6_recursion.c:walk:RULE-1", "--json"])
+        data = json.loads(out)
+        rule1 = [f for f in data["findings"] if f["rule"] == "RULE-1"]
+        self.assertEqual(1, len(rule1), data["findings"])
+        self.assertIs(True, rule1[0].get("report_only"))
+        self.assertEqual(0, rc)
+
+    def test_rule_graced_finding_carries_report_only_true_in_json(self):
+        rc, out = run(["--paths", FIX + "/lg6_recursion.c", "--register", NONE,
+                       "--fail-on-violation", "--report-only-rules", "RULE-1", "--json"])
+        data = json.loads(out)
+        rule1 = [f for f in data["findings"] if f["rule"] == "RULE-1"]
+        self.assertEqual(1, len(rule1), data["findings"])
+        self.assertIs(True, rule1[0].get("report_only"))
+        self.assertEqual(0, rc)
+
+    def test_ungraced_blocking_finding_still_fails_the_build(self):
+        rc, out = run(["--paths", FIX + "/lg6_recursion.c", "--register", NONE,
+                       "--fail-on-violation"])
+        self.assertIn("RULE-1: function 'walk' calls itself (rule 1: no recursion)", out)
+        self.assertNotIn("[report-only]", out)
+        self.assertEqual(1, rc)
 
 
 if __name__ == "__main__":

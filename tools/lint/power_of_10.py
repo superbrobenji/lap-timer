@@ -962,6 +962,22 @@ def main(argv=None):
     findings, summary, register, rule8a = run(args.paths, args.register, args.enforce_fnptr,
                                                base_dir, tuple(args.report_only_paths))
 
+    # Site- and rule-based grace must be baked into findings[]'s own "report_only" flag BEFORE
+    # anything renders findings (text or JSON) -- otherwise a graced finding prints with no
+    # [report-only] marker in text mode, and neither site- nor rule-based grace survives into
+    # --json at all (fix round 1, Important finding: both are report-time facts, not just
+    # exit-code facts). --report-only-paths' own marking (done inside run(), per file) already
+    # lands in findings[] before this point, so it is unaffected.
+    def graced(f):
+        for path, symbol, rule in grace:
+            if f["file"] == path and f["rule"] == rule and (symbol in ("", f.get("symbol", ""))):
+                return True
+        return False
+
+    for f in findings:
+        if graced(f) or f["rule"] in report_only_rules:
+            f["report_only"] = True
+
     if args.json:
         print(json.dumps({
             "findings": findings,
@@ -978,16 +994,6 @@ def main(argv=None):
     if args.fail_on_violation:
         blocking_rules = ("RULE-1", "RULE-3", "RULE-4", "RULE-4-COMPOUND", "RULE-5", "RULE-8",
                           "RULE-9")
-
-        def graced(f):
-            for path, symbol, rule in grace:
-                if f["file"] == path and f["rule"] == rule and (symbol in ("", f.get("symbol", ""))):
-                    return True
-            return False
-
-        for f in findings:
-            if graced(f):
-                f["report_only"] = True
         used = {(p, sy, r) for (p, sy, r) in grace for f in findings
                 if f["file"] == p and f["rule"] == r and (sy in ("", f.get("symbol", "")))}
         for entry in grace:
