@@ -2,8 +2,8 @@
  *
  * The ui task (core 0, prio 6, stack 6144 real / 2560 moto_sim) owns a static screen_model_t and a static framebuffer,
  * drains the pipeline event queue (g_evt_q) and the button queue, updates the model, renders once
- * per change via core/ui screens_render() and -- since no display panel exists yet (plan 04 has no
- * driver) -- logs the dirty box instead of refreshing a panel. Menu navigation, the button debounce
+ * per change via core/ui screens_render() and refreshes the panel through hal/display.h under the
+ * §20.3 refresh ladder (partial/full policy, reinit + retry on failure). Menu navigation, the button debounce
  * state machine and the menu-lock speed gate live in ui.c; ui_buttons.c is only the ISR->queue glue.
  */
 #ifndef APP_UI_H

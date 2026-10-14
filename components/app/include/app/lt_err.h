@@ -2,8 +2,7 @@
  * E_GPS_*, E_IMU_*, E_STO_SD_DEGRADED, E_PWR_*, E_LAP_PLAUSIBILITY and E_FUSION_* are absent
  * because their producers are (GPS/IMU/fusion ladders -> Plan 8; power/SD -> Plan 6). Every code
  * defined here has at least one writer except E_DISP_TEMP and E_CONN_BLE_INIT (reserved: no
- * producer yet; BLE is deferred to sub-project C) and E_NVS_INIT (its writer is app_main's NVS-init
- * failure path, F2a Task 9). Codes are stable u16 values logged into the error ring (§15.2) and are
+ * producer yet; BLE is deferred to sub-project C). Codes are stable u16 values logged into the error ring (§15.2) and are
  * APPEND-ONLY -- never renumber one. */
 #ifndef APP_LT_ERR_H
 #define APP_LT_ERR_H
@@ -37,6 +36,7 @@ enum {
     E_SYS_WDT_SUBSCRIBE = 0x050D, /* arg = hb_id: esp_task_wdt_add() failed for that task (§17.1) */
     E_SYS_HEAP_CORRUPT  = 0x050E, /* arg = uptime_s: heap_caps_check_integrity_all() failed (§17.1) */
     E_NVS_INIT          = 0x050F, /* arg = 0: lt_nvs_init() failed; SYS_NVS_DEAD set (app:L3) */
+    E_BOARD_INIT        = 0x0510, /* arg = 0: board_init() reported a peripheral bring-up failure (drv:L18) */
 
     /* connectivity / command protocol (§17.7, §18.1); land with the 3.5 serial console. */
     E_CONN_BLE_INIT   = 0x0701,

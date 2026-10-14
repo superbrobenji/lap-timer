@@ -3,7 +3,7 @@
 # into the environment (a flag-derived name cannot be read from the cache during IDF's early
 # expansion, but the environment is inherited); require it here unless it is explicitly OFF so
 # app_main's export_serial_start() resolves.
-set(LT_MAIN_REQUIRES core esp_system app lt_hal nvs_flash esp_timer esp_hw_support
+set(LT_MAIN_REQUIRES core esp_system app lt_hal nvs_flash esp_timer esp_hw_support espcoredump
     board_devkit_v1 storage_internal gps_$ENV{LT_GPS} imu_$ENV{LT_IMU} display_$ENV{LT_DISPLAY})
 if(NOT "$ENV{LT_EXPORT_SERIAL}" STREQUAL "OFF")
     list(APPEND LT_MAIN_REQUIRES export_serial)
