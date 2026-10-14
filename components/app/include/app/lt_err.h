@@ -2,8 +2,8 @@
  * E_GPS_*, E_IMU_*, E_STO_SD_DEGRADED, E_PWR_*, E_LAP_PLAUSIBILITY and E_FUSION_* are absent
  * because their producers are (GPS/IMU/fusion ladders -> Plan 8; power/SD -> Plan 6). Every code
  * defined here has at least one writer except E_DISP_TEMP and E_CONN_BLE_INIT (reserved: no
- * producer yet; BLE is deferred to sub-project C). Codes are stable u16 values logged into the error ring (§15.2) and are
- * APPEND-ONLY -- never renumber one. */
+ * producer yet; BLE is deferred to sub-project C). Codes are stable u16 values logged into the
+ * error ring (§15.2) and are APPEND-ONLY -- never renumber one. */
 #ifndef APP_LT_ERR_H
 #define APP_LT_ERR_H
 

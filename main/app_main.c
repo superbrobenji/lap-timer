@@ -3,11 +3,12 @@
  * Implements the §4.7 boot sequence: step 1 reset reason + crash counters, step 2 NVS, step 3
  * boot counter + crash-loop/safe-mode/recovery gate, step 4 RTC validate, step 5 config load,
  * step 6 board + GPS power, step 7 internal storage mount, step 9 the coredump self-test row,
- * steps 10-11 supervisor + static queues/rings + the peer link, steps 12-13 logger/pipeline/ui,
- * and the §18.4 console. Steps 14-15 (power task, conn) have no owner until Plan 6 /
- * sub-project C; §17.6's IMU-genuine, GPS MON-VER and battery-range ROWS are logged here but
- * are not yet rendered as BOOT-screen lines (the screen has four slots: storage, display, GPS,
- * IMU) -- filed.
+ * steps 10-11 supervisor + static queues/rings + the peer link, step 12 logger/pipeline and the
+ * §18.4 console, step 13 ui. Steps 14-15 (power task, conn) have no owner until Plan 6 /
+ * sub-project C. The BOOT screen has four slots (storage, display, GPS, IMU; app/lt_sup.h
+ * BOOT_*); §17.6's GPS MON-VER (gps_get_version is not called at boot) and battery-range rows
+ * have no boot-time check at all, and the IMU-genuine row exists only as imu_init()'s WHO_AM_I
+ * feeding the IMU slot -- handed off (F2a hand-off table).
  */
 #include "build_config.h"
 
@@ -147,8 +148,9 @@ static uint32_t boot_safe_mode(uint8_t *level_out)
     return boot_cnt;
 }
 
-/* §4.7 step 4: RTC memory validate/clear. Full resume is 3.5; here invalid/absent are
- * cleared and only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
+/* §4.7 step 4: RTC memory validate/clear. The resume itself is the pipeline's
+ * (pipeline_init() re-validates and arms the §15.3 resume); here invalid/absent are cleared and
+ * only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
 static void boot_rtc_validate(void)
 {
     switch (lt_rtc_validate(NULL)) {
@@ -160,7 +162,7 @@ static void boot_rtc_validate(void)
         lt_rtc_clear();
         break;
     case RTC_VALID:
-        break;                                 /* left in place; 3.5 resumes from it */
+        break;                                 /* left in place; pipeline_init() resumes */
     }
 }
 
@@ -199,7 +201,7 @@ static void boot_storage(void)
     if (mrc < 0) {
         sys_flags_set(SYS_STORAGE_DEAD);
         errlog_add(E_STO_MOUNT, 0);
-        ESP_LOGE(TAG, "storage DEAD (summaries fall back to RTC/NVS best-effort, 3.5)");
+        ESP_LOGE(TAG, "storage DEAD (no session logging this boot; the logger stays idle)");
     } else {
         if (mrc == 1) {                        /* mounted only after a reformat */
             lt_counters_inc(LT_CTR_STO_FORMAT, true);
@@ -219,7 +221,9 @@ static void boot_storage(void)
  * (CONFIG_ESP_COREDUMP_CHECKSUM_CRC32), so a failed check means the dump itself is damaged and
  * the log line says so rather than promising a readable dump. Errlog M1 dedup: on an ESP_RST_PANIC
  * boot this report collapses onto lt_boot_record_reset's E_SYS_PANIC(0) entry (lt_nvs.c) -- the
- * latest arg wins -- so that one entry becomes the panic-with-dump-size summary §17.6 asks for;
+ * latest arg wins -- so that one entry becomes the panic-with-dump-size summary §17.6 asks for.
+ * That holds because boot_reset_record() is the only thing between the two calls and its only
+ * errlog_add is that E_SYS_PANIC(0) (the crashlog push and counter writes add no entries);
  * on TASK_WDT/INT_WDT boots it appends after E_SYS_WDT_RESET. */
 static void boot_coredump_check(esp_reset_reason_t reason)
 {
@@ -297,7 +301,7 @@ static void boot_subsystems(uint8_t level)
     pipeline_start();
 
     /* §4.7 step 13 (ui): start the ui task (core 0, prio 6). It renders the BOOT one-shot, then
-     * drains the pipeline event queue + the button queue, updates a screen_model_t, and renders via
+     * drains g_ui_evt_q (the pipeline's fan-out copy) + the button queue, updates a screen_model_t, and renders via
      * core/ui screens_render(). It drives the SSD1680 through hal/display.h and runs the full §20.3
      * refresh ladder; the menu (§20.7) + buttons (§20.8) are live. */
     ui_start();
