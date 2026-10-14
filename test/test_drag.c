@@ -378,7 +378,10 @@ static void test_braking_distance_100_to_0(void)
 
 /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns
  * to ARMED. A short g-spike launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires
- * and the discarded run leaves no gate hits. */
+ * and the discarded run leaves no gate hits. R21/M4: §11.2's ARMED row specifies EV_DRAG_ARMED on
+ * entry, so -- unlike the engine's one genuinely silent transition, the DONE -> IDLE settle covered
+ * by test_done_to_idle_settle_is_silent -- this abort is NOT silent: it announces the re-arm with
+ * exactly one new EV_DRAG_ARMED. */
 static void test_false_start_abort(void)
 {
     drag_init(&D, NULL);
@@ -388,8 +391,7 @@ static void test_false_start_abort(void)
         drive_fused(&fs, true);
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
-    const int ev_before_abort = EV.n;   /* #102/pr:M1: abort_to_armed() emits NOTHING, so the only
-                                         * way a consumer can see LAUNCHED -> ARMED is drag_state() */
+    const int ev_before_abort = EV.n;   /* snapshot so the abort's event delta can be pinned exactly */
     fused_sample_t s216 = fused((int64_t)216 * DT_US, 0.0f, 0);
     drive_fused(&s216, true);
     gps_fix_t stall = gfix((int64_t)216 * DT_US, 0, true);        /* Doppler: stopped */
@@ -398,17 +400,18 @@ static void test_false_start_abort(void)
     drive_fused(&s217, true);
 
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));       /* re-armed, run discarded */
-    TEST_ASSERT_EQUAL_INT(ev_before_abort, EV.n);   /* no event announced the abort */
+    TEST_ASSERT_EQUAL_INT(ev_before_abort + 1, EV.n);             /* exactly one new event: the re-arm */
+    TEST_ASSERT_EQUAL_UINT8(EV_DRAG_ARMED, EV.type[ev_before_abort]);
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));
     TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
 }
 
 /* §11.2/§6.6 false-start guard regression: a sustained ~0.2 g launch is itself below
- * DRAG_FALSE_START_KMH for the first ~140 ms after t0 (v_est is still climbing from 0), which is not
- * a stall — the abort requires v_peak to have already cleared the threshold before a drop-below
- * counts as a false start. Without that guard this legitimate low-g launch gets discarded and
- * re-armed the instant it enters LAUNCHED, emitting a duplicate EV_DRAG_LAUNCH; the fixed engine
- * launches exactly once and runs its gates through to the 1/4. */
+ * DRAG_ARM_SPEED_KMH (`stopped`'s threshold) for only a handful of samples right at t0 (v_est is
+ * still climbing from 0) -- that is not a stall, it never drops back below `stopped` once it has
+ * climbed past it, so the now-unconditional abort check (which tests `stopped`, not a v_peak-gated
+ * DRAG_FALSE_START_KMH) never trips for it. The fixed engine launches exactly once and runs its
+ * gates through to the 1/4. */
 static void test_low_g_launch_no_false_start(void)
 {
     drag_init(&D, NULL);
@@ -420,6 +423,42 @@ static void test_low_g_launch_no_false_start(void)
     const drag_result_t *r = drag_current(&D);
     TEST_ASSERT_NOT_NULL(r);
     TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+}
+
+/* H5/R21 (§11.2 "Abort"): a marginal-g trigger that then stalls. do_launch can enter LAUNCHED with
+ * v_peak as low as DRAG_LAUNCH_G x DRAG_LAUNCH_HOLD_MS = 0.1471 m/s = 0.53 km/h -- BELOW the old
+ * abort guard's DRAG_FALSE_START_KMH (1 km/h) but ABOVE `stopped`'s 0.5 km/h. So the stall fell
+ * through to enter_done: a consumed run_no, an EV_DRAG_DONE and a gate-less DRAG_RUN log frame.
+ * Geometry from the reviewer's repro_drag.c case A (0.16 g for 11 samples, then Doppler 0). */
+static void test_marginal_g_launch_then_stall_aborts(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(true);
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_ARMED));
+    for (int k = LAUNCH_K; k <= 211; k++) {                 /* 11 samples just over DRAG_LAUNCH_G */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.16f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+
+    gps_fix_t stall = gfix((int64_t)211 * DT_US, 0, true);  /* Doppler: the bike never moved */
+    drag_on_fix(&D, &stall);
+    fused_sample_t s212 = fused((int64_t)212 * DT_US, 0.0f, 0);
+    drive_fused(&s212, true);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));     /* §11.2: discarded, re-armed */
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));           /* no spurious run */
+    TEST_ASSERT_EQUAL_INT(2, ev_count(EV_DRAG_ARMED));          /* M4: the re-arm is announced */
+    TEST_ASSERT_EQUAL_UINT16(0, drag_current(&D)->run_no);      /* the run was wiped */
+
+    /* and the next, real launch takes run number 1 -- the discarded one consumed nothing */
+    for (int k = 300; k <= 320; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.5f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    TEST_ASSERT_EQUAL_UINT16(1, drag_current(&D)->run_no);
 }
 
 /* §11.2: the braking gate may complete after DONE. A 0.5 g run ends DONE at the 1/4, then braking
@@ -662,6 +701,7 @@ int main(void)
     RUN_TEST(test_braking_distance_100_to_0);
     RUN_TEST(test_false_start_abort);
     RUN_TEST(test_low_g_launch_no_false_start);
+    RUN_TEST(test_marginal_g_launch_then_stall_aborts);
     RUN_TEST(test_done_then_brake);
     RUN_TEST(test_done_to_idle_settle_is_silent);
     RUN_TEST(test_bench_visibility_180_vs_320);

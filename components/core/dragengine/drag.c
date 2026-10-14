@@ -411,17 +411,17 @@ static void enter_armed(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us
     emit(out, cap, n, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
 }
 
-/* §11.2 false start: discard the run and return to ARMED (no event, no run_no consumed). */
-static void abort_to_armed(drag_t *D)
+/* §11.2 false start: discard the run and return to ARMED. R21/M4: §11.2's ARMED row specifies
+ * EV_DRAG_ARMED on entry, so the re-arm is announced -- without it the ui's engine-state card read
+ * LAUNCHED for ever after a stall and the logger never learned the engine re-armed. run_no is NOT
+ * consumed: the discarded launch's EV_DRAG_LAUNCH carries no run number (arg16 = 0), so no record
+ * ever referenced it, and the next real launch reuses the number cleanly. */
+static void abort_to_armed(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us, int64_t mono_us)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
-    if (D->run_no > 0) D->run_no--;      /* the discarded launch does not consume a run number */
-    D->state = DRAG_ST_ARMED;
-    D->v_est = D->dist_m = 0.0;
-    D->v_prev = D->dist_prev = 0.0;
+    if (D->run_no > 0) D->run_no--;
     D->t0_gps_us = 0;
-    D->launch_run = false;
-    reset_run(D);
+    enter_armed(D, out, cap, n, gps_us, mono_us);   /* zeroes v_est/dist/launch_run, resets the run */
 }
 
 static void enter_done(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us, int64_t mono_us)
@@ -564,21 +564,22 @@ static void step_launched(drag_t *D, event_t *out, int cap, int *n, const fused_
     gate_step(D, out, cap, n, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
     brake_step(D, out, cap, n, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
 
-    /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm.
-     * Guarded on v_peak having already cleared the threshold once: a sustained low-g launch is
-     * itself briefly under 1 km/h just after t0 (v_est is still climbing from 0), and that is not
-     * a stall — only a drop-below after the run has actually moved past the threshold counts. */
-    if (now - D->t0_gps_us <= (int64_t)DRAG_FALSE_START_S * 1000000 &&
-        D->v_peak > kmh_to_mps((double)DRAG_FALSE_START_KMH) &&
-        D->v_est < kmh_to_mps((double)DRAG_FALSE_START_KMH)) {
-        abort_to_armed(D);
+    const bool stopped = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+    /* §11.2 abort (R21): a stall inside DRAG_FALSE_START_S of t0 discards the run, whatever v_peak
+     * reached, and it is tested BEFORE the DONE transitions so a stall can never be mistaken for a
+     * finished run (audit core:H5). The threshold is `stopped` (DRAG_ARM_SPEED_KMH, 0.5 km/h)
+     * rather than DRAG_FALSE_START_KMH (1 km/h): do_launch cannot enter LAUNCHED below
+     * DRAG_LAUNCH_G x DRAG_LAUNCH_HOLD_MS = 0.53 km/h, so a genuine launch -- whose v_est is still
+     * climbing out of 0 -- never trips 0.5 km/h, while a clutch-dump stall (Doppler 0) always
+     * does. The old v_peak guard existed to protect that climbing launch and is now unnecessary. */
+    if (stopped && now - D->t0_gps_us <= (int64_t)DRAG_FALSE_START_S * 1000000) {
+        abort_to_armed(D, out, cap, n, now, fs->mono_us);
         return;
     }
 
     /* DONE (§11.2): the 1/4 gate is hit; a full stop; or v below half-peak with no gate for the
      * timeout. */
     bool quarter = (D->quarter_idx != DRAG_NO_GATE && D->cur.gates[D->quarter_idx].hit);
-    bool stopped = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
     bool faded   = D->v_peak > 0.0 && D->v_est < 0.5 * D->v_peak &&
                    D->last_gate_gps_us != 0 &&
                    now - D->last_gate_gps_us >= (int64_t)DRAG_TIMEOUT_S * 1000000;
