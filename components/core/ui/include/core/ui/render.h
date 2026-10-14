@@ -49,6 +49,18 @@ void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill);
 /* Draws a 1px-tall, w-px-wide horizontal line at (x,y). Same clipping rules as fb_rect. */
 void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black);
 
+/* io:L1: fb_text/fb_text_right/fb_text_inv never walk more than FB_TEXT_MAX_CHARS characters of
+ * `s`, even if `s` is not yet NUL-terminated by then -- the bound that stops an untrusted,
+ * unterminated source (e.g. a model field with no guaranteed terminator) from running the read
+ * past its own end. Sized to the widest fixed-capacity field any caller passes today
+ * (screen_model_t.venue_name, core/ui/model.h); screens_moto.c carries the _Static_assert that
+ * machine-checks this constant against that field's real declared size, since this file (the
+ * generic framebuffer layer) must not include model.h itself to check it -- model.h/screens_moto.c
+ * are built on top of this one, not the reverse. A caller whose string is this long or longer AND
+ * still unterminated gets fewer characters than it asked for; every terminated string shorter
+ * than this draws exactly as before. */
+#define FB_TEXT_MAX_CHARS 32u
+
 /* Draws `s` in font `f` starting at pen position (x,y) (y = top of the glyph cell), one fixed-
  * width cell (f->w x f->h) per character, each cell blitted opaquely (ink pixels set to black,
  * non-ink pixels set to background) and clipped per-pixel to the framebuffer bounds — a glyph

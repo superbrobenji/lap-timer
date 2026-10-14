@@ -1013,6 +1013,16 @@ static void render_oneshot_boot(fb_t *fb, const screen_model_t *m)
     }
 }
 
+/* io:L1 (Ruling S4-H): render.h's FB_TEXT_MAX_CHARS is sized to venue_name below, the widest
+ * fixed-capacity field any caller passes to fb_text/fb_text_right/fb_text_inv -- machine-checked
+ * here, not just asserted true by comment, so a future growth of venue_name fails the BUILD
+ * instead of silently letting fb_text's bound start truncating real venue names. render.c itself
+ * must not include model.h to check this directly (that would invert core/ui's primitives-vs-
+ * screens layering: render.c is the generic framebuffer layer model.h/screens_moto.c build on top
+ * of, not the reverse), so the tie-in lives here, in the one file that legitimately sees both. */
+_Static_assert(sizeof(((screen_model_t *)0)->venue_name) - 1u <= FB_TEXT_MAX_CHARS,
+               "FB_TEXT_MAX_CHARS (render.h) must cover screen_model_t.venue_name's content length");
+
 /* VENUE (§20.6): "venue name big, then layout name" -- the ui task (session 4.3 Task 2) shows
  * this one-shot twice, once on EV_VENUE_FOUND and again on EV_LAYOUT_LOCKED, each a pure render of
  * a model with only the relevant field populated. The caller sets which phase this render is by

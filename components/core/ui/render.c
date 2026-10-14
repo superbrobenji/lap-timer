@@ -166,21 +166,15 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
  * guaranteed terminator in the latent case" (screens_moto.c:713-714), and Session 3 confirmed the
  * read overflow empirically by filling the model with 'W'.
  *
- * FB_TEXT_MAX_CHARS is sized from the widest fixed-capacity field any production caller passes to
- * fb_text/fb_text_right/fb_text_inv today: screen_model_t.venue_name[33] (model.h:126), drawn
- * directly by render_oneshot_venue (screens_moto.c:1032) -- 32 content chars, always
- * snprintf-terminated well inside that capacity (components/app/ui/ui.c:1242). Every other
- * caller is shorter still: boot_ver[32]/layout_name[25] (model.h:144/126) top out at 31/24 chars,
- * every literal in this file (e.g. ONESHOT_CALIBRATE_SUB, screens_moto.c) is under 25, and every
- * locally-built buffer (e.g. DCARD_FOOTER_BUF_LEN, screens_moto.c:689, itself == 32) is explicitly
- * NUL-terminated by put_str/put_uint's own destination bound at or inside that same 32-byte cap. A
- * cap of 32 therefore cannot truncate any real caller's text -- strnlen is avoided here the same
- * way the rest of components/core avoids it (ses_records.c:356): a plain bounded scan instead. */
-#define FB_TEXT_MAX_CHARS 32u
+ * FB_TEXT_MAX_CHARS (render.h) is the shared bound; this file (core/ui's generic framebuffer
+ * primitives) must not include model.h just to check it against screen_model_t's fields -- that
+ * would invert the layering model.h/screens_moto.c already build on top of this one. The
+ * machine-checked tie to the real widest field (screen_model_t.venue_name) lives in
+ * screens_moto.c's own _Static_assert instead, the one file that legitimately sees both. */
 
 /* Bounded stand-in for strlen(s): stops at the first NUL, same as strlen, but never looks past
- * FB_TEXT_MAX_CHARS characters -- see FB_TEXT_MAX_CHARS's derivation above. Rule 2: the loop is
- * bounded by that constant. */
+ * FB_TEXT_MAX_CHARS characters -- see render.h and screens_moto.c's _Static_assert for the bound's
+ * derivation and machine-checked tie-in. Rule 2: the loop is bounded by that constant. */
 static size_t fb_text_len(const char *s)
 {
     size_t n = 0;
