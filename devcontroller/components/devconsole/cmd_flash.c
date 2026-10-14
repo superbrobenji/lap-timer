@@ -31,8 +31,12 @@
  * would just be a safe no-op guarded by otastage's own `active` flag, never a double-free -- this
  * file still never makes that redundant call, for clarity), flashctl's single-flight guard is
  * released (flashctl_end_staging(false)), and any image bytes still in flight on the wire (e.g. a
- * host that kept sending after we gave up) are drained off UART0 for a bounded window so they
- * never get interpreted as REPL command characters once we return to the prompt.
+ * host that kept sending after we gave up) are drained off UART0 until the wire goes quiet,
+ * bounded by `FLASH_DRAIN_ITERS` windows (~1.2 s). That covers a host that stops sending when
+ * it sees `STAGE-ERR` -- which the reference host, `tools/devkit.py`, now does (it polls between
+ * chunks, dk:M8). A host that keeps streaming the whole image regardless will still outrun this
+ * drain and have its remainder land on the REPL line editor; the bound here is deliberate (a
+ * drain that waited out an arbitrary sender would be an unbounded loop).
  *
  * Nothing but the STAGE-ERR/STAGE-READY/STAGE-END/pushing/flash-result protocol lines may reach
  * this console's USB while a stage or push is live: `cmd_stream_tap_off()` plus an
@@ -99,7 +103,12 @@
 #define FLASH_CHUNK          4096u  /* raw read granularity, one otastage_write per received chunk */
 #define FLASH_READ_MS        50     /* per-read UART timeout window (Plan 5.6 T10 ruling 2) */
 #define FLASH_STALL_MAX_MS   3000   /* cumulative no-data time before STAGE-ERR timeout */
-#define FLASH_DRAIN_ITERS    10     /* FLASH_DRAIN_ITERS * FLASH_DRAIN_MS == 200 ms drain budget */
+#define FLASH_DRAIN_ITERS    60     /* was 10: with the host fixed (tools/devkit.py stops on the
+                                  * first STAGE-ERR, F3 T10), the worst case still in flight is one
+                                  * CHUNK plus the host OS buffer -- ~4-8 KB, ~0.7 s at 115200 --
+                                  * so 60 * FLASH_DRAIN_MS = 1.2 s covers it. The loop now stops
+                                  * EARLY on the first empty read window, so a clean abort costs
+                                  * one window, not the whole budget. */
 #define FLASH_DRAIN_MS       20
 #define FLASH_PUSH_POLL_MS   500
 #define FLASH_PUSH_MAX_POLLS 360    /* 360 * 500 ms == 180 s push-poll bound */
@@ -170,16 +179,17 @@ static void flash_forget_staged(void)
     s_stage_token = 0;   /* M10: no claim left to present a token for */
 }
 
-/* Reads and discards whatever shows up on the console UART for a fixed ~200 ms budget -- so a
- * host that was still sending image bytes when we gave up never has its leftover bytes land on
- * the REPL as command characters once this call returns. Fixed iteration count (bounded, no
- * wall-clock math). */
+/* Reads and discards whatever shows up on the console UART until the wire goes quiet or the
+ * iteration budget expires (~1.2 s max). Bounded by FLASH_DRAIN_ITERS windows of
+ * FLASH_DRAIN_MS each; breaks early on the first empty read (no data available), so a clean
+ * abort costs one window, not the whole budget. */
 static void flash_drain_rx(void)
 {
     uint8_t junk[64];
     for (int i = 0; i < FLASH_DRAIN_ITERS; i++) {
-        (void)uart_read_bytes((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, junk, sizeof junk,
-                              pdMS_TO_TICKS(FLASH_DRAIN_MS));
+        int n = uart_read_bytes((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, junk, sizeof junk,
+                                pdMS_TO_TICKS(FLASH_DRAIN_MS));
+        if (n <= 0) break;                               /* wire quiet: nothing left in flight */
     }
 }
 
@@ -374,6 +384,15 @@ static int flash_push_report(bool json, const flashctl_status_t *st)
         printf("%s\n", buf);
     } else {
         printf("flash result %s\n", rs);
+        if (st->result == 0) {
+            /* dk:L7: the lap-timer is now inside its OTA trial window -- it validates the new image at
+             * OTA_VALID_UPTIME_S (30 s) plus a sensors-ok check, and anything that resets it before
+             * then (a USB port open asserting DTR/RTS on its auto-reset circuit included) makes the
+             * bootloader roll the image back with 0x0806. The rule lived only in a memory note and the
+             * bench checklist; it belongs next to the event that starts the clock. */
+            printf("note: do not reset the lap-timer or open its USB port for 35 s (OTA trial window; "
+                   "an early reset rolls back, 0x0806)\n");
+        }
     }
     return (st->result == 0) ? 0 : 1;
 }
