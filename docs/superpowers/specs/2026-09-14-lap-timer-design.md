@@ -1992,8 +1992,8 @@ All six `lap.*` keys above reach the lap engine through `lap_cfg_from_user()` �
 | `lt_sys` | `crash_log` | blob | last 3 `{reset_reason u8, uptime_s u32}` for crash-loop detection |
 | `lt_sys` | `safe_until` | u32 | boot counter until which safe mode applies |
 | `lt_sys` | `ota_pending` | u8 | 1 while a new image awaits validation (belt-and-braces beside otadata) |
-| `lt_sys` | `safe_lvl` | u8 | safe-mode level 0 normal / 1 safe / 2 recovery (§17.5 recovery amendment) |
-| `lt_sys` | `stall_rst` | u8 | set by the supervisor just before a pipeline-stall restart (§17.2); read and cleared once at the next boot, which records it as the abnormal reset `LT_RST_STALL` (0x51) in `crash_log` so consecutive stalls trip the §17.5 crash-loop |
+| `lt_sys` | `safe_lvl` | u8 | safe-mode level 0 normal / 1 safe / 2 recovery (§17.5 recovery amendment; audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
+| `lt_sys` | `stall_rst` | u8 | set by the supervisor just before a pipeline-stall restart (§17.2); read and cleared once at the next boot, which records it as the abnormal reset `LT_RST_STALL` (0x51) in `crash_log` so consecutive stalls trip the §17.5 crash-loop (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
 
 NVS writes are batched: config and calibration only on change; error ring entries immediately (they are rare); counters at most once per 60 s except crash paths.
 
@@ -2101,7 +2101,7 @@ Track day ≈ 2 h ACTIVE (150 mAh) + 6 h PIT (78 mAh) + 0.2 h CONNECTED (14 mAh)
 
 ### 17.1 Watchdogs and protections
 
-- Task WDT: `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`, `CONFIG_ESP_TASK_WDT_PANIC=y`, both idle tasks and four app tasks subscribed: the supervisor, logger and pipeline through `sup_wdt_subscribe()` (logs `sup: wdt subscribe hb=N rc=R`; a failure records `E_SYS_WDT_SUBSCRIBE`), and the ui directly through `esp_task_wdt_add(NULL)` until plan F2b converts it. The pipeline subscribes only **after** its boot driver init, just before its loop, so slow GPS/IMU bring-up is never charged to the 5 s window (the heartbeat stall watch covers init). Each task feeds once per loop iteration (`sup_wdt_feed()`; the ui calls `esp_task_wdt_reset()` directly, at the top and again later in each iteration), and inside the long operations that could outlast the window: the logger's yielding session listings and eviction passes (every 16 directory entries and after each eviction), and the e-paper driver's BUSY wait (every 500 ms). The OTA write is **not** such an operation: it runs on the console task, which is not subscribed. `link_task` is **deliberately unsupervised and unsubscribed**: it blocks on a UART write to a peer that may be slow, wedged or absent, and a stalled or missing peer must never panic or restart the lap-timer (ruling R7; before that ruling only the supervisor and the ui were subscribed at all, so a logger wedged in LittleFS compaction hung silently).
+- Task WDT: `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`, `CONFIG_ESP_TASK_WDT_PANIC=y`, both idle tasks and four app tasks subscribed: the supervisor, logger and pipeline through `sup_wdt_subscribe()` (logs `sup: wdt subscribe hb=N rc=R`; a failure records `E_SYS_WDT_SUBSCRIBE`), and the ui directly through `esp_task_wdt_add(NULL)` until plan F2b converts it. The pipeline subscribes only **after** its boot driver init, just before its loop, so slow GPS/IMU bring-up is never charged to the 5 s window (the heartbeat stall watch covers init). Each task feeds once per loop iteration (`sup_wdt_feed()`; the ui calls `esp_task_wdt_reset()` directly, once at the top of each loop iteration and once at the end of its start-up), and inside the long operations that could outlast the window: the logger's yielding session listings and eviction passes (every 16 directory entries and after each eviction), and the e-paper driver's BUSY wait (every 500 ms). The OTA write is **not** such an operation: it runs on the console task, which is not subscribed. `link_task` is **deliberately unsupervised and unsubscribed**: it blocks on a UART write to a peer that may be slow, wedged or absent, and a stalled or missing peer must never panic or restart the lap-timer (ruling R7; before that ruling only the supervisor and the ui were subscribed at all, so a logger wedged in LittleFS compaction hung silently).
 - Interrupt WDT: `CONFIG_ESP_INT_WDT=y`, 300 ms.
 - Brownout: `CONFIG_ESP_BROWNOUT_DET=y`, level 2.8 V (`CONFIG_ESP_BROWNOUT_DET_LVL_SEL_7` on classic ESP32 ≈ 2.8 V **[VERIFY]** mapping in menuconfig).
 - Panic handler: `CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT`, `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF`, `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32`.
@@ -2788,7 +2788,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `HB_STALL_S` (pipeline/logger/ui/conn/power) | 1 / 5 / 10 / 10 / 5 | §17.2 |
 | `HEAP_LOW_KB` / `HEAP_BLE_OFF_KB` / `HEAP_LOG_OFF_KB` | 40 / 20 / 12 | §17.2 |
 | `HEAP_CLEAR_KB` | 48 | §17.2 (hysteresis release for `HEAP_LOW_KB`) |
-| `HEAP_INTEGRITY_PERIOD_S` | 60 | §17.1 |
+| `HEAP_INTEGRITY_PERIOD_S` | 60 | §17.1 (new rows in this block: audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
 | `STACK_LOW_B` | 256 | §17.2 |
 | `GPS_LADDER_S` | 3 / 10 / 30 / 60 | §7.5 |
 | `GPS_CFG_TIMEOUT_MS` | 500 | §7.3 |
@@ -2805,7 +2805,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `OTA_MAX_IMAGE` | 0x140000 − 4096 | §19.5 |
 | `OTA_STILL_MIN_MS` | 30000 | §19.5 |
 | `OTA_CLOSE_TIMEOUT_MS` | 2000 | §19.5 |
-| `OTA_RECV_TIMEOUT_S` | 30 | §19.6 |
+| `OTA_RECV_TIMEOUT_S` | 30 | §19.6 (new rows in this block: audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
 | `RTC_MAGIC` | 0x4C505452 | §15.3 |
 | `SES_SYNC` | 0xA5 | §12.2 |
 | `SES_MAX_PAYLOAD` | 247 | §12.2 |
