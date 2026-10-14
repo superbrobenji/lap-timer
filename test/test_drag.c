@@ -376,9 +376,10 @@ static void test_braking_distance_100_to_0(void)
     TEST_ASSERT_DOUBLE_WITHIN(0.5, 39.3, (double)gb->dist_cm / 100.0);
 }
 
-/* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns
- * to ARMED. A short g-spike launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires
- * and the discarded run leaves no gate hits. R21/M4: §11.2's ARMED row specifies EV_DRAG_ARMED on
+/* §11.2 false start: v_est below `stopped` (DRAG_ARM_SPEED_KMH, 0.5 km/h) within DRAG_FALSE_START_S
+ * of launch discards the run and returns to ARMED, unconditionally on v_peak (R21). A short g-spike
+ * launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires and the discarded run
+ * leaves no gate hits. R21/M4: §11.2's ARMED row specifies EV_DRAG_ARMED on
  * entry, so -- unlike the engine's one genuinely silent transition, the DONE -> IDLE settle covered
  * by test_done_to_idle_settle_is_silent -- this abort is NOT silent: it announces the re-arm with
  * exactly one new EV_DRAG_ARMED. */
@@ -480,9 +481,11 @@ static void test_done_then_brake(void)
 }
 
 /* #102 / pr:M1 — the DONE -> IDLE settle (go_idle_keep_result, drag.c:603, DRAG_DONE_SETTLE_S after
- * DONE) is the engine's second SILENT transition: drag_state() changes and no event is emitted, so
- * a publisher that refreshes only on a step that produced events keeps showing DONE until the next
- * arm. That is why pipeline.c's on_raw compares drag_state() against the state it last published.
+ * DONE) is the engine's ONLY silent transition (R21/M4 made the false-start abort announce itself
+ * with EV_DRAG_ARMED, so this is the one that is left): drag_state() changes and no event is
+ * emitted, so a publisher that refreshes only on a step that produced events keeps showing DONE
+ * until the next arm. That is why pipeline.c's on_raw compares drag_state() against the state it
+ * last published.
  * DEVIATION FROM BRIEF (verified on this checkout, see task-2-report.md): run_quarter_then_brake's
  * fixed 0.5 g launch / 1 g brake decelerates from the quarter's ~226 km/h peak in ~6.4 s, which is
  * already past DRAG_DONE_SETTLE_S (5 s) by the time brake_pending() clears -- so go_idle_keep_result()
