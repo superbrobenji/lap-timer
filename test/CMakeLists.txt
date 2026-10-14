@@ -70,7 +70,8 @@ foreach(src ${CORE_TEST_SRCS})
      AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
      AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile"
      AND NOT name STREQUAL "test_sim_clock" AND NOT name STREQUAL "test_drag"
-     AND NOT name STREQUAL "test_sup_policy" AND NOT name STREQUAL "test_batt_trim")
+     AND NOT name STREQUAL "test_sup_policy" AND NOT name STREQUAL "test_batt_trim"
+     AND NOT name STREQUAL "test_log_pause")
     add_core_test(${name})
   endif()
 endforeach()
@@ -203,3 +204,10 @@ target_include_directories(test_sup_policy PRIVATE ${SUP_POLICY_APP_DIR}/include
 set(BOARD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/board_devkit_v1)
 add_core_test(test_batt_trim ${BOARD_DIR}/host/batt_trim.c)
 target_include_directories(test_batt_trim PRIVATE ${BOARD_DIR}/include)
+
+# test_log_pause (F2b Task 2): the §12.6 still-pause state machine (app/log_pause.h -- pure: no IDF,
+# no FreeRTOS, no statics). Linked like test_sup_policy: the one app source plus the app include
+# root; assert_support.c is the strong recorder so test_null_is_safe can count the NULL-guard reports.
+set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/app)
+add_core_test(test_log_pause assert_support.c ${APP_DIR}/logger/log_pause.c)
+target_include_directories(test_log_pause PRIVATE ${APP_DIR}/include)

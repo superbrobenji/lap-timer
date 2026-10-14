@@ -51,12 +51,17 @@ file(WRITE "${SUITES_GEN}" "${SUITES_GEN_CONTENT}")
 # "app/lt_assert.h".
 set(APP_POLICY_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/sys/sup_policy.c")
 
+# APP_LOG_PAUSE_SRC: test/test_log_pause.c exercises app/log_pause.c (the §12.6 still-pause state
+# machine), which is pure C with no IDF deps -- compiled here the same way APP_POLICY_SRC is, so the
+# suite also runs on the Xtensa toolchain (§22.3) without REQUIRES app.
+set(APP_LOG_PAUSE_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/logger/log_pause.c")
+
 # APP_INCLUDE_DIR: test_proto.c includes app/lt_proto.h, a pure standalone header (stdint.h only,
 # no ESP-IDF/FreeRTOS deps -- see components/app/include/app/lt_proto.h). Adding just the app
 # component's include root (not REQUIRES app) resolves that #include without pulling app's full
 # sources/deps (nvs_flash, gps/imu HAL, ...) into this lightweight core-only selftest.
 set(APP_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include")
-idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" "${APP_POLICY_SRC}" ${WRAPPERS}
+idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" "${APP_POLICY_SRC}" "${APP_LOG_PAUSE_SRC}" ${WRAPPERS}
                        INCLUDE_DIRS "." "${TEST_DIR}" "${APP_INCLUDE_DIR}"
                        REQUIRES core unity_vendored pthread esp_timer)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
