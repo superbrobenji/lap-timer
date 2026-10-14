@@ -73,7 +73,11 @@ rtc_validity_t lt_rtc_validate(rtc_state_t *out)
 
 void lt_rtc_clear(void)
 {
+    /* Same seqlock form as lt_rtc_save: the memset rewrites s_rtc, so readers must see an odd gen. */
+    __atomic_store_n(&s_rtc_gen, s_rtc_gen + 1u, __ATOMIC_SEQ_CST);   /* odd: write in progress */
+    __atomic_thread_fence(__ATOMIC_RELEASE);   /* later data writes must not hoist above the odd store */
     memset(&s_rtc, 0, sizeof(s_rtc));   /* magic cleared -> ABSENT next validate */
+    __atomic_store_n(&s_rtc_gen, s_rtc_gen + 1u, __ATOMIC_RELEASE);   /* even: cleared snapshot coherent */
 }
 
 void lt_rtc_save(const lap_rtc_t *lr, const char *session_id, int64_t saved_gps_us,

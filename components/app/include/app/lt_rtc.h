@@ -51,8 +51,8 @@ void           lt_rtc_clear(void);   /* zero the snapshot (magic cleared) */
  * this snapshot and a WEDGED pipeline (the only task the supervisor restarts) cannot be asked to save,
  * so the resume point is the last gate crossing by design. mode is the operating mode (MODE_LAP/
  * MODE_DRAG). power_state has no owner until Plan 6 (pass 0); partial_count is owned by the ui and is
- * not yet handed here (§15.3, filed). session_epoch_mono_us is preserved across saves. session_id is a
- * bounded copy into the 10-byte field (may truncate). */
+ * not yet handed here (§15.3; handed off in F2a Task 10's handoff table). session_epoch_mono_us is
+ * preserved across saves. session_id is a bounded copy into the 10-byte field (may truncate). */
 void lt_rtc_save(const lap_rtc_t *lr, const char *session_id, int64_t saved_gps_us,
                  uint8_t mode, uint8_t power_state, uint32_t partial_count);
 
