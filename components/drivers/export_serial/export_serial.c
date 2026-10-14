@@ -185,7 +185,7 @@ static ser_ctx_t s_ser;            /* static: keeps the assembly buffer off the 
 static void ser_flush(ser_ctx_t *c)
 {
     if (c->error) {
-        printf("ERR 0x%04x: %.*s\r\n", (unsigned)c->err_code, (int)c->len, (const char *)c->buf);
+        printf("ERR 0x%04x: %.*s\n", (unsigned)c->err_code, (int)c->len, (const char *)c->buf);
         fflush(stdout);
         return;
     }
@@ -381,7 +381,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     sframe_t m; sframe_init(&m, /*print*/false, binary, has_tail);
     (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &m);
     if (m.err) {
-        printf("ERR 0x%04x: %s\r\n", (unsigned)m.err_code, m.errmsg);
+        printf("ERR 0x%04x: %s\n", (unsigned)m.err_code, m.errmsg);
         esp_log_level_set("*", saved);
         frame_tx_end();                            /* flushes, restores CRLF, releases the mutex */
         return;
@@ -397,7 +397,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         /* The op succeeded while measuring but failed while printing (e.g. the file was deleted
          * or storage degraded between the two passes). Abort the frame with an error line rather
          * than closing a body-less "success" with a bogus ---END. */
-        printf("\r\nERR 0x%04x: %s\r\n", (unsigned)pr.err_code, pr.errmsg);
+        printf("\r\nERR 0x%04x: %s\n", (unsigned)pr.err_code, pr.errmsg);
         esp_log_level_set("*", saved);
         frame_tx_end();                            /* flushes, restores CRLF, releases the mutex */
         return;
@@ -491,26 +491,75 @@ static int cmd_status_c(int argc, char **argv)
  * input line, and export_serial_start() sets repl_cfg.max_cmdline_length = 256 (asserted below to
  * be < sizeof s_setbuf), so 320 holds any real line with 64 B of margin. */
 static char s_setbuf[320];
+
+/* Rejoin argv[from..argc-1] into s_setbuf with single spaces, NUL-terminated, truncated to fit.
+ * Shared by `config set <json>` and `tracks put <json>` -- esp_console strips bare quotes, so a
+ * JSON body must be escaped on the command line (config set {\"units\":1}) and arrives split on
+ * spaces. Returns the byte length written. */
+static size_t join_args(int argc, char **argv, int from)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 0);
+    CORE_ASSERT_RET(from >= 0, EXP_SERIAL_ASSERT_CODE, 0);
+    size_t w = 0;
+    for (int i = from; i < argc && w + 1 < sizeof s_setbuf; i++) {
+        if (i > from) s_setbuf[w++] = ' ';
+        size_t al = strlen(argv[i]);
+        if (w + al >= sizeof s_setbuf) al = sizeof s_setbuf - 1 - w;
+        memcpy(s_setbuf + w, argv[i], al);
+        w += al;
+    }
+    s_setbuf[w] = '\0';
+    return w;
+}
+
 static int cmd_config_c(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "get") == 0) { run_cmd(CMD_CONFIG_GET, "config", NULL, 0, /*binary*/false); return 0; }   /* T-B: single-snapshot, no two-pass tear */
     if (argc >= 3 && strcmp(argv[1], "set") == 0) {
-        /* rejoin argv[2..] so a JSON body split on spaces is reassembled (quotes must be escaped
-         * on the command line, e.g. config set {\"units\":1} -- esp_console strips bare quotes). */
-        size_t w = 0;
-        for (int i = 2; i < argc && w + 1 < sizeof s_setbuf; i++) {
-            if (i > 2) s_setbuf[w++] = ' ';
-            size_t al = strlen(argv[i]);
-            if (w + al >= sizeof s_setbuf) al = sizeof s_setbuf - 1 - w;
-            memcpy(s_setbuf + w, argv[i], al);
-            w += al;
-        }
-        s_setbuf[w] = '\0';
+        size_t w = join_args(argc, argv, 2);
         run_cmd(CMD_CONFIG_SET, "config", (const uint8_t *)s_setbuf, w, false);
         return 0;
     }
     printf("usage: config get | config set <json>\n");
     return 1;
+}
+
+/* R5 (§18.4, drv:H4). `tracks get` is read-only and may be large (every bundled + user venue), so
+ * it takes the two-pass streaming frame with the §18.1 CRC32 tail, exactly like `list`. `tracks
+ * put` has side effects, so it takes the single-dispatch buffered frame (run_cmd) -- running it
+ * twice would install the venue twice.
+ *
+ * Console size limit: repl_cfg.max_cmdline_length is 256 B, so a venue pasted here must be small
+ * (one layout, few sectors). The framed CMD_TRACKS_PUT op over the dev-kit link carries the full
+ * CMD_JSON_CAP (3072 B); the usage line says so rather than letting a truncated paste fail
+ * mysteriously. */
+static int cmd_tracks_c(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc >= 2 && strcmp(argv[1], "get") == 0) {
+        run_stream(CMD_TRACKS_GET, "tracks", NULL, 0, /*binary*/false, /*has_tail*/true);
+        return 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "put") == 0) {
+        size_t w = join_args(argc, argv, 2);
+        run_cmd(CMD_TRACKS_PUT, "tracks", (const uint8_t *)s_setbuf, w, false);
+        return 0;
+    }
+    printf("usage: tracks get | tracks put <json>   (console line cap 256 B; the framed\n");
+    printf("       CMD_TRACKS_PUT op over the dev-kit link takes up to 3072 B)\n");
+    return 1;
+}
+
+/* R5 (§18.4 `coredump`, §17.10). Binary body -> Base64 between the markers, like `open <id> log`. */
+static int cmd_coredump_c(int argc, char **argv)
+{
+    CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (argc >= 2 && strcmp(argv[1], "clear") == 0) {
+        run_cmd(CMD_COREDUMP_CLEAR, "coredump", NULL, 0, false);
+        return 0;
+    }
+    run_stream(CMD_COREDUMP_GET, "coredump", NULL, 0, /*binary*/true, /*has_tail*/true);
+    return 0;
 }
 
 static int cmd_errlog_c(int argc, char **argv)
@@ -570,36 +619,20 @@ static int dbg_status(void)
 }
 
 /* ---- dbg logtest [n] (from 3.3) ---- */
-static void synth_fix(gps_fix_t *f, uint32_t i)
-{
-    memset(f, 0, sizeof *f);
-    f->gps_us     = (int64_t)1700000000000000LL + (int64_t)i * 200000;   /* 5 Hz */
-    f->mono_us    = (int64_t)esp_timer_get_time();
-    f->lat_e7     = -338900000 + (int32_t)(i % 2000);                     /* ~ -33.89 deg, wandering */
-    f->lon_e7     =  184000000 + (int32_t)(i % 2000);                     /* ~ 18.40 deg */
-    f->alt_mm     = 45000 + (int32_t)(i % 50);
-    f->gspeed_mms = 20000 + (int32_t)(i % 1000);
-    f->head_e5    = (int32_t)((i * 137) % 36000000);
-    f->hacc_mm    = 2000;
-    f->sacc_mms   = 300;
-    f->pdop_e2    = 120;
-    f->fix_type   = 3;
-    f->sats       = 10;
-    f->flags      = GPS_FLAG_FIXOK | GPS_FLAG_TIME | GPS_FLAG_DATE;
-    f->valid      = 1;
-}
-
 static int dbg_logtest(int argc, char **argv)
 {
     CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
     long n = (argc >= 3) ? strtol(argv[2], NULL, 10) : 1000;
     if (n < 1) n = 1;
-    if (n > 100000) n = 100000;
+    if (n > 65535) n = 65535;      /* R8: carried in command_t.arg16 (was 100000) */
 
     log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = 1, .venue_id = 1, .layout_id = 1,
                           .gps_us = (int64_t)1700000000000000LL };
     CORE_ASSERT_RET(g_log_req_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);   /* xQueueSend needs a real queue handle */
-    xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100));
+    if (xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
+        printf("logtest: log queue full; session not opened\n");
+        return 1;
+    }
     logger_notify();
     vTaskDelay(pdMS_TO_TICKS(30));      /* let the logger open + write the HDR + initial .sum */
 
@@ -619,30 +652,18 @@ static int dbg_logtest(int argc, char **argv)
     }
     logger_notify();
 
-    long pushed = 0;
-    for (long i = 0; i < n; i++) {
-        gps_fix_t f;
-        synth_fix(&f, (uint32_t)i);
-        int spins = 0;
-        bool ok = true;
-        /* rule 2: bounded retry -- FIX_RING_CAP (32) fixes, drained continuously by the logger
-         * task woken via logger_notify() each spin, so 1000 spins (>>30x the ring depth) is far
-         * more yielding than the logger could ever need to catch up under any normal load. On
-         * exhaustion this fix is dropped (logged) rather than spinning forever. */
-        while (!ring_push(&g_fix_ring, &f)) {   /* full: wake the logger and yield */
-            logger_notify();
-            vTaskDelay(1);
-            if (++spins > 1000) {
-                printf("logtest: fix %ld dropped (ring stayed full for %d spins)\n", i, spins);
-                ok = false;
-                break;
-            }
-        }
-        if (ok) pushed++;
-        if ((i & 0x1F) == 0x1F) logger_notify();
+    /* R8 (app:M2): the fixes themselves are synthesised and pushed by the PIPELINE -- g_fix_ring's
+     * one documented producer (app/lt_ipc.h). Pushing them from this task made the relaxed-head
+     * SPSC ring two-producer and spliced two gps_fix_t into one FIX record in the live .log. */
+    command_t c = { .type = CMD_DBG_LOGTEST, .arg16 = (uint16_t)n };
+    CORE_ASSERT_RET(g_cmd_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (xQueueSend(g_cmd_q, &c, pdMS_TO_TICKS(100)) != pdTRUE) {
+        printf("logtest: cmd queue full; fixes not queued\n");
+        return 1;
     }
-    logger_notify();
-    printf("logtest: opened a session, queued 2 laps, pushed %ld/%ld fixes; NOT closed.\n", pushed, n);
+    printf("logtest: opened a session, queued 2 laps, asked the pipeline for %ld fixes; NOT closed.\n", n);
+    printf("  -> the pipeline pushes up to 16 per 50 ms pass, so %ld fixes take ~%ld ms.\n",
+           n, (n + 15) / 16 * 50);
     printf("  -> watch for \"session Sxxxxx_yyy open\", then pull power to test the cut.\n");
     printf("  -> after reboot: dbg fs ; dbg sum <id> ; dbg logck <id>\n");
     return 0;
@@ -656,12 +677,16 @@ static void print_sessions(void)
     if (sto_list_open(&it, "/sessions") != 0) { printf("  (cannot list)\n"); return; }
     sto_entry_t ent;
     int n = 0;
-    while (sto_list_next(&it, &ent) == 1) {
+    int rc;
+    while ((rc = sto_list_next(&it, &ent)) == 1) {
         printf("  %-24s %8u B\n", ent.name, (unsigned)ent.size);
         n++;
     }
     sto_list_close(&it);
-    if (n == 0) printf("  (empty)\n");
+    /* L16: rc < 0 is a storage error mid-listing; reporting it as "(empty)" hid a degraded fs
+     * behind a normal-looking answer. rc == 0 is a genuine end of directory. */
+    if (rc < 0) printf("  (listing error %d after %d entries)\n", rc, n);
+    else if (n == 0) printf("  (empty)\n");
 }
 
 static int dbg_fs(void)
@@ -687,7 +712,7 @@ static int dbg_fs(void)
 /* ---- ses reader tally (shared by dbg sum + dbg logck, from 3.3) ---- */
 typedef struct {
     int hdr, venue, end;
-    int laps, drags, fixes, fused, events, sectors, gates, others;
+    int laps, drags, fixes, fused, events, sectors, gates, tmaps, calibs, others;
     ses_hdr_t   h;
     ses_venue_t v;
 } tally_t;
@@ -707,6 +732,8 @@ static void tally_cb(uint8_t type, const uint8_t *payload, uint8_t len, void *ct
     case SES_T_SECTOR:      t->sectors++; break;
     case SES_T_DRAG_GATE:   t->gates++; break;
     case SES_T_END:         t->end++; break;
+    case SES_T_TIME_MAP:    t->tmaps++;  break;
+    case SES_T_CALIB:       t->calibs++; break;
     default:                t->others++; break;
     }
 }
@@ -760,8 +787,10 @@ static int dbg_logck(int argc, char **argv)
     if (read_through_ses(argv[2], ".log", &t) != 0) return 1;
     printf(".log %s: frames ok=%u bad=%u\n", argv[2],
            (unsigned)s_rdr.frames_ok, (unsigned)s_rdr.frames_bad);
-    printf("  HDR=%d FIX=%d FUSED=%d LAP=%d SECTOR=%d DRAG_RUN=%d DRAG_GATE=%d EVENT=%d END=%d other=%d\n",
-           t.hdr, t.fixes, t.fused, t.laps, t.sectors, t.drags, t.gates, t.events, t.end, t.others);
+    printf("  HDR=%d FIX=%d FUSED=%d LAP=%d SECTOR=%d DRAG_RUN=%d DRAG_GATE=%d EVENT=%d"
+           " TIME_MAP=%d CALIB=%d END=%d other=%d\n",
+           t.hdr, t.fixes, t.fused, t.laps, t.sectors, t.drags, t.gates, t.events,
+           t.tmaps, t.calibs, t.end, t.others);
     if (s_rdr.frames_bad > 0)
         printf("  (bad>0: a truncated/torn tail -- the reader resynced past it, .log stays decodable)\n");
     return 0;
@@ -1017,18 +1046,14 @@ static int cmd_dbg(int argc, char **argv)
             for (;;) { }
         }
         if (strcmp(s, "sim") == 0) return dbg_sim(argc, argv);
-        if (strcmp(s, "gps") == 0 || strcmp(s, "imu") == 0 || strcmp(s, "power") == 0) {
-            printf("dbg %s: not in plan 03 (GPS/IMU raw and power states land later)\n", s);
-            return 0;
-        }
     }
-    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | "
-           "reset | crash | hang\n");
-    printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection, Plan 7 T8)\n");
-    printf("       dbg flag set|clear <bit 0..15>  (bench sys_flags injection, Plan 7 T8)\n");
-    printf("       dbg safe clear  (clear the safe/recovery gate now, debt sweep A #62/§17.5)\n");
-    printf("       dbg gps raw <on|off> | imu raw <on|off> | power <..>  (not in plan 03)\n");
-    printf("       dbg sim drag | laps <n> | park  (bench scenarios, Task 3; sim build only)\n");
+    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem\n");
+    printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection)\n");
+    printf("       dbg flag set|clear <bit 0..15>            (bench sys_flags injection)\n");
+    printf("       dbg safe clear                            (clear the safe/recovery gate, §17.5)\n");
+    printf("       dbg sim drag | laps <n> | park            (bench scenarios; drives the sim GPS only,\n");
+    printf("                                                  a real-GPS build logs a warning and ignores it)\n");
+    printf("       dbg reset | crash | hang                  (reset / panic / task-WDT trip)\n");
     return 1;
 }
 
@@ -1081,14 +1106,14 @@ static int ota_build_begin(int argc, char **argv, uint8_t *payload, uint32_t *si
 {
     CORE_ASSERT_RET(argv != NULL && payload != NULL, EXP_SERIAL_ASSERT_CODE, -1);
     CORE_ASSERT_RET(size_out != NULL, EXP_SERIAL_ASSERT_CODE, -1);
-    if (argc < 6) { printf("OTA-ERR usage\r\n"); fflush(stdout); return -1; }
+    if (argc < 6) { printf("OTA-ERR usage\n"); fflush(stdout); return -1; }
     char *end = NULL;
     unsigned long size = strtoul(argv[2], &end, 10);
-    if (end == argv[2] || *end != '\0' || size == 0) { printf("OTA-ERR badsize\r\n"); fflush(stdout); return -1; }
+    if (end == argv[2] || *end != '\0' || size == 0) { printf("OTA-ERR badsize\n"); fflush(stdout); return -1; }
     memset(payload, 0, OTA_BEGIN_PAYLOAD);
     payload[0] = (uint8_t)size;        payload[1] = (uint8_t)(size >> 8);
     payload[2] = (uint8_t)(size >> 16); payload[3] = (uint8_t)(size >> 24);
-    if (ota_hex2bin(argv[3], payload + 4, 32) != 0) { printf("OTA-ERR badsha\r\n"); fflush(stdout); return -1; }
+    if (ota_hex2bin(argv[3], payload + 4, 32) != 0) { printf("OTA-ERR badsha\n"); fflush(stdout); return -1; }
     size_t vl = strlen(argv[4]); if (vl > 16) vl = 16; memcpy(payload + 36, argv[4], vl);   /* ver[16] */
     size_t hl = strlen(argv[5]); if (hl > 24) hl = 24; memcpy(payload + 52, argv[5], hl);   /* hwid[24] */
     *size_out = (uint32_t)size;
@@ -1154,7 +1179,7 @@ static int ota_recv_stream(uint32_t size)
         int got = ota_fill_chunk(port, s_ota_buf + 4, want);
         if (got < 0) {
             (void)ota_abort();
-            printf("OTA-ERR %s\r\n", (got == -2) ? "timeout" : "read");   /* literal fmt (-Wformat-security) */
+            printf("OTA-ERR %s\n", (got == -2) ? "timeout" : "read");   /* literal fmt (-Wformat-security) */
             fflush(stdout);
             return -1;
         }
@@ -1163,7 +1188,7 @@ static int ota_recv_stream(uint32_t size)
         int rc = ota_data(s_ota_buf, (size_t)got + 4);
         if (rc != 0) {
             (void)ota_abort();
-            printf("OTA-ERR 0x%04x\r\n", (unsigned)rc);
+            printf("OTA-ERR 0x%04x\n", (unsigned)rc);
             fflush(stdout);
             return -1;
         }
@@ -1205,13 +1230,14 @@ static int cmd_ota(int argc, char **argv)
     esp_log_level_set("*", ESP_LOG_NONE);
     int brc = ota_begin(payload, OTA_BEGIN_PAYLOAD);
     if (brc != 0) {                              /* precondition / early hwid reject -> no raw mode */
-        printf("OTA-ERR 0x%04x\r\n", (unsigned)brc);
+        printf("OTA-ERR 0x%04x\n", (unsigned)brc);
         fflush(stdout);
         esp_log_level_set("*", saved);
         xSemaphoreGive(s_uart_mtx);
         return 1;
     }
-    printf("OTA-READY\r\n");                      /* handshake: the host streams the image only now */
+    printf("OTA-READY\n");                        /* handshake: the host streams the image only now. L15: bare \n -- the
+                                                 * console CRLF translation adds the \r; a literal \r\n reached the wire as \r\r\n */
     fflush(stdout);
     if (ota_recv_stream(size) != 0) {             /* aborted + OTA-ERR already printed (inside the lock) */
         esp_log_level_set("*", saved);
@@ -1219,7 +1245,7 @@ static int cmd_ota(int argc, char **argv)
         return 1;
     }
     int erc = ota_end();                          /* SHA + ECDSA verify; 0 -> supervisor reboots (§19.4) */
-    printf("OTA-END 0x%04x\r\n", (unsigned)erc);
+    printf("OTA-END 0x%04x\n", (unsigned)erc);
     fflush(stdout);
     esp_log_level_set("*", saved);
     xSemaphoreGive(s_uart_mtx);
@@ -1262,7 +1288,10 @@ int link_sink_serial_emit(const uint8_t *frame, size_t len)
 static void register_cmd(const char *command, const char *help, esp_console_cmd_func_t func)
 {
     const esp_console_cmd_t cmd = { .command = command, .help = help, .hint = NULL, .func = func };
-    esp_console_cmd_register(&cmd);
+    esp_err_t err = esp_console_cmd_register(&cmd);
+    if (err != ESP_OK) {   /* P10 rule 7; never abort -- the other verbs still work */
+        printf("console: register '%s' failed: %s\n", command, esp_err_to_name(err));
+    }
 }
 
 void export_serial_start(int reset_reason)
@@ -1303,8 +1332,10 @@ void export_serial_start(int reset_reason)
     register_cmd("diag",   "diagnostics JSON (§17.10)", cmd_diag_c);
     register_cmd("delete", "delete <id>  (unlink <id>.log/.sum)", cmd_delete_c);
     register_cmd("close",  "close the current transfer (ack)", cmd_close_c);
+    register_cmd("tracks",   "tracks get | tracks put <json>  (§18.1 0x12/0x13)", cmd_tracks_c);
+    register_cmd("coredump", "coredump | coredump clear  (base64 image, §18.1 0x17/0x18)", cmd_coredump_c);
 #if CFG_HAS_DEVUX
-    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn <n> [ms]|flag set|clear <b>|reset|crash|hang", cmd_dbg);
+    register_cmd("dbg",    "status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn|flag|safe|sim|reset|crash|hang", cmd_dbg);
     register_cmd("ota",    "ota recv <size> <sha256_hex> <ver> <hwid>  (dev bench image push, §19.6)", cmd_ota);
 #endif
 
