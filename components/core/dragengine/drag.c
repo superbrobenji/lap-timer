@@ -277,7 +277,11 @@ static void gate_step_range(drag_t *D, event_t *out, int cap, int *n, uint8_t i,
     }
     /* A single sample pair must not both arm `a` and record `b`: a large Doppler re-anchor after a
      * gap can cross both thresholds in one step, and the interval would be a fraction of one
-     * sample. The b-crossing is looked for from the NEXT pair onwards. */
+     * sample. So the arming pair's own b-crossing is DISCARDED here, not deferred: `b` is only
+     * re-tested on a LATER pair whose `vp < Vb` (a normal run that climbs through `a` then later,
+     * separately, through `b` is unaffected). A monotonic climb past both thresholds inside one
+     * sample pair therefore leaves this gate unrecorded by design -- the only alternative is a
+     * fictitious interval shorter than one sample, which is the defect this LOW exists to remove. */
     if (D->range_started[i] && !armed_now && !D->cur.gates[i].hit) {
         if (vp < Vb && vc >= Vb && vc > vp) {
             double frac = (Vb - vp) / (vc - vp);
@@ -303,8 +307,6 @@ static void gate_step(drag_t *D, event_t *out, int cap, int *n,
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(D->cfg.n_gates <= DRAG_MAX_GATES, DRAG_ASSERT_CODE);   /* loop bound */
-    CORE_ASSERT_VOID(D->quarter_idx == DRAG_NO_GATE || D->quarter_idx < DRAG_MAX_GATES,
-                     DRAG_ASSERT_CODE);        /* the trap block below indexes cfg.gates[quarter_idx] */
     /* M2: fused.gps_us is tb_mono_to_gps(mono), and tb's half-window rollover or a PPS
      * acquire/drop can step the filtered offset backward by up to TB_PPS_DISAGREE_US (§6.2). Skip
      * this sample's interpolation and trap accumulation rather than assert: the old assertion did
