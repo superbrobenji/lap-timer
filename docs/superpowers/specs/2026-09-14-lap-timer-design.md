@@ -1732,7 +1732,7 @@ Rows shown on the riding screen: `SPEED_FROM0` gates in `benches` that were hit,
 
 - Session id: `S%05u_%03u` = boot counter (u16, NVS `lt_sys/boot_cnt`) and per-boot sequence (u8). Example `S00042_001`.
 - Files: `/sessions/S00042_001.log` (append-only stream) and `/sessions/S00042_001.sum` (summary, rewritten atomically).
-- A session starts at boot (or resume) and ends at PARK/SHUTDOWN or when the venue changes. A new session also starts on mode change.
+- A session starts when the lap engine acquires a venue (`EV_VENUE_FOUND`, §10.3) and ends when it leaves one (`EV_VENUE_LOST`) or on a planned restart/OTA (`END.reason = RESTART`, sent by the supervisor's `close_session_before_restart`). A mode change — `CMD_SET_MODE`, or a `CMD_CONFIG_RELOAD` that flips `cfg.mode` — closes the open session (`NORMAL`) and opens the next one, so a `.log`/`.sum` pair never mixes two modes. A §15.3 RTC resume after a reboot opens a **new** session (`resume_open_session`): nothing is open after a reset and `lap_import_rtc` emits no `EV_VENUE_FOUND`, so the resumed lap and every later one would otherwise go unlogged. The owner of the lifecycle is the **pipeline** task (`session_policy()`, `app/session_policy.h`): it issues `LOGGER_OPEN_SESSION`/`LOGGER_CLOSE_SESSION` fire-and-forget on `log_req_q`, whose FIFO order makes a close-then-open rotation atomic without a synchronous wait; the logger is the authority and ignores an OPEN while open or a CLOSE while closed. If the logger refuses an OPEN (storage below the §12.7 reserve, which logs `storage below reserve … session not opened` and records `E_STO_FULL`, or the sequence limit below) the pipeline, which still holds the venue, asks again at most once per 60 s until `logger_session_is_open()` agrees. PARK/SHUTDOWN closes belong to Plan 6 (there is no power task). The per-boot sequence byte saturates at 255: the 256th open of one boot is **refused** (`E_STO_WRITE`, arg `0xFF`, log `session sequence exhausted (255 opens this boot): not opening`) rather than appended to the previous session's file; the next reset advances the boot counter. Ruling R4 (and R4's resume/retry follow-ups B5-5/B5-6), `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
 
 ### 12.2 Frame format
 
@@ -1766,6 +1766,8 @@ Reader: scan for `0xA5`; read type/len; if `len > 247` resync; read payload+crc;
 | 0x0E | `POWER` | `mono_us i64, state u8, batt_mv u16` | 11 |
 | 0x7F | `END` | `gps_us i64, reason u8: 0 NORMAL, 1 RESTART (planned/OTA), 2 STALL` | 9 |
 
+`TIME_MAP` (0x0C), `CALIB` (0x0A) and the `SESSION_HDR` calib block (and its `gps_hz`) are written by the logger from records the pipeline posts on `result_q` (`LOG_RES_TIMEMAP`, `LOG_RES_CALIB`; it owns the time base and the fusion state). The calib values are `fus_calib_defaults()` until Plan 8's calibration persistence (#125) lands (the orientation capture itself is #93), but the block and the record are present and decodable. `MARK` (0x0B) is **reserved and never written**: there is no button-mark feature (`ses_encode_mark` has no caller). `POWER` (0x0E) is **reserved and never written** until Plan 6 owns the power states (`ses_encode_power` has no caller). Ruling R4, design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
+
 `FIX_DELTA` flags: bit0 valid, bit1 gnssFixOK, bit2 3D. `FUSED` flags = `fused_sample_t.flags`. `LAP` flags: bit0 GPS_LOST, bit1 PIT, bit2 INCOMPLETE, bit3 OUT_LAP, bit4 INTERRUPTED, bit5 TOO_LONG, bit6 VALID. `END.reason` values mirror `core/ses.h`'s `SES_END_*` enum (`SES_END_NORMAL=0`, `SES_END_RESTART=1`, `SES_END_STALL=2`; debt sweep A #59): `RESTART` is sent by the OTA reboot path (`ota_reboot_check`, sup.c) and `STALL` by the supervisor's stall-restart path (`check_stalls`, sup.c), both via a synchronous `LOGGER_CLOSE_SESSION` request before the task restarts; existing callers (a normal PARK/SHUTDOWN or venue-change close) pass `NORMAL`.
 
 The `char[n]` fields above are exactly `n` bytes on the wire and are *not* required to be
@@ -1781,7 +1783,7 @@ fix wave (io:M9).
 - `FIX_KEY` is written for the first fix, every `FIX_KEYFRAME_S` seconds, after any invalid fix, and whenever a delta field would overflow (`|dlat| > 32767`, `dt > 65535 ms`, speed > 655 m/s, alt delta > 3276 m).
 - `FIX_DELTA.dt_ms` is relative to the previous `FIX_*` record; `hacc_dm` saturates at 255 (25.5 m).
 - `FUSED.dt_ms` is relative to the previous `FUSED` record, or to the last `FIX_*` record if none since (the reader tracks both).
-- `TIME_MAP` is written at session start, whenever `tb` quality changes, and every 60 s.
+- `TIME_MAP` is written at session start, whenever `tb_quality()` changes, and otherwise every 60 s while a session is open. The pipeline produces every `(mono_us, gps_us, quality)` triple (`LOG_RES_TIMEMAP`) because it owns the time base; the logger only encodes it, and drains `result_q` ahead of the sample rings so the session-start record lands immediately after `SESSION_HDR`. Ruling R4, design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
 
 ### 12.5 Summary file
 
@@ -1799,7 +1801,7 @@ Framed sizes: `FIX_DELTA` 15 + 5 framing = 20 B; `FUSED` 11 + 5 = 16 B; `FIX_KEY
 
 Summaries are never evicted, so timing results outlive sample logs.
 
-Logging pauses (no `FIX_*`/`FUSED`) when `still` for 10 s; resumes with a `FIX_KEY`.
+Logging pauses (no `FIX_*`/`FUSED`) once `still` (`EV_STILL`: not `moving`, §9.1) has held for `LOG_PAUSE_STILL_S` = 10 s (`LOG_PAUSE_STILL_MS`, `app/log_pause.h`; the logger logs `logging paused: still 10 s (§12.6)` once on the tick it engages), and resumes on `EV_MOTION` with a `FIX_KEY` (both the fix and fused delta codecs are re-keyed). Summaries, events and the `.sum` keep flowing throughout, exactly as under `SYS_STORAGE_FULL` and safe mode. The rule is the pure `log_pause_t` state machine (`app/log_pause.h`, host-tested in `test/test_log_pause.c`). The `.sum` carries the first 100 `LAP` frames of a 4-sector layout (`LAP_ACC_CAP` = 100 × 55 B = 5500 B); laps past that cap are `.log`-only and the logger reports the spill once per session (`.sum lap accumulator full at lap N: later laps are .log-only (§12.5)`). Ruling R4, design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
 
 ### 12.7 Eviction (internal)
 
@@ -1842,7 +1844,7 @@ loop:
   hb[LOGGER]++
 ```
 
-The logger owns the open `.log` handle. Session open/close is commanded by the power task (`LOGGER_OPEN_SESSION`, `LOGGER_CLOSE_SESSION`) via `ui_req_q`-style request queue `log_req_q` (depth 4).
+The logger owns the open `.log` handle. Session open/close is commanded by the **pipeline** task over the request queue `log_req_q` (depth 4): `LOGGER_OPEN_SESSION`, `LOGGER_CLOSE_SESSION`, plus `LOGGER_REBUILD_SUMMARY`, `LOGGER_EVICT`, `LOGGER_DELETE_SESSION`, `LOGGER_SAVE_TRACKS` and `LOGGER_PUT_TRACK`. There is no power task (Plan 6). A request may carry a `requester` for a bounded reply (`logger_request_sync`, debt sweep A #59/#73) — used by the supervisor (the close before a restart), the console/command task (`DELETE`, `TRACKS_PUT`'s `LOGGER_PUT_TRACK`, the post-timeout `LOGGER_EVICT` barrier), never by the ui or the pipeline. Design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
 
 ---
 
@@ -2245,7 +2247,7 @@ Menu → Diagnostics shows: fw version, hwid, uptime, boots, crashes, WDT resets
 
 ### 18.1 Command protocol (transport-agnostic, `app/cmd`)
 
-Request frame (from client): `op u8 | tag u8 | payload[]`. Response stream (to client): zero or more `data` chunks `tag u8 | chunk_seq u16 | flags u8 | payload[≤ 496]`; `flags` bit0 `LAST`, bit1 `ERROR` (payload = `code u16 | msg utf8`). A request with tag T is answered only by chunks with tag T. One request in flight at a time; a new request while streaming aborts the stream (`E_CONN_XFER_ABORT`).
+Request frame (from client): `op u8 | tag u8 | payload[]`. Response stream (to client): zero or more `data` chunks `tag u8 | chunk_seq u16 | flags u8 | payload[≤ 496]`; `flags` bit0 `LAST`, bit1 `ERROR` (payload = `code u16 | msg utf8`). A request with tag T is answered only by chunks with tag T. One request in flight at a time; a new request while streaming aborts the stream (`E_CONN_XFER_ABORT`) — **not implemented**: the only transport that exists, the serial console, is synchronous, so no stream is ever in progress when a request arrives; the first asynchronous transport (BLE/WiFi, sub-project C) must add it.
 
 | op | Name | Request payload | Response |
 |----|------|-----------------|----------|
@@ -2257,20 +2259,27 @@ Request frame (from client): `op u8 | tag u8 | payload[]`. Response stream (to c
 | 0x06 | `DELETE` | `id char[10]` | ack |
 | 0x10 | `CONFIG_GET` | — | JSON |
 | 0x11 | `CONFIG_SET` | JSON (merge) | ack or ERROR with validation message |
-| 0x12 | `TRACKS_GET` | — | JSON array of venues (bundled + user, `"src"` field) |
-| 0x13 | `TRACKS_PUT` | JSON venue | ack; persisted to `user.bin` |
+| 0x12 | `TRACKS_GET` | — | JSON array of venues (bundled + user, `"src"` field) — **implemented** |
+| 0x13 | `TRACKS_PUT` | JSON venue (1 – 3071 B) | ack; persisted to `/tracks/user.bin` — **implemented** |
 | 0x14 | `ERRLOG_GET` | — | JSON |
 | 0x15 | `ERRLOG_CLEAR` | — | ack |
 | 0x16 | `DIAG_GET` | — | JSON |
-| 0x17 | `COREDUMP_GET` | — | raw partition bytes (≤ 64 KB) |
-| 0x18 | `COREDUMP_CLEAR` | — | ack |
+| 0x17 | `COREDUMP_GET` | — | raw partition bytes (≤ 64 KB) — **implemented** |
+| 0x18 | `COREDUMP_CLEAR` | — | ack — **implemented** |
 | 0x20 | `OTA_BEGIN` | `size u32, sha256[32], version char[16], hwid char[24]` | ack or ERROR (`E_OTA_PRECOND`, `E_OTA_HWID`) |
 | 0x21 | `OTA_DATA` | `offset u32, bytes[]` | ack per chunk (empty LAST) |
 | 0x22 | `OTA_END` | — | ack after signature + hwid verification, then reboot in 2 s |
 | 0x23 | `OTA_ABORT` | — | ack |
-| 0x30 | `TIME_SYNC` | `unix_s u32` | ack (used only when GPS has no fix; sets a provisional clock for file naming; never used for timing) |
+| 0x30 | `TIME_SYNC` | `unix_s u32` | **Not implemented.** It needs a provisional-clock consumer for file naming; filed against Plan 8 (design 2026-10-13 R5). |
 
 Errors: `E_CONN_PROTO` for unknown op / malformed payload.
+
+Amendments (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`, R5/R8):
+- `TRACKS_PUT` answers `E_CONN_PROTO` with `tracks put: bad length` (empty, or 3072 B and over — the staging buffer is `CMD_JSON_CAP` = 3072 B and keeps a NUL, so the largest accepted venue is 3071 B), `table full` (`TRK_MAX_USER` venues), `bad venue json`, `installed but not saved` (the venue is armed in RAM but the table could not be persisted — storage dead, full, or below the §12.7 5 % reserve), `tracks put timed out` (2 s) or `tracks put failed`. The staged JSON is installed by the **logger** (`LOGGER_PUT_TRACK`), not the command task, because the user table is writer-exclusive to boot, the pipeline and the logger. After a `tracks put timed out` the logger may still be reading the staging buffer, so `LIST`/`CONFIG_GET`/`ERRLOG_GET`/`DIAG_GET`/`TRACKS_GET`/`TRACKS_PUT` answer `busy; retry` until a `LOGGER_EVICT` barrier shows the logger has drained past the request.
+- `TRACKS_GET` ends with an `ERROR` chunk `tracks: N venues skipped (too large)` instead of the closing `]` when a venue document does not fit the 3072 B assembly buffer.
+- `LIST` returns at most 48 sessions (`LIST_MAX_SESSIONS`, `cmd.c`); further ones are omitted. The 48-entry table is a stopgap sized against the DRAM budget; F5 (#91) replaces it.
+- `COREDUMP_GET` answers `E_CONN_PROTO` with `coredump: none stored`, `coredump: no partition`, `coredump: bad offset` or `coredump: read failed`; `COREDUMP_CLEAR` with `coredump erase failed`.
+- An `OTA_BEGIN` refusal on a §19.5 precondition carries `E_OTA_PRECOND` (0x0801) with the message `ota precondition: <reason>`, where `<reason>` is one of `in flight`, `size`, `not still`, `battery`, `slot pending verify`, `bad length`, `session close failed` (`cmd.c`'s table, indexed by the `OTA_WHY_*` errlog arg); when the reason cannot be attributed to this call the message degrades to plain `ota`.
 
 ### 18.2 BLE (`conn_ble`)
 
@@ -2301,12 +2310,13 @@ Platform notes displayed on the page: Android Chrome and desktop Chrome/Edge sup
 
 ### 18.4 Serial fallback (`export_serial`)
 
-- UART0, 921600 baud (CH340 supports up to 2 Mbaud), IDF `esp_console` REPL with line editing disabled (`CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200`).
-- Commands (text): `status`, `list`, `open <id> <vbo|nmea|json|log|sum>`, `read <offset>`, `close`, `delete <id>`, `config get`, `config set <json>`, `tracks get`, `tracks put <json>`, `errlog`, `errlog clear`, `diag`, `coredump`, `dbg <hang|crash|gps raw on|gps raw off|imu raw on|imu raw off|power <active|pit|park|shutdown>|sim on|sim off>`.
+- UART0 at 115200 baud (`CONFIG_ESP_CONSOLE_UART_BAUDRATE`), IDF `esp_console` REPL with line editing disabled (linenoise dumb mode). (Corrected from "921600 baud", design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.)
+- Commands (text): `status`, `list`, `open <id> <vbo|nmea|json|log|sum>`, `read <offset>`, `close`, `delete <id>`, `config get`, `config set <json>`, `tracks get`, `tracks put <json>`, `errlog`, `errlog clear`, `diag`, `coredump`, `coredump clear`, and — on `CFG_HAS_DEVUX` builds only — `ota recv <size> <sha256_hex> <ver> <hwid>` and `dbg <status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn|flag|safe|sim|reset|crash|hang>` (`dbg sim` takes `drag`, `laps <n>` or `park`; `dbg btn`, `dbg flag` and `dbg safe clear` take the arguments printed by their usage lines).
+- There is no `dbg gps raw`, `dbg imu raw` or `dbg power`: GPS/IMU raw dumps need the real drivers (Plan 8, #93) and the power states need Plan 6, so the stub verbs that printed "not in plan 03" were removed rather than left as a promise (ruling R5, design 2026-10-13). `tracks put <json>` over the console is bounded by the 256-byte command line; the framed `TRACKS_PUT` op carries up to 3071 bytes.
 - File output framing: `---BEGIN <name> <size>---\r\n` … raw text … `---END <crc32 hex>---\r\n`. Binary formats (log/sum/coredump) are Base64-encoded between the markers.
 - ESP-IDF logging is set to level **`NONE`** for the duration of every framed console response (`status`, `list`, `open`, `read`, `errlog`, ...) and of an `ota recv` push, and restored when that response or push ends. (Ruling R9, audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`: `ERROR` still let the `core_assert_report` sink, the supervisor's stall line and the logger's below-reserve message print through `stdout` outside the UART mutex, straight into the framed body or the raw OTA byte stream, where the announced size and CRC32 do not cover them. Errors reach the §17.7 error ring regardless, which `errlog` dumps.)
 - `tools/serial_export.py <port> <command...>` wraps the protocol and writes files; plain `screen`/`minicom` also works.
-- OTA over serial is not implemented; use `idf.py flash` / `esptool.py`.
+- OTA over serial **is** the primary bench flash path: `ota recv` plus `tools/ota_push.py`, or the dev-kit's `flash push`. Its tokens (`OTA-READY`, `OTA-ERR <word|0xCODE>`, `OTA-END 0xCODE`) each end in a single CRLF on the wire: the console's own `\n`→`\r\n` translation supplies the `\r`, so the code prints a bare `\n` (L15; a literal `\r\n` reached the wire as `\r\r\n`).
 
 ### 18.5 WiFi AP (`conn_wifi`, O1)
 
@@ -2771,7 +2781,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `FIX_KEYFRAME_S` | 5 | §12.4 |
 | `LOG_BATCH_BYTES` / `LOG_FLUSH_BYTES` | 4096 / 3584 | §13.3 |
 | `LOG_WRITE_S` / `LOG_FSYNC_S` | 1 / 2 | §13.3 |
-| `LOG_PAUSE_STILL_S` | 10 | §12.6 |
+| `LOG_PAUSE_STILL_S` | 10 | §12.6 still-pause (`app/log_pause.h`'s `LOG_PAUSE_STILL_MS`; R4, design 2026-10-13) |
 | `STO_EVICT_FREE_PCT` / `STO_STOP_FREE_PCT` | 10 / 5 | §12.7 |
 | `MOVING_SPEED_KMH` | 3 | §9.1 |
 | `MENU_LOCK_SPEED_KMH` | 10 | §20.7 |
