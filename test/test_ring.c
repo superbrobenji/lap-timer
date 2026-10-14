@@ -154,6 +154,35 @@ static void test_ring_pop_on_an_uncontended_ring_is_unchanged_by_the_retry_cap(v
     TEST_ASSERT_FALSE(ring_pop(&r, &out));
 }
 
+static void test_ring_init_leaves_no_indeterminate_state_on_a_bad_precondition(void)
+{
+    /* Ruling S4-I: r != NULL stays first (nothing to initialise without r), but a bad storage or
+     * item_size must not leave the struct's other fields indeterminate -- poison the struct with a
+     * recognisable byte pattern first, so a test that merely happened to read back zero (the stack's
+     * or static storage's default) would prove nothing. */
+    ring_t r;
+    memset(&r, 0xAA, sizeof(r));
+    ring_init(&r, NULL, sizeof(item_t), 4, true);        /* storage == NULL: bad precondition */
+    TEST_ASSERT_NULL(r.buf);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)sizeof(item_t), r.item_size);
+    TEST_ASSERT_EQUAL_UINT32(3u, r.mask);        /* cap_pow2 == 4 is itself valid: mask = cap - 1 */
+    TEST_ASSERT_EQUAL_UINT32(0u, atomic_load(&r.head));
+    TEST_ASSERT_EQUAL_UINT32(0u, atomic_load(&r.tail));
+    TEST_ASSERT_TRUE(r.overwrite);
+    TEST_ASSERT_EQUAL_UINT32(0u, atomic_load(&r.dropped));
+
+    item_t storage[4];
+    memset(&r, 0xAA, sizeof(r));
+    ring_init(&r, storage, 0u, 4, false);                 /* item_size == 0: bad precondition */
+    TEST_ASSERT_EQUAL_PTR(storage, r.buf);
+    TEST_ASSERT_EQUAL_UINT32(0u, r.item_size);
+    TEST_ASSERT_EQUAL_UINT32(3u, r.mask);        /* cap_pow2 == 4 is itself valid: mask = cap - 1 */
+    TEST_ASSERT_EQUAL_UINT32(0u, atomic_load(&r.head));
+    TEST_ASSERT_EQUAL_UINT32(0u, atomic_load(&r.tail));
+    TEST_ASSERT_FALSE(r.overwrite);
+    TEST_ASSERT_EQUAL_UINT32(0u, atomic_load(&r.dropped));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -164,5 +193,6 @@ int main(void)
     RUN_TEST(test_concurrent_drop_newest_delivers_everything_in_order);
     RUN_TEST(test_ring_init_rejects_a_capacity_that_is_not_a_power_of_two);
     RUN_TEST(test_ring_pop_on_an_uncontended_ring_is_unchanged_by_the_retry_cap);
+    RUN_TEST(test_ring_init_leaves_no_indeterminate_state_on_a_bad_precondition);
     return UNITY_END();
 }

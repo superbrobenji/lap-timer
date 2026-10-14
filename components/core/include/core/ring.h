@@ -43,17 +43,22 @@ typedef struct {
 
 static inline void ring_init(ring_t *r, void *storage, uint32_t item_size, uint32_t cap_pow2, bool overwrite_oldest)
 {
-    CORE_ASSERT_VOID(r != NULL, RING_ASSERT_CODE);
-    CORE_ASSERT_VOID(storage != NULL, RING_ASSERT_CODE);
-    CORE_ASSERT_VOID(item_size > 0u, RING_ASSERT_CODE);
+    CORE_ASSERT_VOID(r != NULL, RING_ASSERT_CODE);   /* nothing to initialise without r */
     /* mask = cap - 1 indexes correctly only for a power of two; any other capacity would alias two
-     * indices onto one slot. Initialise to a safe single slot FIRST, then report -- CORE_ASSERT_VOID
-     * returns, and a ring_t left untouched would hand ring_push a NULL buf. */
+     * indices onto one slot. Store the complete safe single-slot state UNCONDITIONALLY -- even
+     * r->buf = NULL is a defined pointer, where skipping this assignment would leave *r->buf*
+     * indeterminate -- before reporting any of the three preconditions below. CORE_ASSERT_VOID
+     * returns on a failing report, so reporting first and initialising after would leave every
+     * field an early return skipped indeterminate; any later read of such a ring_t is undefined
+     * behaviour even though the ring is already known to be unusable. Storing first and reporting
+     * last removes that UB-on-read; it does NOT make a NULL storage or a zero item_size usable. */
     uint32_t cap = cap_pow2;
     if (cap == 0u || (cap & (cap - 1u)) != 0u) { cap = 1u; }
     r->buf = (uint8_t *)storage; r->item_size = item_size; r->mask = cap - 1u;
     atomic_store(&r->head, 0u); atomic_store(&r->tail, 0u);
     r->overwrite = overwrite_oldest; atomic_store(&r->dropped, 0u);
+    CORE_ASSERT_VOID(storage != NULL, RING_ASSERT_CODE);
+    CORE_ASSERT_VOID(item_size > 0u, RING_ASSERT_CODE);
     CORE_ASSERT_VOID(cap == cap_pow2, RING_ASSERT_CODE);   /* the caller's capacity was usable */
 }
 
