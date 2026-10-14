@@ -2,12 +2,11 @@
  *
  * Runs the §17.2 loop: heartbeat-stall watch with a once-per-episode report, the task-WDT
  * subscribe/feed wrappers the supervised app tasks use (link_task deliberately does not
- * subscribe), the crash-loop uptime tick, the batched counter
- * flush, the §19.4 OTA lifecycle (boot decide / validate / reboot / receive timeout), the §17.5
- * safe-mode auto-clear, the §17.2 heap and stack checks, §17.1's 60 s heap-integrity walk, and
- * EV_FAULT on every sys_flags change. Still absent, each with an owner: the GPS/IMU/storage
- * ladders and the temperature throttle (Plan 8), the "< 20 KB -> conn_stop()" heap step (no conn
- * task; sub-project C).
+ * subscribe), the crash-loop uptime tick, the batched counter flush, the §19.4 OTA lifecycle
+ * (boot decide / validate / reboot / receive timeout), the §17.5 safe-mode auto-clear, the §17.2
+ * heap and stack checks, §17.1's 60 s heap-integrity walk, and EV_FAULT on every sys_flags
+ * change. Still absent, each with an owner: the GPS/IMU/storage ladders and the temperature
+ * throttle (Plan 8), the "< 20 KB -> conn_stop()" heap step (no conn task; sub-project C).
  */
 #include "app/lt_sup.h"
 #include "app/lt_nvs.h"
@@ -260,6 +259,7 @@ static void ota_try_validate(uint32_t uptime_s)
  * Grouped here so the task entry (which must not assert-early-return) stays a thin dispatcher. */
 static void ota_lifecycle(uint32_t uptime_s)
 {
+    ota_poll();                 /* §19.6: a dead peer must not wedge the state machine (app:M8) */
     ota_reboot_check();
     if (!s_ota_boot_checked) { s_ota_boot_checked = true; ota_boot_decide(); }
     ota_rollback_post_retry();

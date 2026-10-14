@@ -28,6 +28,12 @@
 
 #include <stdint.h>
 
+/* §19.4's "status.state = STATE_OTA while any of this is in flight". STATUS byte
+ * LT_ST_OFF_STATE was hardcoded 0 (app:M7), so a peer polling STATUS during a push could not
+ * tell the device was mid-OTA. Only these two states exist today; §16's full power state machine
+ * lands with Plan 6 and will extend this enum. The values are WIRE-VISIBLE: append only. */
+enum { LT_STATE_IDLE = 0, LT_STATE_OTA = 1 };
+
 /* Builds the §18.2 STATUS record (LT_STATUS_LEN bytes). Shared by the framed `status` reply
  * (cmd.c's op_status) and the 1 Hz stream push (pipeline.c, Plan 5.6) so the two can never
  * drift. No I/O, no assertion of caller identity: safe from any task. */

@@ -39,13 +39,22 @@ enum {
     E_CONN_XFER_ABORT = 0x0702,
     E_CONN_PROTO      = 0x0703,   /* unknown op / malformed payload / not-yet-implemented op */
 
-    /* OTA (§17.7, §19.6). Land with the OTA receive-side (Plan 5 sub-project A, session 5.4). */
+    /* OTA (§17.7, §19.6). Land with the OTA receive-side (Plan 5 sub-project A, session 5.4).
+     * NOTE (audit fix wave ruling R3, 2026-10-13): these six values disagree
+     * with §17.7's table on five of six codes. The FIRMWARE values below are authoritative -- they
+     * are the ones in the field, in the project's operating notes and in every errlog already
+     * captured; §17.7 and Appendix A are amended to match (owner: plan F4). Any host-side decoder
+     * must be written from this enum, not from §17.7's historical table. */
     E_OTA_PRECOND     = 0x0801,   /* precondition failed (§19.5: low battery, already pending, ...) */
     E_OTA_HWID        = 0x0802,   /* target image hwid / project_name mismatch */
     E_OTA_WRITE       = 0x0803,   /* esp_ota_write / SHA-256 mismatch */
     E_OTA_SIG         = 0x0804,   /* ECDSA signature verification failed (esp_ota_end) */
     E_OTA_VALIDATED   = 0x0805,   /* pending image passed self-test -> marked valid (info) */
     E_OTA_ROLLBACK    = 0x0806,   /* bootloader rolled back a bad image (logged next boot) */
+    E_OTA_BATT_UNWIRED = 0x0807,  /* arg = 0: §19.5's battery/charger precondition was SKIPPED
+                                   * because this build has no power hardware (CFG_CHRG_WIRED == 0,
+                                   * #54/Plan 6). Logged once per boot so the deviation is visible
+                                   * in the errlog instead of hidden in a floating pin (drv:M11). */
 };
 
 #endif /* APP_LT_ERR_H */

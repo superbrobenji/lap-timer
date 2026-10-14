@@ -8,6 +8,7 @@
 
 #include "app/lt_assert.h"
 #include "app/lt_sup.h"      /* sys_flags_get */
+#include "app/ota.h"         /* ota_in_progress */
 
 #include "build_config.h"    /* CFG_FW_VERSION */
 
@@ -64,7 +65,9 @@ void status_build(uint8_t out[LT_STATUS_LEN])
     LT_ASSERT_VOID(out != NULL, STATUS_ASSERT_CODE);
     memset(out, 0, LT_STATUS_LEN);
     out[LT_ST_OFF_PROTO] = 1;
-    out[LT_ST_OFF_STATE] = 0;                              /* device state machine lands later */
+    /* §19.4 (M7): ota_in_progress() is a single volatile read of ota.c's state word -- no I/O, no
+     * lock -- so status_build() stays safe to call from any task (see this file's header). */
+    out[LT_ST_OFF_STATE] = ota_in_progress() ? (uint8_t)LT_STATE_OTA : (uint8_t)LT_STATE_IDLE;
     put_u16le(&out[LT_ST_OFF_FLAGS], (uint16_t)(sys_flags_get() & 0xFFFFu));
     out[LT_ST_OFF_BATT_PCT] = 0;                           /* power lands in Plan 6 */
     put_u16le(&out[LT_ST_OFF_BATT_MV], 0);

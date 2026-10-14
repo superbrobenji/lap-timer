@@ -17,5 +17,6 @@ int  ota_end(void);                                    /* SHA + signature verify
 int  ota_abort(void);                                  /* esp_ota_abort; running image untouched */
 bool ota_in_progress(void);                            /* true between a successful ota_begin and end/abort */
 bool ota_reboot_due(void);                             /* true once the OTA_END reboot delay elapsed; the supervisor performs the esp_restart (§19.4) */
+void ota_poll(void);   /* §19.6: abort an OTA_RECV idle for OTA_RECV_TIMEOUT_S. Supervisor, 1 Hz. */
 
 #endif /* APP_OTA_H */

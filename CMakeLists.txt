@@ -123,6 +123,22 @@ if(DEVUX)
 else()
     set(CFG_HAS_DEVUX 0)
 endif()
+# §3.3 CHRG (GPIO 39) wiring, audit fix wave F2a (drv:M11, #54). GPIO 34-39 have no internal
+# pull resistors on classic ESP32, so an unwired CHRG pin floats -- and a float reading low used
+# to make board_charger_present() answer "charging", which bypassed §19.5's battery precondition
+# outright. OFF (the prototype, and the default) makes board_charger_present() honour
+# hal/board.h's documented "false if not wired" contract and makes §19.5's battery check an
+# explicitly-logged skip instead of a silent pass. Plan 6 adds the external 100k pull-up and
+# flips this ON.
+set(CHRG "OFF" CACHE STRING "CHRG sense (GPIO39) is wired with its external pull-up: ON | OFF")
+if(NOT CHRG MATCHES "^(ON|OFF)$")
+    message(FATAL_ERROR "CHRG must be 'ON' or 'OFF' (got '${CHRG}')")
+endif()
+if(CHRG)
+    set(CFG_CHRG_WIRED 1)
+else()
+    set(CFG_CHRG_WIRED 0)
+endif()
 
 # fused-sample logging rate: 10 Hz to internal flash, 25 Hz to SD (Appendix A)
 if(STORAGE STREQUAL "sd")
