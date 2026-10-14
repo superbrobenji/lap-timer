@@ -94,6 +94,14 @@ PROBE_TIMEOUT_S = 2.0            # `dc status --json` holds a fixed DC_STATUS_WI
                                  # only guarantees "at least" that long (cmd_dc.c's own comment) --
                                  # so the reply lands a little after 1.0 s, not before. 2.0 s is the
                                  # probe budget that covers that margin.
+PROBE_READ_TIMEOUT_S = 0.2       # main()'s per-read timeout while probe_is_devkit (via read_json ->
+                                 # _readline) is running: it must sit below PROBE_TIMEOUT_S, because
+                                 # _readline's deadline is only checked BETWEEN ser.readline() calls,
+                                 # not during one -- open_serial's normal ser.timeout = 1.0 s would
+                                 # let a check passing at t = 1.99 s be followed by a 1.0 s blocking
+                                 # read, for a 3.0 s worst case against a 2.0 s promise. At 0.2 s the
+                                 # worst case becomes PROBE_TIMEOUT_S + PROBE_READ_TIMEOUT_S =
+                                 # 2.2 s -- the residual the FAIL message below must not overstate.
 TRIAL_WINDOW_S = 35              # OTA trial window: validation at 30 s + a sensors-ok check
 SELFTEST_TIMEOUT_S = 30.0       # selftest [all]: `stream` alone samples for ~10 s by default
 STAGE_READY_TIMEOUT_S = 5.0
@@ -722,8 +730,16 @@ def main(argv=None):
 
     probe_needed = (args.port is None) or (args.cmd == "flash")
     if probe_needed and not args.force_port:
-        if not probe_is_devkit(ser):
-            print("FAIL: %s did not answer `dc status --json` within %.0f s -- this is probably the "
+        saved_timeout = ser.timeout
+        ser.timeout = PROBE_READ_TIMEOUT_S   # see its own comment: must sit below PROBE_TIMEOUT_S,
+                                              # since that deadline is only checked BETWEEN reads
+        try:
+            probed_ok = probe_is_devkit(ser)
+        finally:
+            ser.timeout = saved_timeout      # restore before _dispatch, which needs the normal
+                                              # 1.0 s read timeout for every command after the probe
+        if not probed_ok:
+            print("FAIL: %s did not answer `dc status --json` within ~%.0f s -- this is probably the "
                   "LAP-TIMER's port, not the dev-kit's (the usbserial-0001/-3 assignment swaps "
                   "between re-plugs). Pass --port explicitly, or --force-port to proceed anyway.\n"
                   "%s" % (port, PROBE_TIMEOUT_S, trial_window_note()), file=sys.stderr)

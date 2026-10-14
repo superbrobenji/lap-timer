@@ -153,11 +153,13 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   **Not testable on `moto_sim`:** the mid-session RTC-resume half of this fix — `dbg crash`
   mid-lap, then on the next boot's first fix confirm the log reads `rtc resume: lap N venue M
   continued`. The §15.3 freshness gate (`age = fix->gps_us - saved_gps_us`, must be `> 0`,
-  pipeline.c:492-493) always clears the snapshot on this build, because `gps_init()` restarts the
-  capture's time base from `SIM_FIXES[0].gps_us` on every boot (`sim_clock_init()`,
-  `components/drivers/gps_sim/gps_sim.c:124`) — the first fix after any reset predates the saved
-  snapshot, so `lap_import_rtc()` is never reached and the resume-site `ui_post_venue()` never
-  runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
+  pipeline.c:492-493) always clears the snapshot on this build, because `gps_init()` seeds the
+  capture's time base at `SIM_FIXES[0].gps_us` and `pipeline_init_drivers()`'s immediately
+  following `gps_configure()` call then re-anchors it to `SIM_FIXES[0].gps_us` +
+  `SIM_DRAG_PERIOD_US` (`sim_clock_init()`/`sim_clock_rearm()`,
+  `components/drivers/gps_sim/gps_sim.c:134`) on every boot — the first fix after any reset still
+  predates the saved snapshot either way, so `lap_import_rtc()` is never reached and the
+  resume-site `ui_post_venue()` never runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
   (`test_lap.c`'s `lap_import_rtc`-is-silent contract test) and real hardware, once item 6
   (`moto_neo6m`) is on the bench and GPS RTC carry-over exists. **Sim-boot half PASSED on bench day 5 (2026-10-10):** `Auto → Full → Auto` in words, the post-reset VENUE one-shot read `Synthetic` / `Full`, the footer BEST survived the cycling (a real layout change clears only the page-1 best-sector board, by design, ruling R-9).
 - [ ] **F0/#102 — DRAG card on a silent transition.** In DRAG mode with the sim: `dbg sim drag`, then stall the run within 2 s of launch so the engine false-starts. Then let a full run reach `DONE` and wait > 5 s stationary: the card must stop reading `LAUNCHED` (false start) / `DONE` (settle) within one refresh — expect `READY` (the engine re-arms); `NOT READY` only in the short IDLE window right after the settle.
@@ -212,7 +214,17 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   is rejected rather than streamed, the absolute window is 20 min (`LH_DL_HARD_MAX_MS`) from the
   header, and the idle deadline is refreshed only by real progress (body bytes before `---END`, or a
   parser-state advance) — a normal download should finish in well under either bound; if one is ever
-  approached on real data that is itself worth a follow-up, not evidence the bound misfired.
+  approached on real data that is itself worth a follow-up, not evidence the bound misfired. The
+  real residual of this item's no-automated-test ruling: the six-line idle-deadline wiring in
+  `linkhost.c` itself (the `if (p != prog || dl.state != seen)` refresh) is covered by neither CI
+  nor any bench item here, since `test_linkhost_dl_cap.c` tests only the pure `lh_dl_progress`
+  helper it calls, not that call site — so a regression there would pass every gate.
+  **(e) dk:M11's 15 s OTA-READY timeout and the dev-kit's own 25 ms OTA pacing (`OTA_READY_TMO_MS`
+  / `OTA_PACE_MS`, both linkhost.c) are not independently bench-tested, but both ARE exercised by
+  item 25(b)'s successful `flash push`:** a too-short `OTA_READY_TMO_MS` surfaces there as `flash
+  result link -1` (the lap-timer's erase stalled the relay past the timeout) rather than
+  `0x0000` — that is the one observable distinguishing a healthy push from a regression in either
+  constant, so watch for it on every `flash push`.
 - [ ] **25. Session 2 console behaviour** (F3 T5-T8, dk:M3/M8/H1).
   **(a) `flash stage` abort mid-stream:** `tools/devkit.py --port <dk> flash dist/<signed>.bin`; after
   `STAGE-READY` prints and raw bytes start streaming, Ctrl-C the host partway through (before
@@ -242,7 +254,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   review only, not a bench pass/fail here.
 
 Also, `tools/devkit.py` now refuses an auto-picked port that does not answer `dc status --json`
-within 2 s and opens every port with DTR/RTS deasserted — if it refuses, you have the lap-timer's
+within ~2 s and opens every port with DTR/RTS deasserted — if it refuses, you have the lap-timer's
 port (identify, don't `--force-port`).
 
 ## Closed on 2026-10-10 (bench day 5)

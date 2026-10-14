@@ -131,7 +131,19 @@ int gps_init(const gps_profile_t **out_profile)
     s_wrap_tick = 0;
     reset_last_fix_to_start();
     latch_drag_origin();
-    sim_clock_init(&s_clock, SIM_FIXES[0].gps_us);   /* cold boot: fix 0 keeps its own timestamp */
+    sim_clock_init(&s_clock, SIM_FIXES[0].gps_us);   /* cold boot: seeds the base at fix 0's own
+                                                       * timestamp, but that base does not survive
+                                                       * this call -- pipeline_init_drivers() calls
+                                                       * gps_configure() immediately after a
+                                                       * successful gps_init() on every cold boot,
+                                                       * and gps_configure() re-anchors the base to
+                                                       * SIM_FIXES[0].gps_us + SIM_DRAG_PERIOD_US
+                                                       * before any fix is ever delivered (drv:L23).
+                                                       * Net effect: a harmless constant +200 ms on
+                                                       * the first delivered fix; the rewind drv:L23
+                                                       * defends against cannot occur here anyway,
+                                                       * since s_last_delivered_gps_us ==
+                                                       * SIM_FIXES[0].gps_us at this point. */
     s_last_delivered_gps_us = SIM_FIXES[0].gps_us;
     if (out_profile) *out_profile = &s_profile;
     return 0;

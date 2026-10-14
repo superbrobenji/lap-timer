@@ -385,6 +385,10 @@ class OtaPushTest(unittest.TestCase):
         self.assertFalse(probe_laptimer(FakeSerial(rx=b"\r\ndevkit> "), time.monotonic() + 0.2))
 
     def test_stream_image_writes_exactly_the_image_with_and_without_pacing(self):
+        """Proves pacing does not corrupt or drop bytes: the exact-bytes assertion holds equally
+        at pace_ms=0 and pace_ms=1, so an implementation that ignored pace_ms entirely would pass
+        both. Pacing's actual timing effect -- that it protects the lap-timer's RX ring -- is NOT
+        verified here; that is bench item 23's A/B comparison (paced vs. --pace 0) instead."""
         data = b"B" * (2 * 4096 + 7)
         ser = FakeSerial()
         stream_image(ser, data, pace_ms=0)

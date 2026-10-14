@@ -89,8 +89,13 @@ static void test_drag_profile_drives_the_engine(void)
     for (size_t i = 0; i < sizeof want; i++) TEST_ASSERT_EQUAL_INT_MESSAGE(1, s_hits[want[i]], "gate id missed");
 }
 
-/* drv:H2 -- the delivered position must be origin + f(cumulative distance), with the origin
- * LATCHED for the whole run: the per-frame step is then dist(t) - dist(t-200ms), never dist(t).
+/* drv:H2 -- proves only the pure-offset half: with a FIXED local `origin` held constant for the
+ * whole loop, sim_drag_lat_e7(origin, dist) steps by dist(t) - dist(t-200ms), never by dist(t)
+ * itself, and every step stays inside the jump filter below. It CANNOT detect an unlatched
+ * origin -- reverting deliver_drag() to re-derive its origin from the last fix every frame would
+ * still pass this test unchanged, since `origin` here is the test's own local, never gps_sim.c's
+ * s_drag_origin. That the origin is latched ONCE per run in the real driver is verified instead by
+ * bench item 18 (docs/bench/next-bench-day.md): no `EV_FIX_LOST` over a full `dbg sim drag` run.
  * Bound: the pipeline's §6.5 jump filter allows FIX_MAX_JUMP_MPS*dt + 20 = 250*0.2 + 20 = 70 m
  * per 5 Hz step (core/consts.h, pipeline.c's compute_validity). The reviewer's reproducer
  * (.superpowers/reviews/2026-10-13/drag.c) measured 690 m single-frame steps and a 49496 m total

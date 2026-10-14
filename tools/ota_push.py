@@ -92,9 +92,11 @@ PROBE_READ_TIMEOUT_S = 0.2   # probe_laptimer's per-ser.read(1) timeout while pr
                              # well below the probe's own 2.0 s deadline, since that deadline is
                              # only checked BETWEEN reads -- the normal ser.timeout (READ_TIMEOUT_S
                              # = 5.0, for the OTA token-wait loops) would let one silent read block
-                             # past the 2 s the FAIL message promises. Mirrors devkit.py's own
-                             # open_serial, whose 1.0 s read timeout already sits under its 2.0 s
-                             # probe budget.
+                             # past the 2 s the FAIL message promises. devkit.py clamps its own
+                             # probe read timeout (its PROBE_READ_TIMEOUT_S) the same way and for
+                             # the same reason -- its PROBE_TIMEOUT_S deadline is also only checked
+                             # between reads, so without the clamp its probe's worst case would be
+                             # PROBE_TIMEOUT_S plus a full read timeout, not the budget alone.
 
 E_OTA = {
     0x0000: "OK",
@@ -290,7 +292,7 @@ def main(argv=None):
                 ser.timeout = saved_timeout      # restore before the ota_recv read loops, which
                                                   # need the full READ_TIMEOUT_S
             if not probed_ok:
-                print("FAIL: %s did not print the lap-timer prompt within 2 s -- wrong port? "
+                print("FAIL: %s did not print the lap-timer prompt within ~2 s -- wrong port? "
                       "(--force-port to proceed anyway)" % args.port, file=sys.stderr)
                 return 2
 

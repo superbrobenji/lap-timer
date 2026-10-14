@@ -72,7 +72,8 @@ static const char *TAG = "linkhost";
                                       * write -- covers the deficit with 7 ms of margin. Cost:
                                       * floor((size-1)/4096) = 146 pauses on a 600,000 B image (the
                                       * same decimal-KB "600 KB" the erase-sector estimate above
-                                      * uses) = 146 * 25 ms = 3.65 s added to a ~55 s push (+6.6 %).
+                                      * uses) = 146 * 25 ms = 3.65 s added to a ~52 s push (+7.0 %,
+                                      * i.e. ~56 s paced).
                                       * Far below the lap-timer's own 3 s per-read stall window
                                       * (OTA_RECV_READ_MS), so it can never look like a stall. No
                                       * feedback, no retry: #57 (per-chunk ACK) remains the fix. */

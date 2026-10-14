@@ -242,7 +242,12 @@ int lh_dl_gap_ms(lh_dl_state_t state, int first_ms, int idle_ms);
  * header can arrive seconds into the call, and measuring from the request would clip the window by
  * however long the header took. = t_header + 1.5*size*10/baud + LH_DL_MARGIN_US, clamped to
  * t_header + LH_DL_HARD_MAX_MS; `body_size` is itself clamped to LH_DL_BODY_MAX first. Pure, so
- * the policy is host-testable without the UART loop. */
+ * the policy is host-testable without the UART loop.
+ * PRECONDITION: `baud` must be > 0 -- the implementation divides by it, and its only guard is
+ * `assert(baud > 0)`, which compiles away under NDEBUG, turning baud == 0 into integer division
+ * by zero (UB / a panic) rather than a clamped cap. Unreachable today: the one production caller
+ * (linkhost.c) always passes the compile-time constant DC_LINK_BAUD (115200). A future caller that
+ * passes a runtime baud MUST validate it is > 0 before calling. */
 int64_t lh_dl_cap_us(uint32_t body_size, int64_t t_header_us, uint32_t baud);
 /* On-wire BODY bytes consumed so far: 0 while the header is still being scanned, rising through
  * LH_DL_BODY, frozen at body_size once the trailer starts. The IDF loop's idle deadline may be

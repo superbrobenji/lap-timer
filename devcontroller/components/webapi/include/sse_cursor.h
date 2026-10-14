@@ -22,7 +22,7 @@ extern "C" {
  * All three arguments are the same uint32_t counters do_stream already carries (head == s_bc_head,
  * cap == BC_CAP); head and cursor wrap at 2^32 like any other free-running counter, so the distance
  * below is computed with unsigned-wraparound subtraction (head - cursor), which is correct even
- * once head has wrapped past cursor has not: aliasing is deliberate, not a bug.
+ * once head has wrapped past 2^32 and cursor has not: aliasing is deliberate, not a bug.
  *
  * At distance == cap, cursor's slot (cursor & (cap-1)) is congruent mod cap to head's own slot --
  * the exact slot the producer writes next -- so reading it races the producer and is a guaranteed

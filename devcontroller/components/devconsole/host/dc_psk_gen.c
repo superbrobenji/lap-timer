@@ -15,6 +15,10 @@ void dc_psk_format(const uint8_t *rnd, size_t n, char *out, size_t out_cap)
 {
     assert(rnd != NULL || n == 0);
     assert(out != NULL);
+    /* out_cap > 0 is exactly what the body needs, not merely "a buffer exists": `want = out_cap -
+     * 1u` below underflows to SIZE_MAX for out_cap == 0, which would then drive the write loop
+     * past the end of `out`. Both live callers (dc_psk.c's out_cap = DC_PSK_LEN + 1 = 13, and
+     * test_dc_psk.c's short-buffer case, out_cap = 4) satisfy this with room to spare. */
     assert(out_cap > 0);
     static const char A[] = DC_PSK_ALPHABET;
     size_t want = (n < DC_PSK_LEN) ? n : DC_PSK_LEN;

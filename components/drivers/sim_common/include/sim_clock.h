@@ -27,8 +27,14 @@ typedef struct {
     int64_t base_us;   /* gps_us the ACTIVE scenario's own elapsed-time-zero maps to */
 } sim_clock_t;
 
-/* Cold-boot seed (gps_init()): the very first fix this driver ever delivers keeps its capture
- * timestamp unchanged, matching gps_sim.c's long-documented replay behaviour. */
+/* Cold-boot seed (gps_init()): seeds the base at `first_gps_us` (the capture's own first
+ * timestamp). This base does NOT survive to the first delivered fix on its own: gps_sim.c's only
+ * caller, gps_init(), is always followed immediately by gps_configure() -- pipeline_init_drivers()
+ * calls gps_configure() right after a successful gps_init(), on every cold boot -- and
+ * gps_configure() calls sim_clock_rearm() before any fix is delivered, re-anchoring the base to
+ * `first_gps_us + step_us`. Net effect: a harmless constant one-step offset on the first delivered
+ * fix; see gps_sim.c's gps_init() for why the rewind that sim_clock_rearm() exists to prevent
+ * cannot fire at this call site anyway. */
 void sim_clock_init(sim_clock_t *sc, int64_t first_gps_us);
 
 /* Re-anchor on ANY scenario switch (gps_sim_rearm(), called for every `dbg sim drag|laps|park`):
