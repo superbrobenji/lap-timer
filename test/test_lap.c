@@ -219,6 +219,32 @@ static void test_leave_venue_after_factor_radius_for_timeout(void)
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
 }
 
+/* §10.3 + design §3: leaving a venue emits EV_VENUE_LOST carrying the venue id, before the engine
+ * drops the venue pointer. F2b closes the open session on it (ruling R4). */
+static void test_leave_venue_emits_venue_lost(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    const double lat_s = lat_of(lat0, -300.0);
+    const double lon_far = lon_of(lon0, lat0, -4000.0);              /* 4 km out: > radius * 1.5 */
+
+    gps_fix_t f0 = fix_ll(lat_s, lon_of(lon0, lat0, -500.0), 1000000, 20000, true);
+    drive_fix(&L, &f0, &log);
+    gps_fix_t f1 = fix_ll(lat_s, lon_far, 2000000, 20000, true);     /* leave timer starts */
+    drive_fix(&L, &f1, &log);
+    TEST_ASSERT_EQUAL_INT(0, count_type(&log, EV_VENUE_LOST));
+    gps_fix_t f2 = fix_ll(lat_s, lon_far, 63000000, 0, true);        /* +61 s: leave */
+    drive_fix(&L, &f2, &log);
+
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+    TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_VENUE_LOST));
+    for (int i = 0; i < log.n && i < 64; i++)
+        if (log.type[i] == EV_VENUE_LOST) TEST_ASSERT_EQUAL_UINT16(TRK_USER_ID_BASE, log.arg16[i]);
+}
+
 /* §22.1/§6.4 step 3: on a forward (dir_sign +1) layout a northbound crossing is accepted and a
  * southbound one is rejected (the wrong way across the same line). */
 static void test_forward_crossing_accepted_reverse_rejected(void)
@@ -1567,6 +1593,7 @@ int main(void)
     RUN_TEST(test_venue_found_within_radius_not_beyond);
     RUN_TEST(test_venue_found_then_armed_emits_events);
     RUN_TEST(test_leave_venue_after_factor_radius_for_timeout);
+    RUN_TEST(test_leave_venue_emits_venue_lost);
     RUN_TEST(test_forward_crossing_accepted_reverse_rejected);
     RUN_TEST(test_reverse_layout_accepts_reverse_rejects_forward);
     RUN_TEST(test_out_lap_has_no_time);

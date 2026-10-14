@@ -641,7 +641,7 @@ static void handle_event(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, LOG_ASSERT_CODE);
     LT_ASSERT_VOID(s_open, LOG_ASSERT_CODE);   /* valid session state: callers only forward events while open */
-    LT_ASSERT_VOID(ev->type <= EV_FAULT, LOG_ASSERT_CODE);   /* the EV_* set is closed and stable (core/event.h) */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, LOG_ASSERT_CODE);    /* the EV_* set is closed and stable (core/event.h) */
     /* Every event -- EV_LAP_COMPLETE / EV_DRAG_DONE included -- is logged verbatim as a generic
      * EVENT record (§12.3). The authoritative full LAP / DRAG_RUN records now arrive over result_q
      * (handle_result), so the logger no longer synthesises a minimal one from the event payload. */

@@ -218,7 +218,7 @@ static int16_t clamp_i16(int32_t v)
 static void emit_event(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* copied into the queues by value */
-    LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* only stable §4.5 codes are broadcast */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, PIPE_ASSERT_CODE);   /* a code core/event.h defines (design §3) */
     if (g_evt_q) { (void)xQueueSend(g_evt_q, ev, 0); logger_notify(); }
     if (g_ui_evt_q) (void)xQueueSend(g_ui_evt_q, ev, 0);   /* fan-out to the ui task (drop-newest on full) */
     /* §18: fan the event out to an attached peer as a live stream record (drop-on-full,
@@ -231,7 +231,7 @@ static void emit_event(const event_t *ev)
 
 static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)
 {
-    LT_ASSERT_VOID(type != EV_NONE && type <= EV_FAULT, PIPE_ASSERT_CODE);   /* a real §4.5 event code */
+    LT_ASSERT_VOID(type != EV_NONE && type < EV_COUNT, PIPE_ASSERT_CODE);    /* a real §4.5 event code */
     LT_ASSERT_VOID(gps_us >= 0 && mono_us >= 0, PIPE_ASSERT_CODE);           /* epoch/mono timestamps */
     event_t ev = { type, 0, 0, gps_us, mono_us, 0, 0 };
     emit_event(&ev);
@@ -423,7 +423,7 @@ static void create_finish_if_active(void)
 static void engine_cb(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
-    LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* stable §4.5 code, drives the switch */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, PIPE_ASSERT_CODE);   /* stable §4.5 code, drives the switch */
     if (ev->type == EV_LAP_COMPLETE) {
         on_lap_complete(ev->gps_us);
         s_rtc_save_due = true;     /* §15.3: save after on_fix, once open_lap has opened the new lap */

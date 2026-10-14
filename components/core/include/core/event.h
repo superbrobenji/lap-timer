@@ -66,9 +66,16 @@ enum {
     EV_OTA           = 18,  /* ui-only: posted straight to g_ui_evt_q by ota.c / the supervisor.
                              * flags = phase: OTA_PHASE_RECEIVING/VERIFYING/REBOOTING (core/ui/model.h)
                              * or EV_OTA_ABORTED / EV_OTA_ROLLED_BACK below; arg16 = percent 0..100 */
-    EV_CREATE        = 19   /* ui-only: posted straight to g_ui_evt_q by the pipeline (#97, §10.9).
+    EV_CREATE        = 19,  /* ui-only: posted straight to g_ui_evt_q by the pipeline (#97, §10.9).
                              * flags = EV_CREATE_* phase below; arg16 = gate index (GATE_SET) or an
                              * EV_CREATE_FAIL_* reason (FAILED -- NOFIX = 0 or FULL = 1, both sent) */
+
+    /* Logged again from here. Logged codes are append-only, so leaving a venue takes the next free
+     * integer AFTER the ui-only block rather than renumbering it (audit fix wave design §3). */
+    EV_VENUE_LOST    = 20,  /* arg16 = the venue id just left                     (lapengine) */
+    EV_COUNT         = 21   /* one past the highest code. Producers/consumers assert
+                             * `type < EV_COUNT`; there is no contiguous "logged" prefix to
+                             * compare against any more. */
 };
 /* EV_VENUE_FOUND's flags (#98, fix round 1, Important 1): set ONLY by the pipeline's own ui-only
  * announce posts (ui_post_venue(), pipeline.c) -- the engine's real emission (scan_for_venue()/

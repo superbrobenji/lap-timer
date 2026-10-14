@@ -1196,6 +1196,9 @@ void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, event_
 
     /* Leave-venue watch runs in every venue-bound state (§10.3). */
     if (update_leave_venue(L, lat, lon, now)) {
+        const trk_venue_t *lv = L->venue;    /* rule 9: read before reset_to_no_venue clears it */
+        const uint16_t left = (lv != NULL) ? lv->id : 0u;
+        emit(out, cap, n, EV_VENUE_LOST, 0, left, now, fix->mono_us, 0, 0);
         reset_to_no_venue(L);
         return;
     }
