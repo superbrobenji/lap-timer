@@ -71,7 +71,8 @@ foreach(src ${CORE_TEST_SRCS})
      AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile"
      AND NOT name STREQUAL "test_sim_clock" AND NOT name STREQUAL "test_drag"
      AND NOT name STREQUAL "test_sup_policy" AND NOT name STREQUAL "test_batt_trim"
-     AND NOT name STREQUAL "test_log_pause")
+     AND NOT name STREQUAL "test_log_pause"
+     AND NOT name STREQUAL "test_session_policy")
     add_core_test(${name})
   endif()
 endforeach()
@@ -211,3 +212,8 @@ target_include_directories(test_batt_trim PRIVATE ${BOARD_DIR}/include)
 set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/app)
 add_core_test(test_log_pause assert_support.c ${APP_DIR}/logger/log_pause.c)
 target_include_directories(test_log_pause PRIVATE ${APP_DIR}/include)
+
+# test_session_policy (F2b Task 3): the §12.1 session-lifecycle decision table (app/session_policy.h --
+# pure). Same link shape as test_log_pause; assert_support.c counts the out-of-enum assert.
+add_core_test(test_session_policy assert_support.c ${APP_DIR}/pipeline/session_policy.c)
+target_include_directories(test_session_policy PRIVATE ${APP_DIR}/include)
