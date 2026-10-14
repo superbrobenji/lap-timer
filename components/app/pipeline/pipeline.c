@@ -182,6 +182,10 @@ static int32_t     s_cur_speed_cms;        /* latest valid GPS speed */
  * volatile is the whole synchronisation it needs (same shape as s_gps_seen). Zeroed on the
  * EV_FIX_LOST edge: a stale speed must never keep the menu locked while the GPS is gone. */
 static volatile uint16_t s_speed_kmh;
+/* esp_timer stamp of the last VALID fix; speed_watchdog() zeroes s_speed_kmh once it is older than
+ * SPEED_STALE_US, so a driver that simply stops emitting fixes cannot hold the menu locked. */
+#define SPEED_STALE_US 2000000LL
+static int64_t s_last_valid_us;
 static bool        s_stats_gps_lost;       /* current fix invalid (min_speed ignores these) */
 
 /* completed laps for `dbg laps` (ring, newest last). F4: the pipeline task (core 1) writes s_laps[]
@@ -480,6 +484,7 @@ static void session_send(uint8_t type, uint8_t reason, uint16_t venue_id, uint16
  * logger just writes what it is handed. gps_us > 0 pins the pair to a real fix; 0 asks tb for it. */
 #define TIMEMAP_INTERVAL_US (60LL * 1000000)
 static int64_t s_last_timemap_us;
+static int64_t s_last_open_try_us;       /* esp_timer stamp of the last OPEN request (retry pacing) */
 static uint8_t s_tb_q_last = 0xFFu;      /* 0xFF = no TIME_MAP posted yet this boot */
 
 static void post_time_map(int64_t gps_us)
@@ -512,11 +517,29 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
     s_ses_layout_id = layout_id;
     session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us);
     s_ses_open = true;
+    s_last_open_try_us = esp_timer_get_time();
     /* Both ride on result_q, which the logger drains AFTER log_req_q in the same loop pass, so
      * the HDR is already written when these two records are encoded -- §12.4's "at session
      * start" is exact, not approximate. */
     post_time_map(gps_us);
     post_calib();
+}
+
+/* I2: the OPEN is fire-and-forget and the logger may refuse it (reserve floor, sequence
+ * exhaustion). If the mirror says open but the logger disagrees, ask again, at most once per 60 s. */
+static void session_periodic(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
+    if (!s_ses_open) return;
+    if (!logger_session_is_open()) {
+        if ((now - s_last_open_try_us) >= TIMEMAP_INTERVAL_US) {
+            int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
+            session_open(s_ses_venue_id, s_ses_layout_id, gps_us);
+        }
+        return;
+    }
+    if (tb_quality(&s_tb) != s_tb_q_last || (now - s_last_timemap_us) >= TIMEMAP_INTERVAL_US)
+        post_time_map(0);
 }
 
 static void session_close(uint8_t reason, int64_t gps_us)
@@ -569,8 +592,10 @@ static void engine_cb(const event_t *ev)
          * VENUE record and the HDR's layout_id get their real values -- previously only the
          * CFG_GPS_SIM boot path ever called logger_set_venue(), so a real-GPS .sum had none. */
         s_ses_layout_id = ev->arg16;
-        const trk_venue_t *v = trk_get(s_ses_venue_id);
-        logger_set_venue(s_ses_venue_id, ev->arg16, (v != NULL) ? v->name : NULL);
+        if (s_ses_venue_id != 0u) {          /* no acquisition yet: nothing to name */
+            const trk_venue_t *v = trk_get(s_ses_venue_id);
+            logger_set_venue(s_ses_venue_id, ev->arg16, (v != NULL) ? v->name : NULL);
+        }
         break;
     }
     case EV_VENUE_LOST:
@@ -617,6 +642,21 @@ static bool compute_validity(const gps_fix_t *fix)
     return ok;
 }
 
+/* R4: after a reboot NOTHING is open (logger_boot reopens nothing and lap_import_rtc emits no
+ * EV_VENUE_FOUND), so a successful resume itself must open the session, or the resumed lap and every
+ * later one go unlogged until the venue is lost and re-found. */
+static void resume_open_session(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(venue_id != 0u, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(gps_us > 0, PIPE_ASSERT_CODE);   /* a valid fix's stamp (§6.5) */
+    if (session_policy(s_ses_open, SES_IN_VENUE_FOUND) == SES_ACT_OPEN)
+        session_open(venue_id, layout_id, gps_us);
+    s_ses_venue_id  = venue_id;
+    s_ses_layout_id = layout_id;
+    const trk_venue_t *rv = trk_get(venue_id);
+    logger_set_venue(venue_id, layout_id, (rv != NULL) ? rv->name : NULL);
+}
+
 /* §15.3 resume: on the first valid fix, if a fresh RTC snapshot is armed, restore the interrupted
  * lap into LAP_RUNNING (carrying LAP_F_INTERRUPTED) before the engine sees this fix, so it
  * continues and completes normally. Runs once, lap mode only. (Split verbatim out of on_fix for
@@ -650,8 +690,7 @@ static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
             memcpy(lr.gate_times, s_resume.gate_times, sizeof lr.gate_times);
             if (lap_import_rtc(&s_lap, &lr) == 0) {
                 s_resume_active = true;                /* F2: guard this lap against a later rewind */
-                s_ses_venue_id  = lr.venue_id;         /* R4: the resume continues the open session; */
-                s_ses_layout_id = lr.layout_id;        /* adopt its venue/layout into the mirror */
+                resume_open_session(lr.venue_id, lr.layout_id, fix->gps_us);
                 s_resumed_lap_start_us = s_resume.lap_start_gps_us;
                 ESP_LOGI(TAG, "rtc resume: lap %u venue %u continued (interrupted)",
                          (unsigned)lr.lap_no, (unsigned)lr.venue_id);
@@ -735,6 +774,13 @@ static void on_fix_run_engine(const gps_fix_t *fix, bool valid)
     }
 }
 
+/* m2: zero the published speed when no valid fix has arrived for SPEED_STALE_US. */
+static void speed_watchdog(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
+    if (s_speed_kmh != 0u && (now - s_last_valid_us) > SPEED_STALE_US) s_speed_kmh = 0u;
+}
+
 /* §9.1 on_fix. */
 static void on_fix(gps_fix_t *fix)
 {
@@ -748,6 +794,7 @@ static void on_fix(gps_fix_t *fix)
         s_cur_speed_cms = fix->gspeed_mms / 10;
         double kmh = (double)fix->gspeed_mms * MMS_TO_KMH;
         s_speed_kmh = (kmh <= 0.0) ? 0u : ((kmh >= 65535.0) ? 65535u : (uint16_t)kmh);
+        s_last_valid_us = esp_timer_get_time();
         s_last_fix = *fix;   /* §10.9: CMD_MARK_GATE's fix (lap_mark_gate needs a valid, current one) */
     }
     fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
@@ -1460,11 +1507,8 @@ static void pipeline_task(void *arg)
         }
 
         /* §12.4: on a tb quality change, and otherwise every 60 s, while a session is open. */
-        if (s_ses_open) {
-            int64_t mono = esp_timer_get_time();
-            if (tb_quality(&s_tb) != s_tb_q_last || (mono - s_last_timemap_us) >= TIMEMAP_INTERVAL_US)
-                post_time_map(0);
-        }
+        session_periodic(now);
+        speed_watchdog(now);
 
         g_hb[HB_PIPELINE]++;
     }

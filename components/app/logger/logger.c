@@ -109,7 +109,7 @@ static TaskHandle_t s_task;
 
 /* open session */
 static sto_file_t s_log_fd;
-static bool       s_open;
+static volatile bool s_open;   /* written only by the logger task; read cross-task by logger_session_is_open() */
 static char       s_id[11];            /* "S%05u_%03u" + NUL */
 static uint8_t    s_seq;               /* per-boot session sequence (§12.1) */
 static ses_hdr_t  s_hdr;
@@ -1186,6 +1186,11 @@ void logger_start(void)
 void logger_notify(void)
 {
     if (s_task) xTaskNotifyGive(s_task);
+}
+
+bool logger_session_is_open(void)
+{
+    return s_open;   /* volatile single-byte read; the logger task is the only writer */
 }
 
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily

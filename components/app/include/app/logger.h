@@ -16,6 +16,9 @@
 
 void logger_start(void);    /* create + start the task (boot step 12) */
 void logger_notify(void);   /* wake the logger (task notification); safe from any task */
+/* True while the logger has a session open. Non-blocking, safe from any task; the pipeline polls it
+ * to notice an OPEN the logger refused (reserve floor, sequence exhaustion) and retry. */
+bool logger_session_is_open(void);
 
 /* #97 (§10.9), final review F-4/I-4: load /tracks/user.bin into the core/trk.h user track table.
  * Implemented in logger.c (the file that also writes it, tracks_save()) since it only reads, but
