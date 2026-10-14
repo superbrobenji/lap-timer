@@ -301,9 +301,10 @@ static void boot_subsystems(uint8_t level)
     pipeline_start();
 
     /* §4.7 step 13 (ui): start the ui task (core 0, prio 6). It renders the BOOT one-shot, then
-     * drains g_ui_evt_q (the pipeline's fan-out copy) + the button queue, updates a screen_model_t, and renders via
-     * core/ui screens_render(). It drives the SSD1680 through hal/display.h and runs the full §20.3
-     * refresh ladder; the menu (§20.7) + buttons (§20.8) are live. */
+     * drains g_ui_evt_q (the pipeline's fan-out copy) + the button queue, updates a
+     * screen_model_t, and renders via core/ui screens_render(). It drives the SSD1680 through
+     * hal/display.h and runs the full §20.3 refresh ladder; the menu (§20.7) + buttons (§20.8)
+     * are live. */
     ui_start();
 }
 

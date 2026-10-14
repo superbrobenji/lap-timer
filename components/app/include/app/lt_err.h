@@ -13,7 +13,7 @@ enum {
     E_DISP_DEAD         = 0x0302,
     E_DISP_TEMP         = 0x0303,
 
-    /* storage (§17.7); the full code table lands with the 3.5 console. */
+    /* storage (§17.7); all five codes have writers; E_STO_SD_DEGRADED waits for Plan 6 (SD). */
     E_STO_WRITE       = 0x0401,
     E_STO_MOUNT       = 0x0402,
     E_STO_FORMAT      = 0x0403,
@@ -38,7 +38,8 @@ enum {
     E_NVS_INIT          = 0x050F, /* arg = 0: lt_nvs_init() failed; SYS_NVS_DEAD set (app:L3) */
     E_BOARD_INIT        = 0x0510, /* arg = 0: board_init() reported a peripheral bring-up failure (drv:L18) */
 
-    /* connectivity / command protocol (§17.7, §18.1); land with the 3.5 serial console. */
+    /* connectivity / command protocol (§17.7, §18.1); written by the §18.4 serial console and
+     * command layer; E_CONN_BLE_INIT is reserved for sub-project C. */
     E_CONN_BLE_INIT   = 0x0701,
     E_CONN_XFER_ABORT = 0x0702,
     E_CONN_PROTO      = 0x0703,   /* unknown op / malformed payload / not-yet-implemented op */
