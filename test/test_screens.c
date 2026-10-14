@@ -840,11 +840,15 @@ static void test_strip_imu_disk_lean(void)
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("strip_imu_disk_lean.pbm"), &s_fb));
     /* three slots, ascending bit order leftwards from the anchor: IMU_DEAD(2), STORAGE_DEAD(5),
-     * FUSION_DISAGREE(13). Probe one ink pixel inside each (fault_strip_left_x is static). */
+     * FUSION_DISAGREE(13). These three probes only confirm that a glyph is drawn AT ALL in each
+     * slot (fault_strip_left_x is static, so this is as close as this function can reach in);
+     * they do not by themselves discriminate which glyph -- e.g. the "IMU" probe's pixel is also
+     * ink under ICON_DISK_STRIKE, which shares that row/column. The byte-exact pbm_eq_file check
+     * above is what proves which glyph landed in each slot. */
     const int pitch = ICON_W + 2;
-    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 + 1, FAULT_STRIP_Y + 1));              /* IMU "?" bowl */
-    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - pitch + 1, FAULT_STRIP_Y + 1));      /* disk outline */
-    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * pitch + 5, FAULT_STRIP_Y + 11)); /* lean ground */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 + 1, FAULT_STRIP_Y + 1));              /* IMU slot */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - pitch + 1, FAULT_STRIP_Y + 1));      /* disk slot */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * pitch + 5, FAULT_STRIP_Y + 11)); /* lean slot */
 }
 
 static void test_oneshot_ota_fail(void)
