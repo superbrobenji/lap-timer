@@ -175,7 +175,7 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
 /* Bounded stand-in for strlen(s): stops at the first NUL, same as strlen, but never looks past
  * FB_TEXT_MAX_CHARS characters -- see render.h and screens_moto.c's _Static_assert for the bound's
  * derivation and machine-checked tie-in. Rule 2: the loop is bounded by that constant. */
-static size_t fb_text_len(const char *s)
+size_t fb_text_len(const char *s)
 {
     size_t n = 0;
     while (n < FB_TEXT_MAX_CHARS && s[n] != '\0') {

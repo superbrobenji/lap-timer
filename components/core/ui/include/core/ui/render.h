@@ -1,6 +1,7 @@
 #ifndef CORE_UI_RENDER_H
 #define CORE_UI_RENDER_H
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "core/ui/fonts.h"
@@ -60,6 +61,12 @@ void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black);
  * still unterminated gets fewer characters than it asked for; every terminated string shorter
  * than this draws exactly as before. */
 #define FB_TEXT_MAX_CHARS 32u
+
+/* Bounded stand-in for strlen(s): stops at the first NUL, same as strlen, but never looks past
+ * FB_TEXT_MAX_CHARS characters (see above) -- the same io:L1 bound fb_text/fb_text_right/
+ * fb_text_inv use, exported so centering helpers can size a string without an unbounded strlen
+ * of their own on the same untrusted, possibly-unterminated fixed-capacity fields. */
+size_t fb_text_len(const char *s);
 
 /* Draws `s` in font `f` starting at pen position (x,y) (y = top of the glyph cell), one fixed-
  * width cell (f->w x f->h) per character, each cell blitted opaquely (ink pixels set to black,

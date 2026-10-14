@@ -922,13 +922,17 @@ void screens_moto_render(fb_t *fb, const screen_model_t *m)
  * Pure integer arithmetic; a string wider than the frame (should not happen for the short
  * one-shot captions used here) clamps to x=0 rather than going negative -- fb_text clips
  * off-frame draws safely either way, but a negative x would left-crop the string instead of just
- * running off the right edge. */
+ * running off the right edge. io:L1: sizes against fb_text_len(s), not strlen(s) -- callers pass
+ * fixed-capacity model fields (venue_name/layout_name/boot_name/boot_ver) with no guaranteed
+ * terminator in the latent case, the same class render.c's fb_text/fb_text_right/fb_text_inv
+ * already bound; every real (NUL-terminated) caller here is well under FB_TEXT_MAX_CHARS, so this
+ * draws exactly as before for all of them. */
 static int center_x(const fb_t *fb, const font_t *f, const char *s)
 {
     CORE_ASSERT_RET(fb != NULL, UI_ASSERT_CODE, 0);
     CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, 0);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, 0);
-    int w = (int)strlen(s) * (int)f->w;
+    int w = (int)fb_text_len(s) * (int)f->w;
     int x = (CANVAS_VISIBLE_W - w) / 2;
     return x < 0 ? 0 : x;
 }
