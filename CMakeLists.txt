@@ -98,6 +98,9 @@ if(CONN MATCHES "wifi")
 else()
     set(CFG_HAS_WIFI 0)
 endif()
+# CONN=ble sets CFG_HAS_BLE (hwid + §19.7 compatibility) but appends NO driver directory: no BLE
+# code is built on main, and CONFIG_BT_ENABLED is n (sdkconfig.defaults, ruling R33). Sub-project C
+# adds components/drivers/conn_ble and re-enables the controller.
 if(CONN MATCHES "ble")
     set(CFG_HAS_BLE 1)
 else()
