@@ -11,8 +11,9 @@ file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
 # driver's host/*.c sources directly (test/CMakeLists.txt), which this lightweight core-only
 # selftest does not have on its path, so it is excluded here too.
 # test_sim_profile / test_sim_clock (OTA-screen plan Task 3) link the sim_common driver's host/*.c
-# sources and headers the same way test_epd_pure does, so they are host-only too.
-list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*|sim_profile|sim_clock)\\.c$")
+# sources and headers the same way test_epd_pure does, so they are host-only too. test_batt_trim
+# links the board driver's host/batt_trim.c and include dir (batt_pure.h), so it is host-only as well.
+list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*|sim_profile|sim_clock|batt_trim)\\.c$")
 set(SUITES "")
 foreach(f ${TEST_SRCS})
   get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
