@@ -185,7 +185,7 @@ static ser_ctx_t s_ser;            /* static: keeps the assembly buffer off the 
 static void ser_flush(ser_ctx_t *c)
 {
     if (c->error) {
-        printf("ERR 0x%04x: %.*s\n", (unsigned)c->err_code, (int)c->len, (const char *)c->buf);
+        printf("ERR 0x%04x: %.*s\r\n", (unsigned)c->err_code, (int)c->len, (const char *)c->buf);
         fflush(stdout);
         return;
     }
@@ -381,7 +381,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     sframe_t m; sframe_init(&m, /*print*/false, binary, has_tail);
     (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &m);
     if (m.err) {
-        printf("ERR 0x%04x: %s\n", (unsigned)m.err_code, m.errmsg);
+        printf("ERR 0x%04x: %s\r\n", (unsigned)m.err_code, m.errmsg);
         esp_log_level_set("*", saved);
         frame_tx_end();                            /* flushes, restores CRLF, releases the mutex */
         return;
@@ -397,7 +397,7 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
         /* The op succeeded while measuring but failed while printing (e.g. the file was deleted
          * or storage degraded between the two passes). Abort the frame with an error line rather
          * than closing a body-less "success" with a bogus ---END. */
-        printf("\r\nERR 0x%04x: %s\n", (unsigned)pr.err_code, pr.errmsg);
+        printf("\r\nERR 0x%04x: %s\r\n", (unsigned)pr.err_code, pr.errmsg);
         esp_log_level_set("*", saved);
         frame_tx_end();                            /* flushes, restores CRLF, releases the mutex */
         return;
@@ -1236,8 +1236,9 @@ static int cmd_ota(int argc, char **argv)
         xSemaphoreGive(s_uart_mtx);
         return 1;
     }
-    printf("OTA-READY\n");                        /* handshake: the host streams the image only now. L15: bare \n -- the
-                                                 * console CRLF translation adds the \r; a literal \r\n reached the wire as \r\r\n */
+    /* handshake: the host streams the image only now. L15: bare \n -- the console CRLF translation
+     * adds the \r; a literal \r\n reached the wire as \r\r\n. */
+    printf("OTA-READY\n");
     fflush(stdout);
     if (ota_recv_stream(size) != 0) {             /* aborted + OTA-ERR already printed (inside the lock) */
         esp_log_level_set("*", saved);
