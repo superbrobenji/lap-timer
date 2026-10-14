@@ -36,7 +36,10 @@
  * it sees `STAGE-ERR` -- which the reference host, `tools/devkit.py`, now does (it polls between
  * chunks, dk:M8). A host that keeps streaming the whole image regardless will still outrun this
  * drain and have its remainder land on the REPL line editor; the bound here is deliberate (a
- * drain that waited out an arbitrary sender would be an unbounded loop).
+ * drain that waited out an arbitrary sender would be an unbounded loop). A sender whose bytes
+ * arrive with intra-burst gaps longer than FLASH_DRAIN_MS will also end the drain early via
+ * the first empty read window, with the same consequence -- this file treats an empty window as
+ * "sender stopped", which holds for the reference host but may not for arbitrary senders.
  *
  * Nothing but the STAGE-ERR/STAGE-READY/STAGE-END/pushing/flash-result protocol lines may reach
  * this console's USB while a stage or push is live: `cmd_stream_tap_off()` plus an
@@ -105,11 +108,15 @@
 #define FLASH_STALL_MAX_MS   3000   /* cumulative no-data time before STAGE-ERR timeout */
 #define FLASH_DRAIN_ITERS    60     /* was 10: with the host fixed (tools/devkit.py stops on the
                                   * first STAGE-ERR, F3 T10), the worst case still in flight is one
-                                  * CHUNK plus the host OS buffer -- ~4-8 KB, ~0.7 s at 115200 --
-                                  * so 60 * FLASH_DRAIN_MS = 1.2 s covers it. The loop now stops
-                                  * EARLY on the first empty read window, so a clean abort costs
-                                  * one window, not the whole budget. */
+                                  * CHUNK plus the host OS buffer -- ~4-8 KB worst case (8192 B takes
+                                  * 0.711 s at 115200 baud 8N1 = 11520 B/s). TIME budget is the binding
+                                  * constraint: 60 * FLASH_DRAIN_MS = 1.2 s absorbs
+                                  * 1.2 s * 11520 B/s = 13.8 KB, comfortably over the 8 KB high end;
+                                  * 256 B/window exceeds the ~230 B/20ms arrival rate at 115200.
+                                  * BYTE ceiling: 60 * FLASH_DRAIN_BUF = 15.36 KB. Early break on the
+                                  * first empty window exits a clean abort in one window, not the budget. */
 #define FLASH_DRAIN_MS       20
+#define FLASH_DRAIN_BUF      256u
 #define FLASH_PUSH_POLL_MS   500
 #define FLASH_PUSH_MAX_POLLS 360    /* 360 * 500 ms == 180 s push-poll bound */
 
@@ -181,11 +188,15 @@ static void flash_forget_staged(void)
 
 /* Reads and discards whatever shows up on the console UART until the wire goes quiet or the
  * iteration budget expires (~1.2 s max). Bounded by FLASH_DRAIN_ITERS windows of
- * FLASH_DRAIN_MS each; breaks early on the first empty read (no data available), so a clean
- * abort costs one window, not the whole budget. */
+ * FLASH_DRAIN_MS each, draining up to FLASH_DRAIN_BUF (256 B) per window. An empty read is
+ * taken as "the sender has stopped and the buffer is momentarily empty"; breaks early on the
+ * first such window, so a clean abort costs one window, not the whole budget. If a sender's
+ * bytes arrive with intra-burst gaps longer than FLASH_DRAIN_MS, the early break may exit
+ * before the sender finishes, leaving remainder on the REPL line editor (same risk as a sender
+ * that ignores STAGE-ERR and keeps streaming the whole image). */
 static void flash_drain_rx(void)
 {
-    uint8_t junk[64];
+    uint8_t junk[FLASH_DRAIN_BUF];
     for (int i = 0; i < FLASH_DRAIN_ITERS; i++) {
         int n = uart_read_bytes((uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM, junk, sizeof junk,
                                 pdMS_TO_TICKS(FLASH_DRAIN_MS));
