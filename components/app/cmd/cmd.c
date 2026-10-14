@@ -714,9 +714,12 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t
 /* R5 (§18.1 0x12): a JSON array of every venue -- bundled first, then the user table -- each
  * object being trk_to_json()'s venue document with a "src" key spliced in front. Streamed one
  * venue at a time through s_cw, so there is no whole-table buffer: trk_to_json's output goes into
- * the SAME s_asm.json every other text op uses (a maximal venue -- 8 layouts x 8 sectors -- is
- * ~2.6 KB, inside CMD_JSON_CAP). Read-only and side-effect free, so export_serial's two-pass
- * framing may run it twice.
+ * the SAME s_asm.json every other text op uses, so a venue whose trk_to_json document exceeds
+ * CMD_JSON_CAP cannot be emitted (a maximal 8-layout x 8-sector venue is ~4.6 KB; the small
+ * venues the tool and the bundled table carry fit). Such a venue is COUNTED, and the stream ends
+ * in an ERR instead of a clean "]" -- the precedent finish_export() sets for skipped records --
+ * never a complete-looking array with a venue silently missing. Read-only and side-effect free,
+ * so export_serial's two-pass framing may run it twice.
  *
  * This makes the cmd/console task a THIRD unlocked reader of core/trk.h's module-static user
  * table, beside the pipeline and the ui. The ordering argument (the same shape as the logger's,
@@ -725,10 +728,13 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t
  * trk_next_user_id(), so it only ever APPENDS at user[user_n] and then bumps user_n, never
  * touching a byte below the captured count -- and the logger's LOGGER_PUT_TRACK, which can
  * replace a same-id slot but runs only while THIS task is blocked inside logger_request_sync()
- * (op_tracks_put below), so it can never overlap this read. trk.h's ownership comment still names
+ * (op_tracks_put below, which also latches s_put_pending if its wait times out, so after a
+ * timeout every s_asm user first waits the logger out via put_barrier), so it cannot overlap
+ * this read. trk.h's ownership comment still names
  * two readers: F4 files the doc-debt issue (trk.h is F0's file in this wave).
  *
- * Returns 1 when a venue was written, 0 when it was skipped, -1 on a transport error. */
+ * Returns 1 when a venue was written, 0 when it was skipped (the caller counts it), -1 on a
+ * transport error. */
 static int tracks_emit_one(const trk_venue_t *v, const char *src, bool first)
 {
     LT_ASSERT_RET(v != NULL, CMD_ASSERT_CODE, -1);
@@ -753,10 +759,11 @@ static int op_tracks_get(cmd_emit_fn emit, void *ctx, uint8_t tag)
     cw_init(&s_cw, emit, ctx, tag, 0, /*tail*/true);
     if (cw_write(&s_cw, (const uint8_t *)"[", 1) != 0) return -1;
     bool first = true;
+    unsigned skipped = 0;                                  /* venues too large for s_asm.json */
     for (uint16_t i = 0; i < trk_bundled_count; i++) {     /* rule 2: bounded by the table itself */
         int r = tracks_emit_one(&trk_bundled[i], "bundled", first);
         if (r < 0) return -1;
-        if (r == 1) first = false;
+        if (r == 1) first = false; else skipped++;
     }
     int un = trk_user_count();
     LT_ASSERT_RET(un >= 0 && un <= TRK_MAX_USER, CMD_ASSERT_CODE, -1);   /* bounds the loop below */
@@ -765,13 +772,34 @@ static int op_tracks_get(cmd_emit_fn emit, void *ctx, uint8_t tag)
         if (v == NULL) continue;
         int r = tracks_emit_one(v, "user", first);
         if (r < 0) return -1;
-        if (r == 1) first = false;
+        if (r == 1) first = false; else skipped++;
+    }
+    if (skipped != 0) {                                    /* same shape as finish_export's skipped ERR */
+        char msg[56];
+        (void)snprintf(msg, sizeof msg, "tracks: %u venues skipped (too large)", skipped);
+        return emit_error(emit, ctx, tag, &s_cw.seq, E_CONN_PROTO, msg);
     }
     if (cw_write(&s_cw, (const uint8_t *)"]", 1) != 0) return -1;
     return cw_finish(&s_cw);
 }
 
 static size_t s_track_len;   /* bytes of s_asm.json staged for LOGGER_PUT_TRACK; 0 outside the call */
+static bool   s_put_pending; /* a LOGGER_PUT_TRACK timed out: the logger may still be reading s_asm.json */
+
+/* m3 (B6-8): after a PUT's -2 the logger may still be queued or mid-parse on s_asm.json, and
+ * logger_request_sync has no "wait again" call. The logger drains its queue in order, so ANY later
+ * request it answers proves the earlier PUT is finished: LOGGER_EVICT is the cheapest request with
+ * no side effect beyond a free-space check. Called at cmd_dispatch entry for every op that writes
+ * s_asm; returns true when s_asm is safe to use (no PUT outstanding, or the barrier answered). */
+static bool put_barrier(void)
+{
+    LT_ASSERT_RET(s_track_len == 0, CMD_ASSERT_CODE, false);   /* never staged outside op_tracks_put */
+    if (!s_put_pending) return true;
+    log_request_t req = { .type = LOGGER_EVICT };
+    if (logger_request_sync(&req, 1000) != 0) return false;
+    s_put_pending = false;
+    return true;
+}
 
 /* app/cmd.h's contract: valid for exactly the span of op_tracks_put's logger_request_sync(). */
 const char *cmd_tracks_payload(size_t *len_out)
@@ -784,7 +812,8 @@ const char *cmd_tracks_payload(size_t *len_out)
  * user table writer-exclusive to boot, the pipeline and the logger, and trk_from_json needs a
  * 2752 B trk_venue_t landing slot that must not be a local on this 6 KB console stack (PR #101
  * M2's twin). So: stage the JSON text, hand it to the logger (LOGGER_PUT_TRACK), and block until
- * it answers -- the logger parses into the trk module's own static landing slot via
+ * it answers (on a timeout the hand-off is NOT over: s_put_pending makes put_barrier hold every
+ * later s_asm user back until the logger has demonstrably drained past this request) -- the logger parses into the trk module's own static landing slot via
  * trk_user_add_json() and then persists the table (logger.c's put_track()). The block is what
  * makes the hand-off safe: the staged buffer cannot change while the logger reads it, and
  * ownership returns here with the rc. 2000 ms, not op_delete's 1000: put_track() writes up to
@@ -803,6 +832,7 @@ static int op_tracks_put(const uint8_t *payload, size_t len,
     log_request_t req = { .type = LOGGER_PUT_TRACK };
     int rc = logger_request_sync(&req, 2000);
     s_track_len = 0;                                       /* the staging window is closed */
+    if (rc == -2) s_put_pending = true;                    /* the logger may still hold s_asm.json */
     if (rc == -5) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "table full");
     if (rc == -6) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "bad venue json");
     if (rc == -7) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "installed but not saved");
@@ -840,7 +870,12 @@ static int op_coredump_get(cmd_emit_fn emit, void *ctx, uint8_t tag)
         LT_ASSERT_RET(chunks <= CMD_STREAM_MAX_CHUNKS, CMD_ASSERT_CODE, -1);
         size_t n = size - done;
         if (n > sizeof s_io) n = sizeof s_io;
-        if (esp_partition_read(p, rel + done, s_io, n) != ESP_OK) break;   /* short body, real CRC */
+        if (esp_partition_read(p, rel + done, s_io, n) != ESP_OK) {
+            /* A short body with a valid CRC would read as a complete image, and the two passes
+             * could disagree on a transient failure: record it and end in an ERROR frame. */
+            (void)errlog_add(E_CONN_PROTO, (uint32_t)(rel + done));
+            return emit_error(emit, ctx, tag, &s_cw.seq, E_CONN_PROTO, "coredump: read failed");
+        }
         if (cw_write(&s_cw, s_io, n) != 0) return -1;
         done += n;
     }
@@ -1047,11 +1082,21 @@ static int op_close(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
 }
 
+/* Newest error-ring entry (false when the ring is empty). */
+static bool ota_newest(lt_err_entry_t *out)
+{
+    LT_ASSERT_RET(out != NULL, CMD_ASSERT_CODE, false);
+    LT_ASSERT_RET(sizeof *out > 0, CMD_ASSERT_CODE, false);
+    int n = lt_errlog_count();
+    return n > 0 && lt_errlog_at(n - 1, out) == 0;
+}
+
 /* ota.c records the refusing OTA_WHY_* as the arg of an E_OTA_PRECOND errlog entry (S3-19) just
  * before it returns E_OTA_PRECOND, so the newest ring entry names the reason. Words are indexed by
  * OTA_WHY_* (app/sup_policy.h); an out-of-range arg reads "unknown". Returns false (msg untouched)
- * when the newest entry is not an E_OTA_PRECOND, so the caller keeps its plain "ota" text. */
-static bool ota_precond_msg(char *msg, size_t cap)
+ * when the newest entry is not an E_OTA_PRECOND written by THIS call, so the caller keeps its plain
+ * "ota" text. */
+static bool ota_precond_msg(char *msg, size_t cap, bool had, const lt_err_entry_t *before)
 {
     static const char *const WHY[] = { "unknown", "in flight", "size", "not still", "battery",
                                        "slot pending verify", "bad length", "session close failed" };
@@ -1059,9 +1104,15 @@ static bool ota_precond_msg(char *msg, size_t cap)
     _Static_assert(WHY_N == OTA_WHY_CLOSE + 1, "WHY[] must cover every OTA_WHY_* value");
     LT_ASSERT_RET(msg != NULL, CMD_ASSERT_CODE, false);
     LT_ASSERT_RET(cap >= 2, CMD_ASSERT_CODE, false);
-    int n = lt_errlog_count();
+    LT_ASSERT_RET(before != NULL, CMD_ASSERT_CODE, false);
     lt_err_entry_t e;
-    if (n <= 0 || lt_errlog_at(n - 1, &e) != 0 || e.code != E_OTA_PRECOND) return false;
+    if (!ota_newest(&e) || e.code != E_OTA_PRECOND) return false;
+    /* Stale-entry guard: several E_OTA_PRECOND returns log nothing, so the newest entry only counts
+     * if it is not the one that was already newest before this call (a full ring keeps the count
+     * constant, hence identity rather than count). A repeat with identical code/arg/second reads as
+     * stale and degrades to the plain "ota" text -- never a wrong reason. */
+    if (had && e.code == before->code && e.arg == before->arg &&
+        e.uptime_s == before->uptime_s && e.boot == before->boot) return false;
     const char *word = (e.arg > 0 && e.arg < WHY_N) ? WHY[e.arg] : WHY[0];
     (void)snprintf(msg, cap, "ota precondition: %s", word);
     return true;
@@ -1076,6 +1127,8 @@ static int op_ota(uint8_t op, const uint8_t *payload, size_t len,
 {
     LT_ASSERT_RET(emit != NULL, CMD_ASSERT_CODE, -1);
     LT_ASSERT_RET(seq != NULL, CMD_ASSERT_CODE, -1);
+    lt_err_entry_t before;
+    bool had = ota_newest(&before);
     int rc;
     switch (op) {
     case CMD_OTA_BEGIN: rc = ota_begin(payload, len); break;
@@ -1085,7 +1138,7 @@ static int op_ota(uint8_t op, const uint8_t *payload, size_t len,
     default:            rc = E_CONN_PROTO;            break;
     }
     char msg[48];
-    if (rc == E_OTA_PRECOND && ota_precond_msg(msg, sizeof msg))
+    if (rc == E_OTA_PRECOND && ota_precond_msg(msg, sizeof msg, had, &before))
         return emit_error(emit, ctx, tag, seq, (uint16_t)rc, msg);
     if (rc != 0) return emit_error(emit, ctx, tag, seq, (uint16_t)rc, "ota");
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);   /* empty LAST chunk = ack */
@@ -1103,6 +1156,9 @@ int cmd_dispatch(uint8_t op, uint8_t tag, const uint8_t *payload, size_t len,
     /* s_asm.json overlays LIST's session table (see s_asm): any other op arriving between LIST's
      * measuring and printing passes may rewrite it, so the memo is dropped and LIST re-measures. */
     if (s_memo.valid && s_memo.op == CMD_LIST && op != CMD_LIST) s_memo.valid = false;
+    if ((op == CMD_LIST || op == CMD_CONFIG_GET || op == CMD_ERRLOG_GET || op == CMD_DIAG_GET ||
+         op == CMD_TRACKS_GET || op == CMD_TRACKS_PUT) && !put_barrier())
+        return emit_error(emit, ctx, tag, &seq, E_CONN_PROTO, "busy; retry");
 
     switch (op) {
     case CMD_STATUS:       return op_status(emit, ctx, tag, &seq);
