@@ -36,7 +36,7 @@ CI compiles with gcc; run the same with `CC=$(ls /opt/homebrew/bin/gcc-* | head 
 
 Before a PR, also run what CI gates:
 
-    git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h'
+    git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h' ':!devcontroller/components/webapi/host/jsmn.h' ':!devcontroller/components/webapi/host/jsmn.c'
     python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation
     python3 tools/lint/venue_announce.py --fail-on-violation
     python3 tools/spec_api_check.py
