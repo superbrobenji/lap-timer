@@ -262,9 +262,11 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   come from `fb_diff_rect` since 7c T7, so nothing should change — confirm on the panel that a page
   change still refreshes in full (ruling B-9) and a gate crossing still refreshes partially, with
   no stale rows. One lap of sim run is enough.
-- [ ] **28. Session export after the exporter changes** (F1b T1-T3, io:C1/C2/M5). `lt get <session>
-  vbo`, `… nmea` and `… json` on a sim session: every VBO `[data]` row ends with CRLF, every NMEA
-  checksum verifies, the JSON parses whole and its `"skipped"` reads 0.
+- [ ] **28. Session export after the exporter changes** (F1b T1-T3, io:C1/C2/M5). `lt open <session>
+  vbo`, `lt open <session> nmea` and `lt open <session> json` (no `--json` wrapper on any of the
+  three — that flag reports only `{cmd,rc,attempts,rt_ms,bytes}` and omits the body, and the body
+  is exactly what this item inspects) on a sim session: every VBO `[data]` row ends with CRLF,
+  every NMEA checksum verifies, the JSON parses whole and its `"skipped"` reads 0.
 
 Also, `tools/devkit.py` now refuses an auto-picked port that does not answer `dc status --json`
 within ~2 s and opens every port with DTR/RTS deasserted — if it refuses, you have the lap-timer's
