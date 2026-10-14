@@ -7,18 +7,18 @@
  *     ---BEGIN <name> <size>---\r\n <bytes> \r\n---END <crc32 hex>---\r\n
  *
  * (CRC32 over the body, esp_rom_crc32_le init 0, matching lt_rtc's on-device CRC). An ERROR chunk
- * prints an `ERR 0x<code>: <msg>` line instead. IDF logging is dropped to ERROR for the duration
- * of a transfer and restored after (§18.4).
+ * prints an `ERR 0x<code>: <msg>` line instead. IDF logging is dropped to NONE for the duration
+ * of a transfer and restored after (§18.4 as amended by ruling R9).
  *
  * `list`/`open`/`read` stream session files: LIST emits the §14.3 JSON, OPEN/READ stream a file
  * through the same framing (Base64 body for the binary `log`/`sum` formats, raw text for
  * vbo/nmea/json). Because BEGIN carries the size, these ops run cmd_dispatch twice (a measuring
  * pass then a printing pass); both are read-only so the double run is side-effect free.
  *
- * `dbg` carries the diagnostics verbs migrated from the 3.2-3.4 console (status/logtest/fs/sum/
- * logck/laps) plus `rtc` (dump the validated RTC snapshot), `crash` (force a panic) and `hang`
- * (busy-loop to trip the task WDT). `gps raw`/`imu raw`/`power`/`sim` are stubbed until their
- * drivers land.
+ * `dbg` carries the diagnostics verbs: status, logtest, fs, sum, logck, laps, rtc, mem, btn, flag,
+ * safe, reset, sim (bench scenarios: drag / laps <n> / park), crash and hang. `gps raw`/`imu raw`
+ * are stubbed until the real sensor drivers land (Plan 8) and `power` until the power task does
+ * (Plan 6); `sim` is NOT stubbed -- it dispatches to dbg_sim.
  */
 #include "export_serial.h"
 
@@ -26,6 +26,7 @@
 
 #include "app/cmd.h"
 #include "app/logger.h"
+#include "app/lt_err.h"      /* E_CONN_XFER_ABORT -- ser_emit overflow frame (drv:M7) */
 #include "app/lt_ipc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_proto.h"    /* LT_FRAME_*_FMT (---BEGIN/---END framing) + lt_session_id_ok (M10, dbg sum/logck) */
@@ -146,8 +147,28 @@ static size_t b64_write_all(const uint8_t *src, size_t n)
  * because run_stream re-dispatches the op twice (measure then print) against LIVE state, so an
  * errlog_add() (17 call sites in other tasks) or a menu cfg edit landing between the passes made
  * the printed body longer than the announced ---BEGIN size and tore the frame. A single buffered
- * dispatch here snapshots the body once. 2560 B holds the ERRLOG_GET worst case with margin. */
+ * dispatch here snapshots the body once. 2560 B holds the ERRLOG_GET worst case (SER_ERRLOG_WORST,
+ * asserted below) with 415 B of margin; an overflow is an ERROR frame, never a truncated body. */
 #define SER_ASM_MAX 2560
+/* drv:M7: couple this buffer to its producer at compile time.
+ *
+ * The two numbers are deliberately NOT made equal. Raising SER_ASM_MAX to CMD_JSON_CAP (3072)
+ * costs 512 B of static DRAM for a body size cmd.c cannot currently produce through this path --
+ * the largest is ERRLOG_GET's SER_ERRLOG_WORST -- and the audit-fix-wave design §4 caps this plan
+ * at 256 B of DRAM growth unless it names a reclaim, which it cannot. So the SILENT half of the
+ * bug is removed instead (ser_emit's clamp becomes an explicit error frame below) and these two
+ * asserts pin the headroom that keeps that error path unreachable today: one extra key or one
+ * widened field in op_errlog_get trips the BUILD, not the wire.
+ *
+ * SER_ERRLOG_WORST, derived from cmd.c op_errlog_get (lt_err_entry_t: code u16, arg u32,
+ * uptime_s u32, boot u16; ERR_RING_LEN 32; the body is only the array, no envelope):
+ *   fixed text per entry  {"code": 8 + ,"arg": 7 + ,"uptime_s": 12 + ,"boot": 8 + } 1 = 36
+ *   widest values         65535 (5) + 4294967295 (10) + 4294967295 (10) + 65535 (5)     = 30
+ *   entry = 66 B;  32 x 66 = 2112;  + 31 separating commas = 2143;  + "[" and "]" = 2145.
+ * (CONFIG_GET ~939 B and DIAG_GET ~335 B are the other buffered bodies, both well below.) */
+#define SER_ERRLOG_WORST 2145u
+_Static_assert(SER_ASM_MAX >= SER_ERRLOG_WORST, "ERRLOG_GET's worst case must fit without the overflow path");
+_Static_assert(CMD_JSON_CAP >= SER_ASM_MAX, "cmd.c's producer buffer must not be the smaller of the two");
 typedef struct {
     const char *name;              /* frame name for BEGIN/END */
     uint8_t     buf[SER_ASM_MAX];
@@ -178,6 +199,19 @@ static void ser_flush(ser_ctx_t *c)
     fflush(stdout);
 }
 
+/* drv:M7: ser_emit used to clamp, after which ser_flush computed the announced size AND the CRC32
+ * over the TRUNCATED bytes -- a frame the host accepts as whole while the JSON is cut mid-object.
+ * Unreachable today (see the asserts above); if it is ever reached, it is an ERROR frame, not a
+ * lie. Later chunks are ignored (ser_emit skips appends once c->error is set). */
+static void ser_overflow(ser_ctx_t *c)
+{
+    static const char k_ovf[] = "response too large";
+    c->error = true;
+    c->err_code = E_CONN_XFER_ABORT;
+    memcpy(c->buf, k_ovf, sizeof k_ovf - 1u);
+    c->len = sizeof k_ovf - 1u;
+}
+
 static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
                     const uint8_t *p, size_t n)
 {
@@ -191,11 +225,14 @@ static int ser_emit(void *vctx, uint8_t tag, uint16_t seq, uint8_t flags,
         if (mlen > sizeof c->buf) mlen = sizeof c->buf;
         if (mlen) memcpy(c->buf, p + 2, mlen);
         c->len = mlen;
-    } else if (n) {
+    } else if (n && !c->error) {
         size_t room = sizeof c->buf - c->len;
-        size_t cp = (n > room) ? room : n;   /* clamp: a truncated frame still reports its CRC */
-        if (cp) memcpy(c->buf + c->len, p, cp);
-        c->len += cp;
+        if (n > room) {
+            ser_overflow(c);                           /* drv:M7: an ERROR frame, never a clamp */
+        } else {
+            memcpy(c->buf + c->len, p, n);
+            c->len += n;
+        }
     }
 
     if (flags & CMD_FLAG_LAST) ser_flush(c);
@@ -232,7 +269,13 @@ static void run_cmd(uint8_t op, const char *name, const uint8_t *payload, size_t
     link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
     frame_tx_begin();                             /* own UART0 TX + LF window for the whole framed response */
     esp_log_level_t saved = esp_log_level_get("*");
-    esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs during a framed transfer */
+    /* §18.4 as amended by ruling R9: NONE, not ERROR. An ERROR line from ANY task -- the
+     * core_assert_report sink, the supervisor's stall report, logger.c's below-reserve message at
+     * 1 Hz on a full fs, storage_internal's open/write errors -- prints through stdout outside
+     * s_uart_mtx and so lands inside this transfer's body, which its announced size and CRC32 do
+     * not cover. Nothing is lost: every one of those sites also writes the §17.7 error ring, which
+     * `errlog` dumps. Restored verbatim at every exit from this function. */
+    esp_log_level_set("*", ESP_LOG_NONE);
 
     s_ser.name = name;
     s_ser.len = 0;
@@ -324,7 +367,13 @@ static void run_stream(uint8_t op, const char *name, const uint8_t *payload, siz
     link_note_cmd_activity();                     /* §18: a cmd request marks the peer present (heartbeat) */
     frame_tx_begin();                             /* own UART0 TX + LF window for the whole two-pass transfer */
     esp_log_level_t saved = esp_log_level_get("*");
-    esp_log_level_set("*", ESP_LOG_ERROR);        /* §18.4: quiet logs for the whole transfer */
+    /* §18.4 as amended by ruling R9: NONE, not ERROR. An ERROR line from ANY task -- the
+     * core_assert_report sink, the supervisor's stall report, logger.c's below-reserve message at
+     * 1 Hz on a full fs, storage_internal's open/write errors -- prints through stdout outside
+     * s_uart_mtx and so lands inside this transfer's body, which its announced size and CRC32 do
+     * not cover. Nothing is lost: every one of those sites also writes the §17.7 error ring, which
+     * `errlog` dumps. Restored verbatim at every exit from this function. */
+    esp_log_level_set("*", ESP_LOG_NONE);
 
     sframe_t m; sframe_init(&m, /*print*/false, binary, has_tail);
     (void)cmd_dispatch(op, /*tag*/1, payload, len, sframe_emit, &m);
@@ -970,7 +1019,7 @@ static int cmd_dbg(int argc, char **argv)
             return 0;
         }
     }
-    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | crash | hang\n");
+    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | reset | crash | hang\n");
     printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection, Plan 7 T8)\n");
     printf("       dbg flag set|clear <bit 0..15>  (bench sys_flags injection, Plan 7 T8)\n");
     printf("       dbg safe clear  (clear the safe/recovery gate now, debt sweep A #62/§17.5)\n");
@@ -1076,12 +1125,14 @@ static int ota_fill_chunk(uart_port_t port, uint8_t *dst, uint32_t want)
  *   sdkconfig.defaults) forces the console RX ISR into IRAM, so it keeps draining the 128 B HW
  *   FIFO into the 256 B ring THROUGHOUT the cache-off write -- without it the FIFO overflows in
  *   ~11 ms. With it, a typical (~10-15 ms) write fits inside the 256 B ring at 115200 baud;
- *   only a worst-case ~40 ms write can still overrun it -> dropped bytes -> a byte-offset
- *   mismatch in ota_data() -> ota_abort() + "OTA-ERR". This fails SAFE (no unverified image is
+ *   only a worst-case ~40 ms write can still overrun it -> dropped bytes. The failure MECHANISM
+ *   once claimed here was wrong (drv, false-claim 4): ota_data()'s offset check can never fire on
+ *   this path, because ota_recv_stream supplies the DEVICE's own recvd counter, which always
+ *   equals ota.c's s_recv. What actually happens is either ota_fill_chunk stalling out
+ *   ("OTA-ERR timeout"), or -- if the stream resynchronises -- a corrupt image reaching ota_end
+ *   and failing its SHA-256 there (E_OTA_WRITE). Both fail SAFE (no unverified image is
  *   ever applied: SHA-256 + ECDSA gate esp_ota_end), only unreliable for a large image push.
- *   The robust fix belongs on the host side and lands with the dev-controller integration step:
- *   a per-chunk OTA-ACK handshake (the pusher waits for an ACK/next-offset token before sending
- *   the next chunk) so the wire never has more than one chunk in flight. */
+ *   The robust fix is a per-chunk OTA-ACK handshake on the host side -- issue #57, not implemented. Both pushers (`tools/ota_push.py`'s `--pace`, the dev-kit's `OTA_PACE_MS`) instead pause 25 ms at each `OTA_RECV_CHUNK` boundary, which covers the ~18 ms worst-case ring deficit but provides no feedback and no retry. */
 static int ota_recv_stream(uint32_t size)
 {
     CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, -1);
@@ -1114,7 +1165,7 @@ static int ota_recv_stream(uint32_t size)
 
 /* `ota recv <size_dec> <sha256_hex> <ver_str> <hwid_str>` -- dev bench OTA push (§19.6). Builds the
  * 76 B OTA_BEGIN payload; on a clean begin prints OTA-READY, streams <size> raw bytes off UART0,
- * then OTA_END. Logs are quiesced for the transfer so only the OTA-* tokens reach the host. */
+ * then OTA_END. Logs are silenced (NONE, R9) for the transfer so only the OTA-* tokens reach the host. */
 static int cmd_ota(int argc, char **argv)
 {
     CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
@@ -1133,7 +1184,13 @@ static int cmd_ota(int argc, char **argv)
      * and need no lock. */
     xSemaphoreTake(s_uart_mtx, portMAX_DELAY);
     esp_log_level_t saved = esp_log_level_get("*");
-    esp_log_level_set("*", ESP_LOG_ERROR);       /* only the OTA-* tokens on the wire during the push */
+    /* §18.4 as amended by ruling R9: NONE, not ERROR. An ERROR line from ANY task -- the
+     * core_assert_report sink, the supervisor's stall report, logger.c's below-reserve message at
+     * 1 Hz on a full fs, storage_internal's open/write errors -- prints through stdout outside
+     * s_uart_mtx and so lands inside this transfer's body, which its announced size and CRC32 do
+     * not cover. Nothing is lost: every one of those sites also writes the §17.7 error ring, which
+     * `errlog` dumps. Restored verbatim at every exit from this function. */
+    esp_log_level_set("*", ESP_LOG_NONE);
     int brc = ota_begin(payload, OTA_BEGIN_PAYLOAD);
     if (brc != 0) {                              /* precondition / early hwid reject -> no raw mode */
         printf("OTA-ERR 0x%04x\r\n", (unsigned)brc);
