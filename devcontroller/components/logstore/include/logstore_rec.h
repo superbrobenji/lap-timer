@@ -23,7 +23,9 @@ extern "C" {
 
 /* Precedes every appended record's `len` payload bytes (logstore_append, logstore.c). */
 typedef struct __attribute__((packed)) {
-    uint64_t ts_us;   /* esp_timer_get_time() at append time: monotonic microseconds since boot */
+    uint64_t ts_us;   /* esp_timer_get_time() at append time: microseconds since the dev-kit last
+                       * booted -- restarts at 0 on every dev-kit reboot, so records from two boots
+                       * cannot be ordered by this field alone (rx_us in the NDJSON rendering). */
     uint16_t seq;
     uint8_t  flags;
     uint8_t  type;

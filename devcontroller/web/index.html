@@ -91,14 +91,16 @@
         <code>GET /api/log/&lt;id&gt;</code>.</p>
       <p class="hint">NDJSON &mdash; one JSON object per line; <code>t</code> is
         <code>fused</code>, <code>event</code> or <code>status</code>;
-        <code>rx_us</code> is the dev-kit receive time, <code>gps_us</code> the
-        lap-timer's GPS time.</p>
+        <code>rx_us</code> is the dev-kit's own receive time in microseconds
+        <strong>since the dev-kit last booted</strong> (it restarts at 0 on every
+        dev-kit reboot, so records from two boots cannot be ordered by it);
+        <code>gps_us</code> is the lap-timer's GPS time.</p>
       <div id="logs-status" class="msg" hidden></div>
       <div class="table-wrap">
         <table id="logs-table">
-          <thead><tr><th>ID</th><th>Size</th><th>Download</th></tr></thead>
+          <thead><tr><th>ID</th><th>Size</th><th>Created (UTC)</th><th>Download</th></tr></thead>
           <tbody id="logs-body">
-            <tr><td colspan="3" class="muted">Not loaded yet.</td></tr>
+            <tr><td colspan="4" class="muted">Not loaded yet.</td></tr>
           </tbody>
         </table>
       </div>

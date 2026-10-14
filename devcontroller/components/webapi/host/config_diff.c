@@ -31,7 +31,7 @@ static char      s_va[CFG_JSON_MAX];   /* minified current value */
 static char      s_vb[CFG_JSON_MAX];   /* minified desired value */
 
 /* Copies src[start,end) to dst stripping whitespace that lies outside JSON strings. Returns 0
- * and sets *outlen, or -1 if dst overflows. */
+ * and sets *outlen, or CFG_DIFF_E_SIZE if dst overflows. */
 static int json_minify(const char *src, int start, int end, char *dst, size_t cap, size_t *outlen)
 {
     assert(src != NULL);
@@ -41,22 +41,22 @@ static int json_minify(const char *src, int start, int end, char *dst, size_t ca
     for (int i = start; i < end; i++) {           /* bounded by end-start */
         char c = src[i];
         if (in_str) {
-            if (o >= cap) return -1;
+            if (o >= cap) return CFG_DIFF_E_SIZE;
             dst[o++] = c;
             if (c == '\\') {                       /* copy the escaped char verbatim */
                 i++;
-                if (i < end) { if (o >= cap) return -1; dst[o++] = src[i]; }
+                if (i < end) { if (o >= cap) return CFG_DIFF_E_SIZE; dst[o++] = src[i]; }
             } else if (c == '"') {
                 in_str = 0;
             }
         } else if (c == '"') {
-            if (o >= cap) return -1;
+            if (o >= cap) return CFG_DIFF_E_SIZE;
             dst[o++] = c;
             in_str = 1;
         } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
             /* insignificant whitespace: drop */
         } else {
-            if (o >= cap) return -1;
+            if (o >= cap) return CFG_DIFF_E_SIZE;
             dst[o++] = c;
         }
     }
@@ -65,14 +65,14 @@ static int json_minify(const char *src, int start, int end, char *dst, size_t ca
 }
 
 /* Writes the minified JSON representation of value token t (quotes re-added for strings) to dst.
- * Returns 0 and sets *outlen, or -1 on overflow. */
+ * Returns 0 and sets *outlen, or CFG_DIFF_E_SIZE on overflow. */
 static int value_repr(const char *js, const jsmntok_t *t, char *dst, size_t cap, size_t *outlen)
 {
     assert(js != NULL);
     assert(t != NULL);
     if (t->type == JSMN_STRING) {
         size_t need = (size_t)(t->end - t->start) + 2u;
-        if (need > cap) return -1;
+        if (need > cap) return CFG_DIFF_E_SIZE;
         size_t o = 0;
         dst[o++] = '"';
         for (int i = t->start; i < t->end; i++) dst[o++] = js[i];   /* bounded */
@@ -103,19 +103,19 @@ static int find_value(const char *cjs, const jsmntok_t *ct, int cn,
 int config_diff_minify(const char *current_json, const char *desired_json,
                        char *out, size_t out_cap)
 {
-    if (!current_json || !desired_json || !out || out_cap < 3) return -1;
+    if (!current_json || !desired_json || !out || out_cap < 3) return CFG_DIFF_E_SIZE;
 
     size_t clen = strnlen(current_json, CFG_JSON_MAX + 1u);
     size_t dlen = strnlen(desired_json, CFG_JSON_MAX + 1u);
-    if (clen > CFG_JSON_MAX || dlen > CFG_JSON_MAX) return -1;
+    if (clen > CFG_JSON_MAX || dlen > CFG_JSON_MAX) return CFG_DIFF_E_SIZE;
 
     jsmn_parser cp, dp;
     jsmn_init(&cp);
     jsmn_init(&dp);
     int cn = jsmn_parse(&cp, current_json, clen, s_ctok, CFG_MAXTOK);
     int dn = jsmn_parse(&dp, desired_json, dlen, s_dtok, CFG_MAXTOK);
-    if (cn < 1 || dn < 1) return -1;                         /* NOMEM / malformed */
-    if (s_ctok[0].type != JSMN_OBJECT || s_dtok[0].type != JSMN_OBJECT) return -1;
+    if (cn < 1 || dn < 1) return CFG_DIFF_E_PARSE;           /* NOMEM / malformed */
+    if (s_ctok[0].type != JSMN_OBJECT || s_dtok[0].type != JSMN_OBJECT) return CFG_DIFF_E_PARSE;
 
     size_t o = 0;
     out[o++] = '{';
@@ -127,7 +127,7 @@ int config_diff_minify(const char *current_json, const char *desired_json,
         const jsmntok_t *vt = &s_dtok[i + 1];
 
         size_t dvlen = 0;
-        if (value_repr(desired_json, vt, s_vb, sizeof s_vb, &dvlen) < 0) return -1;
+        if (value_repr(desired_json, vt, s_vb, sizeof s_vb, &dvlen) < 0) return CFG_DIFF_E_SIZE;
 
         int cvi = find_value(current_json, s_ctok, cn, desired_json, kt);
         int changed;
@@ -135,17 +135,18 @@ int config_diff_minify(const char *current_json, const char *desired_json,
             changed = 1;
         } else {
             size_t cvlen = 0;
-            if (value_repr(current_json, &s_ctok[cvi], s_va, sizeof s_va, &cvlen) < 0) return -1;
+            if (value_repr(current_json, &s_ctok[cvi], s_va, sizeof s_va, &cvlen) < 0)
+                return CFG_DIFF_E_SIZE;
             changed = (cvlen != dvlen) || (memcmp(s_va, s_vb, dvlen) != 0);
         }
         if (!changed) continue;
 
         size_t klen = (size_t)(kt->end - kt->start);
         size_t fraglen = klen + 3u + dvlen;                  /* "key": + value */
-        if (fraglen > CFG_SET_FRAG_MAX) return -1;           /* one change too big -> 413 */
+        if (fraglen > CFG_SET_FRAG_MAX) return CFG_DIFF_E_SIZE;  /* one change too big -> 413 */
 
         size_t need = (emitted ? 1u : 0u) + fraglen;         /* optional comma + fragment */
-        if (o + need + 2u > out_cap) return -1;              /* + '}' + NUL */
+        if (o + need + 2u > out_cap) return CFG_DIFF_E_SIZE; /* + '}' + NUL */
 
         if (emitted) out[o++] = ',';
         out[o++] = '"';

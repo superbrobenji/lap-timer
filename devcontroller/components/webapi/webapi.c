@@ -20,7 +20,7 @@
  *   GET  /api/sessions            relay `list` JSON ({proto,sessions:[...]}).
  *   GET  /api/session/<id>?fmt=   async: `open <id> <fmt>` -> stream the decoded body; CRC error
  *                                 -> abort the socket.
- *   GET  /api/logs                logstore_list -> {logs:[{id,bytes}]}.
+ *   GET  /api/logs                logstore_list -> {logs:[{id,bytes,created_unix}]}, every file.
  *   GET  /api/log/<id>?fmt=       async: stream a stored log file. Default fmt=jsonl transcodes
  *                                 each on-flash record to NDJSON (application/x-ndjson,
  *                                 reusing linkhost_stream_to_json via logstore_rec_to_json);
@@ -57,10 +57,13 @@
 #include "logstore.h"
 #include "logstore_id.h"   /* logstore_id_ok -- validated before any path is built (#60 fix 1) */
 #include "logstore_rec.h"
+#include "logstore_rot.h"  /* LOGSTORE_ROT_MAX_FILES -- api_logs' entries array (dk:L2) */
 #include "multipart.h"
 #include "otastage.h"
+#include "sse_cursor.h"    /* sse_cursor_fix -- do_stream's overrun guard (F3 T4, dk:M7) */
 #include "status_json.h"
 #include "wire_escape.h"   /* wire_escape (Plan 5.6 Task 5 fix 1: moved from config_diff_escape) */
+#include "www_path.h"      /* www_path_ok -- static_file's path whitelist (F3 T4, dk:L4) */
 
 static const char *TAG = "webapi";
 
@@ -290,6 +293,8 @@ static esp_err_t api_config_post(httpd_req_t *req)
     s_cur_cfg[cur.body_len] = '\0';
 
     int dlen = config_diff_minify(s_cur_cfg, s_post_body, s_diff, sizeof s_diff);
+    if (dlen == CFG_DIFF_E_PARSE)
+        return send_json(req, "400 Bad Request", "{\"error\":\"malformed JSON body\"}");   /* dk:L1 */
     if (dlen < 0)
         return send_json(req, "413 Payload Too Large",
                          "{\"error\":\"a changed value exceeds the console line limit\"}");
@@ -341,20 +346,29 @@ static esp_err_t api_config_post(httpd_req_t *req)
     return send_json(req, NULL, resp);
 }
 
-/* ---------- GET /api/logs : logstore_list -> {logs:[{id,bytes}]} ---------- */
+/* ---------- GET /api/logs : logstore_list -> {logs:[{id,bytes,created_unix}]} ---------- */
+
+/* dk:L2: the 16-entry cap silently truncated the list and dropped created_unix, which
+ * logstore_list pays one open+read+close per file to produce and logstore.h documents as part of
+ * THIS endpoint's contract. Static, not stack: LOGSTORE_ROT_MAX_FILES entries is 2 KB, and
+ * logstore.c's own scan array is static for the same reason. Single-flight: one httpd request task
+ * reaches this handler at a time (webapi_register's config). */
+static logstore_entry_t s_log_entries[LOGSTORE_ROT_MAX_FILES];
 
 static esp_err_t api_logs(httpd_req_t *req)
 {
-    logstore_entry_t entries[16];
-    int n = logstore_list(entries, (int)(sizeof entries / sizeof entries[0]));
+    int n = logstore_list(s_log_entries, (int)(sizeof s_log_entries / sizeof s_log_entries[0]));
     if (n < 0) n = 0;
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr_chunk(req, "{\"logs\":[");
-    char item[96];
+    char item[128];
     for (int i = 0; i < n; i++) {                              /* bounded by n */
-        int m = snprintf(item, sizeof item, "%s{\"id\":\"%s\",\"bytes\":%lu}",
-                         (i ? "," : ""), entries[i].id, (unsigned long)entries[i].size);
+        int m = snprintf(item, sizeof item,
+                         "%s{\"id\":\"%s\",\"bytes\":%lu,\"created_unix\":%lu}",
+                         (i ? "," : ""), s_log_entries[i].id,
+                         (unsigned long)s_log_entries[i].size,
+                         (unsigned long)s_log_entries[i].created_unix);
         if (m > 0 && (size_t)m < sizeof item) httpd_resp_sendstr_chunk(req, item);
     }
     httpd_resp_sendstr_chunk(req, "]}");
@@ -734,10 +748,8 @@ static void do_stream(httpd_req_t *req)
                           * past one ring's worth of work per wake. */
         while (cursor != s_bc_head && sent < 32 && iter < BC_CAP) {
             iter++;
-            /* M2: on overrun, `s_bc_head - BC_CAP` is congruent mod BC_CAP to `s_bc_head` itself --
-             * i.e. the exact slot the producer writes next -- so landing there is a guaranteed
-             * torn read against a live producer. +2 skips it plus one extra record of margin. */
-            if ((uint32_t)(s_bc_head - cursor) > BC_CAP) cursor = s_bc_head - BC_CAP + 2u;  /* overrun: skip */
+            /* M2: overrun guard -- see sse_cursor.h (dk:M7). */
+            cursor = sse_cursor_fix(s_bc_head, cursor, BC_CAP);
             lt_stream_rec_t rec = s_bc[cursor & (BC_CAP - 1u)];
             cursor++;
             int jn = linkhost_stream_to_json(&rec, line + 6, sizeof(line) - 12);
@@ -1077,12 +1089,23 @@ static esp_err_t static_file(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    /* Local, mutable copy so the query string can be stripped BEFORE the whitelist guard runs --
+     * otherwise a legal "/app.js?v=2" would fail www_path_ok on the '?' alone. */
+    char uri[160];
+    int un = snprintf(uri, sizeof uri, "%s",
+                      (strcmp(req->uri, "/") == 0) ? "/index.html" : req->uri);
+    if (un < 0 || (size_t)un >= sizeof uri) return ESP_FAIL;
+    char *q = strchr(uri, '?');                                 /* drop any query string */
+    if (q) *q = '\0';
+
+    if (!www_path_ok(uri)) {                                    /* dk:L4 */
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such file");
+        return ESP_FAIL;
+    }
+
     char path[160];
-    const char *uri = (strcmp(req->uri, "/") == 0) ? "/index.html" : req->uri;
     int n = snprintf(path, sizeof path, "%s%s", WWW_BASE, uri);
     if (n < 0 || (size_t)n >= sizeof path) return ESP_FAIL;
-    char *q = strchr(path, '?');                               /* drop any query string */
-    if (q) *q = '\0';
 
     FILE *fp = fopen(path, "r");
     if (!fp) {

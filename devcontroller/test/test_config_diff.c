@@ -92,6 +92,21 @@ void test_single_change_over_cap_returns_negative(void)
     TEST_ASSERT_TRUE(n < 0);
 }
 
+/* dk:L1 -- malformed JSON, a non-object, and an oversize fragment all returned -1, so webapi
+ * answered a malformed POST body "413 a changed value exceeds the console line limit". */
+static void test_malformed_body_is_distinguishable_from_oversize(void)
+{
+    char out[CFG_SET_OBJ_MAX + 1];
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_PARSE, config_diff_minify("{\"a\":1}", "{not json", out, sizeof out));
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_PARSE, config_diff_minify("{\"a\":1}", "[1,2]", out, sizeof out));
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_PARSE, config_diff_minify("{not json", "{\"a\":1}", out, sizeof out));
+    /* an oversize single fragment stays CFG_DIFF_E_SIZE (-1), the 413 path */
+    char big[CFG_SET_OBJ_MAX * 2];
+    int n = snprintf(big, sizeof big, "{\"name\":\"%0*d\"}", CFG_SET_OBJ_MAX, 7);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_SIZE, config_diff_minify("{\"name\":\"x\"}", big, out, sizeof out));
+}
+
 void test_malformed_json_returns_negative(void)
 {
     char out[128];
@@ -200,6 +215,7 @@ int main(void)
     RUN_TEST(test_nested_object_value_minified);
     RUN_TEST(test_single_change_over_cap_returns_negative);
     RUN_TEST(test_malformed_json_returns_negative);
+    RUN_TEST(test_malformed_body_is_distinguishable_from_oversize);
     RUN_TEST(test_next_line_single_object_then_done);
     RUN_TEST(test_next_line_empty_object_is_done);
     RUN_TEST(test_next_line_splits_when_over_budget);

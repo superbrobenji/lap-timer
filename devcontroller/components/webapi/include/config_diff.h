@@ -30,13 +30,23 @@ extern "C" {
 /* Max bytes of a single "\"key\":value" fragment (the object is "{" + fragment + "}"). */
 #define CFG_SET_FRAG_MAX   (CFG_SET_OBJ_MAX - 2)                     /* 237 */
 
+/* config_diff_minify's two negative return codes (dk:L1): a malformed POST body and an oversize
+ * changed value used to both come back as a bare -1, so webapi.c could not tell "reject the
+ * request" (400) apart from "reject this one value" (413). */
+/* A buffer was too small to hold the result: insufficient out_cap, or a single changed key's
+ * "\"key\":value" fragment exceeds CFG_SET_FRAG_MAX (cannot fit one `config set` line) -> 413. */
+#define CFG_DIFF_E_SIZE  (-1)
+/* current_json or desired_json was not parseable JSON, or was not a top-level JSON object -> 400. */
+#define CFG_DIFF_E_PARSE (-2)
+
 /* Diff two top-level JSON objects. Writes to out[out_cap] the minimal minified object holding
  * only the keys present in desired_json whose (whitespace-insensitive) value differs from
  * current_json, or that are absent from current_json. Keys only in current_json are ignored
  * (`config set` cannot delete keys). Returns the written length (NUL-terminated; ">=2", "{}"
- * when nothing changed), or <0 on malformed JSON, insufficient out_cap, or a single changed key
- * whose "\"key\":value" fragment exceeds CFG_SET_FRAG_MAX (i.e. cannot fit one `config set`
- * line -> caller answers 413). Not reentrant (uses static scratch; callers are single-flight). */
+ * when nothing changed), CFG_DIFF_E_PARSE if either document is malformed JSON or not a top-level
+ * object, or CFG_DIFF_E_SIZE if out_cap is insufficient or a single changed key's "\"key\":value"
+ * fragment exceeds CFG_SET_FRAG_MAX (i.e. cannot fit one `config set` line -> caller answers 413).
+ * Not reentrant (uses static scratch; callers are single-flight). */
 int config_diff_minify(const char *current_json, const char *desired_json,
                        char *out, size_t out_cap);
 
