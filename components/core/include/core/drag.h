@@ -58,7 +58,7 @@ enum {                              /* drag_state() values (§11.2) */
 };
 
 enum { DRAG_UNITS_KMH = 0, DRAG_UNITS_MPH = 1 };   /* cfg.units: display + bench-list selection only */
-#define DRAG_MPH_PER_KMH 1.609344   /* km/h per mph; mph bench values convert with lround(mph * DRAG_MPH_PER_KMH) */
+#define DRAG_KMH_PER_MPH 1.609344   /* km/h per mph; mph bench values convert with lround(mph * DRAG_KMH_PER_MPH) */
 
 /* ≥ 1 s of fused samples at FUSION_HZ for the launch back-scan (§11.2). Rounded up past FUSION_HZ so a
  * full second of samples always fits with headroom; the newest DRAG_HIST_N entries are retained. */
@@ -86,7 +86,7 @@ void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {10
  * both array sizes; an empty list leaves the shipped defaults (100/200/300) in place.
  * mph mode (cfg->units == CFG_UNITS_MPH, #86, spec dsB §3): the first min(n_mph, 4) gates of kind
  * DRAG_SPEED_FROM0 in table order (ids 1..4) get `a` and benches_kmh[i] set to
- * lround(cfg->drag.benches_mph[i] * DRAG_MPH_PER_KMH) -- a CONVERSION to the engine's km/h unit, not
+ * lround(cfg->drag.benches_mph[i] * DRAG_KMH_PER_MPH) -- a CONVERSION to the engine's km/h unit, not
  * a raw copy (Ruling R-6 rolled back writing mph numbers as km/h unconverted); n_benches = n. Every
  * other gate kind, and every gate id, is untouched. An empty mph list (n_mph == 0) also leaves the
  * shipped defaults in place. out->units always mirrors cfg->units (display only); out->rollout
@@ -108,7 +108,7 @@ void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);
 bool drag_cfg_engine_differs(const drag_cfg_t *a, const drag_cfg_t *b);
 /* §6.6 gate name for `g` into `buf` (cap >= 8 required). units: DRAG_UNITS_KMH (0) prints every gate's
  * raw km/h/cm value as today; DRAG_UNITS_MPH (1) prints a DRAG_SPEED_FROM0 gate's `a` converted back to
- * mph (lround(a / DRAG_MPH_PER_KMH)) -- the inverse of drag_cfg_from_user's conversion, exact for every
+ * mph (lround(a / DRAG_KMH_PER_MPH)) -- the inverse of drag_cfg_from_user's conversion, exact for every
  * integer mph 1..300 (spec dsB §3) -- while SPEED_RANGE/DIST/BRAKE still print their raw km/h/cm values
  * in both units (they are not user-defined in mph). dist_units (CFG_DIST_*, #96) selects DIST-gate
  * naming only: CFG_DIST_FT (1) names the three feet presets (a == 1829/10058/30480 cm) "60ft"/"330ft"/

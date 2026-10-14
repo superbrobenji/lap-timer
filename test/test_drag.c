@@ -688,6 +688,115 @@ static void test_display_only_cfg_swap_keeps_results(void)
     TEST_ASSERT_EQUAL_UINT16(0, D.run_no);
 }
 
+/* M2: a fused sample whose gps_us steps BACKWARD. fused.gps_us = tb_mono_to_gps(mono), and tb's
+ * half-window rollover or a PPS acquire/drop can move the filtered offset by up to
+ * TB_PPS_DISAGREE_US = 50 ms (§6.2), so the stream is not strictly monotonic. gate_step's old
+ * CORE_ASSERT_VOID(tc >= tp) RETURNED from the middle of the gate loop AND write-stormed the
+ * persisted error ring every time it fired; this run exercises a backward step shortly before the
+ * 100 km/h crossing and confirms gate 2 (and gate 1) are still recorded once the stream realigns.
+ * DEVIATION FROM BRIEF (verified on this checkout, see task-9-report.md): transcribed verbatim --
+ * `D.v_est > 27.0` kicks ~16 samples (0.78 m/s at 0.5 g) before the id-2 threshold (27.778 m/s), so
+ * by the time the real crossing is evaluated prev_gps_us is forward again and the crossing is
+ * caught normally; this case is therefore GREEN both before and after the drag.c fix and does not
+ * discriminate the M2 regression -- see the report for the analysis (including why engineering the
+ * kick onto the exact crossing sample is not a usable fix for this: the brief's own fix comment
+ * ("the old assertion did the same skip") confirms gate_step's early return is UNCHANGED behaviour
+ * for that one sample, so a kick landed exactly on the crossing sample still loses it, with or
+ * without this task's fix -- only the write-storm side effect (unobservable from drag_t) is new).
+ * Kept as specified per the controller's ruling against inventing an artificial red. */
+static void test_backward_gps_us_step_does_not_lose_a_gate(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(true);
+    const double a = 0.5 * G_MPS2;
+    bool kicked = false;
+    int64_t t = T_LAUNCH_US;
+    for (int k = LAUNCH_K; k <= LAUNCH_K + 900; k++) {
+        t = (int64_t)k * DT_US;
+        if (!kicked && D.v_est > 27.0) { t -= 50000; kicked = true; }   /* 100 km/h = 27.78 m/s */
+        fused_sample_t fs = fused(t, 0.5f, 0);
+        drive_fused(&fs, true);
+        if (k % 20 == 0) {
+            double tl = (double)((int64_t)k * DT_US - T_LAUNCH_US) / 1e6;
+            if (tl < 0.0) tl = 0.0;
+            gps_fix_t f = gfix((int64_t)k * DT_US, (int32_t)(a * tl * 1000.0), true);
+            drag_on_fix(&D, &f);
+        }
+        if (drag_state(&D) == DRAG_ST_DONE) break;
+    }
+    TEST_ASSERT_TRUE(kicked);
+    TEST_ASSERT_TRUE(gate_by_id(drag_current(&D), 2)->hit);     /* 0-100 survived the step */
+    TEST_ASSERT_TRUE(gate_by_id(drag_current(&D), 1)->hit);     /* 0-60 too */
+}
+
+/* LOW (§11.1): the trap gate is "the DIST gate with the largest distance a". find_quarter used
+ * `>= best_a`, so on a tie the LAST listed DIST gate silently took the trap. */
+static void test_quarter_gate_tie_keeps_the_first_listed(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.n_gates = 3;
+    c.gates[0] = (drag_gate_def_t){ 1, DRAG_SPEED_FROM0, 100, 0 };
+    c.gates[1] = (drag_gate_def_t){ 9, DRAG_DIST, 40234, 0 };
+    c.gates[2] = (drag_gate_def_t){ 10, DRAG_DIST, 40234, 0 };    /* same a: a tie */
+    drag_init(&D, &c);
+    TEST_ASSERT_EQUAL_UINT8(1, D.quarter_idx);                    /* the first of the two */
+}
+
+/* LOW (§11.1 gate 5): one sample pair must not both ARM a and RECORD b. A large Doppler re-anchor
+ * after a gap crosses 100 and 200 km/h in one step; the recorded interval would be a fraction of
+ * one sample, i.e. a fictitious ~0 s 100-200. */
+static void test_range_gate_not_armed_and_recorded_in_one_step(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(true);
+    for (int k = LAUNCH_K; k <= LAUNCH_K + 30; k++) {             /* launch at 1 g */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 1.0f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    gps_fix_t jump = gfix((int64_t)(LAUNCH_K + 30) * DT_US, 70000, true);   /* 252 km/h re-anchor */
+    drag_on_fix(&D, &jump);
+    fused_sample_t nxt = fused((int64_t)(LAUNCH_K + 31) * DT_US, 1.0f, 0);
+    drive_fused(&nxt, true);
+    TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 5)->hit);      /* no 0 s 100-200 */
+}
+
+/* LOW (§11.2 DONE): "v below half peak with no gate for DRAG_TIMEOUT_S". With no gate yet
+ * recorded, last_gate_gps_us is 0 and `faded` could never be true, so a run that never reaches its
+ * first gate stayed LAUNCHED for ever (reachable with a custom gate list).
+ * DEVIATION FROM BRIEF (verified on this checkout, see task-9-report.md): the brief's accel loop
+ * ran only 120 samples (1.2 s) at 0.3 g, which reaches ~12.7 km/h (3.53 m/s), not the "~40 km/h"
+ * the comment claims -- so the 15 km/h (4.166 m/s) coast re-anchor used below is actually FASTER
+ * than that peak and becomes the new v_peak itself (pinned there by the periodic re-anchor), and
+ * v_est can never then be < 0.5*v_peak: the "faded" case was unreachable for a different reason
+ * than the one under test. Extended to 400 samples (4.0 s), which reaches v_peak ~= 11.77 m/s
+ * (42.4 km/h, matching the comment's intent); the unchanged 15 km/h coast is then comfortably
+ * below half of that peak (5.88 m/s), and the case is RED on the unfixed engine (LAUNCHED forever)
+ * and GREEN on the fixed one (verified both ways on this checkout). */
+static void test_faded_done_when_no_gate_was_ever_hit(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.n_gates = 1;
+    c.gates[0] = (drag_gate_def_t){ 4, DRAG_SPEED_FROM0, 300, 0 };   /* unreachable in this run */
+    drag_init(&D, &c);
+    arm_engine(true);
+    int64_t t = T_LAUNCH_US;
+    for (int k = LAUNCH_K; k <= LAUNCH_K + 400; k++) {                /* ~40 km/h at 0.3 g */
+        t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, 0.3f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    for (int k = LAUNCH_K + 401; k <= LAUNCH_K + 7500; k++) {         /* coast 15 km/h for ~70 s */
+        t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, 0.0f, 0);
+        drive_fused(&fs, true);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, 4166, true); drag_on_fix(&D, &f); }
+        if (drag_state(&D) != DRAG_ST_LAUNCHED) break;
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -711,5 +820,9 @@ int main(void)
     RUN_TEST(test_bench_drop_lowest_when_over_four);
     RUN_TEST(test_best_per_gate_two_runs);
     RUN_TEST(test_display_only_cfg_swap_keeps_results);
+    RUN_TEST(test_backward_gps_us_step_does_not_lose_a_gate);
+    RUN_TEST(test_quarter_gate_tie_keeps_the_first_listed);
+    RUN_TEST(test_range_gate_not_armed_and_recorded_in_one_step);
+    RUN_TEST(test_faded_done_when_no_gate_was_ever_hit);
     return UNITY_END();
 }
