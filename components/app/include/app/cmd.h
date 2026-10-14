@@ -31,7 +31,7 @@ enum {
  * assert its own frame-assembly buffer is at least this big: export_serial's ser_emit used to clamp
  * silently and then CRC the truncated body, which would make a widened field or one extra key
  * turn every CONFIG_GET/ERRLOG_GET dump into a self-consistent lie (drv:M7). Keep in step with
- * s_json's declaration in cmd.c. */
+ * s_asm.json's declaration in cmd.c. */
 #define CMD_JSON_CAP 3072u
 
 /* The tag reserved for unsolicited fused-log / event STREAM frames pushed to an attached peer
