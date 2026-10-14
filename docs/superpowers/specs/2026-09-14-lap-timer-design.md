@@ -801,8 +801,9 @@ typedef void (*lap_evt_cb_t)(const event_t *ev, void *ctx);
 
 void lap_cfg_defaults(lap_cfg_t *c);
 void lap_init(lap_t *L, const lap_cfg_t *cfg);
+void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);            /* apply to a live engine; no state reset */
 void lap_set_venue(lap_t *L, const trk_venue_t *v);          /* enters VENUE_FOUND */
-void lap_force_layout(lap_t *L, uint16_t layout_id);
+int  lap_force_layout(lap_t *L, uint16_t layout_id);        /* 0 / -1 the venue has no such layout */
 void lap_reset(lap_t *L);
 /* feed a fix (valid or not) and current fused stats; may emit events via cb */
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx);
@@ -815,7 +816,7 @@ void lap_create_begin(lap_t *L);                             /* §10.9 CREATE su
 int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
 void lap_create_cancel(lap_t *L);
 void lap_export_rtc(const lap_t *L, lap_rtc_t *out);         /* §10.10 */
-int  lap_import_rtc(lap_t *L, const lap_rtc_t *s);           /* restore → LAP_RUNNING | LAP_F_INTERRUPTED */
+int  lap_import_rtc(lap_t *L, const lap_rtc_t *s);           /* 0 / -1 unknown venue / -2 unknown layout / -3 bad sector_idx */
 void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
                         uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap);  /* §10.11, NULL/0 disables */
 int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have);  /* §10.11 */
@@ -1156,7 +1157,7 @@ With PPS (M10):
 
 Inputs: previous fix `A` (ENU `a`, speed `v0`, time `tA`), current fix `B` (`b`, `v1`, `tB`), gate `P–Q`, `dir_sign` ∈ {+1, −1}.
 
-1. Both fixes MUST be valid (§6.5). If either is invalid, no crossing is evaluated and `lap.flags |= LAP_GPS_LOST` if the engine is running.
+1. Both fixes MUST be valid (§6.5). An invalid fix updates no segment state: it sets `lap.flags |= LAP_GPS_LOST` if the engine is running and is otherwise skipped, so the next valid fix forms a chord across the whole outage. A crossing found on such a chord **is** evaluated — dropping it would merge two laps into one — but the chord's `t_cross` is an interpolation across missing data, so `LAP_GPS_LOST` is set on **both** the lap that closes at the crossing and the lap it opens. The same applies to a chord longer than `LAP_SEG_GAP_US` (5 s) made of absent fixes. (Amended by `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R22; the previous "no crossing is evaluated" was never implementable.)
 2. Segment intersection: `r = b − a`, `s = q − p`, `den = r × s`. If `|den| < 1e-9` (parallel), no crossing. `t = ((p − a) × s) / den`, `u = ((p − a) × r) / den`. Crossing iff `0 ≤ t ≤ 1` and `0 ≤ u ≤ 1`.
 3. Direction: `side = sign(s × r)`. Crossing accepted iff `side == dir_sign`. (Reverse layouts are the same line with `dir_sign` negated.)
 4. Crossing time: `d = t · |r|`, `dt = tB − tA`, `acc = (v1 − v0)/dt`. If `|acc| < 0.01` m/s²: `τ = d / v0`. Else `τ = (−v0 + sqrt(v0² + 2·acc·d)) / acc`, clamped to `[0, dt]`. `t_cross = tA + τ`.
@@ -1480,8 +1481,8 @@ Inputs per step: `a_b` (m/s², bias-free accel, body), `ω_b` (rad/s, bias-remov
    - `φ_ref = atan2(−v · ψ̇, 9.80665)` (right turn has ψ̇ < 0 ⇒ φ_ref > 0). Only when `v > 3 m/s` and GPS age < 1 s; otherwise `φ_ref` is not applied and α is 1 for that step (pure gyro), with `FUS_LEAN_VALID` cleared after 5 s without a reference.
    - `φ = α·φ_gyro + (1−α)·φ_ref`, `α = LEAN_ALPHA = 0.98` (τ ≈ 0.5 s).
    - Clamp `|φ| ≤ LEAN_MAX_DEG`; clamping sets `FUS_CLAMPED`.
-   - Cross-check: `ψ̇_gps` = derivative of `headMot` across fixes; if `|ψ̇ − ψ̇_gps| > 10 °/s` for 5 s set `FUS_DISAGREE`, log `E_FUSION_DISAGREE` once per session.
-5. **Lateral g**: moto `g_lat = −v·ψ̇ / 9.80665` (positive = right) while a GPS speed/course reference qualifies (the same freshness and `v > LEAN_REF_MIN_SPEED_MPS` gate as `φ_ref`); with no reference the moto falls back to the specific-force form `g_lat = −a.y / 9.80665`, so lateral g is defined even before the first fix. Car always `g_lat = −a.y / 9.80665`. Both `g_lon` and `g_lat` are clamped to ±`G_MAX`, and clamping sets `FUS_CLAMPED`.
+   - Cross-check: `ψ̇_gps` = derivative of `headMot` across fixes; if `|ψ̇ − ψ̇_gps| > 10 °/s` for 5 s set `FUS_DISAGREE`, log `E_FUSION_DISAGREE` once per session. The cross-check runs only while a GPS yaw reference qualifies — a valid fix, age < 1 s, and `v > LEAN_REF_MIN_SPEED_MPS` — because `headMot` is meaningless at a standstill; below that speed the timer resets and the flag clears. (Recorded by `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R-list item core:M6; the firmware has always had this gate.)
+5. **Lateral g**: moto `g_lat = −v·ψ̇ / 9.80665` (positive = right) while a GPS speed/course reference qualifies (the same freshness and `v > LEAN_REF_MIN_SPEED_MPS` gate as `φ_ref`); with no reference the moto falls back to the specific-force form `g_lat = −a.y / 9.80665`, so lateral g is defined even before the first fix. Car always `g_lat = −a.y / 9.80665`. Both `g_lon` and `g_lat` are clamped to ±`G_MAX`, and clamping sets `FUS_CLAMPED`. Before the forward axis is known (§9.2) there is no signed longitudinal axis: `g_lon` carries the sign-less magnitude of the two in-plane axes of the current calibration frame (with the shipped identity `R`, the body x/y magnitude, which on a non-flat mount includes a component of gravity) and `g_lat` is 0. That magnitude is clamped to `G_MAX` on the same terms. (`docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R-list item core:M1.)
 6. **Combined**: `g_comb = sqrt(g_lat² + g_lon²)`.
 7. **Yaw rate out**: `yaw_dps = ψ̇ · 180/π`, emitted on every step; when orientation is not yet learned (or on the car, `φ ≡ 0`) `ψ̇` reduces to the earth-frame `ω.z`.
 8. **Stillness** updated for bias calibration and drag arming.
@@ -1593,7 +1594,7 @@ Line endpoint convention: `p1` is the **left** end and `p2` the **right** end of
 | `NO_VENUE` | init, reset | every 5 s: `trk_find_nearest`; found within `radius_m` → `lap_set_venue`, `EV_VENUE_FOUND` | → `VENUE_FOUND` |
 | `VENUE_FOUND` | venue set | load candidate layouts = all layouts of venue (or the forced one); ENU origin set to venue centre; arm S/F gates of all candidates; `EV_ARMED` | → `ARMED` immediately |
 | `ARMED` | | evaluate S/F crossings for every candidate layout (direction filters reverse vs forward); first accepted crossing: `lap_start = t_cross`, `lap_no = 0` (out-lap), candidates narrowed to those whose S/F matched (dir_sign) | → `LAP_RUNNING` |
-| `LAP_RUNNING` | | evaluate sector gates of remaining candidates and S/F; on sector hit record split; on S/F hit → complete lap (§10.4); if `lap_no == 0` (out-lap) run layout disambiguation (§10.5) | stays; → `NO_VENUE` if distance from venue centre > `radius_m · 1.5` for 60 s |
+| `LAP_RUNNING` | | evaluate sector gates of remaining candidates and S/F; on sector hit record split; on S/F hit → complete lap (§10.4); if `lap_no == 0` (out-lap) run layout disambiguation (§10.5) | stays; → `NO_VENUE` if distance from venue centre > `radius_m · 1.5` for 60 s, emitting `EV_VENUE_LOST` (arg16 = the venue id) before the venue is dropped; the logger closes the session on it (§12.1), which fix wave F2b implements — F1a only emits it (`docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R4) |
 
 `lap_reset` returns to `NO_VENUE` but keeps best/prev results of the session unless `CMD_RESET_ENGINE` with `arg8 = 1` (clear session).
 
@@ -1666,9 +1667,11 @@ venues the table holds) to a `.tmp` file and renamed into place atomically, so e
 
 The pipeline mirrors `{ venue_id, layout_id (0 if not locked), lap_no, lap_start_gps_us, sector_idx, gate_times[], best, prev, mode }` into `rtc_state_t` (CRC32, version) after every S/F or sector event. On boot with valid RTC state younger than `RTC_RESUME_MAX_S` and matching venue (first fix within `radius_m`), the engine restores directly into `LAP_RUNNING` with the flag `LAP_INTERRUPTED` set on the current lap.
 
+`lap_import_rtc` validates the whole snapshot, not only the venue: a validated snapshot with a layout, or an out-lap, resumes `LAP_RUNNING | LAP_F_INTERRUPTED`; `lap_no > 0` with no layout resumes `ARMED` at `lap_no` 0, since sector timing and §10.8 disambiguation cannot resume without a locked layout. (`docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R25.)
+
 ### 10.11 Predictive delta (O5)
 
-When a best lap exists, the engine records the best lap as a table `(dist_m u16, t_ms u32)` at every fix (max 600 entries; beyond that every 2nd fix). During the current lap, `dist` (integrated Doppler distance since S/F) is looked up by binary search + linear interpolation to give `t_ref(dist)`; `delta_live = elapsed − t_ref`. Exposed via `lap_live_delta_ms()`. The e-paper UI ignores it; OLED UIs render it at 10 Hz. The table is
+When a best lap exists, the engine records the best lap as a table `(dist_m u16, t_ms u32)` at every fix (max 600 entries; beyond that every 2nd fix) (the table is halved in place and the recording stride doubles, so it holds ≤ 600 monotonic-distance samples at an even density spanning the whole lap; `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`'s core LOW findings, closed by this fix wave's F1a). During the current lap, `dist` (integrated Doppler distance since S/F) is looked up by binary search + linear interpolation to give `t_ref(dist)`; `delta_live = elapsed − t_ref`. Exposed via `lap_live_delta_ms()`. The e-paper UI ignores it; OLED UIs render it at 10 Hz. The table is
 6 B/entry (`dist_m u16` + `t_ms u32`) × 600 ≈ 3.6 KB, double-buffered (a reference table for lookup plus
 a recording buffer for the lap in progress) for ≈ 7.2 KB resident, matching the §4.8 row. The table is
 caller-provided via `lap_set_predictive()` (issue #23): the pipeline passes two `PRED_TABLE_MAX`-entry
@@ -1710,7 +1713,7 @@ The two mile gates (1/8, 1/4) keep the same name in both unit modes. A custom DI
 | `LAUNCHED` | `g_lon > DRAG_LAUNCH_G` for `DRAG_LAUNCH_HOLD_MS` continuous | `t0` = time of the first sample in the contiguous run with `g_lon > 0.05` ending at detection (scan back through history); if rollout enabled, `t0` := time when `dist` reaches `DRAG_ROLLOUT_M` and `dist` is re-zeroed there. `EV_DRAG_LAUNCH`. Gates evaluated every sample (§6.6). |
 | `DONE` | 1/4-mile gate hit; or `v_est < 0.5·v_peak` after a peak with no gate for `DRAG_TIMEOUT_S`; or `v_est < DRAG_ARM_SPEED_KMH` | braking gate may still complete after DONE if armed; `EV_DRAG_DONE`; result frozen; logger writes `DRAG_RUN` |
 
-Abort: if `v_est` falls below 1 km/h within 2 s of launch (false start, e.g. clutch dump stall) the run is discarded and state returns to `ARMED`.
+Abort: if `v_est` falls below `DRAG_ARM_SPEED_KMH` (0.5 km/h) within `DRAG_FALSE_START_S` (2 s) of `t0` (false start, e.g. clutch dump stall) the run is discarded, `run_no` is released, and the state returns to `ARMED` with `EV_DRAG_ARMED`. The test runs **before** the DONE transitions, so a stall can never be reported as a finished run. The threshold is 0.5 km/h, not 1 km/h: `do_launch` cannot enter `LAUNCHED` below `DRAG_LAUNCH_G × DRAG_LAUNCH_HOLD_MS` = 0.53 km/h, so a genuine launch whose `v_est` is still climbing out of zero never trips it. (`docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R21; a 1 km/h test could not distinguish the two.)
 
 ### 11.3 Result
 
@@ -1954,6 +1957,8 @@ Written by `exp_json.c` with a minimal writer (no library); numbers only, string
 | `gps.rate_hz` | `gps.rate_hz` | u8 | 0 = profile maximum, else 1–25 | profile max | |
 | `imu.mot_thr` | `imu.mot_thr` | u8 | 2–255 | 20 | motion wake threshold LSB |
 | `imu.mot_dur_ms` | `imu.mot_dur_ms` | u8 | 1–255 | 40 | |
+
+All six `lap.*` keys above reach the lap engine through `lap_cfg_from_user()` → `lap_set_cfg()` (`core/lap_cfg.h`); the `consts.h` macros `MIN_LAP_S`/`MAX_LAP_S`/`GATE_REARM_DIST_M`/`PIT_SPEED_KMH`/`PIT_TIME_S` are now only the defaults and the per-field fallbacks. `lap.default_layout[]` is the §10.5 tie-break map, keyed by venue id. (`docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` ruling R24; before this they were parsed, clamped, persisted and exported but inert.)
 
 `cfg_validate` clamps every field into range and returns the number of corrections; the supervisor logs `E_SYS_CFG_RESET` with that count if > 0. Unknown JSON keys are ignored; missing keys keep current values (`CONFIG_SET` is a merge). Arrays longer than their capacity are rejected with an error rather than truncated. At boot the app calls `cfg_apply_profile` (build-flag and MAC-derived values) after `cfg_defaults` and before applying the NVS blob, so stored user settings always win.
 

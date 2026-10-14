@@ -13,10 +13,25 @@
 /* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
 #define DRAG_ASSERT_CODE 0x0A30
 
+/* Task 8's false-start abort depends on the launch hold's minimum velocity staying above the
+ * `stopped` threshold: at hold, DRAG_LAUNCH_G * G_MPS2 * DRAG_LAUNCH_HOLD_MS / 1000 = 0.14710 m/s,
+ * vs. stopped = DRAG_ARM_SPEED_KMH / 3.6 = 0.13889 m/s -- a margin of about 5.9%. The two
+ * micrometre/s constants below are that same arithmetic hand-evaluated and truncated to integers
+ * (0.15 * 9.80665 * 100 / 1000 * 1e6 = 147099.75 -> 147099; 0.5 / 3.6 * 1e6 = 138888.88... ->
+ * 138888): a C11 integer constant expression may use a floating constant only as the immediate
+ * operand of a cast (6.6p6), so the floating arithmetic itself cannot appear inside the assert --
+ * re-derive both numbers by hand if DRAG_LAUNCH_G, G_MPS2, DRAG_LAUNCH_HOLD_MS or
+ * DRAG_ARM_SPEED_KMH ever change. If a future constant change ever inverted this margin, a
+ * marginal launch would read as `stopped` on its own first sample and core:H5 would silently
+ * reopen with no test failing. */
+#define DRAG_LAUNCH_HOLD_UM_S 147099L   /* DRAG_LAUNCH_G * G_MPS2 * DRAG_LAUNCH_HOLD_MS / 1000 * 1e6, truncated */
+#define DRAG_STOPPED_UM_S     138888L   /* DRAG_ARM_SPEED_KMH / 3.6 * 1e6, truncated */
+_Static_assert(DRAG_LAUNCH_HOLD_UM_S > DRAG_STOPPED_UM_S,
+               "DRAG_LAUNCH_G hold velocity must exceed the stopped threshold (core:H5 false-start abort)");
+
 /* ---- unit helpers ---- */
 static double kmh_to_mps(double kmh)
 {
-    CORE_ASSERT_RET(kmh >= 0.0, DRAG_ASSERT_CODE, 0.0);   /* speeds/thresholds are non-negative */
     return kmh / 3.6;
 }
 
@@ -60,7 +75,10 @@ static void find_quarter(drag_t *D)
     D->quarter_dist_m = 0.0;
     uint16_t best_a = 0;
     for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
-        if (D->cfg.gates[i].kind == DRAG_DIST && D->cfg.gates[i].a >= best_a) {
+        /* §11.1 names ONE trap gate ("the DIST gate with the largest a"); `>=` let the LAST of two
+         * equal gates take it. On a tie the first listed wins. A DIST gate with a == 0 is not a
+         * gate at all and is never picked. */
+        if (D->cfg.gates[i].kind == DRAG_DIST && D->cfg.gates[i].a > best_a) {
             best_a = D->cfg.gates[i].a;
             D->quarter_idx    = i;
             D->quarter_dist_m = (double)D->cfg.gates[i].a / 100.0;
@@ -263,15 +281,24 @@ static void gate_step_range(drag_t *D, event_t *out, int cap, int *n, uint8_t i,
     CORE_ASSERT_VOID(def->kind == DRAG_SPEED_RANGE, DRAG_ASSERT_CODE);   /* def->b is only meaningful for a range gate */
     double Va = kmh_to_mps((double)def->a);
     double Vb = kmh_to_mps((double)def->b);
+    bool armed_now = false;
     if (!D->range_started[i]) {
         if (vp < Va && vc >= Va && vc > vp) {
             double frac = (Va - vp) / (vc - vp);
             D->range_a_gps_us[i] = tp + (int64_t)(frac * (double)(tc - tp));
             D->range_a_dist_m[i] = dp + frac * (dc - dp);
             D->range_started[i]  = true;
+            armed_now = true;
         }
     }
-    if (D->range_started[i] && !D->cur.gates[i].hit) {
+    /* A single sample pair must not both arm `a` and record `b`: a large Doppler re-anchor after a
+     * gap can cross both thresholds in one step, and the interval would be a fraction of one
+     * sample. So the arming pair's own b-crossing is DISCARDED here, not deferred: `b` is only
+     * re-tested on a LATER pair whose `vp < Vb` (a normal run that climbs through `a` then later,
+     * separately, through `b` is unaffected). A monotonic climb past both thresholds inside one
+     * sample pair therefore leaves this gate unrecorded by design -- the only alternative is a
+     * fictitious interval shorter than one sample, which is the defect this LOW exists to remove. */
+    if (D->range_started[i] && !armed_now && !D->cur.gates[i].hit) {
         if (vp < Vb && vc >= Vb && vc > vp) {
             double frac = (Vb - vp) / (vc - vp);
             int64_t t_b = tp + (int64_t)(frac * (double)(tc - tp));
@@ -296,9 +323,12 @@ static void gate_step(drag_t *D, event_t *out, int cap, int *n,
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(D->cfg.n_gates <= DRAG_MAX_GATES, DRAG_ASSERT_CODE);   /* loop bound */
-    CORE_ASSERT_VOID(tc >= tp, DRAG_ASSERT_CODE);                           /* sample time is monotonic */
-    CORE_ASSERT_VOID(vp >= 0.0 && vc >= 0.0, DRAG_ASSERT_CODE);             /* speeds non-negative */
-    CORE_ASSERT_VOID(dp >= 0.0 && dc >= 0.0, DRAG_ASSERT_CODE);             /* distances non-negative */
+    /* M2: fused.gps_us is tb_mono_to_gps(mono), and tb's half-window rollover or a PPS
+     * acquire/drop can step the filtered offset backward by up to TB_PPS_DISAGREE_US (§6.2). Skip
+     * this sample's interpolation and trap accumulation rather than assert: the old assertion did
+     * the same skip but also write-stormed the persisted error ring, and drag_on_fused's own
+     * `dt <= 0` guard already keeps v_est/dist sane. */
+    if (tc < tp) return;
     for (uint8_t i = 0; i < D->cfg.n_gates; i++) {
         const drag_gate_def_t *def = &D->cfg.gates[i];
         switch (def->kind) {
@@ -346,7 +376,6 @@ static void gate_step(drag_t *D, event_t *out, int cap, int *n,
 static void finalize_trap(drag_t *D)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
-    CORE_ASSERT_VOID(D->trap_sum >= 0.0, DRAG_ASSERT_CODE);   /* Σ of non-negative speeds */
     if (D->trap_n > 0)
         D->cur.trap_cms = (uint16_t)((D->trap_sum / (double)D->trap_n) * 100.0 + 0.5);
 }
@@ -411,17 +440,17 @@ static void enter_armed(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us
     emit(out, cap, n, EV_DRAG_ARMED, 0, gps_us, mono_us, 0, 0);
 }
 
-/* §11.2 false start: discard the run and return to ARMED (no event, no run_no consumed). */
-static void abort_to_armed(drag_t *D)
+/* §11.2 false start: discard the run and return to ARMED. R21/M4: §11.2's ARMED row specifies
+ * EV_DRAG_ARMED on entry, so the re-arm is announced -- without it the ui's engine-state card read
+ * LAUNCHED for ever after a stall and the logger never learned the engine re-armed. run_no is NOT
+ * consumed: the discarded launch's EV_DRAG_LAUNCH carries no run number (arg16 = 0), so no record
+ * ever referenced it, and the next real launch reuses the number cleanly. */
+static void abort_to_armed(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us, int64_t mono_us)
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
-    if (D->run_no > 0) D->run_no--;      /* the discarded launch does not consume a run number */
-    D->state = DRAG_ST_ARMED;
-    D->v_est = D->dist_m = 0.0;
-    D->v_prev = D->dist_prev = 0.0;
+    if (D->run_no > 0) D->run_no--;
     D->t0_gps_us = 0;
-    D->launch_run = false;
-    reset_run(D);
+    enter_armed(D, out, cap, n, gps_us, mono_us);   /* zeroes v_est/dist/launch_run, resets the run */
 }
 
 static void enter_done(drag_t *D, event_t *out, int cap, int *n, int64_t gps_us, int64_t mono_us)
@@ -469,6 +498,8 @@ static void do_launch(drag_t *D, event_t *out, int cap, int *n, int64_t mono_us)
     uint16_t cur = t0idx;
     double a_p = (double)D->hist[cur].g_lon * G_MPS2, v_p = 0.0, d_p = 0.0;
     int64_t t_p = D->hist[cur].gps_us;
+    /* rule 2: cur steps forward by 1 mod DRAG_HIST_N each iteration toward newest; t0idx and newest
+     * are both < DRAG_HIST_N (asserted above), so this walk is at most DRAG_HIST_N - 1 iterations. */
     while (cur != newest) {
         uint16_t nxt = (uint16_t)((cur + 1) % DRAG_HIST_N);
         int64_t tc = D->hist[nxt].gps_us;
@@ -508,8 +539,6 @@ static void step_idle(drag_t *D, event_t *out, int cap, int *n, const fused_samp
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
-    CORE_ASSERT_VOID(D->state == DRAG_ST_IDLE, DRAG_ASSERT_CODE);
-    CORE_ASSERT_VOID(D->v_est >= 0.0, DRAG_ASSERT_CODE);   /* module invariant: re-anchor/integration keep it non-negative */
     bool slow  = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
     bool still = (fs->flags & FUS_STILL) != 0;
     if (slow && still) {
@@ -527,7 +556,6 @@ static void step_armed(drag_t *D, event_t *out, int cap, int *n, const fused_sam
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
-    CORE_ASSERT_VOID(D->state == DRAG_ST_ARMED, DRAG_ASSERT_CODE);
     if (fs->g_lon > (float)DRAG_LAUNCH_G) {
         if (!D->launch_run) { D->launch_run = true; D->launch_since_us = now; }
         else if (now - D->launch_since_us >= (int64_t)DRAG_LAUNCH_HOLD_MS * 1000) {
@@ -544,7 +572,6 @@ static void step_launched(drag_t *D, event_t *out, int cap, int *n, const fused_
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
-    CORE_ASSERT_VOID(D->state == DRAG_ST_LAUNCHED, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(d_inc >= 0.0, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(D->quarter_idx == DRAG_NO_GATE || D->quarter_idx < DRAG_MAX_GATES, DRAG_ASSERT_CODE);
     /* Rollout (once): move t0 to where dist reaches DRAG_ROLLOUT_M and re-zero dist there. */
@@ -564,24 +591,28 @@ static void step_launched(drag_t *D, event_t *out, int cap, int *n, const fused_
     gate_step(D, out, cap, n, D->prev_gps_us, D->v_prev, D->dist_prev, now, D->v_est, D->dist_m);
     brake_step(D, out, cap, n, now, fs->mono_us, d_inc);   /* may record a braking result before DONE */
 
-    /* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch → discard, re-arm.
-     * Guarded on v_peak having already cleared the threshold once: a sustained low-g launch is
-     * itself briefly under 1 km/h just after t0 (v_est is still climbing from 0), and that is not
-     * a stall — only a drop-below after the run has actually moved past the threshold counts. */
-    if (now - D->t0_gps_us <= (int64_t)DRAG_FALSE_START_S * 1000000 &&
-        D->v_peak > kmh_to_mps((double)DRAG_FALSE_START_KMH) &&
-        D->v_est < kmh_to_mps((double)DRAG_FALSE_START_KMH)) {
-        abort_to_armed(D);
+    const bool stopped = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
+    /* §11.2 abort (R21): a stall inside DRAG_FALSE_START_S of t0 discards the run, whatever v_peak
+     * reached, and it is tested BEFORE the DONE transitions so a stall can never be mistaken for a
+     * finished run (audit core:H5). The threshold is `stopped` (DRAG_ARM_SPEED_KMH, 0.5 km/h)
+     * rather than DRAG_FALSE_START_KMH (1 km/h): do_launch cannot enter LAUNCHED below
+     * DRAG_LAUNCH_G x DRAG_LAUNCH_HOLD_MS = 0.53 km/h, so a genuine launch -- whose v_est is still
+     * climbing out of 0 -- never trips 0.5 km/h, while a clutch-dump stall (Doppler 0) always
+     * does. The old v_peak guard existed to protect that climbing launch and is now unnecessary. */
+    if (stopped && now - D->t0_gps_us <= (int64_t)DRAG_FALSE_START_S * 1000000) {
+        abort_to_armed(D, out, cap, n, now, fs->mono_us);
         return;
     }
 
     /* DONE (§11.2): the 1/4 gate is hit; a full stop; or v below half-peak with no gate for the
      * timeout. */
     bool quarter = (D->quarter_idx != DRAG_NO_GATE && D->cur.gates[D->quarter_idx].hit);
-    bool stopped = D->v_est < kmh_to_mps((double)DRAG_ARM_SPEED_KMH);
-    bool faded   = D->v_peak > 0.0 && D->v_est < 0.5 * D->v_peak &&
-                   D->last_gate_gps_us != 0 &&
-                   now - D->last_gate_gps_us >= (int64_t)DRAG_TIMEOUT_S * 1000000;
+    /* §11.2's DONE row times the fade from the last gate; with no gate yet recorded the reference
+     * is t0, not 0 -- `last_gate_gps_us != 0` alone left a run that never reaches its first gate
+     * stuck in LAUNCHED for ever (reachable with a custom gate list). */
+    const int64_t since = (D->last_gate_gps_us != 0) ? D->last_gate_gps_us : D->t0_gps_us;
+    bool faded   = D->v_peak > 0.0 && D->v_est < 0.5 * D->v_peak && since != 0 &&
+                   now - since >= (int64_t)DRAG_TIMEOUT_S * 1000000;
     if (quarter) {
         D->cur.flags |= DRAG_F_QUARTER;
         enter_done(D, out, cap, n, now, fs->mono_us);
@@ -596,7 +627,6 @@ static void step_done(drag_t *D, event_t *out, int cap, int *n, const fused_samp
 {
     CORE_ASSERT_VOID(D != NULL, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(fs != NULL, DRAG_ASSERT_CODE);
-    CORE_ASSERT_VOID(D->state == DRAG_ST_DONE, DRAG_ASSERT_CODE);
     CORE_ASSERT_VOID(d_inc >= 0.0, DRAG_ASSERT_CODE);
     if (brake_step(D, out, cap, n, now, fs->mono_us, d_inc)) update_best(D);
     if (now - D->done_gps_us >= (int64_t)DRAG_DONE_SETTLE_S * 1000000 && !brake_pending(D))

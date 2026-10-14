@@ -14,6 +14,19 @@
 #define DEG2RAD (GEO_PI / 180.0)
 #define RAD2DEG (180.0 / GEO_PI)
 
+/* At a pole cos_lat0 collapses to ~6.1e-17 rather than 0 (the existing lat assertion admits exactly
+ * +-90.0), so with heading 0 or 180 (where lx = +-1) dlon = half*lx/(R*cos_lat0) explodes to
+ * ~2.2e12 degrees instead of being rejected: a finite-but-absurd "line". Require the gate
+ * half-width to subtend at most 180 deg of longitude at this latitude -- the point past which the
+ * longitude span wraps and the line stops being representable:
+ *   |dlon| <= 180 deg
+ *   GATE_HALF_WIDTH_M / (GEO_EARTH_R_M * cos_lat0) <= GEO_PI
+ *   cos_lat0 >= GATE_HALF_WIDTH_M / (GEO_EARTH_R_M * GEO_PI)   (~7.4943e-7, i.e. |lat| <= ~89.9999571 deg)
+ * The metric gate width stays exactly 30 m at every latitude the bound admits; only the longitude
+ * span it takes to express that grows (0.00041 deg at 71 N, 0.077 deg at 89.9 N, 7.73 deg at
+ * 89.999 N -- all still well inside a representable line). */
+static const double GATE_MIN_COS_LAT0 = GATE_HALF_WIDTH_M / (GEO_EARTH_R_M * GEO_PI);
+
 /* Build a line perpendicular to a compass heading through (lat,lon), reaching GATE_HALF_WIDTH_M each
  * side (a 30 m gate). Heading is compass degrees (0 = north, clockwise positive), matching
  * gps_fix_t.head. In ENU (east, north) the motion unit vector is (sin h, cos h) and its left normal is
@@ -30,6 +43,7 @@ trk_line_t lap_gate_line(double lat_deg, double lon_deg, double heading_deg)
     const double lx = -cos(h);      /* left-normal east component (unit) */
     const double ly = sin(h);       /* left-normal north component (unit) */
     const double cos_lat0 = cos(lat_deg * DEG2RAD);
+    CORE_ASSERT_RET(cos_lat0 >= GATE_MIN_COS_LAT0, LAP_ASSERT_CODE, (trk_line_t){0});
     const double dlat = (GATE_HALF_WIDTH_M * ly / GEO_EARTH_R_M) * RAD2DEG;
     const double dlon = (GATE_HALF_WIDTH_M * lx / (GEO_EARTH_R_M * cos_lat0)) * RAD2DEG;
 

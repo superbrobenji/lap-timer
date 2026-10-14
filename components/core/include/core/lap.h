@@ -30,8 +30,17 @@
  * p2-right line crossed forward). All engine times are int64 gps microseconds; result times are
  * uint32 milliseconds rounded to nearest. */
 
-/* Upper bound on the events lap_on_fix can append in a single call: at most one ARMED/VENUE_FOUND,
- * one LAYOUT_LOCKED, LAP_MAX_SECTORS SECTORs, and one LAP_COMPLETE. Callers pass a buffer this large. */
+/* Upper bound on the events lap_on_fix can append in a single call. Two cases bound it, and they
+ * are mutually exclusive:
+ *   - the fix that finds a venue emits EV_VENUE_FOUND AND EV_ARMED (both fire on one fix), but
+ *     lap_set_venue clears have_prev_fix, so no crossing can be evaluated on that same fix: 2;
+ *   - a crossing fix emits at most LAP_MAX_SECTORS EV_SECTORs (each gate fires at most once per
+ *     segment, whichever side of the S/F it falls on), one EV_LAYOUT_LOCKED and one
+ *     EV_LAP_COMPLETE: LAP_MAX_SECTORS + 2.
+ * EV_VENUE_LOST is a single event followed by an immediate return. Callers pass a buffer this
+ * large. (The old comment said "at most one ARMED/VENUE_FOUND", which is wrong -- both fire.) The
+ * macro below is LAP_MAX_SECTORS + 3, one more than the derived LAP_MAX_SECTORS + 2 bound -- a
+ * deliberate spare slot above the proven maximum, not part of the count itself. */
 #define LAP_EVT_MAX (LAP_MAX_SECTORS + 3)
 
 enum {                              /* lap_state() values */
@@ -51,10 +60,18 @@ enum {                              /* lap_t.mode: normal running vs. on-device 
  * gates are deduplicated, so LAP_MAX_UGATES is a safe upper bound on distinct gates. */
 #define LAP_MAX_UGATES (TRK_MAX_LAYOUTS * LAP_MAX_SECTORS)
 
+#define LAP_MAX_DEFAULT_LAYOUTS 8      /* == CFG_MAX_DEFAULT_LAYOUTS (lap_cfg.c _Static_asserts) */
 typedef struct {
-    uint16_t default_layout_id;     /* §10.5 tie-break, 0 = none */
+    uint16_t min_lap_s;        /* §10.4 step 2 debounce + S/F re-arm window (default MIN_LAP_S) */
+    uint16_t max_lap_s;        /* §10.4 LAP_F_TOO_LONG threshold           (default MAX_LAP_S) */
+    uint16_t gate_rearm_m;     /* §6.4 step 5 re-arm distance              (default GATE_REARM_DIST_M) */
+    uint8_t  pit_speed_kmh;    /* §10.6                                    (default PIT_SPEED_KMH) */
+    uint8_t  pit_time_s;       /* §10.6                                    (default PIT_TIME_S) */
+    uint8_t  n_default_layout; /* entries used in default_layout[] */
+    struct { uint16_t venue, layout; } default_layout[LAP_MAX_DEFAULT_LAYOUTS];   /* §10.5 tie-break */
 } lap_cfg_t;
-void lap_cfg_defaults(lap_cfg_t *c);   /* default_layout_id = 0 */
+/* every field = its consts.h default, map empty */
+void lap_cfg_defaults(lap_cfg_t *c);
 
 /* Per-candidate S/F gate arm/debounce state (§6.4 step 5) plus its disambiguation score (§10.5). The
  * S/F endpoints are pre-projected into the ENU frame once, when the venue is set, because the origin
@@ -138,6 +155,9 @@ typedef struct {
 
     /* previous VALID fix, for segment crossing (§6.4) and distance integration */
     bool               have_prev_fix;
+    bool               seg_has_invalid;     /* R22/§6.4 step 1: at least one invalid fix has been
+                                             * skipped since the last valid one, so the chord the
+                                             * next valid fix forms spans a GPS outage */
     geo_enu_t          prev_enu;
     int64_t            prev_gps_us;
     double             prev_speed_mps;
@@ -170,13 +190,17 @@ typedef struct {
     uint16_t          *pred_rec_dist_m;    /* records the lap in progress; promoted to best on a new best */
     uint32_t          *pred_rec_t_ms;
     uint16_t           pred_rec_n;
-    uint32_t           pred_rec_fixes;
+    uint32_t           pred_rec_fixes;     /* fixes OFFERED to the recorder this lap (stride counter) */
+    uint16_t           pred_stride;        /* §10.11 recording density: 1 = every fix, doubled on
+                                            * each halving up to PRED_STRIDE_MAX */
     uint16_t           pred_cap;           /* entries each buffer holds; 0 = predictive disabled */
 } lap_t;
 
 void     lap_init(lap_t *L, const lap_cfg_t *cfg);           /* cfg NULL -> defaults; clears best/prev */
+void     lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);        /* apply to a live engine; no state reset */
 void     lap_set_venue(lap_t *L, const trk_venue_t *v);      /* enters VENUE_FOUND, arms candidates */
-void     lap_force_layout(lap_t *L, uint16_t layout_id);     /* restrict candidates to this layout id */
+int      lap_force_layout(lap_t *L, uint16_t layout_id);     /* 0 applied, -1 the venue has no such layout
+                                                               * (forced id left untouched) */
 void     lap_reset(lap_t *L);                                /* back to NO_VENUE; keeps best/prev (§10.3) */
 /* Feed one fix (valid or not) and the current fused stats. Events for this fix are appended to out[]
  * (a caller-owned buffer of at least LAP_EVT_MAX entries); *n_out is set to 0 on entry and left holding
@@ -193,14 +217,22 @@ uint32_t lap_theoretical_best_ms(const lap_t *L);            /* Sigma best_secto
 /* §10.9 on-device track creation. lap_create_begin enters CREATE (state stays NO_VENUE); each
  * lap_mark_gate press adds a gate (gate_idx 0 = S/F, 1.. = sector n, added in order); the next S/F
  * crossing finalises the venue (trk_user_add, auto reverse layout) and enters VENUE_FOUND;
- * lap_create_cancel (long press) aborts. lap_mark_gate returns 0 on success, -1 otherwise, and fills
- * *out_layout (if non-NULL) with the layout built so far. */
+ * lap_create_cancel (long press) aborts. lap_mark_gate returns 0 on success, -1 otherwise (when not
+ * creating, the fix is invalid/not moving, the gate index is out of order/full, the fix's position or
+ * heading is out of range, or the derived line is degenerate), and fills *out_layout (if non-NULL)
+ * with the layout built so far. */
 void     lap_create_begin(lap_t *L);
 int      lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
 void     lap_create_cancel(lap_t *L);
 
-/* §10.10 RTC continuity. Export mirrors the resumable state into a POD; import restores it into
- * LAP_RUNNING with LAP_F_INTERRUPTED and returns 0, or -1 if the venue id is unknown. */
+/* §10.10 RTC continuity. Export mirrors the resumable state into a POD. Import validates the
+ * snapshot and returns 0, -1 (the venue id is unknown to the track store), -2 (the venue has no
+ * such layout_id -- restoring it would arm zero candidates and kill lap timing for the session) or
+ * -3 (sector_idx > LAP_MAX_SECTORS, which would put sec_next outside gate_times[]). On success a
+ * snapshot with a locked layout_id, or an out-lap (lap_no == 0), restores into LAP_RUNNING with
+ * LAP_F_INTERRUPTED; a snapshot with lap_no > 0 and NO locked layout restores into LAP_ST_ARMED
+ * with lap_no 0 instead -- sector timing and §10.8 cannot be resumed without a layout, and
+ * disambiguation is only reachable at lap_no == 0 (audit fix wave R25). */
 void     lap_export_rtc(const lap_t *L, lap_rtc_t *out);
 int      lap_import_rtc(lap_t *L, const lap_rtc_t *s);
 

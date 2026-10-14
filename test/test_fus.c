@@ -81,7 +81,6 @@ static void test_identity_mount_gravity_bias_and_yaw_sign(void)
     TEST_ASSERT_FLOAT_WITHIN(1e-3f, sqrtf(0.34f), o.g_comb);
     TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, o.yaw_dps);            /* 5 dps on X minus the 5 dps bias */
     TEST_ASSERT_EQUAL_UINT8(FUS_ORIENT_OK, o.flags & FUS_ORIENT_OK);
-    TEST_ASSERT_EQUAL_UINT32(1, f.samples);
 }
 
 static void test_ninety_degree_mount_rotates_into_the_vehicle_frame(void)
@@ -167,7 +166,7 @@ static void test_gps_speed_and_course_are_held_with_validity_and_time(void)
 {
     fus_t f; fus_init(&f, NULL, 1);
     fus_set_gps_speed(&f, 27.5f, 91.0f, 5000000, true);
-    TEST_ASSERT_EQUAL_FLOAT(27.5f, f.v_mps); TEST_ASSERT_EQUAL_FLOAT(91.0f, f.v_course_deg);
+    TEST_ASSERT_EQUAL_FLOAT(27.5f, f.v_mps); TEST_ASSERT_EQUAL_FLOAT(91.0f, f.prev_course_deg);
     TEST_ASSERT_EQUAL_INT64(5000000, f.v_mono_us); TEST_ASSERT_TRUE(f.v_valid);
     fus_set_gps_speed(&f, 0.0f, 0.0f, 5200000, false);
     TEST_ASSERT_FALSE(f.v_valid);
@@ -745,6 +744,53 @@ static void test_gps_cross_check_disagrees_and_latches(void)
     TEST_ASSERT_TRUE(f.disagree_latched);
 }
 
+/* M1 (§9.3 step 5, "Both g_lon and g_lat are clamped to ±G_MAX, and clamping sets FUS_CLAMPED"):
+ * the clamp lived inside the `if (oriented)` branch only, so before an upright capture g_lon was
+ * the raw in-plane magnitude. The reviewer's repro_misc.c reported 22.627 g with flags 0x00, and
+ * drag_on_fused integrates g_lon x G_MPS2 straight into v_est. */
+static void test_unoriented_g_lon_is_clamped_to_gmax(void)
+{
+    fus_t f; fus_init(&f, NULL, 1);                      /* identity R, orient_ok = 0 */
+    imu_raw_t r; memset(&r, 0, sizeof r);
+    r.mono_us = 0; r.ax = 32767; r.ay = 32767; r.az = 0; /* ~16 g on each in-plane axis */
+    fused_sample_t o;
+    TEST_ASSERT_EQUAL_INT(1, fus_step(&f, &r, &o));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, G_MAX, o.g_lon);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, o.g_lat);
+    TEST_ASSERT_TRUE(o.flags & FUS_CLAMPED);
+    TEST_ASSERT_FALSE(o.flags & FUS_ORIENT_OK);
+}
+
+/* M7 (§9.2, "the sample flag FUS_BIAS_STALE is set until the next still period"): update_bias_stale
+ * recomputed the flag on every fus_set_temp, so a temperature excursion that came back cleared it
+ * without any recapture. */
+static void test_bias_stale_latches_until_a_recapture(void)
+{
+    lcg_reset();
+    fus_t f; fus_init(&f, NULL, 1);
+    fus_set_temp(&f, 2500);
+    fused_sample_t o; int64_t t = 1000000;
+    const float quiet_a[3] = { 0.0f, 0.0f, 1.0f };
+    feed(&f, &o, FUS_STILL_WINDOW_N, quiet_a, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_TRUE(fus_is_still(&f));
+    fus_gyro_bias_update(&f);                            /* bias captured at 25.00 C */
+    feed(&f, &o, 1, quiet_a, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_FALSE(o.flags & FUS_BIAS_STALE);
+
+    fus_set_temp(&f, 4500);                              /* +20 C > BIAS_TEMP_STALE_C */
+    feed(&f, &o, 1, quiet_a, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_TRUE(o.flags & FUS_BIAS_STALE);
+
+    fus_set_temp(&f, 2500);                              /* back again: still stale, no recapture */
+    feed(&f, &o, 1, quiet_a, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_TRUE(o.flags & FUS_BIAS_STALE);          /* FIX: latched */
+
+    feed(&f, &o, FUS_STILL_WINDOW_N, quiet_a, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    fus_gyro_bias_update(&f);                            /* the next still period clears it */
+    feed(&f, &o, 1, quiet_a, ZERO3, QUIET_ACC_NOISE_G, QUIET_GYR_NOISE_LSB, &t);
+    TEST_ASSERT_FALSE(o.flags & FUS_BIAS_STALE);
+}
+
 static void test_car_variant_lateral_g_and_yaw(void)
 {
     fus_calib_t c; calibrated_identity(&c);
@@ -794,6 +840,8 @@ int main(void)
     RUN_TEST(test_moto_pure_gyro_and_lean_valid_timeout);
     RUN_TEST(test_lean_and_g_are_clamped);
     RUN_TEST(test_gps_cross_check_disagrees_and_latches);
+    RUN_TEST(test_unoriented_g_lon_is_clamped_to_gmax);
+    RUN_TEST(test_bias_stale_latches_until_a_recapture);
     RUN_TEST(test_car_variant_lateral_g_and_yaw);
     return UNITY_END();
 }

@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "core/lap.h"
+#include "core/lap_cfg.h"
 #include "core/trk.h"
 #include "core/geo.h"
 #include "core/consts.h"
@@ -217,6 +218,32 @@ static void test_leave_venue_after_factor_radius_for_timeout(void)
     gps_fix_t f3 = fix_ll(lat_s, lon_far, 1000000 + 1000000 + 61000000, 0, true);      /* +61 s: leave */
     drive_fix(&L, &f3, NULL);
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+}
+
+/* §10.3 + design §3: leaving a venue emits EV_VENUE_LOST carrying the venue id, before the engine
+ * drops the venue pointer. F2b closes the open session on it (ruling R4). */
+static void test_leave_venue_emits_venue_lost(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    const double lat_s = lat_of(lat0, -300.0);
+    const double lon_far = lon_of(lon0, lat0, -4000.0);              /* 4 km out: > radius * 1.5 */
+
+    gps_fix_t f0 = fix_ll(lat_s, lon_of(lon0, lat0, -500.0), 1000000, 20000, true);
+    drive_fix(&L, &f0, &log);
+    gps_fix_t f1 = fix_ll(lat_s, lon_far, 2000000, 20000, true);     /* leave timer starts */
+    drive_fix(&L, &f1, &log);
+    TEST_ASSERT_EQUAL_INT(0, count_type(&log, EV_VENUE_LOST));
+    gps_fix_t f2 = fix_ll(lat_s, lon_far, 63000000, 0, true);        /* +61 s: leave */
+    drive_fix(&L, &f2, &log);
+
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+    TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_VENUE_LOST));
+    for (int i = 0; i < log.n && i < 64; i++)
+        if (log.type[i] == EV_VENUE_LOST) TEST_ASSERT_EQUAL_UINT16(TRK_USER_ID_BASE, log.arg16[i]);
 }
 
 /* §22.1/§6.4 step 3: on a forward (dir_sign +1) layout a northbound crossing is accepted and a
@@ -499,6 +526,45 @@ static void test_sector_resync_after_skip(void)
     TEST_ASSERT_TRUE(found);
 }
 
+/* H1/R23 (§6.4): a sector gate in the SAME previous->current segment as the S/F. §6.4's own
+ * example is "an S/F line and the first sector line within 11 m at 200 km/h on a 5 Hz module".
+ * Geometry lifted from the reviewer's repro_lap.c: gate 1 sits 6 m past the S/F, so the
+ * (0,-40) -> (0,40) chord crosses the S/F at t_frac 0.5 and gate 1 at t_frac 0.575 -- the gate
+ * belongs to the lap the S/F just opened. Before R23 sectors were evaluated first, the gate was
+ * disarmed, dropped by handle_sector_cross (k < sec_next), and re-armed past the car: one lap in
+ * three came out INCOMPLETE and was excluded from best and best_sector_ms. */
+static void test_sector_just_past_sf_in_the_same_segment(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    const double north[1] = { 6.0 };
+    trk_venue_t v; build_venue_sec(&v, lat0, lon0, 1, north);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap opens; gate 1 at +150 ms */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* out-lap completes; lap 1 opens */
+    forward_lap(&L, lat0, lon0, 80000000, 40000000, &log);   /* lap 1 completes */
+
+    const lap_result_t *l1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, l1->lap_no);
+    TEST_ASSERT_EQUAL_UINT8(2, l1->n_sectors);               /* split 0 (S/F->gate 1) + split 1 */
+    TEST_ASSERT_FALSE(l1->flags & LAP_F_INCOMPLETE);
+    TEST_ASSERT_TRUE(l1->flags & LAP_F_VALID);
+    TEST_ASSERT_EQUAL_UINT32(l1->time_ms, l1->sector_ms[0] + l1->sector_ms[1]);
+    TEST_ASSERT_TRUE(l1->sector_ms[0] <= 1000);              /* 6 m at 40 m/s = 150 ms */
+
+    /* ordering is observable in the event stream: on the fix that carries both crossings the
+     * EV_LAP_COMPLETE (t_frac 0.5) precedes the EV_SECTOR (t_frac 0.575). */
+    int i_complete = -1, i_sector = -1;
+    for (int i = 0; i < log.n && i < 64; i++) {
+        if (log.type[i] == EV_LAP_COMPLETE && log.arg16[i] == 0) i_complete = i;
+        if (log.type[i] == EV_SECTOR && i_complete >= 0 && i_sector < 0) i_sector = i;
+    }
+    TEST_ASSERT_TRUE(i_complete >= 0);
+    TEST_ASSERT_TRUE(i_sector > i_complete);
+}
+
 /* §10.7: at a sector hit in a later lap the EV_SECTOR delta equals split - best_lap.sector_ms[idx]. */
 static void test_sector_delta_vs_best(void)
 {
@@ -723,6 +789,26 @@ static void test_create_cancel(void)
     TEST_ASSERT_EQUAL_INT(0, trk_user_count());                    /* nothing saved */
 }
 
+/* core:M5: head_e5 is a signed int32 straight off NAV-PVT's headMot, so an out-of-range heading is
+ * reachable from the wire. lap_mark_gate must refuse it instead of storing a (0,0) line and
+ * returning 0. */
+static void test_mark_gate_refuses_an_out_of_range_heading(void)
+{
+    lap_t L; lap_init(&L, NULL);
+    lap_create_begin(&L);
+    gps_fix_t f = fix_ll(-34.0, 18.0, 1000000, 20000, true);
+    f.head_e5 = 40000000;                                   /* 400 deg: out of range */
+    trk_layout_t ly;
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 0, &f, &ly));
+    TEST_ASSERT_FALSE(L.create_have_sf);
+    f.head_e5 = -9000000;                                   /* -90 deg: out of range */
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 0, &f, &ly));
+    f.head_e5 = 9000000;                                    /* 90 deg: accepted */
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 0, &f, &ly));
+    TEST_ASSERT_TRUE(L.create_have_sf);
+    TEST_ASSERT_TRUE(ly.sf.p1.lat != ly.sf.p2.lat || ly.sf.p1.lon != ly.sf.p2.lon);
+}
+
 /* #97/Task 5: lap_mark_gate refuses a sector gate pressed out of order -- gate_idx 2 ("sector 2")
  * before gate_idx 1 ("sector 1") has ever been marked -- and the refusal leaves the engine's own
  * gate-count state untouched (still waiting for sector 1), so a subsequent in-order press at
@@ -804,6 +890,90 @@ static void test_rtc_import_unknown_venue_fails(void)
     lap_t L; lap_init(&L, NULL);
     TEST_ASSERT_EQUAL_INT(-1, lap_import_rtc(&L, &rtc));
     TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+}
+
+/* H2/R25 (§10.8): best_sector_ms[] / the theoretical best belong to one (venue, layout) pair.
+ * Venue A runs 50 s laps, venue B 100 s laps in the same session; the reviewer's repro_bestsec.c
+ * showed B reporting A's splits, i.e. an unattainable theoretical best. */
+static void test_best_sectors_cleared_on_venue_change(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    const double north[1] = { 35.0 };                   /* one sector gate at 35 m: forward_lap's trajectory
+                                                        * never goes north of 40 m, so the brief's 600 m gate
+                                                        * was unreachable (controller ruling, F1a T4) */
+    trk_venue_t a; build_venue_sec(&a, lat0, lon0, 1, north);
+    trk_venue_t b; build_venue_sec(&b, lat0, lon0, 1, north);
+    b.id = (uint16_t)(TRK_USER_ID_BASE + 1u);
+
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &a);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    int64_t t = 0;
+    for (int i = 0; i < 4; i++) { forward_lap(&L, lat0, lon0, t, 50000000, NULL); t += 50000000; }
+    const uint32_t best_a = lap_theoretical_best_ms(&L);
+    TEST_ASSERT_TRUE(best_a > 0);
+    TEST_ASSERT_TRUE(best_a <= 50500);
+
+    lap_set_venue(&L, &b);                               /* venue change inside the session */
+    TEST_ASSERT_EQUAL_UINT32(0, lap_theoretical_best_ms(&L));   /* FIX: nothing carried over */
+    TEST_ASSERT_EQUAL_UINT8(0, L.best_sector_count);
+
+    arm_at_start(&L, lat0, lon0, t, NULL);
+    for (int i = 0; i < 4; i++) { forward_lap(&L, lat0, lon0, t, 100000000, NULL); t += 100000000; }
+    const uint32_t best_b = lap_theoretical_best_ms(&L);
+    TEST_ASSERT_TRUE(best_b > 90000);                    /* B's own splits, not A's 50 s ones */
+}
+
+/* H3/R25: lap_force_layout with an id the venue does not have must be refused. Before the fix
+ * arm_candidates() matched nothing, n_cand went to 0, no S/F gate was armed and lap timing was
+ * silently dead for the whole session -- reachable from CMD_SET_LAYOUT's arbitrary arg16. */
+static void test_force_layout_unknown_id_is_refused(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    TEST_ASSERT_EQUAL_INT(-1, lap_force_layout(&L, 99));
+    TEST_ASSERT_EQUAL_UINT16(0, L.forced_layout_id);     /* still Auto */
+    TEST_ASSERT_EQUAL_UINT8(1, L.n_cand);                /* the venue's layout is still armed */
+    TEST_ASSERT_EQUAL_INT(0, lap_force_layout(&L, 1));   /* the real id is accepted */
+
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* crossing #1: out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 50000000, &log);   /* crossing #2: out-lap completes, lap 1 opens */
+    forward_lap(&L, lat0, lon0, 90000000, 50000000, &log);   /* crossing #3: lap 1 completes -> 2 completions */
+    TEST_ASSERT_EQUAL_INT(2, count_type(&log, EV_LAP_COMPLETE));   /* laps still complete */
+    const lap_result_t *p1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, p1->lap_no);
+    TEST_ASSERT_TRUE(p1->time_ms > 0);
+}
+
+/* H3/M3/R25: lap_import_rtc validates the layout id and the sector index, and a snapshot that
+ * claims a lap but no locked layout resumes ARMED -- RUNNING with n_sec == 0 left §10.5/§10.8
+ * dead for the rest of the session while laps still completed VALID with n_sectors == 0. */
+static void test_import_rtc_rejects_bad_layout_and_sector_idx(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&v));
+
+    lap_t L; lap_init(&L, NULL);
+    lap_rtc_t s; memset(&s, 0, sizeof s);
+    s.venue_id = TRK_USER_ID_BASE; s.layout_id = 42; s.lap_no = 3; s.lap_start_gps_us = 1000000;
+    TEST_ASSERT_EQUAL_INT(-2, lap_import_rtc(&L, &s));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_NO_VENUE, lap_state(&L));
+
+    memset(&s, 0, sizeof s);
+    s.venue_id = TRK_USER_ID_BASE; s.layout_id = 1; s.lap_no = 3; s.sector_idx = 255;
+    TEST_ASSERT_EQUAL_INT(-3, lap_import_rtc(&L, &s));
+
+    memset(&s, 0, sizeof s);                              /* lap_no > 0 but no locked layout */
+    s.venue_id = TRK_USER_ID_BASE; s.layout_id = 0; s.lap_no = 3; s.lap_start_gps_us = 1000000;
+    TEST_ASSERT_EQUAL_INT(0, lap_import_rtc(&L, &s));
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_ARMED, lap_state(&L));
+    TEST_ASSERT_EQUAL_UINT16(0, L.lap_no);
+    TEST_ASSERT_EQUAL_UINT8(1, L.n_cand);                 /* the S/F gate IS armed */
 }
 
 /* #98 bench defect (Layout: stuck on Auto, 2026-10-07): the ui learns the current venue ONLY from
@@ -950,6 +1120,13 @@ static void test_predictive_table_cap(void)
     TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
     TEST_ASSERT_TRUE(L.pred_rec_n > 0);
     TEST_ASSERT_TRUE(L.pred_rec_n <= PRED_TABLE_MAX);              /* never overflows the fixed table */
+    /* §10.11 "max 600 entries; beyond that every 2nd fix": one halving has happened, so the
+     * stride is 2 and the table holds the 300 survivors plus ~half of the remaining ~100 fixes.
+     * Before the fix pred_rec_fixes was incremented and never read -- recording continued at FULL
+     * density and the halving comment was false (audit core LOW / false claim 2). */
+    TEST_ASSERT_EQUAL_UINT16(2, L.pred_stride);
+    TEST_ASSERT_TRUE(L.pred_rec_n >= 300);
+    TEST_ASSERT_TRUE(L.pred_rec_n < 420);
 
     free(pbd); free(pbt); free(prd); free(prt);
 }
@@ -1252,6 +1429,63 @@ static void test_lap_across_gps_outage_not_clean_valid(void)
     TEST_ASSERT_FALSE(l2->flags & LAP_F_VALID);              /* so lap 2 is not a clean VALID lap */
 }
 
+/* C1/R22 (§6.4 step 1): a GPS dropout SHORTER than LAP_SEG_GAP_US that the S/F chord spans must
+ * flag BOTH laps. The chord's t_cross is interpolated straight across the outage -- the reviewer's
+ * repro_gap.c measured 227 ms of error on a 2.8 s dropout and the next lap still came out VALID,
+ * eligible for best and best_sector. Only the >5 s case was covered before. */
+static void test_short_dropout_chord_flags_the_opened_lap(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);   /* out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* out-lap completes; lap 1 runs */
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);                   /* prev valid fix = (0,-40) @ 80 s */
+
+    /* a 2 s dropout (< LAP_SEG_GAP_US = 5 s) straddling the S/F, then the first valid fix north */
+    feed(&L, lat0, lon0, 0.0, -20.0, 80500000, 0, false, &log);
+    feed(&L, lat0, lon0, 0.0,  20.0, 81500000, 0, false, &log);
+    feed(&L, lat0, lon0, 0.0,  40.0, 82000000, SPD_MMS, true, &log);
+
+    TEST_ASSERT_EQUAL_UINT16(2, L.lap_no);                   /* lap 1 completed over the gap chord */
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_GPS_LOST);          /* FIX: the OPENED lap is flagged */
+
+    /* lap 2 then runs on clean fixes and must still not be reported VALID */
+    feed(&L, lat0, lon0, 300.0,  40.0, 112000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0, 300.0, -40.0, 117000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0, -40.0, 127000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 129000000, SPD_MMS, true, &log);
+    const lap_result_t *l2 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(2, l2->lap_no);
+    TEST_ASSERT_TRUE(l2->flags & LAP_F_GPS_LOST);
+    TEST_ASSERT_FALSE(l2->flags & LAP_F_VALID);
+}
+
+/* R22: a chord longer than LAP_SEG_GAP_US made of ABSENT fixes (never invalid ones, so the
+ * in-lap GPS_LOST path never fires) must flag the COMPLETING lap too -- its end time is the
+ * interpolation across the gap. Before R22 only the opened lap was flagged. */
+static void test_long_absent_gap_flags_the_completing_lap(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    forward_lap(&L, lat0, lon0, 0,        40000000, &log);
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, &log);   /* lap 1 runs; prev fix @ 80 s */
+    TEST_ASSERT_FALSE(L.lap_flags & LAP_F_GPS_LOST);         /* clean so far */
+    feed(&L, lat0, lon0, 0.0, 40.0, 88000000, SPD_MMS, true, &log);   /* 8 s chord, no fix between */
+    const lap_result_t *l1 = lap_prev(&L);
+    TEST_ASSERT_EQUAL_UINT16(1, l1->lap_no);
+    TEST_ASSERT_TRUE(l1->flags & LAP_F_GPS_LOST);            /* FIX: the completing lap too */
+    TEST_ASSERT_FALSE(l1->flags & LAP_F_VALID);
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_GPS_LOST);          /* and the opened one (pre-existing) */
+}
+
 /* Bench B-F5 (debt sweep B, `dbg reset` -> CMD_RESET_ENGINE -> lap_reset()): a reset mid-session must
  * not strand the engine. After lap_reset() the venue is re-found on the next valid fix, the S/F gate
  * re-arms, and laps complete again with fresh numbering (prev/best from before survive, §10.3). */
@@ -1290,12 +1524,149 @@ static void test_reset_mid_session_then_laps_resume(void)
     TEST_ASSERT_UINT32_WITHIN(2, 47000, lap_prev(&L)->time_ms);
 }
 
+/* H4/R24 (§15.1): cfg.lap.min_lap_s reaches the engine. With min_lap_s = 60 the S/F gate stays
+ * disarmed (§6.4 step 5) through a 45 s lap, so nothing completes; the same drive under the
+ * defaults (MIN_LAP_S = 20) completes the out-lap. Before R24 both engines behaved identically. */
+static void test_cfg_min_lap_s_reaches_the_engine(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+
+    lap_cfg_t c; lap_cfg_defaults(&c); c.min_lap_s = 60;
+    lap_t L; lap_init(&L, &c);
+    evlog_t slow; memset(&slow, 0, sizeof slow);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &slow);
+    forward_lap(&L, lat0, lon0, 0, 40000000, &slow);                  /* out-lap opens at t = 1 s */
+    feed(&L, lat0, lon0, 0.0, 40.0, 46000000, SPD_MMS, true, &slow);  /* 45 s later: gate still disarmed */
+    TEST_ASSERT_EQUAL_INT(0, count_type(&slow, EV_LAP_COMPLETE));
+    TEST_ASSERT_EQUAL_UINT16(0, L.lap_no);
+
+    lap_t D; lap_init(&D, NULL);                                      /* control: shipped defaults */
+    evlog_t fast; memset(&fast, 0, sizeof fast);
+    lap_set_venue(&D, &v);
+    arm_at_start(&D, lat0, lon0, 0, &fast);
+    forward_lap(&D, lat0, lon0, 0, 40000000, &fast);
+    feed(&D, lat0, lon0, 0.0, 40.0, 46000000, SPD_MMS, true, &fast);
+    TEST_ASSERT_EQUAL_INT(1, count_type(&fast, EV_LAP_COMPLETE));
+    TEST_ASSERT_EQUAL_UINT16(1, D.lap_no);
+}
+
+/* H4/R24 (§10.5): with two candidates tied on score, the venue's configured default layout wins.
+ * The out-lap below crosses no sector gate of either layout and matches neither length (|1.4 km −
+ * 2.5 km| > 15 %), so both score 0 and only the tie-break decides. Wholly untested before R24. */
+static void test_default_layout_map_breaks_the_tie(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue_2layout(&v, lat0, lon0);              /* ids 1 "Full", 2 "Short" */
+
+    lap_cfg_t c; lap_cfg_defaults(&c);
+    c.n_default_layout = 1;
+    c.default_layout[0].venue  = TRK_USER_ID_BASE;
+    c.default_layout[0].layout = 2;                                  /* prefer "Short" at this venue */
+    lap_t L; lap_init(&L, &c);
+    evlog_t log; memset(&log, 0, sizeof log);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, &log);   /* S/F -> out-lap, union */
+    feed(&L, lat0, lon0, 400.0,  40.0, 10000000, SPD_MMS, true, &log);   /* east of every gate */
+    feed(&L, lat0, lon0, 400.0, 360.0, 18000000, SPD_MMS, true, &log);   /* north, crosses nothing */
+    feed(&L, lat0, lon0, 400.0, -40.0, 30000000, SPD_MMS, true, &log);   /* south, re-arms S/F */
+    feed(&L, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, &log);
+    feed(&L, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, &log);   /* S/F -> disambiguate */
+    TEST_ASSERT_EQUAL_INT(1, count_type(&log, EV_LAYOUT_LOCKED));
+    TEST_ASSERT_EQUAL_UINT16(2, last_locked_id(&log));               /* the configured default */
+
+    lap_t A; lap_init(&A, NULL);                                     /* control: no map -> lowest id */
+    evlog_t alog; memset(&alog, 0, sizeof alog);
+    lap_set_venue(&A, &v);
+    arm_at_start(&A, lat0, lon0, 0, &alog);
+    feed(&A, lat0, lon0,   0.0,  40.0, 2000000,  SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0, 400.0,  40.0, 10000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0, 400.0, 360.0, 18000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0, 400.0, -40.0, 30000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0,   0.0, -40.0, 34000000, SPD_MMS, true, &alog);
+    feed(&A, lat0, lon0,   0.0,  40.0, 36000000, SPD_MMS, true, &alog);
+    TEST_ASSERT_EQUAL_UINT16(1, last_locked_id(&alog));
+}
+
+/* R24: CMD_CONFIG_RELOAD applies a new lap cfg to a RUNNING engine without resetting it
+ * (pipeline_reload_cfg calls lap_set_cfg, never lap_init). */
+static void test_set_cfg_applies_without_resetting(void)
+{
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL);
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL);           /* lap 1 in progress */
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);
+
+    lap_cfg_t c; lap_cfg_defaults(&c); c.pit_speed_kmh = 30; c.pit_time_s = 3;
+    lap_set_cfg(&L, &c);
+    TEST_ASSERT_EQUAL_UINT8(LAP_ST_RUNNING, lap_state(&L));          /* state survives the reload */
+    TEST_ASSERT_EQUAL_UINT16(1, L.lap_no);
+    TEST_ASSERT_EQUAL_UINT8(30, L.cfg.pit_speed_kmh);
+    /* and the new pit thresholds are the ones in force: 20 km/h for 4 s is now a pit */
+    feed(&L, lat0, lon0, 300.0, -40.0, 85000000, 5555, true, NULL);  /* 20 km/h */
+    feed(&L, lat0, lon0, 300.0, -41.0, 89000000, 5555, true, NULL);
+    TEST_ASSERT_TRUE(L.lap_flags & LAP_F_PIT);
+}
+
+/* F1a final review I3: min_lap_s and max_lap_s are each clamped independently (pick16 here,
+ * clamp_u16 in cfg.c), so a pair like min_lap_s=600, max_lap_s=60 passes both per-field range
+ * checks and reaches the engine with no window at all. complete_lap then discards every lap
+ * under min_lap_s and flags every lap over max_lap_s TOO_LONG, so with min >= max NO lap can ever
+ * complete VALID for the rest of the session (R24 requires both fields to fall back together to
+ * the consts.h defaults instead). Covers both paths onto the engine: lap_cfg_from_user (the
+ * json/console loader) and lap_set_cfg (CMD_CONFIG_RELOAD on a live engine). */
+static void test_bad_min_max_window_falls_back_to_defaults(void)
+{
+    /* lap_cfg_from_user: a user cfg with an inverted window. */
+    cfg_t uc; memset(&uc, 0, sizeof uc);
+    uc.lap.min_lap_s = 600;
+    uc.lap.max_lap_s = 60;
+    lap_cfg_t c; lap_cfg_from_user(&uc, &c);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MIN_LAP_S, c.min_lap_s);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MAX_LAP_S, c.max_lap_s);
+
+    /* lap_set_cfg: the same inverted window applied to a live, RUNNING engine (R24 reload path). */
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+
+    lap_cfg_t bad; lap_cfg_defaults(&bad);
+    bad.min_lap_s = 600;
+    bad.max_lap_s = 60;
+    lap_set_cfg(&L, &bad);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MIN_LAP_S, L.cfg.min_lap_s);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MAX_LAP_S, L.cfg.max_lap_s);
+
+    /* and a normal ~40 s lap still completes VALID -- the bad pair must not silently kill lap
+     * completion for the session. */
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL);   /* #1 out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL);   /* #2 out-lap completes, lap 1 opens */
+    forward_lap(&L, lat0, lon0, 80000000, 40000000, NULL);   /* #3 lap 1 completes, ~40 s */
+
+    const lap_result_t *p = lap_prev(&L);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT16(1, p->lap_no);
+    TEST_ASSERT_TRUE(p->flags & LAP_F_VALID);
+    TEST_ASSERT_FALSE(p->flags & LAP_F_TOO_LONG);
+    TEST_ASSERT_NOT_NULL(lap_best(&L));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_venue_found_within_radius_not_beyond);
     RUN_TEST(test_venue_found_then_armed_emits_events);
     RUN_TEST(test_leave_venue_after_factor_radius_for_timeout);
+    RUN_TEST(test_leave_venue_emits_venue_lost);
     RUN_TEST(test_forward_crossing_accepted_reverse_rejected);
     RUN_TEST(test_reverse_layout_accepts_reverse_rejects_forward);
     RUN_TEST(test_out_lap_has_no_time);
@@ -1305,9 +1676,12 @@ int main(void)
     RUN_TEST(test_pit_flag_on_slow_section);
     RUN_TEST(test_gps_lost_flag_on_invalid_fix);
     RUN_TEST(test_lap_across_gps_outage_not_clean_valid);
+    RUN_TEST(test_short_dropout_chord_flags_the_opened_lap);
+    RUN_TEST(test_long_absent_gap_flags_the_completing_lap);
     RUN_TEST(test_sector_splits_sum_to_lap_time);
     RUN_TEST(test_incomplete_flag_when_sector_skipped);
     RUN_TEST(test_sector_resync_after_skip);
+    RUN_TEST(test_sector_just_past_sf_in_the_same_segment);
     RUN_TEST(test_sector_delta_vs_best);
     RUN_TEST(test_disambiguation_locks_full_layout);
     RUN_TEST(test_disambiguation_locks_short_layout);
@@ -1315,14 +1689,22 @@ int main(void)
     RUN_TEST(test_create_track_saves_valid_venue);
     RUN_TEST(test_create_refuses_when_user_table_full);
     RUN_TEST(test_create_cancel);
+    RUN_TEST(test_mark_gate_refuses_an_out_of_range_heading);
     RUN_TEST(test_create_mark_gate_sector_out_of_order);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);
     RUN_TEST(test_rtc_import_unknown_venue_fails);
+    RUN_TEST(test_best_sectors_cleared_on_venue_change);
+    RUN_TEST(test_force_layout_unknown_id_is_refused);
+    RUN_TEST(test_import_rtc_rejects_bad_layout_and_sector_idx);
     RUN_TEST(test_venue_acquisition_paths_announce_or_are_silent);
     RUN_TEST(test_predictive_delta);
     RUN_TEST(test_predictive_table_cap);
     RUN_TEST(test_predictive_disabled_returns_no_delta);
     RUN_TEST(test_reset_mid_session_then_laps_resume);
+    RUN_TEST(test_cfg_min_lap_s_reaches_the_engine);
+    RUN_TEST(test_default_layout_map_breaks_the_tie);
+    RUN_TEST(test_set_cfg_applies_without_resetting);
+    RUN_TEST(test_bad_min_max_window_falls_back_to_defaults);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);

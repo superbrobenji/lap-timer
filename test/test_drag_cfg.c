@@ -57,7 +57,7 @@ static void test_mph_empty_list_keeps_defaults(void)
 static void test_mph_round_trip_is_exact(void)
 {
     for (unsigned m = 1; m <= 300; m++) {
-        drag_gate_def_t g = { 1, DRAG_SPEED_FROM0, (uint16_t)lround((double)m * DRAG_MPH_PER_KMH), 0 };
+        drag_gate_def_t g = { 1, DRAG_SPEED_FROM0, (uint16_t)lround((double)m * DRAG_KMH_PER_MPH), 0 };
         char buf[8], want[8];
         (void)snprintf(want, sizeof want, "0-%u", m);
         TEST_ASSERT_TRUE(drag_gate_label(&g, 1, CFG_DIST_FT, buf, sizeof buf) > 0);

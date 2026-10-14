@@ -18,22 +18,23 @@ static const float FUS_FWD_MIN_NORM = 1e-6f;
 
 static float v_dot(const float a[3], const float b[3])
 {
-    CORE_ASSERT_RET(a != NULL, FUS_ASSERT_CODE, 0.0f);
-    CORE_ASSERT_RET(b != NULL, FUS_ASSERT_CODE, 0.0f);
+    /* Both call sites pass provably non-NULL pointers: v_norm's own (already-checked) parameter,
+     * or fus_orient_set_forward's sum_ah (checked) and a local z[3] (address-of-local). */
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
 static float v_norm(const float a[3])
 {
-    CORE_ASSERT_RET(a != NULL, FUS_ASSERT_CODE, 0.0f);
+    /* Every call site passes a provably non-NULL pointer: fus_orient_from_gravity's checked
+     * mean_acc_g, v_normalize's own (already-checked) parameter, or fus_orient_set_forward's
+     * local h[3] (address-of-local). */
     return sqrtf(v_dot(a, a));
 }
 
 static void v_cross(float out[3], const float a[3], const float b[3])
 {
-    CORE_ASSERT_VOID(out != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(a != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(b != NULL, FUS_ASSERT_CODE);
+    /* Both call sites are inside complete_triad, passing its own local t[3] (address-of-local)
+     * and its own already-checked x/y/z parameters. */
     out[0] = a[1] * b[2] - a[2] * b[1];
     out[1] = a[2] * b[0] - a[0] * b[2];
     out[2] = a[0] * b[1] - a[1] * b[0];
@@ -42,8 +43,9 @@ static void v_cross(float out[3], const float a[3], const float b[3])
 /* out = a / |a|. Every caller has already checked that |a| is finite and far enough from zero. */
 static void v_normalize(float out[3], const float a[3])
 {
-    CORE_ASSERT_VOID(out != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(a != NULL, FUS_ASSERT_CODE);
+    /* Every call site passes provably non-NULL pointers: local arrays (address-of-local) in
+     * fus_orient_from_gravity/complete_triad/fus_orient_set_forward, or complete_triad's own
+     * already-checked x/y parameters. */
     const float n = v_norm(a);
     CORE_ASSERT_VOID(n > 0.0f, FUS_ASSERT_CODE);   /* every caller has gated |a| away from zero */
     out[0] = a[0] / n;
@@ -56,9 +58,9 @@ static void v_normalize(float out[3], const float a[3])
  * ulps off unit length and fus_calib_valid measures the rows against FUS_ORTHO_TOL. */
 static void complete_triad(float x[3], float y[3], const float z[3])
 {
-    CORE_ASSERT_VOID(x != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(y != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(z != NULL, FUS_ASSERT_CODE);
+    /* Both call sites pass provably non-NULL pointers: fus_orient_from_gravity's/
+     * fus_orient_set_forward's local x/y arrays (address-of-local) and local z[3]
+     * (address-of-local). */
     float t[3];
     v_cross(t, z, x);
     v_normalize(y, t);

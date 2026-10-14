@@ -69,7 +69,7 @@ foreach(src ${CORE_TEST_SRCS})
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
      AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
      AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile"
-     AND NOT name STREQUAL "test_sim_clock")
+     AND NOT name STREQUAL "test_sim_clock" AND NOT name STREQUAL "test_drag")
     add_core_test(${name})
   endif()
 endforeach()
@@ -86,10 +86,15 @@ endif()
 # asserts the wire/JSON decoders reject malformed input WITHOUT firing the fault hook -- T-A), so they
 # link assert_support.c (test/assert_support.h) -- the shared STRONG core_assert_report recorder that
 # overrides core.c's weak no-op default for those binaries. It is not a test_*.c, so the glob above
-# never builds it as its own suite.
+# never builds it as its own suite. test_drag joins them (F1a T9 fix round 1): it asserts that a
+# legitimately non-monotonic fused gps_us step (a backward tb half-window rollover or PPS
+# acquire/drop, audit core:M2) fires NO assertion report -- drag_t state alone cannot tell the old
+# CORE_ASSERT_VOID(tc >= tp, ...) apart from the fixed `if (tc < tp) return;`, since both skip the
+# same sample; only the absence of the report distinguishes them.
 add_core_test(test_smoke assert_support.c)
 add_core_test(test_ses_frame assert_support.c)
 add_core_test(test_ses_records assert_support.c)
+add_core_test(test_drag assert_support.c)
 
 # test_ui and test_screens compare rendered framebuffers against PBM goldens in test/snapshots/ by
 # absolute path (TEST_DIR), since CTest runs a test's working directory from the build tree, not

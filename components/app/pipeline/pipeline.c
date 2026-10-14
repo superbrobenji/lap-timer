@@ -36,6 +36,7 @@
 #include "core/fus.h"
 #include "core/geo.h"
 #include "core/lap.h"
+#include "core/lap_cfg.h"
 #include "core/ses.h"      /* SES_T_FUSED / SES_T_EVENT -- stream record type codes */
 #include "core/tb.h"
 #include "core/trk.h"
@@ -217,7 +218,7 @@ static int16_t clamp_i16(int32_t v)
 static void emit_event(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* copied into the queues by value */
-    LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* only stable §4.5 codes are broadcast */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, PIPE_ASSERT_CODE);   /* a code core/event.h defines (design §3) */
     if (g_evt_q) { (void)xQueueSend(g_evt_q, ev, 0); logger_notify(); }
     if (g_ui_evt_q) (void)xQueueSend(g_ui_evt_q, ev, 0);   /* fan-out to the ui task (drop-newest on full) */
     /* §18: fan the event out to an attached peer as a live stream record (drop-on-full,
@@ -230,7 +231,7 @@ static void emit_event(const event_t *ev)
 
 static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)
 {
-    LT_ASSERT_VOID(type != EV_NONE && type <= EV_FAULT, PIPE_ASSERT_CODE);   /* a real §4.5 event code */
+    LT_ASSERT_VOID(type != EV_NONE && type < EV_COUNT, PIPE_ASSERT_CODE);    /* a code core/event.h defines (design §3) */
     LT_ASSERT_VOID(gps_us >= 0 && mono_us >= 0, PIPE_ASSERT_CODE);           /* epoch/mono timestamps */
     event_t ev = { type, 0, 0, gps_us, mono_us, 0, 0 };
     emit_event(&ev);
@@ -422,7 +423,7 @@ static void create_finish_if_active(void)
 static void engine_cb(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
-    LT_ASSERT_VOID(ev->type <= EV_FAULT, PIPE_ASSERT_CODE);  /* stable §4.5 code, drives the switch */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, PIPE_ASSERT_CODE);   /* a code core/event.h defines (design §3), drives the switch */
     if (ev->type == EV_LAP_COMPLETE) {
         on_lap_complete(ev->gps_us);
         s_rtc_save_due = true;     /* §15.3: save after on_fix, once open_lap has opened the new lap */
@@ -744,7 +745,9 @@ static void cancel_active_create(void);
  * moved -- the one case where cur.gates[]/best.gates[] (laid out in cfg.gates order) stop meaning
  * what they say. Otherwise the new cfg is adopted in place: gates[]/n_gates/rollout are identical,
  * so quarter_idx and both result layouts stay valid, and units/benches (display/bench-list
- * selection only) come along for free. */
+ * selection only) come along for free. The lap engine takes its §15.1 lap.* block through
+ * lap_set_cfg(), which applies in place: a reload mid-lap keeps the running lap, the candidates
+ * and the session bests (fix wave R24). */
 static void pipeline_reload_cfg(void)
 {
     cfg_t      cfg;
@@ -754,6 +757,11 @@ static void pipeline_reload_cfg(void)
     drag_cfg_from_user(&cfg, &dc);
     if (drag_cfg_engine_differs(&dc, &s_drag.cfg)) drag_init(&s_drag, &dc);
     else                                           s_drag.cfg = dc;
+    {
+        lap_cfg_t lc;
+        lap_cfg_from_user(&cfg, &lc);
+        lap_set_cfg(&s_lap, &lc);
+    }
     uint8_t new_mode = (cfg.mode == CFG_MODE_DRAG) ? (uint8_t)MODE_DRAG : (uint8_t)MODE_LAP;
     /* fix round 1 (Important finding 1): CMD_SET_MODE resets stats on a mode flip (handle_cmd
      * above) -- a reload that silently changes s_mode must do the same, else a mode change
@@ -1068,14 +1076,20 @@ static void pipeline_init(void)
 {
     tb_init(&s_tb);
     fus_init(&s_fus, NULL, (uint8_t)(CFG_VARIANT_MOTO ? 1 : 0));
-    lap_init(&s_lap, NULL);
     /* Plan 7c T2 fix 1: one NVS cfg load feeds both consumers below -- the drag engine's
      * user-derived gate table (benches/units/rollout) and cfg.mode, the single source of truth
      * for the operating mode (T-D). Same load-with-fallback pattern as ui.c/cmd.c; defaults on a
-     * missing/invalid blob (lt_cfg_load leaves cfg untouched on failure). */
+     * missing/invalid blob (lt_cfg_load leaves cfg untouched on failure). Fix wave R24: the lap
+     * engine is the third consumer -- §15.1's lap.* keys were parsed, clamped, persisted and
+     * exported but never reached it (audit core:H4). */
     cfg_t cfg;   /* pipeline task stack: cfg_t is a few hundred bytes; pipeline has ~4.8 KB free */
     cfg_defaults(&cfg);
     (void)lt_cfg_load(&cfg);
+    {
+        lap_cfg_t lc;
+        lap_cfg_from_user(&cfg, &lc);
+        lap_init(&s_lap, &lc);
+    }
     {
         drag_cfg_t dc;
         drag_cfg_from_user(&cfg, &dc);

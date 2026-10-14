@@ -46,6 +46,45 @@ static void test_gate_dir_sign_accepts_current_motion(void)
     assert_forward_gives_plus_one(-34.0, 18.7, 45.0, sin(GEO_PI / 4), cos(GEO_PI / 4));  /* NE */
 }
 
+/* core:M5 (§10.9): lap_gate_line returns a ZEROED line when its lat/lon/heading preconditions
+ * fail. Callers must test for that -- lap_mark_gate used to store the (0,0) line and report
+ * success, so the UI confirmed a gate that trk_validate_venue's line_ok later rejected, aborting
+ * the whole creation at finalize_create. */
+static void test_gate_line_rejects_out_of_range_inputs(void)
+{
+    const trk_line_t bad_head = lap_gate_line(-34.0, 18.0, 400.0);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, bad_head.p1.lat);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, bad_head.p2.lon);
+    const trk_line_t bad_lat = lap_gate_line(-91.0, 18.0, 0.0);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, bad_lat.p1.lat);
+    const trk_line_t ok = lap_gate_line(-34.0, 18.0, 90.0);
+    TEST_ASSERT_TRUE(ok.p1.lat != ok.p2.lat || ok.p1.lon != ok.p2.lon);
+}
+
+/* Ruling 3-5 (parked finding, folded into F1a Task 11): at a pole cos_lat0 collapses to ~6.1e-17
+ * rather than 0, so with heading 0 or 180 (where lx = +-1) dlon explodes to ~2.2e12 degrees instead
+ * of being rejected -- lap_gate_line returned a finite-but-absurd line. The existing
+ * CORE_ASSERT_RET(lat_deg >= -90.0 && lat_deg <= 90.0, ...) admits exactly 90.0, so this is
+ * reachable. (heading 90/270 is fine there: lx is ~-6.1e-17 and the two tiny factors cancel.) */
+static void test_gate_line_rejects_pole(void)
+{
+    const trk_line_t pole = lap_gate_line(90.0, 0.0, 0.0);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, pole.p1.lat);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, pole.p1.lon);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, pole.p2.lat);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, pole.p2.lon);
+}
+
+/* The bound must not bite at realistic high latitudes: 71 N (the northernmost drivable road) still
+ * builds a proper, geometrically correct 30 m gate. */
+static void test_gate_line_71n_still_30m(void)
+{
+    trk_line_t g = lap_gate_line(71.0, 25.0, 0.0);
+    TEST_ASSERT_TRUE(g.p1.lat != g.p2.lat || g.p1.lon != g.p2.lon);
+    double len = geo_dist_m(g.p1.lat, g.p1.lon, g.p2.lat, g.p2.lon);
+    TEST_ASSERT_DOUBLE_WITHIN(0.05, 2.0 * GATE_HALF_WIDTH_M, len);
+}
+
 /* lap_layout_reverse: same S/F line, sectors reversed, dir negated, id + 1, name suffixed. */
 static void test_layout_reverse_negates_dir_reverses_sectors(void)
 {
@@ -82,6 +121,9 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_gate_line_is_30m);
     RUN_TEST(test_gate_dir_sign_accepts_current_motion);
+    RUN_TEST(test_gate_line_rejects_out_of_range_inputs);
+    RUN_TEST(test_gate_line_rejects_pole);
+    RUN_TEST(test_gate_line_71n_still_30m);
     RUN_TEST(test_layout_reverse_negates_dir_reverses_sectors);
     return UNITY_END();
 }

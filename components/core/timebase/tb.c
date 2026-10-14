@@ -44,7 +44,6 @@ void tb_init(tb_t *t)
 static void recompute(tb_t *t)
 {
     CORE_ASSERT_VOID(t != NULL, TB_ASSERT_CODE);
-    CORE_ASSERT_VOID(t->cur == 0 || t->cur == 1, TB_ASSERT_CODE);   /* half index is one of two */
     int64_t m = 0; bool any = false;
     for (int i = 0; i < 2; i++) {
         if (!t->half_valid[i]) continue;
@@ -60,7 +59,6 @@ void tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t ser
     CORE_ASSERT_VOID(serial_time_us >= 0, TB_ASSERT_CODE);    /* message transmit time */
     int64_t o = (arrival_mono_us - serial_time_us) - fix_gps_us;
     int c = t->cur;
-    CORE_ASSERT_VOID(c == 0 || c == 1, TB_ASSERT_CODE);       /* half index is one of two */
     if (!t->half_valid[c]) {
         t->half_min[c] = o; t->half_start_mono[c] = arrival_mono_us; t->half_valid[c] = true;
     } else if (arrival_mono_us - t->half_start_mono[c] >= HALF_WINDOW_US) {

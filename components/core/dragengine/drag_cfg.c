@@ -8,8 +8,8 @@
  * gate names for the DRAG screens. Power of 10 rule 5: per-module assertion code. */
 #define DRAGCFG_ASSERT_CODE 0x0AF2
 
-static uint16_t mph_to_kmh(uint16_t mph) { return (uint16_t)lround((double)mph * DRAG_MPH_PER_KMH); }
-static unsigned kmh_to_mph(uint16_t kmh) { return (unsigned)lround((double)kmh / DRAG_MPH_PER_KMH); }
+static uint16_t mph_to_kmh(uint16_t mph) { return (uint16_t)lround((double)mph * DRAG_KMH_PER_MPH); }
+static unsigned kmh_to_mph(uint16_t kmh) { return (unsigned)lround((double)kmh / DRAG_KMH_PER_MPH); }
 
 /* mph mode: the first n SPEED_FROM0 gates (table order, ids 1..4) take the mph bench list,
  * converted to the engine's km/h (#86). Range/dist/brake gates and all ids are untouched. */

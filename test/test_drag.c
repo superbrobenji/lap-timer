@@ -2,6 +2,7 @@
 #include "core/drag.h"
 #include "core/consts.h"
 #include "core/types.h"
+#include "assert_support.h"
 #include <math.h>
 #include <string.h>
 
@@ -376,9 +377,13 @@ static void test_braking_distance_100_to_0(void)
     TEST_ASSERT_DOUBLE_WITHIN(0.5, 39.3, (double)gb->dist_cm / 100.0);
 }
 
-/* §11.2 false start: v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns
- * to ARMED. A short g-spike launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires
- * and the discarded run leaves no gate hits. */
+/* §11.2 false start: v_est below `stopped` (DRAG_ARM_SPEED_KMH, 0.5 km/h) within DRAG_FALSE_START_S
+ * of launch discards the run and returns to ARMED, unconditionally on v_peak (R21). A short g-spike
+ * launches, then a Doppler fix of 0 (stall) collapses v_est. No DONE fires and the discarded run
+ * leaves no gate hits. R21/M4: §11.2's ARMED row specifies EV_DRAG_ARMED on
+ * entry, so -- unlike the engine's one genuinely silent transition, the DONE -> IDLE settle covered
+ * by test_done_to_idle_settle_is_silent -- this abort is NOT silent: it announces the re-arm with
+ * exactly one new EV_DRAG_ARMED. */
 static void test_false_start_abort(void)
 {
     drag_init(&D, NULL);
@@ -388,8 +393,7 @@ static void test_false_start_abort(void)
         drive_fused(&fs, true);
     }
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
-    const int ev_before_abort = EV.n;   /* #102/pr:M1: abort_to_armed() emits NOTHING, so the only
-                                         * way a consumer can see LAUNCHED -> ARMED is drag_state() */
+    const int ev_before_abort = EV.n;   /* snapshot so the abort's event delta can be pinned exactly */
     fused_sample_t s216 = fused((int64_t)216 * DT_US, 0.0f, 0);
     drive_fused(&s216, true);
     gps_fix_t stall = gfix((int64_t)216 * DT_US, 0, true);        /* Doppler: stopped */
@@ -398,17 +402,18 @@ static void test_false_start_abort(void)
     drive_fused(&s217, true);
 
     TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));       /* re-armed, run discarded */
-    TEST_ASSERT_EQUAL_INT(ev_before_abort, EV.n);   /* no event announced the abort */
+    TEST_ASSERT_EQUAL_INT(ev_before_abort + 1, EV.n);             /* exactly one new event: the re-arm */
+    TEST_ASSERT_EQUAL_UINT8(EV_DRAG_ARMED, EV.type[ev_before_abort]);
     TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));
     TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 2)->hit);      /* no gate recorded */
 }
 
 /* §11.2/§6.6 false-start guard regression: a sustained ~0.2 g launch is itself below
- * DRAG_FALSE_START_KMH for the first ~140 ms after t0 (v_est is still climbing from 0), which is not
- * a stall — the abort requires v_peak to have already cleared the threshold before a drop-below
- * counts as a false start. Without that guard this legitimate low-g launch gets discarded and
- * re-armed the instant it enters LAUNCHED, emitting a duplicate EV_DRAG_LAUNCH; the fixed engine
- * launches exactly once and runs its gates through to the 1/4. */
+ * DRAG_ARM_SPEED_KMH (`stopped`'s threshold) for only a handful of samples right at t0 (v_est is
+ * still climbing from 0) -- that is not a stall, it never drops back below `stopped` once it has
+ * climbed past it, so the now-unconditional abort check (which tests `stopped`, not a v_peak-gated
+ * DRAG_FALSE_START_KMH) never trips for it. The fixed engine launches exactly once and runs its
+ * gates through to the 1/4. */
 static void test_low_g_launch_no_false_start(void)
 {
     drag_init(&D, NULL);
@@ -420,6 +425,42 @@ static void test_low_g_launch_no_false_start(void)
     const drag_result_t *r = drag_current(&D);
     TEST_ASSERT_NOT_NULL(r);
     TEST_ASSERT_TRUE(r->flags & DRAG_F_QUARTER);
+}
+
+/* H5/R21 (§11.2 "Abort"): a marginal-g trigger that then stalls. do_launch can enter LAUNCHED with
+ * v_peak as low as DRAG_LAUNCH_G x DRAG_LAUNCH_HOLD_MS = 0.1471 m/s = 0.53 km/h -- BELOW the old
+ * abort guard's DRAG_FALSE_START_KMH (1 km/h) but ABOVE `stopped`'s 0.5 km/h. So the stall fell
+ * through to enter_done: a consumed run_no, an EV_DRAG_DONE and a gate-less DRAG_RUN log frame.
+ * Geometry from the reviewer's repro_drag.c case A (0.16 g for 11 samples, then Doppler 0). */
+static void test_marginal_g_launch_then_stall_aborts(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(true);
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_ARMED));
+    for (int k = LAUNCH_K; k <= 211; k++) {                 /* 11 samples just over DRAG_LAUNCH_G */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.16f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    TEST_ASSERT_EQUAL_INT(1, ev_count(EV_DRAG_LAUNCH));
+
+    gps_fix_t stall = gfix((int64_t)211 * DT_US, 0, true);  /* Doppler: the bike never moved */
+    drag_on_fix(&D, &stall);
+    fused_sample_t s212 = fused((int64_t)212 * DT_US, 0.0f, 0);
+    drive_fused(&s212, true);
+
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_ARMED, drag_state(&D));     /* §11.2: discarded, re-armed */
+    TEST_ASSERT_EQUAL_INT(0, ev_count(EV_DRAG_DONE));           /* no spurious run */
+    TEST_ASSERT_EQUAL_INT(2, ev_count(EV_DRAG_ARMED));          /* M4: the re-arm is announced */
+    TEST_ASSERT_EQUAL_UINT16(0, drag_current(&D)->run_no);      /* the run was wiped */
+
+    /* and the next, real launch takes run number 1 -- the discarded one consumed nothing */
+    for (int k = 300; k <= 320; k++) {
+        fused_sample_t fs = fused((int64_t)k * DT_US, 0.5f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    TEST_ASSERT_EQUAL_UINT16(1, drag_current(&D)->run_no);
 }
 
 /* §11.2: the braking gate may complete after DONE. A 0.5 g run ends DONE at the 1/4, then braking
@@ -441,9 +482,11 @@ static void test_done_then_brake(void)
 }
 
 /* #102 / pr:M1 — the DONE -> IDLE settle (go_idle_keep_result, drag.c:603, DRAG_DONE_SETTLE_S after
- * DONE) is the engine's second SILENT transition: drag_state() changes and no event is emitted, so
- * a publisher that refreshes only on a step that produced events keeps showing DONE until the next
- * arm. That is why pipeline.c's on_raw compares drag_state() against the state it last published.
+ * DONE) is the engine's ONLY silent transition (R21/M4 made the false-start abort announce itself
+ * with EV_DRAG_ARMED, so this is the one that is left): drag_state() changes and no event is
+ * emitted, so a publisher that refreshes only on a step that produced events keeps showing DONE
+ * until the next arm. That is why pipeline.c's on_raw compares drag_state() against the state it
+ * last published.
  * DEVIATION FROM BRIEF (verified on this checkout, see task-2-report.md): run_quarter_then_brake's
  * fixed 0.5 g launch / 1 g brake decelerates from the quarter's ~226 km/h peak in ~6.4 s, which is
  * already past DRAG_DONE_SETTLE_S (5 s) by the time brake_pending() clears -- so go_idle_keep_result()
@@ -646,6 +689,114 @@ static void test_display_only_cfg_swap_keeps_results(void)
     TEST_ASSERT_EQUAL_UINT16(0, D.run_no);
 }
 
+/* M2: a fused sample whose gps_us steps BACKWARD is a LEGITIMATE input, not a bug to report. tb's
+ * half-window rollover or a PPS acquire/drop can move the filtered offset (fused.gps_us =
+ * tb_mono_to_gps(mono)) by up to TB_PPS_DISAGREE_US = 50 ms (§6.2), so the stream is not strictly
+ * monotonic in normal operation. The old gate_step fired CORE_ASSERT_VOID(tc >= tp, ...) on every
+ * such sample, write-storming the persisted error ring for something that is not a fault; the fix
+ * is `if (tc < tp) return;` -- same skip, no report. From drag_t state alone the two are
+ * indistinguishable (both skip the same sample and leave the run otherwise unharmed, confirmed
+ * below by the two surviving gate assertions -- NOT because the fix "recovers" that sample: see
+ * task-9-report.md for why a kick landed exactly on a gate's crossing sample is unrecoverable
+ * either way). The discriminating observable is the ABSENCE of an assertion report, which
+ * assert_support.h's STRONG core_assert_report recorder (linked for this suite only, test/
+ * CMakeLists.txt) makes host-testable. RED/GREEN evidence for this count assertion is in
+ * task-9-report.md's fix-round-1 section. */
+static void test_backward_gps_us_step_does_not_lose_a_gate(void)
+{
+    lt_test_assert_reset();
+    drag_init(&D, NULL);
+    arm_engine(true);
+    const double a = 0.5 * G_MPS2;
+    bool kicked = false;
+    int64_t t = T_LAUNCH_US;
+    for (int k = LAUNCH_K; k <= LAUNCH_K + 900; k++) {
+        t = (int64_t)k * DT_US;
+        if (!kicked && D.v_est > 27.0) { t -= 50000; kicked = true; }   /* 100 km/h = 27.78 m/s */
+        fused_sample_t fs = fused(t, 0.5f, 0);
+        drive_fused(&fs, true);
+        if (k % 20 == 0) {
+            double tl = (double)((int64_t)k * DT_US - T_LAUNCH_US) / 1e6;
+            if (tl < 0.0) tl = 0.0;
+            gps_fix_t f = gfix((int64_t)k * DT_US, (int32_t)(a * tl * 1000.0), true);
+            drag_on_fix(&D, &f);
+        }
+        if (drag_state(&D) == DRAG_ST_DONE) break;
+    }
+    TEST_ASSERT_TRUE(kicked);
+    TEST_ASSERT_TRUE(gate_by_id(drag_current(&D), 2)->hit);     /* 0-100 survived the step */
+    TEST_ASSERT_TRUE(gate_by_id(drag_current(&D), 1)->hit);     /* 0-60 too */
+    TEST_ASSERT_EQUAL_UINT(0, lt_test_assert_count());
+}
+
+/* LOW (§11.1): the trap gate is "the DIST gate with the largest distance a". find_quarter used
+ * `>= best_a`, so on a tie the LAST listed DIST gate silently took the trap. */
+static void test_quarter_gate_tie_keeps_the_first_listed(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.n_gates = 3;
+    c.gates[0] = (drag_gate_def_t){ 1, DRAG_SPEED_FROM0, 100, 0 };
+    c.gates[1] = (drag_gate_def_t){ 9, DRAG_DIST, 40234, 0 };
+    c.gates[2] = (drag_gate_def_t){ 10, DRAG_DIST, 40234, 0 };    /* same a: a tie */
+    drag_init(&D, &c);
+    TEST_ASSERT_EQUAL_UINT8(1, D.quarter_idx);                    /* the first of the two */
+}
+
+/* LOW (§11.1 gate 5): one sample pair must not both ARM a and RECORD b. A large Doppler re-anchor
+ * after a gap crosses 100 and 200 km/h in one step; the recorded interval would be a fraction of
+ * one sample, i.e. a fictitious ~0 s 100-200. */
+static void test_range_gate_not_armed_and_recorded_in_one_step(void)
+{
+    drag_init(&D, NULL);
+    arm_engine(true);
+    for (int k = LAUNCH_K; k <= LAUNCH_K + 30; k++) {             /* launch at 1 g */
+        fused_sample_t fs = fused((int64_t)k * DT_US, 1.0f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    gps_fix_t jump = gfix((int64_t)(LAUNCH_K + 30) * DT_US, 70000, true);   /* 252 km/h re-anchor */
+    drag_on_fix(&D, &jump);
+    fused_sample_t nxt = fused((int64_t)(LAUNCH_K + 31) * DT_US, 1.0f, 0);
+    drive_fused(&nxt, true);
+    TEST_ASSERT_FALSE(gate_by_id(drag_current(&D), 5)->hit);      /* no 0 s 100-200 */
+}
+
+/* LOW (§11.2 DONE): "v below half peak with no gate for DRAG_TIMEOUT_S". With no gate yet
+ * recorded, last_gate_gps_us is 0 and `faded` could never be true, so a run that never reaches its
+ * first gate stayed LAUNCHED for ever (reachable with a custom gate list).
+ * DEVIATION FROM BRIEF (verified on this checkout, see task-9-report.md): the brief's accel loop
+ * ran only 120 samples (1.2 s) at 0.3 g, which reaches ~12.7 km/h (3.53 m/s), not the "~40 km/h"
+ * the comment claims -- so the 15 km/h (4.166 m/s) coast re-anchor used below is actually FASTER
+ * than that peak and becomes the new v_peak itself (pinned there by the periodic re-anchor), and
+ * v_est can never then be < 0.5*v_peak: the "faded" case was unreachable for a different reason
+ * than the one under test. Extended to 400 samples (4.0 s), which reaches v_peak ~= 11.77 m/s
+ * (42.4 km/h, matching the comment's intent); the unchanged 15 km/h coast is then comfortably
+ * below half of that peak (5.88 m/s), and the case is RED on the unfixed engine (LAUNCHED forever)
+ * and GREEN on the fixed one (verified both ways on this checkout). */
+static void test_faded_done_when_no_gate_was_ever_hit(void)
+{
+    drag_cfg_t c; drag_cfg_defaults(&c);
+    c.n_gates = 1;
+    c.gates[0] = (drag_gate_def_t){ 4, DRAG_SPEED_FROM0, 300, 0 };   /* unreachable in this run */
+    drag_init(&D, &c);
+    arm_engine(true);
+    int64_t t = T_LAUNCH_US;
+    for (int k = LAUNCH_K; k <= LAUNCH_K + 400; k++) {                /* ~40 km/h at 0.3 g */
+        t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, 0.3f, 0);
+        drive_fused(&fs, true);
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_LAUNCHED, drag_state(&D));
+    for (int k = LAUNCH_K + 401; k <= LAUNCH_K + 7500; k++) {         /* coast 15 km/h for ~70 s */
+        t = (int64_t)k * DT_US;
+        fused_sample_t fs = fused(t, 0.0f, 0);
+        drive_fused(&fs, true);
+        if (k % 20 == 0) { gps_fix_t f = gfix(t, 4166, true); drag_on_fix(&D, &f); }
+        if (drag_state(&D) != DRAG_ST_LAUNCHED) break;
+    }
+    TEST_ASSERT_EQUAL_UINT8(DRAG_ST_DONE, drag_state(&D));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -662,11 +813,16 @@ int main(void)
     RUN_TEST(test_braking_distance_100_to_0);
     RUN_TEST(test_false_start_abort);
     RUN_TEST(test_low_g_launch_no_false_start);
+    RUN_TEST(test_marginal_g_launch_then_stall_aborts);
     RUN_TEST(test_done_then_brake);
     RUN_TEST(test_done_to_idle_settle_is_silent);
     RUN_TEST(test_bench_visibility_180_vs_320);
     RUN_TEST(test_bench_drop_lowest_when_over_four);
     RUN_TEST(test_best_per_gate_two_runs);
     RUN_TEST(test_display_only_cfg_swap_keeps_results);
+    RUN_TEST(test_backward_gps_us_step_does_not_lose_a_gate);
+    RUN_TEST(test_quarter_gate_tie_keeps_the_first_listed);
+    RUN_TEST(test_range_gate_not_armed_and_recorded_in_one_step);
+    RUN_TEST(test_faded_done_when_no_gate_was_ever_hit);
     return UNITY_END();
 }
