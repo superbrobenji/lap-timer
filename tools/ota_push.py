@@ -82,9 +82,10 @@ OTA_PACE_MS = 25      # drv:M8 MITIGATION (not the fix -- #57 is the per-chunk A
                       # 4096 B chunk (export_serial.c's own numbers): a worst-case write overruns
                       # the ring by ~18 ms of wire time. Host and device count the same bytes from
                       # 0, so pausing 25 ms at each CHUNK boundary -- the moment the device is in
-                      # that write -- covers it with 7 ms of margin. Cost: 147 pauses on a 600 KB
-                      # image = 3.7 s on a ~55 s push. Far under the device's 3 s per-read stall
-                      # window, so it can never look like a stall. Use --pace 0 to disable.
+                      # that write -- covers it with 7 ms of margin. Cost: a 600 KB (614400 B)
+                      # image is 150 chunks, 149 boundary pauses = 3.7 s on a ~53 s push. Far under
+                      # the device's 3 s per-read stall window, so it can never look like a stall.
+                      # Use --pace 0 to disable.
 TRIAL_WINDOW_S = 35   # OTA trial window: validation at 30 s + a sensors-ok check
 LT_PROMPT = b"laptimer>"
 
