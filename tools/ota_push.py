@@ -88,6 +88,13 @@ OTA_PACE_MS = 25      # drv:M8 MITIGATION (not the fix -- #57 is the per-chunk A
                       # Use --pace 0 to disable.
 TRIAL_WINDOW_S = 35   # OTA trial window: validation at 30 s + a sensors-ok check
 LT_PROMPT = b"laptimer>"
+PROBE_READ_TIMEOUT_S = 0.2   # probe_laptimer's per-ser.read(1) timeout while probing: it must sit
+                             # well below the probe's own 2.0 s deadline, since that deadline is
+                             # only checked BETWEEN reads -- the normal ser.timeout (READ_TIMEOUT_S
+                             # = 5.0, for the OTA token-wait loops) would let one silent read block
+                             # past the 2 s the FAIL message promises. Mirrors devkit.py's own
+                             # open_serial, whose 1.0 s read timeout already sits under its 2.0 s
+                             # probe budget.
 
 E_OTA = {
     0x0000: "OK",
@@ -273,7 +280,16 @@ def main(argv=None):
         ser.reset_output_buffer()
 
         if not args.force_port:
-            if not probe_laptimer(ser, time.monotonic() + 2.0):
+            saved_timeout = ser.timeout
+            ser.timeout = PROBE_READ_TIMEOUT_S   # see its own comment: must be < the 2.0 s
+                                                  # deadline below, or a single blocking read on a
+                                                  # silent port could overrun it
+            try:
+                probed_ok = probe_laptimer(ser, time.monotonic() + 2.0)
+            finally:
+                ser.timeout = saved_timeout      # restore before the ota_recv read loops, which
+                                                  # need the full READ_TIMEOUT_S
+            if not probed_ok:
                 print("FAIL: %s did not print the lap-timer prompt within 2 s -- wrong port? "
                       "(--force-port to proceed anyway)" % args.port, file=sys.stderr)
                 return 2

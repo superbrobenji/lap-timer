@@ -97,7 +97,8 @@ PROBE_TIMEOUT_S = 2.0            # `dc status --json` holds a fixed DC_STATUS_WI
 TRIAL_WINDOW_S = 35              # OTA trial window: validation at 30 s + a sensors-ok check
 SELFTEST_TIMEOUT_S = 30.0       # selftest [all]: `stream` alone samples for ~10 s by default
 STAGE_READY_TIMEOUT_S = 5.0
-PUSH_TIMEOUT_S = 120.0          # a 600 KB image is ~55 s at 115200 baud; generous slack on top
+PUSH_TIMEOUT_S = 120.0          # a 600 KB (614400 B) image is ~53 s at 115200 baud; generous
+                                 # slack on top
 STREAM_TAP_ACK_TIMEOUT_S = 2.0  # stream tap on <type>: local, one round trip through the console
 SHELL_CLOSE_TIMEOUT_S = 2.0     # lt shell: wait for the device's own "bridge closed" after '~.'
 TAP_MAX_S = 3600.0              # stream tap's row loop: per-_readline bound, not a session cap
@@ -259,9 +260,15 @@ def send_cmd(ser, line, timeout=5.0):
 
 def _poll_err_line(ser):
     """Non-blocking peek for one device line: returns it (ANSI-stripped, trimmed) when bytes are
-    already waiting, else None. Never blocks -- uses `in_waiting` when the serial-like object has
-    it -- so `flash stage`'s upload loop can poll between chunks without paying a read timeout per
-    chunk (which on a 600 KB image would be 147 s of pure waiting)."""
+    already waiting, else None at once (no bytes waiting -> no read is attempted). When bytes ARE
+    waiting this never blocks longer than the port's own read timeout -- `open_serial` sets
+    `ser.timeout = 1.0`, so `ser.readline()` here can wait up to that 1.0 s for the rest of the
+    line, same as every other read in this module; it is `in_waiting` that makes this a poll
+    rather than a wait, not an unconditional non-blocking guarantee. This lets `flash stage`'s
+    upload loop check for an early STAGE-ERR/STAGE-END between chunks without paying a full read
+    timeout per chunk regardless of whether the device has replied yet -- a 600 KB (614400 B)
+    image is 150 chunks, so a *blocking* read-every-chunk design would cost up to 150 s (150 x the
+    1.0 s read timeout) of pure waiting on top of the upload itself."""
     if getattr(ser, "in_waiting", 0) <= 0:
         return None
     raw = ser.readline()
@@ -362,8 +369,11 @@ def _json_cmd(ser, line, timeout=JSON_TIMEOUT_S):
 
 def probe_is_devkit(ser, timeout=PROBE_TIMEOUT_S):
     """True when `ser` answers `dc status --json` with a dev-kit status object inside `timeout` s.
-    `version` + `link` together are unique to cmd_dc.c's reply: the lap-timer console answers an
-    unknown verb with plain text, and its own `status` JSON has neither key."""
+    `version` + `link` together are unique to cmd_dc.c's reply: `dc` is not one of the lap-timer
+    console's own verbs, so it answers with plain text for an unrecognized command (the shape
+    `ProbeTest.test_rejects_the_lap_timer_console` models) rather than any JSON object, let alone
+    one carrying both keys; a foreign JSON object missing either key is rejected the same way
+    (`test_rejects_silence_and_a_foreign_json_object`)."""
     try:
         ser.write(b"dc status --json\r")
         ser.flush()
