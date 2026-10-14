@@ -283,7 +283,15 @@ int lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t
     const double lat = (double)fix->lat_e7 / 1e7;
     const double lon = (double)fix->lon_e7 / 1e7;
     const double heading_deg = (double)fix->head_e5 / 1e5;
+    /* core:M5: lap_gate_line answers an out-of-range lat/lon/heading with a ZEROED line (its own
+     * CORE_ASSERT_RETs). head_e5 is a signed int32 straight off NAV-PVT's headMot, so that is
+     * reachable from the wire, not just from a buggy caller -- range-check here, and verify the
+     * line the geometry actually returned, so a degenerate gate can never be confirmed to the UI
+     * only for trk_validate_venue to reject the venue at finalize_create. */
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) return -1;
+    if (heading_deg < 0.0 || heading_deg > 360.0) return -1;
     const trk_line_t line = lap_gate_line(lat, lon, heading_deg);
+    if (line.p1.lat == line.p2.lat && line.p1.lon == line.p2.lon) return -1;   /* degenerate line */
 
     if (gate_idx == 0) {
         memset(&L->create_layout, 0, sizeof L->create_layout);

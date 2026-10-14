@@ -788,6 +788,26 @@ static void test_create_cancel(void)
     TEST_ASSERT_EQUAL_INT(0, trk_user_count());                    /* nothing saved */
 }
 
+/* core:M5: head_e5 is a signed int32 straight off NAV-PVT's headMot, so an out-of-range heading is
+ * reachable from the wire. lap_mark_gate must refuse it instead of storing a (0,0) line and
+ * returning 0. */
+static void test_mark_gate_refuses_an_out_of_range_heading(void)
+{
+    lap_t L; lap_init(&L, NULL);
+    lap_create_begin(&L);
+    gps_fix_t f = fix_ll(-34.0, 18.0, 1000000, 20000, true);
+    f.head_e5 = 40000000;                                   /* 400 deg: out of range */
+    trk_layout_t ly;
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 0, &f, &ly));
+    TEST_ASSERT_FALSE(L.create_have_sf);
+    f.head_e5 = -9000000;                                   /* -90 deg: out of range */
+    TEST_ASSERT_EQUAL_INT(-1, lap_mark_gate(&L, 0, &f, &ly));
+    f.head_e5 = 9000000;                                    /* 90 deg: accepted */
+    TEST_ASSERT_EQUAL_INT(0, lap_mark_gate(&L, 0, &f, &ly));
+    TEST_ASSERT_TRUE(L.create_have_sf);
+    TEST_ASSERT_TRUE(ly.sf.p1.lat != ly.sf.p2.lat || ly.sf.p1.lon != ly.sf.p2.lon);
+}
+
 /* #97/Task 5: lap_mark_gate refuses a sector gate pressed out of order -- gate_idx 2 ("sector 2")
  * before gate_idx 1 ("sector 1") has ever been marked -- and the refusal leaves the engine's own
  * gate-count state untouched (still waiting for sector 1), so a subsequent in-order press at
@@ -1623,6 +1643,7 @@ int main(void)
     RUN_TEST(test_create_track_saves_valid_venue);
     RUN_TEST(test_create_refuses_when_user_table_full);
     RUN_TEST(test_create_cancel);
+    RUN_TEST(test_mark_gate_refuses_an_out_of_range_heading);
     RUN_TEST(test_create_mark_gate_sector_out_of_order);
     RUN_TEST(test_rtc_restore_mid_lap_interrupted);
     RUN_TEST(test_rtc_import_unknown_venue_fails);

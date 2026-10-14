@@ -46,6 +46,21 @@ static void test_gate_dir_sign_accepts_current_motion(void)
     assert_forward_gives_plus_one(-34.0, 18.7, 45.0, sin(GEO_PI / 4), cos(GEO_PI / 4));  /* NE */
 }
 
+/* core:M5 (§10.9): lap_gate_line returns a ZEROED line when its lat/lon/heading preconditions
+ * fail. Callers must test for that -- lap_mark_gate used to store the (0,0) line and report
+ * success, so the UI confirmed a gate that trk_validate_venue's line_ok later rejected, aborting
+ * the whole creation at finalize_create. */
+static void test_gate_line_rejects_out_of_range_inputs(void)
+{
+    const trk_line_t bad_head = lap_gate_line(-34.0, 18.0, 400.0);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, bad_head.p1.lat);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, bad_head.p2.lon);
+    const trk_line_t bad_lat = lap_gate_line(-91.0, 18.0, 0.0);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, bad_lat.p1.lat);
+    const trk_line_t ok = lap_gate_line(-34.0, 18.0, 90.0);
+    TEST_ASSERT_TRUE(ok.p1.lat != ok.p2.lat || ok.p1.lon != ok.p2.lon);
+}
+
 /* lap_layout_reverse: same S/F line, sectors reversed, dir negated, id + 1, name suffixed. */
 static void test_layout_reverse_negates_dir_reverses_sectors(void)
 {
@@ -82,6 +97,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_gate_line_is_30m);
     RUN_TEST(test_gate_dir_sign_accepts_current_motion);
+    RUN_TEST(test_gate_line_rejects_out_of_range_inputs);
     RUN_TEST(test_layout_reverse_negates_dir_reverses_sectors);
     return UNITY_END();
 }

@@ -208,8 +208,10 @@ uint32_t lap_theoretical_best_ms(const lap_t *L);            /* Sigma best_secto
 /* §10.9 on-device track creation. lap_create_begin enters CREATE (state stays NO_VENUE); each
  * lap_mark_gate press adds a gate (gate_idx 0 = S/F, 1.. = sector n, added in order); the next S/F
  * crossing finalises the venue (trk_user_add, auto reverse layout) and enters VENUE_FOUND;
- * lap_create_cancel (long press) aborts. lap_mark_gate returns 0 on success, -1 otherwise, and fills
- * *out_layout (if non-NULL) with the layout built so far. */
+ * lap_create_cancel (long press) aborts. lap_mark_gate returns 0 on success, -1 otherwise (when not
+ * creating, the fix is invalid/not moving, the gate index is out of order/full, the fix's position or
+ * heading is out of range, or the derived line is degenerate), and fills *out_layout (if non-NULL)
+ * with the layout built so far. */
 void     lap_create_begin(lap_t *L);
 int      lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
 void     lap_create_cancel(lap_t *L);
