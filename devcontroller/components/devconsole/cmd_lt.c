@@ -520,9 +520,13 @@ static int lt_relay(int argc, char **argv, bool json)
     linkhost_bridge_end();
     s_relay_body[blen] = '\0';
     long long rt_ms = (long long)((linkhost_now_us() - t0) / 1000);
-    /* rc is 0 when the lap-timer answered at all (any bytes), LINKHOST_E_TIMEOUT when it did not:
-     * an arbitrary verb has no framed status to report, so "did the console reply" is the only
-     * honest result this path can produce. */
+    /* rc is 0 when any bytes survive the stream-frame filter into `total` -- i.e. the lap-timer's
+     * console sent something back -- and LINKHOST_E_TIMEOUT otherwise: an arbitrary verb has no
+     * framed status to report, so "did any console-reply bytes arrive" is the only honest result
+     * this path can produce. This cannot tell "console never answered" apart from "link
+     * silent/dead": raw UART activity that the loop above classifies entirely as stream-frame
+     * noise still resets the idle deadline (the link is alive), but contributes nothing to
+     * `total`, so it reports the same LINKHOST_E_TIMEOUT / bytes:0 as no activity at all. */
     int rc = (total > 0) ? 0 : LINKHOST_E_TIMEOUT;
 
     if (json) {
