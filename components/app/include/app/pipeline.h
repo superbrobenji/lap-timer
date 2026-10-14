@@ -24,9 +24,13 @@ int  pipeline_lap_count(void);
  * at out[index]) into `*out`, using the SAME F4 seqlock retry. Returns 0 on success, <0 if index
  * is out of range for the current ring. Lets a reader stream laps without a full snapshot array. */
 int  pipeline_lap_at(int index, lap_result_t *out);
-/* True once the pipeline has ingested at least one GPS fix since boot (set-once, monotonic). One
- * of the §19.4 conditions the supervisor gates a pending-OTA validation on. Safe from any task. */
-bool pipeline_gps_seen(void);
+/* §19.4 OTA-validate gate (audit fix wave F2a, R1). True once a GPS fix has been ingested, or
+ * unconditionally on a build whose GPS driver is not a live receiver (gps_profile_t.live == 0:
+ * the Plan-03 stubs and gps_sim) -- see pipeline.c. Read by the supervisor. */
+bool pipeline_sensors_ok(void);
+/* §19.5 OTA stillness precondition (R2): ms since the last EV_STILL edge, 0 while moving, the
+ * whole uptime before any motion edge. Read by ota_begin. */
+uint32_t pipeline_still_for_ms(void);
 
 /* Best-known sector splits + theoretical best for the locked layout (design §2). Refreshed on
  * every EV_LAP_COMPLETE (valid or not -- the engine only updates its own bests on a valid lap, so
