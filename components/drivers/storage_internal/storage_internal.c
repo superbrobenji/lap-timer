@@ -61,6 +61,35 @@ static int full_path(const char *path, char *out, size_t cap)
     return 0;
 }
 
+/* drv:L19 reporting half of sto_mount, split out to keep sto_mount under the rule-5 threshold
+ * without padding it with assertions. Never fails: an implausible info query is only reported. */
+static void mount_report(int formatted)
+{
+    size_t total = 0, used = 0;
+    esp_err_t ie = esp_littlefs_info(LFS_PART, &total, &used);
+    if (ie != ESP_OK) ESP_LOGW(TAG, "esp_littlefs_info: %s", esp_err_to_name(ie));
+    /* drv:L19: a successful mount whose info query is implausible is a REPORTING fault, not a
+     * dead filesystem -- returning -1 here made app_main set SYS_STORAGE_DEAD and disable
+     * logging on a perfectly working fs. Report it and carry on; sto_info() independently returns
+     * -1 to any caller that asks for the numbers, so nobody consumes the underflowed figure. */
+    bool info_ok = (ie == ESP_OK && used <= total);
+    if (!info_ok) ESP_LOGW(TAG, "littlefs info implausible (used %u, total %u): sizes unreported",
+                           (unsigned)used, (unsigned)total);
+    ESP_LOGI(TAG, "mounted %s at %s: %u KB total, %u KB free%s", LFS_PART, LFS_BASE,
+             (unsigned)(total / 1024u), info_ok ? (unsigned)((total - used) / 1024u) : 0u,
+             formatted ? " (formatted)" : "");
+}
+
+/* §13.1 half of sto_mount, split out for the same reason as mount_report. */
+static void make_dirs(void)
+{
+    /* §13.1: create the session/track directories at mount if missing (EEXIST is fine). */
+    if (mkdir(LFS_BASE "/sessions", 0777) != 0 && errno != EEXIST)
+        ESP_LOGW(TAG, "mkdir sessions: %s", strerror(errno));
+    if (mkdir(LFS_BASE "/tracks", 0777) != 0 && errno != EEXIST)
+        ESP_LOGW(TAG, "mkdir tracks: %s", strerror(errno));
+}
+
 int sto_mount(void)
 {
     /* full_path() joins LFS_BASE onto every caller path within STO_PATHMAX; guard here that the
@@ -89,21 +118,8 @@ int sto_mount(void)
         return -1;                                             /* caller -> SYS_STORAGE_DEAD */
     }
 
-    /* §13.1: create the session/track directories at mount if missing (EEXIST is fine). */
-    if (mkdir(LFS_BASE "/sessions", 0777) != 0 && errno != EEXIST)
-        ESP_LOGW(TAG, "mkdir sessions: %s", strerror(errno));
-    if (mkdir(LFS_BASE "/tracks", 0777) != 0 && errno != EEXIST)
-        ESP_LOGW(TAG, "mkdir tracks: %s", strerror(errno));
-
-    size_t total = 0, used = 0;
-    esp_err_t ie = esp_littlefs_info(LFS_PART, &total, &used);
-    if (ie != ESP_OK) ESP_LOGW(TAG, "esp_littlefs_info: %s", esp_err_to_name(ie));
-    /* a successful info query on a just-mounted fs must report used <= total; otherwise the
-     * (total - used) below underflows (both size_t) into a bogus multi-terabyte "free" figure */
-    CORE_ASSERT_RET(ie != ESP_OK || used <= total, STO_ASSERT_CODE, -1);
-    ESP_LOGI(TAG, "mounted %s at %s: %u KB total, %u KB free%s", LFS_PART, LFS_BASE,
-             (unsigned)(total / 1024u), (unsigned)((total - used) / 1024u),
-             formatted ? " (formatted)" : "");
+    make_dirs();
+    mount_report(formatted);
     return formatted ? 1 : 0;                                  /* 1 => caller logs E_STO_FORMAT + counter */
 }
 
@@ -113,6 +129,7 @@ int sto_info(sto_info_t *out)
     size_t total = 0, used = 0;
     esp_err_t e = esp_littlefs_info(LFS_PART, &total, &used);
     if (e != ESP_OK) return -1;
+    if (used > total) return -1;                /* drv:L19: never return an underflowed free_kb */
     out->total_kb = (uint32_t)(total / 1024u);
     out->free_kb  = (uint32_t)((total - used) / 1024u);
     out->degraded = 0;                          /* internal LittleFS is never "degraded" (an SD concept) */
@@ -121,7 +138,7 @@ int sto_info(sto_info_t *out)
 
 int sto_open(const char *path, int flags, sto_file_t *out)
 {
-    if (!out) return -1;
+    CORE_ASSERT_RET(path != NULL && out != NULL, STO_ASSERT_CODE, -1);   /* both are dereferenced below */
     char full[STO_PATHMAX];
     if (full_path(path, full, sizeof full) != 0) return -1;
 
@@ -142,18 +159,27 @@ int sto_open(const char *path, int flags, sto_file_t *out)
 
 int sto_write(sto_file_t f, const void *buf, size_t n)
 {
+    CORE_ASSERT_RET(buf != NULL || n == 0u, STO_ASSERT_CODE, -1);   /* a non-empty write needs a buffer */
     const uint8_t *p = (const uint8_t *)buf;
     size_t off = 0;
-    while (off < n) {
+    /* rule 2 (drv:M10): a short write is legal and retried, but a write() that returns 0 makes no
+     * progress -- without this cap the logger task spins here forever. One iteration per byte is
+     * the worst case a legal short-write sequence can need, so the cap can never reject a
+     * transfer that would have completed. */
+    size_t guard = n + 1u;
+    while (off < n && guard-- > 0u) {
         ssize_t w = write(f, p + off, n - off);
         if (w < 0) { ESP_LOGE(TAG, "write: %s", strerror(errno)); return -1; }
+        if (w == 0) { ESP_LOGE(TAG, "write: no progress at %u/%u", (unsigned)off, (unsigned)n); return -1; }
         off += (size_t)w;
     }
+    CORE_ASSERT_RET(off == n, STO_ASSERT_CODE, -1);   /* postcondition: a 0 return means all n landed */
     return 0;
 }
 
 int sto_read(sto_file_t f, void *buf, size_t n, size_t *n_read)
 {
+    CORE_ASSERT_RET(buf != NULL || n == 0u, STO_ASSERT_CODE, -1);        /* read() writes into buf */
     ssize_t r = read(f, buf, n);
     if (r < 0) { if (n_read) *n_read = 0; return -1; }
     if (n_read) *n_read = (size_t)r;            /* 0 => EOF */
@@ -173,6 +199,7 @@ int sto_sync(sto_file_t f)
 
 int sto_close(sto_file_t f)
 {
+    CORE_ASSERT_RET(f >= 0, STO_ASSERT_CODE, -1);      /* closing a never-opened descriptor is a caller bug */
     return (close(f) != 0) ? -1 : 0;
 }
 
@@ -190,6 +217,7 @@ int sto_rename(const char *from, const char *to)
 
 int sto_unlink(const char *path)
 {
+    CORE_ASSERT_RET(path != NULL, STO_ASSERT_CODE, -1);
     char full[STO_PATHMAX];
     if (full_path(path, full, sizeof full) != 0) return -1;
     if (unlink(full) != 0) { if (errno == ENOENT) return 0; return -1; }
@@ -291,14 +319,15 @@ int sto_probe(void)
     if (sto_open(PROBE, STO_WR | STO_CREATE, &f) != 0) return -1;
     int rc = sto_write(f, wr, sizeof wr);
     if (rc == 0) rc = sto_sync(f);
-    sto_close(f);
-    if (rc != 0) { sto_unlink(PROBE); return -1; }
+    int crc = sto_close(f);                     /* drv:L20: no sto_* return in the probe is discarded */
+    if (rc != 0 || crc != 0) { (void)sto_unlink(PROBE); return -1; }
 
-    if (sto_open(PROBE, STO_RD, &f) != 0) { sto_unlink(PROBE); return -1; }
+    if (sto_open(PROBE, STO_RD, &f) != 0) { (void)sto_unlink(PROBE); return -1; }
     size_t got = 0;
     rc = sto_read(f, rd, sizeof rd, &got);
-    sto_close(f);
-    sto_unlink(PROBE);
-    if (rc != 0 || got != sizeof rd || memcmp(wr, rd, sizeof wr) != 0) return -1;
+    crc = sto_close(f);
+    int urc = sto_unlink(PROBE);                /* the cleanup half is part of the probe */
+    if (rc != 0 || crc != 0 || urc != 0) return -1;
+    if (got != sizeof rd || memcmp(wr, rd, sizeof wr) != 0) return -1;
     return 0;
 }
