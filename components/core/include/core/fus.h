@@ -99,9 +99,9 @@ typedef struct {
     bool        v_valid;
     int16_t     temp_c100;           /* latest IMU temperature (fus_set_temp) */
     bool        temp_known;
-    bool        bias_stale;          /* |temp − gbias_temp| > BIAS_TEMP_STALE_C since the last bias update */
+    bool        bias_stale;          /* §9.2 latch: set once |temp − gbias_temp| exceeds
+                                      * BIAS_TEMP_STALE_C, cleared only by fus_gyro_bias_update */
     bool        fwd_learned_pending; /* set by fus_step when the forward row was just learned; consumed by fus_calib_forward_step */
-    float       v_course_deg;        /* latest GPS course over ground (compass degrees) */
     float       lean_rad;            /* complementary-filter lean estimate (rad, + = right) */
     int64_t     last_ref_mono_us;    /* mono time a lean reference (phi_ref) was last applied; <0 = never */
     bool        have_prev_course;    /* a previous valid course is stored for the turn-rate derivative */
@@ -111,7 +111,6 @@ typedef struct {
     int64_t     yaw_gps_mono_us;     /* arrival time the above was computed at; <0 = none */
     int64_t     disagree_since_mono_us; /* mono time the fused/GPS yaw disagreement began; <0 = agreeing */
     bool        disagree_latched;    /* FUS_DISAGREE has been raised at least once this session (log once) */
-    uint32_t    samples;             /* fus_step calls since init */
 } fus_t;
 
 /* calib NULL or invalid → defaults. */
@@ -126,7 +125,9 @@ void fus_set_gps_speed(fus_t *f, float v_mps, float course_deg, int64_t mono_us,
  * difference wrapped to (-180, 180]. Returns 0 when dt <= 0. */
 float fus_yaw_rate_gps_dps(float prev_course_deg, int64_t prev_mono_us, float cur_course_deg, int64_t cur_mono_us);
 /* IMU temperature (~1 Hz from the pipeline). Sets bias_stale when a captured bias is more than
- * BIAS_TEMP_STALE_C away from its capture temperature. */
+ * BIAS_TEMP_STALE_C away from its capture temperature. bias_stale LATCHES: once set, it is NOT
+ * cleared by a later fus_set_temp call that brings the temperature back within range -- only
+ * fus_gyro_bias_update (a fresh bias capture) clears it. */
 void fus_set_temp(fus_t *f, int16_t temp_c100);
 /* Processes one raw sample into out; always produces a sample and returns 1. out->gps_us is left 0 for the
  * pipeline to fill from the time base. */

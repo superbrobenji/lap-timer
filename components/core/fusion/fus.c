@@ -148,16 +148,19 @@ void fus_set_gps_speed(fus_t *f, float v_mps, float course_deg, int64_t mono_us,
         }
         f->prev_course_deg = course_deg; f->prev_course_mono_us = mono_us; f->have_prev_course = true;
     }
-    f->v_mps = v_mps; f->v_course_deg = course_deg; f->v_mono_us = mono_us; f->v_valid = valid;
+    f->v_mps = v_mps; f->v_mono_us = mono_us; f->v_valid = valid;
 }
 
 static void update_bias_stale(fus_t *f)
 {
     CORE_ASSERT_VOID(f != NULL, FUS_ASSERT_CODE);
-    if (!f->calib.bias_ok || !f->temp_known) { f->bias_stale = false; return; }
+    /* §9.2: FUS_BIAS_STALE is set "until the next still period", i.e. it LATCHES -- only a
+     * recapture (fus_gyro_bias_update) clears it. Recomputing it on every fus_set_temp let a
+     * temperature excursion that came back clear it with no recapture (audit core:M7). */
+    if (!f->calib.bias_ok || !f->temp_known) return;   /* nothing to compare: the latch is unchanged */
     int32_t d = (int32_t)f->temp_c100 - (int32_t)f->calib.gbias_temp_c100;
     if (d < 0) d = -d;
-    f->bias_stale = d > (int32_t)BIAS_TEMP_STALE_C * 100;
+    if (d > (int32_t)BIAS_TEMP_STALE_C * 100) f->bias_stale = true;
 }
 
 void fus_set_temp(fus_t *f, int16_t temp_c100)
@@ -208,9 +211,11 @@ static float fus_step_yaw_rate(const fus_t *f, const float w[3], bool oriented)
 }
 
 /* §9.3 steps 2/4/5 + the Appendix A clamp: the in-plane g components (and, on a moto, the
- * complementary lean filter and lateral g), then each in-plane axis bounded to +-G_MAX *before*
- * g_comb is formed so the reported combined magnitude stays consistent with the reported
- * components. *flags accumulates FUS_CLAMPED / FUS_LEAN_VALID. */
+ * complementary lean filter and lateral g), each bounded to +-G_MAX before g_comb is formed by the
+ * caller, so the reported combined magnitude stays consistent with the reported components. The
+ * clamp applies in BOTH branches -- oriented (g_lon and g_lat) and un-oriented (the single
+ * magnitude in g_lon); it used to apply only in the oriented one (audit core:M1). *flags
+ * accumulates FUS_CLAMPED / FUS_LEAN_VALID. */
 static void fus_step_planar(fus_t *f, const imu_raw_t *raw, const float a[3], const float w[3],
                             float psidot, bool oriented, uint8_t *flags, fused_sample_t *out)
 {
@@ -263,16 +268,24 @@ static void fus_step_planar(fus_t *f, const imu_raw_t *raw, const float a[3], co
             out->g_lat = -a[1];
         }
 
-        /* G_MAX clamp (Appendix A, "clamp in §9.3"): bound each in-plane axis to +-G_MAX *before*
-         * forming g_comb, so the reported combined magnitude stays consistent with the reported
-         * (clamped) components. */
+        /* G_MAX clamp (Appendix A, "clamp in §9.3"), oriented branch: bound each in-plane axis to
+         * +-G_MAX before g_comb is formed, so the reported combined magnitude stays consistent
+         * with the reported (clamped) components. The un-oriented branch clamps too, below. */
         if (out->g_lon > G_MAX)       { out->g_lon =  G_MAX; *flags |= FUS_CLAMPED; }
         else if (out->g_lon < -G_MAX) { out->g_lon = -G_MAX; *flags |= FUS_CLAMPED; }
         if (out->g_lat > G_MAX)       { out->g_lat =  G_MAX; *flags |= FUS_CLAMPED; }
         else if (out->g_lat < -G_MAX) { out->g_lat = -G_MAX; *flags |= FUS_CLAMPED; }
     } else {
-        out->g_lon = sqrtf(a[0] * a[0] + a[1] * a[1]);   /* sign-less horizontal magnitude until forward is learned (§9.2) */
+        /* No forward axis yet (§9.2): g_lon is the sign-less magnitude of the two IN-PLANE axes of
+         * the CURRENT calibration frame. Before an upright capture R is the identity, so that is
+         * the body x/y magnitude -- on a non-flat mount it therefore includes a component of
+         * gravity and reads ~1 g while stationary. It is NOT the horizontal magnitude. */
+        out->g_lon = sqrtf(a[0] * a[0] + a[1] * a[1]);
         out->g_lat = 0.0f;                       /* no lateral, no lean, FUS_LEAN_VALID clear until oriented */
+        /* M1 (§9.3 step 5): the G_MAX clamp applies to this branch too -- the magnitude is
+         * non-negative, so only the upper bound can bite. Without it drag_on_fused integrated an
+         * unbounded g_lon into v_est. */
+        if (out->g_lon > G_MAX) { out->g_lon = G_MAX; *flags |= FUS_CLAMPED; }
     }
 }
 
@@ -361,7 +374,6 @@ int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out)
 
     fus_step_learn_forward(f, a_b);
 
-    f->samples++;
     return 1;
 }
 
