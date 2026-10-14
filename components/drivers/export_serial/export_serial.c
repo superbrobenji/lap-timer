@@ -1199,7 +1199,9 @@ static int cmd_ota(int argc, char **argv)
      * 1 Hz on a full fs, storage_internal's open/write errors -- prints through stdout outside
      * s_uart_mtx and so lands inside this transfer's body, which its announced size and CRC32 do
      * not cover. Nothing is lost: every one of those sites also writes the §17.7 error ring, which
-     * `errlog` dumps. Restored verbatim at every exit from this function. */
+     * `errlog` dumps -- and since S3-19 that includes every OTA refusal and failure
+     * (E_OTA_PRECOND with its reason, E_OTA_WRITE/HWID/SIG, E_CONN_XFER_ABORT). Restored verbatim
+     * at every exit from this function. */
     esp_log_level_set("*", ESP_LOG_NONE);
     int brc = ota_begin(payload, OTA_BEGIN_PAYLOAD);
     if (brc != 0) {                              /* precondition / early hwid reject -> no raw mode */

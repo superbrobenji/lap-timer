@@ -102,56 +102,91 @@ static ota_pre_t good_pre(void)
 static void test_precond_ok(void)
 {
     ota_pre_t p = good_pre();
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_OK, ota_precond_eval(&p));
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(NULL));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_OK, ota_precond_eval(&p, NULL));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(NULL, NULL));
 }
 static void test_precond_refusals(void)
 {
     ota_pre_t p = good_pre(); p.in_flight = true;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
     p = good_pre(); p.size = 0u;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
     p = good_pre(); p.size = OTA_MAX_IMG_BYTES + 1u;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
     p = good_pre(); p.size = OTA_MAX_IMG_BYTES;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_OK, ota_precond_eval(&p));           /* inclusive bound */
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_OK, ota_precond_eval(&p, NULL));           /* inclusive bound */
     p = good_pre(); p.still_ms = OTA_STILL_MIN_MS - 1u;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));       /* §19.5 moving */
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));       /* §19.5 moving */
     p = good_pre(); p.batt_ok = false;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
     p = good_pre(); p.flag_pending = true; p.slot_pending_verify = true;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));       /* a real image awaits */
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));       /* a real image awaits */
+}
+static void test_precond_slot_pending_refuses_without_flag(void)
+{
+    /* S3-17 (F-2): the slot is the authority. A lost flag (NVS GC) with the running slot still
+     * PENDING_VERIFY must refuse BEFORE the session close, not after it via esp_ota_begin. */
+    ota_pre_t p = good_pre(); p.flag_pending = false; p.slot_pending_verify = true;
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
+    p.session_open = true;
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));   /* never reaches the close */
+}
+static void test_precond_reports_the_refusing_reason(void)
+{
+    /* S3-19 (F-11): the reason is the E_OTA_PRECOND errlog arg; first failing check wins. */
+    uint8_t why = 0xFFu;
+    ota_pre_t p = good_pre();
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_OK, ota_precond_eval(&p, &why));
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_NONE, why);
+    p = good_pre(); p.in_flight = true;
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, &why));
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_IN_FLIGHT, why);
+    p = good_pre(); p.size = 0u; (void)ota_precond_eval(&p, &why);
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_SIZE, why);
+    p = good_pre(); p.size = OTA_MAX_IMG_BYTES + 1u; (void)ota_precond_eval(&p, &why);
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_SIZE, why);
+    p = good_pre(); p.still_ms = 0u; (void)ota_precond_eval(&p, &why);
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_STILL, why);
+    p = good_pre(); p.batt_ok = false; (void)ota_precond_eval(&p, &why);
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_BATT, why);
+    p = good_pre(); p.slot_pending_verify = true; (void)ota_precond_eval(&p, &why);
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_SLOT_PENDING, why);
+    p = good_pre(); p.in_flight = true; p.batt_ok = false; (void)ota_precond_eval(&p, &why);
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_IN_FLIGHT, why);                      /* first failing check wins */
+    p = good_pre(); p.session_open = true; why = 0xFFu;
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p, &why));
+    TEST_ASSERT_EQUAL_UINT8(OTA_WHY_NONE, why);                           /* a go-ahead carries no reason */
 }
 static void test_precond_close_session_runs_last(void)
 {
     /* The close is a SIDE EFFECT on a live session, so it must only be asked for once every
      * other precondition already holds -- a refused push must never end a riding session. */
     ota_pre_t p = good_pre(); p.session_open = true;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p, NULL));
     p.still_ms = 0u;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
     p = good_pre(); p.session_open = true; p.batt_ok = false;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
     p = good_pre(); p.session_open = true; p.flag_pending = true; p.slot_pending_verify = true;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_REFUSE, ota_precond_eval(&p, NULL));
 }
 static void test_precond_stale_flag_is_cleared_not_refused(void)
 {
     /* app:C1's dead end: ota_pend set with no PENDING_VERIFY slot refused every later push
      * forever. R1: clear it and proceed. */
     ota_pre_t p = good_pre(); p.flag_pending = true; p.slot_pending_verify = false;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLEAR_STALE, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLEAR_STALE, ota_precond_eval(&p, NULL));
     p.session_open = true;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p));   /* close first */
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p, NULL));   /* close first */
 }
 static void test_precond_second_eval_terminates(void)
 {
     /* The caller's loop is: eval -> CLOSE_SESSION -> close -> eval. The second eval must never
      * return CLOSE_SESSION again, or the caller would loop. */
     ota_pre_t p = good_pre(); p.session_open = true;
-    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p));
+    TEST_ASSERT_EQUAL_UINT8(OTA_PRE_CLOSE_SESSION, ota_precond_eval(&p, NULL));
     p.session_open = false;
-    uint8_t act = ota_precond_eval(&p);
+    uint8_t act = ota_precond_eval(&p, NULL);
     TEST_ASSERT_TRUE(act == OTA_PRE_OK || act == OTA_PRE_CLEAR_STALE);
 }
 
@@ -188,6 +223,8 @@ int main(void)
     RUN_TEST(test_flag_next_change);
     RUN_TEST(test_precond_ok);
     RUN_TEST(test_precond_refusals);
+    RUN_TEST(test_precond_slot_pending_refuses_without_flag);
+    RUN_TEST(test_precond_reports_the_refusing_reason);
     RUN_TEST(test_precond_close_session_runs_last);
     RUN_TEST(test_precond_stale_flag_is_cleared_not_refused);
     RUN_TEST(test_precond_second_eval_terminates);

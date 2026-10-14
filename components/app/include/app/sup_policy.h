@@ -6,8 +6,9 @@
  * the host harness (test/test_sup_policy.c) and onto the Xtensa toolchain
  * (test_apps/core_selftest), so every threshold and every precondition ordering rule is proven by
  * a real test instead of by a bench observation that cannot be scripted. The IDF-bound callers
- * (supervisor/sup.c, ota/ota.c) only gather inputs and perform the side effects a decision asks
- * for; they contain no policy of their own. No statics live here -- each decision is a function of
+ * (supervisor/sup.c, ota/ota.c) gather inputs and perform the side effects a decision asks for;
+ * the policy they keep is hardware-bound (sup.c's validation health predicate and once-per-boot
+ * stack latch, ota.c's CFG_CHRG battery skip and early hwid reject). No statics live here -- each decision is a function of
  * its arguments plus the caller's own state struct (sup_stall_t), so the same function can be
  * driven for HB_COUNT tasks without cross-talk. */
 #ifndef APP_SUP_POLICY_H
@@ -34,7 +35,14 @@ typedef struct {
     bool     flag_pending;         /* lt_ota_pending_get() */
     bool     slot_pending_verify;  /* the RUNNING slot is ESP_OTA_IMG_PENDING_VERIFY */
 } ota_pre_t;
-uint8_t ota_precond_eval(const ota_pre_t *in);
+/* Why a push was refused: the errlog arg of E_OTA_PRECOND (§19.5). The evaluator reports the first
+ * five; ota.c adds the two refusals that are not pure decisions (short payload, session close not
+ * acked). OTA_WHY_NONE means "not refused". */
+enum { OTA_WHY_NONE = 0u, OTA_WHY_IN_FLIGHT = 1u, OTA_WHY_SIZE = 2u, OTA_WHY_STILL = 3u,
+       OTA_WHY_BATT = 4u, OTA_WHY_SLOT_PENDING = 5u, OTA_WHY_LEN = 6u, OTA_WHY_CLOSE = 7u };
+/* `why` (may be NULL; the caller initialises it) receives the refusing OTA_WHY_* when the result is
+ * OTA_PRE_REFUSE, and OTA_WHY_NONE otherwise. */
+uint8_t ota_precond_eval(const ota_pre_t *in, uint8_t *why);
 bool    ota_recv_stale(uint32_t now_ms, uint32_t last_ms, uint32_t timeout_s);
 
 #endif /* APP_SUP_POLICY_H */

@@ -65,7 +65,7 @@ void status_build(uint8_t out[LT_STATUS_LEN])
     LT_ASSERT_VOID(out != NULL, STATUS_ASSERT_CODE);
     memset(out, 0, LT_STATUS_LEN);
     out[LT_ST_OFF_PROTO] = 1;
-    /* §19.4 (M7): ota_in_progress() is a single volatile read of ota.c's state word -- no I/O, no
+    /* §19.4 (M7): ota_in_progress() is a single atomic load of ota.c's ownership word (any value but IDLE counts, including OTA_WRITING) -- no I/O, no
      * lock -- so status_build() stays safe to call from any task (see this file's header). */
     out[LT_ST_OFF_STATE] = ota_in_progress() ? (uint8_t)LT_STATE_OTA : (uint8_t)LT_STATE_IDLE;
     put_u16le(&out[LT_ST_OFF_FLAGS], (uint16_t)(sys_flags_get() & 0xFFFFu));

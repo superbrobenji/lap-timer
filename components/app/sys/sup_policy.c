@@ -53,8 +53,8 @@ bool sup_stack_low(uint32_t high_water_b) { return high_water_b < (uint32_t)STAC
 
 /* §17.2's "EV_FAULT on changes": the index of the lowest sys_flags bit at or above `from` that
  * differs between prev and cur, or 32 when there is none. Bounded by 32 iterations (rule 2);
- * a SET and a CLEARED bit both count as a change, so the ui's fault strip learns about recovery
- * as well as onset. */
+ * a SET and a CLEARED bit both count as a change, so recovery is posted as well as onset
+ * (the ui currently ignores EV_FAULT and reads sys_flags_get() directly -- ui.c). */
 uint8_t sup_flag_next_change(uint32_t prev, uint32_t cur, uint8_t from)
 {
     uint32_t diff = prev ^ cur;
@@ -69,15 +69,23 @@ uint8_t sup_flag_next_change(uint32_t prev, uint32_t cur, uint8_t from)
  * the app:C1 dead end (an ota_pend flag with no PENDING_VERIFY slot refused every later push
  * until a USB flash). Struck from §19.5 by R2: power state CONNECTED (there is no power task --
  * Plan 6) and fus_is_still (fusion is never calibrated -- Plan 8/#93); the 30 s no-motion window
- * is honoured through still_ms. */
-uint8_t ota_precond_eval(const ota_pre_t *in)
+ * is honoured through still_ms. The RUNNING slot's PENDING_VERIFY state refuses on its own
+ * (S3-17): esp_ota_begin would refuse it anyway, but only after the session close. A set flag with
+ * a non-pending slot is the stale case and is cleared, not refused. */
+uint8_t ota_precond_eval(const ota_pre_t *in, uint8_t *why)
 {
     LT_ASSERT_RET(in != NULL, SUP_POLICY_ASSERT_CODE, OTA_PRE_REFUSE);   /* caller passes its own local */
-    if (in->in_flight) return OTA_PRE_REFUSE;
-    if (in->size == 0u || in->size > OTA_MAX_IMG_BYTES) return OTA_PRE_REFUSE;
-    if (in->still_ms < OTA_STILL_MIN_MS) return OTA_PRE_REFUSE;
-    if (!in->batt_ok) return OTA_PRE_REFUSE;
-    if (in->flag_pending && in->slot_pending_verify) return OTA_PRE_REFUSE;
+    if (why != NULL) *why = OTA_WHY_NONE;
+    uint8_t r = OTA_WHY_NONE;
+    if (in->in_flight) r = OTA_WHY_IN_FLIGHT;
+    else if (in->size == 0u || in->size > OTA_MAX_IMG_BYTES) r = OTA_WHY_SIZE;
+    else if (in->still_ms < OTA_STILL_MIN_MS) r = OTA_WHY_STILL;
+    else if (!in->batt_ok) r = OTA_WHY_BATT;
+    else if (in->slot_pending_verify) r = OTA_WHY_SLOT_PENDING;   /* S3-17: the slot is the authority (H3) */
+    if (r != OTA_WHY_NONE) {
+        if (why != NULL) *why = r;
+        return OTA_PRE_REFUSE;
+    }
     if (in->session_open) return OTA_PRE_CLOSE_SESSION;      /* side effect: only once all of the above hold */
     return in->flag_pending ? OTA_PRE_CLEAR_STALE : OTA_PRE_OK;
 }
