@@ -142,6 +142,11 @@ static void test_nesting_past_the_depth_cap_sets_overflow_and_writes_nothing_dee
     for (int i = 0; i < JW_MAX_DEPTH + 4; i++) jw_arr_open(&w);
     TEST_ASSERT_TRUE(jw_overflow(&w));
     TEST_ASSERT_TRUE(w.depth < JW_MAX_DEPTH);        /* first[] was never indexed out of range */
+    /* Review follow-up (Task 9 carried-over minor): the check above only catches a cap that is
+     * too LOOSE (it would ASan-trap on first[12] before this line). A cap that fires one level
+     * EARLY would also satisfy it, so pin the exact boundary too: open_() only increments depth
+     * while depth+1 < JW_MAX_DEPTH, so the deepest reachable depth is JW_MAX_DEPTH-1, not less. */
+    TEST_ASSERT_EQUAL_INT(JW_MAX_DEPTH - 1, w.depth);
 }
 
 int main(void)
