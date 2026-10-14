@@ -240,6 +240,45 @@ static void test_profile_defaults_apply(void)
     TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &bad));
 }
 
+static void test_profile_rejects_a_log_rate_outside_the_spec_set(void)
+{
+    /* io:M6: cfg_apply_profile wrote p->log_fused_hz straight into c->log.fused_hz with no check
+     * against §15.1's {5,10,25}; verified: 77 was accepted and stored, and the no-blob boot path
+     * then persisted it. */
+    cfg_t c; cfg_defaults(&c);
+    cfg_t before = c;
+    cfg_profile_t p = { true, 77, "x" };
+    TEST_ASSERT_EQUAL_INT(-1, cfg_apply_profile(&c, &p));
+    TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+    for (uint8_t hz = 0; hz < 30; hz++) {
+        cfg_defaults(&c);
+        cfg_profile_t q = { false, hz, "LapTimer" };
+        int rc = cfg_apply_profile(&c, &q);
+        if (hz == 5u || hz == 10u || hz == 25u) {
+            TEST_ASSERT_EQUAL_INT(0, rc);
+            TEST_ASSERT_EQUAL_UINT8(hz, c.log.fused_hz);
+        } else {
+            TEST_ASSERT_EQUAL_INT(-1, rc);
+            TEST_ASSERT_EQUAL_UINT8(10, c.log.fused_hz);        /* the default is untouched */
+        }
+    }
+}
+
+static void test_validate_clears_the_unused_bench_tail_without_counting_it(void)
+{
+    /* io:L5: entries past n_kmh/n_mph were never touched, so a blob's stale tail survived a later
+     * count increase. Zeroing (not clamping) keeps cfg_validate(defaults) == 0. */
+    cfg_t c; cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(0, cfg_validate(&c));
+    c.drag.n_kmh = 2; c.drag.benches_kmh[2] = 999; c.drag.benches_kmh[3] = 7;
+    c.drag.n_mph = 1; c.drag.benches_mph[3] = 1;
+    TEST_ASSERT_EQUAL_INT(0, cfg_validate(&c));                 /* not counted as a correction */
+    TEST_ASSERT_EQUAL_UINT16(0, c.drag.benches_kmh[2]);
+    TEST_ASSERT_EQUAL_UINT16(0, c.drag.benches_kmh[3]);
+    TEST_ASSERT_EQUAL_UINT16(0, c.drag.benches_mph[3]);
+    TEST_ASSERT_EQUAL_UINT16(100, c.drag.benches_kmh[0]);       /* live entries untouched */
+}
+
 static void test_oversized_arrays_are_rejected(void)
 {
     cfg_t c; cfg_defaults(&c); char err[64];
@@ -433,6 +472,8 @@ int main(void)
     RUN_TEST(test_migrate_v1_is_noop);
     RUN_TEST(test_version_is_owned_by_firmware);
     RUN_TEST(test_profile_defaults_apply);
+    RUN_TEST(test_profile_rejects_a_log_rate_outside_the_spec_set);
+    RUN_TEST(test_validate_clears_the_unused_bench_tail_without_counting_it);
     RUN_TEST(test_oversized_arrays_are_rejected);
     RUN_TEST(test_validate_resets_implausible_battery_calibration);
     RUN_TEST(test_err_buffer_is_optional);

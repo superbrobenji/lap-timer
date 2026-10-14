@@ -61,6 +61,12 @@ int cfg_validate(cfg_t *c)
     CORE_ASSERT_RET(c->drag.n_mph <= CFG_MAX_BENCHES, CFG_ASSERT_CODE, n);
     for (int i = 0; i < c->drag.n_kmh; i++) n += clamp_u16(&c->drag.benches_kmh[i], 10, 400);
     for (int i = 0; i < c->drag.n_mph; i++) n += clamp_u16(&c->drag.benches_mph[i], 10, 250);
+    /* io:L5: entries past the count are neither displayed nor exported, so a stale tail from an
+     * older blob is invisible until n_kmh/n_mph grows. Zero them -- deliberately NOT clamped into
+     * [10,400]/[10,250], which would count a correction on every fresh default config and fire
+     * E_SYS_CFG_RESET at every boot. Not counted in n. */
+    for (int i = c->drag.n_kmh; i < CFG_MAX_BENCHES; i++) c->drag.benches_kmh[i] = 0;
+    for (int i = c->drag.n_mph; i < CFG_MAX_BENCHES; i++) c->drag.benches_mph[i] = 0;
     n += clamp_u8(&c->drag.launch_g_e2, 5, 50);
     n += clamp_u16(&c->power.pit_after_s, 10, 600);
     n += clamp_u16(&c->power.park_after_s, 60, 7200);
@@ -124,6 +130,10 @@ int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p)
     CORE_ASSERT_RET(p != NULL, CFG_ASSERT_CODE, -1);         /* p->ble_name itself is optionally NULL: checked below, not here */
     /* Validate before touching anything: a rejected profile must leave the config untouched. */
     if (p->ble_name && strlen(p->ble_name) > 15) return -1;
+    /* io:M6: log_fused_hz is a §15.1 enum {5,10,25}, not a free integer -- cfg_validate would
+     * clamp it later, but the no-blob boot path persists this config, so an out-of-range profile
+     * would reach flash. Validated before anything is written: a rejected profile changes nothing. */
+    if (p->log_fused_hz != 5u && p->log_fused_hz != 10u && p->log_fused_hz != 25u) return -1;
     c->display.live_clock = p->display_live_clock;
     c->log.fused_hz = p->log_fused_hz;
     if (p->ble_name) strcpy(c->ble.name, p->ble_name);

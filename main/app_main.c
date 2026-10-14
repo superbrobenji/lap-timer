@@ -157,7 +157,9 @@ static void boot_config(void)
     cfg_apply_profile(&cfg, &prof);
     int corr = lt_cfg_load(&cfg);
     if (corr < 0) {
-        lt_cfg_save(&cfg);                     /* no valid blob -> persist the profile defaults */
+        (void)cfg_validate(&cfg);              /* io:M6/R26: the only path that stores a config
+                                                * cfg_validate never saw */
+        lt_cfg_save(&cfg);                     /* no valid blob -> persist the validated defaults */
         errlog_add(E_SYS_CFG_RESET, 0);
     } else if (corr > 0) {
         errlog_add(E_SYS_CFG_RESET, (uint32_t)corr);
