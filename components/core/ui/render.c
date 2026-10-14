@@ -155,16 +155,53 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
     }
 }
 
+/* io:L1 (parked by Session 3, closed by Ruling S4-G): bounds fb_text_draw's character walk and
+ * fb_text_right's length scan against the SOURCE string -- the read-side counterpart to io:M2
+ * (put_str's unbounded destination write, screens_moto.c, Task 12). Both used to trust the
+ * caller's NUL unconditionally (fb_text_draw's `for (p = s; *p != '\0'; p++)`, fb_text_right's
+ * strlen(s)); an unterminated source runs either walk past its end. This is reachable today, not
+ * just latent: render_drag_page0 passes drag_row_t.label (model.h:44, char[8]) straight to fb_text
+ * with no copy and hence no bound at all (screens_moto.c:764) -- the DCARD footer's own put_str
+ * call a few lines above it already documents that label as "untrusted model data ... with no
+ * guaranteed terminator in the latent case" (screens_moto.c:713-714), and Session 3 confirmed the
+ * read overflow empirically by filling the model with 'W'.
+ *
+ * FB_TEXT_MAX_CHARS is sized from the widest fixed-capacity field any production caller passes to
+ * fb_text/fb_text_right/fb_text_inv today: screen_model_t.venue_name[33] (model.h:126), drawn
+ * directly by render_oneshot_venue (screens_moto.c:1032) -- 32 content chars, always
+ * snprintf-terminated well inside that capacity (components/app/ui/ui.c:1242). Every other
+ * caller is shorter still: boot_ver[32]/layout_name[25] (model.h:144/126) top out at 31/24 chars,
+ * every literal in this file (e.g. ONESHOT_CALIBRATE_SUB, screens_moto.c) is under 25, and every
+ * locally-built buffer (e.g. DCARD_FOOTER_BUF_LEN, screens_moto.c:689, itself == 32) is explicitly
+ * NUL-terminated by put_str/put_uint's own destination bound at or inside that same 32-byte cap. A
+ * cap of 32 therefore cannot truncate any real caller's text -- strnlen is avoided here the same
+ * way the rest of components/core avoids it (ses_records.c:356): a plain bounded scan instead. */
+#define FB_TEXT_MAX_CHARS 32u
+
+/* Bounded stand-in for strlen(s): stops at the first NUL, same as strlen, but never looks past
+ * FB_TEXT_MAX_CHARS characters -- see FB_TEXT_MAX_CHARS's derivation above. Rule 2: the loop is
+ * bounded by that constant. */
+static size_t fb_text_len(const char *s)
+{
+    size_t n = 0;
+    while (n < FB_TEXT_MAX_CHARS && s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
 /* Draws `s` left-to-right starting at (x,y), one fixed-width font cell per character, opaque
  * (invert == false, fb_text/fb_text_right) or inverted (invert == true, fb_text_inv: ink pixels
- * white, background pixels black). Returns the pen x after the last character. */
+ * white, background pixels black). Returns the pen x after the last character. io:L1: the walk is
+ * bounded by fb_text_len(s), not by `s` alone -- see FB_TEXT_MAX_CHARS above. */
 static int fb_text_draw(fb_t *fb, const font_t *font, int x, int y, const char *s, bool invert)
 {
     CORE_ASSERT_RET(font != NULL, UI_ASSERT_CODE, x);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x);
-    int pen = x;
-    for (const char *p = s; *p != '\0'; p++) {
-        int            idx = font_glyph_index(font, *p);
+    size_t len = fb_text_len(s);
+    int    pen = x;
+    for (size_t i = 0; i < len; i++) {
+        int            idx = font_glyph_index(font, s[i]);
         const uint8_t *glyph = NULL;
         if (idx >= 0) {
             glyph = font->bitmaps + (size_t)idx * (size_t)font->h * (size_t)font->stride;
@@ -186,7 +223,7 @@ int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s)
 {
     CORE_ASSERT_RET(f != NULL, UI_ASSERT_CODE, x_right);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, x_right);
-    int x = x_right - (int)(strlen(s) * f->w);
+    int x = x_right - (int)(fb_text_len(s) * (size_t)f->w);
     fb_text_draw(fb, f, x, y, s, false);
     return x;
 }

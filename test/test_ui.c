@@ -203,6 +203,34 @@ static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("clip_edge.pbm"), &s_fb));
 }
 
+/* ---- bounded text walk (io:L1, Ruling S4-G): fb_text_draw's character walk and
+ * fb_text_right's length scan must be bounded by the SOURCE, not just rely on the caller's NUL --
+ * the same defect class as io:M2 (put_str's unbounded destination write, screens_moto.c, Task
+ * 12), but a READ. Session 3 hit this reading drag_row_t.label (model.h:44, char[8]) through
+ * render_drag_page0's direct `fb_text(..., m->drag[n-1].label)` call (screens_moto.c:764) once the
+ * model was filled with no NUL; reproduced directly here against fb_text/fb_text_right themselves
+ * rather than re-deriving that model-level repro. Neither test checks a golden: an unterminated
+ * source makes the drawn pixels unspecified (how far the bounded walk gets before giving up is an
+ * implementation detail, not a contract), so the only thing worth asserting is that the call
+ * returns at all, under ASan, without reading past `s`. ---- */
+
+static void test_text_draw_bounds_an_unterminated_source(void)
+{
+    /* s is never NUL-terminated; its end sits right against ASan's stack redzone, so the unfixed
+     * `for (p = s; *p != '\0'; p++)` walk reads past it on the very next byte. */
+    char s[40];
+    memset(s, 'W', sizeof s);
+    (void)fb_text(&s_fb, &FONT_SMALL, 4, 4, s);
+}
+
+static void test_text_right_bounds_an_unterminated_source(void)
+{
+    /* Same defect, fb_text_right's own strlen(s)-equivalent length scan. */
+    char s[40];
+    memset(s, 'W', sizeof s);
+    (void)fb_text_right(&s_fb, &FONT_MED, 200, 4, s);
+}
+
 /* ---- ui_layout_label (core/ui/menu_labels.c, #98) ---- */
 
 static void test_ui_layout_label(void)
@@ -251,6 +279,8 @@ int main(void)
     RUN_TEST(test_icons_and_bar);
     RUN_TEST(test_composite_lap_screen);
     RUN_TEST(test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds);
+    RUN_TEST(test_text_draw_bounds_an_unterminated_source);
+    RUN_TEST(test_text_right_bounds_an_unterminated_source);
     RUN_TEST(test_ui_layout_label);
     return UNITY_END();
 }
