@@ -26,10 +26,12 @@ int  pipeline_lap_count(void);
 int  pipeline_lap_at(int index, lap_result_t *out);
 /* §19.4 OTA-validate gate (audit fix wave F2a, R1). True once a GPS fix has been ingested, or
  * unconditionally on a build whose GPS driver is not a live receiver (gps_profile_t.live == 0:
- * the Plan-03 stubs and gps_sim) -- see pipeline.c. Read by the supervisor. */
+ * the Plan-03 stubs and gps_sim). FAIL-CLOSED: false until pipeline_init_drivers has run, so an
+ * uninitialised pipeline never reads as healthy -- see pipeline.c. Read by the supervisor. */
 bool pipeline_sensors_ok(void);
-/* §19.5 OTA stillness precondition (R2): ms since the last EV_STILL edge, 0 while moving, the
- * whole uptime before any motion edge. Read by ota_begin. */
+/* §19.5 OTA stillness precondition (R2): ms since the last EV_STILL edge. 0 means "moving or
+ * just stopped" (deliberately indistinguishable: the caller tests >= OTA_STILL_MIN_MS). Before
+ * any motion edge it is uptime modulo 2^32 ms. Read by ota_begin. */
 uint32_t pipeline_still_for_ms(void);
 
 /* Best-known sector splits + theoretical best for the locked layout (design §2). Refreshed on
