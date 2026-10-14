@@ -436,13 +436,16 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   `tracks put {\"id\":900,\"name\":\"Bench\",\"lat\":-33.9,\"lon\":18.4,\"radius_m\":500,\"layouts\":[{\"id\":1,\"name\":\"L\",\"dir\":1,\"sf\":[[-33.9,18.4],[-33.9001,18.4001]]}]}`
   Expect a `---BEGIN tracks 0---` ... `---END 00000000---` ack, then `tracks get` lists id 900 with
   `"src":"user"`, and after `dbg reset` it is STILL listed (it went through `/tracks/user.bin`).
-  Negatives: `tracks put {}` -> `ERR 0x0703: bad venue json`; repeat the put with NEW ids (901, 902, ...) until
+  Negatives: `tracks put {}` -> `ERR 0x0703: bad venue json`; repeat the SAME put (id 900) -> `ERR 0x0703: id exists`
+  (the user table is append-only; the earlier venue is unchanged, `tracks get` still lists it once; I-3); repeat the put with NEW ids (901, 902, ...) until
   `ERR 0x0703: table full`. The table refuses once it already holds `TRK_MAX_USER` (4) user venues
   (`trk_user_add_json` fails when `user_n >= 4`), and the sim venue (id 1004) and anything already in
   `/tracks/user.bin` count. Starting from an EMPTY `user.bin` (check `tracks get` shows no other `"src":"user"`
   entries first) that is: on `moto_sim` the first 3 puts (900-902) succeed and the 4th refuses; on `moto_neo6m`
   the first 4 succeed and the 5th refuses; every venue already persisted pre-fills a slot and moves the
-  refusal one put earlier. A re-put of an existing id while the table is full is also refused (`table full`).
+  refusal one put earlier. A re-put of an existing id while the table is full is refused as `table full` (the
+  full check comes first; with room it is `id exists`). A PUT during an active New track creation answers
+  `ERR 0x0703: creation in progress; retry`. Size: the console line caps a venue at about 245 B (I-6).
   Evidence: the frames and the two errors.
 - [ ] **51. R5 coredump** (F2b T6/T7). `coredump` with nothing stored -> `ERR 0x0703: coredump: none stored`.
   `dbg crash`, let it reboot, then `coredump` -> `---BEGIN coredump <n>---` with a Base64 body and
@@ -510,7 +513,10 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   figure (the 32-slot ring drops the newest on overflow; the counter is cumulative since boot). Also
   `frames ok=N bad=0`, `LAP=2` and no decode error — no spliced records, because the console is no longer a second producer. Repeat with
   `dbg logtest 60000` once to confirm the heartbeat stays alive (`dbg status` `hb[0]` advancing).
-  Evidence: the `logck` line + `dbg fs` drop count.
+  Evidence: the `logck` line + `dbg fs` drop count. The session itself is opened by the PIPELINE (m-3: `dbg logtest`
+  posts no `LOGGER_OPEN_SESSION` any more): with none open the console prints "asked the pipeline to open a session
+  if none is open (venue 0)" and `dbg fs` shows one new session whose header has venue 0; with a session already
+  open (e.g. `moto_sim`'s boot session) no new one appears and the laps/fixes go into it.
 - [ ] **63. OTA tokens end in ONE CRLF; a refusal is the `0x0801` family** (F2b T7, L15). With the lap-timer
   moving (`dbg sim laps 20` on `moto_sim`), capture a refused push raw on the lap-timer port, e.g.
   `python3 -c "import serial,sys;s=serial.Serial(sys.argv[1],115200,timeout=1);s.write(b'ota recv 100 '+b'0'*64+b' v moto_sim_epaper\r');print(s.read(300).hex(' '))" <lt port>`
@@ -527,12 +533,28 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   `ota precondition: <reason>` text of `cmd.c`'s `OTA_BEGIN` only reaches a client through a framed transport
   (BLE/WiFi, sub-project C); the console and dev-kit paths use the `OTA-ERR 0x0801` token, so the reason is read
   from `errlog`'s arg. Evidence: the hex dump + the errlog line.
-- [ ] **64. `list` is capped at 48 sessions** (F2b T6b, #91 follows in F5). Create more than 48 sessions: on
+- [ ] **64. `list` shows the NEWEST 48 sessions** (F2b T6b + final review I-5; #91 follows in F5). Create more than 48 sessions: on
   `moto_sim` alternate `config set {\"mode\":\"drag\"}` / `{\"mode\":\"lap\"}` 52 times, 400 ms apart (each
   change rotates the session, item 48). `list`: the body holds exactly 48 `{"id":"S...` objects
-  (`... | grep -o '"id":"S' | wc -l` -> 48), the frame CRC is valid, `dbg fs` shows more than 48 pairs.
+  (`... | grep -o '"id":"S' | wc -l` -> 48), the frame CRC is valid, `dbg fs` shows more than 48 pairs, the
+  NEWEST session id (the last in `dbg fs`) IS in the `list` body and the oldest ids are not.
   Delete a few (`delete <id>`) and `list` shows 48 again until fewer remain. Evidence: the count + the `dbg fs`
   pair count.
+- [ ] **65. An OTA push does not reopen a session** (F2b final review I-1). With a session open for more than 60 s
+  (`moto_sim` boot session, or a venue acquired) and the bike still >= 30 s, `dbg fs` and note the newest session id.
+  Push an image (`flash push` / `tools/ota_push.py`); do not touch the lap-timer port for 35 s after it (item 23's
+  rule). During and after the push the newest id is UNCHANGED: no `session ... open` line appears after `OTA-READY`
+  (the log silence of the transfer holds), and after the reboot the new boot's session is the only new one. Before
+  the fix a new near-empty session opened ~50 ms after the OTA close. Evidence: the `dbg fs` before and after.
+- [ ] **66. New track at venue A rotates the session** (F2b final review I-4). On `moto_sim` (or a real venue) with
+  a session open for venue A, start Menu -> New track, mark the gates and finish. `dbg fs` / `list`: A's session is
+  closed (its `.sum` ends) and a NEW session opened for the created venue (venue_id = the new id). A's `.sum` holds
+  only A's laps, the new one only the new venue's; no session carries two venue ids. Evidence: two `dbg sum` lines.
+- [ ] **67. `tracks put` of an existing id is refused** (F2b final review I-3): see item 50 (`ERR 0x0703: id exists`,
+  `creation in progress; retry` while New track is active). Evidence: the ERR lines.
+- [ ] **68. TIME_MAP is a consistent pair** (F2b final review I-2). `dbg logck <id>` of a fresh session decodes
+  with no error, and a session opened when GPS has been lost for minutes (parked indoors, sim stopped) carries no
+  TIME_MAP whose gps time is far from its mono time's mapping. Evidence: `dbg logck` clean.
 
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4
