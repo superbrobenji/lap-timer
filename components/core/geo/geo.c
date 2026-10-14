@@ -26,7 +26,7 @@ geo_enu_t geo_to_enu(const geo_origin_t *o, double lat_deg, double lon_deg)
     CORE_ASSERT_RET(isfinite(lat_deg), GEO_ASSERT_CODE, zero);
     CORE_ASSERT_RET(isfinite(lon_deg), GEO_ASSERT_CODE, zero);
     geo_enu_t e;
-    /* Wrap the longitude difference into (-pi, pi]: without it a venue at +179.99 and a fix at
+    /* Wrap the longitude difference into [-pi, pi]: without it a venue at +179.99 and a fix at
      * -179.99 (2.2 km apart) project ~40 000 km apart and every crossing test is nonsense. */
     double dlon = lon_deg * DEG2RAD - o->lon0_rad;
     if (dlon > GEO_PI) dlon -= 2.0 * GEO_PI;

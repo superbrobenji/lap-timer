@@ -15,13 +15,18 @@
 
 /* Task 8's false-start abort depends on the launch hold's minimum velocity staying above the
  * `stopped` threshold: at hold, DRAG_LAUNCH_G * G_MPS2 * DRAG_LAUNCH_HOLD_MS / 1000 = 0.14710 m/s,
- * vs. stopped = DRAG_ARM_SPEED_KMH / 3.6 = 0.13889 m/s -- a margin of about 5.9%. Scaled to
- * micrometres/s (integer, since a _Static_assert needs a constant expression) that is
- * 147099 > 138888. If a future constant change ever inverted this margin, a marginal launch would
- * read as `stopped` on its own first sample and core:H5 would silently reopen with no test
- * failing. */
-_Static_assert((long)((double)DRAG_LAUNCH_G * G_MPS2 * (double)DRAG_LAUNCH_HOLD_MS / 1000.0 * 1e6)
-               > (long)((double)DRAG_ARM_SPEED_KMH / 3.6 * 1e6),
+ * vs. stopped = DRAG_ARM_SPEED_KMH / 3.6 = 0.13889 m/s -- a margin of about 5.9%. The two
+ * micrometre/s constants below are that same arithmetic hand-evaluated and truncated to integers
+ * (0.15 * 9.80665 * 100 / 1000 * 1e6 = 147099.75 -> 147099; 0.5 / 3.6 * 1e6 = 138888.88... ->
+ * 138888): a C11 integer constant expression may use a floating constant only as the immediate
+ * operand of a cast (6.6p6), so the floating arithmetic itself cannot appear inside the assert --
+ * re-derive both numbers by hand if DRAG_LAUNCH_G, G_MPS2, DRAG_LAUNCH_HOLD_MS or
+ * DRAG_ARM_SPEED_KMH ever change. If a future constant change ever inverted this margin, a
+ * marginal launch would read as `stopped` on its own first sample and core:H5 would silently
+ * reopen with no test failing. */
+#define DRAG_LAUNCH_HOLD_UM_S 147099L   /* DRAG_LAUNCH_G * G_MPS2 * DRAG_LAUNCH_HOLD_MS / 1000 * 1e6, truncated */
+#define DRAG_STOPPED_UM_S     138888L   /* DRAG_ARM_SPEED_KMH / 3.6 * 1e6, truncated */
+_Static_assert(DRAG_LAUNCH_HOLD_UM_S > DRAG_STOPPED_UM_S,
                "DRAG_LAUNCH_G hold velocity must exceed the stopped threshold (core:H5 false-start abort)");
 
 /* ---- unit helpers ---- */

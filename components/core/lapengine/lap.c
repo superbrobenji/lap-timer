@@ -57,7 +57,12 @@ void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg)
     if (L->cfg.pit_time_s == 0)   L->cfg.pit_time_s   = (uint8_t)PIT_TIME_S;
     if (L->cfg.n_default_layout > LAP_MAX_DEFAULT_LAYOUTS)
         L->cfg.n_default_layout = LAP_MAX_DEFAULT_LAYOUTS;   /* rule 2: bounds every map scan */
-    CORE_ASSERT_VOID(L->cfg.min_lap_s < L->cfg.max_lap_s, LAP_ASSERT_CODE);   /* a lap window exists */
+    if (L->cfg.min_lap_s >= L->cfg.max_lap_s) {   /* no lap window at all: fall BOTH back (R24) */
+        L->cfg.min_lap_s = (uint16_t)MIN_LAP_S;
+        L->cfg.max_lap_s = (uint16_t)MAX_LAP_S;
+    }
+    CORE_ASSERT_VOID(L->cfg.min_lap_s < L->cfg.max_lap_s, LAP_ASSERT_CODE);   /* postcondition: the
+                                                     * fallback above guarantees a lap window exists */
 }
 
 /* Clear the per-lap sector accumulation (§10.4 step 5): gate crossing times and the next-expected
@@ -137,6 +142,7 @@ void lap_init(lap_t *L, const lap_cfg_t *cfg)
     memset(L, 0, sizeof *L);
     lap_set_cfg(L, cfg);
     L->state = LAP_ST_NO_VENUE;
+    L->pred_stride = 1;    /* lap.h: 1 = every fix; every other path to RUNNING sets this, memset left it 0 */
 }
 
 void lap_reset(lap_t *L)

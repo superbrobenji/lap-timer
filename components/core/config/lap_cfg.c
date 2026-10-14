@@ -30,5 +30,10 @@ void lap_cfg_from_user(const cfg_t *cfg, lap_cfg_t *out)
         out->default_layout[i].layout = cfg->lap.default_layout[i].layout;
     }
     out->n_default_layout = n;
-    CORE_ASSERT_VOID(out->min_lap_s < out->max_lap_s, LAPCFG_ASSERT_CODE);   /* a lap window exists */
+    if (out->min_lap_s >= out->max_lap_s) {       /* no lap window at all: fall BOTH back (R24) */
+        out->min_lap_s = (uint16_t)MIN_LAP_S;
+        out->max_lap_s = (uint16_t)MAX_LAP_S;
+    }
+    CORE_ASSERT_VOID(out->min_lap_s < out->max_lap_s, LAPCFG_ASSERT_CODE);   /* postcondition: the
+                                                     * fallback above guarantees a lap window exists */
 }

@@ -801,8 +801,9 @@ typedef void (*lap_evt_cb_t)(const event_t *ev, void *ctx);
 
 void lap_cfg_defaults(lap_cfg_t *c);
 void lap_init(lap_t *L, const lap_cfg_t *cfg);
+void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);            /* apply to a live engine; no state reset */
 void lap_set_venue(lap_t *L, const trk_venue_t *v);          /* enters VENUE_FOUND */
-void lap_force_layout(lap_t *L, uint16_t layout_id);
+int  lap_force_layout(lap_t *L, uint16_t layout_id);        /* 0 / -1 the venue has no such layout */
 void lap_reset(lap_t *L);
 /* feed a fix (valid or not) and current fused stats; may emit events via cb */
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx);

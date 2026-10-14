@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "core/lap.h"
+#include "core/lap_cfg.h"
 #include "core/trk.h"
 #include "core/geo.h"
 #include "core/consts.h"
@@ -1614,6 +1615,51 @@ static void test_set_cfg_applies_without_resetting(void)
     TEST_ASSERT_TRUE(L.lap_flags & LAP_F_PIT);
 }
 
+/* F1a final review I3: min_lap_s and max_lap_s are each clamped independently (pick16 here,
+ * clamp_u16 in cfg.c), so a pair like min_lap_s=600, max_lap_s=60 passes both per-field range
+ * checks and reaches the engine with no window at all. complete_lap then discards every lap
+ * under min_lap_s and flags every lap over max_lap_s TOO_LONG, so with min >= max NO lap can ever
+ * complete VALID for the rest of the session (R24 requires both fields to fall back together to
+ * the consts.h defaults instead). Covers both paths onto the engine: lap_cfg_from_user (the
+ * json/console loader) and lap_set_cfg (CMD_CONFIG_RELOAD on a live engine). */
+static void test_bad_min_max_window_falls_back_to_defaults(void)
+{
+    /* lap_cfg_from_user: a user cfg with an inverted window. */
+    cfg_t uc; memset(&uc, 0, sizeof uc);
+    uc.lap.min_lap_s = 600;
+    uc.lap.max_lap_s = 60;
+    lap_cfg_t c; lap_cfg_from_user(&uc, &c);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MIN_LAP_S, c.min_lap_s);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MAX_LAP_S, c.max_lap_s);
+
+    /* lap_set_cfg: the same inverted window applied to a live, RUNNING engine (R24 reload path). */
+    const double lat0 = -45.0, lon0 = 170.0;
+    trk_venue_t v; build_venue(&v, lat0, lon0, 1);
+    lap_t L; lap_init(&L, NULL);
+    lap_set_venue(&L, &v);
+    arm_at_start(&L, lat0, lon0, 0, NULL);
+
+    lap_cfg_t bad; lap_cfg_defaults(&bad);
+    bad.min_lap_s = 600;
+    bad.max_lap_s = 60;
+    lap_set_cfg(&L, &bad);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MIN_LAP_S, L.cfg.min_lap_s);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)MAX_LAP_S, L.cfg.max_lap_s);
+
+    /* and a normal ~40 s lap still completes VALID -- the bad pair must not silently kill lap
+     * completion for the session. */
+    forward_lap(&L, lat0, lon0, 0,        40000000, NULL);   /* #1 out-lap opens */
+    forward_lap(&L, lat0, lon0, 40000000, 40000000, NULL);   /* #2 out-lap completes, lap 1 opens */
+    forward_lap(&L, lat0, lon0, 80000000, 40000000, NULL);   /* #3 lap 1 completes, ~40 s */
+
+    const lap_result_t *p = lap_prev(&L);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT16(1, p->lap_no);
+    TEST_ASSERT_TRUE(p->flags & LAP_F_VALID);
+    TEST_ASSERT_FALSE(p->flags & LAP_F_TOO_LONG);
+    TEST_ASSERT_NOT_NULL(lap_best(&L));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1658,6 +1704,7 @@ int main(void)
     RUN_TEST(test_cfg_min_lap_s_reaches_the_engine);
     RUN_TEST(test_default_layout_map_breaks_the_tie);
     RUN_TEST(test_set_cfg_applies_without_resetting);
+    RUN_TEST(test_bad_min_max_window_falls_back_to_defaults);
 #ifndef ESP_PLATFORM
     RUN_TEST(test_ten_synth_laps_within_30ms_at_5hz);
     RUN_TEST(test_ten_synth_laps_within_15ms_at_10hz);
