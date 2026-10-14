@@ -56,9 +56,11 @@ rtc_validity_t lt_rtc_validate(rtc_state_t *out)
 {
     /* L4: read the snapshot under the seqlock -- an odd generation, or one that moved across the
      * copy, means lt_rtc_save was mid-write and the bytes we read are a mix of two snapshots
-     * whose CRC would (correctly) fail. Retry a bounded number of times; falling through after
-     * RTC_READ_RETRIES returns the CRC verdict on the last copy, which is the pre-L4 behaviour
-     * and still safe (a torn read fails the CRC, it never returns VALID garbage). */
+     * whose CRC would (correctly) fail. Retry a bounded number of times. Falling through after
+     * RTC_READ_RETRIES is the pre-L4 unguarded read, reachable only after RTC_READ_RETRIES
+     * consecutive in-progress or moved generations. That read is NOT torn-proof: rtc_validate_copy
+     * CRCs s_rtc and then memcpys it, so a writer between those steps can leave *out torn while
+     * the call returns RTC_VALID. */
     for (int i = 0; i < RTC_READ_RETRIES; i++) {
         uint32_t g0 = __atomic_load_n(&s_rtc_gen, __ATOMIC_ACQUIRE);
         if ((g0 & 1u) != 0u) continue;                       /* writer in progress */
@@ -87,6 +89,7 @@ void lt_rtc_save(const lap_rtc_t *lr, const char *session_id, int64_t saved_gps_
     LT_ASSERT_VOID(mode <= 1u, RTC_ASSERT_CODE);
 
     __atomic_store_n(&s_rtc_gen, s_rtc_gen + 1u, __ATOMIC_SEQ_CST);   /* odd: write in progress */
+    __atomic_thread_fence(__ATOMIC_RELEASE);   /* later data writes must not hoist above the odd store */
 
     /* §15.3 "session_epoch_mono_us: keep existing if set" -- preserve it across saves. */
     int64_t epoch = s_rtc.session_epoch_mono_us;

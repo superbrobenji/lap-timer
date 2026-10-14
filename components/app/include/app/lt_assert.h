@@ -10,10 +10,10 @@
  * LT_ASSERT_* is a reported, recovered anomaly, not a crash. Assertions must be side-effect-free
  * (the condition is only ever evaluated, never relied on to run code).
  *
- * These macros are now the app/driver layer's primary assertion sink -- roughly 300 call sites across
- * components/app, components/drivers and main. The strong core_assert_report they reach lives in
- * components/app/sys/lt_nvs.c (next to errlog_add, in a TU the firmware always links) and records the
- * code into the §17.7 error ring.
+ * These macros are now the app/driver layer's primary assertion sink -- hundreds of call sites
+ * across components/app, components/drivers and main. The strong core_assert_report they reach lives
+ * in components/app/sys/lt_nvs.c (next to errlog_add, in a TU the firmware always links) and records
+ * the code into the §17.7 error ring.
  */
 #ifndef APP_LT_ASSERT_H
 #define APP_LT_ASSERT_H

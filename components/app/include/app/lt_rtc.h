@@ -45,14 +45,14 @@ rtc_validity_t lt_rtc_validate(rtc_state_t *out);
 void           lt_rtc_clear(void);   /* zero the snapshot (magic cleared) */
 
 /* Populate and CRC the RTC state from the current lap-engine snapshot + session identity, then
- * store it in RTC_NOINIT_ATTR memory (survives panic/WDT reset and deep sleep). Called by the pipeline on every
- * S/F and sector event. NOT called before a supervised restart: §17.2's "restarts after saving RTC
- * state" is struck by the 2026-10-13 audit-fix-wave ruling R6 -- the pipeline owns this snapshot and a
- * WEDGED pipeline (the only task the supervisor restarts) cannot be asked to save, so the resume point
- * is the last gate crossing by design. power_state has no owner until Plan 6 (pass 0); partial_count is
- * owned by the ui and is not yet handed here (§15.3, filed). mode is the operating mode (MODE_LAP/
- * MODE_DRAG), power_state has no owner in plan 03 (pass 0). session_epoch_mono_us is preserved
- * across saves. session_id is a bounded copy into the 10-byte field (may truncate). */
+ * store it in RTC_NOINIT_ATTR memory (survives panic/WDT reset and deep sleep). Called by the
+ * pipeline on every S/F and sector event. NOT called before a supervised restart: §17.2's "restarts
+ * after saving RTC state" is struck by the 2026-10-13 audit-fix-wave ruling R6 -- the pipeline owns
+ * this snapshot and a WEDGED pipeline (the only task the supervisor restarts) cannot be asked to save,
+ * so the resume point is the last gate crossing by design. mode is the operating mode (MODE_LAP/
+ * MODE_DRAG). power_state has no owner until Plan 6 (pass 0); partial_count is owned by the ui and is
+ * not yet handed here (§15.3, filed). session_epoch_mono_us is preserved across saves. session_id is a
+ * bounded copy into the 10-byte field (may truncate). */
 void lt_rtc_save(const lap_rtc_t *lr, const char *session_id, int64_t saved_gps_us,
                  uint8_t mode, uint8_t power_state, uint32_t partial_count);
 
