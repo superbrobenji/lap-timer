@@ -436,10 +436,14 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   `tracks put {\"id\":900,\"name\":\"Bench\",\"lat\":-33.9,\"lon\":18.4,\"radius_m\":500,\"layouts\":[{\"id\":1,\"name\":\"L\",\"dir\":1,\"sf\":[[-33.9,18.4],[-33.9001,18.4001]]}]}`
   Expect a `---BEGIN tracks 0---` ... `---END 00000000---` ack, then `tracks get` lists id 900 with
   `"src":"user"`, and after `dbg reset` it is STILL listed (it went through `/tracks/user.bin`).
-  Negatives: `tracks put {}` -> `ERR 0x0703: bad venue json`; repeat the put with ids 901, 902, ... until
-  `ERR 0x0703: table full` (`TRK_MAX_USER` = 4 slots, one already taken by the sim venue on `moto_sim`, so the
-  third extra put refuses there and the fourth on `moto_neo6m`). A re-put of an existing id while the table is full
-  is also refused (`table full`). Evidence: the frames and the two errors.
+  Negatives: `tracks put {}` -> `ERR 0x0703: bad venue json`; repeat the put with NEW ids (901, 902, ...) until
+  `ERR 0x0703: table full`. The table refuses once it already holds `TRK_MAX_USER` (4) user venues
+  (`trk_user_add_json` fails when `user_n >= 4`), and the sim venue (id 1004) and anything already in
+  `/tracks/user.bin` count. Starting from an EMPTY `user.bin` (check `tracks get` shows no other `"src":"user"`
+  entries first) that is: on `moto_sim` the first 3 puts (900-902) succeed and the 4th refuses; on `moto_neo6m`
+  the first 4 succeed and the 5th refuses; every venue already persisted pre-fills a slot and moves the
+  refusal one put earlier. A re-put of an existing id while the table is full is also refused (`table full`).
+  Evidence: the frames and the two errors.
 - [ ] **51. R5 coredump** (F2b T6/T7). `coredump` with nothing stored -> `ERR 0x0703: coredump: none stored`.
   `dbg crash`, let it reboot, then `coredump` -> `---BEGIN coredump <n>---` with a Base64 body and
   `---END <crc32>---`; decode host-side and check the ELF magic (`espcoredump.py info_corefile` is the full
@@ -498,15 +502,26 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   reset by each full refresh and only sampled at a gate crossing, so a reading of 0 right after a full refresh
   is correct — repeat until a gate follows a run of partials. Evidence: the `dbg rtc` output.
 - [ ] **62. `dbg logtest` fixes come from the pipeline** (F2b T5/T7, R8). On `moto_neo6m` (no other fix source):
-  `dbg logtest 200`, wait 2 s, `dbg logck <id>`. Expect `frames ok=N bad=0` and `FIX=` equal to 200 minus
-  the `fix_ring drop:` figure `dbg fs` prints (the 32-slot ring drops newest on overflow), with `LAP=2` and no
-  decode error — no spliced records, because the console is no longer a second producer. Repeat with
+  note `fix_ring drop:` from `dbg fs`, run `dbg logtest 200`, wait >= 3 s (the logger writes its batch every 1 s),
+  `dbg logck <id>` and `dbg fs` again. Every fix the logger pops while the session is open and not suppressed
+  (safe mode, storage full, still-pause: none applies here, the synthetic fixes never reach the pipeline's
+  motion edge) becomes exactly one `FIX_KEY` or `FIX_DELTA` record (`ses_encode_fix` always emits one, and
+  `logck` counts both under `FIX=`), so expect `FIX=` equal to 200 minus the INCREASE in the `fix_ring drop:`
+  figure (the 32-slot ring drops the newest on overflow; the counter is cumulative since boot). Also
+  `frames ok=N bad=0`, `LAP=2` and no decode error — no spliced records, because the console is no longer a second producer. Repeat with
   `dbg logtest 60000` once to confirm the heartbeat stays alive (`dbg status` `hb[0]` advancing).
   Evidence: the `logck` line + `dbg fs` drop count.
 - [ ] **63. OTA tokens end in ONE CRLF; a refusal is the `0x0801` family** (F2b T7, L15). With the lap-timer
   moving (`dbg sim laps 20` on `moto_sim`), capture a refused push raw on the lap-timer port, e.g.
-  `python3 -c "import serial,sys;s=serial.Serial(sys.argv[1],115200,timeout=1);s.write(b'ota recv 100 '+b'0'*64+b' v h\r');print(s.read(300).hex(' '))" <lt port>`:
-  the reply contains `OTA-ERR 0x0801` followed by exactly `0d 0a` (never `0d 0d 0a`). No flash happens, so
+  `python3 -c "import serial,sys;s=serial.Serial(sys.argv[1],115200,timeout=1);s.write(b'ota recv 100 '+b'0'*64+b' v moto_sim_epaper\r');print(s.read(300).hex(' '))" <lt port>`
+  (the last argument must be the device's own hwid, `moto_sim_epaper` on `moto_sim`, the string
+  `tools/ota_push.py` reads from the image header: `ota_begin` rejects a mismatching hwid with `OTA-ERR 0x0802`
+  BEFORE the §19.5 preconditions, so an arbitrary string never reaches them). Traced order: `ota_build_begin`
+  accepts size 100, an all-zero 64-hex sha, any ver and hwid; `ota_begin` then checks length, in-flight, the
+  hwid (0x0802), and `ota_precheck` -> `ota_precond_eval`: in-flight, size (0 or > max), STILL (< 30 s
+  still), battery, slot -- size 100 passes, so while moving it refuses at STILL. The reply contains
+  `OTA-ERR 0x0801` followed by exactly `0d 0a` (never `0d 0d 0a`). If the sim has been parked >= 30 s the begin
+  would SUCCEED (and print `OTA-READY`, closing the session); keep it lapping. No flash happens, so
   the 35 s rule does not apply. `errlog` then carries `0x0801` with arg 3 (not still; item 34). On a real
   push (item 23) capture the same way: `OTA-READY` and `OTA-END 0x0000` each end `0d 0a`. Note: the
   `ota precondition: <reason>` text of `cmd.c`'s `OTA_BEGIN` only reaches a client through a framed transport

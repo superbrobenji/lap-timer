@@ -1844,7 +1844,7 @@ loop:
   hb[LOGGER]++
 ```
 
-The logger owns the open `.log` handle. Session open/close is commanded by the **pipeline** task over the request queue `log_req_q` (depth 4): `LOGGER_OPEN_SESSION`, `LOGGER_CLOSE_SESSION`, plus `LOGGER_REBUILD_SUMMARY`, `LOGGER_EVICT`, `LOGGER_DELETE_SESSION`, `LOGGER_SAVE_TRACKS` and `LOGGER_PUT_TRACK`. There is no power task (Plan 6). A request may carry a `requester` for a bounded reply (`logger_request_sync`, debt sweep A #59/#73) — used by the supervisor (the close before a restart), the console/command task (`DELETE`, `TRACKS_PUT`'s `LOGGER_PUT_TRACK`, the post-timeout `LOGGER_EVICT` barrier), never by the ui or the pipeline. Design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
+The logger owns the open `.log` handle. Session open/close is commanded by the **pipeline** task over the request queue `log_req_q` (depth 4): `LOGGER_OPEN_SESSION`, `LOGGER_CLOSE_SESSION`, plus `LOGGER_REBUILD_SUMMARY`, `LOGGER_EVICT`, `LOGGER_DELETE_SESSION`, `LOGGER_SAVE_TRACKS` and `LOGGER_PUT_TRACK`. There is no power task (Plan 6). A request may carry a `requester` for a bounded reply (`logger_request_sync`, debt sweep A #59/#73) — used by the supervisor (the close before a restart), the OTA begin path (`ota.c`'s session close before the first flash write, §19.5), the console/command task (`DELETE`, `TRACKS_PUT`'s `LOGGER_PUT_TRACK`, the post-timeout `LOGGER_EVICT` barrier), never by the ui or the pipeline. Design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.
 
 ---
 
