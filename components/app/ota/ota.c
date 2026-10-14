@@ -307,14 +307,14 @@ int ota_data(const uint8_t *payload, size_t len)
 int ota_end(void)
 {
     if (s_state != OTA_RECV) return E_OTA_PRECOND;
+    LT_ASSERT_RET(s_handle != 0, OTA_ASSERT_CODE, E_OTA_WRITE);
+    LT_ASSERT_RET(s_target != NULL, OTA_ASSERT_CODE, E_OTA_WRITE);
     /* §19.6: ota_end runs SHA finish, esp_ota_end (ECDSA over ~1.2 MB) and NVS/boot writes, far
      * longer than the idle stamp tolerates. Refresh the stamp, THEN publish OTA_VERIFY (release):
      * ota_poll only acts in OTA_RECV, so it can no longer abort a live ota_end. Every exit below
      * ends in IDLE (ota_fail / ota_reset) or REBOOT. */
     s_last_data_ms = (uint32_t)(esp_timer_get_time() / 1000);
     __atomic_store_n(&s_state, OTA_VERIFY, __ATOMIC_RELEASE);
-    LT_ASSERT_RET(s_handle != 0, OTA_ASSERT_CODE, E_OTA_WRITE);
-    LT_ASSERT_RET(s_target != NULL, OTA_ASSERT_CODE, E_OTA_WRITE);
     if (s_recv != s_size) return ota_fail(E_OTA_WRITE);            /* incomplete transfer */
     if (!s_hwid_ok) return ota_fail(E_OTA_HWID);                   /* image never reached the 4 KB check */
     uint8_t got[OTA_SHA_LEN];
