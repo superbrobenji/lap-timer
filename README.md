@@ -13,7 +13,7 @@ is designed (spec §18.2) but not built — it is sub-project C.
 | Path | What |
 |------|------|
 | `components/core/` | pure C11 algorithm core (timebase, geodesy, fusion, lap/drag engines, tracks, session codec, exporters, config, renderer), no ESP-IDF, host-tested |
-| `components/lt_hal/` | hardware interface headers (`hal/gps.h`, `imu.h`, `display.h`, `storage.h`, `board.h`, `conn.h`); named `lt_hal` because ESP-IDF ships a built-in component called `hal` |
+| `components/lt_hal/` | hardware interface headers (`hal/gps.h`, `imu.h`, `display.h`, `storage.h`, `board.h`); named `lt_hal` because ESP-IDF ships a built-in component called `hal` |
 | `components/drivers/` | one driver per HAL interface, selected at build time (`gps_neo6m`, `gps_sim`, `imu_mpu6050`, `imu_sim`, `sim_common`, `display_epaper_ssd1680`, `storage_internal`, `export_serial`, `board_devkit_v1`) |
 | `components/app/` | ESP-IDF tasks and glue (`pipeline`, `logger`, `ui`, `supervisor`, `cmd`, `ota`, `link`, `sys`) |
 | `devcontroller/` | the removable dev-kit firmware (sub-project B): WiFi AP, web UI, OTA push, session offload |
