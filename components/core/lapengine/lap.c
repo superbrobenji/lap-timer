@@ -1204,7 +1204,7 @@ static void update_running_progress(lap_t *L, const gps_fix_t *fix)
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, event_t *out, int cap, int *n)
 {
     (void)fs;                                    /* The lap engine does not read the fused sample.
-                                                  * §9.1 step 5's per-sector fused statistics are the
+                                                  * §9.4's per-lap fused statistics are the
                                                   * PIPELINE's: pipeline.c's stats_step() folds them
                                                   * and the logger writes them. The parameter stays
                                                   * in the signature so the caller's contract (one
