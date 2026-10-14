@@ -1219,12 +1219,15 @@ static void pipeline_task(void *arg)
 {
     (void)arg;
     sup_register_task(HB_PIPELINE, xTaskGetCurrentTaskHandle(), PIPE_STALL_S);
-    sup_wdt_subscribe(HB_PIPELINE);   /* §17.1 (R7): a wedged pipeline must panic, not just stall */
     pipeline_init();
     LT_ASSERT_VOID(g_cmd_q != NULL, PIPE_ASSERT_CODE);   /* §4.7 lt_ipc_init must precede the task */
     ESP_LOGI(TAG, "pipeline up (core %d prio %d)", PIPE_CORE, PIPE_PRIO);
 
     static imu_raw_t raw[IMU_BATCH];       /* off-stack: 16 * 20 B */
+    sup_wdt_subscribe(HB_PIPELINE);   /* §17.1 (R7): a wedged pipeline must panic, not just stall.
+                                       * After init on purpose: driver init (gps_configure,
+                                       * imu_self_test, cfg load) is never charged to the 5 s WDT;
+                                       * the heartbeat stall watch covers it until the first feed. */
     for (;;) {
         sup_wdt_feed();
         /* Pace at ~50 ms, waking early on a command (§9.1 queue-set behaviour without a UART/timer

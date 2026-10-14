@@ -1,7 +1,8 @@
 /* sup.c -- supervisor task (spec §4.3: core 0, prio 22, stack 3072, 1000 ms; loop §17.2).
  *
  * Runs the §17.2 loop: heartbeat-stall watch with a once-per-episode report, the task-WDT
- * subscribe/feed wrappers every app task uses, the crash-loop uptime tick, the batched counter
+ * subscribe/feed wrappers the supervised app tasks use (link_task deliberately does not
+ * subscribe), the crash-loop uptime tick, the batched counter
  * flush, the §19.4 OTA lifecycle (boot decide / validate / reboot / receive timeout), the §17.5
  * safe-mode auto-clear, the §17.2 heap and stack checks, §17.1's 60 s heap-integrity walk, and
  * EV_FAULT on every sys_flags change. Still absent, each with an owner: the GPS/IMU/storage
@@ -345,7 +346,9 @@ static void check_stack(void)
  * g_ui_evt_q is the ui's. A second producer onto a FreeRTOS queue is legal -- xQueueSend is
  * multi-producer safe -- whereas g_stream_ring is a relaxed-head SPSC ring with the pipeline as
  * its single documented producer, so stream_push() is NEVER called from here (design §2 R6).
- * arg16 = the sys_flags bit index; flags = 1 when the bit was SET, 0 when it was CLEARED.
+ * arg16 = the sys_flags bit index; flags = 1 when the bit was SET, 0 when it was CLEARED (both
+ * are what the ui copy reads). The logger's handle_event encodes only arg32 (ses_encode_event),
+ * so arg32 = (bit << 8) | set is what reaches the session log.
  * Bounded by 32 iterations. The early return keeps s_flags_prev un-advanced until both queues
  * exist (sup_start() runs before app_main's lt_ipc_init(), so the first tick has neither), which
  * is what makes the boot-time flags -- SAFE_MODE, STORAGE_DEAD, NVS_DEAD -- reach the ui at all. */
@@ -358,9 +361,10 @@ static void emit_faults(void)
     for (uint8_t b = sup_flag_next_change(s_flags_prev, cur, 0);
          b < 32u; b = sup_flag_next_change(s_flags_prev, cur, (uint8_t)(b + 1u))) {
         event_t ev = { .type = EV_FAULT, .flags = (uint8_t)((cur >> b) & 1u), .arg16 = b,
-                       .gps_us = 0, .mono_us = now, .arg32 = 0, .arg32b = 0 };
-        (void)xQueueSend(g_evt_q, &ev, 0);        /* drop-newest: the next change re-publishes */
-        (void)xQueueSend(g_ui_evt_q, &ev, 0);
+                       .gps_us = 0, .mono_us = now,
+                       .arg32 = ((uint32_t)b << 8) | ((cur >> b) & 1u), .arg32b = 0 };
+        (void)xQueueSend(g_evt_q, &ev, 0);        /* a dropped event is lost (s_flags_prev still advances): */
+        (void)xQueueSend(g_ui_evt_q, &ev, 0);     /* the ui reads sys_flags directly, so only the log loses it */
     }
     s_flags_prev = cur;
     logger_notify();                              /* drain the EVENT record promptly */
