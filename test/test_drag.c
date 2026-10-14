@@ -2,6 +2,7 @@
 #include "core/drag.h"
 #include "core/consts.h"
 #include "core/types.h"
+#include "assert_support.h"
 #include <math.h>
 #include <string.h>
 
@@ -688,24 +689,22 @@ static void test_display_only_cfg_swap_keeps_results(void)
     TEST_ASSERT_EQUAL_UINT16(0, D.run_no);
 }
 
-/* M2: a fused sample whose gps_us steps BACKWARD. fused.gps_us = tb_mono_to_gps(mono), and tb's
- * half-window rollover or a PPS acquire/drop can move the filtered offset by up to
- * TB_PPS_DISAGREE_US = 50 ms (§6.2), so the stream is not strictly monotonic. gate_step's old
- * CORE_ASSERT_VOID(tc >= tp) RETURNED from the middle of the gate loop AND write-stormed the
- * persisted error ring every time it fired; this run exercises a backward step shortly before the
- * 100 km/h crossing and confirms gate 2 (and gate 1) are still recorded once the stream realigns.
- * DEVIATION FROM BRIEF (verified on this checkout, see task-9-report.md): transcribed verbatim --
- * `D.v_est > 27.0` kicks ~16 samples (0.78 m/s at 0.5 g) before the id-2 threshold (27.778 m/s), so
- * by the time the real crossing is evaluated prev_gps_us is forward again and the crossing is
- * caught normally; this case is therefore GREEN both before and after the drag.c fix and does not
- * discriminate the M2 regression -- see the report for the analysis (including why engineering the
- * kick onto the exact crossing sample is not a usable fix for this: the brief's own fix comment
- * ("the old assertion did the same skip") confirms gate_step's early return is UNCHANGED behaviour
- * for that one sample, so a kick landed exactly on the crossing sample still loses it, with or
- * without this task's fix -- only the write-storm side effect (unobservable from drag_t) is new).
- * Kept as specified per the controller's ruling against inventing an artificial red. */
+/* M2: a fused sample whose gps_us steps BACKWARD is a LEGITIMATE input, not a bug to report. tb's
+ * half-window rollover or a PPS acquire/drop can move the filtered offset (fused.gps_us =
+ * tb_mono_to_gps(mono)) by up to TB_PPS_DISAGREE_US = 50 ms (§6.2), so the stream is not strictly
+ * monotonic in normal operation. The old gate_step fired CORE_ASSERT_VOID(tc >= tp, ...) on every
+ * such sample, write-storming the persisted error ring for something that is not a fault; the fix
+ * is `if (tc < tp) return;` -- same skip, no report. From drag_t state alone the two are
+ * indistinguishable (both skip the same sample and leave the run otherwise unharmed, confirmed
+ * below by the two surviving gate assertions -- NOT because the fix "recovers" that sample: see
+ * task-9-report.md for why a kick landed exactly on a gate's crossing sample is unrecoverable
+ * either way). The discriminating observable is the ABSENCE of an assertion report, which
+ * assert_support.h's STRONG core_assert_report recorder (linked for this suite only, test/
+ * CMakeLists.txt) makes host-testable. RED/GREEN evidence for this count assertion is in
+ * task-9-report.md's fix-round-1 section. */
 static void test_backward_gps_us_step_does_not_lose_a_gate(void)
 {
+    lt_test_assert_reset();
     drag_init(&D, NULL);
     arm_engine(true);
     const double a = 0.5 * G_MPS2;
@@ -727,6 +726,7 @@ static void test_backward_gps_us_step_does_not_lose_a_gate(void)
     TEST_ASSERT_TRUE(kicked);
     TEST_ASSERT_TRUE(gate_by_id(drag_current(&D), 2)->hit);     /* 0-100 survived the step */
     TEST_ASSERT_TRUE(gate_by_id(drag_current(&D), 1)->hit);     /* 0-60 too */
+    TEST_ASSERT_EQUAL_UINT(0, lt_test_assert_count());
 }
 
 /* LOW (§11.1): the trap gate is "the DIST gate with the largest distance a". find_quarter used
