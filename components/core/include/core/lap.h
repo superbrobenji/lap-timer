@@ -30,8 +30,17 @@
  * p2-right line crossed forward). All engine times are int64 gps microseconds; result times are
  * uint32 milliseconds rounded to nearest. */
 
-/* Upper bound on the events lap_on_fix can append in a single call: at most one ARMED/VENUE_FOUND,
- * one LAYOUT_LOCKED, LAP_MAX_SECTORS SECTORs, and one LAP_COMPLETE. Callers pass a buffer this large. */
+/* Upper bound on the events lap_on_fix can append in a single call. Two cases bound it, and they
+ * are mutually exclusive:
+ *   - the fix that finds a venue emits EV_VENUE_FOUND AND EV_ARMED (both fire on one fix), but
+ *     lap_set_venue clears have_prev_fix, so no crossing can be evaluated on that same fix: 2;
+ *   - a crossing fix emits at most LAP_MAX_SECTORS EV_SECTORs (each gate fires at most once per
+ *     segment, whichever side of the S/F it falls on), one EV_LAYOUT_LOCKED and one
+ *     EV_LAP_COMPLETE: LAP_MAX_SECTORS + 2.
+ * EV_VENUE_LOST is a single event followed by an immediate return. Callers pass a buffer this
+ * large. (The old comment said "at most one ARMED/VENUE_FOUND", which is wrong -- both fire.) The
+ * macro below is LAP_MAX_SECTORS + 3, one more than the derived LAP_MAX_SECTORS + 2 bound -- a
+ * deliberate spare slot above the proven maximum, not part of the count itself. */
 #define LAP_EVT_MAX (LAP_MAX_SECTORS + 3)
 
 enum {                              /* lap_state() values */

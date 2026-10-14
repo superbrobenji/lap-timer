@@ -21,9 +21,12 @@ _Static_assert(TRK_MAX_LAYOUTS <= 8, "lap_ugate_t.in_layout is a uint8_t bitmask
  * within this many metres (§10.5 union deduplication and lock re-derivation). */
 #define UGATE_SAME_M 2.0
 
-/* H5 (§6.4): a crossing found on a chord longer than this spans a GPS gap (invalid or absent fixes
- * skip prev_*), so cross_time interpolates an unreliable t_cross; a lap opened at it carries
- * LAP_F_GPS_LOST. Well above the worst normal fix spacing (a lap timer runs GPS at >= 1 Hz). */
+/* §6.4 step 1: a chord longer than this spans absent fixes, so cross_time interpolates an
+ * unreliable t_cross. Well above the worst normal fix spacing (a lap timer runs GPS at >= 1 Hz).
+ * This duration test is only HALF the condition: lap_t.seg_has_invalid covers the other half -- a
+ * chord that spans one or more fixes the §6.5 validator rejected, however short (R22, audit
+ * core:C1). Either way both the lap that closes at the crossing and the lap it opens carry
+ * LAP_F_GPS_LOST. */
 #define LAP_SEG_GAP_US (5LL * 1000000)   /* 5 s */
 
 /* ---- configuration and lifecycle ---- */
@@ -615,7 +618,8 @@ static void rearm_sf(lap_t *L, geo_enu_t cur, int64_t now)
     }
 }
 
-/* Re-arm sector gates (§6.4 step 5); sectors need only GATE_REARM_DIST_M / GATE_REARM_MIN_S. */
+/* Re-arm sector gates (§6.4 step 5); sectors need only L->cfg.gate_rearm_m (default GATE_REARM_DIST_M,
+ * user-configurable) / GATE_REARM_MIN_S. */
 static void rearm_sectors(lap_t *L, geo_enu_t cur, int64_t now)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
@@ -1023,7 +1027,8 @@ static void finalize_create(lap_t *L, int64_t t_cross, int64_t mono, event_t *ou
 }
 
 /* §10.9 CREATE sub-mode: no venue scan; integrate distance and watch for the S/F crossing that closes
- * creation. The MIN_LAP_S guard rejects the spurious crossing right after the S/F press. */
+ * creation. The L->cfg.min_lap_s guard (default MIN_LAP_S, user-configurable) rejects the spurious
+ * crossing right after the S/F press. */
 static void handle_create_mode(lap_t *L, const gps_fix_t *fix, event_t *out, int cap, int *n)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
@@ -1198,7 +1203,12 @@ static void update_running_progress(lap_t *L, const gps_fix_t *fix)
 
 void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, event_t *out, int cap, int *n)
 {
-    (void)fs;                                    /* fused stats feed sector stats in a later session */
+    (void)fs;                                    /* The lap engine does not read the fused sample.
+                                                  * §9.1 step 5's per-sector fused statistics are the
+                                                  * PIPELINE's: pipeline.c's stats_step() folds them
+                                                  * and the logger writes them. The parameter stays
+                                                  * in the signature so the caller's contract (one
+                                                  * fix + its latest fused sample) is explicit. */
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(out != NULL && n != NULL && cap > 0, LAP_ASSERT_CODE);   /* caller-drained event buffer */
     *n = 0;                                      /* engine appends this fix's events; caller drains them */

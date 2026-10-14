@@ -282,7 +282,7 @@ static void fus_step_planar(fus_t *f, const imu_raw_t *raw, const float a[3], co
          * unbounded g_lon into v_est. */
         if (out->g_lon > G_MAX) { out->g_lon = G_MAX; *flags |= FUS_CLAMPED; }
     }
-    CORE_ASSERT_VOID(isfinite(out->g_lon) && isfinite(out->g_lat), FUS_ASSERT_CODE); /* postcondition: both components are integrated by the drag engine and logged */
+    CORE_ASSERT_VOID(isfinite(out->g_lon) && isfinite(out->g_lat), FUS_ASSERT_CODE); /* postcondition: g_lon is integrated by the drag engine (v_est/dist_m); both components are logged/streamed */
 }
 
 /* §9.3 step 4 GPS yaw cross-check. While a fresh GPS turn rate exists above the reference speed, a

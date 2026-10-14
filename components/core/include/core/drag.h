@@ -29,8 +29,10 @@
  *   DONE     — the 1/4-mile gate is hit (DRAG_F_QUARTER); or v_est < 0.5·v_peak with no gate for
  *              DRAG_TIMEOUT_S after a peak; or v_est < DRAG_ARM_SPEED_KMH. The result is frozen and
  *              EV_DRAG_DONE emitted; the braking (100-0) gate may still complete after DONE.
- * Abort (§11.2): v_est < 1 km/h within DRAG_FALSE_START_S of launch discards the run and returns to
- * ARMED (false start, e.g. a clutch-dump stall).
+ * Abort (§11.2, R21): `stopped` (v_est < DRAG_ARM_SPEED_KMH, 0.5 km/h -- not DRAG_FALSE_START_KMH,
+ * 1 km/h) within DRAG_FALSE_START_S of launch discards the run and returns to ARMED (false start,
+ * e.g. a clutch-dump stall); tested BEFORE the DONE transitions so a stall is never mistaken for a
+ * finished run.
  *
  * Gate kinds (§11.1): SPEED_FROM0 (0→a km/h), SPEED_RANGE (a→b km/h), DIST (a cm), BRAKE (a→b km/h, the
  * 100-0 stopping distance). The 1/4 gate — the trap gate — is the DIST gate with the largest distance
