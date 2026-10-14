@@ -11,6 +11,7 @@ import hashlib
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 # `python3 -m unittest tools/test_devkit.py` (run from the repo root, per the task's verification
@@ -21,12 +22,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from devkit import (  # noqa: E402
     DevkitError,
+    _poll_err_line,
     _shell_close,
     _tap_start,
+    classify_push_line,
+    probe_is_devkit,
     push_and_wait,
     read_json,
     send_cmd,
     stage_image,
+    trial_window_note,
+)
+from ota_push import (  # noqa: E402
+    probe_laptimer,
+    stream_image,
+    trial_window_note as ota_trial_window_note,
 )
 
 
@@ -51,6 +61,13 @@ class FakeSerial:
         self.timeout = 1.0
         self.dtr = True
         self.rts = True
+
+    @property
+    def in_waiting(self):
+        """pyserial's bytes-ready count. Modelled as "everything still queued", which is what lets
+        the stage loop's non-blocking poll (devkit.py _poll_err_line) see a device line that has
+        already arrived without ever adding a blocking read per chunk."""
+        return len(self._rx) if self._chunks is None else (len(self._chunks[0]) if self._chunks else 0)
 
     def write(self, data):
         self.written.extend(data)
@@ -275,6 +292,106 @@ class NoStrayLineFeedTest(unittest.TestCase):
             self.assertNotIn(b"\n", bytes(ser.written))
         finally:
             os.remove(path)
+
+
+class PollErrLineTest(unittest.TestCase):
+    """_poll_err_line(ser) is the non-blocking peek `stage_image`'s upload loop uses between
+    chunks (dk:M8). It must never block: it returns None at once when nothing is waiting, rather
+    than paying a read timeout, and -- when bytes ARE already waiting -- returns the line
+    ANSI-stripped and trimmed, exactly like every other line reader in this module."""
+
+    def test_returns_none_when_idle_else_the_ansi_stripped_trimmed_line(self):
+        self.assertIsNone(_poll_err_line(FakeSerial(rx=b"")))
+
+        ser = FakeSerial(rx=b"\x1b[0;31mSTAGE-ERR write\x1b[0m\r\n")
+        self.assertEqual(_poll_err_line(ser), "STAGE-ERR write")
+
+
+class ClassifyPushLineTest(unittest.TestCase):
+    """dk:M9 -- cmd_flash.c answers `ERR nothing staged`, `ERR nothing staged (claim expired or
+    taken by /api/flash)`, `ERR push (image discarded, re-stage)` and `ERR push timeout` through
+    flash_err(). push_and_wait skipped every one of them as noise and blocked the full
+    PUSH_TIMEOUT_S, then reported "timeout waiting for flash result" -- the wrong diagnosis, and
+    the recovery guidance ("re-stage", not "retry push") was lost."""
+
+    def test_classifies_each_shape(self):
+        self.assertEqual(classify_push_line("pushing 42%"), ("progress", "pushing 42%"))
+        self.assertEqual(classify_push_line("flash result 0x0000"), ("result", "0x0000"))
+        self.assertEqual(classify_push_line("flash result link -4"), ("result", "link -4"))
+        self.assertEqual(classify_push_line("ERR push (image discarded, re-stage)"),
+                         ("err", "push (image discarded, re-stage)"))
+        self.assertEqual(classify_push_line("I (123) tag: noise"), (None, None))
+
+
+class PushErrTest(unittest.TestCase):
+    def test_err_line_raises_at_once_with_the_device_message(self):
+        ser = FakeSerial(rx=b"ERR nothing staged\r\n")
+        with self.assertRaises(DevkitError) as ctx:
+            push_and_wait(ser, timeout=5.0)
+        self.assertIn("nothing staged", str(ctx.exception))
+        self.assertNotIn("timeout", str(ctx.exception))
+
+
+class StageAbortTest(unittest.TestCase):
+    """dk:M8 -- on an early STAGE-ERR the host kept pushing the remaining ~55 s (600 KB) of image,
+    whose tail then landed on the REPL line editor as command characters."""
+
+    def test_stops_sending_on_an_early_stage_err(self):
+        fd, path = tempfile.mkstemp(prefix="devkit_test_")
+        os.close(fd)
+        try:
+            with open(path, "wb") as f:
+                f.write(b"A" * (4 * 4096))                 # four CHUNKs
+            ser = FakeSerial(rx=b"STAGE-READY\r\n" b"STAGE-ERR write\r\n")
+            with self.assertRaises(DevkitError) as ctx:
+                stage_image(ser, path)
+            self.assertIn("STAGE-ERR write", str(ctx.exception))
+            self.assertLess(len(ser.written), 2 * 4096)     # the command line + at most one chunk
+        finally:
+            os.remove(path)
+
+
+class ProbeTest(unittest.TestCase):
+    """drv:M9 -- auto-picking the first /dev/cu.usbserial-* can select the LAP-TIMER (the
+    -0001/-3 assignment swaps between re-plugs), and opening that port inside the 35 s OTA trial
+    window rolls the image back."""
+
+    def test_accepts_a_devkit_status_object(self):
+        ser = FakeSerial(rx=b'{"version":"1.2","uptime_s":5,"link":{"connected":true}}\r\n')
+        self.assertTrue(probe_is_devkit(ser, timeout=1.0))
+        self.assertEqual(bytes(ser.written), b"dc status --json\r")
+
+    def test_rejects_the_lap_timer_console(self):
+        ser = FakeSerial(rx=b"Unrecognized command\r\nlaptimer> ")
+        self.assertFalse(probe_is_devkit(ser, timeout=0.2))
+
+    def test_rejects_silence_and_a_foreign_json_object(self):
+        self.assertFalse(probe_is_devkit(FakeSerial(rx=b""), timeout=0.05))
+        self.assertFalse(probe_is_devkit(FakeSerial(rx=b'{"proto":1,"state":0}\r\n'), timeout=1.0))
+
+
+class TrialWindowNoteTest(unittest.TestCase):
+    def test_note_states_the_window_and_the_consequence(self):
+        for note in (trial_window_note(), ota_trial_window_note()):
+            self.assertIn("35", note)
+            self.assertIn("0x0806", note)
+
+
+class OtaPushTest(unittest.TestCase):
+    """drv:M8/M9 -- ota_push.py's own helpers, driven by the same FakeSerial."""
+
+    def test_probe_laptimer_sees_the_prompt_and_refuses_a_devkit(self):
+        self.assertTrue(probe_laptimer(FakeSerial(rx=b"\r\nlaptimer> "), time.monotonic() + 1.0))
+        self.assertFalse(probe_laptimer(FakeSerial(rx=b"\r\ndevkit> "), time.monotonic() + 0.2))
+
+    def test_stream_image_writes_exactly_the_image_with_and_without_pacing(self):
+        data = b"B" * (2 * 4096 + 7)
+        ser = FakeSerial()
+        stream_image(ser, data, pace_ms=0)
+        self.assertEqual(bytes(ser.written), data)
+        ser = FakeSerial()
+        stream_image(ser, data, pace_ms=1)                  # 1 ms: two pauses, still exact bytes
+        self.assertEqual(bytes(ser.written), data)
 
 
 if __name__ == "__main__":
