@@ -133,6 +133,38 @@ static void test_interp_time_degenerate_speeds(void)
     TEST_ASSERT_DOUBLE_WITHIN(1e-12, 0.0, geo_interp_time(2.0, 20.0, 20.0, 0.0));
 }
 
+/* LOW: the haversine `a` reaches 1.0000000000000002 for some antipodal inputs, so sqrt(1.0 - a) is
+ * sqrt(-2e-16) = NaN and geo_dist_m returns NaN. The first pair below (0,0)-(0,180) happens to
+ * land on a == exactly 1.0 (verified), so sqrt(0.0) and it is NOT red -- kept only as a correct
+ * antipodal check. The second pair (2.5,0)-(-2.5,-180) measured a == 1.0000000000000002 and is the
+ * real RED case (ruling 3-4: substituted for the brief's (45,10)-(-45,-170), which also lands on
+ * exactly 1.0 and would not have been red). Benign today only because every caller's comparison
+ * happens to be false on NaN -- in a file that isfinite-checks all four inputs. */
+static void test_dist_antipodal_is_finite(void)
+{
+    const double d = geo_dist_m(0.0, 0.0, 0.0, 180.0);
+    TEST_ASSERT_TRUE(isfinite(d));
+    TEST_ASSERT_DOUBLE_WITHIN(1.0, GEO_PI * GEO_EARTH_R_M, d);
+    const double d2 = geo_dist_m(2.5, 0.0, -2.5, -180.0);
+    TEST_ASSERT_TRUE(isfinite(d2));
+    TEST_ASSERT_DOUBLE_WITHIN(1.0, GEO_PI * GEO_EARTH_R_M, d2);
+}
+
+/* LOW: no +-180 deg wrap in geo_to_enu, so a venue at +179.99 and a fix at -179.99 projected ~40 000
+ * km apart -- every gate test and the leave-venue timer would be nonsense at the antimeridian. */
+static void test_enu_wraps_the_antimeridian(void)
+{
+    geo_origin_t o;
+    geo_origin_set(&o, 0.0, 179.99);
+    const geo_enu_t e = geo_to_enu(&o, 0.0, -179.99);
+    TEST_ASSERT_DOUBLE_WITHIN(5.0, 0.02 * (GEO_PI / 180.0) * GEO_EARTH_R_M, e.x);   /* ~2.2 km east */
+    TEST_ASSERT_DOUBLE_WITHIN(1.0, 0.0, e.y);
+    geo_origin_t o2;
+    geo_origin_set(&o2, 0.0, -179.99);
+    const geo_enu_t w = geo_to_enu(&o2, 0.0, 179.99);
+    TEST_ASSERT_DOUBLE_WITHIN(5.0, -0.02 * (GEO_PI / 180.0) * GEO_EARTH_R_M, w.x);  /* ~2.2 km west */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -148,5 +180,7 @@ int main(void)
     RUN_TEST(test_segment_cross_rejects_each_out_of_range_parameter);
     RUN_TEST(test_dist_point_segment_degenerate_and_before_start);
     RUN_TEST(test_interp_time_degenerate_speeds);
+    RUN_TEST(test_dist_antipodal_is_finite);
+    RUN_TEST(test_enu_wraps_the_antimeridian);
     return UNITY_END();
 }

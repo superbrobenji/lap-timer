@@ -26,7 +26,12 @@ geo_enu_t geo_to_enu(const geo_origin_t *o, double lat_deg, double lon_deg)
     CORE_ASSERT_RET(isfinite(lat_deg), GEO_ASSERT_CODE, zero);
     CORE_ASSERT_RET(isfinite(lon_deg), GEO_ASSERT_CODE, zero);
     geo_enu_t e;
-    e.x = (lon_deg * DEG2RAD - o->lon0_rad) * o->cos_lat0 * GEO_EARTH_R_M;
+    /* Wrap the longitude difference into (-pi, pi]: without it a venue at +179.99 and a fix at
+     * -179.99 (2.2 km apart) project ~40 000 km apart and every crossing test is nonsense. */
+    double dlon = lon_deg * DEG2RAD - o->lon0_rad;
+    if (dlon > GEO_PI) dlon -= 2.0 * GEO_PI;
+    else if (dlon < -GEO_PI) dlon += 2.0 * GEO_PI;
+    e.x = dlon * o->cos_lat0 * GEO_EARTH_R_M;
     e.y = (lat_deg * DEG2RAD - o->lat0_rad) * GEO_EARTH_R_M;
     return e;
 }
@@ -40,6 +45,10 @@ double geo_dist_m(double lat1_deg, double lon1_deg, double lat2_deg, double lon2
     double p1 = lat1_deg * DEG2RAD, p2 = lat2_deg * DEG2RAD;
     double dp = p2 - p1, dl = (lon2_deg - lon1_deg) * DEG2RAD;
     double a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2);
+    /* `a` is a sin^2-sum in [0,1] mathematically, but rounding pushes it to 1 + 2e-16 for some
+     * antipodal inputs, and sqrt(1.0 - a) is then sqrt(-2e-16) = NaN. Clamp so this is total. */
+    if (a < 0.0) a = 0.0;
+    else if (a > 1.0) a = 1.0;
     return 2.0 * GEO_EARTH_R_M * atan2(sqrt(a), sqrt(1.0 - a));
 }
 
