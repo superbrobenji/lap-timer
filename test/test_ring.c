@@ -118,6 +118,42 @@ static void test_concurrent_drop_newest_delivers_everything_in_order(void)
     TEST_ASSERT_EQUAL_UINT64(N, cr.received);
 }
 
+static void test_ring_init_rejects_a_capacity_that_is_not_a_power_of_two(void)
+{
+    /* R27/io:M1: mask = cap - 1 indexes correctly only for a power of two -- a cap of 3 gave
+     * mask 2 and silently aliased slot 3 onto slot 0, and ring.h had no assertions at all.
+     * Degrade to one slot instead of aliasing. */
+    item_t storage[4]; ring_t r;
+    ring_init(&r, storage, sizeof(item_t), 3, false);
+    TEST_ASSERT_EQUAL_UINT32(0u, r.mask);
+    item_t it = { 1, 2 };
+    TEST_ASSERT_TRUE(ring_push(&r, &it));
+    TEST_ASSERT_FALSE(ring_push(&r, &it));            /* capacity 1: the second push is a drop */
+    TEST_ASSERT_EQUAL_UINT32(1u, ring_dropped(&r));
+    item_t out;
+    TEST_ASSERT_TRUE(ring_pop(&r, &out));
+    TEST_ASSERT_EQUAL_INT(1, out.a);
+    TEST_ASSERT_FALSE(ring_pop(&r, &out));
+}
+
+static void test_ring_pop_on_an_uncontended_ring_is_unchanged_by_the_retry_cap(void)
+{
+    /* The cap is only reachable by losing the CAS, which a single thread cannot do -- so pin the
+     * uncontended behaviour it must not disturb. The contended path stays covered by the two
+     * stress cases, whose invariants (no torn item, nothing lost or miscounted) hold whether a pop
+     * returns false early or retries: the consumer simply polls again. */
+    item_t storage[4]; ring_t r;
+    ring_init(&r, storage, sizeof(item_t), 4, true);
+    for (int i = 0; i < 4; i++) { item_t it = { i, i * 10 }; TEST_ASSERT_TRUE(ring_push(&r, &it)); }
+    for (int i = 0; i < 4; i++) {
+        item_t out;
+        TEST_ASSERT_TRUE(ring_pop(&r, &out));
+        TEST_ASSERT_EQUAL_INT(i, out.a);
+    }
+    item_t out;
+    TEST_ASSERT_FALSE(ring_pop(&r, &out));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -126,5 +162,7 @@ int main(void)
     RUN_TEST(test_overwrite_oldest_policy_keeps_newest);
     RUN_TEST(test_concurrent_overwrite_oldest_never_returns_torn_items);
     RUN_TEST(test_concurrent_drop_newest_delivers_everything_in_order);
+    RUN_TEST(test_ring_init_rejects_a_capacity_that_is_not_a_power_of_two);
+    RUN_TEST(test_ring_pop_on_an_uncontended_ring_is_unchanged_by_the_retry_cap);
     return UNITY_END();
 }
