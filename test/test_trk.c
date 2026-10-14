@@ -575,6 +575,80 @@ static void test_sim_reserved_id_excluded_from_save_and_rejected_on_load(void)
     TEST_ASSERT_EQUAL_INT(0, trk_user_count());
 }
 
+/* Task 6 (2026-10-13 audit fix wave, F4, PR #101 review M6): an id none of the cases above use
+ * and that is not TRK_SIM_VENUE_ID (the decoder rejects that one outright) -- a plain, otherwise-
+ * unreserved user id the five hostile-record cases below can seed and re-seed from scratch. */
+#define SEEDED_USER_ID 8000
+
+/* Shared three-line preamble ("the same helper the round-trip cases use", below): trk_init()
+ * drops any live table, mk_venue() builds this file's one fixture builder's venue, trk_user_add()
+ * installs it at index 0 so trk_user_save_venue(0, ...) always has a known-good record to
+ * re-encode and then corrupt. */
+static void seed_one_user_venue(void)
+{
+    trk_init();
+    mk_venue(&s_v, SEEDED_USER_ID);
+    TEST_ASSERT_EQUAL_INT(0, trk_user_add(&s_v));
+}
+
+/* PR #101 review M6 (2026-10-13): the record decoder is the only part of the /tracks/user.bin
+ * path with a host harness, so every hostile byte pattern that CAN be expressed at record level
+ * is pinned here. The FILE level (magic, version, count, per-record len/crc16) is logger.c's and
+ * has no harness -- see the issue filed by the audit fix wave's F4 plan. */
+static void test_user_load_venue_rejects_trailing_garbage(void)
+{
+    seed_one_user_venue();                       /* same helper the round-trip cases use */
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    int before = trk_user_count();
+    s_blob[n] = 0x5A;                            /* one byte past the record's own fields */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n + 1));
+    TEST_ASSERT_EQUAL_INT(before, trk_user_count());
+}
+
+static void test_user_load_venue_rejects_n_layouts_over_cap(void)
+{
+    seed_one_user_venue();
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    s_blob[TRK_USER_VENUE_HDR_LEN - 1] = (uint8_t)(TRK_MAX_LAYOUTS + 1);   /* n_layouts byte */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n));
+}
+
+static void test_user_load_venue_rejects_n_sectors_over_cap(void)
+{
+    seed_one_user_venue();
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    /* layout 0's n_sectors sits after the venue header and the layout's id/name/sf/dir_sign */
+    const size_t n_sec_off = TRK_USER_VENUE_HDR_LEN + (2 + 24 + 4 * 8 + 1);
+    s_blob[n_sec_off] = (uint8_t)(LAP_MAX_SECTORS + 1);
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n));
+}
+
+static void test_user_load_venue_rejects_venue_id_zero(void)
+{
+    seed_one_user_venue();
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    int before = trk_user_count();
+    s_blob[0] = 0; s_blob[1] = 0;                /* id 0 -- trk_validate_venue rejects it */
+    TEST_ASSERT_EQUAL_INT(-1, trk_user_load_venue(s_blob, n));
+    TEST_ASSERT_EQUAL_INT(before, trk_user_count());
+}
+
+static void test_user_load_venue_terminates_an_unterminated_name(void)
+{
+    seed_one_user_venue();
+    size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
+    for (size_t i = 2; i < 2 + 32; i++) { s_blob[i] = 'A'; }   /* 32 bytes, no NUL */
+    TEST_ASSERT_EQUAL_INT(0, trk_user_load_venue(s_blob, n));
+    const trk_venue_t *v = trk_get(SEEDED_USER_ID);
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_EQUAL_size_t(31, strlen(v->name));             /* defensively terminated */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -600,5 +674,10 @@ int main(void)
     RUN_TEST(test_user_load_venue_replaces_same_id);
     RUN_TEST(test_user_load_venue_cleans_up_a_failed_decode_mid_record);
     RUN_TEST(test_sim_reserved_id_excluded_from_save_and_rejected_on_load);
+    RUN_TEST(test_user_load_venue_rejects_trailing_garbage);
+    RUN_TEST(test_user_load_venue_rejects_n_layouts_over_cap);
+    RUN_TEST(test_user_load_venue_rejects_n_sectors_over_cap);
+    RUN_TEST(test_user_load_venue_rejects_venue_id_zero);
+    RUN_TEST(test_user_load_venue_terminates_an_unterminated_name);
     return UNITY_END();
 }
