@@ -52,13 +52,23 @@ static void test_fb_init_sets_the_geometry(void)
 {
     /* io:M4/R27: fb_t no longer carries a dirty box (ui.c's partial window comes from
      * fb_diff_rect against the panel's last accepted frame, 7c §5), so fb_init's whole
-     * observable contract is the geometry it derives. */
+     * observable contract is the geometry it derives, plus render.h's "does not touch the
+     * contents of `bits`" clause -- checked below against the pixel buffer itself, not just
+     * inferred from the struct fields. setUp() already ran fb_clear(), so the poison pattern is
+     * written here, in the test body, after that -- poisoning before setUp() would just be
+     * overwritten before fb_init is even reached. */
+    static uint8_t copy[sizeof s_bits];
+    for (size_t i = 0; i < sizeof s_bits; i++) {
+        s_bits[i] = (uint8_t)(0x5Au + i); /* index-derived, neither all-0x00 nor all-0xFF */
+    }
+    memcpy(copy, s_bits, sizeof copy);
     memset(&s_fb, 0xAA, sizeof s_fb);
     fb_init(&s_fb, s_bits, FB_W, FB_H);
     TEST_ASSERT_EQUAL_PTR(s_bits, s_fb.bits);
     TEST_ASSERT_EQUAL_UINT16(FB_W, s_fb.w);
     TEST_ASSERT_EQUAL_UINT16(FB_H, s_fb.h);
     TEST_ASSERT_EQUAL_UINT16(FB_W / 8, s_fb.stride);
+    TEST_ASSERT_EQUAL_MEMORY(copy, s_bits, sizeof copy); /* fb_init must not touch the pixel buffer */
 }
 
 static void test_off_frame_draws_touch_no_bits(void)
