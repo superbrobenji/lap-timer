@@ -1,6 +1,67 @@
 # Measurements
 
-Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first.
+Bench results recorded per the spec (§22.4) and roadmap session exit criteria. Newest first. Every
+bench day from 2026-09-27 on is transcribed here from the merged PR body that recorded it (the PR
+number and date are given per section) — the project's evidence lives in the tree, not only in
+PR descriptions and git-ignored ledgers (audit 2026-10-13 §6 item 1).
+
+## Bench day 5 — PR #101 fix re-test on the 2.13" panel (2026-10-10)
+
+- Image `v0.1.0-47-g4ae6426` (`glyphs-drag-menu-closure` head), `moto_sim`, dev-kit wired. Source: PR #101 body, "Bench day 5 (2026-10-10) — the re-test of those fixes".
+- > **All four bench-day-4 fixes pass on hardware:** the DRAG card's four states (#95); the gate list's label/value pairing, units and the `Speed:`/`Distance:` names (#96); a `Distance:` flip keeps the live run while a `Speed:` flip clears it and leaves the card at `NOT READY` (proven while the sim was moving, where the engine cannot arm, so `READY` could only have been the stale-snapshot bug); and the sim-boot venue announce (#98): `Layout:` cycles `Auto → Full → Auto` in words, the post-reset VENUE one-shot reads `Synthetic` / `Full`, and the footer BEST survives the cycling.
+- > **#97 New track** passed its main path on the log (one-shot opens and advances per mark, the engine finishes on the closing S/F crossing and immediately times laps on the created one-sector layout); the on-screen `Track_20260915` reading and the item's secondary sub-checks remain […]. **#99 LINK glyph** is the one check not yet run: it needs the operator to unplug the dev-kit connector.
+- Pre-existing findings filed the same day, none caused by that branch: #104 (`free_kb` read 0 with one open session, 472 KB after a remount), #105 (orphaned `.sum.tmp` never reaped), #106 (console INFO logging went silent until a restart), #107 (no track-table readback on the console).
+- Resources: `moto_sim` free static DRAM 4072 B.
+
+## Bench day 4 — glyphs / drag card / menu (2026-10-07)
+
+- Image `v0.1.0-37-g4153025`, `moto_sim`, 2.13" V4 panel. Source: PR #101 body, "Bench day 4 (2026-10-07) and the fixes it forced".
+- > **Passed:** the OTA progress screen (UPDATING -> VERIFYING -> REBOOTING), the rollback screen after a crash inside the trial window, the SIM/MOVING glyphs, a full drag run through `dbg sim drag` (11 gates, 224 km/h trap), a 36-minute lap soak (69 laps, no resets), storage-full behaviour, an OTA push from recovery mode, and the `lt list` timing baseline.
+- > **Found four defects in this branch's own work** […] B4-F1 the DRAG card read its text from a one-bit "armed" mirror of a four-state engine […] B4-F2 every config reload re-initialised the drag engine […] B4-F3 the ui learned the venue only from the engine's venue *scan* […] B4-F4/F5/F6 the gate list drew each label far from its value […]
+- Resources: `moto_sim` free static DRAM 4080 B at the gate, 4072 B after the fix wave (−8 B, one struct tail pad).
+
+## Bench day 3 — OTA screen, glyphs, sim scenarios; tag `p07d-d1` (2026-10-05)
+
+- Lap-timer `v0.1.0-35-gce59b01`, dev-kit `076f327`, `moto_sim`, 2.13" V4 panel. Source: PR #94 body, "Bench day 3 — PASS (2026-10-05 … tag `p07d-d1` → ce59b01)". Merged 2026-10-05.
+- > **8 OTA screen**: second push (received by this image): UPDATING with bar/percent, RECEIVING → VERIFYING → REBOOTING seen […]
+- > **2 OTA rollback**: `dbg crash` at ~10 s of the fresh boot → next boot `reset reason: panic`, errlog `E_OTA_ROLLBACK`, "rolled back by the bootloader", the deferred UPDATE FAILED / REVERTED one-shot right after BOOT (`scr=2 … kind=F`); seen on the display.
+- > **9 glyphs**: SIM always on; MOVING on while the sim laps, gone at park […] **1 drag end-to-end**: […] `pipe: DRAG run 1 gates=11 trap=6234 cm/s` (profile vmax 223 km/h) […]
+- > **4 soak**: 36 min with `dbg sim laps 20`: 69 laps, 2138 partials, 18 fulls (one per replay wrap = the still-deferred counter full), 0 resets, 0 W/E […]
+- > **7 storage full** (in passing during the soak): `evicted S00540_001.log (free 124/1344 KB)`, `E_STO_FULL`, logging continued, no stall. **3 OTA in recovery**: 5× `dbg crash` → SAFE (#545) → RECOVERY (#546, console alive) → push succeeded, "safe/recovery gate cleared", normal boot #547, validated. **10** `lt list` 5.5–6.0 s with 52 sessions (≈105 ms/session, inside the 12 s window) — #91 baseline. **11** covered by the #65 re-test.
+- Resources: host suite 47/47; lint 0; gcc-16 sweep 0/105 TUs; `moto_sim` free static DRAM 4312 → 4192 B (−120 B; recorded as the new baseline).
+- Incident (not a firmware defect): the dev-kit boot-looped with `invalid header: 0xffffffff` while its flash read back intact — a GPIO12/MTDI strapping symptom from a bench wiring change; cleared once the wiring was checked.
+
+## Bench day 2 — display closure + debt sweeps A/B; tags `p07c-d1`, `dsA-d1`, `dsB-d1` (2026-10-04/05)
+
+One bench session covered three stacked branches on image `v0.1.0-102-g3db2231` (`moto_sim`, 2.13"
+V4 panel, dev-kit wired). Sources: PR #88, #89 and #90 bodies (all merged 2026-10-05).
+
+- **`p07c-d1` — PASS (PR #88, tag → 3db2231).**
+  > **boot**: four BOOT lines; the one-shot→riding refresh is `kind=F` (ruling B-12); 0 W/E lines. **lap**: 3 timed laps (28.071/28.044/28.028 s); card with LAST/BEST/delta + BEST tag; page 1 sectors + THEO; page 2 MAX SPD 119 km/h, LEAN, LAT G, LAPS; Units→mph from the device menu → `MAX SPD mph` ≈74 […] User: "all pages look right, no ghosting". **clock**: CUR appears at the out-lap end; 1 Hz partials with the cell-sized box (104,89..128,107 / 88,89..120,107 on the tens digit). **soak** 10 min: 589 partials ≈1 Hz, 0 W/E, no WDT/reset.
+  > **Bench findings** (all fixed on the stacked branch #90 […]): B-F1 a screen replacement while moving went out as a partial (426e7ff); B-F2 the partial RAM window was not mirrored like the pixel rotation → sub-rect partials hit the wrong columns (5ea298d); B-F3 the SSD1680 ping-pongs its image RAMs after a partial update → stale menu carets (f4eec2c, ef4c5db, 3db2231 […]).
+  Resources at the gate: host suite 43/43, lint 0, gcc-16 0/97 TUs, `moto_sim` free static DRAM 4416 B.
+- **`dsA-d1` — PASS (PR #89, tag → 3db2231).**
+  > **#37** first boot on the new blob format: 3× `E_NVS_BLOB_RESET` (args 1/2/3) in the errlog at boot #514; no `nvs blob` lines on any later boot. **#59** OTA push: `session S00525_001 closed (reason 1)` logged before the reboot […] **#73/#60** `lt delete S00491_001` → OK; again → remote 0x0703 no such session; `lt delete ../x` and `lt open ../x vbo` → ERR bad id […] **#62** 6× `dbg crash` 12 s apart: SAFE MODE at boot 532 […], RECOVERY MODE at boots 533/534 (pipeline, GPS power and ui not started; console alive, `lt status` answers), `dbg safe clear` + reset → normal boot 535. **#64/#66** `lt status` round trip 44 ms rc 0; stream flowing.
+  Resources: host 44 + dev-kit 27 executables green; `moto_sim` free static DRAM 3960 B.
+- **`dsB-d1` — PASS (PR #90, tag → 37c8368; lap-timer image `v0.1.0-102-g3db2231`, dev-kit 37c8368).**
+  > **#87 cfg**: device-menu units toggle → `config reloaded (units 1/0, mode 0)`; remote `lt config set` round-trips and reads back; mode flip lap↔drag via the dev-kit repaints without a reboot. **reset**: `dbg reset` clears LAST/BEST/laps/CUR (B-F4: the inverted BEST tag outlived the reset — fixed 076f327, re-checked: "no best tag, lap 1 with dashes"). Host test 469627f pins laps resuming after a mid-session reset. **ring**: the errlog's 6 entries identical before/after a reset […]
+  > **Dev-kit** […] **#65** FAILED on the first try (Sessions/Config "very flaky, usually requiring a refresh"): the real cause (bench B-F8) is the lap-timer's `list`, which reads every session summary before its length-prefixed header — 3.0–3.6 s with 42 sessions — against the dev-kit's 3 s no-bytes abort (10 of 20 relays timed out in the log) […] Fixed in a83163d + 37c8368 (ruling B-18) […] Re-test: fresh loads work without a refresh. The lap-timer's O(sessions) list cost is #91.
+  Resources: host 45 + dev-kit 27 executables green; `moto_sim` free static DRAM 3960 → 4312 B (−352 B, the error ring framed in place).
+
+## Bench day 1b — glanceable riding screens; tag `p07b-d1` (2026-09-28)
+
+- `moto_sim` on the 2.13" V4 panel. Source: PR #77 body (merged 2026-09-28).
+- > Bench gate `p07b-d1` (2026-09-28, `moto_sim` on the 2.13" V4 panel, tag `p07b-d1`): event card shows `-0.01` in 64 px with the inverted `BEST` tag, `L4 S0`, LAST/BEST rows; sector board shows the last lap's deltas (they persist across the line — bench fix 1); stats grid and DRAG lists render (stats values are the unwired fields, roadmap #58); three sim runs with 0 errors and no task WDT. Photos in the ledger.
+- Resources: host LT 38/38 and dev-kit 25/25, lint 0; DRAM `.bss` +56 B; flash `.rodata` ≈ +2.8 KB net.
+
+## Bench day 1 — e-paper display bring-up; tags `p07-d1`/`p07-d2`/`p07-d3` (2026-09-27)
+
+- `moto_sim` on the real 2.13" V4 panel, pushed over the dev-kit. Source: PR #76 body (merged 2026-09-28).
+- > Bench (2026-09-27, `moto_sim` on the real panel via the dev-kit OTA push): boot screen, BOOT → VENUE → LAP one-shots; partials on page changes while moving, forced full at 20 partials, fulls on menu entry/exit and page changes while still; throttle limits partials to 1/30 s with no fulls; externally set `SYS_DISP_DEAD` self-heals; menu open / scroll / select / long-MODE exit / 30 s auto-exit; 10-minute soak with no task WDT; **measured full ≈ 3.2 s, partial ≈ 0.7 s end-to-end**.
+- > Second 10-minute soak on the final-fix image: no task WDT; the throttle now defers instead of dropping (three suppressed page changes, the deferred refresh fired by itself 30.1 s after the last partial).
+- > Ladder on hardware (tag `p07-d3` = `plan-07-done`): GPIO 35 held high → three `E_DISP_BUSY_TIMEOUT` (packed streak/errno), `E_DISP_DEAD`, flag bit 4, refresh attempts stop; wire restored → reinit within 300 s, flag cleared, full refresh. Boot with the pin held high → `E_DISP_DEAD` at 6 s, then recovery within 300 s once restored […]
+- Resources: DRAM reclaim on `moto_sim` 392 B → ~8.2 KB free; host LT 38/38, dev-kit 25/25, lint 0.
+- Carve-out recorded at the time: the real-button debounce check (§20.8) waited for the buttons to be wired (done 2026-09-29, #78).
 
 ## moto_neo6m UI task boot on ESP32 (plan 04, session 4.3 — host UI + ui task)
 
