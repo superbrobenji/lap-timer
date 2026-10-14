@@ -670,6 +670,24 @@ static void render_dcard_value(fb_t *fb, const drag_row_t *r, uint8_t units, uin
     }
 }
 
+/* render_dcard_footer's buf (below): room for a label copy plus its own fixed trailer. DCARD_
+ * FOOTER_RESERVE is the widest that trailer (' ' + value + separator + NUL) can ever be: ' ' (1)
+ * + the widest value dist_display() can print (a uint16_t clamped to <= 65535 by its own overflow
+ * guard, so 5 digits is a tight bound, not an estimate) + the widest dist_unit_suffix() string
+ * ("ft", 2 chars) + DCARD_FOOTER_SEP + the trailing NUL. DCARD_FOOTER_BUF_LEN is sized to that
+ * reserve plus a full drag_row_t.label (its declared size, not the <= 7-char realistic case) with
+ * a byte to spare, so the _Static_assert below is a genuine margin check, not a tautology: if
+ * TIME_BUF_LEN, DCARD_FOOTER_SEP or drag_row_t.label's size ever change, this fails to build
+ * instead of silently overflowing. */
+#define DCARD_FOOTER_VALUE_DIGITS 5u  /* digits in UINT16_MAX (65535) */
+#define DCARD_FOOTER_UNIT_MAX     2u  /* "ft", the wider of dist_unit_suffix()'s two strings */
+#define DCARD_FOOTER_RESERVE \
+    (1u + DCARD_FOOTER_VALUE_DIGITS + DCARD_FOOTER_UNIT_MAX + (sizeof DCARD_FOOTER_SEP - 1u) + 1u)
+#define DCARD_FOOTER_BUF_LEN (TIME_BUF_LEN + 12)
+_Static_assert(DCARD_FOOTER_BUF_LEN > DCARD_FOOTER_RESERVE + (sizeof(((drag_row_t *)0)->label) - 1u),
+                "render_dcard_footer's buf must fit DCARD_FOOTER_RESERVE's worst-case trailer "
+                "plus a full drag_row_t.label with room to spare");
+
 /* The run-card footer (spec 7b §7): gates 0..n-2 (every gate of this run except the newest, which
  * already fills the big slot), oldest first, up to DCARD_FOOTER_MAX entries -- older ones scroll
  * off the left. Each entry is "<label> <value>" (a time via fmt_secs_ms, or "<dist><unit>" for the
@@ -688,18 +706,14 @@ static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /*
     int     limit = fault_strip_left_x(m->flags) - DCARD_FAULT_GAP; /* PF-2: never under a fault icon */
     for (uint8_t i = first; i + 1u < n && i < DRAG_MAX_GATES; i++) {
         const drag_row_t *r = &m->drag[i];
-        char  buf[TIME_BUF_LEN + 12];
+        char  buf[DCARD_FOOTER_BUF_LEN];
         /* r->label is untrusted model data (drag_row_t.label, char[8]) with no guaranteed
          * terminator in the latent case (io:M2) -- unlike every other put_str call in this file,
          * which copies a fixed, known-short literal. Bounding this one to the whole of buf
-         * (sbuf_end(buf, sizeof buf), like every other site) would still let the mandatory ' ' + value +
-         * separator + NUL that follow run past buf's end if the label alone consumed the entire
-         * bound: this reserve is what stops that. Widest trailing content this function ever
-         * appends: ' ' (1) + the widest value (dist_display()'s <= 5 digits + a <= 2-char unit
-         * suffix, 7) + DCARD_FOOTER_SEP (3) + the trailing NUL (1) = 12; buf is TIME_BUF_LEN + 12
-         * bytes, so reserving exactly that many leaves TIME_BUF_LEN (20) bytes for the label
-         * itself, far more than any real (<= 7-char) label ever uses. */
-        char *p = put_str(buf, buf + sizeof buf - 1u - 12u, r->label);
+         * (sbuf_end(buf, sizeof buf), like every other site) would still let the mandatory ' ' +
+         * value + separator + NUL that follow run past buf's end if the label alone consumed the
+         * entire bound: DCARD_FOOTER_RESERVE (checked above) is what stops that. */
+        char *p = put_str(buf, buf + sizeof buf - 1u - DCARD_FOOTER_RESERVE, r->label);
         p = put_char(p, ' ');
         if (r->is_distance) {
             p = put_uint(p, dist_display(r->dist_m, m->dist_units));

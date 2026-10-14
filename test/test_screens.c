@@ -538,12 +538,36 @@ static void test_card_footer_survives_an_unterminated_model_label(void)
      * walk off buf[32]. render_dcard_footer also reads r->is_distance for drag[0] and drag[1]
      * (after the label copy, to pick the value branch) -- a raw 'W' byte there is its own,
      * unrelated UBSan defect (an invalid _Bool load), so both are poked to a valid `true` without
-     * touching (or NUL-terminating) their label bytes. */
+     * touching (or NUL-terminating) their label bytes.
+     *
+     * Review follow-up (fix round 1, Minor finding 1): the blanket memset also leaves
+     * m.dist_units == 0x57, not a valid CFG_DIST_* value -- dist_display() hits its own
+     * `CORE_ASSERT_RET(dist_units <= 1u, ..., 0u)` precondition on that and returns the FALLBACK
+     * 0, so the distance branch used to render "0m" (2 chars): label pressure only, never the
+     * wide trailing value the reserve (DCARD_FOOTER_RESERVE) is actually sized for. Set
+     * explicitly to CFG_DIST_FT, the WIDER of the two units: dist_display() clamps its result to
+     * <= 65535 either way (5 digits, its own overflow guard), but dist_unit_suffix() appends
+     * "ft" (2 chars) for CFG_DIST_FT vs "m" (1 char) for CFG_DIST_M, so FT's "65535ft" (7 chars)
+     * beats M's "65535m" (6 chars) by one -- the widest value render_dcard_footer can ever emit.
+     * drag[0]/drag[1].dist_m are set to 0xFFFF explicitly (rather than relying on 'W''s raw byte
+     * value happening to be large enough) so the test doesn't depend on that coincidence; 0xFFFF
+     * is two more non-zero bytes, so it doesn't disturb the "no NUL anywhere" property either.
+     * Re-audited every other field the blanket memset could steer down a fallback/short path:
+     * m.units is read only by render_dcard_value's has_trap branch, never reached here (drag[2]
+     * -- the only row render_dcard_value is ever called on -- has has_trap == false); m.mode/
+     * .page/.drag_n/.drag_run_state and drag[].present/.has_trap/.trap_cms are all either numeric
+     * (no invalid representation to worry about) or simply never read on this call path (LAP-only
+     * fields, or booleans this path's reader functions don't touch for these two rows) --
+     * confirmed by inspection of screens_moto_render/render_drag_dispatch/render_drag_page0/
+     * render_dcard_footer/render_dcard_value, the only functions this test's render call reaches. */
     screen_model_t m;
     memset(&m, 'W', sizeof m);
     m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_n = 3;
     m.drag[0].is_distance = true;
     m.drag[1].is_distance = true;
+    m.drag[0].dist_m = 0xFFFFu;
+    m.drag[1].dist_m = 0xFFFFu;
+    m.dist_units = CFG_DIST_FT;
     memset(&m.drag[2], 0, sizeof m.drag[2]);
     strcpy(m.drag[2].label, "1/4");
     screens_moto_render(&s_fb, &m);
