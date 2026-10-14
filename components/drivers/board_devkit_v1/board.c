@@ -118,9 +118,9 @@ static void IRAM_ATTR btn_isr(void *arg)
 
 /* drv:L18: a failed peripheral bring-up is a §17.6 self-test result, not a reason to panic --
  * ESP_ERROR_CHECK would abort() here and feed §17.5's crash-loop detector, turning a dud I2C
- * pull-up into a safe-mode device. Each failure is logged by board_chk() and OR-ed into rc (a function, not a macro: rule 8); board_init returns
- * -EIO so app_main can record it (and so the §17.6 rows that depend on a bus -- IMU, display --
- * fail honestly rather than mysteriously). */
+ * pull-up into a safe-mode device. Each failure is logged by board_chk() and OR-ed into rc (a
+ * function, not a macro: rule 8); board_init returns -EIO so app_main can record it (and so the
+ * §17.6 rows that depend on a bus -- IMU, display -- fail honestly rather than mysteriously). */
 static int board_chk(esp_err_t e, const char *what)
 {
     if (e == ESP_OK) return 0;
@@ -180,7 +180,6 @@ static int board_init_buses(void)
     };
     rc |= board_chk(spi_bus_initialize(SPI3_HOST, &spi_cfg, SPI_DMA_CH_AUTO), "spi_bus_initialize");
     return rc;
-
 }
 
 int board_init(void)
@@ -237,9 +236,14 @@ int board_init(void)
 
     /* --- battery ADC (split out to board_init_battery_adc for rule 4): ADC1_CH6, 12-bit --- */
     if (board_init_battery_adc() != 0) rc = -EIO;
-    if (rc == 0) CORE_ASSERT_RET(s_i2c_bus != NULL, BOARD_ASSERT_CODE, -EIO);   /* ESP_OK must imply a usable bus handle */
-    if (rc == 0) CORE_ASSERT_RET(s_adc != NULL, BOARD_ASSERT_CODE, -EIO);   /* ADC bring-up must yield a usable unit handle */
+    if (rc == 0) {
+        CORE_ASSERT_RET(s_i2c_bus != NULL, BOARD_ASSERT_CODE, -EIO);   /* ESP_OK must imply a usable bus handle */
+        CORE_ASSERT_RET(s_adc != NULL, BOARD_ASSERT_CODE, -EIO);   /* ADC bring-up must yield a usable unit handle */
+    }
 
+    /* After a partial failure s_inited stays false, so board_init can be re-entered -- but the parts
+     * that already succeeded (I2C bus, SPI3, ADC unit) would then fail with INVALID_STATE, so a
+     * retry cannot recover them. No caller retries; rc is the whole report of a partial bring-up. */
     s_inited = (rc == 0);
     ESP_LOGI(TAG, "board_devkit_v1 init rc %d: I2C0(21/22) VSPI(18/23/19) ADC1_CH6(34) buttons(32/33/25)", rc);
     return rc;
