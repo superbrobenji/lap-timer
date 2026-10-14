@@ -13,6 +13,17 @@
 /* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
 #define DRAG_ASSERT_CODE 0x0A30
 
+/* Task 8's false-start abort depends on the launch hold's minimum velocity staying above the
+ * `stopped` threshold: at hold, DRAG_LAUNCH_G * G_MPS2 * DRAG_LAUNCH_HOLD_MS / 1000 = 0.14710 m/s,
+ * vs. stopped = DRAG_ARM_SPEED_KMH / 3.6 = 0.13889 m/s -- a margin of about 5.9%. Scaled to
+ * micrometres/s (integer, since a _Static_assert needs a constant expression) that is
+ * 147099 > 138888. If a future constant change ever inverted this margin, a marginal launch would
+ * read as `stopped` on its own first sample and core:H5 would silently reopen with no test
+ * failing. */
+_Static_assert((long)((double)DRAG_LAUNCH_G * G_MPS2 * (double)DRAG_LAUNCH_HOLD_MS / 1000.0 * 1e6)
+               > (long)((double)DRAG_ARM_SPEED_KMH / 3.6 * 1e6),
+               "DRAG_LAUNCH_G hold velocity must exceed the stopped threshold (core:H5 false-start abort)");
+
 /* ---- unit helpers ---- */
 static double kmh_to_mps(double kmh)
 {

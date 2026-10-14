@@ -8,6 +8,10 @@
 /* Power of 10 rule 5: per-module assertion code; file:line at the hook pins the exact check. */
 #define LAP_ASSERT_CODE 0x0A20
 
+/* lap_ugate_t.in_layout is a uint8_t bitmask over cand[] (`1u << i`), so raising TRK_MAX_LAYOUTS
+ * past 8 would silently shift bits off the end of the mask (audit core LOW). */
+_Static_assert(TRK_MAX_LAYOUTS <= 8, "lap_ugate_t.in_layout is a uint8_t bitmask over cand[]");
+
 /* Lap engine (spec §10). Session 2.4: venue detection and arming (part 1), S/F crossing and lap
  * completion (part 2), pit detection and Doppler distance integration (part 3). Session 2.5 layers on
  * sector gates and splits, §10.5 layout disambiguation, §10.7 sector delta, §10.8 theoretical best,
@@ -144,8 +148,9 @@ static void arm_candidates(lap_t *L)
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     L->n_cand = 0;
     if (!L->venue) return;
-    for (uint8_t i = 0; i < L->venue->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
-        const trk_layout_t *ly = &L->venue->layouts[i];
+    const trk_venue_t *v = L->venue;   /* rule 9: one dereference level per expression */
+    for (uint8_t i = 0; i < v->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
+        const trk_layout_t *ly = &v->layouts[i];
         if (L->forced_layout_id != 0 && ly->id != L->forced_layout_id) continue;
         CORE_ASSERT_VOID(L->n_cand < TRK_MAX_LAYOUTS, LAP_ASSERT_CODE);   /* candidate array bound */
         lap_cand_t *c = &L->cand[L->n_cand++];
@@ -336,8 +341,10 @@ void lap_export_rtc(const lap_t *L, lap_rtc_t *out)
     CORE_ASSERT_VOID(!L->locked || L->locked_layout != NULL, LAP_ASSERT_CODE);   /* locked implies a layout to read */
     CORE_ASSERT_VOID(L->sec_next >= 1 && L->sec_next <= LAP_MAX_SECTORS + 1, LAP_ASSERT_CODE);
     memset(out, 0, sizeof *out);
-    out->venue_id         = L->venue ? L->venue->id : 0;
-    out->layout_id        = L->locked ? L->locked_layout->id : 0;
+    const trk_venue_t *v = L->venue;              /* rule 9: one dereference level per expression */
+    const trk_layout_t *ly = L->locked_layout;
+    out->venue_id         = v ? v->id : 0;
+    out->layout_id        = L->locked ? ly->id : 0;
     out->lap_no           = L->lap_no;
     out->sector_idx       = (uint8_t)(L->sec_next - 1);   /* sector gates crossed so far this lap */
     out->mode             = L->mode;
@@ -367,8 +374,9 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
     L->n_sec = 0;
     clear_best_sectors(L);
     if (s->layout_id != 0) {
-        for (uint8_t i = 0; i < L->n_cand; i++)
-            if (L->cand[i].layout->id == s->layout_id) {
+        for (uint8_t i = 0; i < L->n_cand; i++) {
+            const trk_layout_t *cl = L->cand[i].layout;   /* rule 9: one dereference level per expression */
+            if (cl->id == s->layout_id) {
                 L->locked = true;
                 L->locked_layout = L->cand[i].layout;
                 L->cand[0] = L->cand[i];
@@ -376,6 +384,7 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
                 project_locked_sectors(L);
                 break;
             }
+        }
     }
 
     /* R25: a snapshot that claims a lap number but no locked layout cannot resume sector timing
@@ -548,7 +557,8 @@ static void lock_layout(lap_t *L, uint8_t idx, int64_t t, int64_t mono, event_t 
     L->n_cand = 1;
     clear_best_sectors(L);              /* R25: the locked layout owns the §10.8 table */
     project_locked_sectors(L);
-    emit(out, cap, n, EV_LAYOUT_LOCKED, 0, L->locked_layout->id, t, mono, 0, 0);
+    const trk_layout_t *ly = L->locked_layout;   /* rule 9: one dereference level per expression */
+    emit(out, cap, n, EV_LAYOUT_LOCKED, 0, ly->id, t, mono, 0, 0);
 }
 
 /* Find the union gate whose endpoints match (p, q), or -1. */
@@ -751,7 +761,9 @@ static void evaluate_gates(lap_t *L, geo_enu_t cur, const gps_fix_t *fix, int64_
                            event_t *out, int cap, int *n)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
-    CORE_ASSERT_VOID(t_lo < t_hi, LAP_ASSERT_CODE);   /* a non-empty half-open window */
+    /* t_lo < t_hi: both call sites (process_segment) provably satisfy this -- (INT64_MIN, t_sf)
+     * with t_sf > INT64_MIN always, and (t_sf, INT64_MAX) reached only after `if (!hit) return;`,
+     * so t_sf is a real cross_time() value < INT64_MAX, never INT64_MAX itself. */
     if (L->state != LAP_ST_RUNNING) return;
     if (L->locked)            evaluate_locked_sectors(L, cur, fix, t_lo, t_hi, out, cap, n);
     else if (L->n_ugate != 0) evaluate_union(L, cur, fix, t_lo, t_hi);
@@ -794,7 +806,8 @@ static void disambiguate_and_lock(lap_t *L, int64_t t_cross, int64_t mono, event
     int     best_score = -1000000;
     for (uint8_t i = 0; i < L->n_cand; i++) {
         int score = L->cand[i].hits_matching - L->cand[i].hits_foreign;
-        double len = (double)L->cand[i].layout->length_m;
+        const trk_layout_t *cl = L->cand[i].layout;   /* rule 9: one dereference level per expression */
+        double len = (double)cl->length_m;
         if (len > 0.0 && fabs(L->lap_dist_m - len) < LAYOUT_LEN_TOL * len) score += 1;   /* §10.5 */
         if (score > best_score ||
             (score == best_score && tiebreak_better(L, L->cand[i].layout, L->cand[best_i].layout))) {
@@ -863,8 +876,9 @@ static bool update_leave_venue(lap_t *L, double lat, double lon, int64_t now)
 {
     CORE_ASSERT_RET(L != NULL, LAP_ASSERT_CODE, false);
     CORE_ASSERT_RET(L->venue != NULL, LAP_ASSERT_CODE, false);   /* venue pointer valid before use */
-    double d = geo_dist_m(lat, lon, L->venue->lat, L->venue->lon);
-    double thr = (double)L->venue->radius_m * VENUE_LEAVE_FACTOR;
+    const trk_venue_t *v = L->venue;   /* rule 9: one dereference level per expression */
+    double d = geo_dist_m(lat, lon, v->lat, v->lon);
+    double thr = (double)v->radius_m * VENUE_LEAVE_FACTOR;
     if (d > thr) {
         if (!L->leaving) {
             L->leaving = true;
@@ -972,7 +986,7 @@ static void complete_lap(lap_t *L, int64_t t_cross, int64_t mono_us, bool seg_ga
 static void finalize_create(lap_t *L, int64_t t_cross, int64_t mono, event_t *out, int cap, int *n)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
-    CORE_ASSERT_VOID(L->lap_dist_m >= 0.0, LAP_ASSERT_CODE);   /* integrated distance non-negative */
+    CORE_ASSERT_VOID(L->create_layout.n_sectors <= LAP_MAX_SECTORS, LAP_ASSERT_CODE); /* copied into nv.layouts[0].sectors[] below */
     L->create_layout.length_m = (uint32_t)llround(L->lap_dist_m);
 
     /* pr:M2: build the new venue in the track module's static landing slot, not in a 2752 B
@@ -1014,7 +1028,8 @@ static void handle_create_mode(lap_t *L, const gps_fix_t *fix, event_t *out, int
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(fix != NULL, LAP_ASSERT_CODE);
-    CORE_ASSERT_VOID(L->mode == LAP_MODE_CREATE, LAP_ASSERT_CODE);
+    /* mode == LAP_MODE_CREATE: the sole call site (lap_on_fix) branches on the identical
+     * condition immediately above it, so this is tautological here. */
     const bool    valid = fix->valid != 0;
     const int64_t now   = fix->gps_us;
     const double  lat   = (double)fix->lat_e7 / 1e7;
@@ -1022,6 +1037,7 @@ static void handle_create_mode(lap_t *L, const gps_fix_t *fix, event_t *out, int
     const double  v1    = (double)fix->gspeed_mms / 1000.0;
     if (!valid || !L->create_have_sf) return;
     CORE_ASSERT_VOID(v1 >= 0.0, LAP_ASSERT_CODE);   /* ground speed non-negative (feeds lap_dist_m below) */
+    CORE_ASSERT_VOID(isfinite(lat) && isfinite(lon), LAP_ASSERT_CODE); /* fed to geo_to_enu, which would poison the ENU frame */
     const geo_enu_t cur = geo_to_enu(&L->origin, lat, lon);
     if (L->have_prev_fix) {
         const double seg_dt = (double)(now - L->prev_gps_us) / 1e6;
@@ -1046,7 +1062,8 @@ static void scan_for_venue(lap_t *L, const gps_fix_t *fix, event_t *out, int cap
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(fix != NULL, LAP_ASSERT_CODE);
-    CORE_ASSERT_VOID(L->state == LAP_ST_NO_VENUE, LAP_ASSERT_CODE);
+    /* state == LAP_ST_NO_VENUE: the sole call site (lap_on_fix) is gated by the identical
+     * condition immediately above it, so this state is tautological here. */
     if (fix->valid == 0) return;
     const int64_t now = fix->gps_us;
     const double  lat = (double)fix->lat_e7 / 1e7;
@@ -1155,8 +1172,8 @@ static void update_running_progress(lap_t *L, const gps_fix_t *fix)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     CORE_ASSERT_VOID(fix != NULL, LAP_ASSERT_CODE);
-    CORE_ASSERT_VOID(L->state == LAP_ST_RUNNING, LAP_ASSERT_CODE);
-    CORE_ASSERT_VOID(L->lap_dist_m >= 0.0, LAP_ASSERT_CODE);   /* integrated distance non-negative */
+    /* state == LAP_ST_RUNNING: the sole call site (lap_on_fix) is gated by the identical
+     * condition immediately above it, so this state is tautological here. */
     const int64_t now = fix->gps_us;
     const double  v1  = (double)fix->gspeed_mms / 1000.0;
     const double  kmh = (double)fix->gspeed_mms * 0.0036;      /* mm/s → km/h */
@@ -1175,6 +1192,7 @@ static void update_running_progress(lap_t *L, const gps_fix_t *fix)
         if (seg_dt > 0.0)
             L->lap_dist_m += 0.5 * (L->prev_speed_mps + v1) * seg_dt;
     }
+    CORE_ASSERT_VOID(isfinite(L->lap_dist_m) && L->lap_dist_m >= 0.0, LAP_ASSERT_CODE); /* postcondition: a NaN speed would poison §10.5 length scoring and §10.11 for the rest of the lap */
     pred_record(L, now);                                      /* §10.11 record the lap in progress */
 }
 

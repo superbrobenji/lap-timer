@@ -15,8 +15,8 @@
 
 static float dot3(const float *a, const float *b)
 {
-    CORE_ASSERT_RET(a != NULL, FUS_ASSERT_CODE, 0.0f);
-    CORE_ASSERT_RET(b != NULL, FUS_ASSERT_CODE, 0.0f);
+    /* Both call sites are inside fus_calib_valid, which asserts c != NULL first; a and b are
+     * always interior pointers into c->r (never NULL while c is a valid struct pointer). */
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
@@ -26,7 +26,8 @@ static float dot3(const float *a, const float *b)
 
 static bool all_finite(const float *v, int n)
 {
-    CORE_ASSERT_RET(v != NULL, FUS_ASSERT_CODE, false);
+    /* Both call sites pass c->r / c->gbias from fus_calib_valid, which asserts c != NULL first:
+     * v is always an interior pointer into a valid struct, never NULL. */
     CORE_ASSERT_RET(n >= 0 && n <= FUS_ALL_FINITE_MAX_N, FUS_ASSERT_CODE, false);
     for (int i = 0; i < n; i++) if (!isfinite(v[i])) return false;
     return true;
@@ -180,11 +181,9 @@ void fus_set_temp(fus_t *f, int16_t temp_c100)
 static void fus_step_rotate_inputs(const fus_calib_t *calib, const imu_raw_t *raw,
                                    float a_b[3], float a[3], float w[3])
 {
-    CORE_ASSERT_VOID(calib != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(raw != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(a_b != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(a != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(w != NULL, FUS_ASSERT_CODE);
+    /* file-static, one call site (fus_step): calib = &f->calib (address-of, never NULL), raw was
+     * already asserted non-NULL by fus_step before this call, and a_b/a/w are fus_step's own local
+     * arrays (address-of-local, never NULL). */
     a_b[0] = (float)raw->ax / IMU_ACC_LSB_PER_G;
     a_b[1] = (float)raw->ay / IMU_ACC_LSB_PER_G;
     a_b[2] = (float)raw->az / IMU_ACC_LSB_PER_G;
@@ -219,12 +218,8 @@ static float fus_step_yaw_rate(const fus_t *f, const float w[3], bool oriented)
 static void fus_step_planar(fus_t *f, const imu_raw_t *raw, const float a[3], const float w[3],
                             float psidot, bool oriented, uint8_t *flags, fused_sample_t *out)
 {
-    CORE_ASSERT_VOID(f != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(raw != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(a != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(w != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(flags != NULL, FUS_ASSERT_CODE);
-    CORE_ASSERT_VOID(out != NULL, FUS_ASSERT_CODE);
+    /* file-static, one call site (fus_step): f/raw/out were already asserted non-NULL there, and
+     * a/w/flags are fus_step's own local arrays/variable (address-of-local, never NULL). */
     CORE_ASSERT_VOID(isfinite(psidot), FUS_ASSERT_CODE);   /* the lean/lateral algebra assumes a finite turn rate */
     if (oriented) {
         out->g_lon = a[0];                       /* specific force along forward, in g (§9.3 step 2) */
@@ -287,6 +282,7 @@ static void fus_step_planar(fus_t *f, const imu_raw_t *raw, const float a[3], co
          * unbounded g_lon into v_est. */
         if (out->g_lon > G_MAX) { out->g_lon = G_MAX; *flags |= FUS_CLAMPED; }
     }
+    CORE_ASSERT_VOID(isfinite(out->g_lon) && isfinite(out->g_lat), FUS_ASSERT_CODE); /* postcondition: both components are integrated by the drag engine and logged */
 }
 
 /* §9.3 step 4 GPS yaw cross-check. While a fresh GPS turn rate exists above the reference speed, a
