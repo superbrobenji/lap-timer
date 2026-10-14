@@ -291,6 +291,111 @@ port (identify, don't `--force-port`).
   banked, create a second venue on-device (NEW TRACK, item 5) and let it lock: the theoretical-best
   line must blank and then rebuild from the new venue's own splits, never show the old venue's number.
 
+### F2a bench items (audit fix wave — firmware supervision + OTA, 2026-10-13)
+
+Not yet run — bench day after F2b merges. Standing rules unchanged: flash by dev-kit OTA push
+(`tools/devkit.py --port <dk> flash dist/<signed>.bin`), never reset or open the lap-timer's USB port for
+35 s after a push (validation lands at 30 s), sign in place with `keys/laptimer_priv.pem`, and identify the
+two ports first. `dbg flag` bit numbers are the `SYS_*` order in `app/lt_sup.h` (5 = `SYS_STORAGE_DEAD`,
+10 = `SYS_HEAP_LOW`, 13 = `SYS_FUSION_DISAGREE`).
+Error codes below are `lt_err.h`'s values; the spec's §17.7 OTA rows are numbered differently until plan F4
+reconciles them (audit M9/M10), so trust the code table when a number disagrees.
+
+- [ ] **33. A damaged `.log` no longer exports as a silently short file** (F2a T0, the F1b R26 drop-and-count follow-up).
+  Damage a record type the format decodes in a CRC-valid frame (VBO/NMEA count dropped FIX/fused records;
+  JSON counts dropped LAP/DRAG_RUN records). Then `open <id> vbo` and `open <id> nmea` on the console must
+  print `ERR 0x0703: export: N records skipped` with NO `---BEGIN` frame; `open <id> json` must print a full
+  frame whose body ends `"skipped":N` with a valid CRC32. An undamaged log exports all three with rc 0.
+- [ ] **34. OTA preconditions on `moto_sim`** (F2a T4, R2/H1, plus the M11 battery skip). (a) `dbg sim laps 20`
+  and, while it is lapping, push a signed image: the push is refused at OTA_BEGIN (`flash result 0x0801`
+  via the dev-kit; `OTA-ERR 0x0801` on a direct `ota recv`) and the session keeps logging — `dbg fs` shows
+  the `.log` still growing and `dbg sum <id>` reads `END present = no (session still open ...)`. A refusal
+  is returned to the peer only; it is not an `errlog` entry. (b) `dbg sim park`, wait >= 35 s (30 s of
+  stillness plus margin), push again: accepted, the transfer completes (`flash result 0x0000`), and after
+  the 35 s hold `dbg sum <id>` reads `END present = yes` — the begin closed the open session (logging is
+  silenced during a push, so the `log: session <id> closed (reason 1)` line is NOT visible; the
+  ordering "close before the first flash write" is covered by the host tests, not the bench). (c) `errlog`
+  holds exactly one `0x0807` (`E_OTA_BATT_UNWIRED`) per boot — the §19.5 battery check is an explicit,
+  logged skip on a build with no CHRG wiring, and every `ota_begin` evaluates it, refused or not.
+- [ ] **35. Stack high-water after the supervisor's first 60 s integrity walk** (F2a T3, R6; also the #53
+  follow-up). Let the device run >= 70 s, then `dbg mem` twice, once with the menu open and once riding.
+  Record the pipeline / logger / supervisor / ui / console `B free` figures (the #53 reference, taken on
+  an older image: pipeline 4924, logger 736, supervisor 1189, ui 340). Expect every figure > 256 B and
+  `errlog` carrying no `0x0509` (`E_SYS_STACK_LOW`). There is no injection verb for a low stack, so this
+  records that the detector is live and quiet; the threshold arithmetic is proven by `test_sup_policy`'s
+  `test_stack_low`. If any figure IS under 256 B, a `0x0509` entry (arg = `task<<16 | headroom`) is the
+  pass condition for that task.
+- [ ] **36. Logger WDT: a LittleFS compaction longer than 5 s now panics** (F2a T3, R7 — intended).
+  The logger is now subscribed to the 5 s task WDT (it was not before, so a wedged logger hung silently).
+  There is no safe injection verb; this item records the intent and is checked indirectly by item 42's
+  boot lines. If a real compaction ever trips it the symptom is a `TASK_WDT` reset (`errlog` `0x0501`, a
+  coredump line on the next boot) — report it, do not mask it.
+- [ ] **37. Buttons: per-pin 30 ms debounce, IRAM ISR** (F2a T6, L6/L17/C1). With the 6 mm tactiles (#78):
+  press MODE and UP within 30 ms of each other, ten times; the ui log must show both `btn: short MODE`
+  and `btn: short UP` every time (one shared 25 ms stamp used to drop the second edge). Hold UP+DOWN for
+  2 s: `btn: combo UP+DOWN` and a `kind=F` refresh line. Start a session (`dbg sim laps 20`) and press
+  buttons through a logger flush (every 2 s): presses arrive on time with no multi-second stall (the ISR
+  is `IRAM_ATTR` and the service is installed with `ESP_INTR_FLAG_IRAM`, so flash-write cache stalls no
+  longer delay edges). `dbg btn <name> <ms>` is unaffected (it bypasses the ISR).
+- [ ] **38. `moto_neo6m` with the Plan-03 stub drivers tells the truth** (F2a T7, R28 — expected result, not a
+  regression). On the USB-flashed `moto_neo6m` image the BOOT screen reads `GPS FAIL` and `IMU FAIL`
+  (`gps_init`/`imu_init` return `-ENODEV` instead of faking an OK). The pipeline still starts and idles. OTA validation is NOT withheld on this build: `gps_profile_t.live == 0`
+  makes `pipeline_sensors_ok()` true as soon as the pipeline has latched its driver init (a pipeline that
+  never initialised stays fail-closed), so a pushed image validates at ~30 s unless `SYS_SAFE_MODE` or
+  `SYS_STORAGE_DEAD` is set (item 40 is the end-to-end check). The fake 25.00 C IMU temperature is gone
+  (`imu_read_temp_c100` returns `-ENODEV`), but nothing on the device prints that value, so there is no
+  bench observation for it. The BOOT slots flip to OK when Plan 8 lands the real drivers.
+- [ ] **39. Transfers survive a log storm** (F2a T8, R9/M12/M6). With the fs full — `dbg sim laps 200` until
+  `E_STO_EVICT`/`E_STO_FULL` appear, so the logger's below-reserve `ESP_LOGE` is on the wire at ~1 Hz — and/or
+  an assert storm, run `errlog`, `list`, `open <id> json`, `open <id> log` (to completion) and an OTA
+  push. Every framed body must carry NO interleaved log line: verify the byte count and CRC32 against the
+  `---BEGIN`/`---END` values on the host, and for the push confirm `OTA-READY`..`OTA-END 0x0000` is clean.
+  After each transfer, normal `I (...)` lines must resume (the previous level was restored). An undersized
+  response is an `ERR` frame, never a silently truncated body.
+- [ ] **40. OTA validates on the production build** (F2a T2-T4, R1 — the audit's CRITICAL in this slice).
+  Prerequisite: a signed `moto_neo6m` image, flashed once over USB (hold the dev-kit in reset via RTS on
+  its adapter; `tools/sign_release.sh moto_neo6m`). Push a SECOND signed `moto_neo6m` image with
+  `tools/devkit.py --port <dk> flash dist/<signed>.bin` and wait 35 s untouched. Expect `flash result
+  0x0000`, the new version in the banner after the reboot, and at ~30 s `sup: OTA image validated
+  (uptime 30s)` (31 s is fine) with NO GPS fix and no receiver attached — plus `errlog` carrying `0x0805`
+  (`E_OTA_VALIDATED`) and NOT `0x0806`. Then power-cycle the lap-timer (not `dbg reset`, which only resets the lap engine) after the 35 s
+  window: the NEW version must still be running (before this fix the bootloader reverted here, every time). Also push
+  with a stale flag if one can be produced (an `ota_pending` left set with no PENDING_VERIFY slot): the
+  push is accepted, `errlog` gains `0x0806` with arg 1, and the log shows `stale ota_pending cleared`.
+- [ ] **41. `EV_FAULT` reaches both consumers** (F2a T3, R6). With a session open (`dbg sim laps 20`) note
+  `EVENT=` from `dbg logck <id>`, then `dbg flag set 13` (`SYS_FUSION_DISAGREE`, no other writer), wait 2 s,
+  `dbg flag clear 13`, wait 2 s. Expect the strip to gain and then lose the "? beside a leaning mast"
+  glyph within ~2 s each way (the ui reads `sys_flags` directly, and also receives the event), and
+  `dbg logck <id>` `EVENT=` to rise by exactly 2 (one SET, one CLEARED `EV_FAULT`, type 15; the record's
+  `arg` is `bit<<8 | set` = `0x0D01` then `0x0D00`; `dbg logck` counts records, it does not decode
+  them — decode the `.log` on the host via `open <id> log` for the values). Repeat with bit 10
+  (`SYS_HEAP_LOW`): the same +2 `EVENT=`, but NO glyph (that bit has none, §17.4); the supervisor owns this
+  bit, so with >= 48 KB of heap free it clears the injected bit on its next tick (a `heap recovered` log
+  line) — still +2. Finish with bit 5 (`SYS_STORAGE_DEAD`, floppy-with-slash glyph); `dbg flag clear 5`.
+- [ ] **42. Task-WDT coverage is real** (F2a T3, R7). Read the boot log (a read-only capture). Expect exactly
+  these `sup: wdt subscribe hb=N rc=0` lines: `hb=1` (supervisor), `hb=0` (pipeline — printed AFTER its
+  GPS/IMU init lines, not before), `hb=2` (logger); none for the link task (deliberate, §17.1) and none for
+  the ui, which subscribes directly with `esp_task_wdt_add(NULL)` until F2b converts it. A missing or
+  `rc != 0` line also leaves `E_SYS_WDT_SUBSCRIBE` (0x050D) in `errlog`. Then `dbg hang` and confirm the
+  task WDT still panics in ~5 s as before.
+- [ ] **43. OTA receive timeout on both transports** (F2a T4, M8/M7, §19.6). (a) Start `tools/devkit.py --port
+  <dk> flash dist/<signed>.bin`, Ctrl-C the host at ~20 % and leave the lap-timer alone. Expect within
+  ~30 s the supervisor's `ota: recv timeout after 30 s at <n>/<size> B` (visible only if the capture
+  was opened outside any framed transfer), `errlog` `0x0702` (`E_CONN_XFER_ABORT`, arg = bytes
+  received), and — with no reboot — a second push succeeding. (b) The 20-byte STATUS record
+  (`lt status`) byte 1 (`state`) reads 1 (`LT_STATE_OTA`) right after the kill and 0 after the timeout
+  fires. (c) A push that is progressing slowly but steadily (> 1 chunk per 30 s) is NOT aborted, and
+  `ota_end`'s long verify never trips the timeout (the `OTA_VERIFY` state).
+- [ ] **44. RTC snapshot reads are not torn** (F2a T5, L4). While `dbg sim laps 20` runs, issue `dbg rtc`
+  twenty times. Expect 20/20 `rtc: VALID` with a sensible, non-decreasing `lap_no`, and zero `rtc: INVALID`.
+  The unlocked read used to fail the CRC on a torn copy.
+- [ ] **45. The §17.6 coredump row and the 60 s heap walk** (F2a T9 + T3, L3/§17.6/R6). `dbg crash`; on the
+  next boot expect `coredump: <n> B at
+  0x<addr>, check ok (kept)` and `errlog` `0x0502` (`E_SYS_PANIC`) whose `arg` is that byte count. Then a
+  10-minute read-only capture: `hb[1]` (`dbg status`) must advance once per second throughout (the 60 s
+  `heap_caps_check_integrity_all` walk must not perturb the supervisor's cadence) and no `0x050E`
+  (`E_SYS_HEAP_CORRUPT`) may appear.
+
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4
 fixes on hardware: **item 12** (the four card states, #95/B4-F1) PASS; **item 15** (list pairing,

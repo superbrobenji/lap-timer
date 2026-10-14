@@ -157,6 +157,7 @@ Stock DevKit deep-sleep draw is 5–15 mA (AMS1117 quiescent ~5 mA, power LED ~2
 | Button DOWN | 25 | in | active-high, 100 kΩ pull-down | RTC GPIO, EXT1 wake |
 | Battery ADC | 34 | analog | 0–2.1 V at tap | `ADC1_CHANNEL_6`, 12 dB attenuation (`ADC_ATTEN_DB_12`; ESP-IDF v5.3.2 deprecates and aliases `ADC_ATTEN_DB_11` to the identical range, so `-Werror` builds use `ADC_ATTEN_DB_12`). ADC2 is unusable with WiFi. |
 | Charger CHRG (optional) | 39 | in | open-drain active-low | EXT0 wake on low. 100 kΩ pull-up. |
+| Peer-connector DETECT | 4 | in | internal pull-up, active low | Owned by `app/link` (`link.c`), not `hal/board.h`; the dev-kit's presence line (Plan 5.5). Added by the audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md` (`board.c`'s and `link.c`'s comments cite this row). |
 | Console / serial export | 1 (TX), 3 (RX) | | | `UART_NUM_0` via CH340 |
 
 Forbidden: GPIO 0, 2, 12 (strapping), 6–11 (flash). GPIO 12 MUST never see a pull-up at boot (selects 1.8 V flash and bricks the boot).
@@ -1991,8 +1992,12 @@ All six `lap.*` keys above reach the lap engine through `lap_cfg_from_user()` �
 | `lt_sys` | `crash_log` | blob | last 3 `{reset_reason u8, uptime_s u32}` for crash-loop detection |
 | `lt_sys` | `safe_until` | u32 | boot counter until which safe mode applies |
 | `lt_sys` | `ota_pending` | u8 | 1 while a new image awaits validation (belt-and-braces beside otadata) |
+| `lt_sys` | `safe_lvl` | u8 | safe-mode level 0 normal / 1 safe / 2 recovery (§17.5 recovery amendment) |
+| `lt_sys` | `stall_rst` | u8 | set by the supervisor just before a pipeline-stall restart (§17.2); read and cleared once at the next boot, which records it as the abnormal reset `LT_RST_STALL` (0x51) in `crash_log` so consecutive stalls trip the §17.5 crash-loop |
 
 NVS writes are batched: config and calibration only on change; error ring entries immediately (they are rare); counters at most once per 60 s except crash paths.
+
+**Amendments (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`).** Error-ring writes are deduped and rate-limited on the error **code** alone: consecutive reports of the same code collapse onto the newest slot (latest `arg` and `uptime_s` win) and touch flash at most once per `ERRLOG_MIN_PERSIST_US` (5 s, `lt_nvs.c`); a different code persists immediately. Keying on `(code, arg)` let a varying `arg` (`E_STO_WRITE`'s batch length, an assert's line) write the 388 B ring blob at the loop rate forever on a full filesystem (audit `app:M1`). The "config and calibration only on change" half is not yet honoured: `lt_cfg_save()` writes unconditionally (ruling R10, plan F2b); calibration is never persisted at all (the `lt_cal` namespace does not exist yet: #125, with #93).
 
 Bench B4-F2 (#96): every persisted `CONFIG_SET` posts `CMD_CONFIG_RELOAD` to the pipeline, for every key, including purely cosmetic ones such as `dist_units`. The reload does **not** unconditionally re-init the drag engine: `pipeline_reload_cfg()` calls `drag_init()` (which drops the current run, the per-gate session bests, the armed state and resets `run_no` to 0 — the last one would otherwise renumber the next run 1 again mid-session and corrupt the DRAG_GATE records in the `.log`/`.sum`) only when `drag_cfg_engine_differs()` finds the built gate table or `rollout` actually changed; a display-only key (`dist_units`, or a `units` flip whose mph bench list is empty) adopts the new config in place and the run/bests/run-number survive.
 
@@ -2096,30 +2101,32 @@ Track day ≈ 2 h ACTIVE (150 mAh) + 6 h PIT (78 mAh) + 0.2 h CONNECTED (14 mAh)
 
 ### 17.1 Watchdogs and protections
 
-- Task WDT: `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`, `CONFIG_ESP_TASK_WDT_PANIC=y`, all six app tasks and both idle tasks subscribed. Each task calls `esp_task_wdt_reset()` once per loop iteration; long operations (e-paper full refresh ≤ 2 s, OTA write) reset it explicitly inside.
+- Task WDT: `CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`, `CONFIG_ESP_TASK_WDT_PANIC=y`, both idle tasks and four app tasks subscribed: the supervisor, logger and pipeline through `sup_wdt_subscribe()` (logs `sup: wdt subscribe hb=N rc=R`; a failure records `E_SYS_WDT_SUBSCRIBE`), and the ui directly through `esp_task_wdt_add(NULL)` until plan F2b converts it. The pipeline subscribes only **after** its boot driver init, just before its loop, so slow GPS/IMU bring-up is never charged to the 5 s window (the heartbeat stall watch covers init). Each task feeds once per loop iteration (`sup_wdt_feed()`; the ui calls `esp_task_wdt_reset()` directly, at the top and again later in each iteration), and inside the long operations that could outlast the window: the logger's yielding session listings and eviction passes (every 16 directory entries and after each eviction), and the e-paper driver's BUSY wait (every 500 ms). The OTA write is **not** such an operation: it runs on the console task, which is not subscribed. `link_task` is **deliberately unsupervised and unsubscribed**: it blocks on a UART write to a peer that may be slow, wedged or absent, and a stalled or missing peer must never panic or restart the lap-timer (ruling R7; before that ruling only the supervisor and the ui were subscribed at all, so a logger wedged in LittleFS compaction hung silently).
 - Interrupt WDT: `CONFIG_ESP_INT_WDT=y`, 300 ms.
 - Brownout: `CONFIG_ESP_BROWNOUT_DET=y`, level 2.8 V (`CONFIG_ESP_BROWNOUT_DET_LVL_SEL_7` on classic ESP32 ≈ 2.8 V **[VERIFY]** mapping in menuconfig).
 - Panic handler: `CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT`, `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF`, `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32`.
 - Stack overflow: `CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY`.
-- Heap: `CONFIG_HEAP_POISONING_LIGHT` in debug builds; `heap_caps_check_integrity_all` in the supervisor every 60 s in debug builds only.
+- Heap: `heap_caps_check_integrity_all` in the supervisor every `HEAP_INTEGRITY_PERIOD_S` (60 s) on **every** build. The original "in debug builds only" is struck: this project ships one build flavour and configures no heap poisoning (no `CONFIG_HEAP_POISONING_*` symbol is set), so a debug-gated check would never run (ruling R6 / F2a). Without poisoning the walk still validates every allocator block header and canary; a failure logs `E_SYS_HEAP_CORRUPT` (arg = uptime in seconds).
 
 ### 17.2 Supervisor loop (1 Hz)
 
 ```
-for each task t: if hb[t] == last_hb[t] for > HB_STALL_S(t): log E_SYS_TASK_STALL(t); if t == PIPELINE: esp_restart() after saving RTC state
+for each task t: if hb[t] == last_hb[t] for > HB_STALL_S(t): log E_SYS_TASK_STALL(t) ONCE per stall episode; if t == PIPELINE: close the session, flush counters, set the stall marker, esp_restart()
 gps_age = now − gps_last_frame_mono_us; run GPS ladder (§7.5) by posting CMD_GPS_LADDER_STEP(n) to pipeline
 imu: consult pipeline-published imu_fault_level; run IMU ladder (§8.7) via CMD_IMU_RECOVER
 storage: consult logger-published sto_state; ladder §13
-heap: min_free < 40 KB → E_SYS_HEAP_LOW; < 20 KB → request conn_stop()
-stack: uxTaskGetStackHighWaterMark per task < 256 B → E_SYS_STACK_LOW(t)
+heap: free (MALLOC_CAP_8BIT) < HEAP_LOW_KB (40) → SYS_HEAP_LOW + E_SYS_HEAP_LOW(min_ever); releases at ≥ HEAP_CLEAR_KB (48)
+stack: uxTaskGetStackHighWaterMark of one registered task per tick (round-robin) < STACK_LOW_B (256) → E_SYS_STACK_LOW((t << 16) | headroom), once per task per boot
 temperature: imu temp outside [EPAPER_TEMP_MIN, EPAPER_TEMP_MAX] → set SYS_DISP_TEMP_THROTTLE (ui reads)
 ota: if pending-verify and validation criteria met → esp_ota_mark_app_valid_cancel_rollback()
-sys_flags → ui (fault icons); EV_FAULT on changes
+sys_flags → ui (fault icons); EV_FAULT{arg16 = changed bit, flags = 1 set / 0 cleared, arg32 = bit<<8 | set} to g_evt_q AND g_ui_evt_q on every change
 persist counters if dirty and ≥ 60 s
 hb[SUPERVISOR]++
 ```
 
 `HB_STALL_S`: pipeline 1 s, logger 5 s, ui 10 s (a full refresh may take 2 s), conn 10 s, power 5 s. Ladder steps are executed by the owning task (pipeline for GPS/IMU, logger for storage, ui for display), never by the supervisor itself, so driver calls stay single-threaded.
+
+**Amendments (audit fix wave 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`).** "after saving RTC state" is **struck** from the pipeline-stall restart (ruling R6): the pipeline owns the RTC snapshot and writes it on every S/F and sector event, and a *wedged* pipeline — the only task the supervisor restarts — cannot be asked to save, so the last gate crossing is the resume point by design. The stall report (`ESP_LOGE` "task N stalled Ns" plus `E_SYS_TASK_STALL`, arg = task id) is **once per episode**, not once per second, because an `ESP_LOGE` at 1 Hz lands inside framed transfers and the raw OTA stream (ruling R9). `EV_FAULT` is posted onto both FreeRTOS event queues (legal: `xQueueSend` is multi-producer safe) and **never** onto `g_stream_ring`, whose single documented producer is the pipeline; the logger records only `arg32` of an event, so the session `.log` carries `bit<<8 | set` (the supervisor holds back its first publication until both queues exist, so the boot-time flags reach the ui). The heap flag keys on the *current* free size so it can clear with hysteresis; the min-ever figure is the errlog argument. The GPS §7.5 / IMU §8.7 / storage §13 ladders, their `CMD_GPS_LADDER_STEP` / `CMD_IMU_RECOVER` commands and the temperature throttle remain **unimplemented — Plan 8** (#123). The "< 20 KB → `conn_stop()`" heap step is struck until a conn task exists (sub-project C).
 
 ### 17.3 Ladders summary
 
@@ -2297,7 +2304,7 @@ Platform notes displayed on the page: Android Chrome and desktop Chrome/Edge sup
 - UART0, 921600 baud (CH340 supports up to 2 Mbaud), IDF `esp_console` REPL with line editing disabled (`CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200`).
 - Commands (text): `status`, `list`, `open <id> <vbo|nmea|json|log|sum>`, `read <offset>`, `close`, `delete <id>`, `config get`, `config set <json>`, `tracks get`, `tracks put <json>`, `errlog`, `errlog clear`, `diag`, `coredump`, `dbg <hang|crash|gps raw on|gps raw off|imu raw on|imu raw off|power <active|pit|park|shutdown>|sim on|sim off>`.
 - File output framing: `---BEGIN <name> <size>---\r\n` … raw text … `---END <crc32 hex>---\r\n`. Binary formats (log/sum/coredump) are Base64-encoded between the markers.
-- ESP-IDF logging is redirected to level `ERROR` for the duration of an `open` transfer, restored at `close`/END.
+- ESP-IDF logging is set to level **`NONE`** for the duration of every framed console response (`status`, `list`, `open`, `read`, `errlog`, ...) and of an `ota recv` push, and restored when that response or push ends. (Ruling R9, audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`: `ERROR` still let the `core_assert_report` sink, the supervisor's stall line and the logger's below-reserve message print through `stdout` outside the UART mutex, straight into the framed body or the raw OTA byte stream, where the announced size and CRC32 do not cover them. Errors reach the §17.7 error ring regardless, which `errlog` dumps.)
 - `tools/serial_export.py <port> <command...>` wraps the protocol and writes files; plain `screen`/`minicom` also works.
 - OTA over serial is not implemented; use `idf.py flash` / `esptool.py`.
 
@@ -2356,25 +2363,30 @@ OTA_BEGIN{size,sha,ver,hwid} → precondition check (§19.5) → esp_ota_begin(n
 OTA_DATA{offset,bytes} ×N     → esp_ota_write; after first 4 KB: hwid check; running SHA-256 → ack each
 OTA_END                       → verify SHA-256 == sha; esp_ota_end (signature check) → esp_ota_set_boot_partition → nvs ota_pending=1 → ack → 2 s → esp_restart
 [boot]                          bootloader verifies signature, boots new slot as PENDING_VERIFY
-                                supervisor: self-test OK ∧ GPS frame received ∧ storage mounted ∧ uptime ≥ OTA_VALID_UPTIME_S → esp_ota_mark_app_valid_cancel_rollback(); ota_pending=0; E_OTA_VALIDATED
+                                supervisor: not SYS_SAFE_MODE ∧ not SYS_STORAGE_DEAD ∧ pipeline_sensors_ok() ∧ uptime ≥ OTA_VALID_UPTIME_S → esp_ota_mark_app_valid_cancel_rollback(); ota_pending=0; E_OTA_VALIDATED
                                 any panic/WDT/brownout before that → bootloader rolls back (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) → E_OTA_ROLLBACK logged on next boot
 ```
 
 While an image is being received the ui shows the `OTA` one-shot (§20.6), updated every 5 %, then VERIFYING and REBOOTING; an aborted transfer returns to the riding screen. The `OTA` one-shot is persistent — buttons cannot dismiss it (long/very-long MODE are guarded while it shows) — and is left only by `REBOOTING`'s reboot, an aborted transfer, or `OTA_STALE_MS` (60 s) without an `EV_OTA` update, which reverts to riding on the assumption the push died with no terminal event ever posted. After a bootloader revert the supervisor tells the ui (`EV_OTA` ROLLED_BACK), and which screen the revert produces depends on what is showing when that post lands: deferred until the `BOOT` one-shot expires if `BOOT` is up (then the `UPDATE FAILED, REVERTED` one-shot shows for 3 s), shown immediately otherwise (riding, menu, or any other screen replaced outright), and dropped (errlog `E_OTA_ROLLBACK` only, no screen) while the persistent `SAFE MODE` one-shot is up — the operator reads the rollback from the errlog, not a screen that would otherwise evict SAFE MODE's own warning. (`status.state = STATE_OTA` while any of this is in flight.)
 
-### 19.5 Preconditions (checked at `OTA_BEGIN`, re-checked at `OTA_END`)
-- Power state `CONNECTED`, `fus_is_still`, `EV_MOTION` not seen for 30 s.
-- `batt_pct ≥ BATT_OTA_MIN_PCT` (50) or charger present.
-- Logger session closed (`LOGGER_CLOSE_SESSION` acked).
-- `size ≤ 0x140000 − 4096`.
-- Not already `SYS_OTA_PENDING`.
-Failure → `E_OTA_PRECOND` with a reason string.
+**Validation gate (ruling R1, audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`).** `pipeline_sensors_ok()` is false until the pipeline has finished its GPS driver init (fail-closed), then true once a GPS fix has been ingested **or** whenever the build's GPS driver is not a live receiver (`gps_profile_t.live == 0`: the Plan-03 stubs and `gps_sim`). The previous "GPS frame received" wording made every OTA to `moto_neo6m` — the only release env — stay `PENDING_VERIFY` and be reverted by the bootloader at the next reset, after which the un-cleared `ota_pending` flag refused every later push until a USB flash (audit §7.1). `ota_begin` therefore also clears an `ota_pending` flag whose running slot is **not** `PENDING_VERIFY`, recording `E_OTA_ROLLBACK` (arg 1) and logging `stale ota_pending cleared`, instead of refusing on it.
+
+### 19.5 Preconditions (checked at `OTA_BEGIN`; the battery check is repeated at `OTA_END`)
+- No motion for 30 s: `pipeline_still_for_ms() ≥ OTA_STILL_MIN_MS` (time since the last `EV_STILL` edge; 0 while moving; a device that has never reported motion counts as still since boot).
+- Charger present, or battery ≥ `BATT_OTA_MIN_MV` (3800 mV — the stand-in for `BATT_OTA_MIN_PCT` 50 % until a power task provides `batt_pct`) — **skipped and recorded as `E_OTA_BATT_UNWIRED` (once per boot) on a build with `CFG_CHRG_WIRED == 0`**, where neither input exists (GPIO 39 floats and the battery tap is unpopulated; #54/Plan 6).
+- Logger session closed (`LOGGER_CLOSE_SESSION`, end reason `SES_END_RESTART`, acked within `OTA_CLOSE_TIMEOUT_MS`; a logger that cannot ack means the precondition is unmet and the push is refused). The close is attempted **only after** every other precondition holds, so a refused push never ends a riding session.
+- `0 < size ≤ 0x140000 − 4096`, not already mid-transfer (`SYS_OTA_PENDING` / a receive open), and no image already awaiting validation (`ota_pending` set **and** the running slot `PENDING_VERIFY`; a set flag with a non-pending slot is stale and is cleared, §19.4).
+Failure → `E_OTA_PRECOND`; no per-reason string is produced, and the refusal is returned to the peer (`OTA-ERR 0x0801` on the console, the `flash result` code on the dev-kit) but not written to the §17.7 error ring.
+
+**Amendments (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`).** *Struck (ruling R2):* power state `CONNECTED` (there is no power task — Plan 6) and `fus_is_still` (fusion is never calibrated — Plan 8/#93). §17.8's "OTA writes happen only when stationary" is now actually enforced by the 30 s stillness window. Only the battery check is re-evaluated at `OTA_END`; the stillness window and the session close are not. The decision is a pure, host-tested function (`app/sup_policy.h` `ota_precond_eval`).
 
 ### 19.6 Abort and failure handling
 - Disconnect or `OTA_ABORT` mid-transfer: `esp_ota_abort`, slot left invalid, running image untouched, `E_CONN_XFER_ABORT`.
 - `OTA_END` SHA mismatch: `esp_ota_abort`, `E_OTA_WRITE`.
 - Signature failure: `E_OTA_SIG`.
 - Rollback: the reverted image sees `ota_pending=1` at boot with itself running → logs `E_OTA_ROLLBACK`, clears the flag, and shows "UPDATE FAILED, REVERTED" for 3 s.
+
+**Amendments (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`).** "Disconnect mid-transfer" is detected by a **receive timeout**: an `OTA_RECV` that has seen no `OTA_DATA` for `OTA_RECV_TIMEOUT_S` (30) is aborted by the supervisor's `ota_poll()` (`esp_ota_abort`, running image untouched, `E_CONN_XFER_ABORT` with arg = bytes received, log `ota: recv timeout after 30 s at <n>/<size> B`). It is deliberately **not** detected from the link DETECT edge: a detect flap during a healthy push would abort a good transfer, and the console `ota recv` path does not use DETECT at all. Before this (audit `app:M8`) nothing timed out at all on either transport, so a vanished peer left `SYS_OTA_PENDING` set and every later `ota_begin` returning `E_OTA_PRECOND` until a reboot. Once `ota_end` starts (SHA finish, the signature verify in `esp_ota_end`, the boot-partition write) the transfer is in the `OTA_VERIFY` state, which the receive timeout ignores: that work takes far longer than the idle stamp tolerates and must not be aborted from under itself.
 
 ### 19.7 Compatibility rules
 - Config (`lt_cfg`) version bump requires `cfg_migrate` from every prior version still in the field (initially just v1).
@@ -2775,6 +2787,8 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `WDT_S` | 5 | §17.1 |
 | `HB_STALL_S` (pipeline/logger/ui/conn/power) | 1 / 5 / 10 / 10 / 5 | §17.2 |
 | `HEAP_LOW_KB` / `HEAP_BLE_OFF_KB` / `HEAP_LOG_OFF_KB` | 40 / 20 / 12 | §17.2 |
+| `HEAP_CLEAR_KB` | 48 | §17.2 (hysteresis release for `HEAP_LOW_KB`) |
+| `HEAP_INTEGRITY_PERIOD_S` | 60 | §17.1 |
 | `STACK_LOW_B` | 256 | §17.2 |
 | `GPS_LADDER_S` | 3 / 10 / 30 / 60 | §7.5 |
 | `GPS_CFG_TIMEOUT_MS` | 500 | §7.3 |
@@ -2784,11 +2798,14 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `EPAPER_FULL_EVERY_N` / `EPAPER_FULL_EVERY_S` | 10 / 1800 | §20.3 |
 | `EPAPER_TEMP_MIN_C` / `EPAPER_TEMP_MAX_C` | 0 / 45 | §17.2 |
 | `EPAPER_THROTTLE_S` | 30 | §20.3 |
-| `BTN_DEBOUNCE_MS` / `BTN_SHORT_MS` / `BTN_LONG_MS` / `BTN_VLONG_MS` | 30 / 500 / 1000 / 3000 | §20.8 |
+| `BTN_DEBOUNCE_MS` / `BTN_SHORT_MS` / `BTN_LONG_MS` / `BTN_VLONG_MS` | 30 / 500 / 1000 / 3000 | §20.8 (`BTN_DEBOUNCE_MS` has one definition, `hal/board.h`, which the board ISR now uses per pin; it used 25 ms before audit `app:L6`) |
 | `MENU_IDLE_S` | 30 | §20.7 |
 | `CRASH_LOOP_N` / `CRASH_LOOP_WINDOW_S` / `SAFE_MODE_CLEAR_S` | 3 / 60 / 600 | §17.5 |
 | `OTA_VALID_UPTIME_S` | 60 | §19.4 |
 | `OTA_MAX_IMAGE` | 0x140000 − 4096 | §19.5 |
+| `OTA_STILL_MIN_MS` | 30000 | §19.5 |
+| `OTA_CLOSE_TIMEOUT_MS` | 2000 | §19.5 |
+| `OTA_RECV_TIMEOUT_S` | 30 | §19.6 |
 | `RTC_MAGIC` | 0x4C505452 | §15.3 |
 | `SES_SYNC` | 0xA5 | §12.2 |
 | `SES_MAX_PAYLOAD` | 247 | §12.2 |
