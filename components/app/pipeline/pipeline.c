@@ -18,6 +18,7 @@
 #include "app/lt_ipc.h"
 #include "app/logger.h"
 #include "app/lt_sup.h"
+#include "app/ui.h"          /* ui_partial_count() -- §15.3 RTC save */
 #include "app/lt_rtc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_err.h"      /* E_STO_WRITE -- M1/M2 (review fix round 1, #97): errlog a dropped/failed save */
@@ -767,7 +768,7 @@ static void on_fix_run_engine(const gps_fix_t *fix, bool valid)
             lap_rtc_t lr;
             lap_export_rtc(&s_lap, &lr);
             lt_rtc_save(&lr, s_session_id, fix->gps_us, s_mode,
-                        0 /* power_state: 0 -- no power task yet; Plan 6 (#54) owns §15.3's power_state */, 0 /* partial_count */);
+                        0 /* power_state: 0 -- no power task yet; Plan 6 (#54) owns §15.3's power_state */, ui_partial_count());
         }
     } else {
         drag_on_fix(&s_drag, fix);

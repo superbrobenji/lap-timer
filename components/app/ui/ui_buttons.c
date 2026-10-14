@@ -3,7 +3,7 @@
  * The board driver (components/drivers/board_devkit_v1) already owns the three button pins
  * (GPIO 32/33/25): board_init() sets them input + pull-down and board_buttons_enable_isr()
  * installs the shared GPIO ISR service, sets ANYEDGE on each pin, and adds an IRAM ISR that
- * applies a 25 ms contact-bounce guard and then pushes a btn_raw_t straight onto the queue we
+ * applies a per-pin 30 ms leading-edge guard and then pushes a btn_raw_t straight onto the queue we
  * hand it (no function-pointer callback, rule 9). We therefore do NOT re-install the ISR service
  * or reconfigure pins here (spec §20.8: "do not re-init pins the board driver owns");
  * ui_buttons_init() only creates that queue and hands it to board_buttons_enable_isr(). The

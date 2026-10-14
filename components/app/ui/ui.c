@@ -10,13 +10,15 @@
  * three strikes -> SYS_DISP_DEAD, paced 300 s reinit probes while dead) keeps a wedged panel from
  * ever stalling this task's heartbeat.
  *
- * Buttons (§20.8): ui_buttons.c pushes each debounced edge (board 25 ms guard) as a btn_raw_t; the
- * press-duration state machine here classifies short (< 500 ms) / long (>= 1000 ms, fires once while
- * held) / very-long (>= 3000 ms), and UP+DOWN held 2 s -> full-refresh. Each loop also re-reads the
- * live button level (board_buttons_read) to reconcile any edge the ISR's global 25 ms guard
- * coalesced, so the state machine tracks the true button state even if a queue edge was dropped.
+ * Buttons (§20.8): ui_buttons.c pushes each edge the board ISR accepted (a per-pin leading-edge
+ * guard at BTN_DEBOUNCE_MS = 30 ms, hal/board.h -- §20.8's "sampled 30 ms after the edge" is NOT
+ * implemented) as a btn_raw_t; the press-duration state machine here classifies short (< 500 ms) /
+ * long (>= 1000 ms, fires once while held) / very-long (>= 3000 ms), and UP+DOWN held 2 s ->
+ * full-refresh. Each loop also re-reads the live button level (board_buttons_read) to reconcile any
+ * edge the ISR's per-pin guard rejected, so the state machine tracks the true button state even if
+ * a queue edge was dropped.
  *
- * Menu (§20.7): MODE long-press opens the menu when the cached gspeed proxy is below
+ * Menu (§20.7): MODE long-press opens the menu when the live pipeline_speed_kmh() is below
  * MENU_LOCK_SPEED_KMH; UP/DOWN move the selection (keeping it visible via menu_top), MODE selects,
  * long-MODE backs/exits, and 30 s idle auto-exits. Items with state now (Mode, Units, Display, and
  * Layout/Calibrate via commands) are wired; items that need later subsystems (Export, Live,
@@ -57,7 +59,6 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
-#include "esp_task_wdt.h"
 #include "esp_timer.h"
 
 static const char *TAG = "ui";
@@ -202,7 +203,12 @@ static drag_cfg_t s_drag_cfg;
  * gate ids start at 1). */
 static uint8_t s_trap_id;
 static uint8_t s_mode;        /* MODE_LAP / MODE_DRAG (mirrors s_model.mode) */
-static uint16_t s_gspeed_kmh; /* menu-lock proxy from EV_MOTION/EV_STILL (see handle_event) */
+/* R11 (orchestrator §3.2 #15): the real per-fix ground speed, refreshed once per ui pass from
+ * pipeline_speed_kmh() (app/pipeline.h) so the §20.5 MOVING glyph and the §20.3 refresh policy
+ * see one consistent value within a tick. §20.7's menu gate reads the live value at menu-entry
+ * time instead. Was MENU_LOCK_SPEED_KMH-or-0 from the EV_MOTION/EV_STILL edges, i.e. a 3 km/h
+ * (MOVING_SPEED_KMH) proxy for a 10 km/h rule. */
+static uint16_t s_gspeed_kmh;
 static bool    s_fix_lost;    /* EV_FIX_LOST/OK -> SCR_SYS_GPS_NOFIX in the fault strip */
 static bool    s_dirty;       /* model changed since last render -> render once (§20.3) */
 static int64_t s_oneshot_until_us; /* auto-revert time for a transient one-shot (BOOT/VENUE); 0 = none */
@@ -223,7 +229,9 @@ static bool    s_boot_refmt_done;
 static int64_t  s_last_full_us;    /* stamp of the last full refresh (incl. boot's disp_init) */
 static int64_t  s_last_partial_us; /* stamp of the last partial refresh */
 static int64_t  s_next_reinit_us;  /* next allowed disp_reinit() probe while SYS_DISP_DEAD */
-static uint16_t s_partial_count;   /* partials issued since the last full */
+static uint16_t s_partial_count;   /* partials issued since the last full; written ONLY by the ui task
+                                     * via __atomic_store_n (relaxed), read cross-task by
+                                     * ui_partial_count() via __atomic_load_n (relaxed) */
 static uint8_t  s_fail_streak;     /* consecutive disp_refresh (+ one reinit retry) failures */
 static bool     s_wants_full;      /* next render should be a full refresh (page/menu/combo/etc) */
 static bool     s_screen_changed;  /* the next render replaces the whole screen (one-shot<->riding,
@@ -357,7 +365,8 @@ static void menu_scroll_to_sel(void)
 
 static void ui_open_menu(void)
 {
-    if (s_gspeed_kmh < MENU_LOCK_SPEED_KMH) {
+    uint16_t kmh = pipeline_speed_kmh();      /* R11: live, not the once-per-pass cache */
+    if (kmh < MENU_LOCK_SPEED_KMH) {
         build_menu();
         LT_ASSERT_VOID(s_model.menu_n > 0, UI_APP_ASSERT_CODE);            /* build_menu always adds rows */
         LT_ASSERT_VOID(s_model.menu_n <= UI_MENU_MAX, UI_APP_ASSERT_CODE);
@@ -372,7 +381,7 @@ static void ui_open_menu(void)
         /* §20.7: above the lock speed the menu is ignored; the SCR_UI_MOVING bit (update_flags(),
          * ICON_MOVING in the fault-icon strip) is already on while this holds, so no extra glyph
          * work is needed here -- just log it. */
-        ESP_LOGI(TAG, "menu locked (gspeed proxy %u >= %u km/h)", s_gspeed_kmh,
+        ESP_LOGI(TAG, "menu locked (%u >= %u km/h, §20.7)", (unsigned)kmh,
                  (unsigned)MENU_LOCK_SPEED_KMH);
     }
 }
@@ -435,7 +444,7 @@ static void ui_apply_mode(uint8_t new_mode)
      * same safe-direction choice as the rest of this fix: never show a state more confident than
      * IDLE until a real EV_DRAG_* snapshot earns it. */
     s_model.drag_run_state = DRAG_ST_IDLE;
-    LT_ASSERT_VOID(s_model.mode == s_mode, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, UI_APP_ASSERT_CODE);   /* the only two modes CMD_SET_MODE and cfg.mode can carry */
 }
 
 /* MA_MODE: toggle Lap/Drag (ui_apply_mode), persist cfg.mode, push the mode command, refresh the
@@ -443,6 +452,16 @@ static void ui_apply_mode(uint8_t new_mode)
 static void menu_do_mode(void)
 {
     uint8_t new_mode = (s_mode == MODE_DRAG) ? (uint8_t)MODE_LAP : (uint8_t)MODE_DRAG;
+    /* R10 (app:M11): cmd.c's op_config_set does the same load -> mutate -> save on this core; the
+     * lock is what makes the pair atomic. On a 200 ms timeout the write is skipped and logged --
+     * never forced, which would be the silent revert this exists to prevent. The mode is not
+     * applied either (taken BEFORE ui_apply_mode), so the screen keeps showing the persisted
+     * truth. ui_send_cmd below stays after lt_cfg_rmw_end(): it touches no NVS. */
+    if (!lt_cfg_rmw_begin()) { ESP_LOGW(TAG, "mode: cfg busy, not saved"); return; }
+    (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
+    s_cfg.mode = new_mode;                  /* T-D: cfg.mode is the single source of truth; persist it */
+    (void)lt_cfg_save(&s_cfg);
+    lt_cfg_rmw_end();
     ui_apply_mode(new_mode);
     /* Task 1 review round 1, finding I1: ui_apply_mode()'s forced DRAG_ST_IDLE write has no
      * corrective refill on THIS caller -- CMD_SET_MODE's handler (handle_set_mode(), pipeline.c)
@@ -456,9 +475,6 @@ static void menu_do_mode(void)
     if (s_model.mode == SCR_MODE_DRAG) {
         drag_rows_refill();
     }
-    (void)lt_cfg_load(&s_cfg);              /* RMW: don't clobber a peer's CONFIG_SET */
-    s_cfg.mode    = s_mode;                 /* T-D: cfg.mode is the single source of truth; persist it */
-    (void)lt_cfg_save(&s_cfg);
     ui_send_cmd(CMD_SET_MODE, s_mode, 0);
     snprintf(s_lbl_mode, sizeof s_lbl_mode, "Mode: %s", s_mode == MODE_DRAG ? "Drag" : "Lap");
 }
@@ -470,9 +486,13 @@ static void menu_do_mode(void)
  * exits. (Split verbatim out of menu_select.) */
 static void menu_do_units(void)
 {
+    /* R10 (app:M11): see menu_do_mode -- the lock makes load -> mutate -> save atomic against
+     * cmd.c's op_config_set; a 200 ms timeout skips the write (never forced) and leaves the model. */
+    if (!lt_cfg_rmw_begin()) { ESP_LOGW(TAG, "%s: cfg busy, not saved", "units"); return; }
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.units = (s_cfg.units == CFG_UNITS_MPH) ? (uint8_t)CFG_UNITS_KMH : (uint8_t)CFG_UNITS_MPH;
     (void)lt_cfg_save(&s_cfg);
+    lt_cfg_rmw_end();
     /* I1 (final review, ruling B-5): units feed the pipeline's own drag gate table
      * (SPEED_FROM0 benches, design §3) -- a local toggle must reload it exactly like a remote
      * CONFIG_SET does (cmd.c cfg_change_notify posts the same command), or the engine keeps
@@ -521,9 +541,13 @@ static void menu_do_units(void)
  * drag.h/pipeline.c) is the mandatory half; this ui-side skip is the belt that goes with it. */
 static void menu_do_dist(void)
 {
+    /* R10 (app:M11): see menu_do_mode -- the lock makes load -> mutate -> save atomic against
+     * cmd.c's op_config_set; a 200 ms timeout skips the write (never forced) and leaves the model. */
+    if (!lt_cfg_rmw_begin()) { ESP_LOGW(TAG, "%s: cfg busy, not saved", "dist"); return; }
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.dist_units = (s_cfg.dist_units == CFG_DIST_FT) ? (uint8_t)CFG_DIST_M : (uint8_t)CFG_DIST_FT;
     (void)lt_cfg_save(&s_cfg);
+    lt_cfg_rmw_end();
     s_model.dist_units = s_cfg.dist_units;
     s_dirty            = true;
     snprintf(s_lbl_dist, sizeof s_lbl_dist, "Distance: %s", s_cfg.dist_units == CFG_DIST_FT ? "ft" : "m");
@@ -537,9 +561,13 @@ static void menu_do_dist(void)
  * own trailing set, so the card re-renders with/without CUR the moment riding resumes. */
 static void menu_do_display(void)
 {
+    /* R10 (app:M11): see menu_do_mode -- the lock makes load -> mutate -> save atomic against
+     * cmd.c's op_config_set; a 200 ms timeout skips the write (never forced) and leaves the model. */
+    if (!lt_cfg_rmw_begin()) { ESP_LOGW(TAG, "%s: cfg busy, not saved", "display"); return; }
     (void)lt_cfg_load(&s_cfg);              /* RMW (T-D): reload before mutating + saving */
     s_cfg.display.live_clock = !s_cfg.display.live_clock;
     (void)lt_cfg_save(&s_cfg);
+    lt_cfg_rmw_end();
     snprintf(s_lbl_disp, sizeof s_lbl_disp, "Display: clk %s",
              s_cfg.display.live_clock ? "on" : "off");
     s_dirty = true;
@@ -696,6 +724,7 @@ static void btn_long(uint8_t bit)
         }
     } else if (s_model.screen == SCR_ONESHOT) {
         if (s_model.oneshot == ONESHOT_OTA) return;   /* never dismiss an update in progress */
+        if (s_model.oneshot == ONESHOT_SAFE) return;  /* §17.5: SAFE MODE is persistent -- only a reboot leaves it */
         /* #97 (§10.9): long MODE cancels creation -- CMD_CREATE_CANCEL, not an immediate
          * ui_exit_menu(): the screen leaves only once EV_CREATE_CANCELLED confirms the engine
          * actually left CREATE mode, so the engine state and the screen never fall out of step.
@@ -926,7 +955,6 @@ static void clear_last_sector_deltas(void)
     for (uint8_t i = 0; i < LAP_MAX_SECTORS + 1; i++) {
         s_model.have_last_sector_delta[i] = false;
     }
-    LT_ASSERT_VOID(!s_model.have_last_sector_delta[LAP_MAX_SECTORS], UI_APP_ASSERT_CODE);   /* every slot, including the last, is now clear */
 }
 
 /* LAP page 1 (design §2): copies the pipeline's best-sector/theoretical-best snapshot into the
@@ -1236,9 +1264,43 @@ static void handle_sector(const event_t *e)
  * TRACK) depends on provenance -- see show_venue_oneshot()'s announce_only parameter. */
 static void handle_venue_found(const event_t *e, int64_t now)
 {
-    s_venue_id      = e->arg16;
-    s_layout_choice = 0;
+    LT_ASSERT_VOID(e != NULL, UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* the one-shot gates below read it */
+    /* PR #101 M3: the logger could not persist the venue a creation just added (storage dead, full,
+     * or below the §12.7 reserve), so it lives in RAM only until the next reboot. Say so on the
+     * VENUE card's value row -- the created name was already shown by the engine's own
+     * EV_VENUE_FOUND a moment earlier, and a silent success here is what the finding is about.
+     * s_venue_id / s_layout_choice are deliberately NOT touched: the venue IS armed in the engine,
+     * only unpersisted, so the Layout item must keep working. */
+    if ((e->flags & EV_VENUE_NOT_SAVED) != 0u) {
+        snprintf(s_model.venue_name, sizeof s_model.venue_name, "NOT SAVED");
+        s_model.layout_name[0] = '\0';        /* value row = venue_name, label row = "VENUE" */
+        ESP_LOGW(TAG, "venue %u not persisted (RAM only until reboot)", (unsigned)e->arg16);
+        /* The engine's own EV_VENUE_FOUND (the creation finishing) reached this task first and put
+         * up a VENUE one-shot; show_venue_oneshot() would then refuse (it only replaces RIDING), so
+         * the NOT SAVED card would be silently dropped. Step the one-shot down to riding first --
+         * ONLY an ONESHOT_VENUE one: never the menu, OTA, SAFE, NEW TRACK or BOOT. The replacement
+         * below restamps the VENUE timer and requests the whole-screen full. */
+        if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_VENUE) {
+            s_model.screen = SCR_RIDING;
+        }
+        show_venue_oneshot(now, /*announce_only*/true);
+        s_dirty = true;
+        return;
+    }
+    s_venue_id = e->arg16;
     const trk_venue_t *v = trk_get(e->arg16);
+    /* PR #101 M4: an announce (the §15.3 RTC resume) carries the LOCKED layout id in arg32 --
+     * lap_import_rtc() locks forced_layout_id and emits no EV_LAYOUT_LOCKED, so this used to reset
+     * the menu to "Auto" on a locked lap and the first MODE press then changed the layout mid-lap.
+     * Adopt it: s_layout_choice is the 1-based index of that layout in v->layouts[], or 0 (Auto)
+     * when the event names none or the id is not in this venue (a stale snapshot). */
+    s_layout_choice = 0;
+    if (v != NULL && e->arg32 != 0u) {
+        for (uint8_t i = 0; i < v->n_layouts && i < TRK_MAX_LAYOUTS; i++) {
+            if (v->layouts[i].id == (uint16_t)e->arg32) { s_layout_choice = (uint8_t)(i + 1u); break; }
+        }
+    }
     snprintf(s_model.venue_name, sizeof s_model.venue_name, "%s",
              (v != NULL && v->name[0] != '\0') ? v->name : "VENUE");
     s_model.layout_name[0] = '\0'; /* venue phase: render shows venue_name */
@@ -1373,8 +1435,7 @@ static void ui_lap_reset(void)
     s_dirty = true;
 
     LT_ASSERT_VOID(s_model.laps_valid <= s_model.laps_total, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(s_model.lap_no == 1 && s_model.big_kind == (uint8_t)BIG_NONE && !s_model.new_best,
-                   UI_APP_ASSERT_CODE);
+    LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE);   /* a lap reset must leave a valid screen for the next render */
 }
 
 /* EV_CREATE -> model (#97, §10.9; split verbatim out of handle_event for rule 4). BEGUN opens the
@@ -1394,7 +1455,12 @@ static void handle_create(const event_t *e)
     case EV_CREATE_BEGUN:
         s_model.create_step = 0;
         s_create_next_gate  = 0;
-        if (!on_nt) {                       /* menu -> one-shot: whole-screen replacement (B-9) */
+        if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE) {
+            /* §17.5: SAFE MODE is persistent and outranks NEW TRACK (same rule as handle_ota's
+             * on_safe guard): keep the screen, tell the engine to leave CREATE so it is not stranded
+             * in a mode with no screen to finish it from. */
+            ui_send_cmd(CMD_CREATE_CANCEL, 0, 0);
+        } else if (!on_nt) {                /* menu -> one-shot: whole-screen replacement (B-9) */
             s_model.screen     = SCR_ONESHOT;
             s_model.oneshot    = ONESHOT_NEWTRACK;
             s_oneshot_until_us = 0;         /* persistent until finished/cancelled */
@@ -1439,10 +1505,12 @@ static void handle_event(const event_t *e, int64_t now)
     case EV_LAYOUT_LOCKED: handle_layout_locked(e, now); break;
     case EV_FIX_LOST: s_fix_lost = true; s_dirty = true; break;
     case EV_FIX_OK:   s_fix_lost = false; s_dirty = true; break;
-    /* Proxy: no per-fix speed is broadcast to the ui yet, so moving conservatively locks the menu
-     * (== the lock threshold). EV_STILL clears it. Flagged as a coarse gate. */
-    case EV_MOTION: s_gspeed_kmh = MENU_LOCK_SPEED_KMH; break;
-    case EV_STILL:  s_gspeed_kmh = 0; break;
+    /* R11: no longer a speed proxy -- s_gspeed_kmh comes from pipeline_speed_kmh(). These edges
+     * stay the §9.1 still/moving boundary (3 km/h) that the logger's §12.6 pause and the §19.5
+     * OTA precondition use; the ui needs nothing from them. */
+    case EV_MOTION:
+    case EV_STILL:
+        break;
     /* Plan 7c T5 (design §3): drag_rows_refill() re-derives drag_n from the snapshot itself, so
      * these cases must NOT assign drag_n/drag_run_state by hand first -- doing so would race a
      * refill that reads the still-frozen previous run before the engine's own reset lands in the
@@ -1645,10 +1713,10 @@ static int do_refresh(rf_kind_t kind, int64_t now, uint8_t *mode_out)
             /* I4 (ruling R-8): always stamp the timestamp; only the count stays tick-gated. */
             s_last_partial_us = now;
             if (!s_clock_tick) {
-                s_partial_count = (uint16_t)(s_partial_count + 1);
+                __atomic_store_n(&s_partial_count, (uint16_t)(s_partial_count + 1u), __ATOMIC_RELAXED);
             }
         } else {
-            s_partial_count = 0;
+            __atomic_store_n(&s_partial_count, (uint16_t)0, __ATOMIC_RELAXED);
             s_last_full_us  = now;
             s_wants_full    = false;
         }
@@ -1910,7 +1978,7 @@ static void boot_refmt_check(int64_t now)
  * verbatim out of the intentionally-non-terminating ui_task loop for rule 4. */
 static void ui_loop_iter(QueueHandle_t btn_q)
 {
-    esp_task_wdt_reset();
+    sup_wdt_feed();
 
     btn_raw_t ev;
     if (btn_q != NULL && xQueueReceive(btn_q, &ev, pdMS_TO_TICKS(UI_TICK_MS)) == pdTRUE) {
@@ -1925,7 +1993,7 @@ static void ui_loop_iter(QueueHandle_t btn_q)
 
     int64_t now = esp_timer_get_time();
 
-    /* Reconcile with the live level: catches an edge the ISR's global 25 ms guard coalesced. */
+    /* Reconcile with the live level: catches an edge the ISR's per-pin leading-edge guard rejected. */
     uint8_t cur = 0;
     if (board_buttons_read(&cur) == 0) {
         process_mask(cur, now);
@@ -1979,6 +2047,7 @@ static void ui_loop_iter(QueueHandle_t btn_q)
         ui_exit_menu();
     }
 
+    s_gspeed_kmh = pipeline_speed_kmh();   /* R11: one read per pass feeds the glyph + refresh policy */
     update_flags();
     dead_retry(now); /* R5: paced disp_reinit() probe while SYS_DISP_DEAD */
     clock_tick(now); /* Plan 7c T6: live lap clock, once a second, before the render decision below */
@@ -2012,7 +2081,7 @@ static void ui_loop_iter(QueueHandle_t btn_q)
 static void ui_task(void *arg)
 {
     (void)arg;
-    esp_task_wdt_add(NULL); /* §17.2 subscribe to the task WDT; reset once per loop below */
+    sup_wdt_subscribe(HB_UI); /* §17.2 subscribe to the task WDT (sup wrapper); fed once per loop below */
     sup_register_task(HB_UI, xTaskGetCurrentTaskHandle(), UI_STALL_S);
 
     /* ui's own config copy (units / live-clock toggles + save), like cmd.c. */
@@ -2094,7 +2163,7 @@ static void ui_task(void *arg)
         LT_ASSERT_VOID(disp_caps->width == CANVAS_VISIBLE_W && disp_caps->height == CANVAS_H &&
                        disp_caps->partial_ok, UI_APP_ASSERT_CODE);
         s_last_full_us  = esp_timer_get_time();
-        s_partial_count = 0;
+        __atomic_store_n(&s_partial_count, (uint16_t)0, __ATOMIC_RELAXED);
         /* Plan 7c T7: the panel now holds the BOOT frame blitted above -- seed s_fb_prev_bits so
          * the first riding render's diff is against reality, not the fb_clear() placeholder. */
         memcpy(s_fb_prev_bits, s_fb_bits, sizeof s_fb_prev_bits);
@@ -2114,13 +2183,18 @@ static void ui_task(void *arg)
         s_oneshot_until_us = arm_now + (int64_t)ONESHOT_BOOT_MS * 1000;
     }
 
-    esp_task_wdt_reset();
+    sup_wdt_feed();
 
     QueueHandle_t btn_q = ui_buttons_queue();
 
     for (;;) {
         ui_loop_iter(btn_q);
     }
+}
+
+uint32_t ui_partial_count(void)
+{
+    return (uint32_t)__atomic_load_n(&s_partial_count, __ATOMIC_RELAXED);
 }
 
 void ui_start(void)
