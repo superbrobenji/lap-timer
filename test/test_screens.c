@@ -514,6 +514,42 @@ static void test_drag_p0_armed_gates(void)
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_armed_gates.pbm"), &s_fb));
 }
 
+static void test_card_footer_survives_an_unterminated_model_label(void)
+{
+    /* io:M2: put_str walked the caller's string with no destination bound. Every model string is
+     * NUL-terminated today (drag_gate_label and its "G%u" fallback both use snprintf), so this is
+     * the latent case: a drag row whose label[8] uses all eight bytes with no NUL. Two defects in
+     * the plan's original construction had to be fixed to make this genuinely red pre-fix:
+     * (1) zeroing the model then memset-ing only label to 'W' planted a zero byte a couple of
+     * bytes into the following t_ms field for any small t_ms, giving the old unbounded put_str an
+     * early NUL well short of buf[32]; (2) with drag_n == 2 and both labels unterminated, the plain
+     * `fb_text(..., m->drag[n-1].label)` a few lines above render_dcard_footer's call (render_
+     * drag_page0, before this function's own defect is ever reached) ran off the model first,
+     * masking M2 behind a different, already-in-scope-for-Task-11 read overflow in fb_text_draw.
+     * Fix: fill the WHOLE model with a non-NUL byte (no escape anywhere in `m`), then fully
+     * zero-and-relabel the newest gate (drag[2], index n-1) -- the direct fb_text/render_dcard_
+     * value calls on it read label AND its bool fields (is_distance/has_trap/present), so a raw
+     * 'W' byte there is its own UBSan defect (an invalid _Bool load), orthogonal to M2. drag[0] and
+     * drag[1] stay fully unterminated 'W' (every byte, bools included), so the footer's walk over
+     * drag[0] (the first row rendered, loop index i=0) runs through put_str() -- the only read of
+     * drag[0]'s bytes that happens before any bool field is examined -- with far more than
+     * buf[32]'s 32 bytes of non-NUL source ahead of it (drag[0]'s own ~24 bytes plus all of
+     * drag[1]) before it could ever reach drag[2]'s terminator. It must render truncated, never
+     * walk off buf[32]. render_dcard_footer also reads r->is_distance for drag[0] and drag[1]
+     * (after the label copy, to pick the value branch) -- a raw 'W' byte there is its own,
+     * unrelated UBSan defect (an invalid _Bool load), so both are poked to a valid `true` without
+     * touching (or NUL-terminating) their label bytes. */
+    screen_model_t m;
+    memset(&m, 'W', sizeof m);
+    m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_n = 3;
+    m.drag[0].is_distance = true;
+    m.drag[1].is_distance = true;
+    memset(&m.drag[2], 0, sizeof m.drag[2]);
+    strcpy(m.drag[2].label, "1/4");
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);   /* nothing ran off the frame */
+}
+
 /* ---- DRAG pages 1/2 (gate list, spec 7b §7) ---- */
 
 static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this run */
@@ -974,6 +1010,7 @@ int main(void)
     RUN_TEST(test_drag_p0_fault);
     RUN_TEST(test_drag_p0_footer_scroll);
     RUN_TEST(test_drag_p0_armed_gates);
+    RUN_TEST(test_card_footer_survives_an_unterminated_model_label);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p1_dist_ft);
     RUN_TEST(test_drag_p1_dist_m);

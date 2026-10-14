@@ -36,11 +36,25 @@ static char *put_char(char *p, char c)
     return p;
 }
 
-static char *put_str(char *p, const char *s)
+/* Last writable text position of a local char array: the caller's trailing *p = '\0' always
+ * fits. A plain function, not a function-like macro (rule 8c: those belong in headers, not a
+ * .c) -- `n` must be the array's own sizeof, evaluated at the call site (sbuf_end(buf, sizeof
+ * buf)), since it decays to a pointer by the time it reaches this parameter. */
+static char *sbuf_end(char *b, size_t n)
+{
+    CORE_ASSERT_RET(b != NULL, UI_ASSERT_CODE, b);
+    CORE_ASSERT_RET(n > 0u, UI_ASSERT_CODE, b);
+    return b + n - 1u;
+}
+
+static char *put_str(char *p, const char *end, const char *s)
 {
     CORE_ASSERT_RET(p != NULL, UI_ASSERT_CODE, p);
     CORE_ASSERT_RET(s != NULL, UI_ASSERT_CODE, p);
-    while (*s != '\0') {
+    CORE_ASSERT_RET(end >= p, UI_ASSERT_CODE, p);
+    /* io:M2: bounded by the destination, not by the caller's string -- the only unbounded write in
+     * the renderer. Rule 2: the loop is bounded by end - p. */
+    while (p < end && *s != '\0') {
         *p++ = *s++;
     }
     return p;
@@ -82,7 +96,14 @@ static char *put_g_e2(char *p, uint16_t g_e2)
 /* ---- pure integer time formatters (spec §20.5) ---- */
 
 #define TIME_BUF_LEN  20 /* "M:SS.cc\0" and then some, generous for large minute counts */
+/* fmt_time_ms's m = (uint32_t)ms / 60000u; the widest ms a uint32_t can hold is 4294967295, so m's
+ * ceiling is 71582 -- 5 digits, not more. 5 minute digits + ':' + 2 sec digits + '.' + 2 centisecond
+ * digits + NUL = 12. */
+_Static_assert(TIME_BUF_LEN >= 12, "fmt_time_ms: 5 minute digits (uint32_t ms/60000u <= 71582) + ':' + 2 + '.' + 2 + NUL");
 #define DELTA_BUF_LEN 20 /* "+S.cc\0" and then some */
+/* fmt_delta_ms's mag tops out at 2^31 (the INT32_MIN special case), so mag/1000u's ceiling is
+ * 2147483 -- 7 digits. sign + 7 second digits + '.' + 2 centisecond digits + NUL = 12. */
+_Static_assert(DELTA_BUF_LEN >= 12, "fmt_delta_ms: sign + 7 second digits + '.' + 2 + NUL");
 
 /* 7 chars, matching a real "M:SS.cc" value's width for a single-digit minute count (e.g.
  * "1:51.90"): fb_text/fb_text_right blit opaque cells (background pixels included, not just ink),
@@ -112,7 +133,6 @@ static void fmt_time_ms(char *buf, uint32_t ms)
         p = put_char(p, '0');
     }
     p = put_uint(p, cs);
-    CORE_ASSERT_VOID((size_t)(p - buf) < TIME_BUF_LEN, UI_ASSERT_CODE); /* room left for the NUL, per this function's own documented buf size */
     *p = '\0';
 }
 
@@ -140,7 +160,6 @@ static void fmt_delta_ms(char *buf, int32_t dms)
         p = put_char(p, '0');
     }
     p = put_uint(p, cs);
-    CORE_ASSERT_VOID((size_t)(p - buf) < DELTA_BUF_LEN, UI_ASSERT_CODE); /* room left for the NUL, per this function's own documented buf size */
     *p = '\0';
 }
 
@@ -183,7 +202,8 @@ static void fmt_time_s(char *buf, uint32_t ms)
     unsigned s = (unsigned)((ms / 1000u) % 60u);
     unsigned m = (unsigned)(ms / 60000u);
     if (m >= 100u) {
-        m = 99u;
+        m = 99u; /* ruling R-1: clamped here, so m is always <= 2 digits and s is always <= 2
+                  * digits -- the result is structurally at most 5 glyphs; buf must be >= 6 bytes */
         s = 59u;
     }
     char *p = buf;
@@ -193,7 +213,6 @@ static void fmt_time_s(char *buf, uint32_t ms)
         p = put_char(p, '0');
     }
     p = put_uint(p, s);
-    CORE_ASSERT_VOID((size_t)(p - buf) <= 5u, UI_ASSERT_CODE); /* ruling R-1: never more than 5 glyphs */
     *p = '\0';
 }
 
@@ -238,6 +257,7 @@ int ui_fault_icon_for_bit(int bit)
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(FAULT_STRIP_X0 + ICON_W <= CANVAS_VISIBLE_W, UI_ASSERT_CODE); /* the strip's own anchor stays on-canvas -- the real precondition fault_strip_left_x() already carries */
     const int pitch = ICON_W + 2; /* 2px gap between icons */
     int       x = FAULT_STRIP_X0;
     int       y = FAULT_STRIP_Y;
@@ -265,7 +285,6 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
             char    *p = pct_buf;
             p = put_uint(p, pct);
             p = put_char(p, '%');
-            CORE_ASSERT_VOID((size_t)(p - pct_buf) < sizeof pct_buf, UI_ASSERT_CODE); /* room left for the NUL */
             *p = '\0';
             int text_w = (int)strlen(pct_buf) * FONT_SMALL.w;
             int text_y = y + (ICON_H - FONT_SMALL.h) / 2;
@@ -365,9 +384,8 @@ static int render_card_big(fb_t *fb, const screen_model_t *m)
     if (m->big_kind == BIG_NONE) {
         char  buf[16];
         char *p = buf;
-        p = put_str(p, "LAP ");
+        p = put_str(p, sbuf_end(buf, sizeof buf), "LAP ");
         p = put_uint(p, m->lap_no);
-        CORE_ASSERT_RET((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE, CARD_BIG_X); /* room left for the NUL */
         *p = '\0';
         return fb_text(fb, &FONT_MED, CARD_BIG_X, CARD_NONE_Y, buf);
     }
@@ -389,7 +407,6 @@ static void render_card_marker(fb_t *fb, const screen_model_t *m)
     p = put_char(p, ' ');
     p = put_char(p, 'S');
     p = put_uint(p, m->cur_sector_idx);
-    CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
     *p = '\0';
     fb_text_right(fb, &FONT_SMALL, CARD_MARKER_RIGHT_X, CARD_MARKER_Y, buf);
 }
@@ -425,7 +442,7 @@ static void render_footer_left(fb_t *fb, const screen_model_t *m)
     if (m->have_prev) {
         fmt_time_ms(buf, m->prev_ms);
     } else {
-        char *p = put_str(buf, EMPTY_TIME);
+        char *p = put_str(buf, sbuf_end(buf, sizeof buf), EMPTY_TIME);
         *p = '\0';
     }
     fb_text_right(fb, &FONT_MED, CARD_LEFT_RIGHT_X, CARD_VALUE_Y, buf);
@@ -452,7 +469,7 @@ static void render_card_footer(fb_t *fb, const screen_model_t *m)
     if (m->have_best) {
         fmt_time_ms(buf, m->best_ms);
     } else {
-        char *p = put_str(buf, EMPTY_TIME);
+        char *p = put_str(buf, sbuf_end(buf, sizeof buf), EMPTY_TIME);
         *p = '\0';
     }
     fb_text_right(fb, &FONT_MED, CARD_RIGHT_RIGHT_X, CARD_VALUE_Y, buf);
@@ -492,12 +509,12 @@ static void render_board_header(fb_t *fb, const screen_model_t *m)
     CORE_ASSERT_VOID(m != NULL, UI_ASSERT_CODE);
     char  buf[TIME_BUF_LEN + 12];
     char  t[TIME_BUF_LEN];
-    char *p = put_str(buf, "BEST LAP ");
-    if (m->have_best) { fmt_time_ms(t, m->best_ms); p = put_str(p, t); } else { p = put_str(p, EMPTY_TIME); }
+    char *p = put_str(buf, sbuf_end(buf, sizeof buf), "BEST LAP ");
+    if (m->have_best) { fmt_time_ms(t, m->best_ms); p = put_str(p, sbuf_end(buf, sizeof buf), t); } else { p = put_str(p, sbuf_end(buf, sizeof buf), EMPTY_TIME); }
     *p = '\0';
     fb_text(fb, &FONT_SMALL, BOARD_X0, BOARD_HEADER_Y, buf);
-    p = put_str(buf, "THEO ");
-    if (m->have_theo) { fmt_time_ms(t, m->theo_best_ms); p = put_str(p, t); } else { p = put_str(p, EMPTY_TIME); }
+    p = put_str(buf, sbuf_end(buf, sizeof buf), "THEO ");
+    if (m->have_theo) { fmt_time_ms(t, m->theo_best_ms); p = put_str(p, sbuf_end(buf, sizeof buf), t); } else { p = put_str(p, sbuf_end(buf, sizeof buf), EMPTY_TIME); }
     *p = '\0';
     fb_text_right(fb, &FONT_SMALL, CANVAS_VISIBLE_W - BOARD_X0, BOARD_HEADER_Y, buf);
 }
@@ -517,13 +534,13 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
         char  buf[TIME_BUF_LEN];
         char *p = put_char(buf, 'S');
         p = put_uint(p, (unsigned)i + 1u);
-        if (i == BOARD_COLS - 1 && n > BOARD_COLS) { p = put_str(p, " +"); p = put_uint(p, (unsigned)(n - BOARD_COLS)); }
+        if (i == BOARD_COLS - 1 && n > BOARD_COLS) { p = put_str(p, sbuf_end(buf, sizeof buf), " +"); p = put_uint(p, (unsigned)(n - BOARD_COLS)); }
         *p = '\0';
         fb_text(fb, &FONT_SMALL, x, BOARD_LABEL_Y, buf);
         /* Plan 7c T3 (design §2): a sector's best time shows only once the pipeline has one on
          * record (have_best_sector[i]) -- i < n alone is not enough, since best_n_sectors reports
          * the locked layout's split count before every sector has completed a valid lap yet. */
-        if (i < n && m->have_best_sector[i]) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, "--.--"); *p = '\0'; }
+        if (i < n && m->have_best_sector[i]) { fmt_secs_ms(buf, m->best_sector_ms[i]); } else { p = put_str(buf, sbuf_end(buf, sizeof buf), "--.--"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_VALUE_Y, buf);
         /* Ruling FR-2: the delta row depends only on have_last_sector_delta[i] (spec §5 literal),
          * never on best_n_sectors -- ui.c's copy_best_snapshot() (Plan 7c T3, #79) is the producer
@@ -531,7 +548,7 @@ static void render_lap_page1(fb_t *fb, const screen_model_t *m)
          * sector splits vs. the locked layout's best-sector count) and must not be gated on it: a
          * lap can cross sector i before the pipeline has ever recorded a best time for it. */
         if (m->have_last_sector_delta[i]) { fmt_delta_clamped(buf, m->last_sector_delta_ms[i], BOARD_DELTA_CLAMP_MS); }
-        else { p = put_str(buf, "----"); *p = '\0'; }
+        else { p = put_str(buf, sbuf_end(buf, sizeof buf), "----"); *p = '\0'; }
         fb_text(fb, &FONT_MED, x, BOARD_DELTA_Y, buf);
     }
 }
@@ -564,9 +581,9 @@ static void render_grid_laps(fb_t *fb, const screen_model_t *m)
     int start = end + GRID_SUB_GAP;
     int limit = CANVAS_VISIBLE_W - GRID_COL1_X;
 
-    p = put_str(buf, "("); p = put_uint(p, m->laps_valid); p = put_str(p, " valid)"); *p = '\0';
+    p = put_str(buf, sbuf_end(buf, sizeof buf), "("); p = put_uint(p, m->laps_valid); p = put_str(p, sbuf_end(buf, sizeof buf), " valid)"); *p = '\0';
     if (start + (int)strlen(buf) * FONT_SMALL.w > limit) {
-        p = put_str(buf, "("); p = put_uint(p, m->laps_valid); p = put_str(p, ")"); *p = '\0';
+        p = put_str(buf, sbuf_end(buf, sizeof buf), "("); p = put_uint(p, m->laps_valid); p = put_str(p, sbuf_end(buf, sizeof buf), ")"); *p = '\0';
         if (start + (int)strlen(buf) * FONT_SMALL.w > limit) {
             buf[0] = '\0'; /* neither suffix fits: draw nothing rather than clip past the visible edge */
         }
@@ -589,8 +606,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
      * the unit too (grid_cell already draws labels in FONT_SMALL, which has the lowercase glyphs
      * "km/h"/"mph" need -- FONT_MED has none). */
     p = put_uint(buf, speed_display(m->max_speed_cms, m->units)); *p = '\0';
-    char *lp = put_str(label, "MAX SPD "); lp = put_str(lp, unit_suffix(m->units));
-    CORE_ASSERT_VOID((size_t)(lp - label) < sizeof label, UI_ASSERT_CODE);   /* M8: room left for the NUL */
+    char *lp = put_str(label, sbuf_end(label, sizeof label), "MAX SPD "); lp = put_str(lp, sbuf_end(label, sizeof label), unit_suffix(m->units));
     *lp = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y0, GRID_VALUE_Y0, label, buf);
     /* A lean angle cannot exceed 90 deg, but lean_l_deg/lean_r_deg are plain uint8_t -- clamp each
@@ -602,7 +618,7 @@ static void render_lap_page2(fb_t *fb, const screen_model_t *m)
     p = put_g_e2(buf, m->lat_g_e2); *p = '\0';
     grid_cell(fb, GRID_COL1_X, GRID_LABEL_Y1, GRID_VALUE_Y1, "LAT G", buf);
     render_grid_laps(fb, m);
-    p = put_str(buf, "ACC "); p = put_g_e2(p, m->acc_g_e2); p = put_str(p, "   BRK "); p = put_g_e2(p, m->brk_g_e2); *p = '\0';
+    p = put_str(buf, sbuf_end(buf, sizeof buf), "ACC "); p = put_g_e2(p, m->acc_g_e2); p = put_str(p, sbuf_end(buf, sizeof buf), "   BRK "); p = put_g_e2(p, m->brk_g_e2); *p = '\0';
     fb_text(fb, &FONT_SMALL, GRID_COL1_X, GRID_FOOTER_Y, buf);
 }
 
@@ -673,18 +689,28 @@ static void render_dcard_footer(fb_t *fb, const screen_model_t *m, uint8_t n) /*
     for (uint8_t i = first; i + 1u < n && i < DRAG_MAX_GATES; i++) {
         const drag_row_t *r = &m->drag[i];
         char  buf[TIME_BUF_LEN + 12];
-        char *p = put_str(buf, r->label);
+        /* r->label is untrusted model data (drag_row_t.label, char[8]) with no guaranteed
+         * terminator in the latent case (io:M2) -- unlike every other put_str call in this file,
+         * which copies a fixed, known-short literal. Bounding this one to the whole of buf
+         * (sbuf_end(buf, sizeof buf), like every other site) would still let the mandatory ' ' + value +
+         * separator + NUL that follow run past buf's end if the label alone consumed the entire
+         * bound: this reserve is what stops that. Widest trailing content this function ever
+         * appends: ' ' (1) + the widest value (dist_display()'s <= 5 digits + a <= 2-char unit
+         * suffix, 7) + DCARD_FOOTER_SEP (3) + the trailing NUL (1) = 12; buf is TIME_BUF_LEN + 12
+         * bytes, so reserving exactly that many leaves TIME_BUF_LEN (20) bytes for the label
+         * itself, far more than any real (<= 7-char) label ever uses. */
+        char *p = put_str(buf, buf + sizeof buf - 1u - 12u, r->label);
         p = put_char(p, ' ');
         if (r->is_distance) {
             p = put_uint(p, dist_display(r->dist_m, m->dist_units));
-            p = put_str(p, dist_unit_suffix(m->dist_units));
+            p = put_str(p, sbuf_end(buf, sizeof buf), dist_unit_suffix(m->dist_units));
         } else {
             char t[TIME_BUF_LEN];
             fmt_secs_ms(t, r->t_ms);
-            p = put_str(p, t);
+            p = put_str(p, sbuf_end(buf, sizeof buf), t);
         }
         if (i + 2u < n) {
-            p = put_str(p, DCARD_FOOTER_SEP);
+            p = put_str(p, sbuf_end(buf, sizeof buf), DCARD_FOOTER_SEP);
         }
         *p = '\0';
         if (x + (int)strlen(buf) * FONT_SMALL.w > limit) {
@@ -778,7 +804,7 @@ static void render_drag_gate_list(fb_t *fb, const screen_model_t *m, const char 
          * instead of the old vertical-centre offset that read as paired with the next column. */
         fb_text(fb, &FONT_SMALL, x, y + DLIST_LABEL_DY, r->label);
         if (!r->present) {
-            char *p = put_str(buf, "--.--");
+            char *p = put_str(buf, sbuf_end(buf, sizeof buf), "--.--");
             *p = '\0';
             fb_text_right(fb, &FONT_MED, xr, y, buf);
         } else if (r->is_distance) {
@@ -936,9 +962,8 @@ static const char *newtrack_subline(uint8_t step, char *buf, size_t cap)
         return NEWTRACK_SUB_FINISH;
     }
     char *p = buf;
-    p = put_str(p, "S/F set. MODE: sector ");
+    p = put_str(p, buf + cap - 1u, "S/F set. MODE: sector ");
     p = put_uint(p, step);
-    CORE_ASSERT_RET((size_t)(p - buf) < cap, UI_ASSERT_CODE, NEWTRACK_SUB_FINISH);
     *p = '\0';
     return buf;
 }
@@ -1011,7 +1036,6 @@ static void render_oneshot_lowbatt(fb_t *fb, const screen_model_t *m)
     uint8_t  pct = m->batt_pct > 100u ? 100u : m->batt_pct;
     p = put_uint(p, pct);
     p = put_char(p, '%');
-    CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
     *p = '\0';
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), LOWBATT_PCT_Y, buf);
 }
@@ -1030,7 +1054,6 @@ static void render_oneshot_ota(fb_t *fb, const screen_model_t *m)
     char *p = buf;
     p = put_uint(p, pct);
     p = put_char(p, '%');
-    CORE_ASSERT_VOID((size_t)(p - buf) < sizeof buf, UI_ASSERT_CODE); /* room left for the NUL */
     *p = '\0';
     fb_text(fb, &FONT_SMALL, center_x(fb, &FONT_SMALL, buf), OTA_PCT_Y, buf);
 
