@@ -181,7 +181,9 @@ typedef struct {
     uint16_t          *pred_rec_dist_m;    /* records the lap in progress; promoted to best on a new best */
     uint32_t          *pred_rec_t_ms;
     uint16_t           pred_rec_n;
-    uint32_t           pred_rec_fixes;
+    uint32_t           pred_rec_fixes;     /* fixes OFFERED to the recorder this lap (stride counter) */
+    uint16_t           pred_stride;        /* §10.11 recording density: 1 = every fix, doubled on
+                                            * each halving up to PRED_STRIDE_MAX */
     uint16_t           pred_cap;           /* entries each buffer holds; 0 = predictive disabled */
 } lap_t;
 

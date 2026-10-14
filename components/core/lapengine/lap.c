@@ -117,6 +117,7 @@ static void reset_to_no_venue(lap_t *L)
     L->create_have_sf = false;
     L->pred_rec_n = 0;
     L->pred_rec_fixes = 0;
+    L->pred_stride = 1;
     /* best/prev lap results, the predictive reference table and cfg are preserved across a reset
      * (§10.3). The §10.8 best-sector table is NOT: it is per (venue, layout) and the reset drops
      * both, so keeping it would mix two tracks' splits (R25, audit core:H2). */
@@ -191,6 +192,7 @@ void lap_set_venue(lap_t *L, const trk_venue_t *v)
     L->create_have_sf = false;
     L->pred_rec_n = 0;
     L->pred_rec_fixes = 0;
+    L->pred_stride = 1;
     arm_candidates(L);
 }
 
@@ -394,6 +396,7 @@ int lap_import_rtc(lap_t *L, const lap_rtc_t *s)
     L->n_ugate = 0;
     L->pred_rec_n = 0;
     L->pred_rec_fixes = 0;
+    L->pred_stride = 1;
     return 0;
 }
 
@@ -411,32 +414,41 @@ void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
     L->pred_best_n      = 0;
     L->pred_rec_n       = 0;
     L->pred_rec_fixes   = 0;
+    L->pred_stride      = 1;
 }
 
-/* Append the current (distance, elapsed) sample of the lap in progress to the recording table. Beyond
- * PRED_TABLE_MAX entries the table is halved in place and recording continues at half density ("every
- * 2nd fix"), so it always holds <= PRED_TABLE_MAX monotonic-distance samples spanning the whole lap. */
+/* §10.11: the recording table is halved in place when it fills and the density halves with it, so
+ * the stride doubles. Capped so the stride stays a bounded, statically evident divisor (rule 2). */
+#define PRED_STRIDE_MAX 64u
+
+/* Append the current (distance, elapsed) sample of the lap in progress. When the table fills it is
+ * halved in place AND the recording stride doubles (§10.11 "beyond that every 2nd fix"), so the
+ * table always holds <= pred_cap monotonic-distance samples spanning the whole lap at an even
+ * density. Samples the stride skips are counted but not stored. */
 static void pred_record(lap_t *L, int64_t now)
 {
     CORE_ASSERT_VOID(L != NULL, LAP_ASSERT_CODE);
     if (L->pred_cap == 0) return;                        /* predictive disabled: no buffers to fill */
     CORE_ASSERT_VOID(L->pred_rec_dist_m != NULL, LAP_ASSERT_CODE);   /* enabled => buffers set */
     CORE_ASSERT_VOID(L->pred_rec_t_ms != NULL, LAP_ASSERT_CODE);
+    CORE_ASSERT_VOID(L->pred_stride >= 1u, LAP_ASSERT_CODE);         /* used as a divisor below */
     if (now <= L->lap_start_gps_us) return;
+    const uint32_t seq = L->pred_rec_fixes++;
+    if (L->pred_stride > 1u && (seq % (uint32_t)L->pred_stride) != 0u) return;   /* §10.11 density */
     uint32_t t_ms = (uint32_t)((now - L->lap_start_gps_us + 500) / 1000);
     double d = L->lap_dist_m;
     if (d < 0.0) d = 0.0; else if (d > (double)UINT16_MAX) d = (double)UINT16_MAX;
     uint16_t d16 = (uint16_t)llround(d);
-    L->pred_rec_fixes++;
 
     if (L->pred_rec_n >= L->pred_cap) {                  /* full: keep every 2nd entry, then continue */
         uint16_t m = 0;
-        for (uint16_t i = 0; i < L->pred_rec_n; i += 2) {
+        for (uint16_t i = 0; i < L->pred_rec_n; i += 2) {    /* rule 2: pred_rec_n <= pred_cap */
             L->pred_rec_dist_m[m] = L->pred_rec_dist_m[i];
             L->pred_rec_t_ms[m]   = L->pred_rec_t_ms[i];
             m++;
         }
         L->pred_rec_n = m;
+        if (L->pred_stride < PRED_STRIDE_MAX) L->pred_stride = (uint16_t)(L->pred_stride * 2u);
     }
     if (L->pred_rec_n > 0 && d16 <= L->pred_rec_dist_m[L->pred_rec_n - 1]) return;   /* keep monotone */
     L->pred_rec_dist_m[L->pred_rec_n] = d16;
@@ -874,6 +886,7 @@ static void open_lap(lap_t *L, uint16_t lap_no, int64_t t_cross, bool seg_gap)
     for (uint8_t j = 0; j < LAP_MAX_SECTORS; j++) L->sec_armed[j] = true;
     L->pred_rec_n = 0;
     L->pred_rec_fixes = 0;
+    L->pred_stride = 1;
 }
 
 /* Complete the current lap at t_cross (§10.4) and advance to the next. */

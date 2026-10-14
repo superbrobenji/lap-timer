@@ -1099,6 +1099,13 @@ static void test_predictive_table_cap(void)
     TEST_ASSERT_TRUE(L.pred_rec_fixes >= 700);
     TEST_ASSERT_TRUE(L.pred_rec_n > 0);
     TEST_ASSERT_TRUE(L.pred_rec_n <= PRED_TABLE_MAX);              /* never overflows the fixed table */
+    /* §10.11 "max 600 entries; beyond that every 2nd fix": one halving has happened, so the
+     * stride is 2 and the table holds the 300 survivors plus ~half of the remaining ~100 fixes.
+     * Before the fix pred_rec_fixes was incremented and never read -- recording continued at FULL
+     * density and the halving comment was false (audit core LOW / false claim 2). */
+    TEST_ASSERT_EQUAL_UINT16(2, L.pred_stride);
+    TEST_ASSERT_TRUE(L.pred_rec_n >= 300);
+    TEST_ASSERT_TRUE(L.pred_rec_n < 420);
 
     free(pbd); free(pbt); free(prd); free(prt);
 }
