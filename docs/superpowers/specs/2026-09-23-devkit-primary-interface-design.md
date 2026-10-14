@@ -189,14 +189,14 @@ would be negative (no samples yet).
 | `dc status` | AP/clients, link (connected, status/stream age, per-type rates as `*_rate_x10`, gaps), logstore (ready, file, bytes), heap, uptime, version |
 | `dc log <level>` | dev-kit log verbosity on this console; `--json` answers `{"level":…}` |
 | `dc baud <rate>` | switch this console's baud for a faster `flash stage` upload (optional optimisation; 115200 is the requirement); `--json` answers `{"baud":…}` |
-| `lt <console cmd…>` | relay any lap-timer console command through `linkhost` (framed or streaming download); prints the reply, round-trip ms, attempt count. `lt status --json` is the one exception to "prints the reply": it emits the *decoded* §18.2 STATUS fields (named, like `dc status`), not the raw framed body |
-| `lt shell` | transparent byte bridge UART0↔UART1 until `~.` at line start or a 10 min cap; takes the link mutex, pauses the demux (as a download does), silences dev-kit logging, forces `stream tap` off, and filters whole binary stream frames out of the UART1→USB bytes it forwards so a bridged session shows only the lap-timer's own console bytes; resyncs on exit. Refused (`busy`) while a `flash push` is in flight, since both hold the same link mutex |
+| `lt <console cmd…>` | relay any lap-timer console command through `linkhost` (framed or streaming download); prints the reply, round-trip ms, attempt count. `lt status --json` is the one exception to "prints the reply": it emits the *decoded* §18.2 STATUS fields (named, like `dc status`), not the raw framed body. Any verb not implemented locally is relayed raw through the bridge filter (`lt_relay`, F3 T6): framed replies and plain-text `dbg` output both work, bounded by 1.5 s of silence or a 15 s cap. The dev-kit's own verbs (`dc`, `link`, `flash`, `stream`, `selftest`, `help`) are refused, not relayed. |
+| `lt shell` | transparent byte bridge UART0↔UART1 until `~.` at line start or a 10 min cap; takes the link mutex, pauses the demux (as a download does), silences dev-kit logging, forces `stream tap` off, and filters whole binary stream frames out of the UART1→USB bytes it forwards so a bridged session shows only the lap-timer's own console bytes; resyncs on exit (drain-to-quiet + demux resync, both bounded). Refused (`busy`) while a `flash push` is in flight, since both hold the same link mutex |
 | `link trace on\|off` | per-request trace (§5.1) |
 | `stream stats [secs]` | rates over a measured window (default 2 s): samples the counters before and after `secs`, then reports `*_rate_x10` over that interval, seq gaps, ring high-water. Independent of `dc status`, which samples its own fixed 1 s window |
 | `stream tap on\|off [type]` | print decoded records as JSON rows, rate-limited to 5/s |
 | `selftest link [N=20]` | N framed `status` round-trips: latency min/median/max, attempts, failures; PASS if median < 100 ms, max < 500 ms, 0 failures |
 | `selftest stream [s=10]` | measured rates: PASS if fused ≥ 8/s, status ≥ 0.8/s, 0 gaps |
-| `selftest framing` | relay one command with trace on; PASS if every `---BEGIN`/`---END` marker is followed by exactly one CR before LF |
+| `selftest framing` | PASS if every `---BEGIN`/`---END` marker line is terminated by exactly one CR before its LF (a bare-LF or `\r\r\n` marker line FAILS); other lines fail only on a doubled CR, and a truncated trailing line is not judged (the capture is 256 B) |
 | `selftest all` | the three above; one verdict |
 | `flash stage <size> <sha256hex>` | receive a raw image over this console into `ota_stage` (§5.4). A `STAGING` claim left unpushed for 10 min is reclaimed by the next `flash stage` |
 | `flash push` | push the staged image to the lap-timer with the Task 6 `linkhost_flash` |
@@ -314,8 +314,9 @@ dev-kit PCB (stock ESP32 devkit + RJ45 breakout until then).
   UART1 → framed reply → demux/`lh_dl` → reply. `link trace` instruments each step. Downloads and
   flash pause the demux (the #65 park handshake); the stream gap during a transfer is accepted, as
   the Plan 5.5 spec already states.
-- **Bridge:** `lt shell` takes the link mutex, pauses the demux, pumps bytes both ways, restores and
-  drains-to-quiet on exit.
+- **Bridge:** `lt shell` takes the link mutex, pauses the demux, pumps bytes both ways, and on exit
+  drains UART1 to quiet and resyncs the demux parser state (the record ring and `linkstats`
+  counters survive) before the RX task resumes.
 - **Flash over USB:** console raw-receive → `ota_stage` (+SHA) → `linkhost_flash` push → lap-timer
   `ota recv` → apply/reboot → `connected` drops then returns with the new `fw`.
 
@@ -325,9 +326,20 @@ dev-kit PCB (stock ESP32 devkit + RJ45 breakout until then).
   absent path (`LINK_ABSENT_TMO_MS`).
 - STATUS push dropped under M1: the next 1 s tick resends; staleness is 3 s, so two consecutive
   drops are invisible.
-- Link busy (download, flash push, or bridge holds the mutex): `/api/*` and `lt` get BUSY via the
-  bounded mutex take → 503 / `busy`, as today. `dc status` never blocks (no mutex).
-- Bridge safety: `~.` escape + the 10 min cap; on exit the demux is drained and resynced.
+- Link busy (download, flash push, or bridge holds the mutex): `/api/*`, `lt` **and the
+  session/log download worker** get BUSY via the bounded mutex take → 503 / `busy`. `dc status`
+  never blocks (no mutex).
+- **Download bounds:** an announced body over 2 MiB (`LH_DL_BODY_MAX`) is rejected as a protocol
+  error rather than streamed, the absolute window is capped at 20 min (`LH_DL_HARD_MAX_MS`) from
+  the header, and the no-bytes idle deadline is refreshed only by real parser progress — body
+  bytes consumed before `---END`, or the parser advancing a state — never by raw UART activity
+  alone, so neither a corrupted size nor the lap-timer's resumed 10 Hz stream can hold the link
+  mutex (dk:M1).
+- **AP passphrase:** 12 random characters from NVS `dc/psk`, generated once, printed at boot and
+  by `dc status`, rotated by `dc psk reset` (R16). Never derived from the MAC — the SoftAP BSSID
+  in every beacon is a published function of it.
+- Bridge safety: `~.` escape + the 10 min cap; on exit the demux is drained and resynced
+  (`rx_park_and_drain` + `linkhost_demux_resync`).
 - Console and logs interleave on UART0: accepted (lap-timer precedent); `dc log` quiets; `--json`
   output is line-atomic.
 - Ring overflow under a burst: drop-newest as today, now counted (seq gaps) and visible in
