@@ -2,7 +2,7 @@
 # SRCS: logstore.c is the IDF/LittleFS glue; host/logstore_rot.c is the PURE rotation-decision
 # logic, host/logstore_json.c is the PURE on-flash-record -> NDJSON transcode (issue #67),
 # host/logstore_id.c is the PURE generated-id shape validator (debt sweep A #60 fix round 1), and
-# host/logstore_state.c is the PURE dk:M10 ready-state predicate (Plan 5.5 Task 9) --
+# host/logstore_state.c is the PURE dk:M10 ready-state predicate (F3 T9) --
 # none has esp_* / littlefs deps -- that devcontroller/test/test_logstore.c, test_logstore_json.c,
 # test_logstore_id.c and test_logstore_state.c also link directly on the host; all four are
 # compiled here too so the on-target build and the host tests share one implementation instead of

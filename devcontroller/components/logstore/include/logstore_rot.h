@@ -58,7 +58,7 @@ int logstore_pick_drop(const logstore_file_info_t *files, int count, uint32_t in
  * (`open_ok`) AND the last append succeeded in writing (`write_ok`). A write failure leaves this
  * false until the next successful append, giving /api/status and `dc status` visibility into
  * transient or steady ENOSPC / bad-block errors that would otherwise silently kill logging while
- * reporting ready:true. See /include/logstore.h logstore_ready() for the public API. */
+ * reporting ready:true. See logstore.h's logstore_ready() for the public API. */
 bool logstore_accepting(bool open_ok, bool write_ok);
 
 #ifdef __cplusplus
