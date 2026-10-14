@@ -374,6 +374,53 @@ static void test_numeric_tokens_too_long_or_out_of_range_are_rejected(void)
     TEST_ASSERT_FALSE(json_tok_double(inf, &toks[1], &d));      /* ERANGE -> not a value */
 }
 
+static void test_walk_handles_every_nesting_shape_sections_can_take(void)
+{
+    /* io:H2 (R27): walk() was directly recursive (rule 1) with no deviation row. §15.1's grammar
+     * is exactly two levels -- top-level scalars, section objects of scalars/arrays -- so a
+     * two-level loop is equivalent. These are the shapes it must still handle identically. */
+    cfg_t c; char err[80];
+    const char *all =
+        "{\"units\":\"mph\",\"mode\":\"drag\",\"dist_units\":\"ft\","
+        "\"lap\":{\"min_lap_s\":30,\"default_layout\":[{\"venue\":6,\"layout\":2}]},"
+        "\"drag\":{\"benches_kmh\":[80,160],\"benches_mph\":[50,100],\"rollout\":true},"
+        "\"battery\":{\"cal\":[{\"adc_mv\":3100,\"true_mv\":3000},{\"adc_mv\":4200,\"true_mv\":4100}]},"
+        "\"ble\":{\"name\":\"Rig\"},\"log\":{\"fused_hz\":25},\"nonsense\":7,"
+        "\"imu\":{\"mot_thr\":9,\"unknown_key\":3}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&c, all, strlen(all), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT8(CFG_UNITS_MPH, c.units);
+    TEST_ASSERT_EQUAL_UINT8(CFG_MODE_DRAG, c.mode);
+    TEST_ASSERT_EQUAL_UINT8(CFG_DIST_FT, c.dist_units);
+    TEST_ASSERT_EQUAL_UINT16(30, c.lap.min_lap_s);
+    TEST_ASSERT_EQUAL_UINT8(1, c.lap.n_default_layout);
+    TEST_ASSERT_EQUAL_UINT16(6, c.lap.default_layout[0].venue);
+    TEST_ASSERT_EQUAL_UINT16(2, c.lap.default_layout[0].layout);
+    TEST_ASSERT_EQUAL_UINT8(2, c.drag.n_kmh);
+    TEST_ASSERT_EQUAL_UINT16(160, c.drag.benches_kmh[1]);
+    TEST_ASSERT_EQUAL_UINT8(2, c.drag.n_mph);
+    TEST_ASSERT_EQUAL_UINT16(100, c.drag.benches_mph[1]);
+    TEST_ASSERT_TRUE(c.drag.rollout);
+    TEST_ASSERT_EQUAL_UINT16(3100, c.battery.adc_mv[0]);
+    TEST_ASSERT_EQUAL_UINT16(4100, c.battery.true_mv[1]);
+    TEST_ASSERT_EQUAL_STRING("Rig", c.ble.name);
+    TEST_ASSERT_EQUAL_UINT8(25, c.log.fused_hz);
+    TEST_ASSERT_EQUAL_UINT8(9, c.imu.mot_thr);
+
+    const char *not_obj = "{\"lap\":5}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, not_obj, strlen(not_obj), err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("lap must be an object", err);
+    const char *bad = "{\"gps\":{\"rate_hz\":\"fast\"}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, bad, strlen(bad), err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("bad value for gps.rate_hz", err);
+    const char *nested = "{\"lap\":{\"min_lap_s\":{\"deep\":1}}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, nested, strlen(nested), err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("bad value for lap.min_lap_s", err);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -394,5 +441,6 @@ int main(void)
     RUN_TEST(test_fuzz_mutated_documents_never_corrupt_the_struct);
     RUN_TEST(test_bool_fields_reject_a_wrong_json_type);
     RUN_TEST(test_numeric_tokens_too_long_or_out_of_range_are_rejected);
+    RUN_TEST(test_walk_handles_every_nesting_shape_sections_can_take);
     return UNITY_END();
 }
