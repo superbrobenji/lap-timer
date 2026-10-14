@@ -167,8 +167,10 @@ static size_t b64_write_all(const uint8_t *src, size_t n)
  *   entry = 66 B;  32 x 66 = 2112;  + 31 separating commas = 2143;  + "[" and "]" = 2145.
  * (CONFIG_GET ~939 B and DIAG_GET ~335 B are the other buffered bodies, both well below.) */
 #define SER_ERRLOG_WORST 2145u
-_Static_assert(SER_ASM_MAX >= SER_ERRLOG_WORST, "ERRLOG_GET's worst case must fit without the overflow path");
-_Static_assert(CMD_JSON_CAP >= SER_ASM_MAX, "cmd.c's producer buffer must not be the smaller of the two");
+_Static_assert(SER_ASM_MAX >= SER_ERRLOG_WORST,
+               "ERRLOG_GET's worst case must fit without the overflow path");
+_Static_assert(CMD_JSON_CAP >= SER_ASM_MAX,
+               "cmd.c's producer buffer must not be the smaller of the two");
 typedef struct {
     const char *name;              /* frame name for BEGIN/END */
     uint8_t     buf[SER_ASM_MAX];
@@ -202,8 +204,8 @@ static void ser_flush(ser_ctx_t *c)
 /* drv:M7: ser_emit used to clamp, after which ser_flush computed the announced size AND the CRC32
  * over the TRUNCATED bytes -- a frame the host accepts as whole while the JSON is cut mid-object.
  * Unreachable today (see the asserts above); if it is ever reached, it is an ERROR frame, not a
- * lie. Later DATA chunks are ignored (ser_emit skips appends once c->error
- * is set); a later CMD_FLAG_ERROR chunk still overwrites the message, so the producer's own error wins. */
+ * lie. Later DATA chunks are ignored (ser_emit skips appends once c->error is set); a later
+ * CMD_FLAG_ERROR chunk still overwrites the message, so the producer's own error wins. */
 static void ser_overflow(ser_ctx_t *c)
 {
     static const char k_ovf[] = "response too large";
@@ -1020,7 +1022,8 @@ static int cmd_dbg(int argc, char **argv)
             return 0;
         }
     }
-    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | reset | crash | hang\n");
+    printf("usage: dbg status | logtest [n] | fs | sum <id> | logck <id> | laps | rtc | mem | "
+           "reset | crash | hang\n");
     printf("       dbg btn <mode|up|down|up+down> [hold_ms]  (bench button injection, Plan 7 T8)\n");
     printf("       dbg flag set|clear <bit 0..15>  (bench sys_flags injection, Plan 7 T8)\n");
     printf("       dbg safe clear  (clear the safe/recovery gate now, debt sweep A #62/§17.5)\n");
@@ -1135,7 +1138,10 @@ static int ota_fill_chunk(uart_port_t port, uint8_t *dst, uint32_t want)
  *   (E_OTA_HWID, from ota_data), otherwise it fails in ota_end on the SHA-256 (E_OTA_WRITE) or
  *   the signature (E_OTA_SIG). All fail SAFE (no unverified image is
  *   ever applied: SHA-256 + ECDSA gate esp_ota_end), only unreliable for a large image push.
- *   The robust fix is a per-chunk OTA-ACK handshake on the host side -- issue #57, not implemented. Both pushers (`tools/ota_push.py`'s `--pace`, the dev-kit's `OTA_PACE_MS`) instead pause 25 ms at each `OTA_RECV_CHUNK` boundary, which covers the ~18 ms worst-case ring deficit but provides no feedback and no retry. */
+ *   The robust fix is a per-chunk OTA-ACK handshake on the host side -- issue #57, not
+ *   implemented. Both pushers (`tools/ota_push.py`'s `--pace`, the dev-kit's `OTA_PACE_MS`)
+ *   instead pause 25 ms at each `OTA_RECV_CHUNK` boundary, which covers the ~18 ms worst-case
+ *   ring deficit but provides no feedback and no retry. */
 static int ota_recv_stream(uint32_t size)
 {
     CORE_ASSERT_RET(size > 0, EXP_SERIAL_ASSERT_CODE, -1);
@@ -1168,7 +1174,8 @@ static int ota_recv_stream(uint32_t size)
 
 /* `ota recv <size_dec> <sha256_hex> <ver_str> <hwid_str>` -- dev bench OTA push (§19.6). Builds the
  * 76 B OTA_BEGIN payload; on a clean begin prints OTA-READY, streams <size> raw bytes off UART0,
- * then OTA_END. Logs are silenced (NONE, R9) for the transfer so only the OTA-* tokens reach the host. */
+ * then OTA_END. Logs are silenced (NONE, R9) for the transfer so only the OTA-* tokens reach the
+ * host. */
 static int cmd_ota(int argc, char **argv)
 {
     CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
