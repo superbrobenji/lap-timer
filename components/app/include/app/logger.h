@@ -3,7 +3,7 @@
  * Core 0, prio 8, stack 4096, static. Drains the §4.4 fix/fused rings and the logger's event
  * queue into 4 KB .log batches through core/ses, rebuilds the .sum atomically on LAP/DRAG_RUN,
  * fsyncs every 2 s, and evicts every 60 s (§12.5-12.7). Session open/close is commanded over
- * log_req_q. The producer (pipeline, 3.4) calls logger_notify() after pushing to a ring so the
+ * log_req_q. The producer (the pipeline task) calls logger_notify() after pushing to a ring so the
  * logger wakes before its 1000 ms timeout ("ring notify or 1000 ms").
  */
 #ifndef APP_LOGGER_H
@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 
+#include "core/ses.h"
 #include "core/types.h"
 
 void logger_start(void);    /* create + start the task (boot step 12) */
@@ -34,5 +35,10 @@ int  logger_load_tracks(void);
 void logger_submit_lap(const lap_result_t *lap);
 void logger_submit_drag(const drag_result_t *run);
 void logger_set_venue(uint16_t venue_id, uint16_t layout_id, const char *name);
+
+/* R4 producers, implemented beside logger_submit_lap/drag/set_venue: the pipeline owns the time base
+ * (TIME_MAP, §12.3 0x0C) and the calibration (SESSION_HDR calib block + CALIB record, §12.3 0x0A). */
+void logger_submit_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality);
+void logger_submit_calib(const ses_calib_t *c);
 
 #endif /* APP_LOGGER_H */

@@ -64,6 +64,10 @@ static inline bool lt_session_id_ok(const char *id, size_t len)
 /* ---- §18.1 unsolicited stream frame ---- */
 enum { LT_STREAM_TAG = 0xFF };   /* mirrors app/cmd.h's LINK_STREAM_TAG */
 
+/* ---- §18.1 op codes for the dev-kit/host side: mirrors app/cmd.h's CMD_* codes ---- */
+enum { LT_OP_TRACKS_GET = 0x12, LT_OP_TRACKS_PUT = 0x13,
+       LT_OP_COREDUMP_GET = 0x17, LT_OP_COREDUMP_CLEAR = 0x18 };
+
 /* 5-byte stream frame header; `len` payload bytes (a §14 stream record) follow immediately. */
 typedef struct __attribute__((packed)) {
     uint8_t tag;      /* always LT_STREAM_TAG (0xFF): an unsolicited stream frame */

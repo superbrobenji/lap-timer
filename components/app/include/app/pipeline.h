@@ -65,4 +65,8 @@ typedef struct {
  * 0 on success (always succeeds; s_dragsnap is valid, if all-zero, before the first drag sample). */
 int  pipeline_drag_snapshot(pipe_drag_t *out);
 
+/* Latest valid-fix ground speed in km/h (0 while no fix / after EV_FIX_LOST). The §20.7 menu lock
+ * and the §20.5 MOVING glyph read THIS, not the 3 km/h EV_MOTION edge they used as a proxy. */
+uint16_t pipeline_speed_kmh(void);
+
 #endif /* APP_PIPELINE_H */

@@ -6,8 +6,9 @@
  * and uptime win) with their flash write rate-limited to ERRLOG_MIN_PERSIST_US -- keyed on the
  * code ALONE, because keying on (code,arg) let E_STO_WRITE's varying batch length storm NVS at
  * 1 Hz on a dead filesystem (audit fix wave app:M1). Counters are batched (>= 60 s) except on crash
- * paths. cfg is written on EVERY lt_cfg_save() call: §15.2's "only on change" compare and the
- * cross-task read-modify-write lock land with ruling R10 (plan F2b).
+ * paths. cfg is written on EVERY lt_cfg_save() call; the §15.2 "only on change" compare is the
+ * caller's job (cmd.c op_config_set, R10), and the cross-task read-modify-write lock is
+ * lt_cfg_rmw_begin/lt_cfg_rmw_end (below).
  */
 #ifndef APP_LT_NVS_H
 #define APP_LT_NVS_H
@@ -111,6 +112,16 @@ void lt_ota_pending_clear(void);    /* clear + commit */
  * the ui task, the ui (EV_CFG_CHANGED) -- see ui.c menu_do_units / cmd.c cfg_change_notify. */
 int  lt_cfg_load(cfg_t *c);
 int  lt_cfg_save(const cfg_t *c);
+
+/* Wrap a cfg load -> mutate -> save sequence (ui.c's menu writers, cmd.c's op_config_set) so a
+ * CONFIG_SET landing between a peer's load and save is not silently reverted (app:M11). 200 ms
+ * bounded take; false means the lock was not acquired and THE CALLER MUST SKIP THE WRITE (and log
+ * it). Separate from the blob lock lt_cfg_load/lt_cfg_save take internally -- a FreeRTOS mutex is
+ * not recursive, so reusing that one here would deadlock. Before lt_nvs_init() has created the lock
+ * (boot_config, single-threaded) lt_cfg_rmw_begin() returns true without locking and
+ * lt_cfg_rmw_end() is a no-op. */
+bool lt_cfg_rmw_begin(void);
+void lt_cfg_rmw_end(void);
 
 /* True for reset reasons counted as a crash for §17.5 (panic / any WDT / brownout). */
 bool lt_reset_is_abnormal(int reset_reason);
