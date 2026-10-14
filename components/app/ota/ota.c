@@ -75,7 +75,7 @@ static const char __attribute__((section(".rodata_custom_desc"), used)) hwid[OTA
 _Static_assert(sizeof(esp_app_desc_t) == 256, "§19.3: hwid lands at image offset 0x120 only if esp_app_desc_t is 256 B");
 _Static_assert(IMG_HWID_OFF == IMG_DESC_OFF + 256, "§19.3: hwid offset must follow the app descriptor");
 
-typedef enum { OTA_IDLE = 0, OTA_RECV, OTA_REBOOT } ota_st_t;
+typedef enum { OTA_IDLE = 0, OTA_RECV, OTA_REBOOT, OTA_VERIFY } ota_st_t;   /* VERIFY: ota_end owns the machine */
 
 static volatile ota_st_t      s_state;             /* volatile: read by the supervisor task in ota_reboot_due */
 static esp_ota_handle_t       s_handle;
@@ -307,6 +307,12 @@ int ota_data(const uint8_t *payload, size_t len)
 int ota_end(void)
 {
     if (s_state != OTA_RECV) return E_OTA_PRECOND;
+    /* §19.6: ota_end runs SHA finish, esp_ota_end (ECDSA over ~1.2 MB) and NVS/boot writes, far
+     * longer than the idle stamp tolerates. Refresh the stamp, THEN publish OTA_VERIFY (release):
+     * ota_poll only acts in OTA_RECV, so it can no longer abort a live ota_end. Every exit below
+     * ends in IDLE (ota_fail / ota_reset) or REBOOT. */
+    s_last_data_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    __atomic_store_n(&s_state, OTA_VERIFY, __ATOMIC_RELEASE);
     LT_ASSERT_RET(s_handle != 0, OTA_ASSERT_CODE, E_OTA_WRITE);
     LT_ASSERT_RET(s_target != NULL, OTA_ASSERT_CODE, E_OTA_WRITE);
     if (s_recv != s_size) return ota_fail(E_OTA_WRITE);            /* incomplete transfer */
@@ -314,12 +320,8 @@ int ota_end(void)
     uint8_t got[OTA_SHA_LEN];
     (void)mbedtls_sha256_finish(&s_sha, got);
     mbedtls_sha256_free(&s_sha);
-    if (memcmp(got, s_sha_want, OTA_SHA_LEN) != 0) {
-        ota_ui_post(EV_OTA_ABORTED, 0); (void)esp_ota_abort(s_handle); ota_reset(); return E_OTA_WRITE;
-    }
-    if (ota_batt_ok() != 0) {  /* §19.5 re-check */
-        ota_ui_post(EV_OTA_ABORTED, 0); (void)esp_ota_abort(s_handle); ota_reset(); return E_OTA_PRECOND;
-    }
+    if (memcmp(got, s_sha_want, OTA_SHA_LEN) != 0) return ota_fail(E_OTA_WRITE);
+    if (ota_batt_ok() != 0) return ota_fail(E_OTA_PRECOND);   /* §19.5 re-check */
     ota_ui_post(OTA_PHASE_VERIFYING, 100);
     esp_err_t e = esp_ota_end(s_handle);                          /* ECDSA signature verify */
     s_handle = 0;                                                 /* esp_ota_end frees the handle regardless */
@@ -383,8 +385,10 @@ bool ota_reboot_due(void)
  * Cross-task safety: this runs on the supervisor while the console/cmd task owns the state
  * machine. It can only act after OTA_RECV_TIMEOUT_S with no OTA_DATA, and a producing task
  * anywhere inside ota_data() refreshes the stamp -- so the only way both could be inside the
- * machine at once is a task blocked for > 30 s in a single esp_ota_write (a 4 KB program is
- * ~10-40 ms). §19.6's "abort on disconnect" is satisfied by THIS timeout and deliberately not by
+ * machine at once is (a) a task blocked for > 30 s in a single esp_ota_write (a 4 KB program is
+ * ~10-40 ms), or (b) the instruction-wide window in which a poll has loaded OTA_RECV and a stale
+ * stamp just before ota_end's refresh-then-OTA_VERIFY transition. ota_end itself is safe from
+ * this poll: OTA_VERIFY is not OTA_RECV. §19.6's "abort on disconnect" is satisfied by THIS timeout and deliberately not by
  * the link DETECT edge: a detect flap during a healthy push would abort a good transfer, and the
  * console `ota recv` path does not use DETECT at all (see the §19.6 amendment, Task 10). */
 void ota_poll(void)
