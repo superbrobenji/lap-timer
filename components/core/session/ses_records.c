@@ -88,7 +88,11 @@ int ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, size_t
     bw_u16(&w, (uint16_t)dt); bw_i16(&w, (int16_t)dlat); bw_i16(&w, (int16_t)dlon); bw_i16(&w, (int16_t)dalt);
     bw_u16(&w, (uint16_t)v_cms); bw_u16(&w, clamp_u16(round_div(f->head_e5, 1000)));
     bw_u8(&w, clamp_u8(round_div(f->hacc_mm, 100))); bw_u8(&w, f->sats); bw_u8(&w, fix_flags(f));
-    /* advance the reconstructed previous exactly as the decoder will */
+    /* Advance the reconstructed previous for exactly the fields the delta carries -- the fields the
+     * delta math anchors on. ses_decode_fix additionally sets prev.sacc_mms/pdop_e2 to 0,
+     * prev.fix_type from the flag byte and prev.flags to a synthesised word; none of those feeds
+     * any delta, so the two sides agree on everything that matters, but this is deliberately NOT
+     * "exactly as the decoder will" (io false claim 2). */
     st->prev.gps_us += dt * 1000; st->prev.lat_e7 = f->lat_e7; st->prev.lon_e7 = f->lon_e7;
     st->prev.alt_mm += (int32_t)(dalt * 100); st->prev.gspeed_mms = (int32_t)(v_cms * 10);
     st->prev.head_e5 = (int32_t)(round_div(f->head_e5, 1000) * 1000); st->prev.sats = f->sats;

@@ -15,8 +15,12 @@ int exp_win_puts(exp_t *e, const char *s)
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(s != NULL, EXP_ASSERT_CODE, -1);
     size_t n = strlen(s);
-    /* Buffer/window capacity before a write: every caller pre-checks exp_win_free() against its
-     * own worst-case write size before calling this, so this should never trip in practice. */
+    /* Buffer/window capacity before a write. Most callers pre-check exp_win_free() against their
+     * own worst-case write size (exp_nmea_feed's EXP_NMEA_RESERVE, exp_json's EXP_JSON_HDR_BUF),
+     * but NOT all: exp_vbo_open makes five exp_win_puts calls with no exp_win_free check at all --
+     * it relies on being called on an empty window, which exp_open guarantees (it memsets *e
+     * before dispatching to the per-format open). So this is a real last-resort bound, not a
+     * restatement of a universal caller contract (io false claim 1). */
     CORE_ASSERT_RET(e->win_len + n <= EXP_WINDOW, EXP_ASSERT_CODE, -1);
     memcpy(e->win + e->win_len, s, n); e->win_len += n;
     return 0;
