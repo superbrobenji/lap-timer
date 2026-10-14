@@ -2,6 +2,8 @@
 #include "core/core.h"
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <math.h>
 
 /* Power of 10 rule 5 (spec §17.9, design doc §3): this module's assertions all report
  * JSON_ASSERT_CODE. They guard genuine anomalies -- NULL params, negative/impossible indices --
@@ -58,16 +60,26 @@ int json_skip(const jsmntok_t *toks, int ntoks, int i)
     return j;
 }
 
+/* Returns the token's SOURCE length (not the copied length), so a caller can tell "this token did
+ * not fit my scratch buffer" from "this token is 31 chars" (io:L2). */
 static size_t tok_copy(const char *js, const jsmntok_t *t, char *tmp, size_t cap)
 {
     CORE_ASSERT_RET(js != NULL, JSON_ASSERT_CODE, 0);
     CORE_ASSERT_RET(t != NULL, JSON_ASSERT_CODE, 0);
     CORE_ASSERT_RET(tmp != NULL || cap == 0, JSON_ASSERT_CODE, 0);
-    if (cap == 0) return 0;                      /* a zero-capacity destination is a normal, tested call */
-    size_t len = (size_t)(t->end - t->start);
-    if (len >= cap) len = cap - 1;
+    size_t src = (size_t)(t->end - t->start);
+    if (cap == 0) return src;                 /* a zero-capacity destination is a normal call */
+    size_t len = src >= cap ? cap - 1 : src;
     memcpy(tmp, js + t->start, len); tmp[len] = '\0';
-    return len;
+    return src;
+}
+
+/* Two-line raw comparison: json_tok_eq additionally requires JSMN_STRING, which a primitive
+ * literal is not. */
+static bool json_tok_eq_raw(const char *js, const jsmntok_t *t, const char *s)
+{
+    size_t len = (size_t)(t->end - t->start);
+    return strlen(s) == len && memcmp(js + t->start, s, len) == 0;
 }
 
 bool json_tok_int(const char *js, const jsmntok_t *t, int64_t *out)
@@ -76,9 +88,11 @@ bool json_tok_int(const char *js, const jsmntok_t *t, int64_t *out)
     CORE_ASSERT_RET(t != NULL, JSON_ASSERT_CODE, false);
     CORE_ASSERT_RET(out != NULL, JSON_ASSERT_CODE, false);
     if (t->type != JSMN_PRIMITIVE) return false;
-    char tmp[32]; tok_copy(js, t, tmp, sizeof tmp);
+    char tmp[32];                                        /* 48 for json_tok_double */
+    if (tok_copy(js, t, tmp, sizeof tmp) >= sizeof tmp) return false;   /* io:L2: no truncation */
+    errno = 0;
     char *end; long long v = strtoll(tmp, &end, 10);
-    if (*end != '\0') return false;
+    if (*end != '\0' || errno == ERANGE) return false;
     *out = v; return true;
 }
 
@@ -88,9 +102,11 @@ bool json_tok_double(const char *js, const jsmntok_t *t, double *out)
     CORE_ASSERT_RET(t != NULL, JSON_ASSERT_CODE, false);
     CORE_ASSERT_RET(out != NULL, JSON_ASSERT_CODE, false);
     if (t->type != JSMN_PRIMITIVE) return false;
-    char tmp[48]; tok_copy(js, t, tmp, sizeof tmp);
+    char tmp[48];
+    if (tok_copy(js, t, tmp, sizeof tmp) >= sizeof tmp) return false;   /* io:L2: no truncation */
+    errno = 0;
     char *end; double v = strtod(tmp, &end);
-    if (*end != '\0') return false;
+    if (*end != '\0' || errno == ERANGE || !isfinite(v)) return false;  /* JSON has no inf/NaN */
     *out = v; return true;
 }
 
@@ -99,8 +115,11 @@ bool json_tok_bool(const char *js, const jsmntok_t *t, bool *out)
     CORE_ASSERT_RET(js != NULL, JSON_ASSERT_CODE, false);
     CORE_ASSERT_RET(t != NULL, JSON_ASSERT_CODE, false);
     CORE_ASSERT_RET(out != NULL, JSON_ASSERT_CODE, false);
-    if (js[t->start] == 't') { *out = true; return true; }
-    if (js[t->start] == 'f') { *out = false; return true; }
+    /* io:M3: a JSON string must not set a bool. §15.1 types drag.rollout, display.live_clock and
+     * display.invert as bool, so a quoted or numeric value is a type error, not a truthy value. */
+    if (t->type != JSMN_PRIMITIVE) return false;
+    if (json_tok_eq_raw(js, t, "true"))  { *out = true;  return true; }
+    if (json_tok_eq_raw(js, t, "false")) { *out = false; return true; }
     return false;
 }
 
@@ -110,8 +129,9 @@ size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap)
     CORE_ASSERT_RET(t != NULL, JSON_ASSERT_CODE, 0);
     CORE_ASSERT_RET(out != NULL || cap == 0, JSON_ASSERT_CODE, 0);
     /* jsmn leaves escapes in place; the config/track keys never contain escapes, so a plain copy suffices */
-    size_t r = tok_copy(js, t, out, cap);
-    CORE_ASSERT_RET(cap == 0 || r < cap, JSON_ASSERT_CODE, r); /* postcondition: room was left for the NUL */
+    size_t src = tok_copy(js, t, out, cap);
+    size_t r = (cap == 0) ? 0 : (src < cap ? src : cap - 1);
+    CORE_ASSERT_RET(cap == 0 || r < cap, JSON_ASSERT_CODE, r); /* postcondition: room for the NUL */
     return r;
 }
 

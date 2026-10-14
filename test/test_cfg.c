@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "core/cfg.h"
+#include "core/json.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -315,6 +316,64 @@ static void test_fuzz_mutated_documents_never_corrupt_the_struct(void)
     TEST_ASSERT_EQUAL_INT(500, accepted + rejected);
 }
 
+static void test_bool_fields_reject_a_wrong_json_type(void)
+{
+    /* io:M3: json_tok_bool indexed js[t->start] without checking the type, so any quoted value
+     * starting with 't'/'f' set the flag -- and drag.rollout changes reported drag ET by 1 ft. */
+    cfg_t c; char err[64];
+    const char *j1 = "{\"drag\":{\"rollout\":\"take a hike\"}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, j1, strlen(j1), err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("bad value for drag.rollout", err);
+    TEST_ASSERT_FALSE(c.drag.rollout);
+    const char *j2 = "{\"display\":{\"invert\":\"frobnicate\"}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, j2, strlen(j2), err, sizeof err));
+    TEST_ASSERT_EQUAL_STRING("bad value for display.invert", err);
+    const char *j3 = "{\"display\":{\"live_clock\":1}}";          /* 1 is not a bool */
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, j3, strlen(j3), err, sizeof err));
+    const char *ok = "{\"drag\":{\"rollout\":true},\"display\":{\"invert\":false}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(0, cfg_from_json(&c, ok, strlen(ok), err, sizeof err));
+    TEST_ASSERT_TRUE(c.drag.rollout);
+    TEST_ASSERT_FALSE(c.display.invert);
+}
+
+static void test_numeric_tokens_too_long_or_out_of_range_are_rejected(void)
+{
+    /* io:L2: tok_copy's return was discarded (a 40-digit token was silently truncated to 31
+     * chars) and strtoll/strtod errno was never checked (1e999 saturated to inf and passed). */
+    cfg_t c; char err[64];
+    const char *big = "{\"lap\":{\"min_lap_s\":1111111111111111111111111111111111111111}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, big, strlen(big), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT16(20, c.lap.min_lap_s);
+
+    /* Ruling S2-C: traced against the CURRENT (pre-fix) code -- the 40-digit case above is already
+     * rejected pre-fix because its 31-char truncation saturates strtoll to LLONG_MAX (errno ERANGE,
+     * but *end == '\0', so pre-fix json_tok_int returns true) and get_u16 then rejects v > 65535. It
+     * is green before AND after this fix and proves nothing about truncation on its own. This
+     * 34-char token's 31-char truncation ("0" x 31) parses IN range as 0, so pre-fix it was
+     * SILENTLY ACCEPTED (rc 0, min_lap_s set to 0) -- verified empirically against the unmodified
+     * tree before writing this assertion. Post-fix tok_copy's 34 >= sizeof tmp (32) rejects it. */
+    const char *padded = "{\"lap\":{\"min_lap_s\":0000000000000000000000000000000045}}";
+    cfg_defaults(&c);
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, padded, strlen(padded), err, sizeof err));
+    TEST_ASSERT_EQUAL_UINT16(20, c.lap.min_lap_s);
+
+    /* Ruling S2-B: "1e999" alone is a bare root primitive, which JSMN_STRICT's end-of-buffer check
+     * (core/jsmn.h:174-178) rejects regardless of this fix -- json_parse would return -1. Wrapped in
+     * an array it parses to 2 tokens (verified empirically): toks[0] the array, toks[1] the
+     * primitive "1e999" that strtod saturates to inf. */
+    jsmntok_t toks[8];
+    const char *inf = "[1e999]";
+    int n = json_parse(inf, strlen(inf), toks, 8);
+    TEST_ASSERT_EQUAL_INT(2, n);
+    double d = 0.0;
+    TEST_ASSERT_FALSE(json_tok_double(inf, &toks[1], &d));      /* ERANGE -> not a value */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -333,5 +392,7 @@ int main(void)
     RUN_TEST(test_from_json_rejects_document_deeper_than_the_depth_cap);
     RUN_TEST(test_profile_with_bad_name_leaves_the_struct_untouched);
     RUN_TEST(test_fuzz_mutated_documents_never_corrupt_the_struct);
+    RUN_TEST(test_bool_fields_reject_a_wrong_json_type);
+    RUN_TEST(test_numeric_tokens_too_long_or_out_of_range_are_rejected);
     return UNITY_END();
 }
