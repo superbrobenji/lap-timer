@@ -21,33 +21,32 @@
  * a glyph or icon cell.
  */
 
+/* fb_diff_rect's out-parameter -- the partial-refresh window (7c §5) */
 typedef struct {
     uint16_t x0, y0, x1, y1; /* half-open: [x0,x1) x [y0,y1) */
-    bool     valid;          /* false = no draw has happened yet (nothing is dirty) */
+    bool     valid;          /* false = empty rect (fb_diff_rect found no difference) */
 } fb_rect_t;
 
 typedef struct {
     uint8_t  *bits;   /* caller-owned, (w/8)*h bytes; 0 = black */
     uint16_t  w, h;   /* pixels; w must be a multiple of 8 */
     uint16_t  stride; /* bytes per row = w/8 */
-    fb_rect_t dirty;  /* accumulated bounding box of all draws since fb_clear */
 } fb_t;
 
 /* Initialises fb to draw into `bits` ((w/8)*h caller-owned bytes, uninitialised). w must be a
  * multiple of 8. Does not touch the contents of `bits` — call fb_clear to establish a known
- * starting color. dirty starts invalid (nothing drawn yet). */
+ * starting colour. */
 void fb_init(fb_t *fb, uint8_t *bits, uint16_t w, uint16_t h);
 
-/* Fills the whole framebuffer with `black` (nonzero = all ink/black, 0 = all background/white)
- * and resets dirty to the whole frame (a clear touches every pixel). */
+/* Fills the whole framebuffer with `black` (nonzero = all ink/black, 0 = all background/white). */
 void fb_clear(fb_t *fb, uint8_t black);
 
 /* Draws a w x h rectangle at (x,y): filled solid if `fill`, else a 1px outline. `black` selects
  * ink (nonzero) or background (0). Clipped to the framebuffer bounds; a fully off-frame rect is a
- * no-op that leaves `dirty` unchanged. */
+ * no-op. */
 void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill);
 
-/* Draws a 1px-tall, w-px-wide horizontal line at (x,y). Same clipping/dirty rules as fb_rect. */
+/* Draws a 1px-tall, w-px-wide horizontal line at (x,y). Same clipping rules as fb_rect. */
 void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black);
 
 /* Draws `s` in font `f` starting at pen position (x,y) (y = top of the glyph cell), one fixed-
@@ -65,7 +64,7 @@ int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s);
 
 /* Draws `s` as white glyphs on a solid black opaque cell (each cell f->w x f->h): the inverse of
  * fb_text -- ink pixels become background (white), background pixels (including a no-glyph blank
- * cell) become ink (black). Same clipping/dirty rules as fb_text. Returns the pen x after the
+ * cell) become ink (black). Same clipping rules as fb_text. Returns the pen x after the
  * last character (x + strlen(s) * f->w). */
 int fb_text_inv(fb_t *fb, const font_t *f, int x, int y, const char *s);
 

@@ -34,30 +34,6 @@ static void fb_set_px(fb_t *fb, int x, int y, uint8_t black)
     }
 }
 
-/* Unions the clipped, already-in-bounds region [x0,x1) x [y0,y1) into fb->dirty. A zero-area
- * region (nothing actually drawn) leaves dirty untouched. */
-static void fb_extend_dirty(fb_t *fb, int x0, int y0, int x1, int y1)
-{
-    CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
-    if (x1 <= x0 || y1 <= y0) {
-        return;
-    }
-    uint16_t nx0 = (uint16_t)x0, ny0 = (uint16_t)y0;
-    uint16_t nx1 = (uint16_t)x1, ny1 = (uint16_t)y1;
-    if (!fb->dirty.valid) {
-        fb->dirty.x0 = nx0;
-        fb->dirty.y0 = ny0;
-        fb->dirty.x1 = nx1;
-        fb->dirty.y1 = ny1;
-        fb->dirty.valid = true;
-        return;
-    }
-    if (nx0 < fb->dirty.x0) fb->dirty.x0 = nx0;
-    if (ny0 < fb->dirty.y0) fb->dirty.y0 = ny0;
-    if (nx1 > fb->dirty.x1) fb->dirty.x1 = nx1;
-    if (ny1 > fb->dirty.y1) fb->dirty.y1 = ny1;
-}
-
 void fb_init(fb_t *fb, uint8_t *bits, uint16_t w, uint16_t h)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
@@ -69,11 +45,6 @@ void fb_init(fb_t *fb, uint8_t *bits, uint16_t w, uint16_t h)
     fb->w = w;
     fb->h = h;
     fb->stride = (uint16_t)(w / 8);
-    fb->dirty.x0 = 0;
-    fb->dirty.y0 = 0;
-    fb->dirty.x1 = 0;
-    fb->dirty.y1 = 0;
-    fb->dirty.valid = false;
 }
 
 void fb_clear(fb_t *fb, uint8_t black)
@@ -81,16 +52,13 @@ void fb_clear(fb_t *fb, uint8_t black)
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(fb->bits != NULL, UI_ASSERT_CODE);
     memset(fb->bits, black ? 0x00 : 0xFF, (size_t)fb->stride * (size_t)fb->h);
-    fb->dirty.x0 = 0;
-    fb->dirty.y0 = 0;
-    fb->dirty.x1 = fb->w;
-    fb->dirty.y1 = fb->h;
-    fb->dirty.valid = true;
 }
 
 void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(fb->bits != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID((int)fb->stride * 8 == (int)fb->w, UI_ASSERT_CODE); /* fb_init's invariant: keeps fb_set_px's stride indexing in bounds */
     if (w <= 0 || h <= 0) {
         return;
     }
@@ -103,11 +71,6 @@ void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill)
     if (cx1 <= cx0 || cy1 <= cy0) {
         return;
     }
-    /* postcondition of the clip above: the fill/outline loops below never touch an out-of-frame pixel */
-    CORE_ASSERT_VOID(cx0 >= 0, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(cx1 <= (int)fb->w, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(cy0 >= 0, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(cy1 <= (int)fb->h, UI_ASSERT_CODE);
 
     if (fill) {
         for (int yy = cy0; yy < cy1; yy++) {
@@ -131,12 +94,13 @@ void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill)
             for (int yy = cy0; yy < cy1; yy++) fb_set_px(fb, right, yy, black);
         }
     }
-    fb_extend_dirty(fb, cx0, cy0, cx1, cy1);
 }
 
 void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(fb->bits != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID((int)fb->stride * 8 == (int)fb->w, UI_ASSERT_CODE); /* fb_init's invariant: keeps fb_set_px's stride indexing in bounds */
     if (w <= 0 || y < 0 || y >= (int)fb->h) {
         return;
     }
@@ -146,24 +110,23 @@ void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black)
     if (cx1 <= cx0) {
         return;
     }
-    CORE_ASSERT_VOID(cx0 >= 0, UI_ASSERT_CODE);        /* postcondition of the clip above */
-    CORE_ASSERT_VOID(cx1 <= (int)fb->w, UI_ASSERT_CODE);
     for (int xx = cx0; xx < cx1; xx++) {
         fb_set_px(fb, xx, y, black);
     }
-    fb_extend_dirty(fb, cx0, y, cx1, y + 1);
 }
 
 /* Shared opaque 1bpp cell blit used by fb_text (per glyph) and fb_icon: draws a cw x ch cell at
  * (x,y) from `bitmap` (MSB-first, row-major, stride bytes/row, bit=1 is ink), or an all-
  * background cell when `bitmap` is NULL (used for fb_text's "no glyph" case). Clips per-pixel to
- * the framebuffer bounds and extends dirty by the clipped bounding box. `invert` flips the cell's
- * sense (fb_text_inv): ink pixels become background and background pixels become ink, so the
- * NULL-bitmap "no glyph" case (ink 0 throughout) still comes out right -- a solid ink cell. */
+ * the framebuffer bounds. `invert` flips the cell's sense (fb_text_inv): ink pixels become
+ * background and background pixels become ink, so the NULL-bitmap "no glyph" case (ink 0
+ * throughout) still comes out right -- a solid ink cell. */
 static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, const uint8_t *bitmap, bool invert)
 {
     CORE_ASSERT_VOID(fb != NULL, UI_ASSERT_CODE);
     CORE_ASSERT_VOID(cw > 0 && ch > 0 && stride > 0, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(fb->bits != NULL, UI_ASSERT_CODE);
+    CORE_ASSERT_VOID(stride * 8 >= cw, UI_ASSERT_CODE); /* keeps bitmap[row*stride + col/8] inside its row */
     int cx0 = x < 0 ? 0 : x;
     int cy0 = y < 0 ? 0 : y;
     int cx1 = x + cw;
@@ -173,12 +136,7 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
     if (cx1 <= cx0 || cy1 <= cy0) {
         return;
     }
-    /* postcondition of the clip above: the blit loop below never touches an out-of-frame pixel.
-     * `bitmap` is intentionally not asserted non-NULL -- NULL is the documented "no glyph" cell. */
-    CORE_ASSERT_VOID(cx0 >= 0, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(cx1 <= (int)fb->w, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(cy0 >= 0, UI_ASSERT_CODE);
-    CORE_ASSERT_VOID(cy1 <= (int)fb->h, UI_ASSERT_CODE);
+    /* `bitmap` is intentionally not asserted non-NULL -- NULL is the documented "no glyph" cell. */
 
     for (int iy = cy0; iy < cy1; iy++) {
         int row = iy - y;
@@ -195,7 +153,6 @@ static void fb_blit_1bpp(fb_t *fb, int x, int y, int cw, int ch, int stride, con
             fb_set_px(fb, ix, iy, invert ? (uint8_t)(ink ^ 1u) : ink);
         }
     }
-    fb_extend_dirty(fb, cx0, cy0, cx1, cy1);
 }
 
 /* Draws `s` left-to-right starting at (x,y), one fixed-width font cell per character, opaque

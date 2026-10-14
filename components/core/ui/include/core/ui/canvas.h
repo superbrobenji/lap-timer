@@ -31,14 +31,13 @@
  * constrains width, since bits are packed horizontally within a row.
  *
  * CANVAS_VISIBLE_W (Plan 7 T3 fix 1, ruling T3-R1) names that true visible width explicitly, so
- * every caller checking "did this draw land where the panel can actually show it" -- ui.c's
- * render_now() dirty-box bounds check, and test_screens.c's per-golden ink-column scan (a content
- * check, not the fb->dirty box: fb_clear() always reports the whole padded CANVAS_W as dirty,
- * since clearing legitimately touches every addressable byte, padding columns included, so
- * fb->dirty can never usefully be compared against CANVAS_VISIBLE_W) -- compares against 250 on
- * the 213 canvas, not the padded 256-wide buffer: nothing may draw at x >= CANVAS_VISIBLE_W. On
- * the 296 canvas the buffer width already equals the visible width, so CANVAS_VISIBLE_W ==
- * CANVAS_W there. */
+ * the one caller checking "did this draw land where the panel can actually show it" --
+ * test_screens.c's per-golden ink-column scan (a content check: fb_t carries no dirty box any
+ * more (io:M4), and fb_clear() touches every addressable byte anyway, padding columns included,
+ * so only scanning the actual drawn ink can tell "nothing drawn past CANVAS_VISIBLE_W" from "the
+ * whole padded frame was cleared") -- compares against 250 on the 213 canvas, not the padded
+ * 256-wide buffer: nothing may draw at x >= CANVAS_VISIBLE_W. On the 296 canvas the buffer width
+ * already equals the visible width, so CANVAS_VISIBLE_W == CANVAS_W there. */
 #if CANVAS_213
 #define CANVAS_VISIBLE_W 250
 #else

@@ -46,59 +46,35 @@ void setUp(void)
 }
 void tearDown(void) {}
 
-/* ---- fb_init / fb_clear / dirty-box bookkeeping (spec §20.2 dirty tracking) ---- */
+/* ---- fb_init / fb_clear geometry + off-frame no-op (spec §20.2) ---- */
 
-static void test_fb_init_starts_with_no_dirty_region(void)
+static void test_fb_init_sets_the_geometry(void)
 {
-    /* setUp() already ran fb_clear (dirty = whole frame); re-init to observe fb_init's own
-     * invariant, that nothing is dirty until the first clear/draw. */
+    /* io:M4/R27: fb_t no longer carries a dirty box (ui.c's partial window comes from
+     * fb_diff_rect against the panel's last accepted frame, 7c §5), so fb_init's whole
+     * observable contract is the geometry it derives. */
+    memset(&s_fb, 0xAA, sizeof s_fb);
     fb_init(&s_fb, s_bits, FB_W, FB_H);
-    TEST_ASSERT_FALSE(s_fb.dirty.valid);
+    TEST_ASSERT_EQUAL_PTR(s_bits, s_fb.bits);
     TEST_ASSERT_EQUAL_UINT16(FB_W, s_fb.w);
     TEST_ASSERT_EQUAL_UINT16(FB_H, s_fb.h);
     TEST_ASSERT_EQUAL_UINT16(FB_W / 8, s_fb.stride);
 }
 
-static void test_fb_clear_marks_the_whole_frame_dirty(void)
+static void test_off_frame_draws_touch_no_bits(void)
 {
-    /* setUp already cleared once; clear again explicitly so this test does not depend on that. */
-    fb_clear(&s_fb, 1);
-    TEST_ASSERT_TRUE(s_fb.dirty.valid);
-    TEST_ASSERT_EQUAL_UINT16(0, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(0, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(FB_W, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(FB_H, s_fb.dirty.y1);
-    /* black=1 -> every byte fully ink (0x00), since 0 = black */
-    TEST_ASSERT_EQUAL_UINT8(0x00, s_fb.bits[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x00, s_fb.bits[(size_t)s_fb.stride * s_fb.h - 1]);
-}
-
-static void test_dirty_box_accumulates_bounding_box_of_draws(void)
-{
-    /* fb_clear (in setUp) already set dirty to the whole frame; re-init to start from "nothing
-     * drawn yet" so this test can observe accumulation from an empty box. */
-    fb_init(&s_fb, s_bits, FB_W, FB_H);
-    TEST_ASSERT_FALSE(s_fb.dirty.valid);
-
-    fb_rect(&s_fb, 10, 20, 5, 5, 1, true); /* touches [10,15) x [20,25) */
-    TEST_ASSERT_TRUE(s_fb.dirty.valid);
-    TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(20, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(15, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
-
-    fb_rect(&s_fb, 100, 5, 5, 5, 1, true); /* touches [100,105) x [5,10) -> union grows both ways */
-    TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(5, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(105, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
-
-    /* A draw entirely off-frame is a no-op: it must not touch bits and must not move dirty. */
+    /* The "a fully off-frame draw is a no-op" invariant the deleted dirty-box test carried,
+     * checked against the bits themselves -- a stronger check than the box ever was. */
+    static uint8_t copy[sizeof s_bits];
+    fb_clear(&s_fb, 0);
+    memcpy(copy, s_bits, sizeof copy);
     fb_icon(&s_fb, ICON_GPS_NOFIX, 1000, 1000);
-    TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(5, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(105, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
+    fb_rect(&s_fb, -50, -50, 10, 10, 1, true);
+    fb_hline(&s_fb, 4, -3, 40, 1);
+    fb_text(&s_fb, &FONT_SMALL, 400, 4, "OFF");
+    TEST_ASSERT_EQUAL_MEMORY(copy, s_bits, sizeof copy);
+    fb_clear(&s_fb, 1);                                  /* and a clear really touches every byte */
+    for (size_t i = 0; i < sizeof s_bits; i++) TEST_ASSERT_EQUAL_UINT8(0x00u, s_bits[i]);
 }
 
 /* ---- font-size coverage (roadmap exit for session 4.1) + icon/bar goldens ---- */
@@ -215,11 +191,6 @@ static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
     fb_bar(&s_fb, 250, 90, 80, 20, 75);
 
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("clip_edge.pbm"), &s_fb));
-
-    /* Belt-and-braces on top of the ASan/UBSan build (test/CMakeLists.txt Debug default): the
-     * dirty box itself must never claim to extend past the frame. */
-    TEST_ASSERT_TRUE(s_fb.dirty.x1 <= s_fb.w);
-    TEST_ASSERT_TRUE(s_fb.dirty.y1 <= s_fb.h);
 }
 
 /* ---- ui_layout_label (core/ui/menu_labels.c, #98) ---- */
@@ -260,9 +231,8 @@ static void test_ui_layout_label(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_fb_init_starts_with_no_dirty_region);
-    RUN_TEST(test_fb_clear_marks_the_whole_frame_dirty);
-    RUN_TEST(test_dirty_box_accumulates_bounding_box_of_draws);
+    RUN_TEST(test_fb_init_sets_the_geometry);
+    RUN_TEST(test_off_frame_draws_touch_no_bits);
     RUN_TEST(test_text_huge_renders_delta);
     RUN_TEST(test_text_inv_is_white_on_black);
     RUN_TEST(test_text_inv_no_glyph_cell_is_solid_black);

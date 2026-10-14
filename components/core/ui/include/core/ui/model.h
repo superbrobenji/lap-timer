@@ -208,19 +208,17 @@ int ui_layout_label(const trk_venue_t *venue, uint8_t choice, char *buf, size_t 
  * three OTA_PHASE_* enumerators reads as RECEIVING, the phase the screen is first shown in. */
 const char *ota_phase_label(uint8_t phase);
 
-/* Renders the moto riding screens: dispatches on m->mode + m->page, clears the fb, draws the
- * screen and leaves fb->dirty as the changed region (the whole frame for a full screen render).
- * SCR_MODE_DRAG renders pages 0 (benches, §11.4)/1 (all gates of the last run)/2 (best per gate
- * this session); see the SCR_MODE_DRAG case in screens_moto.c. Unlike screens_render() below, this
- * does not look at m->screen -- it always renders the riding layout, which is what the session 4.2
- * host tests exercise directly. */
+/* Renders the moto riding screens: dispatches on m->mode + m->page, clears the fb and draws the
+ * screen. SCR_MODE_DRAG renders pages 0 (the engine-state/latest-gate card)/1 (all gates of the
+ * last run)/2 (best per gate this session); see the SCR_MODE_DRAG case in screens_moto.c. Unlike
+ * screens_render() below, this does not look at m->screen -- it always renders the riding layout,
+ * which is what the host tests exercise directly. */
 void screens_moto_render(fb_t *fb, const screen_model_t *m);
 
 /* Top-level render entry point (spec §20.6-20.7): dispatches on m->screen -- SCR_RIDING to
  * screens_moto_render(), SCR_MENU to the menu list renderer, SCR_ONESHOT to the one-shot screen
- * renderer (selected by m->oneshot). Every path clears the fb and leaves fb->dirty as the changed
- * region, same contract as screens_moto_render(). This is the entry point the app-side ui task
- * (session 4.3 Task 2) calls every render. */
+ * renderer (selected by m->oneshot). Every path clears the fb first. This is the entry point the
+ * app-side ui task calls every render. */
 void screens_render(fb_t *fb, const screen_model_t *m);
 
 #endif
