@@ -94,7 +94,7 @@ static void test_dirty_box_accumulates_bounding_box_of_draws(void)
     TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
 
     /* A draw entirely off-frame is a no-op: it must not touch bits and must not move dirty. */
-    fb_icon(&s_fb, ICON_GPS, 1000, 1000);
+    fb_icon(&s_fb, ICON_GPS_NOFIX, 1000, 1000);
     TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
     TEST_ASSERT_EQUAL_UINT16(5, s_fb.dirty.y0);
     TEST_ASSERT_EQUAL_UINT16(105, s_fb.dirty.x1);
@@ -181,7 +181,7 @@ static void test_composite_lap_screen(void)
     fb_text(&s_fb, &FONT_SMALL, 4, 100, "S2  1:12.30"); /* x[4,81) y[100,112) */
     fb_text(&s_fb, &FONT_SMALL, 4, 114, "-0.21"); /* x[4,39) y[114,126) */
 
-    fb_icon(&s_fb, ICON_GPS, 270, 100);         /* x[270,282) y[100,112) */
+    fb_icon(&s_fb, ICON_GPS_NOFIX, 270, 100);   /* x[270,282) y[100,112) */
 
     fb_bar(&s_fb, 90, 100, 170, 16, 62); /* stand-in session progress/level indicator, x[90,260) y[100,116) */
 
@@ -208,7 +208,7 @@ static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
     fb_text(&s_fb, &FONT_SMALL, 400, 4, "OFF");
 
     /* Icon straddling the bottom-right corner. */
-    fb_icon(&s_fb, ICON_BLE, 290, 120);
+    fb_icon(&s_fb, ICON_LINK, 290, 120);
 
     /* Bar whose nominal width runs past the right edge; the fill fraction is still computed from
      * the full logical width (80), only the drawing is clipped. */

@@ -799,6 +799,54 @@ static void test_strip_link(void)
     TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * (ICON_W + 2) + 6, FAULT_STRIP_Y + 6));
 }
 
+/* io:H1: §17.4's Icon column, asserted directly rather than inferred from a golden's geometry.
+ * Before this fix bit 1 drew the same strike as bit 0 (a dead GPS and a searching GPS were
+ * indistinguishable), bits 2 and 13 drew nothing, and bit 5 drew the HEALTHY disk. */
+static void test_fault_icon_table_matches_spec_17_4(void)
+{
+    TEST_ASSERT_EQUAL_INT((int)ICON_GPS_STRIKE,  ui_fault_icon_for_bit(SCR_SYS_GPS_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_GPS_NOFIX,   ui_fault_icon_for_bit(SCR_SYS_GPS_NOFIX));
+    TEST_ASSERT_EQUAL_INT((int)ICON_IMU_STRIKE,  ui_fault_icon_for_bit(SCR_SYS_IMU_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_IMU_Q,       ui_fault_icon_for_bit(SCR_SYS_IMU_SUSPECT));
+    TEST_ASSERT_EQUAL_INT(-1,                    ui_fault_icon_for_bit(SCR_SYS_DISP_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_DISK_STRIKE, ui_fault_icon_for_bit(SCR_SYS_STORAGE_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_DISK_FULL,   ui_fault_icon_for_bit(SCR_SYS_STORAGE_FULL));
+    TEST_ASSERT_EQUAL_INT((int)ICON_DISK_WARN,   ui_fault_icon_for_bit(SCR_SYS_STORAGE_DEGRADED));
+    TEST_ASSERT_EQUAL_INT((int)ICON_BATT_LOW,    ui_fault_icon_for_bit(SCR_SYS_BATT_LOW));
+    TEST_ASSERT_EQUAL_INT((int)ICON_SAFE,        ui_fault_icon_for_bit(SCR_SYS_SAFE_MODE));
+    TEST_ASSERT_EQUAL_INT(-1,                    ui_fault_icon_for_bit(SCR_SYS_HEAP_LOW));
+    TEST_ASSERT_EQUAL_INT((int)ICON_THERMOMETER, ui_fault_icon_for_bit(SCR_SYS_DISP_TEMP_THROTTLE));
+    TEST_ASSERT_EQUAL_INT(-1,                    ui_fault_icon_for_bit(SCR_SYS_OTA_PENDING));
+    TEST_ASSERT_EQUAL_INT((int)ICON_LEAN_Q,      ui_fault_icon_for_bit(SCR_SYS_FUSION_DISAGREE));
+    TEST_ASSERT_EQUAL_INT((int)ICON_SIM,         ui_fault_icon_for_bit(SCR_UI_SIM));
+    TEST_ASSERT_EQUAL_INT((int)ICON_MOVING,      ui_fault_icon_for_bit(SCR_UI_MOVING));
+    TEST_ASSERT_EQUAL_INT((int)ICON_LINK,        ui_fault_icon_for_bit(SCR_UI_LINK));
+    TEST_ASSERT_EQUAL_INT(-1, ui_fault_icon_for_bit(-1));              /* out of range */
+    TEST_ASSERT_EQUAL_INT(-1, ui_fault_icon_for_bit(SCR_STRIP_BITS));
+    for (int a = 0; a < SCR_STRIP_BITS; a++)                           /* no shared glyphs */
+        for (int b = a + 1; b < SCR_STRIP_BITS; b++) {
+            int ia = ui_fault_icon_for_bit(a), ib = ui_fault_icon_for_bit(b);
+            if (ia >= 0 && ib >= 0) TEST_ASSERT_NOT_EQUAL_INT(ia, ib);
+        }
+}
+
+/* The three bits that used to draw nothing / the wrong glyph now each draw their own. */
+static void test_strip_imu_disk_lean(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_RIDING; m.mode = SCR_MODE_LAP; m.page = 0;
+    m.flags = (1u << SCR_SYS_IMU_DEAD) | (1u << SCR_SYS_STORAGE_DEAD) | (1u << SCR_SYS_FUSION_DISAGREE);
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("strip_imu_disk_lean.pbm"), &s_fb));
+    /* three slots, ascending bit order leftwards from the anchor: IMU_DEAD(2), STORAGE_DEAD(5),
+     * FUSION_DISAGREE(13). Probe one ink pixel inside each (fault_strip_left_x is static). */
+    const int pitch = ICON_W + 2;
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 + 1, FAULT_STRIP_Y + 1));              /* IMU "?" bowl */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - pitch + 1, FAULT_STRIP_Y + 1));      /* disk outline */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * pitch + 5, FAULT_STRIP_Y + 11)); /* lean ground */
+}
+
 static void test_oneshot_ota_fail(void)
 {
     screen_model_t m = {0};
@@ -986,6 +1034,8 @@ int main(void)
     RUN_TEST(test_oneshot_ota_rebooting);
     RUN_TEST(test_strip_sim_and_moving);
     RUN_TEST(test_strip_link);
+    RUN_TEST(test_fault_icon_table_matches_spec_17_4);
+    RUN_TEST(test_strip_imu_disk_lean);
     RUN_TEST(test_oneshot_calibrate);
     RUN_TEST(test_oneshot_newtrack_step0);
     RUN_TEST(test_oneshot_newtrack_step1);

@@ -199,19 +199,18 @@ static void fmt_time_s(char *buf, uint32_t ms)
 
 /* ---- shared fault-icon strip (spec §20.5 + §17.4) ---- */
 
-/* Bit position (SCR_SYS_*, model.h) -> icon (icons.h), or -1 for a bit with no icon: the §17.4
- * "--" bits (SYS_DISP_DEAD, SYS_HEAP_LOW, SYS_OTA_PENDING) plus SYS_IMU_DEAD and
- * SYS_FUSION_DISAGREE, neither of which has a matching bitmap in icons.h (only ICON_IMU_Q exists,
- * no IMU strike-through / lean "?" icon). SYS_STORAGE_DEAD has no disk-strike bitmap either, so it
- * falls back to the plain ICON_DISK glyph. Bits 14/15/16 are ui-level (SCR_UI_SIM/SCR_UI_MOVING/
- * SCR_UI_LINK, model.h), not §17.4 sys flags -- they always draw. */
+/* Bit position (SCR_SYS_*, model.h) -> icon (icons.h), per spec §17.4's Icon column and §20.5.
+ * -1 is a bit §17.4 marks "--": SYS_DISP_DEAD (the panel is gone -- there is nowhere to draw it),
+ * SYS_HEAP_LOW and SYS_OTA_PENDING. Bits 14/15/16 are ui-level (SCR_UI_SIM/SCR_UI_MOVING/
+ * SCR_UI_LINK, model.h), not §17.4 sys flags -- they always draw. io:H1: bits 1, 2, 5 and 13 used
+ * to map to the wrong glyph or to nothing; every §17.4 bit with an Icon entry now has its own. */
 static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     (int8_t)ICON_GPS_STRIKE,    /* 0  SYS_GPS_DEAD */
-    (int8_t)ICON_GPS_STRIKE,    /* 1  SYS_GPS_NOFIX */
-    -1,                         /* 2  SYS_IMU_DEAD */
+    (int8_t)ICON_GPS_NOFIX,     /* 1  SYS_GPS_NOFIX */
+    (int8_t)ICON_IMU_STRIKE,    /* 2  SYS_IMU_DEAD */
     (int8_t)ICON_IMU_Q,         /* 3  SYS_IMU_SUSPECT */
     -1,                         /* 4  SYS_DISP_DEAD */
-    (int8_t)ICON_DISK,          /* 5  SYS_STORAGE_DEAD */
+    (int8_t)ICON_DISK_STRIKE,   /* 5  SYS_STORAGE_DEAD */
     (int8_t)ICON_DISK_FULL,     /* 6  SYS_STORAGE_FULL */
     (int8_t)ICON_DISK_WARN,     /* 7  SYS_STORAGE_DEGRADED */
     (int8_t)ICON_BATT_LOW,      /* 8  SYS_BATT_LOW (special-cased below for the "%<pct>" label) */
@@ -219,17 +218,13 @@ static const int8_t FAULT_ICON_FOR_BIT[SCR_STRIP_BITS] = {
     -1,                         /* 10 SYS_HEAP_LOW */
     (int8_t)ICON_THERMOMETER,   /* 11 SYS_DISP_TEMP_THROTTLE */
     -1,                         /* 12 SYS_OTA_PENDING */
-    -1,                         /* 13 SYS_FUSION_DISAGREE */
+    (int8_t)ICON_LEAN_Q,        /* 13 SYS_FUSION_DISAGREE */
     (int8_t)ICON_SIM,           /* 14 SCR_UI_SIM (ui-level, model.h) */
     (int8_t)ICON_MOVING,        /* 15 SCR_UI_MOVING (ui-level, model.h) */
     (int8_t)ICON_LINK,          /* 16 SCR_UI_LINK (ui-level, model.h) */
 };
 
-/* Shared by fault_strip() and fault_strip_left_x() (PF-4): the icon (icons.h) for `bit`
- * (SCR_SYS_*, model.h), or -1 if that bit draws no icon. The lookup itself lives in the one table
- * above -- this wrapper is what makes "both functions use it" a compile-time fact rather than a
- * convention two call sites could quietly drift apart on. */
-static int fault_icon_for_bit(int bit)
+int ui_fault_icon_for_bit(int bit)
 {
     CORE_ASSERT_RET(bit >= 0, UI_ASSERT_CODE, -1);
     CORE_ASSERT_RET(bit < SCR_STRIP_BITS, UI_ASSERT_CODE, -1);
@@ -251,7 +246,7 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
-        int icon = fault_icon_for_bit(bit);
+        int icon = ui_fault_icon_for_bit(bit);
         if (icon < 0) {
             continue;
         }
@@ -283,7 +278,7 @@ void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct)
 
 /* x of the leftmost icon fault_strip() will draw for `flags`, or CANVAS_VISIBLE_W when it draws
  * none. Walks the same bit order / pitch stepping as fault_strip() above, through the same
- * fault_icon_for_bit() table (PF-4), so the two can never disagree about which bits draw. Unlike
+ * ui_fault_icon_for_bit() table (PF-4), so the two can never disagree about which bits draw. Unlike
  * fault_strip(), this takes no batt_pct -- so for SYS_BATT_LOW it reserves the widest "%<pct>"
  * label fault_strip() could ever draw ("100%", 4 glyphs) rather than the caller's actual
  * percentage. That makes the x this returns always <= fault_strip()'s real left edge for any
@@ -306,7 +301,7 @@ static int fault_strip_left_x(uint32_t flags)
         if ((flags & (1u << bit)) == 0u) {
             continue;
         }
-        if (fault_icon_for_bit(bit) < 0) {
+        if (ui_fault_icon_for_bit(bit) < 0) {
             continue;
         }
         if (bit == SCR_SYS_BATT_LOW) {

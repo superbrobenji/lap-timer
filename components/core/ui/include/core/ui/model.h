@@ -188,10 +188,14 @@ enum {
 
 /* Draws the shared fault-icon strip (spec §20.5 + §17.4): for each set bit in `flags` that maps
  * to an icon, draws its 12x12 icon right-to-left along the bottom-right of the frame. Bits with
- * no icon (§17.4 "--": SYS_DISP_DEAD, SYS_HEAP_LOW, SYS_OTA_PENDING; plus SYS_IMU_DEAD and
- * SYS_FUSION_DISAGREE, which have no matching bitmap in icons.h) draw nothing. Exposed so the
- * DRAG renderer (Task 2) reuses it. */
+ * no icon (§17.4 "--": SYS_DISP_DEAD, SYS_HEAP_LOW, SYS_OTA_PENDING) draw nothing -- every other
+ * §17.4 bit now has its own glyph (io:H1). Exposed so the DRAG renderer (Task 2) reuses it. */
 void fault_strip(fb_t *fb, uint32_t flags, uint8_t batt_pct);
+
+/* The icon (core/ui/icons.h) spec §17.4/§20.5 assigns to strip bit `bit` (SCR_SYS_* / SCR_UI_*
+ * above), or -1 when that bit draws none. One table, shared by fault_strip() and its width
+ * helper, and asserted against §17.4 by test/test_screens.c (io:H1). */
+int ui_fault_icon_for_bit(int bit);
 
 /* "Layout: Auto" or "Layout: <name>" for the Layout menu item (spec §20.7, #98): choice 0 is
  * Auto, choice i (1..venue->n_layouts) is venue->layouts[i-1].name. A NULL venue or a choice
