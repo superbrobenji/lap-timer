@@ -42,10 +42,11 @@ int  board_buttons_read(uint8_t *mask);            /* bit0 MODE, bit1 UP, bit2 D
  * bits again. Never called from production code paths. */
 void board_buttons_override(uint8_t mask, bool on);
 
-/* §20.8 / Appendix A: contact-bounce guard for the three button GPIOs, in milliseconds. Lives
- * here rather than inside the board driver so the ISR's guard and the ui's "level sampled 30 ms
- * after the edge" are one number (audit fix wave app:L6 -- the ISR used 25 ms and the ui a
- * different mechanism at a different time constant). */
+/* §20.8 / Appendix A: the board ISR's per-pin contact-bounce guard for the three button GPIOs,
+ * in milliseconds: an edge within this window of the pin's last accepted edge is dropped (audit
+ * fix wave app:L6 -- the ISR used 25 ms before). It is the ONLY user of this constant. §20.8's
+ * "level sampled 30 ms after the edge" is NOT implemented: the ISR reads the level at the edge and
+ * the ui reconciles the level once per loop iteration. */
 #define BTN_DEBOUNCE_MS 30
 
 #ifdef ESP_PLATFORM   /* QueueHandle_t needs FreeRTOS headers, absent from the host test build */

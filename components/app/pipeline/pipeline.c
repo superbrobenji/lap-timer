@@ -1393,9 +1393,10 @@ bool pipeline_sensors_ok(void)
 {
     /* §19.4's OTA-validate condition (R1, replacing pipeline_gps_seen): true once a GPS fix has
      * been ingested, OR immediately and permanently on a build whose GPS driver is not a live
-     * receiver. On moto_sim this is the fix condition as before; on moto_neo6m it is the second
-     * arm, which is the whole point -- without it the stub's gps_poll()==0 made every OTA to the
-     * only release env revert at the next reset (audit §7.1). Once the Plan-08 UBX driver sets
+     * receiver. gps_sim leaves .live at 0, so moto_sim takes the second arm too: its gate opens at
+     * latch time with no fix. On moto_neo6m the second arm is the whole point -- without it the
+     * stub's gps_poll()==0 made every OTA to the only release env revert at the next reset
+     * (audit §7.1). Once the Plan-08 UBX driver sets
      * live = 1, the gate tightens back to "a real fix was seen" with no code change here.
      * Fail-closed: before pipeline_init_drivers has latched s_gps_latched the answer is false,
      * because a pipeline that never initialised has not proven the build healthy. */
@@ -1408,7 +1409,10 @@ uint32_t pipeline_still_for_ms(void)
      * the two cases are deliberately indistinguishable, because the only caller tests
      * `>= OTA_STILL_MIN_MS`, and both mean "not yet still long enough". Before any motion edge
      * the stamp is 0, so the figure is uptime modulo 2^32 ms (a device that has never reported
-     * motion has been still for its entire life). */
+     * motion has been still for its entire life). The motion state only updates when a fix record
+     * arrives: if a live receiver goes SILENT (no records at all) while the device is "moving",
+     * this returns 0 until records resume or the device reboots, and every push is refused. That
+     * is the conservative direction and latent until Plan 8 (#123); stubs and sim never hit it. */
     uint32_t since = s_still_since_ms;
     if (since == STILL_MOVING) return 0u;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);

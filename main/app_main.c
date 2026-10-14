@@ -72,8 +72,8 @@ static void boot_banner(esp_reset_reason_t reason)
  * unique session ids (boot_cnt stays 0, so open_session regenerates S00000_001 every boot) -- so
  * it gets a sys_flag a peer and the fault strip can see, not one ESP_LOGE. sys_flags_set() is an
  * atomic OR on a static word, safe before sup_start(); the supervisor's first emit_faults() after
- * its queues exist publishes the bit (s_flags_prev stays 0 until then). The errlog entry goes
- * after the flag so it exists in the RAM ring even though its NVS persist will fail. */
+ * its queues exist publishes the bit (s_flags_prev stays 0 until then). The errlog entry is
+ * still recorded in the RAM ring even though its NVS persist will fail. */
 static void boot_nvs_dead(void)
 {
     sys_flags_set(SYS_NVS_DEAD);

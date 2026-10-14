@@ -236,8 +236,10 @@ static void ota_rollback_post_retry(void)
  * Plan-03 gps_neo6m stub can never satisfy (gps_poll always returns 0) -- so on moto_neo6m, the
  * only release env, every applied image stayed PENDING_VERIFY, the bootloader reverted it at the
  * next reset, and the un-cleared ota_pend flag then refused every later push until a USB flash.
- * pipeline_sensors_ok() is the same fix condition on moto_sim and is true on any build whose GPS
- * driver is not a live receiver (gps_profile_t.live == 0). */
+ * pipeline_sensors_ok() is true on any build whose GPS driver is not a live receiver
+ * (gps_profile_t.live == 0) -- that includes moto_sim, whose gps_sim leaves .live at 0, so there
+ * the gate opens as soon as the pipeline has latched its drivers, with NO fix required. Only a
+ * live driver (Plan 8) makes it wait for a real fix. */
 static void ota_try_validate(uint32_t uptime_s)
 {
     if (!s_ota_awaiting) return;
@@ -325,7 +327,10 @@ static void check_heap(void)
 /* §17.2 stack line (app:M5). One registered task per tick, round-robin, so the loop stays short
  * and every task is sampled once per HB_COUNT seconds; once per task per boot (stack_logged),
  * because a task that dipped below the line will keep reading below it -- the high-water mark
- * never recovers. arg packs the task id and the headroom: (hb_id << 16) | high_water. */
+ * never recovers. arg packs the task id and the headroom: (hb_id << 16) | high_water. errlog_add
+ * collapses consecutive identical CODES (M1), so when two tasks go low on consecutive ticks with
+ * no other errlog record between, the second report replaces the first (latest task wins; `dbg
+ * mem` shows every task's high-water mark). Same for E_SYS_TASK_STALL (S3-18). */
 static void check_stack(void)
 {
     uint8_t id = s_stack_scan;
@@ -346,12 +351,14 @@ static void check_stack(void)
  * g_ui_evt_q is the ui's. A second producer onto a FreeRTOS queue is legal -- xQueueSend is
  * multi-producer safe -- whereas g_stream_ring is a relaxed-head SPSC ring with the pipeline as
  * its single documented producer, so stream_push() is NEVER called from here (design §2 R6).
- * arg16 = the sys_flags bit index; flags = 1 when the bit was SET, 0 when it was CLEARED (both
- * are what the ui copy reads). The logger's handle_event encodes only arg32 (ses_encode_event),
+ * arg16 = the sys_flags bit index; flags = 1 when the bit was SET, 0 when it was CLEARED (the
+ * ui copy carries both, but ui.c currently ignores EV_FAULT -- default: break -- and reads
+ * sys_flags_get() directly for its fault strip; R6 mandates the post regardless). The logger's handle_event encodes only arg32 (ses_encode_event),
  * so arg32 = (bit << 8) | set is what reaches the session log.
  * Bounded by 32 iterations. The early return keeps s_flags_prev un-advanced until both queues
  * exist (sup_start() runs before app_main's lt_ipc_init(), so the first tick has neither), which
- * is what makes the boot-time flags -- SAFE_MODE, STORAGE_DEAD, NVS_DEAD -- reach the ui at all. */
+ * is what makes the boot-time flags -- SAFE_MODE, STORAGE_DEAD, NVS_DEAD -- reach the queues (the
+ * session log and the ui queue) at all; the ui's strip sees them through sys_flags either way. */
 static void emit_faults(void)
 {
     if (g_evt_q == NULL || g_ui_evt_q == NULL) return;
@@ -374,7 +381,8 @@ static void emit_faults(void)
  * says "in debug builds only"; this project ships one build flavour (no poisoning is configured
  * in sdkconfig.defaults, so a #if CONFIG_HEAP_POISONING_* guard would compile the line out on
  * every env and leave §17.1 claiming a check that never runs). It therefore runs unconditionally:
- * without poisoning the walk still validates every allocator block header and canary, it is a
+ * without poisoning the walk validates the TLSF control structure and every block header (no
+ * canaries: CONFIG_HEAP_POISONING_DISABLED, multi_heap_check is tlsf_check only), it is a
  * header walk over a few hundred blocks once a minute, and the supervisor has the budget. §17.1
  * is amended accordingly (Task 10). */
 static void check_heap_integrity(uint32_t uptime_s)

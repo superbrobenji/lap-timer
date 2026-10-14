@@ -15,6 +15,9 @@
 
 #define BATT_SAMPLES 64   /* §16.4: 64 samples ... */
 #define BATT_TRIM    8    /* ... discard the 8 highest and the 8 lowest, mean the middle 48 */
+/* The divisor of the trimmed mean is n - 2*trim; it is a build-time constant here, so guard it at
+ * build time (the former runtime assert on it was a constant condition). */
+_Static_assert(BATT_SAMPLES > 2 * BATT_TRIM, "batt_trimmed_mean: the middle window must not be empty");
 
 /* Sorts s[0..n-1] ascending IN PLACE with a bounded insertion sort (rule 1: no recursion; rule 2:
  * the two loops are bounded by n <= BATT_SAMPLES) and returns the integer mean of the middle

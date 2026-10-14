@@ -271,6 +271,7 @@ int board_battery_read_mv(uint16_t *mv)
      * qsort(cmp_int), an unregistered rule-9 function pointer into a recursive newlib sort). */
     int mean_raw = batt_trimmed_mean(s, BATT_SAMPLES, BATT_TRIM);
     if (mean_raw < 0) return -EIO;
+    CORE_ASSERT_RET(mean_raw <= 4095, BOARD_ASSERT_CODE, -EIO);   /* a mean of 12-bit samples (ADC_BITWIDTH_12) */
 
     int v_tap_mv;
     if (s_adc_cali) {
@@ -284,7 +285,6 @@ int board_battery_read_mv(uint16_t *mv)
     int batt = v_tap_mv * BATT_DIVIDER;
     if (batt < 0) batt = 0;
     if (batt > 65535) batt = 65535;
-    CORE_ASSERT_RET(batt >= 0 && batt <= 65535, BOARD_ASSERT_CODE, -EIO);   /* fits the u16 out */
     *mv = (uint16_t)batt;
     return 0;
 }

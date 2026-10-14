@@ -37,7 +37,9 @@ typedef struct {
      * reverted it at the next reset, permanently (audit §7.1, app:C1, drv:H3). The supervisor now
      * asks pipeline_sensors_ok(), which treats "this build has no live receiver" as healthy. A
      * driver that omits the field in its designated initialiser gets 0, i.e. "not live" -- the
-     * fail-safe direction for this gate, which is why gps_sim needs no edit. */
+     * direction that never strands an OTA (R1: the gate opens without a fix), which is why gps_sim
+     * needs no edit. A live driver MUST set it to 1, or its images validate without ever proving
+     * a fix. */
     uint8_t  live;
     const char *name;
 } gps_profile_t;

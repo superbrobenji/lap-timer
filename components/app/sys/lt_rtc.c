@@ -13,6 +13,7 @@
 
 #include "esp_attr.h"
 #include "esp_rom_crc.h"
+#include "esp_rom_sys.h"       /* esp_rom_delay_us */
 
 #define RTC_ASSERT_CODE 0x0B70
 
@@ -34,14 +35,21 @@ static uint32_t rtc_crc(const rtc_state_t *s)
     return esp_rom_crc32_le(0, (const uint8_t *)s, sizeof(*s) - sizeof(s->crc32));
 }
 
-/* L4: a seqlock over the RTC_NOINIT snapshot. The writer is always the pipeline task
- * (lt_rtc_save, on every S/F and sector event); the readers are the pipeline's own resume path
- * at boot and `dbg rtc` on the console task. An odd generation means a write is in progress.
- * This counter is NOT in RTC memory on purpose: it only has to order readers against a writer
- * WITHIN one boot. After a reset it starts even, which is correct -- no write is in progress --
- * and the CRC in the snapshot itself remains the cross-boot integrity check. */
+/* L4: a seqlock over the RTC_NOINIT snapshot. The writers are lt_rtc_save and lt_rtc_clear on the
+ * pipeline task (every S/F and sector event, and the pipeline's own clears) plus app_main's
+ * boot_rtc_validate clear -- single-threaded, before pipeline_start. The readers are the
+ * pipeline's resume path at boot (single-threaded, so never concurrent) and `dbg rtc`
+ * on the console task, the only truly concurrent one. An odd generation means a write is in
+ * progress. This counter is NOT in RTC memory on purpose: it only has to order readers against a
+ * writer WITHIN one boot. After a reset it starts even, which is correct -- no write is in
+ * progress -- and the CRC in the snapshot itself remains the cross-boot integrity check. */
 static volatile uint32_t s_rtc_gen;
-#define RTC_READ_RETRIES 8      /* rule 2: bounded; a writer takes microseconds */
+#define RTC_READ_RETRIES 8      /* rule 2: bounded */
+/* S3-20: the reader WAITS a write out instead of spinning. One lt_rtc_save is a ~60 B memset and
+ * field stores into RTC slow memory plus a ROM CRC32 over ~52 B: well under 20 us even at RTC
+ * slow-memory speed. 8 retries x 10 us = 80 us, i.e. comfortably longer than one save (a bare
+ * `continue` burned all 8 retries in a few hundred ns, far inside a single write). */
+#define RTC_RETRY_DELAY_US 10
 
 static rtc_validity_t rtc_validate_copy(rtc_state_t *out)
 {
@@ -56,14 +64,15 @@ rtc_validity_t lt_rtc_validate(rtc_state_t *out)
 {
     /* L4: read the snapshot under the seqlock -- an odd generation, or one that moved across the
      * copy, means lt_rtc_save was mid-write and the bytes we read are a mix of two snapshots
-     * whose CRC would (correctly) fail. Retry a bounded number of times. Falling through after
-     * RTC_READ_RETRIES is the pre-L4 unguarded read, reachable only after RTC_READ_RETRIES
-     * consecutive in-progress or moved generations. That read is NOT torn-proof: rtc_validate_copy
-     * CRCs s_rtc and then memcpys it, so a writer between those steps can leave *out torn while
-     * the call returns RTC_VALID. */
+     * whose CRC would (correctly) fail. Retry a bounded number of times, waiting
+     * RTC_RETRY_DELAY_US on an odd generation so the retries span a whole lt_rtc_save. Falling
+     * through after RTC_READ_RETRIES is the pre-L4 unguarded read, reachable only if the writer was
+     * preempted for longer than RTC_READ_RETRIES x RTC_RETRY_DELAY_US or wrote repeatedly. That
+     * read is NOT torn-proof: rtc_validate_copy CRCs s_rtc and then memcpys it, so a writer between
+     * those steps can leave *out torn while the call returns RTC_VALID. */
     for (int i = 0; i < RTC_READ_RETRIES; i++) {
         uint32_t g0 = __atomic_load_n(&s_rtc_gen, __ATOMIC_ACQUIRE);
-        if ((g0 & 1u) != 0u) continue;                       /* writer in progress */
+        if ((g0 & 1u) != 0u) { esp_rom_delay_us(RTC_RETRY_DELAY_US); continue; }   /* writer in progress: wait it out */
         rtc_validity_t v = rtc_validate_copy(out);           /* the pre-L4 body, extracted verbatim */
         __atomic_thread_fence(__ATOMIC_ACQUIRE);             /* order the copy before the re-check */
         if (__atomic_load_n(&s_rtc_gen, __ATOMIC_RELAXED) == g0) return v;

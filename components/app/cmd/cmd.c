@@ -684,7 +684,8 @@ static int finish_export(uint8_t expfmt, exp_pump_t *pump, uint32_t done, uint32
         enum { EXP_FINISH_MAX_RETRIES = 16 };
         int retries = 0;
         while ((r = exp_finish(&s_exp)) == EXP_FULL) {
-            LT_ASSERT_RET(retries++ < EXP_FINISH_MAX_RETRIES, CMD_ASSERT_CODE, -1);
+            retries++;                                /* R20: no side effect inside the assert condition */
+            LT_ASSERT_RET(retries <= EXP_FINISH_MAX_RETRIES, CMD_ASSERT_CODE, -1);
             if (drain_exp(&s_exp, &s_cw) != 0) { s_cw.err = -1; break; }
         }
         if (r < 0) pump->err = 1;                 /* propagate a finish error like the feed path */
