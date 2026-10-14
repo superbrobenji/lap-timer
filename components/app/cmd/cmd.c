@@ -788,9 +788,12 @@ static bool   s_put_pending; /* a LOGGER_PUT_TRACK timed out: the logger may sti
 
 /* m3 (B6-8): after a PUT's -2 the logger may still be queued or mid-parse on s_asm.json, and
  * logger_request_sync has no "wait again" call. The logger drains its queue in order, so ANY later
- * request it answers proves the earlier PUT is finished: LOGGER_EVICT is the cheapest request with
- * no side effect beyond a free-space check. Called at cmd_dispatch entry for every op that writes
- * s_asm; returns true when s_asm is safe to use (no PUT outstanding, or the barrier answered). */
+ * request it answers proves the earlier PUT is finished. LOGGER_EVICT is the barrier because it
+ * writes no flash itself: handle_request only sets s_last_evict_ms, so the logger's NEXT loop runs
+ * eviction_check() early -- a sto_info() call and, below STO_EVICT_PCT, the normal §12.7
+ * oldest-first eviction that would have run within 60 s anyway. Called at cmd_dispatch entry for
+ * every op that writes s_asm; returns true when s_asm is safe to use (no PUT outstanding, or the
+ * barrier answered). */
 static bool put_barrier(void)
 {
     LT_ASSERT_RET(s_track_len == 0, CMD_ASSERT_CODE, false);   /* never staged outside op_tracks_put */
@@ -813,8 +816,9 @@ const char *cmd_tracks_payload(size_t *len_out)
  * 2752 B trk_venue_t landing slot that must not be a local on this 6 KB console stack (PR #101
  * M2's twin). So: stage the JSON text, hand it to the logger (LOGGER_PUT_TRACK), and block until
  * it answers (on a timeout the hand-off is NOT over: s_put_pending makes put_barrier hold every
- * later s_asm user back until the logger has demonstrably drained past this request) -- the logger parses into the trk module's own static landing slot via
- * trk_user_add_json() and then persists the table (logger.c's put_track()). The block is what
+ * later s_asm user back until the logger has demonstrably drained past this request). The logger
+ * parses into the trk module's own static landing slot via trk_user_add_json() and then persists
+ * the table (logger.c's put_track()). The block is what
  * makes the hand-off safe: the staged buffer cannot change while the logger reads it, and
  * ownership returns here with the rc. 2000 ms, not op_delete's 1000: put_track() writes up to
  * TRK_MAX_USER records plus a rename. */
