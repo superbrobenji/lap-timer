@@ -1928,9 +1928,12 @@ decodes `FIX_*` records, so the §12.2 CRC-resync `gps_us <= 0` guard (io:C1) fe
 counter only on the VBO/NMEA exporters' own decode path, not here. `N` saturates at 65535. A
 whole, well-formed export reads `"skipped":0`; a non-zero count means the log was damaged and the
 export is partial but still structurally valid (added by the 2026-10-13 audit fix wave, ruling
-R26). The VBO (§14.1) and NMEA (§14.2) exporters call the same `exp_skip_record()` on a decode
-failure but carry no equivalent counter in their own output, so a record either of them drops is
-not self-describing there — it is visible only in the JSON summary's `"skipped"` count.
+R26). The VBO (§14.1) and NMEA (§14.2) exporters count drops through the same `exp_skip_record()`
+but have no in-band field for it, so an `OPEN`/`READ` of either format whose log produced a non-zero
+count fails with `E_CONN_PROTO` and the message `export: N records skipped` (on the serial console:
+`ERR 0x0703: export: N records skipped`, no frame) rather than returning a silently short file; the
+JSON summary (which never decodes `FIX_*` records) and the raw `.log` remain exportable (audit fix
+wave 2026-10-13, F2a Task 0).
 
 ---
 
