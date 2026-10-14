@@ -1,10 +1,14 @@
 /* app_main.c -- LapTimer firmware entry point and boot sequence (§4.7).
  *
- * Session 3.2 implements boot steps 1-5 (reset reason + crash counters, NVS init, boot
- * counter + crash-loop check, RTC-state validate, config load), step 6 in part (board
- * bring-up + GPS power, needed for the battery reading in `dbg status`), and steps 10-11
- * (task WDT + supervisor, hb[]/sys_flags, static queues). Steps 7-9 (storage, display,
- * self-test) and 12-15 (pipeline/logger/ui/power/conn/OTA) land in 3.3-3.5.
+ * Implements the §4.7 boot sequence: step 1 reset reason + crash counters, step 2 NVS, step 3
+ * boot counter + crash-loop/safe-mode/recovery gate, step 4 RTC validate, step 5 config load,
+ * step 6 board + GPS power, step 7 internal storage mount, step 9 the coredump self-test row,
+ * steps 10-11 supervisor + static queues/rings + the peer link, step 12 logger/pipeline and the
+ * §18.4 console, step 13 ui. Steps 14-15 (power task, conn) have no owner until Plan 6 /
+ * sub-project C. The BOOT screen has four slots (storage, display, GPS, IMU; app/lt_sup.h
+ * BOOT_*); §17.6's GPS MON-VER (gps_get_version is not called at boot) and battery-range rows
+ * have no boot-time check at all, and the IMU-genuine row exists only as imu_init()'s WHO_AM_I
+ * feeding the IMU slot -- handed off (F2a hand-off table).
  */
 #include "build_config.h"
 
@@ -14,6 +18,7 @@
 #include "core/core.h"
 #include "core/trk.h"   /* trk_init() -- #97, §10.9, review fix round 1 (T5-R2) */
 
+#include "esp_core_dump.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
@@ -62,6 +67,21 @@ static void boot_banner(esp_reset_reason_t reason)
     ESP_LOGI(TAG, "reset reason: %s (%d)", lt_reset_reason_str((int)reason), (int)reason);
 }
 
+/* app:L3: a failed lt_nvs_init() leaves every NVS accessor on handle 0. That is degraded-but-safe
+ * (IDF validates handles), but it silently disables crash-loop detection, the safe-mode gate and
+ * unique session ids (boot_cnt stays 0, so open_session regenerates S00000_001 every boot) -- so
+ * it gets a sys_flag a peer and the fault strip can see, not one ESP_LOGE. sys_flags_set() is an
+ * atomic OR on a static word, safe before sup_start(); the supervisor's first emit_faults() after
+ * its queues exist publishes the bit (s_flags_prev stays 0 until then). The errlog entry is
+ * still recorded in the RAM ring even though its NVS persist will fail. */
+static void boot_nvs_dead(void)
+{
+    sys_flags_set(SYS_NVS_DEAD);
+    ESP_LOGE(TAG, "lt_nvs_init failed: boot counter, crash-loop detection and the safe-mode "
+                  "gate are INOPERATIVE this boot");
+    errlog_add(E_NVS_INIT, 0);
+}
+
 /* §4.7 step 2: NVS init, erase + re-init on a version/space fault (log E_SYS_CFG_RESET). */
 static void boot_nvs(void)
 {
@@ -74,7 +94,7 @@ static void boot_nvs(void)
     } else {
         ESP_ERROR_CHECK(nerr);
     }
-    if (lt_nvs_init() != 0) ESP_LOGE(TAG, "lt_nvs_init failed");
+    if (lt_nvs_init() != 0) boot_nvs_dead();
     /* core asserts -> error ring via the linked core_assert_report (§17.9) */
     if (nvs_erased) errlog_add(E_SYS_CFG_RESET, 0);
 }
@@ -128,8 +148,9 @@ static uint32_t boot_safe_mode(uint8_t *level_out)
     return boot_cnt;
 }
 
-/* §4.7 step 4: RTC memory validate/clear. Full resume is 3.5; here invalid/absent are
- * cleared and only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
+/* §4.7 step 4: RTC memory validate/clear. The resume itself is the pipeline's
+ * (pipeline_init() re-validates and arms the §15.3 resume); here invalid/absent are cleared and
+ * only a present-but-bad snapshot logs E_SYS_RTC_INVALID. */
 static void boot_rtc_validate(void)
 {
     switch (lt_rtc_validate(NULL)) {
@@ -141,7 +162,7 @@ static void boot_rtc_validate(void)
         lt_rtc_clear();
         break;
     case RTC_VALID:
-        break;                                 /* left in place; 3.5 resumes from it */
+        break;                                 /* left in place; pipeline_init() resumes */
     }
 }
 
@@ -180,7 +201,7 @@ static void boot_storage(void)
     if (mrc < 0) {
         sys_flags_set(SYS_STORAGE_DEAD);
         errlog_add(E_STO_MOUNT, 0);
-        ESP_LOGE(TAG, "storage DEAD (summaries fall back to RTC/NVS best-effort, 3.5)");
+        ESP_LOGE(TAG, "storage DEAD (no session logging this boot; the logger stays idle)");
     } else {
         if (mrc == 1) {                        /* mounted only after a reformat */
             lt_counters_inc(LT_CTR_STO_FORMAT, true);
@@ -191,6 +212,31 @@ static void boot_storage(void)
         if (sto_info(&si) == 0)
             ESP_LOGI(TAG, "storage: %u/%u KB free", (unsigned)si.free_kb, (unsigned)si.total_kb);
     }
+}
+
+/* §4.7 step 9 / §17.6's coredump row. Reported ONLY on a boot whose reset reason was a crash:
+ * the image is deliberately KEPT (§17.10 exports it, and ruling R5's `coredump` console verb --
+ * plan F2b -- reads it), so an unconditional report would add one errlog entry per boot forever
+ * until someone erased it. CRC32 is the checksum §17.1 configures
+ * (CONFIG_ESP_COREDUMP_CHECKSUM_CRC32), so a failed check means the dump itself is damaged and
+ * the log line says so rather than promising a readable dump. Errlog M1 dedup: on an ESP_RST_PANIC
+ * boot this report collapses onto lt_boot_record_reset's E_SYS_PANIC(0) entry (lt_nvs.c) -- the
+ * latest arg wins -- so that one entry becomes the panic-with-dump-size summary §17.6 asks for.
+ * That holds because boot_reset_record() is the only thing between the two calls and its only
+ * errlog_add is that E_SYS_PANIC(0) (the crashlog push and counter writes add no entries);
+ * on TASK_WDT/INT_WDT boots it appends after E_SYS_WDT_RESET. */
+static void boot_coredump_check(esp_reset_reason_t reason)
+{
+    if (reason != ESP_RST_PANIC && reason != ESP_RST_TASK_WDT && reason != ESP_RST_INT_WDT) return;
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK) {
+        ESP_LOGW(TAG, "crash reset but no coredump stored");
+        return;
+    }
+    esp_err_t chk = esp_core_dump_image_check();
+    ESP_LOGW(TAG, "coredump: %u B at 0x%06x, check %s (kept)", (unsigned)size, (unsigned)addr,
+             chk == ESP_OK ? "ok" : esp_err_to_name(chk));
+    (void)errlog_add(E_SYS_PANIC, (uint32_t)size);
 }
 
 /* §4.7 steps 10-13: supervisor, static queues, IPC rings, and the logger/pipeline/ui tasks.
@@ -206,12 +252,13 @@ static void boot_subsystems(uint8_t level)
      * (lt_sys). Start the supervisor first -- it subscribes itself to the task WDT. */
     sup_start();
 
-    /* §4.7 step 11: static queues the supervisor + button ISR need (btn_q). The pipeline
-     * rings arrive in 3.4. */
+    /* §4.7 step 11: the static button queue (g_btn_q) the ui task and button ISR need. */
     lt_queues_init();
 
-    /* §4.7 step 11 (cont): the §4.4 pipeline<->logger rings + the logger's event/control
-     * queues. The pipeline producer lands in 3.4; 3.3 creates them and the logger consumes. */
+    /* §4.7 step 11 (cont): the §4.4 fix/fused rings and the event queues (g_evt_q for the logger,
+     * g_ui_evt_q for the ui) plus the logger's request/result queues and the command queue. All
+     * exist before logger_start(), pipeline_start() and ui_start() below create their consumers
+     * and producers. */
     lt_ipc_init();
 
     /* §4.7 step 11 (cont): start the peer link (Plan 5 §18). Creates the bounded stream ring
@@ -254,9 +301,10 @@ static void boot_subsystems(uint8_t level)
     pipeline_start();
 
     /* §4.7 step 13 (ui): start the ui task (core 0, prio 6). It renders the BOOT one-shot, then
-     * drains the pipeline event queue + the button queue, updates a screen_model_t, and renders via
-     * core/ui screens_render(). Plan 04 ships no display driver, so it logs the dirty box instead of
-     * refreshing a panel; the menu (§20.7) + buttons (§20.8) are live. */
+     * drains g_ui_evt_q (the pipeline's fan-out copy) + the button queue, updates a
+     * screen_model_t, and renders via core/ui screens_render(). It drives the SSD1680 through
+     * hal/display.h and runs the full §20.3 refresh ladder; the menu (§20.7) + buttons (§20.8)
+     * are live. */
     ui_start();
 }
 
@@ -275,6 +323,7 @@ void app_main(void)
     boot_banner(reason);
     boot_nvs();
     boot_reset_record(reason);
+    boot_coredump_check(reason);
 
     uint8_t level = 0;
     uint32_t boot_cnt = boot_safe_mode(&level);
@@ -283,10 +332,17 @@ void app_main(void)
     boot_rtc_validate();
     boot_config();
 
-    /* §4.7 step 6 (partial): board bring-up + GPS power on (battery read feeds `dbg status`).
-     * Recovery (level 2, §17.5 amendment) skips GPS power -- the pipeline that would consume it
+    /* §4.7 step 6 (partial) + §17.6: board bring-up. board_init() reports (0 / -EIO) instead of
+     * ESP_ERROR_CHECK-aborting, so a dud bus is a recorded self-test result rather than a panic
+     * feeding §17.5's crash loop. The battery ADC, I2C (IMU/mag) and VSPI (panel) all hang off
+     * this, so a failure here is what makes the IMU/DISPLAY BOOT slots fail honestly. GPS power
+     * follows; recovery (level 2, §17.5 amendment) skips it -- the pipeline that would consume it
      * never starts. */
-    board_init();
+    int brc = board_init();
+    if (brc != 0) {
+        ESP_LOGE(TAG, "board_init rc %d: some peripherals are unavailable this boot", brc);
+        (void)errlog_add(E_BOARD_INIT, 0);
+    }
     if (level != 2u) board_gps_power(true);
 
     boot_storage();
@@ -307,6 +363,7 @@ void app_main(void)
     ESP_LOGI(TAG, "serial link: prod-slim (DEVUX off -- transport only, no dbg UX)");
 #endif
 
-    /* The main task returns: the supervisor and console tasks run on, and the idle tasks on
-     * both cores feed the task WDT. Pipeline/logger/ui/power start here in 3.4. */
+    /* The main task returns: the supervisor, logger, pipeline, ui, link and console tasks (all
+     * started above) run on, and the idle tasks on both cores feed the task WDT. There is no
+     * power task (Plan 6). */
 }

@@ -522,15 +522,28 @@ int disp_sleep(void)
     if (epd_cmd(0x10) != 0 || epd_data(d, sizeof d) != 0) {
         return -EIO;
     }
+    /* drv:L21: deep sleep invalidates the panel state, so the driver is no longer initialised.
+     * Clearing the flag makes an unpaired disp_refresh() fail its own s_inited guard instead of
+     * clocking commands into a sleeping SSD1680; disp_wake() re-inits and sets it again. Cleared
+     * only after the sleep command succeeded (on failure the panel state is unchanged). There is
+     * currently no caller of disp_sleep/disp_wake. */
+    s_inited = false;
     return 0;
 }
 
 int disp_wake(void)
 {
     CORE_ASSERT_RET(s_panel != NULL, DISP_ASSERT_CODE, -ENODEV);
-    CORE_ASSERT_RET(s_inited, DISP_ASSERT_CODE, -ENODEV);
+    /* s_added, not s_inited: disp_sleep() clears s_inited, and the device handle is what
+     * epd_reset_and_init_seq() actually needs (same invariant disp_reinit() uses). */
+    CORE_ASSERT_RET(s_added, DISP_ASSERT_CODE, -ENODEV);
 
-    return epd_reset_and_init_seq();
+    int rc = epd_reset_and_init_seq();
+    if (rc != 0) {
+        return rc;
+    }
+    s_inited = true;
+    return 0;
 }
 
 /* Fix round 2 (Important #1): does NOT require a prior successful disp_init() -- a boot-time

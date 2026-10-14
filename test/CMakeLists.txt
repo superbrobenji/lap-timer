@@ -69,7 +69,8 @@ foreach(src ${CORE_TEST_SRCS})
      AND NOT name STREQUAL "test_smoke" AND NOT name STREQUAL "test_ses_frame"
      AND NOT name STREQUAL "test_ses_records" AND NOT name STREQUAL "test_epd_pure"
      AND NOT name STREQUAL "test_epd_pure_29" AND NOT name STREQUAL "test_sim_profile"
-     AND NOT name STREQUAL "test_sim_clock" AND NOT name STREQUAL "test_drag")
+     AND NOT name STREQUAL "test_sim_clock" AND NOT name STREQUAL "test_drag"
+     AND NOT name STREQUAL "test_sup_policy" AND NOT name STREQUAL "test_batt_trim")
     add_core_test(${name})
   endif()
 endforeach()
@@ -183,3 +184,22 @@ target_include_directories(test_sim_profile PRIVATE ${SIM_COMMON_DIR}/include ${
 # ARGN; no lt_hal needed (this suite never touches gps_fix_t).
 add_core_test(test_sim_clock ${SIM_COMMON_DIR}/host/sim_clock.c)
 target_include_directories(test_sim_clock PRIVATE ${SIM_COMMON_DIR}/include)
+
+# test_sup_policy (audit fix wave F2a Task 1): the pure supervision/OTA policy decisions
+# (app/sup_policy.h -- IDF-free: stdint/stdbool + core/core.h + app/lt_consts.h). Linked like
+# test_epd_pure links its driver's host/*.c: the one source directly, plus the app component's
+# include root for "app/sup_policy.h"/"app/lt_consts.h"/"app/lt_assert.h". `core` is still linked
+# for core_assert_fail (LT_ASSERT_RET's reporter). assert_support.c is the strong recorder: the
+# timeout-bound trip is asserted via lt_test_assert_* (test_smoke pattern), not merely tolerated.
+set(SUP_POLICY_APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/app)
+add_core_test(test_sup_policy assert_support.c ${SUP_POLICY_APP_DIR}/sys/sup_policy.c)
+target_include_directories(test_sup_policy PRIVATE ${SUP_POLICY_APP_DIR}/include)
+
+# test_batt_trim (audit fix wave F2a Task 6, drv:M12/R19): the board HAL's pure §16.4 trimmed-mean
+# over the battery ADC samples, extracted so the bounded insertion sort that replaces
+# qsort(cmp_int) is proven by a test rather than by a bench voltage reading (there is none -- the
+# STATUS record's batt_mv is still 0 until Plan 6). Same pattern as test_epd_pure: link the
+# driver's one host/*.c source plus its include dir.
+set(BOARD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/board_devkit_v1)
+add_core_test(test_batt_trim ${BOARD_DIR}/host/batt_trim.c)
+target_include_directories(test_batt_trim PRIVATE ${BOARD_DIR}/include)

@@ -671,6 +671,42 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t
 /* ---- OPEN/READ export formats (0 json, 1 vbo, 2 nmea): stream .log through core/exp ---- */
 static exp_meta_t s_meta;
 
+/* Completion path of stream_export: finishes the exporter, then picks the terminal frame
+ * (transport failure, decode error, skipped-record error, or the LAST + CRC32 tail). */
+static int finish_export(uint8_t expfmt, exp_pump_t *pump, uint32_t done, uint32_t *nread,
+                         cmd_emit_fn emit, void *ctx, uint8_t tag)
+{
+    LT_ASSERT_RET(pump != NULL, CMD_ASSERT_CODE, -1);
+    LT_ASSERT_RET(nread != NULL, CMD_ASSERT_CODE, -1);
+    if (!s_cw.err && !pump->err) {                /* finish the exporter (may need EXP_FULL retry) */
+        int r;
+        /* Rule 2: same generous bound as exp_frame_cb's own EXP_FULL retry loop. */
+        enum { EXP_FINISH_MAX_RETRIES = 16 };
+        int retries = 0;
+        while ((r = exp_finish(&s_exp)) == EXP_FULL) {
+            retries++;                                /* R20: no side effect inside the assert condition */
+            LT_ASSERT_RET(retries <= EXP_FINISH_MAX_RETRIES, CMD_ASSERT_CODE, -1);
+            if (drain_exp(&s_exp, &s_cw) != 0) { s_cw.err = -1; break; }
+        }
+        if (r < 0) pump->err = 1;                 /* propagate a finish error like the feed path */
+        else if (!s_cw.err) (void)drain_exp(&s_exp, &s_cw);
+    }
+    if (s_cw.err) return -1;                      /* transport failed */
+    if (pump->err)                                /* undecodable/truncated export: signal, not fake OK */
+        return emit_error(emit, ctx, tag, &s_cw.seq, E_CONN_PROTO, "export: decode error");
+    /* VBO/NMEA have no in-band skipped counter (JSON carries "skipped":N itself), so a non-zero
+     * count would otherwise be a silently short file with rc 0. An ERROR frame in the measuring
+     * pass prints a clean "ERR 0x0703: <msg>" line with no ---BEGIN (no half frame), the surface
+     * the pre-F1b "export: decode error" had; never route it through cw (it would enter the CRC). */
+    if ((expfmt == EXP_VBO || expfmt == EXP_NMEA) && s_exp.skipped != 0) {
+        char msg[40];
+        (void)snprintf(msg, sizeof msg, "export: %u records skipped", (unsigned)s_exp.skipped);
+        return emit_error(emit, ctx, tag, &s_cw.seq, E_CONN_PROTO, msg);
+    }
+    *nread = done;
+    return cw_finish(&s_cw);                      /* LAST + CRC32 tail over the whole export */
+}
+
 /* Reads at most `limit` bytes of the .log (UINT32_MAX = unclamped); on success sets *nread to the
  * input bytes fed so the printing pass feeds the identical range -> identical output + CRC. *nread
  * is left untouched on any error path. */
@@ -728,23 +764,7 @@ static int stream_export(const char *id, uint8_t expfmt, uint32_t offset, uint32
     }
     (void)sto_close(f);
 
-    if (!s_cw.err && !pump.err) {                /* finish the exporter (may need EXP_FULL retry) */
-        int r;
-        /* Rule 2: same generous bound as exp_frame_cb's own EXP_FULL retry loop. */
-        enum { EXP_FINISH_MAX_RETRIES = 16 };
-        int retries = 0;
-        while ((r = exp_finish(&s_exp)) == EXP_FULL) {
-            LT_ASSERT_RET(retries++ < EXP_FINISH_MAX_RETRIES, CMD_ASSERT_CODE, -1);
-            if (drain_exp(&s_exp, &s_cw) != 0) { s_cw.err = -1; break; }
-        }
-        if (r < 0) pump.err = 1;                 /* propagate a finish error like the feed path */
-        else if (!s_cw.err) (void)drain_exp(&s_exp, &s_cw);
-    }
-    if (s_cw.err) return -1;                      /* transport failed */
-    if (pump.err)                                 /* undecodable/truncated export: signal, not fake OK */
-        return emit_error(emit, ctx, tag, &s_cw.seq, E_CONN_PROTO, "export: decode error");
-    *nread = done;
-    return cw_finish(&s_cw);                      /* LAST + CRC32 tail over the whole export */
+    return finish_export(expfmt, &pump, done, nread, emit, ctx, tag);
 }
 
 /* Kept from the last OPEN so READ knows which file/format to resume (§18.1: READ carries only

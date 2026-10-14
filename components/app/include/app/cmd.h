@@ -27,6 +27,13 @@ enum {
     CMD_FLAG_ERROR = 0x02,  /* bit1: payload = code u16 (LE) | msg utf8 */
 };
 
+/* Capacity of cmd.c's JSON/text response assembly buffer (s_json). Exported so a transport can
+ * assert its own frame-assembly buffer is at least this big: export_serial's ser_emit used to clamp
+ * silently and then CRC the truncated body, which would make a widened field or one extra key
+ * turn every CONFIG_GET/ERRLOG_GET dump into a self-consistent lie (drv:M7). Keep in step with
+ * s_json's declaration in cmd.c. */
+#define CMD_JSON_CAP 3072u
+
 /* The tag reserved for unsolicited fused-log / event STREAM frames pushed to an attached peer
  * (Plan 5 sub-project A, §18): a stream frame reuses the chunk framing (tag | seq u16 | flags |
  * payload) but carries this tag instead of a request tag, so a client demultiplexes stream

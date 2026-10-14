@@ -30,6 +30,17 @@ typedef struct {
     uint8_t  max_rate_hz;      /* 5 for NEO-6M, 10 for M10 */
     uint32_t baud;             /* 38400 / 115200 */
     uint8_t  has_pps;
+    /* 1 only when this driver talks to a real receiver that can produce a real fix; 0 for the
+     * Plan-03 stubs (gps_neo6m until Plan 08) and for gps_sim. Added by the 2026-10-13 audit fix
+     * wave (ruling R1): §19.4's OTA-validate gate used to require a GPS fix, which a stub can
+     * never deliver -- so every OTA to moto_neo6m stayed PENDING_VERIFY and the bootloader
+     * reverted it at the next reset, permanently (audit §7.1, app:C1, drv:H3). The supervisor now
+     * asks pipeline_sensors_ok(), which treats "this build has no live receiver" as healthy. A
+     * driver that omits the field in its designated initialiser gets 0, i.e. "not live" -- the
+     * direction that never strands an OTA (R1: the gate opens without a fix), which is why gps_sim
+     * needs no edit. A live driver MUST set it to 1, or its images validate without ever proving
+     * a fix. */
+    uint8_t  live;
     const char *name;
 } gps_profile_t;
 

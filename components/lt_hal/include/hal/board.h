@@ -25,7 +25,14 @@ typedef struct {
 int  board_init(void);
 int  board_gps_power(bool on);
 int  board_battery_read_mv(uint16_t *mv);          /* 64-sample average, calibrated */
-int  board_charger_present(bool *out);             /* CHRG pin, or false if not wired */
+/* Charger-present sense (§3.3 CHRG, GPIO 39, open-drain active-low with an EXTERNAL 100k
+ * pull-up). Returns false UNCONDITIONALLY on a build with CFG_CHRG_WIRED == 0 -- the prototype,
+ * which has neither the pull-up nor a battery. GPIO 34-39 have no internal pull resistor on
+ * classic ESP32, so an unwired pin floats and a float that happens to read low is
+ * indistinguishable from a charger; answering "false if not wired" is the only implementable
+ * reading of this contract, and it is the fail-safe direction for §19.5. Plan 6 (#54) adds the
+ * pull-up and builds with CHRG=ON. */
+int  board_charger_present(bool *out);
 int  board_buttons_read(uint8_t *mask);            /* bit0 MODE, bit1 UP, bit2 DOWN */
 
 /* Bench injection only; see dbg btn (export_serial.c, Plan 7 T8). While `on` is true, `mask`'s
@@ -34,6 +41,13 @@ int  board_buttons_read(uint8_t *mask);            /* bit0 MODE, bit1 UP, bit2 D
  * command can simulate a physical press without real hardware wired. `on` = false clears those
  * bits again. Never called from production code paths. */
 void board_buttons_override(uint8_t mask, bool on);
+
+/* §20.8 / Appendix A: the board ISR's per-pin contact-bounce guard for the three button GPIOs,
+ * in milliseconds: an edge within this window of the pin's last accepted edge is dropped (audit
+ * fix wave app:L6 -- the ISR used 25 ms before). It is the ONLY user of this constant. §20.8's
+ * "level sampled 30 ms after the edge" is NOT implemented: the ISR reads the level at the edge and
+ * the ui reconciles the level once per loop iteration. */
+#define BTN_DEBOUNCE_MS 30
 
 #ifdef ESP_PLATFORM   /* QueueHandle_t needs FreeRTOS headers, absent from the host test build */
 #include "freertos/FreeRTOS.h"

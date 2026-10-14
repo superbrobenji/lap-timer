@@ -11,8 +11,9 @@ file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
 # driver's host/*.c sources directly (test/CMakeLists.txt), which this lightweight core-only
 # selftest does not have on its path, so it is excluded here too.
 # test_sim_profile / test_sim_clock (OTA-screen plan Task 3) link the sim_common driver's host/*.c
-# sources and headers the same way test_epd_pure does, so they are host-only too.
-list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*|sim_profile|sim_clock)\\.c$")
+# sources and headers the same way test_epd_pure does, so they are host-only too. test_batt_trim
+# links the board driver's host/batt_trim.c and include dir (batt_pure.h), so it is host-only as well.
+list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*|sim_profile|sim_clock|batt_trim)\\.c$")
 set(SUITES "")
 foreach(f ${TEST_SRCS})
   get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
@@ -42,12 +43,20 @@ file(WRITE "${SUITES_GEN}" "${SUITES_GEN_CONTENT}")
 # glob above skips it; compile it directly so the on-target link resolves lt_test_assert_* and the
 # strong recorder overrides core.c's weak core_assert_report default.
 #
+# APP_POLICY_SRC: test/test_sup_policy.c (audit fix wave F2a) exercises app/sup_policy.c, which is
+# IDF-free by design (see app/sup_policy.h) -- so the suite runs on the Xtensa toolchain too, per
+# §22.3, by compiling that ONE app source here rather than by REQUIRES app (which would drag
+# nvs_flash/gps/imu/display into this core-only selftest). It needs no include dir of its own:
+# APP_INCLUDE_DIR below already resolves "app/sup_policy.h", "app/lt_consts.h" and
+# "app/lt_assert.h".
+set(APP_POLICY_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/sys/sup_policy.c")
+
 # APP_INCLUDE_DIR: test_proto.c includes app/lt_proto.h, a pure standalone header (stdint.h only,
 # no ESP-IDF/FreeRTOS deps -- see components/app/include/app/lt_proto.h). Adding just the app
 # component's include root (not REQUIRES app) resolves that #include without pulling app's full
 # sources/deps (nvs_flash, gps/imu HAL, ...) into this lightweight core-only selftest.
 set(APP_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include")
-idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" ${WRAPPERS}
+idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" "${APP_POLICY_SRC}" ${WRAPPERS}
                        INCLUDE_DIRS "." "${TEST_DIR}" "${APP_INCLUDE_DIR}"
                        REQUIRES core unity_vendored pthread esp_timer)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")

@@ -1,10 +1,13 @@
 /* app/lt_nvs.h -- persistent state on NVS (spec §15.2). Thin lap-timer layer over the IDF
  * `nvs`/`nvs_flash` API: the boot counter, the 9 crash/health counters, the 32-entry error
  * ring, the crash log (crash-loop detection, §17.5), the safe-mode gate, and the packed cfg
- * blob (version + CRC16 via core). Write policy per §15.2: a DISTINCT error-ring entry persists
- * immediately; an immediate repeat of the same (code,arg) is deduped and its flash write rate-
- * limited (H1, so a stuck hot-path assert cannot storm NVS); counters are batched (>=60 s) except
- * on crash paths; cfg only on change.
+ * blob (version + CRC16 via core). Write policy per §15.2: a DISTINCT error code persists
+ * immediately; CONSECUTIVE reports of the SAME code collapse onto the newest ring slot (latest arg
+ * and uptime win) with their flash write rate-limited to ERRLOG_MIN_PERSIST_US -- keyed on the
+ * code ALONE, because keying on (code,arg) let E_STO_WRITE's varying batch length storm NVS at
+ * 1 Hz on a dead filesystem (audit fix wave app:M1). Counters are batched (>= 60 s) except on crash
+ * paths. cfg is written on EVERY lt_cfg_save() call: §15.2's "only on change" compare and the
+ * cross-task read-modify-write lock land with ruling R10 (plan F2b).
  */
 #ifndef APP_LT_NVS_H
 #define APP_LT_NVS_H
@@ -39,8 +42,8 @@ int      lt_counters_flush(bool force);
 const lt_counters_t *lt_counters(void);
 
 /* Error ring (lt_err/ring): append {code, uptime_s, boot, arg}. A distinct report persists to NVS
- * immediately; an immediate repeat of the same (code,arg) is folded onto the newest entry and its
- * flash write is rate-limited (H1). Assertion-safe: this is the assert sink, so it never itself
+ * immediately; a consecutive repeat of the same code is folded onto the newest entry and its
+ * flash write is rate-limited (H1/M1). Assertion-safe: this is the assert sink, so it never itself
  * asserts (H2). Returns 0 (code 0 is rejected as the empty-slot sentinel). */
 int  errlog_add(uint16_t code, uint32_t arg);
 

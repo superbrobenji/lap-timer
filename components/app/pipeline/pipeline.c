@@ -148,9 +148,23 @@ static bool    s_prev_present;
 /* motion / fix-lost edges (§6.5, §9.1) */
 static bool s_moving, s_have_moving;
 
-/* §19.4 OTA-validate gate: set once the pipeline has ingested at least one GPS fix (set-once,
- * monotonic). The supervisor reads it via pipeline_gps_seen() before marking a pending image valid. */
-static volatile bool s_gps_seen;
+/* §19.4 OTA-validate gate + §19.5 stillness precondition (audit fix wave F2a, R1/R2).
+ * s_gps_seen: set once the pipeline has ingested at least one GPS fix (set-once, monotonic).
+ * s_gps_live: this build's GPS driver advertised gps_profile_t.live (0 for the Plan-03 stubs and
+ *   the sim). Meaningful only once s_gps_latched is set.
+ * s_gps_latched: set once pipeline_init_drivers has latched s_gps_live. Until then the gate is
+ *   CLOSED (fail-closed): a pipeline that never initialised has not proven the build healthy.
+ * s_still_since_ms: esp_timer milliseconds at the last EV_STILL edge, STILL_MOVING while moving,
+ *   and 0 before any motion edge at all -- i.e. "still since boot", which is the honest reading
+ *   for a build whose GPS never produces a fix, and is what lets an OTA proceed there.
+ * All three are read cross-task by the supervisor / ota_begin through the two accessors at the
+ * bottom of this file. Each is a single naturally-atomic word, written only by this task, so a
+ * volatile load/store needs no lock (the same contract s_gps_seen already had). */
+static volatile bool     s_gps_seen;
+static volatile bool     s_gps_live;
+static volatile bool     s_gps_latched;
+#define STILL_MOVING 0xFFFFFFFFu
+static volatile uint32_t s_still_since_ms;
 static int  s_invalid_run;
 static bool s_fix_lost;
 
@@ -628,6 +642,12 @@ static void on_fix(gps_fix_t *fix)
     if (!s_have_moving || moving != s_moving) {
         s_have_moving = true;
         s_moving = moving;
+        /* R2: the §19.5 "EV_MOTION not seen for 30 s" precondition reads this stamp through
+         * pipeline_still_for_ms(). Monotonic esp_timer ms, not fix->mono_us, so the window is
+         * measured against the same clock the supervisor and ota_begin use. */
+        uint32_t still_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (still_ms == STILL_MOVING) still_ms = STILL_MOVING - 1u;   /* keep the sentinel unique */
+        s_still_since_ms = moving ? STILL_MOVING : still_ms;
         emit_simple(moving ? (uint8_t)EV_MOTION : (uint8_t)EV_STILL, fix->gps_us, fix->mono_us);
     }
 
@@ -1060,6 +1080,10 @@ static void pipeline_init_drivers(void)
     /* Plan 7c T8: the sim driver always "succeeds" at gps_init() -- report SIM so the BOOT screen
      * shows which driver is actually wired, not just that init passed. */
     sup_boot_report(BOOT_GPS, CFG_GPS_SIM ? BOOT_SIM : (gps_ok ? BOOT_OK : BOOT_FAIL));
+    /* R1: latch the driver's own claim about itself. A failed gps_init is, by definition, not a
+     * live receiver, so `gps_ok &&` is part of the latch rather than a separate case. */
+    s_gps_live = (gps_ok && prof->live != 0u);
+    s_gps_latched = true;
 
     bool imu_ok = (imu_init() == 0);
     if (imu_ok) {
@@ -1200,7 +1224,12 @@ static void pipeline_task(void *arg)
     ESP_LOGI(TAG, "pipeline up (core %d prio %d)", PIPE_CORE, PIPE_PRIO);
 
     static imu_raw_t raw[IMU_BATCH];       /* off-stack: 16 * 20 B */
+    sup_wdt_subscribe(HB_PIPELINE);   /* §17.1 (R7): a wedged pipeline must panic, not just stall.
+                                       * After init on purpose: driver init (gps_configure,
+                                       * imu_self_test, cfg load) is never charged to the 5 s WDT;
+                                       * the heartbeat stall watch covers it until the first feed. */
     for (;;) {
+        sup_wdt_feed();
         /* Pace at ~50 ms, waking early on a command (§9.1 queue-set behaviour without a UART/timer
          * object -- the sim has no UART events and imu_sim is polled). */
         command_t cmd;
@@ -1360,9 +1389,32 @@ int pipeline_drag_snapshot(pipe_drag_t *out)
     return snap_read(PIPE_SNAP_DRAG, out, sizeof *out);
 }
 
-bool pipeline_gps_seen(void)
+bool pipeline_sensors_ok(void)
 {
-    /* §19.4 OTA-validate condition: true once at least one GPS fix has been ingested since boot
-     * (set-once). Read cross-task by the supervisor; a set-once volatile bool needs no lock. */
-    return s_gps_seen;
+    /* §19.4's OTA-validate condition (R1, replacing pipeline_gps_seen): true once a GPS fix has
+     * been ingested, OR immediately and permanently on a build whose GPS driver is not a live
+     * receiver. gps_sim leaves .live at 0, so moto_sim takes the second arm too: its gate opens at
+     * latch time with no fix. On moto_neo6m the second arm is the whole point -- without it the
+     * stub's gps_poll()==0 made every OTA to the only release env revert at the next reset
+     * (audit §7.1). Once the Plan-08 UBX driver sets
+     * live = 1, the gate tightens back to "a real fix was seen" with no code change here.
+     * Fail-closed: before pipeline_init_drivers has latched s_gps_latched the answer is false,
+     * because a pipeline that never initialised has not proven the build healthy. */
+    return s_gps_latched && (s_gps_seen || !s_gps_live);
+}
+
+uint32_t pipeline_still_for_ms(void)
+{
+    /* §19.5 (R2): milliseconds since the last EV_STILL edge. 0 means "moving or just stopped":
+     * the two cases are deliberately indistinguishable, because the only caller tests
+     * `>= OTA_STILL_MIN_MS`, and both mean "not yet still long enough". Before any motion edge
+     * the stamp is 0, so the figure is uptime modulo 2^32 ms (a device that has never reported
+     * motion has been still for its entire life). The motion state only updates when a fix record
+     * arrives: if a live receiver goes SILENT (no records at all) while the device is "moving",
+     * this returns 0 until records resume or the device reboots, and every push is refused. That
+     * is the conservative direction and latent until Plan 8 (#123); stubs and sim never hit it. */
+    uint32_t since = s_still_since_ms;
+    if (since == STILL_MOVING) return 0u;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    return (uint32_t)(now - since);       /* modular: correct across the 49-day ms wrap */
 }

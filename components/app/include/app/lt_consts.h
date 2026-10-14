@@ -17,4 +17,19 @@
 #define OTA_REBOOT_DELAY_S   2       /* §19.4: delay after the OTA_END ack before the supervisor reboots */
 #define OTA_VALID_UPTIME_S   30      /* §19.4: min stable uptime before a pending image is marked valid */
 
+/* §17.2 supervision thresholds (Appendix A). HEAP_CLEAR_KB is new: §17.2 gives only the 40 KB
+ * entry threshold, and a single threshold makes SYS_HEAP_LOW -- and therefore EV_FAULT -- flap
+ * once per second on a heap hovering at the line, so the flag releases with 8 KB of hysteresis
+ * (audit-fix-wave design R6). The "< 20 KB -> conn_stop()" half of §17.2 is struck: there is no
+ * conn task (BLE is sub-project C). */
+#define HEAP_LOW_KB          40      /* §17.2/§4.8: free 8-bit heap below this -> SYS_HEAP_LOW */
+#define HEAP_CLEAR_KB        48      /* ... and at or above this the flag releases (R6) */
+#define STACK_LOW_B          256     /* §17.2: task stack high-water below this -> E_SYS_STACK_LOW */
+#define HEAP_INTEGRITY_PERIOD_S 60   /* §17.1: heap_caps_check_integrity_all cadence */
+
+/* §19.5/§19.6 OTA policy that is not a battery/charger figure. */
+#define OTA_STILL_MIN_MS     30000u  /* §19.5: no EV_MOTION for 30 s before an OTA_BEGIN is accepted */
+#define OTA_RECV_TIMEOUT_S   30      /* §19.6: an OTA_RECV with no OTA_DATA for this long is aborted */
+#define OTA_CLOSE_TIMEOUT_MS 2000u   /* §19.5: bounded wait for LOGGER_CLOSE_SESSION's ack */
+
 #endif /* APP_LT_CONSTS_H */

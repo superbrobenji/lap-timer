@@ -5,14 +5,15 @@
  * These mirror core/core.h's CORE_ASSERT_RET/CORE_ASSERT_VOID exactly, for app/driver/main
  * code, and call the SAME reporter: on failure they report `code` through
  * core_assert_fail() -> core_assert_report() (§17.9) -- the app links a strong core_assert_report
- * (sup_errlog.c) that logs the code into the §17.7 error ring -- and
+ * (lt_nvs.c) that logs the code into the §17.7 error ring -- and
  * then return a safe value to the caller. They NEVER abort/panic on target: a failing
  * LT_ASSERT_* is a reported, recovered anomaly, not a crash. Assertions must be side-effect-free
  * (the condition is only ever evaluated, never relied on to run code).
  *
- * Session 4.5.1 is tooling-only: this header is new and nothing calls it yet, so there is no
- * behavior change. Rule 5 retrofit (raising assertion density in components/app/drivers/main)
- * lands in later Plan 4.5 sessions.
+ * These macros are now the app/driver layer's primary assertion sink -- hundreds of call sites
+ * across components/app, components/drivers and main. The strong core_assert_report they reach lives
+ * in components/app/sys/lt_nvs.c (next to errlog_add, in a TU the firmware always links) and records
+ * the code into the §17.7 error ring.
  */
 #ifndef APP_LT_ASSERT_H
 #define APP_LT_ASSERT_H

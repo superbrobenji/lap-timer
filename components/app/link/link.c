@@ -37,7 +37,12 @@
 
 #define LINK_ASSERT_CODE 0x0B90   /* Power of 10 rule 5 (app/lt_assert.h); link.c's own code */
 
-/* GPIO detect line (§6 connector). Both build envs today set this unconditionally to GPIO4 via
+/* GPIO detect line (§6 connector, GPIO 4). NOTE (drv:L22): this GPIO is owned HERE, not by
+ * hal/board.h -- an app module configuring a pin behind the board HAL's back. Deliberate: it is a
+ * single app-protocol pin whose polarity and debounce (LINK_DETECT_STABLE) are link semantics,
+ * not board semantics, and routing it through the HAL would add an entry point for one caller.
+ * Recorded in board.c's §3.3 pin-map block and in §3.3's own table so the inventory is complete.
+ * Both build envs today set this unconditionally to GPIO4 via
  * components/app/CMakeLists.txt (which also unconditionally REQUIREs `esp_driver_gpio`), so
  * link_serial_present() below always takes the definitive detect-line path. -1 is a defensive
  * default only, for a hypothetical build that does not define LINK_DETECT_GPIO -- on such a build
@@ -50,8 +55,12 @@
 #endif
 
 /* §4.3-style task: core 0 (off the pipeline's core 1), low priority (best-effort telemetry, must
- * not preempt logging/ui), NOT supervised or WDT-subscribed -- a stalled/absent peer must never
- * reset the lap-timer. */
+ * not preempt logging/ui), and deliberately NEITHER supervised NOR task-WDT-subscribed. §17.1's
+ * "all six app tasks subscribed" is amended by the 2026-10-13 audit fix wave (ruling R7) to
+ * exclude this one BY DESIGN: it blocks on a UART write to a peer that may be slow, wedged or
+ * absent, and a stalled or missing peer must never panic or restart the lap-timer. Every other
+ * app task (pipeline, logger, ui, supervisor) subscribes to the task WDT (sup_wdt_subscribe();
+ * the ui task calls esp_task_wdt_add() directly). */
 #define LINK_CORE         0
 #define LINK_PRIO         4
 #define LINK_STACK_BYTES  3072
