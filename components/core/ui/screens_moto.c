@@ -1,7 +1,10 @@
-/* Moto riding screens: LAP pages 0/1/2 and DRAG pages 0/1/2 (spec §20.4-20.5) + the §11.4 benches
- * rule + the shared fault-icon strip (§20.5 + §17.4); plus the one-shot screens (§20.6) and the
- * menu list (§20.7) and the top-level screens_render() dispatch (session 4.3). Pure C11, no
- * malloc/float/libm — every layout position is a compile-time constant and every value is
+/* Moto riding screens: LAP pages 0/1/2 and DRAG pages 0/1/2 (spec §20.4-20.5, as amended by
+ * 2026-09-27-plan-7b-glanceable-ui-design.md §4-§7) + the shared fault-icon strip (§20.5 + §17.4);
+ * plus the one-shot screens (§20.6), the menu list (§20.7) and the top-level screens_render()
+ * dispatch (session 4.3). NOTE: spec §11.4's benches rule (ascending by speed, at most four rows,
+ * drop-lowest-first, a "1/4 --" row for a run that ends before the 1/4) is NOT implemented here —
+ * 7b §7 superseded it with the newest-gate card plus a scrolling footer (io false claim 3). Pure
+ * C11, no malloc/float/libm — every layout position is a compile-time constant and every value is
  * formatted with plain integer arithmetic, so every render function here is a pure function of its
  * screen_model_t and the PBM goldens in test/snapshots/ are byte-identical across clang and
  * gcc-16.
