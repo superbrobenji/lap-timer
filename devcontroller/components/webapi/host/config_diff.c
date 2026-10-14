@@ -114,7 +114,13 @@ int config_diff_minify(const char *current_json, const char *desired_json,
     jsmn_init(&dp);
     int cn = jsmn_parse(&cp, current_json, clen, s_ctok, CFG_MAXTOK);
     int dn = jsmn_parse(&dp, desired_json, dlen, s_dtok, CFG_MAXTOK);
-    if (cn < 1 || dn < 1) return CFG_DIFF_E_PARSE;           /* NOMEM / malformed */
+    /* fix round 1 finding 1: NOMEM means a SYNTACTICALLY VALID document ran out of the fixed
+     * CFG_MAXTOK token budget -- that is a capacity failure, not a malformed-JSON one, and must
+     * not be reported as CFG_DIFF_E_PARSE (which the HTTP layer turns into a dishonest 400 for a
+     * document that was never actually bad). INVAL/PART (truly malformed) and a zero-token result
+     * stay CFG_DIFF_E_PARSE. */
+    if (cn == JSMN_ERROR_NOMEM || dn == JSMN_ERROR_NOMEM) return CFG_DIFF_E_SIZE;
+    if (cn < 1 || dn < 1) return CFG_DIFF_E_PARSE;            /* INVAL / PART / empty */
     if (s_ctok[0].type != JSMN_OBJECT || s_dtok[0].type != JSMN_OBJECT) return CFG_DIFF_E_PARSE;
 
     size_t o = 0;
