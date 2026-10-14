@@ -25,7 +25,11 @@ enum {
     SYS_STORAGE_DEAD, SYS_STORAGE_FULL, SYS_STORAGE_DEGRADED, SYS_BATT_LOW,
     SYS_SAFE_MODE, SYS_HEAP_LOW, SYS_DISP_TEMP_THROTTLE, SYS_OTA_PENDING, SYS_FUSION_DISAGREE,
     SYS_RECOVERY_MODE,   /* bit 14 (§17.5 recovery-mode amendment): level-2 safe mode */
-    /* M11: bit 15 is the last STATUS-visible flag (status_build masks to u16). */
+    SYS_NVS_DEAD,        /* bit 15 (audit fix wave F2a, app:L3): lt_nvs_init() failed, so every
+                          * NVS accessor runs on handle 0 -- boot_cnt stays 0, crash-loop
+                          * detection and the safe-mode gate are dead, and open_session reuses
+                          * S00000_001 every boot. app_main used to boot on with one ESP_LOGE.
+                          * Bit 15 is the last STATUS-visible flag (status_build masks to u16). */
 };
 uint32_t sys_flags_get(void);
 void     sys_flags_set(uint8_t bit);
@@ -53,5 +57,7 @@ int  sup_register_task(uint8_t hb_id, TaskHandle_t task, uint32_t stall_s);
 /* The FreeRTOS handle a task registered for its heartbeat slot (NULL if unused). Used by
  * `dbg mem` to sample each task's stack high-water mark (§22.4). */
 TaskHandle_t sup_task_handle(uint8_t hb_id);
+void sup_wdt_subscribe(uint8_t hb_id);   /* esp_task_wdt_add(NULL) + a boot line + an errlog on failure */
+void sup_wdt_feed(void);                 /* esp_task_wdt_reset(); safe from any subscribed task */
 
 #endif /* APP_LT_SUP_H */

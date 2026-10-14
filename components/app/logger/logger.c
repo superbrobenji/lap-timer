@@ -159,7 +159,7 @@ static uint16_t session_count(void)
         char name[STO_NAME_MAX];
         int n = 0;
         while (sto_list_next_name(&it, name, sizeof name) == 1) {
-            if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
+            if (++n % 16 == 0) { sup_wdt_feed(); vTaskDelay(1); }   /* §17.1: a long listing resets the WDT inside */
             const char *dot = strrchr(name, '.');
             if (dot && strcmp(dot, ".sum") == 0) c++;
         }
@@ -786,7 +786,7 @@ static bool evict_scan_oldest(evict_ctx_t *e)
         char name[STO_NAME_MAX];
         int n = 0;
         while (sto_list_next_name(&it, name, sizeof name) == 1) {
-            if (++n % 16 == 0) vTaskDelay(1);   /* one tick: lets IDLE0 run (see above) */
+            if (++n % 16 == 0) { sup_wdt_feed(); vTaskDelay(1); }   /* §17.1: a long listing resets the WDT inside */
             size_t len = strlen(name);
             if (len < 4 || strcmp(name + len - 4, ".log") != 0) continue;   /* only .log (never .sum) */
             if (strcmp(name, e->curlog) == 0) continue;                     /* never the current session */
@@ -851,6 +851,7 @@ static void eviction_check(void)
         evict_one(e.oldest, &si);
         pass++;
         if (sto_info(&si) != 0 || si.total_kb == 0) break;   /* re-read for the loop condition */
+        sup_wdt_feed();
         vTaskDelay(1);                                        /* one tick between passes */
     }
     LT_ASSERT_VOID(pass <= EVICT_MAX_PER_PASS, LOG_ASSERT_CODE);   /* rule 2: bounded loop */
@@ -947,22 +948,34 @@ static void status_cache_estimate(void)
     status_cache_update(free_kb, s_sessions_cached);
 }
 
-static void logger_task(void *arg)
+/* Boot-time half of logger_task, extracted (P10 rule 5, controller ruling P-6) so the task entry --
+ * which must never itself LT_ASSERT_*-return (see sup_task's note) -- stays under the 20-line
+ * budget now that it also subscribes to the task WDT. */
+static void logger_boot(void)
 {
-    (void)arg; sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
+    sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
+    sup_wdt_subscribe(HB_LOGGER);     /* §17.1 (R7): a logger wedged in LittleFS compaction -- the
+                                       * Plan-7-T9 bench failure -- must panic, not hang silently */
     /* #97 (§10.9): the user track table is no longer loaded here (final review F-4/I-4) --
      * logger_load_tracks() now runs on app_main's own task, before this task is even created (see
      * that function's doc comment and core/trk.h's ownership comment for why). */
     /* Prime the status.h cache HERE (logger task, storage already mounted by boot_storage()
      * before boot_subsystems()'s logger_start(), app_main.c) so a STATUS built before any
      * session ever opens or closes reports the real free_kb/sessions, not a cold 0/0 (Plan 5.6
-     * T1 fix 2/3). Crammed onto one line to stay within the P10 rule-5 line budget for a task
-     * entry, which must never itself LT_ASSERT_*-return (see sup_task's note). */
-    s_last_evict_ms = now_ms(); status_cache_prime();
+     * T1 fix 2/3). */
+    s_last_evict_ms = now_ms();
+    status_cache_prime();
+}
+
+static void logger_task(void *arg)
+{
+    (void)arg;
+    logger_boot();
     ESP_LOGI(TAG, "logger up (core %d prio %d)", LOG_CORE, LOG_PRIO);
 
     for (;;) {
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOOP_TIMEOUT_MS));   /* ring-notify or 1000 ms */
+        sup_wdt_feed();
 
         drain_requests();
         drain_rings();
