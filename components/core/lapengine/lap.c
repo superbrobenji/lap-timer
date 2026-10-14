@@ -271,8 +271,9 @@ void lap_create_cancel(lap_t *L)
 
 /* §10.9: add a gate at the current fix while in CREATE mode. gate_idx 0 builds the S/F line and the
  * venue skeleton; gate_idx n (added in order) appends sector gate n. The gate line is perpendicular to
- * the fix heading (lap_gate_line), so dir_sign +1 accepts the current motion. Returns 0, or -1 if not
- * creating, the fix is invalid or not moving, or the gate index is out of order / full. */
+ * the fix heading (lap_gate_line), so dir_sign +1 accepts the current motion. Returns 0 on success, -1
+ * otherwise (when not creating, the fix is invalid/not moving, the gate index is out of order/full, the
+ * fix's position or heading is out of range, or the derived line is degenerate). */
 int lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout)
 {
     CORE_ASSERT_RET(L != NULL, LAP_ASSERT_CODE, -1);
