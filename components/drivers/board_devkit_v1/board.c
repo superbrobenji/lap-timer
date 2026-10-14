@@ -242,8 +242,9 @@ int board_init(void)
     }
 
     /* After a partial failure s_inited stays false, so board_init can be re-entered -- but the parts
-     * that already succeeded (I2C bus, SPI3, ADC unit) would then fail with INVALID_STATE, so a
-     * retry cannot recover them. No caller retries; rc is the whole report of a partial bring-up. */
+     * that already succeeded cannot be re-initialised: the I2C bus and SPI3 refuse a second init
+     * with ESP_ERR_INVALID_STATE and the ADC1 unit with ESP_ERR_NOT_FOUND, so a retry cannot
+     * recover them. No caller retries; rc is the whole report of a partial bring-up. */
     s_inited = (rc == 0);
     ESP_LOGI(TAG, "board_devkit_v1 init rc %d: I2C0(21/22) VSPI(18/23/19) ADC1_CH6(34) buttons(32/33/25)", rc);
     return rc;
