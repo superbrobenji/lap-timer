@@ -16,8 +16,10 @@
 int    json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks);   /* token count or -1 */
 bool   json_tok_eq(const char *js, const jsmntok_t *t, const char *s);
 /* Iterative (no recursion): the subtree of token i is the run of following tokens that start
- * before toks[i].end, which JSMN_PARENT_LINKS guarantees is contiguous. Depth is capped by
- * json_parse, so neither helper can be driven to unbounded stack use. */
+ * before toks[i].end. jsmn emits tokens in document order, which is what makes that run
+ * contiguous -- JSMN_PARENT_LINKS is unrelated (json_parse uses the parent links only for its
+ * depth walk). Depth is capped by json_parse, so neither helper can be driven to unbounded
+ * stack use. */
 int    json_skip(const jsmntok_t *toks, int ntoks, int i);                          /* index of the token after subtree i */
 bool   json_tok_int(const char *js, const jsmntok_t *t, int64_t *out);
 bool   json_tok_double(const char *js, const jsmntok_t *t, double *out);

@@ -46,59 +46,45 @@ void setUp(void)
 }
 void tearDown(void) {}
 
-/* ---- fb_init / fb_clear / dirty-box bookkeeping (spec §20.2 dirty tracking) ---- */
+/* ---- fb_init / fb_clear geometry + off-frame no-op (spec §20.2) ---- */
 
-static void test_fb_init_starts_with_no_dirty_region(void)
+static void test_fb_init_sets_the_geometry(void)
 {
-    /* setUp() already ran fb_clear (dirty = whole frame); re-init to observe fb_init's own
-     * invariant, that nothing is dirty until the first clear/draw. */
+    /* io:M4/R27: fb_t no longer carries a dirty box (ui.c's partial window comes from
+     * fb_diff_rect against the panel's last accepted frame, 7c §5), so fb_init's whole
+     * observable contract is the geometry it derives, plus render.h's "does not touch the
+     * contents of `bits`" clause -- checked below against the pixel buffer itself, not just
+     * inferred from the struct fields. setUp() already ran fb_clear(), so the poison pattern is
+     * written here, in the test body, after that -- poisoning before setUp() would just be
+     * overwritten before fb_init is even reached. */
+    static uint8_t copy[sizeof s_bits];
+    for (size_t i = 0; i < sizeof s_bits; i++) {
+        s_bits[i] = (uint8_t)(0x5Au + i); /* index-derived, neither all-0x00 nor all-0xFF */
+    }
+    memcpy(copy, s_bits, sizeof copy);
+    memset(&s_fb, 0xAA, sizeof s_fb);
     fb_init(&s_fb, s_bits, FB_W, FB_H);
-    TEST_ASSERT_FALSE(s_fb.dirty.valid);
+    TEST_ASSERT_EQUAL_PTR(s_bits, s_fb.bits);
     TEST_ASSERT_EQUAL_UINT16(FB_W, s_fb.w);
     TEST_ASSERT_EQUAL_UINT16(FB_H, s_fb.h);
     TEST_ASSERT_EQUAL_UINT16(FB_W / 8, s_fb.stride);
+    TEST_ASSERT_EQUAL_MEMORY(copy, s_bits, sizeof copy); /* fb_init must not touch the pixel buffer */
 }
 
-static void test_fb_clear_marks_the_whole_frame_dirty(void)
+static void test_off_frame_draws_touch_no_bits(void)
 {
-    /* setUp already cleared once; clear again explicitly so this test does not depend on that. */
-    fb_clear(&s_fb, 1);
-    TEST_ASSERT_TRUE(s_fb.dirty.valid);
-    TEST_ASSERT_EQUAL_UINT16(0, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(0, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(FB_W, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(FB_H, s_fb.dirty.y1);
-    /* black=1 -> every byte fully ink (0x00), since 0 = black */
-    TEST_ASSERT_EQUAL_UINT8(0x00, s_fb.bits[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x00, s_fb.bits[(size_t)s_fb.stride * s_fb.h - 1]);
-}
-
-static void test_dirty_box_accumulates_bounding_box_of_draws(void)
-{
-    /* fb_clear (in setUp) already set dirty to the whole frame; re-init to start from "nothing
-     * drawn yet" so this test can observe accumulation from an empty box. */
-    fb_init(&s_fb, s_bits, FB_W, FB_H);
-    TEST_ASSERT_FALSE(s_fb.dirty.valid);
-
-    fb_rect(&s_fb, 10, 20, 5, 5, 1, true); /* touches [10,15) x [20,25) */
-    TEST_ASSERT_TRUE(s_fb.dirty.valid);
-    TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(20, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(15, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
-
-    fb_rect(&s_fb, 100, 5, 5, 5, 1, true); /* touches [100,105) x [5,10) -> union grows both ways */
-    TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(5, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(105, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
-
-    /* A draw entirely off-frame is a no-op: it must not touch bits and must not move dirty. */
-    fb_icon(&s_fb, ICON_GPS, 1000, 1000);
-    TEST_ASSERT_EQUAL_UINT16(10, s_fb.dirty.x0);
-    TEST_ASSERT_EQUAL_UINT16(5, s_fb.dirty.y0);
-    TEST_ASSERT_EQUAL_UINT16(105, s_fb.dirty.x1);
-    TEST_ASSERT_EQUAL_UINT16(25, s_fb.dirty.y1);
+    /* The "a fully off-frame draw is a no-op" invariant the deleted dirty-box test carried,
+     * checked against the bits themselves -- a stronger check than the box ever was. */
+    static uint8_t copy[sizeof s_bits];
+    fb_clear(&s_fb, 0);
+    memcpy(copy, s_bits, sizeof copy);
+    fb_icon(&s_fb, ICON_GPS_NOFIX, 1000, 1000);
+    fb_rect(&s_fb, -50, -50, 10, 10, 1, true);
+    fb_hline(&s_fb, 4, -3, 40, 1);
+    fb_text(&s_fb, &FONT_SMALL, 400, 4, "OFF");
+    TEST_ASSERT_EQUAL_MEMORY(copy, s_bits, sizeof copy);
+    fb_clear(&s_fb, 1);                                  /* and a clear really touches every byte */
+    for (size_t i = 0; i < sizeof s_bits; i++) TEST_ASSERT_EQUAL_UINT8(0x00u, s_bits[i]);
 }
 
 /* ---- font-size coverage (roadmap exit for session 4.1) + icon/bar goldens ---- */
@@ -181,7 +167,7 @@ static void test_composite_lap_screen(void)
     fb_text(&s_fb, &FONT_SMALL, 4, 100, "S2  1:12.30"); /* x[4,81) y[100,112) */
     fb_text(&s_fb, &FONT_SMALL, 4, 114, "-0.21"); /* x[4,39) y[114,126) */
 
-    fb_icon(&s_fb, ICON_GPS, 270, 100);         /* x[270,282) y[100,112) */
+    fb_icon(&s_fb, ICON_GPS_NOFIX, 270, 100);   /* x[270,282) y[100,112) */
 
     fb_bar(&s_fb, 90, 100, 170, 16, 62); /* stand-in session progress/level indicator, x[90,260) y[100,116) */
 
@@ -208,18 +194,41 @@ static void test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds(void)
     fb_text(&s_fb, &FONT_SMALL, 400, 4, "OFF");
 
     /* Icon straddling the bottom-right corner. */
-    fb_icon(&s_fb, ICON_BLE, 290, 120);
+    fb_icon(&s_fb, ICON_LINK, 290, 120);
 
     /* Bar whose nominal width runs past the right edge; the fill fraction is still computed from
      * the full logical width (80), only the drawing is clipped. */
     fb_bar(&s_fb, 250, 90, 80, 20, 75);
 
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("clip_edge.pbm"), &s_fb));
+}
 
-    /* Belt-and-braces on top of the ASan/UBSan build (test/CMakeLists.txt Debug default): the
-     * dirty box itself must never claim to extend past the frame. */
-    TEST_ASSERT_TRUE(s_fb.dirty.x1 <= s_fb.w);
-    TEST_ASSERT_TRUE(s_fb.dirty.y1 <= s_fb.h);
+/* ---- bounded text walk (io:L1, Ruling S4-G): fb_text_draw's character walk and
+ * fb_text_right's length scan must be bounded by the SOURCE, not just rely on the caller's NUL --
+ * the same defect class as io:M2 (put_str's unbounded destination write, screens_moto.c, Task
+ * 12), but a READ. Session 3 hit this reading drag_row_t.label (model.h:44, char[8]) through
+ * render_drag_page0's direct `fb_text(..., m->drag[n-1].label)` call (screens_moto.c:764) once the
+ * model was filled with no NUL; reproduced directly here against fb_text/fb_text_right themselves
+ * rather than re-deriving that model-level repro. Neither test checks a golden: an unterminated
+ * source makes the drawn pixels unspecified (how far the bounded walk gets before giving up is an
+ * implementation detail, not a contract), so the only thing worth asserting is that the call
+ * returns at all, under ASan, without reading past `s`. ---- */
+
+static void test_text_draw_bounds_an_unterminated_source(void)
+{
+    /* s is never NUL-terminated; its end sits right against ASan's stack redzone, so the unfixed
+     * `for (p = s; *p != '\0'; p++)` walk reads past it on the very next byte. */
+    char s[40];
+    memset(s, 'W', sizeof s);
+    (void)fb_text(&s_fb, &FONT_SMALL, 4, 4, s);
+}
+
+static void test_text_right_bounds_an_unterminated_source(void)
+{
+    /* Same defect, fb_text_right's own strlen(s)-equivalent length scan. */
+    char s[40];
+    memset(s, 'W', sizeof s);
+    (void)fb_text_right(&s_fb, &FONT_MED, 200, 4, s);
 }
 
 /* ---- ui_layout_label (core/ui/menu_labels.c, #98) ---- */
@@ -260,9 +269,8 @@ static void test_ui_layout_label(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_fb_init_starts_with_no_dirty_region);
-    RUN_TEST(test_fb_clear_marks_the_whole_frame_dirty);
-    RUN_TEST(test_dirty_box_accumulates_bounding_box_of_draws);
+    RUN_TEST(test_fb_init_sets_the_geometry);
+    RUN_TEST(test_off_frame_draws_touch_no_bits);
     RUN_TEST(test_text_huge_renders_delta);
     RUN_TEST(test_text_inv_is_white_on_black);
     RUN_TEST(test_text_inv_no_glyph_cell_is_solid_black);
@@ -271,6 +279,8 @@ int main(void)
     RUN_TEST(test_icons_and_bar);
     RUN_TEST(test_composite_lap_screen);
     RUN_TEST(test_clipping_partial_and_fully_off_frame_draws_stay_in_bounds);
+    RUN_TEST(test_text_draw_bounds_an_unterminated_source);
+    RUN_TEST(test_text_right_bounds_an_unterminated_source);
     RUN_TEST(test_ui_layout_label);
     return UNITY_END();
 }

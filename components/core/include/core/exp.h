@@ -40,6 +40,7 @@ typedef struct {
     char      venue_name[33];
     uint8_t   run_pending;
     uint8_t   run_gate_idx;            /* DRAG_RUN emission resumes after EXP_FULL */
+    uint16_t  skipped;                 /* io:C1: records dropped because they failed to decode */
 } exp_t;
 
 int  exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
@@ -50,6 +51,7 @@ int  exp_finish(exp_t *e);                                                   /* 
 /* helpers shared by format implementations (internal) */
 int  exp_win_free(const exp_t *e);
 int  exp_win_puts(exp_t *e, const char *s);                                  /* -1 if it does not fit (nothing written) */
+void exp_skip_record(exp_t *e);        /* counts one dropped record (saturates at 0xFFFF) */
 void exp_civil_from_days(int64_t days, int *y, unsigned *m, unsigned *d);
 void exp_utc_parts(int64_t gps_us, int *y, unsigned *mo, unsigned *d, unsigned *hh, unsigned *mm, unsigned *ss, unsigned *cs);
 /* per-format hooks */

@@ -8,7 +8,7 @@
 #include <stddef.h> /* NULL */
 
 /* Power of 10 rule 5 (spec §17.9): this module's assertions report RF_ASSERT_CODE. They guard a
- * NULL input pointer and a full_every below its cfg-enforced 1..50 range (both caller bugs this
+ * NULL input pointer and a full_every outside its cfg-enforced 1..50 range (both caller bugs this
  * module backstops with the conservative RF_NONE) — never the ordinary rule evaluation below,
  * which is this function's whole job and is exercised by the table test's eight cases.
  * 0x0AC0 continues the codebase's per-module assertion-code sequence (fus 0x0A10, lap 0x0A20,
@@ -22,7 +22,7 @@
 rf_kind_t ui_refresh_decide(const rf_in_t *in)
 {
     CORE_ASSERT_RET(in != NULL, RF_ASSERT_CODE, RF_NONE);
-    CORE_ASSERT_RET(in->full_every >= 1, RF_ASSERT_CODE, RF_NONE);
+    CORE_ASSERT_RET(in->full_every >= 1 && in->full_every <= 50, RF_ASSERT_CODE, RF_NONE);
 
     if (in->dead) {
         return RF_NONE;

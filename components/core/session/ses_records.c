@@ -88,7 +88,11 @@ int ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *f, uint8_t *out, size_t
     bw_u16(&w, (uint16_t)dt); bw_i16(&w, (int16_t)dlat); bw_i16(&w, (int16_t)dlon); bw_i16(&w, (int16_t)dalt);
     bw_u16(&w, (uint16_t)v_cms); bw_u16(&w, clamp_u16(round_div(f->head_e5, 1000)));
     bw_u8(&w, clamp_u8(round_div(f->hacc_mm, 100))); bw_u8(&w, f->sats); bw_u8(&w, fix_flags(f));
-    /* advance the reconstructed previous exactly as the decoder will */
+    /* Advance the reconstructed previous for exactly the fields the delta carries -- the fields the
+     * delta math anchors on. ses_decode_fix additionally sets prev.sacc_mms/pdop_e2 to 0,
+     * prev.fix_type from the flag byte and prev.flags to a synthesised word; none of those feeds
+     * any delta, so the two sides agree on everything that matters, but this is deliberately NOT
+     * "exactly as the decoder will" (io false claim 2). */
     st->prev.gps_us += dt * 1000; st->prev.lat_e7 = f->lat_e7; st->prev.lon_e7 = f->lon_e7;
     st->prev.alt_mm += (int32_t)(dalt * 100); st->prev.gspeed_mms = (int32_t)(v_cms * 10);
     st->prev.head_e5 = (int32_t)(round_div(f->head_e5, 1000) * 1000); st->prev.sats = f->sats;
@@ -110,6 +114,8 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         out->gspeed_mms = br_i32(&r); out->head_e5 = br_i32(&r); out->hacc_mm = br_u32(&r); out->sacc_mms = br_u16(&r);
         out->pdop_e2 = br_u16(&r); out->fix_type = br_u8(&r); out->sats = br_u8(&r);
         uint8_t fl = br_u8(&r);
+        if (out->gps_us <= 0) return -1;   /* R26/io:C1: a frame admitted by the §12.2 CRC resync
+                                            * must not reach the exporters */
         out->valid = fl & 0x01; out->flags = (uint8_t)(((fl & 0x02) ? GPS_FLAG_FIXOK : 0) | GPS_FLAG_TIME | GPS_FLAG_DATE);
         st->prev = *out; st->have_prev = true; st->last_key_gps_us = out->gps_us; st->prev_valid = out->valid != 0;
         return 1;
@@ -120,7 +126,12 @@ int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, ui
         uint16_t dt = br_u16(&r); int16_t dlat = br_i16(&r); int16_t dlon = br_i16(&r); int16_t dalt = br_i16(&r);
         uint16_t v = br_u16(&r); uint16_t head = br_u16(&r); uint8_t hacc = br_u8(&r); uint8_t sats = br_u8(&r); uint8_t fl = br_u8(&r);
         gps_fix_t *p = &st->prev;
-        p->gps_us += (int64_t)dt * 1000; p->lat_e7 += dlat; p->lon_e7 += dlon; p->alt_mm += (int32_t)dalt * 100;
+        /* io:C1/R26: reject the reconstructed timestamp before the anchor is mutated -- the KEY
+         * branch checks before it touches st->prev, and a rejected DELTA must not leave a corrupt
+         * anchor for the frames that follow. */
+        int64_t gps_us = p->gps_us + (int64_t)dt * 1000;
+        if (gps_us <= 0) return -1;
+        p->gps_us = gps_us; p->lat_e7 += dlat; p->lon_e7 += dlon; p->alt_mm += (int32_t)dalt * 100;
         p->gspeed_mms = (int32_t)v * 10; p->head_e5 = (int32_t)head * 1000; p->hacc_mm = (uint32_t)hacc * 100u; p->sats = sats;
         p->sacc_mms = 0; p->pdop_e2 = 0;
         p->fix_type = (fl & 0x04) ? 3 : 2; p->valid = fl & 0x01;
@@ -340,7 +351,13 @@ int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, ui
     CORE_ASSERT_RET(name != NULL, SES_ASSERT_CODE, -1);
     CORE_ASSERT_RET(out != NULL, SES_ASSERT_CODE, -1);
     uint8_t p[36]; bw_t w; bw_init(&w, p, sizeof p);
-    char nm[32]; memset(nm, 0, sizeof nm); strncpy(nm, name, sizeof nm - 1);
+    /* io:M9: §12.3's name field is exactly 32 bytes, zero-padded and NOT required to be
+     * NUL-terminated -- so copy up to 32, not strncpy's 31. The length scan is bounded by the
+     * destination (rule 2); strnlen is avoided (unused elsewhere in the tree). */
+    char nm[32]; memset(nm, 0, sizeof nm);
+    size_t ln = 0;
+    while (ln < sizeof nm && name[ln] != '\0') ln++;
+    memcpy(nm, name, ln);
     bw_u16(&w, venue_id); bw_u16(&w, layout_id); bw_bytes(&w, nm, sizeof nm);
     return finish(SES_T_VENUE, &w, out, cap);
 }

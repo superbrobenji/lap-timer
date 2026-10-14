@@ -1497,23 +1497,9 @@ static void render_fb(void)
     LT_ASSERT_VOID(s_model.screen <= SCR_ONESHOT, UI_APP_ASSERT_CODE); /* screens_render dispatches on it */
     LT_ASSERT_VOID(s_model.page < 3, UI_APP_ASSERT_CODE);              /* riding renderer dispatches on it */
     screens_render(&s_fb, &s_model);
-    /* The pure renderer clips every primitive to the fb, so the reported dirty box must lie within
-     * the framebuffer -- a box past CANVAS_W/CANVAS_H would mean a renderer clipping bug.
-     *
-     * Deliberately CANVAS_W here, not CANVAS_VISIBLE_W (Plan 7 T3 fix 1, ruling T3-R1 asked for the
-     * latter): fb_clear() (render.c), called at the top of every screens_render() path, always sets
-     * dirty.x1 = fb->w -- clearing legitimately touches every addressable byte, including the
-     * padding columns between CANVAS_VISIBLE_W and CANVAS_W on the 213 canvas -- so dirty.x1 is
-     * CANVAS_W (256) after literally every render, never less. Binding this check to
-     * CANVAS_VISIBLE_W (250) would make it fire on every single refresh on a ws213v4 build, not
-     * just a genuine clipping bug -- confirmed by hitting exactly that failure in test_screens_213
-     * once test/test_screens.c's dirty-box assertions were rebound the same way (see that file's
-     * fb_max_ink_col() comment for the content-based check that actually verifies "nothing draws at
-     * x >= CANVAS_VISIBLE_W", which this cheap structural bounds check on the hot render path is
-     * not the right place for). CANVAS_W remains the correct bound for "did the renderer clip
-     * itself to the addressable buffer". */
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.x1 <= CANVAS_W, UI_APP_ASSERT_CODE);
-    LT_ASSERT_VOID(!s_fb.dirty.valid || s_fb.dirty.y1 <= CANVAS_H, UI_APP_ASSERT_CODE);
+    /* No dirty-box bounds check here any more (io:M4/R27): fb_t carries no box, and the renderer's
+     * per-pixel clipping is what keeps a draw inside the buffer. The content-based check that
+     * "nothing draws at x >= CANVAS_VISIBLE_W" lives in test/test_screens.c's fb_max_ink_col(). */
 }
 
 /* Builds one rf_in_t snapshot for ui_refresh_decide() (spec §20.3). `full_every` is already

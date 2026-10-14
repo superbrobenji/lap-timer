@@ -46,25 +46,17 @@ static void open_(jw_t *w, char c)
 {
     CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE);
     sep(w); putc_(w, c);
-    if (w->depth + 1 < JW_MAX_DEPTH) w->depth++; else w->overflow = true;
-    CORE_ASSERT_VOID(w->depth < JW_MAX_DEPTH, JSON_ASSERT_CODE); /* invariant: first[] index in range */
+    /* R20: the nesting cap is the control flow, not an assertion restating the branch above it --
+     * first[] is only indexed once the increment is known to be in range. */
+    if (w->depth + 1u >= JW_MAX_DEPTH) { w->overflow = true; return; }
+    w->depth++;
     w->first[w->depth] = true;
 }
 static void close_(jw_t *w, char c) { CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE); if (w->depth) w->depth--; putc_(w, c); }
 
-void jw_obj_open(jw_t *w)
-{
-    CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE);
-    open_(w, '{');
-    CORE_ASSERT_VOID(w->overflow || w->depth > 0, JSON_ASSERT_CODE); /* postcondition: a successful open nests one level */
-}
+void jw_obj_open(jw_t *w) { CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE); open_(w, '{'); }
 void jw_obj_close(jw_t *w) { CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE); close_(w, '}'); }
-void jw_arr_open(jw_t *w)
-{
-    CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE);
-    open_(w, '[');
-    CORE_ASSERT_VOID(w->overflow || w->depth > 0, JSON_ASSERT_CODE); /* postcondition: a successful open nests one level */
-}
+void jw_arr_open(jw_t *w) { CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE); open_(w, '['); }
 void jw_arr_close(jw_t *w) { CORE_ASSERT_VOID(w != NULL, JSON_ASSERT_CODE); close_(w, ']'); }
 
 void jw_str(jw_t *w, const char *s)

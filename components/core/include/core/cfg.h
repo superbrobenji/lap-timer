@@ -73,7 +73,9 @@ _Static_assert(offsetof(cfg_t, dist_units) == sizeof(cfg_t) - 1u,
 /* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
  * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */
 typedef struct { bool display_live_clock; uint8_t log_fused_hz; const char *ble_name; } cfg_profile_t;
-int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);   /* 0 ok / -1 bad ble_name length (> 15)
+                                                            * or log_fused_hz outside §15.1's
+                                                            * {5,10,25}; on -1 *c is untouched */
 
 int cfg_defaults(cfg_t *c);
 int cfg_validate(cfg_t *c);                       /* clamps; returns number of corrected fields */

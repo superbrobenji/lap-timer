@@ -6,6 +6,11 @@
 
 #define EXP_ASSERT_CODE 0x0A60
 
+/* io:M5: put_sentence writes at most 115 bytes ('$' + body[110]'s 109 chars + '*' + 2 hex +
+ * "\r\n") and exp_nmea_feed writes TWO sentences per fix, so the reserve must be 230 -- the old
+ * 200 let the first through and failed the second. 232 keeps 2 bytes of slack. */
+#define EXP_NMEA_RESERVE 232
+
 int exp_nmea_open(exp_t *e) { (void)e; return 0; }
 
 static void latlon_fields(int32_t lat_e7, int32_t lon_e7, char *lat, char *ns, char *lon, char *ew)
@@ -28,7 +33,8 @@ static int put_sentence(exp_t *e, const char *body)      /* body excludes '$' an
     CORE_ASSERT_RET(body != NULL, EXP_ASSERT_CODE, -1);
     uint8_t x = 0; for (const char *s = body; *s; s++) x ^= (uint8_t)*s;
     char line[128];
-    snprintf(line, sizeof line, "$%s*%02X\r\n", body, x);
+    int n = snprintf(line, sizeof line, "$%s*%02X\r\n", body, x);
+    if (n < 0 || (size_t)n >= sizeof line) return -1;   /* never checksum a truncated body */
     return exp_win_puts(e, line);
 }
 
@@ -37,9 +43,9 @@ int exp_nmea_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (type != SES_T_FIX_KEY && type != SES_T_FIX_DELTA) return 0;
-    if (exp_win_free(e) < 200) return EXP_FULL;
+    if (exp_win_free(e) < EXP_NMEA_RESERVE) return EXP_FULL;
     gps_fix_t f;
-    if (ses_decode_fix(&e->fix_st, type, p, len, &f) != 1) return -1;
+    if (ses_decode_fix(&e->fix_st, type, p, len, &f) != 1) { exp_skip_record(e); return 0; }
     int y; unsigned mo, d, hh, mm, ss, cs;
     exp_utc_parts(f.gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
     char lat[16], lon[16], ns, ew;
@@ -47,11 +53,13 @@ int exp_nmea_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     double knots = (double)f.gspeed_mms / 1000.0 * 1.943844;
     double course = (double)f.head_e5 / 1e5;
     char body[110];
-    snprintf(body, sizeof body, "GPRMC,%02u%02u%02u.%02u,%c,%s,%c,%s,%c,%.2f,%06.2f,%02u%02u%02u,,,A",
+    int bn = snprintf(body, sizeof body, "GPRMC,%02u%02u%02u.%02u,%c,%s,%c,%s,%c,%.2f,%06.2f,%02u%02u%02u,,,A",
              hh, mm, ss, cs, f.valid ? 'A' : 'V', lat, ns, lon, ew, knots, course, d, mo, (unsigned)(y % 100));
+    if (bn < 0 || (size_t)bn >= sizeof body) { exp_skip_record(e); return 0; }
     if (put_sentence(e, body) < 0) return -1;
-    snprintf(body, sizeof body, "GPGGA,%02u%02u%02u.%02u,%s,%c,%s,%c,%u,%02u,%.1f,%.1f,M,0.0,M,,",
+    bn = snprintf(body, sizeof body, "GPGGA,%02u%02u%02u.%02u,%s,%c,%s,%c,%u,%02u,%.1f,%.1f,M,0.0,M,,",
              hh, mm, ss, cs, lat, ns, lon, ew, f.valid ? 1u : 0u, f.sats, (double)f.pdop_e2 / 100.0, (double)f.alt_mm / 1000.0);
+    if (bn < 0 || (size_t)bn >= sizeof body) { exp_skip_record(e); return 0; }
     return put_sentence(e, body);
 }
 

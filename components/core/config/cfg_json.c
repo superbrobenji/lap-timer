@@ -37,6 +37,25 @@ static int get_enum2(const char *js, const jsmntok_t *t, const char *str_a, uint
     return -1;
 }
 
+/* io:L3: the caller has already decided kmh vs mph via strcmp on the path; this takes that
+ * decision as a bool instead of re-deriving it from path[13] == 'k'.
+ * Deliberately no ntoks parameter, so it cannot bounds-check toks[v + 1 + k] itself -- this is not
+ * a regression: t->size is capped at CFG_MAX_BENCHES (4) just above, and jsmn only ever reports a
+ * size for children it actually parsed, so a truncated token array makes json_parse (and so
+ * cfg_from_json) fail with -1 before walk()/apply() is reached at all. */
+static int apply_benches(cfg_t *c, const char *js, const jsmntok_t *toks, int v, bool kmh)
+{
+    CORE_ASSERT_RET(c != NULL && js != NULL && toks != NULL, CFG_ASSERT_CODE, -1);
+    const jsmntok_t *t = &toks[v];
+    if (t->type != JSMN_ARRAY) return -1;
+    if (t->size > CFG_MAX_BENCHES) return -1;
+    uint16_t *dst = kmh ? c->drag.benches_kmh : c->drag.benches_mph;
+    uint8_t n = 0;
+    for (int k = 0; k < t->size; k++) { if (!get_u16(js, &toks[v + 1 + k], &dst[n])) return -1; n++; }
+    if (kmh) c->drag.n_kmh = n; else c->drag.n_mph = n;
+    return 0;
+}
+
 /* returns 0 ok, -1 type error */
 static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, const char *path, int v)
 {
@@ -65,15 +84,8 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, con
         }
         c->lap.n_default_layout = n; return 0;
     }
-    if (!strcmp(path, "drag.benches_kmh") || !strcmp(path, "drag.benches_mph")) {
-        if (t->type != JSMN_ARRAY) return -1;
-        if (t->size > CFG_MAX_BENCHES) return -1;
-        bool kmh = path[13] == 'k';
-        uint16_t *dst = kmh ? c->drag.benches_kmh : c->drag.benches_mph; uint8_t n = 0;
-        for (int k = 0; k < t->size; k++) { if (!get_u16(js, &toks[v + 1 + k], &dst[n])) return -1; n++; }
-        if (kmh) c->drag.n_kmh = n; else c->drag.n_mph = n;
-        return 0;
-    }
+    if (!strcmp(path, "drag.benches_kmh")) return apply_benches(c, js, toks, v, true);
+    if (!strcmp(path, "drag.benches_mph")) return apply_benches(c, js, toks, v, false);
     if (!strcmp(path, "drag.rollout")) return json_tok_bool(js, t, &c->drag.rollout) ? 0 : -1;
     if (!strcmp(path, "drag.launch_g")) return get_u8(js, t, &c->drag.launch_g_e2) ? 0 : -1;
     if (!strcmp(path, "power.pit_after_s")) return get_u16(js, t, &c->power.pit_after_s) ? 0 : -1;
@@ -106,31 +118,50 @@ static int apply(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, con
 
 static const char *const SECTIONS[] = { "lap", "drag", "power", "display", "battery", "ble", "log", "gps", "imu" };
 
-static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *prefix, char *err, size_t err_cap)
+static bool is_section(const char *key)
+{
+    CORE_ASSERT_RET(key != NULL, CFG_ASSERT_CODE, false);
+    for (size_t s = 0; s < sizeof SECTIONS / sizeof SECTIONS[0]; s++)
+        if (!strcmp(key, SECTIONS[s])) return true;
+    return false;
+}
+
+/* R27/io:H2: two nested loops, not recursion. §15.1's grammar is exactly two levels -- top-level
+ * scalars and section objects of scalars/arrays -- which is why the recursive version could only
+ * ever reach depth 2 (is_section was tested only when prefix[0] == 0). The outer loop walks the
+ * root object's members, the inner one a section's; both are bounded by the token count. */
+static int walk(cfg_t *c, const char *js, const jsmntok_t *toks, int ntoks, char *err, size_t err_cap)
 {
     CORE_ASSERT_RET(c != NULL, CFG_ASSERT_CODE, -1);
     CORE_ASSERT_RET(js != NULL, CFG_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(toks != NULL, CFG_ASSERT_CODE, -1);
-    CORE_ASSERT_RET(prefix != NULL, CFG_ASSERT_CODE, -1);   /* err is optional: checked by set_err(), not here */
-    int i = obj + 1;
-    for (int k = 0; k < toks[obj].size && i + 1 < ntoks; k++) {
-        char key[32], path[64];
+    CORE_ASSERT_RET(toks != NULL, CFG_ASSERT_CODE, -1);   /* err is optional: set_err checks it */
+    CORE_ASSERT_RET(ntoks > 0, CFG_ASSERT_CODE, -1);
+    int i = 1;                                            /* first key of the root object */
+    for (int k = 0; k < toks[0].size && i + 1 < ntoks; k++) {
+        char key[32];
         json_tok_str(js, &toks[i], key, sizeof key);
         int v = i + 1;
-        if (prefix[0]) snprintf(path, sizeof path, "%s.%s", prefix, key); else snprintf(path, sizeof path, "%s", key);
-        bool is_section = false;
-        if (!prefix[0]) for (size_t s = 0; s < sizeof SECTIONS / sizeof SECTIONS[0]; s++) if (!strcmp(key, SECTIONS[s])) is_section = true;
-        if (is_section) {
+        if (is_section(key)) {
             if (toks[v].type != JSMN_OBJECT) {
                 char msg[64]; snprintf(msg, sizeof msg, "%s must be an object", key);
                 return set_err(err, err_cap, msg);
             }
-            if (walk(c, js, toks, ntoks, v, key, err, err_cap) < 0) return -1;
-        } else if (apply(c, js, toks, ntoks, path, v) < 0) {
-            char msg[96]; snprintf(msg, sizeof msg, "bad value for %s", path);
+            int j = v + 1;                                /* first key of the section object */
+            for (int s = 0; s < toks[v].size && j + 1 < ntoks; s++) {
+                char sub[32], path[64];
+                json_tok_str(js, &toks[j], sub, sizeof sub);
+                snprintf(path, sizeof path, "%s.%s", key, sub);
+                if (apply(c, js, toks, ntoks, path, j + 1) < 0) {
+                    char msg[96]; snprintf(msg, sizeof msg, "bad value for %s", path);
+                    return set_err(err, err_cap, msg);
+                }
+                j = json_skip(toks, ntoks, j + 1);        /* j is the key; step past its value */
+            }
+        } else if (apply(c, js, toks, ntoks, key, v) < 0) {
+            char msg[96]; snprintf(msg, sizeof msg, "bad value for %s", key);
             return set_err(err, err_cap, msg);
         }
-        i = json_skip(toks, ntoks, i + 1);        /* i is the key; step past its value subtree */
+        i = json_skip(toks, ntoks, i + 1);
     }
     return 0;
 }
@@ -145,7 +176,7 @@ int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_ca
     int cnt = json_parse(json, n, toks, MAX_TOKS);
     if (cnt < 1 || toks[0].type != JSMN_OBJECT) return set_err(err, err_cap, "malformed json");
     cfg_t tmp = *c;
-    if (walk(&tmp, json, toks, cnt, 0, "", err, err_cap) < 0) return -1;
+    if (walk(&tmp, json, toks, cnt, err, err_cap) < 0) return -1;
     *c = tmp;
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "unity.h"
 #include "core/exp.h"
 #include "core/ses.h"
+#include "core/bw.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -84,10 +85,27 @@ static void test_vbo_laptiming_section_when_sf_known(void)
     (void)at;
 }
 
+static void test_vbo_drops_a_record_with_a_bad_timestamp(void)
+{
+    /* io:C1: the old row came out 119 bytes with its "\r\n" cut off, merging two [data] lines. */
+    exp_meta_t m; memset(&m, 0, sizeof m);
+    exp_t e; TEST_ASSERT_EQUAL_INT(0, exp_open(&e, EXP_VBO, &m));
+    uint8_t out[2048]; size_t n = 0;
+    TEST_ASSERT_EQUAL_INT(0, exp_pull(&e, out, sizeof out, &n));    /* drain the header */
+    uint8_t p[39]; bw_t w; bw_init(&w, p, sizeof p);
+    bw_i64(&w, -1000000000000LL); bw_i32(&w, -338561234); bw_i32(&w, 185123456);
+    bw_i32(&w, 45000); bw_i32(&w, 18500); bw_i32(&w, 9012000); bw_u32(&w, 100);
+    bw_u16(&w, 10); bw_u16(&w, 120); bw_u8(&w, 3); bw_u8(&w, 8); bw_u8(&w, 0x07);
+    TEST_ASSERT_EQUAL_INT(0, exp_feed(&e, SES_T_FIX_KEY, p, 39));
+    TEST_ASSERT_EQUAL_UINT16(1, e.skipped);
+    TEST_ASSERT_EQUAL_UINT(0, e.win_len);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_vbo_golden_single_fix_with_fused);
     RUN_TEST(test_vbo_laptiming_section_when_sf_known);
+    RUN_TEST(test_vbo_drops_a_record_with_a_bad_timestamp);
     return UNITY_END();
 }

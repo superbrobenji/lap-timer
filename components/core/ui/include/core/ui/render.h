@@ -1,6 +1,7 @@
 #ifndef CORE_UI_RENDER_H
 #define CORE_UI_RENDER_H
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "core/ui/fonts.h"
@@ -21,34 +22,51 @@
  * a glyph or icon cell.
  */
 
+/* fb_diff_rect's out-parameter -- the partial-refresh window (7c §5) */
 typedef struct {
     uint16_t x0, y0, x1, y1; /* half-open: [x0,x1) x [y0,y1) */
-    bool     valid;          /* false = no draw has happened yet (nothing is dirty) */
+    bool     valid;          /* false = empty rect (fb_diff_rect found no difference) */
 } fb_rect_t;
 
 typedef struct {
     uint8_t  *bits;   /* caller-owned, (w/8)*h bytes; 0 = black */
     uint16_t  w, h;   /* pixels; w must be a multiple of 8 */
     uint16_t  stride; /* bytes per row = w/8 */
-    fb_rect_t dirty;  /* accumulated bounding box of all draws since fb_clear */
 } fb_t;
 
 /* Initialises fb to draw into `bits` ((w/8)*h caller-owned bytes, uninitialised). w must be a
  * multiple of 8. Does not touch the contents of `bits` — call fb_clear to establish a known
- * starting color. dirty starts invalid (nothing drawn yet). */
+ * starting colour. */
 void fb_init(fb_t *fb, uint8_t *bits, uint16_t w, uint16_t h);
 
-/* Fills the whole framebuffer with `black` (nonzero = all ink/black, 0 = all background/white)
- * and resets dirty to the whole frame (a clear touches every pixel). */
+/* Fills the whole framebuffer with `black` (nonzero = all ink/black, 0 = all background/white). */
 void fb_clear(fb_t *fb, uint8_t black);
 
 /* Draws a w x h rectangle at (x,y): filled solid if `fill`, else a 1px outline. `black` selects
  * ink (nonzero) or background (0). Clipped to the framebuffer bounds; a fully off-frame rect is a
- * no-op that leaves `dirty` unchanged. */
+ * no-op. */
 void fb_rect(fb_t *fb, int x, int y, int w, int h, uint8_t black, bool fill);
 
-/* Draws a 1px-tall, w-px-wide horizontal line at (x,y). Same clipping/dirty rules as fb_rect. */
+/* Draws a 1px-tall, w-px-wide horizontal line at (x,y). Same clipping rules as fb_rect. */
 void fb_hline(fb_t *fb, int x, int y, int w, uint8_t black);
+
+/* io:L1: fb_text/fb_text_right/fb_text_inv never walk more than FB_TEXT_MAX_CHARS characters of
+ * `s`, even if `s` is not yet NUL-terminated by then -- the bound that stops an untrusted,
+ * unterminated source (e.g. a model field with no guaranteed terminator) from running the read
+ * past its own end. Sized to the widest fixed-capacity field any caller passes today
+ * (screen_model_t.venue_name, core/ui/model.h); screens_moto.c carries the _Static_assert that
+ * machine-checks this constant against that field's real declared size, since this file (the
+ * generic framebuffer layer) must not include model.h itself to check it -- model.h/screens_moto.c
+ * are built on top of this one, not the reverse. A caller whose string is this long or longer AND
+ * still unterminated gets fewer characters than it asked for; every terminated string shorter
+ * than this draws exactly as before. */
+#define FB_TEXT_MAX_CHARS 32u
+
+/* Bounded stand-in for strlen(s): stops at the first NUL, same as strlen, but never looks past
+ * FB_TEXT_MAX_CHARS characters (see above) -- the same io:L1 bound fb_text/fb_text_right/
+ * fb_text_inv use, exported so centering helpers can size a string without an unbounded strlen
+ * of their own on the same untrusted, possibly-unterminated fixed-capacity fields. */
+size_t fb_text_len(const char *s);
 
 /* Draws `s` in font `f` starting at pen position (x,y) (y = top of the glyph cell), one fixed-
  * width cell (f->w x f->h) per character, each cell blitted opaquely (ink pixels set to black,
@@ -65,7 +83,7 @@ int fb_text_right(fb_t *fb, const font_t *f, int x_right, int y, const char *s);
 
 /* Draws `s` as white glyphs on a solid black opaque cell (each cell f->w x f->h): the inverse of
  * fb_text -- ink pixels become background (white), background pixels (including a no-glyph blank
- * cell) become ink (black). Same clipping/dirty rules as fb_text. Returns the pen x after the
+ * cell) become ink (black). Same clipping rules as fb_text. Returns the pen x after the
  * last character (x + strlen(s) * f->w). */
 int fb_text_inv(fb_t *fb, const font_t *f, int x, int y, const char *s);
 

@@ -45,10 +45,9 @@ void tearDown(void) {}
 /* Rightmost column (0-based) holding ink (a 0 bit -- render.h/render.c's fb_set_px: "0 = black",
  * MSB-first within each byte) anywhere in fb, or -1 if the frame is entirely background. Used to
  * confirm every screen's actual drawn content stays within the true visible width
- * (CANVAS_VISIBLE_W, core/ui/canvas.h) -- a stronger, content-based check than fb->dirty, which
- * fb_clear() (render.c) always sets to span the whole padded buffer width (CANVAS_W, e.g. 256 on
- * the 213 canvas) on every render regardless of what ends up drawn, since clearing legitimately
- * touches every addressable byte, padding columns included. Plan 7 T3 fix 1, ruling T3-R1. */
+ * (CANVAS_VISIBLE_W, core/ui/canvas.h). This content scan is the whole check: fb_t carries no
+ * dirty box any more (io:M4), and fb_clear() touched every addressable byte anyway, padding
+ * columns included, so a box could never have said anything narrower. Plan 7 T3 fix 1, T3-R1. */
 static int fb_max_ink_col(const fb_t *fb)
 {
     int max_col = -1;
@@ -111,7 +110,6 @@ static void test_lap_p0_first_lap(void)
     m.have_best = false; m.have_prev = false; m.lap_no = 1; m.cur_sector_idx = 0;
     m.big_kind = BIG_NONE;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_first_lap.pbm"), &s_fb));
 }
@@ -124,7 +122,6 @@ static void test_lap_p0_sector_delta(void)
     lap_model_base(&m);
     m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = -320; m.big_sector_idx = 2;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_sector_delta.pbm"), &s_fb));
 }
@@ -138,7 +135,6 @@ static void test_lap_p0_lap_delta_wide(void)
     m.big_kind = BIG_LAP_DELTA; m.big_delta_ms = 12500; m.cur_sector_idx = 0; m.lap_no = 12;
     m.new_best = true; /* tag must move to the marker row: six glyphs leave no room beside the number */
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_lap_delta_wide.pbm"), &s_fb));
 }
@@ -152,7 +148,6 @@ static void test_lap_p0_new_best(void)
     m.big_kind = BIG_LAP_DELTA; m.big_delta_ms = -440; m.new_best = true; m.cur_sector_idx = 0;
     m.best_ms = 111460; m.prev_ms = 111460;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_new_best.pbm"), &s_fb));
 }
@@ -167,7 +162,6 @@ static void test_lap_p0_fault(void)
     m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = 210; m.big_sector_idx = 2;
     m.flags = (1u << SCR_SYS_GPS_NOFIX) | (1u << SCR_SYS_BATT_LOW); m.batt_pct = 14;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_fault.pbm"), &s_fb));
 }
@@ -181,7 +175,6 @@ static void test_lap_p0_cur_clock(void)
     m.big_kind = BIG_SECTOR_DELTA; m.big_delta_ms = -320; m.big_sector_idx = 2;
     m.cur_running = true; m.cur_ms = 83400;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p0_cur_clock.pbm"), &s_fb));
 }
@@ -203,7 +196,6 @@ static void test_lap_p1_sectors(void)
     m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
     /* sector 3 of the current lap not reached yet: cell shows "----" */
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_sectors.pbm"), &s_fb));
 }
@@ -219,7 +211,6 @@ static void test_lap_p1_many_sectors(void)
     for (uint8_t i = 0; i < 5; i++) { m.best_sector_ms[i] = 20000u + 1000u * i; m.have_best_sector[i] = true; m.have_last_sector_delta[i] = true; m.last_sector_delta_ms[i] = 15000; /* clamps to +9.99 */ }
     m.have_theo = false;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_many_sectors.pbm"), &s_fb));   /* S3 label reads "S3 +2"; THEO reads -:--.-- */
 }
@@ -237,7 +228,6 @@ static void test_lap_p1_deltas_only(void)
     m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
     m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_deltas_only.pbm"), &s_fb));
 }
@@ -255,7 +245,6 @@ static void test_lap_p1_filled(void)
     m.have_last_sector_delta[0] = true; m.last_sector_delta_ms[0] = -120;
     m.have_last_sector_delta[1] = true; m.last_sector_delta_ms[1] = 400;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p1_filled.pbm"), &s_fb));   /* S1 32.10 / S2 41.00 / S3 --.-- ; deltas -0.12 +0.40 ---- ; THEO 1:51.20 */
 }
@@ -271,7 +260,6 @@ static void test_lap_p2_stats(void)
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats.pbm"), &s_fb));
 }
@@ -288,7 +276,6 @@ static void test_lap_p2_stats_many_laps(void)
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 120; m.laps_valid = 118;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_many_laps.pbm"), &s_fb));
 }
@@ -306,7 +293,6 @@ static void test_lap_p2_stats_huge_laps(void)
     m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12000; m.laps_valid = 11999;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_huge_laps.pbm"), &s_fb));   /* 213: nothing after "12000"; 296: "(11999)" */
 }
@@ -324,7 +310,6 @@ static void test_lap_p2_stats_filled(void)
     m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_filled.pbm"), &s_fb));
 }
@@ -340,7 +325,6 @@ static void test_lap_p2_stats_mph(void)
     m.lean_l_deg = 52; m.lean_r_deg = 55; m.lat_g_e2 = 132; m.acc_g_e2 = 61; m.brk_g_e2 = 105;
     m.laps_total = 12; m.laps_valid = 10;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lap_p2_stats_mph.pbm"), &s_fb));
 }
@@ -371,7 +355,6 @@ static void test_dragcard_notready(void)
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     m.drag_run_state = DRAG_ST_IDLE;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_notready.pbm"), &s_fb));
 }
@@ -385,7 +368,6 @@ static void test_dragcard_ready(void)
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     m.drag_run_state = DRAG_ST_ARMED;
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_ready.pbm"), &s_fb));
 }
@@ -409,7 +391,6 @@ static void test_dragcard_launched(void)
     fb_init(&s_fb, s_bits, CANVAS_W, CANVAS_H);
     screens_moto_render(&s_fb, &m);
     TEST_ASSERT_NOT_EQUAL(0, memcmp(idle, s_bits, sizeof idle));
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);   /* T3-R1 */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("dragcard_launched.pbm"), &s_fb));
 }
@@ -436,7 +417,6 @@ static void test_drag_p0_gate_speed(void)
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4806, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_gate_speed.pbm"), &s_fb));   /* big 12.84, "@173 km/h" row, footer "60ft 2.01   330ft 5.43   1/8 8.29" */
 }
@@ -450,7 +430,6 @@ static void test_drag_p0_trap_mph(void)
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4783, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_trap_mph.pbm"), &s_fb));   /* big 12.84, "@107 mph" row */
 }
@@ -465,7 +444,6 @@ static void test_drag_p0_distance(void)
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90;
     drag_gate(&m, "100-200", 6120, 0, false, 0); drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance.pbm"), &s_fb));     /* big "38" + small "m"; footer "100-200 6.12" */
 }
@@ -482,7 +460,6 @@ static void test_drag_p0_distance_ft(void)
     screen_model_t m = {0}; m.mode = SCR_MODE_DRAG; m.page = 0; m.batt_pct = 90; m.dist_units = CFG_DIST_FT;
     drag_gate(&m, "100-0", 0, 0, true, 38); drag_gate(&m, "150-0", 0, 0, true, 64);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_distance_ft.pbm"), &s_fb));  /* big "210"+"ft"; footer "100-0 125ft" */
 }
@@ -500,7 +477,6 @@ static void test_drag_p0_fault(void)
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     drag_gate(&m, "1/8", 8290, 0, false, 0);  drag_gate(&m, "1/4", 12840, 4806, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_fault.pbm"), &s_fb));
 }
@@ -517,7 +493,6 @@ static void test_drag_p0_footer_scroll(void)
     drag_gate(&m, "7", 7000, 0, false, 0); drag_gate(&m, "8", 8000, 0, false, 0);
     drag_gate(&m, "9", 9000, 0, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_footer_scroll.pbm"), &s_fb));   /* big "9.00"; footer starts "3 3.00", never "1"/"2" */
 }
@@ -535,9 +510,68 @@ static void test_drag_p0_armed_gates(void)
     m.drag_run_state = DRAG_ST_LAUNCHED;
     drag_gate(&m, "60ft", 2010, 0, false, 0); drag_gate(&m, "330ft", 5430, 0, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p0_armed_gates.pbm"), &s_fb));
+}
+
+static void test_card_footer_survives_an_unterminated_model_label(void)
+{
+    /* io:M2: put_str walked the caller's string with no destination bound. Every model string is
+     * NUL-terminated today (drag_gate_label and its "G%u" fallback both use snprintf), so this is
+     * the latent case: a drag row whose label[8] uses all eight bytes with no NUL. Two defects in
+     * the plan's original construction had to be fixed to make this genuinely red pre-fix:
+     * (1) zeroing the model then memset-ing only label to 'W' planted a zero byte a couple of
+     * bytes into the following t_ms field for any small t_ms, giving the old unbounded put_str an
+     * early NUL well short of buf[32]; (2) with drag_n == 2 and both labels unterminated, the plain
+     * `fb_text(..., m->drag[n-1].label)` a few lines above render_dcard_footer's call (render_
+     * drag_page0, before this function's own defect is ever reached) ran off the model first,
+     * masking M2 behind a different, already-in-scope-for-Task-11 read overflow in fb_text_draw.
+     * Fix: fill the WHOLE model with a non-NUL byte (no escape anywhere in `m`), then fully
+     * zero-and-relabel the newest gate (drag[2], index n-1) -- the direct fb_text/render_dcard_
+     * value calls on it read label AND its bool fields (is_distance/has_trap/present), so a raw
+     * 'W' byte there is its own UBSan defect (an invalid _Bool load), orthogonal to M2. drag[0] and
+     * drag[1] stay fully unterminated 'W' (every byte, bools included), so the footer's walk over
+     * drag[0] (the first row rendered, loop index i=0) runs through put_str() -- the only read of
+     * drag[0]'s bytes that happens before any bool field is examined -- with far more than
+     * buf[32]'s 32 bytes of non-NUL source ahead of it (drag[0]'s own ~24 bytes plus all of
+     * drag[1]) before it could ever reach drag[2]'s terminator. It must render truncated, never
+     * walk off buf[32]. render_dcard_footer also reads r->is_distance for drag[0] and drag[1]
+     * (after the label copy, to pick the value branch) -- a raw 'W' byte there is its own,
+     * unrelated UBSan defect (an invalid _Bool load), so both are poked to a valid `true` without
+     * touching (or NUL-terminating) their label bytes.
+     *
+     * Review follow-up (fix round 1, Minor finding 1): the blanket memset also leaves
+     * m.dist_units == 0x57, not a valid CFG_DIST_* value -- dist_display() hits its own
+     * `CORE_ASSERT_RET(dist_units <= 1u, ..., 0u)` precondition on that and returns the FALLBACK
+     * 0, so the distance branch used to render "0m" (2 chars): label pressure only, never the
+     * wide trailing value the reserve (DCARD_FOOTER_RESERVE) is actually sized for. Set
+     * explicitly to CFG_DIST_FT, the WIDER of the two units: dist_display() clamps its result to
+     * <= 65535 either way (5 digits, its own overflow guard), but dist_unit_suffix() appends
+     * "ft" (2 chars) for CFG_DIST_FT vs "m" (1 char) for CFG_DIST_M, so FT's "65535ft" (7 chars)
+     * beats M's "65535m" (6 chars) by one -- the widest value render_dcard_footer can ever emit.
+     * drag[0]/drag[1].dist_m are set to 0xFFFF explicitly (rather than relying on 'W''s raw byte
+     * value happening to be large enough) so the test doesn't depend on that coincidence; 0xFFFF
+     * is two more non-zero bytes, so it doesn't disturb the "no NUL anywhere" property either.
+     * Re-audited every other field the blanket memset could steer down a fallback/short path:
+     * m.units is read only by render_dcard_value's has_trap branch, never reached here (drag[2]
+     * -- the only row render_dcard_value is ever called on -- has has_trap == false); m.mode/
+     * .page/.drag_n/.drag_run_state and drag[].present/.has_trap/.trap_cms are all either numeric
+     * (no invalid representation to worry about) or simply never read on this call path (LAP-only
+     * fields, or booleans this path's reader functions don't touch for these two rows) --
+     * confirmed by inspection of screens_moto_render/render_drag_dispatch/render_drag_page0/
+     * render_dcard_footer/render_dcard_value, the only functions this test's render call reaches. */
+    screen_model_t m;
+    memset(&m, 'W', sizeof m);
+    m.mode = SCR_MODE_DRAG; m.page = 0; m.drag_n = 3;
+    m.drag[0].is_distance = true;
+    m.drag[1].is_distance = true;
+    m.drag[0].dist_m = 0xFFFFu;
+    m.drag[1].dist_m = 0xFFFFu;
+    m.dist_units = CFG_DIST_FT;
+    memset(&m.drag[2], 0, sizeof m.drag[2]);
+    strcpy(m.drag[2].label, "1/4");
+    screens_moto_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);   /* nothing ran off the frame */
 }
 
 /* ---- DRAG pages 1/2 (gate list, spec 7b §7) ---- */
@@ -557,7 +591,6 @@ static void test_drag_p1_gates(void)   /* seven gates, 1000ft not reached this r
     drag_gate(&m, "100-200", 12340, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_gates.pbm"), &s_fb));
 }
@@ -576,7 +609,6 @@ static void test_drag_p1_dist_ft(void)
     drag_gate(&m, "100-200", 12340, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_dist_ft.pbm"), &s_fb));
 }
@@ -594,7 +626,6 @@ static void test_drag_p1_dist_m(void)
     drag_gate(&m, "100-200", 12340, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_dist_m.pbm"), &s_fb));
 }
@@ -610,7 +641,6 @@ static void test_drag_p2_best(void)    /* same rows as drag_p1_gates, page 2, ev
     drag_gate(&m, "100-200", 6120, 0, false, 0);
     drag_gate(&m, "100-0", 0, 0, true, 38);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_best.pbm"), &s_fb));
 }
@@ -625,7 +655,6 @@ static void test_drag_p1_overflow(void)   /* I3 (final review, ruling R-7): all 
                                             "60ft", "330ft", "1/8", "1000ft", "1/4", "100-0" };
     for (int i = 0; i < 11; i++) drag_gate(&m, label[i], (uint32_t)(1000 + i * 1000), 0, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p1_overflow.pbm"), &s_fb));   /* header "LAST RUN +3"; rows 0-60..1/4 (8 of 11) */
 }
@@ -639,7 +668,6 @@ static void test_drag_p2_overflow(void)   /* I3 (final review, ruling R-7): nine
                                            "60ft", "330ft", "1/8", "1000ft" };
     for (int i = 0; i < 9; i++) drag_gate(&m, label[i], (uint32_t)(1000 + i * 1000), 0, false, 0);
     screens_moto_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("drag_p2_overflow.pbm"), &s_fb));   /* header "SESSION BEST +1"; rows 0-60..1000ft (8 of 9) */
 }
@@ -662,7 +690,6 @@ static void test_oneshot_boot(void)
     m.boot_n_lines = 4;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot.pbm"), &s_fb));
 }
@@ -684,7 +711,6 @@ static void test_boot_four_lines(void)
     strcpy(m.boot_line[3], "IMU --");
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("boot_four_lines.pbm"), &s_fb));
 }
@@ -699,7 +725,6 @@ static void test_oneshot_venue(void)
     strcpy(m.venue_name, "KILLARNEY");
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("venue.pbm"), &s_fb));
 }
@@ -711,7 +736,6 @@ static void test_oneshot_safe(void)
     m.oneshot = ONESHOT_SAFE;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("safe.pbm"), &s_fb));
 }
@@ -724,7 +748,6 @@ static void test_oneshot_lowbatt(void)
     m.batt_pct = 14;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("lowbatt.pbm"), &s_fb));
 }
@@ -738,7 +761,6 @@ static void test_oneshot_ota(void)
     m.ota_phase = OTA_PHASE_RECEIVING;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota.pbm"), &s_fb));
 }
@@ -762,7 +784,6 @@ static void test_oneshot_ota_rebooting(void)
     m.ota_phase = OTA_PHASE_REBOOTING;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("ota_rebooting.pbm"), &s_fb));
 }
@@ -799,6 +820,58 @@ static void test_strip_link(void)
     TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * (ICON_W + 2) + 6, FAULT_STRIP_Y + 6));
 }
 
+/* io:H1: §17.4's Icon column, asserted directly rather than inferred from a golden's geometry.
+ * Before this fix bit 1 drew the same strike as bit 0 (a dead GPS and a searching GPS were
+ * indistinguishable), bits 2 and 13 drew nothing, and bit 5 drew the HEALTHY disk. */
+static void test_fault_icon_table_matches_spec_17_4(void)
+{
+    TEST_ASSERT_EQUAL_INT((int)ICON_GPS_STRIKE,  ui_fault_icon_for_bit(SCR_SYS_GPS_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_GPS_NOFIX,   ui_fault_icon_for_bit(SCR_SYS_GPS_NOFIX));
+    TEST_ASSERT_EQUAL_INT((int)ICON_IMU_STRIKE,  ui_fault_icon_for_bit(SCR_SYS_IMU_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_IMU_Q,       ui_fault_icon_for_bit(SCR_SYS_IMU_SUSPECT));
+    TEST_ASSERT_EQUAL_INT(-1,                    ui_fault_icon_for_bit(SCR_SYS_DISP_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_DISK_STRIKE, ui_fault_icon_for_bit(SCR_SYS_STORAGE_DEAD));
+    TEST_ASSERT_EQUAL_INT((int)ICON_DISK_FULL,   ui_fault_icon_for_bit(SCR_SYS_STORAGE_FULL));
+    TEST_ASSERT_EQUAL_INT((int)ICON_DISK_WARN,   ui_fault_icon_for_bit(SCR_SYS_STORAGE_DEGRADED));
+    TEST_ASSERT_EQUAL_INT((int)ICON_BATT_LOW,    ui_fault_icon_for_bit(SCR_SYS_BATT_LOW));
+    TEST_ASSERT_EQUAL_INT((int)ICON_SAFE,        ui_fault_icon_for_bit(SCR_SYS_SAFE_MODE));
+    TEST_ASSERT_EQUAL_INT(-1,                    ui_fault_icon_for_bit(SCR_SYS_HEAP_LOW));
+    TEST_ASSERT_EQUAL_INT((int)ICON_THERMOMETER, ui_fault_icon_for_bit(SCR_SYS_DISP_TEMP_THROTTLE));
+    TEST_ASSERT_EQUAL_INT(-1,                    ui_fault_icon_for_bit(SCR_SYS_OTA_PENDING));
+    TEST_ASSERT_EQUAL_INT((int)ICON_LEAN_Q,      ui_fault_icon_for_bit(SCR_SYS_FUSION_DISAGREE));
+    TEST_ASSERT_EQUAL_INT((int)ICON_SIM,         ui_fault_icon_for_bit(SCR_UI_SIM));
+    TEST_ASSERT_EQUAL_INT((int)ICON_MOVING,      ui_fault_icon_for_bit(SCR_UI_MOVING));
+    TEST_ASSERT_EQUAL_INT((int)ICON_LINK,        ui_fault_icon_for_bit(SCR_UI_LINK));
+    TEST_ASSERT_EQUAL_INT(-1, ui_fault_icon_for_bit(-1));              /* out of range */
+    TEST_ASSERT_EQUAL_INT(-1, ui_fault_icon_for_bit(SCR_STRIP_BITS));
+    for (int a = 0; a < SCR_STRIP_BITS; a++)                           /* no shared glyphs */
+        for (int b = a + 1; b < SCR_STRIP_BITS; b++) {
+            int ia = ui_fault_icon_for_bit(a), ib = ui_fault_icon_for_bit(b);
+            if (ia >= 0 && ib >= 0) TEST_ASSERT_NOT_EQUAL_INT(ia, ib);
+        }
+}
+
+/* The three bits that used to draw nothing / the wrong glyph now each draw their own. */
+static void test_strip_imu_disk_lean(void)
+{
+    screen_model_t m = {0};
+    m.screen = SCR_RIDING; m.mode = SCR_MODE_LAP; m.page = 0;
+    m.flags = (1u << SCR_SYS_IMU_DEAD) | (1u << SCR_SYS_STORAGE_DEAD) | (1u << SCR_SYS_FUSION_DISAGREE);
+    screens_render(&s_fb, &m);
+    TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
+    TEST_ASSERT_TRUE(pbm_eq_file(SNAP("strip_imu_disk_lean.pbm"), &s_fb));
+    /* three slots, ascending bit order leftwards from the anchor: IMU_DEAD(2), STORAGE_DEAD(5),
+     * FUSION_DISAGREE(13). These three probes only confirm that a glyph is drawn AT ALL in each
+     * slot (fault_strip_left_x is static, so this is as close as this function can reach in);
+     * they do not by themselves discriminate which glyph -- e.g. the "IMU" probe's pixel is also
+     * ink under ICON_DISK_STRIKE, which shares that row/column. The byte-exact pbm_eq_file check
+     * above is what proves which glyph landed in each slot. */
+    const int pitch = ICON_W + 2;
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 + 1, FAULT_STRIP_Y + 1));              /* IMU slot */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - pitch + 1, FAULT_STRIP_Y + 1));      /* disk slot */
+    TEST_ASSERT_TRUE(px(&s_fb, FAULT_STRIP_X0 - 2 * pitch + 5, FAULT_STRIP_Y + 11)); /* lean slot */
+}
+
 static void test_oneshot_ota_fail(void)
 {
     screen_model_t m = {0};
@@ -806,7 +879,6 @@ static void test_oneshot_ota_fail(void)
     m.oneshot = ONESHOT_OTA_FAIL;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("otafail.pbm"), &s_fb));
 }
@@ -818,7 +890,6 @@ static void test_oneshot_calibrate(void)
     m.oneshot = ONESHOT_CALIBRATE;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("calibrate.pbm"), &s_fb));
 }
@@ -832,7 +903,6 @@ static void test_oneshot_newtrack_step0(void)
     m.oneshot = ONESHOT_NEWTRACK;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack.pbm"), &s_fb));
 }
@@ -846,7 +916,6 @@ static void test_oneshot_newtrack_step1(void)
     m.create_step = 1;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_step1.pbm"), &s_fb));
 }
@@ -860,7 +929,6 @@ static void test_oneshot_newtrack_step3(void)
     m.create_step = 3;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_step3.pbm"), &s_fb));
 }
@@ -874,7 +942,6 @@ static void test_oneshot_newtrack_fail(void)
     m.create_step = 0xFF;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W);
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("newtrack_fail.pbm"), &s_fb));
 }
@@ -902,7 +969,6 @@ static void test_menu_top(void)
     m.menu_top = 0;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_top.pbm"), &s_fb));
 }
@@ -935,7 +1001,6 @@ static void test_menu_scrolled(void)
     m.menu_top = 2;
 
     screens_render(&s_fb, &m);
-    TEST_ASSERT_TRUE(!s_fb.dirty.valid || (s_fb.dirty.x1 <= CANVAS_W && s_fb.dirty.y1 <= CANVAS_H));
     TEST_ASSERT_TRUE(fb_max_ink_col(&s_fb) < CANVAS_VISIBLE_W); /* T3-R1: no ink past the true visible width */
     TEST_ASSERT_TRUE(pbm_eq_file(SNAP("menu_scrolled.pbm"), &s_fb));
 }
@@ -969,6 +1034,7 @@ int main(void)
     RUN_TEST(test_drag_p0_fault);
     RUN_TEST(test_drag_p0_footer_scroll);
     RUN_TEST(test_drag_p0_armed_gates);
+    RUN_TEST(test_card_footer_survives_an_unterminated_model_label);
     RUN_TEST(test_drag_p1_gates);
     RUN_TEST(test_drag_p1_dist_ft);
     RUN_TEST(test_drag_p1_dist_m);
@@ -986,6 +1052,8 @@ int main(void)
     RUN_TEST(test_oneshot_ota_rebooting);
     RUN_TEST(test_strip_sim_and_moving);
     RUN_TEST(test_strip_link);
+    RUN_TEST(test_fault_icon_table_matches_spec_17_4);
+    RUN_TEST(test_strip_imu_disk_lean);
     RUN_TEST(test_oneshot_calibrate);
     RUN_TEST(test_oneshot_newtrack_step0);
     RUN_TEST(test_oneshot_newtrack_step1);

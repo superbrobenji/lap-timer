@@ -15,11 +15,21 @@ int exp_win_puts(exp_t *e, const char *s)
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(s != NULL, EXP_ASSERT_CODE, -1);
     size_t n = strlen(s);
-    /* Buffer/window capacity before a write: every caller pre-checks exp_win_free() against its
-     * own worst-case write size before calling this, so this should never trip in practice. */
+    /* Buffer/window capacity before a write. Most callers pre-check exp_win_free() against their
+     * own worst-case write size (exp_nmea_feed's EXP_NMEA_RESERVE, exp_json's EXP_JSON_HDR_BUF),
+     * but NOT all: exp_vbo_open makes five exp_win_puts calls with no exp_win_free check at all --
+     * it relies on being called on an empty window, which exp_open guarantees (it memsets *e
+     * before dispatching to the per-format open). So this is a real last-resort bound, not a
+     * restatement of a universal caller contract (io false claim 1). */
     CORE_ASSERT_RET(e->win_len + n <= EXP_WINDOW, EXP_ASSERT_CODE, -1);
     memcpy(e->win + e->win_len, s, n); e->win_len += n;
     return 0;
+}
+
+void exp_skip_record(exp_t *e)
+{
+    CORE_ASSERT_VOID(e != NULL, EXP_ASSERT_CODE);
+    if (e->skipped < 0xFFFFu) e->skipped++;
 }
 
 void exp_civil_from_days(int64_t z, int *y, unsigned *m, unsigned *d)
@@ -48,12 +58,15 @@ void exp_utc_parts(int64_t gps_us, int *y, unsigned *mo, unsigned *d, unsigned *
     CORE_ASSERT_VOID(mm != NULL, EXP_ASSERT_CODE);
     CORE_ASSERT_VOID(ss != NULL, EXP_ASSERT_CODE);
     CORE_ASSERT_VOID(cs != NULL, EXP_ASSERT_CODE);
-    int64_t total_cs = (gps_us + 5000) / 10000;           /* round to centiseconds */
+    /* io:C1: a negative wire value must not make sod negative -- hh/mm/ss/cs are unsigned casts. */
+    int64_t total_cs = ((gps_us > 0 ? gps_us : 0) + 5000) / 10000;   /* round to centiseconds */
     int64_t secs = total_cs / 100;
     *cs = (unsigned)(total_cs % 100);
     int64_t days = secs / 86400; int64_t sod = secs % 86400;
     exp_civil_from_days(days, y, mo, d);
     *hh = (unsigned)(sod / 3600); *mm = (unsigned)((sod % 3600) / 60); *ss = (unsigned)(sod % 60);
+    CORE_ASSERT_VOID(*hh < 24u && *mm < 60u && *ss < 60u && *cs < 100u, EXP_ASSERT_CODE);
+    /* postcondition of the clamp: a real civil time, not a cast of a negative second-of-day */
 }
 
 int exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta)

@@ -175,4 +175,28 @@ static void test_engine_differs_only_on_table_or_rollout(void)
     TEST_ASSERT_TRUE(drag_cfg_engine_differs(&dk, &fewer));
 }
 
-int main(void) { UNITY_BEGIN(); RUN_TEST(test_defaults_when_no_benches); RUN_TEST(test_mph_benches_define_speed_gates); RUN_TEST(test_mph_empty_list_keeps_defaults); RUN_TEST(test_mph_round_trip_is_exact); RUN_TEST(test_shipped_defaults_keep_table); RUN_TEST(test_labels_for_every_default_gate); RUN_TEST(test_custom_distance_and_bad_cap); RUN_TEST(test_gate_label_dist_units); RUN_TEST(test_dist_units_does_not_touch_engine_cfg); RUN_TEST(test_engine_differs_only_on_table_or_rollout); return UNITY_END(); }
+/* io:M3: the brief's example input was `"yes"` -- traced against the CURRENT code, json_tok_bool
+ * only tests js[t->start] == 't'/'f' with no type check, so "yes" (first char 'y') already falls
+ * through to its final `return false` for an unrelated reason and this case is green before AND
+ * after the fix. The genuine reproducer is a quoted string whose first character IS 't' or 'f': a
+ * JSON string token's start points past the opening quote (see json_tok_eq), so `"true"` pre-fix
+ * reads js[t->start] == 't' and incorrectly sets rollout -- verified empirically against the
+ * unmodified tree (rc 0, rollout set true) before writing this assertion. A merge attempt on
+ * drag.rollout must be refused outright, and the engine-comparison view (built from the untouched
+ * cfg_t) must then report no change -- unlike a genuine rollout flip, which drag_cfg_engine_differs
+ * does detect (see test_engine_differs_only_on_table_or_rollout above). */
+static void test_bad_rollout_type_is_refused_and_engine_view_is_unchanged(void)
+{
+    cfg_t before; cfg_defaults(&before);
+    drag_cfg_t d_before; drag_cfg_from_user(&before, &d_before);
+
+    cfg_t c = before; char err[64];
+    const char *js = "{\"drag\":{\"rollout\":\"true\"}}";
+    TEST_ASSERT_EQUAL_INT(-1, cfg_from_json(&c, js, strlen(js), err, sizeof err));
+    TEST_ASSERT_EQUAL_MEMORY(&before, &c, sizeof c);
+
+    drag_cfg_t d_after; drag_cfg_from_user(&c, &d_after);
+    TEST_ASSERT_FALSE(drag_cfg_engine_differs(&d_before, &d_after));
+}
+
+int main(void) { UNITY_BEGIN(); RUN_TEST(test_defaults_when_no_benches); RUN_TEST(test_mph_benches_define_speed_gates); RUN_TEST(test_mph_empty_list_keeps_defaults); RUN_TEST(test_mph_round_trip_is_exact); RUN_TEST(test_shipped_defaults_keep_table); RUN_TEST(test_labels_for_every_default_gate); RUN_TEST(test_custom_distance_and_bad_cap); RUN_TEST(test_gate_label_dist_units); RUN_TEST(test_dist_units_does_not_touch_engine_cfg); RUN_TEST(test_engine_differs_only_on_table_or_rollout); RUN_TEST(test_bad_rollout_type_is_refused_and_engine_view_is_unchanged); return UNITY_END(); }

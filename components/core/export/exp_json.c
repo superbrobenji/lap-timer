@@ -9,6 +9,36 @@
 
 #define EXP_ASSERT_CODE 0x0A60   /* new assertions in this module; 0x0A01 below predates this and is kept as-is */
 
+/* io:C2 worst case for open_hdr's buffer, proven rather than guessed. Skeleton = 113 bytes (the
+ * literal braces/keys/quotes of {"id":"","hdr":{...},"laps":[ with every value removed -- measured
+ * with a jw probe). Escapes: jw_str expands a byte < 0x20 to \u00xx (1 -> 6) for all three
+ * variable strings (session_id 10 + venue 32 + fw 16 = 58). Numbers: start_gps_us/1000000 is at
+ * most 14 chars ("-9223372036854"), "drag" 4 with quotes, venue_id/layout_id 5 each, gps_hz and
+ * fused_hz 3 each. Deviation from design R26, which said 480 B: 113 + 348 + 34 + 1 = 496 does not
+ * fit 480, so this plan sizes the buffer 512 and asserts the arithmetic at compile time. */
+#define EXP_JSON_HDR_SKELETON 113u
+#define EXP_JSON_HDR_ESC_MAX  (6u * (10u + 32u + 16u))
+#define EXP_JSON_HDR_NUM_MAX  (14u + 4u + 5u + 5u + 3u + 3u)
+#define EXP_JSON_HDR_BUF      512u
+_Static_assert(EXP_JSON_HDR_SKELETON + EXP_JSON_HDR_ESC_MAX + EXP_JSON_HDR_NUM_MAX + 1u
+                   <= EXP_JSON_HDR_BUF,
+               "open_hdr's buffer must hold the worst-case escaped header plus its NUL");
+
+/* io:C2 worst case for exp_json_finish's single free-check gate, proven rather than guessed.
+ * When finish is reached at json_stage==0 it writes three pieces with no free re-check between
+ * them: open_hdr's header (EXP_JSON_HDR_SKELETON + EXP_JSON_HDR_ESC_MAX + EXP_JSON_HDR_NUM_MAX =
+ * 495 bytes, excluding its own NUL -- it is a local buffer, not window space), the stage 1->2
+ * transition literal "],\"runs\":[" (10 bytes), and the tail below: "],\"skipped\":" + "}" is 13
+ * literal bytes plus up to 5 digits for e->skipped (uint16_t, capped at 0xFFFF in exp.c) = 18.
+ * 495 + 10 + 18 = 523, which EXP_JSON_HDR_BUF (512) alone does not cover; reserve 32 B more. */
+#define EXP_JSON_FINISH_RUNS_MAX 10u
+#define EXP_JSON_FINISH_TAIL_MAX 18u
+#define EXP_JSON_FINISH_RESERVE  (EXP_JSON_HDR_BUF + 32u)
+_Static_assert(EXP_JSON_HDR_SKELETON + EXP_JSON_HDR_ESC_MAX + EXP_JSON_HDR_NUM_MAX
+                   + EXP_JSON_FINISH_RUNS_MAX + EXP_JSON_FINISH_TAIL_MAX
+                   <= EXP_JSON_FINISH_RESERVE,
+               "exp_json_finish's free-check gate must cover header + runs-transition + tail");
+
 static int emit(exp_t *e, jw_t *w)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
@@ -20,7 +50,7 @@ static int open_hdr(exp_t *e, const ses_hdr_t *h, const char *venue_name)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);      /* h/venue_name are legitimately NULL: no header/venue seen yet */
     CORE_ASSERT_RET(e->json_stage == 0, EXP_ASSERT_CODE, -1);   /* opens the header exactly once, stage 0->1 */
-    char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
+    char buf[EXP_JSON_HDR_BUF]; jw_t w; jw_init(&w, buf, sizeof buf);
     jw_obj_open(&w);
     jw_key(&w, "id"); jw_str(&w, e->meta.session_id);
     jw_key(&w, "hdr"); jw_obj_open(&w);
@@ -35,8 +65,11 @@ static int open_hdr(exp_t *e, const ses_hdr_t *h, const char *venue_name)
     jw_obj_close(&w);
     jw_key(&w, "laps"); jw_arr_open(&w);
     /* leave the array open: strip the closing pieces by not calling jw_arr_close/jw_obj_close */
+    int r = emit(e, &w);
+    if (r != 0) return r;          /* io:C2: a failed emit must leave stage 0, so exp_json_finish
+                                    * (and open_hdr's own stage-0 assertion) can retry the open */
     e->json_stage = 1;
-    return emit(e, &w);
+    return 0;
 }
 
 int exp_json_open(exp_t *e)
@@ -64,7 +97,7 @@ static int feed_stage0(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len, in
         *ret = 0; return 1;
     }
     if (type != SES_T_LAP && type != SES_T_DRAG_RUN && type != SES_T_END) { *ret = 0; return 1; }
-    if (exp_win_free(e) < 400) { *ret = EXP_FULL; return 1; }
+    if (exp_win_free(e) < (int)EXP_JSON_HDR_BUF) { *ret = EXP_FULL; return 1; }
     if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) { *ret = -1; return 1; }
     return 0;      /* fall through: handle this frame in stage 1/2 below */
 }
@@ -75,10 +108,10 @@ static int feed_lap(exp_t *e, const uint8_t *p, uint8_t len)
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
     if (e->json_stage != 1) return 0;                     /* laps after runs began: ignore (log order guarantees this never happens) */
     if (exp_win_free(e) < 400) return EXP_FULL;
-    lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) return -1;
+    lap_result_t lap; if (ses_decode_lap(p, len, &lap) != 1) { exp_skip_record(e); return 0; }
     CORE_ASSERT_RET(lap.n_sectors <= LAP_MAX_SECTORS + 1, EXP_ASSERT_CODE, -1);  /* rule 2: explicit bound on the loop below */
     char buf[400]; jw_t w; jw_init(&w, buf, sizeof buf);
-    if (e->laps > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
+    if (e->laps > 0) { int wr = exp_win_puts(e, ","); CORE_ASSERT_RET(wr == 0, 0x0A01, -1); }
     jw_obj_open(&w);
     jw_key(&w, "n"); jw_uint(&w, lap.lap_no);
     jw_key(&w, "ms"); jw_uint(&w, lap.time_ms);
@@ -107,10 +140,11 @@ static int feed_drag_run_open(exp_t *e, const drag_result_t *run)
     CORE_ASSERT_RET(run != NULL, EXP_ASSERT_CODE, -1);
     if (exp_win_free(e) < 200) return EXP_FULL;
     if (e->json_stage == 1) {
-        CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
+        int wr = exp_win_puts(e, "],\"runs\":[");
+        CORE_ASSERT_RET(wr == 0, 0x0A01, -1);
         e->json_stage = 2;
     }
-    if (e->runs > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
+    if (e->runs > 0) { int wr = exp_win_puts(e, ","); CORE_ASSERT_RET(wr == 0, 0x0A01, -1); }
     char buf[200]; jw_t w; jw_init(&w, buf, sizeof buf);
     jw_obj_open(&w);
     jw_key(&w, "n"); jw_uint(&w, run->run_no);
@@ -136,7 +170,7 @@ static int feed_drag_run_gates(exp_t *e, const drag_result_t *run)
         if (exp_win_free(e) < 120) return EXP_FULL;
         const drag_gate_res_t *g = &run->gates[e->run_gate_idx];
         char buf[120]; jw_t w; jw_init(&w, buf, sizeof buf);
-        if (e->run_gate_idx > 0) CORE_ASSERT_RET(exp_win_puts(e, ",") == 0, 0x0A01, -1);
+        if (e->run_gate_idx > 0) { int wr = exp_win_puts(e, ","); CORE_ASSERT_RET(wr == 0, 0x0A01, -1); }
         jw_obj_open(&w);
         jw_key(&w, "id"); jw_uint(&w, g->gate_id);
         jw_key(&w, "ms"); jw_uint(&w, g->time_ms);
@@ -154,7 +188,7 @@ static int feed_drag_run(exp_t *e, const uint8_t *p, uint8_t len)
 {
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(p != NULL || len == 0, EXP_ASSERT_CODE, -1);
-    drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) return -1;
+    drag_result_t run; if (ses_decode_drag_run(p, len, &run) != 1) { exp_skip_record(e); return 0; }
     if (!e->run_pending) {
         int r = feed_drag_run_open(e, &run);
         if (r != 0) return r;
@@ -163,7 +197,8 @@ static int feed_drag_run(exp_t *e, const uint8_t *p, uint8_t len)
     int r = feed_drag_run_gates(e, &run);
     if (r != 0) return r;
     if (exp_win_free(e) < 4) return EXP_FULL;
-    CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
+    int wr = exp_win_puts(e, "]}");
+    CORE_ASSERT_RET(wr == 0, 0x0A01, -1);
     e->run_pending = 0; e->runs++;
     return 0;
 }
@@ -187,12 +222,17 @@ int exp_json_finish(exp_t *e)
     CORE_ASSERT_RET(e != NULL, EXP_ASSERT_CODE, -1);
     CORE_ASSERT_RET(e->json_stage <= 2, EXP_ASSERT_CODE, -1);   /* valid stage enum (0/1/2) */
     if (e->run_pending) return -1;
-    if (exp_win_free(e) < 400) return EXP_FULL;
+    if (exp_win_free(e) < (int)EXP_JSON_FINISH_RESERVE) return EXP_FULL;
     if (e->json_stage == 0) { if (open_hdr(e, e->have_hdr ? &e->hdr : NULL, e->venue_name[0] ? e->venue_name : NULL) < 0) return -1; }
     if (e->json_stage == 1) {
-        CORE_ASSERT_RET(exp_win_puts(e, "],\"runs\":[") == 0, 0x0A01, -1);
+        int wr = exp_win_puts(e, "],\"runs\":[");
+        CORE_ASSERT_RET(wr == 0, 0x0A01, -1);
         e->json_stage = 2;
     }
-    CORE_ASSERT_RET(exp_win_puts(e, "]}") == 0, 0x0A01, -1);
+    char tail[32];
+    int tn = snprintf(tail, sizeof tail, "],\"skipped\":%u}", (unsigned)e->skipped);
+    CORE_ASSERT_RET(tn > 0 && (size_t)tn < sizeof tail, EXP_ASSERT_CODE, -1);  /* §14.3 tail fits */
+    int wr = exp_win_puts(e, tail);
+    CORE_ASSERT_RET(wr == 0, 0x0A01, -1);
     return 0;
 }

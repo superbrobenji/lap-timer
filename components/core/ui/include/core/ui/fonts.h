@@ -5,7 +5,7 @@
 /* Bitmap font (spec §20.2): 1bpp glyph cells, MSB-first, row-major, bit=1 is glyph ink.
  * Every glyph in a font shares one cell size w x h and a fixed advance equal to w (monospace).
  * `first`/`count` record the font's minimum ASCII code point and glyph count for reference only;
- * HUGE, BIG and MED store a non-contiguous character subset densely (sorted by code point), so a
+ * HUGE and MED store a non-contiguous character subset densely (sorted by code point), so a
  * caller must never index bitmaps with `c - first` directly. Use font_glyph_index() instead,
  * which consults the per-font char->glyph-index map that gen_fonts.py emits alongside the
  * bitmaps in fonts.c. */

@@ -15,14 +15,17 @@ int exp_vbo_open(exp_t *e)
     char line[160];
     int y; unsigned mo, d, hh, mm, ss, cs;
     exp_utc_parts(e->meta.created_gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
-    snprintf(line, sizeof line, "File created on %02u/%02u/%04d at %02u:%02u:%02u\r\n", d, mo, y, hh, mm, ss);
+    int ln = snprintf(line, sizeof line, "File created on %02u/%02u/%04d at %02u:%02u:%02u\r\n", d, mo, y, hh, mm, ss);
+    if (ln < 0 || (size_t)ln >= sizeof line) return -1;
     if (exp_win_puts(e, line) < 0) return -1;
     if (exp_win_puts(e, HEADER_PART1) < 0) return -1;
-    snprintf(line, sizeof line, "LapTimer %s (%s)\r\nSession %s\r\nVenue %s / %s\r\n\r\n", e->meta.fw, e->meta.hwid, e->meta.session_id, e->meta.venue, e->meta.layout);
+    ln = snprintf(line, sizeof line, "LapTimer %s (%s)\r\nSession %s\r\nVenue %s / %s\r\n\r\n", e->meta.fw, e->meta.hwid, e->meta.session_id, e->meta.venue, e->meta.layout);
+    if (ln < 0 || (size_t)ln >= sizeof line) return -1;
     if (exp_win_puts(e, line) < 0) return -1;
     if (e->meta.has_sf) {
-        snprintf(line, sizeof line, "[laptiming]\r\nStart %.5f %.5f %.5f %.5f\r\n\r\n",
+        ln = snprintf(line, sizeof line, "[laptiming]\r\nStart %.5f %.5f %.5f %.5f\r\n\r\n",
                  -e->meta.sf_lon1 * 60.0, e->meta.sf_lat1 * 60.0, -e->meta.sf_lon2 * 60.0, e->meta.sf_lat2 * 60.0);
+        if (ln < 0 || (size_t)ln >= sizeof line) return -1;
         if (exp_win_puts(e, line) < 0) return -1;
     }
     if (exp_win_puts(e, "[column names]\r\nsats time lat long velocity heading height lat_g lon_g lean yaw\r\n\r\n[data]\r\n") < 0) return -1;
@@ -41,7 +44,7 @@ int exp_vbo_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     if (type != SES_T_FIX_KEY && type != SES_T_FIX_DELTA) return 0;
     if (exp_win_free(e) < 120) return EXP_FULL;
     gps_fix_t f;
-    if (ses_decode_fix(&e->fix_st, type, p, len, &f) != 1) return -1;
+    if (ses_decode_fix(&e->fix_st, type, p, len, &f) != 1) { exp_skip_record(e); return 0; }
     ses_fused_state_on_fix(&e->fus_st, f.gps_us);
     int y; unsigned mo, d, hh, mm, ss, cs;
     exp_utc_parts(f.gps_us, &y, &mo, &d, &hh, &mm, &ss, &cs);
@@ -53,8 +56,9 @@ int exp_vbo_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len)
     float glat = e->have_held ? e->held.g_lat : 0.0f, glon = e->have_held ? e->held.g_lon : 0.0f;
     float lean = e->have_held ? e->held.lean_deg : 0.0f, yaw = e->have_held ? e->held.yaw_dps : 0.0f;
     char line[120];
-    snprintf(line, sizeof line, "%03u %02u%02u%02u.%02u %.5f %.5f %.2f %06.2f %07.2f %+.3f %+.3f %+06.2f %+06.2f\r\n",
+    int ln = snprintf(line, sizeof line, "%03u %02u%02u%02u.%02u %.5f %.5f %.2f %06.2f %07.2f %+.3f %+.3f %+06.2f %+06.2f\r\n",
              f.sats, hh, mm, ss, cs, lat_min, long_min, kmh, head, height, (double)glat, (double)glon, (double)lean, (double)yaw);
+    if (ln < 0 || (size_t)ln >= sizeof line) { exp_skip_record(e); return 0; }
     return exp_win_puts(e, line);
 }
 

@@ -151,6 +151,18 @@ static void test_null_input_is_none(void)
     TEST_ASSERT_EQUAL_INT(RF_NONE, ui_refresh_decide(NULL));
 }
 
+static void test_full_every_above_the_cfg_range_is_none(void)
+{
+    /* io:L1: the assertion checked full_every >= 1 while its comment claimed it backstopped the
+     * "cfg-enforced 1..50 range" -- the upper half was unchecked, so a caller bug past 50 silently
+     * disabled the counter-based full-refresh trigger instead of being reported. */
+    rf_in_t i = base();
+    i.full_every = 51;
+    TEST_ASSERT_EQUAL_INT(RF_NONE, ui_refresh_decide(&i));
+    i.full_every = 50;
+    TEST_ASSERT_NOT_EQUAL_INT(RF_NONE, ui_refresh_decide(&i));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -168,5 +180,6 @@ int main(void)
     RUN_TEST(test_screen_change_alone_refreshes);
     RUN_TEST(test_full_every_zero_is_none);
     RUN_TEST(test_null_input_is_none);
+    RUN_TEST(test_full_every_above_the_cfg_range_is_none);
     return UNITY_END();
 }

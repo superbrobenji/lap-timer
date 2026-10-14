@@ -1,5 +1,7 @@
 #include "unity.h"
 #include "core/ses.h"
+#include "core/exp.h"
+#include "core/bw.h"
 #include "core/json.h"
 #include "core/cfg.h"
 #include "assert_support.h"   /* T-A: decoding untrusted input must NOT fire the fault hook */
@@ -232,9 +234,9 @@ static void test_small_record_round_trips(void)
     TEST_ASSERT_EQUAL_UINT16(6, vn.venue_id); TEST_ASSERT_EQUAL_UINT16(1, vn.layout_id);
     TEST_ASSERT_EQUAL_STRING("Killarney", vn.name);
     /* a name filling all 32 wire bytes still decodes NUL-terminated */
-    w = ses_encode_venue(9, 2, "0123456789012345678901234567890123", buf, sizeof buf);
+    w = ses_encode_venue(9, 2, "01234567890123456789012345678901", buf, sizeof buf);
     TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(buf + 3, (uint8_t)(w - SES_FRAME_OVERHEAD), &vn));
-    TEST_ASSERT_EQUAL_UINT(31, strlen(vn.name));    /* encoder keeps a NUL inside the 32-byte field */
+    TEST_ASSERT_EQUAL_UINT(32, strlen(vn.name));    /* full 32-byte field is now used */
 
     w = ses_encode_power(77, 3, 3900, buf, sizeof buf);
     ses_power_t pw;
@@ -271,6 +273,52 @@ static void test_calib_round_trip(void)
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_calib(buf + 3, 26, &out));
 }
 
+static void test_decode_fix_rejects_non_positive_gps_us(void)
+{
+    /* io:C1 (R26): §12.2's resync accepts any frame whose CRC16 matches, so a damaged log can
+     * admit one mis-framed FIX_KEY; a negative gps_us then produced ~4.29e9 UTC fields. */
+    uint8_t p[39]; bw_t w; bw_init(&w, p, sizeof p);
+    bw_i64(&w, -1000000000000LL);                       /* the reviewer's reproducer value */
+    bw_i32(&w, -338561234); bw_i32(&w, 185123456); bw_i32(&w, 45000);
+    bw_i32(&w, 18500); bw_i32(&w, 9012000); bw_u32(&w, 100); bw_u16(&w, 10);
+    bw_u16(&w, 120); bw_u8(&w, 3); bw_u8(&w, 8); bw_u8(&w, 0x07);
+    ses_fix_state_t st; ses_fix_state_init(&st);
+    gps_fix_t f;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_KEY, p, 39, &f));
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_DELTA, p, 15, &f));  /* no anchor set */
+    bw_t w0; bw_init(&w0, p, sizeof p); bw_i64(&w0, 0);                /* R26: <= 0, so 0 too */
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_KEY, p, 39, &f));
+}
+
+static void test_decode_delta_rejects_a_non_positive_reconstruction_without_corrupting_the_anchor(void)
+{
+    /* io:C1/R26 fix round 1: the DELTA branch must reject before it writes through st->prev, so a
+     * rejected frame leaves the anchor exactly as it was for whatever is fed next. */
+    ses_fix_state_t st; ses_fix_state_init(&st);
+    st.have_prev = true;
+    st.prev.gps_us = -1000000;              /* already non-positive; dt=0 keeps the sum <= 0 */
+    st.prev.lat_e7 = 123456789;             /* recognisable: must be untouched by the rejected delta */
+
+    uint8_t p[15]; bw_t w; bw_init(&w, p, sizeof p);
+    bw_u16(&w, 0);                          /* dt = 0 */
+    bw_i16(&w, 42); bw_i16(&w, -17); bw_i16(&w, 5);   /* dlat, dlon, dalt: would mutate if applied */
+    bw_u16(&w, 300); bw_u16(&w, 9000); bw_u8(&w, 25); bw_u8(&w, 9); bw_u8(&w, 0x07);
+    gps_fix_t f;
+    TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&st, SES_T_FIX_DELTA, p, 15, &f));
+    TEST_ASSERT_EQUAL_INT64(-1000000, st.prev.gps_us);     /* anchor's gps_us untouched */
+    TEST_ASSERT_EQUAL_INT32(123456789, st.prev.lat_e7);    /* anchor's lat_e7 untouched */
+}
+
+static void test_utc_parts_clamps_a_negative_timestamp(void)
+{
+    int y; unsigned mo, d, hh, mm, ss, cs;
+    exp_utc_parts(-1000000000000LL, &y, &mo, &d, &hh, &mm, &ss, &cs);
+    TEST_ASSERT_EQUAL_INT(1970, y);
+    TEST_ASSERT_EQUAL_UINT(1u, mo); TEST_ASSERT_EQUAL_UINT(1u, d);
+    TEST_ASSERT_EQUAL_UINT(0u, hh); TEST_ASSERT_EQUAL_UINT(0u, mm);
+    TEST_ASSERT_EQUAL_UINT(0u, ss); TEST_ASSERT_EQUAL_UINT(0u, cs);
+}
+
 static void test_decoders_reject_malformed_payloads(void)
 {
     lt_test_assert_reset();                       /* T-A: every rejection below must be a plain return, not a fault */
@@ -278,6 +326,10 @@ static void test_decoders_reject_malformed_payloads(void)
     gps_fix_t f; lap_result_t lap; drag_result_t run; ses_hdr_t hdr; fused_sample_t fs;
     ses_fix_state_t fst; ses_fix_state_init(&fst);
     ses_fused_state_t ust; ses_fused_state_init(&ust);
+
+    /* io:C1/R26: ses_decode_fix now rejects gps_us <= 0, so this reused all-zero buffer needs a
+     * positive gps_us in its first 8 bytes before the "now a reference exists" FIX_KEY decode below. */
+    bw_t gw; bw_init(&gw, p, 8); bw_i64(&gw, 1000000000LL);
 
     /* FIX_KEY / FIX_DELTA: exact lengths only */
     TEST_ASSERT_EQUAL_INT(-1, ses_decode_fix(&fst, SES_T_FIX_KEY, p, 38, &f));
@@ -418,6 +470,23 @@ static void test_fuzz_ten_thousand_fix_random_walk_round_trips(void)
     TEST_ASSERT_EQUAL_UINT32(0, r.frames_bad);
 }
 
+static void test_encode_venue_carries_all_32_wire_bytes(void)
+{
+    /* io:M9: strncpy(nm, name, sizeof nm - 1) capped the §12.3 32-byte field at 31, while
+     * ses_encode_hdr in the same file uses bw_bytes for the full width of fw/hwid. */
+    char full[33]; memset(full, 'X', 32); full[32] = '\0';
+    uint8_t out[64];
+    int n = ses_encode_venue(7, 1, full, out, sizeof out);
+    TEST_ASSERT_EQUAL_INT(41, n);                               /* 36 payload + 5 framing */
+    ses_venue_t v;
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(out + 3, (uint8_t)(n - SES_FRAME_OVERHEAD), &v));
+    TEST_ASSERT_EQUAL_UINT(32u, strlen(v.name));
+    TEST_ASSERT_EQUAL_MEMORY(full, v.name, 32);
+    n = ses_encode_venue(7, 1, "Killarney", out, sizeof out);   /* short name still zero-pads */
+    TEST_ASSERT_EQUAL_INT(1, ses_decode_venue(out + 3, (uint8_t)(n - SES_FRAME_OVERHEAD), &v));
+    TEST_ASSERT_EQUAL_STRING("Killarney", v.name);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -432,8 +501,12 @@ int main(void)
     RUN_TEST(test_hdr_strings_using_every_wire_byte_round_trip_nul_terminated);
     RUN_TEST(test_small_record_round_trips);
     RUN_TEST(test_calib_round_trip);
+    RUN_TEST(test_decode_fix_rejects_non_positive_gps_us);
+    RUN_TEST(test_decode_delta_rejects_a_non_positive_reconstruction_without_corrupting_the_anchor);
+    RUN_TEST(test_utc_parts_clamps_a_negative_timestamp);
     RUN_TEST(test_decoders_reject_malformed_payloads);
     RUN_TEST(test_empty_json_and_config_are_rejected_without_a_fault);
     RUN_TEST(test_fuzz_ten_thousand_fix_random_walk_round_trips);
+    RUN_TEST(test_encode_venue_carries_all_32_wire_bytes);
     return UNITY_END();
 }
