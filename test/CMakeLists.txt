@@ -189,7 +189,8 @@ target_include_directories(test_sim_clock PRIVATE ${SIM_COMMON_DIR}/include)
 # (app/sup_policy.h -- IDF-free: stdint/stdbool + core/core.h + app/lt_consts.h). Linked like
 # test_epd_pure links its driver's host/*.c: the one source directly, plus the app component's
 # include root for "app/sup_policy.h"/"app/lt_consts.h"/"app/lt_assert.h". `core` is still linked
-# for core_assert_fail (LT_ASSERT_RET's reporter).
-set(APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/app)
-add_core_test(test_sup_policy ${APP_DIR}/sys/sup_policy.c)
-target_include_directories(test_sup_policy PRIVATE ${APP_DIR}/include)
+# for core_assert_fail (LT_ASSERT_RET's reporter). assert_support.c is the strong recorder: the
+# timeout-bound trip is asserted via lt_test_assert_* (test_smoke pattern), not merely tolerated.
+set(SUP_POLICY_APP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/app)
+add_core_test(test_sup_policy assert_support.c ${SUP_POLICY_APP_DIR}/sys/sup_policy.c)
+target_include_directories(test_sup_policy PRIVATE ${SUP_POLICY_APP_DIR}/include)

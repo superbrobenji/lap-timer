@@ -1,7 +1,7 @@
 #include "unity.h"
 #include "app/sup_policy.h"
 #include "app/lt_consts.h"
-#include <string.h>
+#include "assert_support.h"
 void setUp(void) {} void tearDown(void) {}
 
 /* ---- §17.2 stall episodes (R9: one log line per episode, not one per second) ---- */
@@ -39,10 +39,22 @@ static void test_stall_restartable_adds_restart_bit(void)
 }
 static void test_stall_rejects_bad_args(void)
 {
-    sup_stall_t st = { 0, 0, false };
+    sup_stall_t st = { .last_hb = 3, .stalled_s = 2, .msg_logged = true };
     TEST_ASSERT_EQUAL_UINT8(0, sup_stall_step(NULL, 1, 5, 1, true));
     TEST_ASSERT_EQUAL_UINT8(0, sup_stall_step(&st, 1, 0, 1, true));
     TEST_ASSERT_EQUAL_UINT8(0, sup_stall_step(&st, 1, 5, 0, true));
+    TEST_ASSERT_EQUAL_UINT32(3, st.last_hb);                    /* bad args leave the state untouched */
+    TEST_ASSERT_EQUAL_UINT32(2, st.stalled_s);
+    TEST_ASSERT_TRUE(st.msg_logged);
+}
+static void test_stall_window_not_multiple_of_period(void)
+{
+    /* window 5, period 2: the report fires on the first tick at or past the window (stalled 6). */
+    sup_stall_t st = { .last_hb = 7, .stalled_s = 0, .msg_logged = false };
+    TEST_ASSERT_EQUAL_UINT8(0, sup_stall_step(&st, 7, 5, 2, false));          /* stalled 2 */
+    TEST_ASSERT_EQUAL_UINT8(0, sup_stall_step(&st, 7, 5, 2, false));          /* stalled 4 */
+    TEST_ASSERT_EQUAL_UINT8(SUP_STALL_LOG, sup_stall_step(&st, 7, 5, 2, false)); /* stalled 6 */
+    TEST_ASSERT_EQUAL_UINT32(6, st.stalled_s);
 }
 
 /* ---- §17.2 heap hysteresis ---- */
@@ -153,6 +165,13 @@ static void test_recv_stale(void)
     TEST_ASSERT_TRUE(ota_recv_stale(30000u, 0xFFFFFFFFu, OTA_RECV_TIMEOUT_S));
     TEST_ASSERT_FALSE(ota_recv_stale(10u, 0xFFFFFFF0u, OTA_RECV_TIMEOUT_S));
     TEST_ASSERT_FALSE(ota_recv_stale(1000u, 1000u, 0u));          /* a 0 s timeout never fires */
+    /* the timeout_s bound (* 1000 must fit u32): 4000000 s is accepted, 4000001 s trips the assert */
+    lt_test_assert_reset();
+    TEST_ASSERT_FALSE(ota_recv_stale(0u, 0u, 4000000u));
+    TEST_ASSERT_EQUAL_UINT(0, lt_test_assert_count());
+    TEST_ASSERT_FALSE(ota_recv_stale(0u, 0u, 4000001u));
+    TEST_ASSERT_EQUAL_UINT(1, lt_test_assert_count());
+    TEST_ASSERT_EQUAL_HEX16(0x0BC0, lt_test_assert_last_code());   /* SUP_POLICY_ASSERT_CODE (sup_policy.c) */
 }
 
 int main(void)
@@ -163,6 +182,7 @@ int main(void)
     RUN_TEST(test_stall_new_episode_logs_again);
     RUN_TEST(test_stall_restartable_adds_restart_bit);
     RUN_TEST(test_stall_rejects_bad_args);
+    RUN_TEST(test_stall_window_not_multiple_of_period);
     RUN_TEST(test_heap_hysteresis);
     RUN_TEST(test_stack_low);
     RUN_TEST(test_flag_next_change);

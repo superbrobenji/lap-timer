@@ -11,7 +11,9 @@
  * SUP_STALL_LOG exactly ONCE per stall episode (R9 -- the old code re-armed every stall_s and so
  * printed an ESP_LOGE at 1 Hz straight into framed transfers and the raw OTA stream, app:M12),
  * and SUP_STALL_RESTART while a restartable task (the pipeline) is over its window. stalled_s
- * keeps accumulating across the episode so the logged figure is the true stall duration. */
+ * keeps accumulating across the episode so the logged figure is the true stall duration.
+ * The report fires on the first tick at or past the window, so a window that is not a multiple of
+ * period_s is reported at the next whole period (e.g. window 5, period 2 -> reported at 6 s). */
 uint8_t sup_stall_step(sup_stall_t *st, uint32_t cur_hb, uint32_t stall_s, uint32_t period_s,
                        bool restartable)
 {
