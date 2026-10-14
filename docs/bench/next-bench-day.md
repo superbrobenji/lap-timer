@@ -257,6 +257,25 @@ Also, `tools/devkit.py` now refuses an auto-picked port that does not answer `dc
 within ~2 s and opens every port with DTR/RTS deasserted — if it refuses, you have the lap-timer's
 port (identify, don't `--force-port`).
 
+- [ ] **26. `cfg.lap.*` really reaches the engine (F1a, R24).** On the sim build with `dbg sim laps 10`
+  running: `lt config set {"lap":{"min_lap_s":120}}` then `lt config get` (confirm 120 persisted) and
+  watch the lap card — the ~28 s sim laps must stop completing while the one in progress keeps its
+  clock (the reload applies in place, it does not reset the engine). Then
+  `lt config set {"lap":{"min_lap_s":20}}` and confirm laps complete again. Second half:
+  `lt config set {"lap":{"pit_speed_kmh":30,"pit_time_s":3}}`, `dbg sim park`, and confirm the next
+  completed lap carries PIT. Before F1a every one of these keys was inert.
+- [ ] **27. Leaving the venue closes the session (F1a emits `EV_VENUE_LOST`, F2b consumes it).** Needs
+  F2b merged. `dbg sim laps 2`, then drive the sim origin > 3 km out for 60 s (or power-cycle with a
+  venue-less capture): expect one `EV_VENUE_LOST` EVENT record with the venue id in the session, the
+  session closed, and a new one opened on the next `EV_VENUE_FOUND`.
+- [ ] **28. A layout override the venue does not have (F1a, R25).** `lt` → `CMD_SET_LAYOUT` with an id
+  the sim venue lacks (e.g. 99): lap timing must keep working (the override is refused and the engine
+  stays on Auto), not go silently dead for the rest of the session. The console gives no error yet —
+  surfacing the −1 is F2b's follow-up below.
+- [ ] **29. Best sectors do not cross venues (F1a, R25).** With the sim venue locked and a few laps
+  banked, create a second venue on-device (NEW TRACK, item 5) and let it lock: the theoretical-best
+  line must blank and then rebuild from the new venue's own splits, never show the old venue's number.
+
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4
 fixes on hardware: **item 12** (the four card states, #95/B4-F1) PASS; **item 15** (list pairing,
