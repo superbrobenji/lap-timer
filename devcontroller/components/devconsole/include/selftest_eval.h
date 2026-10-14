@@ -7,8 +7,8 @@
  * Global Constraints, verbatim:
  *   link:    median < 100 ms, max < 500 ms, 0 failures
  *   stream:  fused >= 8/s, status >= 0.8/s, 0 gaps
- *   framing: BEGIN/END markers present, every reply line ends with exactly one CR before LF (a
- *            "\r\r\n" is a fail)
+ *   framing: BEGIN/END markers present, marker lines end in exactly one CR before LF, other lines
+ *            flagged only for doubled-CR wire quirk ("\r\r\n")
  * cmd_selftest.c (IDF glue) drives the link/timers/rawcap and calls these; it never re-implements
  * a threshold itself.
  */
@@ -70,9 +70,11 @@ typedef struct {
 
 /* Evaluates the raw captured wire bytes of one framed reply (linkhost_trace_last_reply's rawcap
  * copy): `markers` counts "---BEGIN"/"---END" substring occurrences (2 for one ordinary reply);
- * `bad` counts lines (bounded by a trailing '\n') preceded by MORE than one '\r' -- a "\r\r\n",
- * the wire quirk documented in linkhost_parse_frame (export_serial's \n->\r\n translation doubling
- * a literal \r\n separator). Checked in this order: "markers" (no ---BEGIN or no ---END seen),
+ * `bad` counts COMPLETE lines (terminated by '\n') whose CR run before the LF is wrong: a line
+ * carrying a ---BEGIN/---END marker must have exactly one CR (spec §5.2 -- a bare-LF marker line
+ * is the failure this check exists to catch, dk:M3); any other line is counted only when it
+ * carries more than one (the \r\r\n wire quirk linkhost_parse_frame documents). A truncated
+ * trailing line is not judged. Checked in this order: "markers" (no ---BEGIN or no ---END seen),
  * "cr" (bad > 0). reason is "" on pass. */
 void selftest_framing_eval(const uint8_t *raw, size_t n, st_framing_t *out);
 
