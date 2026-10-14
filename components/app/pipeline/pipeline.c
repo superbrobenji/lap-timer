@@ -231,7 +231,7 @@ static void emit_event(const event_t *ev)
 
 static void emit_simple(uint8_t type, int64_t gps_us, int64_t mono_us)
 {
-    LT_ASSERT_VOID(type != EV_NONE && type < EV_COUNT, PIPE_ASSERT_CODE);    /* a real §4.5 event code */
+    LT_ASSERT_VOID(type != EV_NONE && type < EV_COUNT, PIPE_ASSERT_CODE);    /* a code core/event.h defines (design §3) */
     LT_ASSERT_VOID(gps_us >= 0 && mono_us >= 0, PIPE_ASSERT_CODE);           /* epoch/mono timestamps */
     event_t ev = { type, 0, 0, gps_us, mono_us, 0, 0 };
     emit_event(&ev);
@@ -423,7 +423,7 @@ static void create_finish_if_active(void)
 static void engine_cb(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, PIPE_ASSERT_CODE);            /* engine must pass a real event */
-    LT_ASSERT_VOID(ev->type < EV_COUNT, PIPE_ASSERT_CODE);   /* stable §4.5 code, drives the switch */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, PIPE_ASSERT_CODE);   /* a code core/event.h defines (design §3), drives the switch */
     if (ev->type == EV_LAP_COMPLETE) {
         on_lap_complete(ev->gps_us);
         s_rtc_save_due = true;     /* §15.3: save after on_fix, once open_lap has opened the new lap */
