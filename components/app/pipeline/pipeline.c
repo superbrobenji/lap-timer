@@ -460,11 +460,15 @@ static void create_finish_if_active(uint16_t venue_id)
  * is to stop a venue rescan asking for a second session and a mode flip rotating a session that
  * never existed (session_policy(), app/session_policy.h). */
 static bool     s_ses_open;
-/* I-1: set when logger_session_is_open() is first seen true after an OPEN this task sent; cleared
- * on every session_open()/session_close()/rotate. While set, a logger that reports CLOSED was
- * closed by someone else (ota.c's §19.5 ota_close_session(), sup.c's pre-restart close) -- the
- * logger never closes on its own -- so session_periodic() drops the mirror instead of retrying. */
+/* I-1/N-1: set when the logger is seen open at a DIFFERENT open-generation than the one read just
+ * before the latest OPEN was posted (logger_session_open_gen(); session_liveness()) -- i.e. the
+ * logger completed THIS OPEN. A bare "logger reads open" is not enough: after a rotation the old
+ * session is still open while it closes. Cleared on every session_open()/session_close(). While
+ * set, a logger that reports CLOSED was closed by someone else (ota.c's §19.5 ota_close_session(),
+ * sup.c's pre-restart close) -- the logger never closes on its own -- so session_periodic() drops
+ * the mirror instead of retrying. */
 static bool     s_ses_confirmed;
+static uint32_t s_ses_gen_at_post;
 static uint16_t s_ses_venue_id, s_ses_layout_id;
 static uint8_t  s_gps_hz;              /* gps_profile_t.max_rate_hz; §12.3 SESSION_HDR.gps_hz */
 
@@ -536,6 +540,7 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
 {
     s_ses_venue_id  = venue_id;
     s_ses_layout_id = layout_id;
+    s_ses_gen_at_post = logger_session_open_gen();   /* N-1: BEFORE posting; every OPEN path comes through here */
     session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us);
     s_ses_open = true;
     s_ses_confirmed = false;
@@ -543,8 +548,9 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
     /* Both ride on result_q, which the logger drains AFTER log_req_q in the same loop pass, so in
      * the normal case the HDR is already written when these two are encoded. If the logger's
      * request drain happened to run just BEFORE the OPEN above arrived, it receives them while
-     * still closed and stashes both (m-1) and writes them straight after the next HDR -- so the
-     * session start carries a TIME_MAP and a CALIB either way, only their position relative to
+     * still closed: the TIME_MAP is stashed (m-1) and written straight after the next HDR; the
+     * CALIB only seeds that HDR's calib block (open_session copies s_calib) -- no CALIB record
+     * (0x0A) is written after the HDR in that case. Either way the TIME_MAP position relative to
      * the first FIX/FUSED samples is not exact. gps_us feeds only the HDR's start_gps_us. */
     post_time_map();
     post_calib();
@@ -552,7 +558,9 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
 
 /* I2: the OPEN is fire-and-forget and the logger may refuse it (reserve floor, sequence
  * exhaustion). If the mirror says open but the logger NEVER confirmed it, ask again, at most once
- * per 60 s. I-1: once the logger HAS confirmed it (s_ses_confirmed) and later reports closed,
+ * per 60 s. I-1/N-1: once the logger HAS confirmed it (s_ses_confirmed: it completed an OPEN
+ * newer than the one read at post time -- the rotation's old, still-closing session does not
+ * count) and later reports closed,
  * someone else closed it (ota.c's §19.5 close, sup.c's pre-restart close): drop the mirror, as a
  * close would, and do NOT retry -- the next venue event reopens (a retry would open a new
  * session in the middle of an OTA transfer). */
@@ -560,19 +568,21 @@ static void session_periodic(int64_t now)
 {
     LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
     if (!s_ses_open) return;
-    if (!logger_session_is_open()) {
-        if (s_ses_confirmed) {
-            s_ses_open = false;
-            s_ses_confirmed = false;
-            s_ses_venue_id = 0u;
-            s_ses_layout_id = 0u;
-        } else if ((now - s_last_open_try_us) >= TIMEMAP_INTERVAL_US) {
-            int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
-            session_open(s_ses_venue_id, s_ses_layout_id, gps_us);
-        }
-        return;
+    bool lopen = logger_session_is_open();
+    ses_live_t v = session_liveness(lopen, logger_session_open_gen(), s_ses_gen_at_post, s_ses_confirmed,
+                                    now, s_last_open_try_us, TIMEMAP_INTERVAL_US);
+    if (v == SES_LIVE_DROP) {
+        s_ses_open = false;
+        s_ses_confirmed = false;
+        s_ses_venue_id = 0u;
+        s_ses_layout_id = 0u;
+    } else if (v == SES_LIVE_RETRY) {
+        int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
+        session_open(s_ses_venue_id, s_ses_layout_id, gps_us);
+    } else if (v == SES_LIVE_CONFIRM) {
+        s_ses_confirmed = true;
     }
-    s_ses_confirmed = true;
+    if (!lopen) return;
     if (tb_quality(&s_tb) != s_tb_q_last || (now - s_last_timemap_us) >= TIMEMAP_INTERVAL_US)
         post_time_map();
 }

@@ -110,6 +110,7 @@ static TaskHandle_t s_task;
 
 /* open session */
 static sto_file_t s_log_fd;
+static volatile uint32_t s_open_gen;   /* N-1: ++ on every completed OPEN; logger task writes, any task reads */
 static volatile bool s_open;   /* written only by the logger task; read cross-task by logger_session_is_open() */
 static char       s_id[11];            /* "S%05u_%03u" + NUL */
 static uint8_t    s_seq;               /* per-boot session sequence (§12.1) */
@@ -132,7 +133,7 @@ static bool    s_acc_full;               /* L2: the .sum lap accumulator spilled
  * its OPEN, and this task's request drain may have run just before that OPEN arrived). Any
  * consistent (mono, gps, quality) triple stays valid, so it is written straight after the next HDR
  * rather than dropped, exactly like s_calib. */
-static struct { int64_t mono_us, gps_us; uint8_t quality; bool valid; } s_tmap_stash;
+static struct { int64_t mono_us, gps_us; uint8_t quality; bool valid; uint32_t at_ms; } s_tmap_stash;
 static ses_calib_t s_calib;   /* latest block from the pipeline (LOG_RES_CALIB); zero / fusion
                                * defaults until #93 (orientation capture, Plan 8) lands */
 static log_pause_t s_pause;   /* §12.6 still-pause (R4): FIX/FUSED suppressed while paused */
@@ -150,6 +151,7 @@ static uint16_t s_sessions_cached;
 static uint32_t s_free_kb_cached;
 static uint32_t s_bytes_since_info;
 
+#define TMAP_STASH_MAX_AGE_MS 5000u   /* N-2: a stashed TIME_MAP older than this at the next HDR is stale */
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 /* storage_free_kb/session_count (Plan 5.6 T1 fix 1, moved verbatim from cmd.c's op_status):
@@ -341,11 +343,15 @@ static bool next_session_id(void)
 static void write_stashed_time_map(void)
 {
     if (!s_tmap_stash.valid) return;
+    s_tmap_stash.valid = false;
+    /* N-2: only a record that beat its own OPEN belongs here (stashed milliseconds ago). A record
+     * drained after a CLOSE (posted while the logger still read open) is stashed too and no OPEN
+     * follows for hours; its pair must not anchor a later session. close_session also clears it. */
+    if ((now_ms() - s_tmap_stash.at_ms) > TMAP_STASH_MAX_AGE_MS) return;
     uint8_t tmp[FRAME_TMP_CAP];
     int n = ses_encode_time_map(s_tmap_stash.mono_us, s_tmap_stash.gps_us, s_tmap_stash.quality,
                                 tmp, sizeof tmp);
     if (n > 0) batch_append(tmp, n);
-    s_tmap_stash.valid = false;
 }
 
 static void open_session(const log_request_t *req)
@@ -413,6 +419,7 @@ static void open_session(const log_request_t *req)
         return;
     }
     s_open = true;
+    s_open_gen++;
     LT_ASSERT_VOID(s_log_fd >= 0, LOG_ASSERT_CODE);   /* valid session state: a successful sto_open yields fd >= 0 */
     s_last_write_ms = s_last_sync_ms = now_ms();
 
@@ -450,6 +457,7 @@ static int close_session(const log_request_t *req)
     (void)sto_sync(s_log_fd);
     (void)sto_close(s_log_fd);
     s_open = false;
+    s_tmap_stash.valid = false;   /* N-2: a stash only ever bridges a record that beat its OPEN, never a close */
     /* Finalise .sum with END. Plan 5.6 T1 fix 3: the count is incremental, not a rescan -- closing
      * is the one definitive "a session is now counted" boundary this file uses (see
      * status_cache_prime()'s doc comment for why open_session does not also bump this).
@@ -835,6 +843,7 @@ static void handle_result(const log_result_t *res)
         s_tmap_stash.mono_us = res->u.tmap.mono_us;
         s_tmap_stash.gps_us  = res->u.tmap.gps_us;
         s_tmap_stash.quality = res->u.tmap.quality;
+        s_tmap_stash.at_ms   = now_ms();
         s_tmap_stash.valid   = true;
     }
     if (!s_open) return;                             /* nothing to write without an open .log */
@@ -1245,6 +1254,11 @@ void logger_notify(void)
 bool logger_session_is_open(void)
 {
     return s_open;   /* volatile single-byte read; the logger task is the only writer */
+}
+
+uint32_t logger_session_open_gen(void)
+{
+    return s_open_gen;   /* volatile aligned 32-bit read; the logger task is the only writer */
 }
 
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily

@@ -17,3 +17,14 @@ ses_action_t session_policy(bool open_now, ses_input_t in)
     core_assert_fail(SES_POLICY_ASSERT_CODE, __FILE__, __LINE__);
     return SES_ACT_NONE;
 }
+
+ses_live_t session_liveness(bool logger_open, uint32_t gen_now, uint32_t gen_at_post, bool confirmed,
+                            int64_t now_us, int64_t last_try_us, int64_t retry_interval_us)
+{
+    if (logger_open) {
+        /* Generations wrap harmlessly: only inequality is tested. */
+        return (!confirmed && gen_now != gen_at_post) ? SES_LIVE_CONFIRM : SES_LIVE_NONE;
+    }
+    if (confirmed) return SES_LIVE_DROP;
+    return ((now_us - last_try_us) >= retry_interval_us) ? SES_LIVE_RETRY : SES_LIVE_NONE;
+}

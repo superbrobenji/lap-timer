@@ -2,6 +2,7 @@
 #define APP_SESSION_POLICY_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* app/session_policy.h -- §12.1 "A session starts at boot (or resume) and ends at PARK/SHUTDOWN or
  * when the venue changes. A new session also starts on mode change." (R4; audit §3.3 #24/#25.)
@@ -28,5 +29,20 @@ typedef enum {
 } ses_input_t;
 
 ses_action_t session_policy(bool open_now, ses_input_t in);
+
+/* N-1: what the pipeline's periodic check does about an OPEN it has asked for. `logger_open` is
+ * logger_session_is_open(), `gen_now` logger_session_open_gen(), `gen_at_post` the generation read
+ * just BEFORE the (latest) OPEN was posted. A logger that is open at the SAME generation is the
+ * session that was open when the OPEN was posted (a rotation's old session, still closing), not
+ * this OPEN's -- so it never confirms. */
+typedef enum {
+    SES_LIVE_NONE    = 0,
+    SES_LIVE_CONFIRM = 1,   /* the logger opened a session since the post: latch confirmed */
+    SES_LIVE_DROP    = 2,   /* confirmed earlier, logger now closed: closed externally, drop the mirror */
+    SES_LIVE_RETRY   = 3,   /* never confirmed, logger closed, retry interval elapsed: re-post OPEN */
+} ses_live_t;
+
+ses_live_t session_liveness(bool logger_open, uint32_t gen_now, uint32_t gen_at_post, bool confirmed,
+                            int64_t now_us, int64_t last_try_us, int64_t retry_interval_us);
 
 #endif /* APP_SESSION_POLICY_H */

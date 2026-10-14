@@ -50,6 +50,32 @@ static void test_unknown_input_is_inert(void)
     TEST_ASSERT_EQUAL_INT(SES_ACT_NONE, session_policy(false, (ses_input_t)200));
     TEST_ASSERT_EQUAL_UINT(2u, lt_test_assert_count());
 }
+#define IV 60000000LL
+static void test_live_old_session_after_rotate_is_not_a_confirm(void)
+{
+    /* N-1: right after a rotate the OLD session still reads open; its generation equals the one
+     * recorded at post time, so it must not latch the confirm. */
+    lt_test_assert_reset();
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 5u, 5u, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 6u, 5u, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 6u, 5u, true, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 0u, 0xFFFFFFFFu, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+static void test_live_refused_open_after_rotate_retries_after_60s(void)
+{
+    lt_test_assert_reset();
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE,  session_liveness(false, 5u, 5u, false, IV - 1, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_RETRY, session_liveness(false, 5u, 5u, false, IV, 0, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+static void test_live_confirmed_then_closed_drops_without_retry(void)
+{
+    lt_test_assert_reset();
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_DROP, session_liveness(false, 6u, 5u, true, 10 * IV, 0, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -59,5 +85,8 @@ int main(void)
     RUN_TEST(test_mode_change_rotates_only_a_live_session);
     RUN_TEST(test_venue_changed_rotates_a_live_session);
     RUN_TEST(test_unknown_input_is_inert);
+    RUN_TEST(test_live_old_session_after_rotate_is_not_a_confirm);
+    RUN_TEST(test_live_refused_open_after_rotate_retries_after_60s);
+    RUN_TEST(test_live_confirmed_then_closed_drops_without_retry);
     return UNITY_END();
 }

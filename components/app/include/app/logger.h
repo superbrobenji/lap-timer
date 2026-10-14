@@ -19,6 +19,10 @@ void logger_notify(void);   /* wake the logger (task notification); safe from an
 /* True while the logger has a session open. Non-blocking, safe from any task; the pipeline polls it
  * to notice an OPEN the logger refused (reserve floor, sequence exhaustion) and retry. */
 bool logger_session_is_open(void);
+/* N-1: count of OPENs the logger has completed (bumped where s_open becomes true). Non-blocking
+ * volatile read, safe from any task; wraps harmlessly -- callers only compare for inequality. The
+ * pipeline uses it to tell "the session my OPEN created" from "the old session still closing". */
+uint32_t logger_session_open_gen(void);
 
 /* #97 (§10.9), final review F-4/I-4: load /tracks/user.bin into the core/trk.h user track table.
  * Implemented in logger.c (the file that also writes it, tracks_save()) since it only reads, but

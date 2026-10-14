@@ -439,7 +439,7 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   Negatives: `tracks put {}` -> `ERR 0x0703: bad venue json`; repeat the SAME put (id 900) -> `ERR 0x0703: id exists`
   (the user table is append-only; the earlier venue is unchanged, `tracks get` still lists it once; I-3); repeat the put with NEW ids (901, 902, ...) until
   `ERR 0x0703: table full`. The table refuses once it already holds `TRK_MAX_USER` (4) user venues
-  (`trk_user_add_json` fails when `user_n >= 4`), and the sim venue (id 1004) and anything already in
+  (`put_track` is refused when `trk_user_scratch()` finds no free slot, `user_n >= 4`), and the sim venue (id 1004) and anything already in
   `/tracks/user.bin` count. Starting from an EMPTY `user.bin` (check `tracks get` shows no other `"src":"user"`
   entries first) that is: on `moto_sim` the first 3 puts (900-902) succeed and the 4th refuses; on `moto_neo6m`
   the first 4 succeed and the 5th refuses; every venue already persisted pre-fills a slot and moves the
@@ -552,9 +552,16 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   only A's laps, the new one only the new venue's; no session carries two venue ids. Evidence: two `dbg sum` lines.
 - [ ] **67. `tracks put` of an existing id is refused** (F2b final review I-3): see item 50 (`ERR 0x0703: id exists`,
   `creation in progress; retry` while New track is active). Evidence: the ERR lines.
-- [ ] **68. TIME_MAP is a consistent pair** (F2b final review I-2). `dbg logck <id>` of a fresh session decodes
-  with no error, and a session opened when GPS has been lost for minutes (parked indoors, sim stopped) carries no
-  TIME_MAP whose gps time is far from its mono time's mapping. Evidence: `dbg logck` clean.
+- [ ] **68. TIME_MAP is written from a consistent pair** (F2b final review I-2). Console limit: `dbg logck <id>`
+  only COUNTS records (`TIME_MAP=<n>`); it does not decode the gps/mono values, so the pair's consistency is NOT
+  observable on the console (it is covered by the host decode tests). What can be checked: `dbg logck <id>` of a
+  fresh session reports no decode error, and a session opened with GPS lost for minutes (parked indoors, sim
+  stopped) shows `TIME_MAP=0` (none written rather than a wrong one) until a valid fix returns, after which a later
+  `dbg logck` shows `TIME_MAP>=1`. Evidence: the `logck` lines.
+- [ ] **69. Rotation never desyncs the lifecycle** (F2b closure N-1). `config set {\"mode\":\"drag\"}`, `dbg fs`
+  shows the rotation (a second `.log`/`.sum` pair), then `config set {\"mode\":\"lap\"}` rotates again (a third
+  pair), 5 s apart; repeat once with the flips 400 ms apart (item 64). Every flip must produce exactly one
+  close + one open line; no flip may be skipped. Evidence: the log lines + `dbg fs`.
 
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4
