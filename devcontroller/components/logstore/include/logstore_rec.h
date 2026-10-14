@@ -74,8 +74,9 @@ enum {
  *
  * Format (issue #67): NDJSON -- one JSON object per line; "t" is "fused", "event" or "status";
  * "rx_us" is the dev-kit's own receive/append time (this header's ts_us), "gps_us" the
- * lap-timer's GPS time -- the same two clocks, always together, so a line's age can be judged
- * either way. */
+ * lap-timer's GPS time -- the same two clocks, always together. rx_us is only comparable within
+ * one dev-kit boot (since it resets to 0 on reboot), but gps_us carries the lap-timer's own
+ * boot offset and is comparable across dev-kit reboots. */
 int logstore_rec_to_json(const uint8_t *buf, size_t avail, char *out, size_t out_cap,
                           size_t *consumed);
 

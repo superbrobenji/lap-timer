@@ -1,11 +1,12 @@
 # logstore -- bounded rotating black-box log on the `logs` LittleFS partition (Plan 5.5 Task 5).
 # SRCS: logstore.c is the IDF/LittleFS glue; host/logstore_rot.c is the PURE rotation-decision
-# logic, host/logstore_json.c is the PURE on-flash-record -> NDJSON transcode (issue #67), and
-# host/logstore_id.c is the PURE generated-id shape validator (debt sweep A #60 fix round 1) --
-# none has esp_* / littlefs deps -- that devcontroller/test/test_logstore.c, test_logstore_json.c
-# and test_logstore_id.c also link directly on the host; all three are compiled here too so the
-# on-target build and the host tests share one implementation instead of two copies drifting
-# apart.
+# logic, host/logstore_json.c is the PURE on-flash-record -> NDJSON transcode (issue #67),
+# host/logstore_id.c is the PURE generated-id shape validator (debt sweep A #60 fix round 1), and
+# host/logstore_state.c is the PURE dk:M10 ready-state predicate (Plan 5.5 Task 9) --
+# none has esp_* / littlefs deps -- that devcontroller/test/test_logstore.c, test_logstore_json.c,
+# test_logstore_id.c and test_logstore_state.c also link directly on the host; all four are
+# compiled here too so the on-target build and the host tests share one implementation instead of
+# two copies drifting apart.
 #
 # logstore.h's `#include "linkhost.h"` (for lt_stream_rec_t) in turn needs "app/lt_proto.h" --
 # both resolved via direct INCLUDE_DIRS entries rather than REQUIRES linkhost, mirroring
@@ -19,7 +20,7 @@
 # esp_timer is needed for the esp_timer_get_time() per-record monotonic-us stamp (implementation
 # detail, not exposed via logstore.h, hence PRIV_REQUIRES alongside littlefs).
 idf_component_register(
-    SRCS "logstore.c" "host/logstore_rot.c" "host/logstore_json.c" "host/logstore_id.c"
+    SRCS "logstore.c" "host/logstore_rot.c" "host/logstore_json.c" "host/logstore_id.c" "host/logstore_state.c"
     INCLUDE_DIRS "include"
                  "${CMAKE_CURRENT_LIST_DIR}/../linkhost/include"
                  "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include"

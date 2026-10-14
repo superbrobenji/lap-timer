@@ -79,6 +79,10 @@ _Static_assert(sizeof(logstore_file_hdr_t) == LOGSTORE_REC_AREA_OFFSET,
                "logstore_file_hdr_t size must match logstore_rec.h's LOGSTORE_REC_AREA_OFFSET");
 
 static volatile bool s_ready;   /* read cross-task by logstore_ready() (webapi's httpd task) */
+static volatile bool s_write_ok = true;   /* dk:M10: the LAST append's write outcome. Separate from
+                                            * s_ready (a file is open) so a transient/steady write
+                                            * error is visible in /api/status and clears itself on
+                                            * the next successful append. */
 static uint32_t s_cap_bytes;
 static uint32_t s_next_id = 1;
 static int      s_cur_fd = -1;
@@ -267,6 +271,7 @@ esp_err_t logstore_init(size_t cap_bytes)
     if (cap_bytes == 0 || cap_bytes > UINT32_MAX) return ESP_ERR_INVALID_ARG;
 
     s_ready        = false;
+    s_write_ok     = true;   /* reset on init; will be set false on the next write failure */
     s_cap_bytes    = (uint32_t)cap_bytes;
     s_cur_fd       = -1;
     s_cur_bytes    = 0;
@@ -305,7 +310,8 @@ esp_err_t logstore_init(size_t cap_bytes)
     esp_err_t oe = open_new_file();
     if (oe != ESP_OK) return oe;
 
-    s_ready = true;
+    s_ready    = true;
+    s_write_ok = true;
     return ESP_OK;
 }
 
@@ -341,8 +347,14 @@ int logstore_append(const lt_stream_rec_t *rec)
         .type  = rec->type,
         .len   = rec->len,
     };
-    if (write_all(s_cur_fd, &hdr, sizeof hdr) != 0) return -1;
-    if (rec->len > 0 && write_all(s_cur_fd, rec->data, rec->len) != 0) return -1;
+    if (write_all(s_cur_fd, &hdr, sizeof hdr) != 0) {
+        s_write_ok = false;
+        return -1;
+    }
+    if (rec->len > 0 && write_all(s_cur_fd, rec->data, rec->len) != 0) {
+        s_write_ok = false;
+        return -1;
+    }
 
     s_cur_bytes += incoming;
 
@@ -355,12 +367,13 @@ int logstore_append(const lt_stream_rec_t *rec)
         (void)fsync(s_cur_fd);
         s_last_fsync_us = now_us;
     }
+    s_write_ok = true;
     return 0;
 }
 
 bool logstore_ready(void)
 {
-    return s_ready;
+    return logstore_accepting(s_ready, s_write_ok);
 }
 
 int logstore_list(logstore_entry_t *out, int max)

@@ -172,8 +172,10 @@ static void stream_consumer(void *arg)
     lt_stream_rec_t r;
     static bool s_append_fail_logged;   /* I4 (partial, #68 tracks the rest): warn once, not every
                                           * record, once logstore_append starts failing (e.g. the
-                                          * s_ready wedge on open_new_file() failure) -- no other
-                                          * indicator exists yet that black-box logging has stopped. */
+                                          * s_ready wedge on open_new_file() failure). /api/status's
+                                          * `logging` now reports this too (dk:M10), so the one WARN
+                                          * is no longer the only indicator that black-box logging has
+                                          * stopped. */
     for (;;) {
         int any = 0;
         while (linkhost_stream_pop(&r) == 0) {   /* bounded: ring is finite, drains then returns */
