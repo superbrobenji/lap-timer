@@ -91,9 +91,10 @@ void test_frame_split_across_two_calls_removed(void)
     TEST_ASSERT_EQUAL_UINT32(0, f.bad);
 }
 
-/* A header whose len exceeds LT_REC_MAX cannot be a real stream frame: it is counted as bad, the
- * tag+header bytes are dropped (never forwarded), and text classification resumes immediately
- * after -- the bytes that would have been "payload" under the bogus len are ordinary text. */
+/* A header whose len exceeds LT_REC_MAX + 1 (the demux's own largest legal len: one type byte plus
+ * LT_REC_MAX payload) cannot be a real stream frame: it is counted as bad, the tag+header bytes
+ * are dropped (never forwarded), and text classification resumes immediately after -- the bytes
+ * that would have been "payload" under the bogus len are ordinary text. */
 void test_oversize_len_counted_bad_then_text_resumes(void)
 {
     bridge_filter_t f;
@@ -105,7 +106,7 @@ void test_oversize_len_counted_bad_then_text_resumes(void)
     in[n++] = 0x00;                        /* seq_lo */
     in[n++] = 0x00;                        /* seq_hi */
     in[n++] = 0x00;                        /* flags */
-    in[n++] = (uint8_t)(LT_REC_MAX + 1);   /* len: one over the bound -> bad */
+    in[n++] = (uint8_t)(LT_REC_MAX + 2);   /* len: one over the new bound -> bad */
     memcpy(in + n, "hello\n", 6); n += 6;   /* ordinary text, not a real payload */
 
     uint8_t out[16];
@@ -170,6 +171,28 @@ void test_zero_length_frame_counted_immediately(void)
     TEST_ASSERT_EQUAL_UINT32(0, f.bad);
 }
 
+/* dk:L3 -- the bridge rejected len == LT_REC_MAX + 1 as "bad" while the demux accepts it, so a
+ * future 64-byte-payload record would have its 65 payload bytes forwarded RAW into the operator's
+ * terminal -- the exact injection this filter exists to prevent. */
+void test_max_length_frame_is_filtered_not_forwarded(void)
+{
+    bridge_filter_t f;
+    bridge_filter_reset(&f);
+    uint8_t in[5 + LT_REC_MAX + 1];
+    memset(in, 'X', sizeof in);
+    in[0] = 0xFF; in[1] = 1; in[2] = 0; in[3] = 0; in[4] = (uint8_t)(LT_REC_MAX + 1);
+    uint8_t out[sizeof in];
+    size_t w = bridge_filter_run(&f, in, sizeof in, out, sizeof out);
+    TEST_ASSERT_EQUAL_UINT(0, w);
+    TEST_ASSERT_EQUAL_UINT32(1, f.frames);
+    TEST_ASSERT_EQUAL_UINT32(0, f.bad);
+    /* one byte longer is still impossible and still counted bad */
+    bridge_filter_reset(&f);
+    in[4] = (uint8_t)(LT_REC_MAX + 2);
+    (void)bridge_filter_run(&f, in, 5, out, sizeof out);
+    TEST_ASSERT_EQUAL_UINT32(1, f.bad);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -180,5 +203,6 @@ int main(void)
     RUN_TEST(test_len_exactly_at_max_is_valid);
     RUN_TEST(test_cap_smaller_than_text_is_bounded);
     RUN_TEST(test_zero_length_frame_counted_immediately);
+    RUN_TEST(test_max_length_frame_is_filtered_not_forwarded);
     return UNITY_END();
 }

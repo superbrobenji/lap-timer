@@ -55,22 +55,34 @@
 # validator `lt delete`/`lt open` (cmd_lt.c) run before putting an operator-typed id on the wire,
 # host-tested by test_idcheck.c (same jsonw/rate.c/flash_fmt.c split).
 #
+# dc_psk.c / host/dc_psk_gen.c (F3 Task 5, dk:H1 / R16): the dev-kit's random AP passphrase, read
+# by both wifi_ap_start (main.c) and cmd_dc.c's `dc status` / `dc psk reset`. Lives in devconsole
+# (not main, which devconsole cannot see; not a new component) because devconsole is the lowest
+# component both app_main and `dc status` already depend on (main/CMakeLists.txt REQUIRES
+# devconsole). dc_psk.c is target-only (NVS + bootloader_random + esp_random, none IDF-free);
+# host/dc_psk_gen.c (the pure alphabet mapping + validator) is compiled here AND linked directly by
+# devcontroller/test/test_dc_psk.c on the host, same split as host/jsonw.c and host/rate.c above.
+#
 # PRIV_REQUIRES: `console` is the IDF esp_console component (esp_console.h, used only inside this
 # component); esp_driver_uart is `dc baud`'s uart_set_baudrate/uart_wait_tx_done AND `flash
 # stage`'s raw uart_read_bytes loop; esp_wifi is `dc status`'s esp_wifi_ap_get_sta_list; esp_system
 # is esp_get_free_heap_size; logstore is the other subsystem `dc status` reports on; flashcore is
-# `flash`'s otastage_*/flashctl_*/stage_args_parse (Task 7) -- none of its headers are part of
-# console.h's public surface, so it stays PRIV like the rest of this list. None of these (linkhost
-# aside) leak into console.h's public surface (console_start/console_wants_json/console_register/
+# `flash`'s otastage_*/flashctl_*/stage_args_parse (Task 7); nvs_flash is dc_psk.c's nvs_open/_get_str/
+# _set_str/_commit/_close; esp_hw_support is esp_random.h's esp_fill_random; bootloader_support is
+# bootloader_random.h's enable/disable pair -- none of their headers are part of console.h's public
+# surface, so they all stay PRIV like the rest of this list. None of these (linkhost aside) leak
+# into console.h's public surface (console_start/console_wants_json/console_register/
 # console_stream_tap are all plain C + the one linkhost_proto.h type), so everything but linkhost
 # stays PRIV.
 idf_component_register(
     SRCS "console.c" "cmd_dc.c" "cmd_flash.c" "cmd_lt.c" "cmd_stream.c" "cmd_selftest.c"
-         "cmd_shell.c"
+         "cmd_shell.c" "dc_psk.c"
          "host/jsonw.c" "host/rate.c" "host/selftest_eval.c" "host/flash_fmt.c" "host/idcheck.c"
+         "host/dc_psk_gen.c"
     INCLUDE_DIRS "include"
     REQUIRES linkhost
-    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system logstore flashcore)
+    PRIV_REQUIRES console esp_driver_uart esp_wifi esp_system logstore flashcore
+                  nvs_flash esp_hw_support bootloader_support)
 
 # build_config.h from the build tree (CFG_DC_VERSION, for `dc status`'s version field).
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_BINARY_DIR}")

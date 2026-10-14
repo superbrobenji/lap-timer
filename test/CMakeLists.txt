@@ -168,7 +168,7 @@ target_compile_definitions(test_epd_pure_29 PRIVATE EPD_FORCE_PANEL_29=1)
 # needed the lt_hal include root before this, so it is added explicitly here.
 set(SIM_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/drivers/sim_common)
 set(LT_HAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/lt_hal)
-add_core_test(test_sim_profile ${SIM_COMMON_DIR}/host/sim_profile.c)
+add_core_test(test_sim_profile ${SIM_COMMON_DIR}/host/sim_profile.c ${SIM_COMMON_DIR}/host/sim_drag_pos.c)
 target_include_directories(test_sim_profile PRIVATE ${SIM_COMMON_DIR}/include ${LT_HAL_DIR}/include)
 
 # test_sim_clock (final review, ruling F-1 / Critical C1): sim_common's pure gps_us bookkeeping

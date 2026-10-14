@@ -50,7 +50,7 @@ size_t bridge_filter_run(bridge_filter_t *f, const uint8_t *in, size_t n, uint8_
         case BF_HDR:
             f->skip--;
             if (f->skip == 0) {                  /* b is the len byte: the header is complete */
-                if (b > LT_REC_MAX) {
+                if (b > (uint8_t)(LT_REC_MAX + 1u)) {
                     f->bad++;                    /* not a real frame -- resync on the next byte */
                     f->st = BF_TEXT;
                 } else if (b == 0) {

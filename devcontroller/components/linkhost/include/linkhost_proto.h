@@ -30,7 +30,8 @@ extern "C" {
 /* ---- negative returns from linkhost_status/linkhost_cmd/linkhost_flash/linkhost_parse_frame ---- */
 enum {
     LINKHOST_E_TIMEOUT = -1,   /* no/incomplete response within the link timeout */
-    LINKHOST_E_NOTCONN = -2,   /* no lap-timer peer detected (no heartbeat / not yet wired) */
+    LINKHOST_E_NOTCONN = -2,   /* no lap-timer peer detected (no UART1 traffic within
+                                * LINK_PRESENT_MS / not yet wired) */
     LINKHOST_E_CRC     = -3,   /* decoded body CRC did not match the ---END crc32 */
     LINKHOST_E_PROTO   = -4,   /* malformed framing / oversize body / unexpected token */
     LINKHOST_E_REMOTE  = -5,   /* the lap-timer answered `ERR 0x<code>: <msg>` (see err_code/err_msg) */
@@ -224,6 +225,43 @@ int lh_dl_result(const lh_dl_ctx_t *c);
  * length-prefixed header -- so `first_ms` applies; once the header is in (state >= LH_DL_BODY) the
  * shorter steady-state `idle_ms` applies. Pure so the policy is host-testable without the UART loop. */
 int lh_dl_gap_ms(lh_dl_state_t state, int first_ms, int idle_ms);
+
+/* Largest announced body this parser accepts (dk:M1). A ---BEGIN whose size exceeds it cannot be
+ * a real session file on a 4 MB device and is far more likely a digit inserted into the size by a
+ * glitchy link -- the exact corruption this module exists to tolerate. The header is rejected
+ * (LH_DL_ERR / LINKHOST_E_PROTO) rather than streamed, because accepting it hands the caller's
+ * timeout loop a window scaled off a number the wire made up (measured: 36.2 h). */
+#define LH_DL_BODY_MAX     (2u * 1024u * 1024u)
+/* Absolute ceiling on one download, from the moment the header was seen (dk:M1). Independent of
+ * the announced size, so it still holds if the size cap above is ever widened. */
+#define LH_DL_HARD_MAX_MS  (20 * 60 * 1000)
+/* Slack added on top of the size-scaled transfer time (was linkhost.c's DL_HARD_MARGIN_US). */
+#define LH_DL_MARGIN_US    (5 * 1000 * 1000)
+/* Absolute deadline (same clock as t_header_us, microseconds) for a body of `body_size` on-wire
+ * bytes at `baud`, measured from when the header was SEEN (not from the request): a slow `list`
+ * header can arrive seconds into the call, and measuring from the request would clip the window by
+ * however long the header took. = t_header + 1.5*size*10/baud + LH_DL_MARGIN_US, clamped to
+ * t_header + LH_DL_HARD_MAX_MS; `body_size` is itself clamped to LH_DL_BODY_MAX first. Pure, so
+ * the policy is host-testable without the UART loop.
+ * PRECONDITION: `baud` must be > 0 -- the implementation divides by it, and its only guard is
+ * `assert(baud > 0)`, which compiles away under NDEBUG, turning baud == 0 into integer division
+ * by zero (UB / a panic) rather than a clamped cap. Unreachable today: the one production caller
+ * (linkhost.c) always passes the compile-time constant DC_LINK_BAUD (115200). A future caller that
+ * passes a runtime baud MUST validate it is > 0 before calling. */
+int64_t lh_dl_cap_us(uint32_t body_size, int64_t t_header_us, uint32_t baud);
+/* On-wire BODY bytes consumed so far: 0 while the header is still being scanned, rising through
+ * LH_DL_BODY, frozen at body_size once the trailer starts. The IDF loop's idle deadline may be
+ * refreshed only when this ADVANCES (dk:M1): bytes the parser discards -- prompt/echo/log noise,
+ * or the lap-timer's resumed 10 Hz 0xFF stream after a mis-parsed header -- must not keep a
+ * download (and the link mutex) alive, which is exactly what "reset the deadline on every received
+ * byte" did. */
+uint32_t lh_dl_progress(const lh_dl_ctx_t *c);
+/* Resets the demux state machine to DX_SCAN with its line/frame/stream-header accumulators
+ * cleared, WITHOUT touching the record ring, the ring high-water, or the raw capture (unlike
+ * linkhost_reset(), which clears everything). Called by linkhost_bridge_end (dk:M6): after a raw
+ * bridge session the demux would otherwise resume mid-byte-stream in whatever state the bridge's
+ * own reads left it. */
+void linkhost_demux_resync(void);
 
 /* ---- cmd-OTA flash (Task 6): the OTA-token parser + a pure, injectable state machine. ---- */
 /* Mapped codes for the named OTA-ERR reasons (a bare 0x%04x reason passes through unchanged). */

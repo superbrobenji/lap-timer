@@ -135,9 +135,48 @@ void test_stream_fail_gaps(void)
 }
 
 /* ================================================================================================
- *  selftest_framing_eval -- BEGIN/END markers present, every reply line has exactly one CR
- *  before its LF (a "\r\r\n" is a fail)
+ *  selftest_framing_eval -- BEGIN/END markers present, marker lines must have exactly one CR
+ *  before LF; any other line flagged only for doubled-CR wire quirk ("\r\r\n")
  * ============================================================================================== */
+
+/* dk:M3 -- spec §5.2: "PASS if every ---BEGIN/---END marker is followed by exactly one CR before
+ * LF". The evaluator only flagged lines with MORE than one CR, so a bare-LF marker line (a
+ * lap-timer that lost its \n -> \r\n translation) passed. Reviewer's reproducer, verbatim. */
+static void test_bare_lf_marker_lines_fail(void)
+{
+    st_framing_t r;
+    const char *bad = "---BEGIN status 28---\nQUJD\n---END deadbeef---\n";
+    selftest_framing_eval((const uint8_t *)bad, strlen(bad), &r);
+    TEST_ASSERT_FALSE(r.pass);
+    TEST_ASSERT_EQUAL_INT(2, r.markers);
+    TEST_ASSERT_EQUAL_INT(2, r.bad);
+    TEST_ASSERT_EQUAL_STRING("cr", r.reason);
+}
+
+/* The spec-correct reply still passes, and a doubled CR on a marker line still fails. */
+static void test_one_cr_passes_and_double_cr_fails(void)
+{
+    st_framing_t r;
+    const char *good = "---BEGIN status 28---\r\nQUJD\r\n---END deadbeef---\r\n";
+    selftest_framing_eval((const uint8_t *)good, strlen(good), &r);
+    TEST_ASSERT_TRUE(r.pass);
+    TEST_ASSERT_EQUAL_INT(0, r.bad);
+    const char *dbl = "---BEGIN status 28---\r\r\nQUJD\r\n---END deadbeef---\r\n";
+    selftest_framing_eval((const uint8_t *)dbl, strlen(dbl), &r);
+    TEST_ASSERT_FALSE(r.pass);
+    TEST_ASSERT_EQUAL_STRING("cr", r.reason);
+}
+
+/* rawcap is a 256 B truncated capture, so the LAST line is routinely incomplete: a marker line with
+ * no terminating LF must not be judged (it would fail every real `selftest framing` run). */
+static void test_truncated_trailing_marker_line_is_not_judged(void)
+{
+    st_framing_t r;
+    const char *cut = "---BEGIN status 28---\r\nQUJD\r\n---END deadbe";
+    selftest_framing_eval((const uint8_t *)cut, strlen(cut), &r);
+    TEST_ASSERT_EQUAL_INT(0, r.bad);
+    TEST_ASSERT_TRUE(r.pass);
+}
 
 /* Brief Step 1: a well-formed reply -> pass, 2 markers (one ---BEGIN, one ---END), 0 bad lines. */
 void test_framing_pass(void)
@@ -198,6 +237,9 @@ int main(void)
     RUN_TEST(test_stream_fail_fused);
     RUN_TEST(test_stream_fail_status);
     RUN_TEST(test_stream_fail_gaps);
+    RUN_TEST(test_bare_lf_marker_lines_fail);
+    RUN_TEST(test_one_cr_passes_and_double_cr_fails);
+    RUN_TEST(test_truncated_trailing_marker_line_is_not_judged);
     RUN_TEST(test_framing_pass);
     RUN_TEST(test_framing_fail_cr);
     RUN_TEST(test_framing_fail_markers);

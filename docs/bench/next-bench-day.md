@@ -153,14 +153,109 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   **Not testable on `moto_sim`:** the mid-session RTC-resume half of this fix — `dbg crash`
   mid-lap, then on the next boot's first fix confirm the log reads `rtc resume: lap N venue M
   continued`. The §15.3 freshness gate (`age = fix->gps_us - saved_gps_us`, must be `> 0`,
-  pipeline.c:492-493) always clears the snapshot on this build, because `gps_init()` restarts the
-  capture's time base from `SIM_FIXES[0].gps_us` on every boot (`sim_clock_init()`,
-  `components/drivers/gps_sim/gps_sim.c:124`) — the first fix after any reset predates the saved
-  snapshot, so `lap_import_rtc()` is never reached and the resume-site `ui_post_venue()` never
-  runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
+  pipeline.c:492-493) always clears the snapshot on this build, because `gps_init()` seeds the
+  capture's time base at `SIM_FIXES[0].gps_us` and `pipeline_init_drivers()`'s immediately
+  following `gps_configure()` call then re-anchors it to `SIM_FIXES[0].gps_us` +
+  `SIM_DRAG_PERIOD_US` (`sim_clock_init()`/`sim_clock_rearm()`,
+  `components/drivers/gps_sim/gps_sim.c:134`) on every boot — the first fix after any reset still
+  predates the saved snapshot either way, so `lap_import_rtc()` is never reached and the
+  resume-site `ui_post_venue()` never runs. Tracked by #103 (make the resume path testable); until then the only coverage is host-side
   (`test_lap.c`'s `lap_import_rtc`-is-silent contract test) and real hardware, once item 6
   (`moto_neo6m`) is on the bench and GPS RTC carry-over exists. **Sim-boot half PASSED on bench day 5 (2026-10-10):** `Auto → Full → Auto` in words, the post-reset VENUE one-shot read `Synthetic` / `Full`, the footer BEST survived the cycling (a real layout change clears only the page-1 best-sector board, by design, ruling R-9).
 - [ ] **F0/#102 — DRAG card on a silent transition.** In DRAG mode with the sim: `dbg sim drag`, then stall the run within 2 s of launch so the engine false-starts. Then let a full run reach `DONE` and wait > 5 s stationary: the card must stop reading `LAUNCHED` (false start) / `DONE` (settle) within one refresh — expect `READY` (the engine re-arms); `NOT READY` only in the short IDLE window right after the settle.
+- [ ] **18. Drag run shows no `EV_FIX_LOST`** (F3 T1, drv:H2). `config set {"mode":"drag"}`, wait for
+  READY/ARMED, then `dbg sim drag` via `lt shell`. Expect: NO `EV_FIX_LOST` and no `pipe: fix invalid`
+  line for the whole run (before the fix, every frame past ~104 km/h was rejected and the bench-day-3
+  drag pass was effectively IMU-only); the 100-0 brake gate hits, which it can only do with the 5 Hz
+  Doppler re-anchor working. Also: `dbg sim laps 1` → `dbg sim drag` → `dbg sim park` in sequence, and
+  check `lt status`'s free_kb/sessions stay sane across the switches (no gps_us rewind).
+- [ ] **19. AP PSK printed and rotatable** (F3 T5, dk:H1). Cold boot the dev-kit on USB: the banner
+  prints `SoftAP up: ssid=laptimer-dev psk=<12 chars>`. Join the AP with it; `devkit.py status` shows
+  the same `ap_psk`. Reboot: the SAME passphrase (persisted in NVS `dc/psk`). `dc psk reset` prints a
+  NEW one, `applied: true`, and the joined client is dropped and must rejoin with the new value.
+  Then reboot again: the new one persists. **Redact `ap_psk` from anything pasted into a PR or docs.**
+  (The first-boot-from-erased-NVS path and the NVS-failure suffix are NOT covered here — see item 25.)
+- [ ] **20. `lt errlog` and friends relay** (F3 T6, dk:M4). On the dev-kit console: `lt errlog` prints
+  the lap-timer's error ring, `lt diag` its diagnostics JSON, `lt dbg mem` its heap lines, `lt close`
+  acks — each ending with the `-- rt N ms, attempts 1, rc 0` summary. `lt dc status` is REFUSED with
+  "that is a dev-kit verb". `devkit.py lt errlog` returns the same body as JSON with `rc: 0`.
+- [ ] **21. Logs tab lists every file with its creation time** (F3 T4, dk:L2). With ≥ 20 rotated
+  dev-kit log files, the Logs tab lists them all (not 16) with a Created (UTC) column; note the load
+  time (one open+read+close per file). The `rx_us` note reads "since the dev-kit last booted".
+- [ ] **22. `logging` goes false while appends fail** (F3 T9, dk:M10). Fill the `logs` partition (leave
+  the link streaming until rotation has run several times), or mount it read-only, and confirm
+  `/api/status` and `dc status` report `logging:false`/`logstore.ready: false` while nothing is being
+  written, then `true` again once appends succeed.
+- [ ] **23. A paced USB OTA push completes** (F3 T10, drv:M8 mitigation). `tools/ota_push.py --port <lt>
+  --image dist/<signed>.bin` with the dev-kit held in reset: expect `OTA-END 0x0000` and a total time
+  ~3-4 s longer than the un-paced push, then the printed 35 s rule — and honour it. Repeat with
+  `--pace 0` and record whether it also completes (the mitigation's value is the comparison).
+  Note: a `devcontroller/web/*` change does NOT reach the dev-kit over OTA — the SPA lives in the
+  `www` LittleFS partition and needs `cd devcontroller && idf.py -p <dk> flash` over USB.
+- [ ] **24. `linkhost.c` glue** (F3 T3, dk:M1/M2 — no automated test covers this: it is on-target IDF
+  glue, and the host harness only reaches the pure `host/*.c` half, so these bench items are its only
+  verification).
+  **(a) Normal download:** `lt list --json` for a session id, then `lt open <id> vbo --json`. Expect
+  `"rc":0` and `"bytes"` matching the session's real size, finished in a few seconds.
+  **(b) Busy while the mutex is held, `dc status` exempt:** from a browser, start a slow transfer that
+  runs on the webapi worker task — open `http://<dk-ip>/api/session/<id>?fmt=vbo` for a large session,
+  or start a web OTA push from the SPA's Flash tab — and WHILE it streams, on the dev-kit console run
+  `lt status --json` (expect it answers BUSY/non-zero within about the bounded 400 ms mutex take, not
+  after the whole transfer) and `dc status --json` (expect it answers normally with real fields — it
+  takes no mutex). From a second browser tab: `GET /api/status` still answers normally (cache read);
+  `POST /api/config` answers `503 {"error":"link busy, retry"}`.
+  **(c) `lt shell` exits clean and resynced:** `lt shell`, type `status` on the lap-timer console, exit
+  with `~.`. Expect: back at the `dc>` prompt immediately, usable; `lt status --json` right after
+  succeeds with `rc:0` (proves the demux parser resynced rather than stuck mid-frame); `stream stats`'s
+  seq-gap/ring counters read sanely (not reset to zero) — `linkstats` survived the bridge.
+  **(d) A download cannot hold the link forever — not independently bench-testable** (would need a
+  corrupted wire header to trigger; covered by `devcontroller/test/test_linkhost_dl_cap.c` and
+  `test_linkhost_dl_gap.c`). Noted for completeness: an announced body over 2 MiB (`LH_DL_BODY_MAX`)
+  is rejected rather than streamed, the absolute window is 20 min (`LH_DL_HARD_MAX_MS`) from the
+  header, and the idle deadline is refreshed only by real progress (body bytes before `---END`, or a
+  parser-state advance) — a normal download should finish in well under either bound; if one is ever
+  approached on real data that is itself worth a follow-up, not evidence the bound misfired. The
+  real residual of this item's no-automated-test ruling: the six-line idle-deadline wiring in
+  `linkhost.c` itself (the `if (p != prog || dl.state != seen)` refresh) is covered by neither CI
+  nor any bench item here, since `test_linkhost_dl_cap.c` tests only the pure `lh_dl_progress`
+  helper it calls, not that call site — so a regression there would pass every gate.
+  **(e) dk:M11's 15 s OTA-READY timeout and the dev-kit's own 25 ms OTA pacing (`OTA_READY_TMO_MS`
+  / `OTA_PACE_MS`, both linkhost.c) are not independently bench-tested, but both ARE exercised by
+  item 25(b)'s successful `flash push`:** a too-short `OTA_READY_TMO_MS` surfaces there as `flash
+  result link -1` (the lap-timer's erase stalled the relay past the timeout) rather than
+  `0x0000` — that is the one observable distinguishing a healthy push from a regression in either
+  constant, so watch for it on every `flash push`.
+- [ ] **25. Session 2 console behaviour** (F3 T5-T8, dk:M3/M8/H1).
+  **(a) `flash stage` abort mid-stream:** `tools/devkit.py --port <dk> flash dist/<signed>.bin`; after
+  `STAGE-READY` prints and raw bytes start streaming, Ctrl-C the host partway through (before
+  `STAGE-END`). Expect: the console's stall timeout fires (`STAGE-ERR timeout`), and immediately after,
+  `dc status` (or `tools/devkit.py --port <dk> status`) answers normally — the REPL is not left in raw
+  mode and does not reboot. Re-run `flash stage`+`flash push` from scratch and confirm it still
+  succeeds.
+  **(b) The 35 s note, and never under `--json`:** push a signed image plainly
+  (`tools/devkit.py --port <dk> flash dist/<signed>.bin`). Expect exactly ONE further line right after
+  `flash result 0x0000`: `note: do not reset the lap-timer or open its USB port for 35 s (OTA trial
+  window; an early reset rolls back, 0x0806)`. Then, on a plain serial terminal attached directly to
+  the dev-kit console (not `devkit.py`, which never appends `--json` to `push`), stage another image
+  and run `flash push --json`: the ENTIRE output must be the one JSON line and nothing else — no
+  `pushing NN%` lines, no `flash result` text line, and critically the 35 s note never appears even
+  though the result is again success.
+  **(c) `selftest framing` still PASSes on real hardware:** `tools/devkit.py --port <dk> selftest
+  framing`. Expect PASS, `markers:2`, `bad:0` — confirming the stricter one-CR rule (dk:M3) does not
+  turn a normal, correctly-framed `status` round trip into a false FAIL.
+  **(d) AP passphrase first-boot path:** `cd devcontroller && idf.py -p <dk> erase-flash && idf.py -p
+  <dk> flash` (wipes the dev-kit's NVS, including `dc/psk`, and reflashes — this is the dev-kit, not
+  the lap-timer, so the USB-port rule does not apply). On the fresh boot, the banner reads `SoftAP up:
+  ssid=laptimer-dev psk=<12 chars>` with NO `(NOT persisted...)` suffix — the first-boot generation
+  path (entropy drawn before Wi-Fi starts) ran cleanly. Reboot again without re-erasing: the same
+  passphrase persists. The NVS-failure half of this path (the banner's
+  `(NOT persisted: NVS error -- changes on reboot)` suffix) is NOT independently bench-testable
+  without deliberately corrupting flash — confirmed present in `devcontroller/main/main.c` by code
+  review only, not a bench pass/fail here.
+
+Also, `tools/devkit.py` now refuses an auto-picked port that does not answer `dc status --json`
+within ~2 s and opens every port with DTR/RTS deasserted — if it refuses, you have the lap-timer's
+port (identify, don't `--force-port`).
 
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4

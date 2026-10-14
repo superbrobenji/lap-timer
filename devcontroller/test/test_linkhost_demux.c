@@ -194,6 +194,36 @@ static void test_ring_hw(void)
     TEST_ASSERT_EQUAL_UINT16(5, linkhost_stream_ring_hw());  /* high-water persists after draining */
 }
 
+/* dk:L3 -- the demux applied NO len sanity check, so a corrupt len = 255 swallowed 255 following
+ * bytes (possibly a whole genuine frame) before resyncing. The largest legal len is
+ * LT_REC_MAX + 1 (type byte + LT_REC_MAX payload, stream_emit's own datalen = len - 1 bound). */
+static void test_impossible_stream_len_does_not_swallow_the_next_frame(void)
+{
+    linkhost_reset();
+    uint8_t bad[5] = { 0xFF, 1, 0, 0, 255 };                /* len 255: impossible */
+    linkhost_feed(bad, sizeof bad);
+    uint8_t good[5 + 2] = { 0xFF, 2, 0, 0, 2, LT_SES_T_EVENT, 7 };
+    linkhost_feed(good, sizeof good);
+    lt_stream_rec_t r;
+    TEST_ASSERT_EQUAL_INT(0, linkhost_stream_pop(&r));        /* the real frame survived */
+    TEST_ASSERT_EQUAL_UINT8(LT_SES_T_EVENT, r.type);
+    TEST_ASSERT_EQUAL_UINT16(2, r.seq);
+}
+
+/* dk:L8 -- a single corrupted byte inside a base64 body can synthesize a 0xFF "frame" whose type
+ * byte is a legal base64 character ('@' == 0x40 == LT_REC_STATUS); nothing checked its length, so
+ * linkstats cached 20 bytes of body garbage as a fresh STATUS and /api/status reported fabricated
+ * battery/free-space/fw with connected:true. A STATUS record must now carry exactly
+ * LT_STATUS_LEN payload bytes or be dropped. */
+static void test_status_record_of_the_wrong_length_is_dropped(void)
+{
+    linkhost_reset();
+    uint8_t rec[5 + 1 + 8] = { 0xFF, 1, 0, 0, 9, LT_REC_STATUS };   /* 8 payload bytes, not 20 */
+    linkhost_feed(rec, sizeof rec);
+    lt_stream_rec_t r;
+    TEST_ASSERT_NOT_EQUAL(0, linkhost_stream_pop(&r));               /* nothing emitted */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -203,5 +233,7 @@ int main(void)
     RUN_TEST(test_err_line_becomes_remote_response);
     RUN_TEST(test_status_record_demuxes);
     RUN_TEST(test_ring_hw);
+    RUN_TEST(test_impossible_stream_len_does_not_swallow_the_next_frame);
+    RUN_TEST(test_status_record_of_the_wrong_length_is_dropped);
     return UNITY_END();
 }

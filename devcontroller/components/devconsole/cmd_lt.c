@@ -1,6 +1,7 @@
 /* devcontroller/components/devconsole/cmd_lt.c -- the `lt`/`link` commands: a manual relay to the
  * lap-timer's framed console over UART1, with round-trip timing and a debug hexdump trace
- * (Plan 5.6 Task 5).
+ * (Plan 5.6 Task 5); every verb not implemented locally is relayed verbatim over the raw bridge
+ * (F3 Task 6, dk:M4/R17).
  *
  *   lt status [--json]                  `status` -> the decoded §18.2 STATUS record (named fields)
  *   lt list [--json]                    `list` -> the session-list JSON, streamed (linkhost_download_cmd)
@@ -13,18 +14,25 @@
  *                                        <id> validated the same way as `lt delete`'s
  *   lt shell                            raw byte bridge to the lap-timer's own console (Task 8);
  *                                        `~.` at a line start or a 10-min cap exits -- no --json form
+ *   lt <any other verb> [--json]        relayed verbatim to the lap-timer's console over the raw
+ *                                        bridge (R17) -- e.g. `errlog`, `diag`, `dbg ...`, `close`,
+ *                                        `read ...`; the dev-kit's OWN verbs (`dc`, `link`, `flash`,
+ *                                        `stream`, `selftest`, `help`) are refused here instead,
+ *                                        since typed after `lt` they can only be a mistake
  *   link trace on|off [--json]          toggles linkhost's verbose ESP_LOGI("trace: ...")
  *
  * status/config get/config set/delete route through linkhost_cmd_timed (one bounded body, with
  * round-trip stats); list/open route through linkhost_download_cmd (unbounded streaming body --
  * text formats are printed as chunks arrive, binary formats are only byte-counted); shell hands
- * UART1 to cmd_shell_run (cmd_shell.c) for the duration of the bridge. Every subcommand strips a
- * trailing --json via console_wants_json and reports a LOCAL usage error as `ERR <reason>` /
- * `{"err":"<reason>"}` with a non-zero return, same as cmd_dc.c; a completed round trip (success
- * or a link-level failure) always ends with the "-- rt/attempts/rc" summary (or its --json
- * equivalent) so a timeout/CRC/busy failure is still visible with its timing -- shell is the one
- * exception (an interactive bridge, not a single request/reply), and --json on it is rejected
- * outright rather than silently ignored.
+ * UART1 to cmd_shell_run (cmd_shell.c) for the duration of the bridge; any other verb goes through
+ * lt_relay, which takes UART1 via the same raw bridge (linkhost_bridge_begin/_end) and bridge_filter
+ * `lt shell` uses, but for a single request/reply instead of an interactive session. Every
+ * subcommand strips a trailing --json via console_wants_json and reports a LOCAL usage error as
+ * `ERR <reason>` / `{"err":"<reason>"}` with a non-zero return, same as cmd_dc.c; a completed
+ * round trip (success or a link-level failure) always ends with the "-- rt/attempts/rc" summary
+ * (or its --json equivalent) so a timeout/CRC/busy failure is still visible with its timing --
+ * shell is the one exception (an interactive bridge, not a single request/reply), and --json on
+ * it is rejected outright rather than silently ignored.
  */
 #include "cmd_lt.h"
 
@@ -34,12 +42,18 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bridge_filter.h" /* bridge_filter_reset/_run -- lt_relay strips the lap-timer's autonomous stream
+                            * frames out of an arbitrary reply, exactly as `lt shell` does */
+#include "build_config.h"  /* DC_LINK_UART */
 #include "cmd_shell.h"     /* cmd_shell_run -- `lt shell`, Plan 5.6 Task 8 */
 #include "console.h"
+#include "driver/uart.h"   /* uart_read_bytes/uart_write_bytes on DC_LINK_UART -- lt_relay */
+#include "freertos/FreeRTOS.h"  /* pdMS_TO_TICKS -- lt_relay's uart_read_bytes timeout, same pattern cmd_shell.c uses */
 #include "hexfmt.h"        /* status-body-wrong-length fallback dump */
 #include "idcheck.h"       /* lt_id_valid -- M6 final review: validate before `delete`/`open` go on the wire */
 #include "jsonw.h"
-#include "linkhost.h"      /* linkhost_cmd_timed / linkhost_download_cmd, LT_CMD_.. / LT_FMT_.. , trace get/set */
+#include "linkhost.h"      /* linkhost_cmd_timed / linkhost_download_cmd, LT_CMD_.. / LT_FMT_.. , trace get/set,
+                            * linkhost_bridge_begin/_end + linkhost_now_us -- lt_relay */
 #include "wire_escape.h"   /* wire_escape -- the same wire escaping POST /api/config uses (linkhost, not webapi:
                             * Plan 5.6 Task 5 fix 1 moved it out of webapi's config_diff so this component has no
                             * dependency on webapi) */
@@ -56,6 +70,15 @@
 #define LT_CFG_LINE_MAX   250u
 #define LT_CFG_PREFIX_LEN 11u
 #define LT_CFG_OBJ_MAX    (LT_CFG_LINE_MAX - LT_CFG_PREFIX_LEN)   /* 239 */
+
+/* lt_relay (R17): LT_RELAY_IDLE_MS of silence from the lap-timer ends the reply (most replies are
+ * one framed/prompt round trip, well under this); LT_RELAY_CAP_MS ends the call regardless, so a
+ * lap-timer that never stops talking can't wedge this console task forever. LT_RELAY_LINE_MAX is
+ * the lap-timer console's own max_cmdline_length budget (see LT_CFG_LINE_MAX above) applied to an
+ * arbitrary relayed verb instead of just `config set`. */
+#define LT_RELAY_IDLE_MS   1500
+#define LT_RELAY_CAP_MS    15000
+#define LT_RELAY_LINE_MAX  250u
 
 static void lt_err(bool json, const char *reason)
 {
@@ -408,13 +431,132 @@ static int lt_shell(int argc, bool json)
     return cmd_shell_run(json);
 }
 
+/* R17 (dk:M4): every verb this file does NOT implement locally is relayed verbatim to the
+ * lap-timer's console. The six locally-implemented verbs keep precedence (they add id validation,
+ * wire escaping, STATUS decoding and the --json shapes `tools/devkit.py` parses); the list below
+ * is the DENY-list of the dev-kit's OWN console verbs, which are never sent over the link -- typed
+ * after `lt` they can only be a mistake ("lt dc status"), and relaying them would come back as the
+ * lap-timer's "Unrecognized command" with no hint why. */
+static bool lt_verb_is_local(const char *v)
+{
+    static const char *const DENY[] = { "dc", "link", "flash", "stream", "selftest", "help" };
+    for (size_t i = 0; i < sizeof DENY / sizeof DENY[0]; i++)      /* bounded: 6 */
+        if (strcmp(v, DENY[i]) == 0) return true;
+    return false;
+}
+
+/* Joins argv[1..argc) with single spaces into out (bounded by out_cap, which the caller sizes to
+ * the lap-timer console's 250 B line budget) and rejects any byte outside printable ASCII -- a
+ * control byte would split one relayed line into several commands on the lap-timer, the same
+ * injection POST /api/config's control-char guard exists to stop. Same shape as lt_join_json
+ * above, from argv[1] instead of argv[3]. Returns the joined length, or -1 if it does not fit or
+ * is not printable. */
+static int lt_relay_join(int argc, char **argv, char *out, size_t out_cap)
+{
+    assert(out != NULL);
+    assert(out_cap > 0);
+    size_t w = 0;
+    for (int i = 1; i < argc; i++) {                            /* bounded by argc */
+        size_t al = strlen(argv[i]);
+        size_t need = al + ((i > 1) ? 1u : 0u);
+        if (w + need >= out_cap) return -1;
+        if (i > 1) out[w++] = ' ';
+        for (size_t k = 0; k < al; k++) {                       /* bounded by al */
+            unsigned char c = (unsigned char)argv[i][k];
+            if (c < 0x20u || c > 0x7Eu) return -1;
+            out[w++] = (char)c;
+        }
+    }
+    out[w] = '\0';
+    return (w > 0) ? (int)w : -1;
+}
+
+/* Reply body for lt_relay's --json form, bounded to LT_JSON_BODY_MAX -- a module static (not a
+ * stack buffer) because the console REPL task's 6144 B stack (console.c) is shared with every
+ * other command this component registers; lt_report_cmd's own LT_JSON_BODY_MAX+256 B stack buffer
+ * is the existing idiom this mirrors, just moved off the stack since lt_relay needs it to persist
+ * across the read loop below rather than being filled in one shot. */
+static char s_relay_body[LT_JSON_BODY_MAX + 1];
+
+/* Relays one arbitrary console line and prints the lap-timer's reply. Transport: the raw bridge
+ * (linkhost_bridge_begin/_end -- exclusive UART1, demux parked, drained on entry AND exit) with
+ * every byte passed through bridge_filter_run, exactly as `lt shell` does, because an arbitrary
+ * verb's reply may be framed (errlog/diag/close/read all go through export_serial's run_cmd) OR
+ * plain text (every `dbg` subcommand) -- the framed-download path would simply time out on the
+ * latter with nothing printed. Bounded twice: LT_RELAY_IDLE_MS of silence ends the reply,
+ * LT_RELAY_CAP_MS ends the call regardless. --json reports {cmd,rc,attempts,rt_ms,bytes,body} with
+ * the body truncated to LT_JSON_BODY_MAX -- not the same shape as lt_report_cmd (no "name" field,
+ * plus "bytes"), but `tools/devkit.py`'s `_cmd_lt` only pretty-prints the object and reads
+ * `obj["rc"]` for its exit status, so the host parser needs no change; the human form streams the
+ * bytes as they arrive. */
+static int lt_relay(int argc, char **argv, bool json)
+{
+    char line[LT_RELAY_LINE_MAX + 1];
+    if (lt_relay_join(argc, argv, line, sizeof line) < 0) { lt_err(json, "relay line too long or not printable"); return 1; }
+    if (linkhost_bridge_begin() != 0) { lt_err(json, "busy"); return 1; }
+
+    bridge_filter_t filt;
+    bridge_filter_reset(&filt);
+    uart_write_bytes(DC_LINK_UART, line, strlen(line));
+    uart_write_bytes(DC_LINK_UART, "\r", 1);
+
+    int64_t t0 = linkhost_now_us();
+    int64_t cap = t0 + (int64_t)LT_RELAY_CAP_MS * 1000;
+    int64_t idle = t0 + (int64_t)LT_RELAY_IDLE_MS * 1000;
+    size_t blen = 0;
+    uint32_t total = 0;
+    bool last_nl = true;              /* did the last forwarded byte end a line? (prompt tails) */
+    while (linkhost_now_us() < cap && linkhost_now_us() < idle) {   /* bounded by both deadlines */
+        uint8_t rb[64], filtered[64];
+        int n = uart_read_bytes(DC_LINK_UART, rb, sizeof rb, pdMS_TO_TICKS(20));
+        if (n <= 0) continue;
+        size_t w = bridge_filter_run(&filt, rb, (size_t)n, filtered, sizeof filtered);
+        idle = linkhost_now_us() + (int64_t)LT_RELAY_IDLE_MS * 1000;
+        total += (uint32_t)w;
+        if (w > 0) last_nl = (filtered[w - 1] == '\n');
+        if (!json) { if (w > 0) fwrite(filtered, 1, w, stdout); continue; }
+        for (size_t i = 0; i < w && blen < LT_JSON_BODY_MAX; i++) s_relay_body[blen++] = (char)filtered[i];
+    }
+    linkhost_bridge_end();
+    s_relay_body[blen] = '\0';
+    long long rt_ms = (long long)((linkhost_now_us() - t0) / 1000);
+    /* rc is 0 when any bytes survive the stream-frame filter into `total` -- i.e. the lap-timer's
+     * console sent something back -- and LINKHOST_E_TIMEOUT otherwise: an arbitrary verb has no
+     * framed status to report, so "did any console-reply bytes arrive" is the only honest result
+     * this path can produce. This cannot tell "console never answered" apart from "link
+     * silent/dead": raw UART activity that the loop above classifies entirely as stream-frame
+     * noise still resets the idle deadline (the link is alive), but contributes nothing to
+     * `total`, so it reports the same LINKHOST_E_TIMEOUT / bytes:0 as no activity at all. */
+    int rc = (total > 0) ? 0 : LINKHOST_E_TIMEOUT;
+
+    if (json) {
+        char buf[LT_JSON_BODY_MAX + 256u];
+        jsonw_t w;
+        jsonw_begin(&w, buf, sizeof buf);
+        jsonw_str(&w, "cmd", line);
+        jsonw_int(&w, "rc", rc);
+        jsonw_int(&w, "attempts", 1);          /* the relay never retries, same as lt_run_download */
+        jsonw_int(&w, "rt_ms", rt_ms);
+        jsonw_uint(&w, "bytes", total);
+        jsonw_str(&w, "body", s_relay_body);   /* jsonw_str escapes and drops control bytes */
+        if (!jsonw_end(&w)) { lt_err(true, "reply too large"); return 1; }
+        printf("%s\n", buf);
+        return (rc == 0) ? 0 : 1;
+    }
+
+    if (!last_nl) printf("\n");               /* the lap-timer's prompt leaves no trailing LF */
+    printf("-- %u bytes, %lu stream frames filtered\n", (unsigned)total, (unsigned long)filt.frames);
+    printf("-- rt %lld ms, attempts 1, rc %d\n", rt_ms, rc);
+    return (rc == 0) ? 0 : 1;
+}
+
 static int cmd_lt_main(int argc, char **argv)
 {
     assert(argv != NULL);
     bool json = console_wants_json(&argc, argv);
     if (argc < 2) {
         lt_err(json, "usage: lt status|list|config get|config set <json>|delete <id>|"
-                     "open <id> <fmt>|shell");
+                     "open <id> <fmt>|shell|<any lap-timer console cmd>");
         return 1;
     }
     if (strcmp(argv[1], "status") == 0) return lt_status(argc, argv, json);
@@ -423,8 +565,8 @@ static int cmd_lt_main(int argc, char **argv)
     if (strcmp(argv[1], "delete") == 0) return lt_delete(argc, argv, json);
     if (strcmp(argv[1], "open")   == 0) return lt_open(argc, argv, json);
     if (strcmp(argv[1], "shell")  == 0) return lt_shell(argc, json);
-    lt_err(json, "unknown subcommand (want status|list|config|delete|open|shell)");
-    return 1;
+    if (lt_verb_is_local(argv[1])) { lt_err(json, "that is a dev-kit verb -- type it without `lt`"); return 1; }
+    return lt_relay(argc, argv, json);          /* R17: any other verb goes to the lap-timer */
 }
 
 static int cmd_link_main(int argc, char **argv)
@@ -454,6 +596,6 @@ static int cmd_link_main(int argc, char **argv)
 void cmd_lt_register(void)
 {
     console_register("lt", "lt status|list|config get|config set <json>|delete <id>|"
-                            "open <id> <fmt> [--json]|shell", cmd_lt_main);
+                            "open <id> <fmt>|shell|<any lap-timer console cmd> [--json]", cmd_lt_main);
     console_register("link", "link trace on|off [--json]", cmd_link_main);
 }

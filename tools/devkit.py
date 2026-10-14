@@ -29,6 +29,9 @@ CONSOLE COMMAND TABLE -- what this CLI sends, and where each subcommand is imple
 `config set {"k":1}`, `delete <id>`, `open <id> <fmt>`) is joined with spaces, "lt " is prepended
 and " --json" appended, and the parsed reply is `{"cmd","rc","attempts","rt_ms",...,"fw":...}`
 (spec §5.2/§5.3). `trace`/`stream stats`/`selftest` are likewise one-shot --json round trips.
+`lt <cmd...>`: any lap-timer console verb (`errlog`, `diag`, `dbg ...`, `close`, `read <offset>`
+included). The dev-kit's own verbs (`dc`, `link`, `flash`, `stream`, `selftest`, `help`) are
+refused rather than relayed -- type those without the `lt` prefix.
 
 `stream tap [type]` and `shell` are NOT one-shot: they hold the port open and relay/print until
 the user stops them (Ctrl-C for tap; the "~." escape or a device "bridge closed" for shell).
@@ -78,10 +81,32 @@ DEFAULT_BAUD = 115200
 CHUNK = 4096                    # host TX block size for `flash stage`'s raw upload
 
 JSON_TIMEOUT_S = 5.0            # dc status / trace / stream stats: cheap, local reads
-LT_TIMEOUT_S = 10.0             # lt <cmd>: a framed round trip to the lap-timer (up to 3 attempts)
+LT_TIMEOUT_S = 20.0              # lt <cmd>: a framed round trip to the lap-timer. `lt <verb>` is a
+                                 # generic relay (cmd_lt.c's lt_relay) capped device-side at
+                                 # LT_RELAY_CAP_MS = 15000 (devcontroller/components/devconsole/
+                                 # cmd_lt.c) -- _cmd_lt waits this single timeout for the relay's one
+                                 # JSON line, so it must outlast that 15 s cap; at 10 s the host gave
+                                 # up while the device was still writing, leaving a partial JSON
+                                 # object on the wire that corrupted the NEXT command. 20 s gives the
+                                 # 15 s device cap a 5 s margin.
+PROBE_TIMEOUT_S = 2.0            # `dc status --json` holds a fixed DC_STATUS_WINDOW_MS = 1000 ms
+                                 # rate-measurement window (cmd_dc.c) via one vTaskDelay, which
+                                 # only guarantees "at least" that long (cmd_dc.c's own comment) --
+                                 # so the reply lands a little after 1.0 s, not before. 2.0 s is the
+                                 # probe budget that covers that margin.
+PROBE_READ_TIMEOUT_S = 0.2       # main()'s per-read timeout while probe_is_devkit (via read_json ->
+                                 # _readline) is running: it must sit below PROBE_TIMEOUT_S, because
+                                 # _readline's deadline is only checked BETWEEN ser.readline() calls,
+                                 # not during one -- open_serial's normal ser.timeout = 1.0 s would
+                                 # let a check passing at t = 1.99 s be followed by a 1.0 s blocking
+                                 # read, for a 3.0 s worst case against a 2.0 s promise. At 0.2 s the
+                                 # worst case becomes PROBE_TIMEOUT_S + PROBE_READ_TIMEOUT_S =
+                                 # 2.2 s -- the residual the FAIL message below must not overstate.
+TRIAL_WINDOW_S = 35              # OTA trial window: validation at 30 s + a sensors-ok check
 SELFTEST_TIMEOUT_S = 30.0       # selftest [all]: `stream` alone samples for ~10 s by default
 STAGE_READY_TIMEOUT_S = 5.0
-PUSH_TIMEOUT_S = 120.0          # a 600 KB image is ~55 s at 115200 baud; generous slack on top
+PUSH_TIMEOUT_S = 120.0          # a 600 KB (614400 B) image is ~53 s at 115200 baud; generous
+                                 # slack on top
 STREAM_TAP_ACK_TIMEOUT_S = 2.0  # stream tap on <type>: local, one round trip through the console
 SHELL_CLOSE_TIMEOUT_S = 2.0     # lt shell: wait for the device's own "bridge closed" after '~.'
 TAP_MAX_S = 3600.0              # stream tap's row loop: per-_readline bound, not a session cap
@@ -100,6 +125,26 @@ class DevkitError(Exception):
 def _strip_ansi(s):
     """Remove ANSI CSI escape sequences (colourised log lines) from `s`."""
     return _ANSI_RE.sub("", s)
+
+
+def trial_window_note():
+    """The rule that must be printed after every successful push (dk:L7, drv:M9). It is not
+    advice: resetting the lap-timer -- or merely OPENING its USB port, which asserts DTR/RTS on
+    the auto-reset circuit -- before it validates makes the bootloader roll the image back."""
+    return ("note: the lap-timer is now in its OTA trial window -- do NOT reset it or open its USB "
+            "port for %d s; an early reset rolls the image back (0x0806)." % TRIAL_WINDOW_S)
+
+
+def classify_push_line(line):
+    """Classify one line of `flash push` output: ("progress", line) | ("result", "0x0000"|"link -4")
+    | ("err", reason) | (None, None) for console/log noise. The `ERR ` arm is dk:M9."""
+    if line.startswith("pushing "):
+        return ("progress", line)
+    if line.startswith("flash result "):
+        return ("result", line[len("flash result "):].strip())
+    if line.startswith("ERR "):
+        return ("err", line[len("ERR "):].strip())
+    return (None, None)
 
 
 # ==================================================================================================
@@ -221,13 +266,35 @@ def send_cmd(ser, line, timeout=5.0):
     return text.strip("\r\n")
 
 
+def _poll_err_line(ser):
+    """Non-blocking peek for one device line: returns it (ANSI-stripped, trimmed) when bytes are
+    already waiting, else None at once (no bytes waiting -> no read is attempted). When bytes ARE
+    waiting this never blocks longer than the port's own read timeout -- `open_serial` sets
+    `ser.timeout = 1.0`, so `ser.readline()` here can wait up to that 1.0 s for the rest of the
+    line, same as every other read in this module; it is `in_waiting` that makes this a poll
+    rather than a wait, not an unconditional non-blocking guarantee. This lets `flash stage`'s
+    upload loop check for an early STAGE-ERR/STAGE-END between chunks without paying a full read
+    timeout per chunk regardless of whether the device has replied yet -- a 600 KB (614400 B)
+    image is 150 chunks, so a *blocking* read-every-chunk design would cost up to 150 s (150 x the
+    1.0 s read timeout) of pure waiting on top of the upload itself."""
+    if getattr(ser, "in_waiting", 0) <= 0:
+        return None
+    raw = ser.readline()
+    if not raw:
+        return None
+    return _strip_ansi(raw.decode("latin-1", errors="replace")).strip()
+
+
 def stage_image(ser, path, ready_timeout=STAGE_READY_TIMEOUT_S):
     """Run the `flash stage` handshake (spec §5.4) for the image at `path`: compute size +
     SHA-256, send `flash stage <size> <sha256hex>`, wait for STAGE-READY, stream the raw bytes in
-    CHUNK-byte writes (each flushed), then wait for STAGE-END/STAGE-ERR -- bounded by 30 s plus
-    size/4096 * 0.1 s (slack for a full 115200-baud upload). Returns the hex code string out of
-    "STAGE-END 0x0000" (e.g. "0x0000"). Raises DevkitError -- message is the device's own
-    STAGE-ERR line (e.g. "STAGE-ERR badsha") -- on a rejection or either wait timing out."""
+    CHUNK-byte writes (each flushed, polling _poll_err_line after every chunk for an early
+    STAGE-ERR/STAGE-END -- dk:M8: on an early STAGE-ERR this stops sending the REST of the image
+    immediately rather than pushing all of it first), then (if the upload loop did not already
+    return) wait for STAGE-END/STAGE-ERR -- bounded by 30 s plus size/4096 * 0.1 s (slack for a
+    full 115200-baud upload). Returns the hex code string out of "STAGE-END 0x0000" (e.g.
+    "0x0000"). Raises DevkitError -- message is the device's own STAGE-ERR line (e.g. "STAGE-ERR
+    badsha") -- on a rejection (early or late) or either wait timing out."""
     with open(path, "rb") as f:
         data = f.read()
     size = len(data)
@@ -250,6 +317,14 @@ def stage_image(ser, path, ready_timeout=STAGE_READY_TIMEOUT_S):
         ser.flush()
         sent = end
 
+        early = _poll_err_line(ser)
+        if early is not None:
+            if early.startswith("STAGE-ERR"):
+                raise DevkitError(early)          # dk:M8: stop NOW; do not push the rest
+            if early.startswith("STAGE-END"):     # the device finished early (a short image)
+                parts = early.split()
+                return parts[1] if len(parts) > 1 else early
+
     end_timeout = 30.0 + (size / 4096.0) * 0.1
     end_deadline = time.monotonic() + end_timeout
     result = _wait_for_prefix(ser, ("STAGE-END", "STAGE-ERR"), end_deadline)
@@ -266,9 +341,11 @@ def push_and_wait(ser, timeout=PUSH_TIMEOUT_S):
     """Send `flash push`, then read lines until one reads `flash result <code>` -- "0x0000"..
     "0x<hex>" from the E_OTA_*/flash_err table, or "link -N" for a linkhost-level failure (spec
     §5.4's "same codes as /api/flash's flash_err"). `pushing NN%` progress lines are printed
-    (stdout) as they arrive; other lines (log noise) are skipped. Returns the result string (e.g.
-    "0x0000") on success; raises DevkitError on any other result or on a `timeout`-second wait
-    with no result line at all."""
+    (stdout) as they arrive; an `ERR <reason>` line (cmd_flash.c's flash_err -- "nothing staged",
+    "push (image discarded, re-stage)", "push timeout", ...) raises DevkitError(reason) at once
+    instead of being skipped as noise (dk:M9); other lines (log noise) are skipped. Returns the
+    result string (e.g. "0x0000") on success; raises DevkitError on any other result or on a
+    `timeout`-second wait with no result/err line at all."""
     deadline = time.monotonic() + timeout
     ser.write(b"flash push\r")
     ser.flush()
@@ -277,16 +354,17 @@ def push_and_wait(ser, timeout=PUSH_TIMEOUT_S):
         if line is None:
             raise DevkitError("timeout waiting for flash result")
         clean = _strip_ansi(line).strip()
-        if clean.startswith("pushing "):
-            print(clean)
+        kind, payload = classify_push_line(clean)
+        if kind == "progress":
+            print(payload)
             sys.stdout.flush()
-            continue
-        if clean.startswith("flash result "):
-            result = clean[len("flash result ") :].strip()
-            if result != "0x0000":
-                raise DevkitError("flash result %s" % result)
-            return result
-        # other console/log noise: skip
+        elif kind == "err":
+            raise DevkitError(payload)            # dk:M9
+        elif kind == "result":
+            if payload != "0x0000":
+                raise DevkitError("flash result %s" % payload)
+            return payload
+        # else: other console/log noise -- skip
 
 
 def _json_cmd(ser, line, timeout=JSON_TIMEOUT_S):
@@ -297,6 +375,22 @@ def _json_cmd(ser, line, timeout=JSON_TIMEOUT_S):
     return read_json(ser, timeout)
 
 
+def probe_is_devkit(ser, timeout=PROBE_TIMEOUT_S):
+    """True when `ser` answers `dc status --json` with a dev-kit status object inside `timeout` s.
+    `version` + `link` together are unique to cmd_dc.c's reply: `dc` is not one of the lap-timer
+    console's own verbs, so it answers with plain text for an unrecognized command (the shape
+    `ProbeTest.test_rejects_the_lap_timer_console` models) rather than any JSON object, let alone
+    one carrying both keys; a foreign JSON object missing either key is rejected the same way
+    (`test_rejects_silence_and_a_foreign_json_object`)."""
+    try:
+        ser.write(b"dc status --json\r")
+        ser.flush()
+        obj = read_json(ser, timeout)
+    except DevkitError:
+        return False
+    return isinstance(obj, dict) and "version" in obj and "link" in obj
+
+
 # ==================================================================================================
 #  Port discovery + opening (never exercised by unit tests -- always a real port)
 # ==================================================================================================
@@ -305,7 +399,8 @@ def _default_port():
     """First serial device matching /dev/cu.usbserial-* or /dev/ttyUSB* (the dev-kit's USB
     bridge on macOS / Linux): prefers pyserial's own port enumeration (serial.tools.list_ports)
     when importable, falls back to a direct glob of /dev otherwise. Returns None if nothing
-    matches either way."""
+    matches either way. The first match is only a candidate -- main() probes it (probe_is_devkit)
+    before any command runs."""
     candidates = []
     try:
         from serial.tools import list_ports
@@ -323,15 +418,24 @@ def _default_port():
 def open_serial(port, baud, prompt_timeout=3.0):
     """Open `port` at `baud` for the dev-kit console. Most ESP32 boards still reset on the
     DTR/RTS transition that opening a serial port itself triggers (their USB bridge wires
-    DTR/RTS to EN/GPIO0), even with dsrdtr/rtscts disabled and both lines dropped immediately
-    after open -- opening the port cannot be guaranteed not to reset the board, only "not on
-    purpose". So this waits up to `prompt_timeout` s for the boot to settle and the first
-    "devkit> " prompt to appear before returning; the caller can then send commands right away.
-    Never call this from a test -- it always opens a real port."""
+    DTR/RTS to EN/GPIO0), even with dsrdtr/rtscts disabled and both lines set false BEFORE open()
+    -- pyserial applies dtr/rts at open() time, so setting them on an already-open Serial object is
+    one transition too late; building the Serial object unopened and setting both first means the
+    auto-reset circuit is never pulsed on purpose (drv:M9), only "not on purpose" (opening a port
+    still cannot be *guaranteed* not to reset the board). So this waits up to `prompt_timeout` s
+    for the boot to settle and the first "devkit> " prompt to appear before returning; the caller
+    can then send commands right away. Never call this from a test -- it always opens a real
+    port."""
     import serial
-    ser = serial.Serial(port, baud, timeout=1.0, dsrdtr=False, rtscts=False)
-    ser.dtr = False
-    ser.rts = False
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = baud
+    ser.timeout = 1.0
+    ser.dsrdtr = False
+    ser.rtscts = False
+    ser.dtr = False            # set BEFORE open(): pyserial applies both at open, so the
+    ser.rts = False            # auto-reset circuit is never pulsed on purpose (drv:M9)
+    ser.open()
     _read_until(ser, PROMPT.encode("ascii"), time.monotonic() + prompt_timeout)
     return ser
 
@@ -348,8 +452,11 @@ def _cmd_status(ser):
 
 def _cmd_lt(ser, lt_args):
     if not lt_args:
-        print("usage: devkit.py lt <cmd...>  (e.g. status | config get | config set <json> | "
-              "delete <id> | open <id> <fmt>)", file=sys.stderr)
+        print("usage: devkit.py lt <cmd...>  -- any lap-timer console verb (e.g. status | "
+              "config get | config set <json> | delete <id> | open <id> <fmt> | errlog | diag | "
+              "dbg ... | close | read <offset>). The dev-kit's own verbs (dc | link | flash | "
+              "stream | selftest | help) are refused rather than relayed -- type those without "
+              "the lt prefix.", file=sys.stderr)
         return 2
     line = "lt " + " ".join(lt_args)
     obj = _json_cmd(ser, line, timeout=LT_TIMEOUT_S)
@@ -432,6 +539,7 @@ def _cmd_flash(ser, image_path):
     print("staged: %s" % code)
     result = push_and_wait(ser)   # raises DevkitError on any non-0x0000 result
     print("result: %s" % result)
+    print(trial_window_note())
     return 0
 
 
@@ -564,6 +672,8 @@ def build_argparser():
                      help="serial device (default: first /dev/cu.usbserial-* or /dev/ttyUSB*)")
     ap.add_argument("--baud", type=int, default=DEFAULT_BAUD,
                      help="baud rate (default %d)" % DEFAULT_BAUD)
+    ap.add_argument("--force-port", action="store_true",
+                     help="skip the `dc status` identity probe (recovery only)")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -617,6 +727,24 @@ def main(argv=None):
     except Exception as e:   # serial.SerialException / OSError / ...
         print("FAIL: cannot open %s: %s" % (port, e), file=sys.stderr)
         return 2
+
+    probe_needed = (args.port is None) or (args.cmd == "flash")
+    if probe_needed and not args.force_port:
+        saved_timeout = ser.timeout
+        ser.timeout = PROBE_READ_TIMEOUT_S   # see its own comment: must sit below PROBE_TIMEOUT_S,
+                                              # since that deadline is only checked BETWEEN reads
+        try:
+            probed_ok = probe_is_devkit(ser)
+        finally:
+            ser.timeout = saved_timeout      # restore before _dispatch, which needs the normal
+                                              # 1.0 s read timeout for every command after the probe
+        if not probed_ok:
+            print("FAIL: %s did not answer `dc status --json` within ~%.0f s -- this is probably the "
+                  "LAP-TIMER's port, not the dev-kit's (the usbserial-0001/-3 assignment swaps "
+                  "between re-plugs). Pass --port explicitly, or --force-port to proceed anyway.\n"
+                  "%s" % (port, PROBE_TIMEOUT_S, trial_window_note()), file=sys.stderr)
+            ser.close()
+            return 2
 
     try:
         return _dispatch(ser, args)

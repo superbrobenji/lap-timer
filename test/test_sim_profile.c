@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "sim_profile.h"
+#include "sim_drag_pos.h"      /* with the existing includes at the top of the file */
 #include "core/drag.h"
 #include "core/event.h"
 #include "core/types.h"
@@ -88,10 +89,58 @@ static void test_drag_profile_drives_the_engine(void)
     for (size_t i = 0; i < sizeof want; i++) TEST_ASSERT_EQUAL_INT_MESSAGE(1, s_hits[want[i]], "gate id missed");
 }
 
+/* drv:H2 -- proves only the pure-offset half: with a FIXED local `origin` held constant for the
+ * whole loop, sim_drag_lat_e7(origin, dist) steps by dist(t) - dist(t-200ms), never by dist(t)
+ * itself, and every step stays inside the jump filter below. It CANNOT detect an unlatched
+ * origin -- reverting deliver_drag() to re-derive its origin from the last fix every frame would
+ * still pass this test unchanged, since `origin` here is the test's own local, never gps_sim.c's
+ * s_drag_origin. That the origin is latched ONCE per run in the real driver is verified instead by
+ * bench item 18 (docs/bench/next-bench-day.md): no `EV_FIX_LOST` over a full `dbg sim drag` run.
+ * Bound: the pipeline's §6.5 jump filter allows FIX_MAX_JUMP_MPS*dt + 20 = 250*0.2 + 20 = 70 m
+ * per 5 Hz step (core/consts.h, pipeline.c's compute_validity). The reviewer's reproducer
+ * (.superpowers/reviews/2026-10-13/drag.c) measured 690 m single-frame steps and a 49496 m total
+ * with the origin moving every frame. */
+static void test_drag_position_steps_stay_inside_the_jump_filter(void)
+{
+    const int32_t origin = -338900000;             /* the capture's own latitude, 1e-7 deg */
+    int32_t prev = origin;
+    double  max_step_m = 0.0;
+    for (int i = 0; i < 140; i++) {                      /* 28 s at 5 Hz: past the profile's park */
+        sim_drag_state_t s;
+        sim_drag_at((int64_t)i * 200000, &s);
+        int32_t lat = sim_drag_lat_e7(origin, s.dist_m);
+        double step_m = (double)(lat - prev) / 1e7 * SIM_DEG_LAT_M;
+        TEST_ASSERT_TRUE(step_m >= 0.0);                 /* due north, monotonic */
+        if (step_m > max_step_m) max_step_m = step_m;
+        prev = lat;
+    }
+    TEST_ASSERT_TRUE(max_step_m < 70.0);
+    TEST_ASSERT_TRUE(max_step_m > 12.0 && max_step_m < 13.0);   /* VMAX 62 m/s * 0.2 s = 12.4 m */
+    double total_m = (double)(prev - origin) / 1e7 * SIM_DEG_LAT_M;
+    TEST_ASSERT_TRUE(total_m > 680.0 && total_m < 700.0);       /* the profile's 690.25 m run */
+}
+
+/* The origin is a pure offset: the same distance from two different origins yields the same
+ * displacement, and dist_m == 0 (sim_profile.h's t=0 contract) yields the origin byte-identically
+ * -- which is what makes a LAPS -> DRAG switch continuous in position. */
+static void test_drag_position_is_a_pure_offset(void)
+{
+    sim_drag_state_t s;
+    sim_drag_at(0, &s);
+    TEST_ASSERT_EQUAL_DOUBLE(0.0, s.dist_m);
+    TEST_ASSERT_EQUAL_INT32(-338900000, sim_drag_lat_e7(-338900000, s.dist_m));
+    sim_drag_at(SIM_DRAG_HOLD_US + 5000000, &s);
+    int32_t d1 = sim_drag_lat_e7(0, s.dist_m);
+    int32_t d2 = sim_drag_lat_e7(1000000, s.dist_m) - 1000000;
+    TEST_ASSERT_EQUAL_INT32(d1, d2);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_drag_profile_shape);
     RUN_TEST(test_drag_profile_drives_the_engine);
+    RUN_TEST(test_drag_position_steps_stay_inside_the_jump_filter);
+    RUN_TEST(test_drag_position_is_a_pure_offset);
     return UNITY_END();
 }

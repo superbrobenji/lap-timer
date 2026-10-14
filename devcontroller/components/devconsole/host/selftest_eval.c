@@ -5,6 +5,7 @@
 #include "selftest_eval.h"
 
 #include <assert.h>
+#include <stdbool.h>
 #include <string.h>
 
 /* ---- thresholds (Plan 5.6 Global Constraints, verbatim) ---- */
@@ -98,6 +99,34 @@ static int count_occurrences(const uint8_t *raw, size_t n, const char *needle)
     return count;
 }
 
+/* True if raw[0..n) contains `needle`. Bounded by n. Uses the same bounded scan as count_occurrences
+ * to detect presence (avoiding duplicate substring-scan logic). */
+static bool mem_has(const uint8_t *hay, size_t n, const char *needle)
+{
+    return count_occurrences(hay, n, needle) > 0;
+}
+
+/* Counts CR defects line by line over the COMPLETE lines of raw[0..n) (a line is complete only
+ * when terminated by '\n' -- rawcap truncates at 256 B, so the trailing partial line is never
+ * judged). A line carrying a ---BEGIN/---END marker must end in EXACTLY one CR before its LF
+ * (spec §5.2); any other line is flagged only for the doubled-CR wire quirk
+ * linkhost_parse_frame documents ("\r\r\n"). */
+static int framing_bad_lines(const uint8_t *raw, size_t n)
+{
+    int bad = 0;
+    size_t start = 0, cr = 0;
+    for (size_t i = 0; i < n; i++) {                     /* bounded by n */
+        if (raw[i] == '\r') { cr++; continue; }
+        if (raw[i] != '\n') { cr = 0; continue; }
+        size_t text = (i >= start + cr) ? (i - cr - start) : 0;   /* the line without its CR run */
+        bool marker = mem_has(raw + start, text, "---BEGIN") || mem_has(raw + start, text, "---END");
+        if (marker ? (cr != 1) : (cr > 1)) bad++;
+        start = i + 1;
+        cr = 0;
+    }
+    return bad;
+}
+
 void selftest_framing_eval(const uint8_t *raw, size_t n, st_framing_t *out)
 {
     assert(raw != NULL || n == 0);
@@ -108,22 +137,11 @@ void selftest_framing_eval(const uint8_t *raw, size_t n, st_framing_t *out)
     int ends   = count_occurrences(raw, n, "---END");
     out->markers = begins + ends;
 
-    /* A "bad" line is one whose run of '\r' immediately before its '\n' is longer than one byte
-     * (a literal "\r\r\n") -- the wire quirk linkhost_parse_frame documents (export_serial's
-     * \n->\r\n translation doubling a spec "\r\n" separator into 3 bytes). */
-    int bad = 0;
-    int cr_run = 0;
-    for (size_t i = 0; i < n; i++) {                /* bounded by n */
-        uint8_t b = raw[i];
-        if (b == '\r')      cr_run++;
-        else if (b == '\n') { if (cr_run > 1) bad++; cr_run = 0; }
-        else                 cr_run = 0;
-    }
-    out->bad = bad;
+    out->bad = framing_bad_lines(raw, n);
 
     const char *reason = "";
     if (begins < 1 || ends < 1) reason = "markers";
-    else if (bad > 0)            reason = "cr";
+    else if (out->bad > 0)       reason = "cr";
 
     out->pass = (reason[0] == '\0');
     set_reason(out->reason, reason);

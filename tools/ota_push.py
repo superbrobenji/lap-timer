@@ -38,7 +38,9 @@ must be on the charger or read >=3800 mV, else every case returns 0x0801 E_OTA_P
   (1) GOOD -- the matching signed image applies + validates:
         python3 tools/ota_push.py --port /dev/tty.usbserial-XXXX \
             --image dist/laptimer-<ver>-moto_sim_epaper.bin
-      expect: OTA-END 0x0000 -> PASS; device reboots into the new slot and self-validates (§19.4).
+      expect: OTA-END 0x0000 -> PASS; device reboots into the new slot and self-validates (§19.4);
+      do NOT reset it or open its USB port for 35 s during that validation window -- an early
+      reset rolls the image back (0x0806).
 
   (2) WRONG-HWID -- the moto_neo6m image pushed to a moto_sim device is rejected:
         python3 tools/ota_push.py --port /dev/tty.usbserial-XXXX \
@@ -73,6 +75,28 @@ VER_FIELD = 16                 # OTA_BEGIN ver field width
 CHUNK = 4096                   # host TX block size (matches the device read granularity)
 READ_TIMEOUT_S = 5.0           # per-line serial read timeout
 BAUD_BYTES_PER_S = 115200 / 10 # 8N1: ~1 start+8 data+1 stop bit per byte
+
+OTA_PACE_MS = 25      # drv:M8 MITIGATION (not the fix -- #57 is the per-chunk ACK transport). The
+                      # lap-timer's console RX ring is a fixed 256 B (IDF esp_console, no Kconfig)
+                      # = ~22 ms at 115200, and it blocks in esp_ota_write for ~10-40 ms once per
+                      # 4096 B chunk (export_serial.c's own numbers): a worst-case write overruns
+                      # the ring by ~18 ms of wire time. Host and device count the same bytes from
+                      # 0, so pausing 25 ms at each CHUNK boundary -- the moment the device is in
+                      # that write -- covers it with 7 ms of margin. Cost: a 600 KB (614400 B)
+                      # image is 150 chunks, 149 boundary pauses = 3.7 s on a ~53 s push. Far under
+                      # the device's 3 s per-read stall window, so it can never look like a stall.
+                      # Use --pace 0 to disable.
+TRIAL_WINDOW_S = 35   # OTA trial window: validation at 30 s + a sensors-ok check
+LT_PROMPT = b"laptimer>"
+PROBE_READ_TIMEOUT_S = 0.2   # probe_laptimer's per-ser.read(1) timeout while probing: it must sit
+                             # well below the probe's own 2.0 s deadline, since that deadline is
+                             # only checked BETWEEN reads -- the normal ser.timeout (READ_TIMEOUT_S
+                             # = 5.0, for the OTA token-wait loops) would let one silent read block
+                             # past the 2 s the FAIL message promises. devkit.py clamps its own
+                             # probe read timeout (its PROBE_READ_TIMEOUT_S) the same way and for
+                             # the same reason -- its PROBE_TIMEOUT_S deadline is also only checked
+                             # between reads, so without the clamp its probe's worst case would be
+                             # PROBE_TIMEOUT_S plus a full read timeout, not the budget alone.
 
 E_OTA = {
     0x0000: "OK",
@@ -119,9 +143,43 @@ def wait_for_token(ser, deadline):
     return None
 
 
-def stream_image(ser, data):
+def trial_window_note():
+    """The rule that must be printed after every successful push (drv:M9). It is not advice:
+    resetting the lap-timer -- or merely OPENING its USB port, which asserts DTR/RTS on the
+    auto-reset circuit -- before it validates makes the bootloader roll the image back. Duplicated
+    (3 lines) from tools/devkit.py's own trial_window_note() rather than imported: ota_push.py is a
+    standalone single-file tool with no shared module between the two."""
+    return ("note: the lap-timer is now in its OTA trial window -- do NOT reset it or open its USB "
+            "port for %d s; an early reset rolls the image back (0x0806)." % TRIAL_WINDOW_S)
+
+
+def probe_laptimer(ser, deadline):
+    """True when `ser` is the lap-timer's own console: write a bare CR (the one inert probe byte
+    on that console -- it just reprints the prompt, unlike on the dev-kit's REPL where it would
+    merely redraw an empty line) and watch for LT_PROMPT (b"laptimer>") to appear in the last 256
+    bytes read back, within `deadline` (a time.monotonic() value). Bounded: reads one byte at a
+    time up to max_iters, so a silent or foreign port returns False instead of hanging (drv:M9)."""
+    ser.write(b"\r")
+    ser.flush()
+    tail = b""
+    max_iters = 2000000                              # bound: never spin unboundedly on a dead port
+    for _ in range(max_iters):
+        if LT_PROMPT in tail:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        chunk = ser.read(1)
+        if chunk:
+            tail = (tail + chunk)[-256:]
+    return LT_PROMPT in tail
+
+
+def stream_image(ser, data, pace_ms=OTA_PACE_MS):
     """Write the image in CHUNK blocks, flushing each so the OS drains to the UART at line rate
-    (natural pacing for the device's small RX ring). Bounded by len(data)."""
+    (natural pacing for the device's small RX ring), then pausing `pace_ms` ms after each flushed
+    block (except the last -- there is nothing left to protect by then) so the device's cache-off
+    esp_ota_write has drained its RX ring before the next chunk lands (drv:M8 mitigation -- see
+    OTA_PACE_MS). Bounded by len(data). Pass pace_ms=0 to disable pacing entirely."""
     total = len(data)
     sent = 0
     while sent < total:
@@ -132,6 +190,8 @@ def stream_image(ser, data):
         pct = 100 * sent // total
         sys.stdout.write("\r  streaming %d/%d B (%d%%)" % (sent, total, pct))
         sys.stdout.flush()
+        if pace_ms > 0 and sent < total:
+            time.sleep(pace_ms / 1000.0)
     sys.stdout.write("\n")
 
 
@@ -144,6 +204,11 @@ def main(argv=None):
     ap.add_argument("--ver", help="override the ver string (default: read from the image header)")
     ap.add_argument("--hwid", help="override the hwid string (default: read from the image header)")
     ap.add_argument("--baud", type=int, default=115200, help="baud rate (default 115200)")
+    ap.add_argument("--pace", type=int, default=OTA_PACE_MS,
+                    help="ms paused after each CHUNK during streaming, 0 to disable "
+                         "(default %d; drv:M8 mitigation)" % OTA_PACE_MS)
+    ap.add_argument("--force-port", action="store_true",
+                    help="skip the lap-timer prompt identity probe (recovery only)")
     args = ap.parse_args(argv)
 
     try:
@@ -192,16 +257,45 @@ def main(argv=None):
     cmd = "ota recv %d %s %s %s\r" % (size, sha_hex, ver, hwid)
 
     try:
-        ser = serial.Serial(args.port, args.baud, timeout=READ_TIMEOUT_S)
+        ser = serial.Serial()
+        ser.port = args.port
+        ser.baudrate = args.baud
+        ser.timeout = READ_TIMEOUT_S
+        ser.dsrdtr = False
+        ser.rtscts = False
+        ser.dtr = False            # set BEFORE open(): pyserial applies both at open, so the
+        ser.rts = False            # auto-reset circuit is never pulsed on purpose (drv:M9)
+        ser.open()
     except serial.SerialException as e:
         print("FAIL: cannot open %s: %s" % (args.port, e), file=sys.stderr)
         return 2
 
     rc = 2
     try:
+        # Settle + clear BEFORE probing: opening the port can disturb the board, so the OS input
+        # queue may still hold boot-banner bytes that the probe would judge instead of its own
+        # bare-CR reply -- the 0.2 s settle and both buffer resets run first, so probe_laptimer
+        # judges only its own request/response, which is exactly what its 2.0 s budget is sized
+        # for (drv:M9).
         time.sleep(0.2)
         ser.reset_input_buffer()
         ser.reset_output_buffer()
+
+        if not args.force_port:
+            saved_timeout = ser.timeout
+            ser.timeout = PROBE_READ_TIMEOUT_S   # see its own comment: must be < the 2.0 s
+                                                  # deadline below, or a single blocking read on a
+                                                  # silent port could overrun it
+            try:
+                probed_ok = probe_laptimer(ser, time.monotonic() + 2.0)
+            finally:
+                ser.timeout = saved_timeout      # restore before the ota_recv read loops, which
+                                                  # need the full READ_TIMEOUT_S
+            if not probed_ok:
+                print("FAIL: %s did not print the lap-timer prompt within ~2 s -- wrong port? "
+                      "(--force-port to proceed anyway)" % args.port, file=sys.stderr)
+                return 2
+
         ser.write(cmd.encode("ascii"))
         ser.flush()
 
@@ -216,7 +310,7 @@ def main(argv=None):
             return 1
         print("OTA-READY -- streaming image")
 
-        stream_image(ser, data)
+        stream_image(ser, data, pace_ms=args.pace)
 
         # End: SHA + ECDSA verify on the device, then the token. Budget the stream time + slack.
         deadline = time.monotonic() + (size / BAUD_BYTES_PER_S) + 30.0
@@ -227,7 +321,8 @@ def main(argv=None):
         print("result: %s" % end)
         code = parse_code(end)
         if end.startswith("OTA-END") and code == 0x0000:
-            print("PASS: image applied + verified; the device reboots into the new slot (§19.4).")
+            print("PASS: image applied + verified (§19.4).")
+            print(trial_window_note())
             rc = 0
         else:
             print("FAIL: %s" % describe(end))

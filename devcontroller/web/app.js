@@ -677,8 +677,10 @@
       }
       if (res.status === 413) {
         showMsg(msg, "err", "Value too large — a changed field exceeds the console line limit.");
+      } else if (res.status === 400) {
+        showMsg(msg, "err", "Save rejected: malformed request body.");
       } else if (res.status === 503) {
-        showMsg(msg, "err", "Lap-timer not connected — save failed.");
+        showMsg(msg, "err", link503Msg(res, "Lap-timer not connected — save failed."));
       } else {
         var detail = (res.data && (res.data.error || res.data.msg)) || res.raw || res.status;
         showMsg(msg, "err", "Save failed: " + detail);
@@ -962,13 +964,15 @@
     var body = $("#logs-body");
     body.innerHTML = "";
     if (!list || list.length === 0) {
-      body.appendChild(el("tr", {}, [el("td", { colSpan: 3, className: "muted", text: "No logs." })]));
+      body.appendChild(el("tr", {}, [el("td", { colSpan: 4, className: "muted", text: "No logs." })]));
       return;
     }
     list.forEach(function (l) {
       var tr = el("tr", {}, [
         el("td", { text: l.id !== undefined ? String(l.id) : "?" }),
-        el("td", { text: fmtBytes(l.bytes) })
+        el("td", { text: fmtBytes(l.bytes) }),
+        el("td", { text: l.created_unix ? new Date(l.created_unix * 1000)
+                   .toISOString().replace("T", " ").slice(0, 19) + "Z" : "—" })
       ]);
       var logHref = "/api/log/" + encodeURIComponent(l.id);
       var dl = el("td", {}, [

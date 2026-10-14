@@ -23,7 +23,9 @@ extern "C" {
 
 /* Precedes every appended record's `len` payload bytes (logstore_append, logstore.c). */
 typedef struct __attribute__((packed)) {
-    uint64_t ts_us;   /* esp_timer_get_time() at append time: monotonic microseconds since boot */
+    uint64_t ts_us;   /* esp_timer_get_time() at append time: microseconds since the dev-kit last
+                       * booted -- restarts at 0 on every dev-kit reboot, so records from two boots
+                       * cannot be ordered by this field alone (rx_us in the NDJSON rendering). */
     uint16_t seq;
     uint8_t  flags;
     uint8_t  type;
@@ -72,8 +74,9 @@ enum {
  *
  * Format (issue #67): NDJSON -- one JSON object per line; "t" is "fused", "event" or "status";
  * "rx_us" is the dev-kit's own receive/append time (this header's ts_us), "gps_us" the
- * lap-timer's GPS time -- the same two clocks, always together, so a line's age can be judged
- * either way. */
+ * lap-timer's GPS-anchored time -- the same two clocks, always together. rx_us is only comparable
+ * within one dev-kit boot (since it resets to 0 on reboot); gps_us is independent of the dev-kit's
+ * clock domain and stays comparable across dev-kit reboots. */
 int logstore_rec_to_json(const uint8_t *buf, size_t avail, char *out, size_t out_cap,
                           size_t *consumed);
 

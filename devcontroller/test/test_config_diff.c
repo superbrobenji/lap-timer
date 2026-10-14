@@ -92,11 +92,51 @@ void test_single_change_over_cap_returns_negative(void)
     TEST_ASSERT_TRUE(n < 0);
 }
 
+/* dk:L1 -- malformed JSON, a non-object, and an oversize fragment all returned -1, so webapi
+ * answered a malformed POST body "413 a changed value exceeds the console line limit". */
+static void test_malformed_body_is_distinguishable_from_oversize(void)
+{
+    char out[CFG_SET_OBJ_MAX + 1];
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_PARSE, config_diff_minify("{\"a\":1}", "{not json", out, sizeof out));
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_PARSE, config_diff_minify("{\"a\":1}", "[1,2]", out, sizeof out));
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_PARSE, config_diff_minify("{not json", "{\"a\":1}", out, sizeof out));
+    /* an oversize single fragment stays CFG_DIFF_E_SIZE (-1), the 413 path */
+    char big[CFG_SET_OBJ_MAX * 2];
+    int n = snprintf(big, sizeof big, "{\"name\":\"%0*d\"}", CFG_SET_OBJ_MAX, 7);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_SIZE, config_diff_minify("{\"name\":\"x\"}", big, out, sizeof out));
+}
+
 void test_malformed_json_returns_negative(void)
 {
     char out[128];
     TEST_ASSERT_TRUE(config_diff_minify("not json", "{\"a\":1}", out, sizeof out) < 0);
     TEST_ASSERT_TRUE(config_diff_minify("{\"a\":1}", "[1,2,3]", out, sizeof out) < 0);
+}
+
+/* fix round 1 finding 1: a well-formed JSON object that fits CFG_JSON_MAX but has more key/value
+ * pairs than jsmn's fixed CFG_MAXTOK token budget hits JSMN_ERROR_NOMEM, not a syntax error -- that
+ * must come back as CFG_DIFF_E_SIZE (413, "too complex"), never CFG_DIFF_E_PARSE (400,
+ * "malformed"), which would misdiagnose a valid document as a bad request. */
+static void test_token_budget_exceeded_is_size_not_parse(void)
+{
+    char big[2000];
+    size_t p = 0;
+    big[p++] = '{';
+    /* 1 (object) + 150*2 (key string + value) = 301 tokens, well past CFG_MAXTOK (256), while the
+     * raw text stays far under CFG_JSON_MAX (2048). */
+    for (int i = 0; i < 150; i++) {
+        if (i) big[p++] = ',';
+        int m = snprintf(big + p, sizeof big - p, "\"k%03d\":0", i);
+        TEST_ASSERT_TRUE(m > 0);
+        p += (size_t)m;
+    }
+    big[p++] = '}';
+    big[p] = '\0';
+    TEST_ASSERT_TRUE(p < sizeof big);
+
+    char out[64];
+    TEST_ASSERT_EQUAL_INT(CFG_DIFF_E_SIZE, config_diff_minify("{\"a\":1}", big, out, sizeof out));
 }
 
 /* ---- config_diff_next_line: split a big minified object into <=250 B `config set` lines ---- */
@@ -200,6 +240,8 @@ int main(void)
     RUN_TEST(test_nested_object_value_minified);
     RUN_TEST(test_single_change_over_cap_returns_negative);
     RUN_TEST(test_malformed_json_returns_negative);
+    RUN_TEST(test_malformed_body_is_distinguishable_from_oversize);
+    RUN_TEST(test_token_budget_exceeded_is_size_not_parse);
     RUN_TEST(test_next_line_single_object_then_done);
     RUN_TEST(test_next_line_empty_object_is_done);
     RUN_TEST(test_next_line_splits_when_over_budget);

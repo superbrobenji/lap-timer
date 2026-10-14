@@ -37,15 +37,18 @@ typedef int logstore_file_t;
 esp_err_t logstore_init(size_t cap_bytes);
 
 /* Appends one demuxed stream record (framed with a timestamp) to the current log; rotates when
- * cap_bytes would be exceeded. Returns 0 on success, <0 on error. */
+ * cap_bytes would be exceeded. Returns 0 on success, <0 on error. The timestamp is esp_timer
+ * microseconds since the dev-kit last booted (restarts at 0 on every dev-kit reboot). */
 int logstore_append(const lt_stream_rec_t *rec);
 
 /* Fills out[] with up to `max` log entries (newest first), returns the count written. */
 int logstore_list(logstore_entry_t *out, int max);
 
-/* True once logstore_init has opened a current file and logstore_append is accepting records;
- * false before init, or once an append failure has wedged it (Plan 5.6 T3, /api/status "logging").
- * Safe to call from any task -- s_ready is read cross-task from the stream_consumer writer. */
+/* True when a current file is open AND the last append succeeded in writing (dk:M10); false before
+ * init, or if the file is closed (e.g. open_new_file failed) or the last write failed (which
+ * clears on the next successful append). This is exactly 'the black-box store is accepting appends',
+ * which is what spec §4.3 defines `logging` as (returned to /api/status "logging"). Safe to call
+ * from any task -- its inputs are read cross-task from the stream_consumer writer. */
 bool logstore_ready(void);
 
 /* Opens a previously-rotated (or current) log file for reading by id; *out is a read handle
