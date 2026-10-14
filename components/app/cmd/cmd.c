@@ -68,7 +68,7 @@ typedef struct {
     uint32_t best_ms;
     bool     have_best;
 } sess_ent_t;
-enum { LIST_MAX_SESSIONS = 64 };
+enum { LIST_MAX_SESSIONS = 48 };
 /* §18.1 is explicit that exactly ONE request is in flight, and cmd_dispatch is not reentrant (the
  * console task is its only caller). The two largest assembly buffers in this file overlay each
  * other: `json` serves CONFIG_GET/SET, ERRLOG_GET, DIAG_GET and TRACKS_GET/PUT and is rebuilt from
@@ -78,11 +78,14 @@ enum { LIST_MAX_SESSIONS = 64 };
  * passes forces LIST to re-measure instead of printing a clobbered table. s_memo and s_open are
  * deliberately outside this union (they must survive between passes), and stream_export/stream_raw
  * re-run exp_open/ses_reader_init from s_open's id and fmt, so an OPEN -> LIST -> READ sequence
- * regenerates everything it needs. The overlay reclaims 3072 B of static DRAM, which pays for
- * LAP_ACC_CAP's rise to the 100 LAP frames §12.5 promises (logger.c). */
+ * regenerates everything it needs. The union is the larger of the two members (3456 B, the sess
+ * table) where separate statics would be 3072 + 3456 = 6528 B, so the overlay reclaims 3072 B of
+ * static DRAM, which pays for LAP_ACC_CAP's rise to the 100 LAP frames §12.5 promises (logger.c).
+ * LIST reports at most LIST_MAX_SESSIONS (48) sessions; further ones are omitted. The cap is 48
+ * for DRAM (each sess_ent_t is 72 B); F5 #91 replaces this fixed table. */
 static union {
     char       json[CMD_JSON_CAP];        /* 3072 (app/cmd.h, exported for the transport's own assert) */
-    sess_ent_t sess[LIST_MAX_SESSIONS];   /* 64 x ~72 B */
+    sess_ent_t sess[LIST_MAX_SESSIONS];   /* 48 x 72 B = 3456 B (> json) */
 } s_asm;
 static cfg_t          s_cfg;          /* working config for CONFIG_GET/SET */
 /* No error-ring snapshot array here: ERRLOG_GET/DIAG_GET stream entries via lt_errlog_count()/
