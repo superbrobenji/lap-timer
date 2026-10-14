@@ -6,14 +6,16 @@ set(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../test")
 # the directory's timestamp, which re-runs configuration and so re-runs this glob.
 file(GLOB TEST_SRCS "${TEST_DIR}/test_*.c")
 # test_ui and test_screens are host-only: they render PBM snapshots to the host filesystem
-# (TEST_DIR/snapshots) and compare byte-exact, which cannot run on the ESP32. They are exercised
-# by the host `test/` build only. test_epd_pure (Plan 7 Task 4) links the display_epaper_ssd1680
-# driver's host/*.c sources directly (test/CMakeLists.txt), which this lightweight core-only
-# selftest does not have on its path, so it is excluded here too.
-# test_sim_profile / test_sim_clock (OTA-screen plan Task 3) link the sim_common driver's host/*.c
-# sources and headers the same way test_epd_pure does, so they are host-only too. test_batt_trim
-# links the board driver's host/batt_trim.c and include dir (batt_pure.h), so it is host-only as well.
-list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure[a-z0-9_]*|sim_profile|sim_clock|batt_trim)\\.c$")
+# (TEST_DIR/snapshots) and compare byte-exact, which cannot run on the ESP32.
+# test_epd_pure_29 is excluded for a different reason (audit drv:L25, 2026-10-13): it needs
+# host/epd_panel.c compiled with EPD_FORCE_PANEL_29, while test_epd_pure needs the same single TU
+# compiled with EPD_FORCE_PANEL_213 -- a component compiles that source once, so only the owned
+# 2.13" panel row is proven on the target toolchain here. test_batt_trim links the board driver's
+# host/batt_trim.c and include dir (batt_pure.h), which this selftest does not carry, so it is
+# host-only as well. Everything else that only needs Unity plus a pure host/*.c source now runs on
+# target: test_epd_pure (panel table, portrait rotation, RAM-window rounding) and
+# test_sim_profile / test_sim_clock (sim drag profile + gps_us clock).
+list(FILTER TEST_SRCS EXCLUDE REGEX "/test_(ui|screens|epd_pure_29|batt_trim)\\.c$")
 set(SUITES "")
 foreach(f ${TEST_SRCS})
   get_filename_component(base "${f}" NAME_WE)          # .../test_cfg.c -> test_cfg
@@ -65,9 +67,17 @@ set(APP_SES_POLICY_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/pipeli
 # component's include root (not REQUIRES app) resolves that #include without pulling app's full
 # sources/deps (nvs_flash, gps/imu HAL, ...) into this lightweight core-only selftest.
 set(APP_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/app/include")
+set(EPD_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/drivers/display_epaper_ssd1680")
+set(SIM_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/drivers/sim_common")
+set(LT_HAL_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/lt_hal")
 idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" "${APP_POLICY_SRC}" "${APP_LOG_PAUSE_SRC}" "${APP_SES_POLICY_SRC}" ${WRAPPERS}
+                            "${EPD_DIR}/host/epd_panel.c" "${EPD_DIR}/host/epd_rotate.c"
+                            "${SIM_COMMON_DIR}/host/sim_profile.c"
+                            "${SIM_COMMON_DIR}/host/sim_clock.c"
                        INCLUDE_DIRS "." "${TEST_DIR}" "${APP_INCLUDE_DIR}"
+                                    "${EPD_DIR}/include" "${SIM_COMMON_DIR}/include"
+                                    "${LT_HAL_DIR}/include"
                        REQUIRES core unity_vendored pthread esp_timer)
 target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE RING_STRESS_N=20000ULL EPD_FORCE_PANEL_213=1)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TEST_DIR})
