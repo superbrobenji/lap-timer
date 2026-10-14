@@ -202,7 +202,8 @@ static void ser_flush(ser_ctx_t *c)
 /* drv:M7: ser_emit used to clamp, after which ser_flush computed the announced size AND the CRC32
  * over the TRUNCATED bytes -- a frame the host accepts as whole while the JSON is cut mid-object.
  * Unreachable today (see the asserts above); if it is ever reached, it is an ERROR frame, not a
- * lie. Later chunks are ignored (ser_emit skips appends once c->error is set). */
+ * lie. Later DATA chunks are ignored (ser_emit skips appends once c->error
+ * is set); a later CMD_FLAG_ERROR chunk still overwrites the message, so the producer's own error wins. */
 static void ser_overflow(ser_ctx_t *c)
 {
     static const char k_ovf[] = "response too large";
@@ -1128,9 +1129,11 @@ static int ota_fill_chunk(uart_port_t port, uint8_t *dst, uint32_t want)
  *   only a worst-case ~40 ms write can still overrun it -> dropped bytes. The failure MECHANISM
  *   once claimed here was wrong (drv, false-claim 4): ota_data()'s offset check can never fire on
  *   this path, because ota_recv_stream supplies the DEVICE's own recvd counter, which always
- *   equals ota.c's s_recv. What actually happens is either ota_fill_chunk stalling out
- *   ("OTA-ERR timeout"), or -- if the stream resynchronises -- a corrupt image reaching ota_end
- *   and failing its SHA-256 there (E_OTA_WRITE). Both fail SAFE (no unverified image is
+ *   equals ota.c's s_recv. Dropped bytes never resynchronise (the device reads exactly `size`
+ *   bytes), so what actually happens is either ota_fill_chunk stalling out on the short stream
+ *   ("OTA-ERR timeout"), or a corrupt image: damage in the first 4 KB fails the §19.3 hwid check
+ *   (E_OTA_HWID, from ota_data), otherwise it fails in ota_end on the SHA-256 (E_OTA_WRITE) or
+ *   the signature (E_OTA_SIG). All fail SAFE (no unverified image is
  *   ever applied: SHA-256 + ECDSA gate esp_ota_end), only unreliable for a large image push.
  *   The robust fix is a per-chunk OTA-ACK handshake on the host side -- issue #57, not implemented. Both pushers (`tools/ota_push.py`'s `--pace`, the dev-kit's `OTA_PACE_MS`) instead pause 25 ms at each `OTA_RECV_CHUNK` boundary, which covers the ~18 ms worst-case ring deficit but provides no feedback and no retry. */
 static int ota_recv_stream(uint32_t size)
