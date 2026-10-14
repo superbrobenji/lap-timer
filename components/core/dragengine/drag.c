@@ -493,6 +493,8 @@ static void do_launch(drag_t *D, event_t *out, int cap, int *n, int64_t mono_us)
     uint16_t cur = t0idx;
     double a_p = (double)D->hist[cur].g_lon * G_MPS2, v_p = 0.0, d_p = 0.0;
     int64_t t_p = D->hist[cur].gps_us;
+    /* rule 2: cur steps forward by 1 mod DRAG_HIST_N each iteration toward newest; t0idx and newest
+     * are both < DRAG_HIST_N (asserted above), so this walk is at most DRAG_HIST_N - 1 iterations. */
     while (cur != newest) {
         uint16_t nxt = (uint16_t)((cur + 1) % DRAG_HIST_N);
         int64_t tc = D->hist[nxt].gps_us;
