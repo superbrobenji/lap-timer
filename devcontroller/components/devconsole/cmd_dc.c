@@ -5,6 +5,7 @@
  *                                     ~1 s (measures link rates over a fixed window, I5 final review)
  *   dc log <error|warn|info|debug>    esp_log_level_set("*", ...) -- quiet the REPL's own logs
  *   dc baud <rate>                    reopen the console UART at a new baud (host must follow)
+ *   dc psk reset                      regenerate the AP passphrase now (F3 Task 5, dk:H1/R16)
  *
  * Every subcommand strips a trailing --json via console_wants_json and reports errors as
  * `ERR <reason>` (human) or `{"err":"<reason>"}` (json), returning non-zero -- so a later
@@ -28,14 +29,15 @@
 
 #include "build_config.h"   /* CFG_DC_VERSION */
 #include "console.h"
+#include "dc_psk.h"          /* the AP passphrase: dc_psk_get (status) / dc_psk_reset (psk reset) */
 #include "jsonw.h"
 #include "linkhost.h"        /* lt_status_t, linkstats_t + the linkhost_stats_* locked wrappers */
 #include "logstore.h"
 #include "rate.h"            /* rate_x10: pure records/sec*10, host-tested (test_rate.c) */
 
-/* GET /api/logs (webapi.c) uses the same 16-entry scratch array for the same reason: logstore_list
- * bounds its own scan to LOGSTORE_ROT_MAX_FILES, and 16 is already more rotated files than the
- * black-box log ever keeps day to day. */
+/* `dc status` summarises the newest DC_LOGSTORE_MAX files only -- enough for an at-a-glance total
+ * on a console line; `GET /api/logs` lists all of them (LOGSTORE_ROT_MAX_FILES), and logstore_list
+ * bounds its own scan either way. */
 #define DC_LOGSTORE_MAX 16
 
 /* `dc status` link-rate sampling window (I5, final review): a fixed 1 s snapshot-delay-snapshot,
@@ -98,6 +100,9 @@ static int dc_status(int argc, char **argv, bool json)
 
     uint32_t heap_free = esp_get_free_heap_size();
 
+    char psk[DC_PSK_LEN + 1];
+    (void)dc_psk_get(psk, sizeof psk);   /* cached after boot (dc_psk.c) -- never touches NVS/RNG here */
+
     if (json) {
         char buf[512];
         jsonw_t w;
@@ -106,6 +111,7 @@ static int dc_status(int argc, char **argv, bool json)
         jsonw_uint(&w, "uptime_s", (unsigned long long)(now / 1000000));
         jsonw_uint(&w, "heap_free", (unsigned long long)heap_free);
         jsonw_uint(&w, "ap_clients", (unsigned long long)sta.num);
+        jsonw_str(&w, "ap_psk", psk);
         jsonw_obj(&w, "link");
         jsonw_bool(&w, "connected", connected);
         jsonw_int(&w, "status_age_ms", status_age_ms);
@@ -131,6 +137,7 @@ static int dc_status(int argc, char **argv, bool json)
     printf("uptime_s: %lld\n", (long long)(now / 1000000));
     printf("heap_free: %u\n", (unsigned)heap_free);
     printf("ap_clients: %d\n", sta.num);
+    printf("ap_psk: %s\n", psk);
     printf("link.connected: %s\n", connected ? "true" : "false");
     printf("link.status_age_ms: %lld\n", (long long)status_age_ms);
     printf("link.stream_age_ms: %lld\n", (long long)stream_age_ms);
@@ -199,22 +206,56 @@ static int dc_baud(int argc, char **argv, bool json)
     return 0;
 }
 
+static int dc_psk_cmd(int argc, char **argv, bool json)
+{
+    if (argc != 3 || strcmp(argv[2], "reset") != 0) { dc_err(json, "usage: dc psk reset [--json]"); return 1; }
+    char psk[DC_PSK_LEN + 1];
+    int rc = dc_psk_reset(psk, sizeof psk);
+    if (rc < 0) { dc_err(json, "psk generation failed"); return 1; }
+    /* Apply live so the rotation takes effect without a reboot: the AP restarts and every joined
+     * client must rejoin with the new passphrase (this command is USB-console only, so no caller
+     * is relying on the WiFi link at this moment). Persisted BEFORE the live apply, so a failed
+     * apply still leaves the next boot using the printed value. */
+    wifi_config_t c;
+    bool applied = (esp_wifi_get_config(WIFI_IF_AP, &c) == ESP_OK);
+    if (applied) {
+        snprintf((char *)c.ap.password, sizeof c.ap.password, "%s", psk);
+        applied = (esp_wifi_set_config(WIFI_IF_AP, &c) == ESP_OK);
+    }
+    if (json) {
+        char buf[96];
+        jsonw_t w;
+        jsonw_begin(&w, buf, sizeof buf);
+        jsonw_str(&w, "ap_psk", psk);
+        jsonw_bool(&w, "persisted", rc == 0);
+        jsonw_bool(&w, "applied", applied);
+        if (!jsonw_end(&w)) { dc_err(true, "reply too large"); return 1; }
+        printf("%s\n", buf);
+        return 0;
+    }
+    printf("ap_psk: %s\npersisted: %s\napplied: %s (clients must rejoin)\n",
+           psk, (rc == 0) ? "true" : "false", applied ? "true" : "false");
+    return 0;
+}
+
 static int cmd_dc_main(int argc, char **argv)
 {
     assert(argv != NULL);
     bool json = console_wants_json(&argc, argv);
     if (argc < 2) {
-        dc_err(json, "usage: dc status [--json] (~1s) | dc log <level> | dc baud <rate>");
+        dc_err(json, "usage: dc status [--json] (~1s) | dc log <level> | dc baud <rate> | dc psk reset");
         return 1;
     }
     if (strcmp(argv[1], "status") == 0) return dc_status(argc, argv, json);
     if (strcmp(argv[1], "log")    == 0) return dc_log(argc, argv, json);
     if (strcmp(argv[1], "baud")   == 0) return dc_baud(argc, argv, json);
-    dc_err(json, "unknown subcommand (want status|log|baud)");
+    if (strcmp(argv[1], "psk")    == 0) return dc_psk_cmd(argc, argv, json);
+    dc_err(json, "unknown subcommand (want status|log|baud|psk)");
     return 1;
 }
 
 void cmd_dc_register(void)
 {
-    console_register("dc", "dc status [--json] (~1s) | dc log <level> | dc baud <rate>", cmd_dc_main);
+    console_register("dc", "dc status [--json] (~1s) | dc log <level> | dc baud <rate> | dc psk reset",
+                      cmd_dc_main);
 }

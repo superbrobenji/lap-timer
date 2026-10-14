@@ -13,7 +13,8 @@
 extern "C" {
 #endif
 
-/* Registers the `dc` command (status [--json] | log <level> | baud <rate>) via console_register. */
+/* Registers the `dc` command (status [--json] | log <level> | baud <rate> | psk reset) via
+ * console_register. */
 void cmd_dc_register(void);
 
 #ifdef __cplusplus

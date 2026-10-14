@@ -1,6 +1,8 @@
 /* main.c -- dev controller app_main (Plan 5.5 Task 2 scaffold):
  *   1. nvs_flash_init
- *   2. SoftAP up (ssid "laptimer-dev", WPA2, channel 1, ip 192.168.4.1 -- esp_netif's AP default)
+ *   2. SoftAP up (ssid "laptimer-dev", WPA2, channel 1, ip 192.168.4.1 -- esp_netif's AP default;
+ *      the WPA2 passphrase is a random 12-character value from NVS via dc_psk_get, F3 Task 5
+ *      dk:H1/R16 -- not a function of the beacon BSSID the way the old eFuse-MAC-derived PSK was)
  *   3. mount the `www` (RO) and `logs` (RW) LittleFS partitions -- a missing/unformatted `www`
  *      is non-fatal (logged); the static handler below serves a placeholder page instead
  *   4. linkhost_init
@@ -24,7 +26,6 @@
 #include "esp_http_server.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -34,6 +35,7 @@
 
 #include "build_config.h"
 #include "console.h"
+#include "dc_psk.h"
 #include "linkhost.h"
 #include "linkhost_proto.h"
 #include "logstore.h"
@@ -67,6 +69,13 @@ static void nvs_init_or_erase(void)
 
 static void wifi_ap_start(void)
 {
+    /* R16 (dk:H1): a random per-device passphrase from NVS, not a function of the beacon BSSID.
+     * Generated before esp_wifi_init() below, which is also what lets dc_psk_get() use the
+     * bootloader SAR-ADC entropy source and turn it off again before RF comes up. */
+    char psk[DC_PSK_LEN + 1];
+    int pr = dc_psk_get(psk, sizeof psk);
+    if (pr < 0) { ESP_LOGE(TAG, "AP psk generation failed"); return; }
+
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_ap();   /* default AP IP: 192.168.4.1 */
@@ -83,21 +92,14 @@ static void wifi_ap_start(void)
             .authmode       = WIFI_AUTH_WPA2_PSK,
         },
     };
-    /* Per-device WPA2 PSK derived from the eFuse MAC (T-F): a source-constant PSK let anyone within
-     * radio range join the AP and drive `config set` / `ota recv`. "ltdev-" + 12 hex = 18 chars
-     * (>=8 for WPA2), printed below so the operator can read it off the boot console. */
-    uint8_t mac[6] = { 0 };
-    esp_err_t me = esp_efuse_mac_get_default(mac);
-    if (me != ESP_OK) ESP_LOGW(TAG, "efuse mac read failed: %s", esp_err_to_name(me));
-    snprintf((char *)ap_config.ap.password, sizeof ap_config.ap.password,
-             "ltdev-%02x%02x%02x%02x%02x%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf((char *)ap_config.ap.password, sizeof ap_config.ap.password, "%s", psk);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "SoftAP up: ssid=%s psk=%s channel=%d ip=192.168.4.1",
-             DC_WIFI_SSID, (const char *)ap_config.ap.password, DC_WIFI_CHANNEL);
+    ESP_LOGI(TAG, "SoftAP up: ssid=%s psk=%s%s channel=%d ip=192.168.4.1",
+             DC_WIFI_SSID, psk, (pr == 1) ? " (NOT persisted: NVS error -- changes on reboot)" : "",
+             DC_WIFI_CHANNEL);
 }
 
 /* mDNS: advertise "laptimer-dev.local" + the _http._tcp service on the AP so the SPA is reachable
