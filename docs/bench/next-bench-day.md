@@ -310,7 +310,8 @@ reconciles them (audit M9/M10), so trust the code table when a number disagrees.
   and, while it is lapping, push a signed image: the push is refused at OTA_BEGIN (`flash result 0x0801`
   via the dev-kit; `OTA-ERR 0x0801` on a direct `ota recv`) and the session keeps logging — `dbg fs` shows
   the `.log` still growing and `dbg sum <id>` reads `END present = no (session still open ...)`. A refusal
-  is returned to the peer only; it is not an `errlog` entry. (b) `dbg sim park`, wait >= 35 s (30 s of
+  is also an `errlog` entry: `0x0801` (`E_OTA_PRECOND`) with arg 3 (not still long enough; 1 in flight,
+  2 size, 4 battery, 5 slot awaiting validation, 6 short payload, 7 session close not acked). (b) `dbg sim park`, wait >= 35 s (30 s of
   stillness plus margin), push again: accepted, the transfer completes (`flash result 0x0000`), and after
   the 35 s hold `dbg sum <id>` reads `END present = yes` — the begin closed the open session (logging is
   silenced during a push, so the `log: session <id> closed (reason 1)` line is NOT visible; the
@@ -365,13 +366,14 @@ reconciles them (audit M9/M10), so trust the code table when a number disagrees.
 - [ ] **41. `EV_FAULT` reaches both consumers** (F2a T3, R6). With a session open (`dbg sim laps 20`) note
   `EVENT=` from `dbg logck <id>`, then `dbg flag set 13` (`SYS_FUSION_DISAGREE`, no other writer), wait 2 s,
   `dbg flag clear 13`, wait 2 s. Expect the strip to gain and then lose the "? beside a leaning mast"
-  glyph within ~2 s each way (the ui reads `sys_flags` directly, and also receives the event), and
+  glyph within ~2 s each way (the ui reads `sys_flags` directly and ignores the event), and
   `dbg logck <id>` `EVENT=` to rise by exactly 2 (one SET, one CLEARED `EV_FAULT`, type 15; the record's
   `arg` is `bit<<8 | set` = `0x0D01` then `0x0D00`; `dbg logck` counts records, it does not decode
   them — decode the `.log` on the host via `open <id> log` for the values). Repeat with bit 10
-  (`SYS_HEAP_LOW`): the same +2 `EVENT=`, but NO glyph (that bit has none, §17.4); the supervisor owns this
-  bit, so with >= 48 KB of heap free it clears the injected bit on its next tick (a `heap recovered` log
-  line) — still +2. Finish with bit 5 (`SYS_STORAGE_DEAD`, floppy-with-slash glyph); `dbg flag clear 5`.
+  (`SYS_HEAP_LOW`): the supervisor owns this bit, so with >= 48 KB of heap free its next tick
+  clears the injected bit (`check_heap`, a `heap recovered` log line) BEFORE `emit_faults` runs; no
+  change is ever observed, so expect `EVENT=` to rise by 0 (not 2), the `heap recovered` line, and no
+  glyph (that bit has none, §17.4). Finish with bit 5 (`SYS_STORAGE_DEAD`, floppy-with-slash glyph); `dbg flag clear 5`.
 - [ ] **42. Task-WDT coverage is real** (F2a T3, R7). Read the boot log (a read-only capture). Expect exactly
   these `sup: wdt subscribe hb=N rc=0` lines: `hb=1` (supervisor), `hb=0` (pipeline — printed AFTER its
   GPS/IMU init lines, not before), `hb=2` (logger); none for the link task (deliberate, §17.1) and none for
