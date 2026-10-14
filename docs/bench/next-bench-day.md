@@ -168,7 +168,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   Doppler re-anchor working. Also: `dbg sim laps 1` → `dbg sim drag` → `dbg sim park` in sequence, and
   check `lt status`'s free_kb/sessions stay sane across the switches (no gps_us rewind).
 - [ ] **19. AP PSK printed and rotatable** (F3 T5, dk:H1). Cold boot the dev-kit on USB: the banner
-  prints `SoftAp up: ssid=laptimer-dev psk=<12 chars>`. Join the AP with it; `devkit.py status` shows
+  prints `SoftAP up: ssid=laptimer-dev psk=<12 chars>`. Join the AP with it; `devkit.py status` shows
   the same `ap_psk`. Reboot: the SAME passphrase (persisted in NVS `dc/psk`). `dc psk reset` prints a
   NEW one, `applied: true`, and the joined client is dropped and must rejoin with the new value.
   Then reboot again: the new one persists. **Redact `ap_psk` from anything pasted into a PR or docs.**
@@ -233,7 +233,7 @@ sign in place with `keys/laptimer_priv.pem` from the main checkout.
   turn a normal, correctly-framed `status` round trip into a false FAIL.
   **(d) AP passphrase first-boot path:** `cd devcontroller && idf.py -p <dk> erase-flash && idf.py -p
   <dk> flash` (wipes the dev-kit's NVS, including `dc/psk`, and reflashes — this is the dev-kit, not
-  the lap-timer, so the USB-port rule does not apply). On the fresh boot, the banner reads `SoftAp up:
+  the lap-timer, so the USB-port rule does not apply). On the fresh boot, the banner reads `SoftAP up:
   ssid=laptimer-dev psk=<12 chars>` with NO `(NOT persisted...)` suffix — the first-boot generation
   path (entropy drawn before Wi-Fi starts) ran cleanly. Reboot again without re-erasing: the same
   passphrase persists. The NVS-failure half of this path (the banner's
