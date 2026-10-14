@@ -81,8 +81,9 @@ enum { LIST_MAX_SESSIONS = 48 };
  * regenerates everything it needs. The union is the larger of the two members (3456 B, the sess
  * table) where separate statics would be 3072 + 3456 = 6528 B, so the overlay reclaims 3072 B of
  * static DRAM, which pays for LAP_ACC_CAP's rise to the 100 LAP frames §12.5 promises (logger.c).
- * LIST reports at most LIST_MAX_SESSIONS (48) sessions; further ones are omitted. The cap is 48
- * for DRAM (each sess_ent_t is 72 B); F5 #91 replaces this fixed table. */
+ * LIST reports at most LIST_MAX_SESSIONS (48) sessions: the NEWEST 48 (scan_one_entry evicts the
+ * smallest id when full, I-5). The cap is 48 for DRAM (each sess_ent_t is 72 B); F5 #91 replaces
+ * this fixed table. */
 static union {
     char       json[CMD_JSON_CAP];        /* 3072 (app/cmd.h, exported for the transport's own assert) */
     sess_ent_t sess[LIST_MAX_SESSIONS];   /* 48 x 72 B = 3456 B (> json) */
@@ -560,6 +561,30 @@ static struct {
 /* ---- LIST (0x02): enumerate /sessions, emit the §14.3 JSON array (may span chunks) ---- */
 static int        s_nsess;
 
+/* I-5: the table is full and a not-yet-tracked id arrived. LIST keeps the NEWEST 48 sessions (ids
+ * are fixed-width S<boot>_<seq>, so strncmp order is age order, and littlefs lists name-sorted, so
+ * the newest arrive LAST): if the incoming id sorts above the smallest tracked id, drop that
+ * smallest entry (memmove keeps the rest in order) and return true so the caller appends the new
+ * one; otherwise return false and the incoming (older) session is omitted. Correct for any
+ * iteration order, not just sorted: it compares against the true minimum, never assumes slot 0.
+ * A dropped id whose other file (.log/.sum) arrives later is below the new minimum, so that file
+ * is dropped too -- a half-merged entry cannot survive. */
+static bool list_make_room(const char *name, size_t idlen)
+{
+    LT_ASSERT_RET(name != NULL && idlen > 0 && idlen <= 10, CMD_ASSERT_CODE, false);
+    LT_ASSERT_RET(s_nsess == LIST_MAX_SESSIONS, CMD_ASSERT_CODE, false);   /* only called when full */
+    int lo = 0;
+    for (int i = 1; i < s_nsess; i++)
+        if (strcmp(s_asm.sess[i].id, s_asm.sess[lo].id) < 0) lo = i;
+    char inc[11];
+    memcpy(inc, name, idlen);
+    inc[idlen] = '\0';
+    if (strcmp(inc, s_asm.sess[lo].id) <= 0) return false;
+    memmove(&s_asm.sess[lo], &s_asm.sess[lo + 1], (size_t)(s_nsess - lo - 1) * sizeof s_asm.sess[0]);
+    s_nsess--;
+    return true;
+}
+
 /* Dedup/merge one /sessions dirent (name, size) into s_asm.sess[] by session-id prefix (the part of
  * name before ".log"/".sum"). Called once per entry from op_list's measuring-pass loop below. */
 static void scan_one_entry(const char *name, uint32_t size)
@@ -578,7 +603,7 @@ static void scan_one_entry(const char *name, uint32_t size)
     for (int i = 0; i < s_nsess; i++)
         if (strncmp(s_asm.sess[i].id, name, idlen) == 0 && s_asm.sess[i].id[idlen] == '\0') { idx = i; break; }
     if (idx < 0) {
-        if (s_nsess >= LIST_MAX_SESSIONS) return;   /* cap: extra sessions omitted */
+        if (s_nsess >= LIST_MAX_SESSIONS && !list_make_room(name, idlen)) return;   /* older than all 48 */
         idx = s_nsess++;
         memcpy(s_asm.sess[idx].id, name, idlen);
         s_asm.sess[idx].id[idlen] = '\0';
@@ -729,12 +754,13 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t
  * #97/PR #101 H2): the loop reads trk_user_count() first and only indices below it; the only
  * post-boot writers are the pipeline's finalize_create() -- which always allocates a fresh id via
  * trk_next_user_id(), so it only ever APPENDS at user[user_n] and then bumps user_n, never
- * touching a byte below the captured count -- and the logger's LOGGER_PUT_TRACK, which can
- * replace a same-id slot but runs only while THIS task is blocked inside logger_request_sync()
- * (op_tracks_put below, which also latches s_put_pending if its wait times out, so after a
- * timeout every s_asm user first waits the logger out via put_barrier), so it cannot overlap
- * this read. trk.h's ownership comment still names
- * two readers: F4 files the doc-debt issue (trk.h is F0's file in this wave).
+ * touching a byte below the captured count -- and the logger's LOGGER_PUT_TRACK, which is
+ * likewise APPEND-ONLY (put_track refuses a PUT whose id already exists, I-3) and runs only while
+ * THIS task is blocked inside logger_request_sync() (op_tracks_put below, which also latches
+ * s_put_pending if its wait times out, so after a timeout every s_asm user first waits the logger
+ * out via put_barrier), so it cannot overlap this read. trk.h's ownership comment still names
+ * two readers and does not list the logger as a writer: F4 files the doc-debt issue (trk.h is
+ * F0's file in this wave).
  *
  * Returns 1 when a venue was written, 0 when it was skipped (the caller counts it), -1 on a
  * transport error. */
@@ -814,17 +840,22 @@ const char *cmd_tracks_payload(size_t *len_out)
     return s_asm.json;
 }
 
-/* R5 (§18.1 0x13): parse-and-install is forbidden here. core/trk.h's ownership comment makes the
- * user table writer-exclusive to boot, the pipeline and the logger, and trk_from_json needs a
- * 2752 B trk_venue_t landing slot that must not be a local on this 6 KB console stack (PR #101
- * M2's twin). So: stage the JSON text, hand it to the logger (LOGGER_PUT_TRACK), and block until
- * it answers (on a timeout the hand-off is NOT over: s_put_pending makes put_barrier hold every
- * later s_asm user back until the logger has demonstrably drained past this request). The logger
- * parses into the trk module's own static landing slot via trk_user_add_json() and then persists
- * the table (logger.c's put_track()). The block is what
- * makes the hand-off safe: the staged buffer cannot change while the logger reads it, and
- * ownership returns here with the rc. 2000 ms, not op_delete's 1000: put_track() writes up to
- * TRK_MAX_USER records plus a rename. */
+/* R5 (§18.1 0x13): parse-and-install is forbidden here. trk_from_json needs a 2752 B
+ * trk_venue_t landing slot that must not be a local on this 6 KB console stack (PR #101 M2's
+ * twin), and the user table's writers are the boot path, the pipeline and the logger (core/trk.h
+ * still lists only the first two; the logger is an APPEND-ONLY writer, see logger.c's put_track()).
+ * So: stage the JSON text, hand it to the logger (LOGGER_PUT_TRACK), and block until it answers
+ * (on a timeout the hand-off is NOT over: s_put_pending makes put_barrier hold every later s_asm
+ * user back until the logger has demonstrably drained past this request). The logger parses into
+ * the trk module's own static landing slot, refuses an existing id or a PUT during a creation,
+ * installs, and persists the table. The block is what makes the hand-off safe: the staged buffer
+ * cannot change while the logger reads it, and ownership returns here with the rc. 2000 ms, not
+ * op_delete's 1000: put_track() writes up to TRK_MAX_USER records plus a rename.
+ *
+ * Size (I-6): this op accepts up to CMD_JSON_CAP - 1 = 3071 B, but the only transport that ships
+ * today is the 256 B console line (export_serial.c; the dev-kit drives the same console and
+ * linkhost caps a command at 250 B), so a venue is limited to about 245 B -- a one-layout,
+ * start/finish-only venue. Larger venues wait for sub-project C's transport. */
 static int op_tracks_put(const uint8_t *payload, size_t len,
                          cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 {
@@ -843,6 +874,8 @@ static int op_tracks_put(const uint8_t *payload, size_t len,
     if (rc == -5) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "table full");
     if (rc == -6) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "bad venue json");
     if (rc == -7) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "installed but not saved");
+    if (rc == -8) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "id exists");
+    if (rc == -9) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "creation in progress; retry");
     if (rc == -2) return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "tracks put timed out");
     if (rc != 0)  return emit_error(emit, ctx, tag, seq, E_CONN_PROTO, "tracks put failed");
     return emit_bytes(emit, ctx, tag, seq, NULL, 0, true);
@@ -1093,7 +1126,6 @@ static int op_close(cmd_emit_fn emit, void *ctx, uint8_t tag, uint16_t *seq)
 static bool ota_newest(lt_err_entry_t *out)
 {
     LT_ASSERT_RET(out != NULL, CMD_ASSERT_CODE, false);
-    LT_ASSERT_RET(sizeof *out > 0, CMD_ASSERT_CODE, false);
     int n = lt_errlog_count();
     return n > 0 && lt_errlog_at(n - 1, out) == 0;
 }

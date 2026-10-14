@@ -34,8 +34,8 @@ uint32_t ui_partial_count(void);
 
 /* Create the button queue and give it to the board button ISR (board_buttons_enable_isr, §5.1) so
  * any edge on GPIO 32/33/25 pushes a btn_raw_t straight onto it. The board driver already owns
- * those pins (directions + a per-pin leading-edge ISR guard at BTN_DEBOUNCE_MS = 30 ms), so this only creates the queue and hands
- * it over -- it never reconfigures pins. */
+ * those pins (directions + a per-pin leading-edge ISR guard at BTN_DEBOUNCE_MS = 30 ms), so this
+ * only creates the queue and hands it over -- it never reconfigures pins. */
 void ui_buttons_init(void);
 
 /* The button queue created by ui_buttons_init() (NULL before it runs). Drained by the ui task. */

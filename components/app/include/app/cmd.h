@@ -49,7 +49,9 @@ enum { CMD_STATUS=0x01, CMD_LIST=0x02, CMD_OPEN=0x03, CMD_READ=0x04, CMD_CLOSE=0
        CMD_DIAG_GET=0x16, CMD_COREDUMP_GET=0x17, CMD_COREDUMP_CLEAR=0x18,
        CMD_OTA_BEGIN=0x20, CMD_OTA_DATA=0x21, CMD_OTA_END=0x22, CMD_OTA_ABORT=0x23 };
 
-const char *cmd_tracks_payload(size_t *len_out);   /* LOGGER_PUT_TRACK's view of the staged JSON */
+/* LOGGER_PUT_TRACK's view of the staged JSON. put_track()'s rc (logger.c): 0 ok, -5 table full,
+ * -6 bad json, -7 installed but not saved, -8 id exists, -9 creation in progress. */
+const char *cmd_tracks_payload(size_t *len_out);
 
 /* Run one op. Streams the response through `emit`. Returns 0 (including when the op reported an
  * ERROR chunk), or -1 if `emit` signalled a transport error. Not reentrant: one request at a

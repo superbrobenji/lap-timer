@@ -1455,11 +1455,15 @@ static void handle_create(const event_t *e)
     case EV_CREATE_BEGUN:
         s_model.create_step = 0;
         s_create_next_gate  = 0;
-        if (s_model.screen == SCR_ONESHOT && s_model.oneshot == ONESHOT_SAFE) {
-            /* §17.5: SAFE MODE is persistent and outranks NEW TRACK (same rule as handle_ota's
-             * on_safe guard): keep the screen, tell the engine to leave CREATE so it is not stranded
-             * in a mode with no screen to finish it from. */
-            ui_send_cmd(CMD_CREATE_CANCEL, 0, 0);
+        if (s_model.screen == SCR_ONESHOT &&
+            (s_model.oneshot == ONESHOT_SAFE || s_model.oneshot == ONESHOT_OTA)) {
+            /* §17.5: SAFE MODE and an update in progress (ONESHOT_OTA) are persistent and outrank
+             * NEW TRACK (same rule as handle_ota's on_safe guard and btn_vlong's OTA guard): keep
+             * the screen, tell the engine to leave CREATE so it is not stranded in a mode with no
+             * screen to finish it from. A dropped post is logged: the engine then stays in CREATE
+             * until a later CREATE_CANCEL/mode change, which the log line makes diagnosable. */
+            if (!ui_send_cmd(CMD_CREATE_CANCEL, 0, 0))
+                ESP_LOGW(TAG, "create cancel not sent (cmd queue full)");
         } else if (!on_nt) {                /* menu -> one-shot: whole-screen replacement (B-9) */
             s_model.screen     = SCR_ONESHOT;
             s_model.oneshot    = ONESHOT_NEWTRACK;

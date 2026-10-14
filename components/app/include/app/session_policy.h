@@ -23,6 +23,8 @@ typedef enum {
     SES_IN_VENUE_ANNOUNCE = 1,   /* the pipeline's ui-only announce (EV_VENUE_ANNOUNCE_ONLY) */
     SES_IN_VENUE_LOST     = 2,   /* EV_VENUE_LOST (F1a, design §3) */
     SES_IN_MODE_CHANGE    = 3,   /* CMD_SET_MODE, or a CMD_CONFIG_RELOAD that flips cfg.mode */
+    SES_IN_VENUE_CHANGED  = 4,   /* an engine VENUE_FOUND naming a DIFFERENT venue than the open
+                                  * session's (New track at venue A, I-4): rotate, never relabel */
 } ses_input_t;
 
 ses_action_t session_policy(bool open_now, ses_input_t in);

@@ -9,6 +9,7 @@ ses_action_t session_policy(bool open_now, ses_input_t in)
     case SES_IN_VENUE_FOUND:    return open_now ? SES_ACT_NONE   : SES_ACT_OPEN;
     case SES_IN_VENUE_LOST:     return open_now ? SES_ACT_CLOSE  : SES_ACT_NONE;
     case SES_IN_MODE_CHANGE:    return open_now ? SES_ACT_REOPEN : SES_ACT_NONE;
+    case SES_IN_VENUE_CHANGED:  return open_now ? SES_ACT_REOPEN : SES_ACT_OPEN;
     case SES_IN_VENUE_ANNOUNCE: return SES_ACT_NONE;
     default: break;
     }

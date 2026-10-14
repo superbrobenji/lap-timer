@@ -22,6 +22,7 @@
 #include "app/lt_ipc.h"
 #include "app/lt_sup.h"
 #include "app/lt_nvs.h"
+#include "app/pipeline.h"     /* pipeline_create_active(): put_track refuses a PUT mid-creation (I-3b) */
 #include "app/lt_err.h"
 #include "app/status.h"      /* status_cache_update() -- logger.c owns storage, feeds the cache (Plan 5.6 T1 fix 1) */
 #include "hal/storage.h"
@@ -127,7 +128,13 @@ static uint8_t s_lap_acc[LAP_ACC_CAP];   static size_t s_lap_len;
 static uint8_t s_drag_acc[DRAG_ACC_CAP]; static size_t s_drag_len;
 static bool    s_sum_dirty;
 static bool    s_acc_full;               /* L2: the .sum lap accumulator spilled this session (logged once) */
-static ses_calib_t s_calib;   /* latest block from the pipeline (LOG_RES_CALIB); zero / fusion defaults until #125 lands */
+/* m-1: the latest TIME_MAP received while NO session was open (the pipeline posts one right after
+ * its OPEN, and this task's request drain may have run just before that OPEN arrived). Any
+ * consistent (mono, gps, quality) triple stays valid, so it is written straight after the next HDR
+ * rather than dropped, exactly like s_calib. */
+static struct { int64_t mono_us, gps_us; uint8_t quality; bool valid; } s_tmap_stash;
+static ses_calib_t s_calib;   /* latest block from the pipeline (LOG_RES_CALIB); zero / fusion
+                               * defaults until #93 (orientation capture, Plan 8) lands */
 static log_pause_t s_pause;   /* §12.6 still-pause (R4): FIX/FUSED suppressed while paused */
 
 /* timing + state */
@@ -330,6 +337,17 @@ static bool next_session_id(void)
     return true;
 }
 
+/* m-1: write a TIME_MAP stashed while closed, right behind the HDR just flushed. */
+static void write_stashed_time_map(void)
+{
+    if (!s_tmap_stash.valid) return;
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_time_map(s_tmap_stash.mono_us, s_tmap_stash.gps_us, s_tmap_stash.quality,
+                                tmp, sizeof tmp);
+    if (n > 0) batch_append(tmp, n);
+    s_tmap_stash.valid = false;
+}
+
 static void open_session(const log_request_t *req)
 {
     LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
@@ -369,7 +387,7 @@ static void open_session(const log_request_t *req)
     s_hdr.start_gps_us = req->gps_us;
     memcpy(s_hdr.r_e4,  s_calib.r_e4,  sizeof s_hdr.r_e4);     /* §12.3 calib block: the last block the
     memcpy(s_hdr.gbias, s_calib.gbias, sizeof s_hdr.gbias);     * pipeline posted (LOG_RES_CALIB), zeros
-    s_hdr.calib_flags = s_calib.calib_flags;                    * until #125 lands and before the first one of a boot */
+    s_hdr.calib_flags = s_calib.calib_flags;                    * until #93 lands and before the first one of a boot */
 
     s_venue_id = req->venue_id;
     s_layout_id = req->layout_id;
@@ -403,6 +421,7 @@ static void open_session(const log_request_t *req)
     batch_append(tmp, n);
     do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
     (void)sto_sync(s_log_fd);                        /* and sync it: a cut right after open must not lose the .log HDR either */
+    write_stashed_time_map();                        /* m-1: a TIME_MAP that beat the OPEN here lands right behind the HDR */
     /* initial .sum: HDR + VENUE. Failure already recorded by errlog_add inside; the .sum is
      * rebuilt again at the next LAP/close. */
     (void)rebuild_sum(false, 0, 0);
@@ -613,9 +632,21 @@ static int tracks_save(void)
     return 0;
 }
 
-/* R5 (§18.1 0x13 TRACKS_PUT). The install runs HERE because core/trk.h's ownership comment
- * makes the user table writer-exclusive to boot, the pipeline and (since #97) this task -- a
- * trk_user_add() on the console task would be a fourth, unlocked writer.
+/* R5 (§18.1 0x13 TRACKS_PUT). The install runs HERE, off the console task, so a trk_user_add()
+ * never runs on a fourth, ad-hoc context. Honest ownership picture (final review I-3): core/trk.h
+ * names this task a READER (since #97, tracks_save()); this plan makes it a second post-boot
+ * WRITER, but only an APPEND-ONLY one, and trk.h's writer list still says otherwise (trk.h is F0's
+ * file, fenced in this wave -- the controller hands the doc fix to F4). The two rules below are what
+ * keep the table's documented invariant ("no writer may rewrite an id a reader may hold", trk.c):
+ *  (a) a PUT whose id already exists, bundled or user, is REFUSED (-8): a same-id replace would be
+ *      a ~2.7 KB struct copy onto a venue the lap engine and the ui hold by pointer.
+ *  (b) a PUT is refused while a pipeline track creation is active (-9): finalize_create() builds in
+ *      trk_user_scratch() = user[user_n], the very slot this parse lands in, from another core.
+ *      Residual TOCTOU: a creation begun between pipeline_create_active() and the install below is
+ *      not excluded (the window is a parse plus one append; a creation needs a full S/F lap first).
+ * The parse lands in trk_user_scratch() (user[user_n], invisible to every reader until the add
+ * bumps user_n) via the public trk_from_json(), so the id can be checked BEFORE anything becomes
+ * visible and no trk_venue_t ever sits on this 4 KB stack.
  *
  * Ownership hand-off: op_tracks_put() (cmd.c) copies the venue JSON into its own buffer and then
  * BLOCKS in logger_request_sync() until this returns, so cmd_tracks_payload() points at bytes that
@@ -623,23 +654,36 @@ static int tracks_save(void)
  * cmd_dispatch's only caller) and ownership returns to cmd.c with the rc below. Nothing is
  * retained after the return.
  *
- * rc: 0 ok; -5 the table was already full (trk_user_add_json's own TRK_MAX_USER bound -- note a
- * same-id replace is refused too when full, which is the honest answer while no delete op exists);
- * -6 the JSON did not parse or nothing was staged; -7 installed in RAM but not persisted (the
- * caller tells the operator so, rather than reporting a success that a reboot erases). */
+ * rc: 0 ok; -5 the table was already full; -6 the JSON did not parse or nothing was staged;
+ * -7 installed in RAM but not persisted (the caller tells the operator so, rather than reporting
+ * a success that a reboot erases); -8 the venue id already exists ("id exists"); -9 a creation is
+ * in progress ("creation in progress; retry"). */
 static int put_track(void)
 {
     size_t n = 0;
     const char *json = cmd_tracks_payload(&n);
     LT_ASSERT_RET(json != NULL, LOG_ASSERT_CODE, -1);
+    LT_ASSERT_RET(n < CMD_JSON_CAP, LOG_ASSERT_CODE, -1);   /* cmd.c stages len < CMD_JSON_CAP */
     if (n == 0) return -6;
-    bool was_full = (trk_user_count() >= TRK_MAX_USER);
-    uint16_t vid = 0;
+    if (pipeline_create_active()) return -9;
+    trk_venue_t *slot = trk_user_scratch();
+    if (slot == NULL) return -5;
     char err[96];
     err[0] = '\0';
-    if (trk_user_add_json(json, n, &vid, err, sizeof err) != 0) {
+    if (trk_from_json(slot, json, n, err, sizeof err) != 0) {
+        memset(slot, 0, sizeof *slot);
         ESP_LOGW(TAG, "tracks put: %s", err[0] ? err : "parse failed");
-        return was_full ? -5 : -6;
+        return -6;
+    }
+    uint16_t vid = slot->id;
+    if (trk_get(vid) != NULL) {                    /* append-only: never replace a live id */
+        memset(slot, 0, sizeof *slot);
+        ESP_LOGW(TAG, "tracks put: venue %u already exists", (unsigned)vid);
+        return -8;
+    }
+    if (trk_user_add(slot) != 0) {                 /* the new-entry branch; cannot fail after the checks */
+        memset(slot, 0, sizeof *slot);
+        return -5;
     }
     if (tracks_save() != 0) return -7;
     ESP_LOGI(TAG, "tracks put: venue %u installed and persisted", (unsigned)vid);
@@ -767,7 +811,7 @@ static void handle_event(const event_t *ev)
  * first session of a boot has a zero block in its .log HDR frame (already flushed) with the
  * authoritative CALIB record immediately after it; the .sum HDR is rebuilt from s_hdr, and every
  * later session's HDR is right from byte one (s_calib persists across sessions). Values stay
- * zero / fusion defaults until #125 lands (Plan 8 calibration persistence). */
+ * zero / fusion defaults until #93 lands (Plan 8 orientation capture). */
 static void handle_calib(void)
 {
     uint8_t tmp[FRAME_TMP_CAP];
@@ -787,6 +831,12 @@ static void handle_result(const log_result_t *res)
     /* Kept even with no session open: a CALIB arriving between sessions seeds the next OPEN's HDR
      * (open_session copies s_calib). The HDR patch and the record write stay behind the gate. */
     if (res->kind == LOG_RES_CALIB) s_calib = res->u.calib;
+    if (res->kind == LOG_RES_TIMEMAP && !s_open) {   /* m-1: keep it for the next HDR, like s_calib */
+        s_tmap_stash.mono_us = res->u.tmap.mono_us;
+        s_tmap_stash.gps_us  = res->u.tmap.gps_us;
+        s_tmap_stash.quality = res->u.tmap.quality;
+        s_tmap_stash.valid   = true;
+    }
     if (!s_open) return;                             /* nothing to write without an open .log */
     uint8_t tmp[FRAME_TMP_CAP];
     int n;
@@ -1115,10 +1165,14 @@ static void status_cache_estimate(void)
 static void drain_all(void)
 {
     /* R4/§12.4: drain_results() runs BEFORE the sample rings so the TIME_MAP the pipeline
-     * posts right after an OPEN is the first record after the SESSION_HDR, as §12.4 requires
-     * ("at session start"). Records are individually timestamped, so moving LAP/SECTOR/
-     * DRAG/VENUE/TIME_MAP/CALIB ahead of FIX/FUSED inside one batch changes interleaving only
-     * -- never a value, never the .sum, never a decode. */
+     * posts right after an OPEN lands ahead of the first FIX/FUSED samples of the session (a
+     * TIME_MAP that beats its OPEN is stashed and written right behind the HDR, m-1). Records are
+     * individually timestamped, so moving LAP/SECTOR/DRAG/VENUE/TIME_MAP/CALIB ahead of FIX/FUSED
+     * inside one batch changes interleaving only -- never a value, never the .sum, never a decode.
+     * Known cost of draining REQUESTS first (m-2, ruling F-7: reordering is out of this wave's
+     * risk budget): on a CLOSE the closing session's EV_VENUE_LOST event record arrives after the
+     * session is already closed and is dropped, and FIX/FUSED samples still in the rings when a
+     * CLOSE+OPEN rotate is handled land in the NEW session, not the one they belong to. */
     drain_requests();
     drain_results();
     drain_rings();

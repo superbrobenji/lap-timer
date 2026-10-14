@@ -33,6 +33,11 @@ bool pipeline_sensors_ok(void);
  * just stopped" (deliberately indistinguishable: the caller tests >= OTA_STILL_MIN_MS). Before
  * any motion edge it is uptime modulo 2^32 ms. Read by ota_begin. */
 uint32_t pipeline_still_for_ms(void);
+/* True while an on-device track creation (§10.9, #97) is in progress. A volatile, advisory read for
+ * the logger's put_track (I-3b): a TRACKS_PUT is refused while this is true, because the creation
+ * finalises into the trk user table's scratch slot. Residual TOCTOU: a creation begun between the
+ * check and the install is not excluded. */
+bool pipeline_create_active(void);
 
 /* Best-known sector splits + theoretical best for the locked layout (design §2). Refreshed on
  * every EV_LAP_COMPLETE (valid or not -- the engine only updates its own bests on a valid lap, so

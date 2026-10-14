@@ -529,10 +529,12 @@ static int cmd_config_c(int argc, char **argv)
  * put` has side effects, so it takes the single-dispatch buffered frame (run_cmd) -- running it
  * twice would install the venue twice.
  *
- * Console size limit: repl_cfg.max_cmdline_length is 256 B, so a venue pasted here must be small
- * (one layout, few sectors). The framed CMD_TRACKS_PUT op over the dev-kit link carries the full
- * CMD_JSON_CAP (3072 B); the usage line says so rather than letting a truncated paste fail
- * mysteriously. */
+ * Console size limit (I-6): the TRACKS_PUT op itself accepts up to 3071 B (len < CMD_JSON_CAP), but
+ * the only shipped transport is this console line (repl_cfg.max_cmdline_length is 256 B; the
+ * dev-kit drives the same console and linkhost.c caps a command at 250 B), so a venue is limited
+ * to about 245 B today -- one layout, start/finish only. Larger venues wait for sub-project C's
+ * transport. The usage line says so rather than letting a truncated paste fail mysteriously.
+ * A PUT of an id that already exists is refused ("ERR 0x0703: id exists"). */
 static int cmd_tracks_c(int argc, char **argv)
 {
     CORE_ASSERT_RET(argv != NULL, EXP_SERIAL_ASSERT_CODE, 1);
@@ -545,8 +547,8 @@ static int cmd_tracks_c(int argc, char **argv)
         run_cmd(CMD_TRACKS_PUT, "tracks", (const uint8_t *)s_setbuf, w, false);
         return 0;
     }
-    printf("usage: tracks get | tracks put <json>   (console line cap 256 B; the framed\n");
-    printf("       CMD_TRACKS_PUT op over the dev-kit link takes up to 3072 B)\n");
+    printf("usage: tracks get | tracks put <json>   (a venue is limited to ~245 B by the 256 B\n");
+    printf("       console line; larger venues wait for sub-project C's transport)\n");
     return 1;
 }
 
@@ -626,24 +628,26 @@ static int dbg_logtest(int argc, char **argv)
     if (n < 1) n = 1;
     if (n > 65535) n = 65535;      /* R8: carried in command_t.arg16 (was 100000) */
 
-    log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = 1, .venue_id = 1, .layout_id = 1,
-                          .gps_us = (int64_t)1700000000000000LL };
-    CORE_ASSERT_RET(g_log_req_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);   /* xQueueSend needs a real queue handle */
-    if (xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
-        printf("logtest: log queue full; session not opened\n");
+    /* m-3: the PIPELINE is the one session-lifecycle owner (§12.1/§13.3), so this command no longer
+     * posts LOGGER_OPEN_SESSION itself: CMD_DBG_LOGTEST makes the pipeline open one (venue 0, the
+     * cfg mode) when its mirror says none is open, and leaves a live session alone. It goes first so
+     * the session exists when the two synthetic laps below are submitted. */
+    const int64_t base_gps_us = (int64_t)1700000000000000LL;
+    command_t c = { .type = CMD_DBG_LOGTEST, .arg16 = (uint16_t)n };
+    CORE_ASSERT_RET(g_cmd_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);
+    if (xQueueSend(g_cmd_q, &c, pdMS_TO_TICKS(100)) != pdTRUE) {
+        printf("logtest: cmd queue full; nothing queued\n");
         return 1;
     }
-    logger_notify();
-    vTaskDelay(pdMS_TO_TICKS(30));      /* let the logger open + write the HDR + initial .sum */
+    vTaskDelay(pdMS_TO_TICKS(150));     /* a 50 ms pipeline pass + the logger opening the .log/.sum */
 
-    logger_set_venue(1, 1, "logtest");
     for (uint16_t lap = 1; lap <= 2; lap++) {
         lap_result_t lr;
         memset(&lr, 0, sizeof lr);
         lr.lap_no       = lap;
         lr.time_ms      = 92000u + lap * 137u;
         lr.flags        = LAP_F_VALID;
-        lr.start_gps_us = req.gps_us + (int64_t)lap * 92000000;
+        lr.start_gps_us = base_gps_us + (int64_t)lap * 92000000;
         lr.n_sectors    = 3;
         lr.sector_ms[0] = 30000u; lr.sector_ms[1] = 31000u; lr.sector_ms[2] = 31000u + lap * 137u;
         lr.stats.max_speed_cms = 5000; lr.stats.min_speed_cms = 1200;
@@ -653,15 +657,8 @@ static int dbg_logtest(int argc, char **argv)
     logger_notify();
 
     /* R8 (app:M2): the fixes themselves are synthesised and pushed by the PIPELINE -- g_fix_ring's
-     * one documented producer (app/lt_ipc.h). Pushing them from this task made the relaxed-head
-     * SPSC ring two-producer and spliced two gps_fix_t into one FIX record in the live .log. */
-    command_t c = { .type = CMD_DBG_LOGTEST, .arg16 = (uint16_t)n };
-    CORE_ASSERT_RET(g_cmd_q != NULL, EXP_SERIAL_ASSERT_CODE, 1);
-    if (xQueueSend(g_cmd_q, &c, pdMS_TO_TICKS(100)) != pdTRUE) {
-        printf("logtest: cmd queue full; fixes not queued\n");
-        return 1;
-    }
-    printf("logtest: opened a session, queued 2 laps, asked the pipeline for %ld fixes; NOT closed.\n", n);
+     * one documented producer (app/lt_ipc.h), from the CMD_DBG_LOGTEST posted above. */
+    printf("logtest: asked the pipeline to open a session if none is open (venue 0), queued 2 laps, asked for %ld fixes; NOT closed.\n", n);
     printf("  -> the pipeline pushes up to 16 per 50 ms pass, so %ld fixes take ~%ld ms.\n",
            n, (n + 15) / 16 * 50);
     printf("  -> watch for \"session Sxxxxx_yyy open\", then pull power to test the cut.\n");
