@@ -1,6 +1,8 @@
-/* app/lt_err.h -- system error codes (spec §17.7). 3.2 needs the E_SYS_* subset used by the
- * boot sequence, crash-loop detection and supervisor; the full code table lands with the
- * serial console (3.5). Codes are stable u16 values logged into the error ring (§15.2). */
+/* app/lt_err.h -- system error codes (spec §17.7). The table below is still a SUBSET of §17.7:
+ * E_GPS_*, E_IMU_*, E_STO_SD_DEGRADED, E_PWR_*, E_LAP_PLAUSIBILITY and E_FUSION_* are absent
+ * because their producers are (GPS/IMU/fusion ladders -> Plan 8; power/SD -> Plan 6). Every code
+ * defined here has at least one writer. Codes are stable u16 values logged into the error ring (§15.2) and are
+ * APPEND-ONLY -- never renumber one. */
 #ifndef APP_LT_ERR_H
 #define APP_LT_ERR_H
 

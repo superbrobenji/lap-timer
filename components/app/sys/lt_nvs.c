@@ -77,7 +77,7 @@ typedef struct __attribute__((packed)) {
 
 /* H1: coalesce error-ring flash writes for a REPEATING (deduped) report. A distinct report still
  * persists immediately (crash/stall records stay reliable); a stuck hot-path assert reporting the
- * same (code,arg) every tick can refresh the ring in RAM but only writes flash once per this
+ * same code every tick can refresh the ring in RAM but only writes flash once per this
  * interval, so a 100 Hz failing assert cannot storm flash or wear the 24 KB NVS partition out. */
 #define ERRLOG_MIN_PERSIST_US (5 * 1000000LL)
 
@@ -95,9 +95,10 @@ static crash_entry_t  s_crash[CRASH_LOG_LEN];
  * the ring itself is loaded and errlog_add can append to it. */
 static uint8_t         s_blob_reset_mask;
 
-/* H1 dedup + rate-limit state (errlog_add). s_last_* is the most recently ADDED (code,arg): an
- * immediate repeat is folded onto the newest ring slot instead of overwriting all 32 with one
- * fault. s_ring_persist_us is the last time the ring was written to flash. */
+/* H1/M1 dedup + rate-limit state (errlog_add). s_last_* is the most recently ADDED report: a
+ * consecutive repeat of the same CODE (M1: the key is the code alone, not (code,arg)) is folded
+ * onto the newest ring slot instead of overwriting all 32 with one fault. s_ring_persist_us is the
+ * last time the ring was written to flash. */
 static uint16_t       s_last_code;
 static uint32_t       s_last_arg;
 static bool           s_last_valid;
@@ -368,27 +369,39 @@ int errlog_add(uint16_t code, uint32_t arg)
      * LT_ASSERT here would re-enter core_assert_fail -> core_assert_report -> errlog_add and recurse
      * to a boot-time stack overflow, so both guards are plain, self-recovering checks: code 0 is the
      * empty-slot sentinel (§17.7 real codes >= 0x0101), and a corrupt head is clamped, never asserted.
-     * H1: a stuck hot-path assert reports the same (code,arg) every tick -- dedup it onto the newest
-     * slot and rate-limit the flash write so it cannot storm NVS; a distinct report persists at once
-     * so genuine crash/stall records stay reliable. */
+     * H1/M1: a stuck hot-path assert reports the same code every tick -- collapse it onto the newest
+     * slot and rate-limit the flash write so it cannot storm NVS. The key is the code ALONE (M1), so
+     * a varying arg cannot defeat it; a distinct code persists at once so genuine crash/stall records
+     * stay reliable. */
     if (code == 0) return -1;
     blob_lock();                                /* F1: RMW of s_ring + its NVS write is not atomic */
     if (s_ring.head >= ERR_RING_LEN) s_ring.head = 0;
-    bool repeat = s_last_valid && code == s_last_code && arg == s_last_arg;
-    if (repeat) {
+    /* M1: the dedup and the flash-write rate limit both key on `code` ALONE, not on (code, arg).
+     * They used to key on both, which made a varying arg -- E_STO_WRITE's batch length, or an
+     * assert's __LINE__ -- defeat the limit entirely and storm NVS at the loop rate.
+     *
+     * Consecutive reports of the same code COLLAPSE onto the newest slot (latest arg and uptime
+     * win) rather than appending: appending would let a 1 Hz storm fill all 32 slots in 32 s and
+     * evict every other diagnostic, which is exactly the evidence an operator needs when storage
+     * has died. A DIFFERENT code always appends and always persists at once, so genuine
+     * crash/stall/mount records stay immediate and reliable. The only thing lost is the flash
+     * copy of a repeat's newest arg if power is cut inside the ERRLOG_MIN_PERSIST_US window --
+     * strictly less than what the old code lost (it did not even keep the repeat in RAM). */
+    bool same_code = s_last_valid && code == s_last_code;
+    if (same_code) {
         uint8_t newest = (uint8_t)((s_ring.head + ERR_RING_LEN - 1) % ERR_RING_LEN);
+        s_ring.entry[newest].arg      = arg;
         s_ring.entry[newest].uptime_s = uptime_s_now();
-        if (esp_timer_get_time() - s_ring_persist_us >= ERRLOG_MIN_PERSIST_US) errlog_persist();
-        blob_unlock();
-        return 0;
+    } else {
+        err_entry_t *e = &s_ring.entry[s_ring.head];
+        e->code = code; e->uptime_s = uptime_s_now(); e->boot = (uint16_t)s_boot_cnt; e->arg = arg;
+        s_ring.head = (uint8_t)((s_ring.head + 1) % ERR_RING_LEN);
     }
-    err_entry_t *e = &s_ring.entry[s_ring.head];
-    e->code = code; e->uptime_s = uptime_s_now(); e->boot = (uint16_t)s_boot_cnt; e->arg = arg;
-    s_ring.head = (uint8_t)((s_ring.head + 1) % ERR_RING_LEN);
+    bool due = !same_code || (esp_timer_get_time() - s_ring_persist_us) >= ERRLOG_MIN_PERSIST_US;
     s_last_code = code; s_last_arg = arg; s_last_valid = true;
-    errlog_persist();
+    if (due) errlog_persist();
     blob_unlock();
-    ESP_LOGW(TAG, "errlog 0x%04x arg=%u", code, (unsigned)arg);
+    if (!same_code) ESP_LOGW(TAG, "errlog 0x%04x arg=%u", code, (unsigned)arg);   /* no log storm either */
     return 0;
 }
 
@@ -469,7 +482,7 @@ void lt_errlog_clear(void)
 {
     blob_lock();                                /* F1: clear vs. a concurrent errlog_add */
     memset(&s_ring, 0, sizeof(s_ring));   /* head back to 0; layout unchanged, ring emptied */
-    s_last_valid = false;                       /* H1: drop dedup state so a post-clear repeat re-appends */
+    s_last_valid = false;                       /* H1/M1: drop dedup state so a post-clear repeat re-appends */
     (void)ring_save();
     s_ring_persist_us = esp_timer_get_time();
     blob_unlock();

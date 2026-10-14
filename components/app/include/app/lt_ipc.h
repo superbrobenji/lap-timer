@@ -134,9 +134,11 @@ typedef struct {
 
 extern QueueHandle_t g_result_q;
 
-/* §4.4 cmd_q -- ui/conn/power -> pipeline (depth 8, command_t 24 B). The producers (ui/conn/power)
- * land in later sessions; 3.4 creates the queue and the pipeline drains it (CMD_SET_MODE /
- * CMD_SET_LAYOUT / CMD_RESET_ENGINE at least). command_t is the §4.5 struct; the full command
+/* §4.4 cmd_q -- ui/conn/power -> pipeline (depth 8, command_t 24 B). The live producers are the
+ * ui task (menu actions) and app/cmd (remote CONFIG/engine ops); there is no power task (Plan 6)
+ * and no conn task (sub-project C). lt_ipc_init() creates the queue at boot step 11 and the
+ * pipeline drains it (CMD_SET_MODE / CMD_SET_LAYOUT / CMD_RESET_ENGINE / CMD_CONFIG_RELOAD /
+ * CMD_SIM_SCENARIO). command_t is the §4.5 struct; the full command
  * protocol + transport is components/app/cmd (3.5). */
 #define CMD_Q_DEPTH 8
 
