@@ -388,9 +388,10 @@ bool ota_reboot_due(void)
  * machine at once is (a) a task blocked for > 30 s in a single esp_ota_write (a 4 KB program is
  * ~10-40 ms), or (b) the instruction-wide window in which a poll has loaded OTA_RECV and a stale
  * stamp just before ota_end's refresh-then-OTA_VERIFY transition. ota_end itself is safe from
- * this poll: OTA_VERIFY is not OTA_RECV. §19.6's "abort on disconnect" is satisfied by THIS timeout and deliberately not by
- * the link DETECT edge: a detect flap during a healthy push would abort a good transfer, and the
- * console `ota recv` path does not use DETECT at all (see the §19.6 amendment, Task 10). */
+ * this poll: OTA_VERIFY is not OTA_RECV. §19.6's "abort on disconnect" is satisfied by THIS
+ * timeout and deliberately not by the link DETECT edge: a detect flap during a healthy push would
+ * abort a good transfer, and the console `ota recv` path does not use DETECT at all (see the
+ * §19.6 amendment, Task 10). */
 void ota_poll(void)
 {
     if (__atomic_load_n(&s_state, __ATOMIC_ACQUIRE) != OTA_RECV) return;
