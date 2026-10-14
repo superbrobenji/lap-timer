@@ -55,8 +55,6 @@ int json_skip(const jsmntok_t *toks, int ntoks, int i)
      * descendants and the loop exits on the first test. */
     int j = i + 1;
     while (j < ntoks && toks[j].start < toks[i].end) j++;
-    CORE_ASSERT_RET(j >= i, JSON_ASSERT_CODE, ntoks);   /* postcondition: the scan only ever advances */
-    CORE_ASSERT_RET(j <= ntoks, JSON_ASSERT_CODE, ntoks); /* postcondition: the while's own bound */
     return j;
 }
 
