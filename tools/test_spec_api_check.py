@@ -66,8 +66,6 @@ class Extraction(unittest.TestCase):
 
 
 class Drift(unittest.TestCase):
-    # repaired by Task 9 of docs/superpowers/plans/2026-10-13-fix-F4-process-docs.md; the decorator is deleted in that task
-    @unittest.expectedFailure
     def test_the_committed_spec_and_headers_agree(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

@@ -55,8 +55,35 @@ We follow Gerard Holzmann's **refined** Power-of-10 rules as published on his au
 - **`clang-tidy`** with a repo `.clang-tidy` enabling the checks that map to rules 1/6/7/9 (`misc-no-recursion`, `bugprone-*`, `cert-*`, `readability-function-size` for rule 4, pointer checks) — run over the in-scope translation units.
 - **`cppcheck`** (`--enable=warning,style,portability`, misra-adjacent) as a second analyser (rule 10 "multiple analysers").
 - **Compiler warnings for rule 6 linkage:** `-Wmissing-prototypes` and `-Wmissing-declarations` are in the pedantic warning set of every in-scope component and `main`, so a function without a prior declaration — i.e. one that should be `static` or should have a shared prototype — is caught (`-Werror`). (Note: the clang-only `-Wmissing-variable-declarations`, which the original design named, is not accepted by the xtensa gcc target toolchain; `-Wmissing-declarations` is the gcc-valid equivalent, and the file-scope-*variable* linkage half is additionally caught by the clang host build.)
-- **A small custom linter** (`tools/lint/power_of_10.py`) for the project-specific gates automated tools do not cover well: function length ≤ 60 code lines and **compound-statement bodies ≤ 30 code lines** (rule 4); **≥ 2 assertions for every function of > 20 code lines** (rule 5, refined per-function form; the per-component average is reported as an informational health metric only); no `malloc`-family after init (rule 3); no unregistered function pointer (rule 9); and the rule-8 gates — no `##`/token-paste or `#x`-as-logic, no `#undef`, no function-like/logic macros in `.c`, and the advisory `#ifdef`-budget count. It reads the deviation register.
-- **Rollout (as shipped at `plan-4.5-done`):** the analysers ran report-only through the retrofit, then flipped to **blocking** once every in-scope file complied. The blocking gates are the **custom linter** (`--enforce-fnptr --fail-on-violation`) and the **compiler `-Werror`** set (including the rule-6 `-Wmissing-prototypes`/`-Wmissing-declarations`) — together these precisely and comprehensively gate rules 3/4/4-compound/5/6/8/9/10 and fail CI on any violation. **`clang-tidy`** and **`cppcheck`** stay **report-only/advisory**: they satisfy rule 10's "preferably more than one analyser" by running and reporting, but their output is largely non-Power-of-10 (and the CI runner's clang-tidy emits a large, version-dependent clang-diagnostic flood that does not reproduce with the local toolchain, so gating merges on it is unreliable). The custom linter is deterministic and is the authoritative gate for the project-specific rules; the trimmed `.clang-tidy` keeps clang-tidy useful as an advisory analyser and for local runs. Marking the `static-analysis` job a branch-protection *required* check is a GitHub repo setting, noted in the CI workflow.
+- **A small custom linter** (`tools/lint/power_of_10.py`) for the project-specific gates automated
+  tools do not cover well. As amended by the 2026-10-13 audit fix wave (ruling R12) it gates:
+  **rule 1** direct recursion (a function whose body calls its own name); **rule 3** the full heap
+  API surface this codebase could reach (`malloc`/`calloc`/`realloc`/`reallocarray`/`free`/`strdup`/
+  `strndup`/`asprintf`/`vasprintf`/`aligned_alloc`/`heap_caps_*alloc`/`heap_caps_*free`/
+  `pvPortMalloc`/`vPortFree`) — **blocking**, which it was not before; **rule 4** functions over 60
+  code lines and compound-statement bodies over 30; **rule 5** ≥ 2 assertions in any function over 20
+  code lines; **rule 8** the preprocessor gates; **rule 9** unregistered function pointers — the
+  `(*name)(` declarator *and* a function passed by value to a known sink (`qsort`, `bsearch`,
+  `xTaskCreate*`, `esp_timer_create`, `gpio_isr_handler_add`, `esp_console_cmd_register`,
+  `spi_bus_add_device`) *and* a function stored into a struct field or variable. Two counting rules
+  make rules 4/5 un-evadable: an `#if 0` region is blanked before anything is counted (an assertion
+  in dead code never counts, and an unbalanced brace there can no longer desynchronise the scanner),
+  and a body's size is `max(physical code lines, top-level statements)`, so `a; b; c;` on one line
+  counts three. Scope is `components/core`, `components/app`, `components/drivers`, `main` **and**
+  `devcontroller/` — the last report-only, since the dev-kit firmware was never retrofitted. It
+  reads the deviation register.
+- **Rollout.** The analysers ran report-only through the retrofit, then flipped to blocking. A
+  newly added or tightened check follows the same two-step rollout: it lands with its known
+  pre-existing sites listed in `--report-only-sites path:symbol:RULE` (or, coarsely,
+  `--report-only-rules`) in the CI invocation, each entry naming the plan that owns the file; the
+  linter prints `GRACE-STALE` for an entry that stops matching, and the flag is deleted in a
+  separate, final task once every owner has merged. The blocking gates are the custom linter
+  (`--enforce-fnptr --fail-on-violation`) and the compiler `-Werror` set; `clang-tidy` and
+  `cppcheck` stay advisory (rule 10's "preferably more than one analyser"). Ruling R13 (2026-10-13)
+  **designates** `static-analysis` one of nine required checks, and F4's final task enables them in
+  branch protection at merge; until then five contexts are required on `main` (`hygiene`,
+  `host-tests`, `tracks-generated`, `build (moto_neo6m)`, `build (moto_sim)`) and `static-analysis`
+  is not among them — it was not when `plan-4.5-done` was tagged either.
 - Rules not fully automatable (2 bounded-loops provability, 8 preprocessor judgment) are enforced by a **review checklist** — `docs/power-of-10-checklist.md`, referenced from the product spec §17.9.
 
 ## 6. Behavior-preserving mandate
