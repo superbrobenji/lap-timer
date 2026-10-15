@@ -16,10 +16,13 @@
  * unaffected (.sum intact via atomic rename; .log decodable with a resync-past-bad truncated tail).
  */
 #include "app/logger.h"
+#include "app/cmd.h"          /* cmd_tracks_payload(): LOGGER_PUT_TRACK reads the staged venue JSON (R5) */
+#include "app/log_pause.h"    /* §12.6 still-pause state machine (R4) */
 #include "app/lt_assert.h"
 #include "app/lt_ipc.h"
 #include "app/lt_sup.h"
 #include "app/lt_nvs.h"
+#include "app/pipeline.h"     /* pipeline_create_active(): put_track refuses a PUT mid-creation (I-3b) */
 #include "app/lt_err.h"
 #include "app/status.h"      /* status_cache_update() -- logger.c owns storage, feeds the cache (Plan 5.6 T1 fix 1) */
 #include "hal/storage.h"
@@ -89,7 +92,16 @@ static const char *TAG = "log";
 
 /* §12.5 .sum assembly: LAP/DRAG frames accumulate here, then rebuild_sum streams HDR+VENUE+laps+
  * drags+END straight to the .sum fd (A1) -- no assemble-then-emit scratch. */
-#define LAP_ACC_CAP      3072
+/* §12.5 .sum capacity (L2, audit §7.3). The .sum must carry the first 100 LAP frames. Worst case
+ * per frame at a 4-sector layout -- the deepest the §20.4 board renders and the deepest any
+ * bundled or on-device-created venue uses: payload 30 + 4*n_splits (§12.3) with n_splits = 4+1 = 5
+ * -> 50 B, plus the 5 B frame wrapper = 55 B. 100 * 55 = 5500 B. A layout with more than 4 sectors
+ * (LAP_MAX_SECTORS is 8 -> 71 B/frame -> 7100 B for 100) is deliberately NOT provisioned: those
+ * laps spill past the cap, which §12.5 already allows ("laps beyond the first 100 are summarised
+ * only in the .log"), and the spill is now reported once per session instead of silent. */
+#define SUM_LAP_FRAME_B   55u
+#define SUM_LAP_FRAMES    100u
+#define LAP_ACC_CAP       (SUM_LAP_FRAME_B * SUM_LAP_FRAMES)   /* 5500 */
 #define DRAG_ACC_CAP     512
 
 static StaticTask_t s_tcb;
@@ -98,7 +110,9 @@ static TaskHandle_t s_task;
 
 /* open session */
 static sto_file_t s_log_fd;
-static bool       s_open;
+static uint32_t s_open_req_seen;                  /* R-1: OPEN requests dequeued (logger task only) */
+static volatile uint32_t s_open_req_at_open;      /* R-1: s_open_req_seen at the latest completed OPEN; logger writes, any task reads */
+static volatile bool s_open;   /* written only by the logger task; read cross-task by logger_session_is_open() */
 static char       s_id[11];            /* "S%05u_%03u" + NUL */
 static uint8_t    s_seq;               /* per-boot session sequence (§12.1) */
 static ses_hdr_t  s_hdr;
@@ -115,6 +129,15 @@ static size_t  s_batch_len;
 static uint8_t s_lap_acc[LAP_ACC_CAP];   static size_t s_lap_len;
 static uint8_t s_drag_acc[DRAG_ACC_CAP]; static size_t s_drag_len;
 static bool    s_sum_dirty;
+static bool    s_acc_full;               /* L2: the .sum lap accumulator spilled this session (logged once) */
+/* m-1: the latest TIME_MAP received while NO session was open (the pipeline posts one right after
+ * its OPEN, and this task's request drain may have run just before that OPEN arrived). Any
+ * consistent (mono, gps, quality) triple stays valid, so it is written straight after the next HDR
+ * rather than dropped, exactly like s_calib. */
+static struct { int64_t mono_us, gps_us; uint8_t quality; bool valid; uint32_t at_ms; } s_tmap_stash;
+static ses_calib_t s_calib;   /* latest block from the pipeline (LOG_RES_CALIB); zero / fusion
+                               * defaults until #93 (orientation capture, Plan 8) lands */
+static log_pause_t s_pause;   /* §12.6 still-pause (R4): FIX/FUSED suppressed while paused */
 
 /* timing + state */
 static uint32_t s_last_write_ms, s_last_sync_ms, s_last_evict_ms;
@@ -129,6 +152,7 @@ static uint16_t s_sessions_cached;
 static uint32_t s_free_kb_cached;
 static uint32_t s_bytes_since_info;
 
+#define TMAP_STASH_MAX_AGE_MS 5000u   /* N-2: a stashed TIME_MAP older than this at the next HDR is stale */
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 /* storage_free_kb/session_count (Plan 5.6 T1 fix 1, moved verbatim from cmd.c's op_status):
@@ -215,15 +239,16 @@ static void batch_append(const uint8_t *frame, int n)
     s_batch_len += (size_t)n;
 }
 
-static void acc_append(uint8_t *acc, size_t *len, size_t cap, const uint8_t *frame, int n)
+static bool acc_append(uint8_t *acc, size_t *len, size_t cap, const uint8_t *frame, int n)
 {
-    LT_ASSERT_VOID(acc != NULL, LOG_ASSERT_CODE);
-    LT_ASSERT_VOID(len != NULL, LOG_ASSERT_CODE);
-    LT_ASSERT_VOID(*len <= cap, LOG_ASSERT_CODE);   /* precondition: accumulator already within its cap */
-    if (n <= 0 || *len + (size_t)n > cap) return;   /* beyond cap: kept in .log only (§12.5) */
-    LT_ASSERT_VOID(frame != NULL, LOG_ASSERT_CODE);
+    LT_ASSERT_RET(acc != NULL, LOG_ASSERT_CODE, false);
+    LT_ASSERT_RET(len != NULL, LOG_ASSERT_CODE, false);
+    LT_ASSERT_RET(*len <= cap, LOG_ASSERT_CODE, false);   /* precondition: accumulator within its cap */
+    if (n <= 0 || *len + (size_t)n > cap) return false;   /* beyond cap: kept in .log only (§12.5) */
+    LT_ASSERT_RET(frame != NULL, LOG_ASSERT_CODE, false);
     memcpy(acc + *len, frame, (size_t)n);
     *len += (size_t)n;
+    return true;
 }
 
 /* Stream one .sum section to the open tmp fd, in emission order (§12.5). Skips a zero-length
@@ -242,9 +267,8 @@ static int sum_write(sto_file_t f, const uint8_t *p, size_t n)
 /* §12.5: rebuild .sum = HDR + VENUE + every LAP + every DRAG_RUN [+ END] via tmp+sync+rename.
  * A1: each HDR/VENUE/END frame is encoded into one small stack buffer and streamed to the open fd;
  * the accumulators stream straight from their own storage -- no 4 KB assemble-then-emit scratch.
- * The bytes are identical to the old single-buffer build: its fit-guards were always satisfied
- * (HDR 99 + VENUE 41 + LAP_ACC_CAP 3072 + DRAG_ACC_CAP 512 + END 14 = 3738 < the old 4096 cap), so
- * every section was, and still is, emitted in the same order.
+ * Each section is streamed straight to the open fd, so no single buffer has to hold their sum --
+ * only LAP_ACC_CAP/DRAG_ACC_CAP bound their own sections (acc_append).
  * Plan 5.6 T1 fix 4: returns true only when the .sum was fully written, synced and atomically
  * renamed into place; every failure path returns false (each one still recorded by errlog_add), so
  * a caller that counts sessions cannot count a .sum that never landed. */
@@ -285,6 +309,52 @@ static void eviction_check(void);   /* forward decl: called from open_session (�
 static void status_cache_prime(void);   /* forward decl: called from logger_task at boot only -- I2 made
                                           * delete_session's cache update incremental, not a rescan */
 
+/* §12.7's hard floor. open_session() refuses below it (after one eviction pass); tracks_save()
+ * refuses outright (PR #101 M3: it was the one writer in this file that ignored the reserve and
+ * could add ~10 KB of .tmp on a filesystem the project keeps above 5 % -- memory
+ * `project-lt-storage-listing-cost`: never let the fs reach 0 free). */
+static bool below_reserve(sto_info_t *si)
+{
+    LT_ASSERT_RET(si != NULL, LOG_ASSERT_CODE, false);
+    if (sto_info(si) != 0 || si->total_kb == 0) return false;   /* unknown: do not block the write */
+    return si->free_kb < (si->total_kb * STO_RESERVE_PCT) / 100u;
+}
+
+static bool next_session_id(void)
+{
+    /* M13 (audit §7.3): at the 256th open of one boot s_id would stop advancing and this open
+     * would re-open the PREVIOUS session's .log with STO_APPEND, concatenating two sessions into
+     * one file while rebuild_sum overwrote the shared .sum from empty accumulators -- losing the
+     * first session's laps from the summary §12.6 promises is never evicted. R4 makes mode changes
+     * and venue changes rotate sessions, so this is now reachable: refuse the open instead.
+     * The boot counter advances on the next reset, which is the only recovery and the honest one. */
+    if (s_seq >= 0xFFu) {
+        (void)errlog_add(E_STO_WRITE, 0xFFu);
+        ESP_LOGE(TAG, "session sequence exhausted (255 opens this boot): not opening");
+        return false;
+    }
+    s_seq++;
+    (void)snprintf(s_id, sizeof s_id, "S%05u_%03u",
+                   (unsigned)(lt_nvs_boot_get() & 0xFFFFu), (unsigned)s_seq);
+    LT_ASSERT_RET(s_id[0] != '\0', LOG_ASSERT_CODE, false);   /* valid session state before opening a file for it */
+    return true;
+}
+
+/* m-1: write a TIME_MAP stashed while closed, right behind the HDR just flushed. */
+static void write_stashed_time_map(void)
+{
+    if (!s_tmap_stash.valid) return;
+    s_tmap_stash.valid = false;
+    /* N-2: only a record that beat its own OPEN belongs here (stashed milliseconds ago). A record
+     * drained after a CLOSE (posted while the logger still read open) is stashed too and no OPEN
+     * follows for hours; its pair must not anchor a later session. close_session also clears it. */
+    if ((now_ms() - s_tmap_stash.at_ms) > TMAP_STASH_MAX_AGE_MS) return;
+    uint8_t tmp[FRAME_TMP_CAP];
+    int n = ses_encode_time_map(s_tmap_stash.mono_us, s_tmap_stash.gps_us, s_tmap_stash.quality,
+                                tmp, sizeof tmp);
+    if (n > 0) batch_append(tmp, n);
+}
+
 static void open_session(const log_request_t *req)
 {
     LT_ASSERT_VOID(req != NULL, LOG_ASSERT_CODE);
@@ -295,11 +365,9 @@ static void open_session(const log_request_t *req)
      * space below the reserve, do not open -- there is no file yet to leave half-created, and the
      * next open request (or the 60 s eviction pass) retries naturally once space recovers. */
     sto_info_t si;
-    if (sto_info(&si) == 0 && si.total_kb != 0 &&
-        si.free_kb < (si.total_kb * STO_RESERVE_PCT) / 100u) {
+    if (below_reserve(&si)) {
         eviction_check();
-        if (sto_info(&si) == 0 && si.total_kb != 0 &&
-            si.free_kb < (si.total_kb * STO_RESERVE_PCT) / 100u) {
+        if (below_reserve(&si)) {
             if (!s_samples_full) {
                 s_samples_full = true;
                 sys_flags_set(SYS_STORAGE_FULL);
@@ -311,11 +379,7 @@ static void open_session(const log_request_t *req)
         }
     }
 
-    if (s_seq < 0xFF) s_seq++;
-    (void)snprintf(s_id, sizeof s_id, "S%05u_%03u",
-                   (unsigned)(lt_nvs_boot_get() & 0xFFFFu), (unsigned)s_seq);
-    LT_ASSERT_VOID(s_id[0] != '\0', LOG_ASSERT_CODE);   /* valid session state before opening a file for it */
-
+    if (!next_session_id()) return;                 /* M13: refuses at the 256th open of a boot */
     memset(&s_hdr, 0, sizeof s_hdr);
     hdr_set(s_hdr.session_id, sizeof s_hdr.session_id, s_id);
     s_hdr.mode      = req->mode;
@@ -326,8 +390,11 @@ static void open_session(const log_request_t *req)
     hdr_set(s_hdr.hwid, sizeof s_hdr.hwid, CFG_HWID);
     s_hdr.log_profile  = 0;
     s_hdr.fused_hz     = (uint8_t)CFG_FUSED_LOG_HZ;
-    s_hdr.gps_hz       = 0;                         /* real rate filled by the pipeline (3.4) */
-    s_hdr.start_gps_us = req->gps_us;               /* calib block left zero until 3.4 */
+    s_hdr.gps_hz       = req->gps_hz;          /* §12.3: the real GPS rate, from gps_profile_t.max_rate_hz */
+    s_hdr.start_gps_us = req->gps_us;
+    memcpy(s_hdr.r_e4,  s_calib.r_e4,  sizeof s_hdr.r_e4);     /* §12.3 calib block: the last block the
+    memcpy(s_hdr.gbias, s_calib.gbias, sizeof s_hdr.gbias);     * pipeline posted (LOG_RES_CALIB), zeros
+    s_hdr.calib_flags = s_calib.calib_flags;                    * until #93 lands and before the first one of a boot */
 
     s_venue_id = req->venue_id;
     s_layout_id = req->layout_id;
@@ -339,6 +406,7 @@ static void open_session(const log_request_t *req)
     s_lap_len = 0;
     s_drag_len = 0;
     s_sum_dirty = false;
+    s_acc_full = false;
     /* latch and sys flag move together (Plan 7 T9 fix 3b): only reached once the reserve guard
      * above has already confirmed storage is genuinely above STO_RESERVE_PCT, so a latch that was
      * set stays consistent with SYS_STORAGE_FULL instead of going stale. */
@@ -351,7 +419,11 @@ static void open_session(const log_request_t *req)
         s_id[0] = 0;
         return;
     }
-    s_open = true;
+    /* R-1: publish the count BEFORE s_open (release store): a task that loads s_open true (acquire)
+     * therefore reads at_open of that open or a later one -- never an older value -- so a torn pair
+     * can only confirm if the logger's latest completed open is the pipeline's latest OPEN. */
+    s_open_req_at_open = s_open_req_seen;
+    __atomic_store_n(&s_open, true, __ATOMIC_RELEASE);
     LT_ASSERT_VOID(s_log_fd >= 0, LOG_ASSERT_CODE);   /* valid session state: a successful sto_open yields fd >= 0 */
     s_last_write_ms = s_last_sync_ms = now_ms();
 
@@ -360,6 +432,7 @@ static void open_session(const log_request_t *req)
     batch_append(tmp, n);
     do_write();                                     /* flush HDR now: a cut right after open still yields a valid .log */
     (void)sto_sync(s_log_fd);                        /* and sync it: a cut right after open must not lose the .log HDR either */
+    write_stashed_time_map();                        /* m-1: a TIME_MAP that beat the OPEN here lands right behind the HDR */
     /* initial .sum: HDR + VENUE. Failure already recorded by errlog_add inside; the .sum is
      * rebuilt again at the next LAP/close. */
     (void)rebuild_sum(false, 0, 0);
@@ -388,6 +461,7 @@ static int close_session(const log_request_t *req)
     (void)sto_sync(s_log_fd);
     (void)sto_close(s_log_fd);
     s_open = false;
+    s_tmap_stash.valid = false;   /* N-2: a stash only ever bridges a record that beat its OPEN, never a close */
     /* Finalise .sum with END. Plan 5.6 T1 fix 3: the count is incremental, not a rescan -- closing
      * is the one definitive "a session is now counted" boundary this file uses (see
      * status_cache_prime()'s doc comment for why open_session does not also bump this).
@@ -398,6 +472,11 @@ static int close_session(const log_request_t *req)
     s_bytes_since_info = 0;
     status_cache_update(s_free_kb_cached, s_sessions_cached);
     ESP_LOGI(TAG, "session %s closed (reason %u)", s_id, (unsigned)req->reason);
+    /* L1: evict_scan_oldest() excludes "%s.log" built from s_id, so a populated s_id after the
+     * close kept the last closed session's .log permanently out of eviction -- with one log left,
+     * eviction reported nothing_left and latched SYS_STORAGE_FULL instead of reclaiming it.
+     * Logged above first: this must not blank the id in that line. */
+    s_id[0] = '\0';
     return 0;
 }
 
@@ -476,13 +555,15 @@ static int delete_session(const log_request_t *req)
 _Static_assert(TRK_USER_REC_MAX + 4u <= BATCH_CAP,
                "the largest single user-track record (+ its length/crc wrapper) must fit the logger's scratch batch");
 
+_Static_assert(sizeof(s_batch) == BATCH_CAP, "tracks_save/load stream through the whole scratch batch");
+
 /* One record (length prefix + trk_user_save_venue()'s payload + crc16 trailer) for user-table
  * index i, written to f through s_batch. False on any write failure -- tracks_save() aborts the
  * whole save rather than leave a partial file (the caller never sto_rename()s a .tmp this
  * returned false on, so the OLD /tracks/user.bin is untouched by a failed save). */
 static bool tracks_save_record(sto_file_t f, uint8_t i)
 {
-    LT_ASSERT_RET(sizeof s_batch == BATCH_CAP, LOG_ASSERT_CODE, false);   /* the scratch buffer this streams through */
+    LT_ASSERT_RET(s_batch_len == 0, LOG_ASSERT_CODE, false);   /* the scratch batch must be free: a session batch would be clobbered */
     size_t n = 0;
     if (trk_user_save_venue(i, s_batch, sizeof s_batch, &n) != 0) return false;
     LT_ASSERT_RET(n <= TRK_USER_REC_MAX, LOG_ASSERT_CODE, false);   /* within the proven bound (_Static_assert above) */
@@ -517,6 +598,13 @@ static bool tracks_save_record(sto_file_t f, uint8_t i)
  * precedes the records it describes. */
 static int tracks_save(void)
 {
+    sto_info_t si;
+    if (below_reserve(&si)) {
+        (void)errlog_add(E_STO_FULL, 1u);   /* arg 1 = the tracks writer (0 = open_session) */
+        ESP_LOGE(TAG, "tracks save refused: %u/%u KB free is below the %u%% reserve",
+                 (unsigned)si.free_kb, (unsigned)si.total_kb, (unsigned)STO_RESERVE_PCT);
+        return -2;
+    }
     if (s_batch_len != 0) {
         LT_ASSERT_RET(s_open, LOG_ASSERT_CODE, -1);   /* invariant: a non-empty batch implies an open session */
         do_write();
@@ -556,6 +644,80 @@ static int tracks_save(void)
     return 0;
 }
 
+/* R5 (§18.1 0x13 TRACKS_PUT). The install runs HERE, off the console task, so a trk_user_add()
+ * never runs on a fourth, ad-hoc context. Honest ownership picture (final review I-3): core/trk.h
+ * names this task a READER (since #97, tracks_save()); this plan makes it a second post-boot
+ * WRITER, but only an APPEND-ONLY one, and trk.h's writer list still says otherwise (trk.h is F0's
+ * file, fenced in this wave -- the controller hands the doc fix to F4). The two rules below are what
+ * keep the table's documented invariant ("no writer may rewrite an id a reader may hold", trk.c):
+ *  (a) a PUT whose id already exists, bundled or user, is REFUSED (-8): a same-id replace would be
+ *      a ~2.7 KB struct copy onto a venue the lap engine and the ui hold by pointer.
+ *  (b) a PUT is refused while a pipeline track creation is active (-9): finalize_create() builds in
+ *      trk_user_scratch() = user[user_n], the very slot this parse lands in, from another core.
+ *      Residual TOCTOU: a creation begun between pipeline_create_active() and the install below is
+ *      not excluded (the window is a parse plus one append; a creation needs a full S/F lap first).
+ * The parse lands in trk_user_scratch() (user[user_n], invisible to every reader until the add
+ * bumps user_n) via the public trk_from_json(), so the id can be checked BEFORE anything becomes
+ * visible and no trk_venue_t ever sits on this 4 KB stack.
+ *
+ * Ownership hand-off: op_tracks_put() (cmd.c) copies the venue JSON into its own buffer and then
+ * BLOCKS in logger_request_sync() until this returns, so cmd_tracks_payload() points at bytes that
+ * cannot change for exactly this call (§18.1 one request in flight; the console task is
+ * cmd_dispatch's only caller) and ownership returns to cmd.c with the rc below. Nothing is
+ * retained after the return.
+ *
+ * rc: 0 ok; -5 the table was already full; -6 the JSON did not parse or nothing was staged;
+ * -7 installed in RAM but not persisted (the caller tells the operator so, rather than reporting
+ * a success that a reboot erases); -8 the venue id already exists ("id exists"); -9 a creation is
+ * in progress ("creation in progress; retry"). */
+static int put_track(void)
+{
+    size_t n = 0;
+    const char *json = cmd_tracks_payload(&n);
+    LT_ASSERT_RET(json != NULL, LOG_ASSERT_CODE, -1);
+    LT_ASSERT_RET(n < CMD_JSON_CAP, LOG_ASSERT_CODE, -1);   /* cmd.c stages len < CMD_JSON_CAP */
+    if (n == 0) return -6;
+    if (pipeline_create_active()) return -9;
+    trk_venue_t *slot = trk_user_scratch();
+    if (slot == NULL) return -5;
+    char err[96];
+    err[0] = '\0';
+    if (trk_from_json(slot, json, n, err, sizeof err) != 0) {
+        memset(slot, 0, sizeof *slot);
+        ESP_LOGW(TAG, "tracks put: %s", err[0] ? err : "parse failed");
+        return -6;
+    }
+    uint16_t vid = slot->id;
+    if (trk_get(vid) != NULL) {                    /* append-only: never replace a live id */
+        memset(slot, 0, sizeof *slot);
+        ESP_LOGW(TAG, "tracks put: venue %u already exists", (unsigned)vid);
+        return -8;
+    }
+    if (trk_user_add(slot) != 0) {                 /* the new-entry branch; cannot fail after the checks */
+        memset(slot, 0, sizeof *slot);
+        return -5;
+    }
+    if (tracks_save() != 0) return -7;
+    ESP_LOGI(TAG, "tracks put: venue %u installed and persisted", (unsigned)vid);
+    return 0;
+}
+
+/* PR #101 M3: a creation that finished while storage was dead or full showed the rider the VENUE
+ * one-shot with the new name and no hint that the venue lives in RAM only until the next reboot.
+ * The requester is NULL (fire-and-forget, by design: the pipeline must never block on this task),
+ * so the rc goes nowhere -- post the bad news to the ui instead. EV_VENUE_FOUND carrying BOTH
+ * EV_VENUE_ANNOUNCE_ONLY (core/event.h: never a finished creation, never replaces a persistent
+ * one-shot) and EV_VENUE_NOT_SAVED (app/lt_ipc.h). Straight to g_ui_evt_q, never emit_event():
+ * ui-only, exactly like EV_CFG_CHANGED/EV_LAP_RESET. arg16 = the venue id the save was for. */
+static void notify_tracks_not_saved(uint16_t venue_id)
+{
+    if (g_ui_evt_q == NULL) return;
+    event_t ev = { .type = EV_VENUE_FOUND,
+                   .flags = (uint8_t)(EV_VENUE_ANNOUNCE_ONLY | EV_VENUE_NOT_SAVED),
+                   .arg16 = venue_id, .mono_us = esp_timer_get_time() };
+    if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "tracks not-saved: ui queue full");
+}
+
 /* Reads one length-prefixed, CRC16-trailed record from f into s_batch and loads it. False on a
  * short/truncated read (the rest of the file, if any, is unreachable without it -- the caller
  * stops the loop there). A CRC mismatch is NOT a false here: it is reported true (keep reading)
@@ -567,7 +729,7 @@ static int tracks_save(void)
  * if one somehow made it into a committed file. */
 static bool tracks_load_record(sto_file_t f)
 {
-    LT_ASSERT_RET(sizeof s_batch == BATCH_CAP, LOG_ASSERT_CODE, false);   /* the scratch buffer this streams through */
+    LT_ASSERT_RET(s_batch_len == 0, LOG_ASSERT_CODE, false);   /* the scratch batch must be free: a session batch would be clobbered */
     uint8_t lenbuf[2];
     size_t  got = 0;
     if (sto_read(f, lenbuf, sizeof lenbuf, &got) != 0 || got != sizeof lenbuf) return false;
@@ -623,13 +785,18 @@ static int handle_request(const log_request_t *req)
 {
     LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);   /* M1: an asserted anomaly reports failure, not 0/ok */
     switch (req->type) {
-    case LOGGER_OPEN_SESSION:    open_session(req); return 0;
+    case LOGGER_OPEN_SESSION:    open_session(req); return 0;   /* R-1/N-B: counted in drain_requests, at dequeue */
     case LOGGER_CLOSE_SESSION:   return close_session(req);
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
     case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
     case LOGGER_EVICT:           s_last_evict_ms = now_ms() - EVICT_INTERVAL_MS; return 0;   /* force an eviction pass this loop */
     case LOGGER_DELETE_SESSION:  return delete_session(req);
-    case LOGGER_SAVE_TRACKS:     return tracks_save();
+    case LOGGER_SAVE_TRACKS: {
+        int rc = tracks_save();
+        if (rc != 0) notify_tracks_not_saved(req->venue_id);
+        return rc;
+    }
+    case LOGGER_PUT_TRACK:       return put_track();
     /* LOGGER_LOAD_TRACKS retired (review fix round 1, T5-R2) -- logger_load_tracks() is called
      * once from main/app_main.c's boot sequence (final review F-4/I-4), before this task even
      * exists, never via a request. */
@@ -640,8 +807,9 @@ static int handle_request(const log_request_t *req)
 static void handle_event(const event_t *ev)
 {
     LT_ASSERT_VOID(ev != NULL, LOG_ASSERT_CODE);
-    LT_ASSERT_VOID(s_open, LOG_ASSERT_CODE);   /* valid session state: callers only forward events while open */
-    LT_ASSERT_VOID(ev->type < EV_COUNT, LOG_ASSERT_CODE);    /* the EV_* set is closed and stable (core/event.h) */
+    LT_ASSERT_VOID(ev->gps_us >= 0 && ev->mono_us >= 0, LOG_ASSERT_CODE);   /* both are written into the EVENT record (§12.3) as i64 epoch/monotonic values */
+    /* design 2026-10-13 §3: the logged EV_* set is append-only and EV_COUNT (core/event.h, F1a) is its single bound -- EV_FAULT stopped being the last code when EV_VENUE_LOST was added */
+    LT_ASSERT_VOID(ev->type < EV_COUNT, LOG_ASSERT_CODE);
     /* Every event -- EV_LAP_COMPLETE / EV_DRAG_DONE included -- is logged verbatim as a generic
      * EVENT record (§12.3). The authoritative full LAP / DRAG_RUN records now arrive over result_q
      * (handle_result), so the logger no longer synthesises a minimal one from the event payload. */
@@ -650,10 +818,38 @@ static void handle_event(const event_t *ev)
     batch_append(tmp, n);
 }
 
+/* LOG_RES_CALIB, session open (s_calib was stored by handle_result already). §12.3: the header's
+ * calib block AND the CALIB record (0x0A). The pipeline posts this right after each OPEN, so the
+ * first session of a boot has a zero block in its .log HDR frame (already flushed) with the
+ * authoritative CALIB record immediately after it; the .sum HDR is rebuilt from s_hdr, and every
+ * later session's HDR is right from byte one (s_calib persists across sessions). Values stay
+ * zero / fusion defaults until #93 lands (Plan 8 orientation capture). */
+static void handle_calib(void)
+{
+    uint8_t tmp[FRAME_TMP_CAP];
+    LT_ASSERT_VOID(s_open, LOG_ASSERT_CODE);   /* only reached behind handle_result's gate */
+    memcpy(s_hdr.r_e4,  s_calib.r_e4,  sizeof s_hdr.r_e4);
+    memcpy(s_hdr.gbias, s_calib.gbias, sizeof s_hdr.gbias);
+    s_hdr.calib_flags = s_calib.calib_flags;
+    int n = ses_encode_calib(&s_calib, tmp, sizeof tmp);
+    batch_append(tmp, n);
+    s_sum_dirty = true;
+}
+
 /* §12.3 SECTOR / DRAG_GATE / real VENUE from the pipeline's full engine result (result_q). */
 static void handle_result(const log_result_t *res)
 {
     LT_ASSERT_VOID(res != NULL, LOG_ASSERT_CODE);
+    /* Kept even with no session open: a CALIB arriving between sessions seeds the next OPEN's HDR
+     * (open_session copies s_calib). The HDR patch and the record write stay behind the gate. */
+    if (res->kind == LOG_RES_CALIB) s_calib = res->u.calib;
+    if (res->kind == LOG_RES_TIMEMAP && !s_open) {   /* m-1: keep it for the next HDR, like s_calib */
+        s_tmap_stash.mono_us = res->u.tmap.mono_us;
+        s_tmap_stash.gps_us  = res->u.tmap.gps_us;
+        s_tmap_stash.quality = res->u.tmap.quality;
+        s_tmap_stash.at_ms   = now_ms();
+        s_tmap_stash.valid   = true;
+    }
     if (!s_open) return;                             /* nothing to write without an open .log */
     uint8_t tmp[FRAME_TMP_CAP];
     int n;
@@ -663,7 +859,12 @@ static void handle_result(const log_result_t *res)
         LT_ASSERT_VOID(lap->n_sectors <= LAP_MAX_SECTORS + 1u, LOG_ASSERT_CODE);   /* within sector_ms[] */
         n = ses_encode_lap(lap, tmp, sizeof tmp);    /* full record: sectors + per-lap stats §9.4 */
         batch_append(tmp, n);
-        acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n);   /* .sum carries every LAP (§12.5) */
+        /* L2: the 100-frame cap is reached -- say so once, so a short .sum is never a surprise. */
+        if (!acc_append(s_lap_acc, &s_lap_len, LAP_ACC_CAP, tmp, n) && !s_acc_full) {
+            s_acc_full = true;
+            ESP_LOGW(TAG, ".sum lap accumulator full at lap %u: later laps are .log-only (§12.5)",
+                     (unsigned)lap->lap_no);
+        }
         /* One SECTOR record per sector gate: crossing gps_us reconstructed from the cumulative
          * splits (exact -- the splits are the crossing differences), delta left 0. */
         int64_t cum_us = lap->start_gps_us;
@@ -680,7 +881,8 @@ static void handle_result(const log_result_t *res)
         LT_ASSERT_VOID(run->n_gates <= DRAG_MAX_GATES, LOG_ASSERT_CODE);   /* within gates[] */
         n = ses_encode_drag_run(run, tmp, sizeof tmp);
         batch_append(tmp, n);
-        acc_append(s_drag_acc, &s_drag_len, DRAG_ACC_CAP, tmp, n);
+        /* DRAG_ACC_CAP holds 2 worst-case DRAG_RUN frames; a bench session never exceeds it and §12.5 allows the spill */
+        (void)acc_append(s_drag_acc, &s_drag_len, DRAG_ACC_CAP, tmp, n);
         for (uint8_t i = 0; i < run->n_gates && i < DRAG_MAX_GATES; i++) {
             const drag_gate_res_t *g = &run->gates[i];
             if (!g->hit) continue;
@@ -697,6 +899,15 @@ static void handle_result(const log_result_t *res)
         s_hdr.venue_id  = s_venue_id;                /* keep the .sum HDR consistent */
         s_hdr.layout_id = s_layout_id;
         s_sum_dirty = true;                          /* rebuild .sum with the real VENUE record */
+    } else if (res->kind == LOG_RES_TIMEMAP) {
+        /* §12.4: the pipeline owns the time base, so it produces every (mono, gps, quality)
+         * triple -- at session start, on each tb_quality() change and every 60 s -- and this task
+         * only writes it. .log-only (§12.5 lists the .sum's sections). */
+        n = ses_encode_time_map(res->u.tmap.mono_us, res->u.tmap.gps_us, res->u.tmap.quality,
+                                tmp, sizeof tmp);
+        batch_append(tmp, n);
+    } else if (res->kind == LOG_RES_CALIB) {
+        handle_calib();
     }
 }
 
@@ -706,7 +917,8 @@ static void drain_results(void)
     log_result_t res;
     uint32_t n = 0;
     while (xQueueReceive(g_result_q, &res, 0) == pdTRUE) {
-        LT_ASSERT_VOID(n++ < RESULT_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
+        n++;
+        LT_ASSERT_VOID(n <= RESULT_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
         handle_result(&res);
     }
 }
@@ -717,12 +929,14 @@ static void drain_rings(void)
      * does not back up) while SESSION_HDR/VENUE/LAP/DRAG_RUN/END keep flowing (handle_result,
      * open_session, close_session) so summaries and the .sum still form. Same gate as the
      * SYS_STORAGE_FULL sample pause below. */
-    bool suppress = s_samples_full || (sys_flags_get() & (1u << SYS_SAFE_MODE)) != 0;
+    bool suppress = s_samples_full || log_pause_active(&s_pause) ||
+                    (sys_flags_get() & (1u << SYS_SAFE_MODE)) != 0;
 
     gps_fix_t fix;
     uint32_t fix_n = 0;
     while (ring_pop(&g_fix_ring, &fix)) {
-        LT_ASSERT_VOID(fix_n++ < FIX_RING_CAP, LOG_ASSERT_CODE);   /* rule 2: ring drain bounded by ring depth */
+        fix_n++;
+        LT_ASSERT_VOID(fix_n <= FIX_RING_CAP, LOG_ASSERT_CODE);   /* rule 2: ring drain bounded by ring depth */
         if (s_open && !suppress) {
             uint8_t tmp[FRAME_TMP_CAP];
             int n = ses_encode_fix(&s_fix_st, &fix, tmp, sizeof tmp);
@@ -733,7 +947,8 @@ static void drain_rings(void)
     fused_sample_t fs;
     uint32_t fused_n = 0;
     while (ring_pop(&g_fused_ring, &fs)) {
-        LT_ASSERT_VOID(fused_n++ < FUSED_RING_CAP, LOG_ASSERT_CODE);   /* rule 2: ring drain bounded by ring depth */
+        fused_n++;
+        LT_ASSERT_VOID(fused_n <= FUSED_RING_CAP, LOG_ASSERT_CODE);   /* rule 2: ring drain bounded by ring depth */
         if (s_open && !suppress) {
             uint8_t tmp[FRAME_TMP_CAP];
             int n = ses_encode_fused(&s_fused_st, &fs, tmp, sizeof tmp);
@@ -748,7 +963,18 @@ static void drain_events(void)
     event_t ev;
     uint32_t n = 0;
     while (xQueueReceive(g_evt_q, &ev, 0) == pdTRUE) {
-        LT_ASSERT_VOID(n++ < EVT_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
+        n++;
+        LT_ASSERT_VOID(n <= EVT_Q_DEPTH, LOG_ASSERT_CODE);   /* rule 2: drain bounded by queue depth */
+        /* The pause edges are tracked for EVERY event, not only while a session is open -- a bike
+         * parked before the session opens must already be counting down. */
+        if (ev.type == EV_STILL) {
+            log_pause_still(&s_pause, now_ms());
+        } else if (ev.type == EV_MOTION && log_pause_motion(&s_pause)) {
+            /* §12.6 "resumes with a FIX_KEY": re-key both delta codecs so the first record after
+             * the pause is a keyframe, not a delta against a sample from minutes ago. */
+            ses_fix_state_init(&s_fix_st);
+            ses_fused_state_init(&s_fused_st);
+        }
         if (s_open) handle_event(&ev);
     }
 }
@@ -795,7 +1021,7 @@ static bool evict_scan_oldest(evict_ctx_t *e)
         }
         sto_list_close(&it);
     }
-    LT_ASSERT_RET(strlen(e->oldest) < STO_NAME_MAX, LOG_ASSERT_CODE, false);   /* postcondition: name copy in bounds */
+    LT_ASSERT_RET(e->curlog[0] == '\0' || strcmp(e->oldest, e->curlog) != 0, LOG_ASSERT_CODE, false);   /* postcondition: the OPEN session's .log is never a candidate */
     return e->oldest[0] != 0;
 }
 
@@ -889,6 +1115,9 @@ static void drain_requests(void)
     log_request_t req;
     uint32_t n = 0;
     while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) {
+        /* R-1/N-B: count every OPEN taken off the FIFO, before the bound check below, so one that is
+         * dequeued and then dropped is still counted -- exactly once, never in handle_request. */
+        if (req.type == LOGGER_OPEN_SESSION) s_open_req_seen++;
         /* M2: doubled from LOG_REQ_Q_DEPTH -- a handler can yield mid-drain (e.g. storage I/O
          * inside delete_session/eviction_check), letting producers refill the queue within this
          * same call; still a bounded loop (rule 2), just against a less pessimistic worst case. */
@@ -948,12 +1177,31 @@ static void status_cache_estimate(void)
     status_cache_update(free_kb, s_sessions_cached);
 }
 
+/* One loop pass of the four drains, in the order §12.4 needs. */
+static void drain_all(void)
+{
+    /* R4/§12.4: drain_results() runs BEFORE the sample rings so the TIME_MAP the pipeline
+     * posts right after an OPEN lands ahead of the first FIX/FUSED samples of the session (a
+     * TIME_MAP that beats its OPEN is stashed and written right behind the HDR, m-1). Records are
+     * individually timestamped, so moving LAP/SECTOR/DRAG/VENUE/TIME_MAP/CALIB ahead of FIX/FUSED
+     * inside one batch changes interleaving only -- never a value, never the .sum, never a decode.
+     * Known cost of draining REQUESTS first (m-2, ruling F-7: reordering is out of this wave's
+     * risk budget): on a CLOSE the closing session's EV_VENUE_LOST event record arrives after the
+     * session is already closed and is dropped, and FIX/FUSED samples still in the rings when a
+     * CLOSE+OPEN rotate is handled land in the NEW session, not the one they belong to. */
+    drain_requests();
+    drain_results();
+    drain_rings();
+    drain_events();
+}
+
 /* Boot-time half of logger_task, extracted (P10 rule 5, controller ruling P-6) so the task entry --
  * which must never itself LT_ASSERT_*-return (see sup_task's note) -- stays under the 20-line
  * budget now that it also subscribes to the task WDT. */
 static void logger_boot(void)
 {
     sup_register_task(HB_LOGGER, xTaskGetCurrentTaskHandle(), LOG_STALL_S);
+    log_pause_init(&s_pause);
     sup_wdt_subscribe(HB_LOGGER);     /* §17.1 (R7): a logger wedged in LittleFS compaction -- the
                                        * Plan-7-T9 bench failure -- must panic, not hang silently */
     /* #97 (§10.9): the user track table is no longer loaded here (final review F-4/I-4) --
@@ -977,12 +1225,11 @@ static void logger_task(void *arg)
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOOP_TIMEOUT_MS));   /* ring-notify or 1000 ms */
         sup_wdt_feed();
 
-        drain_requests();
-        drain_rings();
-        drain_events();
-        drain_results();
+        drain_all();
 
         uint32_t now = now_ms();
+        if (log_pause_tick(&s_pause, now)) ESP_LOGI(TAG, "logging paused: still %u s (§12.6)",
+                                                    (unsigned)(LOG_PAUSE_STILL_MS / 1000u));
         if (s_open && s_batch_len &&
             (s_batch_len >= BATCH_FLUSH_B || (now - s_last_write_ms) >= WRITE_INTERVAL_MS))
             do_write();
@@ -1011,12 +1258,22 @@ void logger_notify(void)
     if (s_task) xTaskNotifyGive(s_task);
 }
 
+bool logger_session_is_open(void)
+{
+    return __atomic_load_n(&s_open, __ATOMIC_ACQUIRE);   /* single-byte read; the logger task is the only writer */
+}
+
+uint32_t logger_open_req_at_open(void)
+{
+    return s_open_req_at_open;   /* volatile aligned 32-bit read; the logger task is the only writer */
+}
+
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily
  * full queue drops the result (the .log still carries the EVENT record). Safe from the pipeline. */
 static void submit(const log_result_t *r)
 {
     LT_ASSERT_VOID(r != NULL, LOG_ASSERT_CODE);
-    LT_ASSERT_VOID(r->kind <= LOG_RES_VENUE, LOG_ASSERT_CODE);   /* only 3 kinds ever set, all in this file */
+    LT_ASSERT_VOID(r->kind <= LOG_RES_CALIB, LOG_ASSERT_CODE);   /* only the 5 LOG_RES_* kinds are ever set, all in this file */
     if (!g_result_q) return;
     if (xQueueSend(g_result_q, r, 0) == pdTRUE) logger_notify();
 }
@@ -1051,5 +1308,26 @@ void logger_set_venue(uint16_t venue_id, uint16_t layout_id, const char *name)
     r.u.venue.venue_id = venue_id;
     r.u.venue.layout_id = layout_id;
     if (name) (void)snprintf(r.u.venue.name, sizeof r.u.venue.name, "%s", name);
+    submit(&r);
+}
+
+void logger_submit_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality)
+{
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_TIMEMAP;
+    r.u.tmap.mono_us = mono_us;
+    r.u.tmap.gps_us  = gps_us;
+    r.u.tmap.quality = quality;
+    submit(&r);
+}
+
+void logger_submit_calib(const ses_calib_t *c)
+{
+    LT_ASSERT_VOID(c != NULL, LOG_ASSERT_CODE);
+    log_result_t r;
+    memset(&r, 0, sizeof r);
+    r.kind = LOG_RES_CALIB;
+    r.u.calib = *c;
     submit(&r);
 }

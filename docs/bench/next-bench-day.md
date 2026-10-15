@@ -377,7 +377,8 @@ reconciles them (audit M9/M10), so trust the code table when a number disagrees.
 - [ ] **42. Task-WDT coverage is real** (F2a T3, R7). Read the boot log (a read-only capture). Expect exactly
   these `sup: wdt subscribe hb=N rc=0` lines: `hb=1` (supervisor), `hb=0` (pipeline — printed AFTER its
   GPS/IMU init lines, not before), `hb=2` (logger); none for the link task (deliberate, §17.1) and none for
-  the ui, which subscribes directly with `esp_task_wdt_add(NULL)` until F2b converts it. A missing or
+  the ui, which subscribes directly with `esp_task_wdt_add(NULL)` until F2b converts it
+  (superseded: on the F2b build the ui subscribes through `sup_wdt_subscribe` and a fourth line `hb=3` appears — item 60). A missing or
   `rc != 0` line also leaves `E_SYS_WDT_SUBSCRIBE` (0x050D) in `errlog`. Then `dbg hang` and confirm the
   task WDT still panics in ~5 s as before.
 - [ ] **43. OTA receive timeout on both transports** (F2a T4, M8/M7, §19.6). (a) Start `tools/devkit.py --port
@@ -397,6 +398,171 @@ reconciles them (audit M9/M10), so trust the code table when a number disagrees.
   10-minute read-only capture: `hb[1]` (`dbg status`) must advance once per second throughout (the 60 s
   `heap_caps_check_integrity_all` walk must not perturb the supervisor's cadence) and no `0x050E`
   (`E_SYS_HEAP_CORRUPT`) may appear.
+
+### F2b bench items (audit fix wave — firmware logger + cmd, 2026-10-13)
+
+Not yet run — bench gate `f2b-d1`, after F2b merges. Standing rules unchanged: flash by dev-kit OTA push, never
+reset or open the lap-timer's USB port for 35 s after a push, sign in place, identify the two ports first.
+Log lines are `I (<ms>) <tag>: ...` with tags `log` (logger), `pipe`, `ui`, `sup`; they are silenced while a
+framed console response or an `ota recv` push is in flight, so capture them outside those. Framed responses are
+`---BEGIN <name> <size>---` ... `---END <crc32 hex>---` (`lt_proto.h`) and a refusal is
+`ERR 0x<code>: <msg>`; every console command line is sent with a bare `\r`. `config set` takes the JSON with
+escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `units` is `"kmh"|"mph"`). Items
+46-56 are the plan's own eleven; 57-64 cover what the Session B/C fix rounds added.
+
+- [ ] **46. §12.6 still-pause** (F2b T2/T4, R4). On `moto_sim`: `dbg sim laps 2` (so the speed goes above
+  3 km/h), then `dbg sim park`. Take `dbg logck <id>` (id from `dbg fs`) 2 s after the line
+  `log: logging paused: still 10 s (§12.6)` appears (~10 s after the stop), wait 10 s, take it again. Expect
+  `FIX=` and `FUSED=` identical in the two readings (other counts may grow: `EVENT`, `TIME_MAP`). Then
+  `dbg sim laps 2`: `FIX=` grows again, the first record after the pause being a key frame, and `dbg sum <id>`
+  still reads `HDR ok`, `frames: ok=N bad=0`. Evidence: the pause log line + the two `logck` lines.
+- [ ] **47. §12.4 TIME_MAP + §12.3 CALIB** (F2b T4/T5, R4). `dbg logck <id>` on any session opened by this
+  build: the line carries ` TIME_MAP=<n> CALIB=<n> END=<n> other=<n>`. Expect `TIME_MAP>=1` and `CALIB=1`
+  (before this build both fell into `other=`). Leave the session open 70 s and repeat: `TIME_MAP` is at least
+  one higher (60 s cadence, or sooner on a time-base quality change). Evidence: both `logck` lines.
+- [ ] **48. §12.1 session rotation on a mode change** (F2b T5, R4). With a session open run
+  `config set {\"mode\":\"drag\"}`. Expect, in order, `pipe: config reloaded (units <n>, mode 1)`,
+  `log: session S<boot>_<k> closed (reason 0)`, `log: session S<boot>_<k+1> open`; `dbg fs` lists both
+  `.log`/`.sum` pairs; `list` shows the older as `"mode":"lap"` and the newer as `"mode":"drag"`. Repeat
+  with `{\"mode\":\"lap\"}`. The same two sessions appear when the mode is changed from the menu.
+  Evidence: the three log lines + the `list` body.
+- [ ] **49. Real-GPS build opens no session without a venue** (F2b T5, R4, audit §3.3 #25). Flash `moto_neo6m`
+  (stub GPS): no venue is ever acquired, so the honest observable is the ABSENCE of a session and of any
+  crash: `dbg fs` prints `/sessions:` then `(empty)` (only `dbg logtest` opens one there), `errlog` holds no
+  `0x04xx` (`E_STO_*`) entry. The positive half needs the real driver (Plan 8, #93) and stays open there.
+- [ ] **50. R5 tracks round trip** (F2b T6/T7). `tracks get`: a `---BEGIN tracks <n>---` frame whose body is
+  a JSON array, one object per bundled venue with `"src":"bundled"` (and on `moto_sim` the sim venue,
+  id 1004, as `"src":"user"`), ending `---END <crc32>---`. Then (one line, 256 B console cap):
+  `tracks put {\"id\":900,\"name\":\"Bench\",\"lat\":-33.9,\"lon\":18.4,\"radius_m\":500,\"layouts\":[{\"id\":1,\"name\":\"L\",\"dir\":1,\"sf\":[[-33.9,18.4],[-33.9001,18.4001]]}]}`
+  Expect a `---BEGIN tracks 0---` ... `---END 00000000---` ack, then `tracks get` lists id 900 with
+  `"src":"user"`, and after `dbg reset` it is STILL listed (it went through `/tracks/user.bin`).
+  Negatives: `tracks put {}` -> `ERR 0x0703: bad venue json`; repeat the SAME put (id 900) -> `ERR 0x0703: id exists`
+  (the user table is append-only; the earlier venue is unchanged, `tracks get` still lists it once; I-3); repeat the put with NEW ids (901, 902, ...) until
+  `ERR 0x0703: table full`. The table refuses once it already holds `TRK_MAX_USER` (4) user venues
+  (`put_track` is refused when `trk_user_scratch()` finds no free slot, `user_n >= 4`), and the sim venue (id 1004) and anything already in
+  `/tracks/user.bin` count. Starting from an EMPTY `user.bin` (check `tracks get` shows no other `"src":"user"`
+  entries first) that is: on `moto_sim` the first 3 puts (900-902) succeed and the 4th refuses; on `moto_neo6m`
+  the first 4 succeed and the 5th refuses; every venue already persisted pre-fills a slot and moves the
+  refusal one put earlier. A re-put of an existing id while the table is full is refused as `table full` (the
+  full check comes first; with room it is `id exists`). A PUT during an active New track creation answers
+  `ERR 0x0703: creation in progress; retry`. Size: the console line caps a venue at about 245 B (I-6).
+  Evidence: the frames and the two errors.
+- [ ] **51. R5 coredump** (F2b T6/T7). `coredump` with nothing stored -> `ERR 0x0703: coredump: none stored`.
+  `dbg crash`, let it reboot, then `coredump` -> `---BEGIN coredump <n>---` with a Base64 body and
+  `---END <crc32>---`; decode host-side and check the ELF magic (`espcoredump.py info_corefile` is the full
+  check). `coredump clear` -> an empty ack frame, then `coredump` -> `none stored` again. Evidence: the three
+  responses.
+- [ ] **52. R11 menu lock at 10 km/h** (F2b T5/T8). `dbg sim laps 5`; long-MODE (`dbg btn mode 1200`, or the
+  real button) while the sim is between 3 and 10 km/h (the capture's slowest corner) and again above 10.
+  Expect: the low-speed press OPENS the menu with no `menu locked` line; the high-speed press logs
+  `ui: menu locked (<n> >= 10 km/h, §20.7)` with the real speed and the menu stays closed; the MOVING glyph
+  is on only at or above 10 km/h (it follows `pipeline_speed_kmh() >= MENU_LOCK_SPEED_KMH`, the same figure as
+  the lock). Evidence: the two log lines + a photo of the strip.
+- [ ] **53. R10 cfg lock + only-on-change reload** (F2b T1/T6/T8). Run `config set {\"units\":\"mph\"}` and
+  `config set {\"units\":\"kmh\"}` from the console while repeatedly toggling Units in the menu. Expect no
+  silently reverted write: every change ends up in `config get`, and contention shows as
+  `ui: units: cfg busy, not saved` or `ERR 0x0703: config busy; retry`, never a lost value. Also, a
+  `config set` with the SAME values as `config get` logs no `pipe: config reloaded` line (§15.2 only-on-change)
+  while one that changes a value logs it. Evidence: `config get` before/after + the absence of the reload line.
+- [ ] **54. PR #101 M3: NOT SAVED card** (F2b T4/T8). Fill the filesystem below the 5 % reserve (`dbg logtest
+  60000` repeatedly until `dbg fs` shows storage FULL), then create a track from the menu. Expect the VENUE card
+  reads `VENUE` / `NOT SAVED`, `errlog` carries `0x0404` (`E_STO_FULL`) with arg 1 (the tracks writer; arg 0 is `open_session`'s), the
+  venue is still armed (the Layout item offers it) but gone after a reset. Free the space again afterwards
+  (`delete <id>` on the logtest sessions; never leave the filesystem at 0 free). Evidence: card photo + the
+  errlog line.
+- [ ] **55. PR #101 M4: resumed layout** (F2b T8). Lock a layout, let a lap run, `dbg crash` mid-lap, and on
+  the next boot open the menu. Expect `Layout: <the locked layout's name>`, NOT `Auto`, and the first MODE
+  press advances to the NEXT layout rather than silently switching away. Evidence: the two menu photos.
+- [ ] **56. L9: ui stack high-water on BOTH deep paths** (context for #53). `dbg mem` right after a
+  `drag_rows_refill` burst (`dbg sim drag`) and again right after a full refresh (UP+DOWN 2 s,
+  `dbg btn up+down 2200`). Record both `stack ui` `B free` figures (the event branch
+  `handle_event -> drag_rows_refill` and the render branch `render_and_refresh -> disp_refresh` are mutually
+  exclusive, so #53's 340 B may have been taken on only one). Evidence: both `dbg mem` lines, pasted into #53.
+- [ ] **57. Mid-lap reboot opens a NEW session carrying the resumed laps** (F2b T5 fix round, B5-5). On
+  `moto_sim`: `dbg sim laps 5`, `dbg crash` during lap 2. After the reboot expect
+  `pipe: rtc resume: lap <n> venue <id> continued (interrupted)` and `log: session S<boot+1>_001 open` (a new
+  boot counter, so a new id; NOT the crashed session reopened). Let two more laps finish, then `dbg fs` lists
+  the new pair and `dbg sum <new id>` reads `LAP count >= 2`, `VENUE ok`, `frames: ok=N bad=0`;
+  `dbg logck <new id>` shows `LAP>=2`. The crashed session's `.sum` is untouched. Evidence: the two log lines +
+  both `dbg sum` outputs.
+- [ ] **58. A refused OPEN is retried and succeeds once space returns** (F2b T4/T5, B5-6). Starting from item
+  54's full filesystem on `moto_sim`, `dbg reset`: the boot-time OPEN is refused
+  (`log: storage below reserve (<free>/<total> KB): session not opened`). Without another reset, free space
+  with `delete <id>` (a few old sessions, until `dbg fs` shows free above the reserve). Within ~60 s expect
+  `log: session S<boot>_<k> open` and `dbg logck` of it growing. Evidence: both log lines + the timestamps.
+- [ ] **59. SAFE MODE is persistent** (F2b T8, C8-2). Enter safe mode: three `dbg crash` in a row, each issued
+  within 60 s of boot (§17.5). On the SAFE MODE card, `dbg btn mode 1200`, `dbg btn up 1200`,
+  `dbg btn down 1200` and `dbg btn up+down 2200` (and the real buttons) must each leave the card up; only a
+  reboot leaves it. Finish with `dbg safe clear` and a reboot (normal screen). Evidence: a photo after the four
+  presses.
+- [ ] **60. Task-WDT coverage now includes the ui** (F2b T8, R7; amends item 42). Read the boot log: expect FOUR
+  `sup: wdt subscribe hb=N rc=0` lines: `hb=1` (supervisor), `hb=0` (pipeline), `hb=2` (logger) and `hb=3`
+  (ui — it now subscribes through `sup_wdt_subscribe`, not `esp_task_wdt_add` directly); none for the link task.
+  No `0x050D` (`E_SYS_WDT_SUBSCRIBE`) in `errlog`. Evidence: the four lines.
+- [ ] **61. The RTC snapshot carries `partial_count`** (F2b T8, C8-5). `dbg rtc` prints `partial_count`. On
+  `moto_sim`, `dbg sim laps 3`, let several lap-card updates (partial refreshes) happen, then, right after a lap
+  completes (the save-on-gate), `dbg rtc` -> `rtc: VALID` with `partial_count : <n>` > 0. Limitation: the count is
+  reset by each full refresh and only sampled at a gate crossing, so a reading of 0 right after a full refresh
+  is correct — repeat until a gate follows a run of partials. Evidence: the `dbg rtc` output.
+- [ ] **62. `dbg logtest` fixes come from the pipeline** (F2b T5/T7, R8). On `moto_neo6m` (no other fix source):
+  note `fix_ring drop:` from `dbg fs`, run `dbg logtest 200`, wait >= 3 s (the logger writes its batch every 1 s),
+  `dbg logck <id>` and `dbg fs` again. Every fix the logger pops while the session is open and not suppressed
+  (safe mode, storage full, still-pause: none applies here, the synthetic fixes never reach the pipeline's
+  motion edge) becomes exactly one `FIX_KEY` or `FIX_DELTA` record (`ses_encode_fix` always emits one, and
+  `logck` counts both under `FIX=`), so expect `FIX=` equal to 200 minus the INCREASE in the `fix_ring drop:`
+  figure (the 32-slot ring drops the newest on overflow; the counter is cumulative since boot). Also
+  `frames ok=N bad=0`, `LAP=2` and no decode error — no spliced records, because the console is no longer a second producer. Repeat with
+  `dbg logtest 60000` once to confirm the heartbeat stays alive (`dbg status` `hb[0]` advancing).
+  Evidence: the `logck` line + `dbg fs` drop count. The session itself is opened by the PIPELINE (m-3: `dbg logtest`
+  posts no `LOGGER_OPEN_SESSION` any more): with none open the console prints "asked the pipeline to open a session
+  if none is open (venue 0)" and `dbg fs` shows one new session whose header has venue 0; with a session already
+  open (e.g. `moto_sim`'s boot session) no new one appears and the laps/fixes go into it.
+- [ ] **63. OTA tokens end in ONE CRLF; a refusal is the `0x0801` family** (F2b T7, L15). With the lap-timer
+  moving (`dbg sim laps 20` on `moto_sim`), capture a refused push raw on the lap-timer port, e.g.
+  `python3 -c "import serial,sys;s=serial.Serial(sys.argv[1],115200,timeout=1);s.write(b'ota recv 100 '+b'0'*64+b' v moto_sim_epaper\r');print(s.read(300).hex(' '))" <lt port>`
+  (the last argument must be the device's own hwid, `moto_sim_epaper` on `moto_sim`, the string
+  `tools/ota_push.py` reads from the image header: `ota_begin` rejects a mismatching hwid with `OTA-ERR 0x0802`
+  BEFORE the §19.5 preconditions, so an arbitrary string never reaches them). Traced order: `ota_build_begin`
+  accepts size 100, an all-zero 64-hex sha, any ver and hwid; `ota_begin` then checks length, in-flight, the
+  hwid (0x0802), and `ota_precheck` -> `ota_precond_eval`: in-flight, size (0 or > max), STILL (< 30 s
+  still), battery, slot -- size 100 passes, so while moving it refuses at STILL. The reply contains
+  `OTA-ERR 0x0801` followed by exactly `0d 0a` (never `0d 0d 0a`). If the sim has been parked >= 30 s the begin
+  would SUCCEED (and print `OTA-READY`, closing the session); keep it lapping. No flash happens, so
+  the 35 s rule does not apply. `errlog` then carries `0x0801` with arg 3 (not still; item 34). On a real
+  push (item 23) capture the same way: `OTA-READY` and `OTA-END 0x0000` each end `0d 0a`. Note: the
+  `ota precondition: <reason>` text of `cmd.c`'s `OTA_BEGIN` only reaches a client through a framed transport
+  (BLE/WiFi, sub-project C); the console and dev-kit paths use the `OTA-ERR 0x0801` token, so the reason is read
+  from `errlog`'s arg. Evidence: the hex dump + the errlog line.
+- [ ] **64. `list` shows the NEWEST 48 sessions** (F2b T6b + final review I-5; #91 follows in F5). Create more than 48 sessions: on
+  `moto_sim` alternate `config set {\"mode\":\"drag\"}` / `{\"mode\":\"lap\"}` 52 times, 400 ms apart (each
+  change rotates the session, item 48). `list`: the body holds exactly 48 `{"id":"S...` objects
+  (`... | grep -o '"id":"S' | wc -l` -> 48), the frame CRC is valid, `dbg fs` shows more than 48 pairs, the
+  NEWEST session id (the last in `dbg fs`) IS in the `list` body and the oldest ids are not.
+  Delete a few (`delete <id>`) and `list` shows 48 again until fewer remain. Evidence: the count + the `dbg fs`
+  pair count.
+- [ ] **65. An OTA push does not reopen a session** (F2b final review I-1). With a session open for more than 60 s
+  (`moto_sim` boot session, or a venue acquired) and the bike still >= 30 s, `dbg fs` and note the newest session id.
+  Push an image (`flash push` / `tools/ota_push.py`); do not touch the lap-timer port for 35 s after it (item 23's
+  rule). During and after the push the newest id is UNCHANGED: no `session ... open` line appears after `OTA-READY`
+  (the log silence of the transfer holds), and after the reboot the new boot's session is the only new one. Before
+  the fix a new near-empty session opened ~50 ms after the OTA close. Evidence: the `dbg fs` before and after.
+- [ ] **66. New track at venue A rotates the session** (F2b final review I-4). On `moto_sim` (or a real venue) with
+  a session open for venue A, start Menu -> New track, mark the gates and finish. `dbg fs` / `list`: A's session is
+  closed (its `.sum` ends) and a NEW session opened for the created venue (venue_id = the new id). A's `.sum` holds
+  only A's laps, the new one only the new venue's; no session carries two venue ids. Evidence: two `dbg sum` lines.
+- [ ] **67. `tracks put` of an existing id is refused** (F2b final review I-3): see item 50 (`ERR 0x0703: id exists`,
+  `creation in progress; retry` while New track is active). Evidence: the ERR lines.
+- [ ] **68. TIME_MAP is written from a consistent pair** (F2b final review I-2). Console limit: `dbg logck <id>`
+  only COUNTS records (`TIME_MAP=<n>`); it does not decode the gps/mono values, so the pair's consistency is NOT
+  observable on the console (host tests cover only the record encode/decode and the time base, not the
+  pair selection). What can be checked: `dbg logck <id>` of a session reports no decode error and `TIME_MAP>=1`
+  once the session has run with fixes flowing. The q=0 / none-written branch (a
+  session opened before the boot's first fix) is NOT bench-observable: no opener supplies a session without
+  fixes, and `tb_quality()` never returns to 0 after a lock. Evidence: the `logck` lines.
+- [ ] **69. Rotation never desyncs the lifecycle** (F2b closure N-1). `config set {\"mode\":\"drag\"}`, `dbg fs`
+  shows the rotation (a second `.log`/`.sum` pair), then `config set {\"mode\":\"lap\"}` rotates again (a third
+  pair), 5 s apart; repeat once with the flips 400 ms apart (item 64). Every flip must produce exactly one
+  close + one open line; no flip may be skipped. Evidence: the log lines + `dbg fs`.
 
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4

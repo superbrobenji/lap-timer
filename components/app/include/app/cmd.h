@@ -31,7 +31,7 @@ enum {
  * assert its own frame-assembly buffer is at least this big: export_serial's ser_emit used to clamp
  * silently and then CRC the truncated body, which would make a widened field or one extra key
  * turn every CONFIG_GET/ERRLOG_GET dump into a self-consistent lie (drv:M7). Keep in step with
- * s_json's declaration in cmd.c. */
+ * s_asm.json's declaration in cmd.c. */
 #define CMD_JSON_CAP 3072u
 
 /* The tag reserved for unsolicited fused-log / event STREAM frames pushed to an attached peer
@@ -40,12 +40,18 @@ enum {
  * records from command responses. Payload is a §14 record. */
 enum { LINK_STREAM_TAG = 0xFF };
 
-/* Op codes (§18.1). STATUS/CONFIG/ERRLOG/DIAG + LIST/OPEN/READ/DELETE/CLOSE are implemented; the
- * OTA_* ops (§19.4) are the receive-side firmware-update state machine (session 5.4). */
+/* Op codes (§18.1). Every op in this enum is implemented in cmd.c. §18.1's TIME_SYNC (0x30) is the
+ * only op still absent -- it needs a provisional-clock consumer and is filed against Plan 8 (design
+ * 2026-10-13 R5). */
 enum { CMD_STATUS=0x01, CMD_LIST=0x02, CMD_OPEN=0x03, CMD_READ=0x04, CMD_CLOSE=0x05, CMD_DELETE=0x06,
-       CMD_CONFIG_GET=0x10, CMD_CONFIG_SET=0x11, CMD_ERRLOG_GET=0x14, CMD_ERRLOG_CLEAR=0x15,
-       CMD_DIAG_GET=0x16,
+       CMD_CONFIG_GET=0x10, CMD_CONFIG_SET=0x11, CMD_TRACKS_GET=0x12, CMD_TRACKS_PUT=0x13,
+       CMD_ERRLOG_GET=0x14, CMD_ERRLOG_CLEAR=0x15,
+       CMD_DIAG_GET=0x16, CMD_COREDUMP_GET=0x17, CMD_COREDUMP_CLEAR=0x18,
        CMD_OTA_BEGIN=0x20, CMD_OTA_DATA=0x21, CMD_OTA_END=0x22, CMD_OTA_ABORT=0x23 };
+
+/* LOGGER_PUT_TRACK's view of the staged JSON. put_track()'s rc (logger.c): 0 ok, -5 table full,
+ * -6 bad json, -7 installed but not saved, -8 id exists, -9 creation in progress. */
+const char *cmd_tracks_payload(size_t *len_out);
 
 /* Run one op. Streams the response through `emit`. Returns 0 (including when the op reported an
  * ERROR chunk), or -1 if `emit` signalled a transport error. Not reentrant: one request at a

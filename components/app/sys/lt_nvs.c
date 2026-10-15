@@ -134,6 +134,12 @@ static StaticSemaphore_t s_blob_lock_buf;
 static inline void blob_lock(void)   { if (s_blob_lock) xSemaphoreTake(s_blob_lock, portMAX_DELAY); }
 static inline void blob_unlock(void) { if (s_blob_lock) xSemaphoreGive(s_blob_lock); }
 
+/* R10 (app:M11). Static storage, created in lt_nvs_init() beside s_blob_lock -- not lazily on
+ * first use, which would itself race the two tasks (ui core 0, cmd core 0) this exists for. */
+static SemaphoreHandle_t s_cfg_rmw;
+static StaticSemaphore_t s_cfg_rmw_buf;
+#define CFG_RMW_WAIT_MS 200
+
 static uint32_t uptime_s_now(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
 /* ---- blob framing (Task 1 core/blob.h): per-blob versions + the framed-scratch size cap.
@@ -292,6 +298,10 @@ int lt_nvs_init(void)
      * it, blob_lock()/blob_unlock() silently no-op (their own `if (s_blob_lock)` guard) and the
      * F1 serialisation the error ring + s_blob_scratch depend on would be silently absent. */
     LT_ASSERT_RET(s_blob_lock != NULL, NVS_ASSERT_CODE, -1);
+    if (!s_cfg_rmw) s_cfg_rmw = xSemaphoreCreateMutexStatic(&s_cfg_rmw_buf);
+    /* Postcondition: without it lt_cfg_rmw_begin() degrades to "always acquired" and R10's
+     * guarantee silently disappears -- report it rather than lose the lock quietly. */
+    LT_ASSERT_RET(s_cfg_rmw != NULL, NVS_ASSERT_CODE, -1);
     if (nvs_open(NS_SYS, NVS_READWRITE, &s_h_sys) != ESP_OK) return -1;
     if (nvs_open(NS_ERR, NVS_READWRITE, &s_h_err) != ESP_OK) return -1;
     if (nvs_open(NS_CFG, NVS_READWRITE, &s_h_cfg) != ESP_OK) return -1;
@@ -643,6 +653,19 @@ void lt_boot_record_reset(int reset_reason, uint32_t prev_uptime_s)
     default:
         break;
     }
+}
+
+/* R10 (app:M11): see lt_nvs.h. Pre-init (boot_config, single-threaded) the lock does not exist and
+ * there is no contention, so begin reports acquired. */
+bool lt_cfg_rmw_begin(void)
+{
+    if (s_cfg_rmw == NULL) return true;
+    return xSemaphoreTake(s_cfg_rmw, pdMS_TO_TICKS(CFG_RMW_WAIT_MS)) == pdTRUE;
+}
+
+void lt_cfg_rmw_end(void)
+{
+    if (s_cfg_rmw != NULL) (void)xSemaphoreGive(s_cfg_rmw);
 }
 
 /* ---- cfg blob (lt_cfg/cfg): the framing + version/migrate/validate decision now lives in the

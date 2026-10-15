@@ -13,9 +13,10 @@ idf_component_register(
     SRCS ${APP_SRCS}
     INCLUDE_DIRS include
     REQUIRES core lt_hal nvs_flash esp_timer esp_system console
-             app_update esp_app_format esp_partition spi_flash mbedtls
+             app_update esp_app_format esp_partition spi_flash mbedtls espcoredump
              esp_driver_gpio sim_common
              gps_$ENV{LT_GPS} imu_$ENV{LT_IMU} display_$ENV{LT_DISPLAY})
+# espcoredump: cmd.c's COREDUMP_GET/CLEAR (R5, §18.1 0x17/0x18): esp_core_dump_image_get/erase.
 # The pipeline (globbed into `app`) calls the GPS/IMU HAL (hal/gps.h, hal/imu.h), so the selected
 # gps_${GPS}/imu_${IMU} driver is a real dependency of `app`: declaring it here places the driver
 # archive after `app` in the link so the pipeline's calls resolve regardless of how deep the

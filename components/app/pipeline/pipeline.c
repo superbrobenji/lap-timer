@@ -18,12 +18,14 @@
 #include "app/lt_ipc.h"
 #include "app/logger.h"
 #include "app/lt_sup.h"
+#include "app/ui.h"          /* ui_partial_count() -- §15.3 RTC save */
 #include "app/lt_rtc.h"
 #include "app/lt_nvs.h"
 #include "app/lt_err.h"      /* E_STO_WRITE -- M1/M2 (review fix round 1, #97): errlog a dropped/failed save */
 #include "app/lt_assert.h"
 #include "app/link.h"        /* stream_push -- fan the fused-log/event stream to an attached peer (§18) */
 #include "app/lt_proto.h"    /* LT_REC_STATUS / LT_STATUS_REC_LEN -- STATUS stream-record wire contract */
+#include "app/session_policy.h"   /* session_policy() -- §12.1 lifecycle decision table (R4) */
 #include "app/status.h"      /* status_build() -- storage-free (Plan 5.6 T1 fix 1) */
 
 #include "hal/gps.h"
@@ -174,6 +176,17 @@ static int64_t s_last_temp_us;
 /* per-lap statistics (§9.4), accumulated at 100 Hz, reset at each S/F crossing */
 static lap_stats_t s_stats;
 static int32_t     s_cur_speed_cms;        /* latest valid GPS speed */
+/* R11 (orchestrator §3.2 #15): the §20.7 menu lock is specified at 10 km/h, but the ui had no
+ * per-fix speed and used the EV_MOTION edge (MOVING_SPEED_KMH = 3) as a proxy -- locking the menu
+ * from 3 km/h and lighting the §20.5 MOVING glyph there too. Written on every VALID fix by this
+ * task and read by the ui task through pipeline_speed_kmh(); a single aligned 16-bit load/store, so
+ * volatile is the whole synchronisation it needs (same shape as s_gps_seen). Zeroed on the
+ * EV_FIX_LOST edge: a stale speed must never keep the menu locked while the GPS is gone. */
+static volatile uint16_t s_speed_kmh;
+/* esp_timer stamp of the last VALID fix; speed_watchdog() zeroes s_speed_kmh once it is older than
+ * SPEED_STALE_US, so a driver that simply stops emitting fixes cannot hold the menu locked. */
+#define SPEED_STALE_US 2000000LL
+static int64_t s_last_valid_us;
 static bool        s_stats_gps_lost;       /* current fix invalid (min_speed ignores these) */
 
 /* completed laps for `dbg laps` (ring, newest last). F4: the pipeline task (core 1) writes s_laps[]
@@ -201,7 +214,7 @@ static uint8_t           s_last_pub_state = DRAG_ST_IDLE;
  * engine because this task always marks the gate it itself expects next, never trusting cmd->arg8.
  * s_last_fix is the latest VALID fix (copied in on_fix() below, the one allowed extra static of
  * this task, 56 B -- CMD_MARK_GATE carries no fix of its own, so lap_mark_gate() needs this). */
-static bool      s_create_active;
+static volatile bool s_create_active;   /* read cross-task by pipeline_create_active() (I-3b) */
 static uint8_t   s_create_next_gate;
 static gps_fix_t s_last_fix;
 
@@ -218,7 +231,7 @@ static void stats_finalise(lap_stats_t *out)
     LT_ASSERT_VOID(out != NULL, PIPE_ASSERT_CODE);
     *out = s_stats;
     if (out->min_speed_cms == 0xFFFFu) out->min_speed_cms = 0;   /* never sampled -> 0 */
-    LT_ASSERT_VOID(out->min_speed_cms != 0xFFFFu, PIPE_ASSERT_CODE);   /* sentinel resolved */
+    LT_ASSERT_VOID(out->max_speed_cms >= out->min_speed_cms, PIPE_ASSERT_CODE);   /* §9.4: the window's max can never be below its min */
 }
 
 static int16_t clamp_i16(int32_t v)
@@ -283,7 +296,7 @@ static void ui_post_lap_reset(void);
  * Layout menu item is a dead "Auto" that still posts CMD_SET_LAYOUT id 0 on every press, wiping
  * s_best under the seqlock for no reason (handle_set_layout(), below). Forward-declared here
  * (real definition is below, after ui_post_create()) so on_fix_try_resume() can call it. */
-static void ui_post_venue(uint16_t venue_id, int64_t gps_us);
+static void ui_post_venue(uint16_t venue_id, uint16_t layout_id, int64_t gps_us);
 
 /* Final review F-2/I-2: the stats_reset() + seqlocked s_best clear every engine-resetting or
  * venue/layout-changing path in this file already does (handle_reset_engine below;
@@ -408,30 +421,272 @@ static void publish_drag_snapshot(void)
  * engine_cb ever sees the event (ruling T5-R0: trk.c's writer-ordering contract), so the user
  * track table already holds the new venue by the time this runs. Ask the logger to persist it so
  * it survives a reboot; fire-and-forget (requester NULL), same pdMS_TO_TICKS(100) queue-send
- * pattern as the CFG_GPS_SIM venue registration's own LOGGER_OPEN_SESSION request in
- * pipeline_init() below (M1, review fix round 1: was a non-blocking 0-tick send that silently
+ * pattern as session_send() below (M1, review fix round 1: was a non-blocking 0-tick send that silently
  * dropped the just-created venue on a momentarily-full queue, with only an ESP_LOGW to say so --
  * now also errlog_add()'d, so the drop leaves a trace the device itself keeps). A normal
  * (non-CREATE) venue scan also emits EV_VENUE_FOUND, but s_create_active is false then (only
  * CMD_CREATE_BEGIN sets it), so this is a no-op outside creation.
+ * PR #101 M3: the request now names the venue it is saving, so a save the logger cannot land
+ * reaches the rider as a "NOT SAVED" card instead of a silent success that a reboot erases
+ * (logger.c's notify_tracks_not_saved()). Still fire-and-forget (requester NULL): this task must
+ * never block on the logger.
  * Final review F-2/I-2: finalize_create() just called lap_set_venue() on the new venue -- a venue
  * change exactly like the ones handle_reset_engine()/handle_set_layout()/pipeline_init() already
  * clear s_best for -- so this finish runs the same reset_best_and_stats() + ui_post_lap_reset()
  * bookkeeping those paths do, or the riding screen would come back showing the PREVIOUS venue's
  * stale BEST/PREV/theoretical-best/best-sector board under the newly-created venue. */
-static void create_finish_if_active(void)
+static void create_finish_if_active(uint16_t venue_id)
 {
     if (!s_create_active) return;
     s_create_active = false;
     reset_best_and_stats();
     ui_post_lap_reset();
-    log_request_t req = { .type = LOGGER_SAVE_TRACKS };
+    log_request_t req = { .type = LOGGER_SAVE_TRACKS, .venue_id = venue_id };
     if (g_log_req_q != NULL && xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) == pdTRUE) {
         logger_notify();
     } else {
         (void)errlog_add(E_STO_WRITE, 0);   /* M1: the save never ran -- leave a trace, not just a log line */
         ESP_LOGW(TAG, "create: save-tracks request dropped (queue full)");
     }
+}
+
+/* R4 (§12.1/§13.3; audit §3.3 #25: on moto_neo6m NO session was ever opened, so F8 was unmet on
+ * the production build -- LOGGER_OPEN_SESSION was sent only from the #if CFG_GPS_SIM block and by
+ * `dbg logtest`). THIS task owns the lifecycle on every build now. §13.3's "commanded by the power
+ * task" is amended (there is no power task; Plan 6).
+ *
+ * s_ses_* mirror what this task has ASKED the logger for. The logger stays the authority -- it
+ * ignores an OPEN while open and a CLOSE while closed -- so this mirror is advisory only; its job
+ * is to stop a venue rescan asking for a second session and a mode flip rotating a session that
+ * never existed (session_policy(), app/session_policy.h). */
+static bool     s_ses_open;
+/* I-1/R-1: set when the logger is seen open and its at_open count (the OPEN requests it had dequeued
+ * when its latest open completed, logger_open_req_at_open()) EQUALS s_open_req_sent (the OPENs this
+ * task has enqueued) -- i.e. the logger completed the LATEST OPEN. log_req_q is FIFO and this task is
+ * its only OPEN producer, so equality identifies the open exactly: a bare "logger reads open" is not
+ * enough (after a rotation the old session is still open while it closes) and neither is "a newer
+ * open than at post" (the first OPEN of an overlapping pair would confirm the second). Cleared on
+ * every session_open()/session_close(). While set, a logger that reports CLOSED was closed by
+ * someone else (ota.c's §19.5 ota_close_session(), sup.c's pre-restart close) -- the logger never
+ * closes on its own -- so session_periodic() drops the mirror instead of retrying. */
+static bool     s_ses_confirmed;
+static uint32_t s_open_req_sent;   /* R-1: OPENs successfully enqueued; the logger's at_open must equal it to confirm */
+/* N-A: false while the latest OPEN send failed AFTER its CLOSE was enqueued (the logger then shows the
+ * old session at a count equal to s_open_req_sent); never confirm then. A CLOSE that could not be
+ * enqueued never reaches the OPEN at all (B-1, the pending action below), so it never sets this. */
+static bool     s_open_send_ok = true;
+/* B-1 (F2b closure 4, ruling F-15): a CLOSE that was NOT enqueued (queue full) leaves the mirror
+ * exactly as it was (open, confirmation, venue/layout) and records the intent here; session_periodic
+ * re-attempts it on the TIMEMAP_INTERVAL_US cadence (s_last_open_try_us) through the one path
+ * session_close_act(). A rotation's OPEN is posted only after its CLOSE was enqueued. `s_pend_*` is the
+ * rotation's TARGET venue/layout; a newer lifecycle event replaces or cancels the record. */
+static ses_pend_t s_pend;
+static uint16_t   s_pend_venue, s_pend_layout;
+static uint16_t s_ses_venue_id, s_ses_layout_id;
+static uint8_t  s_gps_hz;              /* gps_profile_t.max_rate_hz; §12.3 SESSION_HDR.gps_hz */
+
+static bool session_send(uint8_t type, uint8_t reason, uint16_t venue_id, uint16_t layout_id,
+                         int64_t gps_us)
+{
+    if (g_log_req_q == NULL) return false;
+    log_request_t req = { .type = type, .mode = s_mode, .reason = reason, .gps_us = gps_us,
+                          .venue_id = venue_id, .layout_id = layout_id, .gps_hz = s_gps_hz };
+    /* No reply is awaited (never logger_request_sync): the same bounded 100 ms send every other
+     * request from this task uses (create_finish_if_active), so a full log_req_q costs at most
+     * 100 ms per request (up to 200 ms for a rotate's CLOSE+OPEN), never an unbounded wait on the
+     * logger (app/lt_ipc.h). A drop leaves a trace on the device, not just in the log. */
+    if (xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
+        (void)errlog_add(E_STO_WRITE, 0);
+        ESP_LOGW(TAG, "session request %u dropped (log queue full)", (unsigned)type);
+        return false;
+    }
+    logger_notify();
+    return true;
+}
+
+/* §12.4 "TIME_MAP ... at session start, whenever tb quality changes, and every 60 s". This task
+ * owns the time base, so it is the only producer that can make a (mono, gps, quality) triple; the
+ * logger just writes what it is handed. I-2: the record is ONE consistent (mono, gps) pair, never
+ * esp_timer "now" paired with some earlier fix's GPS time: tb's own mapping of "now" when tb is
+ * locked (quality > 0), else the latest valid fix's own (mono_us, gps_us) stamped quality 0 (the
+ * triggering fix, since on_fix() copies it into s_last_fix before the engine runs). With neither
+ * (no valid fix since boot) nothing is written; the 60 s cadence or a tb quality change will. */
+#define TIMEMAP_INTERVAL_US (60LL * 1000000)
+static int64_t s_last_timemap_us;
+static int64_t s_last_open_try_us;       /* esp_timer stamp of the last OPEN request (retry pacing) */
+static uint8_t s_tb_q_last = 0xFFu;      /* 0xFF = no TIME_MAP posted yet this boot */
+
+static void post_time_map(void)
+{
+    int64_t now = esp_timer_get_time();
+    LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);            /* esp_timer is monotonic/non-negative */
+    uint8_t q = tb_quality(&s_tb);
+    LT_ASSERT_VOID(q <= 2u, PIPE_ASSERT_CODE);             /* core/tb.h: 0 unlocked, 1 min-filter, 2 PPS */
+    int64_t mono, gps;
+    if (q > 0u) {
+        mono = now;
+        gps  = tb_mono_to_gps(&s_tb, now);
+    } else if (s_last_fix.valid != 0u && s_last_fix.gps_us > 0) {
+        mono = s_last_fix.mono_us;
+        gps  = s_last_fix.gps_us;
+    } else {
+        return;                    /* no consistent pair exists yet: write none rather than a wrong one */
+    }
+    logger_submit_time_map(mono, gps, q);
+    s_tb_q_last = q;
+    s_last_timemap_us = now;
+}
+
+/* §12.3's SESSION_HDR calib block and the CALIB record (0x0A), from the live fusion calibration.
+ * Values are fus_calib_defaults() until Plan 8 captures a real orientation (#93) -- the point of
+ * writing them now is that the block and the record exist and are decodable, instead of the
+ * permanently-zero field logger.c used to ship with a "lands in 3.4" comment on it. */
+static void post_calib(void)
+{
+    const fus_calib_t *c = fus_calib(&s_fus);
+    LT_ASSERT_VOID(c != NULL, PIPE_ASSERT_CODE);
+    ses_calib_t out;
+    fus_calib_to_ses(c, &out);
+    logger_submit_calib(&out);
+}
+
+static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
+{
+    s_ses_venue_id  = venue_id;
+    s_ses_layout_id = layout_id;
+    /* R-1: count only an OPEN that really entered the FIFO (log_req_q; this task is its only OPEN
+     * producer), so the logger's dequeued-OPEN count lines up with this one. */
+    /* N-A: latch a failed enqueue so session_liveness never confirms an older session's equal count;
+     * a later successful OPEN send clears it. sent is NOT bumped on failure (counts would desync). */
+    s_open_send_ok = session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us);
+    if (s_open_send_ok) s_open_req_sent++;
+    s_ses_open = true;
+    s_ses_confirmed = false;
+    s_last_open_try_us = esp_timer_get_time();
+    /* Both ride on result_q, which the logger drains AFTER log_req_q in the same loop pass, so in
+     * the normal case the HDR is already written when these two are encoded. If the logger's
+     * request drain happened to run just BEFORE the OPEN above arrived, it receives them while
+     * still closed: the TIME_MAP is stashed (m-1) and written straight after the next HDR; the
+     * CALIB only seeds that HDR's calib block (open_session copies s_calib) -- no CALIB record
+     * (0x0A) is written after the HDR in that case. Either way the TIME_MAP position relative to
+     * the first FIX/FUSED samples is not exact. gps_us feeds only the HDR's start_gps_us. */
+    post_time_map();
+    post_calib();
+}
+
+/* I2: the OPEN is fire-and-forget and the logger may refuse it (reserve floor, sequence
+ * exhaustion). If the mirror says open but the logger NEVER confirmed it, ask again, at most once
+ * per 60 s. I-1/R-1: once the logger HAS confirmed it (s_ses_confirmed: it completed the latest
+ * OPEN enqueued -- the rotation's old, still-closing session and an overlapping pair's first
+ * OPEN do not count) and later reports closed,
+ * someone else closed it (ota.c's §19.5 close, sup.c's pre-restart close): drop the mirror, as a
+ * close would, and do NOT retry -- the next venue event reopens (a retry would open a new
+ * session in the middle of an OTA transfer). */
+static void session_mirror_drop(void)
+{
+    s_ses_open = false;
+    s_ses_confirmed = false;
+    s_ses_venue_id = 0u;
+    s_ses_layout_id = 0u;
+    s_pend = SES_PEND_NONE;
+}
+
+static void session_close_act(ses_action_t act, uint16_t venue_id, uint16_t layout_id, int64_t gps_us);
+
+/* B-1: the pending CLOSE / rotation. While one is pending the old session is still the logger's
+ * live one, so the liveness decision is skipped (a retry or confirm now could open a session beside
+ * it); a logger seen closed after it had confirmed was closed by someone else (OTA): drop, and the
+ * pending intent with it. Returns true while a pending action owns this pass. */
+static bool session_pending_periodic(int64_t now, bool lopen)
+{
+    if (s_pend == SES_PEND_NONE) return false;
+    if (!lopen && s_ses_confirmed) {
+        session_mirror_drop();
+        return true;
+    }
+    if (session_pend_due(s_pend, now, s_last_open_try_us, TIMEMAP_INTERVAL_US)) {
+        int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
+        session_close_act(session_pend_act(s_pend), s_pend_venue, s_pend_layout, gps_us);
+    }
+    return true;
+}
+
+static void session_periodic(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
+    if (!s_ses_open) return;
+    bool lopen = logger_session_is_open();   /* acquire load FIRST, then at_open (see logger.h) */
+    ses_live_t v = session_pending_periodic(now, lopen) ? SES_LIVE_NONE
+        : session_liveness(lopen, logger_open_req_at_open(), s_open_req_sent, s_open_send_ok,
+                           s_ses_confirmed, now, s_last_open_try_us, TIMEMAP_INTERVAL_US);
+    if (v == SES_LIVE_DROP) {
+        session_mirror_drop();
+    } else if (v == SES_LIVE_RETRY) {
+        int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
+        session_open(s_ses_venue_id, s_ses_layout_id, gps_us);
+    } else if (v == SES_LIVE_CONFIRM) {
+        s_ses_confirmed = true;
+    }
+    if (!lopen) return;
+    if (tb_quality(&s_tb) != s_tb_q_last || (now - s_last_timemap_us) >= TIMEMAP_INTERVAL_US)
+        post_time_map();
+}
+
+/* Returns whether the CLOSE was enqueued. Only then does the mirror claim "closed"; a failed send
+ * (already logged + errlog'd inside session_send) leaves it open and unchanged (B-1). */
+static bool session_close(uint8_t reason, int64_t gps_us)
+{
+    bool sent = session_send(LOGGER_CLOSE_SESSION, reason, 0, 0, gps_us);
+    if (sent) {
+        s_ses_open = false;
+        s_ses_confirmed = false;
+    }
+    return sent;
+}
+
+/* The one close path (B-1): `act` is SES_ACT_CLOSE (venue lost) or SES_ACT_REOPEN (rotation to
+ * venue_id/layout_id). The OPEN follows only a CLOSE that was enqueued; otherwise the intent is
+ * recorded as pending and the stamp paces the session_periodic re-attempt. Any call replaces an
+ * older pending record (a VENUE_LOST cancels a pending rotation into a pending close). */
+static void session_close_act(ses_action_t act, uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(act == SES_ACT_CLOSE || act == SES_ACT_REOPEN, PIPE_ASSERT_CODE);
+    bool sent = session_close(SES_END_NORMAL, gps_us);
+    bool post_open = false;
+    s_pend = session_close_outcome(act, sent, &post_open);
+    s_pend_venue  = venue_id;
+    s_pend_layout = layout_id;
+    if (!sent) s_last_open_try_us = esp_timer_get_time();
+    if (post_open) session_open(venue_id, layout_id, gps_us);
+}
+
+/* A venue the engine just acquired (or finished creating) or a resume restored. Same venue as the
+ * open session: nothing. A DIFFERENT venue while open (I-4: New track begun at venue A emits no
+ * EV_VENUE_LOST, so A's session is still open when the new venue is found): rotate -- close A's
+ * session, open the new venue's -- never relabel one .log/.sum with two venues' laps. */
+static void session_on_venue(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(venue_id != 0u, PIPE_ASSERT_CODE);
+    bool changed = s_ses_open && venue_id != s_ses_venue_id;
+    ses_action_t act = session_policy(s_ses_open, changed ? SES_IN_VENUE_CHANGED : SES_IN_VENUE_FOUND);
+    LT_ASSERT_VOID(act == SES_ACT_NONE || act == SES_ACT_OPEN || act == SES_ACT_REOPEN, PIPE_ASSERT_CODE);
+    if (act == SES_ACT_REOPEN) session_close_act(act, venue_id, layout_id, gps_us);   /* B-1: OPEN only after the CLOSE */
+    if (act == SES_ACT_OPEN) session_open(venue_id, layout_id, gps_us);
+    if (act == SES_ACT_NONE && session_pend_cancels_on_found(s_pend, venue_id, s_pend_venue))
+        s_pend = SES_PEND_NONE;      /* the venue is back: the pending close/rotation is superseded */
+}
+
+/* §12.1 "A new session also starts on mode change". Queue order does the work: log_req_q is FIFO
+ * and the logger handles both requests in one drain, so CLOSE is finalised (END + .sum) before
+ * OPEN allocates the next sequence number -- no synchronous wait, no window where both are open. */
+static void session_rotate(void)
+{
+    if (session_policy(s_ses_open, SES_IN_MODE_CHANGE) != SES_ACT_REOPEN) return;
+    if (s_pend == SES_PEND_CLOSE) return;     /* B-1: a pending close (venue lost) outranks a mode rotation */
+    int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
+    bool rot = (s_pend == SES_PEND_ROTATE);   /* a pending rotation's target is the venue to keep */
+    session_close_act(SES_ACT_REOPEN, rot ? s_pend_venue : s_ses_venue_id,
+                      rot ? s_pend_layout : s_ses_layout_id, gps_us);
 }
 
 static void engine_cb(const event_t *ev)
@@ -451,7 +706,33 @@ static void engine_cb(const event_t *ev)
         s_rtc_save_due = true;     /* §15.3: the crossed sector is now the resume point */
         break;
     case EV_DRAG_DONE:     on_drag_done(); break;
-    case EV_VENUE_FOUND:   create_finish_if_active(); break;   /* #97: persist a just-created venue */
+    case EV_VENUE_FOUND:
+        /* R4: the engine just acquired (or finished creating) a venue -- open the session §12.1
+         * promises. The ANNOUNCE-only kind never reaches engine_cb (it goes straight to
+         * g_ui_evt_q, ui_post_venue()), so every event here is a real acquisition. */
+        session_on_venue(ev->arg16, 0u, ev->gps_us);   /* I-4: a different venue rotates */
+        create_finish_if_active(ev->arg16);      /* #97: persist a just-created venue */
+        break;
+    case EV_LAYOUT_LOCKED: {
+        /* The layout is only known one event later than the venue, so this is where the .sum's
+         * VENUE record and the HDR's layout_id get their real values -- previously only the
+         * CFG_GPS_SIM boot path ever called logger_set_venue(), so a real-GPS .sum had none. */
+        if (s_pend == SES_PEND_ROTATE) {     /* B-1: never relabel the old session with the new venue's layout */
+            s_pend_layout = ev->arg16;
+            break;
+        }
+        s_ses_layout_id = ev->arg16;
+        if (s_ses_venue_id != 0u) {          /* no acquisition yet: nothing to name */
+            const trk_venue_t *v = trk_get(s_ses_venue_id);
+            logger_set_venue(s_ses_venue_id, ev->arg16, (v != NULL) ? v->name : NULL);
+        }
+        break;
+    }
+    case EV_VENUE_LOST:
+        /* §12.1 "ends ... when the venue changes" (F1a emits this, design §3). */
+        if (session_policy(s_ses_open, SES_IN_VENUE_LOST) == SES_ACT_CLOSE)
+            session_close_act(SES_ACT_CLOSE, s_ses_venue_id, s_ses_layout_id, ev->gps_us);
+        break;
     default: break;               /* EV_LAP_COMPLETE handled above, before emit_event() */
     }
 }
@@ -491,6 +772,21 @@ static bool compute_validity(const gps_fix_t *fix)
     return ok;
 }
 
+/* R4: after a reboot NOTHING is open (logger_boot reopens nothing and lap_import_rtc emits no
+ * EV_VENUE_FOUND), so a successful resume itself must open the session, or the resumed lap and every
+ * later one go unlogged until the venue is lost and re-found. */
+static void resume_open_session(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(venue_id != 0u, PIPE_ASSERT_CODE);
+    LT_ASSERT_VOID(gps_us > 0, PIPE_ASSERT_CODE);   /* a valid fix's stamp (§6.5) */
+    session_on_venue(venue_id, layout_id, gps_us);   /* same rule as engine_cb: a different venue rotates */
+    if (s_pend == SES_PEND_ROTATE) return;           /* B-1: the old session keeps its labels until the rotation lands */
+    s_ses_venue_id  = venue_id;
+    s_ses_layout_id = layout_id;
+    const trk_venue_t *rv = trk_get(venue_id);
+    logger_set_venue(venue_id, layout_id, (rv != NULL) ? rv->name : NULL);
+}
+
 /* §15.3 resume: on the first valid fix, if a fresh RTC snapshot is armed, restore the interrupted
  * lap into LAP_RUNNING (carrying LAP_F_INTERRUPTED) before the engine sees this fix, so it
  * continues and completes normally. Runs once, lap mode only. (Split verbatim out of on_fix for
@@ -524,12 +820,13 @@ static void on_fix_try_resume(const gps_fix_t *fix, bool valid)
             memcpy(lr.gate_times, s_resume.gate_times, sizeof lr.gate_times);
             if (lap_import_rtc(&s_lap, &lr) == 0) {
                 s_resume_active = true;                /* F2: guard this lap against a later rewind */
+                resume_open_session(lr.venue_id, lr.layout_id, fix->gps_us);
                 s_resumed_lap_start_us = s_resume.lap_start_gps_us;
                 ESP_LOGI(TAG, "rtc resume: lap %u venue %u continued (interrupted)",
                          (unsigned)lr.lap_no, (unsigned)lr.venue_id);
                 /* #98: lap_import_rtc() above cannot announce for itself -- tell the ui directly
                  * (ui_post_venue(), never through engine_cb(): s_create_active can be true here). */
-                ui_post_venue(lr.venue_id, fix->gps_us);
+                ui_post_venue(lr.venue_id, lr.layout_id, fix->gps_us);
             } else {
                 /* Unknown venue: keep the cold engine state (sim already set the venue at init; on
                  * real hardware the engine keeps scanning for it). */
@@ -600,11 +897,18 @@ static void on_fix_run_engine(const gps_fix_t *fix, bool valid)
             lap_rtc_t lr;
             lap_export_rtc(&s_lap, &lr);
             lt_rtc_save(&lr, s_session_id, fix->gps_us, s_mode,
-                        0 /* power_state: no owner in plan 03 */, 0 /* partial_count */);
+                        0 /* power_state: 0 -- no power task yet; Plan 6 (#54) owns §15.3's power_state */, ui_partial_count());
         }
     } else {
         drag_on_fix(&s_drag, fix);
     }
+}
+
+/* m2: zero the published speed when no valid fix has arrived for SPEED_STALE_US. */
+static void speed_watchdog(int64_t now)
+{
+    LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
+    if (s_speed_kmh != 0u && (now - s_last_valid_us) > SPEED_STALE_US) s_speed_kmh = 0u;
 }
 
 /* §9.1 on_fix. */
@@ -618,6 +922,9 @@ static void on_fix(gps_fix_t *fix)
     if (valid) {
         tb_on_fix(&s_tb, fix->gps_us, fix->mono_us, 0);   /* sim: no serial transmit time */
         s_cur_speed_cms = fix->gspeed_mms / 10;
+        double kmh = (double)fix->gspeed_mms * MMS_TO_KMH;
+        s_speed_kmh = (kmh <= 0.0) ? 0u : ((kmh >= 65535.0) ? 65535u : (uint16_t)kmh);
+        s_last_valid_us = esp_timer_get_time();
         s_last_fix = *fix;   /* §10.9: CMD_MARK_GATE's fix (lap_mark_gate needs a valid, current one) */
     }
     fus_set_gps_speed(&s_fus, (float)fix->gspeed_mms / 1000.0f,
@@ -634,7 +941,7 @@ static void on_fix(gps_fix_t *fix)
     } else {
         s_stats_gps_lost = true;
         if (s_invalid_run < 1000) s_invalid_run++;
-        if (s_invalid_run == FIX_LOST_COUNT) { s_fix_lost = true; emit_simple(EV_FIX_LOST, fix->gps_us, fix->mono_us); }
+        if (s_invalid_run == FIX_LOST_COUNT) { s_fix_lost = true; s_speed_kmh = 0u; emit_simple(EV_FIX_LOST, fix->gps_us, fix->mono_us); }
     }
 
     /* §9.1 motion edge (speed-based). */
@@ -787,9 +1094,10 @@ static void pipeline_reload_cfg(void)
      * above) -- a reload that silently changes s_mode must do the same, else a mode change
      * arriving mid-lap carries the old window's stats into the next lap. An unchanged mode (the
      * common case -- most CONFIG_SET calls touch units/display, not mode) leaves stats alone.
-     * I2 (review fix round 1, #97): and must not strand an in-progress creation either. */
-    if (new_mode != s_mode) { stats_reset(); cancel_active_create(); }
-    s_mode = new_mode;
+     * I2 (review fix round 1, #97): and must not strand an in-progress creation either.
+     * R4: and rotates the session, so the .log/.sum never mix two modes. */
+    if (new_mode != s_mode) { stats_reset(); cancel_active_create(); s_mode = new_mode; session_rotate(); }
+    else                    { s_mode = new_mode; }
     publish_drag_snapshot();
     LT_ASSERT_VOID(s_drag.cfg.n_gates <= DRAG_MAX_GATES, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(s_mode == MODE_LAP || s_mode == MODE_DRAG, PIPE_ASSERT_CODE);
@@ -847,14 +1155,21 @@ static void ui_post_create(uint8_t phase, uint16_t arg)
  * EV_CREATE_CANCELLED a no-op (ui.c's on_nt would already read false by the time it is handled).
  * flags = EV_VENUE_ANNOUNCE_ONLY (core/event.h) marks every post from here so
  * handle_venue_found() can tell the two kinds of EV_VENUE_FOUND apart; the engine's own emission
- * always leaves flags 0, so today's creation-finish behaviour is exactly unchanged. */
-static void ui_post_venue(uint16_t venue_id, int64_t gps_us)
+ * always leaves flags 0, so today's creation-finish behaviour is exactly unchanged.
+ *
+ * PR #101 M4: arg32 carries the LOCKED layout id (0 = none/Auto). lap_import_rtc() locks
+ * forced_layout_id from the §15.3 snapshot and emits no EV_LAYOUT_LOCKED (it has no event
+ * buffer), so handle_venue_found() (ui.c) used to reset the menu to "Layout: Auto" on a lap that
+ * was locked to layout N -- and the first MODE press then advanced Auto -> layouts[0], posting
+ * CMD_SET_LAYOUT for a possibly DIFFERENT layout mid-lap and wiping s_best. The announce now
+ * states the truth and the ui adopts it. */
+static void ui_post_venue(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
 {
     LT_ASSERT_VOID(g_ui_evt_q != NULL, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(venue_id != 0, PIPE_ASSERT_CODE);   /* trk_get(0) is always NULL (trk.c) */
     LT_ASSERT_VOID(gps_us >= 0, PIPE_ASSERT_CODE);
     event_t ev = { .type = EV_VENUE_FOUND, .flags = EV_VENUE_ANNOUNCE_ONLY, .arg16 = venue_id,
-                   .gps_us = gps_us, .mono_us = esp_timer_get_time() };
+                   .arg32 = layout_id, .gps_us = gps_us, .mono_us = esp_timer_get_time() };
     if (xQueueSend(g_ui_evt_q, &ev, 0) != pdTRUE) ESP_LOGW(TAG, "venue: ui queue full");
 }
 
@@ -940,6 +1255,7 @@ static void handle_set_mode(const command_t *cmd)
     cancel_active_create();
     s_mode = (cmd->arg8 == MODE_DRAG) ? MODE_DRAG : MODE_LAP;
     stats_reset();
+    session_rotate();   /* §12.1: a mode change starts a new session */
 }
 
 /* CMD_CREATE_BEGIN/CMD_CREATE_CANCEL/CMD_MARK_GATE bodies (#97, §10.9), split out of handle_cmd's
@@ -1029,6 +1345,68 @@ static void handle_create_cmd(const command_t *cmd)
     }
 }
 
+#if CFG_HAS_DEVUX
+/* R8 (app:M2). `dbg logtest n` used to ring_push() synthetic fixes from the CONSOLE task, making
+ * g_fix_ring (core/ring.h: a relaxed-head SPSC ring whose push loads head, memcpys the slot, then
+ * stores head+1) two-producer: two producers reading the same head both write the SAME slot and
+ * both store head+1, so the slot holds a byte-level mix of two gps_fix_t and the logger encodes
+ * that mix into the live session's .log as one FIX record. The console now posts
+ * CMD_DBG_LOGTEST{arg16 = n} and THIS task -- the ring's one documented producer (app/lt_ipc.h) --
+ * synthesises them, at most PIPE_LOGTEST_PER_STEP per 50 ms pass so the heartbeat, the 100 Hz IMU
+ * path and the task WDT all keep running. FIX_RING_CAP is 32, so a larger burst would only be
+ * dropped by the ring anyway. Body moved verbatim from export_serial.c's synth_fix(). */
+#define PIPE_LOGTEST_PER_STEP 16u
+static uint32_t s_logtest_left, s_logtest_i;
+
+static void logtest_synth_fix(gps_fix_t *f, uint32_t i)
+{
+    LT_ASSERT_VOID(f != NULL, PIPE_ASSERT_CODE);
+    memset(f, 0, sizeof *f);
+    f->gps_us     = (int64_t)1700000000000000LL + (int64_t)i * 200000;   /* 5 Hz */
+    f->mono_us    = esp_timer_get_time();
+    f->lat_e7     = -338900000 + (int32_t)(i % 2000);
+    f->lon_e7     =  184000000 + (int32_t)(i % 2000);
+    f->alt_mm     = 45000 + (int32_t)(i % 50);
+    f->gspeed_mms = 20000 + (int32_t)(i % 1000);
+    f->head_e5    = (int32_t)((i * 137) % 36000000);
+    f->hacc_mm    = 2000;
+    f->sacc_mms   = 300;
+    f->pdop_e2    = 120;
+    f->fix_type   = 3;
+    f->sats       = 10;
+    f->flags      = GPS_FLAG_FIXOK | GPS_FLAG_TIME | GPS_FLAG_DATE;
+    f->valid      = 1;
+}
+
+static void logtest_step(void)
+{
+    if (s_logtest_left == 0u) return;
+    uint32_t n = (s_logtest_left < PIPE_LOGTEST_PER_STEP) ? s_logtest_left : PIPE_LOGTEST_PER_STEP;
+    for (uint32_t k = 0; k < n; k++) {
+        gps_fix_t f;
+        logtest_synth_fix(&f, s_logtest_i);
+        s_logtest_i++;
+        (void)ring_push(&g_fix_ring, &f);   /* drop-newest on full, exactly like a real fix */
+    }
+    s_logtest_left -= n;
+    LT_ASSERT_VOID(s_logtest_left <= 0xFFFFu, PIPE_ASSERT_CODE);   /* arg16-sourced: never underflows */
+    logger_notify();
+}
+
+static void handle_dbg_logtest(const command_t *cmd)
+{
+    LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
+    /* m-3: the pipeline is the only session-lifecycle owner, so `dbg logtest` asks HERE for its
+     * session instead of posting LOGGER_OPEN_SESSION itself: open one (venue 0, the cfg mode via
+     * session_send) only when the mirror says none is open. A later real VENUE_FOUND then rotates it
+     * (session_policy SES_IN_VENUE_CHANGED), so the logtest header never labels a real session. */
+    if (!s_ses_open) session_open(0u, 0u, 0);
+    s_logtest_left = cmd->arg16;
+    s_logtest_i    = 0u;
+    ESP_LOGI(TAG, "logtest: %u synthetic fixes queued on this task", (unsigned)cmd->arg16);
+}
+#endif
+
 static void handle_cmd(const command_t *cmd)
 {
     LT_ASSERT_VOID(cmd != NULL, PIPE_ASSERT_CODE);
@@ -1046,12 +1424,8 @@ static void handle_cmd(const command_t *cmd)
     case CMD_CONFIG_RELOAD:
         pipeline_reload_cfg();               /* #87: a peer's CONFIG_SET persisted a new cfg */
         break;
-    case CMD_IMU_MODE:
-        (void)imu_set_mode(cmd->arg8);
-        break;
-    case CMD_GPS_POWER:
-        (void)gps_set_power_mode(cmd->arg8 ? GPS_PM_FULL : GPS_PM_BACKUP);
-        break;
+    case CMD_IMU_MODE:     (void)imu_set_mode(cmd->arg8); break;
+    case CMD_GPS_POWER:    (void)gps_set_power_mode(cmd->arg8 ? GPS_PM_FULL : GPS_PM_BACKUP); break;
     case CMD_SIM_SCENARIO:
         handle_sim_scenario(cmd);
         break;
@@ -1060,6 +1434,9 @@ static void handle_cmd(const command_t *cmd)
     case CMD_CREATE_CANCEL:
         handle_create_cmd(cmd);
         break;
+#if CFG_HAS_DEVUX
+    case CMD_DBG_LOGTEST:  handle_dbg_logtest(cmd); break;
+#endif
     default:
         break;                              /* CALIB_ORIENT: later sessions */
     }
@@ -1073,6 +1450,11 @@ static void pipeline_init_drivers(void)
     bool                  gps_ok = (gps_init(&prof) == 0 && prof);
     if (gps_ok) {
         (void)gps_configure(prof->max_rate_hz);
+        s_gps_hz = prof->max_rate_hz;      /* R4/§12.3: the real rate every SESSION_HDR carries */
+        if (s_gps_hz > 25u) {              /* §12.6's profiles top out at 25 Hz: clamp, never abort bring-up */
+            ESP_LOGE(TAG, "gps profile rate %u Hz > 25: clamped for the SESSION_HDR", (unsigned)s_gps_hz);
+            s_gps_hz = 25u;
+        }
         ESP_LOGI(TAG, "gps \"%s\" %u Hz", prof->name ? prof->name : "?", (unsigned)prof->max_rate_hz);
     } else {
         ESP_LOGW(TAG, "gps_init failed");
@@ -1094,11 +1476,18 @@ static void pipeline_init_drivers(void)
         ESP_LOGW(TAG, "imu_init failed");
     }
     sup_boot_report(BOOT_IMU, CFG_IMU_SIM ? BOOT_SIM : (imu_ok ? BOOT_OK : BOOT_FAIL));
+    /* After BOTH bring-ups (m-6: an assert in the middle used to return before the IMU init). */
+    LT_ASSERT_VOID(s_gps_hz <= 25u, PIPE_ASSERT_CODE);   /* the clamp above holds: §12.6 tops out at 25 Hz */
+    LT_ASSERT_VOID(!s_gps_live || gps_ok, PIPE_ASSERT_CODE);   /* a live claim needs a successful init */
 }
 
 static void pipeline_init(void)
 {
     tb_init(&s_tb);
+    /* R4: hoisted above the venue/session block so s_gps_hz (gps_profile_t.max_rate_hz) is known
+     * before the first LOGGER_OPEN_SESSION -- §12.3's SESSION_HDR.gps_hz was permanently 0.
+     * gps_init/imu_init touch no engine state, so the order is otherwise immaterial. */
+    pipeline_init_drivers();
     fus_init(&s_fus, NULL, (uint8_t)(CFG_VARIANT_MOTO ? 1 : 0));
     /* Plan 7c T2 fix 1: one NVS cfg load feeds both consumers below -- the drag engine's
      * user-derived gate table (benches/units/rollout) and cfg.mode, the single source of truth
@@ -1194,10 +1583,7 @@ static void pipeline_init(void)
             memset(&s_best, 0, sizeof s_best);
             seq_leave();
             uint16_t layout_id = (v->n_layouts > 0) ? v->layouts[0].id : 0;
-            /* open a logging session for the run + write the real VENUE record. */
-            log_request_t req = { .type = LOGGER_OPEN_SESSION, .mode = MODE_LAP,
-                                  .venue_id = v->id, .layout_id = layout_id, .gps_us = 0 };
-            if (g_log_req_q) { (void)xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)); logger_notify(); }
+            session_open(v->id, layout_id, 0);          /* R4: the one lifecycle owner, every build */
             logger_set_venue(v->id, layout_id, v->name);
             ESP_LOGI(TAG, "venue \"%s\" (id %u) armed from sim capture", v->name, (unsigned)v->id);
             /* #98: lap_set_venue() above cannot announce for itself -- tell the ui directly
@@ -1205,14 +1591,12 @@ static void pipeline_init(void)
              * precedes any handle_cmd(), so s_create_active cannot be true yet (see
              * ui_post_venue()'s comment above) -- and show_venue_oneshot() (ui.c) returns early
              * while BOOT is still up, so this never races the BOOT one-shot either. */
-            ui_post_venue(v->id, 0);
+            ui_post_venue(v->id, layout_id, 0);
         } else {
             ESP_LOGW(TAG, "sim venue parse failed: %s", err);
         }
     }
 #endif
-
-    pipeline_init_drivers();
 }
 
 static void pipeline_task(void *arg)
@@ -1243,6 +1627,9 @@ static void pipeline_task(void *arg)
         /* GPS: drain every fix due, run on_fix (rule 2: bounded; ~1 fix/period << the cap). */
         gps_fix_t fix;
         for (int i = 0; i < PIPE_FIX_DRAIN_MAX && gps_poll(&fix) == 1; i++) { on_fix(&fix); s_gps_seen = true; }
+#if CFG_HAS_DEVUX
+        logtest_step();                    /* R8: the console's synthetic fixes, from THIS task */
+#endif
 
         /* IMU: read the samples due since the last read, run on_raw for each. */
         int64_t now = esp_timer_get_time();
@@ -1259,6 +1646,10 @@ static void pipeline_task(void *arg)
             if (imu_read_temp_c100(&tc) == 0) fus_set_temp(&s_fus, tc);
             s_last_temp_us = now;
         }
+
+        /* §12.4: on a tb quality change, and otherwise every 60 s, while a session is open. */
+        session_periodic(now);
+        speed_watchdog(now);
 
         g_hb[HB_PIPELINE]++;
     }
@@ -1389,6 +1780,11 @@ int pipeline_drag_snapshot(pipe_drag_t *out)
     return snap_read(PIPE_SNAP_DRAG, out, sizeof *out);
 }
 
+uint16_t pipeline_speed_kmh(void)
+{
+    return s_speed_kmh;
+}
+
 bool pipeline_sensors_ok(void)
 {
     /* §19.4's OTA-validate condition (R1, replacing pipeline_gps_seen): true once a GPS fix has
@@ -1401,6 +1797,11 @@ bool pipeline_sensors_ok(void)
      * Fail-closed: before pipeline_init_drivers has latched s_gps_latched the answer is false,
      * because a pipeline that never initialised has not proven the build healthy. */
     return s_gps_latched && (s_gps_seen || !s_gps_live);
+}
+
+bool pipeline_create_active(void)
+{
+    return s_create_active;          /* volatile read: a plain aligned bool, advisory (I-3b) */
 }
 
 uint32_t pipeline_still_for_ms(void)

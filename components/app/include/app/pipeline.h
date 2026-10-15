@@ -33,6 +33,11 @@ bool pipeline_sensors_ok(void);
  * just stopped" (deliberately indistinguishable: the caller tests >= OTA_STILL_MIN_MS). Before
  * any motion edge it is uptime modulo 2^32 ms. Read by ota_begin. */
 uint32_t pipeline_still_for_ms(void);
+/* True while an on-device track creation (§10.9, #97) is in progress. A volatile, advisory read for
+ * the logger's put_track (I-3b): a TRACKS_PUT is refused while this is true, because the creation
+ * finalises into the trk user table's scratch slot. Residual TOCTOU: a creation begun between the
+ * check and the install is not excluded. */
+bool pipeline_create_active(void);
 
 /* Best-known sector splits + theoretical best for the locked layout (design §2). Refreshed on
  * every EV_LAP_COMPLETE (valid or not -- the engine only updates its own bests on a valid lap, so
@@ -64,5 +69,9 @@ typedef struct {
 /* Copy the current drag run/session-best record into *out. Safe to call from another task. Returns
  * 0 on success (always succeeds; s_dragsnap is valid, if all-zero, before the first drag sample). */
 int  pipeline_drag_snapshot(pipe_drag_t *out);
+
+/* Latest valid-fix ground speed in km/h (0 while no fix / after EV_FIX_LOST). The §20.7 menu lock
+ * and the §20.5 MOVING glyph read THIS, not the 3 km/h EV_MOTION edge they used as a proxy. */
+uint16_t pipeline_speed_kmh(void);
 
 #endif /* APP_PIPELINE_H */

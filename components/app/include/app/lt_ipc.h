@@ -1,8 +1,10 @@
 /* app/lt_ipc.h -- pipeline<->logger channels (spec §4.4).
  *
- * The §4.4 sample rings and the logger's control/event queues. The pipeline (3.4) is the single
- * producer for the rings and the broadcaster for the event queue; the logger (3.3) is the single
- * consumer. Objects are defined in lt_ipc.c with static storage (no malloc, §17.9) and created at
+ * The §4.4 sample rings and the logger's control/event queues. The pipeline is the single
+ * producer for the rings and the broadcaster for the event queue; the logger is the single
+ * consumer. A dev-only second producer existed until R8 -- 'dbg logtest' pushed synthetic fixes from
+ * the console task; it now posts CMD_DBG_LOGTEST and the pipeline pushes them (design 2026-10-13 R8).
+ * Objects are defined in lt_ipc.c with static storage (no malloc, §17.9) and created at
  * boot step 11 by lt_ipc_init(). The rings are the core/ring.h lock-free SPSC ring.
  */
 #ifndef APP_LT_IPC_H
@@ -17,6 +19,7 @@
 #include "app/lt_proto.h"    /* LT_SESSION_ID_MAX */
 #include "core/event.h"
 #include "core/ring.h"
+#include "core/ses.h"    /* ses_time_map_t, ses_calib_t (R4 logger_submit_time_map/calib) */
 #include "core/types.h"
 
 /* §4.4 sample rings, pipeline -> logger:
@@ -58,6 +61,7 @@ typedef enum {
      * logger_request_sync()'s doc comment below for why that cross-task request existed only
      * briefly and why removing it was the fix, not a workaround. Value retired, not reused, same
      * as 4 above. */
+    LOGGER_PUT_TRACK       = 8,   /* R5 §18.1 0x13: install cmd.c's staged venue JSON, then save */
 } log_req_type_t;
 
 /* debt sweep A #59/#73: a bounded request/reply. requester == NULL is fire-and-forget (today's
@@ -75,7 +79,7 @@ typedef struct {
     int64_t      gps_us;      /* OPEN: start_gps_us; CLOSE: END gps_us (0 if unknown) */
     TaskHandle_t requester;   /* NULL = fire-and-forget; else notified with the rc when handled */
     char         id[LT_SESSION_ID_MAX + 1];   /* DELETE_SESSION: NUL-terminated id, validated by the sender */
-    uint8_t      _pad2[1];
+    uint8_t      gps_hz;      /* OPEN: gps_profile_t.max_rate_hz (§12.3 SESSION_HDR.gps_hz, R4) */
 } log_request_t;
 _Static_assert(sizeof(log_request_t) == 32, "log_request_t must be 32 B (§4.4, debt sweep A)");
 
@@ -121,6 +125,8 @@ typedef enum {
     LOG_RES_LAP   = 0,   /* u.lap  -> LAP (+ SECTOR) records */
     LOG_RES_DRAG  = 1,   /* u.drag -> DRAG_RUN (+ DRAG_GATE) records */
     LOG_RES_VENUE = 2,   /* u.venue -> the .sum VENUE record's id/layout/name */
+    LOG_RES_TIMEMAP = 3,   /* u.tmap  -> TIME_MAP (§12.3 0x0C, §12.4), pipeline owns the time base */
+    LOG_RES_CALIB   = 4,   /* u.calib -> SESSION_HDR calib block + a CALIB record (§12.3 0x0A) */
 } log_result_kind_t;
 
 typedef struct {
@@ -129,16 +135,19 @@ typedef struct {
         lap_result_t  lap;
         drag_result_t drag;
         struct { uint16_t venue_id, layout_id; char name[24]; } venue;
+        ses_time_map_t tmap;
+        ses_calib_t    calib;
     } u;
 } log_result_t;
 
 extern QueueHandle_t g_result_q;
 
 /* §4.4 cmd_q -- ui/conn/power -> pipeline (depth 8, command_t 24 B). The live producers are the
- * ui task (menu actions) and app/cmd (remote CONFIG/engine ops); there is no power task (Plan 6)
+ * ui task (menu actions), app/cmd (remote CONFIG/engine ops) and the console (`dbg sim` ->
+ * CMD_SIM_SCENARIO, `dbg logtest` -> CMD_DBG_LOGTEST); there is no power task (Plan 6)
  * and no conn task (sub-project C). lt_ipc_init() creates the queue at boot step 11 and the
  * pipeline drains it (CMD_SET_MODE / CMD_SET_LAYOUT / CMD_RESET_ENGINE / CMD_CONFIG_RELOAD /
- * CMD_SIM_SCENARIO). command_t is the §4.5 struct; the full command
+ * CMD_SIM_SCENARIO / CMD_DBG_LOGTEST). command_t is the §4.5 struct; the full command
  * protocol + transport is components/app/cmd (3.5). */
 #define CMD_Q_DEPTH 8
 
@@ -163,11 +172,12 @@ typedef enum {
     CMD_SIM_SCENARIO  = 8,   /* arg8 = SIM_SC_* (sim build only), arg16 = laps */
     CMD_CREATE_BEGIN  = 9,   /* menu New track: lap_create_begin */
     CMD_CREATE_CANCEL = 10,  /* long MODE on the NEW TRACK one-shot: lap_create_cancel */
+    CMD_DBG_LOGTEST   = 11,  /* R8: arg16 = synthetic fixes the PIPELINE must push (dev builds) */
 } command_type_t;
 /* Fix round 1, M1: the single bound every `cmd->type <= ...` check (pipeline.c's handle_cmd,
  * ui.c's ui_send_cmd) must use, instead of a literal last enumerator that silently goes stale the
  * next time a command is added. */
-#define CMD_TYPE_LAST CMD_CREATE_CANCEL
+#define CMD_TYPE_LAST CMD_DBG_LOGTEST
 
 enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_MODE_*) */
 /* Fix round 1, M2: CMD_SIM_SCENARIO's arg8 contract, same precedent as MODE_LAP/MODE_DRAG above.
@@ -176,6 +186,14 @@ enum { MODE_LAP = 0, MODE_DRAG = 1 };   /* CMD_SET_MODE arg8 (matches core CFG_M
  * depends on, so they must not #include this FreeRTOS-laden header (see sim_scenario.h for why);
  * pipeline.c _Static_asserts the two numeric sets agree. */
 enum { SIM_SC_LAPS = 0, SIM_SC_DRAG = 1, SIM_SC_PARK = 2 };   /* CMD_SIM_SCENARIO arg8 (sim build only) */
+
+/* PR #101 M3: a second bit in event_t.flags on EV_VENUE_FOUND, beside core/event.h's
+ * EV_VENUE_ANNOUNCE_ONLY (0x01). It lives here and not in core/event.h only because core/event.h
+ * is F1a's file in this wave; moving it there later is a pure relocation. Set ONLY by the logger,
+ * on a ui-only post (never emit_event()), together with EV_VENUE_ANNOUNCE_ONLY -- so it can never
+ * be read as a finished creation and can never replace a persistent one-shot. ui.c already bit-
+ * TESTS the announce flag (its own M3 fix), which is exactly what makes a second bit safe. */
+#define EV_VENUE_NOT_SAVED 0x02u
 
 extern QueueHandle_t g_cmd_q;
 
