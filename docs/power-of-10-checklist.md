@@ -20,7 +20,8 @@ Vendored/managed/IDF code (`jsmn`, `test/unity`, `managed_components/**`, `$IDF_
       this line is the only gate).
 - [ ] **Rule 3 — no dynamic memory after init.** No heap call at all — the linter blocks
       `malloc`/`calloc`/`realloc`/`reallocarray`/`free`/`strdup`/`strndup`/`asprintf`/`vasprintf`/
-      `aligned_alloc`/`heap_caps_*alloc`/`heap_caps_*free`/`pvPortMalloc`/`vPortFree` tree-wide; buffers are static or task-owned.
+      `aligned_alloc`/`heap_caps_*alloc`/`heap_caps_*free`/`pvPortMalloc`/`vPortFree`
+      tree-wide; buffers are static or task-owned.
 - [ ] **Rule 4 — length.** No function over 60 code lines; no `if`/`else`/`for`/`while`/`switch`/`do`
       compound-statement body over 30 code lines (blank/comment/brace-only lines excluded). Split into
       named helpers, or register a justified deviation.
@@ -45,7 +46,8 @@ Vendored/managed/IDF code (`jsmn`, `test/unity`, `managed_components/**`, `$IDF_
       not be worth its cost) OR be justified by the refined-rule tractability clause and registered
       (the linter now also sees a function passed to a sink or stored in a struct field).
 - [ ] **Rule 10 — zero warnings, multiple analysers.** Clean under `-Wall -Wextra -Werror -Wshadow`
-      (+ `-Wconversion` non-fatal) and under the custom linter, with `clang-tidy` + `cppcheck` as advisory second analysers.
+      (+ `-Wconversion` non-fatal) and under the custom linter, with `clang-tidy` + `cppcheck` as
+      advisory second analysers.
 
 **Behavior-preserving retrofits:** a change that only restructures *how* code is written (splitting a
 function, adding assertions, reworking a callback) must keep the host tests, the byte-exact PBM UI

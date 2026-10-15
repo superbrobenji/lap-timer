@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tools/dist_prune.sh -- move signed images older than the current HEAD description into
-# dist/archive/ (R34). dist/ is git-ignored either way; this only keeps the directory readable.
+# tools/dist_prune.sh -- move signed images that do NOT match the current HEAD description (older
+# builds, and images built on another branch) into dist/archive/ (R34). dist/ is git-ignored either way; this only keeps the directory readable.
 # Usage: tools/dist_prune.sh [--dry-run]
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

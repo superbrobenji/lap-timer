@@ -574,8 +574,8 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   `errlog` after the reboot.
 - [ ] **71. BT controller off (R33)** (F4-2). Flash the post-R33 `moto_sim` image (`CONFIG_BT_ENABLED=n`) and
   confirm on the console: `dbg status` boots clean with no BT-related error; `dbg mem` reports heap free **higher**
-  than the pre-R33 bench readings of 184,976 B (bench day 2 flash) / 184,988 B (`docs/measurements.md`, the
-  sim-path section); and a 10-minute sim-lap run shows no new `W`/`E` lines. Record both heap figures in
+  than the pre-R33 bench readings of 184,976 B (plan-04 session 4.3 `moto_neo6m` flash, 2026-09-17) / 184,988 B
+  (plan-03 session 3.6 `moto_sim`, 2026-09-17), both in `docs/measurements.md`; and a 10-minute sim-lap run shows no new `W`/`E` lines. Record both heap figures in
   `docs/measurements.md`. Evidence: the `dbg mem` and `dbg status` lines before/after.
 
 ## Closed on 2026-10-10 (bench day 5)

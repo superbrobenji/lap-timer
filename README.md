@@ -34,13 +34,17 @@ Then:
 CI compiles with gcc; run the same with `CC=$(ls /opt/homebrew/bin/gcc-* | head -1)` and
 `-B test/build-gcc` before opening a PR (`brew install gcc` once).
 
-Before a PR, also run what CI gates:
+Before a PR, also run what CI gates. The commands are the `run:` steps of
+[.github/workflows/ci.yml](.github/workflows/ci.yml) (`hygiene`, `tools-tests`, `static-analysis`);
+run them from there rather than from a copy here. The Power-of-10 gate is the one that is easy to get
+wrong: bare `python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation` exits 1 today with
+`BLOCKING: 5` (the five #131 sites), because CI grants those sites a rollout grace in the step's
+`--report-only-sites` string. The exact CI invocation, with the grace string read from the workflow:
 
-    git diff --check $(git hash-object -t tree /dev/null) HEAD -- . ':!*.pbm' ':!*.bin' ':!components/core/include/core/jsmn.h' ':!devcontroller/components/webapi/host/jsmn.h' ':!devcontroller/components/webapi/host/jsmn.c'
-    python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation
-    python3 tools/lint/venue_announce.py --fail-on-violation
-    python3 tools/spec_api_check.py
-    python3 -m unittest tools/test_devkit.py tools/lint/test_power_of_10.py tools/lint/test_venue_announce.py tools/test_spec_api_check.py tools/tracks/test_gen_tracks.py
+    python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation \
+        --report-only-sites "$(grep -o 'report-only-sites "[^"]*"' .github/workflows/ci.yml | cut -d'"' -f2)"
+
+It must exit 0 and print no `GRACE-STALE` line.
 
 ## Firmware
 
@@ -70,7 +74,7 @@ by squash PR once CI is green. Tags `pNN-dD` mark finished sessions, `plan-NN-do
 `vX.Y.Z` releases.
 
 `main` is protected: pull requests only, linear history, no force pushes, enforced for admins. The
-required status checks (since 2026-10-15) are all nine of CI's jobs: `hygiene`, `host-tests`,
+required status checks (since 2026-10-15) are nine of CI's ten jobs (the tenth, `coverage`, is advisory): `hygiene`, `host-tests`,
 `dc-host-tests`, `tools-tests`, `tracks-generated`, `static-analysis` (the Power-of-10 gate),
 `build (moto_neo6m)`, `build (moto_sim)` and `build (devcontroller)`.
 

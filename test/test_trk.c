@@ -580,7 +580,8 @@ static void test_sim_reserved_id_excluded_from_save_and_rejected_on_load(void)
  * unreserved user id the five hostile-record cases below can seed and re-seed from scratch. */
 #define SEEDED_USER_ID 8000
 
-/* Shared three-line preamble ("the same helper the round-trip cases use", below): trk_init()
+/* Shared three-line preamble (used by the five hostile-record cases below; the earlier round-trip
+ * cases keep their own inline setup, deliberately unchanged): trk_init()
  * drops any live table, mk_venue() builds this file's one fixture builder's venue, trk_user_add()
  * installs it at index 0 so trk_user_save_venue(0, ...) always has a known-good record to
  * re-encode and then corrupt. */
@@ -594,10 +595,10 @@ static void seed_one_user_venue(void)
 /* PR #101 review M6 (2026-10-13): the record decoder is the only part of the /tracks/user.bin
  * path with a host harness, so every hostile byte pattern that CAN be expressed at record level
  * is pinned here. The FILE level (magic, version, count, per-record len/crc16) is logger.c's and
- * has no harness -- see the issue filed by the audit fix wave's F4 plan. */
+ * has no harness -- see #111. */
 static void test_user_load_venue_rejects_trailing_garbage(void)
 {
-    seed_one_user_venue();                       /* same helper the round-trip cases use */
+    seed_one_user_venue();                       /* shared preamble, above */
     size_t n = 0;
     TEST_ASSERT_EQUAL_INT(0, trk_user_save_venue(0, s_blob, TRK_USER_REC_MAX, &n));
     int before = trk_user_count();

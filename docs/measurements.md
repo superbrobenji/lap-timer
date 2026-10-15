@@ -5,7 +5,7 @@ bench day from 2026-09-27 on is transcribed here from the merged PR body that re
 number and date are given per section) — the project's evidence lives in the tree, not only in
 PR descriptions and git-ignored ledgers (audit 2026-10-13 §6 item 1).
 
-## Static DRAM after R33 (BT off) on the merged wave — host build measurement (2026-10-15)
+## Static DRAM after R33 (BT off) on the merged wave — ESP-IDF firmware build measurement (2026-10-15)
 
 - Tree: branch `fix-process-docs` (rebased onto `main` e0defd3, which carries F0/F1a/F1b/F2a/F2b/F3) at a2bcdc9 plus the docs-only changes of F4 Task 9 (no source or build-config change). ESP-IDF 5.3.2 (`source tools/idf-env.sh`), clean builds with `CCACHE_DISABLE=1 ./build.sh <env> size`; no hardware, nothing flashed. Both builds: 0 compiler warnings (the only "warning" text in either log is a CMake deprecation notice from the IDF's own vendored mbedtls `CMakeLists.txt`).
 - `dram0_0_seg`: origin `0x3FFB0000`, length `0x2c200` (180,736 B), from `build/<env>/esp-idf/esp_system/ld/memory.ld` — Bluetooth is off (`CONFIG_BT_ENABLED=n`, ruling R33), so the ~56 KB controller reservation (old origin `0x3ffbdb5c`, length `0x1e6a4` = 124,580 B) is gone.

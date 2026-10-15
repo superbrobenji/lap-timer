@@ -7,7 +7,7 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 | # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
 |---|------|-----|---------|------|--------|-----------|--------|
 | 1 | ESP32 DevKit V1 (ESP32-WROOM-32, CH340, 4 MB) | 1 | controller; verified ESP32-D0WD-V3 rev 3.1, 4 MB flash | §3.1, §3.3 | owned | — | — |
-| 2 | G28U7FTTL-P GPS module (u-blox 7-class UBX-G7020; label 2408U0003297) | 1 | position, speed, time (5 Hz prototype) | §3.1, §7.3 | owned | Communica / Micro Robotics | R150 |
+| 2 | G28U7FTTL-P GPS module (u-blox 7-class UBX-G7020; label 2408U0003297) | 1 | position, speed, time (u-blox 7 maximum nav rate 10 Hz, §3.1; driver is a Plan 8 stub) | §3.1, §7.3 | owned | Communica / Micro Robotics | R150 |
 | 3 | GY-521 (MPU-6050) | 1 | lean angle, g-forces, motion wake | §3.1, §8 | owned | Communica / Micro Robotics | R60 |
 | 4 | Waveshare 2.13" e-Paper HAT rev2.1, panel V4 (SSD1680, 122×250) | 1 | rider display | §3.1, §20.1 | owned | DIYElectronics / Micro Robotics | R450 |
 | 4a | Waveshare 2.9" e-Paper Module V2 (SSD1680, 296×128) | 1 | rider display, alternative panel (`ws29v2`) | §3.1, §20.1 | alternative | DIYElectronics / Micro Robotics | R450 |
@@ -58,7 +58,7 @@ New lines from the Plan 5.6 physical-interface design (`docs/superpowers/specs/2
 |---|------|---------|--------|
 | 24 | USB-A to micro-USB data cable | flashing, serial console | owned |
 | 25 | Multimeter | power-state current measurements (§16.5) | owned (verify) |
-| 26 | USB-UART adapter (CP2102/CH340) | `tools/gps_sim.py` replay into GPIO 16 (the real GPS has been in hand since 2026-10-13); optional with the `gps_sim` driver | optional |
+| 26 | USB-UART adapter (CP2102/CH340) | spare serial console / flash path; no longer a GPS replay source (the `gps_sim` driver replays a capture compiled into the image, spec §4.6, and the real GPS has been in hand since 2026-10-13) | optional |
 | 27 | Bench power supply (variable) | brownout test (§22.3) | optional |
 
 ## Upgrade path (not needed for the prototype)

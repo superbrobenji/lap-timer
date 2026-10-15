@@ -140,6 +140,8 @@ jobs:
             tools/tracks/test_gen_tracks.py
       - name: sign_release.sh guard harness (dry-run; no IDF, no key)
         run: bash tools/test_sign_release.sh
+      - name: build.sh unimplemented-driver refusals (no IDF)
+        run: bash tools/test_build_refusals.sh
 
   static-analysis:
     # Power of 10 (Holzmann/JPL) static analysis -- design §5, amended by the 2026-10-13 audit fix
@@ -200,9 +202,9 @@ jobs:
       # compile database is disproportionate for this session -- cppcheck and the linter above
       # already run over components/app, components/drivers and main report-only. So: clang-tidy
       # runs over components/core (host DB) only, for now.
-      # TODO(4.5.x): add clang-tidy over components/app, components/drivers and main via the IDF
-      # compile database once an IDF-container step exists in this job (or firmware.yml uploads
-      # its compile_commands.json for this job to consume).
+      # Extending clang-tidy to components/app, components/drivers and main needs the IDF compile
+      # database (an IDF-container step in this job, or firmware.yml uploading its
+      # compile_commands.json); that is not wired, and nothing is scheduled for it.
       - name: clang-tidy over components/core (host compile DB; advisory)
         if: steps.probe.outputs.present == 'true'
         continue-on-error: true

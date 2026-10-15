@@ -32,13 +32,24 @@ jobs:
           . $IDF_PATH/export.sh
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           idf.py -C test_apps/core_selftest -B test_apps/core_selftest/build set-target esp32 build
-      - name: Fail if core_selftest skipped a test/test_*.c without a documented reason
+      - name: Fail if core_selftest excludes a test/test_*.c with no reason in the CMake comment
         if: steps.probe_selftest.outputs.present == 'true' && matrix.env == 'moto_neo6m'
         shell: bash
         run: |
           # memory `feedback-core-selftest-gate`: the selftest globs test/test_*.c and excludes a
-          # named few. Every exclusion must be justified in the CMakeLists comment above it.
-          grep -q 'list(FILTER TEST_SRCS EXCLUDE REGEX' test_apps/core_selftest/main/CMakeLists.txt
+          # named few. Every name in the EXCLUDE REGEX must be justified in a `#` comment line of
+          # the same CMakeLists.txt, and the regex must still be there.
+          f=test_apps/core_selftest/main/CMakeLists.txt
+          rx=$(sed -n 's/^list(FILTER TEST_SRCS EXCLUDE REGEX "\/test_(\(.*\))\\\\\.c\$")$/\1/p' "$f")
+          [ -n "$rx" ] || { echo "no EXCLUDE REGEX line of the expected shape in $f"; exit 1; }
+          bad=0
+          for name in $(echo "$rx" | tr '|' ' '); do
+            if ! grep -E '^[[:space:]]*#' "$f" | grep -q "test_$name"; then
+              echo "test_$name.c is excluded from core_selftest with no reason in a comment of $f"
+              bad=1
+            fi
+          done
+          exit $bad
       - name: Build ${{ matrix.env }}
         if: steps.probe.outputs.present == 'true' && matrix.env != 'devcontroller'
         shell: bash
