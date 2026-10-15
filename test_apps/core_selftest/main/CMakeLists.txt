@@ -73,6 +73,7 @@ set(LT_HAL_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/lt_hal")
 idf_component_register(SRCS "main.c" "${TEST_DIR}/assert_support.c" "${APP_POLICY_SRC}" "${APP_LOG_PAUSE_SRC}" "${APP_SES_POLICY_SRC}" ${WRAPPERS}
                             "${EPD_DIR}/host/epd_panel.c" "${EPD_DIR}/host/epd_rotate.c"
                             "${SIM_COMMON_DIR}/host/sim_profile.c"
+                            "${SIM_COMMON_DIR}/host/sim_drag_pos.c"
                             "${SIM_COMMON_DIR}/host/sim_clock.c"
                        INCLUDE_DIRS "." "${TEST_DIR}" "${APP_INCLUDE_DIR}"
                                     "${EPD_DIR}/include" "${SIM_COMMON_DIR}/include"
