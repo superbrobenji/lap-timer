@@ -19,6 +19,48 @@ jobs:
         run: grep -q "espressif/idf:$(cat .idf-version)$" .github/workflows/firmware.yml
       - name: spec §5.2 API blocks match components/core/include/core/*.h
         run: python3 tools/spec_api_check.py
+      - name: No stale forward-looking comments (audit §3.2 -- comments used as a ledger)
+        run: |
+          # A comment that promises a future session is false the moment that session ships, and the
+          # 2026-10-13 audit found 19 of them. Rewrite the comment as a true statement, or cite an
+          # issue number. The pattern is never widened; instead the output is filtered through the
+          # per-SITE allow-list below ("path|fixed substring of the line", no line numbers, so an
+          # edit elsewhere in the file does not stale an entry). Every entry says why it is allowed:
+          # an issue number = a stale survivor that issue owns (delete the entry with the rewrite);
+          # otherwise the hit is TRUE today (a quote of the old comment, "later session" meaning a
+          # riding session, or "until Plan N" naming an open owning plan). Any other hit fails.
+          allow=(
+            # true: quotes the F2b-era comment it replaced
+            "components/app/cmd/cmd.c|are later sessions"
+            # stale, owner #129
+            "components/app/cmd/cmd.c|not in plan 03"
+            "components/app/cmd/cmd.c|weak-stubbed until 5.4"
+            # true: "later session" = a later riding session (logger domain sense)
+            "components/app/logger/logger.c|must not anchor a later session"
+            "components/app/logger/logger.c|later session's HDR is right"
+            # true: quotes the old comment it removed
+            "components/app/pipeline/pipeline.c|lands in 3.4"
+            # stale, owner #129 (CALIB_ORIENT itself: #93 / Plan 8)
+            "components/app/pipeline/pipeline.c|CALIB_ORIENT: later sessions"
+            # true: names the open owning plans (Plan 8 sensors, Plan 6 power)
+            "components/drivers/export_serial/export_serial.c|are stubbed until the real sensor drivers land"
+            # true: the MPU-6050 driver is the open Plan 8 deliverable
+            "components/drivers/imu_mpu6050/CMakeLists.txt|The real I2C driver lands with the"
+            "components/drivers/imu_mpu6050/imu_mpu6050.c|The real I2C driver (WHO_AM_I"
+          )
+          # git grep exits 1 on "no match"; that is the good case, not a job failure.
+          hits=$(git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|stubbed until|stub until|not in plan [0-9]|Plan 04 ships no display' \
+              -- components main tools docs ':!docs/reviews' ':!docs/superpowers' || true)
+          bad=0
+          while IFS= read -r hit; do
+            [ -n "$hit" ] || continue
+            ok=0
+            for e in "${allow[@]}"; do
+              if [[ "$hit" == "${e%%|*}:"* && "$hit" == *"${e#*|}"* ]]; then ok=1; break; fi
+            done
+            if [ "$ok" = 0 ]; then echo "stale forward-looking comment: $hit"; bad=1; fi
+          done <<< "$hits"
+          exit "$bad"
 
   host-tests:
     runs-on: ubuntu-latest
