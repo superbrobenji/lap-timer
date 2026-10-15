@@ -38,8 +38,8 @@ correctly. main() now also counts how many ACQUIRE_RE matches landed inside a re
 found something to check" that costs nothing on a tree which always has >= 2 such call sites. Not
 lap.c's -- is_exempt() drops components/core/lapengine/ before check_file() ever runs, so
 scan_for_venue()/finalize_create() contribute zero; the two that actually keep the floor non-zero
-are pipeline.c's app-layer acquisitions, lap_import_rtc() (pipeline.c:505) and lap_set_venue()
-(pipeline.c:1139). This floor is the only thing that catches this rename.
+are pipeline.c's app-layer acquisitions, lap_import_rtc() (in on_fix_try_resume()) and
+lap_set_venue() (the CFG_GPS_SIM boot venue in pipeline_init()). This floor is the only thing that catches this rename.
 
 Fix round 2 (PR #101 review M5, 2026-10-13): "a call to ui_post_venue() anywhere in the same
 function body" was still too loose -- it proved the announce happened somewhere, not that it was
@@ -65,13 +65,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from power_of_10 import (  # reuse the one C scanner in the tree
     LineIndex,
+    _arg_spans,
     find_top_level_functions,
     strip_comments_and_literals,
 )
 
-# Fix round 1 (review Minor 8, #98): widened to match power_of_10.py's own DEFAULT_PATHS exactly
-# (components/core, components/app, components/drivers, main) -- components/core/lapengine/ is
-# still exempt below (that is where the contract is correctly implemented), but a future blind
+# Fix round 1 (review Minor 8, #98): widened to power_of_10.py's DEFAULT_PATHS -- except
+# devcontroller/, which P10 scans report-only and which has no lap engine, so nothing there can
+# acquire a venue (components/core, components/app, components/drivers, main) --
+# components/core/lapengine/ is still exempt below (that is where the contract is correctly implemented), but a future blind
 # venue-set path elsewhere in core/ or in drivers/ is now in scope too, at no cost (verified: 0
 # violations with the widened scan on this tree).
 DEFAULT_PATHS = ["components/core", "components/app", "components/drivers", "main"]
@@ -82,7 +84,7 @@ SCANNED = (".c",)
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # tokens that carry no venue identity, so sharing one proves nothing (M5)
 _NOISE = {"sizeof", "NULL", "true", "false", "const", "void", "int", "uint16_t", "uint8_t",
-          "int64_t", "s_lap", "L", "D"}
+          "int64_t"}
 
 
 def _innermost_block(stripped, pos):
@@ -104,21 +106,32 @@ def _innermost_block(stripped, pos):
 
 
 def _args_text(stripped, open_paren_idx):
-    """(whole argument list, first argument) of the call whose '(' is at open_paren_idx."""
-    depth = 0
-    for i in range(open_paren_idx, len(stripped)):
-        if stripped[i] == "(":
-            depth += 1
-        elif stripped[i] == ")":
-            depth -= 1
-            if depth == 0:
-                whole = stripped[open_paren_idx + 1:i]
-                return whole, (whole.split(",")[0] if "," in whole else whole)
-    return "", ""
+    """(arguments after the first, first argument) of the call whose '(' is at open_paren_idx;
+    split at depth-aware top-level commas (power_of_10's _arg_spans), so a comma inside a nested
+    call or an index never splits an argument."""
+    args = _arg_spans(stripped, open_paren_idx)
+    if not args:
+        return "", ""
+    return ",".join(args[1:]), args[0]
+
+
+_MEMBER_RE = re.compile(r"(?:\.|->)\s*[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _tokens(text):
-    return {t for t in _IDENT_RE.findall(text)} - _NOISE
+    """Identifiers that carry venue identity: member names (`.venue`, `->id`) are dropped, since
+    two unrelated structs sharing a field name must not count as naming the same venue."""
+    return set(_IDENT_RE.findall(_MEMBER_RE.sub(" ", text))) - _NOISE
+
+
+def _opens_on_acquisition(stripped, acq_pos, block_open):
+    """True when the block opened at `block_open` is the then-block of a condition that CONTAINS the
+    acquisition (`if (lap_import_rtc(...) == 0) {`): nothing but the rest of that condition lies
+    between the acquisition and the brace, so the block runs exactly when the set succeeded."""
+    if block_open < acq_pos:
+        return False
+    between = stripped[acq_pos:block_open]
+    return not any(c in between for c in ";{}") and between.rstrip().endswith(")")
 
 
 # core/lapengine (lap.c) is the engine's own source: scan_for_venue()/finalize_create() announce
@@ -165,11 +178,16 @@ def check_file(path, relpath):
         # past the engine handle). A sibling branch's announce, an announce before the set, and an
         # announce of a different/literal venue id all fail.
         blk = _innermost_block(stripped, m.start()) or (open_idx, close_idx)
-        acq_args, _first = _args_text(stripped, m.end() - 1)
-        acq_tokens = _tokens(acq_args.split(",", 1)[1] if "," in acq_args else acq_args)
+        acq_rest, _first = _args_text(stripped, m.end() - 1)     # arguments past the engine handle
+        acq_tokens = _tokens(acq_rest)
         ok = False
         for a in ANNOUNCE_RE.finditer(stripped, m.end(), blk[1]):
-            _whole, first = _args_text(stripped, a.end() - 1)
+            # the announce must sit at the acquisition's OWN block depth: one inside a nested
+            # conditional after the set runs only on some paths (final review M5)
+            ab = _innermost_block(stripped, a.start())
+            if ab != blk and not (ab and _opens_on_acquisition(stripped, m.start(), ab[0])):
+                continue
+            _rest, first = _args_text(stripped, a.end() - 1)
             if _tokens(first) & acq_tokens:
                 ok = True
                 break

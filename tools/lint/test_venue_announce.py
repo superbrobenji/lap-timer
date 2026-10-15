@@ -26,8 +26,11 @@ class AcquisitionPath(unittest.TestCase):
         self.assertIn("in sibling_branch()", out)
         self.assertIn("in announce_before()", out)
         self.assertIn("in wrong_venue()", out)
-        self.assertNotIn("in correct()", out)
-        self.assertIn("venue-announce: 3 violation(s)", out)
+        self.assertIn("in nested_conditional()", out)
+        self.assertIn("in field_name_only()", out)
+        for ok in ("correct", "comma_in_nested_call", "success_branch"):
+            self.assertNotIn("in %s()" % ok, out)
+        self.assertIn("venue-announce: 5 violation(s)", out)
         self.assertEqual(1, rc)
 
     def test_the_real_tree_still_passes(self):
