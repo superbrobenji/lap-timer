@@ -105,16 +105,20 @@ jobs:
       - name: Install cppcheck + clang-tidy
         run: sudo apt-get update && sudo apt-get install -y cppcheck clang-tidy
       # ROLLOUT GRACE (ruling R12, two-step): the tightened checks land before the plans that own
-      # the offending files. Each entry names a finding that belongs to another plan in the
-      # 2026-10-13 wave; the linter prints GRACE-STALE for any entry that stops matching, and the
-      # whole flag is deleted by F4's final task once every owner has merged. Owners:
-      #   cfg_json.c:walk            RULE-1           -> F1b (ruling R27, walk becomes two loops)
-      #   board.c:cmp_int            RULE-9           -> F2a (ruling R19, bounded insertion sort)
-      #   the remaining five         RULE-4/5         -> issue filed by F4 (statement counting)
+      # the offending files. Each entry names a finding that still matches and is owned by another
+      # layer; the linter prints GRACE-STALE for any entry that stops matching, and that entry is
+      # deleted from the list when its owner fixes the site. Removed 2026-10-15 after their owners
+      # fixed them: cfg_json.c:walk:RULE-1 (F1b, ruling R27) and board.c:cmp_int:RULE-9 (F2a,
+      # ruling R19). Remaining graced sites, with owning layer (the list is not empty):
+      #   components/app/sys/lt_nvs.c:errlog_add:RULE-5                   app layer      issue: filed by F4 Task 14 Step 1 (Power-of-10 statement-count findings)
+      #   components/core/config/cfg.c:cfg_defaults:RULE-5                 core           issue: filed by F4 Task 14 Step 1 (Power-of-10 statement-count findings)
+      #   components/core/config/cfg_json.c:cfg_to_json:RULE-4             core           issue: filed by F4 Task 14 Step 1 (Power-of-10 statement-count findings)
+      #   components/drivers/export_serial/export_serial.c:fmt_from_str:RULE-5   drivers layer  issue: filed by F4 Task 14 Step 1 (Power-of-10 statement-count findings)
+      #   components/drivers/export_serial/export_serial.c:tally_cb:RULE-5       drivers layer  issue: filed by F4 Task 14 Step 1 (Power-of-10 statement-count findings)
       - name: power_of_10.py linter (BLOCKING; rules 1/3/4/4-compound/5/8/9)
         run: |
           python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation \
-            --report-only-sites "components/app/sys/lt_nvs.c:errlog_add:RULE-5,components/core/config/cfg.c:cfg_defaults:RULE-5,components/core/config/cfg_json.c:walk:RULE-1,components/core/config/cfg_json.c:cfg_to_json:RULE-4,components/drivers/board_devkit_v1/board.c:cmp_int:RULE-9,components/drivers/export_serial/export_serial.c:fmt_from_str:RULE-5,components/drivers/export_serial/export_serial.c:tally_cb:RULE-5"
+            --report-only-sites "components/app/sys/lt_nvs.c:errlog_add:RULE-5,components/core/config/cfg.c:cfg_defaults:RULE-5,components/core/config/cfg_json.c:cfg_to_json:RULE-4,components/drivers/export_serial/export_serial.c:fmt_from_str:RULE-5,components/drivers/export_serial/export_serial.c:tally_cb:RULE-5"
       - name: "venue-announce check (BLOCKING; #98 -- every direct venue set announces to the ui)"
         run: python3 tools/lint/venue_announce.py --fail-on-violation
       - name: cppcheck (warning+style+portability; design §5 second analyser, rule 10)
