@@ -19,13 +19,14 @@ ses_action_t session_policy(bool open_now, ses_input_t in)
 }
 
 ses_live_t session_liveness(bool logger_open, uint32_t open_req_at_open, uint32_t open_req_sent,
-                            bool confirmed, int64_t now_us, int64_t last_try_us,
+                            bool open_send_ok, bool confirmed, int64_t now_us, int64_t last_try_us,
                             int64_t retry_interval_us)
 {
     if (logger_open) {
         /* R-1: exact equality (wrap-safe): the logger's last completed open was made by the LATEST
-         * OPEN the pipeline enqueued, not by an earlier one of an overlapping pair. */
-        return (!confirmed && open_req_at_open == open_req_sent) ? SES_LIVE_CONFIRM : SES_LIVE_NONE;
+         * OPEN the pipeline enqueued, not by an earlier one of an overlapping pair. N-A: and never while
+         * the latest OPEN's enqueue failed (the equal count then belongs to an older session). */
+        return (open_send_ok && !confirmed && open_req_at_open == open_req_sent) ? SES_LIVE_CONFIRM : SES_LIVE_NONE;
     }
     if (confirmed) return SES_LIVE_DROP;
     return ((now_us - last_try_us) >= retry_interval_us) ? SES_LIVE_RETRY : SES_LIVE_NONE;

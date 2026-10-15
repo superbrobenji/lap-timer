@@ -471,6 +471,7 @@ static bool     s_ses_open;
  * closes on its own -- so session_periodic() drops the mirror instead of retrying. */
 static bool     s_ses_confirmed;
 static uint32_t s_open_req_sent;   /* R-1: OPENs successfully enqueued; the logger's at_open must equal it to confirm */
+static bool     s_open_send_ok = true;   /* N-A: false while the latest OPEN send failed; never confirm then */
 static uint16_t s_ses_venue_id, s_ses_layout_id;
 static uint8_t  s_gps_hz;              /* gps_profile_t.max_rate_hz; §12.3 SESSION_HDR.gps_hz */
 
@@ -545,7 +546,10 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
     s_ses_layout_id = layout_id;
     /* R-1: count only an OPEN that really entered the FIFO (log_req_q; this task is its only OPEN
      * producer), so the logger's dequeued-OPEN count lines up with this one. */
-    if (session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us)) s_open_req_sent++;
+    /* N-A: latch a failed enqueue so session_liveness never confirms an older session's equal count;
+     * a later successful OPEN send clears it. sent is NOT bumped on failure (counts would desync). */
+    s_open_send_ok = session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us);
+    if (s_open_send_ok) s_open_req_sent++;
     s_ses_open = true;
     s_ses_confirmed = false;
     s_last_open_try_us = esp_timer_get_time();
@@ -573,7 +577,8 @@ static void session_periodic(int64_t now)
     LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
     if (!s_ses_open) return;
     bool lopen = logger_session_is_open();   /* acquire load FIRST, then at_open (see logger.h) */
-    ses_live_t v = session_liveness(lopen, logger_open_req_at_open(), s_open_req_sent, s_ses_confirmed,
+    ses_live_t v = session_liveness(lopen, logger_open_req_at_open(), s_open_req_sent, s_open_send_ok,
+                                    s_ses_confirmed,
                                     now, s_last_open_try_us, TIMEMAP_INTERVAL_US);
     if (v == SES_LIVE_DROP) {
         s_ses_open = false;

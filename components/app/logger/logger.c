@@ -785,7 +785,7 @@ static int handle_request(const log_request_t *req)
 {
     LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);   /* M1: an asserted anomaly reports failure, not 0/ok */
     switch (req->type) {
-    case LOGGER_OPEN_SESSION:    s_open_req_seen++; open_session(req); return 0;   /* R-1: counted whether it opens, refuses or is ignored */
+    case LOGGER_OPEN_SESSION:    open_session(req); return 0;   /* R-1/N-B: counted in drain_requests, at dequeue */
     case LOGGER_CLOSE_SESSION:   return close_session(req);
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
     case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
@@ -1115,6 +1115,9 @@ static void drain_requests(void)
     log_request_t req;
     uint32_t n = 0;
     while (xQueueReceive(g_log_req_q, &req, 0) == pdTRUE) {
+        /* R-1/N-B: count every OPEN taken off the FIFO, before the bound check below, so one that is
+         * dequeued and then dropped is still counted -- exactly once, never in handle_request. */
+        if (req.type == LOGGER_OPEN_SESSION) s_open_req_seen++;
         /* M2: doubled from LOG_REQ_Q_DEPTH -- a handler can yield mid-drain (e.g. storage I/O
          * inside delete_session/eviction_check), letting producers refill the queue within this
          * same call; still a bounded loop (rule 2), just against a less pessimistic worst case. */
