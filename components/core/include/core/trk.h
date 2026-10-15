@@ -64,9 +64,19 @@ extern const uint16_t    trk_bundled_count;
  * The window a future change could open is a second creation landing inside one save; today two
  * creations cannot be closer than MIN_LAP_S apart, so it is unreachable, not merely narrow.
  *
- * Writers: trk_init() then logger_load_tracks() (app/logger.h; the implementation stays in
- * logger.c, the file it reads -- it only reads) run in that exact order, BOTH on app_main's own
- * task, inside main/app_main.c's boot_subsystems(), strictly BEFORE logger_start() creates the
+ * A FOURTH unlocked reader is the cmd/console task (core 0): CMD_TRACKS_GET (§18.1 0x12; cmd.c's
+ * tracks_emit_one()) walks trk_bundled[] and then the user table through trk_user_count() and
+ * trk_get()/trk_to_json(), the same captured-count shape as fact (1) above: it reads
+ * trk_user_count() first and touches only indices below it, and no post-boot writer rewrites a
+ * byte below that count (the writers below are append-only).
+ *
+ * Writers (post-boot, all append-only): the pipeline task's trk_user_add() above, AND the logger
+ * task: LOGGER_PUT_TRACK (CMD_TRACKS_PUT, §18.1 0x13; logger.c's put_track()) installs a venue the
+ * cmd task staged, but only as a NEW id -- put_track() refuses an id that already exists and a PUT
+ * issued while a creation is in flight -- so trk_user_add()'s same-id "replace" branch is
+ * unreachable from every post-boot caller. Boot writers: trk_init() then logger_load_tracks()
+ * (app/logger.h; the implementation stays in logger.c, the file it reads -- it only reads) run in
+ * that exact order, BOTH on app_main's own task, inside main/app_main.c's boot_subsystems(), strictly BEFORE logger_start() creates the
  * logger task a few lines later and well before pipeline_start() creates the pipeline task
  * further down still (final review F-4/I-4, #97: moved here from logger_task()'s own boot init --
  * see that function's history in logger.c -- because the previous placement's safety argument

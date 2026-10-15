@@ -37,7 +37,7 @@ static const char *TAG = "sto";
 #define LFS_PART   "storage"           /* partitions.csv label; STO_PATHMAX lives in hal/storage.h */
 
 /* rule 2: sto_list's readdir scan is capped at a fixed, generous bound -- far more than any
- * realistic /sessions directory holds (cmd.c's LIST_MAX_SESSIONS=64 tracked ids -> at most ~128
+ * realistic /sessions directory holds (cmd.c's LIST_MAX_SESSIONS=48 tracked ids -> at most ~96
  * .log/.sum dirents) -- so the loop is provably bounded rather than running until readdir() is
  * exhausted by (possibly corrupted) filesystem state. */
 #define STO_LIST_MAX_ENTRIES 4096

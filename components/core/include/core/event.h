@@ -51,7 +51,8 @@ enum {
     EV_MOTION        = 12,  /* —                                                  (pipeline) */
     EV_STILL         = 13,  /* —                                                  (pipeline) */
     EV_CALIB_DONE    = 14,  /* arg16 = stage                                      (fusion) */
-    EV_FAULT         = 15,  /* arg16 = error code                                 (supervisor) */
+    EV_FAULT         = 15,  /* arg16 = sys_flags bit index, flags = 1 set / 0 cleared,
+                             * arg32 = bit<<8|set -- the only payload the EVENT record keeps (supervisor) */
 
     /* #87: ui-only codes. Never passed to emit_event() -- posted straight to g_ui_evt_q with a
      * direct xQueueSend() -- so, unlike every code above, they are never logged to an EVENT
