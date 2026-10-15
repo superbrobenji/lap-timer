@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate components/core/tracks/trk_bundled.c from tools/tracks/*.json (spec §10.2)."""
-import json, sys, argparse, math, pathlib
+import io, json, os, sys, argparse, math
 
 MAX_LAYOUTS, MAX_SECTORS = 8, 8
 
@@ -82,11 +82,20 @@ def main(argv=None):
     ap.add_argument("-o", "--output", required=True)
     a = ap.parse_args(argv)
     try:
-        venues = [expand(json.load(open(f))) for f in sorted(a.files)]
+        venues = []
+        for f in sorted(a.files):
+            with open(f, encoding="utf-8") as fh:
+                venues.append(expand(json.load(fh)))
         ids = [v["id"] for v in venues]
         need(len(ids) == len(set(ids)), f"duplicate venue ids {sorted(ids)}")
-        with open(a.output, "w") as out:
-            emit(venues, out)
+        # Render fully BEFORE touching the output: c_str() validates inside emit(), and a rejected
+        # venue must leave the existing trk_bundled.c exactly as it was (final review M4).
+        buf = io.StringIO()
+        emit(venues, buf)
+        tmp = a.output + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as out:
+            out.write(buf.getvalue())
+        os.replace(tmp, a.output)
     except GenError as e:
         print(f"gen_tracks: {e}", file=sys.stderr)
         return 2

@@ -2640,7 +2640,7 @@ Three track sessions with RaceChrono on a phone as reference (phone GPS 1 Hz is 
 | `tools/sign_release.sh` | bash | clean-tree + no-sim guards, build, `size` gate, sign, verify, `dist/` (§19.2, §21.5) | `tools/sign_release.sh moto_neo6m` |
 | `tools/lint/power_of_10.py` | Python 3 | the Power-of-10 gate (rules 1/3/4/4-compound/5/8/9) over `components/**`, `main/`, and `devcontroller/` report-only | `python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation` |
 | `tools/lint/venue_announce.py` | Python 3 | every direct venue acquisition announces to the ui on that path | `python3 tools/lint/venue_announce.py --fail-on-violation` |
-| `tools/spec_api_check.py` | Python 3 | spec §5.2's API blocks vs `components/core/include/core/*.h` | `python3 tools/spec_api_check.py` (`--emit core/lap.h` prints a header's declarations, in first-mention order — reorder to header order when pasting) |
+| `tools/spec_api_check.py` | Python 3 | spec §5.2's API blocks vs `components/core/include/core/*.h` | `python3 tools/spec_api_check.py` (`--emit core/lap.h` prints a header's typedefs, `#define` lines and prototypes, the prototypes in declaration order; `--hdr-dir`/`--headers` aim the check at fixtures) |
 | `tools/sim/gen_sim_capture.sh` | bash | regenerates the committed `gps_sim` capture and its replay-expected lap times (manual, not CI) | `tools/sim/gen_sim_capture.sh [synth] [gensim]` (built host binaries) |
 | `tools/idf-env.sh` | bash | sources the pinned ESP-IDF (asserts `.idf-version`) | `source tools/idf-env.sh` |
 

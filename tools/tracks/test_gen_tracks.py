@@ -54,6 +54,21 @@ class Validation(unittest.TestCase):
             out = os.path.join(tmp, "out.c")
             self.assertEqual(2, gen_tracks.main([a, b, "-o", out]))
 
+    def test_a_rejected_venue_leaves_the_existing_output_untouched(self):
+        """c_str() rejects an over-long name while emitting; the previous output must survive
+        byte for byte (it used to be truncated to 122 B before the error)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "out.c")
+            self.assertEqual(0, gen_tracks.main([write(tmp, GOOD), "-o", out]))
+            with open(out, "rb") as fh:
+                before = fh.read()
+            bad = json.loads(json.dumps(GOOD))
+            bad["name"] = "N" * 40
+            self.assertEqual(2, gen_tracks.main([write(tmp, bad, "bad.json"), "-o", out]))
+            with open(out, "rb") as fh:
+                self.assertEqual(before, fh.read())
+            self.assertFalse(os.path.exists(out + ".tmp"))
+
     def test_validation_survives_dash_O(self):
         """-O strips `assert`; the committed generator must still refuse a bad venue."""
         with tempfile.TemporaryDirectory() as tmp:
