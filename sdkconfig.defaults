@@ -31,14 +31,24 @@ CONFIG_SPI_MASTER_ISR_IN_IRAM=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
-CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
-CONFIG_BTDM_CTRL_PINNED_TO_CORE_0=y
+# --- Bluetooth: OFF (ruling R33, docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md) ---
+# No BLE code is compiled on main: components/drivers/conn_ble does not exist here, CONN=ble
+# appends no driver directory, and the NimBLE host is parked on branch s5.2-conn-ble. With
+# CONFIG_BT_ENABLED=y the linker still reserves the BT controller's DRAM -- dram0_0_seg starts at
+# 0x3ffbdb5c with length 0x1e6a4 (124,580 B) instead of 0x3ffb0000 / 0x2c200 (180,736 B), i.e.
+# ~56 KB of static DRAM held for a stack that is not linked. CFG_HAS_BLE (build_config.h) and the
+# hwid string are unchanged, so OTA compatibility (§19.7) is unaffected.
+#
+# SUB-PROJECT C / branch s5.2-conn-ble MUST restore the block below when it activates BLE, and
+# re-measure: the DRAM headroom this reservation was consuming is now available to other uses and may be spent there.
+CONFIG_BT_ENABLED=n
+#CONFIG_BT_NIMBLE_ENABLED=y
+#CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+#CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
+#CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+#CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+#CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
+#CONFIG_BTDM_CTRL_PINNED_TO_CORE_0=y
 CONFIG_ESP_WIFI_ENABLED=n          # overridden in *_wifi envs
 CONFIG_LITTLEFS_MAX_PARTITIONS=1
 # LittleFS geometry per spec §13.1 (block_size 4096 is fixed by the component for the ESP32).

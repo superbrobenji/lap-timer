@@ -758,9 +758,8 @@ static int stream_raw(const char *id, const char *ext, uint32_t offset, uint32_t
  * likewise APPEND-ONLY (put_track refuses a PUT whose id already exists, I-3) and runs only while
  * THIS task is blocked inside logger_request_sync() (op_tracks_put below, which also latches
  * s_put_pending if its wait times out, so after a timeout every s_asm user first waits the logger
- * out via put_barrier), so it cannot overlap this read. trk.h's ownership comment still names
- * two readers and does not list the logger as a writer: F4 files the doc-debt issue (trk.h is
- * F0's file in this wave).
+ * out via put_barrier), so it cannot overlap this read. core/trk.h's ownership comment names this
+ * task as a reader and the logger as an append-only writer.
  *
  * Returns 1 when a venue was written, 0 when it was skipped (the caller counts it), -1 on a
  * transport error. */

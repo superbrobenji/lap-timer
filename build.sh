@@ -74,6 +74,32 @@ case "$ENV_NAME" in
     *) echo "unknown environment: $ENV_NAME" >&2; usage ;;
 esac
 
+# R34: the spec's §4.6 env table lists environments whose drivers are not written yet (m10, sd,
+# oled, wifi). Say so here, before any IDF work, rather than failing with a CMake include error
+# 20 lines later. The four driver-backed keys are checked by directory; CONN is checked only for
+# wifi (a conn_wifi driver directory), because CONN=ble deliberately has none (CMakeLists.txt).
+for _f in "${FLAGS[@]}"; do
+    case "${_f%%=*}" in
+        GPS|IMU|DISPLAY|STORAGE)
+            _key="${_f%%=*}"; _val="${_f#*=}"
+            _lc="$(printf '%s' "$_key" | tr '[:upper:]' '[:lower:]')"
+            _dir="components/drivers/${_lc}_${_val}"
+            if [ ! -d "$_dir" ]; then
+                echo "driver not implemented: ${_key}=${_val} (no $_dir)" >&2
+                echo "environment '$ENV_NAME' cannot be built from this tree -- see spec §4.6 and the roadmap's plan owners." >&2
+                exit 1
+            fi ;;
+    esac
+    case "${_f}" in
+        CONN=*wifi*)
+            if [ ! -d components/drivers/conn_wifi ]; then
+                echo "driver not implemented: ${_f} (no components/drivers/conn_wifi)" >&2
+                echo "environment '$ENV_NAME' cannot be built from this tree -- see spec §4.6 and the roadmap's plan owners." >&2
+                exit 1
+            fi ;;
+    esac
+done
+
 case "$FLASH_SIZE" in
     4MB) ;;
     8MB|16MB)

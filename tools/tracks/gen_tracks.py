@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 """Generate components/core/tracks/trk_bundled.c from tools/tracks/*.json (spec §10.2)."""
-import json, sys, argparse, math, pathlib
+import io, json, os, sys, argparse, math
 
 MAX_LAYOUTS, MAX_SECTORS = 8, 8
+
+
+class GenError(Exception):
+    """A venue document that violates §10.2's schema. Raised instead of `assert` so validation
+    survives `python3 -O` (drv:L24)."""
+
+
+def need(cond, msg):
+    if not cond:
+        raise GenError(msg)
+
 
 def dist_m(a, b):
     R = 6371008.8
@@ -12,36 +23,38 @@ def dist_m(a, b):
     return 2*R*math.asin(math.sqrt(h))
 
 def check_line(line, what, name):
-    assert isinstance(line, list) and len(line) == 2, f"{name}: {what} must be [[lat,lon],[lat,lon]]"
+    need(isinstance(line, list) and len(line) == 2, f"{name}: {what} must be [[lat,lon],[lat,lon]]")
     for p in line:
-        assert isinstance(p, list) and len(p) == 2, f"{name}: {what} point"
+        need(isinstance(p, list) and len(p) == 2, f"{name}: {what} point")
     L = dist_m(line[0], line[1])
     # a line whose endpoints coincide has no direction, so §6.4 can never detect a crossing
-    assert L >= 1.0, f"{name}: {what} endpoints only {L:.2f} m apart (degenerate line)"
-    assert 10 <= L <= 60, f"{name}: {what} length {L:.1f} m outside 10–60 m"
+    need(L >= 1.0, f"{name}: {what} endpoints only {L:.2f} m apart (degenerate line)")
+    need(10 <= L <= 60, f"{name}: {what} length {L:.1f} m outside 10–60 m")
 
 def expand(v):
-    assert 1 <= v["id"] <= 999, f"{v['name']}: bundled id must be 1..999"
-    assert 1 <= len(v["layouts"]) <= MAX_LAYOUTS
+    need(1 <= v["id"] <= 999, f"{v['name']}: bundled id must be 1..999")
+    need(1 <= len(v["layouts"]) <= MAX_LAYOUTS, f"{v['name']}: {len(v['layouts'])} layouts outside 1..{MAX_LAYOUTS}")
     lids = [L["id"] for L in v["layouts"]]
-    assert len(lids) == len(set(lids)), f"{v['name']}: duplicate layout ids {lids}"
+    need(len(lids) == len(set(lids)), f"{v['name']}: duplicate layout ids {lids}")
     first = v["layouts"][0]
     for k, L in enumerate(v["layouts"]):
-        assert L["dir"] in (1, -1)
+        need(L["dir"] in (1, -1), f"{v['name']}: layout {L.get('id')} dir must be 1 or -1")
         if L["sf"] == "same":
-            assert k > 0; L["sf"] = first["sf"]
+            need(k > 0, f"{v['name']}: layout 0 cannot use \"same\"/\"reverse\" (there is no previous layout)")
+            L["sf"] = first["sf"]
         check_line(L["sf"], "sf", v["name"])
         secs = L.get("sectors", [])
         if secs == "reverse":
-            assert k > 0; secs = list(reversed(first.get("sectors", [])))
-        assert len(secs) <= MAX_SECTORS
+            need(k > 0, f"{v['name']}: layout 0 cannot use \"same\"/\"reverse\" (there is no previous layout)")
+            secs = list(reversed(first.get("sectors", [])))
+        need(len(secs) <= MAX_SECTORS, f"{v['name']}: {len(secs)} sectors > {MAX_SECTORS}")
         for s in secs: check_line(s, "sector", v["name"])
         L["sectors"] = secs
         L.setdefault("length_m", 0)
     return v
 
 def c_str(s, n):
-    assert len(s) < n, f"string too long: {s}"
+    need(len(s) < n, f"string too long for a char[{n}] field: {s}")
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 def c_line(l):
@@ -63,17 +76,32 @@ def emit(venues, out):
     w("};\n")
     w(f"const uint16_t trk_bundled_count = {len(venues)};\n")
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+")
     ap.add_argument("-o", "--output", required=True)
-    a = ap.parse_args()
-    venues = [expand(json.load(open(f))) for f in sorted(a.files)]
-    ids = [v["id"] for v in venues]
-    assert len(ids) == len(set(ids)), "duplicate venue ids"
-    with open(a.output, "w") as out:
-        emit(venues, out)
+    a = ap.parse_args(argv)
+    try:
+        venues = []
+        for f in sorted(a.files):
+            with open(f, encoding="utf-8") as fh:
+                venues.append(expand(json.load(fh)))
+        ids = [v["id"] for v in venues]
+        need(len(ids) == len(set(ids)), f"duplicate venue ids {sorted(ids)}")
+        # Render fully BEFORE touching the output: c_str() validates inside emit(), and a rejected
+        # venue must leave the existing trk_bundled.c exactly as it was (final review M4).
+        buf = io.StringIO()
+        emit(venues, buf)
+        tmp = a.output + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as out:
+            out.write(buf.getvalue())
+        os.replace(tmp, a.output)
+    except GenError as e:
+        print(f"gen_tracks: {e}", file=sys.stderr)
+        return 2
     print(f"wrote {a.output}: {len(venues)} venues")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

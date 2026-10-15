@@ -89,7 +89,7 @@ A self-contained, battery-powered GPS + IMU lap timer for track days and drag ru
 
 | Topic | Decision | Reason |
 |-------|----------|--------|
-| GPS | Keep NEO-6M for prototype; M10 as compile-time driver swap | Budget, availability |
+| GPS | u-blox 7-class G28U7FTTL-P in the `neo6m` driver slot for the prototype (owned, in hand 2026-10-13); M10 as compile-time driver swap | Budget, availability |
 | Board | Keep ESP32 CH340 dev board; external regulator + LED removal | Availability |
 | IMU | Keep MPU6050; boot self-test guards clones | Adequate specs |
 | Display | SSD1680 e-paper, event-driven refresh | Sunlight readability, zero idle power, SA stock |
@@ -113,8 +113,8 @@ The maintained purchase list with quantities, status, and South African sources 
 | Item | Part | Interface | Notes |
 |------|------|-----------|-------|
 | MCU | ESP32 DevKit V1 (ESP32-WROOM-32, CH340) | — | Flash 4 MB, verified 2026-09-15 with esptool flash_id (ESP32-D0WD-V3 rev 3.1, 40 MHz crystal, VRef calibration in eFuse). Dual core 240 MHz, 520 KB SRAM, 8 KB slow RTC RAM. |
-| GPS | GY-NEO6M v2 (u-blox NEO-6M) | UART, 3.3 V logic | 5 Hz max nav rate, ~40 mA, onboard LDO + backup cell (MS621FE) + EEPROM, no PPS pin. Firmware **[VERIFY]** via `UBX-MON-VER` (NAV-PVT needs 7.03). |
-| IMU | GY-521 (MPU6050) | I2C 400 kHz, addr 0x68 (AD0 low) | 16-bit accel ±16 g, gyro ±2000 dps, 1 KB FIFO, motion interrupt. Authenticity **[VERIFY]** via self-test. |
+| GPS | G28U7FTTL-P GPS module (u-blox 7-class UBX-G7020; label 2408U0003297) — **owned, in hand since 2026-10-13** | UART, 3.3 V logic | u-blox 7 notes: `UBX-NAV-PVT` is available (protocol ≥ 14), maximum nav rate 10 Hz, NMEA at 9600 baud by default, the legacy `UBX-CFG-*` configuration set (not `CFG-VALSET`). Supply current, onboard regulator/backup cell and whether a PPS pad is broken out are **[VERIFY]** on the Plan 8 bench; firmware and identity via `UBX-MON-VER`. (The GY-NEO6M v2 this row originally named is not the owned part.) |
+| IMU | GY-521 (MPU6050) — **owned, in hand since 2026-10-13** | I2C 400 kHz, addr 0x68 (AD0 low) | 16-bit accel ±16 g, gyro ±2000 dps, 1 KB FIFO, motion interrupt. Authenticity **[VERIFY]** via self-test on the Plan 8 bench. |
 | Display | Waveshare-class SSD1680 e-paper 2.13" (250×122) or 2.9" (296×128) | SPI mode 0, ≤ 20 MHz | Exact panel **[VERIFY]**; driver parameterised by panel table. |
 | Battery | 2×18650 3000 mAh INR 15 A, 2-slot holder | — | Wired in parallel (1S2P) = 6000 mAh nominal 3.7 V. |
 | Charger | TP4056 module, 6-pad version | micro-USB / USB-C in | **[VERIFY]** has DW01A + FS8205A protection (pads B+, B−, OUT+, OUT−, IN+, IN−). |
@@ -191,6 +191,8 @@ Buttons: 3V3 ── switch ── GPIO32/33/25 ──100k── GND
 | Connectivity | `conn_ble` + `export_serial` | + `conn_wifi`, + `conn_ble_rc` | None; `conn.h` command handler |
 | Board | `board_devkit_v1` | `board_<new>` | `board.h` pin map + power hooks |
 
+The prototype GPS driver keeps the name `gps_neo6m`: it is the u-blox 6/7-class legacy-`CFG-*` driver slot, and its profile's `max_rate_hz` is set after `UBX-MON-VER` identifies the module (10 Hz on the owned u-blox 7-class part, 5 Hz on a NEO-6M). The driver itself is still the Plan 8 stub (no UART yet; it reports failure, so the BOOT screen reads GPS FAIL on `moto_neo6m` until Plan 8 — ruling R28).
+
 **SEQURE M10-25Q notes.** u-blox M10 chipset, 1–10 Hz configurable (10 Hz default), UART 115200, NMEA + UBX, 5 V input pin, −40 to +85 °C, 12.2 g, 25×25×8 mm, QMC5883L on the same SH1.0-6P connector (5V, GND, TX, RX, SDA, SCL). **[VERIFY]** onboard LDO dropout for direct 3.5–4.2 V LiPo feed; **[VERIFY]** TIMEPULSE pad on the PCB; **[VERIFY]** backup capacitor presence. Without a backup capacitor the driver keeps the module powered and uses UBX power-save rather than the MOSFET cut.
 
 ---
@@ -219,6 +221,8 @@ Rules:
 
 ### 4.2 Repository layout
 
+(Generated from `git ls-files`; regenerate with the command in §23 whenever a component or tool is added. Entries marked O* are designed but not built — see §24.)
+
 ```
 lap-timer/
   CMakeLists.txt                 top-level: variant selection, driver dirs, build_config.h generation
@@ -226,81 +230,99 @@ lap-timer/
   sdkconfig.defaults.moto        variant fragment
   sdkconfig.defaults.car         variant fragment
   partitions.csv                 OTA-capable partition table (§19.1)
+  dependencies.lock              pinned IDF-component-manager dependencies
   build.sh                       ./build.sh <env> [build|flash|monitor|clean|size]
   .idf-version                   pinned ESP-IDF tag, e.g. v5.3.2
-  .gitignore
+  .gitignore  .gitattributes  .gitmodules  .editorconfig  .clang-format  .clang-tidy  .clangd
+  .github/workflows/             ci.yml (hygiene, host-tests, ...) and firmware.yml (build matrix) (§21.6)
+  keys/laptimer_pub.pem          release-signing public key (§19.2)
+  README.md  LICENSE
   main/
     CMakeLists.txt
+    Kconfig.projbuild            CONFIG_LAPTIMER_VARIANT_* (menuconfig visibility only, §21.2)
     app_main.c                   boot sequence (§4.7), task spawn
     build_config.h.in            template for generated header
   components/
     core/
-      CMakeLists.txt             idf_component_register(SRCS ... INCLUDE_DIRS include)
+      CMakeLists.txt             idf_component_register(SRCS ... INCLUDE_DIRS include ui/include)
       include/core/*.h           public API (§5.2); core/types.h holds gps_fix_t, imu_raw_t, fused_sample_t, lap_result_t, drag_result_t (HAL headers include it); core/event.h holds the runtime event_t (§4.5)
       timebase/tb.c
       geo/geo.c
-      fusion/fus.c  fusion/fus_calib.c
-      lapengine/lap.c  lapengine/lap_gate.c
-      dragengine/drag.c
-      tracks/trk.c  tracks/trk_bundled.c (generated)
-      session/ses_frame.c  ses_records.c  ses_crc.c
-      export/exp_vbo.c  exp_nmea.c  exp_json.c
-      config/cfg.c  cfg_json.c (jsmn vendored in include/core/jsmn.h; jw.c minimal JSON writer)
-      util/ring.h  util/jw.c  util/bw.h (byte writer/reader for packed records)
-      ui/render.c  ui/fonts.c (generated)  ui/screens_moto.c  ui/screens_car.c  ui/model.h   pure-C framebuffer renderer and screens; host tests snapshot to PBM
+      fusion/fus.c  fus_orient.c  fus_still.c  fus_fwd.c
+      lapengine/lap.c  lap_gate.c
+      dragengine/drag.c  drag_cfg.c
+      tracks/trk.c  trk_json.c  trk_bundled.c (generated)
+      session/ses_frame.c  ses_records.c
+      export/exp.c  exp_vbo.c  exp_nmea.c  exp_json.c
+      config/cfg.c  cfg_json.c  cfg_blob.c  lap_cfg.c
+      sys/blob.c
+      util/core.c  json.c  jsmn.c (vendored jsmn: include/core/jsmn.h)  jw.c (minimal JSON writer)  btn_parse.c;  headers ring.h  bw.h (byte writer/reader for packed records)
+      ui/render.c  fonts.c (generated)  icons.c  screens_moto.c  menu_labels.c  refresh_policy.c  stats_fold.c  units.c  include/core/ui/*.h   pure-C framebuffer renderer and screens; host tests snapshot to PBM
     lt_hal/                      named lt_hal, not hal -- ESP-IDF v5.3.2 ships a built-in
                                   component literally named `hal`; a same-named project
                                   component silently overrides it and breaks the build.
                                   The include prefix is unchanged (drivers/app still
                                   #include "hal/board.h").
       CMakeLists.txt             INTERFACE component
-      include/hal/gps.h imu.h display.h storage.h board.h conn.h
+      include/hal/gps.h imu.h display.h storage.h board.h      (hal/conn.h is designed, §5.1, but not built: O*, sub-project C)
     drivers/
-      gps_neo6m/     gps_ubx_common/ (shared UBX framing used by both GPS drivers)
-      gps_m10/
-      gps_sim/       bench driver: replays /sim/gps.ubx or synthesises a circuit
+      gps_neo6m/                 Plan 8 stub (the owned module is a u-blox 7-class G28U7FTTL-P in this slot, §3.1)
+      gps_ubx_common/            O* shared UBX framing for the GPS drivers (§7.1) -- not built
+      gps_m10/                   O* (O3)
+      gps_sim/                   bench driver: replays the capture compiled into the image (sim_capture.h)
       imu_mpu6050/
-      imu_sim/       bench driver: replays /sim/imu.bin or synthesises samples
+      imu_sim/                   bench driver: synthesises samples from sim_common's profile
+      sim_common/                synthetic profile, clock, drag position and scenario shared by gps_sim and imu_sim (host-testable)
       display_epaper_ssd1680/
-      display_oled_ssd1309/
+      display_oled_ssd1309/      O* (O6)
       storage_internal/
-      storage_sd/
-      conn_ble/
-      conn_wifi/
-      conn_ble_rc/
-      export_serial/
+      storage_sd/                O* (O4)
+      conn_ble/                  O* code-complete but parked on branch s5.2-conn-ble (sub-project C)
+      conn_wifi/                 O* (O1)
+      conn_ble_rc/               O* (O2)
+      export_serial/             serial console transport: export, config, OTA receive, `dbg` (DEVUX)
       board_devkit_v1/
     app/                         introduced in roadmap session 3.2 (sys/lt_sys.c -- hb[]/
                                   sys_flags/btn_q -- plus the nvs/rtc/supervisor/dbg_console
                                   headers), not 3.4 as this list's ordering implies: the boot
                                   sequence and supervisor built in 3.2 need it. The remaining
                                   subdirectories below land as those subsystems are built.
-      pipeline/pipeline.c
-      logger/logger.c
+      include/app/*.h            lt_err.h lt_ipc.h lt_nvs.h lt_rtc.h lt_sup.h lt_consts.h lt_assert.h lt_proto.h ...
+      sys/lt_sys.c  lt_nvs.c  lt_rtc.c  lt_ipc.c  status.c  sup_policy.c
+      pipeline/pipeline.c  session_policy.c
+      logger/logger.c  log_pause.c
       ui/ui.c ui_buttons.c        task, event handling, display glue (renderer and screens live in core/ui)
-      power/power.c power_battery.c
-      supervisor/sup.c sup_errlog.c
+      supervisor/sup.c
       ota/ota.c
       cmd/cmd.c                  transport-agnostic command handler (§18.1)
+      link/link.c                peer link: fused-log/event stream fan-out (§18) and dev-kit presence detect (Plan 5.5)
+      power/                     O* Plan 6 (power task, battery, PARK/SHUTDOWN) -- not built
+  devcontroller/                 the dev-kit firmware (separate IDF project; its own CMakeLists.txt, sdkconfig.defaults, partitions.csv)
+    components/                  devconsole  flashcore  linkhost  logstore  webapi
+    main/  test/  web/
   tools/
-    web/export.html
     replay/CMakeLists.txt        host-only tools, built by test/CMakeLists.txt (§21.4, §22.2)
     replay/include/replay/*.h    synth.h synth_gps.h logio.h replay.h synth_truth.h synth_drag.h
     replay/lib/*.c               synth_track.c synth_gps.c synth_truth.c synth_drag.c logio.c replay_summary.c replay_run.c replay_version.c
-    replay/synth_main.c replay/replay_main.c
+    replay/synth_main.c replay/replay_main.c replay/gensim_main.c
     replay/test/test_*.c         Unity tests for the tools (host only; not compiled into core_selftest)
-    tracks/*.json  tracks/gen_tracks.py
+    tracks/*.json  tracks/gen_tracks.py  tracks/test_gen_tracks.py
     fonts/gen_fonts.py
-    gps_sim.py
-    serial_export.py
-    sign_release.sh
+    lint/power_of_10.py  lint/venue_announce.py  lint/test_*.py  lint/fixtures/
+    sim/gen_sim_capture.sh       regenerates the committed gps_sim capture and its replay-expected lap times
+    devkit.py  test_devkit.py    dev-kit console client (§23)
+    ota_push.py                  direct `ota recv` push (§23)
+    sign_release.sh  test_sign_release.sh
+    spec_api_check.py  test_spec_api_check.py
+    idf-env.sh  requirements.txt
   test/
     CMakeLists.txt               host build of core + Unity
     unity/                       vendored Unity
-    test_geo.c test_tb.c test_fus.c test_lap.c test_drag.c test_ses.c test_exp.c test_trk.c test_cfg.c
+    test_*.c                     one file per module (test_geo, test_tb, test_fus*, test_lap*, test_drag*, test_ses_*, test_exp_*, test_trk, test_cfg*, test_ui, test_screens, ...)
     data/                        fixtures (§22.3)
-  test_apps/                     on-target driver tests
-  docs/superpowers/specs/
+    snapshots/                   byte-exact PBM references for test_ui / test_screens
+  test_apps/core_selftest/       on-target run of the host unit tests (§22.3)
+  docs/                          specs and plans (docs/superpowers/), hardware/, bench/, reviews/, measurements.md, power-of-10-*.md
 ```
 
 ### 4.3 Task map
@@ -353,7 +375,7 @@ Defined in `core/event.h` with the stable `EV_*` codes (logged verbatim in the E
 | `EV_DRAG_DONE` | arg16 = run no | dragengine |
 | `EV_MOTION` / `EV_STILL` | — | pipeline (speed-based) |
 | `EV_CALIB_DONE` | arg16 = stage | fusion |
-| `EV_FAULT` | arg16 = error code | supervisor |
+| `EV_FAULT` | arg16 = `sys_flags` bit index, flags = 1 set / 0 cleared, arg32 = `bit<<8 \| set` (the only payload the EVENT record keeps) | supervisor |
 
 `command_t { uint8_t type; uint8_t arg8; uint16_t arg16; int32_t arg32; double lat; double lon; }`
 
@@ -380,9 +402,13 @@ Defined in `core/event.h` with the stable `EV_*` codes (logged verbatim in the E
 | `CONN` | `ble`, `wifi`, `ble_wifi` | `ble` |
 | `CONN_BLE_RC` | `ON`/`OFF` | `OFF` |
 | `EXPORT_SERIAL` | `ON`/`OFF` | `ON` |
-| `PANEL` | `ws213v4`, `ws29v2` | `ws29v2` |
+| `DEVUX` | `ON`/`OFF` | `ON` |
+| `PANEL` | `ws213v4`, `ws29v2` | `ws213v4` |
+| `CHRG` | `ON`/`OFF` | `OFF` |
 
-`GPS=sim` and `IMU=sim` select bench drivers (`gps_sim`, `imu_sim`) that implement the HAL by replaying a capture file from LittleFS (`/sim/gps.ubx`, `/sim/imu.bin`) at real-time rate, or generating a synthetic circuit when no file exists. They exist so the whole firmware can be developed and bench-tested before the physical sensors are available. They are never part of a release build (`sign_release.sh` refuses them).
+`DEVUX` is the interactive operator UX (`dbg` verbs and their help) inside `export_serial`; `OFF` leaves the prod image with only the cmd + stream + OTA-receive transport. `CHRG` declares that the charger-sense input (GPIO 39, §3.3) is wired with its external pull-up; `OFF` (the prototype) makes `board_charger_present()` report false and turns §19.5's battery precondition into a logged skip (`E_OTA_BATT_UNWIRED`).
+
+`GPS=sim` and `IMU=sim` select bench drivers (`gps_sim`, `imu_sim`) that implement the HAL from a capture compiled into the image (`components/drivers/gps_sim/sim_capture.h`) and a synthetic profile shared by both (`components/drivers/sim_common`) — no filesystem path is involved. They exist so the whole firmware can be developed and bench-tested before the physical sensors are available. They are never part of a release build: `tools/sign_release.sh` refuses an environment or a `build_config.h` that selects them unless `--allow-sim` is passed (spec §21.5).
 
 The lap-timer console's `dbg sim drag | laps <n> | park` (sim build only, `CMD_SIM_SCENARIO`) switches between the three scenarios one shared profile (`components/drivers/sim_common`) drives into both sims: `laps <n>` replays the committed capture n times before parking (today's default behaviour when n = 1), with a 6 s standstill between repeats so each wrap reads as a real stop-and-restart rather than a teleport; `drag` feeds a standing-start acceleration/brake run (straight-line GPS position/speed and matching IMU body-X g) so DRAG mode can be exercised without hardware, and `park` freezes the current position immediately. A scenario switch keeps one monotonic GPS time base across the whole sequence: the next scenario's first fix always lands strictly after the last fix actually delivered (and, for `drag`, continues from that same position too), so `dbg sim <scenario>` never rewinds the clock the pipeline's §6.5 validity rule tracks.
 
@@ -390,18 +416,26 @@ Validation in CMake: `moto` requires `DISPLAY` ∈ {epaper_ssd1680, oled_ssd1309
 
 Generated `build_config.h`:
 ```c
-#define CFG_VARIANT_MOTO 1        /* or CFG_VARIANT_CAR */
-#define CFG_GPS_NAME "neo6m"
-#define CFG_DISPLAY_NAME "epaper_ssd1680"
-#define CFG_PANEL_WS29V2 1
-#define CFG_HWID "moto_neo6m_epaper"   /* used by OTA hardware-id check */
-#define CFG_FW_VERSION "v0.3.1-7-gabc123"
-#define CFG_HAS_PPS 0
-#define CFG_HAS_SD 0
-#define CFG_HAS_WIFI 0
-#define CFG_HAS_BLE 1
-#define CFG_HAS_BLE_RC 0
-#define CFG_FUSED_LOG_HZ 10
+#define CFG_VARIANT_MOTO   1        /* or CFG_VARIANT_CAR */
+#define CFG_VARIANT_CAR    0
+#define CFG_GPS_NAME       "neo6m"
+#define CFG_DISPLAY_NAME   "epaper_ssd1680"
+#define CFG_GPS_SIM        0        /* 1 when the GPS driver is gps_sim */
+#define CFG_IMU_SIM        0        /* 1 when the IMU driver is imu_sim */
+#define CFG_PANEL_WS213V4  1        /* default panel; CFG_PANEL_WS29V2 is the alternative */
+#define CFG_PANEL_WS29V2   0
+#define CFG_HWID           "moto_neo6m_epaper"   /* used by the OTA hardware-id check */
+#define CFG_FW_VERSION     "v0.3.1-7-gabc123"
+#define CFG_HAS_PPS        0
+#define CFG_HAS_SD         0
+#define CFG_HAS_WIFI       0
+#define CFG_HAS_BLE        1
+#define CFG_HAS_BLE_RC     0
+#define CFG_HAS_EXPORT_SERIAL 1
+#define CFG_HAS_DEVUX      1
+#define CFG_CHRG_WIRED     0        /* the CHRG flag: GPIO 39 external pull-up fitted */
+#define CFG_FUSED_LOG_HZ   10
+#define CFG_TRK_JSON_TOKS  64       /* jsmn scratch-token cap for trk_json.c */
 ```
 
 Named environments. Each tuple is `VARIANT, GPS, IMU, DISPLAY, STORAGE, CONN` in full enum values; every other flag keeps its default from the table above. `build.sh` maps names to flag sets and uses `-B build/<env>`.
@@ -416,7 +450,9 @@ Named environments. Each tuple is `VARIANT, GPS, IMU, DISPLAY, STORAGE, CONN` in
 | `car_neo6m` | `car` | `neo6m` | `mpu6050` | `oled_ssd1309` | `internal` | `ble` |
 | `car_m10` | `car` | `m10` | `mpu6050` | `oled_ssd1309` | `internal` | `ble` |
 
-`moto_sim` is the bench build used until the sensors arrive.
+`moto_sim` is the bench build (no sensors needed).
+
+`CONN=ble` sets `CFG_HAS_BLE` and feeds the hardware id (§19.7), but no `conn_ble` component is built on `main` and `CONFIG_BT_ENABLED=n` (sub-project C) — the flag is otherwise inert until that sub-project lands.
 
 ### 4.7 Boot sequence (`app_main`)
 
@@ -443,30 +479,41 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | Consumer | Estimate |
 |----------|----------|
 | IDF + FreeRTOS + drivers baseline | ~60 KB |
-| NimBLE host + controller (when active) | ~70 KB |
+| NimBLE host + controller | **0 B — `CONFIG_BT_ENABLED=n` since 2026-10-13 (ruling R33); ~56 KB was reserved by the linker for a controller no build links. Sub-project C restores it and re-measures.** |
 | Task stacks (§4.3) | ~35 KB |
 | Rings and queues | ~5 KB |
 | Framebuffer (296×128/8) | 4.7 KB |
-| Logger batch buffer | 4 KB |
-| UART RX ring | 2 KB |
+| Logger batch buffer (`BATCH_CAP`, `logger.c`) | 3,840 B |
+| Logger summary accumulators (`s_lap_acc` = `LAP_ACC_CAP` 5,500 B, `s_drag_acc` 512 B) | 6,012 B |
+| `cmd.c` statics (`s_asm` union 3,456 B — `json` 3,072 B overlaid with the 48-entry `sess` table of 72 B; `s_exp` 1,488; `s_sr` 788; `s_cw` 528; `s_io` 256; `s_ss` and `s_meta` 160 each; `s_cfg` 110; `s_memo` 24; the rest under 20 B) | 6,992 B |
+| `link.c` peer stream ring (§18, the fused-log/event fan-out drained by `link_task`; `s_stream_store`) | 1,056 B |
+| Console UART0 RX ring (IDF `esp_console`, fixed 256 B — not tunable) | 256 B |
 | LittleFS cache/lookahead | ~2 KB |
 | User track store, `TRK_MAX_USER` × `trk_venue_t` (2752 B each), `.bss` | 11,008 B |
-| `trk_from_json` token array, 512 × `jsmntok_t` (20 B), `.bss` | 10,240 B |
+| `trk_from_json` token array, `CFG_TRK_JSON_TOKS` (64 on firmware) × `jsmntok_t` (20 B), `.bss` (the host tools and tests use a 512-token tier) | 1,280 B |
 | `cfg_from_json` token array, 192 × `jsmntok_t` (20 B), `.bss` | 3,840 B |
-| `exp_t` (holds the 1 KB export streaming window and the decoder state) | 1,488 B |
-| `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer) | 772 B |
+| `exp_t` (holds the 1 KB export streaming window and the decoder state; `s_exp` in `cmd.c`, counted in the `cmd.c` row) | 1,488 B |
+| `ses_reader_t` (frame reader, 247 B payload + 502 B rescan buffer; `s_sr` in `cmd.c`, counted in the `cmd.c` row) | 788 B |
 | Fusion state `fus_t` (calibration, stillness window sums, forward tracker) | 368 B |
 | Lap engine `lap_t` (venue + candidates + sector/union gates + best/prev) | ~5.3 KB |
-| Drag engine `drag_t` (gate table, 1 s fused-sample history ring, current + composite-best results) | ~3.3 KB, caller-provided (drag mode) |
+| Drag engine `drag_t` (gate table, 1.28 s fused-sample history ring, current + composite-best results) | 3,312 B, caller-provided (drag mode) |
 | Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB, caller-provided (OLED/O5 only; none on the e-paper build) |
-| Headroom | > 90 KB |
+| Headroom | > 90 KB (design estimate of free heap at run time against the 320 KB total; the *measured* static-DRAM headroom after link is 66.5 KB of the 180,736 B `dram0_0_seg`, paragraph below) |
 
 Sizes with a byte figure are measured with the ESP32 toolchain (`xtensa-esp32-elf-gcc`, 32-bit
-`size_t`), not estimated. The first four are permanently resident `.bss`; `exp_t` and `ses_reader_t`
-are owned by the connectivity task and exist only while an export runs. Bundled venues are `const`
-and live in flash, not DRAM, at ~2.75 KB each.
+`size_t`; `xtensa-esp32-elf-nm -S` over the object or the linked ELF, `moto_sim` at the 2026-10-15
+head), not estimated; the `cmd.c` statics total 6,992 B (it was 8,144 B before F2b overlaid the `json` and `sess`
+buffers and cut the `LIST` cap from 64 to 48 sessions — #91 replaces the fixed table). The track store, both token arrays,
+`exp_t` and `ses_reader_t` are permanently resident `.bss` (`exp_t` and `ses_reader_t` are cmd.c
+statics, not allocated per export). Bundled venues are `const` and live in flash, not DRAM, at
+~2.75 KB each.
 
-Hard rule: `heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)` MUST stay above 40 KB during BLE transfer; supervisor logs `E_SYS_HEAP_LOW` below that and disables BLE below 20 KB.
+Hard rule: `heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)` MUST stay above 40 KB; the supervisor
+sets `SYS_HEAP_LOW` and logs `E_SYS_HEAP_LOW(min_ever)` below `HEAP_LOW_KB` (40) and releases at
+`HEAP_CLEAR_KB` (48) (§17.2). The original "disable BLE below 20 KB" step is struck: no BLE code is
+built and Bluetooth is off (R33), so there is nothing to disable until sub-project C restores it.
+
+Until 2026-10-13 the linker reserved the Bluetooth controller's DRAM on every build — `dram0_0_seg` began at `0x3ffbdb5c` with length `0x1e6a4` (124,580 B) instead of `0x3ffb0000` / `0x2c200` (180,736 B) — so the "total DRAM" every build reported, and every free-DRAM figure in `docs/measurements.md` before that date, was measured against a 124,580 B ceiling. With `CONFIG_BT_ENABLED=n` the ceiling is 180,736 B. Measured at the 2026-10-15 head (`idf.py size`, clean ccache-disabled builds): free static DRAM **66,472 B on `moto_sim`** (114,264 B used: `.bss` 103,320, `.data` 10,944) and **66,640 B on `moto_neo6m`** (114,096 B used: `.bss` 103,168, `.data` 10,928); the earlier post-R33 measurement was 65,024 B / 66,448 B (pre-R33: 4,072 B / 5,496 B). The 124 KB internal-DRAM figure the project used to track is this table's `.bss` half against that old ceiling, not an IDF baseline.
 
 ---
 
@@ -604,52 +651,40 @@ int64_t conn_last_activity_mono_us(void);
 
 ### 5.2 Core API (pure C)
 
-The blocks below are the declarations as they exist in `components/core/include/core/`. Modules not
-yet implemented (`fus`, `lap`, `drag`) show the intended function list with their types marked as
-planned. Of the nine implemented headers shown, `tb.h`, `geo.h`, `ses.h` and `cfg.h` are verbatim
-slices of the file; `core.h`, `types.h`, `exp.h`, `json.h` and `trk.h` are excerpts — every
-declaration and signature matches the header exactly, with a few trailing implementation comments
-trimmed for space.
+The blocks below are the declarations exported by `components/core/include/core/`, **generated**
+from those headers by `tools/spec_api_check.py --emit core/<x>.h`. The `hygiene` CI job runs
+`python3 tools/spec_api_check.py`, which fails the build when a block lists a prototype, a
+function-pointer typedef or a macro the header does not have, or is missing one the header exports,
+or when a signature differs. Trailing `/* … */` annotations are documentation and are not compared.
+Struct and enum bodies are deliberately not reproduced here — read the header.
 
 #### `core/core.h`
 
 ```c
-const char *core_version(void);
-
-/* Core assertions (§17.9). A failing check reports `code` through the hook and returns an error to
- * the caller; it never aborts on target. NULL (the default) is silent. */
-typedef void (*core_assert_hook_t)(uint16_t code, const char *file, int line);
-void core_set_assert_hook(core_assert_hook_t hook);       /* NULL = silent */
-void core_assert_fail(uint16_t code, const char *file, int line);
 #define CORE_ASSERT_RET(cond, code, ret) do { if (!(cond)) { core_assert_fail((code), __FILE__, __LINE__); return (ret); } } while (0)
 #define CORE_ASSERT_VOID(cond, code)     do { if (!(cond)) { core_assert_fail((code), __FILE__, __LINE__); return; } } while (0)
+
+const char *core_version(void);
+/* Core assertions (§17.9). A failing check reports `code` through core_assert_report() and returns an
+ * error to the caller; it never aborts on target. */
+void core_assert_fail(uint16_t code, const char *file, int line);
+/* The reporter core_assert_fail() calls: a plain link-time function (Power of 10 rule 9), a WEAK no-op in
+ * core, a STRONG override in the app (components/app/sys/lt_nvs.c, logs into the §17.7 error ring). */
+void core_assert_report(uint16_t code, const char *file, int line);
 ```
 
 #### `core/tb.h` — timebase
 
 ```c
-typedef struct {
-    int64_t  half_min[2];          /* minimum offset seen in each half window */
-    int64_t  half_start_mono[2];   /* mono_us when each half started */
-    bool     half_valid[2];
-    int      cur;                  /* index of the half currently being filled */
-    uint32_t fixes;
-    int64_t  filt_offset_us;       /* min over valid halves */
-    int64_t  pps_offset_us;
-    int64_t  pps_edge_mono_us;     /* mono time of the last accepted PPS edge */
-    bool     pps_valid;
-} tb_t;
-
 int64_t tb_days_from_civil(int y, unsigned m, unsigned d);
 int64_t tb_gps_us_from_utc(int y, unsigned m, unsigned d, unsigned hh, unsigned mm, unsigned ss, int32_t nano);
-
-void    tb_init(tb_t *t);
+void tb_init(tb_t *t);
 /* serial_time_us = len*10/baud of the message just received; subtracted from the arrival stamp. Also expires a PPS lock whose last edge is older than TB_PPS_STALE_US. */
-void    tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t serial_time_us);
-void    tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us);
+void tb_on_fix(tb_t *t, int64_t fix_gps_us, int64_t arrival_mono_us, int64_t serial_time_us);
+void tb_on_pps(tb_t *t, int64_t edge_mono_us, int64_t top_of_second_gps_us);
 int64_t tb_mono_to_gps(const tb_t *t, int64_t mono_us);
-bool    tb_locked(const tb_t *t);
-uint8_t tb_quality(const tb_t *t);     /* 0 unlocked, 1 min-filter, 2 PPS */
+bool tb_locked(const tb_t *t);
+uint8_t tb_quality(const tb_t *t);   /* 0 unlocked, 1 min-filter, 2 PPS */
 ```
 
 #### `core/geo.h`
@@ -658,19 +693,16 @@ uint8_t tb_quality(const tb_t *t);     /* 0 unlocked, 1 min-filter, 2 PPS */
 #define GEO_PI        3.14159265358979323846
 #define GEO_EARTH_R_M EARTH_R_M
 
-typedef struct { double x, y; } geo_enu_t;                       /* metres east, north */
-typedef struct { double lat0_rad, lon0_rad, cos_lat0; } geo_origin_t;
-
-void      geo_origin_set(geo_origin_t *o, double lat_deg, double lon_deg);
+void geo_origin_set(geo_origin_t *o, double lat_deg, double lon_deg);
 geo_enu_t geo_to_enu(const geo_origin_t *o, double lat_deg, double lon_deg);
-double    geo_dist_m(double lat1_deg, double lon1_deg, double lat2_deg, double lon2_deg);
+double geo_dist_m(double lat1_deg, double lon1_deg, double lat2_deg, double lon2_deg);
 /* Returns 1 if segment a→b properly crosses gate p→q. t_out = fraction along a→b (0..1).
  * dir_sign_out = sign(cross(q−p, b−a)): +1 when p is the left end of the gate seen from the motion. */
-int       geo_segment_cross(geo_enu_t a, geo_enu_t b, geo_enu_t p, geo_enu_t q, double *t_out, int *dir_sign_out);
-double    geo_dist_point_segment(geo_enu_t x, geo_enu_t p, geo_enu_t q);
+int geo_segment_cross(geo_enu_t a, geo_enu_t b, geo_enu_t p, geo_enu_t q, double *t_out, int *dir_sign_out);
+double geo_dist_point_segment(geo_enu_t x, geo_enu_t p, geo_enu_t q);
 /* Time τ (0..dt) to travel distance d along a segment entered at speed v0 and left at v1 after dt,
  * assuming constant acceleration. (§6.4 step 4) */
-double    geo_interp_time(double d, double v0, double v1, double dt);
+double geo_interp_time(double d, double v0, double v1, double dt);
 ```
 
 #### `core/types.h` — shared record types
@@ -678,116 +710,79 @@ double    geo_interp_time(double d, double v0, double v1, double dt);
 ```c
 #define LAP_MAX_SECTORS 8
 #define DRAG_MAX_GATES  16
-
-typedef struct {
-    int64_t  gps_us;      /* UTC microseconds since Unix epoch; 0 if time invalid */
-    int64_t  mono_us;     /* arrival time of the last byte of the message */
-    int32_t  lat_e7;      /* degrees * 1e7 */
-    int32_t  lon_e7;
-    int32_t  alt_mm;      /* height above MSL */
-    int32_t  gspeed_mms;  /* Doppler ground speed, mm/s */
-    int32_t  head_e5;     /* heading of motion, degrees * 1e5, 0..36e6 */
-    uint32_t hacc_mm;
-    uint32_t sacc_mms;
-    uint16_t pdop_e2;
-    uint8_t  fix_type;    /* 0 none, 2 2D, 3 3D */
-    uint8_t  sats;
-    uint8_t  flags;       /* GPS_FLAG_* */
-    uint8_t  valid;       /* set by the pipeline validity rule (§6.5) */
-} gps_fix_t;
-
-typedef struct {
-    int64_t mono_us;
-    int16_t ax, ay, az;   /* raw LSB, ±16 g  → 2048 LSB/g */
-    int16_t gx, gy, gz;   /* raw LSB, ±2000 dps → 16.4 LSB/dps */
-} imu_raw_t;
-
-typedef struct {
-    int64_t mono_us;
-    int64_t gps_us;       /* tb_mono_to_gps(mono_us) */
-    float   g_lon, g_lat, g_comb;   /* g; +lat = right */
-    float   lean_deg;               /* + = right */
-    float   yaw_dps;                /* earth frame, + = left turn */
-    uint8_t flags;                  /* FUS_* */
-} fused_sample_t;
-
-typedef struct {
-    uint16_t max_speed_cms, min_speed_cms;
-    int16_t  max_lean_l_cdeg, max_lean_r_cdeg;
-    int16_t  max_glat_e3, max_gacc_e3, max_gbrake_e3;
-} lap_stats_t;                       /* 14 bytes packed on the wire */
-
-typedef struct {
-    uint16_t    lap_no;
-    int64_t     start_gps_us;
-    uint32_t    time_ms;
-    uint8_t     flags;               /* LAP_F_* */
-    uint8_t     n_sectors;           /* number of splits = sector gates + 1 */
-    uint32_t    sector_ms[LAP_MAX_SECTORS + 1];
-    lap_stats_t stats;
-} lap_result_t;
-
-typedef struct { uint8_t gate_id; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; uint8_t hit; } drag_gate_res_t;
-typedef struct {
-    uint16_t        run_no;
-    int64_t         t0_gps_us;
-    uint8_t         flags;           /* DRAG_F_* */
-    uint8_t         n_gates;
-    uint16_t        trap_cms;
-    drag_gate_res_t gates[DRAG_MAX_GATES];
-} drag_result_t;
+#define GPS_FLAG_FIXOK 0x01      /* gps_fix_t.flags */
+#define GPS_FLAG_TIME  0x02
+#define GPS_FLAG_DATE  0x04
+#define FUS_LEAN_VALID 0x01      /* fused_sample_t.flags */
+#define FUS_ORIENT_OK  0x02
+#define FUS_STILL      0x04
+#define FUS_DISAGREE   0x08
+#define FUS_CLAMPED    0x10
+#define FUS_BIAS_STALE 0x20
+#define FUS_SUSPECT    0x40
+#define LAP_F_GPS_LOST    0x01   /* lap_result_t.flags */
+#define LAP_F_PIT         0x02
+#define LAP_F_INCOMPLETE  0x04
+#define LAP_F_OUT_LAP     0x08
+#define LAP_F_INTERRUPTED 0x10
+#define LAP_F_TOO_LONG    0x20
+#define LAP_F_VALID       0x40
+#define DRAG_F_ROLLOUT 0x01      /* drag_result_t.flags */
+#define DRAG_F_QUARTER 0x02      /* 1/4 mile reached */
 ```
 
 #### `core/event.h` — engine events (plan 02)
 
-The runtime event passed to engine callbacks (`lap_evt_cb_t`, and the drag/fusion equivalents). `type`
+The runtime event the engines append to a caller-owned `event_t out[]` (`lap_on_fix` and
+`drag_on_fused` take `out`, `cap` and `n_out`; the callback API of plan 02 was replaced). `type`
 is a stable `EV_*` code — logged in the EVENT record (§12.3), so the values never change. `flags`,
 `arg16`, `arg32` and `arg32b` are per-event payloads (§4.5).
 
 ```c
-typedef struct {
-    uint8_t  type;      /* EV_* */
-    uint8_t  flags;     /* event-specific (e.g. lap flags on EV_LAP_COMPLETE) */
-    uint16_t arg16;     /* venue/layout/lap no, sector idx, gate id, ... */
-    int64_t  gps_us, mono_us;
-    uint32_t arg32, arg32b;
-} event_t;
-enum { EV_NONE = 0, EV_VENUE_FOUND, EV_LAYOUT_LOCKED, EV_ARMED, EV_SECTOR, EV_LAP_COMPLETE,
-       EV_FIX_LOST, EV_FIX_OK, EV_DRAG_ARMED, EV_DRAG_LAUNCH, EV_DRAG_GATE, EV_DRAG_DONE,
-       EV_MOTION, EV_STILL, EV_CALIB_DONE, EV_FAULT };
+/* Stable EV_* codes (EV_NONE = 0 .. EV_COUNT = 21) are an enum in the header; the flag/phase values
+ * that ride in event_t.flags are macros: */
+#define EV_VENUE_ANNOUNCE_ONLY 1u   /* EV_VENUE_FOUND.flags: a pipeline ui-only announce, never a finished creation */
+#define EV_OTA_ABORTED     3u       /* terminal EV_OTA phases (flags) */
+#define EV_OTA_ROLLED_BACK 4u
+#define EV_CREATE_BEGUN     0u      /* EV_CREATE phases (flags) */
+#define EV_CREATE_GATE_SET  1u
+#define EV_CREATE_FAILED    2u
+#define EV_CREATE_CANCELLED 3u
+#define EV_CREATE_FAIL_NOFIX 0u     /* EV_CREATE_FAILED's arg16 reasons */
+#define EV_CREATE_FAIL_FULL  1u
 ```
 
 #### `core/fus.h` — fusion (plan 02)
 
-`fused_sample_t` lives in `core/types.h` above. Calibration and the public entry points (excerpt; the
-internal stillness and forward-learning trackers `fus_still_t` / `fus_fwd_t` are documented in the
-header):
+`fused_sample_t` lives in `core/types.h`. Calibration (`fus_calib_t`), the public entry points, the
+stillness and forward-learning trackers (`fus_still_t` / `fus_fwd_t`) and the orientation helpers
+(`fus_orient_*`, `fus_rotate`) are declared here; their struct bodies are in the header:
 
 ```c
 #define FUS_CALIB_VERSION 1
-typedef struct {
-    float   r[9];             /* rows x, y, z (row-major): vehicle axes in body coordinates, vehicle = R · body */
-    float   gbias[3];         /* gyro bias, raw LSB */
-    int16_t gbias_temp_c100;  /* IMU temperature when gbias was captured */
-    uint8_t bias_ok;          /* gbias captured at least once */
-    uint8_t orient_ok;        /* z row captured */
-    uint8_t forward_ok;       /* x and y rows learned (implies orient_ok) */
-    uint8_t version;          /* FUS_CALIB_VERSION */
-} fus_calib_t;
-void fus_calib_defaults(fus_calib_t *c);
-bool fus_calib_valid(const fus_calib_t *c);           /* version, finite, R orthonormal within 1e-3 */
-void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out);      /* CALIB record (§12.3) */
-void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out);
 
+void fus_calib_defaults(fus_calib_t *c);
+bool fus_calib_valid(const fus_calib_t *c);   /* version, finite, R orthonormal within 1e-3 */
+void fus_calib_to_ses(const fus_calib_t *c, ses_calib_t *out);   /* CALIB record (§12.3) */
+void fus_calib_from_ses(const ses_calib_t *in, fus_calib_t *out);
+void fus_still_init(fus_still_t *s);
+int fus_still_push(fus_still_t *s, const imu_raw_t *raw);   /* 1 when this sample completed a stillness window, else 0 */
+int fus_orient_from_gravity(fus_calib_t *c, const float mean_acc_g[3]);   /* z row from a still window's mean accel; -1 (calib untouched) outside FUS_ORIENT_MIN_G..MAX_G */
+int fus_orient_set_forward(fus_calib_t *c, const float sum_ah[3]);   /* x/y rows from the summed horizontal accel; -1 if !orient_ok or the vector is degenerate */
+void fus_rotate(const float r[9], const float b[3], float v[3]);   /* v = R · b */
+void fus_fwd_init(fus_fwd_t *w);
+void fus_fwd_on_fix(fus_fwd_t *w, float gps_acc_mps2, float yaw_dps);   /* per fix: updates the learning condition (|yaw| small, gps_acc large) */
+int fus_fwd_on_sample(fus_fwd_t *w, const float acc_g[3], const float z[3]);   /* per fus_step while orientation is known; 1 exactly once, when the last learning window is counted */
+bool fus_fwd_ready(const fus_fwd_t *w);   /* windows >= FWD_LEARN_WINDOWS */
 void fus_init(fus_t *f, const fus_calib_t *calib, uint8_t variant_is_moto);   /* NULL/invalid calib → defaults */
 void fus_set_gps_speed(fus_t *f, float v_mps, float course_deg, int64_t mono_us, bool valid);   /* speed + course from one fix */
 float fus_yaw_rate_gps_dps(float prev_course_deg, int64_t prev_mono_us, float cur_course_deg, int64_t cur_mono_us);   /* earth-frame turn rate from two GPS courses, + = left */
-void fus_set_temp(fus_t *f, int16_t temp_c100);       /* IMU temperature, ~1 Hz; drives FUS_BIAS_STALE */
-int  fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);   /* one raw sample → one fused sample */
+void fus_set_temp(fus_t *f, int16_t temp_c100);   /* IMU temperature, ~1 Hz; drives FUS_BIAS_STALE */
+int fus_step(fus_t *f, const imu_raw_t *raw, fused_sample_t *out);   /* one raw sample → one fused sample */
 bool fus_is_still(const fus_t *f);
-void fus_gyro_bias_update(fus_t *f);                  /* call when still; updates calib */
-int  fus_calib_orient_capture(fus_t *f);              /* upright capture; fills the Z row */
-int  fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* per fix; 1 when the X row is learned */
+void fus_gyro_bias_update(fus_t *f);   /* call when still; updates calib */
+int fus_calib_orient_capture(fus_t *f);   /* upright capture; fills the Z row */
+int fus_calib_forward_step(fus_t *f, float gps_acc_mps2, float yaw_dps);   /* per fix; 1 when the X row is learned */
 const fus_calib_t *fus_calib(const fus_t *f);
 ```
 
@@ -798,29 +793,31 @@ a lap emits is `event_t` in `core/event.h`. All state is caller-owned in `lap_t`
 states: `LAP_ST_NO_VENUE`, `LAP_ST_VENUE_FOUND`, `LAP_ST_ARMED`, `LAP_ST_RUNNING`. The function list:
 
 ```c
-typedef void (*lap_evt_cb_t)(const event_t *ev, void *ctx);
-
 void lap_cfg_defaults(lap_cfg_t *c);
 void lap_init(lap_t *L, const lap_cfg_t *cfg);
-void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);            /* apply to a live engine; no state reset */
-void lap_set_venue(lap_t *L, const trk_venue_t *v);          /* enters VENUE_FOUND */
-int  lap_force_layout(lap_t *L, uint16_t layout_id);        /* 0 / -1 the venue has no such layout */
+void lap_set_cfg(lap_t *L, const lap_cfg_t *cfg);   /* apply to a live engine; no state reset */
+void lap_set_venue(lap_t *L, const trk_venue_t *v);   /* enters VENUE_FOUND */
+int lap_force_layout(lap_t *L, uint16_t layout_id);   /* 0 / -1 the venue has no such layout */
 void lap_reset(lap_t *L);
-/* feed a fix (valid or not) and current fused stats; may emit events via cb */
-void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, lap_evt_cb_t cb, void *ctx);
+/* Feed one fix (valid or not) and the current fused stats. Events are appended to out[] (caller-owned,
+ * at least LAP_EVT_MAX entries); *n_out is set to 0 on entry and holds the count on return. */
+void lap_on_fix(lap_t *L, const gps_fix_t *fix, const fused_sample_t *fs, event_t *out, int cap, int *n_out);
 uint8_t lap_state(const lap_t *L);
-const lap_result_t *lap_best(const lap_t *L);
-const lap_result_t *lap_prev(const lap_t *L);
-uint32_t lap_current_elapsed_ms(const lap_t *L, int64_t now_gps_us);
-uint32_t lap_theoretical_best_ms(const lap_t *L);            /* Sigma best_sector_ms; 0 until every split has one */
-void lap_create_begin(lap_t *L);                             /* §10.9 CREATE sub-mode */
-int  lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
+const lap_result_t *lap_best(const lap_t *L);   /* NULL until a valid lap completes */
+const lap_result_t *lap_prev(const lap_t *L);   /* NULL until any lap completes */
+uint32_t lap_current_elapsed_ms(const lap_t *L, int64_t now_gps_us);   /* 0 unless LAP_RUNNING */
+uint32_t lap_theoretical_best_ms(const lap_t *L);   /* Sigma best_sector_ms; 0 until every split has one */
+void lap_create_begin(lap_t *L);   /* §10.9 CREATE sub-mode */
+int lap_mark_gate(lap_t *L, uint8_t gate_idx, const gps_fix_t *fix, trk_layout_t *out_layout);
 void lap_create_cancel(lap_t *L);
-void lap_export_rtc(const lap_t *L, lap_rtc_t *out);         /* §10.10 */
-int  lap_import_rtc(lap_t *L, const lap_rtc_t *s);           /* 0 / -1 unknown venue / -2 unknown layout / -3 bad sector_idx */
-void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t,
-                        uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap);  /* §10.11, NULL/0 disables */
-int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have);  /* §10.11 */
+void lap_export_rtc(const lap_t *L, lap_rtc_t *out);   /* §10.10 */
+int lap_import_rtc(lap_t *L, const lap_rtc_t *s);   /* 0 / -1 unknown venue / -2 unknown layout / -3 bad sector_idx */
+void lap_set_predictive(lap_t *L, uint16_t *best_dist, uint32_t *best_t, uint16_t *rec_dist, uint32_t *rec_t, uint16_t cap);   /* §10.11, NULL/0 disables */
+int32_t lap_live_delta_ms(const lap_t *L, int64_t now_gps_us, double dist_m, bool *have);   /* §10.11 */
+/* Pure gate geometry (lap_gate.c): a 2*GATE_HALF_WIDTH_M line perpendicular to a compass heading, p1 left / p2 right;
+ * lap_layout_reverse derives the reverse layout (same S/F, sectors reversed, dir_sign negated, id = fwd->id + 1). */
+trk_line_t lap_gate_line(double lat_deg, double lon_deg, double heading_deg);
+void lap_layout_reverse(const trk_layout_t *fwd, trk_layout_t *rev);
 ```
 
 Parts 1–2 (sessions 2.4–2.5) implement the full engine: the state machine, S/F crossing and lap
@@ -831,21 +828,22 @@ sector/lap deltas (§10.7), theoretical best (§10.8), on-device creation (§10.
 #### `core/drag.h` — drag engine (plan 02)
 
 `drag_result_t`, `drag_gate_res_t` and `DRAG_F_*` live in `core/types.h`; the event a run emits is
-`event_t` in `core/event.h`. All state is caller-owned in `drag_t` (no allocation, ~3.3 KB — the 1 s
-fused-sample history ring dominates). Gate kinds: `DRAG_SPEED_FROM0`, `DRAG_SPEED_RANGE`, `DRAG_DIST`,
+`event_t` in `core/event.h`. All state is caller-owned in `drag_t` (no allocation, `sizeof(drag_t)` 3312 B — the
+1.28 s (`DRAG_HIST_N` = 128) fused-sample history ring dominates). Gate kinds: `DRAG_SPEED_FROM0`, `DRAG_SPEED_RANGE`, `DRAG_DIST`,
 `DRAG_BRAKE`. States: `DRAG_ST_IDLE`, `DRAG_ST_ARMED`, `DRAG_ST_LAUNCHED`, `DRAG_ST_DONE`. The gate
 table, benches (`{100,200,300}` km/h default), a rollout flag (default OFF for GPS timing) and the
 display units live in `drag_cfg_t`, filled by `drag_cfg_defaults` with the §11.1 eleven gates.
 
 ```c
-typedef struct { uint8_t id; uint8_t kind; /* DRAG_SPEED_FROM0/RANGE, DRAG_DIST, DRAG_BRAKE */ uint16_t a, b; /* km/h or cm */ } drag_gate_def_t;
-typedef void (*drag_evt_cb_t)(const event_t *ev, void *ctx);
-
-void drag_cfg_defaults(drag_cfg_t *c);
-void drag_init(drag_t *D, const drag_cfg_t *cfg);
-void drag_reset(drag_t *D);
-void drag_on_fused(drag_t *D, const fused_sample_t *fs, drag_evt_cb_t cb, void *ctx);   /* 100 Hz */
-void drag_on_fix(drag_t *D, const gps_fix_t *fix);                                       /* re-anchors speed */
+void drag_cfg_defaults(drag_cfg_t *c);   /* the §11.1 eleven gates, benches {100,200,300}, rollout off, km/h */
+void drag_cfg_from_user(const cfg_t *cfg, drag_cfg_t *out);   /* cfg_t → drag_cfg_t; mph benches are CONVERTED to km/h (lround(mph * DRAG_KMH_PER_MPH)) */
+bool drag_cfg_engine_differs(const drag_cfg_t *a, const drag_cfg_t *b);   /* true when a config reload must drag_init() (clears the run) rather than adopt in place */
+int drag_gate_label(const drag_gate_def_t *g, uint8_t units, uint8_t dist_units, char *buf, size_t cap);   /* gate name into buf (cap >= 8); strlen on success, -1 on bad arg */
+void drag_init(drag_t *D, const drag_cfg_t *cfg);   /* cfg NULL → defaults; clears results */
+void drag_reset(drag_t *D);   /* back to IDLE; keeps cfg and session best */
+/* 100 Hz. Events are appended to out[] (caller-owned, at least DRAG_EVT_MAX entries); *n_out as lap_on_fix. */
+void drag_on_fused(drag_t *D, const fused_sample_t *fs, event_t *out, int cap, int *n_out);
+void drag_on_fix(drag_t *D, const gps_fix_t *fix);   /* re-anchors v_est to Doppler gSpeed */
 uint8_t drag_state(const drag_t *D);
 const drag_result_t *drag_current(const drag_t *D);
 const drag_result_t *drag_best(const drag_t *D, uint8_t gate_id);   /* composite best per gate; NULL if that gate was never hit */
@@ -860,160 +858,74 @@ after DONE, and the best-per-gate.
 #### `core/ses.h` — session records and framing
 
 ```c
-/* Record types (spec §12.3) */
-enum {
-    SES_T_SESSION_HDR = 0x01, SES_T_FIX_KEY = 0x02, SES_T_FIX_DELTA = 0x03, SES_T_FUSED = 0x04,
-    SES_T_LAP = 0x05, SES_T_SECTOR = 0x06, SES_T_DRAG_RUN = 0x07, SES_T_DRAG_GATE = 0x08,
-    SES_T_EVENT = 0x09, SES_T_CALIB = 0x0A, SES_T_MARK = 0x0B, SES_T_TIME_MAP = 0x0C,
-    SES_T_VENUE = 0x0D, SES_T_POWER = 0x0E, SES_T_END = 0x7F
-};
-
 #define SES_FRAME_OVERHEAD 5      /* sync + type + len + crc16 */
 
 uint16_t ses_crc16(const uint8_t *buf, size_t n);
 /* Writes sync|type|len|payload|crc16 into out. Returns bytes written, or -1 if cap is too small or len > SES_MAX_PAYLOAD. */
-int      ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
-
-/* Invoked once per valid frame. `payload` points into the reader's internal buffer and is valid
- * only for the duration of the callback: copy what you need before returning. */
-typedef void (*ses_frame_cb_t)(uint8_t type, const uint8_t *payload, uint8_t len, void *ctx);
-
-typedef struct {
-    uint8_t  state;                           /* 0 = hunting sync, 1 = collecting */
-    uint16_t idx;                             /* bytes collected into buf */
-    uint16_t need;                            /* total bytes expected in buf once len is known */
-    uint8_t  buf[2 + SES_MAX_PAYLOAD + 2];    /* type, len, payload, crc */
-    uint8_t  replay[2 * (2 + SES_MAX_PAYLOAD + 2)];    /* rescan buffer; proven bound is 2+247+2 bytes, kept at 2x for headroom */
-    uint16_t replay_len, replay_pos;
-    uint32_t frames_ok, frames_bad;
-} ses_reader_t;
-
+int ses_frame_encode(uint8_t type, const void *payload, uint8_t len, uint8_t *out, size_t cap);
 void ses_reader_init(ses_reader_t *r);
-/* Feed any number of bytes; cb is invoked once per valid frame. Resynchronises after corruption. */
-void ses_reader_feed(ses_reader_t *r, const uint8_t *buf, size_t n, ses_frame_cb_t cb, void *ctx);
-/* Call once at the end of a bounded input (a file). A frame that can never complete is treated as
- * bad and the bytes after its sync are rescanned, so a valid frame hidden behind a spurious sync
- * near EOF is still recovered. Idempotent when the reader is idle. */
-void ses_reader_flush(ses_reader_t *r, ses_frame_cb_t cb, void *ctx);
-
-/* ---- Record codecs (spec §12.3, §12.4) ---- */
-
-typedef struct {
-    bool      have_prev;
-    gps_fix_t prev;               /* reconstructed previous fix (what a decoder holds) */
-    int64_t   last_key_gps_us;
-    bool      prev_valid;
-} ses_fix_state_t;
+void ses_reader_push(ses_reader_t *r, const uint8_t *buf, size_t n);   /* stage n bytes; pull with ses_reader_next() until it returns 0 before the next push */
+int ses_reader_next(ses_reader_t *r, uint8_t *type, const uint8_t **payload, uint8_t *len);   /* 1 = frame ready (payload valid until the next push/next/finish), 0 = staged input exhausted; corrupt frames are resynchronised past and counted, never surfaced */
+void ses_reader_finish(ses_reader_t *r);   /* call once at EOF of a bounded input, then drain with next() */
 void ses_fix_state_init(ses_fix_state_t *st);
 /* Chooses FIX_KEY or FIX_DELTA. Returns frame length or -1. */
-int  ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *fix, uint8_t *out, size_t cap);
+int ses_encode_fix(ses_fix_state_t *st, const gps_fix_t *fix, uint8_t *out, size_t cap);
 /* Returns 1 and fills out for FIX_KEY/FIX_DELTA; 0 for other types; -1 on malformed. */
-int  ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, uint8_t len, gps_fix_t *out);
-
-typedef struct { int64_t ref_gps_us; bool have_ref; } ses_fused_state_t;
+int ses_decode_fix(ses_fix_state_t *st, uint8_t type, const uint8_t *payload, uint8_t len, gps_fix_t *out);
 void ses_fused_state_init(ses_fused_state_t *st);
 void ses_fused_state_on_fix(ses_fused_state_t *st, int64_t fix_gps_us);   /* call on both sides when a FIX_* passes */
-int  ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *out, size_t cap);
-int  ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len, fused_sample_t *out);
-
-int  ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
-int  ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out);
-
-/* Every decoder below validates `len` exactly and returns 1 on success, -1 on a malformed payload.
- * The structs mirror the wire payloads of §12.3; char arrays carry one extra byte so the decoded
- * value is always NUL-terminated (the wire size is unchanged). */
-typedef struct { uint16_t lap_no; uint8_t idx; int64_t gps_us; uint32_t split_ms; int32_t delta_ms; } ses_sector_t;
-typedef struct { uint16_t run_no; uint8_t gate_id; int64_t gps_us; uint32_t time_ms; uint16_t speed_cms; uint32_t dist_cm; } ses_drag_gate_t;
-typedef struct { int64_t mono_us, gps_us; uint16_t code; uint32_t arg; } ses_event_t;
-typedef struct { int64_t mono_us, gps_us; uint8_t quality; } ses_time_map_t;
-typedef struct { uint16_t venue_id, layout_id; char name[33]; } ses_venue_t;     /* name is char[32] on the wire */
-typedef struct { int64_t mono_us; uint8_t state; uint16_t batt_mv; } ses_power_t;
-typedef struct { int64_t gps_us; uint8_t reason; } ses_end_t;
-typedef struct { int64_t gps_us; uint8_t kind; } ses_mark_t;
-typedef struct { int16_t r_e4[9]; int16_t gbias[3]; uint8_t calib_flags; } ses_calib_t;   /* 25 B payload */
-
-int  ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap);
-int  ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out);
-int  ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap);
-int  ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out);
-int  ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap);
-int  ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out);
-int  ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap);
-int  ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out);
-int  ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap);
-int  ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out);
-int  ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap);
-int  ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out);
-int  ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap);
-int  ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out);
-int  ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap);
-int  ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out);
-int  ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap);
-int  ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out);
-int  ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
-int  ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
-
-typedef struct {
-    char     session_id[11];      /* char[10] on the wire + NUL */
-    uint8_t  mode, variant;
-    uint16_t venue_id, layout_id;
-    char     fw[17];              /* char[16] on the wire + NUL */
-    char     hwid[25];            /* char[24] on the wire + NUL */
-    uint8_t  log_profile, fused_hz, gps_hz;
-    int64_t  start_gps_us;
-    int16_t  r_e4[9];             /* rotation matrix × 1e4, row-major */
-    int16_t  gbias[3];
-    uint8_t  calib_flags;
-} ses_hdr_t;
-int  ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap);
-int  ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out);
+int ses_encode_fused(ses_fused_state_t *st, const fused_sample_t *fs, uint8_t *out, size_t cap);
+int ses_decode_fused(ses_fused_state_t *st, const uint8_t *payload, uint8_t len, fused_sample_t *out);
+int ses_encode_lap(const lap_result_t *lap, uint8_t *out, size_t cap);
+int ses_decode_lap(const uint8_t *payload, uint8_t len, lap_result_t *out);
+int ses_encode_sector(uint16_t lap_no, uint8_t idx, int64_t gps_us, uint32_t split_ms, int32_t delta_ms, uint8_t *out, size_t cap);
+int ses_decode_sector(const uint8_t *payload, uint8_t len, ses_sector_t *out);
+int ses_encode_drag_run(const drag_result_t *run, uint8_t *out, size_t cap);
+int ses_decode_drag_run(const uint8_t *payload, uint8_t len, drag_result_t *out);
+int ses_encode_drag_gate(uint16_t run_no, uint8_t gate_id, int64_t gps_us, uint32_t time_ms, uint16_t speed_cms, uint32_t dist_cm, uint8_t *out, size_t cap);
+int ses_decode_drag_gate(const uint8_t *payload, uint8_t len, ses_drag_gate_t *out);
+int ses_encode_event(int64_t mono_us, int64_t gps_us, uint16_t code, uint32_t arg, uint8_t *out, size_t cap);
+int ses_decode_event(const uint8_t *payload, uint8_t len, ses_event_t *out);
+int ses_encode_time_map(int64_t mono_us, int64_t gps_us, uint8_t quality, uint8_t *out, size_t cap);
+int ses_decode_time_map(const uint8_t *payload, uint8_t len, ses_time_map_t *out);
+int ses_encode_venue(uint16_t venue_id, uint16_t layout_id, const char *name, uint8_t *out, size_t cap);
+int ses_decode_venue(const uint8_t *payload, uint8_t len, ses_venue_t *out);
+int ses_encode_power(int64_t mono_us, uint8_t state, uint16_t batt_mv, uint8_t *out, size_t cap);
+int ses_decode_power(const uint8_t *payload, uint8_t len, ses_power_t *out);
+int ses_encode_end(int64_t gps_us, uint8_t reason, uint8_t *out, size_t cap);
+int ses_decode_end(const uint8_t *payload, uint8_t len, ses_end_t *out);
+int ses_encode_mark(int64_t gps_us, uint8_t kind, uint8_t *out, size_t cap);
+int ses_decode_mark(const uint8_t *payload, uint8_t len, ses_mark_t *out);
+int ses_encode_calib(const ses_calib_t *c, uint8_t *out, size_t cap);
+int ses_decode_calib(const uint8_t *payload, uint8_t len, ses_calib_t *out);
+int ses_encode_hdr(const ses_hdr_t *h, uint8_t *out, size_t cap);
+int ses_decode_hdr(const uint8_t *payload, uint8_t len, ses_hdr_t *out);
 ```
 
 #### `core/exp.h` — exporters
 
 ```c
-enum { EXP_VBO = 1, EXP_NMEA = 2, EXP_JSON = 3 };
 #define EXP_FULL 1
 #define EXP_WINDOW 1024
 
-/* char arrays carry one byte more than the matching wire field so the value is always NUL-terminated */
-typedef struct {
-    char    session_id[11];
-    char    fw[17];
-    char    hwid[25];
-    char    venue[33];
-    char    layout[25];
-    int64_t created_gps_us;
-    uint8_t has_sf;
-    double  sf_lat1, sf_lon1, sf_lat2, sf_lon2;
-} exp_meta_t;
-
-typedef struct {
-    uint8_t  fmt;
-    uint8_t  finished;
-    exp_meta_t meta;
-    /* output window */
-    uint8_t  win[EXP_WINDOW];
-    size_t   win_len, win_pos;
-    /* decoder state shared by formats */
-    ses_fix_state_t   fix_st;
-    ses_fused_state_t fus_st;
-    fused_sample_t    held;            /* latest fused values, sample-and-hold */
-    uint8_t           have_held;
-    /* JSON summary state */
-    uint16_t  laps, runs;
-    uint8_t   json_stage;              /* 0 header pending, 1 in laps, 2 in runs */
-    ses_hdr_t hdr;
-    uint8_t   have_hdr;
-    char      venue_name[33];
-    uint8_t   run_pending;
-    uint8_t   run_gate_idx;            /* DRAG_RUN emission resumes after EXP_FULL */
-} exp_t;
-
-int  exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
-int  exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len);   /* 0 consumed, EXP_FULL retry after pull, -1 error */
-int  exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out);           /* 0 ok (n_out may be 0), -1 error */
-int  exp_finish(exp_t *e);                                                   /* may return EXP_FULL: pull, then call again. Returns 0 (no-op) if already finished, -1 if a DRAG_RUN frame is mid-emission (re-feed it first). */
+int exp_open(exp_t *e, uint8_t fmt, const exp_meta_t *meta);
+int exp_feed(exp_t *e, uint8_t type, const uint8_t *payload, uint8_t len);   /* 0 consumed, EXP_FULL retry after pull, -1 error */
+int exp_pull(exp_t *e, uint8_t *out, size_t cap, size_t *n_out);   /* 0 ok (n_out may be 0), -1 error */
+int exp_finish(exp_t *e);   /* may return EXP_FULL: pull, then call again. Returns 0 (no-op) if already finished, -1 if a DRAG_RUN frame is mid-emission (re-feed it first). */
+int exp_win_free(const exp_t *e);   /* output-window space left (internal helper) */
+int exp_win_puts(exp_t *e, const char *s);   /* -1 if it does not fit (nothing written) */
+void exp_skip_record(exp_t *e);   /* counts one dropped record (saturates at 0xFFFF) */
+void exp_civil_from_days(int64_t days, int *y, unsigned *m, unsigned *d);
+void exp_utc_parts(int64_t gps_us, int *y, unsigned *mo, unsigned *d, unsigned *hh, unsigned *mm, unsigned *ss, unsigned *cs);
+int exp_vbo_open(exp_t *e);   /* per-format hooks (internal) */
+int exp_vbo_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len);
+int exp_vbo_finish(exp_t *e);
+int exp_nmea_open(exp_t *e);
+int exp_nmea_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len);
+int exp_nmea_finish(exp_t *e);
+int exp_json_open(exp_t *e);
+int exp_json_feed(exp_t *e, uint8_t type, const uint8_t *p, uint8_t len);
+int exp_json_finish(exp_t *e);
 ```
 
 `exp_feed` and `exp_finish` return `EXP_FULL` (1) when the 1 KB output window cannot take the next
@@ -1024,36 +936,31 @@ and the exporter is then *not* marked finished, so the sequence can be resumed.
 #### `core/json.h` — jsmn helpers
 
 ```c
-/* Maximum nesting depth accepted by json_parse: a token with more than JSON_MAX_DEPTH
- * ancestors makes the whole document invalid. Config and track documents nest 6 deep. */
 #define JSON_MAX_DEPTH 16
 
 /* Parses and enforces JSON_MAX_DEPTH. Returns the token count, or -1 on a jsmn error or too deep. */
-int    json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks);
-bool   json_tok_eq(const char *js, const jsmntok_t *t, const char *s);
+int json_parse(const char *js, size_t n, jsmntok_t *toks, unsigned max_toks);
+bool json_tok_eq(const char *js, const jsmntok_t *t, const char *s);
 /* Iterative (no recursion): the subtree of token i is the run of following tokens that start
  * before toks[i].end, which JSMN_PARENT_LINKS guarantees is contiguous. */
-int    json_skip(const jsmntok_t *toks, int ntoks, int i);
-bool   json_tok_int(const char *js, const jsmntok_t *t, int64_t *out);
-bool   json_tok_double(const char *js, const jsmntok_t *t, double *out);
-bool   json_tok_bool(const char *js, const jsmntok_t *t, bool *out);
+int json_skip(const jsmntok_t *toks, int ntoks, int i);
+bool json_tok_int(const char *js, const jsmntok_t *t, int64_t *out);
+bool json_tok_double(const char *js, const jsmntok_t *t, double *out);
+bool json_tok_bool(const char *js, const jsmntok_t *t, bool *out);
 size_t json_tok_str(const char *js, const jsmntok_t *t, char *out, size_t cap);
-int    json_obj_get(const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *key);
+int json_obj_get(const char *js, const jsmntok_t *toks, int ntoks, int obj, const char *key);
 ```
 
 #### `core/cfg.h`
 
 ```c
-/* Hardware-profile defaults. The app calls cfg_apply_profile() at boot right after cfg_defaults()
- * and before loading the NVS blob, with values from build_config.h and the MAC-derived BLE name. */
-typedef struct { bool display_live_clock; uint8_t log_fused_hz; const char *ble_name; } cfg_profile_t;
-int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);      /* 0 ok / -1 bad name length */
-
+int cfg_apply_profile(cfg_t *c, const cfg_profile_t *p);   /* 0 ok / -1 bad name length */
 int cfg_defaults(cfg_t *c);
-int cfg_validate(cfg_t *c);                       /* clamps; returns number of corrected fields */
+int cfg_validate(cfg_t *c);   /* clamps; returns number of corrected fields */
 int cfg_from_json(cfg_t *c, const char *json, size_t n, char *err, size_t err_cap);   /* merge; "version" is ignored (owned by firmware); arrays longer than capacity are rejected; 0 ok / -1 error with err */
-int cfg_to_json(const cfg_t *c, char *out, size_t cap);                             /* bytes written or -1 */
-int cfg_migrate(cfg_t *c, uint8_t from_version);                                    /* 0 ok / -1 unknown version */
+int cfg_to_json(const cfg_t *c, char *out, size_t cap);   /* bytes written or -1 */
+int cfg_migrate(cfg_t *c, uint8_t from_version);   /* 0 ok / -1 unknown version; v1→v2 sets dist_units = CFG_DIST_M (#96) */
+bool cfg_migrate_supported(uint8_t from_version);   /* true for exactly the versions cfg_migrate() accepts */
 ```
 
 `err` is optional throughout: `NULL` or a zero capacity discards the message. On `-1` the caller's
@@ -1065,59 +972,36 @@ The full field table, ranges and defaults are in §15.1.
 ```c
 #define TRK_F_UNVERIFIED 0x01
 #define TRK_USER_ID_BASE 1000
+#define TRK_USER_REC_MAX /* worst-case record payload (every slot full); the logger's BATCH_CAP must exceed it + 4 */
 
-typedef struct { double lat, lon; } trk_pt_t;
-typedef struct { trk_pt_t p1, p2; } trk_line_t;      /* p1 = left end, p2 = right end in driving direction */
-typedef struct {
-    uint16_t   id;
-    char       name[24];
-    trk_line_t sf;
-    int8_t     dir_sign;                             /* +1 / -1 (§6.4) */
-    uint8_t    n_sectors;                            /* sector gates, excluding S/F */
-    trk_line_t sectors[LAP_MAX_SECTORS];
-    uint32_t   length_m;
-} trk_layout_t;
-typedef struct {
-    uint16_t     id;                                 /* bundled 1..999, user 1000+ */
-    char         name[32];
-    double       lat, lon;
-    uint32_t     radius_m;
-    uint8_t      flags;                              /* TRK_F_* */
-    uint8_t      n_layouts;
-    trk_layout_t layouts[TRK_MAX_LAYOUTS];
-} trk_venue_t;
-
-extern const trk_venue_t trk_bundled[];
-extern const uint16_t    trk_bundled_count;
-
-/* The user store is module-static and not protected by a lock: boot writers run on app_main's task
- * before any consumer task exists; the pipeline task is the only post-boot writer; the ui and
- * logger tasks are unlocked readers (core/trk.h and trk.c carry the full ordering argument). */
-void               trk_init(void);                                   /* clears the user store */
-int                trk_validate_venue(const trk_venue_t *v);         /* 0 ok / -1 structurally invalid */
+/* The user store is module-static and not protected by a lock; core/trk.h carries the full ordering
+ * argument. Boot writers run on app_main's task before any consumer task exists; post-boot writers
+ * are append-only (the pipeline's trk_user_add() from finalize_create(), the logger's
+ * LOGGER_PUT_TRACK); the pipeline, ui, logger and cmd tasks are unlocked readers. */
+void trk_init(void);   /* clears the user store */
+int trk_validate_venue(const trk_venue_t *v);   /* 0 ok / -1 structurally invalid */
 const trk_venue_t *trk_find_nearest(double lat, double lon, uint32_t *dist_m_out);   /* within radius; user beats bundled on id clash */
 const trk_venue_t *trk_get(uint16_t venue_id);
-int                trk_user_add(const trk_venue_t *v);               /* replaces same id; -1 if full or invalid */
-int                trk_user_add_json(const char *json, size_t n, uint16_t *venue_id_out,
-                                     char *err, size_t err_cap);     /* parses into the landing slot */
-int                trk_user_count(void);
-uint16_t           trk_next_user_id(void);
-uint16_t           trk_user_id_at(uint8_t index);   /* live in-RAM order, NOT an id; 0 if out of range */
-trk_venue_t       *trk_user_scratch(void);          /* the module-static landing slot every ~2.7 KB venue
-                                                     * is built/decoded in instead of on a task stack;
-                                                     * NULL when the table is full */
+int trk_user_add(const trk_venue_t *v);   /* replaces same id; -1 if full or invalid */
+int trk_user_add_json(const char *json, size_t n, uint16_t *venue_id_out, char *err, size_t err_cap);   /* parses into the landing slot */
+int trk_user_count(void);
+uint16_t trk_next_user_id(void);
+uint16_t trk_user_id_at(uint8_t index);   /* live in-RAM order, NOT an id; 0 if out of range */
+trk_venue_t *trk_user_scratch(void);   /* the module-static landing slot user[user_n]; NULL when the table is full */
 /* Per-venue variable-length record (§10.1). index is 0..trk_user_count()-1, not a venue id.
  * trk_user_load_venue decodes into trk_user_scratch()'s slot, validates, then trk_user_add()s. */
-int                trk_user_save_venue(uint8_t index, uint8_t *buf, size_t cap, size_t *n_out);
-int                trk_user_load_venue(const uint8_t *buf, size_t n);
-#define TRK_USER_REC_MAX /* worst-case record payload (every slot full); the logger's BATCH_CAP must
-                          * exceed TRK_USER_REC_MAX + 4 (a _Static_assert there proves it) */
-int                trk_from_json(trk_venue_t *out, const char *json, size_t n, char *err, size_t err_cap);
-int                trk_to_json(const trk_venue_t *v, char *out, size_t cap);
+int trk_user_save_venue(uint8_t index, uint8_t *buf, size_t cap, size_t *n_out);
+int trk_user_load_venue(const uint8_t *buf, size_t n);
+int trk_from_json(trk_venue_t *out, const char *json, size_t n, char *err, size_t err_cap);
+int trk_to_json(const trk_venue_t *v, char *out, size_t cap);
 ```
 
-`trk_from_json` and `cfg_from_json` each own a module-static jsmn token array and are therefore not
-reentrant; both are called only from the single connectivity task.
+`trk_from_json` and `cfg_from_json` each own a function-local `static jsmntok_t` array and are
+therefore **not reentrant**. `cfg_from_json` is called only from the cmd task (`CONFIG_SET`).
+`trk_from_json` is called from the logger task (`TRACKS_PUT`, `put_track()`) and, on `moto_sim`
+only, from `pipeline_init` through `trk_user_add_json` (the sim capture's venue); the two cannot
+overlap except in a narrow boot window if a `tracks put` arrived before `pipeline_init` finishes.
+A caller that adds a third entry point must serialise it.
 
 ---
 
@@ -1718,11 +1602,21 @@ Abort: if `v_est` falls below `DRAG_ARM_SPEED_KMH` (0.5 km/h) within `DRAG_FALSE
 
 ### 11.3 Result
 
-`drag_result_t` (§5.2). `hit` per gate. `trap_cms` per §6.6. Best per gate across the session = lowest `time_ms` among hit gates (braking = shortest distance).
+`drag_result_t` (`core/types.h`). `hit` per gate. `trap_cms` per §6.6. Best per gate across the session = lowest `time_ms` among hit gates (braking = shortest distance).
 
 ### 11.4 Screen benches rule
 
-Rows shown on the riding screen: `SPEED_FROM0` gates in `benches` that were hit, ascending by `a`, followed by the 1/4 row. Maximum 4 rows; if more than 3 benches were hit, the lowest are dropped first. Rows appear as gates are hit (each hit triggers a partial refresh). A run ending without the 1/4 shows `1/4 --`.
+**Superseded by Plan 7b §7** (`docs/superpowers/specs/2026-09-27-plan-7b-glanceable-ui-design.md`),
+which is what `core/ui/screens_moto.c` implements: the DRAG card shows the newest gate in the big
+slot with a footer of earlier gates scrolling off the left, and pages 1/2 list the gates
+hit-only / best-only in two columns with a `+n` overflow. The original rule below (ascending by
+`a`, maximum 4 rows, lowest dropped first, a `1/4 --` row for a run that ends without the 1/4) was
+never implemented and is retained only as the design history of the 2.9"-era screen:
+
+> Rows shown on the riding screen: `SPEED_FROM0` gates in `benches` that were hit, ascending by
+> `a`, followed by the 1/4 row. Maximum 4 rows; if more than 3 benches were hit, the lowest are
+> dropped first. Rows appear as gates are hit (each hit triggers a partial refresh). A run ending
+> without the 1/4 shows `1/4 --`.
 
 ---
 
@@ -1993,7 +1887,7 @@ All six `lap.*` keys above reach the lap engine through `lap_cfg_from_user()` �
 | `lt_sys` | `boot_cnt` | u32 | |
 | `lt_sys` | `crash_log` | blob | last 3 `{reset_reason u8, uptime_s u32}` for crash-loop detection |
 | `lt_sys` | `safe_until` | u32 | boot counter until which safe mode applies |
-| `lt_sys` | `ota_pending` | u8 | 1 while a new image awaits validation (belt-and-braces beside otadata) |
+| `lt_sys` | `ota_pend` | u8 | 1 while a new image awaits validation (belt-and-braces beside otadata) |
 | `lt_sys` | `safe_lvl` | u8 | safe-mode level 0 normal / 1 safe / 2 recovery (§17.5 recovery amendment; audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
 | `lt_sys` | `stall_rst` | u8 | set by the supervisor just before a pipeline-stall restart (§17.2); read and cleared once at the next boot, which records it as the abnormal reset `LT_RST_STALL` (0x51) in `crash_log` so consecutive stalls trip the §17.5 crash-loop (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
 
@@ -2023,7 +1917,7 @@ typedef struct {
 } rtc_state_t;
 ```
 
-Updated by the pipeline on every S/F and sector event and by the power task on every state change. CRC32 over all bytes except `crc32`. A successful resume (§10.10) restores the engine's venue directly (`lap_import_rtc`), which cannot itself announce it — the pipeline posts the ui's `EV_VENUE_FOUND` for it (ui queue only — unlike the scan's, this copy is not logged or streamed, and carries `EV_VENUE_ANNOUNCE_ONLY` so the ui does not mistake it for a finished on-device creation) (#98).
+Updated by the pipeline on every S/F and sector event and, once Plan 6 lands, by the power task on every state change: until then `power_state` is saved as 0 (no power task exists; #54), and `partial_count` is the ui's count, handed to the pipeline's save site by `ui_partial_count()`. CRC32 over all bytes except `crc32`. A successful resume (§10.10) restores the engine's venue directly (`lap_import_rtc`), which cannot itself announce it — the pipeline posts the ui's `EV_VENUE_FOUND` for it (ui queue only — unlike the scan's, this copy is not logged or streamed, and carries `EV_VENUE_ANNOUNCE_ONLY` so the ui does not mistake it for a finished on-device creation) (#98).
 
 ---
 
@@ -2126,7 +2020,7 @@ persist counters if dirty and ≥ 60 s
 hb[SUPERVISOR]++
 ```
 
-`HB_STALL_S`: pipeline 1 s, logger 5 s, ui 10 s (a full refresh may take 2 s), conn 10 s, power 5 s. Ladder steps are executed by the owning task (pipeline for GPS/IMU, logger for storage, ui for display), never by the supervisor itself, so driver calls stay single-threaded.
+`HB_STALL_S`: pipeline **5 s** (`pipeline.c`'s `PIPE_STALL_S`), logger 5 s, ui 10 s (a full refresh may take 2 s), conn 10 s, power 5 s. The pipeline figure was 1 s in the original design; the firmware has shipped 5 s since Plan 03 and that is the operating reality (ruling R3, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`). Ladder steps are executed by the owning task (pipeline for GPS/IMU, logger for storage, ui for display), never by the supervisor itself, so driver calls stay single-threaded.
 
 **Amendments (audit fix wave 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`).** "after saving RTC state" is **struck** from the pipeline-stall restart (ruling R6): the pipeline owns the RTC snapshot and writes it on every S/F and sector event, and a *wedged* pipeline — the only task the supervisor restarts — cannot be asked to save, so the last gate crossing is the resume point by design. The stall report (`ESP_LOGE` "task N stalled Ns" plus `E_SYS_TASK_STALL`, arg = task id) is **once per episode**, not once per second, because an `ESP_LOGE` at 1 Hz lands inside framed transfers and the raw OTA stream (ruling R9). `EV_FAULT` is posted onto both FreeRTOS event queues (legal: `xQueueSend` is multi-producer safe) and **never** onto `g_stream_ring`, whose single documented producer is the pipeline; the logger records only `arg32` of an event, so the session `.log` carries `bit<<8 | set` (the supervisor holds back its first publication until both queues exist, so the boot-time flags reach both queues; the ui does not consume the post today — `ui.c` ignores `EV_FAULT` and reads `sys_flags_get()` directly for its fault strip). `errlog_add` collapses consecutive records with the same *code* (M1), so when two tasks report `E_SYS_STACK_LOW` or `E_SYS_TASK_STALL` on consecutive ticks with no other errlog record between them, the second replaces the first (the latest task wins; `dbg mem` shows every task's stack high-water mark). The heap flag keys on the *current* free size so it can clear with hysteresis; the min-ever figure is the errlog argument. The GPS §7.5 / IMU §8.7 / storage §13 ladders, their `CMD_GPS_LADDER_STEP` / `CMD_IMU_RECOVER` commands and the temperature throttle remain **unimplemented — Plan 8** (#123). The "< 20 KB → `conn_stop()`" heap step is struck until a conn task exists (sub-project C).
 
@@ -2140,7 +2034,7 @@ hb[SUPERVISOR]++
 | Storage internal | mount → mount → format → DEAD | §13.1 |
 | Storage SD | mount → re-init → degraded (retry 60 s) | §13.2 |
 | BLE | `conn_stop`; `conn_start` on next menu entry; stack deinit/reinit on `E_CONN_BLE_INIT` twice | §18.2 |
-| Heap | BLE off < 20 KB; sample logging off < 12 KB | |
+| Heap | `SYS_HEAP_LOW` + `E_SYS_HEAP_LOW` below `HEAP_LOW_KB` (40 KB), released at `HEAP_CLEAR_KB` (48 KB); the "BLE off < 20 KB" and "sample logging off < 12 KB" steps are struck (no BLE is built, R33; `conn_stop` waits for sub-project C) | §17.2 |
 
 ### 17.4 System flags (`sys_flags`, atomic u32)
 
@@ -2190,39 +2084,72 @@ Boot screen lists each as `OK` / `FAIL` for 2 s (skipped when `SYS_SAFE_MODE`).
 
 ### 17.7 Error codes
 
-| Code | Name | Code | Name |
-|------|------|------|------|
-| 0x0101 | `E_GPS_SILENT` | 0x0401 | `E_STO_WRITE` |
-| 0x0102 | `E_GPS_RECONFIG` | 0x0402 | `E_STO_MOUNT` |
-| 0x0103 | `E_GPS_UART_REINIT` | 0x0403 | `E_STO_FORMAT` |
-| 0x0104 | `E_GPS_POWER_CYCLE` | 0x0404 | `E_STO_FULL` |
-| 0x0105 | `E_GPS_DEAD` | 0x0405 | `E_STO_EVICT` |
-| 0x0106 | `E_GPS_BAD_FIX` | 0x0406 | `E_STO_SD_DEGRADED` |
-| 0x0107 | `E_GPS_RESET_DETECTED` | 0x0501 | `E_SYS_WDT_RESET` |
-| 0x0108 | `E_GPS_CFG_NAK` | 0x0502 | `E_SYS_PANIC` |
-| 0x0201 | `E_IMU_NACK` | 0x0503 | `E_SYS_BROWNOUT` |
-| 0x0202 | `E_IMU_BUS_RECOVERY` | 0x0504 | `E_SYS_HEAP_LOW` |
-| 0x0203 | `E_IMU_DEAD` | 0x0505 | `E_SYS_SAFE_MODE` |
-| 0x0204 | `E_IMU_FROZEN` | 0x0506 | `E_SYS_TASK_STALL` |
-| 0x0205 | `E_IMU_FIFO_OVF` | 0x0507 | `E_SYS_RTC_INVALID` |
-| 0x0206 | `E_IMU_SELFTEST_FAIL` | 0x0508 | `E_SYS_CFG_RESET` |
-| 0x0207 | `E_IMU_WHOAMI` | 0x0509 | `E_SYS_STACK_LOW` |
-| 0x0301 | `E_DISP_BUSY_TIMEOUT` | 0x0601 | `E_PWR_LOW_BATT` |
-| 0x0302 | `E_DISP_DEAD` | 0x0602 | `E_PWR_SHUTDOWN` |
-| 0x0303 | `E_DISP_TEMP` | 0x0701 | `E_CONN_BLE_INIT` |
-| 0x0801 | `E_OTA_SIG` | 0x0702 | `E_CONN_XFER_ABORT` |
-| 0x0802 | `E_OTA_HWID` | 0x0703 | `E_CONN_PROTO` |
-| 0x0803 | `E_OTA_ROLLBACK` | 0x0901 | `E_LAP_PLAUSIBILITY` |
-| 0x0804 | `E_OTA_PRECOND` | 0x0902 | `E_FUSION_DISAGREE` |
-| 0x0805 | `E_OTA_WRITE` | 0x0903 | `E_FUSION_CALIB_LOST` |
-| 0x0806 | `E_OTA_VALIDATED` (info) | | |
+| Code | Name | Arg / note |
+|------|------|------------|
+| 0x0101 | `E_GPS_SILENT` |  |
+| 0x0102 | `E_GPS_RECONFIG` |  |
+| 0x0103 | `E_GPS_UART_REINIT` |  |
+| 0x0104 | `E_GPS_POWER_CYCLE` |  |
+| 0x0105 | `E_GPS_DEAD` |  |
+| 0x0106 | `E_GPS_BAD_FIX` |  |
+| 0x0107 | `E_GPS_RESET_DETECTED` |  |
+| 0x0108 | `E_GPS_CFG_NAK` |  |
+| 0x0201 | `E_IMU_NACK` |  |
+| 0x0202 | `E_IMU_BUS_RECOVERY` |  |
+| 0x0203 | `E_IMU_DEAD` |  |
+| 0x0204 | `E_IMU_FROZEN` |  |
+| 0x0205 | `E_IMU_FIFO_OVF` |  |
+| 0x0206 | `E_IMU_SELFTEST_FAIL` |  |
+| 0x0207 | `E_IMU_WHOAMI` |  |
+| 0x0301 | `E_DISP_BUSY_TIMEOUT` |  |
+| 0x0302 | `E_DISP_DEAD` |  |
+| 0x0303 | `E_DISP_TEMP` |  |
+| 0x0401 | `E_STO_WRITE` |  |
+| 0x0402 | `E_STO_MOUNT` |  |
+| 0x0403 | `E_STO_FORMAT` |  |
+| 0x0404 | `E_STO_FULL` |  |
+| 0x0405 | `E_STO_EVICT` |  |
+| 0x0406 | `E_STO_SD_DEGRADED` |  |
+| 0x0501 | `E_SYS_WDT_RESET` |  |
+| 0x0502 | `E_SYS_PANIC` |  |
+| 0x0503 | `E_SYS_BROWNOUT` |  |
+| 0x0504 | `E_SYS_HEAP_LOW` |  |
+| 0x0505 | `E_SYS_SAFE_MODE` |  |
+| 0x0506 | `E_SYS_TASK_STALL` |  |
+| 0x0507 | `E_SYS_RTC_INVALID` |  |
+| 0x0508 | `E_SYS_CFG_RESET` |  |
+| 0x0509 | `E_SYS_STACK_LOW` |  |
+| 0x050A | `E_SYS_RECOVERY_MODE` | arg = boot count |
+| 0x050B | `E_NVS_BLOB_RESET` | arg = blob tag |
+| 0x050C | `E_LOG_CLOSE_TIMEOUT` | arg = `END.reason` |
+| 0x050D | `E_SYS_WDT_SUBSCRIBE` | arg = `hb_id` |
+| 0x050E | `E_SYS_HEAP_CORRUPT` | arg = `uptime_s` |
+| 0x050F | `E_NVS_INIT` |  |
+| 0x0510 | `E_BOARD_INIT` |  |
+| 0x0601 | `E_PWR_LOW_BATT` |  |
+| 0x0602 | `E_PWR_SHUTDOWN` |  |
+| 0x0701 | `E_CONN_BLE_INIT` |  |
+| 0x0702 | `E_CONN_XFER_ABORT` |  |
+| 0x0703 | `E_CONN_PROTO` |  |
+| 0x0801 | `E_OTA_PRECOND` |  |
+| 0x0802 | `E_OTA_HWID` |  |
+| 0x0803 | `E_OTA_WRITE` |  |
+| 0x0804 | `E_OTA_SIG` |  |
+| 0x0805 | `E_OTA_VALIDATED` | info |
+| 0x0806 | `E_OTA_ROLLBACK` |  |
+| 0x0807 | `E_OTA_BATT_UNWIRED` | arg = 0 |
+| 0x0901 | `E_LAP_PLAUSIBILITY` |  |
+| 0x0902 | `E_FUSION_DISAGREE` |  |
+| 0x0903 | `E_FUSION_CALIB_LOST` |  |
+
+The `E_OTA_*` values above are the firmware's (`components/app/include/app/lt_err.h`); five of the six differed from this table until ruling R3 (2026-10-13) moved the spec to the code — these codes are already in the field and in the project's operating notes, and `lt_err.h` cites the ruling. `lt_err.h` defines only a subset of this table: the `E_GPS_*`, `E_IMU_*`, `E_STO_SD_DEGRADED`, `E_PWR_*`, `E_LAP_PLAUSIBILITY` and `E_FUSION_*` rows wait for their producers (Plan 8 and Plan 6); `E_DISP_TEMP` and `E_CONN_BLE_INIT` are reserved with no producer yet, and `E_CONN_XFER_ABORT` is unimplemented (§18.1). `E_OTA_BATT_UNWIRED` (`0x0807`) is logged once per boot when the build has no charger sense wired (`CHRG=OFF`, §4.6), because §19.5's battery precondition was then skipped.
 
 `E_DISP_BUSY_TIMEOUT`'s `arg` packs `(fail_streak << 8) | (-rc & 0xFF)` — the pre-failure streak count in the high byte, the driver's `-errno` magnitude in the low byte — so an SPI failure (`-EIO` = 5) is distinguishable in the error ring from a BUSY timeout (`-ETIMEDOUT` = 110) without a second display error code (Plan 7 Task 7, ruling T7-R8).
 
 ### 17.8 Flash-write stalls
 
 Classic ESP32 disables the instruction cache during SPI flash erase/write; code not in IRAM stalls on both cores for the duration (4 KB erase ≈ 20–40 ms, 256 B program ≈ 0.3 ms). Consequences and mitigations:
-- `CONFIG_UART_ISR_IN_IRAM=y`, `CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y`, `CONFIG_SPI_MASTER_ISR_IN_IRAM=y`, PPS ISR `IRAM_ATTR`; UART RX ring 2 KB absorbs 500 ms at 38400 baud.
+- `CONFIG_UART_ISR_IN_IRAM=y`, `CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y`, `CONFIG_SPI_MASTER_ISR_IN_IRAM=y`, PPS ISR `IRAM_ATTR`. There is no GPS UART yet (`gps_neo6m` is a Plan 8 stub with no `uart_driver_install`); the one UART ring that exists is the IDF console's fixed **256 B** on UART0, which is not Kconfig-tunable and is why `ota recv` over USB is pace-sensitive (§18.4, #57).
 - IMU FIFO (1 KB = 85 samples = 850 ms) absorbs stalls.
 - Logger writes in 4 KB batches at most once per second; OTA writes happen only when stationary.
 - Timestamps in the GPS domain are unaffected; `mono_us` stamps for IMU samples are back-dated from FIFO order, so a delayed read does not shift them.
@@ -2283,6 +2210,8 @@ Amendments (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-des
 
 ### 18.2 BLE (`conn_ble`)
 
+**Status: designed, not built on `main` (O\*, sub-project C).** `conn_ble` is code-complete but parked on branch `s5.2-conn-ble`; no `conn_ble` component is built here and `CONFIG_BT_ENABLED=n` (§4.8, ruling R33). The text below is the design sub-project C implements.
+
 - Stack: NimBLE (`CONFIG_BT_NIMBLE_ENABLED=y`, Bluedroid off), `CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`, `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512`, `CONFIG_BT_NIMBLE_ROLE_CENTRAL=n`, `OBSERVER=n`.
 - Device name `cfg.ble.name`. Advertising: connectable undirected, interval 100 ms, for `cfg.ble.adv_s` seconds; then stop and return to previous power state.
 - Service UUID `7a3f0001-1b2c-4d5e-8f90-a1b2c3d4e5f6`.
@@ -2294,7 +2223,9 @@ Amendments (audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-des
 - Security: no bonding, no encryption in v1 (O7 adds LE Secure Connections passkey displayed on the e-paper). Attack surface is limited by advertising only on user action for ≤ `adv_s` seconds.
 - Throughput target ≥ 20 KB/s measured with 496-byte chunks at 15 ms interval and DLE enabled (`CONFIG_BT_NIMBLE_...` data length extension on).
 
-### 18.3 Web Bluetooth page (`tools/web/export.html`)
+### 18.3 Web Bluetooth page (O\*, sub-project C)
+
+**Status: designed, not built.** There is no web client in the tree before sub-project C; the page below would live at `tools/web/` (`export.html`) and the CI has no `web` job (§21.6). Until then the host-side clients are `tools/devkit.py` and `tools/ota_push.py` (§23).
 
 Single HTML file, no build step, vanilla ES2020, ≤ 60 KB.
 
@@ -2310,13 +2241,13 @@ Platform notes displayed on the page: Android Chrome and desktop Chrome/Edge sup
 
 ### 18.4 Serial fallback (`export_serial`)
 
-- UART0 at 115200 baud (`CONFIG_ESP_CONSOLE_UART_BAUDRATE`), IDF `esp_console` REPL with line editing disabled (linenoise dumb mode). (Corrected from "921600 baud", design 2026-10-13, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`.)
+- UART0 at **115200 baud** (`CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200`), IDF `esp_console` REPL with line editing disabled (linenoise dumb mode). The console's RX ring is a fixed 256 B (§17.8). Consoles use **CR** line endings: a host tool sends a bare `\r` (a stray `\n` would become image byte 0 of an `ota recv` push). (Corrected by the 2026-10-13 audit fix wave, `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`: the earlier figure was never what the firmware configured.)
 - Commands (text): `status`, `list`, `open <id> <vbo|nmea|json|log|sum>`, `read <offset>`, `close`, `delete <id>`, `config get`, `config set <json>`, `tracks get`, `tracks put <json>`, `errlog`, `errlog clear`, `diag`, `coredump`, `coredump clear`, and — on `CFG_HAS_DEVUX` builds only — `ota recv <size> <sha256_hex> <ver> <hwid>` and `dbg <status|logtest [n]|fs|sum <id>|logck <id>|laps|rtc|mem|btn|flag|safe|sim|reset|crash|hang>` (`dbg sim` takes `drag`, `laps <n>` or `park`; `dbg btn`, `dbg flag` and `dbg safe clear` take the arguments printed by their usage lines).
 - There is no `dbg gps raw`, `dbg imu raw` or `dbg power`: GPS/IMU raw dumps need the real drivers (Plan 8, #93) and the power states need Plan 6, so the stub verbs that printed "not in plan 03" were removed rather than left as a promise (ruling R5, design 2026-10-13). `tracks put <json>` over the console is bounded by the 256-byte command line; the `TRACKS_PUT` op accepts up to 3071 bytes, but no shipped transport carries more than about 245 B of venue JSON (larger venues wait for sub-project C).
 - File output framing: `---BEGIN <name> <size>---\r\n` … raw text … `---END <crc32 hex>---\r\n`. Binary formats (log/sum/coredump) are Base64-encoded between the markers.
 - ESP-IDF logging is set to level **`NONE`** for the duration of every framed console response (`status`, `list`, `open`, `read`, `errlog`, ...) and of an `ota recv` push, and restored when that response or push ends. (Ruling R9, audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`: `ERROR` still let the `core_assert_report` sink, the supervisor's stall line and the logger's below-reserve message print through `stdout` outside the UART mutex, straight into the framed body or the raw OTA byte stream, where the announced size and CRC32 do not cover them. Errors reach the §17.7 error ring regardless, which `errlog` dumps.)
-- `tools/serial_export.py <port> <command...>` wraps the protocol and writes files; plain `screen`/`minicom` also works.
-- OTA over serial **is** the primary bench flash path: `ota recv` plus `tools/ota_push.py`, or the dev-kit's `flash push`. Its tokens (`OTA-READY`, `OTA-ERR <word|0xCODE>`, `OTA-END 0xCODE`) each end in a single CRLF on the wire: the console's own `\n`→`\r\n` translation supplies the `\r`, so the code prints a bare `\n` (L15; a literal `\r\n` reached the wire as `\r\r\n`).
+- There is no standalone serial-export client script; the host-side clients are `tools/devkit.py` (dev-kit console: `status`, the `lt <cmd>` relay, session/log download, image staging) and `tools/ota_push.py` (direct `ota recv` push), and a plain `screen`/`minicom` session works for the text commands.
+- OTA over serial **is** the primary bench flash path, not an absent feature: `ota recv` plus `tools/ota_push.py`, or the dev-kit's `flash push`, stream a signed image into the inactive slot. `idf.py flash` / `esptool.py` remain the recovery path over USB — and with the dev-kit wired they fail on the shared UART0 RX unless the dev-kit is held in reset. After any push, do not reset the device or open its port for ≥ 35 s: the image is inside its `OTA_VALID_UPTIME_S` trial window (30 s plus the GPS gate) and an early reset rolls it back (`E_OTA_ROLLBACK`, 0x0806). Its tokens (`OTA-READY`, `OTA-ERR <word|0xCODE>`, `OTA-END 0xCODE`) each end in a single CRLF on the wire: the console's own `\n`→`\r\n` translation supplies the `\r`, so the code prints a bare `\n` (L15; a literal `\r\n` reached the wire as `\r\r\n`).
 
 ### 18.5 WiFi AP (`conn_wifi`, O1)
 
@@ -2352,7 +2283,7 @@ coredump,   data, coredump, 0x2A0000, 0x10000,
 storage,    data, spiffs,   0x2B0000, 0x150000,
 ```
 
-`ota_0`/`ota_1` = 1.25 MB each. `storage` = 1.3125 MB. Sizes are fixed; a bigger flash module enlarges `storage` only (generated variant of the CSV via `build.sh --flash-size 8MB`). The app image MUST be ≤ 1.25 MB including the signature block; `build.sh size` fails the build above 1.2 MB to keep margin.
+`ota_0`/`ota_1` = 1.25 MB each. `storage` = 1.3125 MB. Sizes are fixed; a bigger flash module would enlarge `storage` only, but `build.sh` currently **refuses** `--flash-size 8MB`/`16MB` as not wired (`build.sh:79-82`) — 4 MB is the only supported size. The app image MUST be ≤ 1.25 MB including the signature block; `build.sh size` fails the build above **0x130000 bytes (1.1875 MiB)** to keep margin, and `tools/sign_release.sh` runs that gate on every release build.
 
 ### 19.2 Image signing
 
@@ -2515,7 +2446,7 @@ Entered by MODE long-press when `gspeed < MENU_LOCK_SPEED_KMH`; otherwise ignore
 - Combined UP+DOWN held 2 s → full refresh now (ghost clearing) from any screen.
 
 ### 20.9 Car variant (`display_oled_ssd1309`, O6)
-SPI, 128×64 mono, 10 Hz timer-driven render when the model is dirty or `live_clock`; same primitives; layouts in `screens_car.c`: running lap clock, live predictive delta bar (±2 s scale), lateral/longitudinal g dot (friction circle), speed. Pages and menu identical in structure.
+SPI, 128×64 mono, 10 Hz timer-driven render when the model is dirty or `live_clock`; same primitives; layouts in a car screens file (O6, not built — the moto screens are `core/ui/screens_moto.c`): running lap clock, live predictive delta bar (±2 s scale), lateral/longitudinal g dot (friction circle), speed. Pages and menu identical in structure.
 
 ---
 
@@ -2573,6 +2504,7 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
 CONFIG_SECURE_SIGNED_APPS_ECDSA_SCHEME=y
 CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
 CONFIG_SECURE_BOOT_VERIFICATION_KEY="keys/laptimer_pub.pem"
 CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
@@ -2580,29 +2512,29 @@ CONFIG_SPI_MASTER_ISR_IN_IRAM=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
-CONFIG_BT_NIMBLE_PINNED_TO_CORE_0=y
-CONFIG_BTDM_CTRL_PINNED_TO_CORE_0=y
+CONFIG_BT_ENABLED=n
 CONFIG_ESP_WIFI_ENABLED=n          # overridden in *_wifi envs
 CONFIG_LITTLEFS_MAX_PARTITIONS=1
+CONFIG_LITTLEFS_READ_SIZE=128
+CONFIG_LITTLEFS_WRITE_SIZE=128
+CONFIG_LITTLEFS_CACHE_SIZE=512
+CONFIG_LITTLEFS_LOOKAHEAD_SIZE=128
+CONFIG_LITTLEFS_BLOCK_CYCLES=512
 CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
 ```
 
-The three `CONFIG_SECURE_*` lines and `CONFIG_SECURE_BOOT_VERIFICATION_KEY` are added in roadmap session 5.5 together with the generated public key `keys/laptimer_pub.pem` (`.gitignore` carries a `!keys/laptimer_pub.pem` exception, so no `-f` is needed). Until then `sdkconfig.defaults` omits them so dev builds are unsigned.
+Bluetooth is **off** (ruling R33): no BLE code is compiled on `main`, and `CONFIG_BT_ENABLED=y` made the linker reserve ~56 KB of static DRAM for the controller (`dram0_0_seg` 124,580 B instead of 180,736 B). The NimBLE options are kept as a commented block in `sdkconfig.defaults` for sub-project C, which must restore them and re-measure. `sdkconfig.defaults.car` and `.moto` differ in exactly one line each (the variant symbol) and are kept.
 
-`sdkconfig.defaults.moto` / `.car` currently only differ in `CONFIG_LAPTIMER_VARIANT_*` Kconfig symbols used by `app/ui` (kept for menuconfig visibility; the authoritative switch is `build_config.h`).
+The `CONFIG_SECURE_*` lines and `CONFIG_SECURE_BOOT_VERIFICATION_KEY` were added in roadmap session 5.5 together with the generated public key `keys/laptimer_pub.pem` (`.gitignore` carries a `!keys/laptimer_pub.pem` exception, so no `-f` is needed). `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n`: `idf.py build` never signs, so dev builds are unsigned and `tools/sign_release.sh` signs offline (§19.2).
+
+`sdkconfig.defaults.moto` / `.car` differ only in the `CONFIG_LAPTIMER_VARIANT_*` Kconfig symbols. **No code reads them** — `main/Kconfig.projbuild`'s own help text says "menuconfig visibility only"; the authoritative variant switch is `build_config.h`'s `CFG_VARIANT_*`, generated from the build flags (§4.6).
 
 ### 21.3 `build.sh`
 
 ```
 ./build.sh <env> [build|flash|monitor|flash-monitor|clean|size|menuconfig] [--port /dev/ttyUSB0] [--flash-size 4MB|8MB|16MB]
 ```
-Maps `<env>` to flags (§4.6), runs `idf.py -B build/<env> -D<flags> <cmd>`, `size` runs `idf.py size` and fails if the app exceeds 0x130000 bytes. `flash` prints the reminder "Disconnect the battery pack before USB" and requires `--yes` to proceed.
+Maps `<env>` to flags (§4.6), runs `idf.py -B build/<env> -D<flags> <cmd>`, `size` runs `idf.py size` and fails if the app exceeds 0x130000 bytes (not "1.2 MB"; the two differ by 7 KB). `--flash-size` accepts only `4MB`; 8MB/16MB are refused as not wired. `flash` prints the reminder "Disconnect the battery pack before USB" and requires `--yes` to proceed.
 
 ### 21.4 Host build (`test/CMakeLists.txt`)
 
@@ -2613,12 +2545,30 @@ Plain CMake ≥ 3.16, C11, `-Wall -Wextra -Werror -Wshadow -Wconversion -fsaniti
 executable per `tools/replay/test/test_*.c`, all registered with the same `ctest`.
 
 ### 21.5 Versioning
-`git describe --tags --match 'v*' --dirty --always` → `CFG_FW_VERSION` (session tags `pNN-dD` and `plan-NN-done` are excluded by the `--match` filter). Tags `vMAJOR.MINOR.PATCH`. Release builds require a clean tree (`sign_release.sh` refuses `-dirty`).
+`git describe --tags --match 'v*' --dirty --always` → `CFG_FW_VERSION` (session tags `pNN-dD` and `plan-NN-done` are excluded by the `--match` filter). Tags `vMAJOR.MINOR.PATCH`. Release builds require a clean tree (`sign_release.sh` refuses `-dirty`), refuse an environment or `build_config.h` that selects a sim driver unless `--allow-sim` is passed, and run `build.sh <env> size` before signing.
 
 ### 21.6 CI (GitHub Actions)
-- `host-tests`: ubuntu, cmake + ctest with sanitizers.
-- `firmware`: matrix over the environments that exist at the time (initially `moto_neo6m` and `moto_sim`; adding a matrix entry requires updating the branch-protection required checks in the same change) in container `espressif/idf:<pinned>`; runs `build.sh <env> build` and `size`; uploads `.bin` artifacts (unsigned).
-- `web`: HTML validity check and a size cap for `export.html`.
+- `hygiene`: no trailing whitespace/CRLF in tracked text, no committed secrets or build output, the
+  container tag matches `.idf-version`, and `tools/spec_api_check.py` (spec §5.2 vs the headers).
+- `host-tests` / `dc-host-tests`: ubuntu, cmake + ctest with sanitizers, for `test/` and
+  `devcontroller/test/`.
+- `tools-tests`: `python3 -m unittest` over the `tools/` test modules (`test_devkit`, the two linter
+  tests, `test_spec_api_check`, `test_gen_tracks`), plus `tools/test_sign_release.sh`.
+- `static-analysis`: the Power-of-10 linter (`--enforce-fnptr --fail-on-violation`, BLOCKING) and
+  the venue-announce linter, with `cppcheck` and `clang-tidy` advisory (design §5).
+- `tracks-generated`: regenerates `trk_bundled.c` and fails if it differs from the committed file.
+- `coverage`: advisory line coverage of `components/core` via gcc `--coverage` + `gcovr`; prints the
+  percentage into the job summary, never fails the build, never a required check.
+- `firmware` (`build (<env>)`): matrix over `moto_neo6m`, `moto_sim` and `devcontroller` in
+  container `espressif/idf:<pinned>`; runs `build.sh <env> build` and `size` for the two moto
+  environments (`idf.py build` for `devcontroller`), builds `test_apps/core_selftest` on the
+  `moto_neo6m` leg, and uploads unsigned `.bin` artifacts. Adding a matrix entry requires updating
+  the branch-protection required checks in the same change.
+
+Required checks: ruling R13 (audit fix wave) designates nine — `hygiene`, `host-tests`,
+`dc-host-tests`, `tools-tests`, `tracks-generated`, `static-analysis`, `build (moto_neo6m)`,
+`build (moto_sim)` and `build (devcontroller)` — and since 2026-10-15 all nine are required in
+branch protection on `main` (verified with `gh api repos/superbrobenji/lap-timer/branches/main/protection`).
 
 ---
 
@@ -2633,14 +2583,14 @@ executable per `tools/replay/test/test_*.c`, all registered with the same `ctest
 | `test_fus.c` | rotation with identity and 90° mounts; gyro bias applied; still detection; orientation capture from tilted gravity; forward learning from synthetic straight-line acceleration; steady-turn synthetic (v=30 m/s, ψ̇=−0.3 rad/s) converges to lean ≈ atan(0.917) = 42.5° ± 1°; lateral g = 0.917 ± 0.02; lean invalid before forward learned; disagreement flag |
 | `test_lap.c` | venue detect at 1.9 km yes / 2.1 km no; S/F crossing forward accepted, reverse rejected, and vice versa on the reverse layout; out-lap has no time; 10 synthetic laps produce 10 results with sector sums = lap time; debounce prevents double fire on jitter; full vs short disambiguation on Killarney fixture; pit flag; incomplete flag when a sector is skipped; sector resync; `min_lap` rejection; `max_lap` invalid; theoretical best; RTC restore mid-lap yields `INTERRUPTED` with correct time; `lap_mark_gate` builds a 30 m perpendicular line and derived reverse |
 | `test_drag.c` | synthetic constant 0.5 g run: 0-100 at 5.66 s ± 20 ms, 1/4 at 12.81 s ± 20 ms, strip trap (§6.6, mean v over the last TRAP_DIST_M) ≈ 223 km/h ± 2 and the 1/4 gate instantaneous line speed ≈ 226 km/h ± 2; rollout shifts t0 as expected; bench visibility for peak 180 vs 320 km/h; false-start abort; GPS re-anchor correctness with lagging fixes; braking distance from 100 km/h at −1 g = 39.3 m ± 0.5 |
-| `test_ses.c` | frame encode/decode all types; CRC mismatch skipped and resync finds the next frame; delta encoder chooses KEY on overflow and every 5 s; reader reconstructs absolute fixes exactly; truncated file decodes all complete frames |
-| `test_exp.c` | VBO golden file byte-equal for a 3-fix fixture (checks west-positive longitude, minute conversion, formatting); NMEA checksums verified by independent computation; JSON parses (using a tiny reference parser in the test) |
+| `test_ses_frame.c`, `test_ses_records.c` | frame encode/decode all types; CRC mismatch skipped and resync finds the next frame; delta encoder chooses KEY on overflow and every 5 s; reader reconstructs absolute fixes exactly; truncated file decodes all complete frames |
+| `test_exp_vbo.c`, `test_exp_nmea_json.c` | VBO golden file byte-equal for a 3-fix fixture (checks west-positive longitude, minute conversion, formatting); NMEA checksums verified by independent computation; JSON parses (using a tiny reference parser in the test) |
 | `test_trk.c` | nearest lookup; user override on id clash; JSON parse/emit round-trip; `"sf":"same"` / `"sectors":"reverse"` expansion |
 | `test_cfg.c` | defaults valid; each field clamped; JSON merge semantics; unknown keys ignored; migration v1→v1 no-op |
-| `test_ui.c` | every screen renders from a fixed model without out-of-bounds writes; PBM snapshots match goldens; bench rows rule (§11.4); fault icon strip only when flags set |
+| `test_ui.c` | every screen renders from a fixed model without out-of-bounds writes; PBM snapshots match goldens; DRAG card and gate lists (Plan 7b §7); fault icon strip only when flags set |
 | `test_ring.c` | SPSC ring overwrite-oldest vs drop-newest policies, wraparound |
 
-Coverage target: ≥ 90 % lines in `core/` (gcov in CI).
+Coverage target: ≥ 90 % lines in `core/`. This is an **advisory** target, reported by the `coverage` CI job (gcc `--coverage` + `gcovr`, §21.6) and never a merge gate (ruling R14).
 
 ### 22.2 Replay and synthetic generator (host)
 
@@ -2652,8 +2602,8 @@ Coverage target: ≥ 90 % lines in `core/` (gcov in CI).
 
 | Test | Procedure | Pass |
 |------|-----------|------|
-| GPS simulation | `tools/gps_sim.py --port /dev/ttyUSB1 --file capture.ubx --rate 5` into GPIO 16 through a USB-UART adapter | laps appear on the display matching replay |
-| Power per state | multimeter in series with battery; `dbg power active|pit|park` | ≤ 95 / 18 / 0.3 mA |
+| GPS simulation | `moto_sim` build; `dbg sim laps <n>` replays the compiled-in capture | laps appear on the display matching the `replay` reference |
+| Power per state | multimeter in series with battery; force each state (Plan 6 — there is no `dbg power` verb today, §18.4) | ≤ 95 / 18 / 0.3 mA |
 | Sleep/wake | PARK, tap the IMU | ACTIVE within 3 s of tap, GPS fix within 5 s (warm) |
 | WDT path | `dbg hang` | reset within 5 s, session resumed, `E_SYS_WDT_RESET` logged |
 | Crash path | `dbg crash` ×3 within 60 s | safe mode entered; clears after 10 min |
@@ -2665,7 +2615,7 @@ Coverage target: ≥ 90 % lines in `core/` (gcov in CI).
 | OTA | good image; corrupted image; wrong hwid; image with `dbg crash` in `app_main` | applied / `E_OTA_SIG` / `E_OTA_HWID` / rolled back |
 | E-paper | 50 partials, temp 5 °C and 40 °C | legible, full refresh clears ghosting |
 
-From plan 01 onward, `test_apps/core_selftest` also runs the host unit-test files unchanged on the ESP32 (vendored Unity as an IDF component; stress-test iteration counts reduced under `ESP_PLATFORM`), so every core change is proven on the target toolchain (xtensa alignment of packed records, `_Atomic` support, newlib formatting, float performance) before firmware plans build on it.
+From plan 01 onward, `test_apps/core_selftest` also runs the host unit-test files on the ESP32 (vendored Unity as an IDF component; stress-test iteration counts reduced under `ESP_PLATFORM`), so every core change is proven on the target toolchain (xtensa alignment of packed records, `_Atomic` support, newlib formatting, float performance) before firmware plans build on it. Four files are excluded by name and cannot be (`test_apps/core_selftest/main/CMakeLists.txt`): `test_ui.c` and `test_screens.c` write PBM snapshots to the host filesystem and compare byte-exact, `test_epd_pure_29.c` needs the same translation unit compiled for the other panel row (the 2.13" row is the one proven on target), and `test_batt_trim.c` links the board driver's host-only `batt_trim.c`. Everything else — including the pure e-paper geometry and the sim profile/clock — runs there.
 
 ### 22.4 Resource measurement
 After Phase 1: `uxTaskGetStackHighWaterMark` per task, pipeline worst-case iteration time (GPIO toggle + scope, or `esp_timer` delta logged), heap min-free after 1 h with BLE cycling. Values recorded in `docs/measurements.md` and stack sizes updated to high-water + 25 %.
@@ -2682,16 +2632,31 @@ Three track sessions with RaceChrono on a phone as reference (phone GPS 1 Hz is 
 
 | Tool | Language | Purpose | Interface |
 |------|----------|---------|-----------|
-| `tools/web/export.html` | JS | phone client (§18.3) | Web Bluetooth / HTTP |
 | `tools/replay/` | C | offline pipeline `replay` and synthetic fixture generator `synth` (§22.2) | CLI |
-| `tools/tracks/gen_tracks.py` | Python 3 | `*.json` → `trk_bundled.c`; validates schema, lengths, line lengths (10–60 m) | `python gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c` |
-| `tools/fonts/gen_fonts.py` | Python 3 (Pillow) | TTF → 1-bpp glyph arrays | `python gen_fonts.py DejaVuSansMono-Bold.ttf -o components/app/ui/ui_fonts.c` |
-| `tools/gps_sim.py` | Python 3 (pyserial) | replay `.ubx` or `.log` fixes as UBX NAV-PVT at real-time rate to a serial port | `--port --file --rate --loop` |
-| `tools/serial_export.py` | Python 3 (pyserial) | serial protocol client (§18.4) | `serial_export.py /dev/ttyUSB0 list` |
-| `tools/sign_release.sh` | bash | build + sign + verify + dist (§19.2) | `sign_release.sh moto_neo6m` |
-| `tools/log2csv.py` | Python 3 | decode `.log` to CSV for analysis (same frame spec) | |
+| `tools/tracks/gen_tracks.py` | Python 3 | `*.json` → `trk_bundled.c`; validates schema, lengths and the 10–60 m line rule explicitly (never via `assert`, so `python3 -O` validates too) | `python3 tools/tracks/gen_tracks.py tools/tracks/*.json -o components/core/tracks/trk_bundled.c` |
+| `tools/fonts/gen_fonts.py` | Python 3 (Pillow) | TTF → 1-bpp glyph arrays | `python3 tools/fonts/gen_fonts.py > components/core/ui/fonts.c` |
+| `tools/devkit.py` | Python 3 (pyserial) | dev-kit console client: `status`, `lt <cmd>` relay, `trace`, `stream`, `selftest`, `shell`, and `flash` (image staging and OTA push) | `tools/devkit.py --port /dev/cu.usbserial-XXXX status` |
+| `tools/ota_push.py` | Python 3 (pyserial) | direct `ota recv` push of a signed image over the lap-timer console | `tools/ota_push.py --port /dev/cu.usbserial-XXXX --image dist/laptimer-<ver>-<hwid>.bin` |
+| `tools/sign_release.sh` | bash | clean-tree + no-sim guards, build, `size` gate, sign, verify, `dist/` (§19.2, §21.5) | `tools/sign_release.sh moto_neo6m` |
+| `tools/lint/power_of_10.py` | Python 3 | the Power-of-10 gate (rules 1/3/4/4-compound/5/8/9) over `components/**`, `main/`, and `devcontroller/` report-only | `python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation` |
+| `tools/lint/venue_announce.py` | Python 3 | every direct venue acquisition announces to the ui on that path | `python3 tools/lint/venue_announce.py --fail-on-violation` |
+| `tools/spec_api_check.py` | Python 3 | spec §5.2's API blocks vs `components/core/include/core/*.h` | `python3 tools/spec_api_check.py` (`--emit core/lap.h` prints a header's typedefs, `#define` lines and prototypes, the prototypes in declaration order; `--hdr-dir`/`--headers` aim the check at fixtures) |
+| `tools/sim/gen_sim_capture.sh` | bash | regenerates the committed `gps_sim` capture and its replay-expected lap times (manual, not CI) | `tools/sim/gen_sim_capture.sh [synth] [gensim]` (built host binaries) |
+| `tools/idf-env.sh` | bash | sources the pinned ESP-IDF (asserts `.idf-version`) | `source tools/idf-env.sh` |
 
-Python tools pin dependencies in `tools/requirements.txt` (`pyserial`, `Pillow`).
+Python tools pin dependencies in `tools/requirements.txt` (`pyserial`, `Pillow`, `esptool`); the
+linters, `gen_tracks.py` and `spec_api_check.py` are standard-library only, and `tools-tests` runs the unit tests for `devkit.py`, both linters, `spec_api_check.py`,
+`gen_tracks.py` and the `sign_release.sh` guard harness (`ota_push.py`, `idf-env.sh`, `gen_sim_capture.sh`
+and `gen_fonts.py` have none). The §4.2 layout block is generated —
+regenerate it with this command and re-attach the inline comments:
+
+```bash
+git ls-files | awk -F/ '
+  NF==1 {print $0; next}
+  /^components\// {print $1"/"$2"/"$3; next}
+  /^(main|tools|test|test_apps|devcontroller|docs)\// {print $1"/"$2; next}
+  {print $1"/"$2}' | sort -u
+```
 
 ---
 
@@ -2707,7 +2672,7 @@ Python tools pin dependencies in `tools/requirements.txt` (`pyserial`, `Pillow`)
 | 3 | `conn_ble_rc` | `+CONN_BLE_RC` | RaceChrono shows live GPS + lean channel |
 | 4 | `gps_m10`, PPS, QMC5883L | `moto_m10` | accuracy ≤ 15 ms on synthetic 10 Hz; PPS lock quality 2 |
 | 5 | `storage_sd` | `*_sd` | degrade/recover bench test |
-| 6 | `display_oled_ssd1309`, `screens_car.c`, predictive delta | `car_*` | live delta within ±50 ms of replayed truth |
+| 6 | `display_oled_ssd1309`, car screens, predictive delta | `car_*` | live delta within ±50 ms of replayed truth |
 
 Phase 1 (a–c) is the subject of the first implementation plan.
 
@@ -2716,10 +2681,10 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 ## 25. Items to verify on hardware before or during Phase 1
 
 1. ~~Flash size~~ — verified 4 MB on 2026-09-15 (ESP32-D0WD-V3 rev 3.1); partition table §19.1 stands.
-2. NEO-6M firmware via `MON-VER` (NAV-PVT ≥ 7.03 else fallback set).
+2. GPS module identity and firmware via `UBX-MON-VER` — hardware in hand (G28U7FTTL-P, u-blox 7 class; 2026-10-13): verify on the Plan 8 bench (NAV-PVT needs protocol ≥ 14, else the fallback set).
 3. TP4056 module protection (6 pads).
 4. Dev board accepts 3.3 V injection on `3V3` without back-feed issues.
-5. MPU6050 self-test passes (genuine) and `MOT_THR` scaling.
+5. MPU6050 self-test passes (genuine) and `MOT_THR` scaling — hardware in hand (GY-521; 2026-10-13): verify on the Plan 8 bench.
 6. Exact e-paper panel/controller and its update-control constants.
 7. NEO-6M `RXM-PMREQ` wake-on-UART behaviour (else MOSFET only).
 8. Brownout level menuconfig mapping to ≈ 2.8 V.
@@ -2795,8 +2760,8 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `BLE_CHUNK_MAX` | 496 | §18.1 |
 | `BLE_STALL_S` | 10 | §18.2 |
 | `WDT_S` | 5 | §17.1 |
-| `HB_STALL_S` (pipeline/logger/ui/conn/power) | 1 / 5 / 10 / 10 / 5 | §17.2 |
-| `HEAP_LOW_KB` / `HEAP_BLE_OFF_KB` / `HEAP_LOG_OFF_KB` | 40 / 20 / 12 | §17.2 |
+| `HB_STALL_S` (pipeline/logger/ui/conn/power) | 5 / 5 / 10 / 10 / 5 | §17.2 (ruling R3) |
+| `HEAP_LOW_KB` | 40 | §17.2 (the original `HEAP_BLE_OFF_KB` = 20 and `HEAP_LOG_OFF_KB` = 12 steps are struck with the BLE heap step: no such constants exist in the firmware, BT is off — R33) |
 | `HEAP_CLEAR_KB` | 48 | §17.2 (hysteresis release for `HEAP_LOW_KB`) |
 | `HEAP_INTEGRITY_PERIOD_S` | 60 | §17.1 (new rows in this block: audit fix wave `docs/superpowers/specs/2026-10-13-audit-fix-wave-design.md`) |
 | `STACK_LOW_B` | 256 | §17.2 |
@@ -2811,7 +2776,7 @@ Phase 1 (a–c) is the subject of the first implementation plan.
 | `BTN_DEBOUNCE_MS` / `BTN_SHORT_MS` / `BTN_LONG_MS` / `BTN_VLONG_MS` | 30 / 500 / 1000 / 3000 | §20.8 (`BTN_DEBOUNCE_MS` has one definition, `hal/board.h`, which the board ISR now uses per pin as a leading-edge guard; it used 25 ms before audit `app:L6`. §20.8's "level sampled 30 ms after the edge" is not implemented: the ISR reads the level at the edge and the ui reconciles it once per loop) |
 | `MENU_IDLE_S` | 30 | §20.7 |
 | `CRASH_LOOP_N` / `CRASH_LOOP_WINDOW_S` / `SAFE_MODE_CLEAR_S` | 3 / 60 / 600 | §17.5 |
-| `OTA_VALID_UPTIME_S` | 60 | §19.4 |
+| `OTA_VALID_UPTIME_S` | 30 | §19.4 (ruling R3: the 30 s trial window is the bench operating rule — never reset or open the console port within ~35 s of a push) |
 | `OTA_MAX_IMAGE` | 0x140000 − 4096 | §19.5 |
 | `OTA_STILL_MIN_MS` | 30000 | §19.5 |
 | `OTA_CLOSE_TIMEOUT_MS` | 2000 | §19.5 |

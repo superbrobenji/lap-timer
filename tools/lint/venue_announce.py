@@ -38,8 +38,24 @@ correctly. main() now also counts how many ACQUIRE_RE matches landed inside a re
 found something to check" that costs nothing on a tree which always has >= 2 such call sites. Not
 lap.c's -- is_exempt() drops components/core/lapengine/ before check_file() ever runs, so
 scan_for_venue()/finalize_create() contribute zero; the two that actually keep the floor non-zero
-are pipeline.c's app-layer acquisitions, lap_import_rtc() (pipeline.c:505) and lap_set_venue()
-(pipeline.c:1139). This floor is the only thing that catches this rename.
+are pipeline.c's app-layer acquisitions, lap_import_rtc() (in on_fix_try_resume()) and
+lap_set_venue() (the CFG_GPS_SIM boot venue in pipeline_init()). This floor is the only thing that catches this rename.
+
+Fix round 2 (PR #101 review M5, 2026-10-13): "a call to ui_post_venue() anywhere in the same
+function body" was still too loose -- it proved the announce happened somewhere, not that it was
+ON the acquisition path. Three bypasses it silently accepted: (1) the announce in a sibling
+branch of an if/else, never reached on the path that actually calls the acquisition; (2) an
+announce that runs BEFORE the acquisition, so it posts whatever venue was previously current, not
+the one just acquired; (3) an announce of a different venue (a literal id, or any identifier not
+traceable to the acquisition's own arguments) sitting right next to a correct acquisition. The
+rule now requires the ui_post_venue() call to be (a) inside the acquisition's own innermost block
+(so a sibling branch cannot satisfy it), (b) textually AFTER the acquisition within that block,
+and (c) passed a first argument that shares an identifier with the acquisition's own arguments
+(past the engine handle) -- so a hard-coded or unrelated venue id no longer satisfies it. One
+bypass remains open BY DESIGN, unchanged from fix round 1's "Deliberately conservative" note
+above: an announce issued from a HELPER the acquisition calls, rather than inline on the
+acquisition's own path, is still not detected -- extending this would require call-graph
+analysis this linter does not do, and no acquisition in the current tree needs it.
 """
 import argparse
 import os
@@ -49,19 +65,74 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from power_of_10 import (  # reuse the one C scanner in the tree
     LineIndex,
+    _arg_spans,
     find_top_level_functions,
     strip_comments_and_literals,
 )
 
-# Fix round 1 (review Minor 8, #98): widened to match power_of_10.py's own DEFAULT_PATHS exactly
-# (components/core, components/app, components/drivers, main) -- components/core/lapengine/ is
-# still exempt below (that is where the contract is correctly implemented), but a future blind
+# Fix round 1 (review Minor 8, #98): widened to power_of_10.py's DEFAULT_PATHS -- except
+# devcontroller/, which P10 scans report-only and which has no lap engine, so nothing there can
+# acquire a venue (components/core, components/app, components/drivers, main) --
+# components/core/lapengine/ is still exempt below (that is where the contract is correctly implemented), but a future blind
 # venue-set path elsewhere in core/ or in drivers/ is now in scope too, at no cost (verified: 0
 # violations with the widened scan on this tree).
 DEFAULT_PATHS = ["components/core", "components/app", "components/drivers", "main"]
 ACQUIRE_RE = re.compile(r"\b(lap_set_venue|lap_import_rtc)\s*\(")
 ANNOUNCE_RE = re.compile(r"\bui_post_venue\s*\(")
 SCANNED = (".c",)
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# tokens that carry no venue identity, so sharing one proves nothing (M5)
+_NOISE = {"sizeof", "NULL", "true", "false", "const", "void", "int", "uint16_t", "uint8_t",
+          "int64_t"}
+
+
+def _innermost_block(stripped, pos):
+    """(open, close) of the innermost brace pair containing `pos`, or None."""
+    stack = []
+    best = None
+    for i, ch in enumerate(stripped):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}":
+            if not stack:
+                continue
+            o = stack.pop()
+            if o < pos < i and (best is None or o > best[0]):
+                best = (o, i)
+            if i > pos and not stack:
+                break
+    return best
+
+
+def _args_text(stripped, open_paren_idx):
+    """(arguments after the first, first argument) of the call whose '(' is at open_paren_idx;
+    split at depth-aware top-level commas (power_of_10's _arg_spans), so a comma inside a nested
+    call or an index never splits an argument."""
+    args = _arg_spans(stripped, open_paren_idx)
+    if not args:
+        return "", ""
+    return ",".join(args[1:]), args[0]
+
+
+_MEMBER_RE = re.compile(r"(?:\.|->)\s*[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _tokens(text):
+    """Identifiers that carry venue identity: member names (`.venue`, `->id`) are dropped, since
+    two unrelated structs sharing a field name must not count as naming the same venue."""
+    return set(_IDENT_RE.findall(_MEMBER_RE.sub(" ", text))) - _NOISE
+
+
+def _opens_on_acquisition(stripped, acq_pos, block_open):
+    """True when the block opened at `block_open` is the then-block of a condition that CONTAINS the
+    acquisition (`if (lap_import_rtc(...) == 0) {`): nothing but the rest of that condition lies
+    between the acquisition and the brace, so the block runs exactly when the set succeeded."""
+    if block_open < acq_pos:
+        return False
+    between = stripped[acq_pos:block_open]
+    return not any(c in between for c in ";{}") and between.rstrip().endswith(")")
+
 
 # core/lapengine (lap.c) is the engine's own source: scan_for_venue()/finalize_create() announce
 # correctly there (lap.c:871/:924) and are the two call sites this rule must NOT flag -- the rule
@@ -90,13 +161,41 @@ def check_file(path, relpath):
         body = next(((name, o, c) for name, _ns, o, c, _po, _pc in funcs
                      if o < m.start() < c), None)
         if body is None:
-            continue                      # a declaration, not a call
+            # M5: distinguish a prototype (brace depth 0) from an acquisition inside a construct
+            # find_top_level_functions() did not recognise, which used to be skipped silently.
+            if stripped.count("{", 0, m.start()) == stripped.count("}", 0, m.start()):
+                continue                  # depth 0 -> a declaration, not a call
+            findings.append("%s:%d: %s() is called from a context this linter cannot parse "
+                            "(no enclosing top-level function) -- the announce rule cannot be "
+                            "checked here; restructure or extend find_top_level_functions()" %
+                            (relpath, lidx.line_of(m.start()), m.group(1)))
+            continue
         sites += 1                        # M4 (final review): a real acquisition call site
         name, open_idx, close_idx = body
-        if ANNOUNCE_RE.search(stripped, open_idx, close_idx):
+        # M5 (PR #101 review): the announce must be ON the acquisition path, not merely somewhere
+        # in the function -- so it must sit in the acquisition's own innermost block, AFTER it, and
+        # name the venue the acquisition named (a token shared with the acquisition's arguments
+        # past the engine handle). A sibling branch's announce, an announce before the set, and an
+        # announce of a different/literal venue id all fail.
+        blk = _innermost_block(stripped, m.start()) or (open_idx, close_idx)
+        acq_rest, _first = _args_text(stripped, m.end() - 1)     # arguments past the engine handle
+        acq_tokens = _tokens(acq_rest)
+        ok = False
+        for a in ANNOUNCE_RE.finditer(stripped, m.end(), blk[1]):
+            # the announce must sit at the acquisition's OWN block depth: one inside a nested
+            # conditional after the set runs only on some paths (final review M5)
+            ab = _innermost_block(stripped, a.start())
+            if ab != blk and not (ab and _opens_on_acquisition(stripped, m.start(), ab[0])):
+                continue
+            _rest, first = _args_text(stripped, a.end() - 1)
+            if _tokens(first) & acq_tokens:
+                ok = True
+                break
+        if ok:
             continue
-        findings.append("%s:%d: %s() in %s() acquires a venue with no ui_post_venue() call "
-                        "to announce it to the ui -- see tools/lint/venue_announce.py" %
+        findings.append("%s:%d: %s() in %s() acquires a venue with no ui_post_venue() call on "
+                        "that path (same block, after the set, naming the same venue) -- see "
+                        "tools/lint/venue_announce.py" %
                         (relpath, lidx.line_of(m.start()), m.group(1), name))
     return findings, sites
 
@@ -110,17 +209,25 @@ def main(argv=None):
     findings = []
     total_sites = 0
     for root in args.paths:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "build"]
-            for fn in filenames:
-                if fn.endswith(SCANNED):
-                    p = os.path.join(dirpath, fn)
-                    relpath = os.path.relpath(p, base)
-                    if is_exempt(relpath):
-                        continue
-                    file_findings, file_sites = check_file(p, relpath)
-                    findings += file_findings
-                    total_sites += file_sites
+        # M5 (TDD fixture run): a --paths entry may itself be a single file (e.g. a fixture),
+        # not only a directory to walk -- os.walk() on a file silently yields nothing, which
+        # used to make such an entry a silent no-op. Mirrors power_of_10.py's discover_files().
+        if os.path.isfile(root):
+            candidates = [root]
+        else:
+            candidates = []
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "build"]
+                for fn in filenames:
+                    if fn.endswith(SCANNED):
+                        candidates.append(os.path.join(dirpath, fn))
+        for p in candidates:
+            relpath = os.path.relpath(p, base)
+            if is_exempt(relpath):
+                continue
+            file_findings, file_sites = check_file(p, relpath)
+            findings += file_findings
+            total_sites += file_sites
     for f in sorted(findings):
         print(f)
     print("venue-announce: %d violation(s)" % len(findings))
