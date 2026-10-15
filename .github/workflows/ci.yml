@@ -148,8 +148,8 @@ jobs:
     # set (the rule-6 -Wmissing-prototypes/-declarations, -Wshadow, -Wconversion) this gates the
     # ten rules. clang-tidy and cppcheck stay `continue-on-error: true` (advisory second analysers,
     # rule 10) -- see design §5. Ruling R13 (2026-10-13 audit fix wave) designates `static-analysis`
-    # as one of the nine required checks Task 14 will enable in branch protection; it is not yet
-    # enforced there as of this commit.
+    # as one of the nine required checks; as of 2026-10-15 all nine are enabled in branch
+    # protection on `main`.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -168,7 +168,7 @@ jobs:
       #   core:          components/core/config/cfg_json.c:cfg_to_json:RULE-4
       #   drivers layer: components/drivers/export_serial/export_serial.c:fmt_from_str:RULE-5
       #   drivers layer: components/drivers/export_serial/export_serial.c:tally_cb:RULE-5
-      # Issue for all five: filed by F4 Task 14 Step 1 (Power-of-10 statement-count findings).
+      # Issue for all five: #131 (Power-of-10 statement-count findings).
       - name: power_of_10.py linter (BLOCKING; rules 1/3/4/4-compound/5/8/9)
         run: |
           python3 tools/lint/power_of_10.py --enforce-fnptr --fail-on-violation \

@@ -2565,12 +2565,10 @@ executable per `tools/replay/test/test_*.c`, all registered with the same `ctest
   `moto_neo6m` leg, and uploads unsigned `.bin` artifacts. Adding a matrix entry requires updating
   the branch-protection required checks in the same change.
 
-Required checks: ruling R13 (audit fix wave) **designates** nine — `hygiene`, `host-tests`,
+Required checks: ruling R13 (audit fix wave) designates nine — `hygiene`, `host-tests`,
 `dc-host-tests`, `tools-tests`, `tracks-generated`, `static-analysis`, `build (moto_neo6m)`,
-`build (moto_sim)` and `build (devcontroller)` — and F4's final task enables them in branch
-protection at merge. Until then five are required on `main` (`hygiene`, `host-tests`,
-`tracks-generated`, `build (moto_neo6m)`, `build (moto_sim)`; measured 2026-10-15); `static-analysis`
-is not one of them yet.
+`build (moto_sim)` and `build (devcontroller)` — and since 2026-10-15 all nine are required in
+branch protection on `main` (verified with `gh api repos/superbrobenji/lap-timer/branches/main/protection`).
 
 ---
 

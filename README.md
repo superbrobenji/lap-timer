@@ -70,10 +70,9 @@ by squash PR once CI is green. Tags `pNN-dD` mark finished sessions, `plan-NN-do
 `vX.Y.Z` releases.
 
 `main` is protected: pull requests only, linear history, no force pushes, enforced for admins. The
-required status checks today are `hygiene`, `host-tests`, `tracks-generated`, `build (moto_neo6m)`
-and `build (moto_sim)`. CI itself runs nine jobs on every PR — those five plus `dc-host-tests`,
-`tools-tests`, `static-analysis` (the Power-of-10 gate) and `build (devcontroller)`; the audit fix
-wave's final task raises the required set to all nine.
+required status checks (since 2026-10-15) are all nine of CI's jobs: `hygiene`, `host-tests`,
+`dc-host-tests`, `tools-tests`, `tracks-generated`, `static-analysis` (the Power-of-10 gate),
+`build (moto_neo6m)`, `build (moto_sim)` and `build (devcontroller)`.
 
 ## License
 

@@ -563,6 +563,20 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   shows the rotation (a second `.log`/`.sum` pair), then `config set {\"mode\":\"lap\"}` rotates again (a third
   pair), 5 s apart; repeat once with the flips 400 ms apart (item 64). Every flip must produce exactly one
   close + one open line; no flip may be skipped. Evidence: the log lines + `dbg fs`.
+- [ ] **70. Signed release path** (F4-1, `tools/sign_release.sh`, audit drv:M5). On a clean tree (a modified tracked
+  file is refused: `refusing: the working tree has modified tracked files ...`): `tools/sign_release.sh moto_sim`
+  is refused with `refusing: environment 'moto_sim' selects a bench (sim) driver and is never part of a release
+  build (spec §4.6); pass --allow-sim ...` (rc 1); `tools/sign_release.sh moto_neo6m` completes (build, then the
+  `./build.sh moto_neo6m size` gate, sign, verify; ends `signed OK: dist/laptimer-<ver>-<hwid>.bin` + a `.sha256`);
+  `tools/sign_release.sh moto_sim --allow-sim` signs the bench image. Then push the signed `moto_sim --allow-sim`
+  image over the dev-kit (`flash push`) and confirm it boots and validates: no `E_OTA_ROLLBACK` at the next reset,
+  and do not open the LT port for 35 s after the push (item 23's rule). Evidence: the three script outputs + the
+  `errlog` after the reboot.
+- [ ] **71. BT controller off (R33)** (F4-2). Flash the post-R33 `moto_sim` image (`CONFIG_BT_ENABLED=n`) and
+  confirm on the console: `dbg status` boots clean with no BT-related error; `dbg mem` reports heap free **higher**
+  than the pre-R33 bench readings of 184,976 B (bench day 2 flash) / 184,988 B (`docs/measurements.md`, the
+  sim-path section); and a 10-minute sim-lap run shows no new `W`/`E` lines. Record both heap figures in
+  `docs/measurements.md`. Evidence: the `dbg mem` and `dbg status` lines before/after.
 
 ## Closed on 2026-10-10 (bench day 5)
 Image `v0.1.0-47-g4ae6426` (= branch head, PR #101), dev-kit 076f327. Re-test of the four bench-day-4

@@ -80,10 +80,9 @@ We follow Gerard Holzmann's **refined** Power-of-10 rules as published on his au
   separate, final task once every owner has merged. The blocking gates are the custom linter
   (`--enforce-fnptr --fail-on-violation`) and the compiler `-Werror` set; `clang-tidy` and
   `cppcheck` stay advisory (rule 10's "preferably more than one analyser"). Ruling R13 (2026-10-13)
-  **designates** `static-analysis` one of nine required checks, and F4's final task enables them in
-  branch protection at merge; until then five contexts are required on `main` (`hygiene`,
-  `host-tests`, `tracks-generated`, `build (moto_neo6m)`, `build (moto_sim)`) and `static-analysis`
-  is not among them — it was not when `plan-4.5-done` was tagged either.
+  designates `static-analysis` one of nine required checks, and since 2026-10-15 all nine are
+  required in branch protection on `main` (including `static-analysis`; it was not required when
+  `plan-4.5-done` was tagged).
 - Rules not fully automatable (2 bounded-loops provability, 8 preprocessor judgment) are enforced by a **review checklist** — `docs/power-of-10-checklist.md`, referenced from the product spec §17.9.
 
 ## 6. Behavior-preserving mandate
