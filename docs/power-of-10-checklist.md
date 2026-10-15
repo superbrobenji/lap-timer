@@ -2,9 +2,10 @@
 
 Use this when reviewing any change to the shipped on-device C (`components/core`, `components/app`,
 `components/drivers`, `main`). It is the human half of the enforcement; the automated half is the
-blocking CI: the custom linter (`tools/lint/power_of_10.py --fail-on-violation --enforce-fnptr`, which gates
-rules 1 (direct recursion) and 3 (the heap API surface) as well as 4/4-compound/5/8/9) and the compiler
-`-Werror` set. `clang-tidy` and `cppcheck` run as ADVISORY second analysers (`continue-on-error` in ci.yml). Authority: the design at
+blocking CI: the custom linter (`tools/lint/power_of_10.py --fail-on-violation --enforce-fnptr`,
+which gates rules 1 (direct recursion) and 3 (the heap API surface) as well as 4/4-compound/5/8/9)
+and the compiler `-Werror` set. `clang-tidy` and `cppcheck` run as ADVISORY second analysers
+(`continue-on-error` in ci.yml). Authority: the design at
 `docs/superpowers/specs/2026-09-17-power-of-10-compliance-design.md` (refined-rule interpretations);
 deviations: `docs/power-of-10-deviations.md`.
 
