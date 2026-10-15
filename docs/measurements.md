@@ -5,6 +5,19 @@ bench day from 2026-09-27 on is transcribed here from the merged PR body that re
 number and date are given per section) — the project's evidence lives in the tree, not only in
 PR descriptions and git-ignored ledgers (audit 2026-10-13 §6 item 1).
 
+## Static DRAM after R33 (BT off) on the merged wave — host build measurement (2026-10-15)
+
+- Tree: branch `fix-process-docs` (rebased onto `main` e0defd3, which carries F0/F1a/F1b/F2a/F2b/F3) at a2bcdc9 plus the docs-only changes of F4 Task 9 (no source or build-config change). ESP-IDF 5.3.2 (`source tools/idf-env.sh`), clean builds with `CCACHE_DISABLE=1 ./build.sh <env> size`; no hardware, nothing flashed. Both builds: 0 compiler warnings (the only "warning" text in either log is a CMake deprecation notice from the IDF's own vendored mbedtls `CMakeLists.txt`).
+- `dram0_0_seg`: origin `0x3FFB0000`, length `0x2c200` (180,736 B), from `build/<env>/esp-idf/esp_system/ld/memory.ld` — Bluetooth is off (`CONFIG_BT_ENABLED=n`, ruling R33), so the ~56 KB controller reservation (old origin `0x3ffbdb5c`, length `0x1e6a4` = 124,580 B) is gone.
+
+| Env | DRAM used | `.bss` | `.data` | Free static DRAM | App image |
+|-----|-----------|--------|---------|------------------|-----------|
+| `moto_sim` | 114,264 B (63.22 %) | 103,320 B | 10,944 B | **66,472 B** | 655,280 B (limit 0x130000 = 1,245,184 B) |
+| `moto_neo6m` | 114,096 B (63.13 %) | 103,168 B | 10,928 B | **66,640 B** | 589,744 B |
+
+- History: free static DRAM before R33 was 4,072 B (`moto_sim`) / 5,496 B (`moto_neo6m`) against the old 124,580 B ceiling; the first post-R33 measurement (before the F1a–F3 rebase) was 65,024 B / 66,448 B (+60,952 B per env). The wave since then moved `moto_sim` by +1,448 B and `moto_neo6m` by +192 B of headroom.
+- `cmd.c` statics at this head (`xtensa-esp32-elf-nm -S` over `cmd.c.obj`, `moto_sim`): 6,992 B total — `s_asm` 3,456, `s_exp` 1,488, `s_sr` 788, `s_cw` 528, `s_io` 256, `s_ss` 160, `s_meta` 160, `s_cfg` 110, `s_memo` 24, `s_open` 13, `s_nsess` 4, `s_track_len` 4, `s_put_pending` 1.
+
 ## Bench day 5 — PR #101 fix re-test on the 2.13" panel (2026-10-10)
 
 - Image `v0.1.0-47-g4ae6426` (`glyphs-drag-menu-closure` head), `moto_sim`, dev-kit wired. Source: PR #101 body, "Bench day 5 (2026-10-10) — the re-test of those fixes".
