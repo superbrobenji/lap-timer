@@ -471,7 +471,17 @@ static bool     s_ses_open;
  * closes on its own -- so session_periodic() drops the mirror instead of retrying. */
 static bool     s_ses_confirmed;
 static uint32_t s_open_req_sent;   /* R-1: OPENs successfully enqueued; the logger's at_open must equal it to confirm */
-static bool     s_open_send_ok = true;   /* N-A: false while the latest OPEN send failed; never confirm then */
+/* N-A: false while the latest OPEN send failed AFTER its CLOSE was enqueued (the logger then shows the
+ * old session at a count equal to s_open_req_sent); never confirm then. A CLOSE that could not be
+ * enqueued never reaches the OPEN at all (B-1, the pending action below), so it never sets this. */
+static bool     s_open_send_ok = true;
+/* B-1 (F2b closure 4, ruling F-15): a CLOSE that was NOT enqueued (queue full) leaves the mirror
+ * exactly as it was (open, confirmation, venue/layout) and records the intent here; session_periodic
+ * re-attempts it on the TIMEMAP_INTERVAL_US cadence (s_last_open_try_us) through the one path
+ * session_close_act(). A rotation's OPEN is posted only after its CLOSE was enqueued. `s_pend_*` is the
+ * rotation's TARGET venue/layout; a newer lifecycle event replaces or cancels the record. */
+static ses_pend_t s_pend;
+static uint16_t   s_pend_venue, s_pend_layout;
 static uint16_t s_ses_venue_id, s_ses_layout_id;
 static uint8_t  s_gps_hz;              /* gps_profile_t.max_rate_hz; §12.3 SESSION_HDR.gps_hz */
 
@@ -572,19 +582,45 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
  * someone else closed it (ota.c's §19.5 close, sup.c's pre-restart close): drop the mirror, as a
  * close would, and do NOT retry -- the next venue event reopens (a retry would open a new
  * session in the middle of an OTA transfer). */
+static void session_mirror_drop(void)
+{
+    s_ses_open = false;
+    s_ses_confirmed = false;
+    s_ses_venue_id = 0u;
+    s_ses_layout_id = 0u;
+    s_pend = SES_PEND_NONE;
+}
+
+static void session_close_act(ses_action_t act, uint16_t venue_id, uint16_t layout_id, int64_t gps_us);
+
+/* B-1: the pending CLOSE / rotation. While one is pending the old session is still the logger's
+ * live one, so the liveness decision is skipped (a retry or confirm now could open a session beside
+ * it); a logger seen closed after it had confirmed was closed by someone else (OTA): drop, and the
+ * pending intent with it. Returns true while a pending action owns this pass. */
+static bool session_pending_periodic(int64_t now, bool lopen)
+{
+    if (s_pend == SES_PEND_NONE) return false;
+    if (!lopen && s_ses_confirmed) {
+        session_mirror_drop();
+        return true;
+    }
+    if (session_pend_due(s_pend, now, s_last_open_try_us, TIMEMAP_INTERVAL_US)) {
+        int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
+        session_close_act(session_pend_act(s_pend), s_pend_venue, s_pend_layout, gps_us);
+    }
+    return true;
+}
+
 static void session_periodic(int64_t now)
 {
     LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
     if (!s_ses_open) return;
     bool lopen = logger_session_is_open();   /* acquire load FIRST, then at_open (see logger.h) */
-    ses_live_t v = session_liveness(lopen, logger_open_req_at_open(), s_open_req_sent, s_open_send_ok,
-                                    s_ses_confirmed,
-                                    now, s_last_open_try_us, TIMEMAP_INTERVAL_US);
+    ses_live_t v = session_pending_periodic(now, lopen) ? SES_LIVE_NONE
+        : session_liveness(lopen, logger_open_req_at_open(), s_open_req_sent, s_open_send_ok,
+                           s_ses_confirmed, now, s_last_open_try_us, TIMEMAP_INTERVAL_US);
     if (v == SES_LIVE_DROP) {
-        s_ses_open = false;
-        s_ses_confirmed = false;
-        s_ses_venue_id = 0u;
-        s_ses_layout_id = 0u;
+        session_mirror_drop();
     } else if (v == SES_LIVE_RETRY) {
         int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
         session_open(s_ses_venue_id, s_ses_layout_id, gps_us);
@@ -596,11 +632,32 @@ static void session_periodic(int64_t now)
         post_time_map();
 }
 
-static void session_close(uint8_t reason, int64_t gps_us)
+/* Returns whether the CLOSE was enqueued. Only then does the mirror claim "closed"; a failed send
+ * (already logged + errlog'd inside session_send) leaves it open and unchanged (B-1). */
+static bool session_close(uint8_t reason, int64_t gps_us)
 {
-    (void)session_send(LOGGER_CLOSE_SESSION, reason, 0, 0, gps_us);   /* a drop is already logged + errlog'd inside */
-    s_ses_open = false;
-    s_ses_confirmed = false;
+    bool sent = session_send(LOGGER_CLOSE_SESSION, reason, 0, 0, gps_us);
+    if (sent) {
+        s_ses_open = false;
+        s_ses_confirmed = false;
+    }
+    return sent;
+}
+
+/* The one close path (B-1): `act` is SES_ACT_CLOSE (venue lost) or SES_ACT_REOPEN (rotation to
+ * venue_id/layout_id). The OPEN follows only a CLOSE that was enqueued; otherwise the intent is
+ * recorded as pending and the stamp paces the session_periodic re-attempt. Any call replaces an
+ * older pending record (a VENUE_LOST cancels a pending rotation into a pending close). */
+static void session_close_act(ses_action_t act, uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
+{
+    LT_ASSERT_VOID(act == SES_ACT_CLOSE || act == SES_ACT_REOPEN, PIPE_ASSERT_CODE);
+    bool sent = session_close(SES_END_NORMAL, gps_us);
+    bool post_open = false;
+    s_pend = session_close_outcome(act, sent, &post_open);
+    s_pend_venue  = venue_id;
+    s_pend_layout = layout_id;
+    if (!sent) s_last_open_try_us = esp_timer_get_time();
+    if (post_open) session_open(venue_id, layout_id, gps_us);
 }
 
 /* A venue the engine just acquired (or finished creating) or a resume restored. Same venue as the
@@ -613,8 +670,10 @@ static void session_on_venue(uint16_t venue_id, uint16_t layout_id, int64_t gps_
     bool changed = s_ses_open && venue_id != s_ses_venue_id;
     ses_action_t act = session_policy(s_ses_open, changed ? SES_IN_VENUE_CHANGED : SES_IN_VENUE_FOUND);
     LT_ASSERT_VOID(act == SES_ACT_NONE || act == SES_ACT_OPEN || act == SES_ACT_REOPEN, PIPE_ASSERT_CODE);
-    if (act == SES_ACT_REOPEN) session_close(SES_END_NORMAL, gps_us);
-    if (act == SES_ACT_OPEN || act == SES_ACT_REOPEN) session_open(venue_id, layout_id, gps_us);
+    if (act == SES_ACT_REOPEN) session_close_act(act, venue_id, layout_id, gps_us);   /* B-1: OPEN only after the CLOSE */
+    if (act == SES_ACT_OPEN) session_open(venue_id, layout_id, gps_us);
+    if (act == SES_ACT_NONE && session_pend_cancels_on_found(s_pend, venue_id, s_pend_venue))
+        s_pend = SES_PEND_NONE;      /* the venue is back: the pending close/rotation is superseded */
 }
 
 /* §12.1 "A new session also starts on mode change". Queue order does the work: log_req_q is FIFO
@@ -623,10 +682,11 @@ static void session_on_venue(uint16_t venue_id, uint16_t layout_id, int64_t gps_
 static void session_rotate(void)
 {
     if (session_policy(s_ses_open, SES_IN_MODE_CHANGE) != SES_ACT_REOPEN) return;
+    if (s_pend == SES_PEND_CLOSE) return;     /* B-1: a pending close (venue lost) outranks a mode rotation */
     int64_t gps_us = (s_last_fix.valid != 0u) ? s_last_fix.gps_us : 0;
-    uint16_t venue = s_ses_venue_id, layout = s_ses_layout_id;
-    session_close(SES_END_NORMAL, gps_us);
-    session_open(venue, layout, gps_us);
+    bool rot = (s_pend == SES_PEND_ROTATE);   /* a pending rotation's target is the venue to keep */
+    session_close_act(SES_ACT_REOPEN, rot ? s_pend_venue : s_ses_venue_id,
+                      rot ? s_pend_layout : s_ses_layout_id, gps_us);
 }
 
 static void engine_cb(const event_t *ev)
@@ -657,6 +717,10 @@ static void engine_cb(const event_t *ev)
         /* The layout is only known one event later than the venue, so this is where the .sum's
          * VENUE record and the HDR's layout_id get their real values -- previously only the
          * CFG_GPS_SIM boot path ever called logger_set_venue(), so a real-GPS .sum had none. */
+        if (s_pend == SES_PEND_ROTATE) {     /* B-1: never relabel the old session with the new venue's layout */
+            s_pend_layout = ev->arg16;
+            break;
+        }
         s_ses_layout_id = ev->arg16;
         if (s_ses_venue_id != 0u) {          /* no acquisition yet: nothing to name */
             const trk_venue_t *v = trk_get(s_ses_venue_id);
@@ -667,7 +731,7 @@ static void engine_cb(const event_t *ev)
     case EV_VENUE_LOST:
         /* §12.1 "ends ... when the venue changes" (F1a emits this, design §3). */
         if (session_policy(s_ses_open, SES_IN_VENUE_LOST) == SES_ACT_CLOSE)
-            session_close(SES_END_NORMAL, ev->gps_us);
+            session_close_act(SES_ACT_CLOSE, s_ses_venue_id, s_ses_layout_id, ev->gps_us);
         break;
     default: break;               /* EV_LAP_COMPLETE handled above, before emit_event() */
     }
@@ -716,6 +780,7 @@ static void resume_open_session(uint16_t venue_id, uint16_t layout_id, int64_t g
     LT_ASSERT_VOID(venue_id != 0u, PIPE_ASSERT_CODE);
     LT_ASSERT_VOID(gps_us > 0, PIPE_ASSERT_CODE);   /* a valid fix's stamp (§6.5) */
     session_on_venue(venue_id, layout_id, gps_us);   /* same rule as engine_cb: a different venue rotates */
+    if (s_pend == SES_PEND_ROTATE) return;           /* B-1: the old session keeps its labels until the rotation lands */
     s_ses_venue_id  = venue_id;
     s_ses_layout_id = layout_id;
     const trk_venue_t *rv = trk_get(venue_id);

@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include "app/session_policy.h"
 #include "core/core.h"
 
@@ -30,4 +31,30 @@ ses_live_t session_liveness(bool logger_open, uint32_t open_req_at_open, uint32_
     }
     if (confirmed) return SES_LIVE_DROP;
     return ((now_us - last_try_us) >= retry_interval_us) ? SES_LIVE_RETRY : SES_LIVE_NONE;
+}
+
+ses_pend_t session_close_outcome(ses_action_t act, bool close_sent, bool *post_open)
+{
+    bool rotate = (act == SES_ACT_REOPEN);
+    CORE_ASSERT_RET(post_open != NULL, SES_POLICY_ASSERT_CODE, SES_PEND_NONE);   /* out-param is mandatory */
+    CORE_ASSERT_RET(rotate || act == SES_ACT_CLOSE, SES_POLICY_ASSERT_CODE, SES_PEND_NONE);   /* only a close-bearing action */
+    *post_open = close_sent && rotate;      /* the OPEN follows only a CLOSE that really entered the queue */
+    if (close_sent) return SES_PEND_NONE;
+    return rotate ? SES_PEND_ROTATE : SES_PEND_CLOSE;
+}
+
+ses_action_t session_pend_act(ses_pend_t pend)
+{
+    if (pend == SES_PEND_ROTATE) return SES_ACT_REOPEN;
+    return (pend == SES_PEND_CLOSE) ? SES_ACT_CLOSE : SES_ACT_NONE;
+}
+
+bool session_pend_due(ses_pend_t pend, int64_t now_us, int64_t last_try_us, int64_t retry_interval_us)
+{
+    return pend != SES_PEND_NONE && (now_us - last_try_us) >= retry_interval_us;
+}
+
+bool session_pend_cancels_on_found(ses_pend_t pend, uint16_t venue_id, uint16_t pend_venue_id)
+{
+    return pend == SES_PEND_CLOSE || (pend == SES_PEND_ROTATE && pend_venue_id != venue_id);
 }

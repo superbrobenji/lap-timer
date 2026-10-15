@@ -51,4 +51,29 @@ ses_live_t session_liveness(bool logger_open, uint32_t open_req_at_open, uint32_
                             bool open_send_ok, bool confirmed, int64_t now_us, int64_t last_try_us,
                             int64_t retry_interval_us);
 
+/* B-1 (F2b closure 4, ruling F-15): the pipeline's CLOSE send can fail (queue full). A CLOSE that was
+ * NOT enqueued leaves the lifecycle exactly as it was (mirror open, confirmation, venue/layout
+ * unchanged) and records a PENDING action here; session_periodic re-attempts it on the 60 s cadence
+ * through one path. Kept as pure helpers (not session_liveness inputs): the liveness decision
+ * stays about the logger's reported state, and the pending state is a separate lifecycle intent
+ * whose transitions are host-tested below. */
+typedef enum {
+    SES_PEND_NONE   = 0,
+    SES_PEND_CLOSE  = 1,   /* a plain close (EV_VENUE_LOST) whose CLOSE was not enqueued */
+    SES_PEND_ROTATE = 2,   /* a rotation whose CLOSE was not enqueued; the OPEN has NOT been posted */
+} ses_pend_t;
+
+/* After a CLOSE for `act` (SES_ACT_CLOSE or SES_ACT_REOPEN): the pending action to record, and
+ * whether the rotation's OPEN may be posted now (only once the CLOSE was enqueued). */
+ses_pend_t session_close_outcome(ses_action_t act, bool close_sent, bool *post_open);
+/* The action a pending record re-attempts. */
+ses_action_t session_pend_act(ses_pend_t pend);
+/* True when a pending action is due for its re-attempt (same cadence as the OPEN retry). */
+bool session_pend_due(ses_pend_t pend, int64_t now_us, int64_t last_try_us, int64_t retry_interval_us);
+/* A venue acquisition that needs no action of its own (the open session's venue was found again)
+ * while `pend` is pending: true when it supersedes (cancels) the pending action -- a pending close
+ * (the venue is back), or a rotation aimed at `pend_venue_id` other than the venue found. A mode
+ * rotation keeps its venue, so it is not cancelled. */
+bool session_pend_cancels_on_found(ses_pend_t pend, uint16_t venue_id, uint16_t pend_venue_id);
+
 #endif /* APP_SESSION_POLICY_H */

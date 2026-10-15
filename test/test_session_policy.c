@@ -131,6 +131,64 @@ static void test_live_counted_but_dropped_open_retries(void)
     TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
 }
 
+/* B-1 (closure 4, ruling F-15): a CLOSE that was not enqueued leaves the lifecycle as it was and
+ * records a PENDING action; the OPEN is posted only after the CLOSE was enqueued. */
+static void test_pend_failed_close_of_rotation_posts_no_open(void)
+{
+    lt_test_assert_reset();
+    bool post_open = true;
+    TEST_ASSERT_EQUAL_INT(SES_PEND_ROTATE, session_close_outcome(SES_ACT_REOPEN, false, &post_open));
+    TEST_ASSERT_FALSE(post_open);   /* adjacent note 1: CLOSE failed, so the OPEN is NOT sent */
+    post_open = true;
+    TEST_ASSERT_EQUAL_INT(SES_PEND_CLOSE, session_close_outcome(SES_ACT_CLOSE, false, &post_open));
+    TEST_ASSERT_FALSE(post_open);
+    TEST_ASSERT_EQUAL_INT(SES_PEND_NONE, session_close_outcome(SES_ACT_REOPEN, true, &post_open));
+    TEST_ASSERT_TRUE(post_open);
+    TEST_ASSERT_EQUAL_INT(SES_PEND_NONE, session_close_outcome(SES_ACT_CLOSE, true, &post_open));
+    TEST_ASSERT_FALSE(post_open);
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+static void test_pend_failed_rotation_old_session_then_external_close_drops(void)
+{
+    /* The mirror still says open+confirmed with the OLD session at at_open == sent: NONE while the
+     * logger is open, and a later external close (OTA) is DROP, never RETRY, however long ago the
+     * last try was. */
+    lt_test_assert_reset();
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 3u, 3u, true, true, 10 * IV, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_DROP, session_liveness(false, 3u, 3u, true, true, 10 * IV, 0, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+static void test_pend_retry_cadence_then_open_after_close_enqueued(void)
+{
+    lt_test_assert_reset();
+    TEST_ASSERT_FALSE(session_pend_due(SES_PEND_ROTATE, IV - 1, 0, IV));
+    TEST_ASSERT_TRUE(session_pend_due(SES_PEND_ROTATE, IV, 0, IV));
+    TEST_ASSERT_TRUE(session_pend_due(SES_PEND_CLOSE, IV, 0, IV));
+    TEST_ASSERT_FALSE(session_pend_due(SES_PEND_NONE, 100 * IV, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_ACT_REOPEN, session_pend_act(SES_PEND_ROTATE));
+    TEST_ASSERT_EQUAL_INT(SES_ACT_CLOSE, session_pend_act(SES_PEND_CLOSE));
+    TEST_ASSERT_EQUAL_INT(SES_ACT_NONE, session_pend_act(SES_PEND_NONE));
+    bool post_open = false;
+    /* retry 1: queue still full -> stays pending; retry 2: enqueued -> OPEN follows, pending cleared */
+    TEST_ASSERT_EQUAL_INT(SES_PEND_ROTATE, session_close_outcome(session_pend_act(SES_PEND_ROTATE), false, &post_open));
+    TEST_ASSERT_FALSE(post_open);
+    TEST_ASSERT_EQUAL_INT(SES_PEND_NONE, session_close_outcome(session_pend_act(SES_PEND_ROTATE), true, &post_open));
+    TEST_ASSERT_TRUE(post_open);
+    /* the OPEN then confirms normally */
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 4u, 4u, true, false, 2 * IV, IV, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+static void test_pend_newer_event_supersedes(void)
+{
+    lt_test_assert_reset();
+    /* a VENUE_LOST on a pending rotation becomes a pending close; a new rotation replaces the target */
+    TEST_ASSERT_TRUE(session_pend_cancels_on_found(SES_PEND_CLOSE, 1u, 1u));
+    TEST_ASSERT_TRUE(session_pend_cancels_on_found(SES_PEND_ROTATE, 2u, 1u));   /* back at A, rotation was to B */
+    TEST_ASSERT_FALSE(session_pend_cancels_on_found(SES_PEND_ROTATE, 1u, 1u));  /* mode rotation keeps its venue */
+    TEST_ASSERT_FALSE(session_pend_cancels_on_found(SES_PEND_NONE, 1u, 1u));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -147,5 +205,9 @@ int main(void)
     RUN_TEST(test_live_confirmed_then_closed_drops_without_retry);
     RUN_TEST(test_live_failed_open_send_never_confirms_and_retries);
     RUN_TEST(test_live_counted_but_dropped_open_retries);
+    RUN_TEST(test_pend_failed_close_of_rotation_posts_no_open);
+    RUN_TEST(test_pend_failed_rotation_old_session_then_external_close_drops);
+    RUN_TEST(test_pend_retry_cadence_then_open_after_close_enqueued);
+    RUN_TEST(test_pend_newer_event_supersedes);
     return UNITY_END();
 }
