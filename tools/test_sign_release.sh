@@ -6,10 +6,21 @@
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The dirty-tree case needs a tracked file to modify. Never discard a contributor's work: refuse
+# to run on a tree that already has tracked modifications (audit F4 final review I2), and restore
+# the probe file from a byte-exact backup rather than `git checkout`.
+if ! git diff --quiet HEAD -- . 2>/dev/null; then
+    echo "test_sign_release: refusing to run -- the working tree has modified tracked files; commit or stash them first (this harness edits a tracked file as a probe)" >&2
+    exit 2
+fi
+
 PASS=0
 FAIL=0
 DIRT="docs/power-of-10-checklist.md"
-cleanup() { git checkout -- "$DIRT" 2>/dev/null; rm -rf build/t_sign_fixture; }
+BACKUP=$(mktemp)
+cp -p "$DIRT" "$BACKUP"
+restore() { cp -p "$BACKUP" "$DIRT"; }
+cleanup() { restore; rm -f "$BACKUP"; rm -rf build/t_sign_fixture build/t_sign_fixture_ws29v2; }
 trap cleanup EXIT
 
 check() { # <name> <expected rc> <cmd...>
@@ -38,7 +49,7 @@ check "prod env dry-run"           0 tools/sign_release.sh moto_neo6m --dry-run
 printf '\n<!-- sign_release dirty probe -->\n' >> "$DIRT"
 check "dirty tree refused"         1 tools/sign_release.sh moto_neo6m --dry-run
 grep_check "dirty refusal explains" "clean tree" tools/sign_release.sh moto_neo6m --dry-run
-git checkout -- "$DIRT"
+restore
 # 5. the authoritative post-build check reads build_config.h, not the env name
 mkdir -p build/t_sign_fixture
 cat > build/t_sign_fixture/build_config.h <<'EOF'
@@ -49,6 +60,14 @@ cat > build/t_sign_fixture/build_config.h <<'EOF'
 EOF
 check "build_config sim refused"   1 tools/sign_release.sh t_sign_fixture --dry-run
 check "build_config sim allowed"   0 tools/sign_release.sh t_sign_fixture --allow-sim --dry-run
+# 5b. $PANEL selects build/<env>_<panel>, the directory build.sh builds into: the post-build check
+# must read THAT build_config.h (a sim build there is refused even if build/<env> is clean)
+mkdir -p build/t_sign_fixture_ws29v2
+cp build/t_sign_fixture/build_config.h build/t_sign_fixture_ws29v2/build_config.h
+printf '#define CFG_HWID "clean"\n#define CFG_FW_VERSION "v0"\n' > build/t_sign_fixture/build_config.h
+check "default panel reads build/<env>"      0 tools/sign_release.sh t_sign_fixture --dry-run
+check "PANEL=ws29v2 reads build/<env>_ws29v2" 1 env PANEL=ws29v2 tools/sign_release.sh t_sign_fixture --dry-run
+grep_check "PANEL dry-run names the panel image" "build/t_sign_fixture_ws29v2/laptimer.bin" env PANEL=ws29v2 tools/sign_release.sh t_sign_fixture --allow-sim --dry-run
 # 6. a bad argument is a usage error
 check "unknown flag"               2 tools/sign_release.sh moto_sim --nope
 

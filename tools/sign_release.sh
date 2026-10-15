@@ -59,7 +59,12 @@ if [ "$ALLOW_SIM" = 0 ]; then
     [ "${IMU:-}" != "sim" ] || sim_refuse "IMU=sim"
 fi
 
+# Same build-dir rule as build.sh: $PANEL (build.sh reads it from the environment) puts a
+# non-default panel in build/<env>_<panel>, and that is the image that gets size-gated, so it is
+# the image that must be checked and signed.
+PANEL_NAME="${PANEL:-ws213v4}"
 BUILD_DIR="build/${ENV_NAME}"
+[ "$PANEL_NAME" = "ws213v4" ] || BUILD_DIR="build/${ENV_NAME}_${PANEL_NAME}"
 BIN="${BUILD_DIR}/laptimer.bin"
 CFGH="${BUILD_DIR}/build_config.h"
 
