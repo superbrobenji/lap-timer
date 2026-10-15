@@ -498,7 +498,7 @@ Boot-to-pipeline-running target: ≤ 1.5 s from reset (excluding e-paper boot sc
 | Lap engine `lap_t` (venue + candidates + sector/union gates + best/prev) | ~5.3 KB |
 | Drag engine `drag_t` (gate table, 1.28 s fused-sample history ring, current + composite-best results) | 3,312 B, caller-provided (drag mode) |
 | Predictive delta tables (O5), double-buffered `(dist u16, t_ms u32)` × 600 | 7.2 KB, caller-provided (OLED/O5 only; none on the e-paper build) |
-| Headroom | > 90 KB |
+| Headroom | > 90 KB (design estimate of free heap at run time against the 320 KB total; the *measured* static-DRAM headroom after link is 66.5 KB of the 180,736 B `dram0_0_seg`, paragraph below) |
 
 Sizes with a byte figure are measured with the ESP32 toolchain (`xtensa-esp32-elf-gcc`, 32-bit
 `size_t`; `xtensa-esp32-elf-nm -S` over the object or the linked ELF, `moto_sim` at the 2026-10-15
@@ -1602,7 +1602,7 @@ Abort: if `v_est` falls below `DRAG_ARM_SPEED_KMH` (0.5 km/h) within `DRAG_FALSE
 
 ### 11.3 Result
 
-`drag_result_t` (§5.2). `hit` per gate. `trap_cms` per §6.6. Best per gate across the session = lowest `time_ms` among hit gates (braking = shortest distance).
+`drag_result_t` (`core/types.h`). `hit` per gate. `trap_cms` per §6.6. Best per gate across the session = lowest `time_ms` among hit gates (braking = shortest distance).
 
 ### 11.4 Screen benches rule
 
@@ -2084,36 +2084,63 @@ Boot screen lists each as `OK` / `FAIL` for 2 s (skipped when `SYS_SAFE_MODE`).
 
 ### 17.7 Error codes
 
-| Code | Name | Code | Name |
-|------|------|------|------|
-| 0x0101 | `E_GPS_SILENT` | 0x0505 | `E_SYS_SAFE_MODE` |
-| 0x0102 | `E_GPS_RECONFIG` | 0x0506 | `E_SYS_TASK_STALL` |
-| 0x0103 | `E_GPS_UART_REINIT` | 0x0507 | `E_SYS_RTC_INVALID` |
-| 0x0104 | `E_GPS_POWER_CYCLE` | 0x0508 | `E_SYS_CFG_RESET` |
-| 0x0105 | `E_GPS_DEAD` | 0x0509 | `E_SYS_STACK_LOW` |
-| 0x0106 | `E_GPS_BAD_FIX` | 0x050A | `E_SYS_RECOVERY_MODE` (arg = boot count) |
-| 0x0107 | `E_GPS_RESET_DETECTED` | 0x050B | `E_NVS_BLOB_RESET` (arg = blob tag) |
-| 0x0108 | `E_GPS_CFG_NAK` | 0x050C | `E_LOG_CLOSE_TIMEOUT` (arg = `END.reason`) |
-| 0x0201 | `E_IMU_NACK` | 0x050D | `E_SYS_WDT_SUBSCRIBE` (arg = `hb_id`) |
-| 0x0202 | `E_IMU_BUS_RECOVERY` | 0x050E | `E_SYS_HEAP_CORRUPT` (arg = `uptime_s`) |
-| 0x0203 | `E_IMU_DEAD` | 0x050F | `E_NVS_INIT` |
-| 0x0204 | `E_IMU_FROZEN` | 0x0510 | `E_BOARD_INIT` |
-| 0x0205 | `E_IMU_FIFO_OVF` | 0x0601 | `E_PWR_LOW_BATT` |
-| 0x0206 | `E_IMU_SELFTEST_FAIL` | 0x0602 | `E_PWR_SHUTDOWN` |
-| 0x0207 | `E_IMU_WHOAMI` | 0x0701 | `E_CONN_BLE_INIT` |
-| 0x0301 | `E_DISP_BUSY_TIMEOUT` | 0x0702 | `E_CONN_XFER_ABORT` |
-| 0x0302 | `E_DISP_DEAD` | 0x0703 | `E_CONN_PROTO` |
-| 0x0303 | `E_DISP_TEMP` | 0x0801 | `E_OTA_PRECOND` |
-| 0x0401 | `E_STO_WRITE` | 0x0802 | `E_OTA_HWID` |
-| 0x0402 | `E_STO_MOUNT` | 0x0803 | `E_OTA_WRITE` |
-| 0x0403 | `E_STO_FORMAT` | 0x0804 | `E_OTA_SIG` |
-| 0x0404 | `E_STO_FULL` | 0x0805 | `E_OTA_VALIDATED` (info) |
-| 0x0405 | `E_STO_EVICT` | 0x0806 | `E_OTA_ROLLBACK` |
-| 0x0406 | `E_STO_SD_DEGRADED` | 0x0807 | `E_OTA_BATT_UNWIRED` (arg = 0) |
-| 0x0501 | `E_SYS_WDT_RESET` | 0x0901 | `E_LAP_PLAUSIBILITY` |
-| 0x0502 | `E_SYS_PANIC` | 0x0902 | `E_FUSION_DISAGREE` |
-| 0x0503 | `E_SYS_BROWNOUT` | 0x0903 | `E_FUSION_CALIB_LOST` |
-| 0x0504 | `E_SYS_HEAP_LOW` |  |  |
+| Code | Name | Arg / note |
+|------|------|------------|
+| 0x0101 | `E_GPS_SILENT` |  |
+| 0x0102 | `E_GPS_RECONFIG` |  |
+| 0x0103 | `E_GPS_UART_REINIT` |  |
+| 0x0104 | `E_GPS_POWER_CYCLE` |  |
+| 0x0105 | `E_GPS_DEAD` |  |
+| 0x0106 | `E_GPS_BAD_FIX` |  |
+| 0x0107 | `E_GPS_RESET_DETECTED` |  |
+| 0x0108 | `E_GPS_CFG_NAK` |  |
+| 0x0201 | `E_IMU_NACK` |  |
+| 0x0202 | `E_IMU_BUS_RECOVERY` |  |
+| 0x0203 | `E_IMU_DEAD` |  |
+| 0x0204 | `E_IMU_FROZEN` |  |
+| 0x0205 | `E_IMU_FIFO_OVF` |  |
+| 0x0206 | `E_IMU_SELFTEST_FAIL` |  |
+| 0x0207 | `E_IMU_WHOAMI` |  |
+| 0x0301 | `E_DISP_BUSY_TIMEOUT` |  |
+| 0x0302 | `E_DISP_DEAD` |  |
+| 0x0303 | `E_DISP_TEMP` |  |
+| 0x0401 | `E_STO_WRITE` |  |
+| 0x0402 | `E_STO_MOUNT` |  |
+| 0x0403 | `E_STO_FORMAT` |  |
+| 0x0404 | `E_STO_FULL` |  |
+| 0x0405 | `E_STO_EVICT` |  |
+| 0x0406 | `E_STO_SD_DEGRADED` |  |
+| 0x0501 | `E_SYS_WDT_RESET` |  |
+| 0x0502 | `E_SYS_PANIC` |  |
+| 0x0503 | `E_SYS_BROWNOUT` |  |
+| 0x0504 | `E_SYS_HEAP_LOW` |  |
+| 0x0505 | `E_SYS_SAFE_MODE` |  |
+| 0x0506 | `E_SYS_TASK_STALL` |  |
+| 0x0507 | `E_SYS_RTC_INVALID` |  |
+| 0x0508 | `E_SYS_CFG_RESET` |  |
+| 0x0509 | `E_SYS_STACK_LOW` |  |
+| 0x050A | `E_SYS_RECOVERY_MODE` | arg = boot count |
+| 0x050B | `E_NVS_BLOB_RESET` | arg = blob tag |
+| 0x050C | `E_LOG_CLOSE_TIMEOUT` | arg = `END.reason` |
+| 0x050D | `E_SYS_WDT_SUBSCRIBE` | arg = `hb_id` |
+| 0x050E | `E_SYS_HEAP_CORRUPT` | arg = `uptime_s` |
+| 0x050F | `E_NVS_INIT` |  |
+| 0x0510 | `E_BOARD_INIT` |  |
+| 0x0601 | `E_PWR_LOW_BATT` |  |
+| 0x0602 | `E_PWR_SHUTDOWN` |  |
+| 0x0701 | `E_CONN_BLE_INIT` |  |
+| 0x0702 | `E_CONN_XFER_ABORT` |  |
+| 0x0703 | `E_CONN_PROTO` |  |
+| 0x0801 | `E_OTA_PRECOND` |  |
+| 0x0802 | `E_OTA_HWID` |  |
+| 0x0803 | `E_OTA_WRITE` |  |
+| 0x0804 | `E_OTA_SIG` |  |
+| 0x0805 | `E_OTA_VALIDATED` | info |
+| 0x0806 | `E_OTA_ROLLBACK` |  |
+| 0x0807 | `E_OTA_BATT_UNWIRED` | arg = 0 |
+| 0x0901 | `E_LAP_PLAUSIBILITY` |  |
+| 0x0902 | `E_FUSION_DISAGREE` |  |
+| 0x0903 | `E_FUSION_CALIB_LOST` |  |
 
 The `E_OTA_*` values above are the firmware's (`components/app/include/app/lt_err.h`); five of the six differed from this table until ruling R3 (2026-10-13) moved the spec to the code — these codes are already in the field and in the project's operating notes, and `lt_err.h` cites the ruling. `lt_err.h` defines only a subset of this table: the `E_GPS_*`, `E_IMU_*`, `E_STO_SD_DEGRADED`, `E_PWR_*`, `E_LAP_PLAUSIBILITY` and `E_FUSION_*` rows wait for their producers (Plan 8 and Plan 6); `E_DISP_TEMP` and `E_CONN_BLE_INIT` are reserved with no producer yet, and `E_CONN_XFER_ABORT` is unimplemented (§18.1). `E_OTA_BATT_UNWIRED` (`0x0807`) is logged once per boot when the build has no charger sense wired (`CHRG=OFF`, §4.6), because §19.5's battery precondition was then skipped.
 
@@ -2620,8 +2647,9 @@ Three track sessions with RaceChrono on a phone as reference (phone GPS 1 Hz is 
 | `tools/idf-env.sh` | bash | sources the pinned ESP-IDF (asserts `.idf-version`) | `source tools/idf-env.sh` |
 
 Python tools pin dependencies in `tools/requirements.txt` (`pyserial`, `Pillow`, `esptool`); the
-linters, `gen_tracks.py` and `spec_api_check.py` are standard-library only, and all of them except
-`gen_fonts.py` are unit-tested in the `tools-tests` CI job. The §4.2 layout block is generated —
+linters, `gen_tracks.py` and `spec_api_check.py` are standard-library only, and `tools-tests` runs the unit tests for `devkit.py`, both linters, `spec_api_check.py`,
+`gen_tracks.py` and the `sign_release.sh` guard harness (`ota_push.py`, `idf-env.sh`, `gen_sim_capture.sh`
+and `gen_fonts.py` have none). The §4.2 layout block is generated —
 regenerate it with this command and re-attach the inline comments:
 
 ```bash
