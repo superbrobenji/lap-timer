@@ -90,9 +90,95 @@ class Drift(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn(
             "int trk_from_json(trk_venue_t *out, const char *json, size_t n, char *err, size_t err_cap);",
-            out,
+            out.split("\n"),      # a whole line of its own, nothing glued to its front
         )
-        self.assertNotIn("TRK_USER_VENUE_HDR_LEN", out)
+        self.assertIn("#define TRK_USER_REC_MAX \\", out.split("\n"))   # macros are emitted too
+
+
+SPEC_CLEAN = """## 5.2
+#### `core/thing.h`
+```c
+#define THING_MAX 8
+typedef void (*cb_t)(int x);
+int  thing_do(thing_t *t, int n);
+void thing_reset(thing_t *t);
+```
+"""
+HDR_THING = """#ifndef THING_H
+#define THING_H
+#define THING_MAX 8
+typedef void (*cb_t)(int x);
+int  thing_do(thing_t *t, int n);
+void thing_reset(thing_t *t);
+#endif
+"""
+
+
+class FailingPath(unittest.TestCase):
+    """main() on synthetic spec + header pairs: every finding class is reported and rc is 1
+    (audit F4 final review I4 -- a main() that always returned 0 used to pass every test)."""
+
+    def run_check(self, spec, hdr):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "thing.h"), "w", encoding="utf-8") as f:
+                f.write(hdr)
+            sp = os.path.join(d, "spec.md")
+            with open(sp, "w", encoding="utf-8") as f:
+                f.write(spec)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = sac.main(["--spec", sp, "--hdr-dir", d, "--headers", "thing"])
+            return rc, buf.getvalue()
+
+    def test_clean_pair_is_rc_0(self):
+        rc, out = self.run_check(SPEC_CLEAN, HDR_THING)
+        self.assertEqual(0, rc, out)
+        self.assertIn("0 drift(s)", out)
+
+    def test_missing_prototype_is_reported(self):
+        rc, out = self.run_check(SPEC_CLEAN.replace("void thing_reset(thing_t *t);\n", ""), HDR_THING)
+        self.assertEqual(1, rc)
+        self.assertIn("core/thing.h: MISSING   void thing_reset(thing_t *t);", out)
+
+    def test_stale_prototype_is_reported(self):
+        rc, out = self.run_check(SPEC_CLEAN, HDR_THING.replace("void thing_reset(thing_t *t);\n", ""))
+        self.assertEqual(1, rc)
+        self.assertIn("core/thing.h: STALE     void thing_reset(thing_t *t);", out)
+
+    def test_changed_signature_is_reported(self):
+        rc, out = self.run_check(SPEC_CLEAN, HDR_THING.replace("int n);", "long n);"))
+        self.assertEqual(1, rc)
+        self.assertIn("core/thing.h: SIGNATURE int thing_do(thing_t *t, long n);", out)
+        self.assertIn("spec has: int thing_do(thing_t *t, int n);", out)
+
+    def test_stale_define_and_typedef_are_reported(self):
+        rc, out = self.run_check(SPEC_CLEAN, HDR_THING.replace("#define THING_MAX 8\n", "")
+                                 .replace("typedef void (*cb_t)(int x);\n", ""))
+        self.assertEqual(1, rc)
+        self.assertIn("core/thing.h: STALE     #define THING_MAX", out)
+        self.assertIn("core/thing.h: STALE     typedef cb_t", out)
+
+    def test_absent_spec_block_is_reported(self):
+        rc, out = self.run_check("## 5.2\nno blocks here\n", HDR_THING)
+        self.assertEqual(1, rc)
+        self.assertIn("no `core/thing.h` block found", out)
+
+    def test_emit_prints_defines_then_prototypes_in_declaration_order(self):
+        import tempfile
+        hdr = HDR_THING.replace("void thing_reset", "/* thing_do( mentioned in a comment first */\nvoid thing_reset")
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "thing.h"), "w", encoding="utf-8") as f:
+                f.write(hdr.replace("int  thing_do(thing_t *t, int n);\n", "")
+                        + "int thing_do(thing_t *t, int n);\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sac.main(["--emit", "core/thing.h", "--hdr-dir", d])
+        lines = buf.getvalue().split("\n")
+        self.assertEqual("#define THING_MAX 8", lines[1])
+        self.assertLess(lines.index("void thing_reset(thing_t *t);"),
+                        lines.index("int thing_do(thing_t *t, int n);"))
+        self.assertNotIn("#define THING_H", lines)
 
 
 if __name__ == "__main__":

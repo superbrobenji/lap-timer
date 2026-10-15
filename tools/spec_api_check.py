@@ -12,7 +12,10 @@ function is missing). This script extracts each fenced `c` block that follows a
 
 Only function prototypes, function-pointer typedefs and macro names are compared; struct/enum
 bodies and object typedefs are ignored (the blocks are API lists, not whole headers). `--emit`
-prints the list a block must contain, in header order, for pasting into the spec.
+prints the list a block must contain -- function-pointer typedefs first, then the header's
+`#define` lines, then its prototypes in declaration order -- for pasting into the spec.
+`--hdr-dir` points the whole check at another header directory (the unit tests use it to prove
+the failing path with synthetic spec + header pairs).
 
 Pure Python 3 standard library. Run from the repo root.
 """
@@ -102,21 +105,38 @@ def spec_blocks(spec_text):
     return blocks
 
 
-def emit(stem):
-    with open(os.path.join(HDR_DIR, stem + ".h"), encoding="utf-8") as f:
+_GUARD_RE = re.compile(r"^[A-Z0-9_]+_H$")
+
+
+def _define_lines(text, macros):
+    """The header's own `#define` lines (backslash continuations included) for `macros`,
+    include guards excluded, in source order."""
+    out = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        m = _DEFINE_RE.match(lines[i])
+        if m and m.group(1) in macros and not _GUARD_RE.match(m.group(1)):
+            out.append(lines[i].rstrip())
+            while lines[i].rstrip().endswith("\\") and i + 1 < len(lines):
+                i += 1
+                out.append(lines[i].rstrip())
+        i += 1
+    return out
+
+
+def emit(stem, hdr_dir=HDR_DIR):
+    with open(os.path.join(hdr_dir, stem + ".h"), encoding="utf-8") as f:
         text = f.read()
-    protos, typedefs, _macros = api_of(text)
+    protos, typedefs, macros = api_of(text)
     for name in sorted(typedefs):
         for line in text.split("\n"):
             if re.search(r"\(\s*\*\s*%s\s*\)" % re.escape(name), line):
                 print(" ".join(line.split()))
                 break
-    order = {}
-    for i, line in enumerate(text.split("\n")):
-        for name in protos:
-            if name not in order and re.search(r"(?<![A-Za-z0-9_])%s\s*\(" % re.escape(name), line):
-                order[name] = i
-    for name in sorted(protos, key=lambda n: order.get(n, 1 << 30)):
+    for line in _define_lines(text, macros):
+        print(line)
+    for name in protos:          # api_of() fills `protos` in declaration order
         print(protos[name])
     return 0
 
@@ -124,20 +144,24 @@ def emit(stem):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="spec §5.2 API drift check")
     ap.add_argument("--spec", default=SPEC)
+    ap.add_argument("--hdr-dir", default=HDR_DIR, help="header directory (default %(default)s)")
+    ap.add_argument("--headers", default=",".join(HEADERS),
+                    help="comma-separated header stems to check (default: all of them)")
     ap.add_argument("--emit", metavar="core/<x>.h",
                     help="print the declaration list this header's §5.2 block must contain")
     args = ap.parse_args(argv)
     if args.emit:
-        return emit(os.path.basename(args.emit).replace(".h", ""))
+        return emit(os.path.basename(args.emit).replace(".h", ""), args.hdr_dir)
     with open(args.spec, encoding="utf-8") as f:
         spec_text = f.read()
     blocks = spec_blocks(spec_text)
     findings = []
-    for stem in HEADERS:
+    headers = [h for h in args.headers.split(",") if h]
+    for stem in headers:
         if stem not in blocks:
             findings.append("spec §5.2: no `core/%s.h` block found in %s" % (stem, args.spec))
             continue
-        with open(os.path.join(HDR_DIR, stem + ".h"), encoding="utf-8") as f:
+        with open(os.path.join(args.hdr_dir, stem + ".h"), encoding="utf-8") as f:
             hp, ht, hm = api_of(f.read())
         sp, st, sm = api_of(blocks[stem])
         for name in sorted(hp):
@@ -154,7 +178,7 @@ def main(argv=None):
             findings.append("core/%s.h: STALE     #define %s" % (stem, name))
     for f in findings:
         print(f)
-    print("spec_api_check: %d drift(s) across %d §5.2 blocks" % (len(findings), len(HEADERS)))
+    print("spec_api_check: %d drift(s) across %d §5.2 blocks" % (len(findings), len(headers)))
     return 1 if findings else 0
 
 
