@@ -29,6 +29,9 @@ jobs:
           # an issue number = a stale survivor that issue owns (delete the entry with the rewrite);
           # otherwise the hit is TRUE today (a quote of the old comment, "later session" meaning a
           # riding session, or "until Plan N" naming an open owning plan). Any other hit fails.
+          # An allow entry that matches no hit also fails (it went stale): whoever lands #129's
+          # rewrites, or Plan 8 (imu_mpu6050, export_serial gps/imu raw) / Plan 6 (export_serial
+          # power), rewrites the comment and deletes the matching entry in the same PR.
           allow=(
             # true: quotes the F2b-era comment it replaced
             "components/app/cmd/cmd.c|are later sessions"
@@ -52,14 +55,22 @@ jobs:
           hits=$(git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|stubbed until|stub until|not in plan [0-9]|Plan 04 ships no display' \
               -- components main tools docs ':!docs/reviews' ':!docs/superpowers' || true)
           bad=0
+          used=" "
           while IFS= read -r hit; do
             [ -n "$hit" ] || continue
             ok=0
-            for e in "${allow[@]}"; do
-              if [[ "$hit" == "${e%%|*}:"* && "$hit" == *"${e#*|}"* ]]; then ok=1; break; fi
+            for i in "${!allow[@]}"; do
+              e="${allow[$i]}"
+              if [[ "$hit" == "${e%%|*}:"* && "$hit" == *"${e#*|}"* ]]; then ok=1; used="$used$i "; break; fi
             done
             if [ "$ok" = 0 ]; then echo "stale forward-looking comment: $hit"; bad=1; fi
           done <<< "$hits"
+          for i in "${!allow[@]}"; do
+            case "$used" in
+              *" $i "*) ;;
+              *) echo "stale allow-list entry (matches no hit; delete it): ${allow[$i]}"; bad=1 ;;
+            esac
+          done
           exit "$bad"
 
   host-tests:
