@@ -27,9 +27,10 @@ reworks were considered and rejected (see PD-7), so it is accepted, not removed.
 
 Rule 9 (`--enforce-fnptr`) is a blocking CI check. Since the 2026-10-13 audit fix wave the linter no
 longer measures only the `(*name)(` declarator spelling: it also resolves a function passed by
-value to a known sink (`qsort`, `bsearch`, `xTaskCreate*`, `esp_timer_create`,
-`gpio_isr_handler_add`, `esp_console_cmd_register`, `spi_bus_add_device`) and a function stored
-into a struct field or variable, so PD-6's `btn_isr` and PD-9's `pre_cb` are now checked sites
+value to a known sink (`qsort`, `bsearch`, `xTaskCreate*`, `gpio_isr_handler_add`; the function
+may be defined in any scanned file) and a function stored into a struct field or variable (which
+is how `esp_timer_create`, `esp_console_cmd_register` and `spi_bus_add_device` callbacks are
+caught: their callback is a member of a struct argument), so PD-6's `btn_isr` and PD-9's `pre_cb` are now checked sites
 rather than voluntary book-keeping. Rules 1 (direct recursion) and 3 (heap) are blocking too.
 
 | id | rule | file:symbol | compliant alternative considered | why rejected | benefit | reviewer |

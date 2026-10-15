@@ -34,8 +34,9 @@ cover well:
           #elif defined) versus the number of in-scope header files, printed as one summary line.
   RULE-9  (only with --enforce-fnptr) a function-pointer typedef/param/variable whose
           file:symbol is not listed in the deviation register, OR a function passed by value to
-          a known sink (FNPTR_SINKS: qsort/bsearch/xTaskCreate*/esp_timer_create/
-          gpio_isr_handler_add/esp_console_cmd_register/spi_bus_add_device), OR a function stored
+          a known sink (FNPTR_SINKS: qsort/bsearch/xTaskCreate*/
+          gpio_isr_handler_add; the function may be defined in ANY scanned file), OR a function
+          stored
           into a struct field or variable -- the registered symbol is the function's own name.
 
 Pure Python 3 standard library only, no third-party dependencies.
@@ -207,6 +208,7 @@ def strip_comments_and_literals(text):
 
 
 _IF0_RE = re.compile(r"^[ \t]*#[ \t]*if[ \t]+0\b")
+_ELIF0_RE = re.compile(r"^[ \t]*#[ \t]*elif[ \t]+0\b")
 _DIRECTIVE_RE = re.compile(r"^[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b")
 
 
@@ -225,8 +227,9 @@ def blank_dead_regions(text):
         if kw in ("if", "ifdef", "ifndef"):
             stack.append(bool(_IF0_RE.match(line)))
         elif kw in ("else", "elif") and stack:
-            if stack[-1]:
-                stack[-1] = False   # the #else of an `#if 0` is live code
+            # the #else of an `#if 0` is live code; so is a later `#elif <expr>`, but an
+            # `#elif 0` -- even after a live `#if X` -- opens a dead branch
+            stack[-1] = kw == "elif" and bool(_ELIF0_RE.match(line))
         elif kw == "endif" and stack:
             stack.pop()
         dead = dead_before or any(stack)
@@ -508,11 +511,12 @@ FNPTR_SINKS = {
     "qsort": [3], "bsearch": [4],
     "xTaskCreate": [0], "xTaskCreateStatic": [0],
     "xTaskCreatePinnedToCore": [0], "xTaskCreateStaticPinnedToCore": [0],
-    "esp_timer_create": [0],
     "gpio_isr_handler_add": [1],
-    "esp_console_cmd_register": [0],
-    "spi_bus_add_device": [1],
 }
+# NOT listed on purpose: esp_timer_create / esp_console_cmd_register / spi_bus_add_device take a
+# STRUCT whose callback member (`.callback = fn`, `.func = fn`, `.pre_cb = fn`) carries the
+# function; an arg-index entry there could never match. Those members are caught by the
+# stored-value check (_FNVAL_ASSIGN_RE) below instead.
 _SINK_RE = re.compile(r"(?<![A-Za-z0-9_])(%s)\s*\(" % "|".join(sorted(FNPTR_SINKS)))
 # `.field = fn` / `= fn;` where fn is a function defined in this file (LG-3's struct-field case).
 _FNVAL_ASSIGN_RE = re.compile(r"=\s*&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,;}]")
@@ -542,10 +546,16 @@ def _arg_spans(stripped, open_paren_idx):
     return []
 
 
-def check_rule9_sinks(stripped, relpath, lidx, findings, register, funcs):
+def check_rule9_sinks(stripped, relpath, lidx, findings, register, funcs, fn_defs=None):
     """RULE-9 (LG-3): a function passed by value to a known sink, or stored into a struct field /
-    variable, must be registered. The registered symbol is the function's own name."""
+    variable, must be registered. The registered symbol is the function's own name.
+
+    `fn_defs` maps every function name defined anywhere in the scan set to the files defining it,
+    so a sink call may name a function from another file (`qsort(v, n, w, cmp_from_util_c)`); the
+    register entry is then looked up under the DEFINING file. Default: this file's own functions."""
     local_fns = {f[0] for f in funcs}
+    if fn_defs is None:
+        fn_defs = {n: [relpath] for n in local_fns}
     for m in _SINK_RE.finditer(stripped):
         sink = m.group(1)
         args = _arg_spans(stripped, m.end() - 1)
@@ -556,9 +566,9 @@ def check_rule9_sinks(stripped, relpath, lidx, findings, register, funcs):
             if not im:
                 continue
             symbol = im.group(1)
-            if symbol not in local_fns:
-                continue          # a parameter or an extern: not a function this file defines
-            if register.is_registered(9, relpath, symbol):
+            if symbol not in fn_defs:
+                continue          # a parameter or a library symbol: no scanned file defines it
+            if any(register.is_registered(9, d, symbol) for d in fn_defs[symbol] + [relpath]):
                 continue
             findings.append({"file": relpath, "line": lidx.line_of(m.start()), "rule": "RULE-9",
                              "symbol": symbol,
@@ -800,6 +810,15 @@ def run(paths, register_path, enforce_fnptr, base_dir, report_only_paths=()):
 
     files = discover_files(paths, base_dir)
 
+    # rule 9 sinks may name a function defined in another scanned file: index every definition once
+    fn_defs = {}
+    if enforce_fnptr:
+        for _c, fpath, frel in files:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                fs = blank_dead_regions(strip_comments_and_literals(f.read()))
+            for fn in find_top_level_functions(fs):
+                fn_defs.setdefault(fn[0], []).append(frel)
+
     all_findings = []
     per_component = {}  # component -> {"functions":N, "assertions":N, "files":N,
     #                                    "rule1":N, "rule3":N, "rule4":N, "rule4_compound":N,
@@ -862,7 +881,7 @@ def run(paths, register_path, enforce_fnptr, base_dir, report_only_paths=()):
         if enforce_fnptr:
             rule9_findings = []
             check_rule9_fnptr(stripped, relpath, lidx, rule9_findings, register, funcs)
-            check_rule9_sinks(stripped, relpath, lidx, rule9_findings, register, funcs)
+            check_rule9_sinks(stripped, relpath, lidx, rule9_findings, register, funcs, fn_defs)
             comp["rule9"] += len(rule9_findings)
             all_findings.extend(rule9_findings)
 
@@ -929,8 +948,8 @@ def main(argv=None):
     ap.add_argument("--register", default="docs/power-of-10-deviations.md",
                      help="Deviation register path (default: docs/power-of-10-deviations.md)")
     ap.add_argument("--enforce-fnptr", action="store_true",
-                     help="Enable RULE-9 (no unregistered function pointer). INERT unless passed; "
-                          "not used before plan Session 4.5.5.")
+                     help="Enable RULE-9 (no unregistered function pointer). Off by default so a bare "
+                          "run stays report-only-compatible; CI passes it and RULE-9 is blocking there.")
     ap.add_argument("--fail-on-violation", action="store_true",
                      help="Exit 1 if any unregistered RULE-1/RULE-3/RULE-4/RULE-4-COMPOUND/RULE-5/"
                           "RULE-8/RULE-9 finding exists (outside any report-only path/site/rule).")

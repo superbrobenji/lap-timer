@@ -64,8 +64,9 @@ We follow Gerard Holzmann's **refined** Power-of-10 rules as published on his au
   code lines and compound-statement bodies over 30; **rule 5** ≥ 2 assertions in any function over 20
   code lines; **rule 8** the preprocessor gates; **rule 9** unregistered function pointers — the
   `(*name)(` declarator *and* a function passed by value to a known sink (`qsort`, `bsearch`,
-  `xTaskCreate*`, `esp_timer_create`, `gpio_isr_handler_add`, `esp_console_cmd_register`,
-  `spi_bus_add_device`) *and* a function stored into a struct field or variable. Two counting rules
+  `xTaskCreate*`, `gpio_isr_handler_add`; the function may live in any scanned file) *and* a
+  function stored into a struct field or variable (the way `esp_timer_create`,
+  `esp_console_cmd_register` and `spi_bus_add_device` callbacks, which are struct members, are seen). Two counting rules
   make rules 4/5 un-evadable: an `#if 0` region is blanked before anything is counted (an assertion
   in dead code never counts, and an unbalanced brace there can no longer desynchronise the scanner),
   and a body's size is `max(physical code lines, top-level statements)`, so `a; b; c;` on one line

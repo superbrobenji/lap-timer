@@ -62,7 +62,33 @@ class Rule9Sinks(unittest.TestCase):
         self.assertEqual(0, rc)
 
 
+    CROSS = [FIX + "/lg3_cross_file_use.c", FIX + "/lg3_cross_file_def.c"]
+
+    def test_a_sink_naming_a_function_from_another_file_is_a_finding(self):
+        rc, out = run(["--paths"] + self.CROSS + ["--register", NONE, "--enforce-fnptr",
+                                                  "--fail-on-violation"])
+        self.assertIn("unregistered function 'cmp_elsewhere' passed to qsort()", out)
+        self.assertEqual(1, rc)
+
+    def test_the_cross_file_symbol_is_registered_under_its_defining_file(self):
+        rc, out = run(["--paths"] + self.CROSS + ["--register", FIX + "/register_cross.md",
+                                                  "--enforce-fnptr", "--fail-on-violation"])
+        self.assertEqual([], findings(out), out)
+        self.assertEqual(0, rc)
+
+    def test_struct_argument_sinks_are_not_listed_as_inert_entries(self):
+        # their callback is a struct MEMBER, caught by the stored-value check, not by arg index
+        self.assertEqual({}, {k: v for k, v in p10.FNPTR_SINKS.items()
+                              if k in ("esp_timer_create", "esp_console_cmd_register",
+                                       "spi_bus_add_device")}, "struct-arg sinks are inert entries")
+
+
 class Rule5Counting(unittest.TestCase):
+    def test_elif_0_after_a_live_if_is_a_dead_branch(self):
+        rc, out = run(["--paths", FIX + "/lg9_elif0.c", "--register", NONE, "--fail-on-violation"])
+        self.assertIn("function 'elif_dead' has 0 assertion(s) in 24 code lines", out)
+        self.assertEqual(1, rc)
+
     def test_lg4_asserts_inside_if0_do_not_count_but_the_else_branch_does(self):
         rc, out = run(["--paths", FIX + "/lg4_if0_asserts.c", "--register", NONE,
                        "--fail-on-violation"])
