@@ -53,26 +53,59 @@ static void test_unknown_input_is_inert(void)
 #define IV 60000000LL
 static void test_live_old_session_after_rotate_is_not_a_confirm(void)
 {
-    /* N-1: right after a rotate the OLD session still reads open; its generation equals the one
-     * recorded at post time, so it must not latch the confirm. */
+    /* R-1: the latch confirms only the logger's completion of THIS (latest) OPEN: the OPEN-request
+     * count at the logger's last completed open must equal the count the pipeline has enqueued.
+     * Right after a rotate the OLD session still reads open with an older count: no confirm. */
     lt_test_assert_reset();
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 5u, 5u, false, 1000, 0, IV));
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 6u, 5u, false, 1000, 0, IV));
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 6u, 5u, true, 1000, 0, IV));
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 0u, 0xFFFFFFFFu, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 4u, 5u, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 5u, 5u, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 5u, 5u, true, 1000, 0, IV));
+    /* wrap-safe: exact uint32 equality across 0xFFFFFFFF -> 0 */
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 0u, 0u, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 0xFFFFFFFFu, 0u, false, 1000, 0, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+/* R-1(a): two OPENs enqueued (sent == 2) before the logger confirms the first. The logger completes
+ * OPEN1 (count at open 1), then CLOSE2 (closed), then OPEN2 (count at open 2). Walk the passes. */
+static void test_live_two_opens_first_completion_does_not_confirm_second(void)
+{
+    lt_test_assert_reset();
+    /* logger open from OPEN1 (at_open 1), sent 2: not ours */
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 1u, 2u, false, 1000, 0, IV));
+    /* CLOSE2 done, OPEN2 not yet complete: closed + unconfirmed must NOT drop (and no early retry) */
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(false, 1u, 2u, false, 2000, 0, IV));
+    /* OPEN2 completes: now confirmed */
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 2u, 2u, false, 3000, 0, IV));
+    /* confirmed, then an external close: drop */
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_DROP, session_liveness(false, 2u, 2u, true, 4000, 0, IV));
+    TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
+}
+/* R-1(b): the logger is busy and the confirmation arrives several passes late; every pass before
+ * it is NONE (open with an old count, or closed inside the retry interval), the late one confirms. */
+static void test_live_busy_logger_late_confirmation_confirms_right_open(void)
+{
+    lt_test_assert_reset();
+    int64_t t = 50000;
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(true, 7u, 8u, false, t, 0, IV));
+        t += 50000;
+        TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE, session_liveness(false, 7u, 8u, false, t, 0, IV));
+        t += 50000;
+    }
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_CONFIRM, session_liveness(true, 8u, 8u, false, t, 0, IV));
     TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
 }
 static void test_live_refused_open_after_rotate_retries_after_60s(void)
 {
     lt_test_assert_reset();
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE,  session_liveness(false, 5u, 5u, false, IV - 1, 0, IV));
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_RETRY, session_liveness(false, 5u, 5u, false, IV, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_NONE,  session_liveness(false, 4u, 5u, false, IV - 1, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_RETRY, session_liveness(false, 4u, 5u, false, IV, 0, IV));
     TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
 }
 static void test_live_confirmed_then_closed_drops_without_retry(void)
 {
     lt_test_assert_reset();
-    TEST_ASSERT_EQUAL_INT(SES_LIVE_DROP, session_liveness(false, 6u, 5u, true, 10 * IV, 0, IV));
+    TEST_ASSERT_EQUAL_INT(SES_LIVE_DROP, session_liveness(false, 5u, 5u, true, 10 * IV, 0, IV));
     TEST_ASSERT_EQUAL_UINT(0u, lt_test_assert_count());
 }
 
@@ -86,6 +119,8 @@ int main(void)
     RUN_TEST(test_venue_changed_rotates_a_live_session);
     RUN_TEST(test_unknown_input_is_inert);
     RUN_TEST(test_live_old_session_after_rotate_is_not_a_confirm);
+    RUN_TEST(test_live_two_opens_first_completion_does_not_confirm_second);
+    RUN_TEST(test_live_busy_logger_late_confirmation_confirms_right_open);
     RUN_TEST(test_live_refused_open_after_rotate_retries_after_60s);
     RUN_TEST(test_live_confirmed_then_closed_drops_without_retry);
     return UNITY_END();

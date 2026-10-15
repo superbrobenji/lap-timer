@@ -110,7 +110,8 @@ static TaskHandle_t s_task;
 
 /* open session */
 static sto_file_t s_log_fd;
-static volatile uint32_t s_open_gen;   /* N-1: ++ on every completed OPEN; logger task writes, any task reads */
+static uint32_t s_open_req_seen;                  /* R-1: OPEN requests dequeued (logger task only) */
+static volatile uint32_t s_open_req_at_open;      /* R-1: s_open_req_seen at the latest completed OPEN; logger writes, any task reads */
 static volatile bool s_open;   /* written only by the logger task; read cross-task by logger_session_is_open() */
 static char       s_id[11];            /* "S%05u_%03u" + NUL */
 static uint8_t    s_seq;               /* per-boot session sequence (§12.1) */
@@ -418,8 +419,11 @@ static void open_session(const log_request_t *req)
         s_id[0] = 0;
         return;
     }
-    s_open = true;
-    s_open_gen++;
+    /* R-1: publish the count BEFORE s_open (release store): a task that loads s_open true (acquire)
+     * therefore reads at_open of that open or a later one -- never an older value -- so a torn pair
+     * can only confirm if the logger's latest completed open is the pipeline's latest OPEN. */
+    s_open_req_at_open = s_open_req_seen;
+    __atomic_store_n(&s_open, true, __ATOMIC_RELEASE);
     LT_ASSERT_VOID(s_log_fd >= 0, LOG_ASSERT_CODE);   /* valid session state: a successful sto_open yields fd >= 0 */
     s_last_write_ms = s_last_sync_ms = now_ms();
 
@@ -781,7 +785,7 @@ static int handle_request(const log_request_t *req)
 {
     LT_ASSERT_RET(req != NULL, LOG_ASSERT_CODE, -1);   /* M1: an asserted anomaly reports failure, not 0/ok */
     switch (req->type) {
-    case LOGGER_OPEN_SESSION:    open_session(req); return 0;
+    case LOGGER_OPEN_SESSION:    s_open_req_seen++; open_session(req); return 0;   /* R-1: counted whether it opens, refuses or is ignored */
     case LOGGER_CLOSE_SESSION:   return close_session(req);
     /* failure already recorded by errlog_add inside; the .sum is rebuilt again at the next LAP/close */
     case LOGGER_REBUILD_SUMMARY: if (s_open) (void)rebuild_sum(false, 0, 0); return 0;
@@ -1253,12 +1257,12 @@ void logger_notify(void)
 
 bool logger_session_is_open(void)
 {
-    return s_open;   /* volatile single-byte read; the logger task is the only writer */
+    return __atomic_load_n(&s_open, __ATOMIC_ACQUIRE);   /* single-byte read; the logger task is the only writer */
 }
 
-uint32_t logger_session_open_gen(void)
+uint32_t logger_open_req_at_open(void)
 {
-    return s_open_gen;   /* volatile aligned 32-bit read; the logger task is the only writer */
+    return s_open_req_at_open;   /* volatile aligned 32-bit read; the logger task is the only writer */
 }
 
 /* Pipeline -> logger full results. Copy-by-value onto result_q + wake the logger; a momentarily

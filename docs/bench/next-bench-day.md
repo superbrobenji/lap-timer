@@ -554,10 +554,13 @@ escaped quotes (`config set {\"mode\":\"drag\"}`; `mode` is `"lap"|"drag"`, `uni
   `creation in progress; retry` while New track is active). Evidence: the ERR lines.
 - [ ] **68. TIME_MAP is written from a consistent pair** (F2b final review I-2). Console limit: `dbg logck <id>`
   only COUNTS records (`TIME_MAP=<n>`); it does not decode the gps/mono values, so the pair's consistency is NOT
-  observable on the console (it is covered by the host decode tests). What can be checked: `dbg logck <id>` of a
-  fresh session reports no decode error, and a session opened with GPS lost for minutes (parked indoors, sim
-  stopped) shows `TIME_MAP=0` (none written rather than a wrong one) until a valid fix returns, after which a later
-  `dbg logck` shows `TIME_MAP>=1`. Evidence: the `logck` lines.
+  observable on the console (host tests cover only the record encode/decode and the time base, not the
+  pair selection). What can be checked: `dbg logck <id>` of a fresh session reports no decode error, and a session
+  opened BEFORE the boot's first fix (e.g. `dbg logtest` right after boot with the GPS unplugged / the sim stopped
+  from boot) shows `TIME_MAP=0` (none written rather than a wrong one) until the first fix, after which a later
+  `dbg logck` shows `TIME_MAP>=1`. Not a valid check after any earlier fix this boot: `tb_quality()` never returns
+  to 0 after a lock and the last fix is never cleared, so a session opened later (a mode flip with the GPS lost)
+  does get a TIME_MAP. Evidence: the `logck` lines.
 - [ ] **69. Rotation never desyncs the lifecycle** (F2b closure N-1). `config set {\"mode\":\"drag\"}`, `dbg fs`
   shows the rotation (a second `.log`/`.sum` pair), then `config set {\"mode\":\"lap\"}` rotates again (a third
   pair), 5 s apart; repeat once with the flips 400 ms apart (item 64). Every flip must produce exactly one

@@ -460,22 +460,24 @@ static void create_finish_if_active(uint16_t venue_id)
  * is to stop a venue rescan asking for a second session and a mode flip rotating a session that
  * never existed (session_policy(), app/session_policy.h). */
 static bool     s_ses_open;
-/* I-1/N-1: set when the logger is seen open at a DIFFERENT open-generation than the one read just
- * before the latest OPEN was posted (logger_session_open_gen(); session_liveness()) -- i.e. the
- * logger completed THIS OPEN. A bare "logger reads open" is not enough: after a rotation the old
- * session is still open while it closes. Cleared on every session_open()/session_close(). While
- * set, a logger that reports CLOSED was closed by someone else (ota.c's §19.5 ota_close_session(),
- * sup.c's pre-restart close) -- the logger never closes on its own -- so session_periodic() drops
- * the mirror instead of retrying. */
+/* I-1/R-1: set when the logger is seen open and its at_open count (the OPEN requests it had dequeued
+ * when its latest open completed, logger_open_req_at_open()) EQUALS s_open_req_sent (the OPENs this
+ * task has enqueued) -- i.e. the logger completed the LATEST OPEN. log_req_q is FIFO and this task is
+ * its only OPEN producer, so equality identifies the open exactly: a bare "logger reads open" is not
+ * enough (after a rotation the old session is still open while it closes) and neither is "a newer
+ * open than at post" (the first OPEN of an overlapping pair would confirm the second). Cleared on
+ * every session_open()/session_close(). While set, a logger that reports CLOSED was closed by
+ * someone else (ota.c's §19.5 ota_close_session(), sup.c's pre-restart close) -- the logger never
+ * closes on its own -- so session_periodic() drops the mirror instead of retrying. */
 static bool     s_ses_confirmed;
-static uint32_t s_ses_gen_at_post;
+static uint32_t s_open_req_sent;   /* R-1: OPENs successfully enqueued; the logger's at_open must equal it to confirm */
 static uint16_t s_ses_venue_id, s_ses_layout_id;
 static uint8_t  s_gps_hz;              /* gps_profile_t.max_rate_hz; §12.3 SESSION_HDR.gps_hz */
 
-static void session_send(uint8_t type, uint8_t reason, uint16_t venue_id, uint16_t layout_id,
+static bool session_send(uint8_t type, uint8_t reason, uint16_t venue_id, uint16_t layout_id,
                          int64_t gps_us)
 {
-    if (g_log_req_q == NULL) return;
+    if (g_log_req_q == NULL) return false;
     log_request_t req = { .type = type, .mode = s_mode, .reason = reason, .gps_us = gps_us,
                           .venue_id = venue_id, .layout_id = layout_id, .gps_hz = s_gps_hz };
     /* No reply is awaited (never logger_request_sync): the same bounded 100 ms send every other
@@ -485,9 +487,10 @@ static void session_send(uint8_t type, uint8_t reason, uint16_t venue_id, uint16
     if (xQueueSend(g_log_req_q, &req, pdMS_TO_TICKS(100)) != pdTRUE) {
         (void)errlog_add(E_STO_WRITE, 0);
         ESP_LOGW(TAG, "session request %u dropped (log queue full)", (unsigned)type);
-        return;
+        return false;
     }
     logger_notify();
+    return true;
 }
 
 /* §12.4 "TIME_MAP ... at session start, whenever tb quality changes, and every 60 s". This task
@@ -540,8 +543,9 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
 {
     s_ses_venue_id  = venue_id;
     s_ses_layout_id = layout_id;
-    s_ses_gen_at_post = logger_session_open_gen();   /* N-1: BEFORE posting; every OPEN path comes through here */
-    session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us);
+    /* R-1: count only an OPEN that really entered the FIFO (log_req_q; this task is its only OPEN
+     * producer), so the logger's dequeued-OPEN count lines up with this one. */
+    if (session_send(LOGGER_OPEN_SESSION, SES_END_NORMAL, venue_id, layout_id, gps_us)) s_open_req_sent++;
     s_ses_open = true;
     s_ses_confirmed = false;
     s_last_open_try_us = esp_timer_get_time();
@@ -558,9 +562,9 @@ static void session_open(uint16_t venue_id, uint16_t layout_id, int64_t gps_us)
 
 /* I2: the OPEN is fire-and-forget and the logger may refuse it (reserve floor, sequence
  * exhaustion). If the mirror says open but the logger NEVER confirmed it, ask again, at most once
- * per 60 s. I-1/N-1: once the logger HAS confirmed it (s_ses_confirmed: it completed an OPEN
- * newer than the one read at post time -- the rotation's old, still-closing session does not
- * count) and later reports closed,
+ * per 60 s. I-1/R-1: once the logger HAS confirmed it (s_ses_confirmed: it completed the latest
+ * OPEN enqueued -- the rotation's old, still-closing session and an overlapping pair's first
+ * OPEN do not count) and later reports closed,
  * someone else closed it (ota.c's §19.5 close, sup.c's pre-restart close): drop the mirror, as a
  * close would, and do NOT retry -- the next venue event reopens (a retry would open a new
  * session in the middle of an OTA transfer). */
@@ -568,8 +572,8 @@ static void session_periodic(int64_t now)
 {
     LT_ASSERT_VOID(now >= 0, PIPE_ASSERT_CODE);
     if (!s_ses_open) return;
-    bool lopen = logger_session_is_open();
-    ses_live_t v = session_liveness(lopen, logger_session_open_gen(), s_ses_gen_at_post, s_ses_confirmed,
+    bool lopen = logger_session_is_open();   /* acquire load FIRST, then at_open (see logger.h) */
+    ses_live_t v = session_liveness(lopen, logger_open_req_at_open(), s_open_req_sent, s_ses_confirmed,
                                     now, s_last_open_try_us, TIMEMAP_INTERVAL_US);
     if (v == SES_LIVE_DROP) {
         s_ses_open = false;
@@ -589,7 +593,7 @@ static void session_periodic(int64_t now)
 
 static void session_close(uint8_t reason, int64_t gps_us)
 {
-    session_send(LOGGER_CLOSE_SESSION, reason, 0, 0, gps_us);
+    (void)session_send(LOGGER_CLOSE_SESSION, reason, 0, 0, gps_us);   /* a drop is already logged + errlog'd inside */
     s_ses_open = false;
     s_ses_confirmed = false;
 }
