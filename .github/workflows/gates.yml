@@ -18,10 +18,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           # Both interpreters in this one job (no matrix: a matrix would rename the required check).
-          # The first listed is the default `python3`; the local hooks run on 3.9.
+          # The last version listed is the default `python3` (here 3.12); every step names its own.
           python-version: |
-            3.12
             3.9
+            3.12
       - name: Install PyYAML (pinned in tools/requirements.txt)
         run: |
           python3.9 -m pip install PyYAML==6.0.2

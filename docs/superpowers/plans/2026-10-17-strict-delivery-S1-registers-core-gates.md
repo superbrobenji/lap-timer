@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-The code blocks of S1 Tasks 1-6 are byte-equal to the files shipped at block b2, where 198 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (211, 218) are expected values derived from that count, not yet run.
+Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 198 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (211, 218) are expected values derived from that count, not yet run.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -4652,10 +4652,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           # Both interpreters in this one job (no matrix: a matrix would rename the required check).
-          # The first listed is the default `python3`; the local hooks run on 3.9.
+          # The last version listed is the default `python3` (here 3.12); every step names its own.
           python-version: |
-            3.12
             3.9
+            3.12
       - name: Install PyYAML (pinned in tools/requirements.txt)
         run: |
           python3.9 -m pip install PyYAML==6.0.2
