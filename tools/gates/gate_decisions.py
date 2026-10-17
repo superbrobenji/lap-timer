@@ -22,13 +22,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import config, registers  # noqa: E402
-from tools.gates.gate_register import _safe  # noqa: E402
 
 # spec §5: "Decision classes (owner-only, always)" -- every class in the register.
 OWNER_ONLY_CLASSES = list(registers.DECISION_CLASSES)
 REF = re.compile(r"DEC-\d{4}(?!\d)")
 CATEGORIES = ["schema", "duplicate", "owner", "open-ref", "scan"]
-OWNER_ERROR = "answered_at.by: only the owner"    # the prefix validate_decision's owner error starts with
 
 
 def check(args: list) -> Result:
@@ -51,19 +49,26 @@ def check(args: list) -> Result:
         seen.add(did)
         errs = registers.validate_decision(d, owner=owner)
         for e in errs:
-            r.fail(f"decisions.{'owner' if e.startswith(OWNER_ERROR) else 'schema'}.{did}", e)
-        if errs:
-            skipped.add("schema")    # the sha check needs a well-formed row
-            if any(not e.startswith(OWNER_ERROR) for e in errs):
-                skipped.update(["owner", "open-ref"])    # the row's answer state is not reliable
+            r.fail(f"decisions.{'owner' if e.startswith(registers.OWNER_ANSWER_ERROR) else 'schema'}.{did}", e)
+        if any(not e.startswith(registers.OWNER_ANSWER_ERROR) for e in errs):
+            skipped.update(["schema", "owner", "open-ref"])    # the sha and answer checks need a well-formed row
             continue
         for e in registers.decision_commit_errors(d, root, exists):
             r.fail(f"decisions.schema.{did}", e)
-    unanswered = {d["id"] for d in registers.open_decisions(decisions)
-                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])}
+    # only the owner's answer is an answer (spec §5): an agent-answered row is still unanswered
+    unanswered = {d["id"] for d in decisions
+                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])
+                  and (d.get("answer") is None or not isinstance(d.get("answered_at"), dict)
+                       or d["answered_at"].get("by") != owner)}
     for path in ns.scan:
         full = path if os.path.isabs(path) else os.path.join(root, path)
-        rel = _safe(os.path.relpath(full, root))
+        rel = registers.safe_text(os.path.relpath(full, root))
+        try:
+            registers.require_regular(root, full)    # opening a FIFO would hang the gate
+        except GateError as exc:
+            why = str(exc)[len(os.path.relpath(full, root)) + 2:]    # drop the "<path>: " prefix
+            r.fail(f"decisions.scan.{rel}", why if why == "not a regular file" else f"cannot read: {why}")
+            continue
         try:
             with open(full, encoding="utf-8") as fh:
                 text = fh.read()
@@ -73,7 +78,7 @@ def check(args: list) -> Result:
         except UnicodeDecodeError:
             r.fail(f"decisions.scan.{rel}", "cannot read: not valid UTF-8")
             continue
-        for n, line in enumerate(text.splitlines(), 1):
+        for n, line in enumerate(text.split("\n"), 1):
             for did in sorted(set(REF.findall(line)) & unanswered):
                 r.fail(f"decisions.open-ref.{did}", f"{rel}:{n} references unanswered decision {did}; "
                                                     "the owner answers it first")

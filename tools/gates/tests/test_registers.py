@@ -504,6 +504,33 @@ class FixWave(unittest.TestCase):
         finally:
             reg.gitinfo.commit_exists = real
 
+    def test_owner_answer_error_prefix_is_what_validate_decision_says(self):
+        d = copy.deepcopy(DECISION)
+        d["answered_at"] = {"sha": "abcdef1", "by": "session"}
+        d["answer"] = "yes"
+        errs = reg.validate_decision(d, owner="boss")
+        self.assertEqual(1, len(errs), errs)
+        self.assertTrue(errs[0].startswith(reg.OWNER_ANSWER_ERROR + " (boss)"), errs)
+
+    def test_safe_text_escapes_control_characters(self):
+        self.assertEqual("docs/a.md", reg.safe_text("docs/a.md"))
+        self.assertEqual("a\\nPASS x", reg.safe_text("a\nPASS x"))
+
+    def test_require_regular_accepts_files_and_names_everything_else(self):
+        root = tempfile.mkdtemp(prefix="gate-reg-")
+        self.addCleanup(gf.remove, root)
+        gf.write(root, "d/f.md", "x\n")
+        reg.require_regular(root, os.path.join(root, "d", "f.md"))
+        for rel, msg in (("d", "d: not a regular file"), ("d/none.md", "d/none.md: No such file or directory")):
+            with self.assertRaises(GateError) as cm:
+                reg.require_regular(root, os.path.join(root, rel))
+            self.assertEqual(msg, str(cm.exception))
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(os.path.join(root, "pipe"))
+            with self.assertRaises(GateError) as cm:
+                reg.require_regular(root, os.path.join(root, "pipe"))
+            self.assertEqual("pipe: not a regular file", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

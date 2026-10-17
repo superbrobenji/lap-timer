@@ -1255,7 +1255,7 @@ git commit -m "feat(gates): gate framework, config, git helpers, register bootst
 
 **Interfaces:**
 - Consumes: `GateError`, `load_yaml`, `CODE_ROOT` (Task 1); `gitfixture.write`, `.remove`, `.STATE`.
-- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions) -> list[dict]`; `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `row_id(row, index, pattern) -> str` (the id a result line prints: the row's own when well-formed, else `entry-<index>`), `memo_commit_exists() -> exists(root, sha)` (one `gitinfo.commit_exists` call per distinct root and sha), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
+- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions) -> list[dict]`; `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `row_id(row, index, pattern) -> str` (the id a result line prints: the row's own when well-formed, else `entry-<index>`), `memo_commit_exists() -> exists(root, sha)` (one `gitinfo.commit_exists` call per distinct root and sha), `rel_error(root, path, exc) -> GateError` (worded `<path relative to root>: <strerror>`), `require_regular(root, path)` (GateError unless a regular file; a FIFO would hang an open), `safe_text(rel) -> str` (escapes control characters for a result-line id), `OWNER_ANSWER_ERROR` (the prefix of `validate_decision`'s non-owner-answer error, which is built from it), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1768,6 +1768,33 @@ class FixWave(unittest.TestCase):
         finally:
             reg.gitinfo.commit_exists = real
 
+    def test_owner_answer_error_prefix_is_what_validate_decision_says(self):
+        d = copy.deepcopy(DECISION)
+        d["answered_at"] = {"sha": "abcdef1", "by": "session"}
+        d["answer"] = "yes"
+        errs = reg.validate_decision(d, owner="boss")
+        self.assertEqual(1, len(errs), errs)
+        self.assertTrue(errs[0].startswith(reg.OWNER_ANSWER_ERROR + " (boss)"), errs)
+
+    def test_safe_text_escapes_control_characters(self):
+        self.assertEqual("docs/a.md", reg.safe_text("docs/a.md"))
+        self.assertEqual("a\\nPASS x", reg.safe_text("a\nPASS x"))
+
+    def test_require_regular_accepts_files_and_names_everything_else(self):
+        root = tempfile.mkdtemp(prefix="gate-reg-")
+        self.addCleanup(gf.remove, root)
+        gf.write(root, "d/f.md", "x\n")
+        reg.require_regular(root, os.path.join(root, "d", "f.md"))
+        for rel, msg in (("d", "d: not a regular file"), ("d/none.md", "d/none.md: No such file or directory")):
+            with self.assertRaises(GateError) as cm:
+                reg.require_regular(root, os.path.join(root, rel))
+            self.assertEqual(msg, str(cm.exception))
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(os.path.join(root, "pipe"))
+            with self.assertRaises(GateError) as cm:
+                reg.require_regular(root, os.path.join(root, "pipe"))
+            self.assertEqual("pipe: not a regular file", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1790,6 +1817,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import stat
 
 from . import CODE_ROOT, GateError, config, gitinfo, load_yaml
 
@@ -1812,6 +1840,7 @@ SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
 PIN_TEST = re.compile(r"^test_[A-Za-z0-9_]+(::test_[A-Za-z0-9_]+)?$")
 PIN_TRANSCRIPT = re.compile(r"^docs/superpowers/state/(?!\.\.?/)[^/]+/mutations/(?!\.\.?$)[^/]+$")
+OWNER_ANSWER_ERROR = "answered_at.by: only the owner"    # the prefix of validate_decision's non-owner-answer error
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
 
 FINDING_KEYS = ["id", "source", "severity", "class", "siblings", "cites", "repro", "owner", "state",
@@ -2101,10 +2130,32 @@ def validate_decision(d: dict, owner=None) -> list:
             if owner is None:
                 owner = config.load(CODE_ROOT)["owner"]["handle"]
             if at["by"] != owner:
-                errs.append(f"answered_at.by: only the owner ({owner}) answers a decision, got {at['by']!r}")
+                errs.append(f"{OWNER_ANSWER_ERROR} ({owner}) answers a decision, got {at['by']!r}")
     if (ans is None) != (at is None):
         errs.append("answered_at: answer and answered_at are both null or both set")
     return errs
+
+
+def rel_error(root, path, exc) -> GateError:
+    """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
+    return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
+
+
+def require_regular(root, path) -> None:
+    """`path` must be a regular file (after following symlinks): opening a FIFO would hang.
+    Anything else, or a path that cannot be examined, is a GateError."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        raise rel_error(root, path, exc) from None
+    if not stat.S_ISREG(mode):
+        raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
+
+
+def safe_text(rel: str) -> str:
+    """A path for a line id: control characters (a newline in a file name) are escaped, so the
+    name cannot split or forge a result line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
 
 
 def _commit_errors(pairs, root, exists) -> list:
@@ -2185,13 +2236,13 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 46 tests` OK; whole suite `Ran 85 tests` OK.
+Expected: `Ran 49 tests` OK; whole suite `Ran 88 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 46 OK` to the ledger.
+Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 49 OK` to the ledger.
 
 ```bash
 git add tools/gates/lib/registers.py tools/gates/tests/test_registers.py docs/superpowers/state/strict-delivery/ledger.md
@@ -2207,7 +2258,7 @@ git commit -m "feat(gates): register loaders, schema validators and lifecycle ru
 - Test: `tools/gates/tests/test_gate_register.py`
 
 **Interfaces:**
-- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate` (Task 1); `registers.load_findings`, `load_decisions`, `validate_finding`, `transition_errors`, `evidence_errors`, `validate_decision`, `finding_commit_errors`, `decision_commit_errors`, `row_id`, `memo_commit_exists`, `FINDING_ID`, `DECISION_ID` (Task 2).
+- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate` (Task 1); `registers.load_findings`, `load_decisions`, `validate_finding`, `transition_errors`, `evidence_errors`, `validate_decision`, `finding_commit_errors`, `decision_commit_errors`, `row_id`, `memo_commit_exists`, `rel_error`, `require_regular`, `safe_text`, `FINDING_ID`, `DECISION_ID` (Task 2).
 - Produces: `gate_register.check(args: list) -> Result` (args: `--root <tree>`), `main(argv=None) -> int`, `registered_reports(root) -> (found: list[str], bad: list[(path, line)])`, `report_ids(path, root) -> list[str]`, `REPORT_DIRS`, `MARKER = "register: true"`. Line ids: `register.{schema|owner|duplicate|transition|evidence}.<finding or decision id>` on FAIL (a malformed id prints as `entry-<index>`), `register.marker.<file relative to root>` for a near-miss marker, and `register.report.<file relative to root>.<id>: not in register` for a registered report citing an unregistered id (owner ruling 5). One `PASS register.<category>` per category in which every row was evaluated and none failed (a category with a skipped row prints no PASS), in the order schema, owner, duplicate, transition, evidence, report. `--root ""` is `FAIL register.input: --root is empty`; a missing `docs/reviews` is `FAIL register.input: docs/reviews: missing report directory`.
 
 - [ ] **Step 1: Write the fixtures**
@@ -2997,7 +3048,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -3014,27 +3064,6 @@ MARKER_LINES = 20
 MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:", re.I)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]+[.)])\s+(?:\[[ xX]\]\s+)?"
                        r"(?:\*\*([^\s*]+)\*\*|`([^`\s]+)`|([^\s:,.*`]+))(?=[\s:,.]|$)")
-
-
-def _rel_error(root, path, exc) -> GateError:
-    """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
-    return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
-
-
-def _require_regular(root, path) -> None:
-    """A report entry must be a regular file (after following symlinks): opening a FIFO would hang."""
-    try:
-        mode = os.stat(path).st_mode
-    except OSError as exc:
-        raise _rel_error(root, path, exc) from None
-    if not stat.S_ISREG(mode):
-        raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
-
-
-def _safe(rel: str) -> str:
-    """A path for a line id: control characters (a newline in a file name) are escaped, so the
-    name cannot split or forge a result line."""
-    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
 
 
 def _first_visit(seen, path) -> bool:
@@ -3064,17 +3093,17 @@ def registered_reports(root) -> tuple:
             raise GateError(f"{d}: not a directory")
         if not _first_visit(seen, top):
             continue    # this directory was already walked through a symlink
-        for dirpath, dirnames, filenames in os.walk(top, onerror=lambda exc: _raise(_rel_error(root, exc.filename, exc)), followlinks=True):
+        for dirpath, dirnames, filenames in os.walk(top, onerror=lambda exc: _raise(registers.rel_error(root, exc.filename, exc)), followlinks=True):
             dirnames.sort()
             dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
-                _require_regular(root, path)
+                registers.require_regular(root, path)
                 try:
                     with open(path, encoding="utf-8", errors="replace") as fh:
                         head = [next(fh, "").rstrip("\r\n") for _ in range(MARKER_LINES)]
                 except OSError as exc:
-                    raise _rel_error(root, path, exc) from None
+                    raise registers.rel_error(root, path, exc) from None
                 attempts = [l for l in head if MARKER_ATTEMPT.match(l)]
                 wrong = next((l for l in attempts if l != MARKER), None)
                 if wrong is not None:
@@ -3096,12 +3125,12 @@ def report_ids(path, root) -> list:
     """Finding ids a registered report cites: table first cells and leading list-item ids.
     An unreadable file is a GateError worded relative to `root`."""
     ids = []
-    _require_regular(root, path)
+    registers.require_regular(root, path)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError as exc:
-        raise _rel_error(root, path, exc) from None
+        raise registers.rel_error(root, path, exc) from None
     for line in lines:
         s = line.strip()
         if s.startswith("|"):
@@ -3174,12 +3203,12 @@ def check(args: list) -> Result:
              if isinstance(f.get("id"), str) and registers.FINDING_ID.fullmatch(f["id"])}
     reports, bad = registered_reports(root)
     for path, line in bad:
-        r.fail(f"register.marker.{_safe(os.path.relpath(path, root))}",
+        r.fail(f"register.marker.{registers.safe_text(os.path.relpath(path, root))}",
                f"marker must be exactly '{MARKER}' (found {line!r})")
     if bad:
         skipped.add("report")
     for path in reports:
-        rel = _safe(os.path.relpath(path, root))
+        rel = registers.safe_text(os.path.relpath(path, root))
         for rid in sorted(set(report_ids(path, root)) - known):
             r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}
@@ -3201,7 +3230,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 127 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 130 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -3212,7 +3241,7 @@ Mutation check (report scan): in `registered_reports`, replace `if MARKER in att
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 127 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 130 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -3850,8 +3879,8 @@ git commit -m "feat(gates): gate_claims -- claim schema, stale-at-HEAD detection
 - Test: `tools/gates/tests/test_gate_decisions.py`
 
 **Interfaces:**
-- Consumes: `CODE_ROOT`, `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `config.load`; `registers.load_decisions`, `validate_decision(d, owner=owner)`, `decision_commit_errors`, `open_decisions`, `row_id`, `memo_commit_exists`, `DECISION_ID`, `DECISION_CLASSES`; `gate_register._safe` (control-character-safe path for a line id).
-- Produces: `gate_decisions.check(args) -> Result` with args `--root <tree>` (an empty one is `FAIL decisions.input: --root is empty`), `--scan <path> ...` (relative paths resolve against root); `main(argv=None)`; `OWNER_ONLY_CLASSES: list[str]` (= all eight classes, spec §5); `REF = re.compile(r"DEC-\d{4}(?!\d)")`. Line ids: `decisions.{schema|duplicate|owner|open-ref|scan}.<id or path>` on FAIL, the row id being `entry-<i>` when the id is not a well-formed str (forgery-safe); `decisions.owner.<id>` carries `validate_decision`'s own `answered_at.by: only the owner (...)` error, every other schema error and every `decision_commit_errors` error (DEC-0003) is `decisions.schema.<id>`. One `PASS decisions.<category>` per category (schema, duplicate, owner, open-ref, scan) that failed nowhere and that every row reached: a row with a schema error skips `schema` (its shas were not checked) and, unless the only error is the owner one, `owner` and `open-ref`, so those print no PASS line. One `commit_exists` call per distinct sha (`memo_commit_exists`).
+- Consumes: `CODE_ROOT`, `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `config.load`; `registers.load_decisions`, `validate_decision(d, owner=owner)`, `decision_commit_errors`, `row_id`, `memo_commit_exists`, `require_regular`, `safe_text`, `OWNER_ANSWER_ERROR`, `DECISION_ID`, `DECISION_CLASSES`.
+- Produces: `gate_decisions.check(args) -> Result` with args `--root <tree>` (an empty one is `FAIL decisions.input: --root is empty`), `--scan <path> ...` (relative paths resolve against root); `main(argv=None)`; `OWNER_ONLY_CLASSES: list[str]` (= all eight classes, spec §5); `REF = re.compile(r"DEC-\d{4}(?!\d)")`. Line ids: `decisions.{schema|duplicate|owner|open-ref|scan}.<id or path>` on FAIL, the row id being `entry-<i>` when the id is not a well-formed str (forgery-safe); `decisions.owner.<id>` carries `validate_decision`'s own `answered_at.by: only the owner (...)` error, every other schema error and every `decision_commit_errors` error (DEC-0003) is `decisions.schema.<id>`. One `PASS decisions.<category>` per category (schema, duplicate, owner, open-ref, scan) that failed nowhere and that every row reached: a row with an error other than the owner one skips `schema`, `owner` and `open-ref` (no PASS line for those); a row whose only error is the owner one still gets its sha check (`decisions.schema`). Only the owner's answer is an answer: an id is unanswered (an open reference) when `answer` is null, `answered_at` is not a mapping, or `answered_at.by` is not the owner. A `--scan` path that is not a regular file (a directory, a FIFO) is `FAIL decisions.scan.<rel>: not a regular file`; line numbers count `\n` only. One `commit_exists` call per distinct sha (`memo_commit_exists`).
 - [ ] **Step 1: Write the failing tests**
 
 `tools/gates/tests/test_gate_decisions.py`:
@@ -3866,6 +3895,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import signal
 import unittest
 from unittest import mock
 
@@ -3918,7 +3948,7 @@ class GateDecisions(unittest.TestCase):
         rc, out = self.run_gate(ANSWERED.replace("BY", "session"))
         self.assertIn("FAIL decisions.owner.DEC-9002: answered_at.by: only the owner (superbrobenji) "
                       "answers a decision, got 'session'", out)
-        self.assertNotIn("decisions.schema", out)
+        self.assertNotIn("FAIL decisions.schema", out)
         self.assertNotIn("PASS decisions.owner", out)
         self.assertEqual(1, rc)
 
@@ -3930,8 +3960,10 @@ class GateDecisions(unittest.TestCase):
                 text = text.replace("options: []", "options: [{label: a, cost: x}, {label: b, cost: y}]") \
                            .replace('"grant:demo"', '"q?"')
             rc, out = self.run_gate(text)
+            self.assertEqual(1, rc, cls)
             self.assertIn("FAIL decisions.owner.DEC-9002: answered_at.by: only the owner", out, cls)
-            self.assertNotIn("decisions.schema", out, cls)
+            self.assertNotIn("PASS decisions.owner", out, cls)
+            self.assertNotIn("FAIL decisions.schema", out, cls)
 
     def test_reference_to_an_unanswered_decision_fails(self):
         gf.write(self.root, "docs/plan.md", "# plan\n\nBlocked on DEC-9001 (triage).\nDEC-9002 is fine.\n")
@@ -3962,8 +3994,48 @@ class GateDecisions(unittest.TestCase):
         with open(os.path.join(self.root, "docs", "bin.md"), "wb") as fh:
             fh.write(b"\xff\xfe DEC-9001\n")
         rc, out = self.run_gate(OPEN, "--scan", "docs/dir", "docs/bin.md")
-        self.assertIn("FAIL decisions.scan.docs/dir: cannot read", out)
+        self.assertIn("FAIL decisions.scan.docs/dir: not a regular file", out)
         self.assertIn("FAIL decisions.scan.docs/bin.md: cannot read: not valid UTF-8", out)
+        self.assertNotIn("PASS decisions.scan", out)
+        self.assertEqual(1, rc)
+
+    def test_a_fifo_scan_path_fails_instead_of_hanging(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo is not available")
+        os.makedirs(os.path.join(self.root, "docs"), exist_ok=True)
+        os.mkfifo(os.path.join(self.root, "docs", "pipe.md"))
+        old = signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(AssertionError("gate hung on a FIFO")))
+        signal.alarm(20)
+        try:
+            rc, out = self.run_gate(OPEN, "--scan", "docs/pipe.md")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+        self.assertIn("FAIL decisions.scan.docs/pipe.md: not a regular file", out)
+        self.assertNotIn("PASS decisions.scan", out)
+        self.assertEqual(1, rc)
+
+    def test_an_agent_answered_decision_is_still_unanswered_for_open_refs(self):
+        agent = ANSWERED.replace("BY", "session").replace("DEC-9002", "DEC-9003")
+        gf.write(self.root, "docs/plan.md", "Proceeding per DEC-9003.\n")
+        rc, out = self.run_gate(agent, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.owner.DEC-9003", out)
+        self.assertIn("FAIL decisions.open-ref.DEC-9003: docs/plan.md:1 references unanswered decision DEC-9003", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
+        self.assertEqual(1, rc)
+
+    def test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema(self):
+        text = ANSWERED.replace("BY", "session").replace('answered_at: {sha: "SHA"', 'answered_at: {sha: "1234abc"')
+        rc, out = self.run_gate(text)
+        self.assertIn("FAIL decisions.owner.DEC-9002", out)
+        self.assertIn("FAIL decisions.schema.DEC-9002: answered_at.sha: sha 1234abc is not a commit in this "
+                      "repository", out)
+        self.assertEqual(1, rc)
+
+    def test_line_numbers_count_newlines_only(self):
+        gf.write(self.root, "docs/plan.md", "intro\n\x0c page break\u2028 DEC-9001 here\nlast\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/plan.md:2 references", out)
         self.assertEqual(1, rc)
 
     def test_a_scan_path_cannot_forge_a_result_line(self):
@@ -4070,13 +4142,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import config, registers  # noqa: E402
-from tools.gates.gate_register import _safe  # noqa: E402
 
 # spec §5: "Decision classes (owner-only, always)" -- every class in the register.
 OWNER_ONLY_CLASSES = list(registers.DECISION_CLASSES)
 REF = re.compile(r"DEC-\d{4}(?!\d)")
 CATEGORIES = ["schema", "duplicate", "owner", "open-ref", "scan"]
-OWNER_ERROR = "answered_at.by: only the owner"    # the prefix validate_decision's owner error starts with
 
 
 def check(args: list) -> Result:
@@ -4099,19 +4169,26 @@ def check(args: list) -> Result:
         seen.add(did)
         errs = registers.validate_decision(d, owner=owner)
         for e in errs:
-            r.fail(f"decisions.{'owner' if e.startswith(OWNER_ERROR) else 'schema'}.{did}", e)
-        if errs:
-            skipped.add("schema")    # the sha check needs a well-formed row
-            if any(not e.startswith(OWNER_ERROR) for e in errs):
-                skipped.update(["owner", "open-ref"])    # the row's answer state is not reliable
+            r.fail(f"decisions.{'owner' if e.startswith(registers.OWNER_ANSWER_ERROR) else 'schema'}.{did}", e)
+        if any(not e.startswith(registers.OWNER_ANSWER_ERROR) for e in errs):
+            skipped.update(["schema", "owner", "open-ref"])    # the sha and answer checks need a well-formed row
             continue
         for e in registers.decision_commit_errors(d, root, exists):
             r.fail(f"decisions.schema.{did}", e)
-    unanswered = {d["id"] for d in registers.open_decisions(decisions)
-                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])}
+    # only the owner's answer is an answer (spec §5): an agent-answered row is still unanswered
+    unanswered = {d["id"] for d in decisions
+                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])
+                  and (d.get("answer") is None or not isinstance(d.get("answered_at"), dict)
+                       or d["answered_at"].get("by") != owner)}
     for path in ns.scan:
         full = path if os.path.isabs(path) else os.path.join(root, path)
-        rel = _safe(os.path.relpath(full, root))
+        rel = registers.safe_text(os.path.relpath(full, root))
+        try:
+            registers.require_regular(root, full)    # opening a FIFO would hang the gate
+        except GateError as exc:
+            why = str(exc)[len(os.path.relpath(full, root)) + 2:]    # drop the "<path>: " prefix
+            r.fail(f"decisions.scan.{rel}", why if why == "not a regular file" else f"cannot read: {why}")
+            continue
         try:
             with open(full, encoding="utf-8") as fh:
                 text = fh.read()
@@ -4121,7 +4198,7 @@ def check(args: list) -> Result:
         except UnicodeDecodeError:
             r.fail(f"decisions.scan.{rel}", "cannot read: not valid UTF-8")
             continue
-        for n, line in enumerate(text.splitlines(), 1):
+        for n, line in enumerate(text.split("\n"), 1):
             for did in sorted(set(REF.findall(line)) & unanswered):
                 r.fail(f"decisions.open-ref.{did}", f"{rel}:{n} references unanswered decision {did}; "
                                                     "the owner answers it first")
@@ -4143,15 +4220,15 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_decisions -v                          # Ran 16 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_decisions -v                          # Ran 20 tests ... OK
 python3 tools/gates/gate_decisions.py --scan docs/superpowers/plans/*.md; echo rc=$?  # 5 PASS lines, rc=0 (DEC-0001..0003 answered)
 ```
 
-Mutation checks (`PYTHONDONTWRITEBYTECODE=1`; restore after each): route every error to schema (`'owner' if e.startswith(OWNER_ERROR) else 'schema'` -> `'schema'`): `test_an_agent_answer_fails` and `test_every_class_is_owner_only` must fail; drop the `skipped.update(["owner", "open-ref"])` or `skipped.add("schema")` line: `test_a_schema_error_skips_the_categories_it_never_reached` must fail; drop the empty-`--root` check, the `decision_commit_errors` loop, `memo_commit_exists`, `row_id`, the `(?!\d)` in `REF`, the `UnicodeDecodeError` branch, `_safe`, or the duplicate FAIL: the matching test of the 16 must fail. Restore and run again: OK.
+Mutation checks (`PYTHONDONTWRITEBYTECODE=1`; restore after each): route every error to schema (`'owner' if e.startswith(registers.OWNER_ANSWER_ERROR) else 'schema'` -> `'schema'`): `test_an_agent_answer_fails`, `test_every_class_is_owner_only` and two more must fail; drop the `or d["answered_at"].get("by") != owner` clause of `unanswered`: `test_an_agent_answered_decision_is_still_unanswered_for_open_refs` must fail; change the skip condition to `if errs:`: `test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema` must fail; drop the `skipped.update(["schema", "owner", "open-ref"])` effect: `test_a_schema_error_skips_the_categories_it_never_reached` must fail; replace `registers.require_regular(root, full)` with `pass`: the FIFO test (alarm) and the directory test must fail; `text.split("\n")` -> `text.splitlines()`: `test_line_numbers_count_newlines_only` must fail; drop the empty-`--root` check, the `decision_commit_errors` loop, `memo_commit_exists`, `row_id`, the `(?!\d)` in `REF`, the `UnicodeDecodeError` branch, `safe_text`, or the duplicate FAIL: the matching test must fail. Restore and run again: OK.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T5 feat(gates): gate_decisions -- test_gate_decisions 16 OK` to the ledger.
+Append `- T5 feat(gates): gate_decisions -- test_gate_decisions 20 OK` to the ledger.
 
 ```bash
 git add tools/gates/gate_decisions.py tools/gates/tests/test_gate_decisions.py docs/superpowers/state/strict-delivery/ledger.md

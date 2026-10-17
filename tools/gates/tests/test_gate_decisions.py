@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import signal
 import unittest
 from unittest import mock
 
@@ -59,7 +60,7 @@ class GateDecisions(unittest.TestCase):
         rc, out = self.run_gate(ANSWERED.replace("BY", "session"))
         self.assertIn("FAIL decisions.owner.DEC-9002: answered_at.by: only the owner (superbrobenji) "
                       "answers a decision, got 'session'", out)
-        self.assertNotIn("decisions.schema", out)
+        self.assertNotIn("FAIL decisions.schema", out)
         self.assertNotIn("PASS decisions.owner", out)
         self.assertEqual(1, rc)
 
@@ -71,8 +72,10 @@ class GateDecisions(unittest.TestCase):
                 text = text.replace("options: []", "options: [{label: a, cost: x}, {label: b, cost: y}]") \
                            .replace('"grant:demo"', '"q?"')
             rc, out = self.run_gate(text)
+            self.assertEqual(1, rc, cls)
             self.assertIn("FAIL decisions.owner.DEC-9002: answered_at.by: only the owner", out, cls)
-            self.assertNotIn("decisions.schema", out, cls)
+            self.assertNotIn("PASS decisions.owner", out, cls)
+            self.assertNotIn("FAIL decisions.schema", out, cls)
 
     def test_reference_to_an_unanswered_decision_fails(self):
         gf.write(self.root, "docs/plan.md", "# plan\n\nBlocked on DEC-9001 (triage).\nDEC-9002 is fine.\n")
@@ -103,8 +106,48 @@ class GateDecisions(unittest.TestCase):
         with open(os.path.join(self.root, "docs", "bin.md"), "wb") as fh:
             fh.write(b"\xff\xfe DEC-9001\n")
         rc, out = self.run_gate(OPEN, "--scan", "docs/dir", "docs/bin.md")
-        self.assertIn("FAIL decisions.scan.docs/dir: cannot read", out)
+        self.assertIn("FAIL decisions.scan.docs/dir: not a regular file", out)
         self.assertIn("FAIL decisions.scan.docs/bin.md: cannot read: not valid UTF-8", out)
+        self.assertNotIn("PASS decisions.scan", out)
+        self.assertEqual(1, rc)
+
+    def test_a_fifo_scan_path_fails_instead_of_hanging(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo is not available")
+        os.makedirs(os.path.join(self.root, "docs"), exist_ok=True)
+        os.mkfifo(os.path.join(self.root, "docs", "pipe.md"))
+        old = signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(AssertionError("gate hung on a FIFO")))
+        signal.alarm(20)
+        try:
+            rc, out = self.run_gate(OPEN, "--scan", "docs/pipe.md")
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+        self.assertIn("FAIL decisions.scan.docs/pipe.md: not a regular file", out)
+        self.assertNotIn("PASS decisions.scan", out)
+        self.assertEqual(1, rc)
+
+    def test_an_agent_answered_decision_is_still_unanswered_for_open_refs(self):
+        agent = ANSWERED.replace("BY", "session").replace("DEC-9002", "DEC-9003")
+        gf.write(self.root, "docs/plan.md", "Proceeding per DEC-9003.\n")
+        rc, out = self.run_gate(agent, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.owner.DEC-9003", out)
+        self.assertIn("FAIL decisions.open-ref.DEC-9003: docs/plan.md:1 references unanswered decision DEC-9003", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
+        self.assertEqual(1, rc)
+
+    def test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema(self):
+        text = ANSWERED.replace("BY", "session").replace('answered_at: {sha: "SHA"', 'answered_at: {sha: "1234abc"')
+        rc, out = self.run_gate(text)
+        self.assertIn("FAIL decisions.owner.DEC-9002", out)
+        self.assertIn("FAIL decisions.schema.DEC-9002: answered_at.sha: sha 1234abc is not a commit in this "
+                      "repository", out)
+        self.assertEqual(1, rc)
+
+    def test_line_numbers_count_newlines_only(self):
+        gf.write(self.root, "docs/plan.md", "intro\n\x0c page break\u2028 DEC-9001 here\nlast\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/plan.md:2 references", out)
         self.assertEqual(1, rc)
 
     def test_a_scan_path_cannot_forge_a_result_line(self):

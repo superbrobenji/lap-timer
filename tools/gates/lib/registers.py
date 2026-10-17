@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import stat
 
 from . import CODE_ROOT, GateError, config, gitinfo, load_yaml
 
@@ -27,6 +28,7 @@ SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
 PIN_TEST = re.compile(r"^test_[A-Za-z0-9_]+(::test_[A-Za-z0-9_]+)?$")
 PIN_TRANSCRIPT = re.compile(r"^docs/superpowers/state/(?!\.\.?/)[^/]+/mutations/(?!\.\.?$)[^/]+$")
+OWNER_ANSWER_ERROR = "answered_at.by: only the owner"    # the prefix of validate_decision's non-owner-answer error
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
 
 FINDING_KEYS = ["id", "source", "severity", "class", "siblings", "cites", "repro", "owner", "state",
@@ -316,10 +318,32 @@ def validate_decision(d: dict, owner=None) -> list:
             if owner is None:
                 owner = config.load(CODE_ROOT)["owner"]["handle"]
             if at["by"] != owner:
-                errs.append(f"answered_at.by: only the owner ({owner}) answers a decision, got {at['by']!r}")
+                errs.append(f"{OWNER_ANSWER_ERROR} ({owner}) answers a decision, got {at['by']!r}")
     if (ans is None) != (at is None):
         errs.append("answered_at: answer and answered_at are both null or both set")
     return errs
+
+
+def rel_error(root, path, exc) -> GateError:
+    """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
+    return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
+
+
+def require_regular(root, path) -> None:
+    """`path` must be a regular file (after following symlinks): opening a FIFO would hang.
+    Anything else, or a path that cannot be examined, is a GateError."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        raise rel_error(root, path, exc) from None
+    if not stat.S_ISREG(mode):
+        raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
+
+
+def safe_text(rel: str) -> str:
+    """A path for a line id: control characters (a newline in a file name) are escaped, so the
+    name cannot split or forge a result line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
 
 
 def _commit_errors(pairs, root, exists) -> list:
