@@ -512,6 +512,39 @@ class FixWave(unittest.TestCase):
         self.assertEqual(1, len(errs), errs)
         self.assertTrue(errs[0].startswith(reg.OWNER_ANSWER_ERROR + " (boss)"), errs)
 
+    def test_open_decisions_means_not_answered_by_the_owner(self):
+        def row(i, **kw):
+            d = copy.deepcopy(DECISION)
+            d.update(id=f"DEC-900{i}", **kw)
+            return d
+        done = {"sha": "abcdef1", "by": "boss"}
+        rows = [row(1),
+                row(2, answer="a", answered_at={"sha": "abcdef1", "by": "session"}),
+                row(3, answer="a", answered_at=done),
+                row(4, answer="a", answered_at="boss"),
+                row(5, answer="a", answered_at=None)]
+        ids = lambda **kw: [d["id"] for d in reg.open_decisions(rows, **kw)]
+        self.assertEqual(["DEC-9001", "DEC-9002", "DEC-9004", "DEC-9005"], ids(owner="boss"))
+        self.assertEqual(["DEC-9001", "DEC-9002", "DEC-9003", "DEC-9004", "DEC-9005"], ids(owner="someone"))
+        self.assertEqual(["DEC-9001", "DEC-9002", "DEC-9003", "DEC-9004", "DEC-9005"], ids())   # config owner is not "boss"
+
+    def test_open_decisions_defaults_to_the_config_owner(self):
+        d = copy.deepcopy(DECISION)
+        owner = reg.owner_handle()
+        d.update(answer="a", answered_at={"sha": "abcdef1", "by": owner})
+        self.assertEqual([], reg.open_decisions([d]))
+
+    def test_path_error_carries_the_bare_reason(self):
+        root = tempfile.mkdtemp(prefix="gate-reg-")
+        self.addCleanup(gf.remove, root)
+        gf.write(root, "d/f.md", "x\n")
+        with self.assertRaises(reg.PathError) as cm:
+            reg.require_regular(root, os.path.join(root, "d"))
+        self.assertEqual(("not a regular file", True), (cm.exception.reason, cm.exception.not_regular))
+        with self.assertRaises(reg.PathError) as cm:
+            reg.require_regular(root, os.path.join(root, "d", "none.md"))
+        self.assertEqual(("No such file or directory", False), (cm.exception.reason, cm.exception.not_regular))
+
     def test_safe_text_escapes_control_characters(self):
         self.assertEqual("docs/a.md", reg.safe_text("docs/a.md"))
         self.assertEqual("a\\nPASS x", reg.safe_text("a\nPASS x"))

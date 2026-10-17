@@ -55,19 +55,15 @@ def check(args: list) -> Result:
             continue
         for e in registers.decision_commit_errors(d, root, exists):
             r.fail(f"decisions.schema.{did}", e)
-    # only the owner's answer is an answer (spec §5): an agent-answered row is still unanswered
-    unanswered = {d["id"] for d in decisions
-                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])
-                  and (d.get("answer") is None or not isinstance(d.get("answered_at"), dict)
-                       or d["answered_at"].get("by") != owner)}
+    unanswered = {d["id"] for d in registers.open_decisions(decisions, owner=owner)
+                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])}
     for path in ns.scan:
         full = path if os.path.isabs(path) else os.path.join(root, path)
         rel = registers.safe_text(os.path.relpath(full, root))
         try:
             registers.require_regular(root, full)    # opening a FIFO would hang the gate
-        except GateError as exc:
-            why = str(exc)[len(os.path.relpath(full, root)) + 2:]    # drop the "<path>: " prefix
-            r.fail(f"decisions.scan.{rel}", why if why == "not a regular file" else f"cannot read: {why}")
+        except registers.PathError as exc:
+            r.fail(f"decisions.scan.{rel}", exc.reason if exc.not_regular else f"cannot read: {exc.reason}")
             continue
         try:
             with open(full, encoding="utf-8") as fh:

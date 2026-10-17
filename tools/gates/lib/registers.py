@@ -315,8 +315,7 @@ def validate_decision(d: dict, owner=None) -> list:
             errs.append("answered_at: must be null or {sha, by}")
         else:
             errs += _sha_problem("answered_at.sha", at["sha"])
-            if owner is None:
-                owner = config.load(CODE_ROOT)["owner"]["handle"]
+            owner = owner_handle(owner)
             if at["by"] != owner:
                 errs.append(f"{OWNER_ANSWER_ERROR} ({owner}) answers a decision, got {at['by']!r}")
     if (ans is None) != (at is None):
@@ -324,20 +323,30 @@ def validate_decision(d: dict, owner=None) -> list:
     return errs
 
 
-def rel_error(root, path, exc) -> GateError:
-    """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
-    return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
+class PathError(GateError):
+    """A GateError worded `<path relative to root>: <reason>` (machine-independent); `reason` is the bare
+    reason, `not_regular` says the path exists but is not a regular file."""
+
+    def __init__(self, root, path, reason, not_regular=False):
+        super().__init__(f"{os.path.relpath(path, root)}: {reason}")
+        self.reason = reason
+        self.not_regular = not_regular
+
+
+def rel_error(root, path, exc) -> PathError:
+    """A PathError worded `<path relative to root>: <strerror>`."""
+    return PathError(root, path, exc.strerror or str(exc))
 
 
 def require_regular(root, path) -> None:
     """`path` must be a regular file (after following symlinks): opening a FIFO would hang.
-    Anything else, or a path that cannot be examined, is a GateError."""
+    Anything else, or a path that cannot be examined, is a PathError (a GateError)."""
     try:
         mode = os.stat(path).st_mode
     except OSError as exc:
         raise rel_error(root, path, exc) from None
     if not stat.S_ISREG(mode):
-        raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
+        raise PathError(root, path, "not a regular file", not_regular=True)
 
 
 def safe_text(rel: str) -> str:
@@ -393,21 +402,30 @@ def decision_commit_errors(d: dict, root, exists=gitinfo.commit_exists) -> list:
     return _commit_errors(pairs, root, exists)
 
 
+def owner_handle(owner=None) -> str:
+    """`owner`, or config owner.handle when it is None."""
+    return config.load(CODE_ROOT)["owner"]["handle"] if owner is None else owner
+
+
 def finding_by_id(findings, id):
     return next((f for f in findings if f.get("id") == id), None)
 
 
-def open_decisions(decisions) -> list:
-    """Decisions whose answer is None (the owner has not answered)."""
-    return [d for d in decisions if d.get("answer") is None]
+def open_decisions(decisions, *, owner=None) -> list:
+    """Every decision the owner has not answered (owner defaults to config owner.handle): `answer` is
+    None, `answered_at` is not a mapping, or `answered_at.by` is not the owner. Only the owner's answer
+    is an answer (spec §5), so a row answered by an agent is still open."""
+    owner = owner_handle(owner)
+    return [d for d in decisions
+            if d.get("answer") is None or not isinstance(d.get("answered_at"), dict)
+            or d["answered_at"].get("by") != owner]
 
 
 def grant_for(decisions, plan: str, *, owner=None):
     """The merge grant for <plan>: a schema-valid decision of class merge-grant whose question is
     'grant:<plan>' (optionally followed by a space and free text), answered "yes" (case-insensitive)
     by the owner (default: config owner.handle). Any other row is no grant."""
-    if owner is None:
-        owner = config.load(CODE_ROOT)["owner"]["handle"]
+    owner = owner_handle(owner)
     for d in decisions:
         if validate_decision(d, owner) != [] or d["class"] != "merge-grant":
             continue
