@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 198 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (211, 218) are expected values derived from that count, not yet run.
+Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 217 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (230, 237) are expected values derived from that count, not yet run.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -71,7 +71,7 @@ Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config
 8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the exact line `register: true` (DEC-0002: any line that starts `register:` (any case, optionally after a BOM) but is not exactly the marker, such as `register: yes`, `register: "true"` or a BOM before the marker, is a `FAIL register.marker.<file>`, never a silent un-register). Its ids are table first cells and leading list-item ids matching the finding regex, bare or wrapped in `**` / backticks, after an optional checkbox, followed by a space, tab, colon, comma, period or the end of the line. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them. `docs/reviews` must exist; `docs/superpowers/state/briefs` may be absent.
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
 10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
-11. **DEC-0002 and DEC-0003** (owner-delegated 2026-10-17, recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it.
+11. **DEC-0002 and DEC-0003** (owner-delegated 2026-10-17, recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it. **DEC-0004** (owner answered "Yes, add the schema rule" in chat, 2026-10-17, at the b2 final review): every claim cite is a normalised repo-relative path that exists at `verified_at` (a directory only with a trailing `/`); see Task 4 and the state README.
 
 ## Files (S1 creates or modifies exactly these)
 
@@ -415,7 +415,7 @@ class GitInfo(unittest.TestCase):
     def test_bad_revision_raises_gate_error(self):
         with self.assertRaises(GateError) as ctx:
             gitinfo.changed_files(self.root, "0000000", "HEAD")
-        self.assertTrue(str(ctx.exception).startswith("git diff --name-only -z --no-renames 0000000 HEAD: "),
+        self.assertTrue(str(ctx.exception).startswith("git diff --name-only -z --no-renames --end-of-options 0000000 HEAD: "),
                         str(ctx.exception))
         self.assertNotIn(self.root, str(ctx.exception))
 
@@ -586,14 +586,15 @@ class FixWave(unittest.TestCase):
                 rc, out = run(check, ["--json", flag])
             self.assertEqual(1, rc)
             self.assertFalse(out.startswith("usage"), out)
-            self.assertEqual({"status": "FAIL", "id": "demo.input", "reason": "bad arguments (argparse exit 0)"},
+            self.assertEqual({"status": "FAIL", "id": "demo.input", "reason": "help requested; no gate was run"},
                              json.loads(out)["lines"][0])
             self.assertIn("usage: demo", err.getvalue())
             self.assertIn("--root", err.getvalue())
+            self.assertNotIn("bad arguments", out)
         with contextlib.redirect_stderr(io.StringIO()):
             rc, out = run(check, ["--roo", "x"])
         self.assertEqual(1, rc)
-        self.assertIn("FAIL demo.input: bad arguments", out)
+        self.assertIn("FAIL demo.input: bad arguments (argparse exit 2)", out)
 
     def test_load_yaml_messages_are_relative_to_the_root(self):                      # A7
         d = tempfile.mkdtemp(prefix="gate-yaml-")
@@ -889,7 +890,10 @@ def run_check(name: str, check: Callable[[list], Result], args: list) -> Result:
         result = check(list(args))
     except SystemExit as exc:          # argparse: bad arguments are a FAIL, never a skip
         result = Result(name)
-        result.fail(f"{name}.input", f"bad arguments (argparse exit {exc.code})")
+        if exc.code == 0:              # -h/--help: a request for usage, not bad arguments; no gate ran
+            result.fail(f"{name}.input", "help requested; no gate was run")
+        else:
+            result.fail(f"{name}.input", f"bad arguments (argparse exit {exc.code})")
     except Exception as exc:           # GateError and anything unexpected
         result = Result(name)
         result.fail(f"{name}.input", str(exc) or type(exc).__name__)
@@ -1050,9 +1054,27 @@ def worktrees(root) -> list:
 
 
 def changed_files(root, base: str, head: str = "HEAD") -> list:
-    """Paths that differ between two commits (`git diff --name-only -z --no-renames`; -z means no C-quoting of non-ASCII paths)."""
-    out = _git(root, "diff", "--name-only", "-z", "--no-renames", base, head)
+    """Paths that differ between two commits (`git diff --name-only -z --no-renames --end-of-options`; -z means no C-quoting of non-ASCII
+    paths, --end-of-options means a revision shaped like an option is a revision, never an option)."""
+    out = _git(root, "diff", "--name-only", "-z", "--no-renames", "--end-of-options", base, head)
     return [l for l in out.split("\0") if l]
+
+
+def path_type(root, rev: str, path: str):
+    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule) or None when `path` does not exist
+    at `rev` (`git cat-file -t <rev>:<path>`); any other git failure is a GateError."""
+    cmd = ["git", "cat-file", "-t", f"{rev}:{path}"]
+    _check_root(cmd, str(root))
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False, env=_env())
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
+    if p.returncode == 0:
+        return p.stdout.strip()
+    if p.returncode == 128 and any(m in p.stderr for m in ("does not exist in", "exists on disk, but not in",
+                                                  "Not a valid object name", "could not get object info")):
+        return None
+    raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
 
 
 def staged_files(root) -> list:
@@ -1168,8 +1190,8 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
 | File | Holds | Gate |
 |---|---|---|
 | `findings.yml` | one row per finding, with owner, lifecycle state and evidence | `gate_register` |
-| `claims.yml` | one row per factual statement in a tracked document | `gate_claims` (arrives in block b2) |
-| `decisions.yml` | owner questions and merge grants (`grant:<plan>`) | `gate_decisions` (arrives in block b2) |
+| `claims.yml` | one row per factual statement in a tracked document | `gate_claims` |
+| `decisions.yml` | owner questions and merge grants (`grant:<plan>`) | `gate_decisions` |
 | `<plan>/ledger.md` | the plan's progress ledger, rulings, `CHECKPOINT b<N>` lines | by hand |
 | `<plan>/handoff.md` | the checkpoint handoff | by hand |
 | `<plan>/mutations/<id>.txt` | mutation transcripts that pin a finding | `gate_register` |
@@ -1192,9 +1214,12 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   gate needs full history: a shallow clone FAILs `register.evidence` by design, and CI checks out
   with `fetch-depth: 0`.
 - Claims: `verified` needs `verified_at` and `by`; a verified row whose cited file changes goes
-  stale (the `gate_claims` gate and its `--mark-stale` command arrive in block b2; the command
-  rewrites `claims.yml` through PyYAML, so comments in it are not kept: keep none there).
-  `false` needs `finding` = a registered finding id.
+  stale (`gate_claims` fails it; `gate_claims.py --mark-stale --base <sha>` rewrites such rows as
+  `stale` through PyYAML, so comments in `claims.yml` are not kept: keep none there). Every cite is a
+  normalised repo-relative path (decision DEC-0004): no `./`, `..`, leading `/`, `//`, NUL or
+  surrounding space; a directory cite ends in exactly one `/`. `gate_claims` also fails a
+  `verified` row whose cite is not a file (or, with a trailing `/`, a directory) at `verified_at`,
+  because such a row could never go stale. `false` needs `finding` = a registered finding id.
 - Decisions: only the owner answers. The owner states the answer in chat; the session records it
   verbatim (a quoted string) with `answered_at.by: superbrobenji`, the owner handle in
   `tools/gates/config.yml`, and quotes the owner's words in the commit message. An agent never
@@ -1313,8 +1338,8 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003"], [d["id"] for d in decisions])
-        self.assertEqual([[], [], []], [reg.validate_decision(d) for d in decisions])
+        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0004"], [d["id"] for d in decisions])
+        self.assertEqual([[], [], [], []], [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -1514,6 +1539,23 @@ class ClaimSchema(unittest.TestCase):
 
     def test_a_claim_must_cite_something(self):
         self.assertTrue(any(e.startswith("cites: ") for e in reg.validate_claim(with_(CLAIM, cites=[]))))
+
+    def test_a_cite_is_a_normalised_repo_relative_path(self):                        # DEC-0004
+        for ok in ("a.c", "src/a.c", "src/", "docs/superpowers/state/claims.yml", "a b/c d.c", ".github/x.yml"):
+            self.assertEqual([], reg.validate_claim(with_(CLAIM, cites=[ok])), ok)
+        bad = {"not a non-empty string": ["", 5, None, ["a.c"]],
+               "whitespace or a NUL": [" ", "src/a.c ", " src/a.c", "a\0b", "src/\n"],
+               "is absolute": ["/src/a.c", "/", "//", "//x"],
+               "climbs out": ["..", ".", "./", "../x.c", "src/..", "src/../a.c", "src/../"],
+               "not normalised": ["./src/a.c", "src//a.c", "src//", "src/./a.c", "src/a.c/.", "src/a.c//"]}
+        for why, cites in bad.items():
+            for cite in cites:
+                errs = reg.validate_claim(with_(CLAIM, cites=[cite]))
+                self.assertEqual(1, len(errs), (cite, errs))
+                self.assertTrue(errs[0].startswith("cites: ") and why in errs[0], (cite, errs))
+        errs = reg.validate_claim(with_(CLAIM, cites=["a.c", "./b.c"]))
+        self.assertEqual(1, len(errs), errs)
+        self.assertIn("'./b.c'", errs[0])
 
 
 class DecisionSchema(unittest.TestCase):
@@ -2095,6 +2137,23 @@ def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
     return errs
 
 
+def cite_problem(cite) -> str:
+    """'' when `cite` is a normalised repo-relative path (DEC-0004), else why it is not. A directory
+    cite ends in exactly one '/'. The path must also exist at verified_at (gate_claims checks that)."""
+    if not isinstance(cite, str) or not cite:
+        return "is not a non-empty string"
+    if cite != cite.strip() or "\0" in cite:
+        return "has leading or trailing whitespace or a NUL"
+    if cite.startswith("/"):
+        return "is absolute: write a path relative to the repository root"
+    body = cite[:-1] if cite.endswith("/") else cite
+    if body == "." or ".." in body.split("/"):
+        return "climbs out of or names the repository root ('.' or '..')"
+    if os.path.normpath(body) != body:
+        return "is not normalised: no './' segment, '//' or repeated trailing '/'"
+    return ""
+
+
 def validate_claim(c: dict) -> list:
     errs = _keys(c, CLAIM_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
@@ -2104,8 +2163,13 @@ def validate_claim(c: dict) -> list:
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
             errs.append(f"{k}: must be a non-empty string" + _hint(c[k]))
-    if not isinstance(c["cites"], list) or not c["cites"] or not all(_text(p) for p in c["cites"]):
+    if not isinstance(c["cites"], list) or not c["cites"]:
         errs.append("cites: must be a non-empty list of paths (a claim citing nothing can never go stale)")
+    else:
+        for p in c["cites"]:
+            why = cite_problem(p)
+            if why:
+                errs.append(f"cites: {p!r} {why} (a cite that names no changed path can never go stale)")
     if c["state"] is False:
         errs.append('state: YAML read false as a boolean; quote it: state: "false"')
     elif c["state"] not in CLAIM_STATES:
@@ -2287,13 +2351,13 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 52 tests` OK; whole suite `Ran 91 tests` OK.
+Expected: `Ran 53 tests` OK; whole suite `Ran 92 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 52 OK` to the ledger.
+Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 53 OK` to the ledger.
 
 ```bash
 git add tools/gates/lib/registers.py tools/gates/tests/test_registers.py docs/superpowers/state/strict-delivery/ledger.md
@@ -3281,7 +3345,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 133 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 134 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -3292,7 +3356,7 @@ Mutation check (report scan): in `registered_reports`, replace `if MARKER in att
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 133 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 134 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -3461,8 +3525,8 @@ grep -n 'answer:' docs/superpowers/state/decisions.yml   # DEC-0001 answer: "yes
 - Test: `tools/gates/tests/test_gate_claims.py`
 
 **Interfaces:**
-- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`; `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `row_id`, `memo_commit_exists`, `CLAIM_ID`, `STATE_DIR`.
-- Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root; an empty or unknown `--head` is `FAIL claims.input`), `--mark-stale --base <sha>` (refuses to rewrite claims.yml, `FAIL claims.input`, unless every row validates and no id repeats; the rewrite drops YAML comments); `main(argv=None)`; `hits(cites, changed) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`). Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
+- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`, `path_type`; `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `row_id`, `memo_commit_exists`, `CLAIM_ID`, `STATE_DIR`.
+- Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root; an empty or unknown `--head` is `FAIL claims.input`), `--mark-stale --base <sha>` (refuses to rewrite claims.yml, `FAIL claims.input`, unless every row validates and no id repeats; the rewrite drops YAML comments); `main(argv=None)`; `hits(cites, changed) -> list[str]`; `cite_errors(root, claim) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`: well-formed, `verified`, every cite present, not stale). `--base` must name a commit like `--head` (empty or unknown is `FAIL claims.input`) and reaches git after `--end-of-options`. **Cites (DEC-0004):** `validate_claim` requires every cite to be a normalised repo-relative path (`registers.cite_problem`: a non-empty string, no surrounding whitespace or NUL, no leading `/`, no `.` or `..` segment, equal to `os.path.normpath`; a directory cite ends in exactly one `/`), and a `verified` row whose cite is not a file (a directory with the trailing `/`) at `verified_at` is `claims.stale.<id>`: such a row could never go stale. Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3483,7 +3547,7 @@ import unittest
 from unittest import mock
 
 from tools.gates import gate_claims
-from tools.gates.lib import gitinfo, registers
+from tools.gates.lib import GateError, gitinfo, registers
 from tools.gates.tests import gitfixture as gf
 
 CLAIMS = os.path.join(gf.STATE, "claims.yml")
@@ -3557,7 +3621,7 @@ class ClaimsRepo(unittest.TestCase):
         rc, out = self.run_gate()
         self.assertIn("FAIL claims.stale.C-demo-1", out)
         self.assertEqual(1, rc)
-        rc, out = self.run_gate("--mark-stale", "--base", "HEAD")
+        rc, out = self.run_gate("--mark-stale", "--base", gf.git(self.root, "rev-parse", "HEAD"))
         self.assertIn("PASS claims.marked-stale.C-demo-1", out)
         self.assertEqual(0, rc, out)
 
@@ -3734,6 +3798,104 @@ class ClaimsRepo(unittest.TestCase):
         self.assertFalse(gate_claims.verified_at_head(self.root, c, head))
         self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, state="unverified"), head))
 
+    def test_a_directory_cite_does_not_cover_a_sibling_with_the_same_prefix(self):
+        gf.write(self.root, "src2/x.c", "int x;\n")
+        v = gf.commit_all(self.root, "src2")
+        self.claims(row(verified_at=f'"{v}"', cites="src/"))
+        gf.write(self.root, "src2/x.c", "int x2;\n")
+        gf.commit_all(self.root)
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS claims.stale", out)
+
+    def test_verified_at_head_is_false_for_a_stale_or_malformed_row(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        c = registers.load_claims(self.root)[0]
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        self.assertTrue(gate_claims.verified_at_head(self.root, c, head))
+        self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, state="stale"), head))
+        self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, text=5), head))    # malformed, not a raise
+        self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, cites=["src/typo.c"]), head))
+
+    def test_head_is_honoured_in_mark_stale_mode(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        gf.write(self.root, "src/a.c", "int a(void) { return 6; }\n")
+        gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
+        rc, out = self.run_gate("--mark-stale", "--base", self.v, "--head", self.v)    # nothing differs v..v
+        self.assertIn("PASS claims.marked-stale.none", out)
+        self.assertEqual(0, rc, out)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
+
+    def test_mark_stale_refuses_a_row_whose_verified_at_is_not_a_commit(self):
+        self.claims(row(verified_at='"1234abc"'))
+        gf.write(self.root, "src/a.c", "int a(void) { return 7; }\n")
+        gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
+        rc, out = self.run_gate("--mark-stale", "--base", self.v)
+        self.assertTrue(out.startswith("FAIL claims.input: refusing to rewrite "), out)
+        self.assertIn("C-demo-1", out)
+        self.assertEqual(1, rc)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
+
+    def test_a_bad_base_is_an_input_failure_and_never_reaches_git_as_an_option(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        out_file = os.path.join(self.root, "injected.txt")
+        for base in ("", "  ", "deadbee", "--cached", f"--output={out_file}", "HEAD"):
+            rc, out = self.run_gate("--mark-stale", f"--base={base}")
+            self.assertEqual(1, rc, (base, out))
+            self.assertTrue(out.startswith("FAIL claims.input: "), (base, out))
+            self.assertNotIn("PASS", out, base)
+        self.assertFalse(os.path.exists(out_file))
+        self.assertEqual("", gf.git(self.root, "status", "--porcelain"))
+
+    def test_changed_files_treats_an_option_shaped_revision_as_a_revision(self):
+        out_file = os.path.join(self.root, "injected.txt")
+        with self.assertRaises(GateError):
+            gitinfo.changed_files(self.root, f"--output={out_file}", "HEAD")
+        self.assertFalse(os.path.exists(out_file))
+
+    def test_a_cite_that_names_no_tracked_path_fails(self):
+        # every shape is a fail-open without DEC-0004: the row would stay `verified` forever
+        shapes = ("src", "./src/a.c", "src//a.c", "src/typo.c", "src/a.c/", "SRC/a.c", "src/A.c", " src/a.c",
+                  "src/a.c ", "/src/a.c", "src/../src/a.c", "..", ".", "src/..", "src/a.c/.")
+        for n, cite in enumerate(shapes):
+            self.claims(row(verified_at=f'"{self.v}"', cites=f'"{cite}"'))
+            gf.write(self.root, "src/a.c", f"int a(void) {{ return {n + 10}; }}\n")
+            gf.commit_all(self.root, "touch")
+            rc, out = self.run_gate()
+            self.assertEqual(1, rc, (cite, out))
+            self.assertRegex(out, r"FAIL claims\.(schema|stale)\.C-demo-1: ", cite)
+            self.assertNotIn("PASS claims.stale", out, cite)
+
+    def test_an_untouched_row_with_a_missing_cite_fails_too(self):
+        self.claims(row(verified_at=f'"{self.v}"', cites="src/typo.c"))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite src/typo.c is not a file at verified_at", out)
+        self.assertEqual(1, rc)
+
+    def test_a_directory_cite_needs_a_directory_and_a_file_cite_a_file(self):
+        self.claims(row(verified_at=f'"{self.v}"', cites="src"))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite src is not a file at verified_at", out)
+        self.claims(row(verified_at=f'"{self.v}"', cites='"src/a.c/"'))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite src/a.c/ is not a directory at verified_at", out)
+        self.claims(row(verified_at=f'"{self.v}"', cites='"src/", "src/a.c"'))
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+
+    def test_a_cite_only_needs_to_exist_on_a_verified_row(self):
+        self.claims(row(state="unverified", verified_at="null", by="null", cites="src/typo.c"))
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -3758,7 +3920,9 @@ Expected: ERROR, `ImportError: cannot import name 'gate_claims' from 'tools.gate
 A row is "verified at HEAD" when its state is `verified` and no file it cites differs between
 `verified_at` and HEAD, nor is staged for the next commit. (`verified_at` cannot literally equal
 the HEAD that contains the row: a commit cannot hold its own sha.) A cite ending in "/" covers
-every file under that directory. --mark-stale rewrites every `verified` row whose cites
+every file under that directory. Every cite is a normalised repo-relative path (DEC-0004) that
+exists at `verified_at` -- a blob, or a tree when the cite ends in "/" -- else the verified row is a
+FAIL claims.stale.<id> (it could never go stale). --base must name a commit like --head. --mark-stale rewrites every `verified` row whose cites
 intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. It
 rewrites claims.yml with yaml.safe_dump, so YAML comments and hand formatting are lost, and it
 refuses to write (FAIL claims.input) unless every row validates and has no duplicate id. --head
@@ -3788,12 +3952,25 @@ def hits(cites: list, changed) -> list:
                   if any(p == c or (c.endswith("/") and p.startswith(c)) for c in cites))
 
 
+def cite_errors(root, claim: dict) -> list:
+    """Why a cite of a verified claim names nothing at verified_at (DEC-0004); [] when all exist."""
+    errs = []
+    for c in claim["cites"]:
+        want, kind = ("tree", "directory") if c.endswith("/") else ("blob", "file")
+        if gitinfo.path_type(root, claim["verified_at"], c) != want:
+            errs.append(f"cite {c} is not a {kind} at verified_at {claim['verified_at']}")
+    return errs
+
+
 def stale_reason(root, claim: dict, head: str, staged) -> str:
     """'' when a verified claim still holds at head, else why it does not."""
     try:
         changed = gitinfo.changed_files(root, claim["verified_at"], head)
     except GateError as exc:
         return f"verified_at {claim['verified_at']} is not comparable with {head}: {exc}"
+    missing = cite_errors(root, claim)
+    if missing:
+        return "; ".join(missing)
     hit = hits(claim["cites"], list(changed) + list(staged))
     if hit:
         return (f"cited file(s) changed since verified_at {claim['verified_at']}: {', '.join(hit)}; "
@@ -3859,6 +4036,8 @@ def check(args: list) -> Result:
     if ns.mark_stale:
         if not ns.base:
             raise GateError("--mark-stale needs --base <sha>")
+        if not exists(root, ns.base):
+            raise GateError(f"--base {ns.base} is not a commit in this repository")
         head = head or gitinfo.head_sha(root)
         mark_stale(root, claims, ns.base, head, r, exists)
     staged = None
@@ -3907,15 +4086,15 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 23 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 33 tests ... OK
 python3 tools/gates/gate_claims.py; echo rc=$?              # 4 PASS lines (0 claims), rc=0
 ```
 
-Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `registers.row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails.
+Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `registers.row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails. Fix-wave mutations, each killed by the test it names: drop the `registers.validate_claim(claim)` call in `verified_at_head` or let a `stale` row through (`test_verified_at_head_is_false_for_a_stale_or_malformed_row`); drop `claim_commit_errors` from the `--mark-stale` refusal (`test_mark_stale_refuses_a_row_whose_verified_at_is_not_a_commit`); `head = head or gitinfo.head_sha(root)` -> `head = gitinfo.head_sha(root)` (`test_head_is_honoured_in_mark_stale_mode`); `p.startswith(c)` -> `p.startswith(c.rstrip("/"))` in `hits` (`test_a_directory_cite_does_not_cover_a_sibling_with_the_same_prefix`); drop the `exists(root, ns.base)` check (`test_a_bad_base_is_an_input_failure_and_never_reaches_git_as_an_option`) or `--end-of-options` in `gitinfo.changed_files` (`test_changed_files_treats_an_option_shaped_revision_as_a_revision`); drop `cite_errors` from `stale_reason`, swap the file/directory test or drop one clause of `registers.cite_problem` (`test_a_cite_that_names_no_tracked_path_fails`, `test_a_directory_cite_needs_a_directory_and_a_file_cite_a_file`, `test_registers.ClaimSchema.test_a_cite_is_a_normalised_repo_relative_path`).
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T4 feat(gates): gate_claims -- test_gate_claims 23 OK` to the end of `docs/superpowers/state/strict-delivery/ledger.md` (the `## Block b2 (branch block/strict-delivery-b2)` heading and its base line already exist).
+Append `- T4 feat(gates): gate_claims -- test_gate_claims 33 OK` to the end of `docs/superpowers/state/strict-delivery/ledger.md` (the `## Block b2 (branch block/strict-delivery-b2)` heading and its base line already exist).
 
 ```bash
 git add tools/gates/gate_claims.py tools/gates/tests/test_gate_claims.py docs/superpowers/state/strict-delivery/ledger.md
@@ -3931,7 +4110,7 @@ git commit -m "feat(gates): gate_claims -- claim schema, stale-at-HEAD detection
 
 **Interfaces:**
 - Consumes: `CODE_ROOT`, `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `config.load`; `registers.load_decisions`, `validate_decision(d, owner=owner)`, `decision_commit_errors`, `open_decisions`, `row_id`, `memo_commit_exists`, `PathError`, `require_regular`, `safe_text`, `OWNER_ANSWER_ERROR`, `DECISION_ID`, `DECISION_CLASSES`.
-- Produces: `gate_decisions.check(args) -> Result` with args `--root <tree>` (an empty one is `FAIL decisions.input: --root is empty`), `--scan <path> ...` (relative paths resolve against root); `main(argv=None)`; `OWNER_ONLY_CLASSES: list[str]` (= all eight classes, spec §5); `REF = re.compile(r"DEC-\d{4}(?!\d)")`. Line ids: `decisions.{schema|duplicate|owner|open-ref|scan}.<id or path>` on FAIL, the row id being `entry-<i>` when the id is not a well-formed str (forgery-safe); `decisions.owner.<id>` carries `validate_decision`'s own `answered_at.by: only the owner (...)` error, every other schema error and every `decision_commit_errors` error (DEC-0003) is `decisions.schema.<id>`. One `PASS decisions.<category>` per category (schema, duplicate, owner, open-ref, scan) that failed nowhere and that every row reached: a row with an error other than the owner one skips `schema`, `owner` and `open-ref` (no PASS line for those); a row whose only error is the owner one still gets its sha check (`decisions.schema`). Only the owner's answer is an answer: the unanswered ids (open references) are `registers.open_decisions(decisions, owner=owner)`, filtered to well-formed DECISION_IDs. A `--scan` path that is not a regular file (a directory, a FIFO) is `FAIL decisions.scan.<rel>: not a regular file`; line numbers count `\n` only. One `commit_exists` call per distinct sha (`memo_commit_exists`). With no `--scan` path (absent, or `--scan` alone) nothing is scanned, so `scan` and `open-ref` print no PASS line (the other categories still do).
+- Produces: `gate_decisions.check(args) -> Result` with args `--root <tree>` (an empty one is `FAIL decisions.input: --root is empty`), `--scan <path> ...` (relative paths resolve against root; repeated options add up, `action="extend"`); `main(argv=None)`; `OWNER_ONLY_CLASSES: list[str]` (= all eight classes, spec §5); `REF = re.compile(r"DEC-\d{4}(?!\d)")`. Line ids: `decisions.{schema|duplicate|owner|open-ref|scan}.<id or path>` on FAIL, the row id being `entry-<i>` when the id is not a well-formed str (forgery-safe); `decisions.owner.<id>` carries `validate_decision`'s own `answered_at.by: only the owner (...)` error, every other schema error and every `decision_commit_errors` error (DEC-0003) is `decisions.schema.<id>`. One `PASS decisions.<category>` per category (schema, duplicate, owner, open-ref, scan) that failed nowhere and that every row reached: a row with an error other than the owner one skips `schema`, `owner` and `open-ref` (no PASS line for those); a row whose only error is the owner one still gets its sha check (`decisions.schema`). Only the owner's answer is an answer: the unanswered ids (open references) are `registers.open_decisions(decisions, owner=owner)`, filtered to well-formed DECISION_IDs. A `--scan` path that is not a regular file (a directory, a FIFO) is `FAIL decisions.scan.<rel>: not a regular file`, and any unreadable `--scan` file (also missing, not UTF-8) withholds the `open-ref` PASS line (its references were not examined); the owner handle is `registers.owner_handle()`; line numbers count `\n` only. One `commit_exists` call per distinct sha (`memo_commit_exists`). With no `--scan` path (absent, or `--scan` alone) nothing is scanned, so `scan` and `open-ref` print no PASS line (the other categories still do).
 - [ ] **Step 1: Write the failing tests**
 
 `tools/gates/tests/test_gate_decisions.py`:
@@ -4049,6 +4228,7 @@ class GateDecisions(unittest.TestCase):
         rc, out = self.run_gate(OPEN, "--scan", "docs/absent.md")
         self.assertIn("FAIL decisions.scan.docs/absent.md: cannot read", out)
         self.assertNotIn("PASS decisions.scan", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
         self.assertEqual(1, rc)
 
     def test_a_directory_and_a_non_utf8_scan_file_fail(self):
@@ -4059,7 +4239,52 @@ class GateDecisions(unittest.TestCase):
         self.assertIn("FAIL decisions.scan.docs/dir: not a regular file", out)
         self.assertIn("FAIL decisions.scan.docs/bin.md: cannot read: not valid UTF-8", out)
         self.assertNotIn("PASS decisions.scan", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
         self.assertEqual(1, rc)
+
+    def test_a_non_utf8_scan_file_alone_withholds_the_open_ref_pass(self):
+        with open(os.path.join(self.root, "docs-bin.md"), "wb") as fh:
+            fh.write(b"\xff\xfe DEC-9001\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs-bin.md")
+        self.assertIn("FAIL decisions.scan.docs-bin.md: cannot read: not valid UTF-8", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unreadable_scan_file_is_a_scan_failure(self):
+        if not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("file modes do not stop root")
+        path = gf.write(self.root, "docs/locked.md", "DEC-9001\n")
+        os.chmod(path, 0)
+        try:
+            rc, out = self.run_gate(OPEN, "--scan", "docs/locked.md")
+        finally:
+            os.chmod(path, 0o600)
+        self.assertIn("FAIL decisions.scan.docs/locked.md: cannot read: Permission denied", out)
+        self.assertNotIn("decisions.input", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unhashable_id_is_a_schema_failure_not_a_crash(self):
+        bad = OPEN.replace("id: DEC-9001", "id: [DEC-9001]")
+        gf.write(self.root, "docs/plan.md", "nothing\n")
+        rc, out = self.run_gate(bad, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.schema.entry-0: id: ", out)
+        self.assertNotIn("decisions.input", out)
+        self.assertEqual(1, rc)
+
+    def test_repeated_scan_options_add_up(self):
+        gf.write(self.root, "docs/a.md", "clean\n")
+        gf.write(self.root, "docs/b.md", "waits on DEC-9001\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/b.md", "--scan", "docs/a.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/b.md:1", out)
+        self.assertEqual(1, rc)
+
+    def test_the_owner_comes_from_the_shared_helper(self):
+        spy = mock.Mock(wraps=registers.owner_handle)
+        with mock.patch.object(registers, "owner_handle", spy):
+            rc, out = self.run_gate(ANSWERED.replace("BY", "superbrobenji"))
+        self.assertEqual(0, rc, out)
+        self.assertIn(mock.call(), spy.call_args_list)    # the gate asks the helper itself, once, for the default
 
     def test_a_fifo_scan_path_fails_instead_of_hanging(self):
         if not hasattr(os, "mkfifo"):
@@ -4190,7 +4415,9 @@ tools/gates/config.yml (every class in OWNER_ONLY_CLASSES is answered by the own
 schema check in registers.validate_decision rejects it and this gate files it under `owner`);
 an asked_at / answered_at sha that is not a commit of the gated repository (DEC-0003, filed under
 `schema`); and any reference to an unanswered decision id (DEC-NNNN) in a --scan file. A --scan
-path that cannot be read (missing, a directory, not UTF-8) is a FAIL, never a skip. Row ids print
+path that cannot be read (missing, a directory, not UTF-8) is a FAIL, never a skip, and
+it withholds the `open-ref` PASS line (none of that file's references were examined); repeated --scan
+options add up. Row ids print
 forgery-safe (entry-<i> when the id is malformed), an empty --root is an error, and a category
 some row never reached prints no PASS line (an empty or absent --scan list never prints PASS for
 `scan` or `open-ref`).
@@ -4203,8 +4430,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
-from tools.gates.lib import config, registers  # noqa: E402
+from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
 
 # spec §5: "Decision classes (owner-only, always)" -- every class in the register.
 OWNER_ONLY_CLASSES = list(registers.DECISION_CLASSES)
@@ -4214,12 +4441,12 @@ CATEGORIES = ["schema", "duplicate", "owner", "open-ref", "scan"]
 
 def check(args: list) -> Result:
     ap = gate_args("gate_decisions")
-    ap.add_argument("--scan", nargs="*", default=[], help="files that must not cite an unanswered decision")
+    ap.add_argument("--scan", nargs="*", action="extend", default=[], help="files that must not cite an unanswered decision")
     ns = ap.parse_args(args)
     if ns.root is not None and not ns.root.strip():
         raise GateError("--root is empty")
     root = ns.root if ns.root is not None else repo_root()
-    owner = config.load(CODE_ROOT)["owner"]["handle"]
+    owner = registers.owner_handle()
     decisions = registers.load_decisions(root)
     r = Result("decisions")
     exists = registers.memo_commit_exists()    # one git call per distinct sha
@@ -4248,15 +4475,18 @@ def check(args: list) -> Result:
         try:
             registers.require_regular(root, full)    # opening a FIFO would hang the gate
         except registers.PathError as exc:
+            skipped.add("open-ref")    # this file's references were not examined
             r.fail(f"decisions.scan.{rel}", exc.reason if exc.not_regular else f"cannot read: {exc.reason}")
             continue
         try:
             with open(full, encoding="utf-8") as fh:
                 text = fh.read()
         except OSError as exc:
+            skipped.add("open-ref")
             r.fail(f"decisions.scan.{rel}", f"cannot read: {exc.strerror or exc}")
             continue
         except UnicodeDecodeError:
+            skipped.add("open-ref")
             r.fail(f"decisions.scan.{rel}", "cannot read: not valid UTF-8")
             continue
         for n, line in enumerate(text.split("\n"), 1):
@@ -4281,7 +4511,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_decisions -v                          # Ran 21 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_decisions -v                          # Ran 26 tests ... OK
 python3 tools/gates/gate_decisions.py --scan docs/superpowers/plans/*.md; echo rc=$?  # 5 PASS lines, rc=0 (DEC-0001..0003 answered)
 ```
 
@@ -4301,13 +4531,14 @@ Mutation checks (`PYTHONDONTWRITEBYTECODE=1`; restore after each), each with the
 - drop the `UnicodeDecodeError` branch: `test_a_directory_and_a_non_utf8_scan_file_fail`;
 - drop `safe_text` from the scan path: `test_a_scan_path_cannot_forge_a_result_line`;
 - drop the duplicate FAIL: `test_schema_errors_and_duplicates_fail`;
-- drop the `if not ns.scan:` branch (`skipped.update(["scan", "open-ref"])`): `test_without_a_scan_list_no_scan_or_open_ref_line_passes`.
+- drop the `if not ns.scan:` branch (`skipped.update(["scan", "open-ref"])`): `test_without_a_scan_list_no_scan_or_open_ref_line_passes`;
+- fix wave: `action="extend"` removed from `--scan`: `test_repeated_scan_options_add_up`; drop `skipped.add("open-ref")` on the `PathError`, `OSError` or `UnicodeDecodeError` path: `test_a_missing_scan_file_fails`, `test_an_unreadable_scan_file_is_a_scan_failure`, `test_a_non_utf8_scan_file_alone_withholds_the_open_ref_pass`; drop the `except OSError` branch: `test_an_unreadable_scan_file_is_a_scan_failure`; drop the `DECISION_ID` filter on `unanswered`: `test_an_unhashable_id_is_a_schema_failure_not_a_crash`; read the owner from `config` instead of `registers.owner_handle()`: `test_the_owner_comes_from_the_shared_helper`.
 
 Restore and run again: OK.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T5 feat(gates): gate_decisions -- test_gate_decisions 21 OK` to the ledger.
+Append `- T5 feat(gates): gate_decisions -- test_gate_decisions 26 OK` to the ledger.
 
 ```bash
 git add tools/gates/gate_decisions.py tools/gates/tests/test_gate_decisions.py docs/superpowers/state/strict-delivery/ledger.md
@@ -4322,7 +4553,7 @@ git commit -m "feat(gates): gate_decisions -- owner-only answers, no reference t
 
 **Interfaces:**
 - Consumes: `Line`, `Result`, `GateError`, `gate_args`, `repo_root`, `run_check`, `run_gate`; the three gate modules (`tools.gates.gate_<name>.check`).
-- Produces (umbrella "run_all.py"): `GATES = ["register", "claims", "decisions"]` (the gates installed at this block; S2–S4 append theirs); `run(names: list[str], args: dict) -> Result`. `args` keys: `"root"` (tree; default `repo_root()`; not a str is `FAIL <name>.input: --root is not a path`, blank is `--root is empty`, not an existing directory is `--root is not a directory: <root>`; never the cwd repo), plus `"<gate name>": [extra argv]`. `decisions` always gets `--scan` with every `docs/superpowers/plans/*.md` under root; none there (directory missing or empty) is `FAIL decisions.input: no docs/superpowers/plans/*.md under the root: nothing to scan`. Line ids are prefixed `<name>.` unless they already start with `<name>.` (a gate's line naming another gate stays under its own gate's prefix). Unknown name: `FAIL run_all.unknown`. A name given twice runs once and adds `FAIL run_all.duplicate`. No names: `FAIL run_all.empty`. Missing module: `FAIL <name>.input`. Also `gate_argv(name, args) -> list` (raises `GateError`, which `run` turns into the FAIL), `check(args) -> Result` and `main(argv=None) -> int` through `run_gate` (lib conventions: `--json` first, `--only a,b`, `--root <tree>`, no abbreviations, help on stderr, bad arguments are `FAIL run_all.input: bad arguments (argparse exit N)` rc 1). CI job id and name: `gates` (one job, no matrix; the gate tests run on Python 3.9 and 3.12).
+- Produces (umbrella "run_all.py"): `GATES = ["register", "claims", "decisions"]` (the gates installed at this block; S2–S4 append theirs); `run(names: list[str], args: dict) -> Result`. `args` keys: `"root"` (tree; default `repo_root()`; not a str is `FAIL <name>.input: --root is not a path`, blank is `--root is empty`, not an existing directory is `--root is not a directory: <root>`; never the cwd repo), plus `"<gate name>": [extra argv]`. `decisions` always gets `--scan` with every `docs/superpowers/plans/*.md` under root (an extra `"decisions": ["--scan", p]` adds to them, never replaces them), and `gate_argv` resolves the root to an absolute path once, so a relative `--root` works from any cwd; none there (directory missing or empty) is `FAIL decisions.input: no docs/superpowers/plans/*.md under the root: nothing to scan`. Line ids are prefixed `<name>.` unless they already start with `<name>.` (a gate's line naming another gate stays under its own gate's prefix). Unknown name: `FAIL run_all.unknown`. A name given twice runs once and adds `FAIL run_all.duplicate`. No names: `FAIL run_all.empty`. Missing module: `FAIL <name>.input`. Also `gate_argv(name, args) -> list` (raises `GateError`, which `run` turns into the FAIL), `check(args) -> Result` and `main(argv=None) -> int` through `run_gate` (lib conventions: `--json` first, `--only a,b`, `--root <tree>`, no abbreviations, help on stderr, bad arguments are `FAIL run_all.input: bad arguments (argparse exit N)` rc 1; `-h` is `FAIL run_all.input: help requested; no gate was run` rc 1, for every gate through `run_check`). CI job id and name: `gates` (one job, no matrix; the gate tests run on Python 3.9 and 3.12).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4477,6 +4708,37 @@ class RunAll(unittest.TestCase):
         res = run_all.run(["claims"], {"root": self.root, "claims": ["--mark-stale"]})
         self.assertIn("FAIL claims.input: --mark-stale needs --base <sha>", res.render(False))
 
+    def test_an_extra_scan_adds_to_the_plans_never_replaces_them(self):
+        gf.write(self.root, os.path.join(gf.STATE, "decisions.yml"),
+                 '- {id: DEC-9001, class: scope, question: "q?", options: [{label: a, cost: x}, '
+                 '{label: b, cost: y}], asked_at: {sha: "%s", by: s}, answer: null, answered_at: null}\n'
+                 % self.sha)
+        gf.write(self.root, os.path.join(PLANS, "p.md"), "waits on DEC-9001\n")
+        gf.write(self.root, "prompt.md", "a clean prompt\n")
+        res = run_all.run(["decisions"], {"root": self.root, "decisions": ["--scan", "prompt.md"]})
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/superpowers/plans/p.md:1", res.render(False))
+
+    def test_a_relative_root_works_from_any_cwd(self):
+        parent, name = os.path.split(self.root)
+        old = os.getcwd()
+        os.chdir(parent)
+        try:
+            for root in (name, os.path.join(".", name), os.path.join(name, "docs", "..")):
+                res = run_all.run(run_all.GATES, {"root": root})
+                self.assertTrue(res.ok(), (root, res.render(False)))
+                self.assertIn("PASS decisions.open-ref", res.render(False))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(0, run_all.main(["--root", name]), buf.getvalue())
+        finally:
+            os.chdir(old)
+
+    def test_cli_help_is_not_called_bad_arguments(self):
+        p = self.cli("-h")
+        self.assertEqual(1, p.returncode)
+        self.assertIn("usage: run_all", p.stderr)
+        self.assertEqual("FAIL run_all.input: help requested; no gate was run\n", p.stdout)
+
     def test_cli_only_and_rc(self):
         p = self.cli("--only", "register")
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
@@ -4555,6 +4817,7 @@ def gate_argv(name: str, args: dict) -> list:
         raise GateError("--root is empty")
     if not os.path.isdir(root):
         raise GateError(f"--root is not a directory: {root}")
+    root = os.path.abspath(root)    # one form for every gate: a relative root works from any cwd
     argv = ["--root", root]
     if name == "decisions":
         plans = sorted(glob.glob(os.path.join(root, PLANS_GLOB)))
@@ -4610,21 +4873,22 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests and the aggregate**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 21 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 198 tests ... OK
+python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 24 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 217 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
 `test_the_repository_passes_every_installed_gate` fails if DEC-0001 is still unanswered: the umbrella plan references it (lines 17 and 287). That is the intended block, not a bug.
 
-Mutation checks (each run under `PYTHONDONTWRITEBYTECODE=1`, restored afterwards, then `Ran 21 tests ... OK`):
-- `_check_of(name)` returns `Result(name)` (a gate with no lines): `test_clean_tree_passes_and_lines_carry_the_gate_prefix` fails (among 7 others), and `res.render(False)` shows `FAIL register.empty: gate produced no verdict`.
+Mutation checks (each run under `PYTHONDONTWRITEBYTECODE=1`, restored afterwards, then `Ran 24 tests ... OK`):
+- `_check_of(name)` returns `Result(name)` (a gate with no lines): `test_clean_tree_passes_and_lines_carry_the_gate_prefix` fails (among 10 others), and `res.render(False)` shows `FAIL register.empty: gate produced no verdict`.
 - `gate_argv` reads `root = args.get("root") or repo_root()`: `test_an_empty_root_is_fail_never_the_cwd_repo` and `test_an_empty_root_on_the_command_line_is_fail` fail.
 - `gate_argv` loses its `if not os.path.isdir(root):` guard: `test_a_root_that_is_missing_or_a_file_is_not_a_directory` fails. Its `--root is not a path` message becomes `--root is empty`: `test_a_root_that_is_not_a_path_says_so` fails.
 - `gate_argv` loses its `if not plans:` guard: `test_no_plans_to_scan_is_fail_never_a_silent_pass` fails.
 - `run` keeps `lid = l.id` (no prefixing): `test_a_foreign_id_is_prefixed_never_taken_as_another_gates` fails.
 - `run` loses its `if name in ran:` branch: `test_a_gate_named_twice_runs_once_and_fails` fails.
 - `gate_argv` drops the `--scan` list: `test_decisions_scans_the_plans` fails.
+- fix wave: `gate_argv` loses `root = os.path.abspath(root)`: `test_a_relative_root_works_from_any_cwd`; the extra `--scan` replacing the plans: `test_an_extra_scan_adds_to_the_plans_never_replaces_them`; `run_check` loses its `exc.code == 0` branch: `test_cli_help_is_not_called_bad_arguments`.
 - `main` returns 0 instead of `run_gate(...)`, or `check` parses with a plain `argparse.ArgumentParser`: the CLI tests (`test_cli_bad_arguments_are_a_fail_line`, `test_cli_help_goes_to_stderr_and_json_stdout_stays_json`, `test_cli_only_and_rc`) fail.
 
 - [ ] **Step 5: Write the CI job and the README**
@@ -4682,7 +4946,8 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 - Output: one line per verdict, `PASS <id>` or `FAIL <id>: <reason>`; `--json` for a JSON object.
 - Exit 0 only when every line is PASS and there is at least one line; otherwise 1.
 - A missing or unreadable input is `FAIL <gate>.input`, never "nothing to do"; an empty result
-  is `FAIL <gate>.empty`; bad arguments are `FAIL <gate>.input: bad arguments`.
+  is `FAIL <gate>.empty`; bad arguments are `FAIL <gate>.input: bad arguments`; `-h` prints the
+  usage on stderr and reports `FAIL <gate>.input: help requested; no gate was run`.
 - `--root <tree>` points a gate at another tree's `docs/superpowers/state/`; config is always read
   from the checkout holding the gate code (`tools/gates/config.yml`).
 
@@ -4691,14 +4956,14 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | Gate | Checks |
 |---|---|
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
-| `gate_claims.py` | claims schema, every sha a commit of the repository, verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` rewrites stale rows |
+| `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
 gate). An unknown, missing or repeated gate, an empty or non-directory `--root`, and a root with
 no `docs/superpowers/plans/*.md` for `decisions` to scan are each a FAIL. For `decisions` it
-scans every `docs/superpowers/plans/*.md`; run alone without `--scan`, `gate_decisions.py`
+scans every `docs/superpowers/plans/*.md` (extra `--scan` args add to them); a relative `--root` works from any directory; run alone without `--scan`, `gate_decisions.py`
 prints no `scan` or `open-ref` PASS line.
 
 ## Running
@@ -4721,7 +4986,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 198 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 217 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -5220,7 +5485,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 211 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 230 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -5515,7 +5780,7 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 218 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 237 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -5525,7 +5790,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 218 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 237 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md
