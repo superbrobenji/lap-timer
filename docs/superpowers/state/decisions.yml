@@ -5,3 +5,13 @@
   asked_at: {sha: "73cd3cc", by: session}
   answer: "yes"
   answered_at: {sha: "73cd3cc", by: superbrobenji}
+
+- id: DEC-0002
+  class: scope
+  question: "Ruling-5 id grammar: should a list-item id followed by a comma, period, tab, bold/backtick wrapping, or a checkbox prefix also count as a report id (today only space/colon after the id counts; these forms escape the scan)?"
+  options:
+    - {label: tighten, cost: "regex change + 6 fixture lines; more ids caught"}
+    - {label: keep, cost: "report authors must write '<id>: ' or '<id> '"}
+  asked_at: {sha: "23ba3b1", by: session}
+  answer: null
+  answered_at: null

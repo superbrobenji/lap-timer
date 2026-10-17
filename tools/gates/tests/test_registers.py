@@ -46,8 +46,8 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001"], [d["id"] for d in decisions])
-        self.assertEqual([], reg.validate_decision(decisions[0]))
+        self.assertEqual(["DEC-0001", "DEC-0002"], [d["id"] for d in decisions])
+        self.assertEqual([[], []], [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 

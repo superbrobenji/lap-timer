@@ -76,8 +76,57 @@ class GateRegister(unittest.TestCase):
         root = gf.new_repo()
         try:
             path = gf.write(root, "r.md", "register: true\n| t1-lower-1 | x |\n| T1-OPEN-1x y | x |\n"
-                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1, comma\n1. T1-DEF-1 numbered\n")
+                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1, comma\n- T1-X-1\n1. T1-DEF-1 numbered\n")
             self.assertEqual(["T1-DEF-1"], gate_register.report_ids(path))
+        finally:
+            gf.remove(root)
+
+    def test_unreadable_report_subdirectory_fails_closed(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        root = gf.new_repo()
+        locked = os.path.join(root, "docs", "reviews", "locked")
+        try:
+            gf.write(root, os.path.join("docs", "reviews", "locked", "x.md"), "register: true\n")
+            os.chmod(locked, 0)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertIn("FAIL register.input: ", buf.getvalue())
+            self.assertIn("locked: Permission denied", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            os.chmod(locked, 0o755)
+            gf.remove(root)
+
+    def test_report_path_that_is_a_file_fails_closed(self):
+        root = gf.new_repo()
+        try:
+            gf.write(root, os.path.join("docs", "reviews"), "not a directory\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertIn("FAIL register.input: ", buf.getvalue())
+            self.assertIn("docs/reviews: not a directory", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            gf.remove(root)
+
+    def test_symlinked_report_directory_is_followed_and_cycles_stop(self):
+        root = gf.new_repo()
+        try:
+            briefs = os.path.join(root, "docs", "superpowers", "state", "briefs")
+            gf.write(root, os.path.join("docs", "superpowers", "state", "real", "b.md"),
+                     "register: true\n- T9-NOPE-1: x\n")
+            os.makedirs(briefs)
+            os.symlink(os.path.join(root, "docs", "superpowers", "state", "real"), os.path.join(briefs, "link"))
+            os.symlink(briefs, os.path.join(briefs, "loop"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertIn("FAIL register.report.docs/superpowers/state/briefs/link/b.md.T9-NOPE-1: "
+                          "not in register", buf.getvalue())
+            self.assertEqual(1, rc)
         finally:
             gf.remove(root)
 

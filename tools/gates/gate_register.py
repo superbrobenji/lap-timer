@@ -5,7 +5,8 @@ report (umbrella "Owner rulings" 5): a file under docs/reviews/ or docs/superpow
 whose first 20 lines include the line `register: true`. In it, a table row whose first cell is a
 finding id, or a list item that starts with one followed by a space or colon (the id matches
 registers.FINDING_ID via fullmatch), must name a row in findings.yml. Files without the marker are
-ignored; a report directory that does not exist holds no reports.
+ignored; a report directory that does not exist holds no reports, one that exists but is not a
+directory (or cannot be read) is a FAIL; symlinked subdirectories are followed once each.
 
   python3 tools/gates/gate_register.py [--root <tree>] [--json]
 """
@@ -24,22 +25,34 @@ CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
 MARKER = "register: true"
 MARKER_LINES = 20
-LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :]|$)")
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :])")
 
 
 def _walk_error(exc):
     raise GateError(f"{exc.filename}: {exc.strerror or exc}")
 
 
+def _first_visit(seen, path) -> bool:
+    real = os.path.realpath(path)
+    if real in seen:
+        return False
+    seen.add(real)
+    return True
+
+
 def registered_reports(root) -> list:
     """Files under REPORT_DIRS carrying the marker line in their first MARKER_LINES lines."""
     found = []
+    seen = set()    # realpaths of directories already walked: a symlink cycle stops here
     for d in REPORT_DIRS:
         top = os.path.join(root, d)
-        if not os.path.isdir(top):
+        if not os.path.lexists(top):
             continue    # no such report directory: it holds no registered reports
-        for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error):
+        if not os.path.isdir(top):
+            raise GateError(f"{top}: not a directory")
+        for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error, followlinks=True):
             dirnames.sort()
+            dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
                 with open(path, encoding="utf-8", errors="replace") as fh:

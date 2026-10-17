@@ -944,8 +944,8 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001"], [d["id"] for d in decisions])
-        self.assertEqual([], reg.validate_decision(decisions[0]))
+        self.assertEqual(["DEC-0001", "DEC-0002"], [d["id"] for d in decisions])
+        self.assertEqual([[], []], [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -1881,8 +1881,57 @@ class GateRegister(unittest.TestCase):
         root = gf.new_repo()
         try:
             path = gf.write(root, "r.md", "register: true\n| t1-lower-1 | x |\n| T1-OPEN-1x y | x |\n"
-                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1, comma\n1. T1-DEF-1 numbered\n")
+                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1, comma\n- T1-X-1\n1. T1-DEF-1 numbered\n")
             self.assertEqual(["T1-DEF-1"], gate_register.report_ids(path))
+        finally:
+            gf.remove(root)
+
+    def test_unreadable_report_subdirectory_fails_closed(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        root = gf.new_repo()
+        locked = os.path.join(root, "docs", "reviews", "locked")
+        try:
+            gf.write(root, os.path.join("docs", "reviews", "locked", "x.md"), "register: true\n")
+            os.chmod(locked, 0)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertIn("FAIL register.input: ", buf.getvalue())
+            self.assertIn("locked: Permission denied", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            os.chmod(locked, 0o755)
+            gf.remove(root)
+
+    def test_report_path_that_is_a_file_fails_closed(self):
+        root = gf.new_repo()
+        try:
+            gf.write(root, os.path.join("docs", "reviews"), "not a directory\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertIn("FAIL register.input: ", buf.getvalue())
+            self.assertIn("docs/reviews: not a directory", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            gf.remove(root)
+
+    def test_symlinked_report_directory_is_followed_and_cycles_stop(self):
+        root = gf.new_repo()
+        try:
+            briefs = os.path.join(root, "docs", "superpowers", "state", "briefs")
+            gf.write(root, os.path.join("docs", "superpowers", "state", "real", "b.md"),
+                     "register: true\n- T9-NOPE-1: x\n")
+            os.makedirs(briefs)
+            os.symlink(os.path.join(root, "docs", "superpowers", "state", "real"), os.path.join(briefs, "link"))
+            os.symlink(briefs, os.path.join(briefs, "loop"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertIn("FAIL register.report.docs/superpowers/state/briefs/link/b.md.T9-NOPE-1: "
+                          "not in register", buf.getvalue())
+            self.assertEqual(1, rc)
         finally:
             gf.remove(root)
 
@@ -1933,7 +1982,8 @@ report (umbrella "Owner rulings" 5): a file under docs/reviews/ or docs/superpow
 whose first 20 lines include the line `register: true`. In it, a table row whose first cell is a
 finding id, or a list item that starts with one followed by a space or colon (the id matches
 registers.FINDING_ID via fullmatch), must name a row in findings.yml. Files without the marker are
-ignored; a report directory that does not exist holds no reports.
+ignored; a report directory that does not exist holds no reports, one that exists but is not a
+directory (or cannot be read) is a FAIL; symlinked subdirectories are followed once each.
 
   python3 tools/gates/gate_register.py [--root <tree>] [--json]
 """
@@ -1952,22 +2002,34 @@ CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
 MARKER = "register: true"
 MARKER_LINES = 20
-LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :]|$)")
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :])")
 
 
 def _walk_error(exc):
     raise GateError(f"{exc.filename}: {exc.strerror or exc}")
 
 
+def _first_visit(seen, path) -> bool:
+    real = os.path.realpath(path)
+    if real in seen:
+        return False
+    seen.add(real)
+    return True
+
+
 def registered_reports(root) -> list:
     """Files under REPORT_DIRS carrying the marker line in their first MARKER_LINES lines."""
     found = []
+    seen = set()    # realpaths of directories already walked: a symlink cycle stops here
     for d in REPORT_DIRS:
         top = os.path.join(root, d)
-        if not os.path.isdir(top):
+        if not os.path.lexists(top):
             continue    # no such report directory: it holds no registered reports
-        for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error):
+        if not os.path.isdir(top):
+            raise GateError(f"{top}: not a directory")
+        for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error, followlinks=True):
             dirnames.sort()
+            dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
                 with open(path, encoding="utf-8", errors="replace") as fh:
@@ -2038,19 +2100,19 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 12 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 74 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 15 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 77 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
 
 Mutation check (production path): in `registers.evidence_errors`, delete the `elif not _file_under(root, pin["transcript"])` branch for the pin transcript. `test_pinned_without_transcript_fails` must fail. Restore and run again: OK.
 
-Mutation check (report scan): in `registered_reports`, replace `if any(l.strip() == MARKER for l in head):` with `if True:`. The unmarked fixture's ids are now scanned, and `test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes` plus `test_valid_register_passes_every_category` must fail. Restore. Then replace `for rid in sorted(set(report_ids(path)) - known):` with `for rid in []:`. `test_registered_report_with_an_unknown_id_fails` must fail. Restore and run again: OK.
+Mutation check (report scan): in `registered_reports`, replace `if any(l.strip() == MARKER for l in head):` with `if True:`. The unmarked fixture's ids are now scanned, and `test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes`, `test_valid_register_passes_every_category` and `test_the_repository_register_passes` must fail. Restore. Then replace `for rid in sorted(set(report_ids(path)) - known):` with `for rid in []:`. `test_registered_report_with_an_unknown_id_fails` must fail. Restore and run again: OK.
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 12 OK; suite 74 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 15 OK; suite 77 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
