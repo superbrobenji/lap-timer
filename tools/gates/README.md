@@ -22,9 +22,11 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
-prefix; `--only a,b` selects, `--root <tree>` gates another tree; an unknown or missing gate, an
-empty `--root`, and a root with no `docs/superpowers/plans/*.md` for `decisions` to scan are each a
-FAIL. For `decisions` it scans every `docs/superpowers/plans/*.md`.
+prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
+gate). An unknown, missing or repeated gate, an empty or non-directory `--root`, and a root with
+no `docs/superpowers/plans/*.md` for `decisions` to scan are each a FAIL. For `decisions` it
+scans every `docs/superpowers/plans/*.md`; run alone without `--scan`, `gate_decisions.py`
+prints no `scan` or `open-ref` PASS line.
 
 ## Running
 
@@ -35,4 +37,4 @@ python3 tools/gates/run_all.py
 python3 tools/gates/gate_register.py --json
 ```
 
-CI: `.github/workflows/gates.yml`, job `gates` (the unit tests, then `run_all.py`; full history checkout).
+CI: `.github/workflows/gates.yml`, job `gates` (the unit tests on Python 3.9 and 3.12, then `run_all.py`; one job, full history checkout).

@@ -17,10 +17,18 @@ jobs:
           fetch-depth: 0   # claim rows are compared against verified_at..HEAD; a shallow clone has no history
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Both interpreters in this one job (no matrix: a matrix would rename the required check).
+          # The first listed is the default `python3`; the local hooks run on 3.9.
+          python-version: |
+            3.12
+            3.9
       - name: Install PyYAML (pinned in tools/requirements.txt)
-        run: python3 -m pip install PyYAML==6.0.2
-      - name: Gate-script tests
-        run: python3 -m unittest discover -v -s tools/gates/tests -t .
+        run: |
+          python3.9 -m pip install PyYAML==6.0.2
+          python3.12 -m pip install PyYAML==6.0.2
+      - name: Gate-script tests (Python 3.9)
+        run: python3.9 -m unittest discover -v -s tools/gates/tests -t .
+      - name: Gate-script tests (Python 3.12)
+        run: python3.12 -m unittest discover -v -s tools/gates/tests -t .
       - name: Gates at HEAD
-        run: python3 tools/gates/run_all.py
+        run: python3.12 tools/gates/run_all.py

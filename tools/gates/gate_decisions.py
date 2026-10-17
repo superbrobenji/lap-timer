@@ -10,7 +10,8 @@ an asked_at / answered_at sha that is not a commit of the gated repository (DEC-
 `schema`); and any reference to an unanswered decision id (DEC-NNNN) in a --scan file. A --scan
 path that cannot be read (missing, a directory, not UTF-8) is a FAIL, never a skip. Row ids print
 forgery-safe (entry-<i> when the id is malformed), an empty --root is an error, and a category
-some row never reached prints no PASS line.
+some row never reached prints no PASS line (an empty or absent --scan list never prints PASS for
+`scan` or `open-ref`).
 """
 from __future__ import annotations
 
@@ -41,6 +42,8 @@ def check(args: list) -> Result:
     r = Result("decisions")
     exists = registers.memo_commit_exists()    # one git call per distinct sha
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
+    if not ns.scan:    # nothing was scanned: no PASS line for a check that never ran
+        skipped.update(["scan", "open-ref"])
     seen = set()
     for i, d in enumerate(decisions):
         did = registers.row_id(d, i, registers.DECISION_ID)

@@ -52,9 +52,20 @@ class GateDecisions(unittest.TestCase):
         return rc, buf.getvalue()
 
     def test_open_and_owner_answered_decisions_pass(self):
-        rc, out = self.run_gate(OPEN + ANSWERED.replace("BY", "superbrobenji"))
+        gf.write(self.root, "docs/plan.md", "# plan\n\nnothing to wait on\n")
+        rc, out = self.run_gate(OPEN + ANSWERED.replace("BY", "superbrobenji"), "--scan", "docs/plan.md")
         self.assertEqual(PASS_ALL, out)
         self.assertEqual(0, rc)
+
+    def test_without_a_scan_list_no_scan_or_open_ref_line_passes(self):
+        register = OPEN + ANSWERED.replace("BY", "superbrobenji")
+        for extra in ((), ("--scan",)):    # no --scan at all, then --scan with no path
+            rc, out = self.run_gate(register, *extra)
+            self.assertEqual("PASS decisions.schema\nPASS decisions.duplicate\nPASS decisions.owner\n",
+                             out, extra)
+            self.assertNotIn("decisions.scan", out)
+            self.assertNotIn("decisions.open-ref", out)
+            self.assertEqual(0, rc)
 
     def test_an_agent_answer_fails(self):
         rc, out = self.run_gate(ANSWERED.replace("BY", "session"))

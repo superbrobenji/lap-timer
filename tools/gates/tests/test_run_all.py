@@ -80,6 +80,41 @@ class RunAll(unittest.TestCase):
         self.assertEqual(1, p.returncode, p.stdout + p.stderr)
         self.assertEqual("FAIL register.input: --root is empty\n", p.stdout)
 
+    def test_a_root_that_is_not_a_path_says_so(self):
+        for root in (None, 5):
+            res = run_all.run(["register", "decisions"], {"root": root})
+            self.assertEqual("FAIL register.input: --root is not a path\n"
+                             "FAIL decisions.input: --root is not a path", res.render(False), repr(root))
+
+    def test_a_root_that_is_missing_or_a_file_is_not_a_directory(self):
+        missing = os.path.join(self.root, "absent")
+        a_file = os.path.join(self.root, "README.md")
+        for root in (missing, a_file):
+            res = run_all.run(["decisions"], {"root": root})
+            self.assertEqual(f"FAIL decisions.input: --root is not a directory: {root}",
+                             res.render(False), root)
+
+    def test_a_gate_named_twice_runs_once_and_fails(self):
+        res = run_all.run(["register", "register"], {"root": self.root})
+        out = res.render(False)
+        self.assertEqual(1, out.count("PASS register.schema"), out)
+        self.assertIn("FAIL run_all.duplicate: gate 'register' is named more than once", out)
+        self.assertFalse(res.ok())
+        p = self.cli("--only", "register,register")
+        self.assertEqual(1, p.returncode, p.stdout + p.stderr)
+
+    def test_cli_bad_arguments_are_a_fail_line(self):
+        for bad in (("--bogus",), ("--ro", "/x"), ("--only",), ("--only", "register", "--json")):
+            p = self.cli(*bad)
+            self.assertEqual(1, p.returncode, (bad, p.stdout, p.stderr))
+            self.assertEqual("FAIL run_all.input: bad arguments (argparse exit 2)\n", p.stdout, bad)
+
+    def test_cli_help_goes_to_stderr_and_json_stdout_stays_json(self):
+        p = self.cli("--json", "-h")
+        self.assertIn("usage: run_all", p.stderr)
+        self.assertNotIn("usage", p.stdout)
+        self.assertEqual("run_all.input", json.loads(p.stdout)["lines"][0]["id"])
+
     def test_a_foreign_id_is_prefixed_never_taken_as_another_gates(self):
         forged = Result("register")
         forged.fail("claims.stale.CLM-1", "pretends to be claims")
