@@ -28,7 +28,9 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   (`by: postmerge`).
 - Every sha (history, cites, evidence entries shaped like a sha, `asked_at.sha`, `answered_at.sha`,
   `verified_at`) must name a commit of this repository: `gate_register` checks each with
-  `git cat-file -e <sha>^{commit}` (decision DEC-0003).
+  `git cat-file -e <sha>^{commit}` (decision DEC-0003). The registers name commits on `main`, so the
+  gate needs full history: a shallow clone FAILs `register.evidence` by design, and CI checks out
+  with `fetch-depth: 0`.
 - Claims: `verified` needs `verified_at` and `by`; a verified row whose cited file changes goes
   stale (the `gate_claims` gate and its `--mark-stale` command arrive in block b2; the command
   rewrites `claims.yml` through PyYAML, so comments in it are not kept: keep none there).

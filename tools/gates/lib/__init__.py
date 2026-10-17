@@ -45,8 +45,9 @@ class Result:
         if as_json:
             return json.dumps({"gate": self.gate, "ok": self.ok(),
                                "lines": [asdict(l) for l in self.lines]}, indent=1)
-        # one physical line per result line: a multi-line reason (PyYAML's are) is collapsed to single spaces
-        return "\n".join(f"{l.status} {l.id}" + (f": {' '.join(l.reason.split())}" if l.reason else "")
+        # one physical line per result line: only line breaks in a reason (PyYAML's are multi-line) become
+        # spaces; space runs stay, so a quoted value shows exactly what was found
+        return "\n".join(f"{l.status} {l.id}" + (f": {' '.join(l.reason.splitlines())}" if l.reason else "")
                          for l in self.lines)
 
 

@@ -5,16 +5,28 @@ which is the documented None of pr_for_branch()."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 
 from . import GateError
 
 
+def _env() -> dict:
+    """git's messages are matched by text: pin the C locale."""
+    return {**os.environ, "LC_ALL": "C"}
+
+
+def _check_root(cmd: list, cwd) -> None:
+    if cwd is not None and not os.path.isdir(cwd):
+        raise GateError(f"{' '.join(cmd)}: root {cwd} does not exist")
+
+
 def _run(cmd: list, cwd=None) -> str:
     """Run `cmd` in `cwd`. Messages name the command, never the directory (machine-independent)."""
+    _check_root(cmd, cwd)
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False, env=_env())
     except OSError as exc:
         raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode != 0:
@@ -100,13 +112,14 @@ def commit_exists(root, sha) -> bool:
     if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
         return False
     cmd = ["git", "cat-file", "-e", f"{sha}^{{commit}}"]
+    _check_root(cmd, str(root))
     try:
-        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False, env=_env())
     except OSError as exc:
         raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode == 0:
         return True
-    if "Not a valid object name" in p.stderr:
+    if p.returncode == 128 and ("Not a valid object name" in p.stderr or "could not get object info" in p.stderr):
         return False
     raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
 

@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every code block in this plan was run in a throwaway copy of these files: 171 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
+Every code block in this plan was run in a throwaway copy of these files: 176 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -68,7 +68,7 @@ Every code block in this plan was run in a throwaway copy of these files: 171 te
 5. **The umbrella's verbatim `config.yml` fails `ci.yml`'s stale-comment step** (`comment_patterns` contains `'later sessions?'`). Task 1 adds one allow entry, the minimum change, rather than altering the verbatim config.
 6. **Handoff timing:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 2 (no post-merge commits on protected `main`; the handoff lands on the block branch before the merge).
 7. **Final verifier model:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 9 (Fable on the final adversarial verifier and the exception reviewer).
-8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the exact line `register: true` (DEC-0002: a near miss such as `register: yes`, `Register: true` or a BOM before the marker is a `FAIL register.marker.<file>`, never a silent un-register). Its ids are table first cells and leading list-item ids matching the finding regex, bare or wrapped in `**` / backticks, after an optional checkbox, followed by a space, tab, colon, comma, period or the end of the line. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them. `docs/reviews` must exist; `docs/superpowers/state/briefs` may be absent.
+8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the exact line `register: true` (DEC-0002: any line that starts `register:` (any case, optionally after a BOM) but is not exactly the marker, such as `register: yes`, `register: "true"` or a BOM before the marker, is a `FAIL register.marker.<file>`, never a silent un-register). Its ids are table first cells and leading list-item ids matching the finding regex, bare or wrapped in `**` / backticks, after an optional checkbox, followed by a space, tab, colon, comma, period or the end of the line. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them. `docs/reviews` must exist; `docs/superpowers/state/briefs` may be absent.
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
 10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
 11. **DEC-0002 and DEC-0003** (owner-delegated 2026-10-17, recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it.
@@ -569,7 +569,10 @@ class FixWave(unittest.TestCase):
     def test_text_render_is_one_physical_line_per_result_line(self):                 # B9
         r = Result("g")
         r.fail("g.a", "while parsing\n  a block\t\tsequence\n\nin x.yml")
-        self.assertEqual("FAIL g.a: while parsing a block sequence in x.yml", r.render(False))
+        self.assertEqual("FAIL g.a: while parsing   a block\t\tsequence  in x.yml", r.render(False))   # breaks only
+        r2 = Result("g")
+        r2.fail("g.b", "a  b\r\nc\u2028d")
+        self.assertEqual("FAIL g.b: a  b c d", r2.render(False))
         self.assertEqual("while parsing\n  a block\t\tsequence\n\nin x.yml",
                          json.loads(r.render(True))["lines"][0]["reason"])           # JSON keeps the raw text
 
@@ -666,6 +669,35 @@ class FixWave(unittest.TestCase):
         finally:
             gf.remove(root)
 
+    def test_commit_exists_runs_git_in_the_c_locale_and_maps_return_codes(self):    # round 2, item 4
+        import subprocess
+        from unittest import mock
+        calls = []
+
+        def fake(rc, err):
+            def run(cmd, **kw):
+                calls.append(kw)
+                return subprocess.CompletedProcess(cmd, rc, "", err)
+            return run
+
+        for rc, err, want in ((0, "", True), (128, "fatal: Not a valid object name x", False),
+                              (128, "error: could not get object info", False)):
+            with mock.patch.object(subprocess, "run", fake(rc, err)):
+                self.assertIs(want, gitinfo.commit_exists(".", "abcdef1"))
+        for rc, err in ((128, "fatal: not a git repository"), (1, "Not a valid object name"), (2, "")):
+            with mock.patch.object(subprocess, "run", fake(rc, err)):
+                with self.assertRaises(GateError):
+                    gitinfo.commit_exists(".", "abcdef1")
+        self.assertTrue(calls and all(c["env"]["LC_ALL"] == "C" for c in calls), calls)
+
+    def test_a_missing_root_has_its_own_message(self):                                 # round 2, item 6
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.head_sha("no/such/dir")
+        self.assertEqual("git rev-parse HEAD: root no/such/dir does not exist", str(ctx.exception))
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.commit_exists("no/such/dir", "abcdef1")
+        self.assertEqual("git cat-file -e abcdef1^{commit}: root no/such/dir does not exist", str(ctx.exception))
+
     def test_commit_exists(self):                                                    # A8
         root = gf.new_repo()
         outside = tempfile.mkdtemp(prefix="gate-nogit-")
@@ -746,8 +778,9 @@ class Result:
         if as_json:
             return json.dumps({"gate": self.gate, "ok": self.ok(),
                                "lines": [asdict(l) for l in self.lines]}, indent=1)
-        # one physical line per result line: a multi-line reason (PyYAML's are) is collapsed to single spaces
-        return "\n".join(f"{l.status} {l.id}" + (f": {' '.join(l.reason.split())}" if l.reason else "")
+        # one physical line per result line: only line breaks in a reason (PyYAML's are multi-line) become
+        # spaces; space runs stay, so a quoted value shows exactly what was found
+        return "\n".join(f"{l.status} {l.id}" + (f": {' '.join(l.reason.splitlines())}" if l.reason else "")
                          for l in self.lines)
 
 
@@ -943,16 +976,28 @@ which is the documented None of pr_for_branch()."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 
 from . import GateError
 
 
+def _env() -> dict:
+    """git's messages are matched by text: pin the C locale."""
+    return {**os.environ, "LC_ALL": "C"}
+
+
+def _check_root(cmd: list, cwd) -> None:
+    if cwd is not None and not os.path.isdir(cwd):
+        raise GateError(f"{' '.join(cmd)}: root {cwd} does not exist")
+
+
 def _run(cmd: list, cwd=None) -> str:
     """Run `cmd` in `cwd`. Messages name the command, never the directory (machine-independent)."""
+    _check_root(cmd, cwd)
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False, env=_env())
     except OSError as exc:
         raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode != 0:
@@ -1038,13 +1083,14 @@ def commit_exists(root, sha) -> bool:
     if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
         return False
     cmd = ["git", "cat-file", "-e", f"{sha}^{{commit}}"]
+    _check_root(cmd, str(root))
     try:
-        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False, env=_env())
     except OSError as exc:
         raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode == 0:
         return True
-    if "Not a valid object name" in p.stderr:
+    if p.returncode == 128 and ("Not a valid object name" in p.stderr or "could not get object info" in p.stderr):
         return False
     raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
 
@@ -1056,7 +1102,7 @@ def tags_at(root, sha) -> list:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_lib -v`
-Expected: `Ran 36 tests` … `OK`.
+Expected: `Ran 38 tests` … `OK`.
 
 Mutation check: in `run_check`, replace `except Exception as exc:` with `except GateError as exc:`. `test_an_unexpected_exception_is_fail` must now ERROR. Restore it and run again: OK.
 
@@ -1125,7 +1171,9 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   (`by: postmerge`).
 - Every sha (history, cites, evidence entries shaped like a sha, `asked_at.sha`, `answered_at.sha`,
   `verified_at`) must name a commit of this repository: `gate_register` checks each with
-  `git cat-file -e <sha>^{commit}` (decision DEC-0003).
+  `git cat-file -e <sha>^{commit}` (decision DEC-0003). The registers name commits on `main`, so the
+  gate needs full history: a shallow clone FAILs `register.evidence` by design, and CI checks out
+  with `fetch-depth: 0`.
 - Claims: `verified` needs `verified_at` and `by`; a verified row whose cited file changes goes
   stale (the `gate_claims` gate and its `--mark-stale` command arrive in block b2; the command
   rewrites `claims.yml` through PyYAML, so comments in it are not kept: keep none there).
@@ -1173,7 +1221,7 @@ Append to `docs/superpowers/state/strict-delivery/ledger.md`:
 
 ```markdown
 - base BASE_B1=<the sha recorded in setup Step 0.3>
-- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 36 OK
+- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 38 OK
 ```
 
 ```bash
@@ -2079,7 +2127,7 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 44 tests` OK; whole suite `Ran 80 tests` OK.
+Expected: `Ran 44 tests` OK; whole suite `Ran 82 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
@@ -2713,21 +2761,55 @@ class FixWave(unittest.TestCase):
     def test_near_miss_markers_fail_instead_of_unregistering_the_report(self):
         for marker in ("register: yes", "register: True", "Register: true", "register:true", "register: TRUE",
                        "register: on", "register: y", "register: 1", "REGISTER : Y", "  register: true",
-                       "register: true  ", "register:\ttrue", "\ufeffregister: true"):
+                       "register: true  ", "register:\ttrue", "\ufeffregister: true",
+                       'register: "true"', "register: 'true'", "register: true # x", "register: true.",
+                       "register:  true", "register: false", "register: maybe", "register: true now", "register:"):
             rc, out, _ = self.report(marker)
             self.assertEqual(1, rc, marker)
             self.assertEqual(f"FAIL register.marker.docs/reviews/r.md: marker must be exactly 'register: true' "
-                             f"(found {re.sub(' +', ' ', repr(marker.rstrip(chr(13))))})\n"
+                             f"(found {marker.rstrip(chr(13))!r})\n"
                              "PASS register.schema\nPASS register.owner\nPASS register.duplicate\n"
                              "PASS register.transition\nPASS register.evidence\n", out, marker)
 
+    def test_two_space_marker_shows_both_spaces(self):
+        rc, out, _ = self.report("register:  true")
+        self.assertIn("(found 'register:  true')", out)
+
     def test_lines_that_are_not_marker_attempts_are_ignored(self):
-        for marker in ("register: false", "registered: true", "register: maybe", "# register: true", "register: true now"):
+        for marker in ("registered: true", "# register: true", "the register: true", "- register: true"):
             rc, out, _ = self.report(marker)
             self.assertEqual(0, rc, marker)
         late = "\n" * 20 + "register: yes\n- T9-NOPE-1: x\n"       # beyond the first 20 lines
         rc, out, _ = self.gate(files={"docs/reviews/late.md": late})
         self.assertEqual(0, rc, out)
+
+    def test_a_filename_with_control_characters_cannot_split_a_line(self):
+        rc, out, _ = self.gate(files={"docs/reviews/a\nPASS b.md": "register: yes\n",
+                                      "docs/reviews/c\nPASS d.md": "register: true\n- T9-NOPE-1: x\n"})
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.marker.docs/reviews/a\\nPASS b.md: marker must be exactly", out)
+        self.assertIn("FAIL register.report.docs/reviews/c\\nPASS d.md.T9-NOPE-1: not in register", out)
+        self.assertEqual([], [l for l in out.splitlines() if l.startswith("PASS") and "register." not in l])
+        self.assertEqual(["PASS register.schema", "PASS register.owner", "PASS register.duplicate",
+                          "PASS register.transition", "PASS register.evidence"],
+                         [l for l in out.splitlines() if l.startswith("PASS")])
+
+    def test_a_shallow_clone_fails_the_sha_check_by_design(self):
+        import subprocess
+        root = gf.new_repo()
+        self.addCleanup(gf.remove, root)
+        old = gf.git(root, "rev-parse", "--short=7", "HEAD")
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"),
+                 findings_text(owner="{kind: issue, number: 2}").replace("aaaaaaa", old))
+        gf.write(root, "docs/reviews/.gitkeep", "")
+        gf.commit_all(root)
+        self.assertEqual((0, ), (main_out(root)[0], ))
+        parent = tempfile.mkdtemp(prefix="gate-clone-")
+        self.addCleanup(gf.remove, parent)
+        gf.git(parent, "clone", "-q", "--depth", "1", "file://" + root, "shallow")
+        rc, out = main_out(os.path.join(parent, "shallow"))
+        self.assertEqual(1, rc)
+        self.assertIn(f"FAIL register.evidence.T1-ORPHAN-1: history[0].sha: sha {old} is not a commit in this repository", out)
 
     # A7 / A8 -- machine-independent texts, real commits
     def test_load_failures_name_files_relative_to_the_root(self):
@@ -2839,8 +2921,9 @@ lifecycle transitions, the evidence each state needs, every sha naming a commit 
 repository (DEC-0003), and every finding id cited by a registered report (umbrella "Owner rulings"
 5, widened by DEC-0002). A registered report is a file under docs/reviews/ or
 docs/superpowers/state/briefs/ with the exact line `register: true` among its first 20 lines; a
-line there that is a near miss (`register: yes`, `Register: true`, `register:true`, trailing
-spaces, a UTF-8 BOM before the marker ...) is a FAIL `register.marker.<file>`, never a silent
+line there that starts like one (`register:` in any case, optionally after a UTF-8 BOM or spaces)
+but is not exactly the marker (`register: yes`, `register: "true"`, `register: true # x`, trailing
+spaces, a BOM ...) is a FAIL `register.marker.<file>`, never a silent
 un-register. In a registered report a table row whose first cell is a finding id (optionally
 wrapped in `**...**` or backticks), or a list item (`-`, `*`, `+`, `1.`, `1)`, optionally followed
 by a `[ ]` / `[x]` checkbox) that starts with one (bare, `**id**` or `` `id` ``) followed by a
@@ -2870,7 +2953,7 @@ REQUIRED_REPORT_DIRS = [os.path.join("docs", "reviews")]
 MARKER = "register: true"
 MARKER_LINES = 20
 # anything that reads as an attempt at the marker: it must then be the marker, exactly
-MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:\s*(true|yes|on|y|1)\s*$", re.I)
+MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:", re.I)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]+[.)])\s+(?:\[[ xX]\]\s+)?"
                        r"(?:\*\*([^\s*]+)\*\*|`([^`\s]+)`|([^\s:,.*`]+))(?=[\s:,.]|$)")
 
@@ -2888,6 +2971,12 @@ def _require_regular(root, path) -> None:
         raise _rel_error(root, path, exc) from None
     if not stat.S_ISREG(mode):
         raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
+
+
+def _safe(rel: str) -> str:
+    """A path for a line id: control characters (a newline in a file name) are escaped, so the
+    name cannot split or forge a result line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
 
 
 def _first_visit(seen, path) -> bool:
@@ -3039,12 +3128,12 @@ def check(args: list) -> Result:
              if isinstance(f.get("id"), str) and registers.FINDING_ID.fullmatch(f["id"])}
     reports, bad = registered_reports(root)
     for path, line in bad:
-        r.fail(f"register.marker.{os.path.relpath(path, root)}",
+        r.fail(f"register.marker.{_safe(os.path.relpath(path, root))}",
                f"marker must be exactly '{MARKER}' (found {line!r})")
     if bad:
         skipped.add("report")
     for path in reports:
-        rel = os.path.relpath(path, root)
+        rel = _safe(os.path.relpath(path, root))
         for rid in sorted(set(report_ids(path, root)) - known):
             r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}
@@ -3065,9 +3154,9 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 39 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 119 tests ... OK
-python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines (docs/reviews has no marked report yet), rc=0
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 124 tests ... OK
+python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
 
@@ -3077,7 +3166,7 @@ Mutation check (report scan): in `registered_reports`, replace `if MARKER in att
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 39 OK; suite 119 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 124 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -3986,7 +4075,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 10 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 151 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 156 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
@@ -4077,7 +4166,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 151 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 156 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -4576,7 +4665,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 164 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 169 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -4871,7 +4960,7 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 171 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 176 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -4881,7 +4970,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 171 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 176 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md

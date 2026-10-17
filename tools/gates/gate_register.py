@@ -4,8 +4,9 @@ lifecycle transitions, the evidence each state needs, every sha naming a commit 
 repository (DEC-0003), and every finding id cited by a registered report (umbrella "Owner rulings"
 5, widened by DEC-0002). A registered report is a file under docs/reviews/ or
 docs/superpowers/state/briefs/ with the exact line `register: true` among its first 20 lines; a
-line there that is a near miss (`register: yes`, `Register: true`, `register:true`, trailing
-spaces, a UTF-8 BOM before the marker ...) is a FAIL `register.marker.<file>`, never a silent
+line there that starts like one (`register:` in any case, optionally after a UTF-8 BOM or spaces)
+but is not exactly the marker (`register: yes`, `register: "true"`, `register: true # x`, trailing
+spaces, a BOM ...) is a FAIL `register.marker.<file>`, never a silent
 un-register. In a registered report a table row whose first cell is a finding id (optionally
 wrapped in `**...**` or backticks), or a list item (`-`, `*`, `+`, `1.`, `1)`, optionally followed
 by a `[ ]` / `[x]` checkbox) that starts with one (bare, `**id**` or `` `id` ``) followed by a
@@ -35,7 +36,7 @@ REQUIRED_REPORT_DIRS = [os.path.join("docs", "reviews")]
 MARKER = "register: true"
 MARKER_LINES = 20
 # anything that reads as an attempt at the marker: it must then be the marker, exactly
-MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:\s*(true|yes|on|y|1)\s*$", re.I)
+MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:", re.I)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]+[.)])\s+(?:\[[ xX]\]\s+)?"
                        r"(?:\*\*([^\s*]+)\*\*|`([^`\s]+)`|([^\s:,.*`]+))(?=[\s:,.]|$)")
 
@@ -53,6 +54,12 @@ def _require_regular(root, path) -> None:
         raise _rel_error(root, path, exc) from None
     if not stat.S_ISREG(mode):
         raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
+
+
+def _safe(rel: str) -> str:
+    """A path for a line id: control characters (a newline in a file name) are escaped, so the
+    name cannot split or forge a result line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
 
 
 def _first_visit(seen, path) -> bool:
@@ -204,12 +211,12 @@ def check(args: list) -> Result:
              if isinstance(f.get("id"), str) and registers.FINDING_ID.fullmatch(f["id"])}
     reports, bad = registered_reports(root)
     for path, line in bad:
-        r.fail(f"register.marker.{os.path.relpath(path, root)}",
+        r.fail(f"register.marker.{_safe(os.path.relpath(path, root))}",
                f"marker must be exactly '{MARKER}' (found {line!r})")
     if bad:
         skipped.add("report")
     for path in reports:
-        rel = os.path.relpath(path, root)
+        rel = _safe(os.path.relpath(path, root))
         for rid in sorted(set(report_ids(path, root)) - known):
             r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}

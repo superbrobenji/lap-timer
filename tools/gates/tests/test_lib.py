@@ -321,7 +321,10 @@ class FixWave(unittest.TestCase):
     def test_text_render_is_one_physical_line_per_result_line(self):                 # B9
         r = Result("g")
         r.fail("g.a", "while parsing\n  a block\t\tsequence\n\nin x.yml")
-        self.assertEqual("FAIL g.a: while parsing a block sequence in x.yml", r.render(False))
+        self.assertEqual("FAIL g.a: while parsing   a block\t\tsequence  in x.yml", r.render(False))   # breaks only
+        r2 = Result("g")
+        r2.fail("g.b", "a  b\r\nc\u2028d")
+        self.assertEqual("FAIL g.b: a  b c d", r2.render(False))
         self.assertEqual("while parsing\n  a block\t\tsequence\n\nin x.yml",
                          json.loads(r.render(True))["lines"][0]["reason"])           # JSON keeps the raw text
 
@@ -417,6 +420,35 @@ class FixWave(unittest.TestCase):
             self.assertFalse(gitinfo.status_clean(root))                      # ... the helper must not
         finally:
             gf.remove(root)
+
+    def test_commit_exists_runs_git_in_the_c_locale_and_maps_return_codes(self):    # round 2, item 4
+        import subprocess
+        from unittest import mock
+        calls = []
+
+        def fake(rc, err):
+            def run(cmd, **kw):
+                calls.append(kw)
+                return subprocess.CompletedProcess(cmd, rc, "", err)
+            return run
+
+        for rc, err, want in ((0, "", True), (128, "fatal: Not a valid object name x", False),
+                              (128, "error: could not get object info", False)):
+            with mock.patch.object(subprocess, "run", fake(rc, err)):
+                self.assertIs(want, gitinfo.commit_exists(".", "abcdef1"))
+        for rc, err in ((128, "fatal: not a git repository"), (1, "Not a valid object name"), (2, "")):
+            with mock.patch.object(subprocess, "run", fake(rc, err)):
+                with self.assertRaises(GateError):
+                    gitinfo.commit_exists(".", "abcdef1")
+        self.assertTrue(calls and all(c["env"]["LC_ALL"] == "C" for c in calls), calls)
+
+    def test_a_missing_root_has_its_own_message(self):                                 # round 2, item 6
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.head_sha("no/such/dir")
+        self.assertEqual("git rev-parse HEAD: root no/such/dir does not exist", str(ctx.exception))
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.commit_exists("no/such/dir", "abcdef1")
+        self.assertEqual("git cat-file -e abcdef1^{commit}: root no/such/dir does not exist", str(ctx.exception))
 
     def test_commit_exists(self):                                                    # A8
         root = gf.new_repo()

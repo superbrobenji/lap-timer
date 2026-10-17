@@ -405,21 +405,55 @@ class FixWave(unittest.TestCase):
     def test_near_miss_markers_fail_instead_of_unregistering_the_report(self):
         for marker in ("register: yes", "register: True", "Register: true", "register:true", "register: TRUE",
                        "register: on", "register: y", "register: 1", "REGISTER : Y", "  register: true",
-                       "register: true  ", "register:\ttrue", "\ufeffregister: true"):
+                       "register: true  ", "register:\ttrue", "\ufeffregister: true",
+                       'register: "true"', "register: 'true'", "register: true # x", "register: true.",
+                       "register:  true", "register: false", "register: maybe", "register: true now", "register:"):
             rc, out, _ = self.report(marker)
             self.assertEqual(1, rc, marker)
             self.assertEqual(f"FAIL register.marker.docs/reviews/r.md: marker must be exactly 'register: true' "
-                             f"(found {re.sub(' +', ' ', repr(marker.rstrip(chr(13))))})\n"
+                             f"(found {marker.rstrip(chr(13))!r})\n"
                              "PASS register.schema\nPASS register.owner\nPASS register.duplicate\n"
                              "PASS register.transition\nPASS register.evidence\n", out, marker)
 
+    def test_two_space_marker_shows_both_spaces(self):
+        rc, out, _ = self.report("register:  true")
+        self.assertIn("(found 'register:  true')", out)
+
     def test_lines_that_are_not_marker_attempts_are_ignored(self):
-        for marker in ("register: false", "registered: true", "register: maybe", "# register: true", "register: true now"):
+        for marker in ("registered: true", "# register: true", "the register: true", "- register: true"):
             rc, out, _ = self.report(marker)
             self.assertEqual(0, rc, marker)
         late = "\n" * 20 + "register: yes\n- T9-NOPE-1: x\n"       # beyond the first 20 lines
         rc, out, _ = self.gate(files={"docs/reviews/late.md": late})
         self.assertEqual(0, rc, out)
+
+    def test_a_filename_with_control_characters_cannot_split_a_line(self):
+        rc, out, _ = self.gate(files={"docs/reviews/a\nPASS b.md": "register: yes\n",
+                                      "docs/reviews/c\nPASS d.md": "register: true\n- T9-NOPE-1: x\n"})
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.marker.docs/reviews/a\\nPASS b.md: marker must be exactly", out)
+        self.assertIn("FAIL register.report.docs/reviews/c\\nPASS d.md.T9-NOPE-1: not in register", out)
+        self.assertEqual([], [l for l in out.splitlines() if l.startswith("PASS") and "register." not in l])
+        self.assertEqual(["PASS register.schema", "PASS register.owner", "PASS register.duplicate",
+                          "PASS register.transition", "PASS register.evidence"],
+                         [l for l in out.splitlines() if l.startswith("PASS")])
+
+    def test_a_shallow_clone_fails_the_sha_check_by_design(self):
+        import subprocess
+        root = gf.new_repo()
+        self.addCleanup(gf.remove, root)
+        old = gf.git(root, "rev-parse", "--short=7", "HEAD")
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"),
+                 findings_text(owner="{kind: issue, number: 2}").replace("aaaaaaa", old))
+        gf.write(root, "docs/reviews/.gitkeep", "")
+        gf.commit_all(root)
+        self.assertEqual((0, ), (main_out(root)[0], ))
+        parent = tempfile.mkdtemp(prefix="gate-clone-")
+        self.addCleanup(gf.remove, parent)
+        gf.git(parent, "clone", "-q", "--depth", "1", "file://" + root, "shallow")
+        rc, out = main_out(os.path.join(parent, "shallow"))
+        self.assertEqual(1, rc)
+        self.assertIn(f"FAIL register.evidence.T1-ORPHAN-1: history[0].sha: sha {old} is not a commit in this repository", out)
 
     # A7 / A8 -- machine-independent texts, real commits
     def test_load_failures_name_files_relative_to_the_root(self):
