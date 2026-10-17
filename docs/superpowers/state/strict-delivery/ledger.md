@@ -6,13 +6,25 @@ Lines: `- T<n> <commit subject> -- <gate result>`; `Ruling: what -- why -- cost 
 
 ## Block b1 (branch block/strict-delivery-b1)
 - base BASE_B1=73cd3cc
-- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 28 OK
-- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 34 OK
+- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 28 OK (36 after the fix wave)
+- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 34 OK (44 after the fix wave)
 - T2 plan-text corrections: __future__ import; evidence path-escape fix; counts 34 / 62
 - T2 review round 1: fullmatch ids, grant owner check, evidence relative paths, validator robustness; test_registers 34, suite 62
 - T2 review round 2: pin-transcript relative-path message pinned; plan text aligned
-- T3 feat(gates): gate_register -- test_gate_register 12 OK; suite 74 OK; gate_register at HEAD 6 PASS
+- T3 feat(gates): gate_register -- test_gate_register 12 OK; suite 74 OK; gate_register at HEAD 6 PASS (39 and 119 after the fix wave)
 - T3 plan-text corrections: counts 12 / 74 (brief said 11 / 59); run() puts --json before --root; os.walk onerror -> GateError; LIST_ITEM captures a token and fullmatches FINDING_ID; known built from string ids; __future__ in the test
 - T3 review round 1: onerror pinned; non-directory report path FAILs; symlinked report dirs followed (cycle-safe); LIST_ITEM per ruling 5 (no bare id at end of line); DEC-0002 asked; test_registers expects DEC-0001 and DEC-0002; test_gate_register 15, suite 77
 - T3 review round 2: top report dir seeded in the visited set; dangling-symlink FAIL uses <relative path>: <strerror>; test finally guard; test_gate_register 17, suite 79
-- T3 review round 3: every gate_register error path is root-relative (walk error, not-a-directory, unreadable report file via _rel_error / report_ids(path, root)); test_gate_register 18, suite 80
+- T3 review round 3: every gate_register error path is root-relative (walk error, not-a-directory, unreadable report file via _rel_error / report_ids(path, root); the report_ids guard is pinned by the direct call only, main() meets the unreadable file in registered_reports first); test_gate_register 18, suite 80
+- Ruling: `--json` is recognised only as argv[0] -- the umbrella CLI table puts `[--json]` first, and anywhere else the token may be another option's value -- cost if wrong: a gate run as `--root x --json` prints text, not JSON -- spec §7, D6
+- Ruling: a detached HEAD is a GateError in `gitinfo.branch`, never the string "HEAD" -- the checkpoint gate must fail closed on a branch it cannot name -- cost if wrong: none (no caller treats "HEAD" as a branch) -- spec §3.4, D6
+- Ruling: evidence paths are relative to the repo root; an absolute path or a `..` that leaves the root is an error -- a register must read the same on every machine -- cost if wrong: none (no rows existed) -- spec §4.1
+- Ruling: the owner/validity check lives in the schema layer (`validate_decision` requires `answered_at.by` == owner, `grant_for` and `deferred` evidence both build on it) -- the umbrella schema says `by` must equal `config.owner.handle`; a check in `grant_for` alone let `deferred` accept an agent's answer -- cost if wrong: b2 `gate_decisions` would re-implement it -- spec §4.3, D10
+- Ruling: report-directory symlinks are followed once each (visited-realpath set, cycle-safe) and a report path that exists but is not a directory fails -- no registered report may go unscanned -- cost if wrong: a symlinked report directory is scanned once instead of ignored -- spec §4.1, D6
+- Ruling: list-item ids in registered reports follow DEC-0002 = tighten (id followed by space, tab, colon, comma, period or end of line, optionally bold or backtick wrapped, after an optional checkbox; table first cells likewise; a near-miss `register:` marker or a BOM is a FAIL) -- forms that escaped the scan are bugs under the zero-bug rule -- cost if wrong: reports must be written in the strict forms -- spec §4.1, D6
+- Ruling: gate output is machine-independent -- every GateError/FAIL text is root-relative or root-free (git commands are shown without `-C <root>`) -- the same failure must print the same line on every checkout -- cost if wrong: none -- spec §7
+- Ruling: `asked_at.sha` / `answered_at.sha` are the `main` commit when the row was created (73cd3cc for the rows created in block b1, because the register did not exist earlier) -- a branch-only sha is orphaned by the squash merge; DEC-0003 = verify makes that a gate failure -- cost if wrong: one README sentence and three shas -- spec §4.3
+- Ruling: the residuals of the Task 3 re-reviews (docstring typo, `report_ids` fallback message, round-3 wording, absolute paths in Task 1/2 messages) are carried into one final-review fix wave instead of a fourth Task 3 round -- a fresh higher-tier implementer for a docstring is poor value; the merge checklist still requires them closed -- cost if wrong: none -- spec D6
+- Owner: ratified all nine 2026-10-17
+- Decisions DEC-0002 = tighten and DEC-0003 = verify (every sha names a commit of the gated repository; S4 postmerge must re-point branch shas to the squash commit when it sets `merged`) were delegated by the owner on 2026-10-17 ("you may pick ideal for both 002 and 003") and recorded in decisions.yml
+- Fix wave (final review: 7 Important, 13 Minor): empty `--root`, marker near misses, owner/deferred validity in the schema, `status_clean` pinned, sha verification, DEC-0002 forms, machine-independent messages, plan Task 1-3 blocks regenerated byte-equal (D3); counts: test_lib 36, test_registers 44, test_gate_register 39, suite 119 (the plan's Task 1 test_lib block held 21 tests while the ledger said 28; plan blocks now regenerated from the shipped files)

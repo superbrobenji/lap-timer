@@ -57,20 +57,21 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every code block in this plan was run in a throwaway copy of these files: 111 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
+Every code block in this plan was run in a throwaway copy of these files: 171 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
 1. **Package markers and one test helper not in the locked file list:** `tools/gates/__init__.py` and `tools/gates/tests/__init__.py` (empty; unittest discovery refuses a start dir that is not a package, see the facts table), and `tools/gates/tests/gitfixture.py` (throwaway git repos for tests). No `tools/__init__.py`: `tools` stays a namespace package, so the existing `tools-tests` invocations are untouched.
-2. **Additive helpers in `lib/__init__.py`:** `CODE_ROOT` (the checkout holding the gate code; config is read from here, never from `--root`, so fixture trees carry no config copy), `load_yaml(path)` (strict loader), `gate_args(prog)` (shared `--root`), and `run_check(name, check, args) -> Result` (the fail-closed wrapper that both `run_gate` and `run_all.run` use). Additive helpers in `registers.py`: `owner_errors`, `transition_errors`, `evidence_errors`, `STATE_DIR`, `SEVERITIES`, the id regexes. In `gate_claims.py`: `verified_at_head(root, claim, head) -> bool`, for S2's `gate_dispatch`.
+2. **Additive helpers in `lib/__init__.py`:** `CODE_ROOT` (the checkout holding the gate code; config is read from here, never from `--root`, so fixture trees carry no config copy), `load_yaml(path, root=None)` (strict loader; with `root` every message names the file relative to it), `gate_args(prog)` (shared `--root`; `add_help=False`, `allow_abbrev=False`, `-h/--help` prints on stderr so `--json` stdout stays JSON), and `run_check(name, check, args) -> Result` (the fail-closed wrapper that both `run_gate` and `run_all.run` use). Additive helpers in `gitinfo.py`: `commit_exists(root, sha) -> bool`. Additive helpers in `registers.py`: `owner_errors`, `transition_errors`, `evidence_errors`, `finding_commit_errors`, `claim_commit_errors`, `decision_commit_errors`, `STATE_DIR`, `SEVERITIES`, the id regexes (ASCII digits only). In `gate_claims.py`: `verified_at_head(root, claim, head) -> bool`, for S2's `gate_dispatch`.
 3. **"verified only if `verified_at == HEAD`" cannot be met literally.** A row committed in commit C cannot hold C's own sha, so a literal check fails every verified row at every HEAD. Implemented reading: a row is verified at HEAD when `state == verified` and no cited path differs between `verified_at` and HEAD, and none is staged. A cite ending in `/` covers its subtree. An unknown `verified_at` is a FAIL. This reading also covers spec §4.2's "a commit touching a cited file marks dependent rows stale": the gate fails until the row is marked or re-verified.
 4. **`grant_for(decisions, plan, *, owner=None)` counts only a schema-valid row answered `"yes"`** (case-insensitive) with `answered_at.by` equal to the owner (default: config `owner.handle`), and only an exact `grant:<plan>` question, or that question followed by a space. The umbrella says "answered"; read literally, an answer of "no" would grant a merge.
 5. **The umbrella's verbatim `config.yml` fails `ci.yml`'s stale-comment step** (`comment_patterns` contains `'later sessions?'`). Task 1 adds one allow entry, the minimum change, rather than altering the verbatim config.
 6. **Handoff timing:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 2 (no post-merge commits on protected `main`; the handoff lands on the block branch before the merge).
 7. **Final verifier model:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 9 (Fable on the final adversarial verifier and the exception reviewer).
-8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the line `register: true`. Its ids are table first cells and leading list-item ids matching the finding regex. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them.
+8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the exact line `register: true` (DEC-0002: a near miss such as `register: yes`, `Register: true` or a BOM before the marker is a `FAIL register.marker.<file>`, never a silent un-register). Its ids are table first cells and leading list-item ids matching the finding regex, bare or wrapped in `**` / backticks, after an optional checkbox, followed by a space, tab, colon, comma, period or the end of the line. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them. `docs/reviews` must exist; `docs/superpowers/state/briefs` may be absent.
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
 10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
+11. **DEC-0002 and DEC-0003** (owner-delegated 2026-10-17, recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it.
 
 ## Files (S1 creates or modifies exactly these)
 
@@ -249,6 +250,8 @@ def remove(root) -> None:
 """Tests for tools/gates/lib (Gate framework, config, gitinfo). Run from the repo root:
 python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import contextlib
 import io
 import json
@@ -410,8 +413,11 @@ class GitInfo(unittest.TestCase):
         self.assertEqual(["demo-b1"], gitinfo.tags_at(self.root, "HEAD"))
 
     def test_bad_revision_raises_gate_error(self):
-        with self.assertRaisesRegex(GateError, "git -C .* diff --name-only"):
+        with self.assertRaises(GateError) as ctx:
             gitinfo.changed_files(self.root, "0000000", "HEAD")
+        self.assertTrue(str(ctx.exception).startswith("git diff --name-only -z --no-renames 0000000 HEAD: "),
+                        str(ctx.exception))
+        self.assertNotIn(self.root, str(ctx.exception))
 
     def test_check_runs_reads_every_check_kind(self):
         pr = {"statusCheckRollup": [
@@ -453,6 +459,230 @@ class PrForBranch(unittest.TestCase):
         self.fake_gh("echo 'HTTP 401: Bad credentials' >&2; exit 1\n")
         with self.assertRaisesRegex(GateError, "Bad credentials"):
             gitinfo.pr_for_branch(self.bin)
+
+
+class ReviewRound1(unittest.TestCase):
+    def test_json_only_recognised_as_first_argument(self):
+        seen = []
+        def check(args):
+            seen.append(args)
+            r = Result("demo")
+            r.passed("demo.a")
+            return r
+        rc, out = run(check, ["--root", "--json"])
+        self.assertEqual([["--root", "--json"]], seen)
+        self.assertEqual("PASS demo.a\n", out)
+        rc, out = run(check, ["--json", "--root", "x"])
+        self.assertEqual([["--root", "--json"], ["--root", "x"]], seen)
+        self.assertTrue(json.loads(out)["ok"])
+
+    def test_repo_root_git_fallback_and_error(self):
+        old = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        cwd = os.getcwd()
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        try:
+            os.chdir(lib.CODE_ROOT)
+            self.assertEqual(os.path.realpath(gf.git(lib.CODE_ROOT, "rev-parse", "--show-toplevel")),
+                             os.path.realpath(lib.repo_root()))
+            os.chdir(outside)
+            with self.assertRaisesRegex(GateError, "git rev-parse --show-toplevel"):
+                lib.repo_root()
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = "/nonexistent"
+            try:
+                with self.assertRaisesRegex(GateError, "git rev-parse --show-toplevel"):
+                    lib.repo_root()
+            finally:
+                os.environ["PATH"] = old_path
+        finally:
+            os.chdir(cwd)
+            gf.remove(outside)
+            if old is not None:
+                os.environ["CLAUDE_PROJECT_DIR"] = old
+
+    def test_unhashable_key_and_non_utf8_are_gate_errors(self):
+        d = tempfile.mkdtemp(prefix="gate-yaml-")
+        try:
+            with self.assertRaisesRegex(GateError, "unhashable mapping key"):
+                lib.load_yaml(gf.write(d, "k.yml", "? [a, b]\n: 1\n"))
+            path = os.path.join(d, "b.yml")
+            with open(path, "wb") as fh:
+                fh.write(b"x: \xff\xfe\n")
+            with self.assertRaisesRegex(GateError, "not valid UTF-8"):
+                lib.load_yaml(path)
+        finally:
+            gf.remove(d)
+
+    def test_missing_git_and_gh_binaries_are_gate_errors(self):
+        root = gf.new_repo()
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/nonexistent"
+        try:
+            with self.assertRaisesRegex(GateError, "git"):
+                gitinfo.head_sha(root)
+            with self.assertRaisesRegex(GateError, "gh"):
+                gitinfo.pr_for_branch(root)
+        finally:
+            os.environ["PATH"] = old
+            gf.remove(root)
+
+    def test_check_runs_rejects_non_dict_items(self):
+        with self.assertRaises(GateError):
+            gitinfo.check_runs({"statusCheckRollup": ["oops"]})
+
+    def test_non_ascii_and_renamed_paths_are_verbatim(self):
+        root = gf.new_repo()
+        try:
+            gf.write(root, "old.txt", "some content\nmore\nlines\n")
+            gf.commit_all(root)
+            base = gitinfo.head_sha(root)
+            gf.git(root, "mv", "old.txt", "new.txt")
+            gf.write(root, "\u00e9.txt", "x\n")
+            gf.git(root, "add", "-A")
+            self.assertEqual(["new.txt", "old.txt", "\u00e9.txt"], sorted(gitinfo.staged_files(root)))
+            head = gf.commit_all(root)
+            self.assertEqual(["new.txt", "old.txt", "\u00e9.txt"], sorted(gitinfo.changed_files(root, base, head)))
+        finally:
+            gf.remove(root)
+
+    def test_detached_head_is_a_gate_error(self):
+        root = gf.new_repo()
+        try:
+            gf.git(root, "checkout", "-q", "--detach")
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.branch(root)
+            self.assertEqual("git rev-parse --abbrev-ref HEAD: detached HEAD", str(ctx.exception))
+        finally:
+            gf.remove(root)
+
+
+class FixWave(unittest.TestCase):
+    """Block b1 final-review fix wave (items A6-A8, B4, B9, B10)."""
+
+    def test_result_with_no_lines_is_not_ok(self):                                   # B4
+        self.assertFalse(Result("g").ok())
+        self.assertEqual(False, json.loads(Result("g").render(True))["ok"])
+        r = Result("g")
+        r.passed("g.a")
+        self.assertTrue(r.ok())
+
+    def test_text_render_is_one_physical_line_per_result_line(self):                 # B9
+        r = Result("g")
+        r.fail("g.a", "while parsing\n  a block\t\tsequence\n\nin x.yml")
+        self.assertEqual("FAIL g.a: while parsing a block sequence in x.yml", r.render(False))
+        self.assertEqual("while parsing\n  a block\t\tsequence\n\nin x.yml",
+                         json.loads(r.render(True))["lines"][0]["reason"])           # JSON keeps the raw text
+
+    def test_help_goes_to_stderr_and_abbreviations_are_refused(self):                # B10
+        def check(args):
+            lib.gate_args("demo").parse_args(args)
+            return Result("demo")
+        for flag in ("--help", "-h"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc, out = run(check, ["--json", flag])
+            self.assertEqual(1, rc)
+            self.assertFalse(out.startswith("usage"), out)
+            self.assertEqual({"status": "FAIL", "id": "demo.input", "reason": "bad arguments (argparse exit 0)"},
+                             json.loads(out)["lines"][0])
+            self.assertIn("usage: demo", err.getvalue())
+            self.assertIn("--root", err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, out = run(check, ["--roo", "x"])
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL demo.input: bad arguments", out)
+
+    def test_load_yaml_messages_are_relative_to_the_root(self):                      # A7
+        d = tempfile.mkdtemp(prefix="gate-yaml-")
+        try:
+            gf.write(d, "sub/x.yml", "- id: [\n")
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(os.path.join(d, "sub", "x.yml"), d)
+            msg = str(ctx.exception)
+            self.assertTrue(msg.startswith("sub/x.yml: invalid YAML: "), msg)
+            self.assertIn('in "sub/x.yml", line', msg)
+            self.assertNotIn(d, msg)
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(os.path.join(d, "sub", "absent.yml"), d)
+            self.assertEqual("sub/absent.yml: No such file or directory", str(ctx.exception))
+            with open(os.path.join(d, "sub", "b.yml"), "wb") as fh:
+                fh.write(b"x: \xff\xfe\n")
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(os.path.join(d, "sub", "b.yml"), d)
+            self.assertEqual("sub/b.yml: not valid UTF-8", str(ctx.exception))
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(gf.write(d, "sub/m.yml", "- {<<: {a: 1}}\n"), d)
+            self.assertTrue(str(ctx.exception).startswith("sub/m.yml: invalid YAML: "), str(ctx.exception))
+            self.assertNotIn(d, str(ctx.exception))
+        finally:
+            gf.remove(d)
+
+    def test_config_messages_are_relative_to_the_root(self):                         # A7
+        d = tempfile.mkdtemp(prefix="gate-cfg-")
+        try:
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertEqual("tools/gates/config.yml: No such file or directory", str(ctx.exception))
+            gf.write(d, "tools/gates/config.yml", "- a\n")
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertEqual("tools/gates/config.yml: top level must be a mapping", str(ctx.exception))
+            gf.write(d, "tools/gates/config.yml", "owner: {handle: x}\n")
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertTrue(str(ctx.exception).startswith("tools/gates/config.yml: missing keys: triggers"))
+            with open(os.path.join(lib.CODE_ROOT, "tools", "gates", "config.yml"), encoding="utf-8") as fh:
+                good = fh.read()
+            gf.write(d, "tools/gates/config.yml", good.replace("owner: {handle: superbrobenji}", "owner: {handle: ' '}"))
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertEqual("tools/gates/config.yml: owner.handle must be a non-empty string", str(ctx.exception))
+        finally:
+            gf.remove(d)
+
+    def test_git_messages_do_not_carry_the_root(self):                               # A7
+        root = gf.new_repo()
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        try:
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.head_sha(outside)
+            self.assertTrue(str(ctx.exception).startswith("git rev-parse HEAD: "), str(ctx.exception))
+            self.assertNotIn(outside, str(ctx.exception))
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.tags_at(root, "no-such-rev")
+            self.assertTrue(str(ctx.exception).startswith("git tag --points-at no-such-rev: "))
+            self.assertNotIn(root, str(ctx.exception))
+        finally:
+            gf.remove(root)
+            gf.remove(outside)
+
+    def test_status_clean_ignores_the_users_untracked_files_setting(self):          # A6
+        root = gf.new_repo()
+        try:
+            gf.git(root, "config", "status.showUntrackedFiles", "no")
+            gf.write(root, "untracked.txt", "x\n")
+            self.assertEqual("", gf.git(root, "status", "--porcelain"))      # the config hides it ...
+            self.assertFalse(gitinfo.status_clean(root))                      # ... the helper must not
+        finally:
+            gf.remove(root)
+
+    def test_commit_exists(self):                                                    # A8
+        root = gf.new_repo()
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        try:
+            head = gitinfo.head_sha(root)
+            self.assertTrue(gitinfo.commit_exists(root, head))
+            self.assertTrue(gitinfo.commit_exists(root, head[:7]))
+            self.assertFalse(gitinfo.commit_exists(root, "0000000"))
+            self.assertFalse(gitinfo.commit_exists(root, gf.git(root, "rev-parse", "HEAD^{tree}")[:7]))  # a tree
+            self.assertFalse(gitinfo.commit_exists(root, "--all"))
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.commit_exists(outside, head)
+            self.assertTrue(str(ctx.exception).startswith("git cat-file -e "), str(ctx.exception))
+            self.assertNotIn(outside, str(ctx.exception))
+        finally:
+            gf.remove(root)
+            gf.remove(outside)
 
 
 if __name__ == "__main__":
@@ -516,7 +746,8 @@ class Result:
         if as_json:
             return json.dumps({"gate": self.gate, "ok": self.ok(),
                                "lines": [asdict(l) for l in self.lines]}, indent=1)
-        return "\n".join(f"{l.status} {l.id}" + (f": {l.reason}" if l.reason else "")
+        # one physical line per result line: a multi-line reason (PyYAML's are) is collapsed to single spaces
+        return "\n".join(f"{l.status} {l.id}" + (f": {' '.join(l.reason.split())}" if l.reason else "")
                          for l in self.lines)
 
 
@@ -529,8 +760,11 @@ def repo_root() -> str:
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env:
         return env
-    p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                       capture_output=True, text=True, check=False)
+    try:
+        p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"git rev-parse --show-toplevel: {exc.strerror or exc}") from None
     if p.returncode != 0:
         raise GateError(f"git rev-parse --show-toplevel: {p.stderr.strip()}")
     return p.stdout.strip()
@@ -547,7 +781,12 @@ def _mapping_no_duplicates(loader, node, deep=False):
             raise yaml.constructor.ConstructorError(
                 None, None, "merge keys (<<) are not allowed: write every key out", key_node.start_mark)
         key = loader.construct_object(key_node, deep=deep)
-        if key in seen:
+        try:
+            duplicate = key in seen
+        except TypeError:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"unhashable mapping key {key!r}", key_node.start_mark) from None
+        if duplicate:
             raise yaml.constructor.ConstructorError(
                 None, None, f"duplicate key {key!r}", key_node.start_mark)
         seen.add(key)
@@ -557,20 +796,39 @@ def _mapping_no_duplicates(loader, node, deep=False):
 _StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_no_duplicates)
 
 
-def load_yaml(path: str):
-    """Parse one YAML file strictly. Missing, unreadable, invalid or duplicate-key -> GateError."""
+def load_yaml(path: str, root=None):
+    """Parse one YAML file strictly. Missing, unreadable, invalid or duplicate-key -> GateError.
+    With `root`, every message names the file relative to it (machine-independent output)."""
+    shown = os.path.relpath(path, root) if root is not None else path
     try:
         with open(path, encoding="utf-8") as fh:
-            return yaml.load(fh, Loader=_StrictLoader)  # noqa: S506 -- _StrictLoader is a SafeLoader
+            text = fh.read()
+        return yaml.load(text, Loader=_StrictLoader)  # noqa: S506 -- _StrictLoader is a SafeLoader
     except OSError as exc:
-        raise GateError(f"{path}: {exc.strerror or exc}") from None
+        raise GateError(f"{shown}: {exc.strerror or exc}") from None
+    except UnicodeDecodeError:
+        raise GateError(f"{shown}: not valid UTF-8") from None
     except yaml.YAMLError as exc:
-        raise GateError(f"{path}: invalid YAML: {exc}") from None
+        detail = str(exc).replace('"<unicode string>"', f'"{shown}"')   # the text was parsed from a str
+        raise GateError(f"{shown}: invalid YAML: {detail}") from None
+
+
+class _HelpToStderr(argparse.Action):
+    """-h/--help prints the usage on stderr, so a gate's stdout (JSON with --json) is never usage text."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS,
+                         help="show this help on stderr and exit")
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.print_help(sys.stderr)
+        parser.exit(0)
 
 
 def gate_args(prog: str) -> argparse.ArgumentParser:
     """The arguments every gate shares: --root (the tree whose registers are checked)."""
-    ap = argparse.ArgumentParser(prog=prog)
+    ap = argparse.ArgumentParser(prog=prog, add_help=False, allow_abbrev=False)
+    ap.add_argument("-h", "--help", action=_HelpToStderr)
     ap.add_argument("--root", default=None,
                     help="tree holding docs/superpowers/state (default: repo_root())")
     return ap
@@ -595,12 +853,13 @@ def run_check(name: str, check: Callable[[list], Result], args: list) -> Result:
 
 
 def run_gate(name: str, check: Callable[[list], Result], argv: Optional[list] = None) -> int:
-    """Parses --json and gate-specific args, runs check(args) -> Result, prints, returns 0 if ok else 1.
+    """Parses --json (recognised only as argv[0], where the CLI table puts it; anywhere else it is
+    an ordinary token, e.g. another option's value) and gate-specific args, runs check(args) -> Result, prints, returns 0 if ok else 1.
     Any exception (incl. GateError) becomes a FAIL line `<name>.input: <message>` and rc 1.
     An empty Result (no lines) is a FAIL `<name>.empty: gate produced no verdict` (fail closed)."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    as_json = "--json" in argv
-    result = run_check(name, check, [a for a in argv if a != "--json"])
+    as_json = bool(argv) and argv[0] == "--json"
+    result = run_check(name, check, argv[1:] if as_json else argv)
     print(result.render(as_json))
     return 0 if result.ok() else 1
 ```
@@ -621,8 +880,8 @@ REQUIRED = ["owner", "triggers", "models", "model_rank", "fable_roles", "block",
 
 def load(root) -> dict:
     """Parse <root>/tools/gates/config.yml; a missing file, key or owner handle is a GateError."""
-    path = os.path.join(root, "tools", "gates", "config.yml")
-    data = load_yaml(path)
+    path = os.path.join("tools", "gates", "config.yml")    # messages name it relative to `root`
+    data = load_yaml(os.path.join(root, path), root)
     if not isinstance(data, dict):
         raise GateError(f"{path}: top level must be a mapping")
     missing = [k for k in REQUIRED if k not in data]
@@ -671,7 +930,7 @@ comment_patterns:   # regex; a hit must name a finding id or #issue on the same 
 exceptions:
   cost: {blast: {tooling: 1, ui: 2, timing: 3, data-integrity: 3, supervision: 3}, verifiability: [0, 2], reach: {transient: 0, stored_or_3plus: 2}}
   benefit: {complexity: {helper: 1, module: 2, task_or_60_lines: 3}, runtime: [0, 2]}
-tag_pattern: '^[a-z0-9-]+-b\d+$'
+tag_pattern: '^[a-z0-9-]+-b[0-9]+$'
 ```
 
 `tools/gates/lib/gitinfo.py`:
@@ -684,20 +943,25 @@ which is the documented None of pr_for_branch()."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from . import GateError
 
 
 def _run(cmd: list, cwd=None) -> str:
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    """Run `cmd` in `cwd`. Messages name the command, never the directory (machine-independent)."""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode != 0:
         raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
     return p.stdout
 
 
 def _git(root, *args) -> str:
-    return _run(["git", "-C", str(root), *args])
+    return _run(["git", *args], cwd=str(root))
 
 
 def head_sha(root) -> str:
@@ -705,11 +969,16 @@ def head_sha(root) -> str:
 
 
 def branch(root) -> str:
-    return _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    """The checked-out branch name; a detached HEAD is a GateError (never the string "HEAD")."""
+    name = _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    if name == "HEAD":
+        raise GateError("git rev-parse --abbrev-ref HEAD: detached HEAD")
+    return name
 
 
 def status_clean(root) -> bool:
-    return _git(root, "status", "--porcelain") == ""
+    # status.showUntrackedFiles=no (a common user setting) would hide untracked files: pin it
+    return _git(root, "-c", "status.showUntrackedFiles=all", "status", "--porcelain=v1", "-uall") == ""
 
 
 def worktrees(root) -> list:
@@ -719,19 +988,24 @@ def worktrees(root) -> list:
 
 
 def changed_files(root, base: str, head: str = "HEAD") -> list:
-    """Paths that differ between two commits (`git diff --name-only base head`)."""
-    return [l for l in _git(root, "diff", "--name-only", base, head).splitlines() if l]
+    """Paths that differ between two commits (`git diff --name-only -z --no-renames`; -z means no C-quoting of non-ASCII paths)."""
+    out = _git(root, "diff", "--name-only", "-z", "--no-renames", base, head)
+    return [l for l in out.split("\0") if l]
 
 
 def staged_files(root) -> list:
-    return [l for l in _git(root, "diff", "--cached", "--name-only").splitlines() if l]
+    out = _git(root, "diff", "--cached", "--name-only", "-z", "--no-renames")
+    return [l for l in out.split("\0") if l]
 
 
 def pr_for_branch(root):
     """`gh pr view` for the checked-out branch, or None when the branch has no PR."""
     cmd = ["gh", "pr", "view", "--json",
            "number,title,body,state,isDraft,headRefOid,statusCheckRollup"]
-    p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode != 0:
         if "no pull requests found" in p.stderr.lower():
             return None
@@ -749,10 +1023,30 @@ def check_runs(pr: dict) -> list:
         raise GateError("check_runs: PR JSON has no statusCheckRollup list")
     runs = []
     for item in pr["statusCheckRollup"]:
+        if not isinstance(item, dict):
+            raise GateError(f"check_runs: statusCheckRollup item is not an object: {item!r}")
         name = item.get("name") or item.get("context") or ""
         conclusion = item.get("conclusion") or item.get("state") or ""
         runs.append({"name": name, "conclusion": conclusion})
     return runs
+
+
+def commit_exists(root, sha) -> bool:
+    """True when `sha` (full or abbreviated hex) names a commit in the repository at `root`
+    (`git cat-file -e <sha>^{commit}`); False for an unknown, ambiguous or non-commit object;
+    any other git failure (not a repository, no git) is a GateError."""
+    if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
+        return False
+    cmd = ["git", "cat-file", "-e", f"{sha}^{{commit}}"]
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
+    if p.returncode == 0:
+        return True
+    if "Not a valid object name" in p.stderr:
+        return False
+    raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
 
 
 def tags_at(root, sha) -> list:
@@ -762,7 +1056,7 @@ def tags_at(root, sha) -> list:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_lib -v`
-Expected: `Ran 28 tests` … `OK`.
+Expected: `Ran 36 tests` … `OK`.
 
 Mutation check: in `run_check`, replace `except Exception as exc:` with `except GateError as exc:`. `test_an_unexpected_exception_is_fail` must now ERROR. Restore it and run again: OK.
 
@@ -811,11 +1105,11 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
 | File | Holds | Gate |
 |---|---|---|
 | `findings.yml` | one row per finding, with owner, lifecycle state and evidence | `gate_register` |
-| `claims.yml` | one row per factual statement in a tracked document | `gate_claims` |
-| `decisions.yml` | owner questions and merge grants (`grant:<plan>`) | `gate_decisions` |
-| `<plan>/ledger.md` | the plan's progress ledger, rulings, `CHECKPOINT b<N>` lines | by hand until `gate_checkpoint` |
-| `<plan>/handoff.md` | the checkpoint handoff | by hand until `gate_checkpoint` |
-| `<plan>/mutations/<id>.txt` | mutation transcripts that pin a finding | `gate_register` (exists), `gate_review_package` |
+| `claims.yml` | one row per factual statement in a tracked document | `gate_claims` (arrives in block b2) |
+| `decisions.yml` | owner questions and merge grants (`grant:<plan>`) | `gate_decisions` (arrives in block b2) |
+| `<plan>/ledger.md` | the plan's progress ledger, rulings, `CHECKPOINT b<N>` lines | by hand |
+| `<plan>/handoff.md` | the checkpoint handoff | by hand |
+| `<plan>/mutations/<id>.txt` | mutation transcripts that pin a finding | `gate_register` |
 
 ## Editing rules
 
@@ -824,18 +1118,25 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
 - Quote `answer: "yes"` and `state: "false"`: YAML reads bare yes/no/on/off/true/false as booleans.
 - No duplicate keys and no merge keys (`<<`): the loader refuses both.
 - Findings: history starts at `open`, every step is a legal transition, the last history state
-  equals `state`; `pinned` needs `pin.test`, an existing `pin.transcript` and the reviewer's
-  report path in `evidence`; `deferred` needs `ruling` = an answered decision; `closed` needs
-  evidence; `merged` is written only by the post-merge script (`by: postmerge`).
+  equals `state`; `pinned` needs `pin.test` (`test_<name>` or `test_<file>::test_<name>`), an
+  existing `pin.transcript` under `docs/superpowers/state/<plan>/mutations/` and the reviewer's
+  report path in `evidence`; `deferred` needs `ruling` = a valid, unique decision that the owner
+  answered; `closed` needs evidence; `merged` is written only by the post-merge script
+  (`by: postmerge`).
+- Every sha (history, cites, evidence entries shaped like a sha, `asked_at.sha`, `answered_at.sha`,
+  `verified_at`) must name a commit of this repository: `gate_register` checks each with
+  `git cat-file -e <sha>^{commit}` (decision DEC-0003).
 - Claims: `verified` needs `verified_at` and `by`; a verified row whose cited file changes goes
-  stale; mark it with `python3 tools/gates/gate_claims.py --mark-stale --base <sha>` (this
+  stale (the `gate_claims` gate and its `--mark-stale` command arrive in block b2; the command
   rewrites `claims.yml` through PyYAML, so comments in it are not kept: keep none there).
   `false` needs `finding` = a registered finding id.
 - Decisions: only the owner answers. The owner states the answer in chat; the session records it
   verbatim (a quoted string) with `answered_at.by: superbrobenji`, the owner handle in
   `tools/gates/config.yml`, and quotes the owner's words in the commit message. An agent never
-  writes an answer of its own.
-- The git pre-commit hook refuses a commit while this directory has unstaged edits.
+  writes an answer of its own. `asked_at.sha` / `answered_at.sha` are the `main` commit at the time the
+  row was created/answered (a question asked before the register existed records the register's
+  creating commit).
+- A git pre-commit hook that refuses a commit while this directory has unstaged edits arrives in block b3.
 ```
 
 `docs/superpowers/state/strict-delivery/ledger.md`:
@@ -872,7 +1173,7 @@ Append to `docs/superpowers/state/strict-delivery/ledger.md`:
 
 ```markdown
 - base BASE_B1=<the sha recorded in setup Step 0.3>
-- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 28 OK
+- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 36 OK
 ```
 
 ```bash
@@ -932,6 +1233,9 @@ DECISION = {
 }
 
 
+MUT = "docs/superpowers/state/demo/mutations/"
+
+
 def with_(row, **kw):
     out = copy.deepcopy(row)
     out.update(kw)
@@ -944,8 +1248,8 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002"], [d["id"] for d in decisions])
-        self.assertEqual([[], []], [reg.validate_decision(d) for d in decisions])
+        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003"], [d["id"] for d in decisions])
+        self.assertEqual([[], [], []], [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -1041,7 +1345,7 @@ class Transitions(unittest.TestCase):
 class Evidence(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="gate-ev-")
-        gf.write(self.root, "st/demo/mutations/T1-PIN-1.txt", "finding: T1-PIN-1\n")
+        gf.write(self.root, MUT + "T1-PIN-1.txt", "finding: T1-PIN-1\n")
         gf.write(self.root, "st/demo/review/T1.md", "status: DONE\n")
 
     def tearDown(self):
@@ -1049,7 +1353,7 @@ class Evidence(unittest.TestCase):
 
     def pinned(self, **kw):
         f = with_(FINDING, state="pinned",
-                  pin={"test": "test_x", "transcript": "st/demo/mutations/T1-PIN-1.txt"},
+                  pin={"test": "test_x", "transcript": MUT + "T1-PIN-1.txt"},
                   evidence=["st/demo/review/T1.md"],
                   history=[{"state": s, "sha": "aaaaaaa", "by": "x"}
                            for s in ("open", "planned", "in-progress", "pinned")])
@@ -1062,8 +1366,8 @@ class Evidence(unittest.TestCase):
     def test_pinned_needs_pin_transcript_file_and_review(self):
         self.assertIn("evidence: pinned needs pin {test, transcript}",
                       reg.evidence_errors(self.pinned(pin=None), self.root, []))
-        gone = {"test": "test_x", "transcript": "st/demo/mutations/absent.txt"}
-        self.assertIn("evidence: pin transcript st/demo/mutations/absent.txt does not exist",
+        gone = {"test": "test_x", "transcript": MUT + "absent.txt"}
+        self.assertIn(f"evidence: pin transcript {MUT}absent.txt does not exist",
                       reg.evidence_errors(self.pinned(pin=gone), self.root, []))
         self.assertIn("evidence: pinned needs the reviewer's confirming report path in evidence",
                       reg.evidence_errors(self.pinned(evidence=["bbbbbbb"]), self.root, []))
@@ -1080,23 +1384,23 @@ class Evidence(unittest.TestCase):
         for p in ("../" + os.path.basename(outside),):
             self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file under the repo root",
                           reg.evidence_errors(self.pinned(evidence=[p]), self.root, []), p)
-        escaped = {"test": "test_x", "transcript": "../" + os.path.basename(outside)}
-        self.assertIn(f"evidence: pin transcript {escaped['transcript']} does not exist",
+        escaped = {"test": "test_x", "transcript": MUT + "../../../../../" + os.path.basename(outside)}
+        self.assertIn(f"evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, got {escaped['transcript']!r}",
                       reg.evidence_errors(self.pinned(pin=escaped), self.root, []))
 
     def test_absolute_and_nul_evidence_paths_are_errors_not_crashes(self):
         abs_p = os.path.join(self.root, "st/demo/review/T1.md")
         self.assertIn(f"evidence: path must be relative to the repo root: {abs_p!r}",
                       reg.evidence_errors(self.pinned(evidence=[abs_p]), self.root, []))
-        abs_t = {"test": "test_x", "transcript": os.path.join(self.root, "st/demo/mutations/T1-PIN-1.txt")}
+        abs_t = {"test": "test_x", "transcript": os.path.join(self.root, MUT + "T1-PIN-1.txt")}
         errs = reg.evidence_errors(self.pinned(pin=abs_t), self.root, [])
         self.assertIn("evidence: pin transcript: must be relative to the repo root", errs)
         self.assertFalse(any("does not exist" in e for e in errs), errs)
         nul = "st/a\0b.md"
         self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
                       reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
-        bad = {"test": "test_x", "transcript": "st/a\0b.txt"}
-        self.assertIn("evidence: pin transcript st/a\0b.txt does not exist",
+        bad = {"test": "test_x", "transcript": MUT + "a\0b.txt"}
+        self.assertIn(f"evidence: pin transcript {MUT}a\0b.txt does not exist",
                       reg.evidence_errors(self.pinned(pin=bad), self.root, []))
 
     def test_deferred_needs_an_answered_owner_decision(self):
@@ -1236,6 +1540,151 @@ class Queries(unittest.TestCase):
         self.assertIs(g, reg.grant_for([DECISION, g], "demo"))
 
 
+def deferred(ruling="DEC-9001"):
+    return with_(FINDING, state="deferred", ruling=ruling,
+                 history=[{"state": "open", "sha": "aaaaaaa", "by": "a"},
+                          {"state": "deferred", "sha": "aaaaaaa", "by": "a"}])
+
+
+class FixWave(unittest.TestCase):
+    """Block b1 final-review fix wave."""
+
+    def answered(self, **kw):
+        return with_(DECISION, answer="defer", answered_at={"sha": "aaaaaaa", "by": "superbrobenji"}, **kw)
+
+    def test_owner_is_evaluated_even_when_other_keys_are_missing(self):               # A1
+        f = with_(FINDING, owner=None)
+        del f["siblings"]
+        self.assertEqual(["keys: missing siblings", "owner: missing (every finding needs an owner: a plan task, an issue or a roadmap plan)"],
+                         reg.validate_finding(f))
+        g = with_(FINDING, owner={"kind": "person"})
+        del g["repro"]
+        errs = reg.validate_finding(g)
+        self.assertEqual(["keys: missing repro"], errs[:1])
+        self.assertTrue(errs[1].startswith("owner: kind must be one of"), errs)
+        h = with_(FINDING)
+        del h["owner"]
+        self.assertEqual(["keys: missing owner"], reg.validate_finding(h))
+
+    def test_only_the_owner_answers_a_decision(self):                                  # A2
+        agent = with_(DECISION, answer="yes", answered_at={"sha": "aaaaaaa", "by": "session"})
+        self.assertEqual(["answered_at.by: only the owner (superbrobenji) answers a decision, got 'session'"],
+                         reg.validate_decision(agent))
+        self.assertEqual([], reg.validate_decision(agent, owner="session"))
+        self.assertEqual([], reg.validate_decision(self.answered()))
+
+    def test_deferred_needs_a_valid_owner_answered_unique_decision(self):             # A2
+        root = tempfile.mkdtemp(prefix="gate-def-")
+        self.addCleanup(gf.remove, root)
+        f = deferred()
+        self.assertEqual([], reg.evidence_errors(f, root, [self.answered()]))
+        by_agent = with_(DECISION, answer="defer", answered_at={"sha": "aaaaaaa", "by": "session"})
+        errs = reg.evidence_errors(f, root, [by_agent])
+        self.assertEqual(["evidence: ruling DEC-9001 is not a valid owner-answered decision "
+                          "(answered_at.by: only the owner (superbrobenji) answers a decision, got 'session')"], errs)
+        boolean = with_(DECISION, answer=False, answered_at={"sha": "aaaaaaa", "by": "superbrobenji"})
+        errs = reg.evidence_errors(f, root, [boolean])
+        self.assertEqual(1, len(errs), errs)
+        self.assertTrue(errs[0].startswith("evidence: ruling DEC-9001 is not a valid owner-answered decision (answer: "), errs)
+        self.assertIn("quote it", errs[0])
+        self.assertEqual(["evidence: ruling DEC-9001 appears more than once in decisions.yml"],
+                         reg.evidence_errors(f, root, [self.answered(), self.answered()]))
+        self.assertEqual(["evidence: ruling DEC-9001 is not answered by the owner"],
+                         reg.evidence_errors(f, root, [DECISION]))
+
+    def test_unicode_digits_are_not_ids(self):                                         # B8
+        for bad in ("DEC-\uff10\uff10\uff10\uff11", "DEC-\u0663\u0663\u0663\u0663"):
+            self.assertTrue(any(e.startswith("id: ") for e in reg.validate_decision(with_(DECISION, id=bad))), bad)
+            self.assertTrue(any(e.startswith("ruling: ") for e in reg.validate_finding(with_(FINDING, ruling=bad))), bad)
+
+    def test_sha_length_bounds(self):                                                   # B14
+        for sha in ("aaaaaa", "a", "a" * 41):
+            f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": sha}])
+            self.assertTrue(any(e.startswith("cites: entry 0 sha") for e in reg.validate_finding(f)), sha)
+        for sha in ("a" * 7, "a" * 40):
+            f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": sha}])
+            self.assertEqual([], reg.validate_finding(f), sha)
+
+    def test_unquoted_dates_and_booleans_in_string_fields_get_the_quote_hint(self):  # B15
+        import datetime
+        for v in (datetime.date(2026, 10, 17), True, 7, 1.5):
+            errs = reg.validate_finding(with_(FINDING, source=v))
+            self.assertEqual(["source: must be a non-empty string (YAML read it as a date, boolean or number: quote it)"],
+                             errs, v)
+        self.assertEqual(["source: must be a non-empty string"], reg.validate_finding(with_(FINDING, source="")))
+        self.assertEqual(["doc: must be a non-empty string (YAML read it as a date, boolean or number: quote it)"],
+                         reg.validate_claim(with_(CLAIM, doc=datetime.date(2026, 10, 17))))
+
+    def test_pinned_transcript_location_and_test_name(self):                           # B13
+        root = tempfile.mkdtemp(prefix="gate-pin-")
+        self.addCleanup(gf.remove, root)
+        gf.write(root, "README.md", "x\n")
+        gf.write(root, MUT + "T1-PIN-1.txt", "t\n")
+        gf.write(root, "docs/superpowers/state/demo/review/T1.md", "r\n")
+        base = with_(FINDING, state="pinned", evidence=["docs/superpowers/state/demo/review/T1.md"],
+                     history=[{"state": s, "sha": "aaaaaaa", "by": "x"}
+                              for s in ("open", "planned", "in-progress", "pinned")])
+        ok = with_(base, pin={"test": "test_x", "transcript": MUT + "T1-PIN-1.txt"})
+        self.assertEqual([], reg.evidence_errors(ok, root, []))
+        self.assertEqual([], reg.evidence_errors(with_(ok, pin={"test": "test_mod::test_x", "transcript": MUT + "T1-PIN-1.txt"}), root, []))
+        for where in ("README.md", "docs/superpowers/state/demo/review/T1.md", "docs/superpowers/state/mutations/T1-PIN-1.txt",
+                      "docs/superpowers/state/../demo/mutations/T1-PIN-1.txt", "docs/superpowers/state/demo/mutations/a/T1-PIN-1.txt"):
+            errs = reg.evidence_errors(with_(base, pin={"test": "test_x", "transcript": where}), root, [])
+            self.assertEqual([f"evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, got {where!r}"],
+                             errs, where)
+        for name in ("not a test", "x", "test_", "test_a::x", "test_a::", "test_a b", "test_a::test_b::test_c", "test_x\n"):
+            errs = reg.evidence_errors(with_(ok, pin={"test": name, "transcript": MUT + "T1-PIN-1.txt"}), root, [])
+            self.assertEqual([f"evidence: pin test must be test_<name> or test_<name>::test_<name>, got {name!r}"], errs, name)
+
+    def test_load_errors_name_the_register_relative_to_the_root(self):                # A7
+        root = tempfile.mkdtemp(prefix="gate-reg-")
+        self.addCleanup(gf.remove, root)
+        rel = "docs/superpowers/state/findings.yml"
+        with self.assertRaises(GateError) as ctx:
+            reg.load_findings(root)
+        self.assertEqual(f"{rel}: No such file or directory", str(ctx.exception))
+        for text, msg in (("", "empty file (an empty register is the YAML list [])"),
+                          ("id: A-1\n", "top level must be a YAML list"), ("- A-1\n", "entry 0 is not a mapping")):
+            gf.write(root, rel, text)
+            with self.assertRaises(GateError) as ctx:
+                reg.load_findings(root)
+            self.assertEqual(f"{rel}: {msg}", str(ctx.exception))
+
+    def commits(self):
+        root = gf.new_repo()
+        self.addCleanup(gf.remove, root)
+        return root, gf.git(root, "rev-parse", "--short=7", "HEAD")
+
+    def test_every_sha_field_must_name_a_commit(self):                                 # A8
+        root, real = self.commits()
+        fake = "0000000"
+        msg = "{}: sha 0000000 is not a commit in this repository"
+        f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": real}, {"file": "b.c", "lines": "1", "sha": fake}],
+                  evidence=[real, fake, "README.md"],
+                  history=[{"state": "open", "sha": real, "by": "a"}])
+        self.assertEqual([msg.format("cites[1].sha"), msg.format("evidence[1]")], reg.finding_commit_errors(f, root))
+        g = with_(f, cites=[], evidence=[], history=[{"state": "open", "sha": fake, "by": "a"}])
+        self.assertEqual([msg.format("history[0].sha")], reg.finding_commit_errors(g, root))
+        d = with_(DECISION, asked_at={"sha": fake, "by": "session"}, answer="x",
+                  answered_at={"sha": fake, "by": "superbrobenji"})
+        self.assertEqual([msg.format("asked_at.sha"), msg.format("answered_at.sha")], reg.decision_commit_errors(d, root))
+        self.assertEqual([], reg.decision_commit_errors(with_(DECISION, asked_at={"sha": real, "by": "s"}), root))
+        c = with_(CLAIM, verified_at=fake, by="s", state="verified")
+        self.assertEqual([msg.format("verified_at")], reg.claim_commit_errors(c, root))
+        self.assertEqual([], reg.claim_commit_errors(with_(c, verified_at=real), root))
+        self.assertEqual([], reg.claim_commit_errors(CLAIM, root))
+
+    def test_the_commit_lookup_is_injectable_and_a_git_failure_propagates(self):      # A8
+        seen = []
+        f = with_(FINDING, cites=[], history=[{"state": "open", "sha": "abcdef1", "by": "a"}], evidence=["abcdef1"])
+        self.assertEqual([], reg.finding_commit_errors(f, "r", lambda root, sha: seen.append((root, sha)) or True))
+        self.assertEqual([("r", "abcdef1"), ("r", "abcdef1")], seen)
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        self.addCleanup(gf.remove, outside)
+        with self.assertRaises(GateError):
+            reg.finding_commit_errors(f, outside)
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -1254,10 +1703,11 @@ Expected: ERROR, `ImportError: cannot import name 'registers' from 'tools.gates.
 spec §4). Every validator returns a list of "<field>: <problem>" strings, [] when the row is ok."""
 from __future__ import annotations
 
+import datetime
 import os
 import re
 
-from . import CODE_ROOT, GateError, config, load_yaml
+from . import CODE_ROOT, GateError, config, gitinfo, load_yaml
 
 FINDING_STATES = ["open", "planned", "in-progress", "fixed-unpinned", "pinned", "deferred", "closed", "merged"]
 FINDING_TRANSITIONS = {  # from -> allowed to
@@ -1272,10 +1722,12 @@ OWNER_KINDS = ["plan", "issue", "roadmap"]
 SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 FINDING_ID = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 CLAIM_ID = re.compile(r"^C-[A-Za-z0-9.§-]+$")
-DECISION_ID = re.compile(r"^DEC-\d{4}$")
+DECISION_ID = re.compile(r"^DEC-[0-9]{4}$")
 GRANT_QUESTION = re.compile(r"grant:\S+( .*)?", re.S)
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
+PIN_TEST = re.compile(r"^test_[A-Za-z0-9_]+(::test_[A-Za-z0-9_]+)?$")
+PIN_TRANSCRIPT = re.compile(r"^docs/superpowers/state/(?!\.\.?/)[^/]+/mutations/(?!\.\.?$)[^/]+$")
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
 
 FINDING_KEYS = ["id", "source", "severity", "class", "siblings", "cites", "repro", "owner", "state",
@@ -1287,8 +1739,8 @@ OWNER_SHAPES = {"plan": {"kind", "plan", "task"}, "issue": {"kind", "number"}, "
 
 
 def _load(root, name) -> list:
-    path = os.path.join(root, STATE_DIR, name)
-    data = load_yaml(path)
+    path = os.path.join(STATE_DIR, name)    # messages name the file relative to `root`
+    data = load_yaml(os.path.join(root, path), root)
     if data is None:
         raise GateError(f"{path}: empty file (an empty register is the YAML list [])")
     if not isinstance(data, list):
@@ -1313,6 +1765,13 @@ def load_decisions(root) -> list:
 
 def _text(v) -> bool:
     return isinstance(v, str) and v.strip() != ""
+
+
+def _hint(v) -> str:
+    """The "quote it" hint for a string field YAML parsed as a date, boolean or number."""
+    if isinstance(v, (datetime.date, bool, int, float)):
+        return " (YAML read it as a date, boolean or number: quote it)"
+    return ""
 
 
 def _sha(v) -> bool:
@@ -1379,15 +1838,15 @@ def owner_errors(owner) -> list:
 def validate_finding(f: dict) -> list:
     errs = _keys(f, FINDING_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
-        return errs
+        return errs + (owner_errors(f["owner"]) if "owner" in f else [])   # the owner rule is never skipped
     if not isinstance(f["id"], str) or not FINDING_ID.fullmatch(f["id"]):
         errs.append(f"id: {f['id']!r} does not match {FINDING_ID.pattern}")
     if not _text(f["source"]):
-        errs.append("source: must be a non-empty string")
+        errs.append("source: must be a non-empty string" + _hint(f["source"]))
     if f["severity"] not in SEVERITIES:
         errs.append(f"severity: must be one of {SEVERITIES}, got {f['severity']!r}")
     if not _text(f["class"]):
-        errs.append("class: the reviewer's class statement, verbatim, non-empty")
+        errs.append("class: the reviewer's class statement, verbatim, non-empty" + _hint(f["class"]))
     if not isinstance(f["siblings"], list) or not all(_text(s) for s in f["siblings"]):
         errs.append("siblings: must be a list of non-empty strings (may be empty)")
     if not isinstance(f["cites"], list):
@@ -1398,10 +1857,11 @@ def validate_finding(f: dict) -> list:
                 errs.append(f"cites: entry {i} must be exactly {{file, lines, sha}}")
                 continue
             if not _text(c["file"]) or not _text(c["lines"]):
-                errs.append(f"cites: entry {i} file and lines must be non-empty strings (quote lines)")
+                errs.append(f"cites: entry {i} file and lines must be non-empty strings (quote lines)"
+                            + _hint(c["file"]) + _hint(c["lines"]))
             errs += _sha_problem(f"cites: entry {i} sha", c["sha"])
     if f["repro"] is not None and not _text(f["repro"]):
-        errs.append("repro: must be a path string or null")
+        errs.append("repro: must be a path string or null" + _hint(f["repro"]))
     errs += owner_errors(f["owner"])
     if f["state"] not in FINDING_STATES:
         errs.append(f"state: must be one of {FINDING_STATES}, got {f['state']!r}")
@@ -1425,7 +1885,7 @@ def validate_finding(f: dict) -> list:
                 errs.append(f"history: entry {i} state {h['state']!r} is not a finding state")
             errs += _sha_problem(f"history: entry {i} sha", h["sha"])
             if not _text(h["by"]):
-                errs.append(f"history: entry {i} by must be a non-empty string")
+                errs.append(f"history: entry {i} by must be a non-empty string" + _hint(h["by"]))
         last = hist[-1]
         if isinstance(last, dict) and last.get("state") != f["state"]:
             errs.append(f"history: last entry state {last.get('state')!r} != state {f['state']!r}")
@@ -1442,7 +1902,7 @@ def transition_errors(f: dict) -> list:
     return errs
 
 
-def evidence_errors(f: dict, root, decisions: list) -> list:
+def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
     """What each state must carry (spec §4.1). Call only on a valid row."""
     errs = []
     for e in f["evidence"]:
@@ -1455,20 +1915,32 @@ def evidence_errors(f: dict, root, decisions: list) -> list:
         pin = f["pin"]
         if pin is None:
             errs.append("evidence: pinned needs pin {test, transcript}")
-        elif os.path.isabs(pin["transcript"]):
-            errs.append("evidence: pin transcript: must be relative to the repo root")
-        elif not _file_under(root, pin["transcript"]):
-            errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
+        else:
+            if not PIN_TEST.fullmatch(pin["test"]):
+                errs.append(f"evidence: pin test must be test_<name> or test_<name>::test_<name>, got {pin['test']!r}")
+            if os.path.isabs(pin["transcript"]):
+                errs.append("evidence: pin transcript: must be relative to the repo root")
+            elif not PIN_TRANSCRIPT.fullmatch(pin["transcript"]):
+                errs.append("evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, "
+                            f"got {pin['transcript']!r}")
+            elif not _file_under(root, pin["transcript"]):
+                errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
         if not any(not _sha(e) and _file_under(root, e) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":
-        d = next((x for x in decisions if x.get("id") == f["ruling"]), None)
+        matches = [x for x in decisions if x.get("id") == f["ruling"]]
         if f["ruling"] is None:
             errs.append("evidence: deferred needs ruling = the owner's decision id")
-        elif d is None:
+        elif not matches:
             errs.append(f"evidence: ruling {f['ruling']} is not in decisions.yml")
-        elif d.get("answer") is None:
+        elif len(matches) > 1:
+            errs.append(f"evidence: ruling {f['ruling']} appears more than once in decisions.yml")
+        elif matches[0].get("answer") is None:
             errs.append(f"evidence: ruling {f['ruling']} is not answered by the owner")
+        else:
+            bad = validate_decision(matches[0], owner)
+            if bad:
+                errs.append(f"evidence: ruling {f['ruling']} is not a valid owner-answered decision ({'; '.join(bad)})")
     if f["state"] == "closed" and not f["evidence"]:
         errs.append("evidence: closed needs evidence (commits or report paths)")
     for h in f["history"]:
@@ -1485,7 +1957,7 @@ def validate_claim(c: dict) -> list:
         errs.append(f"id: {c['id']!r} does not match {CLAIM_ID.pattern}")
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
-            errs.append(f"{k}: must be a non-empty string")
+            errs.append(f"{k}: must be a non-empty string" + _hint(c[k]))
     if not isinstance(c["cites"], list) or not c["cites"] or not all(_text(p) for p in c["cites"]):
         errs.append("cites: must be a non-empty list of paths (a claim citing nothing can never go stale)")
     if c["state"] is False:
@@ -1495,7 +1967,7 @@ def validate_claim(c: dict) -> list:
     if c["verified_at"] is not None:
         errs += _sha_problem("verified_at", c["verified_at"])
     if c["by"] is not None and not _text(c["by"]):
-        errs.append("by: must be null or a non-empty string")
+        errs.append("by: must be null or a non-empty string" + _hint(c["by"]))
     if c["state"] == "verified" and (c["verified_at"] is None or c["by"] is None):
         errs.append("state: verified needs verified_at and by")
     if c["state"] == "false":
@@ -1506,7 +1978,8 @@ def validate_claim(c: dict) -> list:
     return errs
 
 
-def validate_decision(d: dict) -> list:
+def validate_decision(d: dict, owner=None) -> list:
+    """`owner` (default: config owner.handle) is the only handle allowed in answered_at.by."""
     errs = _keys(d, DECISION_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
@@ -1515,7 +1988,7 @@ def validate_decision(d: dict) -> list:
     if d["class"] not in DECISION_CLASSES:
         errs.append(f"class: must be one of {DECISION_CLASSES}, got {d['class']!r}")
     if not _text(d["question"]):
-        errs.append("question: must be a non-empty string")
+        errs.append("question: must be a non-empty string" + _hint(d["question"]))
     elif d["class"] == "merge-grant" and not GRANT_QUESTION.fullmatch(d["question"]):
         errs.append("question: a merge-grant question is 'grant:<plan>'")
     opts = d["options"]
@@ -1541,9 +2014,38 @@ def validate_decision(d: dict) -> list:
             errs.append("answered_at: must be null or {sha, by}")
         else:
             errs += _sha_problem("answered_at.sha", at["sha"])
+            if owner is None:
+                owner = config.load(CODE_ROOT)["owner"]["handle"]
+            if at["by"] != owner:
+                errs.append(f"answered_at.by: only the owner ({owner}) answers a decision, got {at['by']!r}")
     if (ans is None) != (at is None):
         errs.append("answered_at: answer and answered_at are both null or both set")
     return errs
+
+
+def _commit_errors(pairs, root, exists) -> list:
+    return [f"{field}: sha {sha} is not a commit in this repository"
+            for field, sha in pairs if _sha(sha) and not exists(root, sha)]
+
+
+def finding_commit_errors(f: dict, root, exists=gitinfo.commit_exists) -> list:
+    """Every sha in a (valid) finding row -- history, cites, evidence entries shaped like a sha --
+    must name a commit in the repository at `root` (DEC-0003). `exists(root, sha) -> bool`."""
+    pairs = [(f"history[{i}].sha", h["sha"]) for i, h in enumerate(f["history"])]
+    pairs += [(f"cites[{i}].sha", c["sha"]) for i, c in enumerate(f["cites"])]
+    pairs += [(f"evidence[{i}]", e) for i, e in enumerate(f["evidence"])]
+    return _commit_errors(pairs, root, exists)
+
+
+def claim_commit_errors(c: dict, root, exists=gitinfo.commit_exists) -> list:
+    return _commit_errors([("verified_at", c["verified_at"])], root, exists)
+
+
+def decision_commit_errors(d: dict, root, exists=gitinfo.commit_exists) -> list:
+    pairs = [("asked_at.sha", d["asked_at"]["sha"])]
+    if d["answered_at"] is not None:
+        pairs.append(("answered_at.sha", d["answered_at"]["sha"]))
+    return _commit_errors(pairs, root, exists)
 
 
 def finding_by_id(findings, id):
@@ -1562,7 +2064,7 @@ def grant_for(decisions, plan: str, *, owner=None):
     if owner is None:
         owner = config.load(CODE_ROOT)["owner"]["handle"]
     for d in decisions:
-        if validate_decision(d) != [] or d["class"] != "merge-grant":
+        if validate_decision(d, owner) != [] or d["class"] != "merge-grant":
             continue
         q = d["question"]
         if q != f"grant:{plan}" and not q.startswith(f"grant:{plan} "):
@@ -1577,13 +2079,13 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 34 tests` OK; whole suite `Ran 62 tests` OK.
+Expected: `Ran 44 tests` OK; whole suite `Ran 80 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 34 OK` to the ledger.
+Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 44 OK` to the ledger.
 
 ```bash
 git add tools/gates/lib/registers.py tools/gates/tests/test_registers.py docs/superpowers/state/strict-delivery/ledger.md
@@ -1600,7 +2102,7 @@ git commit -m "feat(gates): register loaders, schema validators and lifecycle ru
 
 **Interfaces:**
 - Consumes: `Result`, `gate_args`, `repo_root`, `run_gate` (Task 1); `registers.load_findings`, `load_decisions`, `validate_finding`, `transition_errors`, `evidence_errors` (Task 2).
-- Produces: `gate_register.check(args: list) -> Result` (args: `--root <tree>`), `main(argv=None) -> int`, `registered_reports(root) -> list[str]`, `report_ids(path) -> list[str]`, `REPORT_DIRS`, `MARKER = "register: true"`. Line ids: `register.{schema|owner|duplicate|transition|evidence}.<finding id>` on FAIL, and `register.report.<file relative to root>.<id>: not in register` for a registered report citing an unregistered id (owner ruling 5). One `PASS register.<category>` per category with no FAIL, in the order schema, owner, duplicate, transition, evidence, report.
+- Produces: `gate_register.check(args: list) -> Result` (args: `--root <tree>`), `main(argv=None) -> int`, `registered_reports(root) -> (found: list[str], bad: list[(path, line)])`, `report_ids(path, root) -> list[str]`, `REPORT_DIRS`, `MARKER = "register: true"`. Line ids: `register.{schema|owner|duplicate|transition|evidence}.<finding or decision id>` on FAIL (a malformed id prints as `entry-<index>`), `register.marker.<file relative to root>` for a near-miss marker, and `register.report.<file relative to root>.<id>: not in register` for a registered report citing an unregistered id (owner ruling 5). One `PASS register.<category>` per category in which every row was evaluated and none failed (a category with a skipped row prints no PASS), in the order schema, owner, duplicate, transition, evidence, report. `--root ""` is `FAIL register.input: --root is empty`; a missing `docs/reviews` is `FAIL register.input: docs/reviews: missing report directory`.
 
 - [ ] **Step 1: Write the fixtures**
 
@@ -1608,8 +2110,9 @@ git commit -m "feat(gates): register loaders, schema validators and lifecycle ru
 F=tools/gates/tests/fixtures/register
 mkdir -p $F/valid/docs/superpowers/state/demo/mutations $F/valid/docs/superpowers/state/demo/review
 for c in illegal_transition pinned_no_transcript missing_owner missing_file report_unknown; do
-  mkdir -p $F/$c/docs/superpowers/state
+  mkdir -p $F/$c/docs/superpowers/state $F/$c/docs/reviews
   printf '[]\n' > $F/$c/docs/superpowers/state/decisions.yml
+  : > $F/$c/docs/reviews/.gitkeep          # docs/reviews must exist (a missing one is a FAIL)
 done
 mkdir -p $F/valid/docs/reviews $F/report_unknown/docs/superpowers/state/briefs
 printf '[]\n' > $F/report_unknown/docs/superpowers/state/findings.yml
@@ -1812,6 +2315,9 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
+import signal
+import tempfile
 import unittest
 
 from tools.gates import gate_register
@@ -1820,12 +2326,44 @@ from tools.gates.tests import gitfixture as gf
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "register")
 
 
-def run(case, *lead):
-    """main() on a fixture tree; `lead` goes before --root (--json is recognised only as argv[0])."""
+def fixture_repo(case):
+    """A throwaway git repo holding the fixture tree `case`. The fixtures write their shas as
+    aaaaaaa / bbbbbbb; here those become two real commits of the repo (DEC-0003)."""
+    root = gf.new_repo({"findings": None, "claims": None, "decisions": None})
+    first = gf.git(root, "rev-parse", "--short=7", "HEAD")
+    gf.write(root, "second.txt", "second\n")
+    second = gf.commit_all(root)[:7]
+    top = os.path.join(FIX, case)
+    for dirpath, _, names in os.walk(top):
+        for name in names:
+            with open(os.path.join(dirpath, name), encoding="utf-8") as fh:
+                text = fh.read()
+            gf.write(root, os.path.relpath(os.path.join(dirpath, name), top),
+                     text.replace("aaaaaaa", first).replace("bbbbbbb", second))
+    return root
+
+
+def main_out(root, *args):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = gate_register.main([*lead, "--root", os.path.join(FIX, case)])
+        rc = gate_register.main(list(args) if args else ["--root", root])
     return rc, buf.getvalue()
+
+
+def report_repo():
+    """An empty-register git repo that has the required docs/reviews directory."""
+    root = gf.new_repo()
+    os.makedirs(os.path.join(root, "docs", "reviews"))
+    return root
+
+
+def run(case, *lead):
+    """main() on a fixture tree; `lead` goes before --root (--json is recognised only as argv[0])."""
+    root = fixture_repo(case)
+    try:
+        return main_out(root, *lead, "--root", root)
+    finally:
+        gf.remove(root)
 
 
 class GateRegister(unittest.TestCase):
@@ -1875,16 +2413,42 @@ class GateRegister(unittest.TestCase):
 
     def test_report_ids_reads_table_cells_and_list_items(self):
         path = os.path.join(FIX, "valid", "docs", "reviews", "2026-01-01-registered.md")
-        self.assertEqual(["T1-OPEN-1", "T1-DEF-1", "T1-PIN-1"], gate_register.report_ids(path))
+        self.assertEqual(["T1-OPEN-1", "T1-DEF-1", "T1-PIN-1"],
+                         gate_register.report_ids(path, os.path.join(FIX, "valid")))
 
     def test_report_ids_ignores_what_is_not_a_finding_id(self):
         root = gf.new_repo()
         try:
             path = gf.write(root, "r.md", "register: true\n| t1-lower-1 | x |\n| T1-OPEN-1x y | x |\n"
-                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1, comma\n- T1-X-1\n1. T1-DEF-1 numbered\n")
-            self.assertEqual(["T1-DEF-1"], gate_register.report_ids(path))
+                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1x\u00e9 y\n1. T1-DEF-1 numbered\n"
+                            "- T1-FW-\uff11 full-width digit\n-T1-NOSPACE-1: no bullet space\n"
+                            "| `T1-A-1 | unbalanced\n| ** T1-B-1** | spaces inside the wrapper\n")
+            self.assertEqual(["T1-DEF-1"], gate_register.report_ids(path, root))
         finally:
             gf.remove(root)
+
+    def test_report_ids_accepts_every_dec_0002_form(self):
+        root = gf.new_repo()
+        try:
+            forms = ["- T1-A-1 space", "- T1-A-2: colon", "- T1-A-3, comma", "- T1-A-4. period", "- T1-A-5\ttab",
+                     "- T1-A-6", "- **T1-A-7** bold", "- **T1-A-8**: bold colon", "- `T1-A-9` tick",
+                     "- `T1-A-10`, tick comma", "- [ ] T1-A-11: open box", "- [x] T1-A-12 done box",
+                     "- [X] **T1-A-13**: both", "* T1-A-14 star", "+ T1-A-15 plus", "1. T1-A-16 num", "2) T1-A-17 paren",
+                     "  - T1-A-18 nested", "- T1-A-19\r", "| **T1-A-20** | bold cell |", "| `T1-A-21` | tick cell |",
+                     "| T1-A-22 | plain cell |"]
+            text = "register: true\n" + "\n".join(forms) + "\n"
+            path = gf.write(root, "r.md", text)
+            self.assertEqual([f"T1-A-{n}" for n in range(1, 23)], gate_register.report_ids(path, root))
+            bare = gf.write(root, "b.md", "register: true\n- T1-B-1\n- T1-B-2")      # no newline at the end of the file
+            self.assertEqual(["T1-B-1", "T1-B-2"], gate_register.report_ids(bare, root))
+            crlf = gf.write(root, "c.md", "register: true\r\n- T1-C-1\r\n- **T1-C-2**\r\n")
+            self.assertEqual(["T1-C-1", "T1-C-2"], gate_register.report_ids(crlf, root))
+        finally:
+            gf.remove(root)
+
+    def test_report_ids_needs_the_root(self):
+        with self.assertRaises(TypeError):
+            gate_register.report_ids("x.md")
 
     def test_unreadable_report_subdirectory_fails_closed(self):
         if os.geteuid() == 0:
@@ -1919,7 +2483,7 @@ class GateRegister(unittest.TestCase):
             gf.remove(root)
 
     def test_symlinked_report_directory_is_followed_and_cycles_stop(self):
-        root = gf.new_repo()
+        root = report_repo()
         try:
             briefs = os.path.join(root, "docs", "superpowers", "state", "briefs")
             gf.write(root, os.path.join("docs", "superpowers", "state", "real", "b.md"),
@@ -1988,7 +2552,7 @@ class GateRegister(unittest.TestCase):
             gf.remove(root)
 
     def test_duplicate_ids_fail(self):
-        root = gf.new_repo()
+        root = report_repo()
         try:
             with open(os.path.join(FIX, "missing_owner", gf.STATE, "findings.yml")) as fh:
                 row = fh.read().replace("owner: null", "owner: {kind: issue, number: 2}")
@@ -2013,6 +2577,248 @@ class GateRegister(unittest.TestCase):
         self.assertEqual(0, rc, buf.getvalue())
 
 
+ORPHAN = os.path.join(FIX, "missing_owner", gf.STATE, "findings.yml")
+NO_OWNER_MSG = "owner: missing (every finding needs an owner: a plan task, an issue or a roadmap plan)"
+
+
+def findings_text(**edits):
+    """The missing_owner fixture row with `key: value` lines replaced (value None deletes the line)."""
+    with open(ORPHAN, encoding="utf-8") as fh:
+        lines = fh.read().splitlines(keepends=True)
+    out = []
+    for line in lines:
+        lead = "- " if line.startswith("- ") else "  "
+        key = line.strip().split(":")[0].lstrip("- ")
+        if key in edits and (line.startswith("- ") or line.startswith("  " + key + ":")):
+            if edits[key] is not None:
+                out.append(f"{lead}{key}: {edits[key]}\n")
+            elif lead == "- ":
+                raise AssertionError("cannot delete the first line")
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def gate_on(registers=None, files=None):
+    """main() on a fresh repo (empty registers unless given) plus extra files; returns (rc, out, root)."""
+    root = report_repo()
+    for name, text in (registers or {}).items():
+        gf.write(root, os.path.join(gf.STATE, f"{name}.yml"), text)
+    for rel, text in (files or {}).items():
+        gf.write(root, rel, text)
+    gf.commit_all(root)
+    rc, out = main_out(root)
+    return rc, out, root
+
+
+class FixWave(unittest.TestCase):
+    """Block b1 final-review fix wave, every case through main()."""
+
+    def gate(self, **kw):
+        rc, out, root = gate_on(**kw)
+        self.addCleanup(gf.remove, root)
+        return rc, out, root
+
+    # A1 -- a category PASS needs every row evaluated and none failed
+    def test_a_row_without_an_owner_key_fails_owner_and_never_passes_it(self):
+        rc, out, _ = self.gate(registers={"findings": findings_text(owner=None)})
+        self.assertEqual("FAIL register.owner.T1-ORPHAN-1: keys: missing owner\n"
+                         "PASS register.schema\nPASS register.duplicate\nPASS register.report\n", out)
+        self.assertEqual(1, rc)
+
+    def test_null_owner_plus_another_missing_key_fails_both_categories(self):
+        rc, out, _ = self.gate(registers={"findings": findings_text(owner="null", siblings=None)})
+        self.assertEqual(f"FAIL register.schema.T1-ORPHAN-1: keys: missing siblings\n"
+                         f"FAIL register.owner.T1-ORPHAN-1: {NO_OWNER_MSG}\n"
+                         "PASS register.duplicate\nPASS register.report\n", out)
+        self.assertEqual(1, rc)
+
+    def test_owner_and_other_keys_missing_together_fails_both_categories(self):
+        rc, out, _ = self.gate(registers={"findings": findings_text(owner=None, siblings=None)})
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1: keys: missing siblings, owner", out)
+        self.assertIn("FAIL register.schema.T1-ORPHAN-1: keys: missing siblings, owner", out)
+        self.assertNotIn("PASS register.owner", out)
+        self.assertNotIn("PASS register.schema", out)
+
+    def test_categories_whose_rows_were_skipped_never_pass(self):
+        rc, out, _ = self.gate(registers={"findings": findings_text(severity="SEVERE", owner="{kind: issue, number: 2}")})
+        self.assertIn("FAIL register.schema.T1-ORPHAN-1: severity:", out)
+        for cat in ("schema", "transition", "evidence"):
+            self.assertNotIn(f"PASS register.{cat}", out)
+        self.assertIn("PASS register.owner", out)
+        rc, out, _ = self.gate(registers={"decisions": "- {id: DEC-0001, class: triage}\n"})
+        self.assertIn("FAIL register.schema.DEC-0001: keys: missing ", out)
+        self.assertNotIn("PASS register.schema", out)
+        self.assertNotIn("PASS register.evidence", out)
+        self.assertIn("PASS register.transition", out)
+
+    # A2 -- deferred needs a valid, unique, owner-answered decision
+    def deferred_gate(self, decisions):
+        row = findings_text(owner="{kind: issue, number: 2}", state="deferred", ruling="DEC-9001").replace(
+            "history: [{state: open, sha: \"aaaaaaa\", by: audit}]",
+            "history: [{state: open, sha: \"aaaaaaa\", by: audit}, {state: deferred, sha: \"aaaaaaa\", by: s}]")
+        root = report_repo()
+        self.addCleanup(gf.remove, root)
+        first = gf.git(root, "rev-parse", "--short=7", "HEAD")
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row.replace("aaaaaaa", first))
+        gf.write(root, os.path.join(gf.STATE, "decisions.yml"), decisions.replace("aaaaaaa", first))
+        gf.commit_all(root)
+        return main_out(root)
+
+    DECISION = ('- id: DEC-9001\n  class: scope\n  question: "defer it?"\n'
+                '  options: [{label: a, cost: x}, {label: b, cost: y}]\n'
+                '  asked_at: {sha: "aaaaaaa", by: session}\n  answer: ANSWER\n  answered_at: AT\n')
+
+    def decision(self, answer='"defer"', at='{sha: "aaaaaaa", by: superbrobenji}'):
+        return self.DECISION.replace("ANSWER", answer).replace("AT", at)
+
+    def test_deferred_on_an_owner_answered_decision_passes(self):
+        rc, out = self.deferred_gate(self.decision())
+        self.assertEqual(0, rc, out)
+
+    def test_deferred_on_a_decision_the_agent_answered_fails(self):
+        rc, out = self.deferred_gate(self.decision(at='{sha: "aaaaaaa", by: session}'))
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.schema.DEC-9001: answered_at.by: only the owner (superbrobenji) answers a decision, got 'session'", out)
+        self.assertIn("FAIL register.evidence.T1-ORPHAN-1: evidence: ruling DEC-9001 is not a valid owner-answered decision", out)
+
+    def test_deferred_on_a_boolean_answer_fails(self):
+        rc, out = self.deferred_gate(self.decision(answer="no"))
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.schema.DEC-9001: answer: must be null or a non-empty string, got False", out)
+        self.assertIn("evidence: ruling DEC-9001 is not a valid owner-answered decision (answer:", out)
+
+    def test_duplicate_decision_ids_fail(self):
+        rc, out = self.deferred_gate(self.decision() + self.decision())
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.duplicate.DEC-9001: id appears more than once", out)
+        self.assertIn("evidence: ruling DEC-9001 appears more than once in decisions.yml", out)
+
+    # A3
+    def test_an_empty_root_is_a_fail_not_the_cwd_repo(self):
+        for root in ("", "  ", "\t"):
+            self.assertEqual((1, "FAIL register.input: --root is empty\n"), main_out(None, "--root", root))
+
+    # A4 -- marker near misses
+    def report(self, first_line, body="- T9-NOPE-1: x\n"):
+        return self.gate(files={"docs/reviews/r.md": first_line + "\n" + body})
+
+    def test_exact_marker_registers_the_report(self):
+        for marker in ("register: true", "register: true\r"):
+            rc, out, _ = self.report(marker)
+            self.assertEqual(1, rc)
+            self.assertIn("FAIL register.report.docs/reviews/r.md.T9-NOPE-1: not in register", out, marker)
+            self.assertNotIn("register.marker", out)
+
+    def test_near_miss_markers_fail_instead_of_unregistering_the_report(self):
+        for marker in ("register: yes", "register: True", "Register: true", "register:true", "register: TRUE",
+                       "register: on", "register: y", "register: 1", "REGISTER : Y", "  register: true",
+                       "register: true  ", "register:\ttrue", "\ufeffregister: true"):
+            rc, out, _ = self.report(marker)
+            self.assertEqual(1, rc, marker)
+            self.assertEqual(f"FAIL register.marker.docs/reviews/r.md: marker must be exactly 'register: true' "
+                             f"(found {re.sub(' +', ' ', repr(marker.rstrip(chr(13))))})\n"
+                             "PASS register.schema\nPASS register.owner\nPASS register.duplicate\n"
+                             "PASS register.transition\nPASS register.evidence\n", out, marker)
+
+    def test_lines_that_are_not_marker_attempts_are_ignored(self):
+        for marker in ("register: false", "registered: true", "register: maybe", "# register: true", "register: true now"):
+            rc, out, _ = self.report(marker)
+            self.assertEqual(0, rc, marker)
+        late = "\n" * 20 + "register: yes\n- T9-NOPE-1: x\n"       # beyond the first 20 lines
+        rc, out, _ = self.gate(files={"docs/reviews/late.md": late})
+        self.assertEqual(0, rc, out)
+
+    # A7 / A8 -- machine-independent texts, real commits
+    def test_load_failures_name_files_relative_to_the_root(self):
+        root = report_repo()
+        self.addCleanup(gf.remove, root)
+        os.remove(os.path.join(root, gf.STATE, "findings.yml"))
+        self.assertEqual((1, "FAIL register.input: docs/superpowers/state/findings.yml: No such file or directory\n"),
+                         main_out(root))
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), "- id: [\n")
+        gf.write(root, os.path.join(gf.STATE, "decisions.yml"), "[]\n")
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertEqual(1, out.count("\n"), out)                       # one physical line
+        self.assertTrue(out.startswith("FAIL register.input: docs/superpowers/state/findings.yml: invalid YAML: "), out)
+        self.assertIn('in "docs/superpowers/state/findings.yml", line', out)
+        self.assertNotIn(root, out)
+        for text, msg in (("", "empty file (an empty register is the YAML list [])"), ("id: x\n", "top level must be a YAML list"),
+                          ("- x\n", "entry 0 is not a mapping")):
+            gf.write(root, os.path.join(gf.STATE, "findings.yml"), text)
+            self.assertEqual((1, f"FAIL register.input: docs/superpowers/state/findings.yml: {msg}\n"), main_out(root))
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
+        gf.write(root, os.path.join(gf.STATE, "decisions.yml"), "- {id: DEC-0001, id: DEC-0002}\n")
+        rc, out = main_out(root)
+        self.assertTrue(out.startswith("FAIL register.input: docs/superpowers/state/decisions.yml: invalid YAML: "), out)
+        self.assertNotIn(root, out)
+
+    def test_a_root_that_is_not_a_git_repository_is_a_fail_without_the_path(self):
+        root = tempfile.mkdtemp(prefix="gate-plain-")
+        self.addCleanup(gf.remove, root)
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), findings_text(owner="{kind: issue, number: 2}"))
+        gf.write(root, os.path.join(gf.STATE, "decisions.yml"), "[]\n")
+        os.makedirs(os.path.join(root, "docs", "reviews"))
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertTrue(out.startswith("FAIL register.input: git cat-file -e aaaaaaa^{commit}: "), out)
+        self.assertNotIn(root, out)
+
+    def test_every_sha_in_findings_and_decisions_must_be_a_commit(self):
+        row = findings_text(owner="{kind: issue, number: 2}", evidence='["0000000"]',
+                            cites='[{file: a.c, lines: "1", sha: "0000000"}]').replace('sha: "aaaaaaa"', 'sha: "0000000"')
+        dec = ('- id: DEC-9001\n  class: scope\n  question: "q?"\n  options: [{label: a, cost: x}, {label: b, cost: y}]\n'
+               '  asked_at: {sha: "0000000", by: session}\n  answer: "a"\n  answered_at: {sha: "0000000", by: superbrobenji}\n')
+        rc, out, _ = self.gate(registers={"findings": row, "decisions": dec})
+        self.assertEqual(1, rc)
+        gone = "sha 0000000 is not a commit in this repository"
+        for fid, field in (("T1-ORPHAN-1", "history[0].sha"), ("T1-ORPHAN-1", "cites[0].sha"),
+                           ("T1-ORPHAN-1", "evidence[0]"), ("DEC-9001", "asked_at.sha"), ("DEC-9001", "answered_at.sha")):
+            self.assertIn(f"FAIL register.evidence.{fid}: {field}: {gone}\n", out)
+        self.assertNotIn("PASS register.evidence", out)
+
+    def test_the_repository_registers_name_commits_of_this_repository(self):
+        rc, out = main_out(gf.REPO)
+        self.assertEqual(0, rc, out)
+
+    # B6
+    def test_a_malformed_id_cannot_forge_or_split_a_result_line(self):
+        evil = findings_text(owner="{kind: issue, number: 2}", id='"T1-A-1\\nPASS register.forged"')
+        rc, out, _ = self.gate(registers={"findings": evil})
+        self.assertEqual(1, rc)
+        self.assertEqual(["FAIL register.schema.entry-0: id: 'T1-A-1\\nPASS register.forged' does not match "
+                          + "^[A-Z0-9]+(-[A-Za-z0-9]+)+$"], [l for l in out.splitlines() if l.startswith("FAIL")])
+        self.assertEqual([], [l for l in out.splitlines() if "forged" in l and not l.startswith("FAIL")])
+        self.assertEqual(4, len(out.splitlines()), out)             # one FAIL + three PASS: no line was split
+
+    # B11
+    def test_a_fifo_in_a_report_directory_fails_instead_of_hanging(self):
+        root = report_repo()
+        self.addCleanup(gf.remove, root)
+        os.mkfifo(os.path.join(root, "docs", "reviews", "pipe.md"))
+        old = signal.signal(signal.SIGALRM, lambda *a: (_ for _ in ()).throw(AssertionError("gate hung on a FIFO")))
+        signal.alarm(10)
+        try:
+            rc, out = main_out(root)
+            self.assertEqual((1, "FAIL register.input: docs/reviews/pipe.md: not a regular file\n"), (rc, out))
+            with self.assertRaises(gate_register.GateError):
+                gate_register.report_ids(os.path.join(root, "docs", "reviews", "pipe.md"), root)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    # B12
+    def test_docs_reviews_must_exist_but_briefs_may_be_absent(self):
+        root = gf.new_repo()
+        self.addCleanup(gf.remove, root)
+        self.assertEqual((1, "FAIL register.input: docs/reviews: missing report directory\n"), main_out(root))
+        os.makedirs(os.path.join(root, "docs", "reviews"))
+        rc, out = main_out(root)
+        self.assertEqual(0, rc, out)
+        self.assertFalse(os.path.exists(os.path.join(root, "docs", "superpowers", "state", "briefs")))
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -2029,37 +2835,59 @@ Expected: ERROR, `ImportError: cannot import name 'gate_register' from 'tools.ga
 ```python
 #!/usr/bin/env python3
 """gate_register -- the findings register (spec §4.1, §7): schema, an owner on every row, legal
-lifecycle transitions, the evidence each state needs, and every finding id cited by a registered
-report (umbrella "Owner rulings" 5): a file under docs/reviews/ or docs/superpowers/state/briefs/
-whose first 20 lines include the line `register: true`. In it, a table row whose first cell is a
-finding id, or a list item that starts with one followed by a space or colon (the id matches
-registers.FINDING_ID via fullmatch), must name a row in findings.yml. Files without the marker are
-ignored; a report directory that does not exist holds no reports, one that exists but is not a
-directory (or cannot be read) is a FAIL; symlinked subdirectories are followed once each.
+lifecycle transitions, the evidence each state needs, every sha naming a commit in the gated
+repository (DEC-0003), and every finding id cited by a registered report (umbrella "Owner rulings"
+5, widened by DEC-0002). A registered report is a file under docs/reviews/ or
+docs/superpowers/state/briefs/ with the exact line `register: true` among its first 20 lines; a
+line there that is a near miss (`register: yes`, `Register: true`, `register:true`, trailing
+spaces, a UTF-8 BOM before the marker ...) is a FAIL `register.marker.<file>`, never a silent
+un-register. In a registered report a table row whose first cell is a finding id (optionally
+wrapped in `**...**` or backticks), or a list item (`-`, `*`, `+`, `1.`, `1)`, optionally followed
+by a `[ ]` / `[x]` checkbox) that starts with one (bare, `**id**` or `` `id` ``) followed by a
+space, tab, colon, comma, period or the end of the line, must name a row in findings.yml (the id
+matches registers.FINDING_ID via fullmatch). Files without the marker are ignored.
+docs/reviews must exist (a missing one is a FAIL); docs/superpowers/state/briefs may be absent;
+a report path that is not a directory, an entry that is not a regular file, or anything that
+cannot be read is a FAIL; symlinked subdirectories are followed once each.
 
-  python3 tools/gates/gate_register.py [--root <tree>] [--json]
+  python3 tools/gates/gate_register.py [--json] [--root <tree>]
 """
 from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
-from tools.gates.lib import registers  # noqa: E402
+from tools.gates.lib import gitinfo, registers  # noqa: E402
 
 CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"]
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
+REQUIRED_REPORT_DIRS = [os.path.join("docs", "reviews")]
 MARKER = "register: true"
 MARKER_LINES = 20
-LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :])")
+# anything that reads as an attempt at the marker: it must then be the marker, exactly
+MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:\s*(true|yes|on|y|1)\s*$", re.I)
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]+[.)])\s+(?:\[[ xX]\]\s+)?"
+                       r"(?:\*\*([^\s*]+)\*\*|`([^`\s]+)`|([^\s:,.*`]+))(?=[\s:,.]|$)")
 
 
 def _rel_error(root, path, exc) -> GateError:
     """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
     return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
+
+
+def _require_regular(root, path) -> None:
+    """A report entry must be a regular file (after following symlinks): opening a FIFO would hang."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        raise _rel_error(root, path, exc) from None
+    if not stat.S_ISREG(mode):
+        raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
 
 
 def _first_visit(seen, path) -> bool:
@@ -2074,14 +2902,17 @@ def _raise(exc):
     raise exc
 
 
-def registered_reports(root) -> list:
-    """Files under REPORT_DIRS carrying the marker line in their first MARKER_LINES lines."""
-    found = []
+def registered_reports(root) -> tuple:
+    """(found, bad): `found` lists the files under REPORT_DIRS with the exact marker line in their
+    first MARKER_LINES lines; `bad` lists (file, line) for a file with a near-miss marker line."""
+    found, bad = [], []
     seen = set()    # realpaths of directories already walked: a symlink cycle stops here
     for d in REPORT_DIRS:
         top = os.path.join(root, d)
         if not os.path.lexists(top):
-            continue    # no such report directory: it holds no registered reports
+            if d in REQUIRED_REPORT_DIRS:
+                raise GateError(f"{d}: missing report directory")
+            continue    # an optional report directory that does not exist holds no reports
         if not os.path.isdir(top):
             raise GateError(f"{d}: not a directory")
         if not _first_visit(seen, top):
@@ -2091,67 +2922,134 @@ def registered_reports(root) -> list:
             dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
+                _require_regular(root, path)
                 try:
                     with open(path, encoding="utf-8", errors="replace") as fh:
-                        head = [next(fh, "") for _ in range(MARKER_LINES)]
+                        head = [next(fh, "").rstrip("\r\n") for _ in range(MARKER_LINES)]
                 except OSError as exc:
                     raise _rel_error(root, path, exc) from None
-                if any(l.strip() == MARKER for l in head):
+                attempts = [l for l in head if MARKER_ATTEMPT.match(l)]
+                wrong = next((l for l in attempts if l != MARKER), None)
+                if wrong is not None:
+                    bad.append((path, wrong))
+                if MARKER in attempts:
                     found.append(path)
-    return found
+    return found, bad
 
 
-def report_ids(path, root=None) -> list:
+def _unwrap(cell: str) -> str:
+    """`**id**` and `id` in backticks are the id."""
+    for w in ("**", "`"):
+        if len(cell) > 2 * len(w) and cell.startswith(w) and cell.endswith(w):
+            return cell[len(w):-len(w)]
+    return cell
+
+
+def report_ids(path, root) -> list:
     """Finding ids a registered report cites: table first cells and leading list-item ids.
-    An unreadable file is a GateError worded relative to  (default: the file's directory)."""
+    An unreadable file is a GateError worded relative to `root`."""
     ids = []
+    _require_regular(root, path)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError as exc:
-        raise _rel_error(root or os.path.dirname(path), path, exc) from None
+        raise _rel_error(root, path, exc) from None
     for line in lines:
         s = line.strip()
         if s.startswith("|"):
-            cell = s.split("|")[1].strip()
+            cell = _unwrap(s.split("|")[1].strip())
             if registers.FINDING_ID.fullmatch(cell):
                 ids.append(cell)
             continue
         m = LIST_ITEM.match(line)
-        if m and registers.FINDING_ID.fullmatch(m.group(1)):
-            ids.append(m.group(1))
+        if m:
+            token = m.group(1) or m.group(2) or m.group(3)
+            if registers.FINDING_ID.fullmatch(token):
+                ids.append(token)
     return ids
+
+
+def _row_id(row, index, pattern) -> str:
+    """The id to print in a line id: the row's own id only when it is well-formed, else entry-<index>
+    (a raw malformed id could carry a newline and forge or split a result line)."""
+    rid = row.get("id")
+    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
+
+
+def _categories(error: str) -> list:
+    """Which categories a finding-schema error belongs to: owner errors (including a missing
+    `owner` key) are `owner`; every other error is `schema`."""
+    if error.startswith("owner"):
+        return ["owner"]
+    if error.startswith("keys: missing "):
+        names = [n.strip() for n in error[len("keys: missing "):].split(",")]
+        return (["owner"] if "owner" in names else []) + (["schema"] if set(names) - {"owner"} else [])
+    return ["schema"]
 
 
 def check(args: list) -> Result:
     ns = gate_args("gate_register").parse_args(args)
-    root = ns.root or repo_root()
+    if ns.root is not None and not ns.root.strip():
+        raise GateError("--root is empty")
+    root = ns.root if ns.root is not None else repo_root()
     findings = registers.load_findings(root)
     decisions = registers.load_decisions(root)
     r = Result("register")
+    skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
+    commits = {}
+
+    def exists(root, sha):    # one git call per distinct sha
+        if sha not in commits:
+            commits[sha] = gitinfo.commit_exists(root, sha)
+        return commits[sha]
+
     seen = set()
     for i, f in enumerate(findings):
-        fid = f["id"] if isinstance(f.get("id"), str) else f"entry-{i}"
+        fid = _row_id(f, i, registers.FINDING_ID)
         if fid in seen:
             r.fail(f"register.duplicate.{fid}", "id appears more than once")
         seen.add(fid)
         errs = registers.validate_finding(f)
         for e in errs:
-            r.fail(f"register.{'owner' if e.startswith('owner') else 'schema'}.{fid}", e)
+            for cat in _categories(e):
+                r.fail(f"register.{cat}.{fid}", e)
         if errs:
-            continue   # lifecycle rules need a well-formed row
+            skipped.update(["transition", "evidence"])   # lifecycle rules need a well-formed row
+            continue
         for e in registers.transition_errors(f):
             r.fail(f"register.transition.{fid}", e)
-        for e in registers.evidence_errors(f, root, decisions):
+        for e in registers.evidence_errors(f, root, decisions) + registers.finding_commit_errors(f, root, exists):
             r.fail(f"register.evidence.{fid}", e)
-    known = {f["id"] for f in findings if isinstance(f.get("id"), str)}
-    for path in registered_reports(root):
+    seen = set()
+    for i, d in enumerate(decisions):
+        did = _row_id(d, i, registers.DECISION_ID)
+        if did in seen:
+            r.fail(f"register.duplicate.{did}", "id appears more than once")
+        seen.add(did)
+        errs = registers.validate_decision(d)
+        for e in errs:
+            r.fail(f"register.schema.{did}", e)
+        if errs:
+            skipped.add("evidence")
+            continue
+        for e in registers.decision_commit_errors(d, root, exists):
+            r.fail(f"register.evidence.{did}", e)
+    known = {f["id"] for f in findings
+             if isinstance(f.get("id"), str) and registers.FINDING_ID.fullmatch(f["id"])}
+    reports, bad = registered_reports(root)
+    for path, line in bad:
+        r.fail(f"register.marker.{os.path.relpath(path, root)}",
+               f"marker must be exactly '{MARKER}' (found {line!r})")
+    if bad:
+        skipped.add("report")
+    for path in reports:
         rel = os.path.relpath(path, root)
         for rid in sorted(set(report_ids(path, root)) - known):
             r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}
     for cat in CATEGORIES:
-        if cat not in failed:
+        if cat not in failed and cat not in skipped:
             r.passed(f"register.{cat}")
     return r
 
@@ -2167,19 +3065,19 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 18 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 80 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 39 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 119 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
 
 Mutation check (production path): in `registers.evidence_errors`, delete the `elif not _file_under(root, pin["transcript"])` branch for the pin transcript. `test_pinned_without_transcript_fails` must fail. Restore and run again: OK.
 
-Mutation check (report scan): in `registered_reports`, replace `if any(l.strip() == MARKER for l in head):` with `if True:`. The unmarked fixture's ids are now scanned, and `test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes`, `test_valid_register_passes_every_category` and `test_the_repository_register_passes` must fail. Restore. Then replace `for rid in sorted(set(report_ids(path)) - known):` with `for rid in []:`. `test_registered_report_with_an_unknown_id_fails` must fail. Restore and run again: OK.
+Mutation check (report scan): in `registered_reports`, replace `if MARKER in attempts:` with `if True:`. The unmarked fixture's ids are now scanned, and `test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes`, `test_valid_register_passes_every_category` and `test_the_repository_register_passes` must fail. Restore. Then replace `for rid in sorted(set(report_ids(path, root)) - known):` with `for rid in []:`. `test_registered_report_with_an_unknown_id_fails` must fail. Restore and run again: OK.
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 18 OK; suite 80 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 39 OK; suite 119 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -2219,7 +3117,7 @@ Add `claims.md` (claim | direct command | contradiction | output excerpt | PASS/
 
 - [ ] **Step 3: Owner items for this block**
 
-These come before Step 4, which depends on them. Each owner-only question goes into `docs/superpowers/state/decisions.yml` under the next free `DEC-` id, with `asked_at: {sha: "<git rev-parse --short=7 HEAD>", by: session}`, `answer: null`, `answered_at: null`. Present it to the owner and stop until they answer. Transcribe the owner's answer as a quoted string with `answered_at: {sha: "<HEAD short>", by: superbrobenji}`, quote the owner's words in the commit message, and run `python3 -m unittest discover -s tools/gates/tests -t .` before each commit.
+These come before Step 4, which depends on them. Each owner-only question goes into `docs/superpowers/state/decisions.yml` under the next free `DEC-` id, with `asked_at: {sha: "<git rev-parse --short=7 main>", by: session}` (the `main` commit when the row is created: a branch-only sha is orphaned by the squash merge, and `gate_register` fails a sha that is not a commit), `answer: null`, `answered_at: null`. Present it to the owner and stop until they answer. Transcribe the owner's answer as a quoted string with `answered_at: {sha: "<main short>", by: superbrobenji}`, quote the owner's words in the commit message, and run `python3 -m unittest discover -s tools/gates/tests -t .` before each commit.
 
 (a) **DEC-0001 `grant:strict-delivery`.** The owner answered it in chat at setup Step 0.1, and Task 1 recorded the answer. Verify `grep -n -A1 'answer:' docs/superpowers/state/decisions.yml` shows `answer: "yes"` and `by: superbrobenji`. If it shows `null`, ask the owner the Step 0.1 question again and transcribe the answer. b1 cannot merge without `"yes"`, and b2's CI fails while DEC-0001 is unanswered, because the umbrella plan cites it.
 
@@ -2532,7 +3430,7 @@ Expected: ERROR, `ImportError: cannot import name 'gate_claims' from 'tools.gate
 #!/usr/bin/env python3
 """gate_claims -- the claim register (spec §4.2, §7).
 
-  python3 tools/gates/gate_claims.py [--root <tree>] [--head <sha>] [--json]
+  python3 tools/gates/gate_claims.py [--json] [--root <tree>] [--head <sha>]
   python3 tools/gates/gate_claims.py --mark-stale --base <sha> [--root <tree>]
 
 A row is "verified at HEAD" when its state is `verified` and no file it cites differs between
@@ -2803,7 +3701,7 @@ Expected: ERROR, `ImportError: cannot import name 'gate_decisions' from 'tools.g
 #!/usr/bin/env python3
 """gate_decisions -- the decisions register (spec §4.3, §5 "Decision classes", §7).
 
-  python3 tools/gates/gate_decisions.py [--root <tree>] [--scan <path> ...] [--json]
+  python3 tools/gates/gate_decisions.py [--json] [--root <tree>] [--scan <path> ...]
 
 Fails on: a malformed row; an answer whose `answered_at.by` is not the owner handle in
 tools/gates/config.yml (every class in OWNER_ONLY_CLASSES is answered by the owner alone); and
@@ -3088,7 +3986,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 10 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 91 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 151 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
@@ -3179,7 +4077,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 91 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 151 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -3678,7 +4576,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 104 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 164 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -3973,7 +4871,7 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 111 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 171 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -3983,7 +4881,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 111 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 171 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md
