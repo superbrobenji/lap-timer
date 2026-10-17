@@ -76,7 +76,12 @@ def _mapping_no_duplicates(loader, node, deep=False):
             raise yaml.constructor.ConstructorError(
                 None, None, "merge keys (<<) are not allowed: write every key out", key_node.start_mark)
         key = loader.construct_object(key_node, deep=deep)
-        if key in seen:
+        try:
+            duplicate = key in seen
+        except TypeError:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"unhashable mapping key {key!r}", key_node.start_mark) from None
+        if duplicate:
             raise yaml.constructor.ConstructorError(
                 None, None, f"duplicate key {key!r}", key_node.start_mark)
         seen.add(key)
@@ -93,6 +98,8 @@ def load_yaml(path: str):
             return yaml.load(fh, Loader=_StrictLoader)  # noqa: S506 -- _StrictLoader is a SafeLoader
     except OSError as exc:
         raise GateError(f"{path}: {exc.strerror or exc}") from None
+    except UnicodeDecodeError:
+        raise GateError(f"{path}: not valid UTF-8") from None
     except yaml.YAMLError as exc:
         raise GateError(f"{path}: invalid YAML: {exc}") from None
 
@@ -124,11 +131,12 @@ def run_check(name: str, check: Callable[[list], Result], args: list) -> Result:
 
 
 def run_gate(name: str, check: Callable[[list], Result], argv: Optional[list] = None) -> int:
-    """Parses --json and gate-specific args, runs check(args) -> Result, prints, returns 0 if ok else 1.
+    """Parses --json (recognised only as argv[0], where the CLI table puts it; anywhere else it is
+    an ordinary token, e.g. another option's value) and gate-specific args, runs check(args) -> Result, prints, returns 0 if ok else 1.
     Any exception (incl. GateError) becomes a FAIL line `<name>.input: <message>` and rc 1.
     An empty Result (no lines) is a FAIL `<name>.empty: gate produced no verdict` (fail closed)."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    as_json = "--json" in argv
-    result = run_check(name, check, [a for a in argv if a != "--json"])
+    as_json = bool(argv) and argv[0] == "--json"
+    result = run_check(name, check, argv[1:] if as_json else argv)
     print(result.render(as_json))
     return 0 if result.ok() else 1

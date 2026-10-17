@@ -31,5 +31,7 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
 - Decisions: only the owner answers. The owner states the answer in chat; the session records it
   verbatim (a quoted string) with `answered_at.by: superbrobenji`, the owner handle in
   `tools/gates/config.yml`, and quotes the owner's words in the commit message. An agent never
-  writes an answer of its own.
+  writes an answer of its own. `asked_at.sha` / `answered_at.sha` are the `main` commit at the time the
+  row was created/answered (a question asked before the register existed records the register's
+  creating commit).
 - The git pre-commit hook refuses a commit while this directory has unstaged edits.

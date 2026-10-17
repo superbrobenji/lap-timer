@@ -11,7 +11,10 @@ from . import GateError
 
 
 def _run(cmd: list, cwd=None) -> str:
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode != 0:
         raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
     return p.stdout
@@ -26,7 +29,11 @@ def head_sha(root) -> str:
 
 
 def branch(root) -> str:
-    return _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    """The checked-out branch name; a detached HEAD is a GateError (never the string "HEAD")."""
+    name = _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    if name == "HEAD":
+        raise GateError(f"git -C {root} rev-parse --abbrev-ref HEAD: detached HEAD")
+    return name
 
 
 def status_clean(root) -> bool:
@@ -40,19 +47,24 @@ def worktrees(root) -> list:
 
 
 def changed_files(root, base: str, head: str = "HEAD") -> list:
-    """Paths that differ between two commits (`git diff --name-only base head`)."""
-    return [l for l in _git(root, "diff", "--name-only", base, head).splitlines() if l]
+    """Paths that differ between two commits (`git diff --name-only -z --no-renames`; -z means no C-quoting of non-ASCII paths)."""
+    out = _git(root, "diff", "--name-only", "-z", "--no-renames", base, head)
+    return [l for l in out.split("\0") if l]
 
 
 def staged_files(root) -> list:
-    return [l for l in _git(root, "diff", "--cached", "--name-only").splitlines() if l]
+    out = _git(root, "diff", "--cached", "--name-only", "-z", "--no-renames")
+    return [l for l in out.split("\0") if l]
 
 
 def pr_for_branch(root):
     """`gh pr view` for the checked-out branch, or None when the branch has no PR."""
     cmd = ["gh", "pr", "view", "--json",
            "number,title,body,state,isDraft,headRefOid,statusCheckRollup"]
-    p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
     if p.returncode != 0:
         if "no pull requests found" in p.stderr.lower():
             return None
@@ -70,6 +82,8 @@ def check_runs(pr: dict) -> list:
         raise GateError("check_runs: PR JSON has no statusCheckRollup list")
     runs = []
     for item in pr["statusCheckRollup"]:
+        if not isinstance(item, dict):
+            raise GateError(f"check_runs: statusCheckRollup item is not an object: {item!r}")
         name = item.get("name") or item.get("context") or ""
         conclusion = item.get("conclusion") or item.get("state") or ""
         runs.append({"name": name, "conclusion": conclusion})

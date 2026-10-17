@@ -2,6 +2,8 @@
 """Tests for tools/gates/lib (Gate framework, config, gitinfo). Run from the repo root:
 python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import contextlib
 import io
 import json
@@ -206,6 +208,91 @@ class PrForBranch(unittest.TestCase):
         self.fake_gh("echo 'HTTP 401: Bad credentials' >&2; exit 1\n")
         with self.assertRaisesRegex(GateError, "Bad credentials"):
             gitinfo.pr_for_branch(self.bin)
+
+
+class ReviewRound1(unittest.TestCase):
+    def test_json_only_recognised_as_first_argument(self):
+        seen = []
+        def check(args):
+            seen.append(args)
+            r = Result("demo")
+            r.passed("demo.a")
+            return r
+        rc, out = run(check, ["--root", "--json"])
+        self.assertEqual([["--root", "--json"]], seen)
+        self.assertEqual("PASS demo.a\n", out)
+        rc, out = run(check, ["--json", "--root", "x"])
+        self.assertEqual([["--root", "--json"], ["--root", "x"]], seen)
+        self.assertTrue(json.loads(out)["ok"])
+
+    def test_repo_root_git_fallback_and_error(self):
+        old = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        cwd = os.getcwd()
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        try:
+            self.assertEqual(os.path.realpath(lib.CODE_ROOT), os.path.realpath(lib.repo_root()))
+            os.chdir(outside)
+            with self.assertRaisesRegex(GateError, "git rev-parse --show-toplevel"):
+                lib.repo_root()
+        finally:
+            os.chdir(cwd)
+            gf.remove(outside)
+            if old is not None:
+                os.environ["CLAUDE_PROJECT_DIR"] = old
+
+    def test_unhashable_key_and_non_utf8_are_gate_errors(self):
+        d = tempfile.mkdtemp(prefix="gate-yaml-")
+        try:
+            with self.assertRaises(GateError):
+                lib.load_yaml(gf.write(d, "k.yml", "? [a, b]\n: 1\n"))
+            path = os.path.join(d, "b.yml")
+            with open(path, "wb") as fh:
+                fh.write(b"x: \xff\xfe\n")
+            with self.assertRaisesRegex(GateError, "not valid UTF-8"):
+                lib.load_yaml(path)
+        finally:
+            gf.remove(d)
+
+    def test_missing_git_and_gh_binaries_are_gate_errors(self):
+        root = gf.new_repo()
+        old = os.environ["PATH"]
+        os.environ["PATH"] = "/nonexistent"
+        try:
+            with self.assertRaisesRegex(GateError, "git"):
+                gitinfo.head_sha(root)
+            with self.assertRaisesRegex(GateError, "gh"):
+                gitinfo.pr_for_branch(root)
+        finally:
+            os.environ["PATH"] = old
+            gf.remove(root)
+
+    def test_check_runs_rejects_non_dict_items(self):
+        with self.assertRaises(GateError):
+            gitinfo.check_runs({"statusCheckRollup": ["oops"]})
+
+    def test_non_ascii_and_renamed_paths_are_verbatim(self):
+        root = gf.new_repo()
+        try:
+            gf.write(root, "old.txt", "some content\nmore\nlines\n")
+            gf.commit_all(root)
+            base = gitinfo.head_sha(root)
+            gf.git(root, "mv", "old.txt", "new.txt")
+            gf.write(root, "\u00e9.txt", "x\n")
+            gf.git(root, "add", "-A")
+            self.assertEqual(["new.txt", "old.txt", "\u00e9.txt"], sorted(gitinfo.staged_files(root)))
+            head = gf.commit_all(root)
+            self.assertEqual(["new.txt", "old.txt", "\u00e9.txt"], sorted(gitinfo.changed_files(root, base, head)))
+        finally:
+            gf.remove(root)
+
+    def test_detached_head_is_a_gate_error(self):
+        root = gf.new_repo()
+        try:
+            gf.git(root, "checkout", "-q", "--detach")
+            with self.assertRaisesRegex(GateError, "detached HEAD"):
+                gitinfo.branch(root)
+        finally:
+            gf.remove(root)
 
 
 if __name__ == "__main__":
