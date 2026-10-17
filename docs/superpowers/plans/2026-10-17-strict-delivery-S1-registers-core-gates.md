@@ -1807,6 +1807,8 @@ register: true
 """Tests for tools/gates/gate_register.py through main() on fixture trees (the production path).
 Run from the repo root: python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import contextlib
 import io
 import os
@@ -1818,10 +1820,11 @@ from tools.gates.tests import gitfixture as gf
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "register")
 
 
-def run(case, *extra):
+def run(case, *lead):
+    """main() on a fixture tree; `lead` goes before --root (--json is recognised only as argv[0])."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = gate_register.main(["--root", os.path.join(FIX, case), *extra])
+        rc = gate_register.main([*lead, "--root", os.path.join(FIX, case)])
     return rc, buf.getvalue()
 
 
@@ -1874,6 +1877,15 @@ class GateRegister(unittest.TestCase):
         path = os.path.join(FIX, "valid", "docs", "reviews", "2026-01-01-registered.md")
         self.assertEqual(["T1-OPEN-1", "T1-DEF-1", "T1-PIN-1"], gate_register.report_ids(path))
 
+    def test_report_ids_ignores_what_is_not_a_finding_id(self):
+        root = gf.new_repo()
+        try:
+            path = gf.write(root, "r.md", "register: true\n| t1-lower-1 | x |\n| T1-OPEN-1x y | x |\n"
+                            "- t1-lower-1: no\n- Note: prose\n- T1-OPEN-1, comma\n1. T1-DEF-1 numbered\n")
+            self.assertEqual(["T1-DEF-1"], gate_register.report_ids(path))
+        finally:
+            gf.remove(root)
+
     def test_duplicate_ids_fail(self):
         root = gf.new_repo()
         try:
@@ -1919,8 +1931,9 @@ Expected: ERROR, `ImportError: cannot import name 'gate_register' from 'tools.ga
 lifecycle transitions, the evidence each state needs, and every finding id cited by a registered
 report (umbrella "Owner rulings" 5): a file under docs/reviews/ or docs/superpowers/state/briefs/
 whose first 20 lines include the line `register: true`. In it, a table row whose first cell is a
-finding id, or a list item that starts with one followed by a space or colon, must name a row in
-findings.yml. Files without the marker are ignored.
+finding id, or a list item that starts with one followed by a space or colon (the id matches
+registers.FINDING_ID via fullmatch), must name a row in findings.yml. Files without the marker are
+ignored; a report directory that does not exist holds no reports.
 
   python3 tools/gates/gate_register.py [--root <tree>] [--json]
 """
@@ -1932,21 +1945,28 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.gates.lib import Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import registers  # noqa: E402
 
 CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"]
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
 MARKER = "register: true"
 MARKER_LINES = 20
-LIST_ID = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([A-Z0-9]+(?:-[A-Za-z0-9]+)+)(?=[ :])")
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :]|$)")
+
+
+def _walk_error(exc):
+    raise GateError(f"{exc.filename}: {exc.strerror or exc}")
 
 
 def registered_reports(root) -> list:
     """Files under REPORT_DIRS carrying the marker line in their first MARKER_LINES lines."""
     found = []
     for d in REPORT_DIRS:
-        for dirpath, dirnames, filenames in os.walk(os.path.join(root, d)):
+        top = os.path.join(root, d)
+        if not os.path.isdir(top):
+            continue    # no such report directory: it holds no registered reports
+        for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error):
             dirnames.sort()
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
@@ -1968,8 +1988,8 @@ def report_ids(path) -> list:
                 if registers.FINDING_ID.fullmatch(cell):
                     ids.append(cell)
                 continue
-            m = LIST_ID.match(line)
-            if m:
+            m = LIST_ITEM.match(line)
+            if m and registers.FINDING_ID.fullmatch(m.group(1)):
                 ids.append(m.group(1))
     return ids
 
@@ -1995,7 +2015,7 @@ def check(args: list) -> Result:
             r.fail(f"register.transition.{fid}", e)
         for e in registers.evidence_errors(f, root, decisions):
             r.fail(f"register.evidence.{fid}", e)
-    known = {f.get("id") for f in findings}
+    known = {f["id"] for f in findings if isinstance(f.get("id"), str)}
     for path in registered_reports(root):
         rel = os.path.relpath(path, root)
         for rid in sorted(set(report_ids(path)) - known):
@@ -2018,8 +2038,8 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 11 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 59 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 12 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 74 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -2030,7 +2050,7 @@ Mutation check (report scan): in `registered_reports`, replace `if any(l.strip()
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 11 OK; suite 59 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 12 OK; suite 74 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md

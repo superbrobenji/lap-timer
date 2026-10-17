@@ -1,0 +1,7 @@
+- id: DEC-9001
+  class: scope
+  question: "Defer T1-DEF-1 to Plan 8 or fix now?"
+  options: [{label: defer, cost: "none now"}, {label: fix, cost: "1 task"}]
+  asked_at: {sha: "aaaaaaa", by: session}
+  answer: "defer"
+  answered_at: {sha: "aaaaaaa", by: superbrobenji}

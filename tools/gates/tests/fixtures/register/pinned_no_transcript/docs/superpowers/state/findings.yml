@@ -1,0 +1,18 @@
+- id: T1-NOPIN-1
+  source: review
+  severity: HIGH
+  class: >-
+    Marked pinned by hand with a test name but the mutation transcript was never recorded.
+  siblings: []
+  cites: []
+  repro: null
+  owner: {kind: plan, plan: demo, task: 1}
+  state: pinned
+  pin: {test: test_x, transcript: docs/superpowers/state/demo/mutations/T1-NOPIN-1.txt}
+  ruling: null
+  evidence: ["bbbbbbb"]
+  history:
+    - {state: open, sha: "aaaaaaa", by: audit}
+    - {state: planned, sha: "aaaaaaa", by: session}
+    - {state: in-progress, sha: "aaaaaaa", by: session}
+    - {state: pinned, sha: "bbbbbbb", by: session}

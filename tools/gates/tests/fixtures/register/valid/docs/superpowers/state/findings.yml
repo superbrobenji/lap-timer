@@ -1,0 +1,46 @@
+- id: T1-OPEN-1
+  source: audit
+  severity: MEDIUM
+  class: >-
+    An open finding owned by an issue.
+  siblings: []
+  cites: [{file: components/core/a.c, lines: "10-20", sha: "aaaaaaa"}]
+  repro: null
+  owner: {kind: issue, number: 140}
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history: [{state: open, sha: "aaaaaaa", by: audit}]
+- id: T1-PIN-1
+  source: review
+  severity: HIGH
+  class: >-
+    A pinned finding: production-path test, mutation transcript and the reviewer's report.
+  siblings: [CRC-bad KEY]
+  cites: [{file: components/core/b.c, lines: "1-5", sha: "aaaaaaa"}]
+  repro: null
+  owner: {kind: plan, plan: demo, task: 3}
+  state: pinned
+  pin: {test: test_crc_bad_delta_fails, transcript: docs/superpowers/state/demo/mutations/T1-PIN-1.txt}
+  ruling: null
+  evidence: ["bbbbbbb", docs/superpowers/state/demo/review/T1-PIN-1.md]
+  history:
+    - {state: open, sha: "aaaaaaa", by: audit}
+    - {state: planned, sha: "aaaaaaa", by: session}
+    - {state: in-progress, sha: "bbbbbbb", by: session}
+    - {state: pinned, sha: "bbbbbbb", by: reviewer}
+- id: T1-DEF-1
+  source: agent
+  severity: LOW
+  class: >-
+    A finding the owner deferred by decision.
+  siblings: []
+  cites: []
+  repro: null
+  owner: {kind: roadmap, plan: 8}
+  state: deferred
+  pin: null
+  ruling: DEC-9001
+  evidence: []
+  history: [{state: open, sha: "aaaaaaa", by: agent}, {state: deferred, sha: "aaaaaaa", by: session}]

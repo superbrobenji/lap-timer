@@ -1,0 +1,14 @@
+- id: T1-ORPHAN-1
+  source: audit
+  severity: MEDIUM
+  class: >-
+    A finding nobody owns.
+  siblings: []
+  cites: []
+  repro: null
+  owner: null
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history: [{state: open, sha: "aaaaaaa", by: audit}]
