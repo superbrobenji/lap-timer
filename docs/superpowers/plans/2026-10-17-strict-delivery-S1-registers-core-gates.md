@@ -676,7 +676,7 @@ class FixWave(unittest.TestCase):
 
         def fake(rc, err):
             def run(cmd, **kw):
-                calls.append(kw)
+                calls.append(dict(kw, env=dict(kw.get("env") or {})))     # copy now: os.environ is restored later
                 return subprocess.CompletedProcess(cmd, rc, "", err)
             return run
 
@@ -694,7 +694,6 @@ class FixWave(unittest.TestCase):
             with mock.patch.object(subprocess, "run", fake(rc, err)):
                 with self.assertRaises(GateError):
                     gitinfo.commit_exists(".", "abcdef1")
-
 
     def test_a_missing_root_has_its_own_message(self):                                 # round 2, item 6
         with self.assertRaises(GateError) as ctx:
