@@ -58,8 +58,11 @@ def repo_root() -> str:
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env:
         return env
-    p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                       capture_output=True, text=True, check=False)
+    try:
+        p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"git rev-parse --show-toplevel: {exc.strerror or exc}") from None
     if p.returncode != 0:
         raise GateError(f"git rev-parse --show-toplevel: {p.stderr.strip()}")
     return p.stdout.strip()

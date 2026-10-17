@@ -230,10 +230,19 @@ class ReviewRound1(unittest.TestCase):
         cwd = os.getcwd()
         outside = tempfile.mkdtemp(prefix="gate-nogit-")
         try:
-            self.assertEqual(os.path.realpath(lib.CODE_ROOT), os.path.realpath(lib.repo_root()))
+            os.chdir(lib.CODE_ROOT)
+            self.assertEqual(os.path.realpath(gf.git(lib.CODE_ROOT, "rev-parse", "--show-toplevel")),
+                             os.path.realpath(lib.repo_root()))
             os.chdir(outside)
             with self.assertRaisesRegex(GateError, "git rev-parse --show-toplevel"):
                 lib.repo_root()
+            old_path = os.environ["PATH"]
+            os.environ["PATH"] = "/nonexistent"
+            try:
+                with self.assertRaisesRegex(GateError, "git rev-parse --show-toplevel"):
+                    lib.repo_root()
+            finally:
+                os.environ["PATH"] = old_path
         finally:
             os.chdir(cwd)
             gf.remove(outside)
@@ -243,7 +252,7 @@ class ReviewRound1(unittest.TestCase):
     def test_unhashable_key_and_non_utf8_are_gate_errors(self):
         d = tempfile.mkdtemp(prefix="gate-yaml-")
         try:
-            with self.assertRaises(GateError):
+            with self.assertRaisesRegex(GateError, "unhashable mapping key"):
                 lib.load_yaml(gf.write(d, "k.yml", "? [a, b]\n: 1\n"))
             path = os.path.join(d, "b.yml")
             with open(path, "wb") as fh:
