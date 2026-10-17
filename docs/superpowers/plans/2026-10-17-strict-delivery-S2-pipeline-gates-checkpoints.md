@@ -1,0 +1,4168 @@
+# Strict Delivery S2 — Pipeline Gates and Checkpoints Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This is sub-plan S2 of the umbrella `docs/superpowers/plans/2026-10-17-strict-delivery.md`; the umbrella's "Shared interfaces" section is binding and is consumed here verbatim.
+
+**Goal:** Install the four pipeline gates (`gate_dispatch`, `gate_review_package`, `gate_plan`, `gate_checkpoint`), the Agent branch of the PreToolUse hook, the Stop and SubagentStop hooks, the per-plan state layout and the checkpoint/resume/block-end checklists, so that from block b4 every dispatch, from b5 every review package and plan, and from b6 every block end is machine-checked.
+
+**Architecture:** Each gate is one module under `tools/gates/` exposing `check(args) -> Result` and `main(argv)` over the S1 library (`tools/gates/lib/`), registered in `run_all.GATES` with a default argv that is meaningful in CI (`--config-check`, `--all`, `--in-flight`, `--structure`); the moment-of-truth modes (`--prompt`, `--dir`, `--plan`) are what hooks and the controller call. Hooks are thin: parse the event, call `run_all.run`, exit 2 with the rendered lines. Tests drive `main()` (the production path) against throwaway git repositories built by one helper.
+
+**Tech Stack:** Python 3.9+ (local `python3` is 3.9.6; every module starts with `from __future__ import annotations`), PyYAML 6 (6.0.3 installed locally; pinned in `tools/requirements.txt` by S1), `python3 -m unittest`, git ≥ 2.28 (`git init -b`; local 2.50.1), `gh` (faked in tests), Claude Code hooks.
+
+**Spec:** `docs/superpowers/specs/2026-10-17-strict-delivery-design.md` — §3.3–§3.5 (checkpoints), §5 (dispatch contract), §6 (pipeline), §7 (gates). Umbrella: `docs/superpowers/plans/2026-10-17-strict-delivery.md`.
+
+## Global Constraints
+
+- Every change, any size, goes through the pipeline (spec D20); this plan's own blocks are executed with the gates that exist at that point (spec §13 rollout).
+- Block = PR, at most 3 tasks per block; a block ends in a clean tree (spec §3.4); one block per context; the session stops after each block for the owner's `/clear` (spec §3.5).
+- Merge only on all-green (every CI job incl. advisory) under a per-plan grant entry `grant:<plan>` in `decisions.yml` (spec D22). The grant for this plan is decision `DEC-0001`.
+- Tags: `strict-delivery-b4`, `strict-delivery-b5`, `strict-delivery-b6` on the squash commits.
+- Model map (spec §5): controllers opus; implementers sonnet (haiku only for transcription of complete code); task reviewers opus; final branch reviewer opus; final adversarial verifier Fable; exception reviewer Fable. Never any other Fable use.
+- Triggers (spec §3.1): controller 3 tasks / 250k tokens / 90 min; implementer 1 task / 150k; reviewer 1 review / 120k; any 429 → checkpoint at the task boundary.
+- Zero warnings; zero gate failures at every commit once the gate exists; every Python script exits non-zero on any failure path; a missing input is a FAIL never "nothing to do" (spec §7).
+- Pinned = production-path test + mutation transcript (spec D7). For gate scripts "production path" = the script's `main()` invoked on a fixture, never a helper called in isolation.
+- No claim trusted (spec D3): every plan-text claim about the repo is verified by the implementer before use; a wrong claim is corrected in the plan and ledgered.
+- Owner-only decisions (spec §5) stop the block with a decision entry; controller rulings max 5 per block, ledgered with cost-if-wrong.
+- Hardware: nothing in this plan flashes or opens a serial port.
+- Commit trailers: subagents use their own model's trailer; the squash commit carries the session's.
+- Repo fact (verified 2026-10-17 with `gh api repos/superbrobenji/lap-timer/branches/main/protection`): `main` requires status checks (strict), linear history, and `enforce_admins: true` — no commit can be pushed to `main` directly. Every state commit (handoff, ledger, register transitions) therefore rides inside the block PR: the handoff is committed on the block branch before the merge, `gate_checkpoint --plan <slug>` checks it there (pre-merge) and `--post` checks the squash on `main` afterwards (Task 7). `merged` register states are written only by S4's `postmerge.py` (`by: postmerge`, S1 rule); until S4 lands, S2 rows stay `pinned` after their block merges.
+- Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the reviewer once satisfied.
+- Block branches are named `<plan>/b<N>` (here `block/strict-delivery-b4`…`b6`), never `<plan>-b<N>`, so a branch never shares a name with its tag.
+
+## Review Focus
+
+1. **A dispatch with no `model` in `tool_input`.** The subagent would silently inherit the session model (possibly Fable); the Agent hook must block it even when the `## Model:` line is right. Pinned by `test_hooks.py::AgentDispatchHook::test_missing_tool_model_blocks` (Task 2).
+2. **A strict block that itself contains `## ` headings.** Parsing by heading would cut it short and report a false mismatch; the gate compares by byte offset. Pinned by `test_gate_dispatch.py::GateDispatch::test_good_reviewer_with_inner_heading_passes` (Task 1).
+3. **A handoff committed on the block branch, then squash-merged.** Its `head` is no longer an ancestor of `main`; the post-merge check must accept `main` = one commit on `base` whose tree differs from `head` only under `docs/superpowers/state/`, and reject a code change pushed after the handoff. Pinned by `test_gate_checkpoint.py::PostMerge::test_squash_merged_checkpoint_passes` and `::test_post_tree_mismatch_fails` (Task 7).
+4. **A session waiting on a background subagent or an owner decision.** The Stop hook must bounce at most once (loop guard) and say how to stop. Pinned by `test_hook_stop.py::StopHook::test_stop_hook_active_passes_through` (Task 8).
+5. **A `CHECKPOINT` line appended to the ledger but never committed.** The plan is still in flight and the Stop hook must still run the checkpoint gate. Pinned by `test_gate_plan.py::InFlight::test_uncommitted_checkpoint_line_is_in_flight` (Task 6).
+
+---
+
+## Consumed from S1 (verify before Task 1; do not redefine)
+
+Run and read the output; every name below must exist. A mismatch is a plan-vs-code claim to correct and ledger (D3), not a reason to redefine the S1 interface.
+
+```bash
+grep -n "^def \|^class " tools/gates/lib/__init__.py tools/gates/lib/registers.py tools/gates/lib/gitinfo.py tools/gates/lib/config.py
+grep -n "^GATES\|DEFAULT_ARGV\|^def gate_argv\|^def run\|^def main" tools/gates/run_all.py
+grep -n "^def verified_at_head\|^def stale_reason" tools/gates/gate_claims.py
+ls tools/gates/__init__.py tools/gates/tests/__init__.py tools/gates/tests/gitfixture.py
+grep -n "tool_name\|^def " tools/gates/hooks/pre_tool_use.py
+grep -n "unittest" .github/workflows/gates.yml
+ls docs/superpowers/state/ ~/.claude/skills/strict-delivery/prompts/
+```
+
+Used names (S1 plan `2026-10-17-strict-delivery-S1-registers-core-gates.md`, Tasks 1–8): `tools.gates.lib.{Result, Line, GateError, CODE_ROOT, repo_root, gate_args, run_check, run_gate}` — every gate parses with `gate_args(prog)` (adds `--root <tree>`) and uses `root = a.root or repo_root()`; config is always `config.load(CODE_ROOT)`, never the tree under `--root`; `run_check` turns argparse `SystemExit` into `FAIL <name>.input`. `lib.registers.{STATE_DIR, load_findings, load_claims, load_decisions, finding_by_id, open_decisions, grant_for}` (registers are bare YAML lists; `merged` history entries are written only with `by: postmerge`, i.e. by S4's `postmerge.py`). `lib.gitinfo.{head_sha, branch, status_clean, worktrees, changed_files, staged_files}`. `gate_claims.{verified_at_head(root, claim, head) -> bool, stale_reason(root, claim, head, staged) -> str}`. `run_all.{GATES, gate_argv(name, args), run(names, args), main}` with `args = {"root": <tree>, "<gate>": [extra argv]}`; `gate_argv` always starts with `--root <tree>`. `hooks/pre_tool_use.py`: `CODE_ROOT`, `project_root(event)`, `gates_for(event)`, `main()` with the fail-closed `__main__` wrapper. Test helper `tools/gates/tests/gitfixture.py`: `REPO`, `STATE`, `git`, `write`, `new_repo`, `commit_all`, `remove` (and the package markers `tools/gates/__init__.py`, `tools/gates/tests/__init__.py`).
+
+**One S1 extension this plan makes (Task 3):** a per-gate default argv for the S2 gates, used only when the caller passes nothing for that gate: `DEFAULT_ARGV` in `run_all.py`, applied in `gate_argv`. Each default is the gate's CI-meaningful mode (`dispatch --config-check`, `review_package --all`, `plan --in-flight`, `checkpoint --structure`).
+
+---
+
+## Block b4 — dispatch gate (Tasks 1–3; branch `block/strict-delivery-b4`; tag `strict-delivery-b4`)
+
+### b4 preamble (controller, before Task 1)
+
+- [ ] **Step 1: Branch from the tagged b3**
+
+```bash
+git fetch origin --tags && git checkout main && git pull --ff-only
+test "$(git rev-parse strict-delivery-b3^{commit})" = "$(git rev-parse HEAD)" && echo b3-is-HEAD
+git checkout -b block/strict-delivery-b4
+```
+Expected: `b3-is-HEAD`. Otherwise stop: S1 has not merged.
+
+- [ ] **Step 2: Register rows for the nine S2 tasks (intake, spec §6.1)**
+
+Every S2 task closes one maintenance row; from b5 the dispatch gate refuses an implementer without a `planned`/`in-progress` row.
+
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"
+PLAN = "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"
+SPEC = "docs/superpowers/specs/2026-10-17-strict-delivery-design.md"
+TITLES = ["gate_dispatch", "PreToolUse Agent branch", "dispatch config check and run_all registration",
+          "gate_review_package", "make_review_package", "gate_plan", "gate_checkpoint",
+          "Stop and SubagentStop hooks", "per-plan state creator and checklists"]
+sha = os.environ["SHA"]
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+if isinstance(doc, dict):
+    key = next(k for k, v in doc.items() if v is None or isinstance(v, list))
+    doc[key] = rows = doc[key] or []
+else:
+    doc = rows = doc or []
+have = {r["id"] for r in rows}
+for n, title in enumerate(TITLES, 1):
+    fid = f"SD-S2-T{n}"
+    if fid in have:
+        continue
+    rows.append({"id": fid, "source": PLAN, "severity": "INFO",
+                 "class": f"strict-delivery rollout step 3: {title}", "siblings": [],
+                 "cites": [{"file": SPEC, "lines": "189-207", "sha": sha}], "repro": None,
+                 "owner": {"kind": "plan", "plan": "strict-delivery", "task": f"S2-T{n}"},
+                 "state": "planned", "pin": None, "ruling": None, "evidence": [],
+                 "history": [{"state": "open", "sha": sha, "by": "controller"},
+                             {"state": "planned", "sha": sha, "by": "controller"}]})
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py && git diff --stat
+git add docs/superpowers/state/findings.yml
+git commit -m "chore(state): register rows SD-S2-T1..T9 for strict-delivery S2"
+```
+Expected: `gate_register` prints only `PASS` lines; the diff touches `findings.yml` only.
+
+- [ ] **Step 3: Ledger the start** — append `- b4 start <sha> rows SD-S2-T1..T9` to `docs/superpowers/state/strict-delivery/ledger.md` and commit with message `chore(state): b4 start`.
+
+Note for the controller: after Task 2's commit the Agent hook is live in this checkout (`.claude/settings.json` already routes `Agent` to `pre_tool_use.py`, umbrella hook block). From Task 3 on, every dispatch prompt follows the umbrella's dispatch grammar.
+
+### Task 1: gate_dispatch — grammar, roles, models, registers, strict block
+
+**Files:**
+- Create: `tools/gates/gate_dispatch.py`
+- Create: `tools/gates/tests/repo_fixture.py`
+- Create: `tools/gates/tests/fixtures/rows.yml`
+- Create: `tools/gates/tests/fixtures/dispatch/prompts/implementer.md`
+- Create: `tools/gates/tests/fixtures/dispatch/prompts/reviewer.md`
+- Create: `tools/gates/tests/fixtures/dispatch/good_implementer.md`
+- Create: `tools/gates/tests/fixtures/dispatch/good_reviewer.md`
+- Test: `tools/gates/tests/test_gate_dispatch.py`
+
+**Findings:** SD-S2-T1
+
+**Interfaces:**
+- Consumes: S1 `Result`, `GateError`, `CODE_ROOT`, `gate_args(prog)` (adds `--root`), `repo_root()`, `run_gate()`, `config.load(CODE_ROOT)` (config is never read from `--root`), `registers.load_findings/load_claims/load_decisions/finding_by_id`, `gitinfo.head_sha/staged_files`, `gate_claims.verified_at_head(root, claim, head) -> bool` and `gate_claims.stale_reason(root, claim, head, staged) -> str` (S1's claim-freshness rule: state verified and no cited path changed since `verified_at` or staged; never sha equality); test helper `gitfixture`.
+- Produces: `gate_dispatch.check(args: list) -> Result`, `main(argv=None) -> int`; `parse(text) -> tuple[dict, int]`; `claim_fresh(root: str, claim: dict, head: str) -> str | None` (None = verified at `head`; used by Task 7); constants `ROLES`, `ROLE_PROMPT`, `DEFAULT_PROMPTS`. CLI: `--prompt P|- [--tool-model M] [--prompts-dir D] [--json]`. Line ids: `dispatch.{length,grammar,role,model.known,model.rank,model.fable,model.agree,brief,findings[.<id>],claims[.<id>],budget,report,decisions[.<id>],strict,task}`.
+- Produces (tests): `repo_fixture.{REAL, FIX, STATE, DISPATCH_FILES, git, write, remove, commit, load_rows, write_registers, make_repo}` over S1's `gitfixture` (reused, not duplicated).
+
+- [ ] **Step 1: Write the test helper and fixtures**
+
+`tools/gates/tests/repo_fixture.py` (composes S1's `tools/gates/tests/gitfixture.py`; registers are bare YAML lists as in S1):
+```python
+"""S2 test repositories, built on S1's gitfixture. make_repo() commits the given files, then writes the
+three registers from fixtures/rows.yml with every "@BASE@" value replaced by the sha of that commit, and
+commits again. Config is never copied: gates read it from CODE_ROOT (S1). Tests point --root or
+CLAUDE_PROJECT_DIR at the repo.
+"""
+from __future__ import annotations
+
+import copy
+import os
+
+import yaml
+
+from tools.gates.tests import gitfixture as gf
+
+REAL = gf.REPO
+FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+STATE = "docs/superpowers/state"
+DISPATCH_FILES = {
+    "docs/cited.md": "cited\n",
+    "docs/moved.md": "moved once\n",
+    "docs/brief.md": "# Brief\nfixture task 1\n",
+    "reports/.gitkeep": "",
+}
+git, write, remove = gf.git, gf.write, gf.remove
+
+
+def commit(root: str, message: str) -> str:
+    return gf.commit_all(root, message)
+
+
+def load_rows() -> dict:
+    with open(os.path.join(FIX, "rows.yml"), encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _subst(obj, base: str):
+    if isinstance(obj, dict):
+        return {k: _subst(v, base) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_subst(v, base) for v in obj]
+    return base if obj == "@BASE@" else obj
+
+
+def write_registers(root: str, rows: dict, base: str) -> None:
+    rows = _subst(copy.deepcopy(rows), base)
+    for key in ("findings", "claims", "decisions"):
+        write(root, f"{STATE}/{key}.yml", yaml.safe_dump(rows.get(key, []), sort_keys=False, allow_unicode=True))
+
+
+def make_repo(files: dict, rows: dict, after: dict | None = None) -> str:
+    root = gf.new_repo()
+    for rel, text in files.items():
+        write(root, rel, text)
+    base = commit(root, "fixture: base files")
+    write_registers(root, rows, base)
+    commit(root, "fixture: registers")
+    if after:
+        for rel, text in after.items():
+            write(root, rel, text)
+        commit(root, "fixture: after")
+    return root
+```
+
+`tools/gates/tests/fixtures/rows.yml` (one mapping of three lists; `write_registers` writes each list to its register file):
+```yaml
+# Register rows for the S2 gate tests. "@BASE@" becomes the sha of the first fixture commit.
+findings:
+  - id: SD-FX-1
+    source: docs/cited.md
+    severity: LOW
+    class: fixture class one
+    siblings: [sib-a]
+    cites: [{file: docs/cited.md, lines: "1", sha: "@BASE@"}]
+    repro: null
+    owner: {kind: plan, plan: fx, task: "1"}
+    state: planned
+    pin: null
+    ruling: null
+    evidence: []
+    history:
+      - {state: open, sha: "@BASE@", by: fixture}
+      - {state: planned, sha: "@BASE@", by: fixture}
+  - id: SD-FX-2
+    source: docs/cited.md
+    severity: LOW
+    class: fixture class two
+    siblings: []
+    cites: [{file: docs/cited.md, lines: "1", sha: "@BASE@"}]
+    repro: null
+    owner: {kind: plan, plan: fx, task: "2"}
+    state: open
+    pin: null
+    ruling: null
+    evidence: []
+    history:
+      - {state: open, sha: "@BASE@", by: fixture}
+claims:
+  - id: C-fx.ok
+    doc: docs/cited.md
+    anchor: L1
+    text: docs/cited.md says cited
+    direct: grep -n cited docs/cited.md
+    contra: grep -c uncited docs/cited.md
+    cites: [docs/cited.md]
+    verified_at: "@BASE@"
+    by: fixture
+    state: verified
+    finding: null
+  - id: C-fx.stale
+    doc: docs/cited.md
+    anchor: L1
+    text: docs/cited.md says cited
+    direct: grep -n cited docs/cited.md
+    contra: grep -c uncited docs/cited.md
+    cites: [docs/cited.md]
+    verified_at: "@BASE@"
+    by: fixture
+    state: stale
+    finding: null
+  - id: C-fx.moved
+    doc: docs/moved.md
+    anchor: L1
+    text: docs/moved.md says moved once
+    direct: grep -n "moved once" docs/moved.md
+    contra: grep -c "moved twice" docs/moved.md
+    cites: [docs/moved.md]
+    verified_at: "@BASE@"
+    by: fixture
+    state: verified
+    finding: null
+decisions:
+  - id: DEC-0001
+    class: merge-grant
+    question: "grant:fx"
+    options: []
+    asked_at: {sha: "@BASE@", by: fixture}
+    answer: "yes"
+    answered_at: {sha: "@BASE@", by: superbrobenji}
+  - id: DEC-0002
+    class: scope
+    question: Does fixture task 3 enter the plan?
+    options: [{label: enter, cost: one more task}, {label: defer, cost: none}]
+    asked_at: {sha: "@BASE@", by: fixture}
+    answer: null
+    answered_at: null
+```
+
+`tools/gates/tests/fixtures/dispatch/prompts/implementer.md` (ends with one newline):
+```
+You are an implementer under strict delivery.
+Verify every claim you make or read: one direct check and one contradiction check.
+A bug from your own change leaves the task incomplete. Dispatch no subagents.
+Write the full report to the report path; its first line is status: <STATUS>.
+```
+
+`tools/gates/tests/fixtures/dispatch/prompts/reviewer.md` (contains a `## ` heading on purpose — Review Focus 2):
+```
+You are a reviewer under strict delivery.
+## Checks
+Re-run every gate clean. Execute every claim in the report, the commits and the diff comments.
+```
+
+`tools/gates/tests/fixtures/dispatch/good_implementer.md` (the strict block is `prompts/implementer.md` byte for byte):
+```
+## Role: implementer
+## Brief: docs/brief.md
+## Findings: SD-FX-1
+## Claims: C-fx.ok
+## Budget: tokens=150000 minutes=60
+## Model: sonnet
+## Report: reports/t1.md
+## Strict block
+You are an implementer under strict delivery.
+Verify every claim you make or read: one direct check and one contradiction check.
+A bug from your own change leaves the task incomplete. Dispatch no subagents.
+Write the full report to the report path; its first line is status: <STATUS>.
+## Task
+Implement fixture task 1 from docs/brief.md.
+```
+
+`tools/gates/tests/fixtures/dispatch/good_reviewer.md`:
+```
+## Role: task_reviewer
+## Brief: docs/brief.md
+## Findings: SD-FX-2
+## Claims: none
+## Budget: tokens=120000 minutes=30
+## Model: opus
+## Report: reports/r1.md
+## Strict block
+You are a reviewer under strict delivery.
+## Checks
+Re-run every gate clean. Execute every claim in the report, the commits and the diff comments.
+## Task
+Review fixture task 1.
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+`tools/gates/tests/test_gate_dispatch.py`:
+```python
+"""gate_dispatch through main() on fixture repos (strict-delivery S2 Tasks 1 and 3).
+Run from the repo root: python3 -m unittest tools.gates.tests.test_gate_dispatch -v
+"""
+import contextlib
+import io
+import os
+import shutil
+import unittest
+from unittest import mock
+
+from tools.gates import gate_dispatch
+from tools.gates.lib import config
+from tools.gates.tests import repo_fixture as rf
+
+DFIX = os.path.join(rf.FIX, "dispatch")
+PROMPTS = os.path.join(DFIX, "prompts")
+
+
+def fixture(name):
+    with open(os.path.join(DFIX, name), encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+GOOD = fixture("good_implementer.md")
+REVIEWER = fixture("good_reviewer.md")
+
+
+def gate(root, argv):
+    buf = io.StringIO()
+    with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}), contextlib.redirect_stdout(buf):
+        rc = gate_dispatch.main(argv)
+    return rc, buf.getvalue()
+
+
+class GateDispatch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows(),
+                                after={"docs/moved.md": "moved twice\n"})
+        cls.conf = config.load(rf.REAL)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def dispatch(self, text, *extra):
+        path = os.path.join(self.root, "prompt.under-test.md")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        return gate(self.root, ["--prompt", path, "--prompts-dir", PROMPTS, *extra])
+
+    def variant(self, old, new, base=GOOD):
+        text = base.replace(old, new, 1)
+        self.assertNotEqual(base, text, f"fixture lacks {old!r}")
+        return text
+
+    def assertFailLine(self, rc, out, line_id):
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL {line_id}", out)
+
+    def test_good_prompt_passes(self):
+        rc, out = self.dispatch(GOOD)
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("FAIL", out)
+
+    def test_good_reviewer_with_inner_heading_passes(self):
+        self.assertIn("\n## Checks\n", fixture("prompts/reviewer.md"))
+        rc, out = self.dispatch(REVIEWER)
+        self.assertEqual(0, rc, out)
+
+    def test_wrong_model_fails(self):
+        rc, out = self.dispatch(self.variant("## Model: sonnet", "## Model: haiku"))
+        self.assertFailLine(rc, out, "dispatch.model.rank")
+
+    def test_fable_on_implementer_fails(self):
+        rc, out = self.dispatch(self.variant("## Model: sonnet", "## Model: fable"))
+        self.assertFailLine(rc, out, "dispatch.model.fable")
+        self.assertNotIn("FAIL dispatch.model.rank", out)
+
+    def test_unknown_model_fails(self):
+        rc, out = self.dispatch(self.variant("## Model: sonnet", "## Model: gpt"))
+        self.assertFailLine(rc, out, "dispatch.model.known")
+
+    def test_unknown_role_fails(self):
+        rc, out = self.dispatch(self.variant("## Role: implementer", "## Role: helper"))
+        self.assertFailLine(rc, out, "dispatch.role")
+
+    def test_unregistered_finding_fails(self):
+        rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: SD-FX-404"))
+        self.assertFailLine(rc, out, "dispatch.findings.SD-FX-404")
+
+    def test_implementer_on_open_finding_fails(self):
+        rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: SD-FX-2"))
+        self.assertFailLine(rc, out, "dispatch.findings.SD-FX-2")
+
+    def test_implementer_without_findings_fails(self):
+        rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: none"))
+        self.assertFailLine(rc, out, "dispatch.findings")
+
+    def test_stale_claim_fails(self):
+        rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.stale"))
+        self.assertFailLine(rc, out, "dispatch.claims.C-fx.stale")
+
+    def test_claim_whose_cited_file_changed_fails(self):
+        rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.moved"))
+        self.assertFailLine(rc, out, "dispatch.claims.C-fx.moved")
+        self.assertIn("docs/moved.md", out)
+
+    def test_open_decision_fails(self):
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-0002.\n")
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
+
+    def test_unknown_decision_fails(self):
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-0404.\n")
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0404")
+
+    def test_answered_decision_passes(self):
+        rc, out = self.dispatch(GOOD + "Merge under DEC-0001.\n")
+        self.assertEqual(0, rc, out)
+
+    def test_prompt_at_cap_passes_and_one_over_fails(self):
+        cap = self.conf["dispatch"]["max_prompt_chars"]
+        at_cap = GOOD + "x" * (cap - len(GOOD) - 1) + "\n"
+        self.assertEqual(cap, len(at_cap))
+        rc, out = self.dispatch(at_cap)
+        self.assertEqual(0, rc, out)
+        rc, out = self.dispatch(at_cap + "y")
+        self.assertFailLine(rc, out, "dispatch.length")
+
+    def test_strict_block_altered_by_one_byte_fails(self):
+        block = fixture("prompts/implementer.md")
+        i = GOOD.index(block) + len(block) // 2
+        text = GOOD[:i] + ("X" if GOOD[i] != "X" else "Y") + GOOD[i + 1:]
+        rc, out = self.dispatch(text)
+        self.assertFailLine(rc, out, "dispatch.strict")
+
+    def test_strict_block_must_be_followed_by_task(self):
+        rc, out = self.dispatch(self.variant("## Task\n", "## Tasks\n"))
+        self.assertFailLine(rc, out, "dispatch.strict")
+
+    def test_empty_task_fails(self):
+        rc, out = self.dispatch(self.variant("Implement fixture task 1 from docs/brief.md.\n", "\n"))
+        self.assertFailLine(rc, out, "dispatch.task")
+
+    def test_missing_brief_fails(self):
+        rc, out = self.dispatch(self.variant("## Brief: docs/brief.md", "## Brief: docs/no-brief.md"))
+        self.assertFailLine(rc, out, "dispatch.brief")
+
+    def test_report_dir_missing_fails(self):
+        rc, out = self.dispatch(self.variant("## Report: reports/t1.md", "## Report: nowhere/t1.md"))
+        self.assertFailLine(rc, out, "dispatch.report")
+
+    def test_section_out_of_order_fails(self):
+        rc, out = self.dispatch(self.variant("## Findings: SD-FX-1\n## Claims: C-fx.ok\n",
+                                             "## Claims: C-fx.ok\n## Findings: SD-FX-1\n"))
+        self.assertFailLine(rc, out, "dispatch.grammar")
+
+    def test_budget_over_role_cap_fails(self):
+        rc, out = self.dispatch(self.variant("tokens=150000", "tokens=150001"))
+        self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_tool_model_must_agree(self):
+        rc, out = self.dispatch(GOOD, "--tool-model", "sonnet")
+        self.assertEqual(0, rc, out)
+        rc, out = self.dispatch(GOOD, "--tool-model", "opus")
+        self.assertFailLine(rc, out, "dispatch.model.agree")
+        rc, out = self.dispatch(GOOD, "--tool-model", "")
+        self.assertFailLine(rc, out, "dispatch.model.agree")
+
+    def test_no_input_fails(self):
+        rc, out = gate(self.root, [])
+        self.assertFailLine(rc, out, "dispatch.input")
+
+    def test_prompt_from_stdin_passes(self):
+        with mock.patch("sys.stdin", io.StringIO(GOOD)):
+            rc, out = gate(self.root, ["--prompt", "-", "--prompts-dir", PROMPTS])
+        self.assertEqual(0, rc, out)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
+Expected: ERROR `ImportError: cannot import name 'gate_dispatch'` (or `ModuleNotFoundError`).
+
+- [ ] **Step 4: Implement `tools/gates/gate_dispatch.py`**
+
+```python
+#!/usr/bin/env python3
+"""gate_dispatch -- a subagent dispatch prompt obeys the strict-delivery dispatch grammar.
+
+Grammar and rules: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Dispatch prompt grammar".
+Usage: gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D] [--json]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import config as gconfig  # noqa: E402
+from tools.gates.gate_claims import stale_reason, verified_at_head  # noqa: E402
+from tools.gates.lib import gitinfo, registers  # noqa: E402
+
+ROLES = ["controller", "implementer", "implementer_transcription", "task_reviewer", "final_reviewer",
+         "final_verifier", "exception_reviewer", "audit_reviewer", "audit_verifier", "investigator"]
+# The umbrella names ten roles but eight prompt files; this map is the only place they meet.
+ROLE_PROMPT = {"controller": "controller", "implementer": "implementer",
+               "implementer_transcription": "implementer", "task_reviewer": "reviewer",
+               "final_reviewer": "reviewer", "final_verifier": "verifier",
+               "exception_reviewer": "exception-reviewer", "audit_reviewer": "audit-reviewer",
+               "audit_verifier": "audit-verifier", "investigator": "investigator"}
+IMPLEMENTERS = {"implementer", "implementer_transcription"}
+BRIEF_ROLES = IMPLEMENTERS | {"task_reviewer", "final_reviewer", "final_verifier", "exception_reviewer"}
+FINDINGS_NONE_ROLES = {"investigator", "audit_reviewer", "audit_verifier"}
+HEADERS = ["Role", "Brief", "Findings", "Claims", "Budget", "Model", "Report"]
+STRICT, TASK = "## Strict block\n", "## Task\n"
+DEC_RE = re.compile(r"\bDEC-\d{4}\b")
+BUDGET_RE = re.compile(r"^tokens=(\d+) minutes=(\d+)$")
+DEFAULT_PROMPTS = os.path.expanduser("~/.claude/skills/strict-delivery/prompts")
+
+
+
+class Grammar(Exception):
+    """The prompt's sections are missing or out of order."""
+
+
+def parse(text: str) -> tuple[dict, int]:
+    """(header fields, offset of the first character after '## Strict block\\n')."""
+    fields, pos = {}, 0
+    for key in HEADERS:
+        while text.startswith("\n", pos):
+            pos += 1
+        end = text.find("\n", pos)
+        line = text[pos:end] if end >= 0 else text[pos:]
+        prefix = f"## {key}: "
+        if end < 0 or not line.startswith(prefix) or not line[len(prefix):].strip():
+            raise Grammar(f"expected '{prefix}<value>' as the next section, got {line[:60]!r}")
+        fields[key] = line[len(prefix):].strip()
+        pos = end + 1
+    while text.startswith("\n", pos):
+        pos += 1
+    if not text.startswith(STRICT, pos):
+        raise Grammar(f"expected '## Strict block' after '## Report:', got {text[pos:pos + 60]!r}")
+    return fields, pos + len(STRICT)
+
+
+def id_list(value: str) -> list[str]:
+    if value.strip().lower() == "none":
+        return []
+    return [v.strip() for v in value.split(",")]
+
+
+def resolve(root: str, path: str) -> str:
+    return path if os.path.isabs(path) else os.path.join(root, path)
+
+
+def read_prompt(path: str) -> str:
+    """'--prompt -' reads the prompt from stdin (umbrella "CLI flags and conventions")."""
+    if path == "-":
+        return sys.stdin.read()
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def claim_fresh(root: str, claim: dict, head: str) -> str | None:
+    """None when the row is verified at head -- S1's rule (gate_claims.verified_at_head): state verified
+    and no cited path changed between verified_at and head or in the index; otherwise the reason."""
+    if claim.get("state") != "verified":
+        return f"state is {claim.get('state')!r}, not 'verified'"
+    if verified_at_head(root, claim, head):
+        return None
+    return stale_reason(root, claim, head, gitinfo.staged_files(root)) or "row fails the claims schema"
+
+def _model(conf, role, model, tool_model, res):
+    rank, need, fable = conf["model_rank"], conf["models"][role], conf["fable_roles"]
+    if model not in rank:
+        res.fail("dispatch.model.known", f"model {model!r} not in model_rank {sorted(rank)}")
+        return
+    res.passed("dispatch.model.known")
+    if rank[model] < rank[need]:
+        res.fail("dispatch.model.rank", f"role {role} needs at least {need}, got {model}")
+    else:
+        res.passed("dispatch.model.rank")
+    if model == "fable" and role not in conf["fable_roles"]:
+        res.fail("dispatch.model.fable", f"fable is reserved for {', '.join(fable)}; role is {role}")
+    else:
+        res.passed("dispatch.model.fable")
+    if tool_model is None:
+        return
+    if not tool_model:
+        res.fail("dispatch.model.agree", "tool_input.model is not set; the subagent would inherit the session model")
+    elif tool_model != model:
+        res.fail("dispatch.model.agree", f"tool_input.model {tool_model!r} != '## Model: {model}'")
+    else:
+        res.passed("dispatch.model.agree")
+
+
+def _brief(root, role, value, res):
+    if value.lower() == "none" and role not in BRIEF_ROLES:
+        res.passed("dispatch.brief")
+    elif value.lower() != "none" and os.path.isfile(resolve(root, value)):
+        res.passed("dispatch.brief")
+    else:
+        res.fail("dispatch.brief", f"role {role} needs an existing brief file; got {value!r}")
+
+
+def _findings(root, role, value, res):
+    ids = id_list(value)
+    if not ids:
+        if role in FINDINGS_NONE_ROLES:
+            res.passed("dispatch.findings")
+        else:
+            res.fail("dispatch.findings", f"role {role} must name the register ids it works on")
+        return
+    findings = registers.load_findings(root)
+    for fid in ids:
+        f = registers.finding_by_id(findings, fid)
+        if f is None:
+            res.fail(f"dispatch.findings.{fid}", "not in docs/superpowers/state/findings.yml")
+        elif role in IMPLEMENTERS and f["state"] not in ("planned", "in-progress"):
+            res.fail(f"dispatch.findings.{fid}",
+                     f"state {f['state']!r}; an implementer takes only planned or in-progress rows")
+        else:
+            res.passed(f"dispatch.findings.{fid}")
+
+
+def _claims(root, value, res):
+    ids = id_list(value)
+    if not ids:
+        res.passed("dispatch.claims")
+        return
+    by_id = {c["id"]: c for c in registers.load_claims(root)}
+    head = gitinfo.head_sha(root)
+    for cid in ids:
+        c = by_id.get(cid)
+        reason = "not in docs/superpowers/state/claims.yml" if c is None else claim_fresh(root, c, head)
+        if reason:
+            res.fail(f"dispatch.claims.{cid}", reason)
+        else:
+            res.passed(f"dispatch.claims.{cid}")
+
+
+def _budget(conf, role, value, res):
+    m = BUDGET_RE.match(value)
+    if not m:
+        res.fail("dispatch.budget", f"expected 'tokens=<n> minutes=<n>', got {value!r}")
+        return
+    tokens, minutes = int(m.group(1)), int(m.group(2))
+    t = conf["triggers"]
+    if role == "controller":
+        cap_t, cap_m = t["controller"]["tokens"], t["controller"]["minutes"]
+    elif role in IMPLEMENTERS:
+        cap_t, cap_m = t["implementer"]["tokens"], None
+    else:
+        cap_t, cap_m = t["reviewer"]["tokens"], None
+    if tokens <= 0 or minutes <= 0:
+        res.fail("dispatch.budget", "tokens and minutes must be positive")
+    elif tokens > cap_t or (cap_m is not None and minutes > cap_m):
+        res.fail("dispatch.budget", f"budget {value!r} exceeds the {role} trigger (tokens {cap_t}"
+                 + (f", minutes {cap_m})" if cap_m is not None else ")"))
+    else:
+        res.passed("dispatch.budget")
+
+
+def _report(root, value, res):
+    folder = os.path.dirname(resolve(root, value))
+    if os.path.isdir(folder):
+        res.passed("dispatch.report")
+    else:
+        res.fail("dispatch.report", f"report directory {os.path.dirname(value) or '.'!r} does not exist")
+
+
+def _decisions(root, text, res):
+    ids = sorted(set(DEC_RE.findall(text)))
+    if not ids:
+        res.passed("dispatch.decisions")
+        return
+    by_id = {d["id"]: d for d in registers.load_decisions(root)}
+    for did in ids:
+        d = by_id.get(did)
+        if d is None:
+            res.fail(f"dispatch.decisions.{did}", "not in docs/superpowers/state/decisions.yml")
+        elif d.get("answer") is None:
+            res.fail(f"dispatch.decisions.{did}", "unanswered owner decision; the path halts until the owner answers")
+        else:
+            res.passed(f"dispatch.decisions.{did}")
+
+
+def _strict(text, start, role, prompts_dir, res):
+    path = os.path.join(prompts_dir, ROLE_PROMPT[role] + ".md")
+    if not os.path.isfile(path):
+        res.fail("dispatch.strict", f"prompt block file {path} not found")
+        return
+    with open(path, encoding="utf-8", newline="") as f:
+        block = f.read()
+    if not block.endswith("\n"):
+        res.fail("dispatch.strict", f"{path} must end with a newline")
+        return
+    got = text[start:start + len(block)]
+    if got != block:
+        i = next((k for k, (x, y) in enumerate(zip(got, block)) if x != y), min(len(got), len(block)))
+        res.fail("dispatch.strict", f"strict block differs from {path} at character {i}")
+        return
+    rest = text[start + len(block):]
+    if not rest.startswith(TASK):
+        res.fail("dispatch.strict", "the strict block must be followed directly by '## Task'")
+        return
+    res.passed("dispatch.strict")
+    if rest[len(TASK):].strip():
+        res.passed("dispatch.task")
+    else:
+        res.fail("dispatch.task", "the '## Task' section is empty")
+
+
+def check_prompt(root, conf, text, tool_model, prompts_dir, res) -> None:
+    cap = conf["dispatch"]["max_prompt_chars"]
+    if len(text) > cap:
+        res.fail("dispatch.length", f"{len(text)} chars > dispatch.max_prompt_chars {cap}")
+    else:
+        res.passed("dispatch.length")
+    try:
+        fields, start = parse(text)
+    except Grammar as e:
+        res.fail("dispatch.grammar", str(e))
+        return
+    res.passed("dispatch.grammar")
+    role = fields["Role"]
+    if role not in ROLES or role not in conf["models"]:
+        res.fail("dispatch.role", f"unknown role {role!r}; roles: {', '.join(ROLES)}")
+        return
+    res.passed("dispatch.role")
+    _model(conf, role, fields["Model"], tool_model, res)
+    _brief(root, role, fields["Brief"], res)
+    _findings(root, role, fields["Findings"], res)
+    _claims(root, fields["Claims"], res)
+    _budget(conf, role, fields["Budget"], res)
+    _report(root, fields["Report"], res)
+    _decisions(root, text, res)
+    _strict(text, start, role, prompts_dir, res)
+
+
+def check(args: list) -> Result:
+    p = gate_args("gate_dispatch")
+    p.add_argument("--prompt", required=True)
+    p.add_argument("--tool-model")
+    p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(args)
+    root = a.root or repo_root()
+    res = Result("dispatch")
+    check_prompt(root, gconfig.load(CODE_ROOT), read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
+    return res
+
+
+def main(argv=None):
+    return run_gate("dispatch", check, argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
+Expected: `OK` (25 tests). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tools/gates/gate_dispatch.py tools/gates/tests/repo_fixture.py tools/gates/tests/fixtures/rows.yml \
+        tools/gates/tests/fixtures/dispatch tools/gates/tests/test_gate_dispatch.py
+git commit -m "feat(gates): gate_dispatch -- dispatch grammar, model map, register ids, fresh claims, strict block byte-equal"
+```
+
+- [ ] **Step 7: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/if model == "fable" and role not in conf\["fable_roles"\]:/if False:/' tools/gates/gate_dispatch.py
+git diff --stat                                                            # expect 1 file, 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/gate_dispatch.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T1/mutation-SD-S2-T1.txt` (the package copy) with exactly the observed verdicts:
+```
+finding: SD-S2-T1
+test: test_fable_on_implementer_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> PASS
+step 2 (fix reverted: perl replaces the fable_roles condition in tools/gates/gate_dispatch.py with False): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T1"
+PIN = {"test": "tools/gates/tests/test_gate_dispatch.py::GateDispatch::test_fable_on_implementer_fails",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt
+git commit -m "chore(state): SD-S2-T1 pinned (mutation transcript)"
+```
+Expected: `gate_register` all `PASS`.
+
+- [ ] **Step 8: Ledger (controller, after the task review is ✅)** — append `- S2-T1 DONE <task head sha> gate_dispatch; review <report path>` to `docs/superpowers/state/strict-delivery/ledger.md`; commit `chore(state): ledger S2-T1`.
+
+### Task 2: PreToolUse Agent branch
+
+**Files:**
+- Modify: `tools/gates/hooks/pre_tool_use.py` (S1 file: add `handle_agent`, route `tool_name == "Agent"` to it)
+- Test: `tools/gates/tests/test_hooks.py` (S1 file: append class `AgentDispatchHook`)
+
+**Findings:** SD-S2-T2
+
+**Interfaces:**
+- Consumes: `gate_dispatch` CLI (Task 1); S1 `run_all.run(names, {"root": ..., "<gate>": [argv]}) -> Result`, `pre_tool_use.{CODE_ROOT, project_root, main}`, `gate_decisions --scan <paths...>`; `repo_fixture` (Task 1).
+- Produces: `handle_agent(event: dict) -> int` in `pre_tool_use.py` (0 = allow, 2 = block, lines on stderr). Test-only environment override `SD_PROMPTS_DIR` → `--prompts-dir`.
+
+- [ ] **Step 1: Write the failing tests** — append to `tools/gates/tests/test_hooks.py`:
+
+```python
+# --- strict-delivery S2 Task 2: PreToolUse Agent branch -----------------------------------------
+import json as _json  # noqa: E402
+import os as _os  # noqa: E402
+import shutil as _shutil  # noqa: E402
+import subprocess as _sp  # noqa: E402
+import sys as _sys  # noqa: E402
+import unittest as _ut  # noqa: E402
+
+from tools.gates.tests import repo_fixture as _rf  # noqa: E402
+
+_HOOK = _os.path.join(_rf.REAL, "tools", "gates", "hooks", "pre_tool_use.py")
+_DFIX = _os.path.join(_rf.FIX, "dispatch")
+
+
+def _agent_event(root, prompt, model="sonnet"):
+    tool_input = {"prompt": prompt, "description": "fixture", "subagent_type": "general-purpose"}
+    if model is not None:
+        tool_input["model"] = model
+    return {"session_id": "fx", "transcript_path": "/dev/null", "cwd": root, "permission_mode": "default",
+            "hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": tool_input,
+            "tool_use_id": "fx-1"}
+
+
+def _run_hook(root, event):
+    env = dict(_os.environ, CLAUDE_PROJECT_DIR=root, SD_PROMPTS_DIR=_os.path.join(_DFIX, "prompts"))
+    return _sp.run([_sys.executable, _HOOK], input=_json.dumps(event), capture_output=True, text=True,
+                   cwd=root, env=env, check=False)
+
+
+class AgentDispatchHook(_ut.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        rows = _rf.load_rows()
+        rows["decisions"] = [d for d in rows["decisions"] if d["id"] == "DEC-0001"]
+        clean = dict(rows, claims=[c for c in rows["claims"] if c["id"] == "C-fx.ok"])
+        stale = dict(rows, claims=[c for c in rows["claims"] if c["id"] in ("C-fx.ok", "C-fx.stale")])
+        cls.root = _rf.make_repo(_rf.DISPATCH_FILES, clean)
+        cls.stale_root = _rf.make_repo(_rf.DISPATCH_FILES, stale)
+        with open(_os.path.join(_DFIX, "good_implementer.md"), encoding="utf-8", newline="") as f:
+            cls.good = f.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        _shutil.rmtree(cls.root, ignore_errors=True)
+        _shutil.rmtree(cls.stale_root, ignore_errors=True)
+
+    def test_good_dispatch_passes(self):
+        r = _run_hook(self.root, _agent_event(self.root, self.good))
+        self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_agent_dispatch_blocked_on_stale_claim(self):
+        prompt = self.good.replace("## Claims: C-fx.ok", "## Claims: C-fx.stale")
+        r = _run_hook(self.stale_root, _agent_event(self.stale_root, prompt))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("dispatch.claims.C-fx.stale", r.stderr)
+
+    def test_tool_model_disagreeing_with_model_line_blocks(self):
+        r = _run_hook(self.root, _agent_event(self.root, self.good, model="opus"))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("model.agree", r.stderr)
+
+    def test_missing_tool_model_blocks(self):
+        r = _run_hook(self.root, _agent_event(self.root, self.good, model=None))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("model.agree", r.stderr)
+
+    def test_empty_prompt_blocks(self):
+        r = _run_hook(self.root, _agent_event(self.root, "   "))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("dispatch.input", r.stderr)
+
+    def test_fable_implementer_blocks_even_when_both_lines_agree(self):
+        prompt = self.good.replace("## Model: sonnet", "## Model: fable")
+        r = _run_hook(self.root, _agent_event(self.root, prompt, model="fable"))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("model.fable", r.stderr)
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook -v`
+Expected: `test_good_dispatch_passes` may pass (S1 lets `Agent` through); the five blocking tests FAIL with `AssertionError: 2 != 0`.
+
+- [ ] **Step 3: Implement** — in `tools/gates/hooks/pre_tool_use.py` add this function above the S1 entry point:
+
+```python
+def handle_agent(event: dict) -> int:
+    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch, gate_claims and gate_decisions.
+    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch grammar)."""
+    import tempfile
+    sys.path.insert(0, CODE_ROOT)
+    from tools.gates import run_all
+    tool_input = event.get("tool_input") or {}
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
+        return 2
+    model = tool_input.get("model")
+    fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(prompt)
+        argv = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        prompts = os.environ.get("SD_PROMPTS_DIR")  # test override; unset in real sessions
+        if prompts:
+            argv += ["--prompts-dir", prompts]
+        res = run_all.run(["dispatch", "claims", "decisions"],
+                          {"root": project_root(event), "dispatch": argv, "decisions": ["--scan", path]})
+    finally:
+        os.unlink(path)
+    if res.ok():
+        return 0
+    print(res.render(False), file=sys.stderr)
+    return 2
+```
+and in S1's `main()`, directly after the `if not isinstance(event, dict): raise ...` check and before `names = gates_for(event)`, insert:
+```python
+    if event.get("tool_name") == "Agent":
+        return handle_agent(event)
+```
+`os` and `sys` are already imported by S1's hook (check with `grep -n "^import" tools/gates/hooks/pre_tool_use.py`; add `import os` / `import sys` at the top if either is absent). The S1 fail-closed wrapper (`except Exception` → exit 2) already surrounds the dispatch.
+
+- [ ] **Step 4: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
+Expected: `OK` (S1's hook tests and the six new ones). Then `python3 tools/gates/run_all.py` → only `PASS`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools/gates/hooks/pre_tool_use.py tools/gates/tests/test_hooks.py
+git commit -m "feat(hooks): PreToolUse Agent branch -- every dispatch through gate_dispatch, claims, decisions; tool model must equal the Model line"
+```
+
+- [ ] **Step 6: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/argv = \["--prompt", path, "--tool-model", model if isinstance\(model, str\) else ""\]/argv = ["--prompt", path]/' tools/gates/hooks/pre_tool_use.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/hooks/pre_tool_use.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T2/mutation-SD-S2-T2.txt` (the package copy):
+```
+finding: SD-S2-T2
+test: test_missing_tool_model_blocks
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> PASS
+step 2 (fix reverted: perl drops the --tool-model argument in tools/gates/hooks/pre_tool_use.py): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T2"
+PIN = {"test": "tools/gates/tests/test_hooks.py::AgentDispatchHook::test_missing_tool_model_blocks",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt
+git commit -m "chore(state): SD-S2-T2 pinned (mutation transcript)"
+```
+
+- [ ] **Step 7: Ledger (controller, after the task review is ✅)** — append `- S2-T2 DONE <task head sha> Agent hook branch; review <report path>`; commit `chore(state): ledger S2-T2`. From here every dispatch in this checkout is gated.
+
+### Task 3: dispatch config check, run_all registration, README
+
+**Files:**
+- Modify: `tools/gates/gate_dispatch.py` (`check()` parser; add `check_config`)
+- Modify: `tools/gates/run_all.py` (S1 file: `GATES`, `DEFAULT_ARGV`)
+- Modify: `tools/gates/README.md` (S1 file: append the gate_dispatch section)
+- Modify: `.github/workflows/gates.yml` (S1 file: only if it lists test modules explicitly)
+- Test: `tools/gates/tests/test_gate_dispatch.py` (append class `ConfigCheck`)
+
+**Findings:** SD-S2-T3
+
+**Interfaces:**
+- Consumes: Task 1 `gate_dispatch`; S1 `run_all`.
+- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`.
+
+- [ ] **Step 1: Write the failing tests** — append to `tools/gates/tests/test_gate_dispatch.py` above the `if __name__` line:
+
+```python
+class ConfigCheck(unittest.TestCase):
+    def with_config(self, edit):
+        """Config is read from CODE_ROOT (S1), so a bad config is injected at config.load."""
+        conf = config.load(rf.REAL)
+        edit(conf)
+        return mock.patch("tools.gates.lib.config.load", return_value=conf)
+
+    def test_config_check_passes_on_repo_config(self):
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.implementer", out)
+
+    def test_config_check_fails_when_implementer_minimum_is_fable(self):
+        with self.with_config(lambda c: c["models"].__setitem__("implementer", "fable")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.implementer", out)
+
+    def test_config_check_fails_on_an_unknown_role(self):
+        with self.with_config(lambda c: c["models"].__setitem__("helper", "opus")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.models", out)
+
+    def test_config_check_fails_on_a_non_positive_cap(self):
+        with self.with_config(lambda c: c["dispatch"].__setitem__("max_prompt_chars", 0)):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_prompt_and_config_check_are_exclusive(self):
+        rc, out = gate(rf.REAL, ["--config-check", "--prompt", "x.md"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.input", out)
+
+    def test_run_all_runs_dispatch_in_config_check_mode(self):
+        from tools.gates import run_all
+        self.assertIn("dispatch", run_all.GATES)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": rf.REAL}), contextlib.redirect_stdout(buf):
+            rc = run_all.main(["--only", "dispatch"])
+        self.assertEqual(0, rc, buf.getvalue())
+        self.assertIn("dispatch.config.implementer", buf.getvalue())
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck -v`
+Expected: FAIL — `--config-check` is an unknown argument (`FAIL dispatch.input`), `dispatch` not in `GATES`.
+
+- [ ] **Step 3: Implement the mode** — in `tools/gates/gate_dispatch.py`, add above `check()`:
+
+```python
+def check_config(conf: dict, res: Result) -> None:
+    """CI mode: the model map, fable_roles and the prompt cap agree with the dispatch grammar."""
+    models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
+    for role in ROLES:
+        need = models.get(role)
+        if need not in rank:
+            res.fail(f"dispatch.config.{role}", f"minimum model {need!r} not in model_rank")
+        elif need == "fable" and role not in fable:
+            res.fail(f"dispatch.config.{role}", "minimum model fable but the role is not in fable_roles")
+        elif ROLE_PROMPT.get(role) is None:
+            res.fail(f"dispatch.config.{role}", "no prompt file mapped for the role")
+        else:
+            res.passed(f"dispatch.config.{role}")
+    extra = sorted(set(models) - set(ROLES))
+    if extra:
+        res.fail("dispatch.config.models", f"roles outside the dispatch grammar: {', '.join(extra)}")
+    else:
+        res.passed("dispatch.config.models")
+    stray = sorted(fable - set(ROLES))
+    if stray:
+        res.fail("dispatch.config.fable_roles", f"unknown roles: {', '.join(stray)}")
+    else:
+        res.passed("dispatch.config.fable_roles")
+    cap = conf["dispatch"]["max_prompt_chars"]
+    if isinstance(cap, int) and cap > 0:
+        res.passed("dispatch.config.max_prompt_chars")
+    else:
+        res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
+```
+and replace the body of `check()` with:
+```python
+def check(args: list) -> Result:
+    p = gate_args("gate_dispatch")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prompt")
+    mode.add_argument("--config-check", action="store_true")
+    p.add_argument("--tool-model")
+    p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(args)
+    root = a.root or repo_root()
+    conf = gconfig.load(CODE_ROOT)
+    res = Result("dispatch")
+    if a.config_check:
+        check_config(conf, res)
+        return res
+    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
+    return res
+```
+Also change the module docstring's usage line to:
+`Usage: gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D] [--json] | --config-check [--json]`
+
+- [ ] **Step 4: Register in run_all** — in `tools/gates/run_all.py` set:
+```python
+GATES = ["register", "claims", "decisions", "dispatch"]
+# argv an S2+ gate gets when run() is handed nothing for it: the gate's CI-meaningful mode
+DEFAULT_ARGV = {"dispatch": ["--config-check"]}
+```
+
+- [ ] **Step 5: Apply it in `gate_argv`** — replace S1's last line of `gate_argv`, `return argv + list(args.get(name, []))`, with:
+```python
+    return argv + (list(args[name]) if name in args else list(DEFAULT_ARGV.get(name, [])))
+```
+S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged (`test_run_all.py` stays green).
+
+- [ ] **Step 6: README** — append to `tools/gates/README.md`:
+```markdown
+## gate_dispatch (S2)
+
+`python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D]` checks one dispatch
+prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
+Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; brief exists for
+implementer and reviewer roles; implementer findings `planned`/`in-progress`; claim rows `verified` with no cited
+file changed since `verified_at`; report directory exists; no unanswered `DEC-nnnn` anywhere; length <=
+`dispatch.max_prompt_chars`; the strict block equals `~/.claude/skills/strict-delivery/prompts/<file>.md` byte
+for byte (role -> file map: `ROLE_PROMPT`). The PreToolUse hook runs it on every Agent call with
+`--tool-model <tool_input.model>`. `--config-check` (run_all's default) checks the model map and the cap.
+```
+
+- [ ] **Step 7: CI** — run `grep -n "unittest" .github/workflows/gates.yml`. If the job uses `discover`, nothing to change. If it lists modules, append `tools.gates.tests.test_gate_dispatch` to that list (the `test_hooks` entry already exists).
+
+- [ ] **Step 8: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch tools.gates.tests.test_hooks -v` → `OK`; `python3 tools/gates/run_all.py` → only `PASS`, including `dispatch.config.*` lines.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add tools/gates/gate_dispatch.py tools/gates/run_all.py tools/gates/README.md tools/gates/tests/test_gate_dispatch.py .github/workflows/gates.yml
+git commit -m "feat(gates): gate_dispatch --config-check; dispatch joins run_all"
+```
+
+- [ ] **Step 10: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/elif need == "fable" and role not in fable:/elif False:/' tools/gates/gate_dispatch.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/gate_dispatch.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T3/mutation-SD-S2-T3.txt` (the package copy):
+```
+finding: SD-S2-T3
+test: test_config_check_fails_when_implementer_minimum_is_fable
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable -> PASS
+step 2 (fix reverted: perl replaces the fable-minimum condition in check_config with False): python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T3"
+PIN = {"test": "tools/gates/tests/test_gate_dispatch.py::ConfigCheck::test_config_check_fails_when_implementer_minimum_is_fable",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt
+git commit -m "chore(state): SD-S2-T3 pinned (mutation transcript)"
+```
+
+- [ ] **Step 11: Ledger (controller, after the task review is ✅)** — append `- S2-T3 DONE <task head sha> dispatch config check + run_all; review <report path>`; commit `chore(state): ledger S2-T3`.
+
+### b4 checkpoint
+
+`gate_checkpoint` does not exist yet: the controller runs the umbrella's checkpoint protocol by hand, in this order (state commits ride inside the PR — repo fact in Global Constraints).
+
+- [ ] **Step 1: CHECKPOINT b4** — run, in order, stopping on any red line:
+  1. `python3 tools/gates/run_all.py` → every line `PASS`; the gate-test command from `.github/workflows/gates.yml` → `OK`.
+  2. Dispatch the final branch reviewer (opus) and the final adversarial verifier (Fable) with the three task diffs (superpowers `review-package` output per task) and the three mutation transcripts; both reports clean. Every dispatch now uses the grammar (the hook is live).
+  3. Write `docs/superpowers/state/strict-delivery/handoff.md` with the umbrella front matter: `plan: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md`, `spec: docs/superpowers/specs/2026-10-17-strict-delivery-design.md`, `branch: block/strict-delivery-b4`, `head: "<git rev-parse HEAD>"` (before the state commit), `base: "<git merge-base HEAD origin/main>"`, `ledger: docs/superpowers/state/strict-delivery/ledger.md`, `resume_line` = the ledger line number of `- b4 start`, `block: 4`, `next_task: T4`, `findings_in_flight: [{SD-S2-T1: pinned}, {SD-S2-T2: pinned}, {SD-S2-T3: pinned}]`, `claims_verified_at_head: []`, `live_subagents: []`, `open_decisions` = every unanswered id in `decisions.yml`, `rulings` = this block's ruling lines, `grant: DEC-0001`, `parked_branches` = every local branch but main with reason and owner, `env: {idf: "source tools/idf-env.sh", flash: "owner says ready", ota_window_s: 35}`, `traps` = one line each.
+  4. Append `CHECKPOINT b4 <head sha>` to the ledger; `git add docs/superpowers/state/strict-delivery && git commit -m "chore(state): checkpoint b4" && git push -u origin block/strict-delivery-b4`.
+  5. `gh pr create --fill` (body lists tasks, gate output, mutation transcripts); `gh pr ready`; `gh pr checks --watch` → every check passes, advisory included.
+  6. Merge-readiness by hand (`checklists/block-end.md` step 6 text, below in Task 9, applies verbatim): PR body free of every `merge_markers` entry in `tools/gates/config.yml`; rows pinned; grant `DEC-0001` answered `yes` by the owner.
+  7. `gh pr merge --squash --delete-branch`; `git checkout main && git pull --ff-only`; `git tag strict-delivery-b4 && git push origin strict-delivery-b4`; `git branch -D block/strict-delivery-b4` if it remains; `git worktree list` → remove any worktree the block created. Check by hand what Task 7 will automate: `git rev-parse main^` equals the handoff `base`, and `git diff --name-only <handoff head> main` lists only `docs/superpowers/state/` paths.
+  8. Post the status update (spec §3.3 item 1) and this resume prompt, then stop:
+```
+Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/handoff.md. Run python3 tools/gates/run_all.py at HEAD and stop on any FAIL. Continue the strict-delivery plan at block 5 (sub-plan S2, task 4) with superpowers:subagent-driven-development, opus sub-controller, models per tools/gates/config.yml.
+```
+
+## Block b5 — review package and plan gates (Tasks 4–6; branch `block/strict-delivery-b5`; tag `strict-delivery-b5`)
+
+### b5 preamble (controller, before Task 4)
+
+- [ ] **Step 1: Branch** — `git checkout main && git pull --ff-only && git checkout -b block/strict-delivery-b5`; append `- b5 start <sha>` to the ledger and commit `chore(state): b5 start`.
+- [ ] **Step 2: Rows** — `SD-S2-T1..T3` stay `pinned`: `merged` is written only by S4's `postmerge.py` (`by: postmerge`). Run `python3 tools/gates/gate_register.py` → `PASS`.
+- [ ] **Step 3: Review packages** — Tasks 4 and 5 use superpowers' `review-package` diff plus the mutation transcript; from Task 6 the controller runs `python3 tools/gates/make_review_package.py strict-delivery S2-T<n> <base> <head>` and `python3 tools/gates/gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T<n>` (git-ignored; the dir is the row's `owner.task`) before every reviewer dispatch, after the implementer has written `mutation-<id>.txt`, `siblings.md` and `claims.md` into that directory.
+
+### Task 4: gate_review_package
+
+**Files:**
+- Create: `tools/gates/gate_review_package.py`
+- Modify: `tools/gates/run_all.py` (`GATES`, `DEFAULT_ARGV`)
+- Test: `tools/gates/tests/test_gate_review_package.py`
+
+**Findings:** SD-S2-T4
+
+**Interfaces:**
+- Consumes: S1 lib; `repo_fixture` (Task 1).
+- Produces: `gate_review_package.check(args) -> Result`, `main(argv=None)`; `REQUIRED` (list of file names); `table_rows(text) -> list[list[str]] | None`; `mutation_errors(text, finding_id) -> list[str]`. `task_findings(findings, pkg) -> list[str]`. CLI (umbrella table): `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored) | `--all` (every package under `.superpowers/sdd/*/review/*`; none is a PASS — CI has none); the task's ids are the register rows with owner `{kind: plan, plan: <plan>, task: <task>}` plus every `mutation-<id>.txt` present, so the review dir is named by the row's `owner.task` (here `S2-T<n>`). Line ids add `review_package.findings` (no owned row). Line ids: `<pfx>.file.<name>`, `<pfx>.diff`, `<pfx>.gates`, `<pfx>.finding.<id>`, `<pfx>.mutation[.<id>]`, `<pfx>.siblings`, `<pfx>.claims`, with `<pfx>` = `review_package` (single) or `review_package.<plan>.<task>` (`--all`); `review_package.all` when no package exists.
+
+- [ ] **Step 1: Write the failing tests** — `tools/gates/tests/test_gate_review_package.py`:
+
+```python
+"""gate_review_package through main() (strict-delivery S2 Task 4).
+Run from the repo root: python3 -m unittest tools.gates.tests.test_gate_review_package -v
+"""
+import contextlib
+import io
+import os
+import shutil
+import unittest
+from unittest import mock
+
+from tools.gates import gate_review_package as grp
+from tools.gates.tests import repo_fixture as rf
+
+PKG = ".superpowers/sdd/fx/review/1"
+MUT = ("finding: SD-FX-1\n"
+       "test: test_fx\n"
+       "step 1 (fix present): python3 -m unittest t.T.test_fx -> PASS\n"
+       "step 2 (fix reverted: git stash push src/fx.py): python3 -m unittest t.T.test_fx -> FAIL\n"
+       "step 3 (fix restored): python3 -m unittest t.T.test_fx -> PASS\n")
+GOOD = {
+    "commits.txt": "abc1234 feat: fixture\n",
+    "diff.patch": "diff --git a/src/fx.py b/src/fx.py\n+fixed\n",
+    "gates.txt": "PASS register.schema\n",
+    "siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-a | test_sib_a |\n",
+    "claims.md": ("| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
+                  "| fx fixed | python3 -m unittest t | git stash; python3 -m unittest t | OK / FAILED | PASS |\n"),
+    "mutation-SD-FX-1.txt": MUT,
+}
+
+
+def gate(root, argv):
+    buf = io.StringIO()
+    with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}), contextlib.redirect_stdout(buf):
+        rc = grp.main(argv)
+    return rc, buf.getvalue()
+
+
+class GateReviewPackage(unittest.TestCase):
+    def setUp(self):
+        self.root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.put(GOOD)
+
+    def put(self, files):
+        for name, text in files.items():
+            rf.write(self.root, f"{PKG}/{name}", text)
+
+    def check(self):
+        return gate(self.root, ["--dir", PKG])
+
+    def assertFailLine(self, rc, out, line_id):
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL {line_id}", out)
+
+    def test_good_package_passes(self):
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("FAIL", out)
+
+    def test_each_missing_file_fails(self):
+        expect = {n: f"review_package.file.{n}" for n in grp.REQUIRED}
+        expect["mutation-SD-FX-1.txt"] = "review_package.mutation.SD-FX-1"
+        for name, line_id in expect.items():
+            with self.subTest(name=name):
+                os.remove(os.path.join(self.root, PKG, name))
+                rc, out = self.check()
+                self.assertFailLine(rc, out, line_id)
+                self.put({name: GOOD[name]})
+
+    def test_mutation_step_two_must_fail(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("-> FAIL", "-> PASS")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1")
+
+    def test_mutation_steps_must_run_one_command(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("restored): python3 -m unittest t.T.test_fx",
+                                                      "restored): python3 -m unittest t.T.test_other")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1")
+
+    def test_mutation_command_must_name_the_test(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("test: test_fx", "test: test_elsewhere")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1")
+
+    def test_mutation_for_another_finding_fails(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("finding: SD-FX-1", "finding: SD-FX-2")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1")
+
+    def test_fewer_sibling_rows_than_register_fails(self):
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings")
+
+    def test_sibling_named_in_register_must_appear(self):
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-z | test_z |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings")
+
+    def test_claims_fail_row_fails(self):
+        self.put({"claims.md": GOOD["claims.md"].replace("| PASS |", "| FAIL |")})
+        self.assertFailLine(*self.check(), "review_package.claims")
+
+    def test_claims_without_rows_fails(self):
+        self.put({"claims.md": "| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"})
+        self.assertFailLine(*self.check(), "review_package.claims")
+
+    def test_red_gates_output_fails(self):
+        self.put({"gates.txt": "FAIL register.schema: broken\n"})
+        self.assertFailLine(*self.check(), "review_package.gates")
+
+    def test_diff_must_be_a_git_diff(self):
+        self.put({"diff.patch": "not a diff\n"})
+        self.assertFailLine(*self.check(), "review_package.diff")
+
+    def test_unregistered_finding_fails(self):
+        self.put({"mutation-SD-FX-404.txt": MUT.replace("SD-FX-1", "SD-FX-404")})
+        self.assertFailLine(*self.check(), "review_package.finding.SD-FX-404")
+
+    def test_task_with_no_owned_rows_fails(self):
+        other = ".superpowers/sdd/fx/review/9"
+        for name in grp.REQUIRED:
+            rf.write(self.root, f"{other}/{name}", GOOD[name])
+        self.assertFailLine(*gate(self.root, ["--dir", other]), "review_package.findings")
+
+    def test_all_mode_checks_every_package(self):
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS review_package.fx.1.claims", out)
+        os.remove(os.path.join(self.root, PKG, "mutation-SD-FX-1.txt"))
+        rc, out = gate(self.root, ["--all"])
+        self.assertFailLine(rc, out, "review_package.fx.1.mutation")
+
+    def test_all_mode_with_no_packages_passes(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS review_package.all", out)
+
+    def test_no_mode_fails(self):
+        self.assertFailLine(*gate(self.root, []), "review_package.input")
+
+    def test_registered_in_run_all(self):
+        from tools.gates import run_all
+        self.assertIn("review_package", run_all.GATES)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.root}), contextlib.redirect_stdout(buf):
+            rc = run_all.main(["--only", "review_package"])
+        self.assertEqual(0, rc, buf.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v`
+Expected: ERROR `cannot import name 'gate_review_package'`.
+
+- [ ] **Step 3: Implement** — `tools/gates/gate_review_package.py`:
+
+```python
+#!/usr/bin/env python3
+"""gate_review_package -- a task's review package is complete before a reviewer sees it.
+
+Layout and mutation transcript format: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Review package".
+Extends superpowers' subagent-driven-development review-package (commits + diff) with gates.txt, one
+mutation-<finding-id>.txt per finding the task closes, siblings.md and claims.md.
+Usage: gate_review_package.py --dir .superpowers/sdd/<plan>/review/<task> [--json] | --all [--json]
+The task's ids: register rows owned by {kind: plan, plan: <plan>, task: <task>} plus mutation-<id>.txt files.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import re
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
+
+STATE = "docs/superpowers/state"
+SDD = ".superpowers/sdd"          # git-ignored; packages live at .superpowers/sdd/<plan>/review/<task>/
+REQUIRED = ["commits.txt", "diff.patch", "gates.txt", "siblings.md", "claims.md"]
+STEP1 = re.compile(r"^step 1 \(fix present\): (?P<cmd>.+) -> PASS$")
+STEP2 = re.compile(r"^step 2 \(fix reverted: (?P<how>.+?)\): (?P<cmd>.+) -> FAIL$")
+STEP3 = re.compile(r"^step 3 \(fix restored\): (?P<cmd>.+) -> PASS$")
+SEPARATOR = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
+
+
+
+def _read(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def table_rows(text: str) -> list[list[str]] | None:
+    """Data rows of the first Markdown table in text; None when there is no header + separator."""
+    lines = [l.strip() for l in text.splitlines() if l.strip().startswith("|")]
+    if len(lines) < 2 or not SEPARATOR.match(lines[1]):
+        return None
+    return [[c.strip() for c in l.strip("|").split("|")] for l in lines[2:]]
+
+
+def mutation_errors(text: str, fid: str) -> list[str]:
+    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+    if len(lines) < 5:
+        return ["fewer than five lines (finding, test, step 1, step 2, step 3)"]
+    errs = []
+    if lines[0] != f"finding: {fid}":
+        errs.append(f"line 1 must be 'finding: {fid}'")
+    test = lines[1][len("test: "):].strip() if lines[1].startswith("test: ") else ""
+    if not test:
+        errs.append("line 2 must be 'test: <test name>'")
+    steps = [STEP1.match(lines[2]), STEP2.match(lines[3]), STEP3.match(lines[4])]
+    for n, m in enumerate(steps, 1):
+        if not m:
+            errs.append(f"step {n} malformed or wrong verdict (want PASS/FAIL/PASS): {lines[n + 1][:80]!r}")
+    if all(steps):
+        cmds = {m.group("cmd") for m in steps}
+        if len(cmds) != 1:
+            errs.append("steps 1-3 must run the same command")
+        elif test and test not in steps[0].group("cmd"):
+            errs.append(f"the command does not name the test {test!r}")
+    return errs
+
+
+def _verdict(res, lid, ok, reason):
+    if ok:
+        res.passed(lid)
+    else:
+        res.fail(lid, reason)
+
+
+def _siblings(pkg, needed, res, pfx):
+    path = os.path.join(pkg, "siblings.md")
+    if not os.path.isfile(path):
+        return
+    rows = table_rows(_read(path))
+    if rows is None:
+        res.fail(f"{pfx}.siblings", "siblings.md is not a Markdown table (header row + separator)")
+        return
+    bad = [r for r in rows if len(r) < 2 or not r[0] or not r[1]]
+    missing = [s for s in needed if not any(s in r[0] for r in rows)]
+    if bad:
+        res.fail(f"{pfx}.siblings", f"{len(bad)} row(s) lack 'sibling | test name or finding id'")
+    elif len(rows) < len(needed) or missing:
+        res.fail(f"{pfx}.siblings", f"{len(rows)} row(s) for {len(needed)} register sibling(s); "
+                 f"not listed: {', '.join(missing) or '-'}")
+    else:
+        res.passed(f"{pfx}.siblings")
+
+
+def _claims(pkg, res, pfx):
+    path = os.path.join(pkg, "claims.md")
+    if not os.path.isfile(path):
+        return
+    rows = table_rows(_read(path))
+    if rows is None:
+        res.fail(f"{pfx}.claims", "claims.md is not a Markdown table (header row + separator)")
+        return
+    malformed = [r for r in rows if len(r) != 5 or r[4] not in ("PASS", "FAIL")]
+    failed = [r[0] for r in rows if len(r) == 5 and r[4] == "FAIL"]
+    if not rows:
+        res.fail(f"{pfx}.claims", "no executed claims; a claim with no executable check is a finding")
+    elif malformed:
+        res.fail(f"{pfx}.claims", f"{len(malformed)} row(s) not 'claim | direct | contradiction | output | PASS/FAIL'")
+    elif failed:
+        res.fail(f"{pfx}.claims", f"FAIL rows: {'; '.join(failed)}")
+    else:
+        res.passed(f"{pfx}.claims")
+
+
+def task_findings(findings: list, pkg: str) -> list[str]:
+    """Ids the package's task closes: register rows with owner {kind: plan, plan: <plan>, task: <task>}
+    (the directory names in .superpowers/sdd/<plan>/review/<task>) plus every mutation-<id>.txt present."""
+    parts = os.path.normpath(pkg).split(os.sep)
+    plan, task = parts[-3], parts[-1]
+    owned = {f["id"] for f in findings
+             if (f.get("owner") or {}).get("kind") == "plan"
+             and str(f["owner"].get("plan")) == plan and str(f["owner"].get("task")) == task}
+    files = {n[len("mutation-"):-len(".txt")] for n in os.listdir(pkg)
+             if n.startswith("mutation-") and n.endswith(".txt")}
+    return sorted(owned | files)
+
+
+def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, pfx: str) -> None:
+    for name in REQUIRED:
+        path = os.path.join(pkg, name)
+        _verdict(res, f"{pfx}.file.{name}", os.path.isfile(path) and os.path.getsize(path) > 0,
+                 f"{os.path.relpath(path, root)} missing or empty")
+    diff = os.path.join(pkg, "diff.patch")
+    if os.path.isfile(diff):
+        _verdict(res, f"{pfx}.diff", _read(diff).startswith("diff --git"), "diff.patch does not start with 'diff --git'")
+    gates = os.path.join(pkg, "gates.txt")
+    if os.path.isfile(gates):
+        red = [l for l in _read(gates).splitlines() if l.startswith("FAIL ")]
+        _verdict(res, f"{pfx}.gates", not red, f"gates.txt has {len(red)} FAIL line(s); first: {red[0] if red else ''}")
+    needed = []
+    for fid in ids:
+        f = registers.finding_by_id(findings, fid)
+        if f is None:
+            res.fail(f"{pfx}.finding.{fid}", "not in docs/superpowers/state/findings.yml")
+            continue
+        needed.extend(str(s) for s in (f.get("siblings") or []))
+        path = os.path.join(pkg, f"mutation-{fid}.txt")
+        if not os.path.isfile(path):
+            res.fail(f"{pfx}.mutation.{fid}", f"mutation-{fid}.txt missing")
+            continue
+        errs = mutation_errors(_read(path), fid)
+        _verdict(res, f"{pfx}.mutation.{fid}", not errs, "; ".join(errs))
+    _siblings(pkg, needed, res, pfx)
+    _claims(pkg, res, pfx)
+
+
+def check(args: list) -> Result:
+    p = gate_args("gate_review_package")
+    p.add_argument("--dir")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(args)
+    if a.all == bool(a.dir):
+        raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
+    root = a.root or repo_root()
+    findings = registers.load_findings(root)
+    res = Result("review_package")
+    if a.all:
+        if not os.path.isdir(os.path.join(root, STATE)):
+            raise GateError(f"{STATE}/ missing")
+        pkgs = sorted(d for d in glob.glob(os.path.join(root, SDD, "*", "review", "*")) if os.path.isdir(d))
+        if not pkgs:
+            res.passed("review_package.all")
+            return res
+        for pkg in pkgs:
+            parts = os.path.normpath(pkg).split(os.sep)
+            pfx = f"review_package.{parts[-3]}.{parts[-1]}"
+            ids = task_findings(findings, pkg)
+            if not ids:
+                res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
+            check_package(root, pkg, ids, findings, res, pfx)
+        return res
+    pkg = os.path.normpath(a.dir if os.path.isabs(a.dir) else os.path.join(root, a.dir))
+    if not os.path.isdir(pkg):
+        raise GateError(f"--dir {a.dir}: no such directory")
+    ids = task_findings(findings, pkg)
+    if not ids:
+        plan, task = pkg.split(os.sep)[-3], pkg.split(os.sep)[-1]
+        res.fail("review_package.findings", f"no register row has owner {{kind: plan, plan: {plan}, task: {task}}}")
+    check_package(root, pkg, ids, findings, res, "review_package")
+    return res
+
+
+def main(argv=None):
+    return run_gate("review_package", check, argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 4: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package"]`; add `"review_package": ["--all"]` to `DEFAULT_ARGV`.
+
+- [ ] **Step 5: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (18 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tools/gates/gate_review_package.py tools/gates/run_all.py tools/gates/tests/test_gate_review_package.py
+git commit -m "feat(gates): gate_review_package -- required files, PASS/FAIL/PASS mutation transcript, sibling and claims tables"
+```
+
+- [ ] **Step 7: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/failed = \[r\[0\] for r in rows if len\(r\) == 5 and r\[4\] == "FAIL"\]/failed = []/' tools/gates/gate_review_package.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/gate_review_package.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T4/mutation-SD-S2-T4.txt` (the package copy):
+```
+finding: SD-S2-T4
+test: test_claims_fail_row_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
+step 2 (fix reverted: perl empties the FAIL-row list in tools/gates/gate_review_package.py): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T4"
+PIN = {"test": "tools/gates/tests/test_gate_review_package.py::GateReviewPackage::test_claims_fail_row_fails",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt
+git commit -m "chore(state): SD-S2-T4 pinned (mutation transcript)"
+```
+
+- [ ] **Step 8: Ledger (controller, after the task review is ✅)** — append `- S2-T4 DONE <task head sha> gate_review_package; review <report path>`; commit `chore(state): ledger S2-T4`.
+
+### Task 5: make_review_package helper
+
+**Files:**
+- Create: `tools/gates/make_review_package.py`
+- Test: `tools/gates/tests/test_make_review_package.py`
+
+**Findings:** SD-S2-T5
+
+**Interfaces:**
+- Consumes: `run_all.GATES`, `run_all.run` (S1/Task 4); `gitinfo.head_sha`; `repo_fixture`.
+- Produces: CLI `python3 tools/gates/make_review_package.py <plan> <task> <base> <head> [--only a,b]` → writes `.superpowers/sdd/<plan>/review/<task>/{commits.txt,diff.patch,gates.txt}` (git-ignored; `docs/superpowers/state/<plan>/` must exist); never touches `mutation-*.txt`, `siblings.md`, `claims.md`; exit 0 only when the range is valid and every gate in `gates.txt` passed. `main(argv=None) -> int`; `EXCLUDE = ("review_package", "merge_ready")`; `SDD = ".superpowers/sdd"`.
+
+- [ ] **Step 1: Write the failing tests** — `tools/gates/tests/test_make_review_package.py`:
+
+```python
+"""make_review_package.main() on a fixture repo (strict-delivery S2 Task 5).
+Run from the repo root: python3 -m unittest tools.gates.tests.test_make_review_package -v
+"""
+import contextlib
+import io
+import os
+import shutil
+import unittest
+from unittest import mock
+
+from tools.gates import make_review_package as mrp
+from tools.gates.tests import repo_fixture as rf
+
+REVIEW = ".superpowers/sdd/fx/review"
+
+
+def read(root, rel):
+    with open(os.path.join(root, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+class MakeReviewPackage(unittest.TestCase):
+    def setUp(self):
+        files = dict(rf.DISPATCH_FILES)
+        files["docs/superpowers/state/fx/mutations/.gitkeep"] = ""
+        self.root = rf.make_repo(files, rf.load_rows())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.base = rf.git(self.root, "rev-parse", "HEAD")
+        rf.write(self.root, "src/fx.py", "fixed = True\n")
+        self.head = rf.commit(self.root, "feat: fixture fix")
+
+    def make(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.root}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = mrp.main(list(argv))
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_writes_commits_diff_and_gates(self):
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        commits = read(self.root, f"{REVIEW}/1/commits.txt")
+        self.assertEqual(1, len(commits.splitlines()), commits)
+        self.assertIn("feat: fixture fix", commits)
+        diff = read(self.root, f"{REVIEW}/1/diff.patch")
+        self.assertTrue(diff.startswith("diff --git"), diff[:80])
+        self.assertIn("src/fx.py", diff)
+        gates = read(self.root, f"{REVIEW}/1/gates.txt")
+        self.assertIn("register", gates)
+        self.assertNotIn("FAIL", gates)
+
+    def test_keeps_the_implementer_files(self):
+        mine = "| sibling | test or finding |\n|---|---|\n"
+        rf.write(self.root, f"{REVIEW}/1/siblings.md", mine)
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertEqual(mine, read(self.root, f"{REVIEW}/1/siblings.md"))
+        self.assertIn("claims.md", out)
+
+    def test_empty_range_fails(self):
+        rc, out = self.make("fx", "1", self.head, self.head)
+        self.assertEqual(1, rc, out)
+        self.assertIn("empty commit range", out)
+
+    def test_reversed_range_fails(self):
+        rc, out = self.make("fx", "1", self.head, self.base)
+        self.assertEqual(1, rc, out)
+        self.assertIn("not a descendant", out)
+
+    def test_head_must_be_checked_out(self):
+        first = rf.git(self.root, "rev-list", "--max-parents=0", "HEAD")
+        rf.git(self.root, "checkout", "-q", self.base)
+        rc, out = self.make("fx", "1", first, self.head)
+        self.assertEqual(1, rc, out)
+        self.assertIn("check out", out)
+
+    def test_missing_plan_state_dir_fails(self):
+        rc, out = self.make("nope", "1", self.base, self.head)
+        self.assertEqual(1, rc, out)
+        self.assertIn("new_plan_state", out)
+
+    def test_red_gate_fails_but_still_writes_gates_txt(self):
+        rf.write(self.root, "docs/superpowers/state/findings.yml", "not: [valid\n")
+        rf.commit(self.root, "break the register")
+        head = rf.git(self.root, "rev-parse", "HEAD")
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL", read(self.root, f"{REVIEW}/1/gates.txt"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v`
+Expected: ERROR `cannot import name 'make_review_package'`.
+
+- [ ] **Step 3: Implement** — `tools/gates/make_review_package.py`:
+
+```python
+#!/usr/bin/env python3
+"""make_review_package -- build .superpowers/sdd/<plan>/review/<task>/ (git-ignored) for one task's BASE..HEAD.
+
+Writes commits.txt (git log --oneline), diff.patch (git diff -U10) and gates.txt
+(run_all at HEAD minus the gates that judge the package or the PR). The implementer adds
+mutation-<finding-id>.txt, siblings.md and claims.md; this script never touches those.
+Same range guards as superpowers' subagent-driven-development scripts/review-package.
+Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from tools.gates import run_all  # noqa: E402
+from tools.gates.lib import gitinfo, repo_root  # noqa: E402
+
+STATE = "docs/superpowers/state"
+SDD = ".superpowers/sdd"
+EXCLUDE = ("review_package", "merge_ready")
+IMPLEMENTER_FILES = ("siblings.md", "claims.md")
+
+
+class Refused(Exception):
+    pass
+
+
+def _git(root: str, *args: str) -> str:
+    r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise Refused(f"git {' '.join(args)}: {r.stderr.strip() or 'exit ' + str(r.returncode)}")
+    return r.stdout
+
+
+def _range(root: str, base: str, head: str) -> tuple[str, str, int]:
+    b = _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").strip()
+    h = _git(root, "rev-parse", "--verify", "--quiet", f"{head}^{{commit}}").strip()
+    anc = subprocess.run(["git", "merge-base", "--is-ancestor", b, h], cwd=root, capture_output=True, check=False)
+    if anc.returncode != 0:
+        raise Refused(f"HEAD is not a descendant of BASE: {base}..{head}")
+    n = int(_git(root, "rev-list", "--count", f"{b}..{h}").strip())
+    if n == 0:
+        raise Refused(f"empty commit range: {base}..{head}")
+    if h != gitinfo.head_sha(root):
+        raise Refused(f"check out {head} first: gates.txt must describe the commit under review")
+    return b, h, n
+
+
+def _write(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="make_review_package")
+    p.add_argument("plan")
+    p.add_argument("task")
+    p.add_argument("base")
+    p.add_argument("head")
+    p.add_argument("--only", help="comma-separated gates for gates.txt (default: run_all.GATES minus "
+                                  + ", ".join(EXCLUDE) + ")")
+    a = p.parse_args(argv)
+    root = repo_root()
+    try:
+        plan_dir = os.path.join(root, STATE, a.plan)
+        if not os.path.isdir(plan_dir):
+            raise Refused(f"{STATE}/{a.plan}/ missing: run tools/gates/new_plan_state.py {a.plan} first")
+        b, h, n = _range(root, a.base, a.head)
+        pkg = os.path.join(root, SDD, a.plan, "review", a.task)
+        os.makedirs(pkg, exist_ok=True)
+        _write(os.path.join(pkg, "commits.txt"), _git(root, "log", "--oneline", f"{b}..{h}"))
+        _write(os.path.join(pkg, "diff.patch"), _git(root, "diff", "-U10", f"{b}..{h}"))
+    except Refused as e:
+        print(f"make_review_package: {e}", file=sys.stderr)
+        return 1
+    names = a.only.split(",") if a.only else [g for g in run_all.GATES if g not in EXCLUDE]
+    res = run_all.run(names, {"root": root})
+    _write(os.path.join(pkg, "gates.txt"), res.render(False) + "\n")
+    pending = [f for f in IMPLEMENTER_FILES if not os.path.isfile(os.path.join(pkg, f))]
+    if not any(f.startswith("mutation-") for f in os.listdir(pkg)):
+        pending.append("mutation-<finding-id>.txt")
+    print(f"wrote {os.path.relpath(pkg, root)}: {n} commit(s); gates {'PASS' if res.ok() else 'FAIL'}")
+    if pending:
+        print(f"the implementer still adds: {', '.join(pending)}")
+    return 0 if res.ok() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 4: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (7 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools/gates/make_review_package.py tools/gates/tests/test_make_review_package.py
+git commit -m "feat(gates): make_review_package -- commits, diff and gates.txt from BASE..HEAD into the ignored package dir"
+```
+
+- [ ] **Step 6: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/    if n == 0:/    if False:/' tools/gates/make_review_package.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/make_review_package.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T5/mutation-SD-S2-T5.txt` (the package copy):
+```
+finding: SD-S2-T5
+test: test_empty_range_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
+step 2 (fix reverted: perl replaces the empty-range guard in tools/gates/make_review_package.py with False): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T5"
+PIN = {"test": "tools/gates/tests/test_make_review_package.py::MakeReviewPackage::test_empty_range_fails",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt
+git commit -m "chore(state): SD-S2-T5 pinned (mutation transcript)"
+```
+
+- [ ] **Step 7: Ledger (controller, after the task review is ✅)** — append `- S2-T5 DONE <task head sha> make_review_package; review <report path>`; commit `chore(state): ledger S2-T5`.
+
+### Task 6: gate_plan and the ledger contract
+
+**Files:**
+- Create: `tools/gates/gate_plan.py`
+- Create: `tools/gates/tests/fixtures/plan/good.md`
+- Modify: `tools/gates/run_all.py` (`GATES`, `DEFAULT_ARGV`)
+- Modify: `tools/gates/README.md` (append review_package/plan section)
+- Modify: `docs/superpowers/state/strict-delivery/ledger.md` (line 1 `plan:` header; `mutations/.gitkeep`)
+- Modify: `.github/workflows/gates.yml` (only if it lists test modules)
+- Test: `tools/gates/tests/test_gate_plan.py`
+
+**Findings:** SD-S2-T6
+
+**Interfaces:**
+- Consumes: S1 lib; `repo_fixture`.
+- Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
+- **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** when the last non-empty ledger line is not a `CHECKPOINT` line in the working tree **or** in the `HEAD` commit (or the ledger is not committed).
+
+- [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
+
+```markdown
+# Fixture Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development.
+
+**Goal:** Exercise gate_plan.
+
+**Architecture:** Two blocks; one parallel pair in the first.
+
+**Tech Stack:** Python 3.9.
+
+**Spec:** `docs/cited.md`
+
+## Global Constraints
+
+- The fixture has no constraints beyond itself.
+
+## Review Focus
+
+1. Overlap between parallel tasks.
+
+---
+
+## Block b1 — first
+
+### Task 1: alpha
+
+**Mode:** PARALLEL
+
+**Files:**
+- Create: `src/alpha.py`
+- Test: `tests/test_alpha.py`
+
+**Findings:** SD-FX-1
+
+- [ ] **Step 1: Write the failing test**
+
+### Task 2: beta
+
+**Mode:** PARALLEL
+
+**Files:**
+- Create: `src/beta.py`
+- Modify: `src/shared.py:10-20`
+
+**Findings:** SD-FX-2
+
+- [ ] **Step 1: CHECKPOINT b1**
+
+## Block b2 — second
+
+### Task 3: gamma
+
+**Files:**
+- Modify: `src/shared.py`
+
+**Findings:** none — fixture maintenance with no register row
+
+- [ ] **Step 1: CHECKPOINT b2**
+```
+
+- [ ] **Step 2: Write the failing tests** — `tools/gates/tests/test_gate_plan.py`:
+
+```python
+"""gate_plan through main() (strict-delivery S2 Task 6).
+Run from the repo root: python3 -m unittest tools.gates.tests.test_gate_plan -v
+"""
+import contextlib
+import io
+import os
+import shutil
+import unittest
+from unittest import mock
+
+from tools.gates import gate_plan
+from tools.gates.tests import repo_fixture as rf
+
+with open(os.path.join(rf.FIX, "plan", "good.md"), encoding="utf-8") as _f:
+    GOOD = _f.read()
+FENCE = "`" * 3
+PH = "T" + "BD"   # a writing-plans placeholder, assembled so this file never contains one
+LEDGER = "plan: docs/superpowers/plans/fx.md\n# Ledger: fx\n- T1 DONE\n"
+
+
+def gate(root, argv):
+    buf = io.StringIO()
+    with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}), contextlib.redirect_stdout(buf):
+        rc = gate_plan.main(argv)
+    return rc, buf.getvalue()
+
+
+def plan_repo(ledger=None):
+    files = dict(rf.DISPATCH_FILES)
+    files["docs/superpowers/plans/fx.md"] = GOOD
+    if ledger is not None:
+        files["docs/superpowers/state/fx/ledger.md"] = ledger
+    return rf.make_repo(files, rf.load_rows())
+
+
+class GatePlan(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = plan_repo()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def check(self, text, *extra):
+        path = os.path.join(self.root, "plan.under-test.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return gate(self.root, ["--plan", path, *extra])
+
+    def variant(self, old, new, base=GOOD):
+        text = base.replace(old, new, 1)
+        self.assertNotEqual(base, text, f"fixture lacks {old!r}")
+        return text
+
+    def assertFailLine(self, rc, out, line_id):
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL {line_id}", out)
+
+    def test_good_plan_passes_with_register_source(self):
+        rc, out = self.check(GOOD, "--source", "register:plan=fx")
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.coverage.SD-FX-1", out)
+        self.assertIn("PASS plan.overlap.1-2", out)
+        self.assertNotIn("plan.overlap.2-3", out)
+
+    def test_report_source_counts_ids_in_the_text(self):
+        rf.write(self.root, "docs/report.md", "Findings SD-FX-1 and SD-FX-2 and UTF-8.\n")
+        rc, out = self.check(GOOD, "--source", "docs/report.md")
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("UTF-8", out)
+
+    def test_missing_header_fails(self):
+        self.assertFailLine(*self.check(self.variant("**Tech Stack:** Python 3.9.\n", "")), "plan.header.tech-stack")
+
+    def test_spec_path_must_exist(self):
+        self.assertFailLine(*self.check(self.variant("`docs/cited.md`", "`docs/none.md`")), "plan.header.spec-path")
+
+    def test_task_without_findings_line_fails(self):
+        text = self.variant("**Findings:** none — fixture maintenance with no register row\n", "")
+        self.assertFailLine(*self.check(text), "plan.task.3.findings")
+
+    def test_findings_line_with_a_non_id_fails(self):
+        self.assertFailLine(*self.check(self.variant("**Findings:** SD-FX-2", "**Findings:** see audit")),
+                            "plan.task.2.findings")
+
+    def test_task_without_files_fails(self):
+        self.assertFailLine(*self.check(self.variant("- Modify: `src/shared.py`\n", "")), "plan.task.3.files")
+
+    def test_parallel_tasks_sharing_a_file_fail(self):
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py`")
+        self.assertFailLine(*self.check(text), "plan.overlap.1-2")
+
+    def test_line_ranges_do_not_hide_an_overlap(self):
+        text = self.variant("- Test: `tests/test_alpha.py`\n",
+                            "- Test: `tests/test_alpha.py`\n- Modify: `src/shared.py:1-5`\n")
+        rc, out = self.check(text)
+        self.assertFailLine(rc, out, "plan.overlap.1-2")
+        self.assertIn("src/shared.py", out)
+
+    def test_block_over_the_cap_fails(self):
+        extra = "".join(f"### Task {n}: extra\n\n**Files:**\n- Create: `src/x{n}.py`\n\n"
+                        f"**Findings:** none — fixture filler\n\n" for n in (4, 5, 6))
+        text = self.variant("- [ ] **Step 1: CHECKPOINT b2**", extra + "- [ ] **Step 1: CHECKPOINT b2**")
+        self.assertFailLine(*self.check(text), "plan.block.2")
+
+    def test_checkpoint_markers_split_blocks_without_headings(self):
+        rc, out = self.check(self.variant("## Block b2 — second\n", ""))
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.block.2", out)
+
+    def test_placeholder_fails(self):
+        rc, out = self.check(GOOD + f"\nStep detail: {PH}\n")
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL plan.placeholder.L", out)
+
+    def test_placeholder_inside_code_fence_fails(self):
+        rc, out = self.check(GOOD + f"\n{FENCE}python\nx = 1  # {PH}\n{FENCE}\n")
+        self.assertIn("FAIL plan.placeholder.L", out)
+
+    def test_task_heading_inside_code_fence_is_ignored(self):
+        rc, out = self.check(GOOD + f"\n{FENCE}\n### Task 9: not a task\n{FENCE}\n")
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("plan.task.9", out)
+
+    def test_id_in_two_tasks_fails(self):
+        text = self.variant("**Findings:** none — fixture maintenance with no register row", "**Findings:** SD-FX-1")
+        self.assertFailLine(*self.check(text), "plan.id.SD-FX-1")
+
+    def test_unregistered_id_fails(self):
+        self.assertFailLine(*self.check(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-404")),
+                            "plan.id.SD-FX-404")
+
+    def test_source_id_missing_from_plan_fails(self):
+        text = self.variant("**Findings:** SD-FX-2", "**Findings:** none — moved out of the plan")
+        self.assertFailLine(*self.check(text, "--source", "register:plan=fx"), "plan.coverage.SD-FX-2")
+
+    def test_source_with_no_ids_fails(self):
+        self.assertFailLine(*self.check(GOOD, "--source", "register:plan=nothing"), "plan.source")
+
+    def test_bad_register_query_fails(self):
+        self.assertFailLine(*self.check(GOOD, "--source", "register:owner=fx"), "plan.input")
+
+    def test_no_mode_fails(self):
+        self.assertFailLine(*gate(self.root, []), "plan.input")
+
+
+class InFlight(unittest.TestCase):
+    def repo(self, ledger):
+        root = plan_repo(ledger)
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def test_in_flight_plan_is_checked(self):
+        root = self.repo(LEDGER)
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.fx.header.goal", out)
+
+    def test_closed_ledger_is_not_in_flight(self):
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        self.assertEqual([], gate_plan.plans_in_flight(root))
+        rc, out = gate(root, ["--in-flight"])
+        self.assertIn("PASS plan.in_flight", out)
+
+    def test_uncommitted_checkpoint_line_is_in_flight(self):
+        root = self.repo(LEDGER)
+        with open(os.path.join(root, "docs/superpowers/state/fx/ledger.md"), "a", encoding="utf-8") as f:
+            f.write("CHECKPOINT b1 abc1234\n")
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
+        rf.commit(root, "chore(state): checkpoint b1")
+        self.assertEqual([], gate_plan.plans_in_flight(root))
+
+    def test_ledger_without_plan_line_fails(self):
+        root = self.repo("# Ledger: fx\n")
+        self.assertIn("FAIL plan.input", gate(root, ["--in-flight"])[1])
+
+    def test_no_state_dirs_pass(self):
+        root = plan_repo()
+        self.addCleanup(shutil.rmtree, root, True)
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.in_flight", out)
+
+    def test_registered_in_run_all(self):
+        from tools.gates import run_all
+        self.assertIn("plan", run_all.GATES)
+        root = self.repo(LEDGER)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}), contextlib.redirect_stdout(buf):
+            rc = run_all.main(["--only", "plan"])
+        self.assertEqual(0, rc, buf.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 3: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v`
+Expected: ERROR `cannot import name 'gate_plan'`.
+
+- [ ] **Step 4: Implement** — `tools/gates/gate_plan.py`:
+
+```python
+#!/usr/bin/env python3
+"""gate_plan -- an implementation plan is executable under strict delivery (spec §6 step 3).
+
+Checks: writing-plans header blocks; '**Files:**' and '**Findings:**' per task; every routed id registered
+and in exactly one task; with --source, every source id in exactly one task; file overlap between PARALLEL
+tasks of one block; tasks per block <= config block.max_tasks (blocks: '## Block bN' headings or CHECKPOINT
+steps); the writing-plans "No Placeholders" list over the whole file, code included.
+Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
+Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
+       gate_plan.py --in-flight [--json]
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import glob
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import config as gconfig  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
+
+STATE = "docs/superpowers/state"
+HEADERS = {
+    "agentic": re.compile(r"^> \*\*For agentic workers:\*\*"),
+    "goal": re.compile(r"^\*\*Goal:\*\* \S"),
+    "architecture": re.compile(r"^\*\*Architecture:\*\* \S"),
+    "tech-stack": re.compile(r"^\*\*Tech Stack:\*\* \S"),
+    "spec": re.compile(r"^\*\*Spec:\*\* \S"),
+    "global-constraints": re.compile(r"^## Global Constraints\s*$"),
+    "review-focus": re.compile(r"^## Review Focus\s*$"),
+}
+BLOCK_RE = re.compile(r"^#{2,} Block b?(\d+)\b")
+TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
+CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
+FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): `([^`]+)`")
+FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
+MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(PARALLEL|SERIAL)\s*$")
+ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
+NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
+SPEC_PATH = re.compile(r"`([^`]+)`")
+TOKEN_RE = re.compile(r"\b[A-Z0-9]+(?:-[A-Za-z0-9]+)+\b")
+# writing-plans "No Placeholders"; each phrase is split so this file never matches itself
+PLACEHOLDERS = [re.compile(r"\bT" r"BD\b"), re.compile(r"\bTO" r"DO\b")] + [re.compile(p, re.I) for p in (
+    r"implement lat" r"er", r"fill in detai" r"ls", r"add appropriate error handl" r"ing",
+    r"add valid" r"ation", r"handle edge cas" r"es", r"write tests for the abo" r"ve",
+    r"similar to tas" r"k \d+")]
+LEDGER_PLAN = re.compile(r"^plan: (\S+)\s*$")
+CHECKPOINT_LINE = re.compile(r"^CHECKPOINT b(\d+)\b")
+QUERY_KEYS = {
+    "plan": lambda f: (f.get("owner") or {}).get("plan"),
+    "task": lambda f: (f.get("owner") or {}).get("task"),
+    "state": lambda f: f.get("state"),
+    "severity": lambda f: f.get("severity"),
+}
+
+
+
+@dataclass
+class Task:
+    num: str
+    line: int
+    block: int
+    files: list = field(default_factory=list)
+    findings: list | None = None
+    findings_error: str = ""
+    parallel: bool = False
+
+
+@dataclass
+class Plan:
+    headers: dict
+    tasks: list
+    placeholders: list
+
+
+def _read(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _resolve(root: str, path: str) -> str:
+    return path if os.path.isabs(path) else os.path.join(root, path)
+
+
+def _findings_value(task: Task, value: str) -> None:
+    value = value.strip()
+    if NONE_RE.match(value):
+        task.findings = []
+        return
+    ids = [v.strip().strip("`") for v in value.split(",")]
+    bad = [i for i in ids if not ID_RE.match(i)]
+    task.findings = [] if bad else ids
+    if bad:
+        task.findings_error = f"not register ids: {', '.join(repr(b) for b in bad)} (or write 'none — <reason>')"
+
+
+def parse_plan(text: str) -> Plan:
+    headers, tasks, placeholders = {}, [], []
+    fence, block, closed, cur, in_files = False, 1, False, None, False
+    for n, line in enumerate(text.splitlines(), 1):
+        if any(rx.search(line) for rx in PLACEHOLDERS):
+            placeholders.append((n, line.strip()[:80]))
+        if line.startswith("`" * 3):
+            fence, in_files = not fence, False
+            continue
+        if fence:
+            continue
+        m = BLOCK_RE.match(line)
+        if m:
+            block, closed, cur, in_files = int(m.group(1)), False, None, False
+            continue
+        m = TASK_RE.match(line)
+        if m:
+            if closed:
+                block, closed = block + 1, False
+            cur, in_files = Task(m.group(1), n, block), False
+            tasks.append(cur)
+            continue
+        if CHECKPOINT_STEP.match(line):
+            closed, in_files = True, False
+            continue
+        for key, rx in HEADERS.items():
+            if key not in headers and rx.match(line):
+                headers[key] = line
+        if cur is None:
+            continue
+        if line.startswith("**Files:**"):
+            in_files = True
+            continue
+        if in_files:
+            fm = FILE_RE.match(line)
+            if fm:
+                cur.files.append(fm.group(1).split(":")[0])
+                continue
+            if not line.strip() and not cur.files:
+                continue
+            in_files = False
+        m = FINDINGS_RE.match(line)
+        if m:
+            _findings_value(cur, m.group(1))
+            continue
+        m = MODE_RE.match(line)
+        if m:
+            cur.parallel = m.group(1) == "PARALLEL"
+    return Plan(headers, tasks, placeholders)
+
+
+def parse_query(query: str) -> dict:
+    out = {}
+    for part in query.split("&"):
+        key, sep, value = part.partition("=")
+        if not sep or key not in QUERY_KEYS or not value:
+            raise GateError(f"bad register query part {part!r}: use key=pattern[,pattern] with key in {sorted(QUERY_KEYS)}")
+        out[key] = value.split(",")
+    return out
+
+
+def source_ids(root: str, source: str, findings: list) -> list[str]:
+    if source.startswith("register:"):
+        q = parse_query(source[len("register:"):])
+        return sorted(f["id"] for f in findings
+                      if all(any(fnmatch.fnmatchcase(str(QUERY_KEYS[k](f)), p) for p in pats) for k, pats in q.items()))
+    path = _resolve(root, source)
+    if not os.path.isfile(path):
+        raise GateError(f"--source {source}: no such file")
+    known = {f["id"] for f in findings}
+    in_text = {t for t in TOKEN_RE.findall(_read(path)) if t in known}
+    by_source = {f["id"] for f in findings if str(f.get("source") or "").startswith(source)}
+    return sorted(in_text | by_source)
+
+
+def _verdict(res, lid, ok, reason):
+    if ok:
+        res.passed(lid)
+    else:
+        res.fail(lid, reason)
+
+
+def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: str | None,
+               res: Result, pfx: str) -> None:
+    full = _resolve(root, plan_path)
+    if not os.path.isfile(full):
+        res.fail(f"{pfx}.file", f"{plan_path}: no such plan file")
+        return
+    plan = parse_plan(_read(full))
+    for key, rx in HEADERS.items():
+        _verdict(res, f"{pfx}.header.{key}", key in plan.headers, f"no header line matching {rx.pattern!r}")
+    if "spec" in plan.headers:
+        m = SPEC_PATH.search(plan.headers["spec"])
+        _verdict(res, f"{pfx}.header.spec-path", bool(m) and os.path.isfile(_resolve(root, m.group(1))),
+                 "the **Spec:** line must name an existing file in backticks")
+    if not plan.tasks:
+        res.fail(f"{pfx}.tasks", "no '### Task N' headings outside code fences")
+    routed = {}
+    for t in plan.tasks:
+        tid = f"{pfx}.task.{t.num}"
+        _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
+        if t.findings is None:
+            res.fail(f"{tid}.findings", "no **Findings:** line (register ids, or 'none — <reason>')")
+        else:
+            _verdict(res, f"{tid}.findings", not t.findings_error, t.findings_error)
+        for fid in t.findings or []:
+            routed.setdefault(fid, []).append(t.num)
+    known = {f["id"] for f in findings}
+    for fid, nums in sorted(routed.items()):
+        if fid not in known:
+            res.fail(f"{pfx}.id.{fid}", "not in docs/superpowers/state/findings.yml")
+        else:
+            _verdict(res, f"{pfx}.id.{fid}", len(nums) == 1,
+                     f"routed to tasks {', '.join(nums)}; each id belongs to exactly one task")
+    cap = conf["block"]["max_tasks"]
+    by_block = {}
+    for t in plan.tasks:
+        by_block.setdefault(t.block, []).append(t.num)
+    for b, nums in sorted(by_block.items()):
+        _verdict(res, f"{pfx}.block.{b}", len(nums) <= cap,
+                 f"{len(nums)} tasks ({', '.join(nums)}) > block.max_tasks {cap}")
+    pairs = 0
+    for i, a in enumerate(plan.tasks):
+        for b in plan.tasks[i + 1:]:
+            if not (a.parallel and b.parallel and a.block == b.block):
+                continue
+            pairs += 1
+            shared = sorted(set(a.files) & set(b.files))
+            _verdict(res, f"{pfx}.overlap.{a.num}-{b.num}", not shared, f"PARALLEL tasks share {', '.join(shared)}")
+    if not pairs:
+        res.passed(f"{pfx}.overlap")
+    for n, text in plan.placeholders:
+        res.fail(f"{pfx}.placeholder.L{n}", text)
+    if not plan.placeholders:
+        res.passed(f"{pfx}.placeholders")
+    if source is None:
+        return
+    ids = source_ids(root, source, findings)
+    if not ids:
+        res.fail(f"{pfx}.source", f"{source} yields no register ids")
+    for fid in ids:
+        nums = routed.get(fid, [])
+        _verdict(res, f"{pfx}.coverage.{fid}", len(nums) == 1,
+                 "in no task" if not nums else f"in tasks {', '.join(nums)}")
+
+
+def _closed(text: str | None) -> bool:
+    if text is None:
+        return False
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return bool(lines) and bool(CHECKPOINT_LINE.match(lines[-1]))
+
+
+def _committed(root: str, rel: str) -> str | None:
+    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, text=True, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def plans_in_flight(root: str) -> list[tuple[str, str]]:
+    """(state-dir name, plan path) for every ledger whose last line is not a committed CHECKPOINT line."""
+    state = os.path.join(root, STATE)
+    if not os.path.isdir(state):
+        raise GateError(f"{STATE}/ missing")
+    out = []
+    for ledger in sorted(glob.glob(os.path.join(state, "*", "ledger.md"))):
+        name = os.path.basename(os.path.dirname(ledger))
+        rel = os.path.relpath(ledger, root).replace(os.sep, "/")
+        text = _read(ledger)
+        first = text.splitlines()[0] if text else ""
+        m = LEDGER_PLAN.match(first)
+        if not m:
+            raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
+        if not (_closed(text) and _closed(_committed(root, rel))):
+            out.append((name, m.group(1)))
+    return out
+
+
+def check(args: list) -> Result:
+    p = gate_args("gate_plan")
+    p.add_argument("--plan")
+    p.add_argument("--source")
+    p.add_argument("--in-flight", action="store_true")
+    p.add_argument("--json", action="store_true")
+    a = p.parse_args(args)
+    if bool(a.plan) == a.in_flight:
+        raise GateError("give exactly one of --plan P or --in-flight")
+    if a.in_flight and a.source:
+        raise GateError("--source goes with --plan")
+    root = a.root or repo_root()
+    conf = gconfig.load(CODE_ROOT)
+    findings = registers.load_findings(root)
+    res = Result("plan")
+    if a.plan:
+        check_plan(root, conf, findings, a.plan, a.source, res, "plan")
+        return res
+    pairs = plans_in_flight(root)
+    if not pairs:
+        res.passed("plan.in_flight")
+    for name, path in pairs:
+        check_plan(root, conf, findings, path, None, res, f"plan.{name}")
+    return res
+
+
+def main(argv=None):
+    return run_gate("plan", check, argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "plan", "dispatch", "review_package"]` (umbrella order); add `"plan": ["--in-flight"]` to `DEFAULT_ARGV`.
+
+- [ ] **Step 6: Give the live strict-delivery ledger the contract header** (from this commit, `run_all` checks in-flight plans):
+
+```bash
+python3 - <<'EOF'
+import os
+d = "docs/superpowers/state/strict-delivery"
+p = f"{d}/ledger.md"
+plan = "plan: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md\n"
+text = open(p, encoding="utf-8").read() if os.path.exists(p) else "# Ledger: strict-delivery\n"
+if text.startswith("plan: "):
+    text = text.split("\n", 1)[1]
+os.makedirs(d, exist_ok=True)
+open(p, "w", encoding="utf-8").write(plan + text)
+os.makedirs(f"{d}/mutations", exist_ok=True)
+open(f"{d}/mutations/.gitkeep", "a").close()
+os.makedirs(".superpowers/sdd/strict-delivery/review", exist_ok=True)   # git-ignored package root
+EOF
+head -1 docs/superpowers/state/strict-delivery/ledger.md
+```
+Expected: the `plan:` line. Ledger it: append `- ledger header added (line numbers shift by one; next handoff resume_line counts it)`.
+
+- [ ] **Step 7: README + CI** — append to `tools/gates/README.md`:
+```markdown
+## gate_review_package, make_review_package, gate_plan (S2)
+
+`make_review_package.py <plan> <task> <base> <head>` writes the git-ignored `.superpowers/sdd/<plan>/review/<task>/`
+`commits.txt`, `diff.patch`, `gates.txt`; the implementer adds `mutation-<id>.txt`, `siblings.md`, `claims.md`.
+`gate_review_package.py --dir <that dir>` (ids = rows owned by `<plan>`/`<task>` + mutation files) must pass before a reviewer is dispatched;
+`--all` (run_all's default) re-checks every committed package. `gate_plan.py --plan P --source <report |
+register:plan=<name>&task=<pattern>>` prints the header, id-coverage, overlap, block-size and placeholder
+lines at plan approval; `--in-flight` (run_all's default) checks the plan named on line 1 of every ledger
+that does not end in a committed `CHECKPOINT b<N>` line.
+```
+Run `grep -n "unittest" .github/workflows/gates.yml`; if modules are listed, append `tools.gates.tests.test_gate_review_package tools.gates.tests.test_make_review_package tools.gates.tests.test_gate_plan`.
+
+- [ ] **Step 8: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (26 tests). Then `python3 tools/gates/run_all.py` → only `PASS`, including `plan.strict-delivery.*` lines for this very plan file. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-*'` → only `PASS` (each SD-S2-Tn in exactly one task).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add tools/gates/gate_plan.py tools/gates/tests/fixtures/plan/good.md tools/gates/tests/test_gate_plan.py \
+        tools/gates/run_all.py tools/gates/README.md .github/workflows/gates.yml docs/superpowers/state/strict-delivery
+git commit -m "feat(gates): gate_plan -- headers, findings per task, id coverage, PARALLEL overlap, block cap, placeholders; ledger contract"
+```
+
+- [ ] **Step 10: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/shared = sorted\(set\(a\.files\) & set\(b\.files\)\)/shared = []/' tools/gates/gate_plan.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/gate_plan.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T6/mutation-SD-S2-T6.txt` (the package copy):
+```
+finding: SD-S2-T6
+test: test_parallel_tasks_sharing_a_file_fail
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
+step 2 (fix reverted: perl empties the shared-file set in tools/gates/gate_plan.py): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T6"
+PIN = {"test": "tools/gates/tests/test_gate_plan.py::GatePlan::test_parallel_tasks_sharing_a_file_fail",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt
+git commit -m "chore(state): SD-S2-T6 pinned (mutation transcript)"
+```
+
+- [ ] **Step 11: Ledger (controller, after the task review is ✅)** — append `- S2-T6 DONE <task head sha> gate_plan; review <package path>`; commit `chore(state): ledger S2-T6`.
+
+### b5 checkpoint
+
+- [ ] **Step 1: CHECKPOINT b5** — the b4 checkpoint sequence, with these values: `python3 tools/gates/gate_review_package.py --all` → only `PASS` (packages stay git-ignored); handoff `branch: block/strict-delivery-b5`, `head` = `git rev-parse HEAD` before the state commit, `base` = `git merge-base HEAD origin/main`, `block: 5`, `next_task: "7"`, `findings_in_flight: [{SD-S2-T4: pinned}, {SD-S2-T5: pinned}, {SD-S2-T6: pinned}]`, `resume_line` = the line of `- b5 start`; ledger `CHECKPOINT b5 <head sha>`; commit `chore(state): checkpoint b5`; push `block/strict-delivery-b5`; PR; all checks green; merge-readiness by hand; squash-merge; tag `strict-delivery-b5`; clean worktrees; status update; this resume prompt; stop:
+```
+Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/handoff.md. Run python3 tools/gates/run_all.py at HEAD and stop on any FAIL. Continue the strict-delivery plan at block 6 (sub-plan S2, task 7) with superpowers:subagent-driven-development, opus sub-controller, models per tools/gates/config.yml.
+```
+
+## Block b6 — checkpoint gate, stop hooks, state layout (Tasks 7–9; branch `block/strict-delivery-b6`; tag `strict-delivery-b6`)
+
+### b6 preamble (controller, before Task 7)
+
+- [ ] **Step 1: Branch** — `git checkout main && git pull --ff-only && git checkout -b block/strict-delivery-b6`; append `- b6 start <sha>` to the ledger; `python3 tools/gates/gate_register.py` → `PASS` (rows `SD-S2-T1..T6` stay `pinned` until S4's `postmerge.py`); commit `chore(state): b6 start`.
+
+### Task 7: gate_checkpoint — pre-merge and post-merge
+
+**Files:**
+- Create: `tools/gates/gate_checkpoint.py`
+- Modify: `tools/gates/tests/repo_fixture.py` (append `fake_gh`)
+- Modify: `tools/gates/run_all.py` (`GATES`, `DEFAULT_ARGV`)
+- Test: `tools/gates/tests/test_gate_checkpoint.py`
+
+**Findings:** SD-S2-T7
+
+**Interfaces:**
+- Consumes: `gate_dispatch.claim_fresh` (Task 1); `gate_plan.{STATE, CHECKPOINT_LINE, LEDGER_PLAN, parse_plan}` (Task 6); S1 `gate_args`, `CODE_ROOT`, `registers.{load_*, finding_by_id, open_decisions, grant_for}`, `gitinfo.{head_sha, branch, status_clean, worktrees}`.
+- Produces: `gate_checkpoint.check(args) -> Result`, `main(argv=None)`; `front_matter(path) -> dict`; `KEYS` (umbrella handoff keys); `open_prs(root) -> list[dict]`. CLI (umbrella table): `--plan <slug>` (pre-merge), `--plan <slug> --post` (post-merge), `--structure` (CI-safe; run_all's default).
+- **The two moments (umbrella "Handoff"; `main` is protected, so the handoff is committed on the block branch before the merge):**
+  - *pre-merge* (`--plan`): checkout on `handoff.branch` (a block branch, never `main`); `handoff.head` is an ancestor of `HEAD` and `git diff --name-only head HEAD` lists only paths under `docs/superpowers/state/` (the handoff commit; a commit cannot name its own sha, so `head == HEAD` is impossible once the handoff is committed); `base` is an ancestor of `head`. The block's own PR is open by design and worktrees are removed after the merge, so neither is checked here.
+  - *post-merge* (`--plan --post`): checkout on `main`; `git rev-parse main` has exactly one parent and it is `handoff.base`; `main`'s tree differs from `handoff.head`'s only under `docs/superpowers/state/` (the squashed handoff commit); `git worktree list` shows the main checkout alone; local branches are `main` plus `parked_branches`; no open PR whose head is `<slug>/…` or `handoff.branch`.
+  - *both*: front matter keys, paths, shas; finding states equal the register; claims fresh at HEAD (`claim_fresh`); `open_decisions` equals the register's open set; rulings ≤ `rulings.max_per_block`; `grant` is the answered `grant:<slug>`; `git status --porcelain` empty; `live_subagents` empty; a `CHECKPOINT b<block>` ledger line after `resume_line`; `next_task` is `none` exactly when `block` is the plan's last.
+  - *structure*: every state dir's layout (ledger line 1 `plan: <existing file>`, `mutations/`) and, where a handoff exists, keys, paths, shas, ids, rulings cap and grant — none of the moment checks.
+- Line ids (prefix `checkpoint`; structure mode `checkpoint.<slug>`): `handoff`, `keys`, `path.{plan,spec,ledger}`, `head.commit`, `base.commit`, `numbers`, `rulings`, `env`, `parked`, `finding.<id>`, `claim.<id>`, `decision.<id>`, `open_decisions`, `grant`, `branch`, `head`, `base`, `post.parent`, `post.tree`, `worktrees`, `branches`, `prs`, `status`, `subagents`, `ledger`, `next_task`, `moment`, `layout`.
+
+- [ ] **Step 1: Test helper** — append to `tools/gates/tests/repo_fixture.py`:
+
+```python
+def fake_gh(dirpath: str) -> str:
+    """Directory holding a `gh` that prints $FAKE_GH_JSON (default []), for gates that list PRs."""
+    os.makedirs(dirpath, exist_ok=True)
+    path = os.path.join(dirpath, "gh")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('#!/bin/sh\nprintf \'%s\\n\' "${FAKE_GH_JSON:-[]}"\n')
+    os.chmod(path, 0o755)
+    return dirpath
+```
+
+- [ ] **Step 2: Write the failing tests** — `tools/gates/tests/test_gate_checkpoint.py`:
+
+```python
+"""gate_checkpoint through main() (strict-delivery S2 Task 7): pre-merge on the block branch, post-merge
+after a simulated squash merge, and the CI-safe structure mode.
+Run from the repo root: python3 -m unittest tools.gates.tests.test_gate_checkpoint -v
+"""
+import contextlib
+import io
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+import yaml
+
+from tools.gates import gate_checkpoint
+from tools.gates.lib import config
+from tools.gates.tests import repo_fixture as rf
+
+with open(os.path.join(rf.FIX, "plan", "good.md"), encoding="utf-8") as _f:
+    PLAN = _f.read()
+STATE = "docs/superpowers/state/fx"
+BIN = rf.fake_gh(tempfile.mkdtemp(prefix="gates-gh-"))
+BLOCK_BRANCH = "fx/b1"
+
+
+def cp_repo(checkpoint=True, drop=(), **over):
+    """Plan fx, block 1 of 2, at its pre-merge checkpoint: one task commit on fx/b1, then the handoff and
+    the CHECKPOINT line committed on fx/b1 (state-only). Returns the repo, checked out on fx/b1."""
+    files = dict(rf.DISPATCH_FILES)
+    files.update({"docs/superpowers/plans/fx.md": PLAN, "docs/superpowers/specs/fx.md": "# fx spec\n",
+                  f"{STATE}/mutations/.gitkeep": "",
+                  f"{STATE}/ledger.md": "plan: docs/superpowers/plans/fx.md\n# Ledger: fx\n- T1 DONE\n"})
+    root = rf.make_repo(files, rf.load_rows())
+    base = rf.git(root, "rev-parse", "HEAD")
+    rf.git(root, "checkout", "-q", "-b", BLOCK_BRANCH)
+    rf.write(root, "src/fx.py", "fixed = True\n")
+    head = rf.commit(root, "feat: fixture task 1")
+    fm = {"plan": "docs/superpowers/plans/fx.md", "spec": "docs/superpowers/specs/fx.md", "branch": BLOCK_BRANCH,
+          "head": head, "base": base, "ledger": f"{STATE}/ledger.md", "resume_line": 2, "block": 1,
+          "next_task": "3", "findings_in_flight": [{"SD-FX-1": "planned"}], "claims_verified_at_head": ["C-fx.ok"],
+          "live_subagents": [], "open_decisions": ["DEC-0002"], "rulings": [], "grant": "DEC-0001",
+          "parked_branches": [],
+          "env": {"idf": "source tools/idf-env.sh", "flash": "owner says ready", "ota_window_s": 35},
+          "traps": []}
+    fm.update(over)
+    for key in drop:
+        fm.pop(key)
+    rf.write(root, f"{STATE}/handoff.md", "---\n" + yaml.safe_dump(fm, sort_keys=False) + "---\n\nfixture\n")
+    if checkpoint:
+        with open(os.path.join(root, STATE, "ledger.md"), "a", encoding="utf-8") as f:
+            f.write(f"CHECKPOINT b{fm.get('block', 1)} {head}\n")
+    rf.commit(root, "chore(state): checkpoint")
+    return root
+
+
+def squash(root, parent=None):
+    """Simulate GitHub's squash merge of fx/b1 onto main, then delete the block branch."""
+    tip = rf.git(root, "rev-parse", "HEAD")
+    base = parent or rf.git(root, "rev-parse", "main")
+    merged = rf.git(root, "commit-tree", f"{tip}^{{tree}}", "-p", base, "-m", "fx block 1 (#1)")
+    rf.git(root, "checkout", "-q", "main")
+    rf.git(root, "reset", "-q", "--hard", merged)
+    rf.git(root, "branch", "-D", BLOCK_BRANCH)
+
+
+def gate(root, argv, gh_json="[]"):
+    env = {"PATH": BIN + os.pathsep + os.environ["PATH"], "FAKE_GH_JSON": gh_json}
+    buf = io.StringIO()
+    with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
+        rc = gate_checkpoint.main(["--root", root, *argv])
+    return rc, buf.getvalue()
+
+
+class Base(unittest.TestCase):
+    def repo(self, **kw):
+        root = cp_repo(**kw)
+        self.addCleanup(rf.remove, root)
+        return root
+
+    def assertFailLine(self, rc, out, line_id):
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL {line_id}", out)
+
+
+class PreMerge(Base):
+    def pre(self, root, gh_json="[]"):
+        return gate(root, ["--plan", "fx"], gh_json)
+
+    def test_clean_pre_merge_checkpoint_passes(self):
+        rc, out = self.pre(self.repo())
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("FAIL", out)
+
+    def test_the_blocks_own_open_pr_is_allowed_before_merge(self):
+        rc, out = self.pre(self.repo(), json.dumps([{"number": 7, "headRefName": BLOCK_BRANCH}]))
+        self.assertEqual(0, rc, out)
+
+    def test_state_only_commits_after_head_pass(self):
+        root = self.repo()
+        with open(os.path.join(root, STATE, "ledger.md"), "a", encoding="utf-8") as f:
+            f.write("- note after the checkpoint\n")
+        rf.commit(root, "chore(state): note")
+        rc, out = self.pre(root)
+        self.assertEqual(0, rc, out)
+
+    def test_sha_mismatch_fails(self):
+        root = self.repo()
+        rf.write(root, "src/late.py", "late = True\n")
+        rf.commit(root, "feat: code after the checkpoint")
+        rc, out = self.pre(root)
+        self.assertFailLine(rc, out, "checkpoint.head")
+        self.assertIn("src/late.py", out)
+
+    def test_head_not_an_ancestor_fails(self):
+        root = self.repo()
+        rf.git(root, "reset", "-q", "--soft", "HEAD~2")
+        rf.commit(root, "the block rewritten as one commit")
+        rc, out = self.pre(root)
+        self.assertFailLine(rc, out, "checkpoint.head")
+
+    def test_checkout_on_another_branch_fails_pre_merge(self):
+        root = self.repo()
+        rf.git(root, "checkout", "-q", "-b", "elsewhere")
+        self.assertFailLine(*self.pre(root), "checkpoint.branch")
+
+    def test_handoff_naming_main_fails_pre_merge(self):
+        self.assertFailLine(*self.pre(self.repo(branch="main")), "checkpoint.branch")
+
+    def test_dirty_status_fails(self):
+        root = self.repo()
+        rf.write(root, "stray.txt", "x\n")
+        self.assertFailLine(*self.pre(root), "checkpoint.status")
+
+    def test_live_subagent_fails(self):
+        self.assertFailLine(*self.pre(self.repo(live_subagents=["agent-7"])), "checkpoint.subagents")
+
+    def test_finding_state_mismatch_fails(self):
+        self.assertFailLine(*self.pre(self.repo(findings_in_flight=[{"SD-FX-1": "pinned"}])),
+                            "checkpoint.finding.SD-FX-1")
+
+    def test_claim_not_verified_at_head_fails(self):
+        self.assertFailLine(*self.pre(self.repo(claims_verified_at_head=["C-fx.stale"])), "checkpoint.claim.C-fx.stale")
+
+    def test_open_decisions_must_match_register(self):
+        self.assertFailLine(*self.pre(self.repo(open_decisions=[])), "checkpoint.open_decisions")
+
+    def test_rulings_over_cap_fail(self):
+        cap = config.load(rf.REAL)["rulings"]["max_per_block"]
+        root = self.repo(rulings=[f"Ruling {i}: fixture — why — cost — §3" for i in range(cap + 1)])
+        self.assertFailLine(*self.pre(root), "checkpoint.rulings")
+
+    def test_missing_checkpoint_line_fails(self):
+        self.assertFailLine(*self.pre(self.repo(checkpoint=False)), "checkpoint.ledger")
+
+    def test_next_task_must_be_none_at_last_block(self):
+        self.assertFailLine(*self.pre(self.repo(block=2, next_task="4")), "checkpoint.next_task")
+        rc, out = self.pre(self.repo(block=2, next_task="none"))
+        self.assertEqual(0, rc, out)
+
+    def test_next_task_none_before_last_block_fails(self):
+        self.assertFailLine(*self.pre(self.repo(next_task="none")), "checkpoint.next_task")
+
+    def test_wrong_grant_fails(self):
+        self.assertFailLine(*self.pre(self.repo(grant="DEC-0002")), "checkpoint.grant")
+
+    def test_missing_key_fails(self):
+        self.assertFailLine(*self.pre(self.repo(drop=("traps",))), "checkpoint.keys")
+
+    def test_missing_handoff_fails(self):
+        root = self.repo()
+        os.remove(os.path.join(root, STATE, "handoff.md"))
+        rf.commit(root, "chore(state): drop handoff")
+        self.assertFailLine(*self.pre(root), "checkpoint.handoff")
+
+
+class PostMerge(Base):
+    def merged(self, **kw):
+        root = self.repo(**kw)
+        squash(root)
+        return root
+
+    def post(self, root, gh_json="[]"):
+        return gate(root, ["--plan", "fx", "--post"], gh_json)
+
+    def test_squash_merged_checkpoint_passes(self):
+        rc, out = self.post(self.merged())
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS checkpoint.post.tree", out)
+
+    def test_post_tree_mismatch_fails(self):
+        root = self.repo()
+        rf.write(root, "src/late.py", "late = True\n")
+        rf.commit(root, "feat: pushed after the handoff")
+        squash(root)
+        rc, out = self.post(root)
+        self.assertFailLine(rc, out, "checkpoint.post.tree")
+        self.assertIn("src/late.py", out)
+
+    def test_post_parent_mismatch_fails(self):
+        root = self.repo()
+        squash(root, parent=rf.git(root, "rev-list", "--max-parents=0", "HEAD"))
+        self.assertFailLine(*self.post(root), "checkpoint.post.parent")
+
+    def test_post_merge_must_run_on_main(self):
+        root = self.merged()
+        rf.git(root, "checkout", "-q", "-b", "elsewhere")
+        self.assertFailLine(*self.post(root), "checkpoint.branch")
+
+    def test_post_extra_worktree_fails(self):
+        root = self.merged()
+        wt = tempfile.mkdtemp(prefix="gates-wt-")
+        os.rmdir(wt)
+        rf.git(root, "worktree", "add", "-q", "--detach", wt)
+        self.addCleanup(rf.remove, wt)
+        self.assertFailLine(*self.post(root), "checkpoint.worktrees")
+
+    def test_post_unlisted_branch_fails_and_parked_branch_passes(self):
+        root = self.merged()
+        rf.git(root, "branch", "fx-parked")
+        self.assertFailLine(*self.post(root), "checkpoint.branches")
+        root = self.merged(parked_branches=[{"name": "fx-parked", "reason": "fixture", "owner": "issue #1"}])
+        rf.git(root, "branch", "fx-parked")
+        rc, out = self.post(root)
+        self.assertEqual(0, rc, out)
+
+    def test_post_open_pr_from_plan_fails(self):
+        root = self.merged()
+        self.assertFailLine(*self.post(root, json.dumps([{"number": 9, "headRefName": "fx/b2"}])), "checkpoint.prs")
+        rc, out = self.post(root, json.dumps([{"number": 8, "headRefName": "other-work"}]))
+        self.assertEqual(0, rc, out)
+
+    def test_post_dirty_status_fails(self):
+        root = self.merged()
+        rf.write(root, "stray.txt", "x\n")
+        self.assertFailLine(*self.post(root), "checkpoint.status")
+
+
+class Structure(Base):
+    def test_structure_mode_passes_and_ignores_moment_checks(self):
+        root = self.repo()
+        rf.write(root, "stray.txt", "x\n")
+        rc, out = gate(root, ["--structure"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS checkpoint.fx.layout", out)
+
+    def test_structure_mode_fails_on_a_broken_handoff(self):
+        self.assertFailLine(*gate(self.repo(drop=("traps",)), ["--structure"]), "checkpoint.fx.keys")
+
+    def test_no_mode_fails(self):
+        self.assertFailLine(*gate(self.repo(), []), "checkpoint.input")
+
+    def test_post_without_plan_fails(self):
+        self.assertFailLine(*gate(self.repo(), ["--structure", "--post"]), "checkpoint.input")
+
+    def test_registered_in_run_all(self):
+        from tools.gates import run_all
+        self.assertIn("checkpoint", run_all.GATES)
+        root = self.repo()
+        res = run_all.run(["checkpoint"], {"root": root})
+        self.assertTrue(res.ok(), res.render(False))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 3: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_checkpoint -v`
+Expected: ERROR `cannot import name 'gate_checkpoint'`.
+
+- [ ] **Step 4: Implement** — `tools/gates/gate_checkpoint.py`:
+
+```python
+#!/usr/bin/env python3
+"""gate_checkpoint -- a plan's handoff agrees with git, GitHub and the registers at a block boundary.
+
+Handoff format and failure rules: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Handoff".
+main is protected, so the handoff is committed on the block branch before the merge. Two moments:
+  pre-merge (--plan):         on handoff.branch; HEAD = handoff.head plus state-only commits.
+  post-merge (--plan --post): on main; main's only parent is handoff.base; main's tree differs from
+                              handoff.head's only under docs/superpowers/state/; one worktree; local
+                              branches main + parked; no open PR from <slug>/... or handoff.branch.
+Both: clean status, no live subagents, finding states, fresh claims, open decisions, rulings cap, grant,
+the ledger's CHECKPOINT b<block> line after resume_line, next_task.
+Usage: gate_checkpoint.py --plan SLUG [--post] [--root R] [--json]
+       gate_checkpoint.py --structure [--root R] [--json]     CI-safe subset over every state dir
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import subprocess
+import sys
+
+import yaml
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from tools.gates.gate_dispatch import claim_fresh  # noqa: E402
+from tools.gates.gate_plan import CHECKPOINT_LINE, LEDGER_PLAN, STATE, parse_plan  # noqa: E402
+from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import config as gconfig  # noqa: E402
+from tools.gates.lib import gitinfo, registers  # noqa: E402
+
+KEYS = ["plan", "spec", "branch", "head", "base", "ledger", "resume_line", "block", "next_task",
+        "findings_in_flight", "claims_verified_at_head", "live_subagents", "open_decisions", "rulings",
+        "grant", "parked_branches", "env", "traps"]
+ENV_KEYS = ["idf", "flash", "ota_window_s"]
+
+
+def _read(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _git(root: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+
+
+def _is_commit(root: str, sha: str) -> bool:
+    return bool(sha) and _git(root, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
+def _ancestor(root: str, a: str, b: str) -> bool:
+    return _git(root, "merge-base", "--is-ancestor", a, b).returncode == 0
+
+
+def _outside_state(root: str, a: str, b: str) -> list[str]:
+    r = _git(root, "diff", "--name-only", a, b)
+    if r.returncode != 0:
+        raise GateError(f"git diff {a[:12]} {b[:12]}: {r.stderr.strip()}")
+    return [p for p in r.stdout.splitlines() if p and not p.startswith(STATE + "/")]
+
+
+def _verdict(res, lid, ok, reason):
+    if ok:
+        res.passed(lid)
+    else:
+        res.fail(lid, reason)
+
+
+def front_matter(path: str) -> dict:
+    text = _read(path)
+    if not text.startswith("---\n"):
+        raise GateError(f"{path}: first line must be '---' (YAML front matter)")
+    end = text.find("\n---\n", 3)
+    if end < 0:
+        raise GateError(f"{path}: front matter is not closed by a '---' line")
+    doc = yaml.safe_load(text[4:end + 1])
+    if not isinstance(doc, dict):
+        raise GateError(f"{path}: front matter is not a mapping")
+    return doc
+
+
+def _pairs(items) -> list[tuple[str, str]]:
+    out = []
+    for it in items or []:
+        if isinstance(it, dict):
+            out.extend((str(k), str(v)) for k, v in it.items())
+        else:
+            key, _, value = str(it).partition(":")
+            out.append((key.strip(), value.strip()))
+    return out
+
+
+def open_prs(root: str) -> list[dict]:
+    r = subprocess.run(["gh", "pr", "list", "--state", "open", "--json", "number,headRefName", "--limit", "200"],
+                       cwd=root, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise GateError(f"gh pr list: {r.stderr.strip()}")
+    return json.loads(r.stdout or "[]")
+
+
+def _local_branches(root: str) -> list[str]:
+    r = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    if r.returncode != 0:
+        raise GateError(f"git for-each-ref: {r.stderr.strip()}")
+    return [b for b in r.stdout.split() if b]
+
+
+def _shape(root, conf, fm, res, pfx) -> bool:
+    for key in ("plan", "spec", "ledger"):
+        ok = isinstance(fm[key], str) and os.path.isfile(os.path.join(root, fm[key]))
+        _verdict(res, f"{pfx}.path.{key}", ok, f"{fm[key]!r} is not an existing file")
+    for key in ("head", "base"):
+        _verdict(res, f"{pfx}.{key}.commit", _is_commit(root, str(fm[key])),
+                 f"{fm[key]!r} is not a commit in this repository")
+    ints = all(isinstance(fm[k], int) and not isinstance(fm[k], bool) and fm[k] >= 1 for k in ("resume_line", "block"))
+    _verdict(res, f"{pfx}.numbers", ints, "resume_line and block must be integers >= 1")
+    cap = conf["rulings"]["max_per_block"]
+    rulings = fm["rulings"]
+    _verdict(res, f"{pfx}.rulings", isinstance(rulings, list) and len(rulings) <= cap,
+             f"rulings must be a list of at most {cap} (rulings.max_per_block); got {len(rulings or [])}")
+    env = fm["env"]
+    _verdict(res, f"{pfx}.env", isinstance(env, dict) and all(k in env for k in ENV_KEYS),
+             f"env must carry {', '.join(ENV_KEYS)}")
+    parked = fm["parked_branches"]
+    ok = isinstance(parked, list) and all(isinstance(p, dict) and all(str(p.get(k) or "").strip()
+                                          for k in ("name", "reason", "owner")) for p in parked)
+    _verdict(res, f"{pfx}.parked", ok, "parked_branches entries need name, reason and owner")
+    return ints
+
+
+def _ids(root, name, fm, res, pfx, moment):
+    findings, claims = registers.load_findings(root), registers.load_claims(root)
+    decisions = registers.load_decisions(root)
+    for fid, state in _pairs(fm["findings_in_flight"]):
+        f = registers.finding_by_id(findings, fid)
+        if f is None:
+            res.fail(f"{pfx}.finding.{fid}", "not in findings.yml")
+        else:
+            _verdict(res, f"{pfx}.finding.{fid}", not moment or f["state"] == state,
+                     f"handoff says {state!r}, register says {f['state']!r}")
+    by_claim = {c["id"]: c for c in claims}
+    head = gitinfo.head_sha(root) if moment else ""
+    for cid in [str(c) for c in fm["claims_verified_at_head"] or []]:
+        c = by_claim.get(cid)
+        reason = "not in claims.yml" if c is None else (claim_fresh(root, c, head) if moment else None)
+        _verdict(res, f"{pfx}.claim.{cid}", not reason, reason or "")
+    by_dec = {d["id"]: d for d in decisions}
+    listed = sorted(str(d) for d in fm["open_decisions"] or [])
+    for did in listed:
+        _verdict(res, f"{pfx}.decision.{did}", did in by_dec, "not in decisions.yml")
+    if moment:
+        actual = sorted(d["id"] for d in registers.open_decisions(decisions))
+        _verdict(res, f"{pfx}.open_decisions", listed == actual,
+                 f"handoff lists {listed}, decisions.yml has open {actual}")
+    grant = registers.grant_for(decisions, name)
+    _verdict(res, f"{pfx}.grant", grant is not None and grant["id"] == str(fm["grant"]),
+             f"grant {fm['grant']!r} is not the answered merge-grant 'grant:{name}' in decisions.yml")
+
+
+def _ledger(root, fm, res, pfx):
+    lines = _read(os.path.join(root, fm["ledger"])).splitlines()
+    hits = [l for l in lines[fm["resume_line"]:] if CHECKPOINT_LINE.match(l.strip())
+            and int(CHECKPOINT_LINE.match(l.strip()).group(1)) == fm["block"]]
+    _verdict(res, f"{pfx}.ledger", bool(hits), f"no 'CHECKPOINT b{fm['block']}' line after ledger line {fm['resume_line']}")
+
+
+def _next_task(root, fm, res, pfx):
+    blocks = sorted({t.block for t in parse_plan(_read(os.path.join(root, fm["plan"]))).tasks})
+    nxt, block = str(fm["next_task"]).strip(), fm["block"]
+    if not blocks or block not in blocks:
+        res.fail(f"{pfx}.next_task", f"block {block} is not a block of {fm['plan']} (blocks {blocks})")
+    elif block == blocks[-1]:
+        _verdict(res, f"{pfx}.next_task", nxt == "none", f"block {block} is the plan's last; next_task must be 'none'")
+    else:
+        _verdict(res, f"{pfx}.next_task", nxt != "none", f"block {block} is not the last ({blocks[-1]}); name the next task")
+
+
+def _pre(root, fm, res, pfx):
+    cur, head, base, on = gitinfo.head_sha(root), str(fm["head"]), str(fm["base"]), gitinfo.branch(root)
+    _verdict(res, f"{pfx}.branch", str(fm["branch"]) == on and on != "main",
+             f"pre-merge runs on the block branch the handoff names ({fm['branch']!r}); checkout is on {on!r}")
+    if _is_commit(root, head):
+        moved = _outside_state(root, head, cur)
+        anc = _ancestor(root, head, cur)
+        _verdict(res, f"{pfx}.head", anc and not moved,
+                 f"HEAD {cur[:12]} is not handoff head {head[:12]} plus state-only commits: "
+                 + (f"files outside {STATE}/ differ: {', '.join(moved[:5])}" if moved else "head is not an ancestor of HEAD"))
+        if _is_commit(root, base):
+            _verdict(res, f"{pfx}.base", _ancestor(root, base, head), f"base {base[:12]} is not an ancestor of head {head[:12]}")
+
+
+def _post(root, name, fm, res, pfx):
+    head, base, on = str(fm["head"]), str(fm["base"]), gitinfo.branch(root)
+    _verdict(res, f"{pfx}.branch", on == "main", f"post-merge runs on main; checkout is on {on!r}")
+    r = _git(root, "rev-list", "--parents", "-n", "1", "main")
+    if r.returncode != 0:
+        raise GateError(f"git rev-list main: {r.stderr.strip()}")
+    main, *parents = r.stdout.split()
+    _verdict(res, f"{pfx}.post.parent", parents == [base],
+             f"main {main[:12]} has parent(s) {[p[:12] for p in parents]}; the squash merge must sit on base {base[:12]}")
+    if _is_commit(root, head):
+        moved = _outside_state(root, head, main)
+        _verdict(res, f"{pfx}.post.tree", not moved,
+                 f"main's tree differs from handoff head {head[:12]} outside {STATE}/: {', '.join(moved[:5])}")
+    wts = gitinfo.worktrees(root)
+    _verdict(res, f"{pfx}.worktrees", len(wts) == 1, f"worktrees besides the main checkout: {', '.join(wts[1:])}")
+    parked = {str(p.get("name")) for p in fm["parked_branches"] or [] if isinstance(p, dict)}
+    extra = sorted(set(_local_branches(root)) - {"main"} - parked)
+    _verdict(res, f"{pfx}.branches", not extra, f"local branches neither main nor parked in the handoff: {', '.join(extra)}")
+
+    def ours(pr: dict) -> bool:
+        ref = str(pr.get("headRefName", ""))
+        return ref.startswith(f"{name}/") or ref == str(fm["branch"])
+    prs = [p for p in open_prs(root) if ours(p)]
+    _verdict(res, f"{pfx}.prs", not prs, f"open PRs from this plan: {', '.join('#' + str(p.get('number')) for p in prs)}")
+
+
+def check_handoff(root: str, conf: dict, name: str, res: Result, pfx: str, mode: str) -> None:
+    """mode: 'structure', 'pre' or 'post'."""
+    path = os.path.join(root, STATE, name, "handoff.md")
+    if not os.path.isfile(path):
+        res.fail(f"{pfx}.handoff", f"{STATE}/{name}/handoff.md missing")
+        return
+    fm = front_matter(path)
+    missing = [k for k in KEYS if k not in fm]
+    if missing:
+        res.fail(f"{pfx}.keys", f"handoff front matter lacks: {', '.join(missing)}")
+        return
+    res.passed(f"{pfx}.keys")
+    ints = _shape(root, conf, fm, res, pfx)
+    moment = mode != "structure"
+    _ids(root, name, fm, res, pfx, moment)
+    if not moment:
+        return
+    if not (ints and all(isinstance(fm[k], str) and os.path.isfile(os.path.join(root, fm[k])) for k in ("plan", "ledger"))):
+        res.fail(f"{pfx}.moment", "plan, ledger, resume_line or block unusable; moment checks not run")
+        return
+    if mode == "pre":
+        _pre(root, fm, res, pfx)
+    else:
+        _post(root, name, fm, res, pfx)
+    _verdict(res, f"{pfx}.status", gitinfo.status_clean(root), "git status --porcelain is not empty")
+    live = fm["live_subagents"] or []
+    _verdict(res, f"{pfx}.subagents", not live, f"live subagents at a checkpoint: {live}")
+    _ledger(root, fm, res, pfx)
+    _next_task(root, fm, res, pfx)
+
+
+def _layout(root, name, res, pfx):
+    d = os.path.join(root, STATE, name)
+    first = _read(os.path.join(d, "ledger.md")).splitlines()[:1]
+    m = LEDGER_PLAN.match(first[0]) if first else None
+    ok = bool(m) and os.path.isfile(os.path.join(root, m.group(1))) and os.path.isdir(os.path.join(d, "mutations"))
+    _verdict(res, f"{pfx}.layout", ok, "need ledger.md line 1 'plan: <existing file>' and mutations/")
+
+
+def check(args: list) -> Result:
+    p = gate_args("gate_checkpoint")
+    p.add_argument("--plan")
+    p.add_argument("--post", action="store_true")
+    p.add_argument("--structure", action="store_true")
+    a = p.parse_args(args)
+    if bool(a.plan) == a.structure:
+        raise GateError("give exactly one of --plan SLUG [--post] or --structure")
+    if a.post and not a.plan:
+        raise GateError("--post goes with --plan SLUG")
+    root = a.root or repo_root()
+    conf = gconfig.load(CODE_ROOT)
+    res = Result("checkpoint")
+    if a.plan:
+        if not os.path.isdir(os.path.join(root, STATE, a.plan)):
+            raise GateError(f"{STATE}/{a.plan}/ missing")
+        check_handoff(root, conf, a.plan, res, "checkpoint", "post" if a.post else "pre")
+        return res
+    if not os.path.isdir(os.path.join(root, STATE)):
+        raise GateError(f"{STATE}/ missing")
+    names = sorted(os.path.basename(os.path.dirname(p)) for p in glob.glob(os.path.join(root, STATE, "*", "ledger.md")))
+    if not names:
+        res.passed("checkpoint.structure")
+    for name in names:
+        pfx = f"checkpoint.{name}"
+        _layout(root, name, res, pfx)
+        if os.path.isfile(os.path.join(root, STATE, name, "handoff.md")):
+            check_handoff(root, conf, name, res, pfx, "structure")
+    return res
+
+
+def main(argv=None):
+    return run_gate("checkpoint", check, argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "plan", "dispatch", "review_package", "checkpoint"]`; add `"checkpoint": ["--structure"]` to `DEFAULT_ARGV`.
+
+- [ ] **Step 6: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_gate_checkpoint -v` → `OK` (32 tests); `python3 tools/gates/run_all.py` → only `PASS` (structure mode over `docs/superpowers/state/strict-delivery/`).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add tools/gates/gate_checkpoint.py tools/gates/tests/repo_fixture.py tools/gates/tests/test_gate_checkpoint.py tools/gates/run_all.py
+git commit -m "feat(gates): gate_checkpoint -- pre-merge (block branch) and post-merge (--post, squash on base) handoff checks; --structure for CI"
+```
+
+- [ ] **Step 8: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_gate_checkpoint.PostMerge.test_post_tree_mismatch_fails
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/_verdict\(res, f"\{pfx\}\.post\.tree", not moved,/_verdict(res, f"{pfx}.post.tree", True,/' tools/gates/gate_checkpoint.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/gate_checkpoint.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T7/mutation-SD-S2-T7.txt` (the package copy):
+```
+finding: SD-S2-T7
+test: test_post_tree_mismatch_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_checkpoint.PostMerge.test_post_tree_mismatch_fails -> PASS
+step 2 (fix reverted: perl makes the post-merge tree verdict always pass in tools/gates/gate_checkpoint.py): python3 -m unittest tools.gates.tests.test_gate_checkpoint.PostMerge.test_post_tree_mismatch_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_checkpoint.PostMerge.test_post_tree_mismatch_fails -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T7"
+PIN = {"test": "tools/gates/tests/test_gate_checkpoint.py::PostMerge::test_post_tree_mismatch_fails",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt
+git commit -m "chore(state): SD-S2-T7 pinned (mutation transcript)"
+```
+
+- [ ] **Step 9: Review package and ledger (controller)** — before the reviewer: `python3 tools/gates/make_review_package.py strict-delivery S2-T7 <task base> <task head>`; the implementer's `mutation-SD-S2-T7.txt`, `siblings.md` (header + separator only: the row has no siblings) and `claims.md` in `.superpowers/sdd/strict-delivery/review/S2-T7/`; `python3 tools/gates/gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T7` → `PASS`; reviewer; after ✅ and the pin commit append `- S2-T7 DONE <task head sha> gate_checkpoint; review <package path>`; commit `chore(state): ledger S2-T7`.
+
+### Task 8: Stop and SubagentStop hooks
+
+**Files:**
+- Create: `tools/gates/hooks/stop.py`
+- Create: `tools/gates/hooks/subagent_stop.py`
+- Modify: `.claude/settings.json` (add `Stop` and `SubagentStop`)
+- Test: `tools/gates/tests/test_hook_stop.py`
+
+**Findings:** SD-S2-T8
+
+**Interfaces:**
+- Consumes: `gate_plan.plans_in_flight` (Task 6); `run_all.run(["checkpoint"], {"root": root, "checkpoint": ["--plan", name] (+ ["--post"] on main)})` (Task 7); `gitinfo.branch`; `registers.open_decisions`; test helpers `test_gate_checkpoint.{BIN, STATE, cp_repo, squash}`.
+- Produces: `stop.py` — exit 0 when `stop_hook_active`, or when no plan is in flight and the checkout is on no `<plan>/b<N>` branch; otherwise runs gate_checkpoint for the in-flight plan with the newest `handoff.md` (falling back to `ledger.md` mtime) — `--post` when the checkout is on `main`, pre-merge otherwise — adds `checkpoint.subagents.live` when `background_tasks` is non-empty, exit 2 on any FAIL; the message lists the open decision ids and the line `waiting for the owner: DEC-…` the session ends with (umbrella convention), or a stop-again hint when none is open. `subagent_stop.py` — exit 0 when `stop_hook_active`; else the first user message of `agent_transcript_path` must carry `## Report: <path>`, the file must exist (relative paths resolve against the event `cwd`'s git top level, then `repo_root()`), and its first line must match `^status: (DONE_WITH_FINDINGS|DONE|NEEDS_DECISION|BLOCKED|DENIED)\b`; else exit 2 with "write your report file first".
+
+- [ ] **Step 1: Write the failing tests** — `tools/gates/tests/test_hook_stop.py`:
+
+```python
+"""Stop and SubagentStop hooks run as Claude Code runs them: a subprocess with one JSON event on stdin
+(strict-delivery S2 Task 8). Run from the repo root: python3 -m unittest tools.gates.tests.test_hook_stop -v
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+from tools.gates.tests import repo_fixture as rf
+from tools.gates.tests.test_gate_checkpoint import BIN, STATE, cp_repo, squash
+
+HOOKS = os.path.join(rf.REAL, "tools", "gates", "hooks")
+STATUSES = ["DONE", "DONE_WITH_FINDINGS", "NEEDS_DECISION", "BLOCKED", "DENIED"]
+
+
+def hook(name, event, root):
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=root, PATH=BIN + os.pathsep + os.environ["PATH"], FAKE_GH_JSON="[]")
+    data = event if isinstance(event, str) else json.dumps(event)
+    return subprocess.run([sys.executable, os.path.join(HOOKS, name)], input=data, capture_output=True,
+                          text=True, cwd=root, env=env, check=False)
+
+
+def stop_event(root, **kw):
+    ev = {"session_id": "fx", "transcript_path": "/dev/null", "cwd": root, "permission_mode": "default",
+          "hook_event_name": "Stop", "stop_hook_active": False, "last_assistant_message": "done",
+          "background_tasks": []}
+    ev.update(kw)
+    return ev
+
+
+class StopHook(unittest.TestCase):
+    def repo(self, merged=False):
+        root = cp_repo()             # on fx/b1 at its pre-merge checkpoint (handoff committed)
+        if merged:
+            squash(root)             # on main after the squash merge; ledger ends in CHECKPOINT b1
+        self.addCleanup(rf.remove, root)
+        return root
+
+    def broken(self):
+        root = self.repo()
+        rf.write(root, "src/late.py", "late = True\n")
+        rf.commit(root, "feat: work after the handoff")
+        return root
+
+    def test_no_plan_in_flight_passes(self):
+        root = self.repo(merged=True)
+        r = hook("stop.py", stop_event(root), root)
+        self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_block_branch_with_a_consistent_handoff_passes(self):
+        root = self.repo()
+        r = hook("stop.py", stop_event(root), root)
+        self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_in_flight_plan_with_an_inconsistent_tree_blocks(self):
+        root = self.broken()
+        r = hook("stop.py", stop_event(root), root)
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("checkpoint.head", r.stderr)
+        self.assertIn("stop_hook_active", r.stderr)
+
+    def test_stop_hook_active_passes_through(self):
+        root = self.broken()
+        r = hook("stop.py", stop_event(root, stop_hook_active=True), root)
+        self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_waiting_for_the_owner_names_the_open_decisions(self):
+        root = self.broken()
+        r = hook("stop.py", stop_event(root), root)
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("waiting for the owner: DEC-0002", r.stderr)
+
+    def test_ledger_in_flight_on_main_runs_the_post_merge_check(self):
+        root = self.repo(merged=True)
+        with open(os.path.join(root, STATE, "ledger.md"), "a", encoding="utf-8") as f:
+            f.write("- b2 start\n")
+        rf.commit(root, "chore(state): b2 start")
+        r = hook("stop.py", stop_event(root), root)
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("checkpoint.post.parent", r.stderr)
+
+    def test_background_tasks_block_while_in_flight(self):
+        root = self.repo()
+        r = hook("stop.py", stop_event(root, background_tasks=[{"id": "a1"}]), root)
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("subagents.live", r.stderr)
+
+    def test_background_tasks_ignored_when_no_plan_in_flight(self):
+        root = self.repo(merged=True)
+        r = hook("stop.py", stop_event(root, background_tasks=[{"id": "a1"}]), root)
+        self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_garbage_stdin_blocks(self):
+        root = self.repo()
+        r = hook("stop.py", "not json", root)
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("FAIL hook.", r.stderr)
+
+
+class SubagentStopHook(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="gates-sub-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def transcript(self, prompt):
+        path = os.path.join(self.dir, "agent.jsonl")
+        lines = [{"type": "system", "content": "init"},
+                 {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}},
+                 {"type": "assistant", "message": {"role": "assistant", "content": "ok"}}]
+        rf.write(self.dir, "agent.jsonl", "".join(json.dumps(l) + "\n" for l in lines))
+        return path
+
+    def report(self, text, name="r1.md"):
+        rf.write(self.dir, name, text)
+        return os.path.join(self.dir, name)
+
+    def event(self, transcript, **kw):
+        ev = {"session_id": "fx", "transcript_path": "/dev/null", "cwd": self.dir, "permission_mode": "default",
+              "hook_event_name": "SubagentStop", "stop_hook_active": False, "agent_id": "a1",
+              "agent_type": "general-purpose", "agent_transcript_path": transcript,
+              "last_assistant_message": "status: DONE"}
+        ev.update(kw)
+        return ev
+
+    def run_hook(self, ev, root=None):
+        return hook("subagent_stop.py", ev, root or self.dir)
+
+    def test_each_status_passes(self):
+        for status in STATUSES:
+            with self.subTest(status=status):
+                rp = self.report(f"status: {status}\nbody\n")
+                r = self.run_hook(self.event(self.transcript(f"## Role: implementer\n## Report: {rp}\n")))
+                self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_subagent_report_missing_blocks(self):
+        tp = self.transcript(f"## Report: {os.path.join(self.dir, 'absent.md')}\n")
+        r = self.run_hook(self.event(tp))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("write your report file first", r.stderr)
+
+    def test_subagent_bad_status_blocks(self):
+        rp = self.report("status: FINISHED\n")
+        r = self.run_hook(self.event(self.transcript(f"## Report: {rp}\n")))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("subagent.report.status", r.stderr)
+
+    def test_status_must_be_the_first_line(self):
+        rp = self.report("notes\nstatus: DONE\n")
+        r = self.run_hook(self.event(self.transcript(f"## Report: {rp}\n")))
+        self.assertEqual(2, r.returncode, r.stderr)
+
+    def test_prompt_without_report_line_blocks(self):
+        r = self.run_hook(self.event(self.transcript("## Role: implementer\n")))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("subagent.report", r.stderr)
+
+    def test_missing_transcript_blocks(self):
+        r = self.run_hook(self.event(os.path.join(self.dir, "none.jsonl")))
+        self.assertEqual(2, r.returncode, r.stderr)
+        self.assertIn("subagent.transcript", r.stderr)
+
+    def test_stop_hook_active_passes_through(self):
+        tp = self.transcript(f"## Report: {os.path.join(self.dir, 'absent.md')}\n")
+        r = self.run_hook(self.event(tp, stop_hook_active=True))
+        self.assertEqual(0, r.returncode, r.stderr)
+
+    def test_relative_report_path_resolves_against_the_repo(self):
+        root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows())
+        self.addCleanup(rf.remove, root)
+        rf.write(root, "reports/r2.md", "status: BLOCKED\nwaiting\n")
+        r = self.run_hook(self.event(self.transcript("## Report: reports/r2.md\n"), cwd=root), root)
+        self.assertEqual(0, r.returncode, r.stderr)
+
+
+class Settings(unittest.TestCase):
+    def test_stop_and_subagent_stop_hooks_are_registered(self):
+        with open(os.path.join(rf.REAL, ".claude", "settings.json"), encoding="utf-8") as f:
+            hooks = json.load(f)["hooks"]
+        stop = hooks["Stop"][0]["hooks"][0]
+        sub = hooks["SubagentStop"][0]["hooks"][0]
+        self.assertEqual('python3 "${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py"', stop["command"])
+        self.assertEqual(300, stop["timeout"])
+        self.assertEqual('python3 "${CLAUDE_PROJECT_DIR}/tools/gates/hooks/subagent_stop.py"', sub["command"])
+        self.assertEqual(60, sub["timeout"])
+        self.assertIn("Agent", [e.get("matcher") for e in hooks["PreToolUse"]])
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_hook_stop -v`
+Expected: FAIL/ERROR — `stop.py` and `subagent_stop.py` do not exist (`can't open file`, rc 2 where 0 is expected), `KeyError: 'Stop'`.
+
+- [ ] **Step 3: Implement** — `tools/gates/hooks/stop.py`:
+
+```python
+#!/usr/bin/env python3
+"""Claude Code Stop hook (umbrella "Hook protocol"; spec §3.4, §3.5).
+
+While a strict-delivery plan is in flight the session may stop only when gate_checkpoint passes for it.
+In flight = gate_plan.plans_in_flight() (ledger without a committed trailing CHECKPOINT line), or the
+checkout is on one of the plan's block branches '<plan>/b<N>'. On main the post-merge check runs
+(gate_checkpoint --plan <slug> --post), elsewhere the pre-merge one. When it blocks it names the open owner
+decisions, so a session waiting for the owner stops on its second try. Loop guard: stop_hook_active -> exit 0.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+STATE = "docs/superpowers/state"
+HINT = ("If you are only waiting for a background subagent or an owner decision, end the turn again: "
+        "this hook lets the second stop through (stop_hook_active).")
+
+
+def _newest(root: str, names: list) -> str:
+    def stamp(name: str) -> float:
+        for f in ("handoff.md", "ledger.md"):
+            p = os.path.join(root, STATE, name, f)
+            if os.path.isfile(p):
+                return os.path.getmtime(p)
+        return 0.0
+    return max(names, key=stamp)
+
+
+def run(event: dict) -> int:
+    if event.get("stop_hook_active"):
+        return 0
+    from tools.gates import run_all
+    from tools.gates.gate_plan import plans_in_flight
+    from tools.gates.lib import gitinfo, registers, repo_root
+    root = repo_root()
+    names = {n for n, _ in plans_in_flight(root)}
+    on = gitinfo.branch(root)
+    state = os.path.join(root, STATE)
+    names |= {n for n in os.listdir(state)
+              if on.startswith(f"{n}/") and os.path.isfile(os.path.join(state, n, "ledger.md"))}
+    if not names:
+        return 0
+    name = _newest(root, sorted(names))
+    argv = ["--plan", name] + (["--post"] if on == "main" else [])   # post-merge on main, else pre-merge
+    res = run_all.run(["checkpoint"], {"root": root, "checkpoint": argv})
+    live = event.get("background_tasks") or []
+    if live:
+        count = len(live) if isinstance(live, (list, dict)) else 1
+        res.fail("checkpoint.subagents.live", f"{count} background task(s) still running")
+    if res.ok():
+        return 0
+    print(res.render(False), file=sys.stderr)
+    waiting = [d["id"] for d in registers.open_decisions(registers.load_decisions(root))]
+    if waiting:   # umbrella "CLI flags and conventions": waiting for the owner mid-block
+        ids = ", ".join(waiting)
+        print(f"plan {name} is in flight with open owner decisions {ids}. If you are waiting for the owner, "
+              f"make your last message 'waiting for the owner: {ids}' and end the turn again: the second stop "
+              "is let through (stop_hook_active).", file=sys.stderr)
+    else:
+        print(f"plan {name} is in flight. {HINT}", file=sys.stderr)
+    return 2
+
+def main() -> int:
+    try:
+        event = json.loads(sys.stdin.read() or "null")
+        if not isinstance(event, dict):
+            print("FAIL hook.input: the Stop hook expects one JSON object on stdin", file=sys.stderr)
+            return 2
+        return run(event)
+    except Exception as exc:  # hooks fail closed (umbrella hook protocol)
+        print(f"FAIL hook.internal: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+`tools/gates/hooks/subagent_stop.py`:
+```python
+#!/usr/bin/env python3
+"""Claude Code SubagentStop hook (umbrella "Hook protocol"; spec §5 "Reports").
+
+The subagent's report file -- path from the '## Report:' line of its dispatch prompt, which is the first
+user message of agent_transcript_path -- must exist and start with 'status: <STATUS>'. Loop guard:
+stop_hook_active -> exit 0.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+STATUS_RE = re.compile(r"^status: (DONE_WITH_FINDINGS|DONE|NEEDS_DECISION|BLOCKED|DENIED)\b")
+REPORT_RE = re.compile(r"^## Report: (\S.*?)\s*$", re.M)
+
+
+def first_user_text(path: str) -> str | None:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or obj.get("type") != "user":
+                continue
+            content = (obj.get("message") or {}).get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return None
+
+
+def _candidates(path: str, cwd: str | None) -> list[str]:
+    if os.path.isabs(path):
+        return [path]
+    out = []
+    if cwd and os.path.isdir(cwd):
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+        if r.returncode == 0:
+            out.append(os.path.join(r.stdout.strip(), path))
+    from tools.gates.lib import repo_root
+    out.append(os.path.join(repo_root(), path))
+    return out
+
+
+def run(event: dict) -> int:
+    if event.get("stop_hook_active"):
+        return 0
+    transcript = event.get("agent_transcript_path")
+    if not transcript or not os.path.isfile(transcript):
+        print(f"FAIL subagent.transcript: agent_transcript_path missing or unreadable: {transcript!r}", file=sys.stderr)
+        return 2
+    text = first_user_text(transcript)
+    m = REPORT_RE.search(text or "")
+    if not m:
+        print("FAIL subagent.report: the dispatch prompt has no '## Report: <path>' line", file=sys.stderr)
+        return 2
+    found = [p for p in _candidates(m.group(1), event.get("cwd")) if os.path.isfile(p)]
+    if not found:
+        print(f"FAIL subagent.report.missing: write your report file first: {m.group(1)}", file=sys.stderr)
+        return 2
+    with open(found[0], encoding="utf-8") as f:
+        first = f.readline()
+    if not STATUS_RE.match(first):
+        print("FAIL subagent.report.status: write your report file first: line 1 must be 'status: "
+              "DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED'", file=sys.stderr)
+        return 2
+    return 0
+
+
+def main() -> int:
+    try:
+        event = json.loads(sys.stdin.read() or "null")
+        if not isinstance(event, dict):
+            print("FAIL hook.input: the SubagentStop hook expects one JSON object on stdin", file=sys.stderr)
+            return 2
+        return run(event)
+    except Exception as exc:  # hooks fail closed (umbrella hook protocol)
+        print(f"FAIL hook.internal: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 4: Register the hooks** (exact umbrella entries; other keys untouched):
+
+```bash
+python3 - <<'EOF'
+import json
+p = ".claude/settings.json"
+s = json.load(open(p, encoding="utf-8"))
+cmd = 'python3 "${CLAUDE_PROJECT_DIR}/tools/gates/hooks/%s"'
+s["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command": cmd % "stop.py", "timeout": 300}]}]
+s["hooks"]["SubagentStop"] = [{"hooks": [{"type": "command", "command": cmd % "subagent_stop.py", "timeout": 60}]}]
+open(p, "w", encoding="utf-8").write(json.dumps(s, indent=2) + "\n")
+EOF
+git diff .claude/settings.json
+```
+Expected: the diff adds the two keys (and may re-indent S1's JSON; no value changes).
+
+- [ ] **Step 5: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_hook_stop -v` → `OK` (18 tests); `python3 tools/gates/run_all.py` → only `PASS`. The controller's own session now meets the Stop hook at turn ends while b6 is in flight (once per stop; the second stop passes); Claude Code may require a hooks review (`/hooks`) before the edited settings take effect.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tools/gates/hooks/stop.py tools/gates/hooks/subagent_stop.py .claude/settings.json tools/gates/tests/test_hook_stop.py
+git commit -m "feat(hooks): Stop runs gate_checkpoint while a plan is in flight; SubagentStop enforces the report contract"
+```
+
+- [ ] **Step 7: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_hook_stop.SubagentStopHook.test_subagent_bad_status_blocks
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/if not STATUS_RE\.match\(first\):/if False:/' tools/gates/hooks/subagent_stop.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/hooks/subagent_stop.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T8/mutation-SD-S2-T8.txt` (the package copy):
+```
+finding: SD-S2-T8
+test: test_subagent_bad_status_blocks
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_hook_stop.SubagentStopHook.test_subagent_bad_status_blocks -> PASS
+step 2 (fix reverted: perl replaces the status check in tools/gates/hooks/subagent_stop.py with False): python3 -m unittest tools.gates.tests.test_hook_stop.SubagentStopHook.test_subagent_bad_status_blocks -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_hook_stop.SubagentStopHook.test_subagent_bad_status_blocks -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T8"
+PIN = {"test": "tools/gates/tests/test_hook_stop.py::SubagentStopHook::test_subagent_bad_status_blocks",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt
+git commit -m "chore(state): SD-S2-T8 pinned (mutation transcript)"
+```
+
+- [ ] **Step 8: Review package and ledger (controller)** — `make_review_package.py strict-delivery S2-T8 <task base> <task head>`, implementer files, `gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T8` → `PASS`, reviewer; after ✅ append `- S2-T8 DONE <task head sha> Stop + SubagentStop hooks; review <package path>`; commit `chore(state): ledger S2-T8`.
+
+### Task 9: per-plan state creator and the checklists
+
+**Files:**
+- Create: `tools/gates/new_plan_state.py`
+- Create: `~/.claude/skills/strict-delivery/checklists/checkpoint.md` (outside the repo; not committed)
+- Create: `~/.claude/skills/strict-delivery/checklists/resume.md` (outside the repo; not committed)
+- Create: `~/.claude/skills/strict-delivery/checklists/block-end.md` (outside the repo; not committed)
+- Modify: `tools/gates/README.md` (append checkpoint/hooks/state section)
+- Modify: `.github/workflows/gates.yml` (only if it lists test modules)
+- Test: `tools/gates/tests/test_new_plan_state.py`
+
+**Findings:** SD-S2-T9
+
+**Interfaces:**
+- Consumes: ledger contract and `plans_in_flight` (Task 6); `gate_checkpoint --structure` (Task 7).
+- Produces: CLI `python3 tools/gates/new_plan_state.py <plan> [--plan-file docs/superpowers/plans/<file>.md]` creating the tracked `docs/superpowers/state/<plan>/{ledger.md, mutations/.gitkeep}` and the git-ignored package root `.superpowers/sdd/<plan>/review/`; `ledger.md` line 1 `plan: <plan file>`; refuses an existing dir, a missing plan file, or a name not matching `^[a-z0-9][a-z0-9-]*$` (exit 1). `handoff.md` is written at the first checkpoint, never by this script. `main(argv=None) -> int`.
+
+- [ ] **Step 1: Write the failing tests** — `tools/gates/tests/test_new_plan_state.py`:
+
+```python
+"""new_plan_state.main() on a fixture repo (strict-delivery S2 Task 9).
+Run from the repo root: python3 -m unittest tools.gates.tests.test_new_plan_state -v
+"""
+import contextlib
+import io
+import os
+import shutil
+import unittest
+from unittest import mock
+
+from tools.gates import gate_checkpoint, gate_plan, new_plan_state as nps
+from tools.gates.tests import repo_fixture as rf
+
+STATE = "docs/superpowers/state/fx"
+
+
+class NewPlanState(unittest.TestCase):
+    def setUp(self):
+        files = dict(rf.DISPATCH_FILES)
+        files["docs/superpowers/plans/fx.md"] = "# fx\n"
+        self.root = rf.make_repo(files, rf.load_rows())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def run_main(self, module, *argv):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.root}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = module.main(list(argv))
+        return rc, out.getvalue()
+
+    def test_creates_ledger_mutations_and_review(self):
+        rc, out = self.run_main(nps, "fx")
+        self.assertEqual(0, rc, out)
+        for rel in ("ledger.md", "mutations/.gitkeep"):
+            self.assertTrue(os.path.isfile(os.path.join(self.root, STATE, rel)), rel)
+        self.assertTrue(os.path.isdir(os.path.join(self.root, ".superpowers/sdd/fx/review")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, STATE, "handoff.md")))
+
+    def test_ledger_starts_with_plan_line(self):
+        rc, out = self.run_main(nps, "fx", "--plan-file", "docs/superpowers/plans/fx.md")
+        self.assertEqual(0, rc, out)
+        with open(os.path.join(self.root, STATE, "ledger.md"), encoding="utf-8") as f:
+            self.assertEqual("plan: docs/superpowers/plans/fx.md", f.readline().rstrip("\n"))
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(self.root))
+
+    def test_refuses_existing_state_dir(self):
+        self.assertEqual(0, self.run_main(nps, "fx")[0])
+        rc, out = self.run_main(nps, "fx")
+        self.assertEqual(1, rc, out)
+        self.assertIn("already exists", out)
+
+    def test_refuses_missing_plan_file(self):
+        rc, out = self.run_main(nps, "nope")
+        self.assertEqual(1, rc, out)
+        self.assertIn("no such plan file", out)
+
+    def test_refuses_bad_name(self):
+        rc, out = self.run_main(nps, "Bad_Name", "--plan-file", "docs/superpowers/plans/fx.md")
+        self.assertEqual(1, rc, out)
+
+    def test_new_state_passes_structure_mode(self):
+        self.assertEqual(0, self.run_main(nps, "fx")[0])
+        rf.commit(self.root, "chore(state): new plan fx")
+        rc, out = self.run_main(gate_checkpoint, "--structure")
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS checkpoint.fx.layout", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m unittest tools.gates.tests.test_new_plan_state -v`
+Expected: ERROR `cannot import name 'new_plan_state'`.
+
+- [ ] **Step 3: Implement** — `tools/gates/new_plan_state.py`:
+
+```python
+#!/usr/bin/env python3
+"""new_plan_state -- create docs/superpowers/state/<plan>/ (ledger.md, mutations/) and the git-ignored
+.superpowers/sdd/<plan>/review/ for a plan
+about to execute. The ledger's line 1 names the plan file (the contract in tools/gates/gate_plan.py);
+handoff.md is written at the first checkpoint, never here.
+Usage: new_plan_state.py <plan> [--plan-file docs/superpowers/plans/<file>.md]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from tools.gates.lib import gitinfo, repo_root  # noqa: E402
+
+STATE = "docs/superpowers/state"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="new_plan_state")
+    p.add_argument("plan", help="state directory name; block branches are <plan>/b<N>, tags <plan>-b<N>")
+    p.add_argument("--plan-file", help="default: docs/superpowers/plans/<plan>.md")
+    a = p.parse_args(argv)
+    if not NAME_RE.match(a.plan):
+        print(f"new_plan_state: plan name {a.plan!r} must match {NAME_RE.pattern}", file=sys.stderr)
+        return 1
+    root = repo_root()
+    plan_file = a.plan_file or f"docs/superpowers/plans/{a.plan}.md"
+    if not os.path.isfile(os.path.join(root, plan_file)):
+        print(f"new_plan_state: no such plan file: {plan_file}", file=sys.stderr)
+        return 1
+    d = os.path.join(root, STATE, a.plan)
+    if os.path.exists(d):
+        print(f"new_plan_state: {STATE}/{a.plan} already exists; a plan's state is created once", file=sys.stderr)
+        return 1
+    os.makedirs(os.path.join(d, "mutations"))
+    open(os.path.join(d, "mutations", ".gitkeep"), "w", encoding="utf-8").close()
+    os.makedirs(os.path.join(root, ".superpowers", "sdd", a.plan, "review"), exist_ok=True)  # git-ignored
+    with open(os.path.join(d, "ledger.md"), "w", encoding="utf-8") as f:
+        f.write(f"plan: {plan_file}\n# Ledger: {a.plan}\n\n"
+                f"- created by tools/gates/new_plan_state.py at {gitinfo.head_sha(root)[:12]}\n")
+    print(f"created {STATE}/{a.plan}/ (ledger.md, mutations/) and .superpowers/sdd/{a.plan}/review/ "
+          "(plan in flight until 'CHECKPOINT b<N>')")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 4: Run to verify they pass**
+
+Run: `python3 -m unittest tools.gates.tests.test_new_plan_state -v` → `OK` (6 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+
+- [ ] **Step 5: Checklists** (skill files, outside the repo: `mkdir -p ~/.claude/skills/strict-delivery/checklists`).
+
+`~/.claude/skills/strict-delivery/checklists/block-end.md`:
+```markdown
+# Block end (spec §3.4) — in order; any red line stops the sequence
+
+Variables: PLAN = state dir name (`docs/superpowers/state/PLAN/`); N = block number; BR = `PLAN/bN`.
+main is protected (strict checks, enforce_admins): never commit to main; every state commit rides in the PR.
+
+1. Boundary. Every task of block N is `DONE` in the ledger with a ✅ review and its row `pinned` (the
+   reviewer copied the accepted transcript to `docs/superpowers/state/PLAN/mutations/<id>.txt`). A trigger
+   that fired mid-task means: finish that task's review loop, or revert to the last boundary
+   (`git reset --hard <last task head>`, row back to `planned`, ledger `- Tn reverted to boundary`).
+2. Up to date. `git fetch origin && git merge --ff-only origin/main` is a no-op, or merge main in and re-run
+   step 3 (branch protection is strict: the PR must contain main's tip).
+3. Gates. `python3 tools/gates/run_all.py` → every line PASS; `python3 -m unittest discover -s tools/gates/tests -t .` → OK.
+4. Packages (git-ignored, never committed): `python3 tools/gates/gate_review_package.py --all` → every line PASS.
+5. Final reviews. Dispatch role `final_reviewer` (opus) and role `final_verifier` (fable) with the dispatch
+   grammar; both re-run every gate and every mutation; both report files start `status: DONE`. Any finding →
+   fix loop (spec §6.7), then back to step 3.
+6. Rulings. At most 5 `Ruling:` lines in the ledger since `- bN start`.
+7. Merge readiness. If `python3 -c "from tools.gates import run_all; print('merge_ready' in run_all.GATES)"`
+   prints True: `python3 tools/gates/gate_merge_ready.py --pr <number>` → PASS. Otherwise by hand, ledgering each:
+   a. PR body free of every `merge_markers` entry:
+      `python3 -c "import re,subprocess,yaml; m=yaml.safe_load(open('tools/gates/config.yml'))['merge_markers']; b=subprocess.run(['gh','pr','view','--json','body','-q','.body'],capture_output=True,text=True,check=True).stdout; h=[x for x in m if re.search(re.escape(x),b,re.I)]; print(h or 'markers: none'); raise SystemExit(1 if h else 0)"`
+   b. `python3 tools/gates/gate_register.py`, `gate_claims.py`, `gate_decisions.py` → PASS; every row the
+      ledger names for block N is `pinned`, `closed`, or `deferred` with a `ruling`.
+   c. The grant `grant:PLAN` is answered `yes` by the owner in `decisions.yml`.
+8. Handoff on BR: `checkpoint.md` steps 1–4, ending with `python3 tools/gates/gate_checkpoint.py --plan PLAN`
+   (pre-merge) → every line PASS.
+9. PR. `gh pr ready`; `gh pr checks --watch`; then `gh pr checks` shows every check `pass`, advisory included.
+10. Merge. `gh pr merge --squash --delete-branch`.
+11. Post-merge. `git checkout main && git pull --ff-only`; `git tag PLAN-bN && git push origin PLAN-bN`;
+    `git branch -D BR` if it still exists; `git worktree list` → for every tree the block created
+    `git worktree remove <path>` (trees with submodules: `rm -rf <path> && git worktree prune`); archive the
+    scratch workspace: `mkdir -p .superpowers/archive/PLAN-bN && mv .superpowers/sdd/PLAN .superpowers/archive/PLAN-bN/`.
+12. Verify. `python3 tools/gates/gate_checkpoint.py --plan PLAN --post` → every line PASS on main. A FAIL is
+    reported to the owner and fixed in the next block's first commit; it is never waved through.
+13. `checkpoint.md` steps 5–7: status update, resume prompt, stop (spec §3.5).
+```
+
+`~/.claude/skills/strict-delivery/checklists/checkpoint.md`:
+```markdown
+# Checkpoint outputs (spec §3.3) — called from block-end.md steps 8 and 13
+
+1. Facts on BR: `git rev-parse HEAD` (HEAD), `git merge-base HEAD origin/main` (BASE), `git status --porcelain`,
+   `python3 tools/gates/run_all.py` (summary for the status update).
+2. Handoff. Write `docs/superpowers/state/PLAN/handoff.md`: YAML front matter with exactly the umbrella keys —
+   plan (the plan file whose tasks ran), spec, `branch: BR` (the block branch; the post-merge check maps it to
+   main), `head: "<HEAD from step 1>"` (quoted), `base: "<BASE from step 1>"`,
+   `ledger: docs/superpowers/state/PLAN/ledger.md`, `resume_line` (ledger line of `- bN start`), `block: N`,
+   `next_task` (`none` after the plan's last block), `findings_in_flight` (`[{ID: state}, …]` exactly as
+   `findings.yml` says), `claims_verified_at_head` (ids whose rows are verified with no cited file changed
+   since), `live_subagents: []`, `open_decisions` (every unanswered id in `decisions.yml`), `rulings` (this
+   block's ledger `Ruling:` lines), `grant` (the `grant:PLAN` decision id), `parked_branches` (every local
+   branch but main and BR: name, reason, owner), `env: {idf: "source tools/idf-env.sh", flash: "owner says ready", ota_window_s: 35}`, `traps`.
+   Body: the status update text.
+3. Ledger. Append `CHECKPOINT bN <HEAD from step 1>`.
+4. Commit and push on BR (state files only): `git add docs/superpowers/state/PLAN && git commit -m "chore(state): checkpoint bN" && git push`;
+   then `python3 tools/gates/gate_checkpoint.py --plan PLAN` → PASS (pre-merge).
+5. Status update to the owner: done since the last checkpoint (task ids, commits, gate results at HEAD);
+   remaining in this plan; remaining on the roadmap after it; open decisions awaiting the owner; rulings
+   made in this block; parked items.
+6. Resume prompt, verbatim:
+   `Invoke the strict-delivery skill. Read docs/superpowers/state/PLAN/handoff.md. Run python3 tools/gates/run_all.py at HEAD and stop on any FAIL. Continue the PLAN plan at block <N+1> (sub-plan <S>, task <T>) with superpowers:subagent-driven-development, opus sub-controller, models per tools/gates/config.yml.`
+7. Stop. Do not start the next block in this context. If an owner decision is open, the last message is
+   `waiting for the owner: DEC-…`; the Stop hook blocks once listing the ids and lets the second stop through.
+```
+
+`~/.claude/skills/strict-delivery/checklists/resume.md`:
+```markdown
+# Resume after /clear (spec §3.5) — skill first, handoff second, gates third, then dispatch
+
+0. If this context already ran a block, refuse: ask the owner to /clear and paste the resume prompt.
+1. Invoke the strict-delivery skill (Skill tool) before any other action.
+2. Read `docs/superpowers/state/PLAN/handoff.md` (plan, block, next_task, open decisions, traps).
+3. `git checkout main && git pull --ff-only`; `python3 tools/gates/gate_checkpoint.py --plan PLAN --post` → PASS
+   (only while main is still the squash of that block; once later work has merged, read the handoff only).
+   A FAIL means the last checkpoint did not finish: report the lines to the owner and stop.
+4. `python3 tools/gates/run_all.py` → every line PASS; stop on any FAIL.
+5. Decisions: `python3 tools/gates/gate_decisions.py`; for each id in `open_decisions` read its answer in
+   `decisions.yml`; one still unanswered that blocks `next_task` → stop and say `waiting for the owner: DEC-…`.
+6. Branch: `git checkout -b PLAN/b<N+1>`; ledger `- b<N+1> start <sha>`; commit `chore(state): b<N+1> start`
+   (the plan is in flight). Rows of earlier blocks stay `pinned` until `postmerge.py` (S4) sets `merged`.
+7. Dispatch `next_task` with the dispatch grammar; models per `tools/gates/config.yml`; budget per
+   `triggers`. The PreToolUse hook refuses anything else.
+```
+
+Verify: `ls ~/.claude/skills/strict-delivery/checklists/` → three files; `grep -c "gate_checkpoint" ~/.claude/skills/strict-delivery/checklists/*.md` → each ≥ 1.
+
+- [ ] **Step 6: README + CI** — append to `tools/gates/README.md`:
+```markdown
+## gate_checkpoint, Stop/SubagentStop hooks, per-plan state (S2)
+
+`python3 tools/gates/new_plan_state.py <plan> [--plan-file P]` creates `docs/superpowers/state/<plan>/`
+(`ledger.md` with line 1 `plan: P`, `mutations/`) and the git-ignored `.superpowers/sdd/<plan>/review/`.
+`gate_checkpoint.py --plan <plan>` (pre-merge, on the block branch) checks HEAD = handoff head plus
+state-only commits, branch, clean status, live subagents, finding states, fresh claims, open decisions,
+rulings cap, grant, the ledger's `CHECKPOINT b<N>` line and `next_task`; `--post` (on main after the squash)
+checks instead that main's only parent is the handoff base and its tree differs from the handoff head only
+under `docs/superpowers/state/`, plus worktrees (main only), local branches (main + parked) and open PRs from
+`<plan>/…`; `--structure` (run_all's default) is the CI-safe subset. The Stop hook runs the check (`--post`
+on main) whenever a plan is in flight (ledger not ending in a committed `CHECKPOINT` line, or the checkout
+is on `<plan>/b<N>`) and names open owner decisions when it blocks; the SubagentStop hook requires
+the report file named by the dispatch's `## Report:` line, starting `status: <STATUS>`. Checklists:
+`~/.claude/skills/strict-delivery/checklists/{block-end,checkpoint,resume}.md`.
+```
+Run `grep -n "unittest" .github/workflows/gates.yml`; if modules are listed, append `tools.gates.tests.test_gate_checkpoint tools.gates.tests.test_hook_stop tools.gates.tests.test_new_plan_state`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add tools/gates/new_plan_state.py tools/gates/tests/test_new_plan_state.py tools/gates/README.md .github/workflows/gates.yml
+git commit -m "feat(gates): new_plan_state -- per-plan ledger, mutations/, review/; README for the S2 gates and hooks"
+```
+
+- [ ] **Step 8: Mutation run and pin**
+
+```bash
+T=tools.gates.tests.test_new_plan_state.NewPlanState.test_ledger_starts_with_plan_line
+python3 -m unittest $T                                                     # expect OK
+perl -pi -e 's/f\.write\(f"plan: \{plan_file\}\\n# Ledger/f.write(f"# plan {plan_file}\\n# Ledger/' tools/gates/new_plan_state.py
+git diff --stat                                                            # expect 1 line changed
+python3 -m unittest $T                                                     # expect FAILED
+git checkout -- tools/gates/new_plan_state.py
+python3 -m unittest $T                                                     # expect OK
+```
+Write `.superpowers/sdd/strict-delivery/review/S2-T9/mutation-SD-S2-T9.txt` (the package copy):
+```
+finding: SD-S2-T9
+test: test_ledger_starts_with_plan_line
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_new_plan_state.NewPlanState.test_ledger_starts_with_plan_line -> PASS
+step 2 (fix reverted: perl turns the ledger's 'plan:' line into a comment in tools/gates/new_plan_state.py): python3 -m unittest tools.gates.tests.test_new_plan_state.NewPlanState.test_ledger_starts_with_plan_line -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_new_plan_state.NewPlanState.test_ledger_starts_with_plan_line -> PASS
+```
+After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt` (what `pin.transcript` names); then move the row to `pinned`:
+```bash
+SHA=$(git rev-parse HEAD) python3 - <<'EOF'
+import os, yaml
+P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T9"
+PIN = {"test": "tools/gates/tests/test_new_plan_state.py::NewPlanState::test_ledger_starts_with_plan_line",
+       "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt"}
+text = open(P, encoding="utf-8").read()
+header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
+doc = yaml.safe_load(text)
+rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
+row = next(r for r in rows if r["id"] == FID)
+row["state"], row["pin"] = "pinned", PIN
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+EOF
+python3 tools/gates/gate_register.py
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt
+git commit -m "chore(state): SD-S2-T9 pinned (mutation transcript)"
+```
+
+- [ ] **Step 9: Review package and ledger (controller)** — `make_review_package.py strict-delivery S2-T9 <task base> <task head>`, implementer files, `gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T9` → `PASS`, reviewer; after ✅ append `- S2-T9 DONE <task head sha> new_plan_state + checklists; review <package path>`; commit `chore(state): ledger S2-T9`.
+
+### b6 checkpoint
+
+From this block on `gate_checkpoint` runs the checkpoint itself: the Stop hook calls `gate_checkpoint --plan strict-delivery` (pre-merge on `block/strict-delivery-b6`, `--post` on main) whenever the plan is in flight, and `checklists/block-end.md` is the sequence.
+
+- [ ] **Step 1: CHECKPOINT b6** — run `~/.claude/skills/strict-delivery/checklists/block-end.md` steps 1–13 with `PLAN=strict-delivery`, `N=6`, `BR=block/strict-delivery-b6`. Handoff values: `block: 6`, `next_task: none` (b6 is this sub-plan's last block; the resume prompt names S3), `findings_in_flight: [{SD-S2-T7: pinned}, {SD-S2-T8: pinned}, {SD-S2-T9: pinned}]`. Before step 12, two repo facts will fail `gate_checkpoint --plan strict-delivery --post` unless the owner acts; each is an owner decision, so write it to `decisions.yml` and stop rather than ruling:
+  1. `git worktree list` shows `/Users/benji/projects/personal/lap-timer-worktrees/s52` (branch `s5.2-conn-ble`, parked per sub-project C) → `checkpoint.worktrees` FAIL. Options: remove the worktree and keep the branch listed in `parked_branches` (cost: re-create the worktree when C starts), or amend the gate to accept worktrees of parked branches (cost: spec §3.4 "main alone" weakened).
+  2. Local branch `pre-bench-wrap-up` (and `s5.2-conn-ble`) must be listed in `parked_branches` with reason and owner, or deleted → `checkpoint.branches`.
+  After step 12 passes, the resume prompt is:
+```
+Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/handoff.md. Run python3 tools/gates/run_all.py at HEAD and stop on any FAIL. Continue the strict-delivery plan at block 7 (sub-plan S3, task 1) with superpowers:subagent-driven-development, opus sub-controller, models per tools/gates/config.yml.
+```
