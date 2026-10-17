@@ -8,5 +8,5 @@ Lines: `- T<n> <commit subject> -- <gate result>`; `Ruling: what -- why -- cost 
 - base BASE_B1=73cd3cc
 - T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 28 OK
 - T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 34 OK
-- T2 plan-text corrections: __future__ import; evidence path-escape fix; counts 28/56
+- T2 plan-text corrections: __future__ import; evidence path-escape fix; counts 34 / 62
 - T2 review round 1: fullmatch ids, grant owner check, evidence relative paths, validator robustness; test_registers 34, suite 62
