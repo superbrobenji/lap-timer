@@ -165,8 +165,11 @@ class GitInfo(unittest.TestCase):
         self.assertEqual(["demo-b1"], gitinfo.tags_at(self.root, "HEAD"))
 
     def test_bad_revision_raises_gate_error(self):
-        with self.assertRaisesRegex(GateError, "git -C .* diff --name-only"):
+        with self.assertRaises(GateError) as ctx:
             gitinfo.changed_files(self.root, "0000000", "HEAD")
+        self.assertTrue(str(ctx.exception).startswith("git diff --name-only -z --no-renames 0000000 HEAD: "),
+                        str(ctx.exception))
+        self.assertNotIn(self.root, str(ctx.exception))
 
     def test_check_runs_reads_every_check_kind(self):
         pr = {"statusCheckRollup": [
@@ -298,10 +301,140 @@ class ReviewRound1(unittest.TestCase):
         root = gf.new_repo()
         try:
             gf.git(root, "checkout", "-q", "--detach")
-            with self.assertRaisesRegex(GateError, "detached HEAD"):
+            with self.assertRaises(GateError) as ctx:
                 gitinfo.branch(root)
+            self.assertEqual("git rev-parse --abbrev-ref HEAD: detached HEAD", str(ctx.exception))
         finally:
             gf.remove(root)
+
+
+class FixWave(unittest.TestCase):
+    """Block b1 final-review fix wave (items A6-A8, B4, B9, B10)."""
+
+    def test_result_with_no_lines_is_not_ok(self):                                   # B4
+        self.assertFalse(Result("g").ok())
+        self.assertEqual(False, json.loads(Result("g").render(True))["ok"])
+        r = Result("g")
+        r.passed("g.a")
+        self.assertTrue(r.ok())
+
+    def test_text_render_is_one_physical_line_per_result_line(self):                 # B9
+        r = Result("g")
+        r.fail("g.a", "while parsing\n  a block\t\tsequence\n\nin x.yml")
+        self.assertEqual("FAIL g.a: while parsing a block sequence in x.yml", r.render(False))
+        self.assertEqual("while parsing\n  a block\t\tsequence\n\nin x.yml",
+                         json.loads(r.render(True))["lines"][0]["reason"])           # JSON keeps the raw text
+
+    def test_help_goes_to_stderr_and_abbreviations_are_refused(self):                # B10
+        def check(args):
+            lib.gate_args("demo").parse_args(args)
+            return Result("demo")
+        for flag in ("--help", "-h"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc, out = run(check, ["--json", flag])
+            self.assertEqual(1, rc)
+            self.assertFalse(out.startswith("usage"), out)
+            self.assertEqual({"status": "FAIL", "id": "demo.input", "reason": "bad arguments (argparse exit 0)"},
+                             json.loads(out)["lines"][0])
+            self.assertIn("usage: demo", err.getvalue())
+            self.assertIn("--root", err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, out = run(check, ["--roo", "x"])
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL demo.input: bad arguments", out)
+
+    def test_load_yaml_messages_are_relative_to_the_root(self):                      # A7
+        d = tempfile.mkdtemp(prefix="gate-yaml-")
+        try:
+            gf.write(d, "sub/x.yml", "- id: [\n")
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(os.path.join(d, "sub", "x.yml"), d)
+            msg = str(ctx.exception)
+            self.assertTrue(msg.startswith("sub/x.yml: invalid YAML: "), msg)
+            self.assertIn('in "sub/x.yml", line', msg)
+            self.assertNotIn(d, msg)
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(os.path.join(d, "sub", "absent.yml"), d)
+            self.assertEqual("sub/absent.yml: No such file or directory", str(ctx.exception))
+            with open(os.path.join(d, "sub", "b.yml"), "wb") as fh:
+                fh.write(b"x: \xff\xfe\n")
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(os.path.join(d, "sub", "b.yml"), d)
+            self.assertEqual("sub/b.yml: not valid UTF-8", str(ctx.exception))
+            with self.assertRaises(GateError) as ctx:
+                lib.load_yaml(gf.write(d, "sub/m.yml", "- {<<: {a: 1}}\n"), d)
+            self.assertTrue(str(ctx.exception).startswith("sub/m.yml: invalid YAML: "), str(ctx.exception))
+            self.assertNotIn(d, str(ctx.exception))
+        finally:
+            gf.remove(d)
+
+    def test_config_messages_are_relative_to_the_root(self):                         # A7
+        d = tempfile.mkdtemp(prefix="gate-cfg-")
+        try:
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertEqual("tools/gates/config.yml: No such file or directory", str(ctx.exception))
+            gf.write(d, "tools/gates/config.yml", "- a\n")
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertEqual("tools/gates/config.yml: top level must be a mapping", str(ctx.exception))
+            gf.write(d, "tools/gates/config.yml", "owner: {handle: x}\n")
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertTrue(str(ctx.exception).startswith("tools/gates/config.yml: missing keys: triggers"))
+            with open(os.path.join(lib.CODE_ROOT, "tools", "gates", "config.yml"), encoding="utf-8") as fh:
+                good = fh.read()
+            gf.write(d, "tools/gates/config.yml", good.replace("owner: {handle: superbrobenji}", "owner: {handle: ' '}"))
+            with self.assertRaises(GateError) as ctx:
+                config.load(d)
+            self.assertEqual("tools/gates/config.yml: owner.handle must be a non-empty string", str(ctx.exception))
+        finally:
+            gf.remove(d)
+
+    def test_git_messages_do_not_carry_the_root(self):                               # A7
+        root = gf.new_repo()
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        try:
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.head_sha(outside)
+            self.assertTrue(str(ctx.exception).startswith("git rev-parse HEAD: "), str(ctx.exception))
+            self.assertNotIn(outside, str(ctx.exception))
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.tags_at(root, "no-such-rev")
+            self.assertTrue(str(ctx.exception).startswith("git tag --points-at no-such-rev: "))
+            self.assertNotIn(root, str(ctx.exception))
+        finally:
+            gf.remove(root)
+            gf.remove(outside)
+
+    def test_status_clean_ignores_the_users_untracked_files_setting(self):          # A6
+        root = gf.new_repo()
+        try:
+            gf.git(root, "config", "status.showUntrackedFiles", "no")
+            gf.write(root, "untracked.txt", "x\n")
+            self.assertEqual("", gf.git(root, "status", "--porcelain"))      # the config hides it ...
+            self.assertFalse(gitinfo.status_clean(root))                      # ... the helper must not
+        finally:
+            gf.remove(root)
+
+    def test_commit_exists(self):                                                    # A8
+        root = gf.new_repo()
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        try:
+            head = gitinfo.head_sha(root)
+            self.assertTrue(gitinfo.commit_exists(root, head))
+            self.assertTrue(gitinfo.commit_exists(root, head[:7]))
+            self.assertFalse(gitinfo.commit_exists(root, "0000000"))
+            self.assertFalse(gitinfo.commit_exists(root, gf.git(root, "rev-parse", "HEAD^{tree}")[:7]))  # a tree
+            self.assertFalse(gitinfo.commit_exists(root, "--all"))
+            with self.assertRaises(GateError) as ctx:
+                gitinfo.commit_exists(outside, head)
+            self.assertTrue(str(ctx.exception).startswith("git cat-file -e "), str(ctx.exception))
+            self.assertNotIn(outside, str(ctx.exception))
+        finally:
+            gf.remove(root)
+            gf.remove(outside)
 
 
 if __name__ == "__main__":

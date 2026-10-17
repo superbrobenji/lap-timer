@@ -11,8 +11,8 @@ REQUIRED = ["owner", "triggers", "models", "model_rank", "fable_roles", "block",
 
 def load(root) -> dict:
     """Parse <root>/tools/gates/config.yml; a missing file, key or owner handle is a GateError."""
-    path = os.path.join(root, "tools", "gates", "config.yml")
-    data = load_yaml(path)
+    path = os.path.join("tools", "gates", "config.yml")    # messages name it relative to `root`
+    data = load_yaml(os.path.join(root, path), root)
     if not isinstance(data, dict):
         raise GateError(f"{path}: top level must be a mapping")
     missing = [k for k in REQUIRED if k not in data]

@@ -45,7 +45,8 @@ class Result:
         if as_json:
             return json.dumps({"gate": self.gate, "ok": self.ok(),
                                "lines": [asdict(l) for l in self.lines]}, indent=1)
-        return "\n".join(f"{l.status} {l.id}" + (f": {l.reason}" if l.reason else "")
+        # one physical line per result line: a multi-line reason (PyYAML's are) is collapsed to single spaces
+        return "\n".join(f"{l.status} {l.id}" + (f": {' '.join(l.reason.split())}" if l.reason else "")
                          for l in self.lines)
 
 
@@ -94,22 +95,39 @@ def _mapping_no_duplicates(loader, node, deep=False):
 _StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_no_duplicates)
 
 
-def load_yaml(path: str):
-    """Parse one YAML file strictly. Missing, unreadable, invalid or duplicate-key -> GateError."""
+def load_yaml(path: str, root=None):
+    """Parse one YAML file strictly. Missing, unreadable, invalid or duplicate-key -> GateError.
+    With `root`, every message names the file relative to it (machine-independent output)."""
+    shown = os.path.relpath(path, root) if root is not None else path
     try:
         with open(path, encoding="utf-8") as fh:
-            return yaml.load(fh, Loader=_StrictLoader)  # noqa: S506 -- _StrictLoader is a SafeLoader
+            text = fh.read()
+        return yaml.load(text, Loader=_StrictLoader)  # noqa: S506 -- _StrictLoader is a SafeLoader
     except OSError as exc:
-        raise GateError(f"{path}: {exc.strerror or exc}") from None
+        raise GateError(f"{shown}: {exc.strerror or exc}") from None
     except UnicodeDecodeError:
-        raise GateError(f"{path}: not valid UTF-8") from None
+        raise GateError(f"{shown}: not valid UTF-8") from None
     except yaml.YAMLError as exc:
-        raise GateError(f"{path}: invalid YAML: {exc}") from None
+        detail = str(exc).replace('"<unicode string>"', f'"{shown}"')   # the text was parsed from a str
+        raise GateError(f"{shown}: invalid YAML: {detail}") from None
+
+
+class _HelpToStderr(argparse.Action):
+    """-h/--help prints the usage on stderr, so a gate's stdout (JSON with --json) is never usage text."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS,
+                         help="show this help on stderr and exit")
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.print_help(sys.stderr)
+        parser.exit(0)
 
 
 def gate_args(prog: str) -> argparse.ArgumentParser:
     """The arguments every gate shares: --root (the tree whose registers are checked)."""
-    ap = argparse.ArgumentParser(prog=prog)
+    ap = argparse.ArgumentParser(prog=prog, add_help=False, allow_abbrev=False)
+    ap.add_argument("-h", "--help", action=_HelpToStderr)
     ap.add_argument("--root", default=None,
                     help="tree holding docs/superpowers/state (default: repo_root())")
     return ap

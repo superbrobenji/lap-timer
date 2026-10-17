@@ -31,4 +31,4 @@ comment_patterns:   # regex; a hit must name a finding id or #issue on the same 
 exceptions:
   cost: {blast: {tooling: 1, ui: 2, timing: 3, data-integrity: 3, supervision: 3}, verifiability: [0, 2], reach: {transient: 0, stored_or_3plus: 2}}
   benefit: {complexity: {helper: 1, module: 2, task_or_60_lines: 3}, runtime: [0, 2]}
-tag_pattern: '^[a-z0-9-]+-b\d+$'
+tag_pattern: '^[a-z0-9-]+-b[0-9]+$'

@@ -5,12 +5,14 @@ which is the documented None of pr_for_branch()."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from . import GateError
 
 
 def _run(cmd: list, cwd=None) -> str:
+    """Run `cmd` in `cwd`. Messages name the command, never the directory (machine-independent)."""
     try:
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
     except OSError as exc:
@@ -21,7 +23,7 @@ def _run(cmd: list, cwd=None) -> str:
 
 
 def _git(root, *args) -> str:
-    return _run(["git", "-C", str(root), *args])
+    return _run(["git", *args], cwd=str(root))
 
 
 def head_sha(root) -> str:
@@ -32,12 +34,13 @@ def branch(root) -> str:
     """The checked-out branch name; a detached HEAD is a GateError (never the string "HEAD")."""
     name = _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
     if name == "HEAD":
-        raise GateError(f"git -C {root} rev-parse --abbrev-ref HEAD: detached HEAD")
+        raise GateError("git rev-parse --abbrev-ref HEAD: detached HEAD")
     return name
 
 
 def status_clean(root) -> bool:
-    return _git(root, "status", "--porcelain") == ""
+    # status.showUntrackedFiles=no (a common user setting) would hide untracked files: pin it
+    return _git(root, "-c", "status.showUntrackedFiles=all", "status", "--porcelain=v1", "-uall") == ""
 
 
 def worktrees(root) -> list:
@@ -88,6 +91,24 @@ def check_runs(pr: dict) -> list:
         conclusion = item.get("conclusion") or item.get("state") or ""
         runs.append({"name": name, "conclusion": conclusion})
     return runs
+
+
+def commit_exists(root, sha) -> bool:
+    """True when `sha` (full or abbreviated hex) names a commit in the repository at `root`
+    (`git cat-file -e <sha>^{commit}`); False for an unknown, ambiguous or non-commit object;
+    any other git failure (not a repository, no git) is a GateError."""
+    if not re.fullmatch(r"[0-9a-f]{4,40}", sha):
+        return False
+    cmd = ["git", "cat-file", "-e", f"{sha}^{{commit}}"]
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
+    if p.returncode == 0:
+        return True
+    if "Not a valid object name" in p.stderr:
+        return False
+    raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
 
 
 def tags_at(root, sha) -> list:
