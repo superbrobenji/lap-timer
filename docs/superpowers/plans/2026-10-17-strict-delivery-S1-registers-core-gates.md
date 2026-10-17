@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every code block in this plan was run in a throwaway copy of these files: 177 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
+Every code block in this plan was run in a throwaway copy of these files: 212 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -4307,7 +4307,7 @@ git commit -m "feat(gates): gate_decisions -- owner-only answers, no reference t
 
 **Interfaces:**
 - Consumes: `Line`, `Result`, `repo_root`, `run_check`; the three gate modules (`tools.gates.gate_<name>.check`).
-- Produces (umbrella "run_all.py"): `GATES = ["register", "claims", "decisions"]` (the gates installed at this block; S2–S4 append theirs); `run(names: list[str], args: dict) -> Result`. `args` keys: `"root"` (tree; default `repo_root()`), plus `"<gate name>": [extra argv]`. `decisions` always gets `--scan` with every `docs/superpowers/plans/*.md` under root. Line ids are prefixed `<name>.` unless they already are. Unknown name: `FAIL run_all.unknown`. No names: `FAIL run_all.empty`. Missing module: `FAIL <name>.input`. Also `gate_argv(name, args) -> list`, `main(argv=None) -> int` (`--only a,b`, `--json`). CI job id and name: `gates`.
+- Produces (umbrella "run_all.py"): `GATES = ["register", "claims", "decisions"]` (the gates installed at this block; S2–S4 append theirs); `run(names: list[str], args: dict) -> Result`. `args` keys: `"root"` (tree; default `repo_root()`; an empty or blank value is `FAIL <name>.input: --root is empty`, never the cwd repo), plus `"<gate name>": [extra argv]`. `decisions` always gets `--scan` with every `docs/superpowers/plans/*.md` under root; none there (directory missing or empty) is `FAIL decisions.input: no docs/superpowers/plans/*.md under the root: nothing to scan`. Line ids are prefixed `<name>.` unless they already start with `<name>.` (a gate's line naming another gate stays under its own gate's prefix). Unknown name: `FAIL run_all.unknown`. No names: `FAIL run_all.empty`. Missing module: `FAIL <name>.input`. Also `gate_argv(name, args) -> list` (raises `GateError`, which `run` turns into the FAIL), `main(argv=None) -> int` (`--only a,b`, `--json`, `--root <tree>`). CI job id and name: `gates`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4318,24 +4318,40 @@ git commit -m "feat(gates): gate_decisions -- owner-only answers, no reference t
 """Tests for tools/gates/run_all.py. Run from the repo root:
 python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import contextlib
 import io
+import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
 from unittest import mock
 
 from tools.gates import run_all
+from tools.gates.lib import Result
 from tools.gates.tests import gitfixture as gf
+
+PLANS = os.path.join("docs", "superpowers", "plans")
+SCRIPT = os.path.join(gf.REPO, "tools", "gates", "run_all.py")
 
 
 class RunAll(unittest.TestCase):
     def setUp(self):
         self.root = gf.new_repo()
+        self.sha = gf.git(self.root, "rev-parse", "HEAD")
+        os.makedirs(os.path.join(self.root, "docs", "reviews"))    # gate_register's required directory
+        gf.write(self.root, os.path.join(PLANS, "p.md"), "a plan citing nothing\n")
 
     def tearDown(self):
         gf.remove(self.root)
+
+    def cli(self, *args):
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.root)
+        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True,
+                              env=env, check=False)
 
     def test_gates_at_this_block(self):
         self.assertEqual(["register", "claims", "decisions"], run_all.GATES)
@@ -4369,28 +4385,69 @@ class RunAll(unittest.TestCase):
         res = run_all.run([], {"root": self.root})
         self.assertEqual("FAIL run_all.empty: no gate ran", res.render(False))
 
+    def test_an_empty_root_is_fail_never_the_cwd_repo(self):
+        for root in ("", "  "):
+            res = run_all.run(["register", "decisions"], {"root": root})
+            self.assertEqual("FAIL register.input: --root is empty\nFAIL decisions.input: --root is empty",
+                             res.render(False), repr(root))
+
+    def test_an_empty_root_on_the_command_line_is_fail(self):
+        p = self.cli("--only", "register", "--root", "")
+        self.assertEqual(1, p.returncode, p.stdout + p.stderr)
+        self.assertEqual("FAIL register.input: --root is empty\n", p.stdout)
+
+    def test_a_foreign_id_is_prefixed_never_taken_as_another_gates(self):
+        forged = Result("register")
+        forged.fail("claims.stale.CLM-1", "pretends to be claims")
+        forged.passed("decisions.owner")
+        with mock.patch.object(run_all, "_check_of", return_value=lambda argv: forged):
+            res = run_all.run(["register"], {"root": self.root})
+        self.assertEqual("FAIL register.claims.stale.CLM-1: pretends to be claims\n"
+                         "PASS register.decisions.owner", res.render(False))
+
     def test_decisions_scans_the_plans(self):
         gf.write(self.root, os.path.join(gf.STATE, "decisions.yml"),
                  '- {id: DEC-9001, class: scope, question: "q?", options: [{label: a, cost: x}, '
-                 '{label: b, cost: y}], asked_at: {sha: "aaaaaaa", by: s}, answer: null, answered_at: null}\n')
-        gf.write(self.root, "docs/superpowers/plans/p.md", "waits on DEC-9001\n")
+                 '{label: b, cost: y}], asked_at: {sha: "%s", by: s}, answer: null, answered_at: null}\n'
+                 % self.sha)
+        gf.write(self.root, os.path.join(PLANS, "p.md"), "waits on DEC-9001\n")
         res = run_all.run(["decisions"], {"root": self.root})
         self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/superpowers/plans/p.md:1", res.render(False))
+
+    def test_no_plans_to_scan_is_fail_never_a_silent_pass(self):
+        shutil.rmtree(os.path.join(self.root, PLANS))
+        for make_dir in (False, True):     # plans directory missing, then present and empty
+            if make_dir:
+                os.makedirs(os.path.join(self.root, PLANS))
+            res = run_all.run(["decisions"], {"root": self.root})
+            self.assertEqual("FAIL decisions.input: no docs/superpowers/plans/*.md under the root: "
+                             "nothing to scan", res.render(False), make_dir)
 
     def test_extra_args_reach_the_gate(self):
         res = run_all.run(["claims"], {"root": self.root, "claims": ["--mark-stale"]})
         self.assertIn("FAIL claims.input: --mark-stale needs --base <sha>", res.render(False))
 
     def test_cli_only_and_rc(self):
-        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.root)
-        p = subprocess.run([sys.executable, os.path.join(gf.REPO, "tools/gates/run_all.py"), "--only", "register"],
-                           capture_output=True, text=True, env=env, check=False)
+        p = self.cli("--only", "register")
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
         self.assertTrue(p.stdout.startswith("PASS register.schema"), p.stdout)
         os.remove(os.path.join(self.root, gf.STATE, "findings.yml"))
-        p = subprocess.run([sys.executable, os.path.join(gf.REPO, "tools/gates/run_all.py"), "--only", "register"],
-                           capture_output=True, text=True, env=env, check=False)
+        p = self.cli("--only", "register")
         self.assertEqual(1, p.returncode)
+
+    def test_cli_unknown_gate_is_rc_1(self):
+        p = self.cli("--only", "comments")
+        self.assertEqual(1, p.returncode, p.stdout + p.stderr)
+        self.assertEqual("FAIL run_all.unknown: no gate named 'comments' "
+                         "(installed: register, claims, decisions)\n", p.stdout)
+
+    def test_cli_json(self):
+        p = self.cli("--json", "--only", "claims")
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        out = json.loads(p.stdout)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["lines"])
+        self.assertTrue(all(l["id"].startswith("claims.") for l in out["lines"]))
 
     def test_the_repository_passes_every_installed_gate(self):
         buf = io.StringIO()
@@ -4416,10 +4473,11 @@ Expected: ERROR, `ImportError: cannot import name 'run_all' from 'tools.gates'`.
 #!/usr/bin/env python3
 """run_all -- every installed gate, one aggregated Result (umbrella plan, "run_all.py").
 
-  python3 tools/gates/run_all.py [--only a,b] [--json]
+  python3 tools/gates/run_all.py [--only a,b] [--json] [--root <tree>]
 
 A gate not yet implemented at this block is absent from GATES, never stubbed to PASS. A gate
-module that is missing or raises is a FAIL `<name>.input`, never a skip.
+module that is missing or raises is a FAIL `<name>.input`, never a skip. An empty --root, or a
+root with no docs/superpowers/plans/*.md for `decisions` to scan, is a FAIL, never a pass.
 """
 from __future__ import annotations
 
@@ -4431,7 +4489,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.gates.lib import Line, Result, repo_root, run_check  # noqa: E402
+from tools.gates.lib import GateError, Line, Result, repo_root, run_check  # noqa: E402
 
 GATES = ["register", "claims", "decisions"]
 PLANS_GLOB = os.path.join("docs", "superpowers", "plans", "*.md")
@@ -4439,12 +4497,15 @@ PLANS_GLOB = os.path.join("docs", "superpowers", "plans", "*.md")
 
 def gate_argv(name: str, args: dict) -> list:
     """argv for one gate: --root, the gate's defaults, then args[name] (a list) verbatim."""
-    root = args.get("root") or repo_root()
+    root = args["root"] if "root" in args else repo_root()
+    if not isinstance(root, str) or not root.strip():
+        raise GateError("--root is empty")
     argv = ["--root", root]
     if name == "decisions":
         plans = sorted(glob.glob(os.path.join(root, PLANS_GLOB)))
-        if plans:
-            argv += ["--scan", *plans]
+        if not plans:
+            raise GateError(f"no {PLANS_GLOB.replace(os.sep, '/')} under the root: nothing to scan")
+        argv += ["--scan", *plans]
     return argv + list(args.get(name, []))
 
 
@@ -4474,9 +4535,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="run_all")
     ap.add_argument("--only", default=None, help="comma-separated gate names")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--root", default=None, help="tree to gate (default: repo_root())")
     ns = ap.parse_args(argv)
     names = GATES if ns.only is None else [n.strip() for n in ns.only.split(",") if n.strip()]
-    result = run(names, {})
+    result = run(names, {} if ns.root is None else {"root": ns.root})
     print(result.render(ns.json))
     return 0 if result.ok() else 1
 
@@ -4488,14 +4550,19 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests and the aggregate**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 10 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 157 tests ... OK
+python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 16 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 192 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
 `test_the_repository_passes_every_installed_gate` fails if DEC-0001 is still unanswered: the umbrella plan references it (lines 17 and 287). That is the intended block, not a bug.
 
-Mutation check: make `_check_of(name)` return `lambda argv: Result(name)` (a gate that returns no lines). `test_clean_tree_passes_and_lines_carry_the_gate_prefix` must fail, and `res.render(False)` must show `FAIL register.empty: gate produced no verdict`. Restore and run again: OK.
+Mutation checks (each run under `PYTHONDONTWRITEBYTECODE=1`, restored afterwards, then `Ran 16 tests ... OK`):
+- `_check_of(name)` returns `Result(name)` (a gate with no lines): `test_clean_tree_passes_and_lines_carry_the_gate_prefix` fails (among 7 others), and `res.render(False)` shows `FAIL register.empty: gate produced no verdict`.
+- `gate_argv` reads `root = args.get("root") or repo_root()`: `test_an_empty_root_is_fail_never_the_cwd_repo` and `test_an_empty_root_on_the_command_line_is_fail` fail.
+- `gate_argv` loses its `if not plans:` guard: `test_no_plans_to_scan_is_fail_never_a_silent_pass` fails.
+- `run` keeps `lid = l.id` (no prefixing): `test_a_foreign_id_is_prefixed_never_taken_as_another_gates` fails.
+- `gate_argv` drops the `--scan` list: `test_decisions_scans_the_plans` fails.
 
 - [ ] **Step 5: Write the CI job and the README**
 
@@ -4553,12 +4620,13 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | Gate | Checks |
 |---|---|
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
-| `gate_claims.py` | claims schema, verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` rewrites stale rows |
-| `gate_decisions.py` | decisions schema, owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
+| `gate_claims.py` | claims schema, every sha a commit of the repository, verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` rewrites stale rows |
+| `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
-prefix; `--only a,b` selects; an unknown or missing gate is a FAIL. For `decisions` it scans
-every `docs/superpowers/plans/*.md`.
+prefix; `--only a,b` selects, `--root <tree>` gates another tree; an unknown or missing gate, an
+empty `--root`, and a root with no `docs/superpowers/plans/*.md` for `decisions` to scan are each a
+FAIL. For `decisions` it scans every `docs/superpowers/plans/*.md`.
 
 ## Running
 
@@ -4569,7 +4637,7 @@ python3 tools/gates/run_all.py
 python3 tools/gates/gate_register.py --json
 ```
 
-CI: `.github/workflows/gates.yml`, job `gates` (both commands above, full history checkout).
+CI: `.github/workflows/gates.yml`, job `gates` (the unit tests, then `run_all.py`; full history checkout).
 ````
 
 ```bash
@@ -4580,7 +4648,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 157 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 192 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -5079,7 +5147,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 170 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 205 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -5374,7 +5442,7 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 177 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 212 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -5384,7 +5452,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 177 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 212 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md
