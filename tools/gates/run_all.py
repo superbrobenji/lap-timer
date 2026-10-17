@@ -33,6 +33,7 @@ def gate_argv(name: str, args: dict) -> list:
         raise GateError("--root is empty")
     if not os.path.isdir(root):
         raise GateError(f"--root is not a directory: {root}")
+    root = os.path.abspath(root)    # one form for every gate: a relative root works from any cwd
     argv = ["--root", root]
     if name == "decisions":
         plans = sorted(glob.glob(os.path.join(root, PLANS_GLOB)))

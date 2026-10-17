@@ -8,7 +8,9 @@ tools/gates/config.yml (every class in OWNER_ONLY_CLASSES is answered by the own
 schema check in registers.validate_decision rejects it and this gate files it under `owner`);
 an asked_at / answered_at sha that is not a commit of the gated repository (DEC-0003, filed under
 `schema`); and any reference to an unanswered decision id (DEC-NNNN) in a --scan file. A --scan
-path that cannot be read (missing, a directory, not UTF-8) is a FAIL, never a skip. Row ids print
+path that cannot be read (missing, a directory, not UTF-8) is a FAIL, never a skip, and
+it withholds the `open-ref` PASS line (none of that file's references were examined); repeated --scan
+options add up. Row ids print
 forgery-safe (entry-<i> when the id is malformed), an empty --root is an error, and a category
 some row never reached prints no PASS line (an empty or absent --scan list never prints PASS for
 `scan` or `open-ref`).
@@ -21,8 +23,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
-from tools.gates.lib import config, registers  # noqa: E402
+from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
 
 # spec §5: "Decision classes (owner-only, always)" -- every class in the register.
 OWNER_ONLY_CLASSES = list(registers.DECISION_CLASSES)
@@ -32,12 +34,12 @@ CATEGORIES = ["schema", "duplicate", "owner", "open-ref", "scan"]
 
 def check(args: list) -> Result:
     ap = gate_args("gate_decisions")
-    ap.add_argument("--scan", nargs="*", default=[], help="files that must not cite an unanswered decision")
+    ap.add_argument("--scan", nargs="*", action="extend", default=[], help="files that must not cite an unanswered decision")
     ns = ap.parse_args(args)
     if ns.root is not None and not ns.root.strip():
         raise GateError("--root is empty")
     root = ns.root if ns.root is not None else repo_root()
-    owner = config.load(CODE_ROOT)["owner"]["handle"]
+    owner = registers.owner_handle()
     decisions = registers.load_decisions(root)
     r = Result("decisions")
     exists = registers.memo_commit_exists()    # one git call per distinct sha
@@ -66,15 +68,18 @@ def check(args: list) -> Result:
         try:
             registers.require_regular(root, full)    # opening a FIFO would hang the gate
         except registers.PathError as exc:
+            skipped.add("open-ref")    # this file's references were not examined
             r.fail(f"decisions.scan.{rel}", exc.reason if exc.not_regular else f"cannot read: {exc.reason}")
             continue
         try:
             with open(full, encoding="utf-8") as fh:
                 text = fh.read()
         except OSError as exc:
+            skipped.add("open-ref")
             r.fail(f"decisions.scan.{rel}", f"cannot read: {exc.strerror or exc}")
             continue
         except UnicodeDecodeError:
+            skipped.add("open-ref")
             r.fail(f"decisions.scan.{rel}", "cannot read: not valid UTF-8")
             continue
         for n, line in enumerate(text.split("\n"), 1):

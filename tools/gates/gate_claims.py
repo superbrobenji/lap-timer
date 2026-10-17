@@ -7,7 +7,9 @@
 A row is "verified at HEAD" when its state is `verified` and no file it cites differs between
 `verified_at` and HEAD, nor is staged for the next commit. (`verified_at` cannot literally equal
 the HEAD that contains the row: a commit cannot hold its own sha.) A cite ending in "/" covers
-every file under that directory. --mark-stale rewrites every `verified` row whose cites
+every file under that directory. Every cite is a normalised repo-relative path (DEC-0004) that
+exists at `verified_at` -- a blob, or a tree when the cite ends in "/" -- else the verified row is a
+FAIL claims.stale.<id> (it could never go stale). --base must name a commit like --head. --mark-stale rewrites every `verified` row whose cites
 intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. It
 rewrites claims.yml with yaml.safe_dump, so YAML comments and hand formatting are lost, and it
 refuses to write (FAIL claims.input) unless every row validates and has no duplicate id. --head
@@ -37,12 +39,25 @@ def hits(cites: list, changed) -> list:
                   if any(p == c or (c.endswith("/") and p.startswith(c)) for c in cites))
 
 
+def cite_errors(root, claim: dict) -> list:
+    """Why a cite of a verified claim names nothing at verified_at (DEC-0004); [] when all exist."""
+    errs = []
+    for c in claim["cites"]:
+        want, kind = ("tree", "directory") if c.endswith("/") else ("blob", "file")
+        if gitinfo.path_type(root, claim["verified_at"], c) != want:
+            errs.append(f"cite {c} is not a {kind} at verified_at {claim['verified_at']}")
+    return errs
+
+
 def stale_reason(root, claim: dict, head: str, staged) -> str:
     """'' when a verified claim still holds at head, else why it does not."""
     try:
         changed = gitinfo.changed_files(root, claim["verified_at"], head)
     except GateError as exc:
         return f"verified_at {claim['verified_at']} is not comparable with {head}: {exc}"
+    missing = cite_errors(root, claim)
+    if missing:
+        return "; ".join(missing)
     hit = hits(claim["cites"], list(changed) + list(staged))
     if hit:
         return (f"cited file(s) changed since verified_at {claim['verified_at']}: {', '.join(hit)}; "
@@ -108,6 +123,8 @@ def check(args: list) -> Result:
     if ns.mark_stale:
         if not ns.base:
             raise GateError("--mark-stale needs --base <sha>")
+        if not exists(root, ns.base):
+            raise GateError(f"--base {ns.base} is not a commit in this repository")
         head = head or gitinfo.head_sha(root)
         mark_stale(root, claims, ns.base, head, r, exists)
     staged = None

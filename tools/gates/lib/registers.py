@@ -250,6 +250,23 @@ def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
     return errs
 
 
+def cite_problem(cite) -> str:
+    """'' when `cite` is a normalised repo-relative path (DEC-0004), else why it is not. A directory
+    cite ends in exactly one '/'. The path must also exist at verified_at (gate_claims checks that)."""
+    if not isinstance(cite, str) or not cite:
+        return "is not a non-empty string"
+    if cite != cite.strip() or "\0" in cite:
+        return "has leading or trailing whitespace or a NUL"
+    if cite.startswith("/"):
+        return "is absolute: write a path relative to the repository root"
+    body = cite[:-1] if cite.endswith("/") else cite
+    if body == "." or ".." in body.split("/"):
+        return "climbs out of or names the repository root ('.' or '..')"
+    if os.path.normpath(body) != body:
+        return "is not normalised: no './' segment, '//' or repeated trailing '/'"
+    return ""
+
+
 def validate_claim(c: dict) -> list:
     errs = _keys(c, CLAIM_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
@@ -259,8 +276,13 @@ def validate_claim(c: dict) -> list:
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
             errs.append(f"{k}: must be a non-empty string" + _hint(c[k]))
-    if not isinstance(c["cites"], list) or not c["cites"] or not all(_text(p) for p in c["cites"]):
+    if not isinstance(c["cites"], list) or not c["cites"]:
         errs.append("cites: must be a non-empty list of paths (a claim citing nothing can never go stale)")
+    else:
+        for p in c["cites"]:
+            why = cite_problem(p)
+            if why:
+                errs.append(f"cites: {p!r} {why} (a cite that names no changed path can never go stale)")
     if c["state"] is False:
         errs.append('state: YAML read false as a boolean; quote it: state: "false"')
     elif c["state"] not in CLAIM_STATES:

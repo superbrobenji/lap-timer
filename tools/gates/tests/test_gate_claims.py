@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from tools.gates import gate_claims
-from tools.gates.lib import gitinfo, registers
+from tools.gates.lib import GateError, gitinfo, registers
 from tools.gates.tests import gitfixture as gf
 
 CLAIMS = os.path.join(gf.STATE, "claims.yml")
@@ -86,7 +86,7 @@ class ClaimsRepo(unittest.TestCase):
         rc, out = self.run_gate()
         self.assertIn("FAIL claims.stale.C-demo-1", out)
         self.assertEqual(1, rc)
-        rc, out = self.run_gate("--mark-stale", "--base", "HEAD")
+        rc, out = self.run_gate("--mark-stale", "--base", gf.git(self.root, "rev-parse", "HEAD"))
         self.assertIn("PASS claims.marked-stale.C-demo-1", out)
         self.assertEqual(0, rc, out)
 
@@ -262,6 +262,104 @@ class ClaimsRepo(unittest.TestCase):
         head = gf.commit_all(self.root)
         self.assertFalse(gate_claims.verified_at_head(self.root, c, head))
         self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, state="unverified"), head))
+
+    def test_a_directory_cite_does_not_cover_a_sibling_with_the_same_prefix(self):
+        gf.write(self.root, "src2/x.c", "int x;\n")
+        v = gf.commit_all(self.root, "src2")
+        self.claims(row(verified_at=f'"{v}"', cites="src/"))
+        gf.write(self.root, "src2/x.c", "int x2;\n")
+        gf.commit_all(self.root)
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS claims.stale", out)
+
+    def test_verified_at_head_is_false_for_a_stale_or_malformed_row(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        c = registers.load_claims(self.root)[0]
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        self.assertTrue(gate_claims.verified_at_head(self.root, c, head))
+        self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, state="stale"), head))
+        self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, text=5), head))    # malformed, not a raise
+        self.assertFalse(gate_claims.verified_at_head(self.root, dict(c, cites=["src/typo.c"]), head))
+
+    def test_head_is_honoured_in_mark_stale_mode(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        gf.write(self.root, "src/a.c", "int a(void) { return 6; }\n")
+        gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
+        rc, out = self.run_gate("--mark-stale", "--base", self.v, "--head", self.v)    # nothing differs v..v
+        self.assertIn("PASS claims.marked-stale.none", out)
+        self.assertEqual(0, rc, out)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
+
+    def test_mark_stale_refuses_a_row_whose_verified_at_is_not_a_commit(self):
+        self.claims(row(verified_at='"1234abc"'))
+        gf.write(self.root, "src/a.c", "int a(void) { return 7; }\n")
+        gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
+        rc, out = self.run_gate("--mark-stale", "--base", self.v)
+        self.assertTrue(out.startswith("FAIL claims.input: refusing to rewrite "), out)
+        self.assertIn("C-demo-1", out)
+        self.assertEqual(1, rc)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
+
+    def test_a_bad_base_is_an_input_failure_and_never_reaches_git_as_an_option(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        out_file = os.path.join(self.root, "injected.txt")
+        for base in ("", "  ", "deadbee", "--cached", f"--output={out_file}", "HEAD"):
+            rc, out = self.run_gate("--mark-stale", f"--base={base}")
+            self.assertEqual(1, rc, (base, out))
+            self.assertTrue(out.startswith("FAIL claims.input: "), (base, out))
+            self.assertNotIn("PASS", out, base)
+        self.assertFalse(os.path.exists(out_file))
+        self.assertEqual("", gf.git(self.root, "status", "--porcelain"))
+
+    def test_changed_files_treats_an_option_shaped_revision_as_a_revision(self):
+        out_file = os.path.join(self.root, "injected.txt")
+        with self.assertRaises(GateError):
+            gitinfo.changed_files(self.root, f"--output={out_file}", "HEAD")
+        self.assertFalse(os.path.exists(out_file))
+
+    def test_a_cite_that_names_no_tracked_path_fails(self):
+        # every shape is a fail-open without DEC-0004: the row would stay `verified` forever
+        shapes = ("src", "./src/a.c", "src//a.c", "src/typo.c", "src/a.c/", "SRC/a.c", "src/A.c", " src/a.c",
+                  "src/a.c ", "/src/a.c", "src/../src/a.c", "..", ".", "src/..", "src/a.c/.")
+        for n, cite in enumerate(shapes):
+            self.claims(row(verified_at=f'"{self.v}"', cites=f'"{cite}"'))
+            gf.write(self.root, "src/a.c", f"int a(void) {{ return {n + 10}; }}\n")
+            gf.commit_all(self.root, "touch")
+            rc, out = self.run_gate()
+            self.assertEqual(1, rc, (cite, out))
+            self.assertRegex(out, r"FAIL claims\.(schema|stale)\.C-demo-1: ", cite)
+            self.assertNotIn("PASS claims.stale", out, cite)
+
+    def test_an_untouched_row_with_a_missing_cite_fails_too(self):
+        self.claims(row(verified_at=f'"{self.v}"', cites="src/typo.c"))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite src/typo.c is not a file at verified_at", out)
+        self.assertEqual(1, rc)
+
+    def test_a_directory_cite_needs_a_directory_and_a_file_cite_a_file(self):
+        self.claims(row(verified_at=f'"{self.v}"', cites="src"))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite src is not a file at verified_at", out)
+        self.claims(row(verified_at=f'"{self.v}"', cites='"src/a.c/"'))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite src/a.c/ is not a directory at verified_at", out)
+        self.claims(row(verified_at=f'"{self.v}"', cites='"src/", "src/a.c"'))
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+
+    def test_a_cite_only_needs_to_exist_on_a_verified_row(self):
+        self.claims(row(state="unverified", verified_at="null", by="null", cites="src/typo.c"))
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
 
 
 if __name__ == "__main__":

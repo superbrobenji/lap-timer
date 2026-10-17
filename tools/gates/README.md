@@ -9,7 +9,8 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 - Output: one line per verdict, `PASS <id>` or `FAIL <id>: <reason>`; `--json` for a JSON object.
 - Exit 0 only when every line is PASS and there is at least one line; otherwise 1.
 - A missing or unreadable input is `FAIL <gate>.input`, never "nothing to do"; an empty result
-  is `FAIL <gate>.empty`; bad arguments are `FAIL <gate>.input: bad arguments`.
+  is `FAIL <gate>.empty`; bad arguments are `FAIL <gate>.input: bad arguments`; `-h` prints the
+  usage on stderr and reports `FAIL <gate>.input: help requested; no gate was run`.
 - `--root <tree>` points a gate at another tree's `docs/superpowers/state/`; config is always read
   from the checkout holding the gate code (`tools/gates/config.yml`).
 
@@ -18,14 +19,14 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | Gate | Checks |
 |---|---|
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
-| `gate_claims.py` | claims schema, every sha a commit of the repository, verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` rewrites stale rows |
+| `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
 gate). An unknown, missing or repeated gate, an empty or non-directory `--root`, and a root with
 no `docs/superpowers/plans/*.md` for `decisions` to scan are each a FAIL. For `decisions` it
-scans every `docs/superpowers/plans/*.md`; run alone without `--scan`, `gate_decisions.py`
+scans every `docs/superpowers/plans/*.md` (extra `--scan` args add to them); a relative `--root` works from any directory; run alone without `--scan`, `gate_decisions.py`
 prints no `scan` or `open-ref` PASS line.
 
 ## Running

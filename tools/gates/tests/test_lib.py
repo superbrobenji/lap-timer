@@ -167,7 +167,7 @@ class GitInfo(unittest.TestCase):
     def test_bad_revision_raises_gate_error(self):
         with self.assertRaises(GateError) as ctx:
             gitinfo.changed_files(self.root, "0000000", "HEAD")
-        self.assertTrue(str(ctx.exception).startswith("git diff --name-only -z --no-renames 0000000 HEAD: "),
+        self.assertTrue(str(ctx.exception).startswith("git diff --name-only -z --no-renames --end-of-options 0000000 HEAD: "),
                         str(ctx.exception))
         self.assertNotIn(self.root, str(ctx.exception))
 
@@ -338,14 +338,15 @@ class FixWave(unittest.TestCase):
                 rc, out = run(check, ["--json", flag])
             self.assertEqual(1, rc)
             self.assertFalse(out.startswith("usage"), out)
-            self.assertEqual({"status": "FAIL", "id": "demo.input", "reason": "bad arguments (argparse exit 0)"},
+            self.assertEqual({"status": "FAIL", "id": "demo.input", "reason": "help requested; no gate was run"},
                              json.loads(out)["lines"][0])
             self.assertIn("usage: demo", err.getvalue())
             self.assertIn("--root", err.getvalue())
+            self.assertNotIn("bad arguments", out)
         with contextlib.redirect_stderr(io.StringIO()):
             rc, out = run(check, ["--roo", "x"])
         self.assertEqual(1, rc)
-        self.assertIn("FAIL demo.input: bad arguments", out)
+        self.assertIn("FAIL demo.input: bad arguments (argparse exit 2)", out)
 
     def test_load_yaml_messages_are_relative_to_the_root(self):                      # A7
         d = tempfile.mkdtemp(prefix="gate-yaml-")

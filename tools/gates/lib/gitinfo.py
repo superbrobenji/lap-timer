@@ -63,9 +63,27 @@ def worktrees(root) -> list:
 
 
 def changed_files(root, base: str, head: str = "HEAD") -> list:
-    """Paths that differ between two commits (`git diff --name-only -z --no-renames`; -z means no C-quoting of non-ASCII paths)."""
-    out = _git(root, "diff", "--name-only", "-z", "--no-renames", base, head)
+    """Paths that differ between two commits (`git diff --name-only -z --no-renames --end-of-options`; -z means no C-quoting of non-ASCII
+    paths, --end-of-options means a revision shaped like an option is a revision, never an option)."""
+    out = _git(root, "diff", "--name-only", "-z", "--no-renames", "--end-of-options", base, head)
     return [l for l in out.split("\0") if l]
+
+
+def path_type(root, rev: str, path: str):
+    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule) or None when `path` does not exist
+    at `rev` (`git cat-file -t <rev>:<path>`); any other git failure is a GateError."""
+    cmd = ["git", "cat-file", "-t", f"{rev}:{path}"]
+    _check_root(cmd, str(root))
+    try:
+        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False, env=_env())
+    except OSError as exc:
+        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
+    if p.returncode == 0:
+        return p.stdout.strip()
+    if p.returncode == 128 and any(m in p.stderr for m in ("does not exist in", "exists on disk, but not in",
+                                                  "Not a valid object name", "could not get object info")):
+        return None
+    raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
 
 
 def staged_files(root) -> list:

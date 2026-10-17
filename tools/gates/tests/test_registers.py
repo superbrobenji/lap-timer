@@ -49,8 +49,8 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003"], [d["id"] for d in decisions])
-        self.assertEqual([[], [], []], [reg.validate_decision(d) for d in decisions])
+        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0004"], [d["id"] for d in decisions])
+        self.assertEqual([[], [], [], []], [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -250,6 +250,23 @@ class ClaimSchema(unittest.TestCase):
 
     def test_a_claim_must_cite_something(self):
         self.assertTrue(any(e.startswith("cites: ") for e in reg.validate_claim(with_(CLAIM, cites=[]))))
+
+    def test_a_cite_is_a_normalised_repo_relative_path(self):                        # DEC-0004
+        for ok in ("a.c", "src/a.c", "src/", "docs/superpowers/state/claims.yml", "a b/c d.c", ".github/x.yml"):
+            self.assertEqual([], reg.validate_claim(with_(CLAIM, cites=[ok])), ok)
+        bad = {"not a non-empty string": ["", 5, None, ["a.c"]],
+               "whitespace or a NUL": [" ", "src/a.c ", " src/a.c", "a\0b", "src/\n"],
+               "is absolute": ["/src/a.c", "/", "//", "//x"],
+               "climbs out": ["..", ".", "./", "../x.c", "src/..", "src/../a.c", "src/../"],
+               "not normalised": ["./src/a.c", "src//a.c", "src//", "src/./a.c", "src/a.c/.", "src/a.c//"]}
+        for why, cites in bad.items():
+            for cite in cites:
+                errs = reg.validate_claim(with_(CLAIM, cites=[cite]))
+                self.assertEqual(1, len(errs), (cite, errs))
+                self.assertTrue(errs[0].startswith("cites: ") and why in errs[0], (cite, errs))
+        errs = reg.validate_claim(with_(CLAIM, cites=["a.c", "./b.c"]))
+        self.assertEqual(1, len(errs), errs)
+        self.assertIn("'./b.c'", errs[0])
 
 
 class DecisionSchema(unittest.TestCase):

@@ -140,7 +140,10 @@ def run_check(name: str, check: Callable[[list], Result], args: list) -> Result:
         result = check(list(args))
     except SystemExit as exc:          # argparse: bad arguments are a FAIL, never a skip
         result = Result(name)
-        result.fail(f"{name}.input", f"bad arguments (argparse exit {exc.code})")
+        if exc.code == 0:              # -h/--help: a request for usage, not bad arguments; no gate ran
+            result.fail(f"{name}.input", "help requested; no gate was run")
+        else:
+            result.fail(f"{name}.input", f"bad arguments (argparse exit {exc.code})")
     except Exception as exc:           # GateError and anything unexpected
         result = Result(name)
         result.fail(f"{name}.input", str(exc) or type(exc).__name__)

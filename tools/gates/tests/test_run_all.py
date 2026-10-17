@@ -146,6 +146,37 @@ class RunAll(unittest.TestCase):
         res = run_all.run(["claims"], {"root": self.root, "claims": ["--mark-stale"]})
         self.assertIn("FAIL claims.input: --mark-stale needs --base <sha>", res.render(False))
 
+    def test_an_extra_scan_adds_to_the_plans_never_replaces_them(self):
+        gf.write(self.root, os.path.join(gf.STATE, "decisions.yml"),
+                 '- {id: DEC-9001, class: scope, question: "q?", options: [{label: a, cost: x}, '
+                 '{label: b, cost: y}], asked_at: {sha: "%s", by: s}, answer: null, answered_at: null}\n'
+                 % self.sha)
+        gf.write(self.root, os.path.join(PLANS, "p.md"), "waits on DEC-9001\n")
+        gf.write(self.root, "prompt.md", "a clean prompt\n")
+        res = run_all.run(["decisions"], {"root": self.root, "decisions": ["--scan", "prompt.md"]})
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/superpowers/plans/p.md:1", res.render(False))
+
+    def test_a_relative_root_works_from_any_cwd(self):
+        parent, name = os.path.split(self.root)
+        old = os.getcwd()
+        os.chdir(parent)
+        try:
+            for root in (name, os.path.join(".", name), os.path.join(name, "docs", "..")):
+                res = run_all.run(run_all.GATES, {"root": root})
+                self.assertTrue(res.ok(), (root, res.render(False)))
+                self.assertIn("PASS decisions.open-ref", res.render(False))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(0, run_all.main(["--root", name]), buf.getvalue())
+        finally:
+            os.chdir(old)
+
+    def test_cli_help_is_not_called_bad_arguments(self):
+        p = self.cli("-h")
+        self.assertEqual(1, p.returncode)
+        self.assertIn("usage: run_all", p.stderr)
+        self.assertEqual("FAIL run_all.input: help requested; no gate was run\n", p.stdout)
+
     def test_cli_only_and_rc(self):
         p = self.cli("--only", "register")
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)

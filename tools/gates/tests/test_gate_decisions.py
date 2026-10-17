@@ -110,6 +110,7 @@ class GateDecisions(unittest.TestCase):
         rc, out = self.run_gate(OPEN, "--scan", "docs/absent.md")
         self.assertIn("FAIL decisions.scan.docs/absent.md: cannot read", out)
         self.assertNotIn("PASS decisions.scan", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
         self.assertEqual(1, rc)
 
     def test_a_directory_and_a_non_utf8_scan_file_fail(self):
@@ -120,7 +121,52 @@ class GateDecisions(unittest.TestCase):
         self.assertIn("FAIL decisions.scan.docs/dir: not a regular file", out)
         self.assertIn("FAIL decisions.scan.docs/bin.md: cannot read: not valid UTF-8", out)
         self.assertNotIn("PASS decisions.scan", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
         self.assertEqual(1, rc)
+
+    def test_a_non_utf8_scan_file_alone_withholds_the_open_ref_pass(self):
+        with open(os.path.join(self.root, "docs-bin.md"), "wb") as fh:
+            fh.write(b"\xff\xfe DEC-9001\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs-bin.md")
+        self.assertIn("FAIL decisions.scan.docs-bin.md: cannot read: not valid UTF-8", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unreadable_scan_file_is_a_scan_failure(self):
+        if not hasattr(os, "geteuid") or os.geteuid() == 0:
+            self.skipTest("file modes do not stop root")
+        path = gf.write(self.root, "docs/locked.md", "DEC-9001\n")
+        os.chmod(path, 0)
+        try:
+            rc, out = self.run_gate(OPEN, "--scan", "docs/locked.md")
+        finally:
+            os.chmod(path, 0o600)
+        self.assertIn("FAIL decisions.scan.docs/locked.md: cannot read: Permission denied", out)
+        self.assertNotIn("decisions.input", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unhashable_id_is_a_schema_failure_not_a_crash(self):
+        bad = OPEN.replace("id: DEC-9001", "id: [DEC-9001]")
+        gf.write(self.root, "docs/plan.md", "nothing\n")
+        rc, out = self.run_gate(bad, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.schema.entry-0: id: ", out)
+        self.assertNotIn("decisions.input", out)
+        self.assertEqual(1, rc)
+
+    def test_repeated_scan_options_add_up(self):
+        gf.write(self.root, "docs/a.md", "clean\n")
+        gf.write(self.root, "docs/b.md", "waits on DEC-9001\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/b.md", "--scan", "docs/a.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/b.md:1", out)
+        self.assertEqual(1, rc)
+
+    def test_the_owner_comes_from_the_shared_helper(self):
+        spy = mock.Mock(wraps=registers.owner_handle)
+        with mock.patch.object(registers, "owner_handle", spy):
+            rc, out = self.run_gate(ANSWERED.replace("BY", "superbrobenji"))
+        self.assertEqual(0, rc, out)
+        self.assertIn(mock.call(), spy.call_args_list)    # the gate asks the helper itself, once, for the default
 
     def test_a_fifo_scan_path_fails_instead_of_hanging(self):
         if not hasattr(os, "mkfifo"):
