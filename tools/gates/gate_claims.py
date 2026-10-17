@@ -8,7 +8,10 @@ A row is "verified at HEAD" when its state is `verified` and no file it cites di
 `verified_at` and HEAD, nor is staged for the next commit. (`verified_at` cannot literally equal
 the HEAD that contains the row: a commit cannot hold its own sha.) A cite ending in "/" covers
 every file under that directory. --mark-stale rewrites every `verified` row whose cites
-intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. Every
+intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. It
+rewrites claims.yml with yaml.safe_dump, so YAML comments and hand formatting are lost, and it
+refuses to write (FAIL claims.input) unless every row validates and has no duplicate id. --head
+must name a commit of the gated repository (an empty or unknown --head is FAIL claims.input). Every
 verified_at names a commit of the gated repository (DEC-0003); a row that does not is a FAIL
 claims.stale.<id>. Row ids print forgery-safe (entry-<i> when the id is malformed), an empty
 --root is an error, and a category some row never reached prints no PASS line.
@@ -58,7 +61,14 @@ def _claims_path(root) -> str:
     return os.path.join(root, registers.STATE_DIR, "claims.yml")
 
 
-def mark_stale(root, claims: list, base: str, head: str, r: Result) -> None:
+def mark_stale(root, claims: list, base: str, head: str, r: Result, exists) -> None:
+    ids = [registers.row_id(c, i, registers.CLAIM_ID) for i, c in enumerate(claims)]
+    bad = [ids[i] for i, c in enumerate(claims)
+           if registers.validate_claim(c) or registers.claim_commit_errors(c, root, exists)]
+    bad += [f"{n} (duplicate id)" for n in sorted({n for n in ids if ids.count(n) > 1})]
+    if bad:
+        raise GateError(f"refusing to rewrite {registers.STATE_DIR}/claims.yml (it drops YAML comments): "
+                        f"fix {', '.join(bad)} first; run without --mark-stale to see the failures")
     changed = list(gitinfo.changed_files(root, base, head)) + gitinfo.staged_files(root)
     marked = 0
     for c in claims:
@@ -73,16 +83,11 @@ def mark_stale(root, claims: list, base: str, head: str, r: Result) -> None:
         r.passed("claims.marked-stale.none")
 
 
-def _row_id(row, index) -> str:
-    """The id to print in a line id: the row's own id only when it is well-formed, else entry-<index>."""
-    rid = row.get("id")
-    return rid if isinstance(rid, str) and registers.CLAIM_ID.fullmatch(rid) else f"entry-{index}"
-
-
 def check(args: list) -> Result:
     ap = gate_args("gate_claims")
     ap.add_argument("--head", default=None, help="sha to check against (default: HEAD of --root)")
-    ap.add_argument("--mark-stale", action="store_true")
+    ap.add_argument("--mark-stale", action="store_true",
+                    help="rewrite stale `verified` rows as `stale` (drops YAML comments in claims.yml)")
     ap.add_argument("--base", default=None)
     ns = ap.parse_args(args)
     if ns.root is not None and not ns.root.strip():
@@ -91,24 +96,24 @@ def check(args: list) -> Result:
     claims = registers.load_claims(root)
     findings = registers.load_findings(root)
     r = Result("claims")
-    commits = {}
-
-    def exists(root, sha):    # one git call per distinct sha
-        if sha not in commits:
-            commits[sha] = gitinfo.commit_exists(root, sha)
-        return commits[sha]
+    exists = registers.memo_commit_exists()    # one git call per distinct sha
 
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
     head = ns.head
+    if head is not None:
+        if not head.strip():
+            raise GateError("--head is empty")
+        if not exists(root, head):
+            raise GateError(f"--head {head} is not a commit in this repository")
     if ns.mark_stale:
         if not ns.base:
             raise GateError("--mark-stale needs --base <sha>")
         head = head or gitinfo.head_sha(root)
-        mark_stale(root, claims, ns.base, head, r)
+        mark_stale(root, claims, ns.base, head, r, exists)
     staged = None
     seen = set()
     for i, c in enumerate(claims):
-        cid = _row_id(c, i)
+        cid = registers.row_id(c, i, registers.CLAIM_ID)
         if cid in seen:
             r.fail(f"claims.duplicate.{cid}", "id appears more than once")
         seen.add(cid)
@@ -118,13 +123,13 @@ def check(args: list) -> Result:
         if errs:
             skipped.update(["false", "stale"])    # the false and stale rules need a well-formed row
             continue
+        if c["state"] == "false" and registers.finding_by_id(findings, c["finding"]) is None:
+            r.fail(f"claims.false.{cid}", f"finding {c['finding']} is not in findings.yml")
         bad_commit = registers.claim_commit_errors(c, root, exists)
         for e in bad_commit:
             r.fail(f"claims.stale.{cid}", e)
         if bad_commit:
             continue    # nothing to compare against
-        if c["state"] == "false" and registers.finding_by_id(findings, c["finding"]) is None:
-            r.fail(f"claims.false.{cid}", f"finding {c['finding']} is not in findings.yml")
         if c["state"] == "verified":
             if head is None:
                 head = gitinfo.head_sha(root)

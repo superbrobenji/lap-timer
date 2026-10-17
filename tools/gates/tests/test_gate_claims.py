@@ -110,8 +110,13 @@ class ClaimsRepo(unittest.TestCase):
                     + row(state="unverified", verified_at="null", by="null").replace("C-demo-1", "C-demo-2"))
         gf.write(self.root, "src/a.c", "int a(void) { return 5; }\n")
         gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
         rc, out = self.run_gate("--mark-stale", "--base", self.v)
         self.assertIn("PASS claims.marked-stale.none", out)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
         self.assertEqual(["verified", "unverified"], [c["state"] for c in registers.load_claims(self.root)])
         self.assertEqual(0, rc, out)
 
@@ -190,6 +195,63 @@ class ClaimsRepo(unittest.TestCase):
             rc, out = self.run_gate()
         self.assertEqual(0, rc, out)
         self.assertEqual([self.v], calls)
+
+    def test_a_false_row_with_an_unknown_commit_still_needs_its_finding(self):
+        self.claims(row(state='"false"', verified_at='"1234abc"', by="null", finding="A2-IO-N4"))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.false.C-demo-1: finding A2-IO-N4 is not in findings.yml", out)
+        self.assertIn("FAIL claims.stale.C-demo-1: verified_at: sha 1234abc is not a commit", out)
+        self.assertNotIn("PASS claims.false", out)
+        self.assertEqual(1, rc)
+
+    def test_a_bad_head_is_an_input_failure(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        for head in ("", "  "):
+            self.assertEqual((1, "FAIL claims.input: --head is empty\n"), self.run_gate("--head", head))
+            self.assertEqual((1, "FAIL claims.input: --head is empty\n"),
+                             self.run_gate("--head", head, "--mark-stale", "--base", self.v))
+        rc, out = self.run_gate("--head", "deadbee")
+        self.assertEqual((1, "FAIL claims.input: --head deadbee is not a commit in this repository\n"), (rc, out))
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        rc, out = self.run_gate("--head", head)
+        self.assertEqual(0, rc, out)
+
+    def test_mark_stale_refuses_to_rewrite_an_invalid_register(self):
+        bad = row(state="unverified", verified_at="null", by="null").replace("C-demo-1", "C-demo-2").replace(
+            'text: "a.c returns 1"', "text: 5")
+        self.claims(row(verified_at=f'"{self.v}"') + bad)
+        gf.write(self.root, "src/a.c", "int a(void) { return 3; }\n")
+        gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
+        rc, out = self.run_gate("--mark-stale", "--base", self.v)
+        self.assertTrue(out.startswith("FAIL claims.input: refusing to rewrite "), out)
+        self.assertIn("C-demo-2", out)
+        self.assertEqual(1, rc)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
+        self.claims(row(verified_at=f'"{self.v}"') * 2)
+        rc, out = self.run_gate("--mark-stale", "--base", self.v)
+        self.assertIn("C-demo-1 (duplicate id)", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unknown_verified_at_is_not_comparable(self):
+        # main() rejects such a row first (claims.stale), so the defensive branch is reached
+        # through the helper dispatch uses
+        self.claims(row(verified_at=f'"{self.v}"'))
+        c = dict(registers.load_claims(self.root)[0], verified_at="1234abc")
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        self.assertIn("verified_at 1234abc is not comparable with", gate_claims.stale_reason(self.root, c, head, []))
+
+    def test_verified_at_head_sees_a_staged_change(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        c = registers.load_claims(self.root)[0]
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        self.assertTrue(gate_claims.verified_at_head(self.root, c, head))
+        gf.write(self.root, "src/a.c", "int a(void) { return 4; }\n")
+        gf.git(self.root, "add", "src/a.c")
+        self.assertFalse(gate_claims.verified_at_head(self.root, c, head))
 
     def test_verified_at_head_for_dispatch(self):
         self.claims(row(verified_at=f'"{self.v}"'))

@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
-from tools.gates.lib import gitinfo, registers  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
 
 CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"]
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
@@ -142,13 +142,6 @@ def report_ids(path, root) -> list:
     return ids
 
 
-def _row_id(row, index, pattern) -> str:
-    """The id to print in a line id: the row's own id only when it is well-formed, else entry-<index>
-    (a raw malformed id could carry a newline and forge or split a result line)."""
-    rid = row.get("id")
-    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
-
-
 def _categories(error: str) -> list:
     """Which categories a finding-schema error belongs to: owner errors (including a missing
     `owner` key) are `owner`; every other error is `schema`."""
@@ -169,16 +162,11 @@ def check(args: list) -> Result:
     decisions = registers.load_decisions(root)
     r = Result("register")
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
-    commits = {}
-
-    def exists(root, sha):    # one git call per distinct sha
-        if sha not in commits:
-            commits[sha] = gitinfo.commit_exists(root, sha)
-        return commits[sha]
+    exists = registers.memo_commit_exists()    # one git call per distinct sha
 
     seen = set()
     for i, f in enumerate(findings):
-        fid = _row_id(f, i, registers.FINDING_ID)
+        fid = registers.row_id(f, i, registers.FINDING_ID)
         if fid in seen:
             r.fail(f"register.duplicate.{fid}", "id appears more than once")
         seen.add(fid)
@@ -195,7 +183,7 @@ def check(args: list) -> Result:
             r.fail(f"register.evidence.{fid}", e)
     seen = set()
     for i, d in enumerate(decisions):
-        did = _row_id(d, i, registers.DECISION_ID)
+        did = registers.row_id(d, i, registers.DECISION_ID)
         if did in seen:
             r.fail(f"register.duplicate.{did}", "id appears more than once")
         seen.add(did)

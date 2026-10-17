@@ -1255,7 +1255,7 @@ git commit -m "feat(gates): gate framework, config, git helpers, register bootst
 
 **Interfaces:**
 - Consumes: `GateError`, `load_yaml`, `CODE_ROOT` (Task 1); `gitfixture.write`, `.remove`, `.STATE`.
-- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions) -> list[dict]`; `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
+- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions) -> list[dict]`; `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `row_id(row, index, pattern) -> str` (the id a result line prints: the row's own when well-formed, else `entry-<index>`), `memo_commit_exists() -> exists(root, sha)` (one `gitinfo.commit_exists` call per distinct root and sha), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1750,6 +1750,26 @@ class FixWave(unittest.TestCase):
             reg.finding_commit_errors(f, outside)
 
 
+    def test_row_id_prints_only_a_well_formed_id(self):
+        self.assertEqual("DEC-0001", reg.row_id({"id": "DEC-0001"}, 3, reg.DECISION_ID))
+        for bad in ("DEC-1", "DEC-0001\nPASS x", 5, None, ["DEC-0001"]):
+            self.assertEqual("entry-3", reg.row_id({"id": bad}, 3, reg.DECISION_ID))
+        self.assertEqual("entry-0", reg.row_id({}, 0, reg.DECISION_ID))
+
+    def test_memo_commit_exists_asks_git_once_per_distinct_sha(self):
+        calls = []
+        real = reg.gitinfo.commit_exists
+        reg.gitinfo.commit_exists = lambda root, sha: calls.append((root, sha)) or sha == "abcdef1"
+        try:
+            exists = reg.memo_commit_exists()
+            self.assertEqual([True, True, False, False, True],
+                             [exists("r", "abcdef1"), exists("r", "abcdef1"), exists("r", "1234abc"),
+                              exists("r", "1234abc"), exists("r2", "abcdef1")])
+            self.assertEqual([("r", "abcdef1"), ("r", "1234abc"), ("r2", "abcdef1")], calls)
+        finally:
+            reg.gitinfo.commit_exists = real
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -2093,6 +2113,28 @@ def _commit_errors(pairs, root, exists) -> list:
             for field, sha in pairs if _sha(sha) and not exists(root, sha)]
 
 
+def row_id(row, index, pattern) -> str:
+    """The id to print in a result line id: the row's own id only when it is a str matching
+    `pattern`, else `entry-<index>` (a raw malformed id could carry a newline and forge or split a
+    result line)."""
+    rid = row.get("id")
+    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
+
+
+def memo_commit_exists():
+    """An `exists(root, sha) -> bool` for the *_commit_errors functions that asks git once per
+    distinct (root, sha) and remembers the answer (a GateError is not remembered)."""
+    seen = {}
+
+    def exists(root, sha):
+        key = (str(root), sha)
+        if key not in seen:
+            seen[key] = gitinfo.commit_exists(root, sha)
+        return seen[key]
+
+    return exists
+
+
 def finding_commit_errors(f: dict, root, exists=gitinfo.commit_exists) -> list:
     """Every sha in a (valid) finding row -- history, cites, evidence entries shaped like a sha --
     must name a commit in the repository at `root` (DEC-0003). `exists(root, sha) -> bool`."""
@@ -2144,13 +2186,13 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 44 tests` OK; whole suite `Ran 83 tests` OK.
+Expected: `Ran 46 tests` OK; whole suite `Ran 85 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 44 OK` to the ledger.
+Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 46 OK` to the ledger.
 
 ```bash
 git add tools/gates/lib/registers.py tools/gates/tests/test_registers.py docs/superpowers/state/strict-delivery/ledger.md
@@ -2962,7 +3004,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
-from tools.gates.lib import gitinfo, registers  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
 
 CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"]
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
@@ -3076,13 +3118,6 @@ def report_ids(path, root) -> list:
     return ids
 
 
-def _row_id(row, index, pattern) -> str:
-    """The id to print in a line id: the row's own id only when it is well-formed, else entry-<index>
-    (a raw malformed id could carry a newline and forge or split a result line)."""
-    rid = row.get("id")
-    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
-
-
 def _categories(error: str) -> list:
     """Which categories a finding-schema error belongs to: owner errors (including a missing
     `owner` key) are `owner`; every other error is `schema`."""
@@ -3103,16 +3138,11 @@ def check(args: list) -> Result:
     decisions = registers.load_decisions(root)
     r = Result("register")
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
-    commits = {}
-
-    def exists(root, sha):    # one git call per distinct sha
-        if sha not in commits:
-            commits[sha] = gitinfo.commit_exists(root, sha)
-        return commits[sha]
+    exists = registers.memo_commit_exists()    # one git call per distinct sha
 
     seen = set()
     for i, f in enumerate(findings):
-        fid = _row_id(f, i, registers.FINDING_ID)
+        fid = registers.row_id(f, i, registers.FINDING_ID)
         if fid in seen:
             r.fail(f"register.duplicate.{fid}", "id appears more than once")
         seen.add(fid)
@@ -3129,7 +3159,7 @@ def check(args: list) -> Result:
             r.fail(f"register.evidence.{fid}", e)
     seen = set()
     for i, d in enumerate(decisions):
-        did = _row_id(d, i, registers.DECISION_ID)
+        did = registers.row_id(d, i, registers.DECISION_ID)
         if did in seen:
             r.fail(f"register.duplicate.{did}", "id appears more than once")
         seen.add(did)
@@ -3172,7 +3202,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 125 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 127 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -3183,7 +3213,7 @@ Mutation check (report scan): in `registered_reports`, replace `if MARKER in att
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 125 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 127 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -3353,7 +3383,7 @@ grep -n 'answer:' docs/superpowers/state/decisions.yml   # DEC-0001 answer: "yes
 
 **Interfaces:**
 - Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`, `commit_exists`; `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `STATE_DIR`.
-- Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root), `--mark-stale --base <sha>`; `main(argv=None)`; `hits(cites, changed) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`). Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
+- Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root; an empty or unknown `--head` is `FAIL claims.input`), `--mark-stale --base <sha>` (refuses to rewrite claims.yml, `FAIL claims.input`, unless every row validates and no id repeats; the rewrite drops YAML comments); `main(argv=None)`; `hits(cites, changed) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`). Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3472,8 +3502,13 @@ class ClaimsRepo(unittest.TestCase):
                     + row(state="unverified", verified_at="null", by="null").replace("C-demo-1", "C-demo-2"))
         gf.write(self.root, "src/a.c", "int a(void) { return 5; }\n")
         gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
         rc, out = self.run_gate("--mark-stale", "--base", self.v)
         self.assertIn("PASS claims.marked-stale.none", out)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
         self.assertEqual(["verified", "unverified"], [c["state"] for c in registers.load_claims(self.root)])
         self.assertEqual(0, rc, out)
 
@@ -3553,6 +3588,63 @@ class ClaimsRepo(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertEqual([self.v], calls)
 
+    def test_a_false_row_with_an_unknown_commit_still_needs_its_finding(self):
+        self.claims(row(state='"false"', verified_at='"1234abc"', by="null", finding="A2-IO-N4"))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.false.C-demo-1: finding A2-IO-N4 is not in findings.yml", out)
+        self.assertIn("FAIL claims.stale.C-demo-1: verified_at: sha 1234abc is not a commit", out)
+        self.assertNotIn("PASS claims.false", out)
+        self.assertEqual(1, rc)
+
+    def test_a_bad_head_is_an_input_failure(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        for head in ("", "  "):
+            self.assertEqual((1, "FAIL claims.input: --head is empty\n"), self.run_gate("--head", head))
+            self.assertEqual((1, "FAIL claims.input: --head is empty\n"),
+                             self.run_gate("--head", head, "--mark-stale", "--base", self.v))
+        rc, out = self.run_gate("--head", "deadbee")
+        self.assertEqual((1, "FAIL claims.input: --head deadbee is not a commit in this repository\n"), (rc, out))
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        rc, out = self.run_gate("--head", head)
+        self.assertEqual(0, rc, out)
+
+    def test_mark_stale_refuses_to_rewrite_an_invalid_register(self):
+        bad = row(state="unverified", verified_at="null", by="null").replace("C-demo-1", "C-demo-2").replace(
+            'text: "a.c returns 1"', "text: 5")
+        self.claims(row(verified_at=f'"{self.v}"') + bad)
+        gf.write(self.root, "src/a.c", "int a(void) { return 3; }\n")
+        gf.commit_all(self.root)
+        path = os.path.join(self.root, CLAIMS)
+        with open(path, "rb") as fh:
+            before = fh.read()
+        rc, out = self.run_gate("--mark-stale", "--base", self.v)
+        self.assertTrue(out.startswith("FAIL claims.input: refusing to rewrite "), out)
+        self.assertIn("C-demo-2", out)
+        self.assertEqual(1, rc)
+        with open(path, "rb") as fh:
+            self.assertEqual(before, fh.read())
+        self.claims(row(verified_at=f'"{self.v}"') * 2)
+        rc, out = self.run_gate("--mark-stale", "--base", self.v)
+        self.assertIn("C-demo-1 (duplicate id)", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unknown_verified_at_is_not_comparable(self):
+        # main() rejects such a row first (claims.stale), so the defensive branch is reached
+        # through the helper dispatch uses
+        self.claims(row(verified_at=f'"{self.v}"'))
+        c = dict(registers.load_claims(self.root)[0], verified_at="1234abc")
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        self.assertIn("verified_at 1234abc is not comparable with", gate_claims.stale_reason(self.root, c, head, []))
+
+    def test_verified_at_head_sees_a_staged_change(self):
+        self.claims(row(verified_at=f'"{self.v}"'))
+        c = registers.load_claims(self.root)[0]
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        self.assertTrue(gate_claims.verified_at_head(self.root, c, head))
+        gf.write(self.root, "src/a.c", "int a(void) { return 4; }\n")
+        gf.git(self.root, "add", "src/a.c")
+        self.assertFalse(gate_claims.verified_at_head(self.root, c, head))
+
     def test_verified_at_head_for_dispatch(self):
         self.claims(row(verified_at=f'"{self.v}"'))
         c = registers.load_claims(self.root)[0]
@@ -3588,7 +3680,10 @@ A row is "verified at HEAD" when its state is `verified` and no file it cites di
 `verified_at` and HEAD, nor is staged for the next commit. (`verified_at` cannot literally equal
 the HEAD that contains the row: a commit cannot hold its own sha.) A cite ending in "/" covers
 every file under that directory. --mark-stale rewrites every `verified` row whose cites
-intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. Every
+intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. It
+rewrites claims.yml with yaml.safe_dump, so YAML comments and hand formatting are lost, and it
+refuses to write (FAIL claims.input) unless every row validates and has no duplicate id. --head
+must name a commit of the gated repository (an empty or unknown --head is FAIL claims.input). Every
 verified_at names a commit of the gated repository (DEC-0003); a row that does not is a FAIL
 claims.stale.<id>. Row ids print forgery-safe (entry-<i> when the id is malformed), an empty
 --root is an error, and a category some row never reached prints no PASS line.
@@ -3638,7 +3733,14 @@ def _claims_path(root) -> str:
     return os.path.join(root, registers.STATE_DIR, "claims.yml")
 
 
-def mark_stale(root, claims: list, base: str, head: str, r: Result) -> None:
+def mark_stale(root, claims: list, base: str, head: str, r: Result, exists) -> None:
+    ids = [registers.row_id(c, i, registers.CLAIM_ID) for i, c in enumerate(claims)]
+    bad = [ids[i] for i, c in enumerate(claims)
+           if registers.validate_claim(c) or registers.claim_commit_errors(c, root, exists)]
+    bad += [f"{n} (duplicate id)" for n in sorted({n for n in ids if ids.count(n) > 1})]
+    if bad:
+        raise GateError(f"refusing to rewrite {registers.STATE_DIR}/claims.yml (it drops YAML comments): "
+                        f"fix {', '.join(bad)} first; run without --mark-stale to see the failures")
     changed = list(gitinfo.changed_files(root, base, head)) + gitinfo.staged_files(root)
     marked = 0
     for c in claims:
@@ -3653,16 +3755,11 @@ def mark_stale(root, claims: list, base: str, head: str, r: Result) -> None:
         r.passed("claims.marked-stale.none")
 
 
-def _row_id(row, index) -> str:
-    """The id to print in a line id: the row's own id only when it is well-formed, else entry-<index>."""
-    rid = row.get("id")
-    return rid if isinstance(rid, str) and registers.CLAIM_ID.fullmatch(rid) else f"entry-{index}"
-
-
 def check(args: list) -> Result:
     ap = gate_args("gate_claims")
     ap.add_argument("--head", default=None, help="sha to check against (default: HEAD of --root)")
-    ap.add_argument("--mark-stale", action="store_true")
+    ap.add_argument("--mark-stale", action="store_true",
+                    help="rewrite stale `verified` rows as `stale` (drops YAML comments in claims.yml)")
     ap.add_argument("--base", default=None)
     ns = ap.parse_args(args)
     if ns.root is not None and not ns.root.strip():
@@ -3671,24 +3768,24 @@ def check(args: list) -> Result:
     claims = registers.load_claims(root)
     findings = registers.load_findings(root)
     r = Result("claims")
-    commits = {}
-
-    def exists(root, sha):    # one git call per distinct sha
-        if sha not in commits:
-            commits[sha] = gitinfo.commit_exists(root, sha)
-        return commits[sha]
+    exists = registers.memo_commit_exists()    # one git call per distinct sha
 
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
     head = ns.head
+    if head is not None:
+        if not head.strip():
+            raise GateError("--head is empty")
+        if not exists(root, head):
+            raise GateError(f"--head {head} is not a commit in this repository")
     if ns.mark_stale:
         if not ns.base:
             raise GateError("--mark-stale needs --base <sha>")
         head = head or gitinfo.head_sha(root)
-        mark_stale(root, claims, ns.base, head, r)
+        mark_stale(root, claims, ns.base, head, r, exists)
     staged = None
     seen = set()
     for i, c in enumerate(claims):
-        cid = _row_id(c, i)
+        cid = registers.row_id(c, i, registers.CLAIM_ID)
         if cid in seen:
             r.fail(f"claims.duplicate.{cid}", "id appears more than once")
         seen.add(cid)
@@ -3698,13 +3795,13 @@ def check(args: list) -> Result:
         if errs:
             skipped.update(["false", "stale"])    # the false and stale rules need a well-formed row
             continue
+        if c["state"] == "false" and registers.finding_by_id(findings, c["finding"]) is None:
+            r.fail(f"claims.false.{cid}", f"finding {c['finding']} is not in findings.yml")
         bad_commit = registers.claim_commit_errors(c, root, exists)
         for e in bad_commit:
             r.fail(f"claims.stale.{cid}", e)
         if bad_commit:
             continue    # nothing to compare against
-        if c["state"] == "false" and registers.finding_by_id(findings, c["finding"]) is None:
-            r.fail(f"claims.false.{cid}", f"finding {c['finding']} is not in findings.yml")
         if c["state"] == "verified":
             if head is None:
                 head = gitinfo.head_sha(root)
@@ -3731,15 +3828,15 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 18 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 23 tests ... OK
 python3 tools/gates/gate_claims.py; echo rc=$?              # 4 PASS lines (0 claims), rc=0
 ```
 
-Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `_row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK.
+Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `_row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T4 feat(gates): gate_claims -- test_gate_claims 18 OK` to the end of `docs/superpowers/state/strict-delivery/ledger.md` (the `## Block b2 (branch block/strict-delivery-b2)` heading and its base line already exist).
+Append `- T4 feat(gates): gate_claims -- test_gate_claims 23 OK` to the end of `docs/superpowers/state/strict-delivery/ledger.md` (the `## Block b2 (branch block/strict-delivery-b2)` heading and its base line already exist).
 
 ```bash
 git add tools/gates/gate_claims.py tools/gates/tests/test_gate_claims.py docs/superpowers/state/strict-delivery/ledger.md

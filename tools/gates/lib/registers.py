@@ -327,6 +327,28 @@ def _commit_errors(pairs, root, exists) -> list:
             for field, sha in pairs if _sha(sha) and not exists(root, sha)]
 
 
+def row_id(row, index, pattern) -> str:
+    """The id to print in a result line id: the row's own id only when it is a str matching
+    `pattern`, else `entry-<index>` (a raw malformed id could carry a newline and forge or split a
+    result line)."""
+    rid = row.get("id")
+    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
+
+
+def memo_commit_exists():
+    """An `exists(root, sha) -> bool` for the *_commit_errors functions that asks git once per
+    distinct (root, sha) and remembers the answer (a GateError is not remembered)."""
+    seen = {}
+
+    def exists(root, sha):
+        key = (str(root), sha)
+        if key not in seen:
+            seen[key] = gitinfo.commit_exists(root, sha)
+        return seen[key]
+
+    return exists
+
+
 def finding_commit_errors(f: dict, root, exists=gitinfo.commit_exists) -> list:
     """Every sha in a (valid) finding row -- history, cites, evidence entries shaped like a sha --
     must name a commit in the repository at `root` (DEC-0003). `exists(root, sha) -> bool`."""
