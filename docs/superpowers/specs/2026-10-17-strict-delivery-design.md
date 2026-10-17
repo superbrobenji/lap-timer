@@ -1,6 +1,6 @@
 # Strict delivery: skill, gates, hooks and workflows — design
 
-Date: 2026-10-17. Status: DRAFT for owner review. Owner: the repository owner. Author: the assistant session, from the brainstorm of 2026-10-17.
+Date: 2026-10-17. Status: APPROVED by the owner 2026-10-17 (§11 resolved). Owner: the repository owner. Author: the assistant session, from the brainstorm of 2026-10-17.
 
 ## 0. Why
 
@@ -250,13 +250,13 @@ Cost scale: blast radius 1–3 (tooling 1, UI 2, timing/data-integrity/supervisi
 
 **Comments:** pattern gate; intent comments name a register id or issue, or go.
 
-## 11. Open choices for the owner (answer in review)
+## 11. Owner choices (resolved 2026-10-17)
 
-1. Skill name: `strict-delivery` (default) or another.
-2. Tag rule: enforce `<plan>-b<N>` on every merged block via `gate_merge_ready`, or delete the rule from the roadmap.
-3. Trigger defaults (§3.1) and exception scales (§9): accept or tune.
-4. Register format: YAML (default) or Markdown tables.
-5. Audit cadence: per merged plan automatically (default) or on call only.
+1. Skill name: `strict-delivery`.
+2. Tag rule: ENFORCED. `gate_merge_ready` requires every merged block to carry the tag `<plan>-b<N>`; the post-merge script creates and pushes it.
+3. Trigger defaults (§3.1) and exception scales (§9): accepted as written; tunable later in `tools/gates/config.yml` through a decision entry.
+4. Register format: YAML.
+5. Audit cadence: automatic per merged plan for the plan's new surface; full audit on the owner's call.
 
 ## 12. `CLAUDE.md` content (project overrides)
 
