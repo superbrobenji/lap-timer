@@ -16,14 +16,15 @@
 - Merge only on all-green under `grant:strict-delivery` (DEC-0001); tag `strict-delivery-b<N>` on the squash commit.
 - Model map: implementers sonnet, task reviewers opus, final reviewer opus, final verifier Fable, exception reviewer Fable (umbrella Global Constraints).
 - Zero gate failures at every commit once the gate exists; every Python failure path exits non-zero; a missing input is a FAIL (rc 2 from the linter, `FAIL p10.input` from the gate), never "nothing to do".
-- **No inline fixes (spec §13 step 4).** Every violation the extended linter finds in existing code becomes a findings row with `owner: {kind: plan, plan: docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md, task: conformance}`, added with the exact command in "Filing surfaced violations" below. Changing a `.c`/`.h` file to make a violation go away is out of scope; the one exception is Task 6, which adds the allowance comment `/* p10: host-test heap allowed */` to host-test files (spec §9).
+- **Owner ruling 3 (umbrella "Owner rulings on the writers' questions"):** a P10 violation in any file a task touches is FIXED in that task — the task is incomplete until every file it touches is clean under the full-reach linter; violations in untouched files are tracked as open findings rows (owner `{kind: plan, plan: docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md, task: conformance}`, added with the command in "Filing surfaced violations") until the conformance sweep; a stale or missing tracking row blocks. `gate_p10` enforces it: `FAIL p10.touched.<file>:<line>` for a violation in the staged/changed set (never excused by a row), `PASS p10.tracked.<id>` for a tracked violation elsewhere.
+- **This plan touches no C/H file in a scanned tree.** Its C edits are fixtures under `tools/lint/fixtures/` (outside `DEFAULT_PATHS`). The per-file host-test allowance comment is therefore NOT added to existing test files here (that would touch 15 files carrying 252 non-heap violations, measured): their 49 rule-3 sites are filed as tracked rows, and the sweep adds the comment when it cleans each file. If a task must touch a scanned C file after all, its "touched-file rule" bullet applies: fix, never track.
 - Pinned = production-path test + mutation transcript (spec D7): tests call `power_of_10.main([...])` / `gate_p10.main([...])` on fixtures, never a helper alone.
 - No claim trusted (spec D3): every line number below was read on `pre-bench-wrap-up` @ `24aa0c7`; the implementer re-reads each one before editing (`sed -n`), and a mismatch is corrected here and ledgered.
 - Hardware: nothing here flashes or opens a serial port.
 
 ## Review Focus
 
-1. **A cross-file rule run on a subset.** `gate_p10 --paths a.c` (pre-commit) scans only `a.c`, so the call graph, rule-9 `fn_defs` and pointed-to sets see one file; a stale-row check must ignore rows whose file was not scanned. Pinned by `test_stale_row_in_a_scanned_file_blocks_and_unscanned_file_is_ignored` (Task 1) and `test_paths_scope_to_the_named_c_files_only` (Task 6). CI always runs every tree.
+1. **A tracked violation in a touched file** must fail (ruling 3): `test_tracked_violation_in_an_untouched_file_passes_and_in_a_touched_file_fails`, `test_base_ref_adds_the_branch_diff_to_the_touched_set` (Task 6). Also **a cross-file rule run on a subset.** `gate_p10 --paths a.c` (pre-commit) scans only `a.c`, so the call graph, rule-9 `fn_defs` and pointed-to sets see one file; a stale-row check must ignore rows whose file was not scanned. Pinned by `test_stale_row_in_a_scanned_file_blocks_and_unscanned_file_is_ignored` (Task 1) and `test_paths_scope_to_the_named_c_files_only` (Task 6). CI always runs every tree.
 2. **A findings row the S1 schema rejects.** `cites[].sha` and `history[].sha` must be quoted strings (a 7-digit sha parses as int), `owner.task` must be non-empty, `evidence` holds only shas or files — so the site key lives in `repro`. Pinned by `test_emit_findings_numbers_after_the_highest_s3_id_and_matches_the_schema` (Task 1) and by running `gate_register` after every filing.
 3. **A wrapper that hides an allocator.** `#define ALLOC2(n) ALLOC(n)` with `#define ALLOC malloc`; a member call `p->free(x)` must not fire. Pinned by `test_r3_negative_…` / `test_r3_positive_…` (Task 3).
 4. **A local variable shadowing a function name** (`int step = 0; x = step;`) must not become a rule-9 value finding, while `.pre_cb = pre_cb` must. Pinned by `test_r9_positive_…` (Task 5) and the existing `test_lg3_sink_and_stored_value_are_findings`.
@@ -94,7 +95,7 @@ Commit the rows in the same commit as the code that surfaced them (the commit is
 | b7 T3 | 3 | components/*, main | 0 |
 | b8 T4 | 5 (tautology, conditional) | components/*, main | 2 (`sizeof == sizeof` asserts are constants) |
 | b8 T5 | 9 (typedef params/fields, values, pointed-to) | components/*, main | 41 (app 26: 24 `cmd_emit_fn` params + field + `cmd.h`; drivers 15: 13 console callbacks, `ser_emit`, `sframe_emit`) |
-| b8 T6 | all rules, newly scanned trees | devcontroller, test, test_apps, tools/replay, lt_hal | ≈ 544 (devcontroller 225, test 147, test_apps 8, tools/replay 164, after the allowance comments) |
+| b8 T6 | all rules, newly scanned trees | devcontroller, test, test_apps, tools/replay, lt_hal | ≈ 593 (devcontroller 225, test ≈ 151, test_apps ≈ 9, tools/replay ≈ 208; no allowance comments added — ruling 3) |
 | b9 T7/T8 | PD-7 unregistered; grace deleted | firmware | +1 (former PD-7 typedef site) and −13 closed (console callbacks covered by PD-5) in T7; +5 (G1..G5) in T8 |
 
 ---
@@ -111,7 +112,7 @@ Commit the rows in the same commit as the code that surfaced them (the commit is
 | `tools/lint/fixtures/r3_neg.c`, `r3_pos.c`, `register_r3.md` | 3 | rule-3 probe pair (TCI-T3 p2) |
 | `tools/lint/fixtures/r5_neg.c`, `r5_pos.h` | 4 | rule-5 probe pair (TCI-T3 p5/p7) |
 | `tools/lint/fixtures/r9_neg.c`, `r9_pos.c`, `register_r9.md`, `r9_console.c` | 5 | rule-9 probe pair (TCI-T4 p4, TCI-T2 shape) |
-| `tools/lint/fixtures/r3_allow/test/t_heap.c`, `r3_allow/components/x.c` | 6 | allowance pair |
+| `tools/lint/fixtures/r3_allow_test.c`, `r3_allow_misplaced.c`, `r5_unity.c` | 6 | allowance pair, Unity asserts |
 | `tools/gates/gate_p10.py`, `tools/gates/tests/test_gate_p10.py` | 6 (8) | the gate |
 | `tools/gates/run_all.py` | 6 | `"p10"` in `GATES` |
 | `tools/gates/hooks/pre_tool_use.py`, `tools/gates/hooks/git-pre-commit.sh` | 6 | p10 on commit (staged files) |
@@ -139,6 +140,8 @@ Commit the rows in the same commit as the code that surfaced them (the commit is
 **Interfaces:**
 - Consumes: S1 `docs/superpowers/state/findings.yml` (top-level YAML list, bootstrapped `[]`), `tools/requirements.txt` with PyYAML.
 - Produces (used by Tasks 2–8): `symbol_at(funcs, pos) -> str`; every finding dict carries `symbol`; `run(...)` returns 5 values `(findings, summary, register, rule8a, scanned)` where `scanned` is the sorted POSIX relpaths; `InputError`; `load_findings_rows(path) -> list`; `tracked_sites(rows) -> {(file, symbol, rule): id}`; `next_s3_number(rows) -> int`; `append_rows(path, text)`; `site_key(f)`; `emit_findings_yaml(blocking, first_n, sha) -> str`; CLI `--findings PATH`, `--emit-findings`, `--append-to PATH`; output markers ` [tracked <id>]`, `TRACKED-STALE: <id> p10-site:<key> …`, JSON key `tracked_stale`; blocking rules tuple now includes `RULE-2`; `units` list and `comp_of` map inside `run()` for whole-set passes.
+
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
 
 - [ ] **Step 1: Write the fixtures**
 
@@ -322,8 +325,9 @@ class Tracking(unittest.TestCase):
         self.assertEqual(["S3-P10-42", "S3-P10-43", "S3-P10-44", "S3-P10-45"],
                          [r["id"] for r in rows])
         r = rows[0]
-        self.assertEqual({"kind": "plan", "plan": "strict-delivery-S5 conformance",
-                          "task": "conformance sweep"}, r["owner"])
+        self.assertEqual({"kind": "plan", "task": "conformance", "plan":
+                          "docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md"},
+                         r["owner"])
         self.assertEqual("open", r["state"])
         self.assertEqual("p10-site:" + FIX + "/r1_neg.c:is_even:RULE-1", r["repro"])
         self.assertEqual([], r["evidence"])
@@ -785,6 +789,8 @@ Ledger: `- S3-T1 DONE <sha> rule-1 call graph + tracking; filed 0`.
 
 Rule (spec §9 rule 2): a `for`/`while`/`do` passes when its controlling expression has a top-level conjunct `x < LIMIT` / `x <= LIMIT` (or `LIMIT > x`) where LIMIT is built only from integer literals, ALL_CAPS identifiers (`#define`/enum by project convention) and `sizeof`; or a count-down `x > CONST` whose `for` init sets `x` to a constant; or, when the limit is a variable, an assertion in the enclosing function before the loop ends that compares one of the limit's identifiers with a constant. `while (0)` passes. An infinite form (`for (;;)`, `while (1)`, any non-zero constant) passes only in a registered task entry (passed as `xTaskCreate*` argument 0 **and** registered under rule 9) or when its own body asserts a counter against a constant limit (the R27 idiom at `components/app/cmd/cmd.c:446-450`). Known limit, ledgered: an ALL_CAPS local `const` computed at run time (`ses_frame.c:103 NEXT_MAX_STEPS`) is accepted as a constant.
 
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
+
 - [ ] **Step 1: Fixtures**
 
 `tools/lint/fixtures/r2_neg.c`:
@@ -1184,6 +1190,8 @@ Ledger: `- S3-T2 DONE <sha> rule 2; filed S3-P10-1..67`.
 - Consumes: Task 2 `_macro_at`; Task 1 `symbol_at`.
 - Produces: `HEAP_APIS` (regex alternation), `RULE3_RE`, `heap_wrappers(texts) -> {macro: allocator}`, `check_rule3_heap(stripped, relpath, lidx, findings, register=None, funcs=(), wrappers=None)`; `run()` local `texts` (blanked text of every scanned file, reused by Task 5).
 
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
+
 - [ ] **Step 1: Fixtures**
 
 `tools/lint/fixtures/r3_neg.c`:
@@ -1369,6 +1377,8 @@ Block start: ledger `- b8 start <sha>`; rows SD-S3-T4..T6 already exist (`planne
 **Interfaces:**
 - Consumes: Task 2 `is_const_expr` (its `_CONST_TEXT_RE` already admits `= ! < > & | ~ ^`, so `sizeof(int) == 4` is a constant), `_arg_spans`, `_DIRECTIVE_RE`, `_IF0_RE`.
 - Produces: `conditional_context(text) -> list[tuple]`, `count_live_assertions(stripped, open_idx, close_idx, lidx, ctx, assert_re=None) -> int`; `check_rule5_assertions(..., funcs, ctx=None, assert_re=None, min_lines=..., min_asserts=...)` (Task 6 passes `assert_re`).
+
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
 
 - [ ] **Step 1: Fixtures**
 
@@ -1635,6 +1645,8 @@ Docstring RULE-5: "a literal tautology (any constant expression) and an assertio
 - Produces: `check_rule9_values(stripped, relpath, lidx, findings, register, funcs, fn_defs=None)`, `check_rule9_fnptr(stripped, relpath, lidx, findings, register, funcs, fntypes=None, params=None)`, `fnptr_typedefs(texts) -> {name: needs_star}`, `pointed_to_sets(units, params, fn_defs) -> ({(F, k): set}, unresolved)`, `_call_owner(stripped, pos) -> str | None`; `rule8a["pointed_to"] = {"F#k": [names]}` (printed as `rule9 pointed-to sets`, JSON under `rule8a`); `RUNNER_SITES = ("RUN_TEST",)`; `SDK_FNPTR_TYPES`. Task 7 adds the register `covers` check inside `check_rule9_values`.
 
 Symbols (what a register row or findings `repro` keys): a function used as a value → the function's name (unchanged: PD-1..4, 6, 8, 9 keep working); a parameter of function-pointer type → its function (`export_serial.c:register_cmd`, so PD-5 is no longer a dead row); a field or variable → its own name (`cmd.c:emit` for `cw_t.emit`); a test function passed to Unity's `RUN_TEST` → `RUN_TEST` (one site per test file, not one per test).
+
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
 
 - [ ] **Step 1: Fixtures**
 
@@ -2038,14 +2050,15 @@ Docstring RULE-9: list the spellings (raw and array declarators, anonymous casts
 - Modify: `tools/lint/power_of_10.py` — `DEFAULT_PATHS`/`DEFAULT_REPORT_ONLY_PATHS` (:62-66), `EXEMPT_PATH_FRAGMENTS` (:74-80), `ASSERT_RE` (:504), rule-5 and rule-3 calls in `run()`, the BLOCKING print in `main()`
 - Create: `tools/lint/fixtures/r3_allow_test.c`, `r3_allow_misplaced.c`, `r5_unity.c`; `tools/gates/gate_p10.py`; `tools/gates/tests/test_gate_p10.py`
 - Modify: `tools/lint/test_power_of_10.py` (class `AllTrees`); `tools/gates/run_all.py` (`GATES`); `tools/gates/hooks/pre_tool_use.py` (`GATED`); `tools/gates/hooks/git-pre-commit.sh` (`--only`); `.github/workflows/gates.yml`; `.github/workflows/ci.yml:162-177`
-- Modify (allowance comment as line 1, nothing else): `test/test_lap.c`, `test_apps/core_selftest/main/main.c`, `tools/replay/gensim_main.c`, `tools/replay/replay_main.c`, `tools/replay/synth_main.c`, `tools/replay/lib/replay_run.c`, `tools/replay/lib/replay_summary.c`, `tools/replay/lib/synth_drag.c`, `tools/replay/lib/synth_truth.c`, `tools/replay/test/test_replay_fixtures.c`, `tools/replay/test/test_replay_run.c`, `tools/replay/test/test_replay_summary.c`, `tools/replay/test/test_synth_e2e.c`, `tools/replay/test/test_synth_gps.c`, `tools/replay/test/test_synth_track.c` (the 15 files with RULE-3 hits, measured)
 - Modify: `docs/superpowers/state/findings.yml`
 
 **Interfaces:**
 - Consumes: S1 `tools.gates.lib.{CODE_ROOT, Line, Result, gate_args, repo_root, run_gate}`, `run_all.GATES` / `gate_argv(name, args)` (`--root` + `args[name]`), `pre_tool_use.GATED`, umbrella CLI row "Any gate".
-- Produces: `HOST_TEST_PREFIXES`, `HOST_TEST_HEAP_ALLOWANCE = "/* p10: host-test heap allowed */"`, `TEST_ASSERT_RE`; `gate_p10.check(args) -> Result`, `gate_p10.main(argv=None)`, `gate_p10.linter_argv(paths) -> list`, `gate_p10.ROLLOUT_GRACE` (deleted in Task 8). CLI `python3 tools/gates/gate_p10.py [--json] [--root R] [--paths <files...>]`. Line ids: `p10.<file>:<line>.<RULE>`, `p10.stale.<id>`, `p10.register.<id>` (Task 8 on), `p10.input`, `p10.rc`, `p10.clean`, `p10.tracked`.
+- Produces: `HOST_TEST_PREFIXES`, `HOST_TEST_HEAP_ALLOWANCE = "/* p10: host-test heap allowed */"`, `TEST_ASSERT_RE`; `gate_p10.check(args) -> Result`, `gate_p10.main(argv=None)`, `gate_p10.linter_argv(paths) -> list`, `gate_p10.changed_set(root, changed, base) -> set`, `gate_p10.ROLLOUT_GRACE` (deleted in Task 8). CLI `python3 tools/gates/gate_p10.py [--json] [--root R] [--paths <files...>] [--changed <files...>] [--base <ref>]`. Line ids: `p10.touched.<file>:<line>` (FAIL; a violation in a changed file, even with a row), `p10.<file>:<line>.<RULE>` (FAIL; untracked), `p10.stale.<id>`, `p10.register.<id>` (Task 7 on), `p10.input`, `p10.rc`, `p10.clean`, `p10.tracked.<id>` (PASS, one per tracked row hit outside the changed set).
 
 Scope note (spec §9 "every tree" vs the compliance design §1 exemption of `tools/replay/**` and `test/**`): the strict-delivery spec is later and binding, so both are scanned; `components/lt_hal` (headers only, 0 findings) is added because no tree may be silently outside. `tools/lint/fixtures/` stays outside the default paths (it is the linter's own test input).
+
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
 
 - [ ] **Step 1: Fixtures**
 
@@ -2184,7 +2197,7 @@ class GateP10(unittest.TestCase):
     def test_clean_tree_passes(self):
         self.write("components/core/a.c", CLEAN_C)
         rc, out = self.gate()
-        self.assertEqual("PASS p10.clean\nPASS p10.tracked: 0 violation(s) tracked by open findings rows\n", out)
+        self.assertEqual("PASS p10.clean\n", out)
         self.assertEqual(0, rc)
 
     def test_violation_is_one_fail_line(self):
@@ -2198,8 +2211,39 @@ class GateP10(unittest.TestCase):
         self.write("docs/superpowers/state/findings.yml",
                    '- id: S3-P10-1\n  state: open\n  repro: "p10-site:components/core/a.c:walk:RULE-1"\n')
         rc, out = self.gate()
-        self.assertIn("PASS p10.tracked: 1 violation(s) tracked", out)
+        self.assertIn("PASS p10.tracked.S3-P10-1: open findings row, file not touched", out)
         self.assertEqual(0, rc)
+
+    def test_tracked_violation_in_an_untouched_file_passes_and_in_a_touched_file_fails(self):
+        self.write("components/core/a.c", REC_C)
+        self.write("components/core/b.c", CLEAN_C)
+        self.write("docs/superpowers/state/findings.yml",
+                   '- id: S3-P10-1\n  state: open\n  repro: "p10-site:components/core/a.c:walk:RULE-1"\n')
+        rc, out = self.gate("--changed", "components/core/b.c")
+        self.assertIn("PASS p10.tracked.S3-P10-1", out)
+        self.assertEqual(0, rc)
+        rc, out = self.gate("--changed", "components/core/a.c")
+        self.assertIn("FAIL p10.touched.components/core/a.c:1: RULE-1: function 'walk' calls itself", out)
+        self.assertIn("(row S3-P10-1 does not excuse a touched file)", out)
+        self.assertNotIn("PASS p10.tracked", out)
+        self.assertEqual(1, rc)
+
+    def test_base_ref_adds_the_branch_diff_to_the_touched_set(self):
+        import subprocess
+        self.write("components/core/a.c", REC_C)
+        self.write("docs/superpowers/state/findings.yml",
+                   '- id: S3-P10-1\n  state: open\n  repro: "p10-site:components/core/a.c:walk:RULE-1"\n')
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                                       "commit.gpgsign=false", *a], cwd=self.root, check=True,
+                                      capture_output=True)
+        g("init", "-q", "-b", "main"); g("add", "-A"); g("commit", "-qm", "base")
+        g("checkout", "-qb", "topic")
+        with open(os.path.join(self.root, "components/core/a.c"), "a") as f:
+            f.write("/* touched */\n")
+        g("commit", "-qam", "touch a.c")
+        rc, out = self.gate("--base", "main")
+        self.assertIn("FAIL p10.touched.components/core/a.c:1", out)
+        self.assertEqual(1, rc)
 
     def test_stale_row_fails(self):
         self.write("components/core/a.c", CLEAN_C)
@@ -2293,7 +2337,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.gates.lib import CODE_ROOT, Line, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import CODE_ROOT, GateError, Line, Result, gate_args, repo_root, run_gate  # noqa: E402
 
 LINTER = os.path.join(CODE_ROOT, "tools", "lint", "power_of_10.py")
 FINDINGS = os.path.join("docs", "superpowers", "state", "findings.yml")
@@ -2317,11 +2361,27 @@ def linter_argv(paths: list) -> list:
     return argv + (["--paths", *paths] if paths else [])
 
 
+def changed_set(root: str, changed: list, base) -> set:
+    """Owner ruling 3: the files a task touches. --changed names them (the commit hook passes
+    the staged files); --base <ref> adds `git diff --name-only <ref>...HEAD` (CI: origin/main)."""
+    out = {c.replace(os.sep, "/") for c in changed}
+    if base:
+        p = subprocess.run(["git", "diff", "--name-only", "%s...HEAD" % base], cwd=root,
+                           capture_output=True, text=True, check=False)
+        if p.returncode != 0:
+            raise GateError("git diff --name-only %s...HEAD: %s" % (base, p.stderr.strip()))
+        out |= {l.strip() for l in p.stdout.splitlines() if l.strip()}
+    return out
+
+
 def check(args: list) -> Result:
     ap = gate_args("gate_p10")
     ap.add_argument("--paths", nargs="*", default=[])
+    ap.add_argument("--changed", nargs="*", default=[])
+    ap.add_argument("--base", default=None)
     ns = ap.parse_args(args)
     root = ns.root or repo_root()
+    touched = changed_set(root, ns.changed, ns.base)
     paths = [p for p in ns.paths if p.endswith((".c", ".h")) and os.path.isfile(os.path.join(root, p))]
     p = subprocess.run(linter_argv(paths), cwd=root, capture_output=True, text=True, check=False)
     r = Result("p10")
@@ -2333,12 +2393,19 @@ def check(args: list) -> Result:
     except ValueError:
         r.fail("p10.input", "linter printed no JSON: %s" % (p.stdout + p.stderr).strip()[-400:])
         return r
-    tracked = 0
+    tracked = []
     for f in data["findings"]:
         if f["rule"] not in BLOCKING:
             continue
-        if f.get("tracked") or f.get("report_only"):
-            tracked += 1
+        if f.get("report_only"):
+            continue                      # the five graced sites, until Task 8
+        if f["file"] in touched:          # ruling 3: a touched file is fixed, never tracked
+            r.fail("p10.touched.%s:%d" % (f["file"], f["line"]), "%s: %s%s" % (
+                f["rule"], f["message"],
+                " (row %s does not excuse a touched file)" % f["tracked"] if f.get("tracked") else ""))
+            continue
+        if f.get("tracked"):
+            tracked.append(f["tracked"])
             continue
         r.fail("p10.%s:%d.%s" % (f["file"], f["line"], f["rule"]), f["message"])
     for s in data.get("tracked_stale", []):
@@ -2346,14 +2413,16 @@ def check(args: list) -> Result:
     for e in data.get("register_errors", []):
         r.fail("p10.register.%s" % e["id"], e["reason"])
     failed = any(l.status == "FAIL" for l in r.lines)
-    if p.returncode == 1 and not failed:
+    if p.returncode == 1 and not failed and not any(
+            l.id.startswith("p10.touched.") for l in r.lines):
         r.fail("p10.rc", "linter exited 1 without a parseable violation")
-    if p.returncode == 0 and failed:
+    if p.returncode == 0 and any(not l.id.startswith("p10.touched.") for l in r.lines
+                                 if l.status == "FAIL"):
         r.fail("p10.rc", "linter exited 0 with blocking lines")
     if not failed and p.returncode == 0:
         r.passed("p10.clean")
-    r.lines.append(Line("PASS", "p10.tracked", "%d violation(s) tracked by open findings rows"
-                        % tracked))
+    for fid in sorted(set(tracked)):
+        r.lines.append(Line("PASS", "p10.tracked.%s" % fid, "open findings row, file not touched"))
     return r
 
 
@@ -2364,33 +2433,28 @@ def main(argv=None):
 if __name__ == "__main__":
     sys.exit(main())
 ```
-`tools/gates/run_all.py`: `GATES = ["register", "claims", "decisions", …existing…, "p10"]` (append, keep order). `tools/gates/hooks/pre_tool_use.py`: add `"p10"` to both lists in `GATED` (S1: `GATED = {"commit": [...], "push": [...]}`) — a commit scans every tree (≈ 3.5 s measured), which is stricter than the spec's "changed files locally" and avoids the cross-file blind spot of Review Focus 1. `tools/gates/hooks/git-pre-commit.sh`: `--only register,claims` → `--only register,claims,p10`. `.github/workflows/gates.yml`: after the step that runs `run_all.py` add `- name: gate_p10 (every tree)` / `run: python3 tools/gates/gate_p10.py`. `.github/workflows/ci.yml`: replace the ROLLOUT GRACE comment (:162-172) and the linter step (:174-177) with
+`tools/gates/run_all.py`: `GATES = ["register", "claims", "decisions", …existing…, "p10"]` (append, keep order). `tools/gates/hooks/pre_tool_use.py`: add `"p10"` to both lists in `GATED` (S1: `GATED = {"commit": [...], "push": [...]}`) and pass the touched set as its per-gate argv (`args["p10"]`, consumed by S1 `gate_argv`): commit → `["--changed", *gitinfo.staged_files(root)]`, push → `["--base", "origin/main"]`. The scan is always every tree (≈ 3.5 s measured), which also avoids Review Focus 1's cross-file blind spot. `tools/gates/hooks/git-pre-commit.sh`: after the existing `run_all.py --only register,claims` line add `python3 tools/gates/gate_p10.py --changed $(git diff --cached --name-only) || exit 1`. `.github/workflows/gates.yml`: after the step that runs `run_all.py` add `- name: gate_p10 (every tree; touched = this PR)` / `run: python3 tools/gates/gate_p10.py --base origin/main` (S1's checkout has full history). `.github/workflows/ci.yml`: replace the ROLLOUT GRACE comment (:162-172) and the linter step (:174-177) with
 ```yaml
       - name: Install Python requirements
         run: python3 -m pip install -r tools/requirements.txt
       # Power of 10 via the gate (strict-delivery S3): every tree, every rule blocking, open findings
       # rows tracked; the grace triples live in tools/gates/gate_p10.py until S3 Task 8 deletes them.
-      - name: gate_p10 (BLOCKING; rules 1/2/3/4/4-compound/5/8/9, every tree)
-        run: python3 tools/gates/gate_p10.py
+      - name: gate_p10 (BLOCKING; rules 1/2/3/4/4-compound/5/8/9, every tree; touched = this PR)
+        run: python3 tools/gates/gate_p10.py --base origin/main
 ```
-(job id and name `static-analysis` unchanged, so branch protection keeps its required check).
+(job id and name `static-analysis` unchanged, so branch protection keeps its required check; add `fetch-depth: 0` to that job's `actions/checkout@v4` `with:` so `origin/main...HEAD` resolves).
 
-- [ ] **Step 5: Allowance comments** — for each of the 15 files listed above:
-```bash
-for f in test/test_lap.c test_apps/core_selftest/main/main.c tools/replay/gensim_main.c tools/replay/replay_main.c tools/replay/synth_main.c tools/replay/lib/replay_run.c tools/replay/lib/replay_summary.c tools/replay/lib/synth_drag.c tools/replay/lib/synth_truth.c tools/replay/test/test_replay_fixtures.c tools/replay/test/test_replay_run.c tools/replay/test/test_replay_summary.c tools/replay/test/test_synth_e2e.c tools/replay/test/test_synth_gps.c tools/replay/test/test_synth_track.c; do
-  printf '/* p10: host-test heap allowed */\n' | cat - "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done
-```
-These build zero-warning unchanged (a comment). Rebuild the host tests to prove it: `cmake -S test -B test/build && cmake --build test/build 2>&1 | grep -c warning` → 0.
+- [ ] **Step 5: No allowance comments in existing files (ruling 3)** — the 15 host-test files with heap calls (`test/test_lap.c`, `test_apps/core_selftest/main/main.c`, 13 under `tools/replay/`) also carry 252 non-heap violations (79 RULE-2, 117 RULE-9, 34 RULE-5, 11 RULE-8, 11 RULE-4/4-COMPOUND); adding the comment would make each a touched file to clean in this task. Their 49 rule-3 sites are filed as tracked rows in Step 8; the S5 sweep adds the comment as it cleans each file.
 
-- [ ] **Step 6: Tests pass** — `python3 -m unittest tools/lint/test_power_of_10.py tools/gates/tests/test_gate_p10.py` → `Ran 51 tests` `OK`; `python3 -m unittest discover -s tools/gates/tests` OK.
+- [ ] **Step 6: Tests pass** — `python3 -m unittest tools/lint/test_power_of_10.py tools/gates/tests/test_gate_p10.py` → `Ran 53 tests` `OK` (lint 45, gate 8); `python3 -m unittest discover -s tools/gates/tests` OK.
 
 - [ ] **Step 7: Mutation** — set `DEFAULT_REPORT_ONLY_PATHS = ["devcontroller/"]`; `test_default_paths_cover_every_c_tree_and_nothing_is_report_only` FAILS; restore. In `gate_p10.check` delete the `p.returncode not in (0, 1)` branch; `test_missing_findings_register_is_input_fail` FAILS; restore. `mutations/SD-S3-T6.txt`.
 
-- [ ] **Step 8: File** — the filing command with the b8 flag set (no `--report-only-paths` needed: the default is empty). Expected ≈ 544 rows: devcontroller ≈ 225 (incl. devcontroller/test 49), test 147, test_apps 8, tools/replay 164; by rule ≈ RULE-1 3 (the `goto`s at `cmd_flash.c:480`, `cmd_shell.c:85`, `linkhost.c:605`), RULE-2 189, RULE-3 5, RULE-4 15, RULE-4-COMPOUND 12, RULE-5 132, RULE-8 4, RULE-9 184. Then `gate_register` PASS and `python3 tools/gates/gate_p10.py` → `PASS p10.clean` + `PASS p10.tracked: <n> …`.
+- [ ] **Step 8: File** — the filing command with the b8 flag set (no `--report-only-paths` needed: the default is empty). Expected ≈ 593 rows: devcontroller ≈ 225 (incl. devcontroller/test 49), test ≈ 151, test_apps ≈ 9, tools/replay ≈ 208; by rule ≈ RULE-1 3 (the `goto`s at `cmd_flash.c:480`, `cmd_shell.c:85`, `linkhost.c:605`), RULE-2 189, RULE-3 54 (49 host-test heap sites, Step 5), RULE-4 15, RULE-4-COMPOUND 12, RULE-5 132, RULE-8 4, RULE-9 184. Then `gate_register` PASS and `python3 tools/gates/gate_p10.py` → `PASS p10.clean` + one `PASS p10.tracked.<id>` per row.
 
 - [ ] **Step 9: Commit**
 ```bash
-git add -A tools .github test test_apps docs/superpowers/state
+git add -A tools .github docs/superpowers/state
 git commit -m "feat(p10): every C tree blocking, host-test heap allowance, gate_p10 replaces the CI linter step; surfaced sites filed (S3 T6)"
 ```
 Ledger `- S3-T6 DONE <sha>; filed S3-P10-<a>..<b> (<n>)`.
@@ -2417,6 +2481,8 @@ Block start: ledger `- b9 start <sha>`.
 - Produces: `REGISTER_COLUMNS` = `id | rule | site | tier | pointed-to set | compliant alternative | why rejected | cost | benefit | adversarial report | owner | expiry`; `load_scales(path)`; `score(cell, scale, terms) -> (total | None, error | None)`; `_git(args) -> (rc, stdout)`; `Register.load(path, scales)` raising `InputError` on a missing file / wrong header; `Register.errors [(id, reason)]`; `Register.pointed {symbol: set}`; `Register.covers(forwarder, function)`; `run(paths, register_path, enforce_fnptr, base_dir, scales=None)`; CLI `--config` (default `tools/gates/config.yml`); output `REGISTER-ERROR: <id>: <reason>`, JSON `register_errors`. Score cell grammar: `<total> = blast:<key> <v> + verifiability <v> + reach:<key> <v>` and `<total> = complexity:<key> <v> + runtime <v>[ (measured: <file>)]`. Tier cell: `A (<SDK contract>)` or `B`. Tier A: expiry `none`, report may be `n/a (tier A)`, scores informational. Tier B: benefit > cost, report file exists, expiry a commit sha that is not an ancestor of HEAD. Every row: site file exists and its symbol occurs in it; rule-9 rows carry `{…}` (`{}` = no caller), equal to the computed pointed-to set when the site's file is scanned.
 
 Pre-b9 compatibility: none. A seven-column register is `INPUT-ERROR` rc 2 and the commit hook runs `gate_p10`, so Task 7's commit also carries the real register (Task 8 Step 4, done here), the former-PD-7 findings row and the 13 closures (the parts of Task 8 Step 5 after the G rows). Task 8 then only deletes the grace and files G1..G5.
+
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
 
 - [ ] **Step 1: Fixture registers** (each file exactly):
 
@@ -2853,6 +2919,8 @@ class Register:
 | PD-8 `link.c:link_task` | A — FreeRTOS `TaskFunction_t` | tooling 1 (peer stream) + 0 + 2 = **3** | 3 + 0 = **3** | registered (tier A) |
 | PD-9 `display_epaper.c:pre_cb` | A — IDF `transaction_cb_t` (`spi_device_interface_config_t.pre_cb`) | ui 2 + 0 + 2 = **4** | helper 1 (a GPIO toggle helper) + 0 = **1** | registered (tier A) |
 
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
+
 - [ ] **Step 1: Failing tests** — replace `Rollout` and `GraceVisibility` with:
 ```python
 class NoGrace(unittest.TestCase):
@@ -3007,10 +3075,9 @@ def main(argv=None):
 <             "--report-only-sites", ROLLOUT_GRACE, "--findings", FINDINGS]
 ---
 >             "--config", CONFIG, "--findings", FINDINGS]
-65c57
-<         if f.get("tracked") or f.get("report_only"):
----
->         if f.get("tracked"):
+81,82d72
+<         if f.get("report_only"):
+<             continue                      # the five graced sites, until Task 8
 ```
 (i.e. delete `ROLLOUT_GRACE` and `report_only`, add `CONFIG = os.path.join(CODE_ROOT, "tools", "gates", "config.yml")` and `"--config", CONFIG`). In `.github/workflows/ci.yml` change the comment above the gate step to `# Power of 10 via the gate (strict-delivery S3): every tree, every rule blocking, open findings rows tracked; no grace.` and in `README.md:40-45` replace the grace paragraph and command with "`python3 tools/gates/gate_p10.py` — the exact CI check; it exits 1 on any violation that has no open row in `docs/superpowers/state/findings.yml`."
 
@@ -3124,10 +3191,10 @@ open(P, "w").write("\n".join(out) + "\n")
 print("closed", len(want))
 PY
 python3 tools/gates/gate_register.py        # PASS only
-python3 tools/gates/gate_p10.py             # PASS p10.clean, PASS p10.tracked: <n>
+python3 tools/gates/gate_p10.py             # PASS p10.clean + PASS p10.tracked.<id> lines
 ```
 
-- [ ] **Step 6: Tests pass** — `python3 -m unittest tools/lint/test_power_of_10.py tools/gates/tests/test_gate_p10.py` → `Ran 61 tests` `OK` (lint 54: 59 − 7 grace tests + 2; gate 7); `python3 -m unittest discover -s tools/gates/tests` OK; `python3 tools/gates/run_all.py` PASS only.
+- [ ] **Step 6: Tests pass** — `python3 -m unittest tools/lint/test_power_of_10.py tools/gates/tests/test_gate_p10.py` → `Ran 63 tests` `OK` (lint 54: 59 − 7 grace tests + 2; gate 9); `python3 -m unittest discover -s tools/gates/tests` OK; `python3 tools/gates/run_all.py` PASS only.
 
 - [ ] **Step 7: Mutation** — re-add `ap.add_argument("--report-only-sites", default="")`; `test_every_grace_flag_is_rejected` FAILS; restore. `mutations/SD-S3-T8.txt`.
 
@@ -3146,6 +3213,8 @@ git push -u origin block/strict-delivery-b9
 - Modify: `docs/superpowers/specs/2026-09-17-power-of-10-compliance-design.md` §1 (:11-15), §3 rule 2 (:28), §4 (:54), §5 linter bullet and Rollout (:58-82)
 - Modify: `docs/superpowers/specs/2026-09-14-lap-timer-design.md:2641` (tool table row)
 - Modify: `docs/power-of-10-checklist.md:5` (the CI invocation)
+
+- [ ] **Touched-file rule (ruling 3)** — before this task's commit run `python3 tools/gates/gate_p10.py --changed $(git diff --name-only HEAD) $(git diff --name-only --cached)`; every `FAIL p10.touched.*` is fixed in this task (never a tracking row; a behaviour change gets its own test). Expected here: none (the task touches no scanned C file).
 
 - [ ] **Step 1: Find every stale statement** — `grep -rn 'report-only\|GRACE\|report-only-sites\|stored-value check\|direct recursion\|devcontroller.*report' README.md docs/superpowers/specs/2026-09-17-power-of-10-compliance-design.md docs/superpowers/specs/2026-09-14-lap-timer-design.md docs/power-of-10-checklist.md docs/power-of-10-deviations.md`. Each hit is either rewritten below or ledgered as historical (a dated section that describes the past is left alone).
 - [ ] **Step 2: Rewrite** — compliance design: add a dated note at the top of §5, "Amended 2026-10-17 (strict-delivery S3): the linter's reach is spec 2026-10-17 §9 — rules 1 (call graph, goto/longjmp), 2 (loop bounds), 3 (census incl. wrappers), 5 (tautologies, conditional context), 9 (typedef'd params/fields, every function value, pointed-to set) on every C tree; the exception model is the two-tier register; the rollout grace is deleted; existing violations are findings rows." Replace the Rollout paragraph (:76-82) with that rule; §1 scope: "every C tree (strict-delivery spec §9 supersedes the `tools/replay/**`, `test/**` exemption); host tests may declare a per-file rule-3 allowance". lap-timer spec :2641: `| tools/gates/gate_p10.py (wraps tools/lint/power_of_10.py) | Python 3 | Power of 10 rules 1/2/3/4/4-compound/5/8/9 on every C tree, blocking | python3 tools/gates/gate_p10.py |`. Checklist :5: the same command.
@@ -3172,3 +3241,4 @@ Same as b7's block end with `b9`, tag `strict-delivery-b9`; S4 follows, so `next
 2. **Placeholder scan.** `<sha>` / `<a>..<b>` / `<n>` are values produced at execution by the commands shown; the `…` cells in Task 8 Step 4 are "copy the existing cell verbatim".
 3. **Type consistency.** `run()` returns 5 values from T1 on; `check_rule5_assertions(..., ctx=None, assert_re=None)` T4/T6; `run(..., scales=None)` T7/T8; `Register.covers` T7 used in `check_rule9_values` T7; gate line ids identical in T6 tests and T8 tests.
 4. **Review Focus.** Each of the five lines has its pinning test in its owning task.
+5. **Owner ruling 3.** Global Constraints states it; every task carries the touched-file step; `gate_p10` emits `FAIL p10.touched.*` / `PASS p10.tracked.<id>` with two fixture tests (Task 6); no task touches a scanned C file, so the allowance comment is deferred to the sweep (Task 6 Step 5).

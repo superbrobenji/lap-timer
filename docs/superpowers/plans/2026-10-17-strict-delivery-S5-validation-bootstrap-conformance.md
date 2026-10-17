@@ -35,7 +35,7 @@ The umbrella fixes the names below; S1–S4 fix the flags. Task 1 Step 0 and Tas
 | `gate_review_package.py` | `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored; mutation transcripts tracked under `docs/superpowers/state/<plan>/mutations/`) | umbrella "Review package" |
 | `gate_merge_ready.py` | `--pr <number>` | S4 |
 | `gate_checkpoint.py` | `--plan <slug>`; reads `docs/superpowers/state/<slug>/handoff.md` | S2 |
-| `postmerge.py` | `--plan <slug> --block <N> --pr <number>`; deletes branches/worktrees, tags `<slug>-b<N>`, regenerates state docs, sets rows `merged`, commits and pushes per S4 | S4 |
+| `postmerge.py` | `--plan <slug> --block <N> --pr <number>`; tags `<slug>-b<N>`, deletes branches/worktrees, commits nothing to protected `main` (owner ruling 2: handoff and state-doc regeneration land on the block branch before merge; register `merged` edits land on the next block's branch) | S4 + ruling 2 |
 | Workflows | `audit` and `block` run by the session with the Workflow tool, input `{brief: <path>}` | S4 |
 | Gate-suite CI | `.github/workflows/gates.yml` job `gates` runs every `tools/gates/tests/test_*.py` | S1 |
 | Owner answers | the owner states the answer; the session records it verbatim with `answered_at.by: superbrobenji` per `docs/superpowers/state/README.md` | S1 |
@@ -77,7 +77,7 @@ tools/gates/tests/fixtures/dryrun/{buggy.py,test_buggy.py} created and deleted i
 
 ## Block b13 (branch `block/strict-delivery-b13`, PR, tag `strict-delivery-b13`)
 
-Start: on `main` at the S4 checkpoint; `python3 tools/gates/run_all.py` rc 0; `git switch -c block/strict-delivery-b13`. Ledger: `docs/superpowers/state/strict-delivery/ledger.md`.
+Start: on `main` at the S4 checkpoint; `python3 tools/gates/run_all.py` rc 0. Execution order (owner ruling 6: every block branch is `block/<plan>-b<N>` off `main`, and at a checkpoint only `main` and the parked `s5.2-conn-ble` may exist): **Task 2 first**, on its own branch `block/dryrun-b1` from `main`, through its merge, checkpoint and `/clear`; then `git switch -c block/strict-delivery-b13 main` (Task 2 Step 20) and Tasks 1 and 3 on it. Ledger: `docs/superpowers/state/strict-delivery/ledger.md`.
 
 ---
 
@@ -1011,11 +1011,11 @@ Controller builds the review package for task `S5-1` and dispatches the task rev
 
 ### Task 2: Dry run on a throwaway finding (DRY-RUN-1)
 
-**Files (all on branch `dryrun-b1`, merged by its own PR, tag `dryrun-b1`):**
+**Files (all on branch `block/dryrun-b1`, merged by its own PR, tag `dryrun-b1`):**
 - Create then delete: `tools/gates/tests/fixtures/dryrun/buggy.py`, `tools/gates/tests/fixtures/dryrun/test_buggy.py`
 - Create: `docs/superpowers/state/briefs/dryrun-DRY-RUN-1.md`, `docs/superpowers/state/dryrun/{ledger.md,handoff.md,mutations/DRY-RUN-1.txt,review/1/*}`
 - Modify: `docs/superpowers/state/findings.yml` (rows DRY-RUN-1, DRY-RUN-1-R1), `docs/superpowers/state/decisions.yml` (`grant:dryrun`)
-- On `strict-delivery-b13`: Modify `docs/superpowers/state/strict-delivery/ledger.md` (evidence lines)
+- On `block/strict-delivery-b13` (created in Step 20): Modify `docs/superpowers/state/findings.yml` (DRY-RUN rows → `merged`, ruling 2) and `docs/superpowers/state/strict-delivery/ledger.md` (evidence lines)
 
 **Interfaces:**
 - Consumes: every gate, both workflows' fallback sequence (spec §8 "the skill runs the same sequence with the Agent tool"), `postmerge.py`, hooks.
@@ -1023,11 +1023,11 @@ Controller builds the review package for task `S5-1` and dispatches the task rev
 
 Rules for this task: every command's output is pasted into `docs/superpowers/state/dryrun/ledger.md` under its step number; "Expected" lines are hypotheses — a differing output is a finding in the gate or hook under test (register row, owner `{kind: plan, plan: 2026-10-17-strict-delivery, task: S5-2}`), never a reason to edit the expectation silently.
 
-- [ ] **Step 0: Verify interfaces and park b13**
+- [ ] **Step 0: Verify interfaces; start from a clean main (owner ruling 6)**
 
 Run: `for g in register claims decisions plan dispatch review_package p10 comments state_docs bench merge_ready checkpoint tools_py; do python3 tools/gates/gate_$g.py --help >/dev/null && echo "PASS help.$g" || echo "FAIL help.$g"; done; python3 tools/gates/postmerge.py --help | head -5`
 Expected: 13 `PASS help.<g>`; postmerge usage shows `--plan --block --pr` (else correct this plan per "Interfaces assumed").
-Then: `git status --porcelain` → empty; `git switch main && git pull --ff-only && git switch -c dryrun-b1`.
+Then: `git status --porcelain` → empty; `git worktree list` → the main checkout only (ruling 6 removed `../lap-timer-worktrees/s52` before b1); `git branch --list` → `main`, `s5.2-conn-ble` (parked, owner "sub-project C"); no `block/strict-delivery-b13` yet (Task 2 runs first); `git switch main && git pull --ff-only && git switch -c block/dryrun-b1`.
 
 - [ ] **Step 1: Register the defect, write the brief, ask for the grant (controller)**
 
@@ -1147,11 +1147,11 @@ Agent tool, `model: sonnet`, prompt:
 ## Strict block
 <exact bytes of ~/.claude/skills/strict-delivery/prompts/implementer.md>
 ## Task
-Close DRY-RUN-1 per the brief on branch dryrun-b1. Class (verbatim): <class from findings.yml>.
+Close DRY-RUN-1 per the brief on branch block/dryrun-b1. Class (verbatim): <class from findings.yml>.
 Siblings: x < lo, x > hi, lo == hi with x outside, lo > hi refused. Set the row to in-progress in your
 first commit. Commit test and fix together (pre-commit runs the gates). Write the mutation transcript.
 ```
-Expected: hook silent (dispatch proceeds); return ≤10 lines with `status: DONE`; commits on `dryrun-b1`; `test_buggy.py` exists with ≥4 tests; row state `in-progress`.
+Expected: hook silent (dispatch proceeds); return ≤10 lines with `status: DONE`; commits on `block/dryrun-b1`; `test_buggy.py` exists with ≥4 tests; row state `in-progress`.
 
 - [ ] **Step 4: Verify the implementer's artefacts directly**
 
@@ -1196,14 +1196,18 @@ Set `DRY-RUN-1` → `closed`, append to `evidence`: `"files removed in this comm
 
 - [ ] **Step 11: Final branch review + Fable adversarial verifier**
 
-Two dispatches (roles `final_reviewer` model opus, `final_verifier` model fable), reports `docs/superpowers/state/dryrun/review/final/reviewer.md` and `final/verifier.md`. Task text: "Whole branch `git diff main...dryrun-b1`. Re-run every gate (`python3 tools/gates/run_all.py`). Re-run the pin from PIN_SHA <sha>: `mkdir -p $SCR && git show <sha>:tools/gates/tests/fixtures/dryrun/buggy.py > $SCR/buggy.py && git show <sha>:tools/gates/tests/fixtures/dryrun/test_buggy.py > $SCR/test_buggy.py && python3 -m unittest -v $SCR/test_buggy.py`, then revert the fix in `$SCR/buggy.py` and show it fails, restore, passes. Execute every claim in the PR body draft `docs/superpowers/state/dryrun/pr-body.md` and in the commit messages." Expected: both clean. A finding → fix loop (Steps 8–9) and re-run this step.
+Two dispatches (roles `final_reviewer` model opus, `final_verifier` model fable), reports `docs/superpowers/state/dryrun/review/final/reviewer.md` and `final/verifier.md`. Task text: "Whole branch `git diff main...block/dryrun-b1`. Re-run every gate (`python3 tools/gates/run_all.py`). Re-run the pin from PIN_SHA <sha>: `mkdir -p $SCR && git show <sha>:tools/gates/tests/fixtures/dryrun/buggy.py > $SCR/buggy.py && git show <sha>:tools/gates/tests/fixtures/dryrun/test_buggy.py > $SCR/test_buggy.py && python3 -m unittest -v $SCR/test_buggy.py`, then revert the fix in `$SCR/buggy.py` and show it fails, restore, passes. Execute every claim in the PR body draft `docs/superpowers/state/dryrun/pr-body.md` and in the commit messages." Expected: both clean. A finding → fix loop (Steps 8–9) and re-run this step.
+
+- [ ] **Step 11b: Handoff and checkpoint line on the block branch (owner ruling 2 — nothing is committed to `main` after merge)**
+
+Write `docs/superpowers/state/dryrun/handoff.md` with the umbrella front matter: `plan: docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md`, `spec: docs/superpowers/specs/2026-10-17-strict-delivery-design.md`, `branch: main`, `head`/`base` per S2's pre-merge handoff rule, `ledger: docs/superpowers/state/dryrun/ledger.md`, `resume_line: <ledger line count>`, `block: 1`, `next_task: none`, `findings_in_flight: [DRY-RUN-1: closed, DRY-RUN-1-R1: closed]`, `claims_verified_at_head: []`, `live_subagents: []`, `open_decisions: [$DEC until answered]`, `rulings: [<this block's rulings or none>]`, `grant: $DEC`, `parked_branches: [{name: s5.2-conn-ble, reason: "BLE activation deferred", owner: "sub-project C"}]`, `env: {idf: "source tools/idf-env.sh", flash: "owner says ready", ota_window_s: 35}`, `traps: [<what this dry run found>]`. Append `CHECKPOINT b1` to the ledger. Commit both on `block/dryrun-b1` (they ride in the squash).
 
 - [ ] **Step 12: Push and open the PR**
 
 Write `docs/superpowers/state/dryrun/pr-body.md`: summary (what the dry run exercised, the planted claim, the fix round), register ids DRY-RUN-1 and DRY-RUN-1-R1 with states, the evidence paths, the gate run, and the trailer `🤖 Generated with [Claude Code](https://claude.com/claude-code)`. No merge markers. Commit it with the final reports.
 ```bash
-git push -u origin dryrun-b1
-gh pr create --base main --head dryrun-b1 --title "dryrun: strict-delivery end-to-end dry run (DRY-RUN-1)" --body-file docs/superpowers/state/dryrun/pr-body.md
+git push -u origin block/dryrun-b1
+gh pr create --base main --head block/dryrun-b1 --title "dryrun: strict-delivery end-to-end dry run (DRY-RUN-1)" --body-file docs/superpowers/state/dryrun/pr-body.md
 DRPR=$(gh pr view --json number -q .number)
 gh pr checks "$DRPR" --watch
 ```
@@ -1225,30 +1229,30 @@ On the owner's "yes": set `$DEC` `answer: "yes"`, `answered_at: {sha: <HEAD>, by
 - [ ] **Step 16: Post-merge**
 
 Run: `python3 tools/gates/postmerge.py --plan dryrun --block 1 --pr "$DRPR"`
-Expected: lines PASS for branch deletion (remote + local `dryrun-b1`), `tag dryrun-b1` pushed, state regenerated, `DRY-RUN-1` and `DRY-RUN-1-R1` → `merged`, gates on `main` rc 0.
+Expected: lines PASS for branch deletion (remote + local `block/dryrun-b1`), `tag dryrun-b1` pushed, no commit on `main` (ruling 2), gates on `main` rc 0. `DRY-RUN-1` and `DRY-RUN-1-R1` stay `closed` on `main`; their `merged` edit lands on the next block's branch (Step 20).
 
-- [ ] **Step 17: Handoff**
+- [ ] **Step 17: Checkpoint**
 
-Write `docs/superpowers/state/dryrun/handoff.md` with the umbrella front matter: `plan: docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md`, `spec: docs/superpowers/specs/2026-10-17-strict-delivery-design.md`, `branch: main`, `head: <git rev-parse HEAD>`, `base: <sha before the squash>`, `ledger: docs/superpowers/state/dryrun/ledger.md`, `resume_line: <ledger line count>`, `block: 1`, `next_task: none`, `findings_in_flight: []`, `claims_verified_at_head: []`, `live_subagents: []`, `open_decisions: []`, `rulings: [<this block's rulings or none>]`, `grant: $DEC`, `parked_branches: [{name: strict-delivery-b13, reason: "b13 in progress; resume at Task 3", owner: session}]`, `env: {idf: "source tools/idf-env.sh", flash: "owner says ready", ota_window_s: 35}`, `traps: [<what this dry run found>]`. Append `CHECKPOINT b1` to the ledger. Land both through the path S4's `postmerge.py` defines for post-merge state commits.
+Run: `python3 tools/gates/gate_checkpoint.py --plan dryrun` → rc 0 (the handoff landed with the squash, Step 11b).
 
 - [ ] **Step 18: Status update and resume prompt; STOP**
 
 Post: PR `$DRPR` merged, tag `dryrun-b1`, register states, gate result on main, open decisions (none), rulings, and the resume prompt:
 ```
-Invoke the strict-delivery skill. Read docs/superpowers/state/dryrun/handoff.md. Run python3 tools/gates/run_all.py on main and python3 tools/gates/gate_checkpoint.py --plan dryrun; stop on any FAIL. Then git switch block/strict-delivery-b13, git rebase main, and continue docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md at Task 2 Step 19.
+Invoke the strict-delivery skill. Read docs/superpowers/state/dryrun/handoff.md. Run python3 tools/gates/run_all.py on main and python3 tools/gates/gate_checkpoint.py --plan dryrun; stop on any FAIL. Then continue docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md at Task 2 Step 19 (Step 20 creates block/strict-delivery-b13 from main).
 ```
 Stop. The owner runs `/clear` and pastes it.
 
 - [ ] **Step 19: Resume verification (new context)**
 
-Run: `python3 tools/gates/gate_checkpoint.py --plan dryrun` → rc 0; `git worktree list` → main only; `git branch --list` → `main`, `strict-delivery-b13`; `gh pr list --head dryrun-b1 --state open` → empty; `git tag -l dryrun-b1` → `dryrun-b1`.
+Run: `python3 tools/gates/gate_checkpoint.py --plan dryrun` → rc 0; `git worktree list` → main only; `git branch --list` → `main`, `s5.2-conn-ble`; `gh pr list --head block/dryrun-b1 --state open` → empty; `git tag -l dryrun-b1` → `dryrun-b1`.
 
 - [ ] **Step 20: Evidence on b13 and commit**
 
-`git switch block/strict-delivery-b13 && git rebase main`; `git ls-files tools/gates/tests/fixtures/dryrun` → empty. Append to `docs/superpowers/state/strict-delivery/ledger.md`: `S5-2 complete — dry run PR #$DRPR merged <squash sha>, tag dryrun-b1, DRY-RUN-1 merged, DRY-RUN-1-R1 merged, planted claim caught by review 1, gate_checkpoint --plan dryrun PASS after /clear`.
+`git switch -c block/strict-delivery-b13 main` (ruling 6); `git ls-files tools/gates/tests/fixtures/dryrun` → empty. Set `DRY-RUN-1` and `DRY-RUN-1-R1` to `merged` in `findings.yml` (history entry `{state: merged, sha: <squash sha>, by: postmerge}`; ruling 2). Append to `docs/superpowers/state/strict-delivery/ledger.md`: `S5-2 complete — dry run PR #$DRPR merged <squash sha>, tag dryrun-b1, DRY-RUN-1 merged, DRY-RUN-1-R1 merged, planted claim caught by review 1, gate_checkpoint --plan dryrun PASS after /clear`.
 ```bash
-git add docs/superpowers/state/strict-delivery/ledger.md
-git commit -m "docs(state): S5 dry-run evidence (DRY-RUN-1 end to end)" -m "Co-Authored-By: $TRAILER"
+git add docs/superpowers/state/strict-delivery/ledger.md docs/superpowers/state/findings.yml
+git commit -m "docs(state): S5 dry-run evidence (DRY-RUN-1 end to end); DRY-RUN rows merged" -m "Co-Authored-By: $TRAILER"
 ```
 
 ---
@@ -1392,7 +1396,7 @@ runs every gate and every `tests/test_*.py`. Never bypass a hook (`--no-verify` 
 `.github/workflows/gates.yml`). Every gate ships fixtures that must FAIL and must PASS.
 
 ## Validation evidence
-Skill RED/GREEN: `skill-tests/` (transcripts, `rationalizations.md`). End-to-end dry run: PR for `dryrun-b1`,
+Skill RED/GREEN: `skill-tests/` (transcripts, `rationalizations.md`). End-to-end dry run: PR from `block/dryrun-b1` (tag `dryrun-b1`),
 `docs/superpowers/state/dryrun/` (ledger, review package, mutation, handoff).
 
 ## Changing a gate
@@ -1467,8 +1471,8 @@ And in `MEMORY.md` replace the line beginning `- [Subagent models]` with:
 - [ ] **B1:** `python3 tools/gates/run_all.py` → rc 0; `python3 -m unittest -v tools/gates/tests/test_skill_tests.py` → OK.
 - [ ] **B2:** Final branch reviewer (opus) and final adversarial verifier (Fable) on `git diff main...block/strict-delivery-b13`: re-run every gate, re-run `grade.py`, re-run scenario 1's mutation in a fresh fixture, execute every claim in the PR body and commits; reports under `.superpowers/sdd/strict-delivery/review/b13/`. Both clean (fix loop otherwise).
 - [ ] **B3:** PR body (no merge markers; ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`); `git push -u origin block/strict-delivery-b13`; `gh pr create`; `gh pr checks <n> --watch` → all pass; `python3 tools/gates/gate_merge_ready.py --pr <n>` → rc 0 (grant `DEC-0001` answered).
-- [ ] **B4:** `gh pr merge <n> --squash`; `python3 tools/gates/postmerge.py --plan strict-delivery --block 13 --pr <n>` → tag `strict-delivery-b13`, branches gone, rows `merged`, gates on main rc 0.
-- [ ] **B5:** Handoff `docs/superpowers/state/strict-delivery/handoff.md` (`block: 13`, `next_task: none`, `open_decisions: []`, `parked_branches: []`); ledger `CHECKPOINT b13`; `python3 tools/gates/gate_checkpoint.py --plan strict-delivery` → rc 0.
+- [ ] **B4:** Before `gh pr ready` (owner ruling 2): handoff `docs/superpowers/state/strict-delivery/handoff.md` (`block: 13`, `next_task: none`, `open_decisions: []`, `parked_branches: [{name: s5.2-conn-ble, reason: "BLE activation deferred", owner: "sub-project C"}]`) and ledger `CHECKPOINT b13` committed on `block/strict-delivery-b13`; then `gh pr merge <n> --squash`; `python3 tools/gates/postmerge.py --plan strict-delivery --block 13 --pr <n>` → tag `strict-delivery-b13`, branch gone, no commit on `main`; b13's register `merged` edits go on the bootstrap's first block branch.
+- [ ] **B5:** `python3 tools/gates/gate_checkpoint.py --plan strict-delivery` → rc 0; `git branch --list` → `main`, `s5.2-conn-ble`; `git worktree list` → main only.
 - [ ] **B6:** Status update (umbrella complete: b1–b13 merged; remaining = bootstrap load, conformance sweep, then the first fix plan; open decisions none) and resume prompt; stop:
 ```
 Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/handoff.md. Run python3 tools/gates/run_all.py on main and stop on any FAIL. Then start the bootstrap load from docs/superpowers/state/briefs/bootstrap-load.md: ask for grant:bootstrap-load, write its plan with superpowers:writing-plans, run gate_plan, and stop for the owner's review of the plan.
@@ -1501,16 +1505,55 @@ Plan slug: `bootstrap-load`. Grant: `grant:bootstrap-load` (merge-grant, asked f
 | A2 §4 code findings | 79 (HIGH 13, MEDIUM 24, LOW 42; CE 14, IO 15, APP 14, DRV 12, TCI 14, DC 10) | `A2-<area id>`, `#` → `I` (e.g. `A2-IO-N2`, `A2-CE-I118`) | A2 §4 row "defect" cell verbatim; siblings from the merged ids in the id cell and the reviewer report |
 | A2 §3 standalone false claims | 61 (spec 26: S3–S7, S13, S16–S35; roadmap/README/FW/P10 8: R1–R4, R6–R8, R11; code comments 24 per A2 §3.4; PR/issue 3: P3, P9, P12) | `A2-S<n>`, `A2-R<n>`, `A2-CMT-01`…`A2-CMT-24` (A2 §3.4 order; file:line in `class`), `A2-P<n>` | A2 §3 row "claim" + "contradicting evidence" verbatim |
 | A2 §5 bench rows | 29 (HIGH 1 = item 50; MEDIUM 13; LOW 15) | `A2-BENCH-<item>` (`A2-BENCH-12-13-15`, `A2-BENCH-D12`, `A2-BENCH-V9`) | the 27 §5 rows whose verdict is NEEDS REWRITE / CANNOT RUN / WOULD FALSE-PASS (20, 24–30, 32, 33, 39, 40, 43, 47–50, 52, 54–59, 69, 70, 12/13/15) + D-12 + V-9 from A2 §6 B |
-| Drift rows absent from A2 | 17 | `FW-RES-01`…`FW-RES-13` (RD §4.4, in its order: OTA validation gate host test; task-WDT subscription; tracks/coredump pin; errlog dedup; `s_seq` saturation test; `status.state` hardcoded 0; cfg RMW lock/save-on-change test; `ESP_LOG_NONE` windows pin; `ring_pop` contended retry test; `sto_write` host build; `/api/sessions` IDF glue; button-ISR IRAM ELF check; gen_fonts drift CI check), `A1-PR-L5`, `A1-PR-L6`, `A1-PR-L7` (FG §1.7), `DRIFT-RM177-WS29V2` (DG §5.2) | RD/FG/DG text verbatim |
+| Drift rows absent from A2 | 17 | `DG-FW-RES-01`…`DG-FW-RES-13` (RD §4.4, in its order: OTA validation gate host test; task-WDT subscription; tracks/coredump pin; errlog dedup; `s_seq` saturation test; `status.state` hardcoded 0; cfg RMW lock/save-on-change test; `ESP_LOG_NONE` windows pin; `ring_pop` contended retry test; `sto_write` host build; `/api/sessions` IDF glue; button-ISR IRAM ELF check; gen_fonts drift CI check), `A1-PR-L5`, `A1-PR-L6`, `A1-PR-L7` (FG §1.7), `DG-RM177-WS29V2` (DG §5.2) | RD/FG/DG text verbatim |
+| Audit-1 ids its report names in scan position (owner ruling 5) | 2 | `A1-RULE-5`, `A1-RULE-9` (A1 report :167-168, §7.4 linter gaps) | A1 list item verbatim; state from FG §1.5's trace after the verifier's re-run |
 
-Totals: 79 + 90 standalone (61 + 29) + 17 = **186**; sources `audit-2026-10-16` 169, `review-2026-10-17-drift` 14, `audit-2026-10-13` 3.
+Totals: 79 + 90 standalone (61 + 29) + 17 + 2 = **188**; sources `audit-2026-10-16` 169, `review-2026-10-17-drift` 14, `audit-2026-10-13` 5. Prefixes (owner ruling 5): audit-1 ids `A1-`, audit-2 ids `A2-`, ids originating in the drift analysis `DG-`.
 Not rows: the 30 false claims A2 §3 links to a §4 defect (→ that row's `siblings`/`evidence`), S36 (TRUE), the A2 §5 RUNNABLE rows.
 Deduplication against the drift's 160 untracked items (RD §4.5 = 63 + 29 + 51 + 13 + 3 + 1): the 63 are a subset of the 79 (match by id), the 29 are the bench group (match by item), the 51 are a subset of the 61 standalone claims (match by row id / file:line) — 143 items add an `evidence` line `untracked per RD §4` to an existing row and no new row; the remaining 17 are the drift group. A loader that produces any other number stops (decision `[BOOT-COUNT]`).
-Each row: `state: open`; `history: [{state: open, sha: 7265059, by: audit-2026-10-16}]` (drift rows: `sha: 5d95a53`); `cites` from the row's file:line at 7265059; `repro` = the reproducer path if any; `owner` = the A2 §6 bucket's proposal (A/B → `{kind: roadmap, plan: pre-bench}`, C → the issue A2 §6 names or `{kind: roadmap, plan: F5}`, D → `{kind: roadmap, plan: "8"}` or `"6"`; drift rows → `{kind: roadmap, plan: F5}`, `DRIFT-RM177-WS29V2` → `{kind: roadmap, plan: "7"}`) with `evidence` line `owner proposed by A2 §6 bucket <X>; confirmed only by [BOOT-TRIAGE-<X>]`. The verifier re-runs each row's evidence at the load HEAD; a row that no longer reproduces (S1–S4 changed `tools/lint`, CI) stays `open` with the output in `evidence` and is listed in `[BOOT-NOREPRO]`.
+Each row: `state: open`; `history: [{state: open, sha: 7265059, by: audit-2026-10-16}]` (drift rows: `sha: 5d95a53`); `cites` from the row's file:line at 7265059; `repro` = the reproducer path if any; `owner` = the A2 §6 bucket's proposal (A/B → `{kind: roadmap, plan: pre-bench}`, C → the issue A2 §6 names or `{kind: roadmap, plan: F5}`, D → `{kind: roadmap, plan: "8"}` or `"6"`; drift rows → `{kind: roadmap, plan: F5}`, `DG-RM177-WS29V2` → `{kind: roadmap, plan: "7"}`) with `evidence` line `owner proposed by A2 §6 bucket <X>; confirmed only by [BOOT-TRIAGE-<X>]`. The verifier re-runs each row's evidence at the load HEAD; a row that no longer reproduces (S1–S4 changed `tools/lint`, CI) stays `open` with the output in `evidence` and is listed in `[BOOT-NOREPRO]`.
 Reconciliation: every one of FG's 78 not-fixed-and-pinned trace rows is mapped in `.superpowers/bootstrap/a1-map.md` to an A2 id, a drift id, or "unmapped"; unmapped rows (at least P-L8, P-L9, P-L10, P-L11) go to `[BOOT-A1-REST]`, not into the register.
 
+## Registered reports (owner ruling 5; runs after the last findings block, L2, before L3)
+The three reports become *registered reports* so `gate_register`'s scan (`FAIL register.report.<file>.<id>: not in register`) holds them to the register from now on.
+1. Reword the one non-finding token the scan grammar matches in A2 (a list item that begins with a date): A2 line 669 `- 2026-10-13 reproducers re-run:` → `- Re-run of the 2026-10-13 reproducers:` (ledgered; no other text changes).
+2. Insert the marker as line 3 of each report (after the title and a blank line):
+```bash
+for f in docs/reviews/2026-10-13-audit-roadmap-code-vs-spec.md docs/reviews/2026-10-16-audit-post-fix-wave.md docs/reviews/2026-10-17-audit-drift-and-gaps.md; do
+  python3 -c "import sys;p=sys.argv[1];l=open(p,encoding='utf-8').read().split('\n',1);open(p,'w',encoding='utf-8').write(l[0]+'\n\nregister: true\n'+l[1])" "$f"
+  head -20 "$f" | grep -x 'register: true' >/dev/null && echo "PASS marker $f" || echo "FAIL marker $f"
+done
+```
+3. Collect what the scan now names: `python3 tools/gates/gate_register.py | grep '^FAIL register.report\.' > .superpowers/bootstrap/report-scan.txt`.
+4. Append to each report an `## id-map` table (`| report id | register id |`), one row per id in step 3 for that file: A1 file → `A1-<id>`; A2 file → `A2-<id>` (`#` → `I`); DG file → `A2-<id>` when that row exists, else `DG-<id>`. Every register id in the map must already exist (the rows above); an id with no row stops the load (decision `[BOOT-COUNT]`).
+```bash
+python3 - <<'EOF'
+import re, yaml
+ids = {r["id"] for r in yaml.safe_load(open("docs/superpowers/state/findings.yml"))}
+files = {"2026-10-13-audit-roadmap-code-vs-spec.md": "A1", "2026-10-16-audit-post-fix-wave.md": "A2", "2026-10-17-audit-drift-and-gaps.md": "DG"}
+rows = {}
+for line in open(".superpowers/bootstrap/report-scan.txt"):
+    m = re.match(r"FAIL register\.report\.(?:docs/reviews/)?(.+?\.md)\.(.+?):", line)
+    rows.setdefault(m.group(1), []).append(m.group(2))
+for name, rids in rows.items():
+    pre = files[name]
+    out = []
+    for rid in sorted(set(rids)):
+        reg = (pre if pre != "DG" else "A2") + "-" + rid.replace("#", "I")
+        if reg not in ids and pre == "DG":
+            reg = "DG-" + rid
+        assert reg in ids, f"{name}: {rid} -> {reg} not in register"
+        out.append(f"| {rid} | {reg} |")
+    with open("docs/reviews/" + name, "a", encoding="utf-8") as fh:
+        fh.write("\n## id-map\n\n| report id | register id |\n|---|---|\n" + "\n".join(out) + "\n")
+    print(f"PASS id-map {name}: {len(out)} rows")
+EOF
+```
+Expected at 24aa0c7 under the ruling-5 grammar (table rows whose first cell is exactly an id; list items that begin with an id): A1 2 rows (RULE-5, RULE-9), A2 55 rows (all A2 §4 ids written alone in the first cell), DG 3 rows (APP-N1, DC-FC-1, DRV-N1 → their `A2-` rows). The counts are re-derived from step 3 at the load HEAD.
+5. Acceptance line: `python3 tools/gates/gate_register.py | grep -c '^FAIL register\.report\.'` prints `0`, and `grep -c '^register: true$'` on each of the three reports prints `1`.
+
 ## claims.yml — one row per claim unit
-A unit is a table row that is not a header row, or a sentence of a prose line (split after `.`/`!`/`?` before a capital, backtick, bracket or `*`), outside code fences and headings, that contains a digit, a path, a state word (`DONE OPEN CLOSED MERGED FIXED PASS FAIL pinned merged closed open done fixed green passes fails blocks enforced required gated implemented exists tested verified`) or `always`/`never`/`every`. Id `C-<doc>-L<line>-<k>` (k = sentence index on the line); `anchor` = `L<line>`; `text` verbatim. Enumerator (run at the load HEAD; the counts below are at 24aa0c7 and are re-derived, the gate compares rows with the enumerator output):
+Owner ruling 8 (umbrella, 2026-10-17) confirms this granularity rule and its 2,569 rows at 24aa0c7; the enumerator below is the rule's executable form (the ruling's paraphrase also names `pending`, `blocking` and `only`, which the enumerator does not match — adding them gives 2,626 rows at 24aa0c7, so the session asks the owner which form is binding before L3 and records the answer as `(claim-word list: the umbrella's ruling 8 list is binding — it adds pending/blocking/only — 2,626 rows at 24aa0c7)`). A unit is a table row that is not a header row, or a sentence of a prose line (split after `.`/`!`/`?` before a capital, backtick, bracket or `*`), outside code fences and headings, that contains a digit, a path, a state word (`DONE OPEN CLOSED MERGED FIXED PASS FAIL pinned merged closed open done fixed green passes fails blocks enforced required gated implemented exists tested verified`) or `always`/`never`/`every`. Id `C-<doc>-L<line>-<k>` (k = sentence index on the line); `anchor` = `L<line>`; `text` verbatim. Enumerator (run at the load HEAD; the counts below are at 24aa0c7 and are re-derived, the gate compares rows with the enumerator output):
 
 ```python enumerate
 import re, sys
@@ -1571,7 +1614,7 @@ if "--counts" in sys.argv:
 
 Seeds: the 612 claims A2's reviewers checked (core-engines 55, core-io-ui 46, app-layer 58, drivers-build 59, tools-ci-tests 34, devcontroller-link-sim 52, docs-claims 308; A2 §7) are mapped first in `.superpowers/bootstrap/seed-map.tsv`, one line per seed: the unit id it lands on, or a disposition for seeds outside the eight documents (code comment → `gate_comments`/finding row; PR or issue → its `A2-P<n>` row; `docs/measurements.md` → `gate_state_docs`). The per-report seed count must equal the report's own final count; a mismatch is `[BOOT-SEED-COUNT]`. A seed's verdict and evidence pre-fill `direct`/`contra` as hypotheses only. Every row ends `verified` or `false` (with `finding` = an existing id or a new `BOOT-C-<unit id>` finding row, source `agent`, owner per `[BOOT-TRIAGE-DRIFT]`); zero rows `unverified`. The 75 A2 §3 false-claim rows inside the eight documents (spec 35, bench 29, roadmap/README/FW/P10 11) must come out `false` with their A2 finding; a verifier result that contradicts an A2 verdict is entered as found and listed in `[BOOT-CONTRA]` — no agent narrows a finding.
 
-## decisions.yml — 42 owner questions + 1 grant (ids assigned at load; the question text starts with the tag)
+## decisions.yml — 43 owner questions + 1 grant (ids assigned at load; the question text starts with the tag)
 | Tag | Class | Question (options and cost copied from the source) |
 |---|---|---|
 | `grant:bootstrap-load` | merge-grant | may the session merge the bootstrap blocks on all-green? |
@@ -1583,21 +1626,23 @@ Seeds: the 612 claims A2's reviewers checked (core-engines 55, core-io-ui 46, ap
 | `[BOOT-UNTRACKED]` | scope | the 160 untracked items: issues for bucket C now, carry in a plan, or both (DG §6.2 item 5) |
 | `[BOOT-CLOSURE]` | scope | plan closure targets: which of the 11 host-work + owned-hardware plans and 3 host-only plans the pre-bench plan closes (DG §6.2 item 6) |
 | `[BOOT-REVERIFY]` | scope | re-verification of A2: accept the verifier layer, fresh verifiers over all 79 §4 rows, or over the 14 HIGH + 24 MEDIUM (DG §6.2 item 1; cost ≈ 7 agents, 1–2 h) |
+| `(claim-word list: the umbrella's ruling 8 list is binding — it adds pending/blocking/only — 2,626 rows at 24aa0c7)` | scope | claim-unit word list: the enumerator as written (2,569 at 24aa0c7) or with `pending`/`blocking`/`only` added (2,626) |
 | `[BOOT-A1-REST]` | scope | audit-1 trace rows in no other group (P-L8..P-L11 at least): load as rows, re-verify first, or drop with reason |
 
-Count: 4 + 1 + 17 + 9 + 7 + 1 + 1 + 1 + 1 = **42**, plus the grant = 43. Conditional, created only when triggered: `[BOOT-COUNT]`, `[BOOT-NOREPRO]`, `[BOOT-SEED-COUNT]`, `[BOOT-CONTRA]`. Not entries: DG §6.2 item 2 (answered by the approved strict-delivery spec) and item 7 (a standing hardware rule, `CLAUDE.md`).
+Count: 4 + 1 + 17 + 9 + 7 + 1 + 1 + 1 + 1 + 1 = **43**, plus the grant = 44. Conditional, created only when triggered: `[BOOT-COUNT]`, `[BOOT-NOREPRO]`, `[BOOT-SEED-COUNT]`, `[BOOT-CONTRA]`. Not entries: DG §6.2 item 2 (answered by the approved strict-delivery spec) and item 7 (a standing hardware rule, `CLAUDE.md`).
 
 ## Blocks (≤3 tasks each; one task = one area's verified rows committed)
-L1: grant + 42 decisions; findings ce + io + app (43). L2: findings drv + tci + dc (36); doc-text (37 + 24 comments = 61); bench (29) + drift (17). L3: claims spec L1–700, L701–1404, L1405–1849. L4: spec L1850–2265, L2266–end, bench L1–311. L5: bench L312–end, roadmap + README, FW + P10.
+L1: grant + 43 decisions; findings ce + io + app (43). L2: findings drv + tci + dc (36); doc-text (37 + 24 comments = 61); bench (29) + drift (17) + A1 report ids (2), then the registered-reports step. L3: claims spec L1–700, L701–1404, L1405–1849. L4: spec L1850–2265, L2266–end, bench L1–311. L5: bench L312–end, roadmap + README, FW + P10.
 
 ## Stop points
 1. Before L1: `grant:bootstrap-load` unanswered → stop. 2. The plan written from this brief → owner review → stop.
-3. Any conditional decision created → that area stops; other areas continue. 4. After L5: the owner answers the 42 questions; nothing in the conformance sweep that depends on an unanswered tag starts.
+3. Any conditional decision created → that area stops; other areas continue. 4. After L5: the owner answers the 43 questions; nothing in the conformance sweep that depends on an unanswered tag starts.
 
 ## Acceptance (at the L5 checkpoint, on main)
-- `python3 tools/gates/gate_register.py` rc 0 and `python3 -c "import yaml;f=yaml.safe_load(open('docs/superpowers/state/findings.yml'));import collections;print(collections.Counter(r['source'] for r in f))"` shows `audit-2026-10-16: 169`, `review-2026-10-17-drift: 14`, `audit-2026-10-13: 3` (plus pre-existing S1–S4 rows and any `BOOT-C-*` rows, listed).
+- `python3 tools/gates/gate_register.py` rc 0 and `python3 -c "import yaml;f=yaml.safe_load(open('docs/superpowers/state/findings.yml'));import collections;print(collections.Counter(r['source'] for r in f))"` shows `audit-2026-10-16: 169`, `review-2026-10-17-drift: 14`, `audit-2026-10-13: 5` (plus pre-existing S1–S4 rows and any `BOOT-C-*` rows, listed).
 - `python3 tools/gates/gate_claims.py` rc 0; claim rows = enumerator lines at HEAD (2,569 at 24aa0c7); zero `unverified`; every `false` row has a finding.
-- `python3 tools/gates/gate_decisions.py` rc 0; 43 bootstrap entries + the conditional ones, each with ≥2 options and cost (grant excepted).
+- `python3 tools/gates/gate_register.py | grep -c '^FAIL register\.report\.'` prints `0`; each of the three reports carries `register: true` in its first 20 lines and an `## id-map` table.
+- `python3 tools/gates/gate_decisions.py` rc 0; 44 bootstrap entries + the conditional ones, each with ≥2 options and cost (grant excepted).
 - `.superpowers/bootstrap/seed-map.tsv` has 612 lines; `.superpowers/bootstrap/a1-map.md` maps 78 rows.
 ````
 

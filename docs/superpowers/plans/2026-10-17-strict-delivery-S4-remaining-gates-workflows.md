@@ -18,6 +18,7 @@
 - Comment patterns are case-sensitive Python regexes from `tools/gates/config.yml::comment_patterns`.
 - Block branches are named `block/<plan>-b<N>` (e.g. `block/strict-delivery-b10`); tags are `<plan>-b<N>`; a branch never shares a name with a tag.
 - Plan files that `gate_merge_ready` reads mark blocks with `## Block b<N>` and tasks with `### Task <n>:` (this file follows it; S5 must too).
+- Every Python file under `tools/gates/` passes `python3 -m mypy --strict tools/gates` (owner ruling 7, enforced by `gate_tools_py` from Task 2 on). The code blocks in this plan show the logic; where a block lacks annotations, the implementer adds them (parameter and return types, `typing` generics, `-> None`) until mypy is clean. That is required work, not optional polish. mypy is the oracle; a reviewer re-runs it.
 - No source in this plan writes a comment or docstring that matches a `comment_patterns` entry (the gate added in Task 1 would fail on it). Strings in code are not comments and are fine.
 - Nothing in this plan flashes, opens a serial port, or writes to GitHub from a subagent; `gh` writes (`pr create`, `pr ready`, `pr merge`) run only from the session or from `postmerge.py` launched by the session.
 
@@ -56,7 +57,7 @@
 - Review packages live git-ignored under `.superpowers/sdd/<plan>/review/<task>/` (umbrella correction 2026-10-17). The umbrella CLI table still shows `gate_review_package --dir docs/superpowers/state/<plan>/review/<task>`; `block.js` uses the `.superpowers/sdd/…` path and keeps the command in one constant.
 - Umbrella hook protocol: "`git merge` → merge_ready + grant". Block integration merges task branches with `git merge` into the block branch, where a PR-level gate cannot pass yet. The hook here blocks `git merge` only when the current branch is `main` (main moves only by `gh pr merge`) and lets it through on any other branch.
 - Spec §8 "pre-push → merge-readiness when the branch has a PR". The commits being pushed have no check runs yet, so the pre-push mode (`--pre-push`) checks every static rule and leaves out the check-run rule. It runs only when the PR is no longer a draft.
-- Spec §7 `gate_tools_py` lists a "type check". No type checker is pinned in `tools/requirements.txt` and the brief leaves it out. S4 doesn't ship one; it's an open item for the owner (a new dependency is a scope decision).
+- Spec §7 `gate_tools_py` lists a "type check". Owner ruling 7 settles it: mypy 1.11.2, `--strict` on `tools/gates`, `--ignore-missing-imports` on the other tools with legacy errors as `SD-TYPES-<n>` rows (Task 2).
 - Gates that land on a tree which already violates them (65 comment sites, 72 bench rows, the `power_of_10.py` and `devkit.py` exit codes) would fail at every commit until the conformance sweep (spec rollout step 9, S5). S4 records each class as one register row owned by the umbrella's conformance work and marks each site with that id, so the gate passes today and the sweep has an exact work list. The bench gate gets one extra marker for this, `[no-transcript: <finding-id>]`, which the brief did not list.
 
 ## File structure (S4 creates or modifies exactly these)
@@ -1098,17 +1099,23 @@ python3 .superpowers/sdd/strict-delivery/regedit.py set SD-S4-T1 pinned S4-T1 \
 git add docs/superpowers/state && git commit -m "state: SD-S4-T1 pinned (mutation transcript)"
 ```
 
-### Task 2: `gate_tools_py` + the exit-code harness
+### Task 2: `gate_tools_py` + the exit-code harness + mypy
 
-**Register:** SD-S4-T2 (closes); SD-TOOLS-1 (creates); DC-N3 (creates from audit 2026-10-16, verbatim). **Siblings:** cli tools; serial-relay tools called with a fake port; generators with no argv. **Gates:** `run_all.py`, gate-test suite.
+**Register:** SD-S4-T2 (closes); SD-TOOLS-1 (creates); DC-N3 (creates from audit 2026-10-16, verbatim); `SD-TYPES-<n>` (generated, one per distinct legacy mypy error). **Siblings:** cli tools; serial-relay tools called with a fake port; generators with no argv; strict typing of `tools/gates`; legacy typing of the other tools. **Gates:** `run_all.py`, gate-test suite.
+
+Type checking (owner ruling 7: mypy 1.11.2, pinned in `tools/requirements.txt`, installed in the `gates` CI job) adds two checks:
+- **Strict:** `python3 -m mypy --strict tools/gates` must pass. Each error is `FAIL tools_py.mypy.<file>:<line>: <message>`.
+- **Legacy:** `python3 -m mypy --ignore-missing-imports <targets>`, where `<targets>` is `tools/lint tools/*.py tools/tracks tools/sim` restricted to directories that contain a tracked `.py` file (mypy exits 2 on a directory with none; `tools/sim` holds only `gen_sim_capture.sh` today, so it is left out until it gains a `.py`) plus every tracked `tools/*.py`. Each distinct error, keyed line-free as `<file>: error: <message>`, must match the `repro` of a `SD-TYPES-<n>` row that is not `closed`/`merged` (`PASS tools_py.mypy-legacy.<file>.SD-TYPES-<n>`); an unmatched error FAILs (`FAIL tools_py.mypy-legacy.<file>:<line>: …`), and so does a matched row whose error is gone (`… fixed -- move SD-TYPES-<n> forward`). The conformance sweep (S5) fixes the errors and closes the rows; after it, no `SD-TYPES` row is open and any legacy error FAILs, so the second set must pass too.
+- mypy missing, or exiting non-zero without a parsable `error:` line (usage error, crash), is `FAIL tools_py.input`, never a skip. A blocking error (rc 2 with error lines, e.g. a syntax error) is reported per line like any other.
+- Measured 2026-10-17 with mypy 1.11.2: the legacy set (`tools/lint tools/tracks tools/*.py`) reports `Success: no issues found in 11 source files`, so Step 6b is expected to generate zero `SD-TYPES` rows unless S1–S4 add errors; `mypy tools/sim` prints `There are no .py[i] files in directory 'tools/sim'`.
 
 **Files:**
 - Create: `tools/gates/gate_tools_py.py`, `tools/gates/tests/fixtures/tools_rc/{cases.yml,call_runner.py,devkit_lt_echo_unknown.txt,devkit_lt_err_body.txt,devkit_lt_truncated.txt}`, `tools/gates/tests/test_gate_tools_py.py`
-- Modify: `tools/gates/run_all.py`, `.github/workflows/gates.yml`, `tools/gates/README.md`, `docs/superpowers/state/findings.yml`
+- Modify: `tools/requirements.txt` (+ `mypy==1.11.2`), `tools/gates/run_all.py`, `.github/workflows/gates.yml`, `tools/gates/README.md`, `docs/superpowers/state/findings.yml`, every `tools/gates/**/*.py` that lacks annotations (Task 1's files, S1–S3's files)
 
 **Interfaces:**
 - Consumes: Task 1's `s4kit`; `registers.load_findings`; `gitinfo.staged_files`.
-- Produces: `gate_tools_py.check(args)` with argv `[] | ["--staged"] | ["--cases", path]`; `gate_tools_py.unittest_targets(root) -> list[str]`; `gate_tools_py.inventory(root) -> list[str]`; `gate_tools_py.run_case(root, case, cases_dir) -> (rc, tail)`; cases schema below.
+- Produces: `gate_tools_py.check(args)` with argv `[] | ["--staged"] | ["--cases", path]`; `gate_tools_py.unittest_targets(root) -> list[str]`; `gate_tools_py.inventory(root) -> list[str]`; `gate_tools_py.run_case(root, case, cases_dir) -> (rc, tail)`; `gate_tools_py.legacy_targets(root) -> list[str]`; `gate_tools_py.mypy(root, flags, targets) -> list[(file, line, message)]`; cases schema below.
 
 Cases schema (`cases.yml`, a list): `id` (str), `kind` (`cli` | `call`), `script` (repo-relative path), `argv` (cli), `function` + `call_args` (list of positional args after the fake serial port) + optional `serial_reply` (file in the cases dir: the bytes the fake device sends) + optional `patch_path` (`{NAME: path}`, set as `pathlib.Path`) (call), optional `timeout_s` (default 60), optional `expected_fail` (a finding id: the case currently exits 0 and that row owns the defect).
 
@@ -1336,11 +1343,15 @@ BAD_TEST = OK_TEST.replace("assertTrue(True)", "assertTrue(False)")
 GOOD_TOOL = "import sys, os\ndef main(argv=None):\n    argv = sys.argv[1:] if argv is None else argv\n    return 0 if os.path.exists(argv[0]) else 1\nif __name__ == '__main__':\n    sys.exit(main())\n"
 BAD_TOOL = GOOD_TOOL.replace("return 0 if os.path.exists(argv[0]) else 1", "return 0")
 RELAY_TOOL = "def handler(ser, verb):\n    line = ser.readline()\n    return 0\n"
+TYPED_OK = "def double(x: int) -> int:\n    return 2 * x\n"
+TYPED_BAD = "def double(x: int) -> int:\n    return str(x)\n"
+LEGACY_BAD = "x: int = 'a'\n"   # module level: mypy does not check the bodies of unannotated functions
 CLI_CASE = {"id": "tool.missing", "kind": "cli", "script": "tools/tool.py", "argv": ["/nonexistent-probe"]}
 
 
 def repo(tool=GOOD_TOOL, test=OK_TEST, cases=None, findings=None, extra=None):
     files = {".github/workflows/ci.yml": CI, "tools/test_ok.py": test, "tools/tool.py": tool,
+             "tools/gates/typedpkg/__init__.py": "", "tools/gates/typedpkg/mod.py": TYPED_OK,
              "tools/gates/tests/fixtures/tools_rc/cases.yml": yaml.safe_dump(cases or [CLI_CASE])}
     files.update(extra or {})
     return s4kit.make_repo(files=files, findings=findings)
@@ -1414,6 +1425,37 @@ class ToolsPyGateTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("FAIL tools_py.input", out)
 
+    def test_mypy_strict_error_in_tools_gates_fails(self):
+        rc, out = run(repo(extra={"tools/gates/typedpkg/mod.py": TYPED_BAD}))
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL tools_py.mypy.tools/gates/typedpkg/mod.py:2", out)
+
+    def test_mypy_strict_clean_passes(self):
+        rc, out = run(repo())
+        self.assertIn("PASS tools_py.mypy.strict.tools/gates", out)
+        self.assertNotIn("FAIL tools_py.mypy", out)
+
+    def test_legacy_error_without_row_fails(self):
+        rc, out = run(repo(extra={"tools/lint/old.py": LEGACY_BAD},
+                           cases=[CLI_CASE, dict(CLI_CASE, id="old", script="tools/lint/old.py")]))
+        self.assertIn("FAIL tools_py.mypy-legacy.tools/lint/old.py:1", out)
+
+    def test_legacy_error_with_open_types_row_passes(self):
+        key = ('tools/lint/old.py: error: Incompatible types in assignment (expression has type "str", '
+               'variable has type "int")  [assignment]')
+        row = s4kit.finding("SD-TYPES-1")
+        row["repro"] = key
+        rc, out = run(repo(extra={"tools/lint/old.py": LEGACY_BAD}, findings=[row],
+                           cases=[CLI_CASE, dict(CLI_CASE, id="old", script="tools/lint/old.py")]))
+        self.assertIn("PASS tools_py.mypy-legacy.tools/lint/old.py.SD-TYPES-1", out)
+        self.assertNotIn("FAIL tools_py.mypy", out)
+
+    def test_types_row_whose_error_is_gone_fails(self):
+        row = s4kit.finding("SD-TYPES-1")
+        row["repro"] = "tools/tool.py: error: gone  [misc]"
+        rc, out = run(repo(findings=[row]))
+        self.assertIn("move SD-TYPES-1 forward", out)
+
     def test_staged_mode_without_tools_change_passes(self):
         rc, out = run(repo(), ["--staged"])
         self.assertEqual(rc, 0, out)
@@ -1453,8 +1495,10 @@ Expected: ImportError for `gate_tools_py`.
 #!/usr/bin/env python3
 """gate_tools_py -- the tools' Python is tested, compiles, and exits non-zero on failure (spec section 7).
 
-Three checks: (1) the `python3 -m unittest tools/...` list of ci.yml's tools-tests job, run as CI
-runs it; (2) `python3 -m compileall -q tools`; (3) the exit-code harness: every case in
+Four checks: (1) the `python3 -m unittest tools/...` list of ci.yml's tools-tests job, run as CI
+runs it; (2) `python3 -m compileall -q tools`; (3) mypy: --strict over tools/gates must be clean,
+and --ignore-missing-imports over the other tools may only report errors an open SD-TYPES row
+names in its repro; (4) the exit-code harness: every case in
 tools/gates/tests/fixtures/tools_rc/cases.yml invokes a tool on a known-bad input and must exit
 non-zero, unless it names an expected_fail finding that is still open; every non-test
 tools/**/*.py outside tools/gates/ must have a case.
@@ -1480,6 +1524,9 @@ CASES = "tools/gates/tests/fixtures/tools_rc/cases.yml"
 RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "fixtures", "tools_rc",
                       "call_runner.py")
 DONE_STATES = {"pinned", "closed", "merged"}
+LEGACY_DIRS = ("tools/lint", "tools/tracks", "tools/sim")
+MYPY_LINE = re.compile(r"^(?P<file>[^:\n]+):(?P<line>\d+): error: (?P<msg>.*)$")
+TYPES_ID = re.compile(r"^SD-TYPES-\d+$")
 
 
 def _env():
@@ -1519,6 +1566,54 @@ def inventory(root):
         raise GateError("git ls-files: %s" % p.stderr.strip())
     return [f for f in p.stdout.split("\n") if f and not os.path.basename(f).startswith("test_")
             and not f.startswith("tools/gates/")]
+
+
+def legacy_targets(root):
+    tracked = [p for p in subprocess.run(["git", "ls-files", "--", "tools/*.py"], cwd=root, capture_output=True,
+                                         text=True, check=False).stdout.split("\n") if p]
+    dirs = [d for d in LEGACY_DIRS if any(p.startswith(d + "/") for p in tracked)]
+    top = sorted(p for p in tracked if p.count("/") == 1)
+    if not dirs and not top:
+        raise GateError("no tracked Python under %s or tools/*.py" % ", ".join(LEGACY_DIRS))
+    return dirs + top
+
+
+def mypy(root, flags, targets):
+    p = subprocess.run([sys.executable, "-m", "mypy", "--no-color-output", "--no-error-summary",
+                        "--show-error-codes"] + flags + targets, cwd=root, capture_output=True, text=True,
+                       check=False, timeout=900, env=_env())
+    errors = []
+    for line in p.stdout.split("\n"):
+        m = MYPY_LINE.match(line.strip())
+        if m:
+            errors.append((m.group("file"), int(m.group("line")), m.group("msg")))
+    if p.returncode not in (0, 1, 2) or (p.returncode != 0 and not errors):
+        # rc 2 with error lines is a blocking error such as a syntax error: reported per line;
+        # rc 2 with none (usage error, crash, no .py in a target) is a missing input
+        raise GateError("mypy %s: rc %d: %s" % (" ".join(flags + targets), p.returncode, _tail(p)))
+    return errors
+
+
+def check_types(root, r, findings):
+    strict = mypy(root, ["--strict"], ["tools/gates"])
+    for f, ln, msg in strict:
+        r.fail("tools_py.mypy.%s:%d" % (f, ln), msg)
+    if not strict:
+        r.passed("tools_py.mypy.strict.tools/gates")
+    rows = {f["repro"]: f for f in findings if TYPES_ID.match(f["id"]) and f["state"] not in ("closed", "merged")}
+    seen = set()
+    for f, ln, msg in mypy(root, ["--ignore-missing-imports"], legacy_targets(root)):
+        key = "%s: error: %s" % (f, msg)
+        row = rows.get(key)
+        if row is None:
+            r.fail("tools_py.mypy-legacy.%s:%d" % (f, ln), msg)
+        elif key not in seen:
+            seen.add(key)
+            r.passed("tools_py.mypy-legacy.%s.%s" % (f, row["id"]))
+    for key, row in rows.items():
+        if key not in seen:
+            r.fail("tools_py.mypy-legacy.%s" % row["id"], "its error is gone (%s): fixed -- move %s forward"
+                   % (key[:80], row["id"]))
 
 
 def run_case(root, case, cases_dir):
@@ -1567,6 +1662,7 @@ def check(args):
         r.passed("tools_py.compileall")
     else:
         r.fail("tools_py.compileall", _tail(p, 5))
+    check_types(root, r, registers.load_findings(root))
     cases_path = os.path.join(root, a.cases)
     if not os.path.isfile(cases_path):
         raise GateError("%s missing" % a.cases)
@@ -1610,25 +1706,74 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 6: Pin mypy, run the tests**
 
-Run: `python3 -m unittest tools/gates/tests/test_gate_tools_py.py -v` → PASS (the two `RealTreeTest` cases need Pillow for `gen_fonts`: `pip3 install -r tools/requirements.txt` once). Run: `python3 tools/gates/gate_tools_py.py` on the real tree → rc 0, with `PASS tools_py.rc.devkit.lt-relay-*.expected-fail.DC-N3` (×3) and `PASS tools_py.rc.power_of_10.missing-paths.expected-fail.SD-TOOLS-1`.
+Append to `tools/requirements.txt`:
+```
+mypy==1.11.2
+```
+Run `pip3 install -r tools/requirements.txt` (Pillow for `gen_fonts`, pyserial for `devkit`, mypy), then `python3 -m unittest tools/gates/tests/test_gate_tools_py.py -v`. Expected: all fixture tests PASS.
+
+- [ ] **Step 6a: Make `tools/gates` pass `mypy --strict`**
+
+Run: `python3 -m mypy --strict tools/gates`. Annotate every function it reports (S1–S3's files and Task 1's) until it prints `Success`. Annotation-only edits: no behaviour change, so the full gate-test suite must stay green (`python3 -m unittest discover -s tools/gates/tests -p 'test_*.py'`). Where a third-party stub is missing (PyYAML), add `types-PyYAML` to `tools/requirements.txt` at the version pip resolves today, and ledger it. Don't use `# type: ignore` without an error code and a one-line reason.
+
+- [ ] **Step 6b: Conformance: one `SD-TYPES-<n>` row per distinct legacy error**
+
+This generates the rows (the row template is the dict in the snippet); then `regedit.py add` them:
+```bash
+python3 - <<'PY'
+import subprocess, sys, yaml
+sys.path.insert(0, ".")
+from tools.gates import gate_tools_py as g
+errors = g.mypy(".", ["--ignore-missing-imports"], g.legacy_targets("."))
+sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+first, keys = {}, []
+for f, ln, msg in errors:
+    key = "%s: error: %s" % (f, msg)
+    if key not in first:
+        first[key] = (f, ln)
+        keys.append(key)
+rows = []
+for n, key in enumerate(keys, 1):
+    f, ln = first[key]
+    rows.append({"id": "SD-TYPES-%d" % n, "source": "agent", "severity": "LOW",
+                 "class": "mypy --ignore-missing-imports reports this error in a tools script, so the tools Python "
+                          "does not type-check: " + key,
+                 "siblings": [], "cites": [{"file": f, "lines": str(ln), "sha": sha}], "repro": key,
+                 "owner": {"kind": "plan", "plan": "2026-10-17-strict-delivery", "task": "S5-conformance"},
+                 "state": "open", "pin": None, "ruling": None, "evidence": [],
+                 "history": [{"state": "open", "sha": sha, "by": "S4-T2"}]})
+yaml.safe_dump(rows, open(".superpowers/sdd/strict-delivery/rows-types.yml", "w"), sort_keys=False, width=100)
+print(len(rows), "SD-TYPES rows from", len(errors), "errors")
+PY
+python3 .superpowers/sdd/strict-delivery/regedit.py add .superpowers/sdd/strict-delivery/rows-types.yml
+python3 tools/gates/gate_tools_py.py | grep -c "mypy-legacy.*SD-TYPES"
+```
+Expected: the gate then shows only PASS lines for `tools_py.mypy*`. Zero rows is a valid outcome: then the second set already passes. The rows are owned by the conformance sweep, which fixes each error and closes its row; with no open `SD-TYPES` row left, any legacy error FAILs.
+
+Then run `python3 tools/gates/gate_tools_py.py` on the real tree. Run: `python3 tools/gates/gate_tools_py.py` on the real tree → rc 0, with `PASS tools_py.rc.devkit.lt-relay-*.expected-fail.DC-N3` (×3) and `PASS tools_py.rc.power_of_10.missing-paths.expected-fail.SD-TOOLS-1`.
 
 - [ ] **Step 7: Wire in**
 
-`run_all.py` `GATES`: add `"tools_py"` (umbrella order: last). The hook's staged argv for `tools_py` is `["--staged"]`. `gates.yml` gate-suite job: add a step before run_all: `pip3 install -r tools/requirements.txt` (Pillow for `gen_fonts`, pyserial for `devkit`) if S1's job does not install the whole file, and add `tools_py` to any `--only` list. README gates table:
+`run_all.py` `GATES`: add `"tools_py"` (umbrella order: last). The hook's staged argv for `tools_py` is `["--staged"]`. `gates.yml`, job `gates`: its install step must install mypy. Make it
+```yaml
+      - name: Install gate dependencies (PyYAML, mypy 1.11.2, Pillow, pyserial)
+        run: pip3 install -r tools/requirements.txt mypy==1.11.2
+```
+(the explicit `mypy==1.11.2` matches the requirements pin and keeps the install visible if the file moves), and add `tools_py` to any `--only` list. README gates table:
 ```markdown
-| `gate_tools_py` | ci.yml's tools unittest list; `compileall`; exit-code harness `tests/fixtures/tools_rc/cases.yml` (known-bad invocation must exit non-zero, or carry an open `expected_fail` row) | pre-commit when `tools/` is staged, CI |
+| `gate_tools_py` | ci.yml's tools unittest list; `compileall`; `mypy --strict tools/gates` clean; `mypy --ignore-missing-imports` over the other tools clean except errors named by an open `SD-TYPES-<n>` row; exit-code harness `tests/fixtures/tools_rc/cases.yml` (known-bad invocation must exit non-zero, or carry an open `expected_fail` row) | pre-commit when `tools/` is staged, CI |
 ```
 Run: `python3 tools/gates/run_all.py` → rc 0.
 
 - [ ] **Step 8: Commit, mutation, pin**
 
 ```bash
-git add tools/gates .github/workflows/gates.yml docs/superpowers/state/findings.yml
-git commit -m "gates: gate_tools_py with the tools exit-code harness; DC-N3 and SD-TOOLS-1 as expected fails (SD-S4-T2)"
+git add tools/gates tools/requirements.txt .github/workflows/gates.yml docs/superpowers/state/findings.yml
+git commit -m "gates: gate_tools_py with mypy and the tools exit-code harness; DC-N3, SD-TOOLS-1, SD-TYPES rows (SD-S4-T2)"
 ```
-Mutation: `sed -i.bak 's/^            elif exp is None:$/            elif False:/' tools/gates/gate_tools_py.py` (plain cases stop being judged; `test_rc_zero_on_bad_args_fails` then FAILs because no FAIL line is produced). Transcript `mutations/SD-S4-T2.txt` with test `test_rc_zero_on_bad_args_fails` (PASS / FAIL / PASS), then:
+Mutation: `sed -i.bak 's/^            elif exp is None:$/            elif False:/' tools/gates/gate_tools_py.py` (plain cases stop being judged; `test_rc_zero_on_bad_args_fails` then FAILs because no FAIL line is produced). Transcript `mutations/SD-S4-T2.txt` with test `test_rc_zero_on_bad_args_fails` (PASS / FAIL / PASS). Append a second three-step section to the same file for the type check: mutation `sed -i.bak 's/^        r.fail("tools_py.mypy.%s:%d" % (f, ln), msg)$/        pass/' tools/gates/gate_tools_py.py` (strict errors stop failing), test `test_mypy_strict_error_in_tools_gates_fails` PASS / FAIL / PASS. Then:
 ```bash
 python3 .superpowers/sdd/strict-delivery/regedit.py set SD-S4-T2 pinned S4-T2 \
   --pin-test tools/gates/tests/test_gate_tools_py.py::ToolsPyGateTest::test_rc_zero_on_bad_args_fails \

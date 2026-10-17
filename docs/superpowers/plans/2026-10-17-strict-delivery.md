@@ -324,6 +324,19 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 | Prompt file per role | `controller`→`controller.md`; `implementer` and `implementer_transcription`→`implementer.md`; `task_reviewer` and `final_reviewer`→`reviewer.md`; `final_verifier`→`verifier.md`; `exception_reviewer`→`exception-reviewer.md`; `audit_reviewer`→`audit-reviewer.md`; `audit_verifier`→`audit-verifier.md`; `investigator`→`investigator.md` |
 | Waiting for the owner mid-block (e.g. an unanswered grant) | the Stop hook blocks once with the open decision ids; on the second stop (`stop_hook_active`) it allows the stop; the session's last message says "waiting for the owner: DEC-…" |
 
+
+## Owner rulings on the writers' questions (2026-10-17, binding)
+
+1. "Verified at HEAD" = state `verified` and no cited path changed since `verified_at` (or in the index). Confirmed.
+2. No post-merge commits on protected `main`: handoff and state-doc regeneration land on the block branch before merge; `postmerge.py` tags, cleans, and leaves register `merged` edits for the next block's branch. Confirmed.
+3. P10 full reach: **a violation in any file a task touches is fixed in that task** (zero-bug rule; the task is incomplete until the touched files are clean); violations in untouched files are tracked as open findings rows (`S3-P10-*`) until the conformance sweep, which closes the rest. A stale or missing tracking row blocks.
+4. PD-7 `cmd_emit` fails tier-B scoring and is reworked in the sweep. Confirmed.
+5. **Report-id grammar (defined now, built in S1 Task 3):** a finding id matches the register regex `^[A-Z0-9]+(-[A-Za-z0-9]+)+$`. A report under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the line `register: true` is a *registered report*; in such a file every Markdown table row whose first cell matches the regex, and every list item beginning with such an id followed by a space or colon, names a finding that MUST exist in `findings.yml` (`FAIL register.report.<file>.<id>: not in register`). Reports without the marker are ignored by the gate; the bootstrap load adds the marker to the three 2026-10-13/16/17 reports after loading them (their historical ids are loaded with the prefixes `A1-` / `A2-` / `DG-` and the report gets an `id-map` table so the scan resolves them).
+6. The pre-bench fix work is **parked until this plan is complete**. Before b1: open a docs-only PR from `pre-bench-wrap-up` (audit report, drift analysis, spec, these plans), merge it, delete the branch; b1 and every later block branch from `main`. The parked worktree `../lap-timer-worktrees/s52` is removed (branch `s5.2-conn-ble` stays, listed in the handoff as parked with owner "sub-project C"). No other worktree or branch may exist at a checkpoint.
+7. Type checker: **mypy** (`mypy==1.11.2`, pinned in `tools/requirements.txt`, installed in the `gates` CI job). `gate_tools_py` runs `mypy --strict tools/gates` (must pass) and `mypy --ignore-missing-imports tools/lint tools/*.py tools/tracks tools/sim` (failures become findings rows for the sweep; after the sweep this set must pass too). Chosen over pyright because it needs no Node toolchain in CI.
+8. Claim granularity: S5's rule stands — one row per sentence that carries a number, a path, a state word (done/pending/required/blocking/merged/open/closed/passes/fails) or a universal (always/never/every/only). 2,569 rows at 24aa0c7.
+9. Fable on the final adversarial verifier and the exception reviewer stands; the 2026-10-17 memory note is superseded (S5 Task 3 rewrites it).
+
 ## Sub-plans and blocks (13 blocks, each one PR, tags `strict-delivery-b1..b13`)
 
 | Sub-plan | Blocks | Tasks | Spec rollout step |

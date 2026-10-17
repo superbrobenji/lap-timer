@@ -13,9 +13,9 @@
 ## Global Constraints
 
 - Every umbrella Global Constraint applies verbatim. The ones that bind S1 most:
-- Block = PR, at most 3 tasks; branch `strict-delivery-b<N>`; tag `strict-delivery-b<N>` on the squash commit (spec §11.2).
-- Merge only on every CI job green, advisory included, under `grant:strict-delivery` = `DEC-0001` answered `"yes"` by the owner. DEC-0001 is created in Task 1 and answered by the owner before b1 merges.
-- Model map: implementers sonnet (haiku only to transcribe the complete code in this plan); task reviewers, final reviewer and controller opus; final verifier Fable (but see Interface note 7).
+- Block = PR, at most 3 tasks; branch `block/strict-delivery-b<N>`; tag `strict-delivery-b<N>` on the squash commit (spec §11.2).
+- Merge only on every CI job green, advisory included, under `grant:strict-delivery` = `DEC-0001` answered `"yes"` by the owner. The owner answers DEC-0001 in chat at b1 setup Step 0.1, before the docs PR merges. Task 1 records the answer.
+- Model map: implementers sonnet (haiku only to transcribe the complete code in this plan); task reviewers, final reviewer and controller opus; final verifier Fable (umbrella Owner ruling 9).
 - Zero warnings, zero failing tests, zero gate failures at every commit once the gate exists. A missing input is a FAIL (spec §7).
 - "Production path" for a gate = its `main()` run on a fixture tree, or the hook script run as a subprocess with JSON on stdin; never a helper called on its own (umbrella Global Constraints).
 - Python files start with `from __future__ import annotations` (Python 3.9 cannot evaluate `dict | None` at runtime) and use only the stdlib plus PyYAML.
@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every code block in this plan was run in a throwaway copy of these files: 108 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 14 PASS lines once DEC-0001 is answered.
+Every code block in this plan was run in a throwaway copy of these files: 111 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -66,11 +66,11 @@ Every code block in this plan was run in a throwaway copy of these files: 108 te
 3. **"verified only if `verified_at == HEAD`" cannot be met literally.** A row committed in commit C cannot hold C's own sha, so a literal check fails every verified row at every HEAD. Implemented reading: a row is verified at HEAD when `state == verified` and no cited path differs between `verified_at` and HEAD, and none is staged. A cite ending in `/` covers its subtree. An unknown `verified_at` is a FAIL. This reading also covers spec §4.2's "a commit touching a cited file marks dependent rows stale": the gate fails until the row is marked or re-verified.
 4. **`grant_for` counts only an answer of `"yes"`** (case-insensitive) with `answered_at` set, and only an exact `grant:<plan>` question, or that question followed by a space. The umbrella says "answered"; read literally, an answer of "no" would grant a merge.
 5. **The umbrella's verbatim `config.yml` fails `ci.yml`'s stale-comment step** (`comment_patterns` contains `'later sessions?'`). Task 1 adds one allow entry, the minimum change, rather than altering the verbatim config.
-6. **Checkpoint protocol vs branch protection.** The umbrella says to write the handoff and the `CHECKPOINT` ledger line after the merge. `main` has `enforce_admins` plus strict required checks, so a post-merge commit cannot be pushed to `main` without its own PR. A committed file also cannot name the sha of the commit that contains it. The checkpoint steps below therefore commit the handoff and ledger line as the block branch's last commit, and verify the post-merge facts by hand. The same issue reaches S2's `gate_checkpoint` (`head` ≠ `git rev-parse HEAD`). S2's author and the owner must settle it there.
-7. **Model policy conflict (owner-only).** Spec D18 / umbrella: final verifier on Fable. The owner's standing note of 2026-10-17 (session memory `feedback-subagent-models`): "you can stop using fable sub agents now". Before the first Fable dispatch (CHECKPOINT b1 step 3), the controller writes a `model-policy` decision question into `decisions.yml` with the next free id and stops until the owner answers.
-8. **`gate_register` does not check "every id in any audit or review report exists here"** (spec §7). Neither the spec nor the umbrella defines a grammar for finding ids inside reports, and the existing reports would fail it before the bootstrap load (rollout step 8). It is not implemented in S1. That is a scope question for the owner, raised at CHECKPOINT b1. The umbrella assigns this check to no other sub-plan either.
+6. **Handoff timing:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 2 (no post-merge commits on protected `main`; the handoff lands on the block branch before the merge).
+7. **Final verifier model:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 9 (Fable on the final adversarial verifier and the exception reviewer).
+8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the line `register: true`. Its ids are table first cells and leading list-item ids matching the finding regex. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them.
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
-10. **Spec and plans are not on `main`**, so b1's branch starts from `pre-bench-wrap-up` after the plans are committed. The b1 PR therefore also carries the four documentation commits (audits 2026-10-16/17 and the spec).
+10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
 
 ## Files (S1 creates or modifies exactly these)
 
@@ -100,17 +100,57 @@ Every code block in this plan was run in a throwaway copy of these files: 108 te
 
 ### Block b1 setup (controller, before Task 1)
 
-- [ ] **Step 1: Put the approved documents on the block branch**
+- [ ] **Step 0: The owner answers DEC-0001, the docs land on `main`, then b1 branches from `main` (owner ruling 6)**
 
-The owner has approved this plan. Commit both plan files on `pre-bench-wrap-up`, then branch:
+Owner ruling 6 parks the pre-bench fix work until this plan completes, and requires b1 and every later block to branch from `main`. The docs-only PR below is merged by the controller under `grant:strict-delivery`. That grant must therefore be answered first. DEC-0001 does not exist as a register row until Task 1, so the owner answers in chat now, and Task 1 records the answer per `docs/superpowers/state/README.md`. If the owner does not answer `yes`, the owner merges the docs PR by hand, and Task 1 records DEC-0001 unanswered.
+
+(0.1) Ask the owner, verbatim: "DEC-0001 grant:strict-delivery -- may the controller merge each strict-delivery PR (the docs PR now, then blocks b1-b13) on all-green under this standing grant? Options: yes (each merges on all-green; every red line stops) / no (the owner merges each PR by hand)." Stop until the owner answers. Save the reply verbatim:
+
+```bash
+mkdir -p .superpowers/sdd/strict-delivery
+cat > .superpowers/sdd/strict-delivery/DEC-0001-answer.txt <<'ANSWER'
+<the owner's chat message, verbatim>
+<the date and time it was sent>
+ANSWER
+```
+
+(0.2) Open the docs-only PR from `pre-bench-wrap-up`. It carries the 2026-10-16 re-audit, the 2026-10-17 drift analysis, the strict-delivery spec and the six plan files.
 
 ```bash
 git switch pre-bench-wrap-up
-git status --short        # expect only the two plan files untracked
-git add docs/superpowers/plans/2026-10-17-strict-delivery.md docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md
-git commit -m "docs(plans): strict-delivery umbrella plan and S1 sub-plan (registers and core gates)"
+git status --short                                             # empty (commit any plan edits first)
+git log --oneline main.. --                                     # docs commits only
+git diff --stat main...pre-bench-wrap-up -- . ':!docs'          # empty: nothing outside docs/
+cat > .superpowers/sdd/strict-delivery/docs-pr-body.md <<'BODY'
+## Summary
+
+Docs only, per owner ruling 6 of docs/superpowers/plans/2026-10-17-strict-delivery.md: the pre-bench fix work is parked until the strict-delivery plan completes, and every block branches from main.
+
+- docs/reviews/2026-10-16-audit-post-fix-wave.md -- re-audit of main after the fix wave
+- docs/reviews/2026-10-17-audit-drift-and-gaps.md -- drift and fix-wave gap analysis
+- docs/superpowers/specs/2026-10-17-strict-delivery-design.md -- strict-delivery design (APPROVED 2026-10-17)
+- docs/superpowers/plans/2026-10-17-strict-delivery*.md -- umbrella plan and sub-plans S1-S5
+
+No code, CI, tool or firmware change. Merged by the controller under grant:strict-delivery (DEC-0001, answered by the owner in chat; recorded in decisions.yml by S1 Task 1).
+BODY
+git push -u origin pre-bench-wrap-up
+gh pr create --base main --head pre-bench-wrap-up --title "docs: re-audit, drift analysis, strict-delivery spec and plans" --body-file .superpowers/sdd/strict-delivery/docs-pr-body.md
+gh pr checks pre-bench-wrap-up --watch                          # every job green, advisory included
+```
+
+(0.3) Merge, but only if the reply saved in 0.1 is a yes. Otherwise the owner merges, and the controller waits. Then delete the branch, return to `main`, and remove the parked worktree. The branch `s5.2-conn-ble` stays: it is listed as parked, owner "sub-project C", in every handoff.
+
+```bash
+gh pr merge pre-bench-wrap-up --squash
+git push origin --delete pre-bench-wrap-up 2>/dev/null || true   # gone already if GitHub auto-deleted it
+git switch main && git pull --ff-only
+git branch -D pre-bench-wrap-up
+git -C ../lap-timer-worktrees/s52 status --short                # empty; else stop and ask the owner
+git worktree remove ../lap-timer-worktrees/s52 || { rm -rf ../lap-timer-worktrees/s52 && git worktree prune; }   # spec §3.4: rm + prune for a tree with submodules
+git worktree list                                               # the main checkout only
+git branch --format='%(refname:short)'                          # main, s5.2-conn-ble
 git switch -c block/strict-delivery-b1
-git rev-parse --short=7 HEAD   # record as BASE_B1 in the ledger (Task 1 Step 7)
+git rev-parse --short=7 HEAD                                    # record as BASE_B1 in the ledger (Task 1 Step 7)
 ```
 
 ### Task 1: Gate framework, config, git helpers, register bootstrap
@@ -734,7 +774,7 @@ Mutation check: in `run_check`, replace `except Exception as exc:` with `except 
 []
 ```
 
-`docs/superpowers/state/decisions.yml` (the umbrella says DEC-0001 is "created in S1 Task 1 and answered by the owner"; `__ASKED_SHA__` is replaced by the command right after this block):
+`docs/superpowers/state/decisions.yml`. The umbrella says DEC-0001 is "created in S1 Task 1". The owner answered it in chat at setup Step 0.1, and this records that answer per `docs/superpowers/state/README.md`. `__ASKED_SHA__` is replaced by the command right after this block. If the reply saved in `.superpowers/sdd/strict-delivery/DEC-0001-answer.txt` was not a yes, write `answer: null` and `answered_at: null` instead.
 
 ```yaml
 - id: DEC-0001
@@ -742,8 +782,8 @@ Mutation check: in `run_check`, replace `except Exception as exc:` with `except 
   question: "grant:strict-delivery"
   options: []
   asked_at: {sha: "__ASKED_SHA__", by: session}
-  answer: null
-  answered_at: null
+  answer: "yes"
+  answered_at: {sha: "__ASKED_SHA__", by: superbrobenji}
 ```
 
 ```bash
@@ -755,7 +795,7 @@ s = open(p).read()
 assert "__ASKED_SHA__" in s
 open(p, "w").write(s.replace("__ASKED_SHA__", sha))
 EOF
-grep -n asked_at docs/superpowers/state/decisions.yml   # asked_at: {sha: "<7 hex>", by: session}
+grep -n -e asked_at -e answer docs/superpowers/state/decisions.yml   # sha = the BASE_B1 sha; answer: "yes"; by: superbrobenji
 ```
 
 `docs/superpowers/state/README.md`:
@@ -807,7 +847,7 @@ Umbrella: docs/superpowers/plans/2026-10-17-strict-delivery.md. S1: docs/superpo
 Spec: docs/superpowers/specs/2026-10-17-strict-delivery-design.md. Grant: decisions.yml grant:strict-delivery.
 Lines: `- T<n> <commit subject> -- <gate result>`; `Ruling: what -- why -- cost if wrong -- spec cite`; `CHECKPOINT b<N> ...`.
 
-## Block b1 (branch strict-delivery-b1)
+## Block b1 (branch block/strict-delivery-b1)
 ```
 
 `.github/workflows/ci.yml`: insert these two lines after line 52 (the `"components/drivers/imu_mpu6050/imu_mpu6050.c|The real I2C driver (WHO_AM_I"` entry), before the closing `)` on line 53:
@@ -831,14 +871,14 @@ git diff --cached --check && echo whitespace-clean
 Append to `docs/superpowers/state/strict-delivery/ledger.md`:
 
 ```markdown
-- base BASE_B1=<the sha recorded in setup Step 1>
+- base BASE_B1=<the sha recorded in setup Step 0.3>
 - T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 21 OK
 ```
 
 ```bash
 git add tools/gates tools/requirements.txt .github/workflows/ci.yml docs/superpowers/state
 git commit -m "feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001" \
-  -m "Strict-delivery S1 Task 1 (spec §4, §7; umbrella Gate contract, Config, Git/gh helpers). Registers start with zero findings, zero claims and DEC-0001 grant:strict-delivery for the owner to answer. ci.yml allow-lists the comment gate's own pattern line in config.yml."
+  -m "Strict-delivery S1 Task 1 (spec §4, §7; umbrella Gate contract, Config, Git/gh helpers). Registers start with zero findings, zero claims and DEC-0001 grant:strict-delivery, recorded as the owner answered it in chat at setup Step 0.1: <quote the saved reply verbatim>. ci.yml allow-lists the comment gate's own pattern line in config.yml."
 ```
 
 ### Task 2: Register loaders, schema validators, lifecycle rules
@@ -1456,22 +1496,24 @@ git commit -m "feat(gates): register loaders, schema validators and lifecycle ru
 
 **Files:**
 - Create: `tools/gates/gate_register.py`
-- Create: fixtures under `tools/gates/tests/fixtures/register/` (`valid`, `illegal_transition`, `pinned_no_transcript`, `missing_owner`, `missing_file`)
+- Create: fixtures under `tools/gates/tests/fixtures/register/` (`valid`, including two reports under `valid/docs/reviews/`; `illegal_transition`, `pinned_no_transcript`, `missing_owner`, `missing_file`, `report_unknown`)
 - Test: `tools/gates/tests/test_gate_register.py`
 
 **Interfaces:**
 - Consumes: `Result`, `gate_args`, `repo_root`, `run_gate` (Task 1); `registers.load_findings`, `load_decisions`, `validate_finding`, `transition_errors`, `evidence_errors` (Task 2).
-- Produces: `gate_register.check(args: list) -> Result` (args: `--root <tree>`), `main(argv=None) -> int`. Line ids: `register.{schema|owner|duplicate|transition|evidence}.<finding id>` on FAIL; one `PASS register.<category>` per category with no FAIL, in the order schema, owner, duplicate, transition, evidence.
+- Produces: `gate_register.check(args: list) -> Result` (args: `--root <tree>`), `main(argv=None) -> int`, `registered_reports(root) -> list[str]`, `report_ids(path) -> list[str]`, `REPORT_DIRS`, `MARKER = "register: true"`. Line ids: `register.{schema|owner|duplicate|transition|evidence}.<finding id>` on FAIL, and `register.report.<file relative to root>.<id>: not in register` for a registered report citing an unregistered id (owner ruling 5). One `PASS register.<category>` per category with no FAIL, in the order schema, owner, duplicate, transition, evidence, report.
 
 - [ ] **Step 1: Write the fixtures**
 
 ```bash
 F=tools/gates/tests/fixtures/register
 mkdir -p $F/valid/docs/superpowers/state/demo/mutations $F/valid/docs/superpowers/state/demo/review
-for c in illegal_transition pinned_no_transcript missing_owner missing_file; do
+for c in illegal_transition pinned_no_transcript missing_owner missing_file report_unknown; do
   mkdir -p $F/$c/docs/superpowers/state
   printf '[]\n' > $F/$c/docs/superpowers/state/decisions.yml
 done
+mkdir -p $F/valid/docs/reviews $F/report_unknown/docs/superpowers/state/briefs
+printf '[]\n' > $F/report_unknown/docs/superpowers/state/findings.yml
 ```
 
 (`missing_file` deliberately has no `findings.yml`.)
@@ -1554,6 +1596,46 @@ step 3 (fix restored): python3 -m unittest demo -> PASS
 ```markdown
 status: DONE
 T1-PIN-1 pin confirmed: mutation re-run, PASS/FAIL/PASS.
+```
+
+`tools/gates/tests/fixtures/register/valid/docs/reviews/2026-01-01-registered.md` (marked; every id it cites is registered → PASS):
+
+```markdown
+# A registered review
+
+register: true
+
+| Id | Severity | Class |
+|---|---|---|
+| T1-OPEN-1 | MEDIUM | An open finding owned by an issue. |
+| T1-DEF-1 | LOW | A deferred finding. |
+
+- T1-PIN-1: pinned by test_crc_bad_delta_fails.
+- See T9-PROSE-1 in prose: not a list item, not a table cell, not checked.
+```
+
+`tools/gates/tests/fixtures/register/valid/docs/reviews/2026-01-02-unmarked.md` (no marker; its unknown ids are ignored):
+
+```markdown
+# An unmarked review (no marker line): ignored by the gate
+
+| Id | Severity |
+|---|---|
+| T9-NOPE-1 | HIGH |
+
+- T9-NOPE-2: never registered, and that is fine here.
+```
+
+`tools/gates/tests/fixtures/register/report_unknown/docs/superpowers/state/briefs/b1-brief.md` (marked; cites one unregistered id → FAIL):
+
+```markdown
+# A registered brief
+
+register: true
+
+| Finding | Task |
+|---|---|
+| T9-NOPE-1 | 3 |
 ```
 
 `tools/gates/tests/fixtures/register/illegal_transition/docs/superpowers/state/findings.yml`:
@@ -1648,7 +1730,7 @@ class GateRegister(unittest.TestCase):
     def test_valid_register_passes_every_category(self):
         rc, out = run("valid")
         self.assertEqual("PASS register.schema\nPASS register.owner\nPASS register.duplicate\n"
-                         "PASS register.transition\nPASS register.evidence\n", out)
+                         "PASS register.transition\nPASS register.evidence\nPASS register.report\n", out)
         self.assertEqual(0, rc)
 
     def test_illegal_transition_fails(self):
@@ -1675,6 +1757,23 @@ class GateRegister(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertTrue(out.startswith("FAIL register.input: "), out)
         self.assertIn("findings.yml: No such file or directory", out)
+
+    def test_registered_report_with_an_unknown_id_fails(self):
+        rc, out = run("report_unknown")
+        self.assertEqual("FAIL register.report.docs/superpowers/state/briefs/b1-brief.md.T9-NOPE-1: "
+                         "not in register\n", out.split("PASS")[0])
+        self.assertEqual(1, rc)
+
+    def test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes(self):
+        rc, out = run("valid")      # valid/docs/reviews: one marked (all ids known), one unmarked
+        self.assertNotIn("T9-NOPE", out)
+        self.assertNotIn("T9-PROSE", out)
+        self.assertIn("PASS register.report", out)
+        self.assertEqual(0, rc)
+
+    def test_report_ids_reads_table_cells_and_list_items(self):
+        path = os.path.join(FIX, "valid", "docs", "reviews", "2026-01-01-registered.md")
+        self.assertEqual(["T1-OPEN-1", "T1-DEF-1", "T1-PIN-1"], gate_register.report_ids(path))
 
     def test_duplicate_ids_fail(self):
         root = gf.new_repo()
@@ -1718,13 +1817,18 @@ Expected: ERROR, `ImportError: cannot import name 'gate_register' from 'tools.ga
 ```python
 #!/usr/bin/env python3
 """gate_register -- the findings register (spec §4.1, §7): schema, an owner on every row, legal
-lifecycle transitions and the evidence each state needs.
+lifecycle transitions, the evidence each state needs, and every finding id cited by a registered
+report (umbrella "Owner rulings" 5): a file under docs/reviews/ or docs/superpowers/state/briefs/
+whose first 20 lines include the line `register: true`. In it, a table row whose first cell is a
+finding id, or a list item that starts with one followed by a space or colon, must name a row in
+findings.yml. Files without the marker are ignored.
 
   python3 tools/gates/gate_register.py [--root <tree>] [--json]
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -1732,7 +1836,43 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from tools.gates.lib import Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import registers  # noqa: E402
 
-CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence"]
+CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"]
+REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
+MARKER = "register: true"
+MARKER_LINES = 20
+LIST_ID = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([A-Z0-9]+(?:-[A-Za-z0-9]+)+)(?=[ :])")
+
+
+def registered_reports(root) -> list:
+    """Files under REPORT_DIRS carrying the marker line in their first MARKER_LINES lines."""
+    found = []
+    for d in REPORT_DIRS:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, d)):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    head = [next(fh, "") for _ in range(MARKER_LINES)]
+                if any(l.strip() == MARKER for l in head):
+                    found.append(path)
+    return found
+
+
+def report_ids(path) -> list:
+    """Finding ids a registered report cites: table first cells and leading list-item ids."""
+    ids = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            s = line.strip()
+            if s.startswith("|"):
+                cell = s.split("|")[1].strip()
+                if registers.FINDING_ID.match(cell):
+                    ids.append(cell)
+                continue
+            m = LIST_ID.match(line)
+            if m:
+                ids.append(m.group(1))
+    return ids
 
 
 def check(args: list) -> Result:
@@ -1756,6 +1896,11 @@ def check(args: list) -> Result:
             r.fail(f"register.transition.{fid}", e)
         for e in registers.evidence_errors(f, root, decisions):
             r.fail(f"register.evidence.{fid}", e)
+    known = {f.get("id") for f in findings}
+    for path in registered_reports(root):
+        rel = os.path.relpath(path, root)
+        for rid in sorted(set(report_ids(path)) - known):
+            r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}
     for cat in CATEGORIES:
         if cat not in failed:
@@ -1774,22 +1919,24 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 8 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 56 tests ... OK
-python3 tools/gates/gate_register.py; echo rc=$?                 # 5 PASS lines, rc=0
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 11 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 59 tests ... OK
+python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
 
 Mutation check (production path): in `registers.evidence_errors`, delete the `elif not os.path.isfile(...)` branch for the pin transcript. `test_pinned_without_transcript_fails` must fail. Restore and run again: OK.
 
+Mutation check (report scan): in `registered_reports`, replace `if any(l.strip() == MARKER for l in head):` with `if True:`. The unmarked fixture's ids are now scanned, and `test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes` plus `test_valid_register_passes_every_category` must fail. Restore. Then replace `for rid in sorted(set(report_ids(path)) - known):` with `for rid in []:`. `test_registered_report_with_an_unknown_id_fails` must fail. Restore and run again: OK.
+
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 8 OK; suite 56 OK; gate_register at HEAD 5 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 11 OK; suite 59 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
-git commit -m "feat(gates): gate_register -- findings schema, owners, transitions, evidence" \
-  -m "Strict-delivery S1 Task 3 (spec §4.1, §7). Fixtures: valid, illegal transition, pinned without transcript, missing owner, missing file (FAIL register.input)."
+git commit -m "feat(gates): gate_register -- findings schema, owners, transitions, evidence, registered-report ids" \
+  -m "Strict-delivery S1 Task 3 (spec §4.1, §7; umbrella owner ruling 5). Fixtures: valid (with a marked and an unmarked report), illegal transition, pinned without transcript, missing owner, missing file (FAIL register.input), report_unknown (FAIL register.report.<file>.<id>)."
 ```
 
 ### CHECKPOINT b1
@@ -1798,7 +1945,7 @@ The umbrella's "Checkpoint protocol for this plan", verbatim:
 
 > At every block end: run `python3 tools/gates/run_all.py`; dispatch final reviewer (opus) + final verifier (Fable) with the block's review packages; `gh pr ready`; wait for every check; merge with `gh pr merge --squash` only if `decisions.yml` has `grant:strict-delivery` answered `yes` by the owner; tag `strict-delivery-b<N>` on the squash commit and push the tag; delete branch + worktrees; write `docs/superpowers/state/strict-delivery/handoff.md`; append `CHECKPOINT b<N>` to the ledger; post the status update and the resume prompt; stop.
 
-These steps carry it out by hand for block b1, because `gate_checkpoint` does not exist until b6. The one ordering change is Interface note 6: the handoff and the `CHECKPOINT` line are committed before the merge, and the post-merge facts are verified in step 8. The owner sees this in the status update.
+These steps carry it out by hand for block b1, because `gate_checkpoint` does not exist until b6. The one ordering change is umbrella Owner ruling 2: the handoff and the `CHECKPOINT` line are committed before the merge, and the post-merge facts are verified in step 8. The owner sees this in the status update.
 
 - [ ] **Step 1: Gates at the block tip**
 
@@ -1826,17 +1973,15 @@ Add `claims.md` (claim | direct command | contradiction | output excerpt | PASS/
 
 These come before Step 4, which depends on them. Each owner-only question goes into `docs/superpowers/state/decisions.yml` under the next free `DEC-` id, with `asked_at: {sha: "<git rev-parse --short=7 HEAD>", by: session}`, `answer: null`, `answered_at: null`. Present it to the owner and stop until they answer. Transcribe the owner's answer as a quoted string with `answered_at: {sha: "<HEAD short>", by: superbrobenji}`, quote the owner's words in the commit message, and run `python3 -m unittest discover -s tools/gates/tests -t .` before each commit.
 
-(a) **DEC-0001 `grant:strict-delivery`.** Ask: "May the controller merge each strict-delivery block (b1-b13) on all-green under this standing grant? Options: yes (each block merges on all-green; every red line stops) / no (the owner merges each PR by hand)." Transcribe the answer into DEC-0001. b1 cannot merge without `"yes"`, and b2's CI fails while DEC-0001 is unanswered, because the umbrella plan cites it.
+(a) **DEC-0001 `grant:strict-delivery`.** The owner answered it in chat at setup Step 0.1, and Task 1 recorded the answer. Verify `grep -n -A1 'answer:' docs/superpowers/state/decisions.yml` shows `answer: "yes"` and `by: superbrobenji`. If it shows `null`, ask the owner the Step 0.1 question again and transcribe the answer. b1 cannot merge without `"yes"`, and b2's CI fails while DEC-0001 is unanswered, because the umbrella plan cites it.
 
-(b) **Model policy for the final verifier** (class `model-policy`; Interface note 7). Options: `fable` (spec D18; about +5 % weekly limit per plan) and `opus` (the owner's 2026-10-17 note "you can stop using fable sub agents now"; less adversarial distance from the opus reviewer).
+(b) Final verifier model: settled by the umbrella's "Owner rulings", ruling 9 (Fable). No question to ask.
 
-(c) **Handoff timing vs branch protection** (class `spec-direction`; Interface note 6). Options: `branch-commit` (this plan's steps: the handoff and ledger line are the last commit on the block branch; post-merge facts checked by hand and, from S2 on, by `gate_checkpoint` reading `head` as the reviewed tip) and `post-merge-pr` (a second PR per block carries the post-merge handoff, at the cost of one extra CI cycle per block). Steps 5–8 assume `branch-commit`. If the owner picks the other option, stop and amend this plan first.
-
-(d) **"Every id in reports present"** (class `scope`; Interface note 8). Options: `S2` (define a report id grammar and add the check in S2), `S5` (add it with the bootstrap load, once the register holds the existing ids) or `drop`.
+(c) Handoff timing: settled by the umbrella's "Owner rulings", ruling 2 (on the block branch, before the merge). No question to ask.
 
 - [ ] **Step 4: Final reviewer and final verifier**
 
-**Before this dispatch**, Step 3 item (b) must be answered: the owner's model-policy decision on Fable (Interface note 7). Dispatch the verifier on the model the owner picks, and ledger the choice. Dispatch the final branch reviewer (opus) and then the final adversarial verifier on the whole branch `BASE_B1..HEAD`. Give each the review packages and these report paths: `.superpowers/sdd/strict-delivery/b1-final-review.md` and `.superpowers/sdd/strict-delivery/b1-final-verify.md`. The prompt-block files do not exist until Task 9. Each dispatch therefore cites, as its strict block, spec §5 dispatch contract item 4, §6 step 6, D8 and D16, plus the Review Focus of the umbrella and of this plan. Both must report `status: DONE` with no finding. Any finding goes through the fix loop (spec §6 step 7), then back to Step 1.
+Final verifier model: Fable (umbrella Owner ruling 9). Dispatch the final branch reviewer (opus) and then the final adversarial verifier on the whole branch `BASE_B1..HEAD`. Give each the review packages and these report paths: `.superpowers/sdd/strict-delivery/b1-final-review.md` and `.superpowers/sdd/strict-delivery/b1-final-verify.md`. The prompt-block files do not exist until Task 9. Each dispatch therefore cites, as its strict block, spec §5 dispatch contract item 4, §6 step 6, D8 and D16, plus the Review Focus of the umbrella and of this plan. Both must report `status: DONE` with no finding. Any finding goes through the fix loop (spec §6 step 7), then back to Step 1.
 
 - [ ] **Step 5: Ledger CHECKPOINT line and handoff, committed on the branch**
 
@@ -1887,14 +2032,14 @@ git push -u origin block/strict-delivery-b1
 - [ ] **Step 6: PR, every check green, grant, merge**
 
 ```bash
-gh pr create --draft --base main --head strict-delivery-b1 --title "strict-delivery b1: gate library, registers, gate_register" --body-file .superpowers/sdd/strict-delivery/b1-pr-body.md
-gh pr ready strict-delivery-b1
-gh pr checks strict-delivery-b1 --watch          # every job, advisory (coverage) included, must pass
+gh pr create --draft --base main --head block/strict-delivery-b1 --title "strict-delivery b1: gate library, registers, gate_register" --body-file .superpowers/sdd/strict-delivery/b1-pr-body.md
+gh pr ready block/strict-delivery-b1
+gh pr checks block/strict-delivery-b1 --watch          # every job, advisory (coverage) included, must pass
 python3 -c "import sys; sys.path.insert(0, '.'); from tools.gates.lib import registers as r; d = r.grant_for(r.load_decisions('.'), 'strict-delivery'); print('GRANT', d['id']) if d else sys.exit('NO GRANT: stop, the owner answers DEC-0001 first')"
-gh pr merge strict-delivery-b1 --squash
+gh pr merge block/strict-delivery-b1 --squash
 ```
 
-The PR body (`.superpowers/sdd/strict-delivery/b1-pr-body.md`) lists the tasks, the gate output from Step 1, both final report summaries, the owner items from Step 3 with their state, and Interface notes 6–10 where they apply. It contains none of `fix before merge`, `draft`, `parked`, `TODO`, `not for merge` (config `merge_markers`). If any check is red or the grant line says `NO GRANT`, stop. Never merge red, never recommend it.
+The PR body (`.superpowers/sdd/strict-delivery/b1-pr-body.md`) lists the tasks, the gate output from Step 1, both final report summaries, the owner items from Step 3 with their state, and Interface notes 8–10 where they apply. It contains none of `fix before merge`, `draft`, `parked`, `TODO`, `not for merge` (config `merge_markers`). If any check is red or the grant line says `NO GRANT`, stop. Never merge red, never recommend it.
 
 - [ ] **Step 7: Tag and clean up**
 
@@ -1903,8 +2048,8 @@ git switch main && git pull --ff-only
 SQUASH=$(git rev-parse HEAD)
 git log -1 --format=%s "$SQUASH"                  # the PR title
 git tag strict-delivery-b1 "$SQUASH" && git push origin strict-delivery-b1
-git push origin --delete strict-delivery-b1 2>/dev/null || true   # gone already if GitHub auto-deleted it
-git branch -D strict-delivery-b1
+git push origin --delete block/strict-delivery-b1 2>/dev/null || true   # gone already if GitHub auto-deleted it
+git branch -D block/strict-delivery-b1
 git worktree list                                  # main checkout only; else `git worktree remove <path>` each
 ```
 
@@ -1915,7 +2060,7 @@ test "$(git rev-parse --short=7 "$SQUASH^")" = "<BASE_B1>" && echo parent-ok   #
 git diff --quiet "$FINAL" "$SQUASH" && echo tree-ok                            # squash == the reviewed branch
 git status --porcelain | wc -l                                                 # 0
 git branch --format='%(refname:short)'                                         # main, plus only the parked branches in the handoff
-gh pr list --head strict-delivery-b1 --state open                           # empty
+gh pr list --head block/strict-delivery-b1 --state open                           # empty
 git tag --points-at "$SQUASH"                                                  # strict-delivery-b1
 python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/gate_register.py
 ```
@@ -2272,7 +2417,7 @@ Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `sta
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T4 feat(gates): gate_claims -- test_gate_claims 14 OK` to `docs/superpowers/state/strict-delivery/ledger.md` under a new heading `## Block b2 (branch strict-delivery-b2)` with `- base BASE_B2=<sha>`.
+Append `- T4 feat(gates): gate_claims -- test_gate_claims 14 OK` to `docs/superpowers/state/strict-delivery/ledger.md` under a new heading `## Block b2 (branch block/strict-delivery-b2)` with `- base BASE_B2=<sha>`.
 
 ```bash
 git add tools/gates/gate_claims.py tools/gates/tests/test_gate_claims.py docs/superpowers/state/strict-delivery/ledger.md
@@ -2695,8 +2840,8 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 10 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 88 tests ... OK
-python3 tools/gates/run_all.py; echo rc=$?                # 14 PASS lines (5 register, 4 claims, 5 decisions), rc=0
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 91 tests ... OK
+python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
 `test_the_repository_passes_every_installed_gate` fails if DEC-0001 is still unanswered: the umbrella plan references it (lines 17 and 287). That is the intended block, not a bug.
@@ -2786,7 +2931,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 88 OK; run_all 14 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 91 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -2800,7 +2945,7 @@ The umbrella's "Checkpoint protocol for this plan", verbatim:
 
 > At every block end: run `python3 tools/gates/run_all.py`; dispatch final reviewer (opus) + final verifier (Fable) with the block's review packages; `gh pr ready`; wait for every check; merge with `gh pr merge --squash` only if `decisions.yml` has `grant:strict-delivery` answered `yes` by the owner; tag `strict-delivery-b<N>` on the squash commit and push the tag; delete branch + worktrees; write `docs/superpowers/state/strict-delivery/handoff.md`; append `CHECKPOINT b<N>` to the ledger; post the status update and the resume prompt; stop.
 
-These steps carry it out by hand for block b2, because `gate_checkpoint` does not exist until b6. The one ordering change is Interface note 6: the handoff and the `CHECKPOINT` line are committed before the merge, and the post-merge facts are verified in step 8. The owner sees this in the status update.
+These steps carry it out by hand for block b2, because `gate_checkpoint` does not exist until b6. The one ordering change is umbrella Owner ruling 2: the handoff and the `CHECKPOINT` line are committed before the merge, and the post-merge facts are verified in step 8. The owner sees this in the status update.
 
 - [ ] **Step 1: Gates at the block tip**
 
@@ -2832,7 +2977,7 @@ Add `claims.md` (claim | direct command | contradiction | output excerpt | PASS/
 
 - [ ] **Step 4: Final reviewer and final verifier**
 
-Final verifier model: as answered in the model-policy decision from CHECKPOINT b1. Dispatch the final branch reviewer (opus) and then the final adversarial verifier on the whole branch `BASE_B2..HEAD`. Give each the review packages and these report paths: `.superpowers/sdd/strict-delivery/b2-final-review.md` and `.superpowers/sdd/strict-delivery/b2-final-verify.md`. The prompt-block files do not exist until Task 9. Each dispatch therefore cites, as its strict block, spec §5 dispatch contract item 4, §6 step 6, D8 and D16, plus the Review Focus of the umbrella and of this plan. Both must report `status: DONE` with no finding. Any finding goes through the fix loop (spec §6 step 7), then back to Step 1.
+Final verifier model: Fable (umbrella Owner ruling 9). Dispatch the final branch reviewer (opus) and then the final adversarial verifier on the whole branch `BASE_B2..HEAD`. Give each the review packages and these report paths: `.superpowers/sdd/strict-delivery/b2-final-review.md` and `.superpowers/sdd/strict-delivery/b2-final-verify.md`. The prompt-block files do not exist until Task 9. Each dispatch therefore cites, as its strict block, spec §5 dispatch contract item 4, §6 step 6, D8 and D16, plus the Review Focus of the umbrella and of this plan. Both must report `status: DONE` with no finding. Any finding goes through the fix loop (spec §6 step 7), then back to Step 1.
 
 - [ ] **Step 5: Ledger CHECKPOINT line and handoff, committed on the branch**
 
@@ -2883,14 +3028,14 @@ git push -u origin block/strict-delivery-b2
 - [ ] **Step 6: PR, every check green, grant, merge**
 
 ```bash
-gh pr create --draft --base main --head strict-delivery-b2 --title "strict-delivery b2: gate_claims, gate_decisions, run_all, CI job gates" --body-file .superpowers/sdd/strict-delivery/b2-pr-body.md
-gh pr ready strict-delivery-b2
-gh pr checks strict-delivery-b2 --watch          # every job, advisory (coverage) included, must pass
+gh pr create --draft --base main --head block/strict-delivery-b2 --title "strict-delivery b2: gate_claims, gate_decisions, run_all, CI job gates" --body-file .superpowers/sdd/strict-delivery/b2-pr-body.md
+gh pr ready block/strict-delivery-b2
+gh pr checks block/strict-delivery-b2 --watch          # every job, advisory (coverage) included, must pass
 python3 -c "import sys; sys.path.insert(0, '.'); from tools.gates.lib import registers as r; d = r.grant_for(r.load_decisions('.'), 'strict-delivery'); print('GRANT', d['id']) if d else sys.exit('NO GRANT: stop, the owner answers DEC-0001 first')"
-gh pr merge strict-delivery-b2 --squash
+gh pr merge block/strict-delivery-b2 --squash
 ```
 
-The PR body (`.superpowers/sdd/strict-delivery/b2-pr-body.md`) lists the tasks, the gate output from Step 1, both final report summaries, the owner items from Step 3 with their state, and Interface notes 6–10 where they apply. It contains none of `fix before merge`, `draft`, `parked`, `TODO`, `not for merge` (config `merge_markers`). If any check is red or the grant line says `NO GRANT`, stop. Never merge red, never recommend it.
+The PR body (`.superpowers/sdd/strict-delivery/b2-pr-body.md`) lists the tasks, the gate output from Step 1, both final report summaries, the owner items from Step 3 with their state, and Interface notes 8–10 where they apply. It contains none of `fix before merge`, `draft`, `parked`, `TODO`, `not for merge` (config `merge_markers`). If any check is red or the grant line says `NO GRANT`, stop. Never merge red, never recommend it.
 
 - [ ] **Step 7: Tag and clean up**
 
@@ -2899,8 +3044,8 @@ git switch main && git pull --ff-only
 SQUASH=$(git rev-parse HEAD)
 git log -1 --format=%s "$SQUASH"                  # the PR title
 git tag strict-delivery-b2 "$SQUASH" && git push origin strict-delivery-b2
-git push origin --delete strict-delivery-b2 2>/dev/null || true   # gone already if GitHub auto-deleted it
-git branch -D strict-delivery-b2
+git push origin --delete block/strict-delivery-b2 2>/dev/null || true   # gone already if GitHub auto-deleted it
+git branch -D block/strict-delivery-b2
 git worktree list                                  # main checkout only; else `git worktree remove <path>` each
 ```
 
@@ -2911,7 +3056,7 @@ test "$(git rev-parse --short=7 "$SQUASH^")" = "<BASE_B2>" && echo parent-ok   #
 git diff --quiet "$FINAL" "$SQUASH" && echo tree-ok                            # squash == the reviewed branch
 git status --porcelain | wc -l                                                 # 0
 git branch --format='%(refname:short)'                                         # main, plus only the parked branches in the handoff
-gh pr list --head strict-delivery-b2 --state open                           # empty
+gh pr list --head block/strict-delivery-b2 --state open                           # empty
 git tag --points-at "$SQUASH"                                                  # strict-delivery-b2
 python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/run_all.py
 ```
@@ -3285,7 +3430,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 101 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 104 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -3294,7 +3439,7 @@ Mutation check: remove the `try/except` wrapper around `main()` in `pre_tool_use
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
-Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 13 OK` to the ledger under `## Block b3 (branch strict-delivery-b3)` with `- base BASE_B3=<sha>`.
+Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 13 OK` to the ledger under `## Block b3 (branch block/strict-delivery-b3)` with `- base BASE_B3=<sha>`.
 
 ```bash
 git add tools/gates/hooks tools/gates/install-hooks.sh tools/gates/tests/test_hooks.py docs/superpowers/state/strict-delivery/ledger.md
@@ -3302,7 +3447,7 @@ git commit -m "feat(gates): PreToolUse gating of git commit/push, git pre-commit
   -m "Strict-delivery S1 Task 7 (spec §8; umbrella Hook protocol). Fail closed on any hook error; the git hook gates the tree being committed, refuses unstaged register edits and blocks trees that predate the gates."
 ```
 
-Expected: the commit output first shows the 9 PASS lines of `run_all --only register,claims` from the pre-commit hook.
+Expected: the commit output first shows the 10 PASS lines of `run_all --only register,claims` from the pre-commit hook.
 
 ### Task 8: SessionStart and UserPromptSubmit hooks, `.claude/settings.json`, `CLAUDE.md`
 
@@ -3580,8 +3725,8 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 108 tests ... OK
-python3 tools/gates/run_all.py                            # 14 PASS
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 111 tests ... OK
+python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
 ```
@@ -3590,7 +3735,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 108 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 111 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md
@@ -3952,7 +4097,7 @@ The umbrella's "Checkpoint protocol for this plan", verbatim:
 
 > At every block end: run `python3 tools/gates/run_all.py`; dispatch final reviewer (opus) + final verifier (Fable) with the block's review packages; `gh pr ready`; wait for every check; merge with `gh pr merge --squash` only if `decisions.yml` has `grant:strict-delivery` answered `yes` by the owner; tag `strict-delivery-b<N>` on the squash commit and push the tag; delete branch + worktrees; write `docs/superpowers/state/strict-delivery/handoff.md`; append `CHECKPOINT b<N>` to the ledger; post the status update and the resume prompt; stop.
 
-These steps carry it out by hand for block b3, because `gate_checkpoint` does not exist until b6. The one ordering change is Interface note 6: the handoff and the `CHECKPOINT` line are committed before the merge, and the post-merge facts are verified in step 8. The owner sees this in the status update.
+These steps carry it out by hand for block b3, because `gate_checkpoint` does not exist until b6. The one ordering change is umbrella Owner ruling 2: the handoff and the `CHECKPOINT` line are committed before the merge, and the post-merge facts are verified in step 8. The owner sees this in the status update.
 
 - [ ] **Step 1: Gates at the block tip**
 
@@ -3986,7 +4131,7 @@ Add `claims.md` (claim | direct command | contradiction | output excerpt | PASS/
 
 - [ ] **Step 4: Final reviewer and final verifier**
 
-Final verifier model: as answered in the model-policy decision from CHECKPOINT b1. Dispatch the final branch reviewer (opus) and then the final adversarial verifier on the whole branch `BASE_B3..HEAD`. Give each the review packages and these report paths: `.superpowers/sdd/strict-delivery/b3-final-review.md` and `.superpowers/sdd/strict-delivery/b3-final-verify.md`. Each dispatch appends `~/.claude/skills/strict-delivery/prompts/reviewer.md` or `prompts/verifier.md` verbatim under `## Strict block`, per the umbrella's dispatch grammar. Both must report `status: DONE` with no finding. Any finding goes through the fix loop (spec §6 step 7), then back to Step 1.
+Final verifier model: Fable (umbrella Owner ruling 9). Dispatch the final branch reviewer (opus) and then the final adversarial verifier on the whole branch `BASE_B3..HEAD`. Give each the review packages and these report paths: `.superpowers/sdd/strict-delivery/b3-final-review.md` and `.superpowers/sdd/strict-delivery/b3-final-verify.md`. Each dispatch appends `~/.claude/skills/strict-delivery/prompts/reviewer.md` or `prompts/verifier.md` verbatim under `## Strict block`, per the umbrella's dispatch grammar. Both must report `status: DONE` with no finding. Any finding goes through the fix loop (spec §6 step 7), then back to Step 1.
 
 - [ ] **Step 5: Ledger CHECKPOINT line and handoff, committed on the branch**
 
@@ -4037,14 +4182,14 @@ git push -u origin block/strict-delivery-b3
 - [ ] **Step 6: PR, every check green, grant, merge**
 
 ```bash
-gh pr create --draft --base main --head strict-delivery-b3 --title "strict-delivery b3: hooks, CLAUDE.md, skill skeleton" --body-file .superpowers/sdd/strict-delivery/b3-pr-body.md
-gh pr ready strict-delivery-b3
-gh pr checks strict-delivery-b3 --watch          # every job, advisory (coverage) included, must pass
+gh pr create --draft --base main --head block/strict-delivery-b3 --title "strict-delivery b3: hooks, CLAUDE.md, skill skeleton" --body-file .superpowers/sdd/strict-delivery/b3-pr-body.md
+gh pr ready block/strict-delivery-b3
+gh pr checks block/strict-delivery-b3 --watch          # every job, advisory (coverage) included, must pass
 python3 -c "import sys; sys.path.insert(0, '.'); from tools.gates.lib import registers as r; d = r.grant_for(r.load_decisions('.'), 'strict-delivery'); print('GRANT', d['id']) if d else sys.exit('NO GRANT: stop, the owner answers DEC-0001 first')"
-gh pr merge strict-delivery-b3 --squash
+gh pr merge block/strict-delivery-b3 --squash
 ```
 
-The PR body (`.superpowers/sdd/strict-delivery/b3-pr-body.md`) lists the tasks, the gate output from Step 1, both final report summaries, the owner items from Step 3 with their state, and Interface notes 6–10 where they apply. It contains none of `fix before merge`, `draft`, `parked`, `TODO`, `not for merge` (config `merge_markers`). If any check is red or the grant line says `NO GRANT`, stop. Never merge red, never recommend it.
+The PR body (`.superpowers/sdd/strict-delivery/b3-pr-body.md`) lists the tasks, the gate output from Step 1, both final report summaries, the owner items from Step 3 with their state, and Interface notes 8–10 where they apply. It contains none of `fix before merge`, `draft`, `parked`, `TODO`, `not for merge` (config `merge_markers`). If any check is red or the grant line says `NO GRANT`, stop. Never merge red, never recommend it.
 
 - [ ] **Step 7: Tag and clean up**
 
@@ -4053,8 +4198,8 @@ git switch main && git pull --ff-only
 SQUASH=$(git rev-parse HEAD)
 git log -1 --format=%s "$SQUASH"                  # the PR title
 git tag strict-delivery-b3 "$SQUASH" && git push origin strict-delivery-b3
-git push origin --delete strict-delivery-b3 2>/dev/null || true   # gone already if GitHub auto-deleted it
-git branch -D strict-delivery-b3
+git push origin --delete block/strict-delivery-b3 2>/dev/null || true   # gone already if GitHub auto-deleted it
+git branch -D block/strict-delivery-b3
 git worktree list                                  # main checkout only; else `git worktree remove <path>` each
 ```
 
@@ -4065,7 +4210,7 @@ test "$(git rev-parse --short=7 "$SQUASH^")" = "<BASE_B3>" && echo parent-ok   #
 git diff --quiet "$FINAL" "$SQUASH" && echo tree-ok                            # squash == the reviewed branch
 git status --porcelain | wc -l                                                 # 0
 git branch --format='%(refname:short)'                                         # main, plus only the parked branches in the handoff
-gh pr list --head strict-delivery-b3 --state open                           # empty
+gh pr list --head block/strict-delivery-b3 --state open                           # empty
 git tag --points-at "$SQUASH"                                                  # strict-delivery-b3
 python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/run_all.py
 ```
@@ -4084,7 +4229,7 @@ Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/ha
 
 ## Self-review (run 2026-10-17 against the spec and the umbrella)
 
-1. **Spec coverage, S1 rows.** Rollout step 1: library ✓ (T1), schemas ✓ (T2), `gate_register` ✓ (T3), `gate_claims` ✓ (T4), `gate_decisions` ✓ (T5), tests ✓, registers bootstrapped empty plus DEC-0001 ✓ (T1). Rollout step 2: hooks wired to the three gates (Claude Code ✓ T7–T8, git ✓ T7, CI job ✓ T6), `CLAUDE.md` ✓ (T8), skill skeleton with prompt blocks ✓ (T9). §7 common contract: exit 0/1 ✓, `--json` ✓, missing input FAIL ✓, shared lib ✓, fixtures that fail and pass ✓, gate tests a required CI job ✓ (T6 plus the owner step in CHECKPOINT b2). §4.1 gates: schema ✓, owner ✓, transitions + evidence ✓, "every id in reports" ✗. This one is deliberately not built (Interface note 8), and the question goes to the owner at CHECKPOINT b1. §4.2: schema ✓, stale marking ✓, false rows resolved ✓ (to a finding only; the umbrella schema has no doc-fix-commit alternative). §4.3: answered by owner ✓, references blocked ✓ (plans scanned by `run_all`; S2 adds dispatch prompts). §8 hooks: SessionStart ✓, UserPromptSubmit ✓, PreToolUse Bash for commit/push ✓. The remaining verbs, Agent, Stop and SubagentStop are S2/S4 per the umbrella.
+1. **Spec coverage, S1 rows.** Rollout step 1: library ✓ (T1), schemas ✓ (T2), `gate_register` ✓ (T3), `gate_claims` ✓ (T4), `gate_decisions` ✓ (T5), tests ✓, registers bootstrapped empty plus DEC-0001 ✓ (T1). Rollout step 2: hooks wired to the three gates (Claude Code ✓ T7–T8, git ✓ T7, CI job ✓ T6), `CLAUDE.md` ✓ (T8), skill skeleton with prompt blocks ✓ (T9). §7 common contract: exit 0/1 ✓, `--json` ✓, missing input FAIL ✓, shared lib ✓, fixtures that fail and pass ✓, gate tests a required CI job ✓ (T6 plus the owner step in CHECKPOINT b2). §4.1 gates: schema ✓, owner ✓, transitions + evidence ✓, "every id in reports" ✓ (T3, owner ruling 5 grammar). §4.2: schema ✓, stale marking ✓, false rows resolved ✓ (to a finding only; the umbrella schema has no doc-fix-commit alternative). §4.3: answered by owner ✓, references blocked ✓ (plans scanned by `run_all`; S2 adds dispatch prompts). §8 hooks: SessionStart ✓, UserPromptSubmit ✓, PreToolUse Bash for commit/push ✓. The remaining verbs, Agent, Stop and SubagentStop are S2/S4 per the umbrella.
 2. **Placeholder scan.** No TBD/TODO/"similar to". The only fill-ins are runtime values: the sha recorded at setup (`BASE_B<N>`), and `__ASKED_SHA__`, which a command replaces in the same step.
 3. **Type consistency.** `run(names, args)` uses `args["root"]` in T6, T7 and the tests. `verified_at_head(root, claim, head)` is defined in T4 for S2. Line-id categories match between the gates, `run_all`'s prefixing and every assertion. The marker string `# strict-delivery-gates-hook` is the same in install-hooks.sh, git-pre-commit.sh, session_start.py and the tests.
 4. **Review Focus.** Five lines, each pinned by a named test in its owning task; the umbrella's four S1 rows are pinned under their umbrella names.
