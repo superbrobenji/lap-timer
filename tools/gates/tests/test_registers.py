@@ -34,6 +34,9 @@ DECISION = {
 }
 
 
+MUT = "docs/superpowers/state/demo/mutations/"
+
+
 def with_(row, **kw):
     out = copy.deepcopy(row)
     out.update(kw)
@@ -46,8 +49,8 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002"], [d["id"] for d in decisions])
-        self.assertEqual([[], []], [reg.validate_decision(d) for d in decisions])
+        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003"], [d["id"] for d in decisions])
+        self.assertEqual([[], [], []], [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -143,7 +146,7 @@ class Transitions(unittest.TestCase):
 class Evidence(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="gate-ev-")
-        gf.write(self.root, "st/demo/mutations/T1-PIN-1.txt", "finding: T1-PIN-1\n")
+        gf.write(self.root, MUT + "T1-PIN-1.txt", "finding: T1-PIN-1\n")
         gf.write(self.root, "st/demo/review/T1.md", "status: DONE\n")
 
     def tearDown(self):
@@ -151,7 +154,7 @@ class Evidence(unittest.TestCase):
 
     def pinned(self, **kw):
         f = with_(FINDING, state="pinned",
-                  pin={"test": "test_x", "transcript": "st/demo/mutations/T1-PIN-1.txt"},
+                  pin={"test": "test_x", "transcript": MUT + "T1-PIN-1.txt"},
                   evidence=["st/demo/review/T1.md"],
                   history=[{"state": s, "sha": "aaaaaaa", "by": "x"}
                            for s in ("open", "planned", "in-progress", "pinned")])
@@ -164,8 +167,8 @@ class Evidence(unittest.TestCase):
     def test_pinned_needs_pin_transcript_file_and_review(self):
         self.assertIn("evidence: pinned needs pin {test, transcript}",
                       reg.evidence_errors(self.pinned(pin=None), self.root, []))
-        gone = {"test": "test_x", "transcript": "st/demo/mutations/absent.txt"}
-        self.assertIn("evidence: pin transcript st/demo/mutations/absent.txt does not exist",
+        gone = {"test": "test_x", "transcript": MUT + "absent.txt"}
+        self.assertIn(f"evidence: pin transcript {MUT}absent.txt does not exist",
                       reg.evidence_errors(self.pinned(pin=gone), self.root, []))
         self.assertIn("evidence: pinned needs the reviewer's confirming report path in evidence",
                       reg.evidence_errors(self.pinned(evidence=["bbbbbbb"]), self.root, []))
@@ -182,23 +185,23 @@ class Evidence(unittest.TestCase):
         for p in ("../" + os.path.basename(outside),):
             self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file under the repo root",
                           reg.evidence_errors(self.pinned(evidence=[p]), self.root, []), p)
-        escaped = {"test": "test_x", "transcript": "../" + os.path.basename(outside)}
-        self.assertIn(f"evidence: pin transcript {escaped['transcript']} does not exist",
+        escaped = {"test": "test_x", "transcript": MUT + "../../../../../" + os.path.basename(outside)}
+        self.assertIn(f"evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, got {escaped['transcript']!r}",
                       reg.evidence_errors(self.pinned(pin=escaped), self.root, []))
 
     def test_absolute_and_nul_evidence_paths_are_errors_not_crashes(self):
         abs_p = os.path.join(self.root, "st/demo/review/T1.md")
         self.assertIn(f"evidence: path must be relative to the repo root: {abs_p!r}",
                       reg.evidence_errors(self.pinned(evidence=[abs_p]), self.root, []))
-        abs_t = {"test": "test_x", "transcript": os.path.join(self.root, "st/demo/mutations/T1-PIN-1.txt")}
+        abs_t = {"test": "test_x", "transcript": os.path.join(self.root, MUT + "T1-PIN-1.txt")}
         errs = reg.evidence_errors(self.pinned(pin=abs_t), self.root, [])
         self.assertIn("evidence: pin transcript: must be relative to the repo root", errs)
         self.assertFalse(any("does not exist" in e for e in errs), errs)
         nul = "st/a\0b.md"
         self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
                       reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
-        bad = {"test": "test_x", "transcript": "st/a\0b.txt"}
-        self.assertIn("evidence: pin transcript st/a\0b.txt does not exist",
+        bad = {"test": "test_x", "transcript": MUT + "a\0b.txt"}
+        self.assertIn(f"evidence: pin transcript {MUT}a\0b.txt does not exist",
                       reg.evidence_errors(self.pinned(pin=bad), self.root, []))
 
     def test_deferred_needs_an_answered_owner_decision(self):
@@ -336,6 +339,151 @@ class Queries(unittest.TestCase):
         self.assertIsNone(reg.grant_for([with_(g, answer="no")], "demo"))
         self.assertIsNone(reg.grant_for([with_(g, answer=None, answered_at=None)], "demo"))
         self.assertIs(g, reg.grant_for([DECISION, g], "demo"))
+
+
+def deferred(ruling="DEC-9001"):
+    return with_(FINDING, state="deferred", ruling=ruling,
+                 history=[{"state": "open", "sha": "aaaaaaa", "by": "a"},
+                          {"state": "deferred", "sha": "aaaaaaa", "by": "a"}])
+
+
+class FixWave(unittest.TestCase):
+    """Block b1 final-review fix wave."""
+
+    def answered(self, **kw):
+        return with_(DECISION, answer="defer", answered_at={"sha": "aaaaaaa", "by": "superbrobenji"}, **kw)
+
+    def test_owner_is_evaluated_even_when_other_keys_are_missing(self):               # A1
+        f = with_(FINDING, owner=None)
+        del f["siblings"]
+        self.assertEqual(["keys: missing siblings", "owner: missing (every finding needs an owner: a plan task, an issue or a roadmap plan)"],
+                         reg.validate_finding(f))
+        g = with_(FINDING, owner={"kind": "person"})
+        del g["repro"]
+        errs = reg.validate_finding(g)
+        self.assertEqual(["keys: missing repro"], errs[:1])
+        self.assertTrue(errs[1].startswith("owner: kind must be one of"), errs)
+        h = with_(FINDING)
+        del h["owner"]
+        self.assertEqual(["keys: missing owner"], reg.validate_finding(h))
+
+    def test_only_the_owner_answers_a_decision(self):                                  # A2
+        agent = with_(DECISION, answer="yes", answered_at={"sha": "aaaaaaa", "by": "session"})
+        self.assertEqual(["answered_at.by: only the owner (superbrobenji) answers a decision, got 'session'"],
+                         reg.validate_decision(agent))
+        self.assertEqual([], reg.validate_decision(agent, owner="session"))
+        self.assertEqual([], reg.validate_decision(self.answered()))
+
+    def test_deferred_needs_a_valid_owner_answered_unique_decision(self):             # A2
+        root = tempfile.mkdtemp(prefix="gate-def-")
+        self.addCleanup(gf.remove, root)
+        f = deferred()
+        self.assertEqual([], reg.evidence_errors(f, root, [self.answered()]))
+        by_agent = with_(DECISION, answer="defer", answered_at={"sha": "aaaaaaa", "by": "session"})
+        errs = reg.evidence_errors(f, root, [by_agent])
+        self.assertEqual(["evidence: ruling DEC-9001 is not a valid owner-answered decision "
+                          "(answered_at.by: only the owner (superbrobenji) answers a decision, got 'session')"], errs)
+        boolean = with_(DECISION, answer=False, answered_at={"sha": "aaaaaaa", "by": "superbrobenji"})
+        errs = reg.evidence_errors(f, root, [boolean])
+        self.assertEqual(1, len(errs), errs)
+        self.assertTrue(errs[0].startswith("evidence: ruling DEC-9001 is not a valid owner-answered decision (answer: "), errs)
+        self.assertIn("quote it", errs[0])
+        self.assertEqual(["evidence: ruling DEC-9001 appears more than once in decisions.yml"],
+                         reg.evidence_errors(f, root, [self.answered(), self.answered()]))
+        self.assertEqual(["evidence: ruling DEC-9001 is not answered by the owner"],
+                         reg.evidence_errors(f, root, [DECISION]))
+
+    def test_unicode_digits_are_not_ids(self):                                         # B8
+        for bad in ("DEC-\uff10\uff10\uff10\uff11", "DEC-\u0663\u0663\u0663\u0663"):
+            self.assertTrue(any(e.startswith("id: ") for e in reg.validate_decision(with_(DECISION, id=bad))), bad)
+            self.assertTrue(any(e.startswith("ruling: ") for e in reg.validate_finding(with_(FINDING, ruling=bad))), bad)
+
+    def test_sha_length_bounds(self):                                                   # B14
+        for sha in ("aaaaaa", "a", "a" * 41):
+            f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": sha}])
+            self.assertTrue(any(e.startswith("cites: entry 0 sha") for e in reg.validate_finding(f)), sha)
+        for sha in ("a" * 7, "a" * 40):
+            f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": sha}])
+            self.assertEqual([], reg.validate_finding(f), sha)
+
+    def test_unquoted_dates_and_booleans_in_string_fields_get_the_quote_hint(self):  # B15
+        import datetime
+        for v in (datetime.date(2026, 10, 17), True, 7, 1.5):
+            errs = reg.validate_finding(with_(FINDING, source=v))
+            self.assertEqual(["source: must be a non-empty string (YAML read it as a date, boolean or number: quote it)"],
+                             errs, v)
+        self.assertEqual(["source: must be a non-empty string"], reg.validate_finding(with_(FINDING, source="")))
+        self.assertEqual(["doc: must be a non-empty string (YAML read it as a date, boolean or number: quote it)"],
+                         reg.validate_claim(with_(CLAIM, doc=datetime.date(2026, 10, 17))))
+
+    def test_pinned_transcript_location_and_test_name(self):                           # B13
+        root = tempfile.mkdtemp(prefix="gate-pin-")
+        self.addCleanup(gf.remove, root)
+        gf.write(root, "README.md", "x\n")
+        gf.write(root, MUT + "T1-PIN-1.txt", "t\n")
+        gf.write(root, "docs/superpowers/state/demo/review/T1.md", "r\n")
+        base = with_(FINDING, state="pinned", evidence=["docs/superpowers/state/demo/review/T1.md"],
+                     history=[{"state": s, "sha": "aaaaaaa", "by": "x"}
+                              for s in ("open", "planned", "in-progress", "pinned")])
+        ok = with_(base, pin={"test": "test_x", "transcript": MUT + "T1-PIN-1.txt"})
+        self.assertEqual([], reg.evidence_errors(ok, root, []))
+        self.assertEqual([], reg.evidence_errors(with_(ok, pin={"test": "test_mod::test_x", "transcript": MUT + "T1-PIN-1.txt"}), root, []))
+        for where in ("README.md", "docs/superpowers/state/demo/review/T1.md", "docs/superpowers/state/mutations/T1-PIN-1.txt",
+                      "docs/superpowers/state/../demo/mutations/T1-PIN-1.txt", "docs/superpowers/state/demo/mutations/a/T1-PIN-1.txt"):
+            errs = reg.evidence_errors(with_(base, pin={"test": "test_x", "transcript": where}), root, [])
+            self.assertEqual([f"evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, got {where!r}"],
+                             errs, where)
+        for name in ("not a test", "x", "test_", "test_a::x", "test_a::", "test_a b", "test_a::test_b::test_c", "test_x\n"):
+            errs = reg.evidence_errors(with_(ok, pin={"test": name, "transcript": MUT + "T1-PIN-1.txt"}), root, [])
+            self.assertEqual([f"evidence: pin test must be test_<name> or test_<name>::test_<name>, got {name!r}"], errs, name)
+
+    def test_load_errors_name_the_register_relative_to_the_root(self):                # A7
+        root = tempfile.mkdtemp(prefix="gate-reg-")
+        self.addCleanup(gf.remove, root)
+        rel = "docs/superpowers/state/findings.yml"
+        with self.assertRaises(GateError) as ctx:
+            reg.load_findings(root)
+        self.assertEqual(f"{rel}: No such file or directory", str(ctx.exception))
+        for text, msg in (("", "empty file (an empty register is the YAML list [])"),
+                          ("id: A-1\n", "top level must be a YAML list"), ("- A-1\n", "entry 0 is not a mapping")):
+            gf.write(root, rel, text)
+            with self.assertRaises(GateError) as ctx:
+                reg.load_findings(root)
+            self.assertEqual(f"{rel}: {msg}", str(ctx.exception))
+
+    def commits(self):
+        root = gf.new_repo()
+        self.addCleanup(gf.remove, root)
+        return root, gf.git(root, "rev-parse", "--short=7", "HEAD")
+
+    def test_every_sha_field_must_name_a_commit(self):                                 # A8
+        root, real = self.commits()
+        fake = "0000000"
+        msg = "{}: sha 0000000 is not a commit in this repository"
+        f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": real}, {"file": "b.c", "lines": "1", "sha": fake}],
+                  evidence=[real, fake, "README.md"],
+                  history=[{"state": "open", "sha": real, "by": "a"}])
+        self.assertEqual([msg.format("cites[1].sha"), msg.format("evidence[1]")], reg.finding_commit_errors(f, root))
+        g = with_(f, cites=[], evidence=[], history=[{"state": "open", "sha": fake, "by": "a"}])
+        self.assertEqual([msg.format("history[0].sha")], reg.finding_commit_errors(g, root))
+        d = with_(DECISION, asked_at={"sha": fake, "by": "session"}, answer="x",
+                  answered_at={"sha": fake, "by": "superbrobenji"})
+        self.assertEqual([msg.format("asked_at.sha"), msg.format("answered_at.sha")], reg.decision_commit_errors(d, root))
+        self.assertEqual([], reg.decision_commit_errors(with_(DECISION, asked_at={"sha": real, "by": "s"}), root))
+        c = with_(CLAIM, verified_at=fake, by="s", state="verified")
+        self.assertEqual([msg.format("verified_at")], reg.claim_commit_errors(c, root))
+        self.assertEqual([], reg.claim_commit_errors(with_(c, verified_at=real), root))
+        self.assertEqual([], reg.claim_commit_errors(CLAIM, root))
+
+    def test_the_commit_lookup_is_injectable_and_a_git_failure_propagates(self):      # A8
+        seen = []
+        f = with_(FINDING, cites=[], history=[{"state": "open", "sha": "abcdef1", "by": "a"}], evidence=["abcdef1"])
+        self.assertEqual([], reg.finding_commit_errors(f, "r", lambda root, sha: seen.append((root, sha)) or True))
+        self.assertEqual([("r", "abcdef1"), ("r", "abcdef1")], seen)
+        outside = tempfile.mkdtemp(prefix="gate-nogit-")
+        self.addCleanup(gf.remove, outside)
+        with self.assertRaises(GateError):
+            reg.finding_commit_errors(f, outside)
 
 
 if __name__ == "__main__":

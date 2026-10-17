@@ -2,10 +2,11 @@
 spec §4). Every validator returns a list of "<field>: <problem>" strings, [] when the row is ok."""
 from __future__ import annotations
 
+import datetime
 import os
 import re
 
-from . import CODE_ROOT, GateError, config, load_yaml
+from . import CODE_ROOT, GateError, config, gitinfo, load_yaml
 
 FINDING_STATES = ["open", "planned", "in-progress", "fixed-unpinned", "pinned", "deferred", "closed", "merged"]
 FINDING_TRANSITIONS = {  # from -> allowed to
@@ -20,10 +21,12 @@ OWNER_KINDS = ["plan", "issue", "roadmap"]
 SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 FINDING_ID = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 CLAIM_ID = re.compile(r"^C-[A-Za-z0-9.§-]+$")
-DECISION_ID = re.compile(r"^DEC-\d{4}$")
+DECISION_ID = re.compile(r"^DEC-[0-9]{4}$")
 GRANT_QUESTION = re.compile(r"grant:\S+( .*)?", re.S)
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
+PIN_TEST = re.compile(r"^test_[A-Za-z0-9_]+(::test_[A-Za-z0-9_]+)?$")
+PIN_TRANSCRIPT = re.compile(r"^docs/superpowers/state/(?!\.\.?/)[^/]+/mutations/(?!\.\.?$)[^/]+$")
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
 
 FINDING_KEYS = ["id", "source", "severity", "class", "siblings", "cites", "repro", "owner", "state",
@@ -35,8 +38,8 @@ OWNER_SHAPES = {"plan": {"kind", "plan", "task"}, "issue": {"kind", "number"}, "
 
 
 def _load(root, name) -> list:
-    path = os.path.join(root, STATE_DIR, name)
-    data = load_yaml(path)
+    path = os.path.join(STATE_DIR, name)    # messages name the file relative to `root`
+    data = load_yaml(os.path.join(root, path), root)
     if data is None:
         raise GateError(f"{path}: empty file (an empty register is the YAML list [])")
     if not isinstance(data, list):
@@ -61,6 +64,13 @@ def load_decisions(root) -> list:
 
 def _text(v) -> bool:
     return isinstance(v, str) and v.strip() != ""
+
+
+def _hint(v) -> str:
+    """The "quote it" hint for a string field YAML parsed as a date, boolean or number."""
+    if isinstance(v, (datetime.date, bool, int, float)):
+        return " (YAML read it as a date, boolean or number: quote it)"
+    return ""
 
 
 def _sha(v) -> bool:
@@ -127,15 +137,15 @@ def owner_errors(owner) -> list:
 def validate_finding(f: dict) -> list:
     errs = _keys(f, FINDING_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
-        return errs
+        return errs + (owner_errors(f["owner"]) if "owner" in f else [])   # the owner rule is never skipped
     if not isinstance(f["id"], str) or not FINDING_ID.fullmatch(f["id"]):
         errs.append(f"id: {f['id']!r} does not match {FINDING_ID.pattern}")
     if not _text(f["source"]):
-        errs.append("source: must be a non-empty string")
+        errs.append("source: must be a non-empty string" + _hint(f["source"]))
     if f["severity"] not in SEVERITIES:
         errs.append(f"severity: must be one of {SEVERITIES}, got {f['severity']!r}")
     if not _text(f["class"]):
-        errs.append("class: the reviewer's class statement, verbatim, non-empty")
+        errs.append("class: the reviewer's class statement, verbatim, non-empty" + _hint(f["class"]))
     if not isinstance(f["siblings"], list) or not all(_text(s) for s in f["siblings"]):
         errs.append("siblings: must be a list of non-empty strings (may be empty)")
     if not isinstance(f["cites"], list):
@@ -146,10 +156,11 @@ def validate_finding(f: dict) -> list:
                 errs.append(f"cites: entry {i} must be exactly {{file, lines, sha}}")
                 continue
             if not _text(c["file"]) or not _text(c["lines"]):
-                errs.append(f"cites: entry {i} file and lines must be non-empty strings (quote lines)")
+                errs.append(f"cites: entry {i} file and lines must be non-empty strings (quote lines)"
+                            + _hint(c["file"]) + _hint(c["lines"]))
             errs += _sha_problem(f"cites: entry {i} sha", c["sha"])
     if f["repro"] is not None and not _text(f["repro"]):
-        errs.append("repro: must be a path string or null")
+        errs.append("repro: must be a path string or null" + _hint(f["repro"]))
     errs += owner_errors(f["owner"])
     if f["state"] not in FINDING_STATES:
         errs.append(f"state: must be one of {FINDING_STATES}, got {f['state']!r}")
@@ -173,7 +184,7 @@ def validate_finding(f: dict) -> list:
                 errs.append(f"history: entry {i} state {h['state']!r} is not a finding state")
             errs += _sha_problem(f"history: entry {i} sha", h["sha"])
             if not _text(h["by"]):
-                errs.append(f"history: entry {i} by must be a non-empty string")
+                errs.append(f"history: entry {i} by must be a non-empty string" + _hint(h["by"]))
         last = hist[-1]
         if isinstance(last, dict) and last.get("state") != f["state"]:
             errs.append(f"history: last entry state {last.get('state')!r} != state {f['state']!r}")
@@ -190,7 +201,7 @@ def transition_errors(f: dict) -> list:
     return errs
 
 
-def evidence_errors(f: dict, root, decisions: list) -> list:
+def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
     """What each state must carry (spec §4.1). Call only on a valid row."""
     errs = []
     for e in f["evidence"]:
@@ -203,20 +214,32 @@ def evidence_errors(f: dict, root, decisions: list) -> list:
         pin = f["pin"]
         if pin is None:
             errs.append("evidence: pinned needs pin {test, transcript}")
-        elif os.path.isabs(pin["transcript"]):
-            errs.append("evidence: pin transcript: must be relative to the repo root")
-        elif not _file_under(root, pin["transcript"]):
-            errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
+        else:
+            if not PIN_TEST.fullmatch(pin["test"]):
+                errs.append(f"evidence: pin test must be test_<name> or test_<name>::test_<name>, got {pin['test']!r}")
+            if os.path.isabs(pin["transcript"]):
+                errs.append("evidence: pin transcript: must be relative to the repo root")
+            elif not PIN_TRANSCRIPT.fullmatch(pin["transcript"]):
+                errs.append("evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, "
+                            f"got {pin['transcript']!r}")
+            elif not _file_under(root, pin["transcript"]):
+                errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
         if not any(not _sha(e) and _file_under(root, e) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":
-        d = next((x for x in decisions if x.get("id") == f["ruling"]), None)
+        matches = [x for x in decisions if x.get("id") == f["ruling"]]
         if f["ruling"] is None:
             errs.append("evidence: deferred needs ruling = the owner's decision id")
-        elif d is None:
+        elif not matches:
             errs.append(f"evidence: ruling {f['ruling']} is not in decisions.yml")
-        elif d.get("answer") is None:
+        elif len(matches) > 1:
+            errs.append(f"evidence: ruling {f['ruling']} appears more than once in decisions.yml")
+        elif matches[0].get("answer") is None:
             errs.append(f"evidence: ruling {f['ruling']} is not answered by the owner")
+        else:
+            bad = validate_decision(matches[0], owner)
+            if bad:
+                errs.append(f"evidence: ruling {f['ruling']} is not a valid owner-answered decision ({'; '.join(bad)})")
     if f["state"] == "closed" and not f["evidence"]:
         errs.append("evidence: closed needs evidence (commits or report paths)")
     for h in f["history"]:
@@ -233,7 +256,7 @@ def validate_claim(c: dict) -> list:
         errs.append(f"id: {c['id']!r} does not match {CLAIM_ID.pattern}")
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
-            errs.append(f"{k}: must be a non-empty string")
+            errs.append(f"{k}: must be a non-empty string" + _hint(c[k]))
     if not isinstance(c["cites"], list) or not c["cites"] or not all(_text(p) for p in c["cites"]):
         errs.append("cites: must be a non-empty list of paths (a claim citing nothing can never go stale)")
     if c["state"] is False:
@@ -243,7 +266,7 @@ def validate_claim(c: dict) -> list:
     if c["verified_at"] is not None:
         errs += _sha_problem("verified_at", c["verified_at"])
     if c["by"] is not None and not _text(c["by"]):
-        errs.append("by: must be null or a non-empty string")
+        errs.append("by: must be null or a non-empty string" + _hint(c["by"]))
     if c["state"] == "verified" and (c["verified_at"] is None or c["by"] is None):
         errs.append("state: verified needs verified_at and by")
     if c["state"] == "false":
@@ -254,7 +277,8 @@ def validate_claim(c: dict) -> list:
     return errs
 
 
-def validate_decision(d: dict) -> list:
+def validate_decision(d: dict, owner=None) -> list:
+    """`owner` (default: config owner.handle) is the only handle allowed in answered_at.by."""
     errs = _keys(d, DECISION_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
@@ -263,7 +287,7 @@ def validate_decision(d: dict) -> list:
     if d["class"] not in DECISION_CLASSES:
         errs.append(f"class: must be one of {DECISION_CLASSES}, got {d['class']!r}")
     if not _text(d["question"]):
-        errs.append("question: must be a non-empty string")
+        errs.append("question: must be a non-empty string" + _hint(d["question"]))
     elif d["class"] == "merge-grant" and not GRANT_QUESTION.fullmatch(d["question"]):
         errs.append("question: a merge-grant question is 'grant:<plan>'")
     opts = d["options"]
@@ -289,9 +313,38 @@ def validate_decision(d: dict) -> list:
             errs.append("answered_at: must be null or {sha, by}")
         else:
             errs += _sha_problem("answered_at.sha", at["sha"])
+            if owner is None:
+                owner = config.load(CODE_ROOT)["owner"]["handle"]
+            if at["by"] != owner:
+                errs.append(f"answered_at.by: only the owner ({owner}) answers a decision, got {at['by']!r}")
     if (ans is None) != (at is None):
         errs.append("answered_at: answer and answered_at are both null or both set")
     return errs
+
+
+def _commit_errors(pairs, root, exists) -> list:
+    return [f"{field}: sha {sha} is not a commit in this repository"
+            for field, sha in pairs if _sha(sha) and not exists(root, sha)]
+
+
+def finding_commit_errors(f: dict, root, exists=gitinfo.commit_exists) -> list:
+    """Every sha in a (valid) finding row -- history, cites, evidence entries shaped like a sha --
+    must name a commit in the repository at `root` (DEC-0003). `exists(root, sha) -> bool`."""
+    pairs = [(f"history[{i}].sha", h["sha"]) for i, h in enumerate(f["history"])]
+    pairs += [(f"cites[{i}].sha", c["sha"]) for i, c in enumerate(f["cites"])]
+    pairs += [(f"evidence[{i}]", e) for i, e in enumerate(f["evidence"])]
+    return _commit_errors(pairs, root, exists)
+
+
+def claim_commit_errors(c: dict, root, exists=gitinfo.commit_exists) -> list:
+    return _commit_errors([("verified_at", c["verified_at"])], root, exists)
+
+
+def decision_commit_errors(d: dict, root, exists=gitinfo.commit_exists) -> list:
+    pairs = [("asked_at.sha", d["asked_at"]["sha"])]
+    if d["answered_at"] is not None:
+        pairs.append(("answered_at.sha", d["answered_at"]["sha"]))
+    return _commit_errors(pairs, root, exists)
 
 
 def finding_by_id(findings, id):
@@ -310,7 +363,7 @@ def grant_for(decisions, plan: str, *, owner=None):
     if owner is None:
         owner = config.load(CODE_ROOT)["owner"]["handle"]
     for d in decisions:
-        if validate_decision(d) != [] or d["class"] != "merge-grant":
+        if validate_decision(d, owner) != [] or d["class"] != "merge-grant":
             continue
         q = d["question"]
         if q != f"grant:{plan}" and not q.startswith(f"grant:{plan} "):

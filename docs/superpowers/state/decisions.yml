@@ -12,6 +12,16 @@
   options:
     - {label: tighten, cost: "regex change + 6 fixture lines; more ids caught"}
     - {label: keep, cost: "report authors must write '<id>: ' or '<id> '"}
-  asked_at: {sha: "23ba3b1", by: session}
-  answer: null
-  answered_at: null
+  asked_at: {sha: "73cd3cc", by: session}
+  answer: "tighten (delegated: owner said \"you may pick ideal for both 002 and 003\", 2026-10-17)"
+  answered_at: {sha: "73cd3cc", by: superbrobenji}
+
+- id: DEC-0003
+  class: scope
+  question: "Must every sha field in the registers name an existing commit in the gated repository?"
+  options:
+    - {label: verify, cost: "git cat-file per sha; fixtures need real commits; S4 postmerge remaps branch shas to the squash commit"}
+    - {label: accept-any-hex, cost: "closed/pinned satisfiable with 0000000"}
+  asked_at: {sha: "73cd3cc", by: session}
+  answer: "verify (delegated: owner said \"you may pick ideal for both 002 and 003\", 2026-10-17)"
+  answered_at: {sha: "73cd3cc", by: superbrobenji}
