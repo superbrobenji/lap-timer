@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every code block in this plan was run in a throwaway copy of these files: 176 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
+Every code block in this plan was run in a throwaway copy of these files: 177 tests pass on Python 3.9.6 and 3.12.14, and `run_all.py` gives 15 PASS lines once DEC-0001 is answered.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -680,6 +680,12 @@ class FixWave(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, rc, "", err)
             return run
 
+        with mock.patch.dict(os.environ, {"LC_ALL": "de_DE.UTF-8"}):     # whatever the CI image exports
+            self._codes(fake, mock)
+        self.assertTrue(calls and all(c["env"]["LC_ALL"] == "C" for c in calls), calls)
+
+    def _codes(self, fake, mock):
+        import subprocess
         for rc, err, want in ((0, "", True), (128, "fatal: Not a valid object name x", False),
                               (128, "error: could not get object info", False)):
             with mock.patch.object(subprocess, "run", fake(rc, err)):
@@ -688,7 +694,7 @@ class FixWave(unittest.TestCase):
             with mock.patch.object(subprocess, "run", fake(rc, err)):
                 with self.assertRaises(GateError):
                     gitinfo.commit_exists(".", "abcdef1")
-        self.assertTrue(calls and all(c["env"]["LC_ALL"] == "C" for c in calls), calls)
+
 
     def test_a_missing_root_has_its_own_message(self):                                 # round 2, item 6
         with self.assertRaises(GateError) as ctx:
@@ -697,6 +703,17 @@ class FixWave(unittest.TestCase):
         with self.assertRaises(GateError) as ctx:
             gitinfo.commit_exists("no/such/dir", "abcdef1")
         self.assertEqual("git cat-file -e abcdef1^{commit}: root no/such/dir does not exist", str(ctx.exception))
+
+    def test_a_root_that_is_a_file_is_not_a_directory(self):                           # round 3, item 2
+        d = tempfile.mkdtemp(prefix="gate-file-")
+        self.addCleanup(gf.remove, d)
+        f = gf.write(d, "f.txt", "x\n")
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.head_sha(f)
+        self.assertEqual(f"git rev-parse HEAD: root {f} is not a directory", str(ctx.exception))
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.commit_exists(f, "abcdef1")
+        self.assertEqual(f"git cat-file -e abcdef1^{{commit}}: root {f} is not a directory", str(ctx.exception))
 
     def test_commit_exists(self):                                                    # A8
         root = gf.new_repo()
@@ -990,7 +1007,8 @@ def _env() -> dict:
 
 def _check_root(cmd: list, cwd) -> None:
     if cwd is not None and not os.path.isdir(cwd):
-        raise GateError(f"{' '.join(cmd)}: root {cwd} does not exist")
+        why = "is not a directory" if os.path.exists(cwd) else "does not exist"
+        raise GateError(f"{' '.join(cmd)}: root {cwd} {why}")
 
 
 def _run(cmd: list, cwd=None) -> str:
@@ -1102,7 +1120,7 @@ def tags_at(root, sha) -> list:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_lib -v`
-Expected: `Ran 38 tests` … `OK`.
+Expected: `Ran 39 tests` … `OK`.
 
 Mutation check: in `run_check`, replace `except Exception as exc:` with `except GateError as exc:`. `test_an_unexpected_exception_is_fail` must now ERROR. Restore it and run again: OK.
 
@@ -1221,7 +1239,7 @@ Append to `docs/superpowers/state/strict-delivery/ledger.md`:
 
 ```markdown
 - base BASE_B1=<the sha recorded in setup Step 0.3>
-- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 38 OK
+- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 39 OK
 ```
 
 ```bash
@@ -2127,7 +2145,7 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 44 tests` OK; whole suite `Ran 82 tests` OK.
+Expected: `Ran 44 tests` OK; whole suite `Ran 83 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
@@ -3155,7 +3173,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 124 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 125 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -3166,7 +3184,7 @@ Mutation check (report scan): in `registered_reports`, replace `if MARKER in att
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 124 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 125 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -4075,7 +4093,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 10 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 156 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 157 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
@@ -4166,7 +4184,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 156 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 157 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -4665,7 +4683,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 169 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 170 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -4960,7 +4978,7 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 176 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 177 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -4970,7 +4988,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 176 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 177 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md

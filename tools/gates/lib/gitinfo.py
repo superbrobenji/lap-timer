@@ -19,7 +19,8 @@ def _env() -> dict:
 
 def _check_root(cmd: list, cwd) -> None:
     if cwd is not None and not os.path.isdir(cwd):
-        raise GateError(f"{' '.join(cmd)}: root {cwd} does not exist")
+        why = "is not a directory" if os.path.exists(cwd) else "does not exist"
+        raise GateError(f"{' '.join(cmd)}: root {cwd} {why}")
 
 
 def _run(cmd: list, cwd=None) -> str:

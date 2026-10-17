@@ -432,6 +432,12 @@ class FixWave(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, rc, "", err)
             return run
 
+        with mock.patch.dict(os.environ, {"LC_ALL": "de_DE.UTF-8"}):     # whatever the CI image exports
+            self._codes(fake, mock)
+        self.assertTrue(calls and all(c["env"]["LC_ALL"] == "C" for c in calls), calls)
+
+    def _codes(self, fake, mock):
+        import subprocess
         for rc, err, want in ((0, "", True), (128, "fatal: Not a valid object name x", False),
                               (128, "error: could not get object info", False)):
             with mock.patch.object(subprocess, "run", fake(rc, err)):
@@ -440,7 +446,7 @@ class FixWave(unittest.TestCase):
             with mock.patch.object(subprocess, "run", fake(rc, err)):
                 with self.assertRaises(GateError):
                     gitinfo.commit_exists(".", "abcdef1")
-        self.assertTrue(calls and all(c["env"]["LC_ALL"] == "C" for c in calls), calls)
+
 
     def test_a_missing_root_has_its_own_message(self):                                 # round 2, item 6
         with self.assertRaises(GateError) as ctx:
@@ -449,6 +455,17 @@ class FixWave(unittest.TestCase):
         with self.assertRaises(GateError) as ctx:
             gitinfo.commit_exists("no/such/dir", "abcdef1")
         self.assertEqual("git cat-file -e abcdef1^{commit}: root no/such/dir does not exist", str(ctx.exception))
+
+    def test_a_root_that_is_a_file_is_not_a_directory(self):                           # round 3, item 2
+        d = tempfile.mkdtemp(prefix="gate-file-")
+        self.addCleanup(gf.remove, d)
+        f = gf.write(d, "f.txt", "x\n")
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.head_sha(f)
+        self.assertEqual(f"git rev-parse HEAD: root {f} is not a directory", str(ctx.exception))
+        with self.assertRaises(GateError) as ctx:
+            gitinfo.commit_exists(f, "abcdef1")
+        self.assertEqual(f"git cat-file -e abcdef1^{{commit}}: root {f} is not a directory", str(ctx.exception))
 
     def test_commit_exists(self):                                                    # A8
         root = gf.new_repo()
