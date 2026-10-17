@@ -96,7 +96,8 @@ class GateRegister(unittest.TestCase):
             self.assertIn("locked: Permission denied", buf.getvalue())
             self.assertEqual(1, rc)
         finally:
-            os.chmod(locked, 0o755)
+            if os.path.exists(locked):
+                os.chmod(locked, 0o755)
             gf.remove(root)
 
     def test_report_path_that_is_a_file_fails_closed(self):
@@ -126,6 +127,36 @@ class GateRegister(unittest.TestCase):
                 rc = gate_register.main(["--root", root])
             self.assertIn("FAIL register.report.docs/superpowers/state/briefs/link/b.md.T9-NOPE-1: "
                           "not in register", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            gf.remove(root)
+
+    def test_top_directory_reached_through_a_symlink_is_reported_once(self):
+        root = gf.new_repo()
+        try:
+            briefs = os.path.join(root, "docs", "superpowers", "state", "briefs")
+            gf.write(root, os.path.join("docs", "superpowers", "state", "briefs", "b.md"),
+                     "register: true\n- T9-NOPE-1: x\n")
+            os.symlink(briefs, os.path.join(briefs, "loop"))
+            os.symlink(briefs, os.path.join(root, "docs", "reviews"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertEqual(1, buf.getvalue().count("T9-NOPE-1: not in register"), buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            gf.remove(root)
+
+    def test_dangling_symlink_in_a_report_directory_fails_with_a_relative_path(self):
+        root = gf.new_repo()
+        try:
+            os.makedirs(os.path.join(root, "docs", "reviews"))
+            os.symlink(os.path.join(root, "nowhere.md"), os.path.join(root, "docs", "reviews", "dangling.md"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertEqual("FAIL register.input: docs/reviews/dangling.md: No such file or directory\n",
+                             buf.getvalue())
             self.assertEqual(1, rc)
         finally:
             gf.remove(root)

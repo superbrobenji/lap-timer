@@ -50,13 +50,18 @@ def registered_reports(root) -> list:
             continue    # no such report directory: it holds no registered reports
         if not os.path.isdir(top):
             raise GateError(f"{top}: not a directory")
+        if not _first_visit(seen, top):
+            continue    # this directory was already walked through a symlink
         for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error, followlinks=True):
             dirnames.sort()
             dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    head = [next(fh, "") for _ in range(MARKER_LINES)]
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        head = [next(fh, "") for _ in range(MARKER_LINES)]
+                except OSError as exc:
+                    raise GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}") from None
                 if any(l.strip() == MARKER for l in head):
                     found.append(path)
     return found

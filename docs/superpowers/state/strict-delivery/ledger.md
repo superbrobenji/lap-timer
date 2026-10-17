@@ -14,3 +14,4 @@ Lines: `- T<n> <commit subject> -- <gate result>`; `Ruling: what -- why -- cost 
 - T3 feat(gates): gate_register -- test_gate_register 12 OK; suite 74 OK; gate_register at HEAD 6 PASS
 - T3 plan-text corrections: counts 12 / 74 (brief said 11 / 59); run() puts --json before --root; os.walk onerror -> GateError; LIST_ITEM captures a token and fullmatches FINDING_ID; known built from string ids; __future__ in the test
 - T3 review round 1: onerror pinned; non-directory report path FAILs; symlinked report dirs followed (cycle-safe); LIST_ITEM per ruling 5 (no bare id at end of line); DEC-0002 asked; test_registers expects DEC-0001 and DEC-0002; test_gate_register 15, suite 77
+- T3 review round 2: top report dir seeded in the visited set; dangling-symlink FAIL uses <relative path>: <strerror>; test finally guard; test_gate_register 17, suite 79

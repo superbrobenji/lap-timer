@@ -1901,7 +1901,8 @@ class GateRegister(unittest.TestCase):
             self.assertIn("locked: Permission denied", buf.getvalue())
             self.assertEqual(1, rc)
         finally:
-            os.chmod(locked, 0o755)
+            if os.path.exists(locked):
+                os.chmod(locked, 0o755)
             gf.remove(root)
 
     def test_report_path_that_is_a_file_fails_closed(self):
@@ -1931,6 +1932,36 @@ class GateRegister(unittest.TestCase):
                 rc = gate_register.main(["--root", root])
             self.assertIn("FAIL register.report.docs/superpowers/state/briefs/link/b.md.T9-NOPE-1: "
                           "not in register", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            gf.remove(root)
+
+    def test_top_directory_reached_through_a_symlink_is_reported_once(self):
+        root = gf.new_repo()
+        try:
+            briefs = os.path.join(root, "docs", "superpowers", "state", "briefs")
+            gf.write(root, os.path.join("docs", "superpowers", "state", "briefs", "b.md"),
+                     "register: true\n- T9-NOPE-1: x\n")
+            os.symlink(briefs, os.path.join(briefs, "loop"))
+            os.symlink(briefs, os.path.join(root, "docs", "reviews"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertEqual(1, buf.getvalue().count("T9-NOPE-1: not in register"), buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            gf.remove(root)
+
+    def test_dangling_symlink_in_a_report_directory_fails_with_a_relative_path(self):
+        root = gf.new_repo()
+        try:
+            os.makedirs(os.path.join(root, "docs", "reviews"))
+            os.symlink(os.path.join(root, "nowhere.md"), os.path.join(root, "docs", "reviews", "dangling.md"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertEqual("FAIL register.input: docs/reviews/dangling.md: No such file or directory\n",
+                             buf.getvalue())
             self.assertEqual(1, rc)
         finally:
             gf.remove(root)
@@ -2027,13 +2058,18 @@ def registered_reports(root) -> list:
             continue    # no such report directory: it holds no registered reports
         if not os.path.isdir(top):
             raise GateError(f"{top}: not a directory")
+        if not _first_visit(seen, top):
+            continue    # this directory was already walked through a symlink
         for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error, followlinks=True):
             dirnames.sort()
             dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    head = [next(fh, "") for _ in range(MARKER_LINES)]
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        head = [next(fh, "") for _ in range(MARKER_LINES)]
+                except OSError as exc:
+                    raise GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}") from None
                 if any(l.strip() == MARKER for l in head):
                     found.append(path)
     return found
@@ -2100,8 +2136,8 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 15 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 77 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 17 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 79 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -2112,7 +2148,7 @@ Mutation check (report scan): in `registered_reports`, replace `if any(l.strip()
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 15 OK; suite 77 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 17 OK; suite 79 OK; gate_register at HEAD 6 PASS` to the ledger.
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
