@@ -1,0 +1,14 @@
+- id: T1-JUMP-1
+  source: review
+  severity: HIGH
+  class: >-
+    Well-formed YAML whose history jumps from open straight to pinned.
+  siblings: []
+  cites: []
+  repro: null
+  owner: {kind: issue, number: 1}
+  state: pinned
+  pin: {test: test_x, transcript: docs/superpowers/state/demo/mutations/T1-JUMP-1.txt}
+  ruling: null
+  evidence: []
+  history: [{state: open, sha: "aaaaaaa", by: audit}, {state: pinned, sha: "aaaaaaa", by: session}]

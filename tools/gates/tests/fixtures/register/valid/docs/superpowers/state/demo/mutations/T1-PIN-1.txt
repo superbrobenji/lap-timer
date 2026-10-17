@@ -1,0 +1,5 @@
+finding: T1-PIN-1
+test: test_crc_bad_delta_fails
+step 1 (fix present): python3 -m unittest demo -> PASS
+step 2 (fix reverted: git stash of components/core/b.c): python3 -m unittest demo -> FAIL
+step 3 (fix restored): python3 -m unittest demo -> PASS

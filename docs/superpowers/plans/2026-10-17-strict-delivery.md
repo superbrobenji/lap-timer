@@ -155,7 +155,7 @@ def grant_for(decisions, plan: str) -> dict | None   # class merge-grant, questi
 
 Finding schema (all keys required; `pin`, `ruling` may be `null`): `id` (regex `^[A-Z0-9]+(-[A-Za-z0-9]+)+$`), `source`, `severity` ∈ {CRITICAL,HIGH,MEDIUM,LOW,INFO}, `class` (non-empty string), `siblings` (list, may be empty), `cites` (list of `{file, lines, sha}`), `repro` (string or null), `owner` (`{kind, plan, task}` | `{kind: issue, number}` | `{kind: roadmap, plan}`), `state`, `pin` (`{test, transcript}` or null), `ruling` (decision id or null), `evidence` (list of strings), `history` (list of `{state, sha, by}`; last entry's state == `state`).
 Claim schema: `id` (`^C-[A-Za-z0-9.§-]+$`), `doc`, `anchor`, `text`, `direct`, `contra`, `cites` (list of paths), `verified_at` (sha or null), `by`, `state`, `finding` (required non-null iff state == false).
-Decision schema: `id` (`^DEC-\d{4}$`), `class`, `question`, `options` (list of `{label, cost}`, ≥2 unless class == merge-grant), `asked_at` (`{sha, by}`), `answer` (null or string), `answered_at` (null or `{sha, by}`; `by` must equal `config.owner.handle` when non-null).
+Decision schema: `id` (`^DEC-[0-9]{4}$`), `class`, `question`, `options` (list of `{label, cost}`, ≥2 unless class == merge-grant), `asked_at` (`{sha, by}`), `answer` (null or string), `answered_at` (null or `{sha, by}`; `by` must equal `config.owner.handle` when non-null).
 
 ### Config (`tools/gates/config.yml`, loaded by `lib/config.py::load(root) -> dict`)
 
@@ -193,7 +193,7 @@ comment_patterns:   # regex; a hit must name a finding id or #issue on the same 
 exceptions:
   cost: {blast: {tooling: 1, ui: 2, timing: 3, data-integrity: 3, supervision: 3}, verifiability: [0, 2], reach: {transient: 0, stored_or_3plus: 2}}
   benefit: {complexity: {helper: 1, module: 2, task_or_60_lines: 3}, runtime: [0, 2]}
-tag_pattern: '^[a-z0-9-]+-b\d+$'
+tag_pattern: '^[a-z0-9-]+-b[0-9]+$'
 ```
 
 ### Git/gh helpers (`tools/gates/lib/gitinfo.py`)
@@ -251,7 +251,7 @@ A dispatch prompt is Markdown with these headed sections, in this order; `gate_d
 ## Task
 <the task-specific text>
 ```
-`gate_dispatch` rules: role present and known; model rank ≥ `models[role]` rank; fable only if role ∈ `fable_roles`; brief path exists when required; every finding id exists in the register and is `planned` or `in-progress` (implementer) or any state (reviewer); every claim id exists and is `verified` at HEAD — defined as: state `verified`, and no path in `cites` changed between `verified_at` and HEAD or in the index (`tools.gates.gate_claims.verified_at_head(root, claim, head) -> bool`, with `stale_reason(...)` beside it, as S1 defines them; a commit cannot name its own sha, so equality with HEAD is never required); report path's directory exists; no unanswered decision id (`DEC-\d{4}`) mentioned anywhere in the prompt; prompt length ≤ `dispatch.max_prompt_chars`; the strict block equals the prompt file byte-for-byte.
+`gate_dispatch` rules: role present and known; model rank ≥ `models[role]` rank; fable only if role ∈ `fable_roles`; brief path exists when required; every finding id exists in the register and is `planned` or `in-progress` (implementer) or any state (reviewer); every claim id exists and is `verified` at HEAD — defined as: state `verified`, and no path in `cites` changed between `verified_at` and HEAD or in the index (`tools.gates.gate_claims.verified_at_head(root, claim, head) -> bool`, with `stale_reason(...)` beside it, as S1 defines them; a commit cannot name its own sha, so equality with HEAD is never required); report path's directory exists; no unanswered decision id (`DEC-[0-9]{4}`) mentioned anywhere in the prompt; prompt length ≤ `dispatch.max_prompt_chars`; the strict block equals the prompt file byte-for-byte.
 
 ### Review package (`tools/gates/gate_review_package.py` input; produced by the controller via `review-package` script plus the implementer's artefacts)
 
@@ -307,7 +307,7 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 | Interface | Form |
 |---|---|
 | Any gate | `python3 tools/gates/gate_<name>.py [--json] [gate args]`; `check(args)` receives argv without `--json`; rc 0/1 |
-| `run_all.py` | `python3 tools/gates/run_all.py [--only a,b] [--json]` |
+| `run_all.py` | `python3 tools/gates/run_all.py [--json] [--only a,b]` |
 | `gate_review_package.py` | `--dir docs/superpowers/state/<plan>/review/<task>` |
 | `gate_plan.py` | `--plan <path> [--source <report-or-register>]` |
 | `gate_dispatch.py` | `--prompt <file>` (or stdin) `[--prompts-dir <dir>]` |

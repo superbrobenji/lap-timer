@@ -50,6 +50,8 @@ jobs:
             # true: the MPU-6050 driver is the open Plan 8 deliverable
             "components/drivers/imu_mpu6050/CMakeLists.txt|The real I2C driver lands with the"
             "components/drivers/imu_mpu6050/imu_mpu6050.c|The real I2C driver (WHO_AM_I"
+            # true: the strict-delivery comment gate's own pattern list (tools/gates/config.yml)
+            "tools/gates/config.yml|- 'later sessions?'"
           )
           # git grep exits 1 on "no match"; that is the good case, not a job failure.
           hits=$(git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|stubbed until|stub until|not in plan [0-9]|Plan 04 ships no display' \

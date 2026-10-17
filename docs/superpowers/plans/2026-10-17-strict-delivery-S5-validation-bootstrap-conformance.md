@@ -1177,7 +1177,7 @@ Expected: verdict FAIL naming the planted claim (`buggy.py 5 10 0` exits 1 with 
 
 - [ ] **Step 7: Register the reviewer's finding**
 
-Append `DRY-RUN-1-R1` to `findings.yml`: `source: review`, `severity: LOW`, class = the reviewer's sentence verbatim, `siblings: []`, `cites: [{file: .superpowers/sdd/dryrun/review/1/claims.md, lines: "<row>", sha: <HEAD>}]`, `repro: "python3 tools/gates/tests/fixtures/dryrun/buggy.py 5 10 0"`, `owner: {kind: plan, plan: docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md, task: dryrun}`, `state: open`, `history: [{state: open, sha: <HEAD>, by: task_reviewer}]`. Commit `chore(dryrun): register DRY-RUN-1-R1 from review 1`. Expected: `gate_register` PASS including `register.reports` (every id in `review-1.md` exists).
+Append `DRY-RUN-1-R1` to `findings.yml`: `source: review`, `severity: LOW`, class = the reviewer's sentence verbatim, `siblings: []`, `cites: [{file: .superpowers/sdd/dryrun/review/1/claims.md, lines: "<row>", sha: <HEAD>}]`, `repro: "python3 tools/gates/tests/fixtures/dryrun/buggy.py 5 10 0"`, `owner: {kind: plan, plan: docs/superpowers/plans/2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md, task: dryrun}`, `state: open`, `history: [{state: open, sha: <HEAD>, by: task_reviewer}]`. Commit `chore(dryrun): register DRY-RUN-1-R1 from review 1`. Expected: `gate_register` PASS including `register.report` (every id in `review-1.md` exists).
 
 - [ ] **Step 8: Fix round 1 (resume the implementer)**
 
