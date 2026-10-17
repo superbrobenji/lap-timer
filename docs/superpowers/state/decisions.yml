@@ -1,0 +1,7 @@
+- id: DEC-0001
+  class: merge-grant
+  question: "grant:strict-delivery"
+  options: []
+  asked_at: {sha: "73cd3cc", by: session}
+  answer: "yes"
+  answered_at: {sha: "73cd3cc", by: superbrobenji}

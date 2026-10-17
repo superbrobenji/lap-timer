@@ -1,0 +1,34 @@
+owner: {handle: superbrobenji}
+triggers:
+  controller: {tasks: 3, tokens: 250000, minutes: 90}
+  implementer: {tasks: 1, tokens: 150000}
+  reviewer: {reviews: 1, tokens: 120000}
+models:            # minimum model per role; dispatch hook enforces
+  controller: opus
+  implementer: sonnet
+  implementer_transcription: haiku
+  task_reviewer: opus
+  final_reviewer: opus
+  final_verifier: fable
+  exception_reviewer: fable
+  audit_reviewer: opus
+  audit_verifier: opus
+  investigator: opus
+model_rank: {haiku: 1, sonnet: 2, opus: 3, fable: 4}
+fable_roles: [final_verifier, exception_reviewer]     # the only roles allowed on fable
+block: {max_tasks: 3}
+rulings: {max_per_block: 5}
+dispatch: {max_prompt_chars: 12000}
+merge_markers: ["fix before merge", "draft", "parked", "TODO", "not for merge"]
+comment_patterns:   # regex; a hit must name a finding id or #issue on the same line or the next
+  - 'lands? (in|with)'
+  - 'until Plan \d'
+  - 'plan 0?\d'
+  - 'later sessions?'
+  - 'wired in'
+  - 'session \d'
+  - 'task \d'
+exceptions:
+  cost: {blast: {tooling: 1, ui: 2, timing: 3, data-integrity: 3, supervision: 3}, verifiability: [0, 2], reach: {transient: 0, stored_or_3plus: 2}}
+  benefit: {complexity: {helper: 1, module: 2, task_or_60_lines: 3}, runtime: [0, 2]}
+tag_pattern: '^[a-z0-9-]+-b\d+$'
