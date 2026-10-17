@@ -4271,7 +4271,24 @@ python3 -m unittest tools.gates.tests.test_gate_decisions -v                    
 python3 tools/gates/gate_decisions.py --scan docs/superpowers/plans/*.md; echo rc=$?  # 5 PASS lines, rc=0 (DEC-0001..0003 answered)
 ```
 
-Mutation checks (`PYTHONDONTWRITEBYTECODE=1`; restore after each): route every error to schema (`'owner' if e.startswith(registers.OWNER_ANSWER_ERROR) else 'schema'` -> `'schema'`): `test_an_agent_answer_fails`, `test_every_class_is_owner_only` and two more must fail; pass `owner='x'` to `registers.open_decisions`: `test_an_agent_answered_decision_is_still_unanswered_for_open_refs` must fail; change the skip condition to `if errs:`: `test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema` must fail; drop the `skipped.update(["schema", "owner", "open-ref"])` effect: `test_a_schema_error_skips_the_categories_it_never_reached` must fail; replace `registers.require_regular(root, full)` with `pass`: the FIFO test (alarm) and the directory test must fail; `text.split("\n")` -> `text.splitlines()`: `test_line_numbers_count_newlines_only` must fail; drop the empty-`--root` check, the `decision_commit_errors` loop, `memo_commit_exists`, `row_id`, the `(?!\d)` in `REF`, the `UnicodeDecodeError` branch, `safe_text`, or the duplicate FAIL: the matching test must fail. Restore and run again: OK.
+Mutation checks (`PYTHONDONTWRITEBYTECODE=1`; restore after each), each with the tests it kills:
+- route every error to schema (`'owner' if e.startswith(registers.OWNER_ANSWER_ERROR) else 'schema'` -> `'schema'`): `test_an_agent_answer_fails`, `test_every_class_is_owner_only`, `test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema`, `test_an_agent_answered_decision_is_still_unanswered_for_open_refs`;
+- pass `owner='x'` to `registers.open_decisions` in the gate: `test_reference_to_an_unanswered_decision_fails`;
+- revert `registers.open_decisions` to `answer is None` only: `test_an_agent_answered_decision_is_still_unanswered_for_open_refs` and `test_open_decisions_means_not_answered_by_the_owner`;
+- change the skip condition to `if errs:`: `test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema`;
+- drop the `skipped.update(["schema", "owner", "open-ref"])` effect (`pass`): `test_a_schema_error_skips_the_categories_it_never_reached`;
+- replace `registers.require_regular(root, full)` with `pass`: `test_a_directory_and_a_non_utf8_scan_file_fail` and `test_a_fifo_scan_path_fails_instead_of_hanging` (alarm);
+- `text.split("\n")` -> `text.splitlines()`: `test_line_numbers_count_newlines_only`;
+- drop the empty-`--root` check: `test_an_empty_root_is_a_fail_not_the_cwd_repo`;
+- drop the `decision_commit_errors` loop: `test_an_unknown_commit_is_a_schema_failure`, `test_an_agent_answer_with_an_unknown_commit_fails_owner_and_schema`, `test_one_commit_lookup_per_distinct_sha`;
+- use `gitinfo.commit_exists` instead of `memo_commit_exists()`: `test_one_commit_lookup_per_distinct_sha`;
+- use `d.get("id")` instead of `row_id`: `test_a_malformed_id_prints_as_entry_index`;
+- drop the `(?!\d)` in `REF`: `test_a_longer_id_is_not_a_reference_to_a_shorter_one`;
+- drop the `UnicodeDecodeError` branch: `test_a_directory_and_a_non_utf8_scan_file_fail`;
+- drop `safe_text` from the scan path: `test_a_scan_path_cannot_forge_a_result_line`;
+- drop the duplicate FAIL: `test_schema_errors_and_duplicates_fail`.
+
+Restore and run again: OK.
 
 - [ ] **Step 5: Ledger line, then commit**
 
