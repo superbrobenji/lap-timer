@@ -3850,9 +3850,8 @@ git commit -m "feat(gates): gate_claims -- claim schema, stale-at-HEAD detection
 - Test: `tools/gates/tests/test_gate_decisions.py`
 
 **Interfaces:**
-- Consumes: `CODE_ROOT`, `Result`, `gate_args`, `repo_root`, `run_gate`; `config.load`; `registers.load_decisions`, `validate_decision`, `open_decisions`, `DECISION_CLASSES`.
-- Produces: `gate_decisions.check(args) -> Result` with args `--root <tree>`, `--scan <path> ...` (relative paths resolve against root); `main(argv=None)`; `OWNER_ONLY_CLASSES: list[str]` (= all eight classes, spec §5); `REF = re.compile(r"DEC-\d{4}")`. Line ids: `decisions.{schema|duplicate|owner|open-ref|scan}.<id or path>` on FAIL; one `PASS decisions.<category>` per clean category (schema, duplicate, owner, open-ref, scan).
-
+- Consumes: `CODE_ROOT`, `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `config.load`; `registers.load_decisions`, `validate_decision(d, owner=owner)`, `decision_commit_errors`, `open_decisions`, `row_id`, `memo_commit_exists`, `DECISION_ID`, `DECISION_CLASSES`; `gate_register._safe` (control-character-safe path for a line id).
+- Produces: `gate_decisions.check(args) -> Result` with args `--root <tree>` (an empty one is `FAIL decisions.input: --root is empty`), `--scan <path> ...` (relative paths resolve against root); `main(argv=None)`; `OWNER_ONLY_CLASSES: list[str]` (= all eight classes, spec §5); `REF = re.compile(r"DEC-\d{4}(?!\d)")`. Line ids: `decisions.{schema|duplicate|owner|open-ref|scan}.<id or path>` on FAIL, the row id being `entry-<i>` when the id is not a well-formed str (forgery-safe); `decisions.owner.<id>` carries `validate_decision`'s own `answered_at.by: only the owner (...)` error, every other schema error and every `decision_commit_errors` error (DEC-0003) is `decisions.schema.<id>`. One `PASS decisions.<category>` per category (schema, duplicate, owner, open-ref, scan) that failed nowhere and that every row reached: a row with a schema error skips `schema` (its shas were not checked) and, unless the only error is the owner one, `owner` and `open-ref`, so those print no PASS line. One `commit_exists` call per distinct sha (`memo_commit_exists`).
 - [ ] **Step 1: Write the failing tests**
 
 `tools/gates/tests/test_gate_decisions.py`:
@@ -3862,12 +3861,16 @@ git commit -m "feat(gates): gate_claims -- claim schema, stale-at-HEAD detection
 """Tests for tools/gates/gate_decisions.py through main() on throwaway trees.
 Run from the repo root: python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import contextlib
 import io
 import os
 import unittest
+from unittest import mock
 
 from tools.gates import gate_decisions
+from tools.gates.lib import gitinfo, registers
 from tools.gates.tests import gitfixture as gf
 
 DECISIONS = os.path.join(gf.STATE, "decisions.yml")
@@ -3875,7 +3878,7 @@ OPEN = """- id: DEC-9001
   class: triage
   question: "accept bucket A or widen it?"
   options: [{label: accept, cost: "8 tasks"}, {label: widen, cost: "18 tasks"}]
-  asked_at: {sha: "aaaaaaa", by: session}
+  asked_at: {sha: "SHA", by: session}
   answer: null
   answered_at: null
 """
@@ -3883,21 +3886,24 @@ ANSWERED = """- id: DEC-9002
   class: merge-grant
   question: "grant:demo"
   options: []
-  asked_at: {sha: "aaaaaaa", by: session}
+  asked_at: {sha: "SHA", by: session}
   answer: "yes"
-  answered_at: {sha: "aaaaaaa", by: BY}
+  answered_at: {sha: "SHA", by: BY}
 """
+PASS_ALL = ("PASS decisions.schema\nPASS decisions.duplicate\nPASS decisions.owner\n"
+            "PASS decisions.open-ref\nPASS decisions.scan\n")
 
 
 class GateDecisions(unittest.TestCase):
     def setUp(self):
         self.root = gf.new_repo()
+        self.sha = gf.git(self.root, "rev-parse", "HEAD")
 
     def tearDown(self):
         gf.remove(self.root)
 
     def run_gate(self, decisions, *extra):
-        gf.write(self.root, DECISIONS, decisions)
+        gf.write(self.root, DECISIONS, decisions.replace("SHA", self.sha))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = gate_decisions.main(["--root", self.root, *extra])
@@ -3905,31 +3911,40 @@ class GateDecisions(unittest.TestCase):
 
     def test_open_and_owner_answered_decisions_pass(self):
         rc, out = self.run_gate(OPEN + ANSWERED.replace("BY", "superbrobenji"))
-        self.assertEqual("PASS decisions.schema\nPASS decisions.duplicate\nPASS decisions.owner\n"
-                         "PASS decisions.open-ref\nPASS decisions.scan\n", out)
+        self.assertEqual(PASS_ALL, out)
         self.assertEqual(0, rc)
 
     def test_an_agent_answer_fails(self):
         rc, out = self.run_gate(ANSWERED.replace("BY", "session"))
-        self.assertIn("FAIL decisions.owner.DEC-9002: answered by 'session'; a merge-grant decision is "
-                      "answered by the owner (superbrobenji) only", out)
+        self.assertIn("FAIL decisions.owner.DEC-9002: answered_at.by: only the owner (superbrobenji) "
+                      "answers a decision, got 'session'", out)
+        self.assertNotIn("decisions.schema", out)
+        self.assertNotIn("PASS decisions.owner", out)
         self.assertEqual(1, rc)
 
     def test_every_class_is_owner_only(self):
+        self.assertEqual(registers.DECISION_CLASSES, gate_decisions.OWNER_ONLY_CLASSES)
         for cls in gate_decisions.OWNER_ONLY_CLASSES:
             text = ANSWERED.replace("BY", "controller").replace("merge-grant", cls)
             if cls != "merge-grant":
                 text = text.replace("options: []", "options: [{label: a, cost: x}, {label: b, cost: y}]") \
                            .replace('"grant:demo"', '"q?"')
             rc, out = self.run_gate(text)
-            self.assertIn("FAIL decisions.owner.DEC-9002", out, cls)
+            self.assertIn("FAIL decisions.owner.DEC-9002: answered_at.by: only the owner", out, cls)
+            self.assertNotIn("decisions.schema", out, cls)
 
     def test_reference_to_an_unanswered_decision_fails(self):
         gf.write(self.root, "docs/plan.md", "# plan\n\nBlocked on DEC-9001 (triage).\nDEC-9002 is fine.\n")
         rc, out = self.run_gate(OPEN + ANSWERED.replace("BY", "superbrobenji"), "--scan", "docs/plan.md")
         self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/plan.md:3 references unanswered decision DEC-9001", out)
         self.assertNotIn("DEC-9002", out)
+        self.assertNotIn("PASS decisions.open-ref", out)
         self.assertEqual(1, rc)
+
+    def test_a_longer_id_is_not_a_reference_to_a_shorter_one(self):
+        gf.write(self.root, "docs/plan.md", "See DEC-90012 for the long form.\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertEqual(0, rc, out)
 
     def test_unknown_ids_are_not_open_references(self):
         gf.write(self.root, "docs/plan.md", "Example id DEC-9999 in prose.\n")
@@ -3939,6 +3954,21 @@ class GateDecisions(unittest.TestCase):
     def test_a_missing_scan_file_fails(self):
         rc, out = self.run_gate(OPEN, "--scan", "docs/absent.md")
         self.assertIn("FAIL decisions.scan.docs/absent.md: cannot read", out)
+        self.assertNotIn("PASS decisions.scan", out)
+        self.assertEqual(1, rc)
+
+    def test_a_directory_and_a_non_utf8_scan_file_fail(self):
+        gf.write(self.root, "docs/dir/x.md", "x\n")
+        with open(os.path.join(self.root, "docs", "bin.md"), "wb") as fh:
+            fh.write(b"\xff\xfe DEC-9001\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/dir", "docs/bin.md")
+        self.assertIn("FAIL decisions.scan.docs/dir: cannot read", out)
+        self.assertIn("FAIL decisions.scan.docs/bin.md: cannot read: not valid UTF-8", out)
+        self.assertEqual(1, rc)
+
+    def test_a_scan_path_cannot_forge_a_result_line(self):
+        rc, out = self.run_gate(OPEN, "--scan", "x\nPASS decisions.forged")
+        self.assertFalse([l for l in out.splitlines() if l.startswith("PASS decisions.forged")], out)
         self.assertEqual(1, rc)
 
     def test_schema_errors_and_duplicates_fail(self):
@@ -3946,6 +3976,52 @@ class GateDecisions(unittest.TestCase):
         self.assertIn("FAIL decisions.duplicate.DEC-9001", out)
         self.assertIn("quote it", out)
         self.assertEqual(1, rc)
+
+    def test_a_schema_error_skips_the_categories_it_never_reached(self):
+        rc, out = self.run_gate(OPEN.replace("answer: null", "answer: yes"))
+        self.assertIn("FAIL decisions.schema.DEC-9001", out)
+        for cat in ("schema", "owner", "open-ref"):
+            self.assertNotIn(f"PASS decisions.{cat}", out)
+        self.assertIn("PASS decisions.duplicate", out)
+        self.assertEqual(1, rc)
+
+    def test_an_unknown_commit_is_a_schema_failure(self):
+        for field in ("asked_at", "answered_at"):
+            text = ANSWERED.replace("BY", "superbrobenji")
+            text = text.replace(f"{field}: {{sha: \"SHA\"", f"{field}: {{sha: \"1234abc\"")
+            rc, out = self.run_gate(text)
+            self.assertIn(f"FAIL decisions.schema.DEC-9002: {field}.sha: sha 1234abc is not a commit "
+                          "in this repository", out, field)
+            self.assertEqual(1, rc, field)
+
+    def test_a_malformed_id_prints_as_entry_index(self):
+        forged = OPEN.replace("id: DEC-9001", 'id: "DEC-9\\nFAIL decisions.forged.x"')
+        numeric = OPEN.replace("id: DEC-9001", "id: 5")
+        rc, out = self.run_gate(forged + numeric)
+        self.assertIn("FAIL decisions.schema.entry-0: id: ", out)
+        self.assertIn("FAIL decisions.schema.entry-1: id: ", out)
+        self.assertFalse([l for l in out.splitlines() if l.startswith("FAIL decisions.forged")], out)
+        self.assertEqual(1, rc)
+
+    def test_an_empty_root_is_a_fail_not_the_cwd_repo(self):
+        for root in ("", "  ", "\t"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_decisions.main(["--root", root])
+            self.assertEqual((1, "FAIL decisions.input: --root is empty\n"), (rc, buf.getvalue()))
+
+    def test_one_commit_lookup_per_distinct_sha(self):
+        calls = []
+        real = gitinfo.commit_exists
+
+        def counting(root, sha):
+            calls.append(sha)
+            return real(root, sha)
+
+        with mock.patch.object(gitinfo, "commit_exists", counting):
+            rc, out = self.run_gate(OPEN + ANSWERED.replace("BY", "superbrobenji"))
+        self.assertEqual(0, rc, out)
+        self.assertEqual([self.sha], calls)
 
     def test_missing_register_is_fail_input(self):
         os.remove(os.path.join(self.root, DECISIONS))
@@ -3976,9 +4052,13 @@ Expected: ERROR, `ImportError: cannot import name 'gate_decisions' from 'tools.g
   python3 tools/gates/gate_decisions.py [--json] [--root <tree>] [--scan <path> ...]
 
 Fails on: a malformed row; an answer whose `answered_at.by` is not the owner handle in
-tools/gates/config.yml (every class in OWNER_ONLY_CLASSES is answered by the owner alone); and
-any reference to an unanswered decision id (DEC-NNNN) in a --scan file. A --scan path that does
-not exist is a FAIL, never a skip.
+tools/gates/config.yml (every class in OWNER_ONLY_CLASSES is answered by the owner alone; the
+schema check in registers.validate_decision rejects it and this gate files it under `owner`);
+an asked_at / answered_at sha that is not a commit of the gated repository (DEC-0003, filed under
+`schema`); and any reference to an unanswered decision id (DEC-NNNN) in a --scan file. A --scan
+path that cannot be read (missing, a directory, not UTF-8) is a FAIL, never a skip. Row ids print
+forgery-safe (entry-<i> when the id is malformed), an empty --root is an error, and a category
+some row never reached prints no PASS line.
 """
 from __future__ import annotations
 
@@ -3988,56 +4068,66 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.gates.lib import CODE_ROOT, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import config, registers  # noqa: E402
+from tools.gates.gate_register import _safe  # noqa: E402
 
 # spec §5: "Decision classes (owner-only, always)" -- every class in the register.
 OWNER_ONLY_CLASSES = list(registers.DECISION_CLASSES)
-REF = re.compile(r"DEC-\d{4}")
-CATEGORIES = ["schema", "duplicate", "owner", "open-ref"]
+REF = re.compile(r"DEC-\d{4}(?!\d)")
+CATEGORIES = ["schema", "duplicate", "owner", "open-ref", "scan"]
+OWNER_ERROR = "answered_at.by: only the owner"    # the prefix validate_decision's owner error starts with
 
 
 def check(args: list) -> Result:
     ap = gate_args("gate_decisions")
     ap.add_argument("--scan", nargs="*", default=[], help="files that must not cite an unanswered decision")
     ns = ap.parse_args(args)
-    root = ns.root or repo_root()
+    if ns.root is not None and not ns.root.strip():
+        raise GateError("--root is empty")
+    root = ns.root if ns.root is not None else repo_root()
     owner = config.load(CODE_ROOT)["owner"]["handle"]
     decisions = registers.load_decisions(root)
     r = Result("decisions")
+    exists = registers.memo_commit_exists()    # one git call per distinct sha
+    skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
     seen = set()
     for i, d in enumerate(decisions):
-        did = d["id"] if isinstance(d.get("id"), str) else f"entry-{i}"
+        did = registers.row_id(d, i, registers.DECISION_ID)
         if did in seen:
             r.fail(f"decisions.duplicate.{did}", "id appears more than once")
         seen.add(did)
-        errs = registers.validate_decision(d)
+        errs = registers.validate_decision(d, owner=owner)
         for e in errs:
-            r.fail(f"decisions.schema.{did}", e)
+            r.fail(f"decisions.{'owner' if e.startswith(OWNER_ERROR) else 'schema'}.{did}", e)
         if errs:
+            skipped.add("schema")    # the sha check needs a well-formed row
+            if any(not e.startswith(OWNER_ERROR) for e in errs):
+                skipped.update(["owner", "open-ref"])    # the row's answer state is not reliable
             continue
-        if d["answered_at"] is not None and d["class"] in OWNER_ONLY_CLASSES \
-                and d["answered_at"]["by"] != owner:
-            r.fail(f"decisions.owner.{did}",
-                   f"answered by {d['answered_at']['by']!r}; a {d['class']} decision is answered by "
-                   f"the owner ({owner}) only")
-    unanswered = {d.get("id") for d in registers.open_decisions(decisions)}
+        for e in registers.decision_commit_errors(d, root, exists):
+            r.fail(f"decisions.schema.{did}", e)
+    unanswered = {d["id"] for d in registers.open_decisions(decisions)
+                  if isinstance(d.get("id"), str) and registers.DECISION_ID.fullmatch(d["id"])}
     for path in ns.scan:
         full = path if os.path.isabs(path) else os.path.join(root, path)
-        rel = os.path.relpath(full, root)
+        rel = _safe(os.path.relpath(full, root))
         try:
             with open(full, encoding="utf-8") as fh:
                 text = fh.read()
         except OSError as exc:
             r.fail(f"decisions.scan.{rel}", f"cannot read: {exc.strerror or exc}")
             continue
+        except UnicodeDecodeError:
+            r.fail(f"decisions.scan.{rel}", "cannot read: not valid UTF-8")
+            continue
         for n, line in enumerate(text.splitlines(), 1):
             for did in sorted(set(REF.findall(line)) & unanswered):
                 r.fail(f"decisions.open-ref.{did}", f"{rel}:{n} references unanswered decision {did}; "
                                                     "the owner answers it first")
     failed = {l.id.split(".")[1] for l in r.lines if l.status == "FAIL"}
-    for cat in CATEGORIES + ["scan"]:
-        if cat not in failed:
+    for cat in CATEGORIES:
+        if cat not in failed and cat not in skipped:
             r.passed(f"decisions.{cat}")
     return r
 
@@ -4053,15 +4143,15 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_decisions -v                          # Ran 8 tests ... OK
-python3 tools/gates/gate_decisions.py --scan docs/superpowers/plans/*.md; echo rc=$?  # 5 PASS lines, rc=0 (DEC-0001 answered)
+python3 -m unittest tools.gates.tests.test_gate_decisions -v                          # Ran 16 tests ... OK
+python3 tools/gates/gate_decisions.py --scan docs/superpowers/plans/*.md; echo rc=$?  # 5 PASS lines, rc=0 (DEC-0001..0003 answered)
 ```
 
-Mutation check: replace `and d["answered_at"]["by"] != owner` with `and False`. `test_an_agent_answer_fails` must fail. Restore and run again: OK.
+Mutation checks (`PYTHONDONTWRITEBYTECODE=1`; restore after each): route every error to schema (`'owner' if e.startswith(OWNER_ERROR) else 'schema'` -> `'schema'`): `test_an_agent_answer_fails` and `test_every_class_is_owner_only` must fail; drop the `skipped.update(["owner", "open-ref"])` or `skipped.add("schema")` line: `test_a_schema_error_skips_the_categories_it_never_reached` must fail; drop the empty-`--root` check, the `decision_commit_errors` loop, `memo_commit_exists`, `row_id`, the `(?!\d)` in `REF`, the `UnicodeDecodeError` branch, `_safe`, or the duplicate FAIL: the matching test of the 16 must fail. Restore and run again: OK.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T5 feat(gates): gate_decisions -- test_gate_decisions 8 OK` to the ledger.
+Append `- T5 feat(gates): gate_decisions -- test_gate_decisions 16 OK` to the ledger.
 
 ```bash
 git add tools/gates/gate_decisions.py tools/gates/tests/test_gate_decisions.py docs/superpowers/state/strict-delivery/ledger.md
