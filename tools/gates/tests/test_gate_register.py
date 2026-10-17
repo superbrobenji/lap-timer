@@ -93,7 +93,7 @@ class GateRegister(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 rc = gate_register.main(["--root", root])
             self.assertIn("FAIL register.input: ", buf.getvalue())
-            self.assertIn("locked: Permission denied", buf.getvalue())
+            self.assertEqual("FAIL register.input: docs/reviews/locked: Permission denied\n", buf.getvalue())
             self.assertEqual(1, rc)
         finally:
             if os.path.exists(locked):
@@ -108,7 +108,7 @@ class GateRegister(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 rc = gate_register.main(["--root", root])
             self.assertIn("FAIL register.input: ", buf.getvalue())
-            self.assertIn("docs/reviews: not a directory", buf.getvalue())
+            self.assertEqual("FAIL register.input: docs/reviews: not a directory\n", buf.getvalue())
             self.assertEqual(1, rc)
         finally:
             gf.remove(root)
@@ -129,6 +129,27 @@ class GateRegister(unittest.TestCase):
                           "not in register", buf.getvalue())
             self.assertEqual(1, rc)
         finally:
+            gf.remove(root)
+
+    def test_unreadable_report_file_fails_with_a_relative_path(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        root = gf.new_repo()
+        path = os.path.join(root, "docs", "reviews", "r.md")
+        try:
+            gf.write(root, os.path.join("docs", "reviews", "r.md"), "register: true\n- T1-X-1: x\n")
+            os.chmod(path, 0)
+            with self.assertRaises(gate_register.GateError) as ctx:
+                gate_register.report_ids(path, root)
+            self.assertEqual("docs/reviews/r.md: Permission denied", str(ctx.exception))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gate_register.main(["--root", root])
+            self.assertEqual("FAIL register.input: docs/reviews/r.md: Permission denied\n", buf.getvalue())
+            self.assertEqual(1, rc)
+        finally:
+            if os.path.exists(path):
+                os.chmod(path, 0o644)
             gf.remove(root)
 
     def test_top_directory_reached_through_a_symlink_is_reported_once(self):

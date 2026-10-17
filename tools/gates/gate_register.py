@@ -28,8 +28,9 @@ MARKER_LINES = 20
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+([^\s:]+)(?=[ :])")
 
 
-def _walk_error(exc):
-    raise GateError(f"{exc.filename}: {exc.strerror or exc}")
+def _rel_error(root, path, exc) -> GateError:
+    """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
+    return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
 
 
 def _first_visit(seen, path) -> bool:
@@ -38,6 +39,10 @@ def _first_visit(seen, path) -> bool:
         return False
     seen.add(real)
     return True
+
+
+def _raise(exc):
+    raise exc
 
 
 def registered_reports(root) -> list:
@@ -49,10 +54,10 @@ def registered_reports(root) -> list:
         if not os.path.lexists(top):
             continue    # no such report directory: it holds no registered reports
         if not os.path.isdir(top):
-            raise GateError(f"{top}: not a directory")
+            raise GateError(f"{d}: not a directory")
         if not _first_visit(seen, top):
             continue    # this directory was already walked through a symlink
-        for dirpath, dirnames, filenames in os.walk(top, onerror=_walk_error, followlinks=True):
+        for dirpath, dirnames, filenames in os.walk(top, onerror=lambda exc: _raise(_rel_error(root, exc.filename, exc)), followlinks=True):
             dirnames.sort()
             dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
@@ -61,26 +66,31 @@ def registered_reports(root) -> list:
                     with open(path, encoding="utf-8", errors="replace") as fh:
                         head = [next(fh, "") for _ in range(MARKER_LINES)]
                 except OSError as exc:
-                    raise GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}") from None
+                    raise _rel_error(root, path, exc) from None
                 if any(l.strip() == MARKER for l in head):
                     found.append(path)
     return found
 
 
-def report_ids(path) -> list:
-    """Finding ids a registered report cites: table first cells and leading list-item ids."""
+def report_ids(path, root=None) -> list:
+    """Finding ids a registered report cites: table first cells and leading list-item ids.
+    An unreadable file is a GateError worded relative to  (default: the file's directory)."""
     ids = []
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            s = line.strip()
-            if s.startswith("|"):
-                cell = s.split("|")[1].strip()
-                if registers.FINDING_ID.fullmatch(cell):
-                    ids.append(cell)
-                continue
-            m = LIST_ITEM.match(line)
-            if m and registers.FINDING_ID.fullmatch(m.group(1)):
-                ids.append(m.group(1))
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        raise _rel_error(root or os.path.dirname(path), path, exc) from None
+    for line in lines:
+        s = line.strip()
+        if s.startswith("|"):
+            cell = s.split("|")[1].strip()
+            if registers.FINDING_ID.fullmatch(cell):
+                ids.append(cell)
+            continue
+        m = LIST_ITEM.match(line)
+        if m and registers.FINDING_ID.fullmatch(m.group(1)):
+            ids.append(m.group(1))
     return ids
 
 
@@ -108,7 +118,7 @@ def check(args: list) -> Result:
     known = {f["id"] for f in findings if isinstance(f.get("id"), str)}
     for path in registered_reports(root):
         rel = os.path.relpath(path, root)
-        for rid in sorted(set(report_ids(path)) - known):
+        for rid in sorted(set(report_ids(path, root)) - known):
             r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}
     for cat in CATEGORIES:
