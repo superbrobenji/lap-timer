@@ -80,7 +80,7 @@ class FindingSchema(unittest.TestCase):
 
     def test_unquoted_numeric_sha_is_named(self):
         f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": 7265059}])
-        self.assertIn('cites: entry 0 sha: 7265059 parsed as a number; quote the sha ("7265059")',
+        self.assertIn("cites: entry 0 sha: parsed as a number; quote the sha exactly as written in the file",
                       reg.validate_finding(f))
 
     def test_owner_shapes(self):
@@ -179,12 +179,23 @@ class Evidence(unittest.TestCase):
         with open(outside, "w", encoding="utf-8") as fh:
             fh.write("x\n")
         self.addCleanup(os.remove, outside)
-        for p in (outside, "../" + os.path.basename(outside)):
+        for p in ("../" + os.path.basename(outside),):
             self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file under the repo root",
                           reg.evidence_errors(self.pinned(evidence=[p]), self.root, []), p)
         escaped = {"test": "test_x", "transcript": "../" + os.path.basename(outside)}
         self.assertIn(f"evidence: pin transcript {escaped['transcript']} does not exist",
                       reg.evidence_errors(self.pinned(pin=escaped), self.root, []))
+
+    def test_absolute_and_nul_evidence_paths_are_errors_not_crashes(self):
+        abs_p = os.path.join(self.root, "st/demo/review/T1.md")
+        self.assertIn(f"evidence: path must be relative to the repo root: {abs_p!r}",
+                      reg.evidence_errors(self.pinned(evidence=[abs_p]), self.root, []))
+        nul = "st/a\0b.md"
+        self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
+                      reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
+        bad = {"test": "test_x", "transcript": "st/a\0b.txt"}
+        self.assertIn("evidence: pin transcript st/a\0b.txt does not exist",
+                      reg.evidence_errors(self.pinned(pin=bad), self.root, []))
 
     def test_deferred_needs_an_answered_owner_decision(self):
         f = with_(FINDING, state="deferred", ruling="DEC-9001",
@@ -254,6 +265,54 @@ class DecisionSchema(unittest.TestCase):
         self.assertEqual([], reg.validate_decision(grant))
         self.assertIn("question: a merge-grant question is 'grant:<plan>'",
                       reg.validate_decision(with_(grant, question="may we merge?")))
+
+
+class ReviewRound1(unittest.TestCase):
+    def test_trailing_newline_is_rejected_in_every_id_and_sha(self):
+        self.assertTrue(any(e.startswith("id: ") for e in reg.validate_finding(with_(FINDING, id="T1-PIN-1\n"))))
+        self.assertTrue(any(e.startswith("ruling: ") for e in
+                            reg.validate_finding(with_(FINDING, ruling="DEC-0001\n"))))
+        self.assertTrue(any(e.startswith("id: ") for e in reg.validate_claim(with_(CLAIM, id="C-a-1\n"))))
+        self.assertTrue(any(e.startswith("finding: ") for e in
+                            reg.validate_claim(with_(CLAIM, state="false", finding="A2-IO-N4\n"))))
+        self.assertTrue(any(e.startswith("id: ") for e in reg.validate_decision(with_(DECISION, id="DEC-0001\n"))))
+        f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": "aaaaaaa\n"}])
+        self.assertTrue(any(e.startswith("cites: entry 0 sha") for e in reg.validate_finding(f)))
+
+    def test_mixed_type_unknown_keys_do_not_crash(self):
+        f = with_(FINDING)
+        f[1] = 1
+        f["z"] = 2
+        self.assertEqual(["keys: unknown z, 1"], reg.validate_finding(f))
+
+    def test_octal_looking_sha_is_not_echoed_as_a_reconstructed_number(self):
+        f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": 0o123456}])
+        errs = reg.validate_finding(f)
+        self.assertIn("cites: entry 0 sha: parsed as a number; quote the sha exactly as written in the file", errs)
+        self.assertFalse(any("42798" in e for e in errs), errs)
+
+    def test_grant_question_needs_a_plan_name(self):
+        for q in ("grant:", "grant: x"):
+            self.assertIn("question: a merge-grant question is 'grant:<plan>'",
+                          reg.validate_decision(with_(DECISION, **{"class": "merge-grant", "question": q,
+                                                                   "options": []})), q)
+        self.assertEqual([], reg.validate_decision(with_(DECISION, **{
+            "class": "merge-grant", "question": "grant:demo some text", "options": []})))
+
+    def grant(self, by="superbrobenji", **kw):
+        g = with_(DECISION, **{"class": "merge-grant", "question": "grant:demo", "options": [],
+                               "answer": "YES", "answered_at": {"sha": "aaaaaaa", "by": by}})
+        g.update(kw)
+        return g
+
+    def test_grant_for_checks_answerer_and_validity(self):
+        g = self.grant()
+        self.assertIs(g, reg.grant_for([g], "demo"))                       # two-arg form, owner from config
+        self.assertIsNone(reg.grant_for([self.grant(by="someone-else")], "demo"))
+        other = self.grant(by="someone-else")
+        self.assertIs(other, reg.grant_for([other], "demo", owner="someone-else"))
+        self.assertIsNone(reg.grant_for([with_(g, extra=1)], "demo"))      # malformed row
+        self.assertIsNone(reg.grant_for([with_(g, id="bad")], "demo"))
 
 
 class Queries(unittest.TestCase):

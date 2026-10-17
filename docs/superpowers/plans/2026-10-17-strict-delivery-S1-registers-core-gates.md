@@ -762,7 +762,7 @@ def tags_at(root, sha) -> list:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_lib -v`
-Expected: `Ran 21 tests` … `OK`.
+Expected: `Ran 28 tests` … `OK`.
 
 Mutation check: in `run_check`, replace `except Exception as exc:` with `except GateError as exc:`. `test_an_unexpected_exception_is_fail` must now ERROR. Restore it and run again: OK.
 
@@ -872,7 +872,7 @@ Append to `docs/superpowers/state/strict-delivery/ledger.md`:
 
 ```markdown
 - base BASE_B1=<the sha recorded in setup Step 0.3>
-- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 21 OK
+- T1 feat(gates): gate framework, config, git helpers, register bootstrap with DEC-0001 -- test_lib 28 OK
 ```
 
 ```bash
@@ -901,6 +901,8 @@ git commit -m "feat(gates): gate framework, config, git helpers, register bootst
 bootstrapped registers under docs/superpowers/state/. Run from the repo root:
 python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import copy
 import os
 import tempfile
@@ -976,7 +978,7 @@ class FindingSchema(unittest.TestCase):
 
     def test_unquoted_numeric_sha_is_named(self):
         f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": 7265059}])
-        self.assertIn('cites: entry 0 sha: 7265059 parsed as a number; quote the sha ("7265059")',
+        self.assertIn("cites: entry 0 sha: parsed as a number; quote the sha exactly as written in the file",
                       reg.validate_finding(f))
 
     def test_owner_shapes(self):
@@ -1070,6 +1072,29 @@ class Evidence(unittest.TestCase):
         self.assertIn("evidence: 'st/nope.md' is neither a commit sha nor a file under the repo root",
                       reg.evidence_errors(self.pinned(evidence=["st/nope.md"]), self.root, []))
 
+    def test_evidence_paths_cannot_escape_the_repo_root(self):
+        outside = os.path.join(os.path.dirname(self.root), os.path.basename(self.root) + "-out.md")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        self.addCleanup(os.remove, outside)
+        for p in ("../" + os.path.basename(outside),):
+            self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file under the repo root",
+                          reg.evidence_errors(self.pinned(evidence=[p]), self.root, []), p)
+        escaped = {"test": "test_x", "transcript": "../" + os.path.basename(outside)}
+        self.assertIn(f"evidence: pin transcript {escaped['transcript']} does not exist",
+                      reg.evidence_errors(self.pinned(pin=escaped), self.root, []))
+
+    def test_absolute_and_nul_evidence_paths_are_errors_not_crashes(self):
+        abs_p = os.path.join(self.root, "st/demo/review/T1.md")
+        self.assertIn(f"evidence: path must be relative to the repo root: {abs_p!r}",
+                      reg.evidence_errors(self.pinned(evidence=[abs_p]), self.root, []))
+        nul = "st/a\0b.md"
+        self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
+                      reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
+        bad = {"test": "test_x", "transcript": "st/a\0b.txt"}
+        self.assertIn("evidence: pin transcript st/a\0b.txt does not exist",
+                      reg.evidence_errors(self.pinned(pin=bad), self.root, []))
+
     def test_deferred_needs_an_answered_owner_decision(self):
         f = with_(FINDING, state="deferred", ruling="DEC-9001",
                   history=[{"state": "open", "sha": "aaaaaaa", "by": "a"},
@@ -1140,6 +1165,54 @@ class DecisionSchema(unittest.TestCase):
                       reg.validate_decision(with_(grant, question="may we merge?")))
 
 
+class ReviewRound1(unittest.TestCase):
+    def test_trailing_newline_is_rejected_in_every_id_and_sha(self):
+        self.assertTrue(any(e.startswith("id: ") for e in reg.validate_finding(with_(FINDING, id="T1-PIN-1\n"))))
+        self.assertTrue(any(e.startswith("ruling: ") for e in
+                            reg.validate_finding(with_(FINDING, ruling="DEC-0001\n"))))
+        self.assertTrue(any(e.startswith("id: ") for e in reg.validate_claim(with_(CLAIM, id="C-a-1\n"))))
+        self.assertTrue(any(e.startswith("finding: ") for e in
+                            reg.validate_claim(with_(CLAIM, state="false", finding="A2-IO-N4\n"))))
+        self.assertTrue(any(e.startswith("id: ") for e in reg.validate_decision(with_(DECISION, id="DEC-0001\n"))))
+        f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": "aaaaaaa\n"}])
+        self.assertTrue(any(e.startswith("cites: entry 0 sha") for e in reg.validate_finding(f)))
+
+    def test_mixed_type_unknown_keys_do_not_crash(self):
+        f = with_(FINDING)
+        f[1] = 1
+        f["z"] = 2
+        self.assertEqual(["keys: unknown z, 1"], reg.validate_finding(f))
+
+    def test_octal_looking_sha_is_not_echoed_as_a_reconstructed_number(self):
+        f = with_(FINDING, cites=[{"file": "a.c", "lines": "1", "sha": 0o123456}])
+        errs = reg.validate_finding(f)
+        self.assertIn("cites: entry 0 sha: parsed as a number; quote the sha exactly as written in the file", errs)
+        self.assertFalse(any("42798" in e for e in errs), errs)
+
+    def test_grant_question_needs_a_plan_name(self):
+        for q in ("grant:", "grant: x"):
+            self.assertIn("question: a merge-grant question is 'grant:<plan>'",
+                          reg.validate_decision(with_(DECISION, **{"class": "merge-grant", "question": q,
+                                                                   "options": []})), q)
+        self.assertEqual([], reg.validate_decision(with_(DECISION, **{
+            "class": "merge-grant", "question": "grant:demo some text", "options": []})))
+
+    def grant(self, by="superbrobenji", **kw):
+        g = with_(DECISION, **{"class": "merge-grant", "question": "grant:demo", "options": [],
+                               "answer": "YES", "answered_at": {"sha": "aaaaaaa", "by": by}})
+        g.update(kw)
+        return g
+
+    def test_grant_for_checks_answerer_and_validity(self):
+        g = self.grant()
+        self.assertIs(g, reg.grant_for([g], "demo"))                       # two-arg form, owner from config
+        self.assertIsNone(reg.grant_for([self.grant(by="someone-else")], "demo"))
+        other = self.grant(by="someone-else")
+        self.assertIs(other, reg.grant_for([other], "demo", owner="someone-else"))
+        self.assertIsNone(reg.grant_for([with_(g, extra=1)], "demo"))      # malformed row
+        self.assertIsNone(reg.grant_for([with_(g, id="bad")], "demo"))
+
+
 class Queries(unittest.TestCase):
     def test_finding_by_id_and_open_decisions(self):
         self.assertIs(FINDING, reg.finding_by_id([FINDING], "T1-PIN-1"))
@@ -1180,7 +1253,7 @@ from __future__ import annotations
 import os
 import re
 
-from . import GateError, load_yaml
+from . import CODE_ROOT, GateError, config, load_yaml
 
 FINDING_STATES = ["open", "planned", "in-progress", "fixed-unpinned", "pinned", "deferred", "closed", "merged"]
 FINDING_TRANSITIONS = {  # from -> allowed to
@@ -1196,6 +1269,7 @@ SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 FINDING_ID = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 CLAIM_ID = re.compile(r"^C-[A-Za-z0-9.§-]+$")
 DECISION_ID = re.compile(r"^DEC-\d{4}$")
+GRANT_QUESTION = re.compile(r"grant:\S+( .*)?", re.S)
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
@@ -1238,14 +1312,14 @@ def _text(v) -> bool:
 
 
 def _sha(v) -> bool:
-    return isinstance(v, str) and SHA.match(v) is not None
+    return isinstance(v, str) and SHA.fullmatch(v) is not None
 
 
 def _sha_problem(field: str, v) -> list:
     if _sha(v):
         return []
     if isinstance(v, int) and not isinstance(v, bool):
-        return [f"{field}: {v} parsed as a number; quote the sha (\"{v}\")"]
+        return [f"{field}: parsed as a number; quote the sha exactly as written in the file"]
     return [f"{field}: must be a 7-40 char lowercase hex sha string, got {v!r}"]
 
 
@@ -1254,10 +1328,23 @@ def _keys(row: dict, keys: list) -> list:
     missing = [k for k in keys if k not in row]
     if missing:
         errs.append(f"keys: missing {', '.join(missing)}")
-    extra = sorted(set(row) - set(keys))
+    extra = sorted(set(row) - set(keys), key=repr)
     if extra:
         errs.append(f"keys: unknown {', '.join(map(str, extra))}")
     return errs
+
+
+def _file_under(root, rel) -> bool:
+    """True when `rel` names an existing file inside `root` (an absolute path or a `..` that
+    leaves the root does not count)."""
+    if os.path.isabs(rel):
+        return False
+    try:
+        base = os.path.realpath(root)
+        path = os.path.realpath(os.path.join(base, rel))
+        return os.path.commonpath([base, path]) == base and os.path.isfile(path)
+    except (ValueError, OSError):
+        return False
 
 
 def owner_errors(owner) -> list:
@@ -1289,7 +1376,7 @@ def validate_finding(f: dict) -> list:
     errs = _keys(f, FINDING_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
-    if not isinstance(f["id"], str) or not FINDING_ID.match(f["id"]):
+    if not isinstance(f["id"], str) or not FINDING_ID.fullmatch(f["id"]):
         errs.append(f"id: {f['id']!r} does not match {FINDING_ID.pattern}")
     if not _text(f["source"]):
         errs.append("source: must be a non-empty string")
@@ -1318,7 +1405,7 @@ def validate_finding(f: dict) -> list:
     if pin is not None and (not isinstance(pin, dict) or set(pin) != {"test", "transcript"}
                             or not _text(pin["test"]) or not _text(pin["transcript"])):
         errs.append("pin: must be null or {test, transcript}, both non-empty strings")
-    if f["ruling"] is not None and not (isinstance(f["ruling"], str) and DECISION_ID.match(f["ruling"])):
+    if f["ruling"] is not None and not (isinstance(f["ruling"], str) and DECISION_ID.fullmatch(f["ruling"])):
         errs.append(f"ruling: must be null or a decision id DEC-NNNN, got {f['ruling']!r}")
     if not isinstance(f["evidence"], list) or not all(_text(e) for e in f["evidence"]):
         errs.append("evidence: must be a list of non-empty strings (commit shas or paths)")
@@ -1355,16 +1442,18 @@ def evidence_errors(f: dict, root, decisions: list) -> list:
     """What each state must carry (spec §4.1). Call only on a valid row."""
     errs = []
     for e in f["evidence"]:
-        if not _sha(e) and not os.path.isfile(os.path.join(root, e)):
+        if not _sha(e) and os.path.isabs(e):
+            errs.append(f"evidence: path must be relative to the repo root: {e!r}")
+        elif not _sha(e) and not _file_under(root, e):
             errs.append(f"evidence: {e!r} is neither a commit sha nor a file under the repo root")
     states = [h["state"] for h in f["history"]]
     if "pinned" in states:
         pin = f["pin"]
         if pin is None:
             errs.append("evidence: pinned needs pin {test, transcript}")
-        elif not os.path.isfile(os.path.join(root, pin["transcript"])):
+        elif not _file_under(root, pin["transcript"]):
             errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
-        if not any(not _sha(e) and os.path.isfile(os.path.join(root, e)) for e in f["evidence"]):
+        if not any(not _sha(e) and _file_under(root, e) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":
         d = next((x for x in decisions if x.get("id") == f["ruling"]), None)
@@ -1386,7 +1475,7 @@ def validate_claim(c: dict) -> list:
     errs = _keys(c, CLAIM_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
-    if not isinstance(c["id"], str) or not CLAIM_ID.match(c["id"]):
+    if not isinstance(c["id"], str) or not CLAIM_ID.fullmatch(c["id"]):
         errs.append(f"id: {c['id']!r} does not match {CLAIM_ID.pattern}")
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
@@ -1404,7 +1493,7 @@ def validate_claim(c: dict) -> list:
     if c["state"] == "verified" and (c["verified_at"] is None or c["by"] is None):
         errs.append("state: verified needs verified_at and by")
     if c["state"] == "false":
-        if not (isinstance(c["finding"], str) and FINDING_ID.match(c["finding"])):
+        if not (isinstance(c["finding"], str) and FINDING_ID.fullmatch(c["finding"])):
             errs.append("finding: a false claim must name the finding id that records it")
     elif c["finding"] is not None:
         errs.append("finding: only a false claim carries a finding (set it to null)")
@@ -1415,13 +1504,13 @@ def validate_decision(d: dict) -> list:
     errs = _keys(d, DECISION_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
-    if not isinstance(d["id"], str) or not DECISION_ID.match(d["id"]):
+    if not isinstance(d["id"], str) or not DECISION_ID.fullmatch(d["id"]):
         errs.append(f"id: {d['id']!r} does not match {DECISION_ID.pattern}")
     if d["class"] not in DECISION_CLASSES:
         errs.append(f"class: must be one of {DECISION_CLASSES}, got {d['class']!r}")
     if not _text(d["question"]):
         errs.append("question: must be a non-empty string")
-    elif d["class"] == "merge-grant" and not d["question"].startswith("grant:"):
+    elif d["class"] == "merge-grant" and not GRANT_QUESTION.fullmatch(d["question"]):
         errs.append("question: a merge-grant question is 'grant:<plan>'")
     opts = d["options"]
     if not isinstance(opts, list) or not all(
@@ -1460,17 +1549,21 @@ def open_decisions(decisions) -> list:
     return [d for d in decisions if d.get("answer") is None]
 
 
-def grant_for(decisions, plan: str):
-    """The merge grant for <plan>: class merge-grant, question 'grant:<plan>' (optionally followed
-    by a space and free text), answered "yes" (case-insensitive). Any other answer is no grant."""
+def grant_for(decisions, plan: str, *, owner=None):
+    """The merge grant for <plan>: a schema-valid decision of class merge-grant whose question is
+    'grant:<plan>' (optionally followed by a space and free text), answered "yes" (case-insensitive)
+    by the owner (default: config owner.handle). Any other row is no grant."""
+    if owner is None:
+        owner = config.load(CODE_ROOT)["owner"]["handle"]
     for d in decisions:
-        q = d.get("question")
-        if d.get("class") != "merge-grant" or not isinstance(q, str):
+        if validate_decision(d) != [] or d["class"] != "merge-grant":
             continue
+        q = d["question"]
         if q != f"grant:{plan}" and not q.startswith(f"grant:{plan} "):
             continue
-        ans = d.get("answer")
-        if isinstance(ans, str) and ans.strip().lower() == "yes" and d.get("answered_at") is not None:
+        ans = d["answer"]
+        if (isinstance(ans, str) and ans.strip().lower() == "yes"
+                and d["answered_at"]["by"] == owner):
             return d
     return None
 ```
@@ -1478,13 +1571,13 @@ def grant_for(decisions, plan: str):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 27 tests` OK; whole suite `Ran 48 tests` OK.
+Expected: `Ran 34 tests` OK; whole suite `Ran 62 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then delete `if isinstance(ans, str) and ans.strip().lower() == "yes"` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 27 OK` to the ledger.
+Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 34 OK` to the ledger.
 
 ```bash
 git add tools/gates/lib/registers.py tools/gates/tests/test_registers.py docs/superpowers/state/strict-delivery/ledger.md
@@ -1925,7 +2018,7 @@ python3 tools/gates/gate_register.py; echo rc=$?                 # 6 PASS lines 
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
 
-Mutation check (production path): in `registers.evidence_errors`, delete the `elif not os.path.isfile(...)` branch for the pin transcript. `test_pinned_without_transcript_fails` must fail. Restore and run again: OK.
+Mutation check (production path): in `registers.evidence_errors`, delete the `elif not _file_under(root, pin["transcript"])` branch for the pin transcript. `test_pinned_without_transcript_fails` must fail. Restore and run again: OK.
 
 Mutation check (report scan): in `registered_reports`, replace `if any(l.strip() == MARKER for l in head):` with `if True:`. The unmarked fixture's ids are now scanned, and `test_unmarked_report_is_ignored_and_marked_report_with_known_ids_passes` plus `test_valid_register_passes_every_category` must fail. Restore. Then replace `for rid in sorted(set(report_ids(path)) - known):` with `for rid in []:`. `test_registered_report_with_an_unknown_id_fails` must fail. Restore and run again: OK.
 

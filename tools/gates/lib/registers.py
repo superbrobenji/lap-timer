@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 
-from . import GateError, load_yaml
+from . import CODE_ROOT, GateError, config, load_yaml
 
 FINDING_STATES = ["open", "planned", "in-progress", "fixed-unpinned", "pinned", "deferred", "closed", "merged"]
 FINDING_TRANSITIONS = {  # from -> allowed to
@@ -21,6 +21,7 @@ SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 FINDING_ID = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 CLAIM_ID = re.compile(r"^C-[A-Za-z0-9.§-]+$")
 DECISION_ID = re.compile(r"^DEC-\d{4}$")
+GRANT_QUESTION = re.compile(r"grant:\S+( .*)?", re.S)
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
@@ -63,14 +64,14 @@ def _text(v) -> bool:
 
 
 def _sha(v) -> bool:
-    return isinstance(v, str) and SHA.match(v) is not None
+    return isinstance(v, str) and SHA.fullmatch(v) is not None
 
 
 def _sha_problem(field: str, v) -> list:
     if _sha(v):
         return []
     if isinstance(v, int) and not isinstance(v, bool):
-        return [f"{field}: {v} parsed as a number; quote the sha (\"{v}\")"]
+        return [f"{field}: parsed as a number; quote the sha exactly as written in the file"]
     return [f"{field}: must be a 7-40 char lowercase hex sha string, got {v!r}"]
 
 
@@ -79,7 +80,7 @@ def _keys(row: dict, keys: list) -> list:
     missing = [k for k in keys if k not in row]
     if missing:
         errs.append(f"keys: missing {', '.join(missing)}")
-    extra = sorted(set(row) - set(keys))
+    extra = sorted(set(row) - set(keys), key=repr)
     if extra:
         errs.append(f"keys: unknown {', '.join(map(str, extra))}")
     return errs
@@ -88,9 +89,14 @@ def _keys(row: dict, keys: list) -> list:
 def _file_under(root, rel) -> bool:
     """True when `rel` names an existing file inside `root` (an absolute path or a `..` that
     leaves the root does not count)."""
-    base = os.path.realpath(root)
-    path = os.path.realpath(os.path.join(base, rel))
-    return os.path.commonpath([base, path]) == base and os.path.isfile(path)
+    if os.path.isabs(rel):
+        return False
+    try:
+        base = os.path.realpath(root)
+        path = os.path.realpath(os.path.join(base, rel))
+        return os.path.commonpath([base, path]) == base and os.path.isfile(path)
+    except (ValueError, OSError):
+        return False
 
 
 def owner_errors(owner) -> list:
@@ -122,7 +128,7 @@ def validate_finding(f: dict) -> list:
     errs = _keys(f, FINDING_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
-    if not isinstance(f["id"], str) or not FINDING_ID.match(f["id"]):
+    if not isinstance(f["id"], str) or not FINDING_ID.fullmatch(f["id"]):
         errs.append(f"id: {f['id']!r} does not match {FINDING_ID.pattern}")
     if not _text(f["source"]):
         errs.append("source: must be a non-empty string")
@@ -151,7 +157,7 @@ def validate_finding(f: dict) -> list:
     if pin is not None and (not isinstance(pin, dict) or set(pin) != {"test", "transcript"}
                             or not _text(pin["test"]) or not _text(pin["transcript"])):
         errs.append("pin: must be null or {test, transcript}, both non-empty strings")
-    if f["ruling"] is not None and not (isinstance(f["ruling"], str) and DECISION_ID.match(f["ruling"])):
+    if f["ruling"] is not None and not (isinstance(f["ruling"], str) and DECISION_ID.fullmatch(f["ruling"])):
         errs.append(f"ruling: must be null or a decision id DEC-NNNN, got {f['ruling']!r}")
     if not isinstance(f["evidence"], list) or not all(_text(e) for e in f["evidence"]):
         errs.append("evidence: must be a list of non-empty strings (commit shas or paths)")
@@ -188,7 +194,9 @@ def evidence_errors(f: dict, root, decisions: list) -> list:
     """What each state must carry (spec §4.1). Call only on a valid row."""
     errs = []
     for e in f["evidence"]:
-        if not _sha(e) and not _file_under(root, e):
+        if not _sha(e) and os.path.isabs(e):
+            errs.append(f"evidence: path must be relative to the repo root: {e!r}")
+        elif not _sha(e) and not _file_under(root, e):
             errs.append(f"evidence: {e!r} is neither a commit sha nor a file under the repo root")
     states = [h["state"] for h in f["history"]]
     if "pinned" in states:
@@ -219,7 +227,7 @@ def validate_claim(c: dict) -> list:
     errs = _keys(c, CLAIM_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
-    if not isinstance(c["id"], str) or not CLAIM_ID.match(c["id"]):
+    if not isinstance(c["id"], str) or not CLAIM_ID.fullmatch(c["id"]):
         errs.append(f"id: {c['id']!r} does not match {CLAIM_ID.pattern}")
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
@@ -237,7 +245,7 @@ def validate_claim(c: dict) -> list:
     if c["state"] == "verified" and (c["verified_at"] is None or c["by"] is None):
         errs.append("state: verified needs verified_at and by")
     if c["state"] == "false":
-        if not (isinstance(c["finding"], str) and FINDING_ID.match(c["finding"])):
+        if not (isinstance(c["finding"], str) and FINDING_ID.fullmatch(c["finding"])):
             errs.append("finding: a false claim must name the finding id that records it")
     elif c["finding"] is not None:
         errs.append("finding: only a false claim carries a finding (set it to null)")
@@ -248,13 +256,13 @@ def validate_decision(d: dict) -> list:
     errs = _keys(d, DECISION_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
         return errs
-    if not isinstance(d["id"], str) or not DECISION_ID.match(d["id"]):
+    if not isinstance(d["id"], str) or not DECISION_ID.fullmatch(d["id"]):
         errs.append(f"id: {d['id']!r} does not match {DECISION_ID.pattern}")
     if d["class"] not in DECISION_CLASSES:
         errs.append(f"class: must be one of {DECISION_CLASSES}, got {d['class']!r}")
     if not _text(d["question"]):
         errs.append("question: must be a non-empty string")
-    elif d["class"] == "merge-grant" and not d["question"].startswith("grant:"):
+    elif d["class"] == "merge-grant" and not GRANT_QUESTION.fullmatch(d["question"]):
         errs.append("question: a merge-grant question is 'grant:<plan>'")
     opts = d["options"]
     if not isinstance(opts, list) or not all(
@@ -293,16 +301,20 @@ def open_decisions(decisions) -> list:
     return [d for d in decisions if d.get("answer") is None]
 
 
-def grant_for(decisions, plan: str):
-    """The merge grant for <plan>: class merge-grant, question 'grant:<plan>' (optionally followed
-    by a space and free text), answered "yes" (case-insensitive). Any other answer is no grant."""
+def grant_for(decisions, plan: str, *, owner=None):
+    """The merge grant for <plan>: a schema-valid decision of class merge-grant whose question is
+    'grant:<plan>' (optionally followed by a space and free text), answered "yes" (case-insensitive)
+    by the owner (default: config owner.handle). Any other row is no grant."""
+    if owner is None:
+        owner = config.load(CODE_ROOT)["owner"]["handle"]
     for d in decisions:
-        q = d.get("question")
-        if d.get("class") != "merge-grant" or not isinstance(q, str):
+        if validate_decision(d) != [] or d["class"] != "merge-grant":
             continue
+        q = d["question"]
         if q != f"grant:{plan}" and not q.startswith(f"grant:{plan} "):
             continue
-        ans = d.get("answer")
-        if isinstance(ans, str) and ans.strip().lower() == "yes" and d.get("answered_at") is not None:
+        ans = d["answer"]
+        if (isinstance(ans, str) and ans.strip().lower() == "yes"
+                and d["answered_at"]["by"] == owner):
             return d
     return None
