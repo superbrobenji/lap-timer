@@ -1749,7 +1749,6 @@ class FixWave(unittest.TestCase):
         with self.assertRaises(GateError):
             reg.finding_commit_errors(f, outside)
 
-
     def test_row_id_prints_only_a_well_formed_id(self):
         self.assertEqual("DEC-0001", reg.row_id({"id": "DEC-0001"}, 3, reg.DECISION_ID))
         for bad in ("DEC-1", "DEC-0001\nPASS x", 5, None, ["DEC-0001"]):
@@ -2208,7 +2207,7 @@ git commit -m "feat(gates): register loaders, schema validators and lifecycle ru
 - Test: `tools/gates/tests/test_gate_register.py`
 
 **Interfaces:**
-- Consumes: `Result`, `gate_args`, `repo_root`, `run_gate` (Task 1); `registers.load_findings`, `load_decisions`, `validate_finding`, `transition_errors`, `evidence_errors` (Task 2).
+- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate` (Task 1); `registers.load_findings`, `load_decisions`, `validate_finding`, `transition_errors`, `evidence_errors`, `validate_decision`, `finding_commit_errors`, `decision_commit_errors`, `row_id`, `memo_commit_exists`, `FINDING_ID`, `DECISION_ID` (Task 2).
 - Produces: `gate_register.check(args: list) -> Result` (args: `--root <tree>`), `main(argv=None) -> int`, `registered_reports(root) -> (found: list[str], bad: list[(path, line)])`, `report_ids(path, root) -> list[str]`, `REPORT_DIRS`, `MARKER = "register: true"`. Line ids: `register.{schema|owner|duplicate|transition|evidence}.<finding or decision id>` on FAIL (a malformed id prints as `entry-<index>`), `register.marker.<file relative to root>` for a near-miss marker, and `register.report.<file relative to root>.<id>: not in register` for a registered report citing an unregistered id (owner ruling 5). One `PASS register.<category>` per category in which every row was evaluated and none failed (a category with a skipped row prints no PASS), in the order schema, owner, duplicate, transition, evidence, report. `--root ""` is `FAIL register.input: --root is empty`; a missing `docs/reviews` is `FAIL register.input: docs/reviews: missing report directory`.
 
 - [ ] **Step 1: Write the fixtures**
@@ -3382,7 +3381,7 @@ grep -n 'answer:' docs/superpowers/state/decisions.yml   # DEC-0001 answer: "yes
 - Test: `tools/gates/tests/test_gate_claims.py`
 
 **Interfaces:**
-- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`, `commit_exists`; `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `STATE_DIR`.
+- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`; `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `row_id`, `memo_commit_exists`, `CLAIM_ID`, `STATE_DIR`.
 - Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root; an empty or unknown `--head` is `FAIL claims.input`), `--mark-stale --base <sha>` (refuses to rewrite claims.yml, `FAIL claims.input`, unless every row validates and no id repeats; the rewrite drops YAML comments); `main(argv=None)`; `hits(cites, changed) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`). Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
 
 - [ ] **Step 1: Write the failing tests**
@@ -3739,8 +3738,8 @@ def mark_stale(root, claims: list, base: str, head: str, r: Result, exists) -> N
            if registers.validate_claim(c) or registers.claim_commit_errors(c, root, exists)]
     bad += [f"{n} (duplicate id)" for n in sorted({n for n in ids if ids.count(n) > 1})]
     if bad:
-        raise GateError(f"refusing to rewrite {registers.STATE_DIR}/claims.yml (it drops YAML comments): "
-                        f"fix {', '.join(bad)} first; run without --mark-stale to see the failures")
+        raise GateError(f"refusing to rewrite {registers.STATE_DIR}/claims.yml: invalid or duplicate row(s) "
+                        f"{', '.join(bad)}; fix them first (run without --mark-stale to see the failures)")
     changed = list(gitinfo.changed_files(root, base, head)) + gitinfo.staged_files(root)
     marked = 0
     for c in claims:
@@ -3832,7 +3831,7 @@ python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 23 tests ... O
 python3 tools/gates/gate_claims.py; echo rc=$?              # 4 PASS lines (0 claims), rc=0
 ```
 
-Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `_row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails.
+Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `registers.row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails.
 
 - [ ] **Step 5: Ledger line, then commit**
 

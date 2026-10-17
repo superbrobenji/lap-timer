@@ -67,8 +67,8 @@ def mark_stale(root, claims: list, base: str, head: str, r: Result, exists) -> N
            if registers.validate_claim(c) or registers.claim_commit_errors(c, root, exists)]
     bad += [f"{n} (duplicate id)" for n in sorted({n for n in ids if ids.count(n) > 1})]
     if bad:
-        raise GateError(f"refusing to rewrite {registers.STATE_DIR}/claims.yml (it drops YAML comments): "
-                        f"fix {', '.join(bad)} first; run without --mark-stale to see the failures")
+        raise GateError(f"refusing to rewrite {registers.STATE_DIR}/claims.yml: invalid or duplicate row(s) "
+                        f"{', '.join(bad)}; fix them first (run without --mark-stale to see the failures)")
     changed = list(gitinfo.changed_files(root, base, head)) + gitinfo.staged_files(root)
     marked = 0
     for c in claims:

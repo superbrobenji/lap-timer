@@ -485,7 +485,6 @@ class FixWave(unittest.TestCase):
         with self.assertRaises(GateError):
             reg.finding_commit_errors(f, outside)
 
-
     def test_row_id_prints_only_a_well_formed_id(self):
         self.assertEqual("DEC-0001", reg.row_id({"id": "DEC-0001"}, 3, reg.DECISION_ID))
         for bad in ("DEC-1", "DEC-0001\nPASS x", 5, None, ["DEC-0001"]):
