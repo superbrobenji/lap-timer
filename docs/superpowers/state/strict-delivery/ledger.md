@@ -10,3 +10,4 @@ Lines: `- T<n> <commit subject> -- <gate result>`; `Ruling: what -- why -- cost 
 - T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 34 OK
 - T2 plan-text corrections: __future__ import; evidence path-escape fix; counts 34 / 62
 - T2 review round 1: fullmatch ids, grant owner check, evidence relative paths, validator robustness; test_registers 34, suite 62
+- T2 review round 2: pin-transcript relative-path message pinned; plan text aligned

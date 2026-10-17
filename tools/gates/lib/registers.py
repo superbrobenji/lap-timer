@@ -203,6 +203,8 @@ def evidence_errors(f: dict, root, decisions: list) -> list:
         pin = f["pin"]
         if pin is None:
             errs.append("evidence: pinned needs pin {test, transcript}")
+        elif os.path.isabs(pin["transcript"]):
+            errs.append("evidence: pin transcript: must be relative to the repo root")
         elif not _file_under(root, pin["transcript"]):
             errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
         if not any(not _sha(e) and _file_under(root, e) for e in f["evidence"]):

@@ -64,7 +64,7 @@ Every code block in this plan was run in a throwaway copy of these files: 111 te
 1. **Package markers and one test helper not in the locked file list:** `tools/gates/__init__.py` and `tools/gates/tests/__init__.py` (empty; unittest discovery refuses a start dir that is not a package, see the facts table), and `tools/gates/tests/gitfixture.py` (throwaway git repos for tests). No `tools/__init__.py`: `tools` stays a namespace package, so the existing `tools-tests` invocations are untouched.
 2. **Additive helpers in `lib/__init__.py`:** `CODE_ROOT` (the checkout holding the gate code; config is read from here, never from `--root`, so fixture trees carry no config copy), `load_yaml(path)` (strict loader), `gate_args(prog)` (shared `--root`), and `run_check(name, check, args) -> Result` (the fail-closed wrapper that both `run_gate` and `run_all.run` use). Additive helpers in `registers.py`: `owner_errors`, `transition_errors`, `evidence_errors`, `STATE_DIR`, `SEVERITIES`, the id regexes. In `gate_claims.py`: `verified_at_head(root, claim, head) -> bool`, for S2's `gate_dispatch`.
 3. **"verified only if `verified_at == HEAD`" cannot be met literally.** A row committed in commit C cannot hold C's own sha, so a literal check fails every verified row at every HEAD. Implemented reading: a row is verified at HEAD when `state == verified` and no cited path differs between `verified_at` and HEAD, and none is staged. A cite ending in `/` covers its subtree. An unknown `verified_at` is a FAIL. This reading also covers spec §4.2's "a commit touching a cited file marks dependent rows stale": the gate fails until the row is marked or re-verified.
-4. **`grant_for` counts only an answer of `"yes"`** (case-insensitive) with `answered_at` set, and only an exact `grant:<plan>` question, or that question followed by a space. The umbrella says "answered"; read literally, an answer of "no" would grant a merge.
+4. **`grant_for(decisions, plan, *, owner=None)` counts only a schema-valid row answered `"yes"`** (case-insensitive) with `answered_at.by` equal to the owner (default: config `owner.handle`), and only an exact `grant:<plan>` question, or that question followed by a space. The umbrella says "answered"; read literally, an answer of "no" would grant a merge.
 5. **The umbrella's verbatim `config.yml` fails `ci.yml`'s stale-comment step** (`comment_patterns` contains `'later sessions?'`). Task 1 adds one allow entry, the minimum change, rather than altering the verbatim config.
 6. **Handoff timing:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 2 (no post-merge commits on protected `main`; the handoff lands on the block branch before the merge).
 7. **Final verifier model:** settled by the umbrella's "Owner rulings on the writers' questions", ruling 9 (Fable on the final adversarial verifier and the exception reviewer).
@@ -889,7 +889,7 @@ git commit -m "feat(gates): gate framework, config, git helpers, register bootst
 
 **Interfaces:**
 - Consumes: `GateError`, `load_yaml`, `CODE_ROOT` (Task 1); `gitfixture.write`, `.remove`, `.STATE`.
-- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions) -> list[dict]`; `grant_for(decisions, plan) -> dict | None`. Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
+- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions) -> list[dict]`; `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1088,6 +1088,10 @@ class Evidence(unittest.TestCase):
         abs_p = os.path.join(self.root, "st/demo/review/T1.md")
         self.assertIn(f"evidence: path must be relative to the repo root: {abs_p!r}",
                       reg.evidence_errors(self.pinned(evidence=[abs_p]), self.root, []))
+        abs_t = {"test": "test_x", "transcript": os.path.join(self.root, "st/demo/mutations/T1-PIN-1.txt")}
+        errs = reg.evidence_errors(self.pinned(pin=abs_t), self.root, [])
+        self.assertIn("evidence: pin transcript: must be relative to the repo root", errs)
+        self.assertFalse(any("does not exist" in e for e in errs), errs)
         nul = "st/a\0b.md"
         self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
                       reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
@@ -1451,6 +1455,8 @@ def evidence_errors(f: dict, root, decisions: list) -> list:
         pin = f["pin"]
         if pin is None:
             errs.append("evidence: pinned needs pin {test, transcript}")
+        elif os.path.isabs(pin["transcript"]):
+            errs.append("evidence: pin transcript: must be relative to the repo root")
         elif not _file_under(root, pin["transcript"]):
             errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
         if not any(not _sha(e) and _file_under(root, e) for e in f["evidence"]):
@@ -1573,7 +1579,7 @@ def grant_for(decisions, plan: str, *, owner=None):
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
 Expected: `Ran 34 tests` OK; whole suite `Ran 62 tests` OK.
 
-Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then delete `if isinstance(ans, str) and ans.strip().lower() == "yes"` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
+Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
@@ -1959,7 +1965,7 @@ def report_ids(path) -> list:
             s = line.strip()
             if s.startswith("|"):
                 cell = s.split("|")[1].strip()
-                if registers.FINDING_ID.match(cell):
+                if registers.FINDING_ID.fullmatch(cell):
                     ids.append(cell)
                 continue
             m = LIST_ID.match(line)

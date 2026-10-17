@@ -190,6 +190,10 @@ class Evidence(unittest.TestCase):
         abs_p = os.path.join(self.root, "st/demo/review/T1.md")
         self.assertIn(f"evidence: path must be relative to the repo root: {abs_p!r}",
                       reg.evidence_errors(self.pinned(evidence=[abs_p]), self.root, []))
+        abs_t = {"test": "test_x", "transcript": os.path.join(self.root, "st/demo/mutations/T1-PIN-1.txt")}
+        errs = reg.evidence_errors(self.pinned(pin=abs_t), self.root, [])
+        self.assertIn("evidence: pin transcript: must be relative to the repo root", errs)
+        self.assertFalse(any("does not exist" in e for e in errs), errs)
         nul = "st/a\0b.md"
         self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
                       reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
