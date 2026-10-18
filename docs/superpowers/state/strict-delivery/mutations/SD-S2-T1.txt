@@ -1,0 +1,5 @@
+finding: SD-S2-T1
+test: test_fable_on_implementer_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> PASS
+step 2 (fix reverted: perl replaces the fable_roles condition in tools/gates/gate_dispatch.py with False): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> PASS
