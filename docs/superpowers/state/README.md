@@ -35,9 +35,11 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   stale (`gate_claims` fails it; `gate_claims.py --mark-stale --base <sha>` rewrites such rows as
   `stale` through PyYAML, so comments in `claims.yml` are not kept: keep none there). Every cite is a
   normalised repo-relative path (decision DEC-0004): no `./`, `..`, leading `/`, `//`, NUL or
-  surrounding space; a directory cite ends in exactly one `/`. `gate_claims` also fails a
-  `verified` row whose cite is not a file (or, with a trailing `/`, a directory) at `verified_at`,
-  because such a row could never go stale. `false` needs `finding` = a registered finding id.
+  surrounding space, and never a leading `:` (git pathspec magic is rejected per row); a directory
+  cite ends in exactly one `/`, and a git submodule is cited in the file form, without a trailing
+  `/`. `gate_claims` also fails a `verified` row whose cite is not a file (a submodule counts as a
+  file; or, with a trailing `/`, a directory) at `verified_at`, because such a row could never go
+  stale. `false` needs `finding` = a registered finding id.
 - Decisions: only the owner answers. The owner states the answer in chat; the session records it
   verbatim (a quoted string) with `answered_at.by: superbrobenji`, the owner handle in
   `tools/gates/config.yml`, and quotes the owner's words in the commit message. An agent never

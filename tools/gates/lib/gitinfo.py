@@ -71,7 +71,8 @@ def changed_files(root, base: str, head: str = "HEAD") -> list:
 
 def path_type(root, rev: str, path: str):
     """'blob' (a file), 'tree' (a directory), 'commit' (a submodule gitlink) or None when `path` (no
-    trailing '/') is not an entry at `rev` (`git ls-tree -z <rev> -- <path>`); other git failures are a GateError."""
+    trailing '/') is not an entry at `rev` (`git --literal-pathspecs ls-tree -z <rev> -- <path>`, so
+    a path is never read as pathspec magic); other git failures are a GateError."""
     out = _git(root, "--literal-pathspecs", "ls-tree", "-z", rev, "--", path)    # never pathspec magic
     for entry in out.split("\0"):
         meta, _, name = entry.partition("\t")

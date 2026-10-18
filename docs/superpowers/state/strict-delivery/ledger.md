@@ -45,3 +45,4 @@ CHECKPOINT b1 tip 1f5df6d -- gates: suite 125 OK (3.9.6 + 3.12), gate_register 6
 - fix wave: fix(gates): b2 final-review fix wave -- D3 plan re-sync and ledger -- suite 217 OK; run_all 15 PASS
 - fix wave round 2: fix(gates): b2 fix round 2 -- submodule cite, plan note 11, mutation sentence, ledger subjects -- test_gate_claims 34; suite 218 OK on 3.9.6 and 3.12.14; run_all 15 PASS
 - fix wave round 3: fix(gates): b2 fix round 3 -- cites are never pathspecs, path_type name check pinned, note 11 wording, ledger counts -- test_gate_claims 37; suite 221 OK on 3.9.6 and 3.12.14; run_all 15 PASS
+- fix wave round 4: fix(gates): b2 fix round 4 -- state README cite rule complete, path_type docstring -- suite 221 OK; run_all 15 PASS
