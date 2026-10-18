@@ -118,7 +118,7 @@ commit and push, however it was launched.
   temporary file for `gate_dispatch --prompt` and `gate_decisions --scan`, and `tool_input.model` as
   `--tool-model`. An empty or missing prompt is `FAIL dispatch.input`; a missing or disagreeing
   `tool_input.model` is `FAIL dispatch.model.agree` (the subagent would otherwise inherit the session
-  model). `SD_PROMPTS_DIR` overrides `--prompts-dir` (tests only). Exit 2 prints the gate lines on stderr.
+  model). `SD_PROMPTS_DIR` overrides `--prompts-dir` (tests only). Exit 2 prints the gate lines on stderr; the temporary file in a reason is shown as `<tool_input.prompt>`.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when

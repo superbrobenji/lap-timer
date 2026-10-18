@@ -1034,6 +1034,8 @@ class AgentDispatchHook(unittest.TestCase):
         stale = dict(rows, claims=[c for c in rows["claims"] if c["id"] in ("C-fx.ok", "C-fx.stale")])
         cls.root = rf.make_repo(rf.DISPATCH_FILES, clean)
         cls.stale_root = rf.make_repo(rf.DISPATCH_FILES, stale)
+        cls.dup_root = rf.make_repo(rf.DISPATCH_FILES, dict(clean, claims=2 * [c for c in rows["claims"] if c["id"] == "C-fx.ok"]))
+        cls.open_root = rf.make_repo(rf.DISPATCH_FILES, dict(rf.load_rows(), claims=[c for c in rows["claims"] if c["id"] == "C-fx.ok"]))
         with open(os.path.join(DISPATCH_FIX, "good_implementer.md"), encoding="utf-8", newline="") as f:
             cls.good = f.read()
 
@@ -1041,6 +1043,8 @@ class AgentDispatchHook(unittest.TestCase):
     def tearDownClass(cls):
         gf.remove(cls.root)
         gf.remove(cls.stale_root)
+        gf.remove(cls.dup_root)
+        gf.remove(cls.open_root)
 
     def run_agent(self, root, prompt, model="sonnet", cwd=True):
         event = agent_event(root if cwd is True else cwd, prompt, model)
@@ -1055,6 +1059,19 @@ class AgentDispatchHook(unittest.TestCase):
         p = self.run_agent(self.stale_root, prompt)
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("dispatch.claims.C-fx.stale", p.stderr)
+
+    def test_claims_gate_runs_on_the_tree(self):
+        p = self.run_agent(self.dup_root, self.good)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL claims.duplicate.C-fx.ok", p.stderr)
+
+    def test_prompt_is_scanned_for_open_decisions(self):
+        p = self.run_agent(self.open_root, self.good + "\nsee DEC-0002\n")
+        self.assertEqual(2, p.returncode, p.stderr)
+        lines = [l for l in p.stderr.splitlines() if l.startswith("FAIL decisions.open-ref.DEC-0002")]
+        self.assertEqual(1, len(lines), p.stderr)
+        self.assertIn("<tool_input.prompt>", lines[0])
+        self.assertNotIn("sd-dispatch-", p.stderr)
 
     def test_tool_model_disagreeing_with_model_line_blocks(self):
         p = self.run_agent(self.root, self.good, model="opus")
@@ -1094,9 +1111,9 @@ class AgentDispatchHook(unittest.TestCase):
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook -v`
-Expected: `test_good_dispatch_passes` passes (S1 lets `Agent` through); the other seven new tests and the updated S1 case FAIL (`AssertionError: 2 != 0`, or `startswith` for the cwd cases).
+Expected: `test_good_dispatch_passes` passes (S1 lets `Agent` through); the other nine new tests and the updated S1 case FAIL (`AssertionError: 2 != 0`, or `startswith` for the cwd cases).
 
-- [ ] **Step 3: Implement** — in `tools/gates/hooks/pre_tool_use.py` add `import tempfile` after `import sys`, rewrite the module docstring's tool sentence (Bash and Agent branches), add this function above `main()`:
+- [ ] **Step 3: Implement** — in `tools/gates/hooks/pre_tool_use.py` add `import tempfile` after `import sys`, add the module constant `PROMPT_LABEL = "<tool_input.prompt>"` above `class Blocked` (a blank line before it), rewrite the module docstring's tool sentence (Bash and Agent branches), add this function above `main()`:
 
 ```python
 def handle_agent(event: dict) -> int:
@@ -1133,6 +1150,11 @@ def handle_agent(event: dict) -> int:
         os.unlink(path)
     if res.ok():
         return 0
+    # the temporary file is gone when the reader sees a reason: name the prompt, not the path
+    forms = {path, os.path.realpath(path), os.path.relpath(path, root), os.path.relpath(os.path.realpath(path), root)}
+    for line in res.lines:
+        for form in sorted(forms, key=len, reverse=True):
+            line.reason = line.reason.replace(form, PROMPT_LABEL)
     print(res.render(False), file=sys.stderr)
     return 2
 ```
@@ -1146,7 +1168,7 @@ In `tools/gates/README.md` replace the sentence "the `Agent` branch (the dispatc
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `OK` (60 S1 hook tests, one updated, and the eight new ones: 68). Then `python3 tools/gates/run_all.py` → only `PASS`.
+Expected: `OK` (60 S1 hook tests, one updated, and the ten new ones: 70). Then `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 

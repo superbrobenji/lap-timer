@@ -100,6 +100,8 @@ BYPASS = (
 CONFIG_HOME = re.compile(r"(?<![\w$])(?:HOME|XDG_CONFIG_HOME)\+?=")   # before a gated verb: a bypass
 NO_VERIFY = re.compile(r"""(?:^|(?<=[\s"']))(--no-veri(?:fy?)?|-[A-Za-z]+)(?=[\s"'()<>;&|`]|$)""")   # after a gated verb
 
+PROMPT_LABEL = "<tool_input.prompt>"
+
 
 class Blocked(Exception):
     """A refusal with its own FAIL id (hook.bypass, hook.input, hook.target)."""
@@ -282,6 +284,11 @@ def handle_agent(event: dict) -> int:
         os.unlink(path)
     if res.ok():
         return 0
+    # the temporary file is gone when the reader sees a reason: name the prompt, not the path
+    forms = {path, os.path.realpath(path), os.path.relpath(path, root), os.path.relpath(os.path.realpath(path), root)}
+    for line in res.lines:
+        for form in sorted(forms, key=len, reverse=True):
+            line.reason = line.reason.replace(form, PROMPT_LABEL)
     print(res.render(False), file=sys.stderr)
     return 2
 
