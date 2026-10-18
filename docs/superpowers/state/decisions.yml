@@ -44,5 +44,5 @@
     - {label: plan-design-only, cost: "same cut of pre_tool_use.py, no pre-push shim until S4 b11 as the umbrella says; a push launched through a wrapper the regex does not see has no gate until then"}
     - {label: keep-parser, cost: "a 6th fix round for W1-W3 under the current parser; the hook stays a 1020-line shell parser with a closed data-holder allowlist that every new tool or shell form must be added to; agents in this repository keep hitting FAIL hook.target on heredocs and sed that mention commit/push; later review rounds of the same shape are likely"}
   asked_at: {sha: "151f2bb", by: session}
-  answer: null
-  answered_at: null
+  answer: "plan-design-plus-prepush (owner answered \"for DEC-0005 1 is good ... option 1 is good. being thorough is important\" in chat, 2026-10-18)"
+  answered_at: {sha: "151f2bb", by: superbrobenji}
