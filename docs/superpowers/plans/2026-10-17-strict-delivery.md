@@ -217,15 +217,14 @@ Claude Code hooks read one JSON object on stdin. Common fields: `session_id`, `t
 
 Blocking: exit code 2 with the gate's rendered lines on stderr (Claude receives them as the reason). Exit 0 with no output = no decision (normal flow continues). `SessionStart` injects context by printing to stdout. Every hook wraps its body in `try/except Exception: print("FAIL hook.internal: <exc>", file=sys.stderr); sys.exit(2)` — hooks fail closed. Hooks call gate modules through `run_all.run(names, args) -> Result` so output is identical to the CLI. `CLAUDE_PROJECT_DIR` is the project root and stays fixed inside worktrees; hooks resolve the repo for the *current* `cwd` with `git rev-parse --show-toplevel` when gating a worktree.
 
-Matcher: a value of letters/digits/`_-,| ` is an exact list; `"Agent|Bash"` matches exactly those two tools. The `if` field (permission-rule syntax, tool events only) narrows the Bash handler to the verbs we gate so ordinary commands are not slowed.
+Matcher: a value of letters/digits/`_-,| ` is an exact list; `"Agent|Bash"` matches exactly those two tools. The Bash handler carries no `if` filter: `if` uses permission-rule matching, which does not see `/usr/bin/git push`, `bash -c 'git push'`, `env -C <dir> git push` or `sudo git push`, so `pre_tool_use.py` receives every Bash call and alone decides what is gated (an ungated command exits 0 silently; owner ruling 5, S1 Task 8 review).
 
 `.claude/settings.json` (committed):
 ```json
 {"hooks": {
   "PreToolUse": [
     {"matcher": "Agent", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 300}]},
-    {"matcher": "Bash", "hooks": [{"type": "command", "if": "Bash(git *)", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900},
-                                  {"type": "command", "if": "Bash(gh *)",  "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
+    {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
   ],
   "Stop":         [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\"", "timeout": 300}]}],
   "SubagentStop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/subagent_stop.py\"", "timeout": 60}]}],

@@ -5307,6 +5307,22 @@ class PreToolUse(unittest.TestCase):
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
 
+    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL hook.target", p.stderr, cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push"):
+            self.assertEqual(0, hook("pre_tool_use.py", bash_event(self.root, cmd)).returncode, cmd)
+
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
         self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
@@ -5990,7 +6006,7 @@ Expected: the commit output first shows the 10 PASS lines of `run_all --only reg
 
 **Interfaces:**
 - Consumes: `install-hooks.sh` and its marker (Task 7); `hook()`, `copy_gates()` and `ORPHAN` in `test_hooks.py` (Task 7).
-- Produces: `session_start.py` prints `strict-delivery: gates installed in <root> ...` or `strict-delivery: gates NOT installed in <root> ...`, one `strict-delivery: handoff <path> ...` line per `docs/superpowers/state/*/handoff.md`, the install-hooks output when the pre-commit is not ours, and `strict-delivery: invoke the strict-delivery skill before any other action`. Exit 2 on install failure (`FAIL hook.install: ...`) or internal error. `user_prompt_submit.py` prints one line starting `strict-delivery: `. `.claude/settings.json` is the umbrella's JSON without the `Stop` and `SubagentStop` entries. **S2 adds those two entries, together with `stop.py` and `subagent_stop.py`.** Until then a `Stop` entry would call a script that does not exist, and fail closed on every turn.
+- Produces: `session_start.py` prints `strict-delivery: gates installed in <root> ...` or `strict-delivery: gates NOT installed in <root> ...`, one `strict-delivery: handoff <path> ...` line per `docs/superpowers/state/*/handoff.md`, the install-hooks output when the repository's pre-commit hook is not ours, and `strict-delivery: invoke the strict-delivery skill before any other action`. It always exits 0: SessionStart cannot block and only exit-0 stdout reaches the model, so every failure (`FAIL hook.install: ...` for an install-hooks.sh failure or refusal, `FAIL hook.input: ...` for a missing or non-directory `cwd`, `FAIL hook.internal: ...`) is a line on stdout (and echoed on stderr) followed by the skill line (owner ruling 5). `user_prompt_submit.py` prints one line starting `strict-delivery: `. `.claude/settings.json` is the umbrella's JSON without the `Stop` and `SubagentStop` entries; its Bash handler has no `if` filter (owner ruling 5: `if` uses permission-rule matching and never offered `/usr/bin/git push`, `bash -c`, `env -C` or `sudo git push` to the script; the umbrella's block carries the same JSON plus the two lines). **S2 adds those two entries, together with `stop.py` and `subagent_stop.py`.** Until then a `Stop` entry would call a script that does not exist, and fail closed on every turn.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -6027,29 +6043,46 @@ class SessionStart(unittest.TestCase):
         self.assertNotIn("install-hooks:", p.stdout)
         self.assertIn("invoke the strict-delivery skill", p.stdout)
 
-    def test_install_failure_exits_2(self):
+    def assert_failure_reaches_the_model(self, p, line):
+        """SessionStart cannot block and only exit-0 stdout reaches the model: the FAIL is on stdout
+        (context) and echoed on stderr (owner), the skill line follows it, the exit code is 0."""
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn(line, p.stdout.splitlines()[-2], p.stdout)
+        self.assertIn(line, p.stderr)
+        self.assertEqual("strict-delivery: invoke the strict-delivery skill before any other action",
+                         p.stdout.splitlines()[-1])
+
+    def test_install_failure_is_reported_on_stdout_and_exits_0(self):
         copy_gates(self.root)
         gf.write(self.root, "tools/gates/install-hooks.sh", "echo boom >&2; exit 3\n")
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 3: boom", p.stderr)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.install: install-hooks.sh exit 3: boom")
+        self.assertIn("strict-delivery: gates installed in", p.stdout)
 
-    def test_a_refusal_of_install_hooks_exits_2(self):
+    def test_a_non_utf8_foreign_hook_is_moved_aside(self):
+        copy_gates(self.root)
+        with open(os.path.join(self.root, ".git", "hooks", "pre-commit"), "wb") as fh:
+            fh.write(b"#!/bin/sh\n# \xff\xfe\n")
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertNotIn("FAIL", p.stdout)
+        self.assertIn("install-hooks: moved the existing pre-commit hook", p.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, ".git", "hooks", "pre-commit.pre-strict-delivery")))
+
+    def test_a_refusal_of_install_hooks_is_reported_and_exits_0(self):
         copy_gates(self.root)
         hooks = os.path.join(self.root, ".git", "hooks")
         gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
         gf.write(self.root, ".git/hooks/pre-commit.pre-strict-delivery", "#!/bin/sh\necho older\n")
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing:", p.stderr)
-        self.assertIn("strict-delivery: invoke the strict-delivery skill", p.stdout)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing:")
         with open(os.path.join(hooks, "pre-commit")) as fh:
             self.assertIn("echo mine", fh.read())           # the foreign hook was not touched
         gf.git(self.root, "config", "core.hooksPath", os.path.join(self.root, "..", "shared-hooks"))
         os.remove(os.path.join(hooks, "pre-commit"))
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing: the hooks directory", p.stderr)
+        self.assert_failure_reaches_the_model(
+            p, "FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing: the hooks directory")
 
     def test_a_cwd_that_is_not_a_repository_fails_closed(self):
         outside = tempfile.mkdtemp()
@@ -6059,14 +6092,26 @@ class SessionStart(unittest.TestCase):
             p = hook("session_start.py", event)
         finally:
             shutil.rmtree(outside)
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.internal:", p.stderr)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.internal: RuntimeError: git -C")
 
-    def test_malformed_stdin_fails_closed(self):
-        for raw in ("nope", "[]"):
+    def test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback(self):
+        for cwd, line in ((None, "FAIL hook.input: the event has no cwd"), ("", "FAIL hook.input: the event has no cwd"),
+                          (7, "FAIL hook.input: the event has no cwd"),
+                          (os.path.join(self.root, "nope"), "FAIL hook.input: cwd %s is not a directory"
+                           % os.path.join(self.root, "nope"))):
+            event = self.event()
+            if cwd is None:
+                del event["cwd"]
+            else:
+                event["cwd"] = cwd
+            p = hook("session_start.py", event)       # the hook's own process cwd is this repository: it must not be used
+            self.assert_failure_reaches_the_model(p, line)
+            self.assertNotIn("gates installed", p.stdout)
+
+    def test_malformed_stdin_is_reported_and_exits_0(self):
+        for raw, line in (("nope", "FAIL hook.internal: JSONDecodeError:"), ("[]", "FAIL hook.internal: ValueError: stdin is not a JSON object")):
             p = hook("session_start.py", raw)
-            self.assertEqual(2, p.returncode, raw)
-            self.assertIn("FAIL hook.internal:", p.stderr)
+            self.assert_failure_reaches_the_model(p, line)
 
 
 class UserPromptSubmit(unittest.TestCase):
@@ -6077,23 +6122,36 @@ class UserPromptSubmit(unittest.TestCase):
         self.assertTrue(p.stdout.startswith("strict-delivery: "))
 
     def test_malformed_stdin_fails_closed(self):
-        p = hook("user_prompt_submit.py", "nope")
-        self.assertEqual(2, p.returncode)
+        for raw, line in (("nope", "FAIL hook.internal: JSONDecodeError:"),
+                          ("[]", "FAIL hook.internal: ValueError: stdin is not a JSON object")):
+            p = hook("user_prompt_submit.py", raw)
+            self.assertEqual(2, p.returncode, raw)
+            self.assertIn(line, p.stderr)
+            self.assertEqual("", p.stdout)
 
 
 class ProjectWiring(unittest.TestCase):
-    def test_settings_json_wires_existing_hook_scripts_without_stop_hooks(self):
+    def test_settings_json_is_the_expected_wiring_without_stop_hooks(self):
+        def command(script, timeout=None):
+            h = {"type": "command", "command": 'python3 "${CLAUDE_PROJECT_DIR}/tools/gates/hooks/%s"' % script}
+            if timeout:
+                h["timeout"] = timeout
+            return {"hooks": [h]}
+        # No "if" on the Bash handler: pre_tool_use.py alone decides what is gated (owner ruling 5).
+        # No Stop/SubagentStop: S2 adds them together with their scripts.
+        expected = {"hooks": {
+            "PreToolUse": [dict(command("pre_tool_use.py", 300), matcher="Agent"),
+                           dict(command("pre_tool_use.py", 900), matcher="Bash")],
+            "SessionStart": [command("session_start.py")],
+            "UserPromptSubmit": [command("user_prompt_submit.py")]}}
         with open(os.path.join(gf.REPO, ".claude", "settings.json")) as fh:
-            hooks = json.load(fh)["hooks"]
-        self.assertEqual({"PreToolUse", "SessionStart", "UserPromptSubmit"}, set(hooks))  # Stop/SubagentStop: S2
-        self.assertEqual(["Agent", "Bash"], [m["matcher"] for m in hooks["PreToolUse"]])
-        commands = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
-        self.assertEqual(5, len(commands))
-        for c in commands:
-            script = c.split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
-            self.assertTrue(os.path.isfile(script), c)
+            self.assertEqual(expected, json.load(fh))
+        for groups in expected["hooks"].values():
+            for g in groups:
+                script = g["hooks"][0]["command"].split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
+                self.assertTrue(os.path.isfile(script), script)
 
-    def test_claude_md_carries_spec_section_12_verbatim(self):
+    def test_claude_md_carries_spec_section_12_verbatim_and_nothing_else(self):
         with open(os.path.join(gf.REPO, "docs/superpowers/specs/2026-10-17-strict-delivery-design.md")) as fh:
             spec = fh.read()
         section = spec.split("## 12. ", 1)[1].split("\n## 13. ", 1)[0]
@@ -6101,14 +6159,13 @@ class ProjectWiring(unittest.TestCase):
         self.assertEqual(11, len(bullets))
         with open(os.path.join(gf.REPO, "CLAUDE.md")) as fh:
             claude = fh.read().splitlines()
-        for b in bullets:
-            self.assertIn(b, claude)
+        self.assertEqual(bullets, [l for l in claude if l.startswith("- ")])
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `FAILED (failures=7, errors=2)`, 39 tests: 9 of the 10 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`); `UserPromptSubmit::test_malformed_stdin_fails_closed` already passes, because a missing script also exits 2. The 29 Task 7 tests still pass.
+Expected: `FAILED (failures=10, errors=2)`, 42 tests: 12 of the 13 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). `PreToolUse::test_path_qualified_git_and_wrapper_prefixes_are_gated` passes at once: `pre_tool_use.py` already gates those forms, and the test pins them for the Bash handler that now sees every command. The 29 Task 7 tests still pass.
 
 - [ ] **Step 3: Write the hooks, the settings and CLAUDE.md**
 
@@ -6118,8 +6175,12 @@ Expected: `FAILED (failures=7, errors=2)`, 39 tests: 9 of the 10 new tests FAIL/
 #!/usr/bin/env python3
 """Claude Code SessionStart hook (spec §8). Prints to stdout (injected as context): whether the
 gates are installed in the event's project, every handoff document, and the skill instruction;
-installs the git hooks when .git/hooks/pre-commit is not ours. Exit 2 (shown to the owner) when
-the install fails (install-hooks.sh refuses included) or the hook itself breaks."""
+installs the git hooks when the repository's pre-commit hook (git rev-parse --git-path
+hooks/pre-commit) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
+exit-0 hook into the model's context (exit-2 stderr reaches the owner alone). So every failure --
+install-hooks.sh refusing or failing, a missing or invalid cwd, any internal error -- is a `FAIL ...`
+line on stdout (the model sees it) and on stderr (the owner sees it), followed by the skill
+instruction, and the exit code is 0."""
 from __future__ import annotations
 
 import glob
@@ -6149,21 +6210,34 @@ def pre_commit_path(root: str) -> str:
 
 def ours(path: str) -> bool:
     try:
-        with open(path, encoding="utf-8") as fh:
-            return MARKER in fh.read()
+        with open(path, "rb") as fh:       # bytes: a foreign hook need not be UTF-8
+            return MARKER.encode() in fh.read()
     except OSError:
         return False
 
 
-def main() -> int:
+def fail(code: str, reason: str) -> None:
+    line = f"FAIL {code}: {reason}"
+    print(line)
+    print(line, file=sys.stderr)
+
+
+def main() -> None:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
-    root = toplevel(event.get("cwd") or os.getcwd())
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        fail("hook.input", "the event has no cwd")
+        return
+    if not os.path.isdir(cwd):
+        fail("hook.input", f"cwd {cwd} is not a directory")
+        return
+    root = toplevel(cwd)
     if not os.path.isfile(os.path.join(root, "tools", "gates", "run_all.py")):
         print(f"strict-delivery: gates NOT installed in {root} (no tools/gates/run_all.py); apply the "
               "skill's judgment rules and state that the gates are missing")
-        return 0
+        return
     try:
         import yaml  # noqa: F401
         yaml_state = "PyYAML ok"
@@ -6173,26 +6247,22 @@ def main() -> int:
     print(f"strict-delivery: gates installed in {root} (tools/gates/run_all.py); {yaml_state}")
     for h in sorted(glob.glob(os.path.join(root, "docs", "superpowers", "state", "*", "handoff.md"))):
         print(f"strict-delivery: handoff {os.path.relpath(h, root)} -- read it before any dispatch")
-    rc = 0
     if not ours(pre_commit_path(root)):
         p = subprocess.run(["bash", os.path.join(root, "tools", "gates", "install-hooks.sh")],
                            cwd=root, capture_output=True, text=True, check=False)
         if p.stdout.strip():
             print(p.stdout.strip())
         if p.returncode != 0:
-            print(f"FAIL hook.install: install-hooks.sh exit {p.returncode}: {p.stderr.strip()}", file=sys.stderr)
-            rc = 2
-    print("strict-delivery: invoke the strict-delivery skill before any other action")
-    return rc
+            fail("hook.install", f"install-hooks.sh exit {p.returncode}: {p.stderr.strip()}")
 
 
 if __name__ == "__main__":
     try:
-        rc = main()
-    except Exception as exc:  # fail closed
-        print(f"FAIL hook.internal: {type(exc).__name__}: {exc}", file=sys.stderr)
-        rc = 2
-    sys.exit(rc)
+        main()
+    except Exception as exc:  # reported, never raised: SessionStart cannot block
+        fail("hook.internal", f"{type(exc).__name__}: {exc}")
+    print("strict-delivery: invoke the strict-delivery skill before any other action")
+    sys.exit(0)
 ```
 
 `tools/gates/hooks/user_prompt_submit.py`:
@@ -6234,8 +6304,7 @@ if __name__ == "__main__":
 {"hooks": {
   "PreToolUse": [
     {"matcher": "Agent", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 300}]},
-    {"matcher": "Bash", "hooks": [{"type": "command", "if": "Bash(git *)", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900},
-                                  {"type": "command", "if": "Bash(gh *)",  "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
+    {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
   ],
   "SessionStart": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/session_start.py\""}]}],
   "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/user_prompt_submit.py\""}]}]
@@ -6281,38 +6350,46 @@ Append to `tools/gates/README.md`:
 
 ## Hooks
 
-`.claude/settings.json` wires `hooks/pre_tool_use.py`, `hooks/session_start.py` and
-`hooks/user_prompt_submit.py`; a new Claude Code session loads it. Every hook exits 2 with the
-failing lines on stderr, and also on any internal error (`FAIL hook.internal`, fail closed).
+`.claude/settings.json` wires `hooks/pre_tool_use.py` (matchers `Agent` and `Bash`, the Bash entry
+without an `if` filter, so the script sees every Bash call), `hooks/session_start.py` and
+`hooks/user_prompt_submit.py`; a new Claude Code session loads it. `Stop` and `SubagentStop` arrive
+with S2.
 
-- `pre_tool_use.py` (Bash): `git commit` and `git push` run the register and claim gates on the
-  tree the command names (the event's cwd, moved by a leading `cd <dir> &&` and by each `git -C
-  <dir>`). A gated command whose tree it cannot tell (another `cd`, a subshell, `--git-dir`,
-  `GIT_DIR=`, an expanded `-C` word, a nested shell, `eval`, `xargs`, `env -C`) exits 2 with
-  `FAIL hook.target`. Every other command and tool exits 0 silently; the `Agent` branch (the
-  dispatch gate) arrives with S2.
-- `session_start.py`: prints whether the gates are installed in the project, one line per
-  `docs/superpowers/state/*/handoff.md` and the instruction to invoke the strict-delivery skill;
-  runs `install-hooks.sh` when `.git/hooks/pre-commit` is not ours. A refusal of
-  `install-hooks.sh` (a hooks directory outside the repository's git directory, or a second foreign
-  pre-commit over an existing `pre-commit.pre-strict-delivery` backup) exits 2 with
-  `FAIL hook.install`.
-- `user_prompt_submit.py`: one reminder line.
+- `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
+  (`FAIL hook.internal`, fail closed). Bash: `git commit` and `git push` (bare, path-qualified,
+  quoted, or after `sudo`, `command`, `nohup`, `time`, `timeout`, `env [VAR=val|options]`, `VAR=val`)
+  run the register and claim gates on the tree the command names: the event's cwd, moved by a leading
+  `cd <dir> &&` or `;` and by each `git -C <dir>`. A gated command whose tree it cannot tell (another
+  `cd`, `pushd`, a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word, a nested
+  shell such as `bash -c`, `eval`, `xargs`, `-execdir`, `env -C`, `sudo -D`) exits 2 with
+  `FAIL hook.target`. Every other command and tool exits 0 silently, after one python3 start; the
+  `Agent` branch (the dispatch gate) arrives with S2.
+- `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
+  hook, so this hook always exits 0. It prints whether the gates are installed in the event's
+  project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
+  the repository's pre-commit hook (`$(git rev-parse --git-path hooks)/pre-commit`) is not ours, and
+  the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line on stdout
+  (the model sees it) echoed on stderr (the owner sees it), then the instruction line: `FAIL
+  hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the repository's
+  git directory, or a second foreign pre-commit over an existing `pre-commit.pre-strict-delivery`
+  backup), `FAIL hook.input` for a missing or non-directory `cwd`, `FAIL hook.internal` for anything
+  else (a cwd outside a repository, malformed stdin).
+- `user_prompt_submit.py`: one reminder line; malformed stdin exits 2 with `FAIL hook.internal`.
 - `install-hooks.sh` installs the git `pre-commit` shim (marker `# strict-delivery-gates-hook`),
   which runs `hooks/git-pre-commit.sh` of the tree being committed (`FAIL pre-commit.missing` for a
   tree without it). That script runs `run_all.py --only register,claims` and refuses
   (`FAIL pre-commit.unstaged`) while a worktree-side change, an untracked or an ignored file sits
-  under `docs/superpowers/state`, `docs/reviews`, `tools/gates` (except `tests/` and `README.md`)
-  or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with the commit or
-  remove it.
+  under `docs/superpowers/state`, `docs/reviews`, `tools/gates` or among the root-level `*.py`,
+  `*.pyc`, `*.so` and `*/__init__.*`: stage it with the commit or remove it. Exempt: `tools/gates/tests`,
+  `tools/gates/README.md`, any `.DS_Store` and the `__pycache__` directories under `tools/gates`.
 ````
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 39 tests ... OK
-python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 260 tests ... OK
-tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 260 tests ... OK (3.12)
+python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 42 tests ... OK
+python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 263 tests ... OK
+tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 263 tests ... OK (3.12)
 python3 tools/gates/run_all.py                                                    # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 # strict-delivery: gates installed in <root> (tools/gates/run_all.py); PyYAML ok
@@ -6323,19 +6400,19 @@ git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md 
   docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md && git diff --cached --check && echo whitespace-clean
 ```
 
-Mutation checks (each restored, then `OK` again; all killed by the test named). `session_start.py`: `if not ours(...)` to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_exits_2`, `test_a_refusal_of_install_hooks_exits_2`); `rc = 2` after the install failure to `rc = 0`, or drop the stderr text from the `FAIL hook.install` line (`test_install_failure_exits_2`, `test_a_refusal_of_install_hooks_exits_2`); `except Exception` to `except KeyError` (`test_a_cwd_that_is_not_a_repository_fails_closed`, `SessionStart::test_malformed_stdin_fails_closed`); empty the handoff glob (`test_installs_git_hooks_and_lists_handoffs`); drop the final skill line (the same test and the refusal test). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix or add a second line (`test_one_line_reminder`); `except Exception` to `except KeyError` (`UserPromptSubmit::test_malformed_stdin_fails_closed`). Add `"Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\""}]}],` to `.claude/settings.json` (`test_settings_json_wires_existing_hook_scripts_without_stop_hooks`); delete one bullet from `CLAUDE.md` (`test_claude_md_carries_spec_section_12_verbatim`).
+Mutation checks (each restored, then `OK` again; all killed by the test named). `session_start.py`: `if not ours(...)` to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_is_reported_on_stdout_and_exits_0`, `test_a_refusal_of_install_hooks_is_reported_and_exits_0`, `test_a_non_utf8_foreign_hook_is_moved_aside`); `ours()` reading UTF-8 text (`test_a_non_utf8_foreign_hook_is_moved_aside`); `fail()` without the stdout print, without the stderr echo, or the final `sys.exit(0)` to `sys.exit(2)` (the failure tests through `assert_failure_reaches_the_model`); the `hook.install` call or the `hook.internal` report removed (the install tests; `test_a_cwd_that_is_not_a_repository_fails_closed`, `test_malformed_stdin_is_reported_and_exits_0`); `event.get("cwd") or os.getcwd()` or the `os.path.isdir` check dropped (`test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback`); empty the handoff glob (`test_installs_git_hooks_and_lists_handoffs`). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix (`test_one_line_reminder`); drop the FAIL line, or replace the script by `sys.exit(2)` (`UserPromptSubmit::test_malformed_stdin_fails_closed`). `pre_tool_use.py` (pinned for the unfiltered handler): `\bgit\b` to `(?<![/\w])git\b`, `env = env or ...` to `env = False`, or the `sudo -D` check removed (`test_path_qualified_git_and_wrapper_prefixes_are_gated`). Settings: add `"Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\""}]}],`, add an `if` back to the Bash handler, or change `"timeout": 900` to `1` (`test_settings_json_is_the_expected_wiring_without_stop_hooks`); append a bullet to `CLAUDE.md` or delete one (`test_claude_md_carries_spec_section_12_verbatim_and_nothing_else`).
 
 Whole-file check (each prints nothing): `diff <(sed -n 'A,Bp' PLAN) FILE` with A,B the first and last line of each code block above, for `session_start.py`, `user_prompt_submit.py`, `.claude/settings.json` and `CLAUDE.md`; the Task 8 test block equals `sed -n '/^class SessionStart/,/^if __name__/p' tools/gates/tests/test_hooks.py` minus its last line and the blank lines before it; the Task 7 test block equals `test_hooks.py` without those lines.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 39 OK (29 + 10); suite 260 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` to the ledger under the existing `## Block b3` section.
+Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 42 OK (29 + 13); suite 263 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` to the ledger under the existing `## Block b3` section.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md \
   docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md docs/superpowers/state/strict-delivery/ledger.md
 git commit -m "feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides" \
-  -m "Strict-delivery S1 Task 8 (spec §8, §12). settings.json = the umbrella's hooks without Stop/SubagentStop (S2 adds them with their scripts). CLAUDE.md carries spec §12 verbatim, pinned by a test."
+  -m "Strict-delivery S1 Task 8 (spec §8, §12). settings.json = the umbrella's hooks without Stop/SubagentStop (S2 adds them with their scripts), the Bash handler unfiltered. CLAUDE.md carries spec §12 verbatim, pinned by a test."
 ```
 
 The owner restarts the Claude Code session after this block merges: hooks in a new `.claude/settings.json` load at session start.

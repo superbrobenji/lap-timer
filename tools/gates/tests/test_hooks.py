@@ -100,6 +100,22 @@ class PreToolUse(unittest.TestCase):
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
 
+    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL hook.target", p.stderr, cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push"):
+            self.assertEqual(0, hook("pre_tool_use.py", bash_event(self.root, cmd)).returncode, cmd)
+
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
         self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
@@ -446,29 +462,46 @@ class SessionStart(unittest.TestCase):
         self.assertNotIn("install-hooks:", p.stdout)
         self.assertIn("invoke the strict-delivery skill", p.stdout)
 
-    def test_install_failure_exits_2(self):
+    def assert_failure_reaches_the_model(self, p, line):
+        """SessionStart cannot block and only exit-0 stdout reaches the model: the FAIL is on stdout
+        (context) and echoed on stderr (owner), the skill line follows it, the exit code is 0."""
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn(line, p.stdout.splitlines()[-2], p.stdout)
+        self.assertIn(line, p.stderr)
+        self.assertEqual("strict-delivery: invoke the strict-delivery skill before any other action",
+                         p.stdout.splitlines()[-1])
+
+    def test_install_failure_is_reported_on_stdout_and_exits_0(self):
         copy_gates(self.root)
         gf.write(self.root, "tools/gates/install-hooks.sh", "echo boom >&2; exit 3\n")
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 3: boom", p.stderr)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.install: install-hooks.sh exit 3: boom")
+        self.assertIn("strict-delivery: gates installed in", p.stdout)
 
-    def test_a_refusal_of_install_hooks_exits_2(self):
+    def test_a_non_utf8_foreign_hook_is_moved_aside(self):
+        copy_gates(self.root)
+        with open(os.path.join(self.root, ".git", "hooks", "pre-commit"), "wb") as fh:
+            fh.write(b"#!/bin/sh\n# \xff\xfe\n")
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertNotIn("FAIL", p.stdout)
+        self.assertIn("install-hooks: moved the existing pre-commit hook", p.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, ".git", "hooks", "pre-commit.pre-strict-delivery")))
+
+    def test_a_refusal_of_install_hooks_is_reported_and_exits_0(self):
         copy_gates(self.root)
         hooks = os.path.join(self.root, ".git", "hooks")
         gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
         gf.write(self.root, ".git/hooks/pre-commit.pre-strict-delivery", "#!/bin/sh\necho older\n")
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing:", p.stderr)
-        self.assertIn("strict-delivery: invoke the strict-delivery skill", p.stdout)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing:")
         with open(os.path.join(hooks, "pre-commit")) as fh:
             self.assertIn("echo mine", fh.read())           # the foreign hook was not touched
         gf.git(self.root, "config", "core.hooksPath", os.path.join(self.root, "..", "shared-hooks"))
         os.remove(os.path.join(hooks, "pre-commit"))
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing: the hooks directory", p.stderr)
+        self.assert_failure_reaches_the_model(
+            p, "FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing: the hooks directory")
 
     def test_a_cwd_that_is_not_a_repository_fails_closed(self):
         outside = tempfile.mkdtemp()
@@ -478,14 +511,26 @@ class SessionStart(unittest.TestCase):
             p = hook("session_start.py", event)
         finally:
             shutil.rmtree(outside)
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.internal:", p.stderr)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.internal: RuntimeError: git -C")
 
-    def test_malformed_stdin_fails_closed(self):
-        for raw in ("nope", "[]"):
+    def test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback(self):
+        for cwd, line in ((None, "FAIL hook.input: the event has no cwd"), ("", "FAIL hook.input: the event has no cwd"),
+                          (7, "FAIL hook.input: the event has no cwd"),
+                          (os.path.join(self.root, "nope"), "FAIL hook.input: cwd %s is not a directory"
+                           % os.path.join(self.root, "nope"))):
+            event = self.event()
+            if cwd is None:
+                del event["cwd"]
+            else:
+                event["cwd"] = cwd
+            p = hook("session_start.py", event)       # the hook's own process cwd is this repository: it must not be used
+            self.assert_failure_reaches_the_model(p, line)
+            self.assertNotIn("gates installed", p.stdout)
+
+    def test_malformed_stdin_is_reported_and_exits_0(self):
+        for raw, line in (("nope", "FAIL hook.internal: JSONDecodeError:"), ("[]", "FAIL hook.internal: ValueError: stdin is not a JSON object")):
             p = hook("session_start.py", raw)
-            self.assertEqual(2, p.returncode, raw)
-            self.assertIn("FAIL hook.internal:", p.stderr)
+            self.assert_failure_reaches_the_model(p, line)
 
 
 class UserPromptSubmit(unittest.TestCase):
@@ -496,23 +541,36 @@ class UserPromptSubmit(unittest.TestCase):
         self.assertTrue(p.stdout.startswith("strict-delivery: "))
 
     def test_malformed_stdin_fails_closed(self):
-        p = hook("user_prompt_submit.py", "nope")
-        self.assertEqual(2, p.returncode)
+        for raw, line in (("nope", "FAIL hook.internal: JSONDecodeError:"),
+                          ("[]", "FAIL hook.internal: ValueError: stdin is not a JSON object")):
+            p = hook("user_prompt_submit.py", raw)
+            self.assertEqual(2, p.returncode, raw)
+            self.assertIn(line, p.stderr)
+            self.assertEqual("", p.stdout)
 
 
 class ProjectWiring(unittest.TestCase):
-    def test_settings_json_wires_existing_hook_scripts_without_stop_hooks(self):
+    def test_settings_json_is_the_expected_wiring_without_stop_hooks(self):
+        def command(script, timeout=None):
+            h = {"type": "command", "command": 'python3 "${CLAUDE_PROJECT_DIR}/tools/gates/hooks/%s"' % script}
+            if timeout:
+                h["timeout"] = timeout
+            return {"hooks": [h]}
+        # No "if" on the Bash handler: pre_tool_use.py alone decides what is gated (owner ruling 5).
+        # No Stop/SubagentStop: S2 adds them together with their scripts.
+        expected = {"hooks": {
+            "PreToolUse": [dict(command("pre_tool_use.py", 300), matcher="Agent"),
+                           dict(command("pre_tool_use.py", 900), matcher="Bash")],
+            "SessionStart": [command("session_start.py")],
+            "UserPromptSubmit": [command("user_prompt_submit.py")]}}
         with open(os.path.join(gf.REPO, ".claude", "settings.json")) as fh:
-            hooks = json.load(fh)["hooks"]
-        self.assertEqual({"PreToolUse", "SessionStart", "UserPromptSubmit"}, set(hooks))  # Stop/SubagentStop: S2
-        self.assertEqual(["Agent", "Bash"], [m["matcher"] for m in hooks["PreToolUse"]])
-        commands = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
-        self.assertEqual(5, len(commands))
-        for c in commands:
-            script = c.split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
-            self.assertTrue(os.path.isfile(script), c)
+            self.assertEqual(expected, json.load(fh))
+        for groups in expected["hooks"].values():
+            for g in groups:
+                script = g["hooks"][0]["command"].split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
+                self.assertTrue(os.path.isfile(script), script)
 
-    def test_claude_md_carries_spec_section_12_verbatim(self):
+    def test_claude_md_carries_spec_section_12_verbatim_and_nothing_else(self):
         with open(os.path.join(gf.REPO, "docs/superpowers/specs/2026-10-17-strict-delivery-design.md")) as fh:
             spec = fh.read()
         section = spec.split("## 12. ", 1)[1].split("\n## 13. ", 1)[0]
@@ -520,8 +578,7 @@ class ProjectWiring(unittest.TestCase):
         self.assertEqual(11, len(bullets))
         with open(os.path.join(gf.REPO, "CLAUDE.md")) as fh:
             claude = fh.read().splitlines()
-        for b in bullets:
-            self.assertIn(b, claude)
+        self.assertEqual(bullets, [l for l in claude if l.startswith("- ")])
 
 
 if __name__ == "__main__":

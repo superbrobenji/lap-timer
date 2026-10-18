@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Claude Code SessionStart hook (spec §8). Prints to stdout (injected as context): whether the
 gates are installed in the event's project, every handoff document, and the skill instruction;
-installs the git hooks when .git/hooks/pre-commit is not ours. Exit 2 (shown to the owner) when
-the install fails (install-hooks.sh refuses included) or the hook itself breaks."""
+installs the git hooks when the repository's pre-commit hook (git rev-parse --git-path
+hooks/pre-commit) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
+exit-0 hook into the model's context (exit-2 stderr reaches the owner alone). So every failure --
+install-hooks.sh refusing or failing, a missing or invalid cwd, any internal error -- is a `FAIL ...`
+line on stdout (the model sees it) and on stderr (the owner sees it), followed by the skill
+instruction, and the exit code is 0."""
 from __future__ import annotations
 
 import glob
@@ -32,21 +36,34 @@ def pre_commit_path(root: str) -> str:
 
 def ours(path: str) -> bool:
     try:
-        with open(path, encoding="utf-8") as fh:
-            return MARKER in fh.read()
+        with open(path, "rb") as fh:       # bytes: a foreign hook need not be UTF-8
+            return MARKER.encode() in fh.read()
     except OSError:
         return False
 
 
-def main() -> int:
+def fail(code: str, reason: str) -> None:
+    line = f"FAIL {code}: {reason}"
+    print(line)
+    print(line, file=sys.stderr)
+
+
+def main() -> None:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
-    root = toplevel(event.get("cwd") or os.getcwd())
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        fail("hook.input", "the event has no cwd")
+        return
+    if not os.path.isdir(cwd):
+        fail("hook.input", f"cwd {cwd} is not a directory")
+        return
+    root = toplevel(cwd)
     if not os.path.isfile(os.path.join(root, "tools", "gates", "run_all.py")):
         print(f"strict-delivery: gates NOT installed in {root} (no tools/gates/run_all.py); apply the "
               "skill's judgment rules and state that the gates are missing")
-        return 0
+        return
     try:
         import yaml  # noqa: F401
         yaml_state = "PyYAML ok"
@@ -56,23 +73,19 @@ def main() -> int:
     print(f"strict-delivery: gates installed in {root} (tools/gates/run_all.py); {yaml_state}")
     for h in sorted(glob.glob(os.path.join(root, "docs", "superpowers", "state", "*", "handoff.md"))):
         print(f"strict-delivery: handoff {os.path.relpath(h, root)} -- read it before any dispatch")
-    rc = 0
     if not ours(pre_commit_path(root)):
         p = subprocess.run(["bash", os.path.join(root, "tools", "gates", "install-hooks.sh")],
                            cwd=root, capture_output=True, text=True, check=False)
         if p.stdout.strip():
             print(p.stdout.strip())
         if p.returncode != 0:
-            print(f"FAIL hook.install: install-hooks.sh exit {p.returncode}: {p.stderr.strip()}", file=sys.stderr)
-            rc = 2
-    print("strict-delivery: invoke the strict-delivery skill before any other action")
-    return rc
+            fail("hook.install", f"install-hooks.sh exit {p.returncode}: {p.stderr.strip()}")
 
 
 if __name__ == "__main__":
     try:
-        rc = main()
-    except Exception as exc:  # fail closed
-        print(f"FAIL hook.internal: {type(exc).__name__}: {exc}", file=sys.stderr)
-        rc = 2
-    sys.exit(rc)
+        main()
+    except Exception as exc:  # reported, never raised: SessionStart cannot block
+        fail("hook.internal", f"{type(exc).__name__}: {exc}")
+    print("strict-delivery: invoke the strict-delivery skill before any other action")
+    sys.exit(0)
