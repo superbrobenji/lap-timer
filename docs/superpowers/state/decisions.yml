@@ -35,3 +35,34 @@
   asked_at: {sha: "e2a20af", by: session}
   answer: "require (owner answered \"Yes, add the schema rule\" in chat, 2026-10-17)"
   answered_at: {sha: "e2a20af", by: superbrobenji}
+
+- id: DEC-0005
+  class: scope
+  question: "S1 block b3 Task 8: the PreToolUse Bash hook grew from the plan's 70-line verb regex into a 1020-line shell parser over 5 review rounds, still lets a BSD `xargs -J` form push ungated (verified at 4bb2185) and false-blocks ordinary commands that only mention the verb words (python heredocs, sed, brace groups; verified). Which hook design does b3 ship?"
+  options:
+    - {label: plan-design-plus-prepush, cost: "pre_tool_use.py returns to the plan's best-effort textual check (verb regex on code, tree from -C or a leading cd, fail closed on internal error, documented limits) and additionally blocks hook bypasses (--no-verify, -n, -c core.hooksPath=, GIT_CONFIG*); the git pre-push shim moves from S4 b11 into b3 and runs register + claims on every push however launched (S4 extends it with merge-readiness); about 600 hook lines and their tests are discarded; one implementer round, one review, D3 re-sync; the open classes the parser never closed (aliases, functions, payload files) are closed by the git hooks instead"}
+    - {label: plan-design-only, cost: "same cut of pre_tool_use.py, no pre-push shim until S4 b11 as the umbrella says; a push launched through a wrapper the regex does not see has no gate until then"}
+    - {label: keep-parser, cost: "a 6th fix round for W1-W3 under the current parser; the hook stays a 1020-line shell parser with a closed data-holder allowlist that every new tool or shell form must be added to; agents in this repository keep hitting FAIL hook.target on heredocs and sed that mention commit/push; later review rounds of the same shape are likely"}
+  asked_at: {sha: "151f2bb", by: session}
+  answer: "plan-design-plus-prepush (owner answered \"for DEC-0005 1 is good ... option 1 is good. being thorough is important\" in chat, 2026-10-18)"
+  answered_at: {sha: "151f2bb", by: superbrobenji}
+
+- id: DEC-0006
+  class: scope
+  question: "b3 final review F5: the git pre-push hook gates HEAD's working tree, not the ref being pushed, so `git push origin bad` from a clean main pushes a branch whose registers fail (reproduced by both final reviewers). Close it in b3 or hand it to S4 b11?"
+  options:
+    - {label: fix-in-b3, cost: "git-pre-push.sh reads the ref lines on stdin and refuses (FAIL pre-push.not-head) any pushed local sha that is neither HEAD nor the delete sha; about 6 lines, one fixture test through a real git push, D3 re-sync of the Task 7 block, README and docstring edit; one more fix-wave item before the b3 merge"}
+    - {label: register-for-S4, cost: "one finding row owned by S4 Task 5 (SD-S4-T5); pushes of non-HEAD refs stay locally ungated until b11; CI's gates job still gates every PR"}
+  asked_at: {sha: "151f2bb", by: session}
+  answer: "fix-in-b3 (owner answered \"for dec-0006 and 0007 do recommended\" in chat, 2026-10-18; the session had recommended fix-in-b3)"
+  answered_at: {sha: "151f2bb", by: superbrobenji}
+
+- id: DEC-0007
+  class: scope
+  question: "b3 final review F6: the S4 plan's Task 5 Step 5 still installs pre-push with `ln -sf` over the b3 shim, which makes every later install-hooks run refuse and SessionStart print FAIL hook.install (reproduced). DEC-0005 allowed one sentence in the S4 plan. May b3 edit the S4 plan now?"
+  options:
+    - {label: edit-S4-now, cost: "drop the ln -sf line and the test's os.symlink from S4 Task 5 Step 5 and point them at install-hooks.sh; a small S4 plan diff in the b3 fix wave"}
+    - {label: register-for-S4, cost: "one finding row owned by S4 Task 5 pre-flight; the contradiction stays in the S4 plan until b11 runs"}
+  asked_at: {sha: "151f2bb", by: session}
+  answer: "edit-S4-now (owner answered \"for dec-0006 and 0007 do recommended\" in chat, 2026-10-18; the session had recommended edit-S4-now)"
+  answered_at: {sha: "151f2bb", by: superbrobenji}

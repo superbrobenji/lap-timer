@@ -141,6 +141,7 @@ def check(args: list) -> Result:
     r = Result("register")
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
     exists = registers.memo_commit_exists()    # one git call per distinct sha
+    tracked = registers.memo_tracked()          # one git ls-files per gate run
 
     seen = set()
     for i, f in enumerate(findings):
@@ -157,7 +158,7 @@ def check(args: list) -> Result:
             continue
         for e in registers.transition_errors(f):
             r.fail(f"register.transition.{fid}", e)
-        for e in registers.evidence_errors(f, root, decisions) + registers.finding_commit_errors(f, root, exists):
+        for e in registers.evidence_errors(f, root, decisions, tracked=tracked) + registers.finding_commit_errors(f, root, exists):
             r.fail(f"register.evidence.{fid}", e)
     seen = set()
     for i, d in enumerate(decisions):

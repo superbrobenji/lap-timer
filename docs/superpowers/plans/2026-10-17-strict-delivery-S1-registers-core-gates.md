@@ -57,12 +57,12 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 221 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (234, 241) are expected values derived from that count, not yet run.
+Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2 (the evidence rule's files re-synced at the b3 final-review fix wave, note 13); the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion, and the empty `findings.yml`, which takes rows from b3 on: B3-S4PREPUSH-1) equal the matching lines of the live file. At b2 221 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines; the b3 fix wave adds three register tests (224 at Task 6). Tasks 7 and 8 bring the suite to 271 and 284 tests (run at the b3 final-review fix wave).
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
 1. **Package markers and one test helper not in the locked file list:** `tools/gates/__init__.py` and `tools/gates/tests/__init__.py` (empty; unittest discovery refuses a start dir that is not a package, see the facts table), and `tools/gates/tests/gitfixture.py` (throwaway git repos for tests). No `tools/__init__.py`: `tools` stays a namespace package, so the existing `tools-tests` invocations are untouched.
-2. **Additive helpers in `lib/__init__.py`:** `CODE_ROOT` (the checkout holding the gate code; config is read from here, never from `--root`, so fixture trees carry no config copy), `load_yaml(path, root=None)` (strict loader; with `root` every message names the file relative to it), `gate_args(prog)` (shared `--root`; `add_help=False`, `allow_abbrev=False`, `-h/--help` prints on stderr so `--json` stdout stays JSON), and `run_check(name, check, args) -> Result` (the fail-closed wrapper that both `run_gate` and `run_all.run` use). Additive helpers in `gitinfo.py`: `commit_exists(root, sha) -> bool`. Additive helpers in `registers.py`: `owner_errors`, `transition_errors`, `evidence_errors`, `finding_commit_errors`, `claim_commit_errors`, `decision_commit_errors`, `STATE_DIR`, `SEVERITIES`, the id regexes (ASCII digits only). In `gate_claims.py`: `verified_at_head(root, claim, head) -> bool`, for S2's `gate_dispatch`.
+2. **Additive helpers in `lib/__init__.py`:** `CODE_ROOT` (the checkout holding the gate code; config is read from here, never from `--root`, so fixture trees carry no config copy), `load_yaml(path, root=None)` (strict loader; with `root` every message names the file relative to it), `gate_args(prog)` (shared `--root`; `add_help=False`, `allow_abbrev=False`, `-h/--help` prints on stderr so `--json` stdout stays JSON), and `run_check(name, check, args) -> Result` (the fail-closed wrapper that both `run_gate` and `run_all.run` use). Additive helpers in `gitinfo.py`: `commit_exists(root, sha) -> bool`, `tracked_files(root) -> frozenset` (`git ls-files -s -z`, regular files only: mode 100644 or 100755; added at the b3 fix wave for the evidence rule). Additive helpers in `registers.py`: `owner_errors`, `transition_errors`, `evidence_errors`, `finding_commit_errors`, `claim_commit_errors`, `decision_commit_errors`, `STATE_DIR`, `SEVERITIES`, the id regexes (ASCII digits only). In `gate_claims.py`: `verified_at_head(root, claim, head) -> bool`, for S2's `gate_dispatch`.
 3. **"verified only if `verified_at == HEAD`" cannot be met literally.** A row committed in commit C cannot hold C's own sha, so a literal check fails every verified row at every HEAD. Implemented reading: a row is verified at HEAD when `state == verified` and no cited path differs between `verified_at` and HEAD, and none is staged. A cite ending in `/` covers its subtree. An unknown `verified_at` is a FAIL. This reading also covers spec §4.2's "a commit touching a cited file marks dependent rows stale": the gate fails until the row is marked or re-verified.
 4. **`grant_for(decisions, plan, *, owner=None)` counts only a schema-valid row answered `"yes"`** (case-insensitive) with `answered_at.by` equal to the owner (default: config `owner.handle`), and only an exact `grant:<plan>` question, or that question followed by a space. The umbrella says "answered"; read literally, an answer of "no" would grant a merge.
 5. **The umbrella's verbatim `config.yml` fails `ci.yml`'s stale-comment step** (`comment_patterns` contains `'later sessions?'`). Task 1 adds one allow entry, the minimum change, rather than altering the verbatim config.
@@ -72,6 +72,8 @@ Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
 10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
 11. **DEC-0002, DEC-0003 and DEC-0004** (DEC-0002 and DEC-0003 owner-delegated 2026-10-17, DEC-0004 answered by the owner directly in chat; each recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it. **DEC-0004** (owner answered "Yes, add the schema rule" in chat, 2026-10-17, at the b2 final review): every claim cite is a normalised repo-relative path that exists at `verified_at` (a directory only with a trailing `/`); see Task 4 and the state README.
+12. **DEC-0005** (owner answered "plan-design-plus-prepush" in chat, 2026-10-18, at the Task 8 review breaker; Task 8b): `pre_tool_use.py` is a best-effort textual check with documented limits (a verb behind an expansion, alias, function, `eval`, payload file or unseen wrapper is not gated by it), and it blocks hook bypasses (`--no-verify`, `-n`, `core.hooksPath`, `GIT_CONFIG_*`) with `FAIL hook.bypass`. The git hooks are the enforcement: the `pre-push` shim ships in b3 with register + claims (umbrella: S4), and S4 b11 extends `git-pre-push.sh` with merge-readiness.
+13. **DEC-0006 and DEC-0007** (owner answered "for dec-0006 and 0007 do recommended" in chat, 2026-10-18; b3 final-review fix wave): `git-pre-push.sh` reads the ref lines on stdin and refuses every pushed local sha whose commit is not HEAD, whatever the ref kind (`FAIL pre-push.not-head`; the answer text read literally, fix-wave round 2); the S4 plan's Task 5 Step 5 no longer installs pre-push with `ln -sf` (`install-hooks.sh` already installs the shim). The same wave makes an evidence path valid only when it names a file git tracks (F1, DEC-0004 paths; `git-pre-commit.sh --pre-push` gives the gates an index built from HEAD) and adds the bypass carriers `GIT`/`Git`, `GIT_CONFIG_*+=`, `HOME=`/`XDG_CONFIG_HOME=` and the leading `cd -- <dir>` / `cd <dir> ||` forms to `pre_tool_use.py`.
 
 ## Files (S1 creates or modifies exactly these)
 
@@ -91,7 +93,7 @@ Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config
 | `tools/gates/gate_claims.py`, `tools/gates/tests/test_gate_claims.py` | 4 | the claims gate |
 | `tools/gates/gate_decisions.py`, `tools/gates/tests/test_gate_decisions.py` | 5 | the decisions gate |
 | `tools/gates/run_all.py`, `tools/gates/tests/test_run_all.py`, `.github/workflows/gates.yml`, `tools/gates/README.md` | 6 | aggregation, CI job `gates`, docs |
-| `tools/gates/hooks/{pre_tool_use.py,git-pre-commit.sh}`, `tools/gates/install-hooks.sh`, `tools/gates/tests/test_hooks.py` | 7 | Bash gating, git hook |
+| `tools/gates/hooks/{pre_tool_use.py,git-pre-commit.sh,git-pre-push.sh}`, `tools/gates/install-hooks.sh`, `tools/gates/tests/test_hooks.py` | 7 | Bash gating, git hooks (`git-pre-push.sh`: Task 8b, DEC-0005) |
 | `tools/gates/hooks/{session_start.py,user_prompt_submit.py}`, `.claude/settings.json`, `CLAUDE.md`, `tools/gates/README.md` (Hooks section), `test_hooks.py` (more classes) | 8 | session hooks, wiring, overrides |
 | `~/.claude/skills/strict-delivery/SKILL.md`, `~/.claude/skills/strict-delivery/prompts/*.md` (8 files) | 9 | skill skeleton + prompt blocks (outside the repo; ledgered by sha256) |
 
@@ -1072,6 +1074,18 @@ def path_type(root, rev: str, path: str):
     return None
 
 
+REGULAR_MODES = ("100644", "100755")    # a symlink (120000) or a submodule (160000) is not a file
+
+
+def tracked_files(root) -> frozenset:
+    """Every regular file in the index of the repository at `root`, relative to `root`
+    (`git ls-files -s -z`: a staged new file included, a tracked symlink or submodule not; -z means
+    no C-quoting of non-ASCII paths)."""
+    out = _git(root, "ls-files", "-s", "-z")
+    entries = (l.partition("\t") for l in out.split("\0") if l)
+    return frozenset(path for meta, _, path in entries if meta.split(" ")[0] in REGULAR_MODES)
+
+
 def staged_files(root) -> list:
     out = _git(root, "diff", "--cached", "--name-only", "-z", "--no-renames")
     return [l for l in out.split("\0") if l]
@@ -1203,6 +1217,13 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   report path in `evidence`; `deferred` needs `ruling` = a valid, unique decision that the owner
   answered; `closed` needs evidence; `merged` is written only by the post-merge script
   (`by: postmerge`).
+- An evidence entry is a commit sha or a file git tracks at the repository root, written as a
+  normalised repo-relative path (DEC-0004: no leading `:`, no `..`, not absolute). Tracked means
+  in the index as a regular file (mode 100644 or 100755): a staged new file counts; an untracked
+  or ignored file (anything under the gitignored `.superpowers/`) does not, nor does a directory, a
+  tracked symlink or a submodule. A pinned row's `pin.transcript` must be tracked the same way.
+  `gate_register` fails any other entry (`register.evidence`), so the register reads the same on
+  every machine.
 - Every sha (history, cites, evidence entries shaped like a sha, `asked_at.sha`, `answered_at.sha`,
   `verified_at`) must name a commit of this repository: `gate_register` checks each with
   `git cat-file -e <sha>^{commit}` (decision DEC-0003). The registers name commits on `main`, so the
@@ -1223,7 +1244,12 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   writes an answer of its own. `asked_at.sha` / `answered_at.sha` are the `main` commit at the time the
   row was created/answered (a question asked before the register existed records the register's
   creating commit).
-- A git pre-commit hook that refuses a commit while this directory has unstaged edits arrives in block b3.
+- Two git hooks guard this directory (`tools/gates/install-hooks.sh` installs them). The
+  pre-commit hook refuses a commit while it has an unstaged edit or an untracked or ignored file
+  (`FAIL pre-commit.unstaged`); the pre-push hook refuses a push while it differs from HEAD, staged
+  changes included (`FAIL pre-push.uncommitted`), and a push of any commit, branch or tag, that is
+  not the checked-out HEAD (`FAIL pre-push.not-head`). A tree without the hook scripts can neither
+  commit (`FAIL pre-commit.missing`) nor push (`FAIL pre-push.missing`).
 ```
 
 `docs/superpowers/state/strict-delivery/ledger.md`:
@@ -1277,7 +1303,7 @@ git commit -m "feat(gates): gate framework, config, git helpers, register bootst
 
 **Interfaces:**
 - Consumes: `GateError`, `load_yaml`, `CODE_ROOT` (Task 1); `gitfixture.write`, `.remove`, `.STATE`.
-- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions, *, owner=None) -> list[dict]` (every decision the owner has not answered: `answer` is null, `answered_at` is not a mapping, or `answered_at.by` is not the owner; owner defaults to config `owner.handle`); `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions) -> list[str]` (call both only on a row with no schema errors), `row_id(row, index, pattern) -> str` (the id a result line prints: the row's own when well-formed, else `entry-<index>`), `memo_commit_exists() -> exists(root, sha)` (one `gitinfo.commit_exists` call per distinct root and sha), `PathError(GateError)` (message `<path relative to root>: <reason>`, with `.reason` and `.not_regular`), `rel_error(root, path, exc) -> PathError`, `require_regular(root, path)` (PathError unless a regular file; a FIFO would hang an open), `owner_handle(owner=None) -> str` (the owner, or config `owner.handle`), `safe_text(rel) -> str` (escapes control characters for a result-line id), `OWNER_ANSWER_ERROR` (the prefix of `validate_decision`'s non-owner-answer error, which is built from it), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
+- Produces (umbrella "Registers", verbatim): `FINDING_STATES`, `FINDING_TRANSITIONS`, `CLAIM_STATES`, `DECISION_CLASSES`, `OWNER_KINDS`; `load_findings(root) -> list[dict]`, `load_claims(root)`, `load_decisions(root)` (GateError on missing/empty/invalid/non-list); `validate_finding(f) -> list[str]`, `validate_claim(c)`, `validate_decision(d)` (each error is `"<field>: <problem>"`); `finding_by_id(findings, id) -> dict | None`; `open_decisions(decisions, *, owner=None) -> list[dict]` (every decision the owner has not answered: `answer` is null, `answered_at` is not a mapping, or `answered_at.by` is not the owner; owner defaults to config `owner.handle`); `grant_for(decisions, plan, *, owner=None) -> dict | None` (owner defaults to config `owner.handle`; the row must pass `validate_decision` and `answered_at.by` must be the owner). Additive: `owner_errors(owner) -> list[str]` (every message starts `owner: `), `transition_errors(f) -> list[str]` and `evidence_errors(f, root, decisions, owner=None, tracked=None) -> list[str]` (call both only on a row with no schema errors; an evidence path must be a normalised repo-relative path naming a file git tracks at `root`, in the index, as a regular file, so a staged new file counts and an untracked or ignored file or a tracked symlink does not; a pin transcript must be tracked the same way (b3 fix wave, F1, round 3 N1): `evidence: '<path>' is neither a commit sha nor a file tracked at the repo root`), `row_id(row, index, pattern) -> str` (the id a result line prints: the row's own when well-formed, else `entry-<index>`), `memo_commit_exists() -> exists(root, sha)` (one `gitinfo.commit_exists` call per distinct root and sha), `memo_tracked() -> tracked(root)` (one `gitinfo.tracked_files` call per distinct root; gate_register passes it to `evidence_errors`), `PathError(GateError)` (message `<path relative to root>: <reason>`, with `.reason` and `.not_regular`), `rel_error(root, path, exc) -> PathError`, `require_regular(root, path)` (PathError unless a regular file; a FIFO would hang an open), `owner_handle(owner=None) -> str` (the owner, or config `owner.handle`), `safe_text(rel) -> str` (escapes control characters for a result-line id), `OWNER_ANSWER_ERROR` (the prefix of `validate_decision`'s non-owner-answer error, which is built from it), `STATE_DIR`, `SEVERITIES`, `FINDING_ID`, `CLAIM_ID`, `DECISION_ID`, `SHA`, `POSTMERGE = "postmerge"`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1332,11 +1358,15 @@ def with_(row, **kw):
 class Loaders(unittest.TestCase):
     def test_bootstrapped_registers_are_valid(self):
         root = lib.CODE_ROOT
-        self.assertEqual([], reg.load_findings(root))
+        findings = reg.load_findings(root)     # the live register grows (B3-S4PREPUSH-1 at b3): every row valid
+        self.assertEqual([[]] * len(findings), [reg.validate_finding(f) for f in findings])
+        self.assertEqual([], [e for f in findings for e in reg.transition_errors(f)])
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0004"], [d["id"] for d in decisions])
-        self.assertEqual([[], [], [], []], [reg.validate_decision(d) for d in decisions])
+        ids = [d["id"] for d in decisions]       # the live register grows (DEC-0005 at b3): pin the order, not a count
+        self.assertEqual(["DEC-%04d" % n for n in range(1, len(ids) + 1)], ids)
+        self.assertLessEqual(4, len(ids))
+        self.assertEqual([[]] * len(ids), [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -1432,8 +1462,10 @@ class Transitions(unittest.TestCase):
 class Evidence(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="gate-ev-")
+        gf.git(self.root, "init", "-q")
         gf.write(self.root, MUT + "T1-PIN-1.txt", "finding: T1-PIN-1\n")
         gf.write(self.root, "st/demo/review/T1.md", "status: DONE\n")
+        gf.git(self.root, "add", "-A")     # an evidence file must be tracked: staged counts
 
     def tearDown(self):
         gf.remove(self.root)
@@ -1460,8 +1492,25 @@ class Evidence(unittest.TestCase):
                       reg.evidence_errors(self.pinned(evidence=["bbbbbbb"]), self.root, []))
 
     def test_evidence_entries_must_exist(self):
-        self.assertIn("evidence: 'st/nope.md' is neither a commit sha nor a file under the repo root",
+        self.assertIn("evidence: 'st/nope.md' is neither a commit sha nor a file tracked at the repo root",
                       reg.evidence_errors(self.pinned(evidence=["st/nope.md"]), self.root, []))
+
+    def test_evidence_files_must_be_tracked_by_git(self):                                # b3 F1
+        tracked = "evidence: {!r} is neither a commit sha nor a file tracked at the repo root"
+        gf.write(self.root, "notes/r.md", "untracked\n")
+        gf.write(self.root, ".gitignore", "ignored/\n")
+        gf.write(self.root, "ignored/r.md", "ignored\n")
+        for p in ("notes/r.md", "ignored/r.md", "st/demo/review", "st/demo/review/", "./st/demo/review/T1.md",
+                  "st//demo/review/T1.md", ":st/demo/review/T1.md", "st/demo/review/*.md", "ST/demo/review/T1.md"):
+            errs = reg.evidence_errors(self.pinned(evidence=[p]), self.root, [])
+            self.assertIn(tracked.format(p), errs, p)
+            self.assertIn("evidence: pinned needs the reviewer's confirming report path in evidence", errs, p)
+        self.assertEqual([], reg.evidence_errors(self.pinned(), self.root, []))      # staged, never committed
+        gf.git(self.root, "commit", "-q", "-m", "x")
+        gf.write(self.root, "st/demo/review/T1.md", "modified\n")                        # tracked and modified
+        self.assertEqual([], reg.evidence_errors(self.pinned(), self.root, []))
+        gf.git(self.root, "rm", "-q", "--cached", "st/demo/review/T1.md")               # removed from the index, left on disk
+        self.assertIn(tracked.format("st/demo/review/T1.md"), reg.evidence_errors(self.pinned(), self.root, []))
 
     def test_evidence_paths_cannot_escape_the_repo_root(self):
         outside = os.path.join(os.path.dirname(self.root), os.path.basename(self.root) + "-out.md")
@@ -1469,7 +1518,7 @@ class Evidence(unittest.TestCase):
             fh.write("x\n")
         self.addCleanup(os.remove, outside)
         for p in ("../" + os.path.basename(outside),):
-            self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file under the repo root",
+            self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file tracked at the repo root",
                           reg.evidence_errors(self.pinned(evidence=[p]), self.root, []), p)
         escaped = {"test": "test_x", "transcript": MUT + "../../../../../" + os.path.basename(outside)}
         self.assertIn(f"evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, got {escaped['transcript']!r}",
@@ -1484,7 +1533,7 @@ class Evidence(unittest.TestCase):
         self.assertIn("evidence: pin transcript: must be relative to the repo root", errs)
         self.assertFalse(any("does not exist" in e for e in errs), errs)
         nul = "st/a\0b.md"
-        self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
+        self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file tracked at the repo root",
                       reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
         bad = {"test": "test_x", "transcript": MUT + "a\0b.txt"}
         self.assertIn(f"evidence: pin transcript {MUT}a\0b.txt does not exist",
@@ -1726,6 +1775,8 @@ class FixWave(unittest.TestCase):
         gf.write(root, "README.md", "x\n")
         gf.write(root, MUT + "T1-PIN-1.txt", "t\n")
         gf.write(root, "docs/superpowers/state/demo/review/T1.md", "r\n")
+        gf.git(root, "init", "-q")
+        gf.git(root, "add", "-A")
         base = with_(FINDING, state="pinned", evidence=["docs/superpowers/state/demo/review/T1.md"],
                      history=[{"state": s, "sha": "aaaaaaa", "by": "x"}
                               for s in ("open", "planned", "in-progress", "pinned")])
@@ -1996,6 +2047,16 @@ def _file_under(root, rel) -> bool:
         return False
 
 
+def _tracked_under(root, rel, tracked) -> bool:
+    """True when `rel` is a normalised repo-relative path (DEC-0004: no leading ':', no '..', not
+    absolute) naming a regular file inside `root` that git tracks there as a regular file (in the
+    index with mode 100644 or 100755, so a staged new file counts and an untracked or ignored
+    file, a tracked symlink or a submodule does not): the register reads the same on every
+    machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
+    return (isinstance(rel, str) and cite_problem(rel) == "" and not rel.endswith("/")
+            and _file_under(root, rel) and rel in tracked(root))
+
+
 def owner_errors(owner) -> list:
     """`{kind: plan, plan, task}` | `{kind: issue, number}` | `{kind: roadmap, plan}`."""
     if owner is None:
@@ -2088,14 +2149,18 @@ def transition_errors(f: dict) -> list:
     return errs
 
 
-def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
-    """What each state must carry (spec §4.1). Call only on a valid row."""
+def evidence_errors(f: dict, root, decisions: list, owner=None, tracked=None) -> list:
+    """What each state must carry (spec §4.1). Call only on a valid row. An evidence path must be
+    a file git tracks at `root` (_tracked_under); `tracked(root)` defaults to
+    gitinfo.tracked_files."""
+    tracked = gitinfo.tracked_files if tracked is None else tracked
     errs = []
     for e in f["evidence"]:
         if not _sha(e) and os.path.isabs(e):
             errs.append(f"evidence: path must be relative to the repo root: {e!r}")
-        elif not _sha(e) and not _file_under(root, e):
-            errs.append(f"evidence: {e!r} is neither a commit sha nor a file under the repo root")
+        elif not _sha(e) and not _tracked_under(root, e, tracked):
+            errs.append(f"evidence: {e!r} is neither a commit sha nor a file tracked at the "
+                        "repo root")
     states = [h["state"] for h in f["history"]]
     if "pinned" in states:
         pin = f["pin"]
@@ -2111,7 +2176,10 @@ def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
                             f"got {pin['transcript']!r}")
             elif not _file_under(root, pin["transcript"]):
                 errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
-        if not any(not _sha(e) and _file_under(root, e) for e in f["evidence"]):
+            elif not _tracked_under(root, pin["transcript"], tracked):
+                errs.append(f"evidence: pin transcript {pin['transcript']} is not a file tracked "
+                            "at the repo root")
+        if not any(not _sha(e) and _tracked_under(root, e, tracked) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":
         matches = [x for x in decisions if x.get("id") == f["ruling"]]
@@ -2291,6 +2359,20 @@ def memo_commit_exists():
     return exists
 
 
+def memo_tracked():
+    """A `tracked(root) -> frozenset` for evidence_errors that runs `git ls-files` once per distinct
+    root (a GateError is not remembered)."""
+    seen = {}
+
+    def tracked(root):
+        key = str(root)
+        if key not in seen:
+            seen[key] = gitinfo.tracked_files(root)
+        return seen[key]
+
+    return tracked
+
+
 def finding_commit_errors(f: dict, root, exists=gitinfo.commit_exists) -> list:
     """Every sha in a (valid) finding row -- history, cites, evidence entries shaped like a sha --
     must name a commit in the repository at `root` (DEC-0003). `exists(root, sha) -> bool`."""
@@ -2351,13 +2433,13 @@ def grant_for(decisions, plan: str, *, owner=None):
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_registers -v && python3 -m unittest discover -s tools/gates/tests -t .`
-Expected: `Ran 53 tests` OK; whole suite `Ran 92 tests` OK.
+Expected: `Ran 54 tests` OK; whole suite `Ran 93 tests` OK.
 
 Mutation check: in `transition_errors`, delete the `for a, b in zip(states, states[1:]):` loop (three lines). `test_every_illegal_edge_fails` must fail (an IndexError on the empty error list counts). Restore and run again: OK. Then in `grant_for`, replace `ans.strip().lower() == "yes"` with `True` (accept any answer). `test_grant_needs_an_exact_plan_and_a_yes` must fail. Restore.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 53 OK` to the ledger.
+Append `- T2 feat(gates): register loaders, schema validators and lifecycle rules -- test_registers 54 OK` to the ledger (the live ledger's b1 T2 line carries the historical first-pass count; this is what a fresh execution of the re-synced plan gives).
 
 ```bash
 git add tools/gates/lib/registers.py tools/gates/tests/test_registers.py docs/superpowers/state/strict-delivery/ledger.md
@@ -2612,6 +2694,7 @@ def fixture_repo(case):
                 text = fh.read()
             gf.write(root, os.path.relpath(os.path.join(dirpath, name), top),
                      text.replace("aaaaaaa", first).replace("bbbbbbb", second))
+    gf.git(root, "add", "-A")      # staged: an evidence file must be tracked (b3 F1)
     return root
 
 
@@ -3124,6 +3207,65 @@ class FixWave(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertFalse(os.path.exists(os.path.join(root, "docs", "superpowers", "state", "briefs")))
 
+    # b3 F1 -- an evidence path must be a file git tracks: an untracked or ignored one fails
+    def test_an_evidence_file_must_be_tracked(self):
+        row = findings_text(owner="{kind: issue, number: 2}", evidence="[notes/r.md]")
+        rc, out, root = self.gate(registers={"findings": row}, files={".gitignore": "ignored/\n"})
+        self.assertEqual(1, rc)
+        missing = "FAIL register.evidence.T1-ORPHAN-1: evidence: 'notes/r.md' is neither a commit sha nor a file tracked at the repo root\n"
+        self.assertIn(missing, out)
+        row = row.replace("aaaaaaa", gf.git(root, "rev-parse", "--short=7", "HEAD"))   # a commit of this repo
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row)
+        gf.write(root, "notes/r.md", "untracked\n")
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertIn(missing, out)
+        self.assertNotIn("PASS register.evidence", out)
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row.replace("notes/r.md", "ignored/r.md"))
+        gf.write(root, "ignored/r.md", "ignored\n")
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertIn(missing.replace("notes/r.md", "ignored/r.md"), out)
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row)
+        gf.commit_all(root)
+        rc, out = main_out(root)
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS register.evidence\n", out)
+
+    # b3 re-review N1, N2 -- a tracked symlink is not a tracked file; a tracked name that is not a DEC-0004 path fails
+    def test_a_tracked_symlink_or_an_unnormalised_name_is_not_evidence(self):
+        root = fixture_repo("valid")
+        self.addCleanup(gf.remove, root)
+        self.assertEqual(0, main_out(root)[0])                     # the regular files: PASS
+        gf.write(root, ".gitignore", "ignored/\n")
+        gf.write(root, "ignored/r.md", "ignored\n")
+        for rel in ("docs/superpowers/state/demo/review/T1-PIN-1.md", "docs/superpowers/state/demo/mutations/T1-PIN-1.txt"):
+            os.remove(os.path.join(root, rel))
+            os.symlink(os.path.relpath(os.path.join(root, "ignored", "r.md"), os.path.dirname(os.path.join(root, rel))),
+                       os.path.join(root, rel))
+        gf.git(root, "add", "-A")
+        self.assertIn("120000", gf.git(root, "ls-files", "-s", "docs/superpowers/state/demo"))
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.evidence.T1-PIN-1: evidence: 'docs/superpowers/state/demo/review/T1-PIN-1.md' "
+                      "is neither a commit sha nor a file tracked at the repo root\n", out)
+        self.assertIn("FAIL register.evidence.T1-PIN-1: evidence: pin transcript "
+                      "docs/superpowers/state/demo/mutations/T1-PIN-1.txt is not a file tracked at the repo root\n", out)
+        self.assertIn("FAIL register.evidence.T1-PIN-1: evidence: pinned needs the reviewer's confirming report path "
+                      "in evidence\n", out)
+        # a tracked file whose name is not a normalised repo-relative path (DEC-0004)
+        sha = gf.git(root, "rev-parse", "--short=7", "HEAD")
+        for name in (":r.md", " r.md"):
+            gf.write(root, name, "x\n")
+            gf.git(root, "add", "--", ":(literal)" + name)
+            gf.git(root, "ls-files", "--error-unmatch", "--", ":(literal)" + name)    # tracked (raises if not)
+            row = findings_text(owner="{kind: issue, number: 2}", evidence='["%s"]' % name).replace("aaaaaaa", sha)
+            gf.write(root, os.path.join(gf.STATE, "findings.yml"), row)
+            rc, out = main_out(root)
+            self.assertEqual(1, rc, name)
+            self.assertIn("FAIL register.evidence.T1-ORPHAN-1: evidence: %r is neither a commit sha nor a file tracked "
+                          "at the repo root\n" % name, out)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -3282,6 +3424,7 @@ def check(args: list) -> Result:
     r = Result("register")
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
     exists = registers.memo_commit_exists()    # one git call per distinct sha
+    tracked = registers.memo_tracked()          # one git ls-files per gate run
 
     seen = set()
     for i, f in enumerate(findings):
@@ -3298,7 +3441,7 @@ def check(args: list) -> Result:
             continue
         for e in registers.transition_errors(f):
             r.fail(f"register.transition.{fid}", e)
-        for e in registers.evidence_errors(f, root, decisions) + registers.finding_commit_errors(f, root, exists):
+        for e in registers.evidence_errors(f, root, decisions, tracked=tracked) + registers.finding_commit_errors(f, root, exists):
             r.fail(f"register.evidence.{fid}", e)
     seen = set()
     for i, d in enumerate(decisions):
@@ -3344,8 +3487,8 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .           # Ran 134 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 44 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .           # Ran 137 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
 ```
@@ -3356,7 +3499,7 @@ Mutation check (report scan): in `registered_reports`, replace `if MARKER in att
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T3 feat(gates): gate_register -- test_gate_register 42 OK; suite 134 OK; gate_register at HEAD 6 PASS` to the ledger.
+Append `- T3 feat(gates): gate_register -- test_gate_register 44 OK; suite 137 OK; gate_register at HEAD 6 PASS` to the ledger (the live ledger's b1 T3 line carries the historical first-pass counts; this is what a fresh execution of the re-synced plan gives).
 
 ```bash
 git add tools/gates/gate_register.py tools/gates/tests/test_gate_register.py tools/gates/tests/fixtures docs/superpowers/state/strict-delivery/ledger.md
@@ -4921,7 +5064,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 24 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 221 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 224 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
@@ -5033,7 +5176,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 221 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 224 OK; run_all 15 PASS` to the ledger (the live ledger's b2 T6 line carries its own executions' counts, 198 and 221 after round 3; the b3 fix wave added three register tests).
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -5193,16 +5336,16 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 ### Task 7: `pre_tool_use.py` (Bash branch), git pre-commit, `install-hooks.sh`
 
 **Files:**
-- Create: `tools/gates/hooks/pre_tool_use.py`, `tools/gates/hooks/git-pre-commit.sh`, `tools/gates/install-hooks.sh`
+- Create: `tools/gates/hooks/pre_tool_use.py`, `tools/gates/hooks/git-pre-commit.sh`, `tools/gates/hooks/git-pre-push.sh` (Task 8b, DEC-0005), `tools/gates/install-hooks.sh`
 - Test: `tools/gates/tests/test_hooks.py` (classes `PreToolUse`, `GitHooks`; Task 8 adds more)
 
 **Interfaces:**
 - Consumes: `run_all.run(names, {"root": <toplevel>}) -> Result` (Task 6); the hook protocol in the umbrella (stdin JSON: `tool_name`, `tool_input.command`, `cwd`; exit 2 + stderr to block; exit 0 silent to allow).
-- Produces: `pre_tool_use.py`. `Bash` event whose command contains `git [opts] commit` or `git [opts] push` → `run_all.run(["register", "claims"], {"root": git toplevel of cwd})`. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `GIT_VERB`, `GATED`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses unstaged edits under `docs/superpowers/state` (`FAIL pre-commit.unstaged`); then `run_all.py --only register,claims`. `install-hooks.sh`: writes the marked shim to `$(git rev-parse --git-path hooks)/pre-commit` and moves a foreign hook to `pre-commit.pre-strict-delivery`. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing`.
+- Produces: `pre_tool_use.py` (owner decision DEC-0005, Task 8b: a best-effort textual check; the git hooks are the enforcement). `Bash` event: a hook bypass -- `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`, `_SYSTEM` or `_NOSYSTEM` assignment (`=` or `+=`) anywhere in the command, a `HOME` or `XDG_CONFIG_HOME` assignment (`=` or `+=`, `env HOME=...` too) before a gated verb, or `--no-verify` (also `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding n in the arguments of a gated verb, quoted (`git "push"`) or not (`arguments_end`: up to an unquoted separator outside every parenthesis the arguments open, or an unpaired `)`, quote or backtick, so the rest of an enclosing `$(...)` is not read; quotes, `$'...'`, `${...}`, backticks, `$(...)`, `<(...)`, `>(...)`, `$((...))` at any depth and `>&`, `<&`, `&>`, `>|` do not end them; the flag may stand before `)`, a backtick, a redirection or a separator; every gated verb gets its own argument scan, so a verb mentioned in a quoted string, a heredoc or a comment never hides a later verb's flag) -- → `FAIL hook.bypass: <form>`, exit 2, before any gate runs. `git [opts] commit|push` matched in the text wherever it stands (quotes, heredocs and comments included; a path-qualified git word; the git word in any case; any prefix), the options (git 2.50.1's global options; values may hold `$(...)` or backticks) read left to right as git reads them → `run_all.run(["register", "claims"], {"root": <toplevel>})` once per tree named: each `-C <dir>` applied in turn from a leading `cd <dir>` or `cd -- <dir>` (followed by `&&`, `||`, `;` or a newline) or the event's `cwd`; a directory outside a repository → `FAIL hook.target: <dir>: <git stderr>`; a missing `cwd` → `FAIL hook.input`. The documented limits (a verb behind an expansion, alias, function, `eval`, a payload file or a wrapper the regex does not see; a quoted piece in the git word or the verb; a tree changed by a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`/`--work-tree`) are gated by the git hooks. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `git_calls(command) -> list[(options, verb, verb_end)]`, `bypass(command, calls) -> str | None`, `dq_closes(command) -> list[int]`, `arguments_end(command, pos, seen=None, closes=None) -> (end, more)`, `tree_for(event, command, options="") -> str`, `GIT_VERB`, `GATED`, `BYPASS`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); with `--pre-push` it also refuses staged changes there, because a push sends HEAD (`FAIL pre-push.uncommitted`), and runs the gates with an index built from HEAD; then `run_all.py --only register,claims` (an evidence file is gated by the register itself: tracked only, DEC-0004 paths). `git-pre-push.sh` (DEC-0006): ignores its `<remote> <url>` arguments, reads the ref lines on stdin, peels each pushed local sha to a commit and refuses it unless that commit is HEAD, whatever the ref kind: a branch, `bad~0:refs/heads/y`, `<sha>:refs/heads/z`, a tag of an older commit, an object that is not a commit (`FAIL pre-push.not-head: <local ref> (<sha7>) is not the checked-out HEAD; check it out and push from it, so the gates see its tree`); `HEAD:refs/heads/x`, a tag of HEAD (annotated or lightweight) and a delete pass; from an unborn HEAD only deletes pass (`... pushed from an unborn HEAD`) and no gate runs; then runs `git-pre-commit.sh --pre-push` (S4 extends it with merge-readiness). `install-hooks.sh`: checks both hooks, then writes the marked shims `pre-commit` and `pre-push` to `$(git rev-parse --git-path hooks)/` and moves a foreign hook, or any symlink (the link itself), to `<hook>.pre-strict-delivery`; an existing backup is never overwritten and then nothing is installed. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing` / `FAIL pre-push.missing`.
 
 - [ ] **Step 1: Write the failing tests**
 
-`tools/gates/tests/test_hooks.py`:
+`tools/gates/tests/test_hooks.py` (its `new_repo()` helper adds the empty `docs/reviews/` directory `gate_register` requires, because `gitfixture.new_repo` stays bare for `test_gate_register`'s missing-directory FAIL; `isolated_env()` keeps the developer's global git config out of the fixtures (`hook()` runs every hook under it, so the SessionStart tests of Task 8 are isolated too); the option cases in `test_push_with_options_is_gated_too` pin quoted, escaped, continued and separate-word option values; the pre-push tests push to a `git init --bare` remote and check whether it received the ref):
 
 ```python
 #!/usr/bin/env python3
@@ -5210,11 +5353,15 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 runs as a subprocess with a JSON event on stdin -- the way Claude Code runs it. Run from the repo
 root: python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 
 from tools.gates.tests import gitfixture as gf
@@ -5238,16 +5385,33 @@ ORPHAN = """- id: T1-ORPHAN-1
 
 
 def hook(script, event, hooks_dir=HOOKS):
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env = isolated_env()    # defined below: a hook that runs git or install-hooks.sh on a fixture must not read the developer's git config
     raw = event if isinstance(event, str) else json.dumps(event)
     return subprocess.run([sys.executable, os.path.join(hooks_dir, script)], input=raw,
-                          capture_output=True, text=True, env=env, check=False)
+                          capture_output=True, text=True, env=env, check=False, timeout=20)   # a stalled hook is an error
 
 
 def bash_event(root, command):
     return {"session_id": "s", "transcript_path": "/dev/null", "cwd": root, "permission_mode": "default",
             "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "t",
             "tool_input": {"command": command, "description": "d"}}
+
+
+def new_repo():
+    """gitfixture.new_repo plus the empty docs/reviews directory gate_register requires (a missing
+    one is FAIL register.input); gitfixture.new_repo stays bare because test_gate_register pins that."""
+    root = gf.new_repo()
+    os.makedirs(os.path.join(root, "docs", "reviews"))
+    return root
+
+
+def isolated_env(**extra):
+    """The environment for git and install calls on a fixture: no CLAUDE_PROJECT_DIR, and neither the
+    developer's global nor system git config (core.hooksPath, gpgsign, templates) reaches the fixture."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    env.update(extra)
+    return env
 
 
 def copy_gates(dst):
@@ -5258,10 +5422,21 @@ def copy_gates(dst):
 
 class PreToolUse(unittest.TestCase):
     def setUp(self):
-        self.root = gf.new_repo()
+        self.root = new_repo()
+        self.spaced = os.path.join(self.root, "a b")    # a directory name with a space, inside the failing repo
+        os.makedirs(self.spaced)
 
     def tearDown(self):
         gf.remove(self.root)
+
+    def assert_gated(self, cmd, root=None):
+        p = hook("pre_tool_use.py", bash_event(root or self.root, cmd))
+        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd[:80])
+
+    def assert_silent(self, cmd, root=None):
+        p = hook("pre_tool_use.py", bash_event(root or self.root, cmd))
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd[:80])
 
     def test_commit_on_a_failing_register_is_blocked(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
@@ -5275,19 +5450,264 @@ class PreToolUse(unittest.TestCase):
         p = hook("pre_tool_use.py", bash_event(self.root, "cd . && git -C . --no-pager push origin HEAD"))
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr)
+        for cmd in ('git -C "%s" commit -m x' % self.spaced, "git -c 'a=b c' push",       # quoted values
+                    "git -C . \\\n  commit -m x",               # backslash-newline continuation
+                    "git -C %s commit -m x" % self.spaced.replace(" ", "\\ "),   # escaped space
+                    "git --config-env a=B commit", '"git" commit -m x', "'git' push",
+                    "git ${X} commit -m x", "git $X push",      # unexpandable option word: gated conservatively
+                    "git p\\\nush", "git --git-dir=.git --work-tree . -p --bare --exec-path --literal-pathspecs push",
+                    "git --namespace n --no-replace-objects --no-optional-locks --html-path -c x.y=\"a b\" commit",
+                    "git --shallow-file x --attr-source=HEAD --no-literal-pathspecs --glob-pathspecs --no-advice push"):
+            self.assert_gated(cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
         self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
 
+    def test_a_verb_that_only_shares_a_prefix_is_not_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("git commit-graph write", "git push-to-checkout x", "git commits", "git pushd",
+                    "git --push-option x", "git stash push -m x", "git -C . log --grep commit"):
+            self.assert_silent(cmd)
+
+    def test_the_tree_named_by_dash_C_or_cd_is_the_one_gated(self):
+        bad = new_repo()
+        self.addCleanup(gf.remove, bad)
+        gf.write(bad, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        # failing tree named from a clean cwd: blocked
+        for cmd in ("git -C %s commit -m x" % bad, "cd %s && git push" % bad, "cd '%s'; git commit -m x" % bad,
+                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root)),
+                    "cd %s\ngit push" % bad, "cd %s && git -C %s push" % (os.path.dirname(bad), os.path.basename(bad)),
+                    "cd %s || exit 1; git push" % bad, "cd -- %s && git push" % bad, "cd -- '%s' || return; git commit" % bad):
+            self.assert_gated(cmd)
+        # clean tree named from a failing cwd: passes
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        clean = new_repo()
+        self.addCleanup(gf.remove, clean)
+        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean,
+                    "cd %s && git -C %s push" % (os.path.dirname(clean), os.path.basename(clean)),
+                    "cd %s || exit 1; git push" % clean, "cd -- %s && git push" % clean):
+            self.assert_silent(cmd)
+        # a relative -C resolves against the event cwd
+        p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
+        self.assertEqual(0, p.returncode, p.stderr)
+
+    def test_two_trees_are_each_gated_once(self):
+        one, two = new_repo(), new_repo()
+        self.addCleanup(gf.remove, one)
+        self.addCleanup(gf.remove, two)
+        gf.write(one, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.write(two, os.path.join(gf.STATE, "findings.yml"), ORPHAN.replace("T1-ORPHAN-1", "T1-ORPHAN-2"))
+        p = hook("pre_tool_use.py", bash_event(self.root, "git -C %s commit -m x && git -C %s push" % (one, two)))
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-1:"), p.stderr)
+        self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-2:"), p.stderr)
+        for cmd in ("git commit -m x && git push && git -C . push",       # one tree, three calls
+                    "git -C docs commit -m x && git push"):               # one tree named by two directories
+            p = hook("pre_tool_use.py", bash_event(one, cmd))
+            self.assertEqual(2, p.returncode, p.stderr)
+            self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-1:"), (cmd, p.stderr))
+        p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m x; git -C %s push" % two))   # clean cwd, failing two
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertEqual(["FAIL register.owner.T1-ORPHAN-2"], [l.split(":")[0] for l in p.stderr.splitlines()
+                                                              if l.startswith("FAIL")])
+
+    def test_documented_limits_are_not_gated(self):
+        # DEC-0005: the git hooks gate these (pre-commit for commits, pre-push for pushes)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("G=git; $G push", "git $V", 'eval "$CMD"', "bash script-that-pushes.sh",
+                    "echo push | xargs git", "xargs -a verbs.txt /usr/bin/git", 'g"it" push', "git p\"ush\"",
+                    "alias gp='git p''ush'; gp"):
+            self.assert_silent(cmd)
+
+    def test_a_mention_in_data_runs_the_gates(self):
+        cmds = ('echo "git push"', "python3 - <<'EOF'\nprint('then git commit the change')\nEOF",
+                "grep -rn 'git push' docs", "echo hi # git push", "cat <<'EOF'\ngit push\nEOF")
+        for cmd in cmds:
+            self.assert_silent(cmd)          # a clean register: the gates run and pass, nothing printed
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in cmds:
+            self.assert_gated(cmd)
+
+    def test_path_qualified_git_and_prefixes_are_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push",
+                    "echo hi && git push", "echo hi; git push", "true || git commit -m x", "ls | git commit -m x",
+                    "echo hi\ngit push", "x=$(git commit -m y)", "echo `git push`", "(git push)", "{ git push; }",
+                    "if git push; then echo ok; fi", "A=1 " * 13 + "git push", "FOO=" + "x" * 300 + " git push"):
+            self.assert_gated(cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log",
+                    "my-git push", "x.git push"):
+            self.assert_silent(cmd)
+
+    def test_hook_bypasses_are_blocked(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd, form in (("git commit --no-verify -m x", "--no-verify after a gated git verb"),
+                          ("git commit -m x --no-verif", "--no-verif after"), ("git push --no-veri", "--no-veri after"),
+                          ("git commit -n -m x", "-n after"), ("git commit -anm x", "-anm after"),
+                          ("git push -n origin HEAD", "-n after"), ("git push --no-verify origin", "--no-verify after"),
+                          ("git commit -m 'a; b' --no-verify", "--no-verify after"),
+                          ("git commit -m x \"-n\"", "-n after"), ("git add f && git commit -qn -m x", "-qn after"),
+                          ("git -c core.hooksPath=/dev/null commit -m x", "core.hooksPath"),
+                          ("git --config-env=core.hooksPath=H commit -m x", "core.hooksPath"),
+                          ("git config core.hooksPath /tmp/h", "core.hooksPath"),
+                          ("git -c CORE.HOOKSPATH=x push", "core.hooksPath"),
+                          ("GIT_CONFIG_PARAMETERS=\"'a.b'='c'\" git push", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=a.b GIT_CONFIG_VALUE_0=c git push", "GIT_CONFIG_* assignment"),
+                          ("env GIT_CONFIG_GLOBAL=/tmp/g git commit -m x", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_SYSTEM=/x git push", "GIT_CONFIG_* assignment"),
+                          ("export GIT_CONFIG_NOSYSTEM=1; git push", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_KEY_0=a.b ls", "GIT_CONFIG_* assignment"),
+                          # a flag before `)`, a backtick or a redirection; `>&`, `&>` and `$(...;...)` inside the command
+                          ("(git commit -m x --no-verify)", "--no-verify after"), ("out=$(git push --no-verify)", "--no-verify after"),
+                          ("out=`git push -n`", "-n after"), ("git commit -m x 2>&1 --no-verify", "--no-verify after"),
+                          ("git commit -m x &>/dev/null --no-verify", "--no-verify after"),
+                          ("git commit -m x --no-verify>/dev/null", "--no-verify after"), ("git push -n</dev/null", "-n after"),
+                          ("git commit -m $(date; true) --no-verify", "--no-verify after"),
+                          ("git push >&2 --no-verify", "--no-verify after"), ("git commit -m x --no-verify;", "--no-verify after"),
+                          # `>|` and process substitutions holding `;` keep the arguments; a flag right before the `)` of $(...)
+                          ("git push >|out --no-verify", "--no-verify after"), ("git push >| out -n", "-n after"),
+                          ("git push 2>|out --no-verify", "--no-verify after"), ("git push <(echo; echo) --no-verify", "--no-verify after"),
+                          ("git push >(cat; cat) -n", "-n after"), ("x=$(git commit -m y --no-verify; ls)", "--no-verify after"),
+                          ("git commit -m `date` -n", "-n after"), ("git commit -m x; git push -n", "-n after"),
+                          # a quoted verb; nested substitutions and arithmetic in the arguments (depth is counted)
+                          ('git "commit" --no-verify', "--no-verify after"), ("git 'push' -n", "-n after"),
+                          ('git "commit" -m "x" --no-verify', "--no-verify after"), ('git "push" origin --no-verify', "--no-verify after"),
+                          ('git --no-pager "push" -n', "-n after"), ("git commit -m x $(echo $(date)) --no-verify", "--no-verify after"),
+                          ("git push origin $(git rev-parse $(echo HEAD)) -n", "-n after"), ("git push $((1+2)) -n", "-n after"),
+                          ("git push $(( (1+2)*3 )) -n", "-n after"), ("git push $(echo `date`) -n", "-n after"),
+                          ("git push `echo $(date)` -n", "-n after"), ("git push <(cat <(echo)) -n", "-n after"),
+                          ("git push $(echo ')') -n", "-n after"), ("(git push $(echo) -n)", "-n after"),
+                          ("$(git push $(echo) -n)", "-n after"), ("x=$(git push --no-verify 2>&1)", "--no-verify after"),
+                          # quoting forms in the arguments
+                          ("git commit -m 'a b' -n", "-n after"), ("git commit -m $'a\\'b' -n", "-n after"),
+                          ('git commit -m "a\\"b" -n', "-n after"), ('git commit -m "$(echo ")")" -n', "-n after"),
+                          ('git commit -m "$(echo $(date))" -n', "-n after"), ('git commit -m "`date`" -n', "-n after"),
+                          ("git commit -m ${x:-y} -n", "-n after"), ("git commit -m ${x:-)} -n", "-n after"), ('git commit -m "${x:-)}" -n', "-n after"),
+                          ("git commit -m x \\; -n", "-n after"), ("git commit -m 'x;y' -n", "-n after"),
+                          ('git commit -m "x|y" -n', "-n after"), ("{ git push -n; }", "-n after"),
+                          # redirections
+                          ("git push 2>/dev/null -n", "-n after"), ("git push &>>log -n", "-n after"), ("git push >>log -n", "-n after"),
+                          ("git push 0<&- -n", "-n after"), ("git push <<<x -n", "-n after"), ("git push 3<>f -n", "-n after"),
+                          # option values with substitutions and the rest of git's global options are read
+                          ("git -C $(pwd) commit -m x --no-verify", "--no-verify after"), ("git -C `pwd` push -n", "-n after"),
+                          ("git --shallow-file x commit --no-verify", "--no-verify after"),
+                          ("git --no-literal-pathspecs push --no-verify", "--no-verify after"),
+                          # a verb mentioned in quotes, a heredoc or a comment does not hide a later real verb's flag
+                          ('echo "git push"; git commit -m "x" --no-verify', "--no-verify after"),
+                          ('echo "git push" && git push origin "main" -n', "-n after"),
+                          ("printf '%s' 'git commit'; git push 'origin' --no-verify", "--no-verify after"),
+                          ("echo 'git push'; git commit -m 'x' -n", "-n after"),
+                          ("echo $'git push' || git commit -m \"it's\" --no-verify", "--no-verify after"),
+                          ('echo "git push \'" | git push \'origin\' -n', "-n after"),
+                          ("x='git commit \"'\ngit push \"origin\" -n", "-n after"),
+                          ("cat <<'EOF'\ngit push \"x\nEOF\ngit commit -m \"y\" -n", "-n after"),
+                          ("# don't git push\ngit commit -m 'x' -n", "-n after"),
+                          # the later scan meets the earlier one deeper inside $(...): it reads on past the earlier end
+                          ("echo 'git push'; git commit $(echo \\' ; date) -n", "-n after"),
+                          ('echo "a" "git commit" & git "push" -m "$(date)" -n', "-n after")):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
+            self.assertIn(form, p.stderr, cmd)
+            self.assertEqual(1, len(p.stderr.splitlines()), (cmd, p.stderr))     # no gate ran
+            self.assertNotIn("register", p.stderr, cmd)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
+        for cmd in ("git commit -m x && grep -n y f", "git push --dry-run", "nice -n 5 git push", "git log -n 3",
+                    "git commit --amend --no-edit", "git push --set-upstream origin x", "git commit -m x\nls -n",
+                    "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD",
+                    "git commit -m x 2>&1 && ls -n", "git push 2>&1 | grep -n x", "x=$(git log -n 3)",
+                    "(git commit -m x) && ls -n", "git commit -m x &>/dev/null; ls -n", "git push >&2; sort -n f",
+                    "git commit -m x & ls -n", "echo $(git push) | wc -l",
+                    # another command after the verb inside the same substitution, subshell or backticks is not its argument
+                    "out=$(git push 2>&1; echo -n done)", "x=$(git commit -m y; ls -n)", "x=`git push; ls -n`",
+                    "(git commit -m x; ls -n)", "echo $(git push) -n", "echo `git push` -n", "git push >|out; ls -n",
+                    "git push <(echo) | grep -n x",
+                    # nesting and quoting closed again before the separator
+                    "git push $(echo $(date)); ls -n", "git push $((1+2)) && ls -n", 'git "push" && ls -n',
+                    "git 'commit' -m x; sort -n f", "x=$(git push $(echo a)); ls -n", "git commit -F - <<EOF\n-n\nEOF",
+                    "( git push ) | wc -l", "git push & sort -n", 'x="$(git push)"; ls -n',
+                    'echo "git push"; ls -n', "echo 'git push'; git commit -m 'x'; sort -n f",
+                    'echo "git push" "a"; ls -n', "cat <<EOF\ngit push\nEOF\nls -n",
+                    # documented limits (DEC-0005): the argument scan ends early, the git hooks gate these
+                    "git push $(case x in x) echo;; esac) -n", 'git commit -m "$(a $(b ")"))" -n'):
+            self.assert_silent(cmd)
+
+    def test_any_case_git_word_and_config_carriers_are_bypasses(self):      # b3 m-1, m-2, m-3
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        carrier = "a HOME or XDG_CONFIG_HOME assignment before a gated git verb"
+        for cmd, form in (("GIT commit -n -m x", "-n after"), ("Git push --no-verify", "--no-verify after"),
+                          ("/usr/bin/GIT commit -n", "-n after"),
+                          ("GIT_CONFIG_GLOBAL+=/x git commit -m x", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_COUNT+=1 git push", "GIT_CONFIG_* assignment"),
+                          ("HOME=/x git commit -m x", carrier), ("HOME+=/x git push", carrier),
+                          ("env HOME=/x git push", carrier), ("XDG_CONFIG_HOME=/x git commit -m x", carrier),
+                          ("XDG_CONFIG_HOME+=/x git push", carrier), ("env XDG_CONFIG_HOME=/x git commit", carrier),
+                          ("export HOME=/x; git push", carrier), ("env -i HOME=/x Git push", carrier)):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
+            self.assertIn(form, p.stderr, cmd)
+            self.assertEqual(1, len(p.stderr.splitlines()), (cmd, p.stderr))     # no gate ran
+        for cmd in ("GIT push", "Git commit -m x", "gIt -C . push"):           # any case runs the gates
+            self.assert_gated(cmd)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
+        for cmd in ("HOME=/x ls", "git push; HOME=/x ls", "echo $HOME && git push", "MYHOME=/x git push",
+                    "XDG_CONFIG_HOMES=/x ls", "git commit -m x && export HOME=/x", "cd $HOME/x || ls; ls"):
+            self.assert_silent(cmd)
+
+    def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
+        for cmd in ("git -c x=" + "\\" * 300 + " status", "git " + "-c " * 300 + "status", "git " + "-C " * 300 + "status",
+                    "git " + '-c "a" ' * 300 + "status", "git " + "$x " * 300 + "status",
+                    "git " + "--git-dir " * 300 + "status", "git -C " + "\\ " * 300 + "status",
+                    # git words inside option runs, verbs, segments and option-like words: every scan is linear
+                    "git -c " * 30000 + "status", "git -C " * 30000, 'git -c "' * 30000, "git $x " * 30000,
+                    "git commit -m x " + "<<A\n" * 20000, "git commit -m x && " + "bash -o x " * 10000 + "-c y",
+                    "git commit " * 30000, "git commit -m 'x' ; " * 20000, "git commit " + "-aaaaaaaaa! " * 20000,
+                    "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit",
+                    # unterminated substitutions and backticks in option values and segments, redirection runs
+                    "git -C $(" * 20000, "git -C `" * 20000, "git commit $(" * 20000, "git commit " + ">&" * 50000,
+                    "$(a" * 30000 + ")", "cd " + "$(" * 30000, "cd `" + "x" * 100000,
+                    # one argument scan per verb: unpaired backticks, process substitutions, parentheses, quotes
+                    "git push `" * 30000, "git push <(" * 30000, "git push ) " * 30000, "git commit '" * 30000,
+                    "git push \"" * 30000, "git push >|" * 30000, "git push ${" * 30000, 'git push "$(' * 30000,
+                    'git push "$("' * 30000, "git push $'" * 30000, "git push " + "(" * 100000,
+                    "git push " + "$(" * 50000 + ")" * 50000,
+                    # verbs inside quoted strings of earlier scans; a "..." whose $(...) holds a quote, retried
+                    'echo "git push \'' * 30000, "echo 'git push \"" * 30000, 'git push $(")' * 30000,
+                    "git push }$(\"" * 30000):
+            start = time.monotonic()
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])
+            self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
+        gated = "git -c x=" + "\\" * 300 + " commit -m x"      # same runs before a real verb: still gated, still fast
+        start = time.monotonic()
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        p = hook("pre_tool_use.py", bash_event(self.root, gated))
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertLess(time.monotonic() - start, 2.0)
+
+    def test_a_named_directory_that_is_not_a_repo_fails_closed(self):
+        outside = tempfile.mkdtemp(prefix="gate-test-outside-")
+        self.addCleanup(gf.remove, outside)
+        for cmd, d in (("git -C %s commit -m x" % outside, outside), ("cd %s && git push" % outside, outside),
+                       ("git -C /nonexistent-dir push", "/nonexistent-dir"), ('git -C "$WT" push', "%s/$WT" % self.root),
+                       ("git -C $(pwd) push", "%s/$(pwd)" % self.root), ("cd `pwd` && git push", "%s/`pwd`" % self.root)):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % d), (cmd, p.stderr))
+
     def test_ungated_commands_and_tools_pass_even_on_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         for cmd in ("git status", "git log --grep commit", "gh pr view", "ls"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(0, p.returncode, (cmd, p.stderr))
+            self.assert_silent(cmd)
         agent = dict(bash_event(self.root, ""), tool_name="Agent",
-                     tool_input={"prompt": "p", "description": "d", "subagent_type": "general-purpose"})
-        self.assertEqual(0, hook("pre_tool_use.py", agent).returncode)
+                     tool_input={"prompt": "git push --no-verify", "description": "d", "subagent_type": "general-purpose"})
+        p = hook("pre_tool_use.py", agent)
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
 
     def test_hook_fails_closed_when_script_errors(self):
         broken = os.path.join(self.root, "broken")
@@ -5301,7 +5721,8 @@ class PreToolUse(unittest.TestCase):
         self.assertEqual("FAIL hook.internal: RuntimeError: gate exploded\n", p.stderr)
 
     def test_malformed_stdin_fails_closed(self):
-        for raw in ("", "not json", "[1, 2]"):
+        for raw in ("", "not json", "[1, 2]", json.dumps(dict(bash_event(self.root, ""), tool_input={"command": 7})),
+                    json.dumps(dict(bash_event(self.root, ""), tool_input=None))):
             p = hook("pre_tool_use.py", raw)
             self.assertEqual(2, p.returncode, raw)
             self.assertTrue(p.stderr.startswith("FAIL hook.internal: "), p.stderr)
@@ -5310,25 +5731,36 @@ class PreToolUse(unittest.TestCase):
         outside = os.path.dirname(self.root)
         p = hook("pre_tool_use.py", bash_event(outside, "git commit -m x"))
         self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr)
+        self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % outside), p.stderr)
+        for cwd in (None, "", 7):
+            event = bash_event(self.root, "git commit -m x")
+            if cwd is None:
+                del event["cwd"]
+            else:
+                event["cwd"] = cwd
+            p = hook("pre_tool_use.py", event)       # the hook's own process cwd is this repository: it must not be used
+            self.assertEqual((2, "FAIL hook.input: the event has no cwd\n"), (p.returncode, p.stderr), cwd)
 
 
 class GitHooks(unittest.TestCase):
     def setUp(self):
-        self.root = gf.new_repo()
+        self.root = new_repo()
         copy_gates(self.root)
         gf.commit_all(self.root, "gates")
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
         self.assertEqual(0, p.returncode, p.stderr)
         self.hook = os.path.join(self.root, ".git", "hooks", "pre-commit")
+        self.pre_push = os.path.join(self.root, ".git", "hooks", "pre-push")
 
     def tearDown(self):
         gf.remove(self.root)
 
+    def install(self):
+        return subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root, capture_output=True,
+                              text=True, env=isolated_env(), check=False)
+
     def commit(self):
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-        env["CLAUDE_PROJECT_DIR"] = "/nonexistent-project"   # the hook must ignore it
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
         return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
                                "commit", "-q", "-m", "x"], cwd=self.root, capture_output=True, text=True,
                               env=env, check=False)
@@ -5337,8 +5769,7 @@ class GitHooks(unittest.TestCase):
         with open(self.hook) as fh:
             first = fh.read()
         self.assertIn("# strict-delivery-gates-hook", first)
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
         self.assertEqual(0, p.returncode)
         self.assertNotIn("moved the existing", p.stdout)
         with open(self.hook) as fh:
@@ -5346,11 +5777,34 @@ class GitHooks(unittest.TestCase):
 
     def test_a_foreign_hook_is_moved_aside(self):
         gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
         self.assertIn("moved the existing pre-commit hook", p.stdout)
         with open(self.hook + ".pre-strict-delivery") as fh:
             self.assertEqual("#!/bin/sh\necho mine\n", fh.read())
+        with open(self.hook) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+
+    def test_a_second_foreign_hook_does_not_overwrite_the_first_backup(self):
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho one\n")
+        self.assertEqual(0, self.install().returncode)
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho two\n")
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-strict-delivery already exists", p.stderr)
+        with open(self.hook + ".pre-strict-delivery") as fh:
+            self.assertEqual("#!/bin/sh\necho one\n", fh.read())
+        with open(self.hook) as fh:
+            self.assertEqual("#!/bin/sh\necho two\n", fh.read())
+
+    def test_a_hooks_path_outside_the_repository_is_refused(self):
+        shared = tempfile.mkdtemp(prefix="gate-test-shared-hooks-")
+        self.addCleanup(gf.remove, shared)
+        gf.git(self.root, "config", "core.hooksPath", shared)
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("install-hooks: refusing: the hooks directory", p.stderr)
+        self.assertEqual([], os.listdir(shared))
 
     def test_pre_commit_blocks_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
@@ -5367,6 +5821,107 @@ class GitHooks(unittest.TestCase):
         self.assertNotEqual(0, p.returncode)
         self.assertIn("FAIL pre-commit.unstaged", p.stderr)
 
+    def test_pre_commit_blocks_a_register_removed_from_the_index_but_left_on_disk(self):
+        gf.git(self.root, "rm", "--cached", "-q", os.path.join(gf.STATE, "findings.yml"))
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("findings.yml", p.stderr)
+
+    def test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit(self):
+        report = os.path.join("docs", "reviews", "r.md")
+        gf.write(self.root, report, "register: true\n- T1-GHOST-1: x\n")
+        gf.git(self.root, "add", report)
+        gf.write(self.root, report, "register: true\n")    # the unstaged edit drops the line the index cites
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("docs/reviews/r.md", p.stderr)
+
+    def test_pre_commit_blocks_an_untracked_file_the_gates_read(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("docs", "reviews", "new.md"), "register: true\n- T1-GHOST-1: x\n")
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("docs/reviews/new.md", p.stderr)
+
+    def test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store(self):
+        gf.write(self.root, ".gitignore", "ignored.md\n.DS_Store\n")
+        gf.git(self.root, "add", ".gitignore")
+        gf.write(self.root, os.path.join("docs", "reviews", ".DS_Store"), "\x00bud1\n")
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)     # a Finder file no gate can read a marker from
+        gf.write(self.root, os.path.join("docs", "reviews", "ignored.md"), "register: true\n- T1-GHOST-1: x\n")
+        gf.write(self.root, "y.txt", "y\n")
+        gf.git(self.root, "add", "y.txt")
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)                       # ignored, yet gate_register opens it
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("ignored.md", p.stderr)
+
+    def test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        for rel in ("config.yml", "gate_register.py", "run_all.py", "lib/registers.py", "hooks/git-pre-commit.sh"):
+            path = os.path.join(self.root, "tools", "gates", *rel.split("/"))
+            with open(path) as fh:
+                orig = fh.read()
+            with open(path, "w") as fh:
+                fh.write(orig + "\n# edited\n")
+            p = self.commit()
+            self.assertNotEqual(0, p.returncode, rel)
+            self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+            self.assertIn("tools/gates/" + rel, p.stderr)
+            with open(path, "w") as fh:
+                fh.write(orig)
+
+    def test_pre_commit_blocks_an_untracked_module_in_the_gate_code(self):
+        # run_all.py searches the repo root, then tools/gates, before PyYAML and the stdlib: an untracked
+        # yaml.py in either would be imported in place of PyYAML and pass
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.git(self.root, "add", "-A")
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        for rel in ("tools/gates/yaml.py", "tools/gates/glob/__init__.py", "tools/gates/datetime.pyc",
+                    "tools/gates/lib/extra.py", "tools/gates/hooks/new.py",
+                    "yaml.py", "yaml/__init__.py", "yaml/__init__.pyc", "glob/__init__.so", "glob.pyc", "_yaml.so"):
+            gf.write(self.root, rel, "raise SystemExit(0)\n")
+            p = self.commit()
+            self.assertNotEqual(0, p.returncode, rel)
+            self.assertIn("FAIL pre-commit.unstaged", p.stderr, rel)
+            self.assertIn(rel, p.stderr)
+            self.assertEqual(head, gf.git(self.root, "rev-parse", "HEAD"), rel)
+            path = os.path.join(self.root, *rel.split("/"))
+            os.remove(path)
+            if not os.listdir(os.path.dirname(path)):
+                os.rmdir(os.path.dirname(path))      # the new glob/ and yaml/ packages
+
+    def test_edits_to_gate_tests_and_readme_do_not_block_a_commit(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("tools", "gates", "tests", "new_test.py"), "x = 1\n")
+        path = os.path.join(self.root, "tools", "gates", "README.md")
+        with open(path, "a") as fh:
+            fh.write("\nedited\n")
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+
+    def test_bytecode_caches_under_the_gates_do_not_block_a_commit(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("tools", "gates", "__pycache__", "m.cpython-39.pyc"), "x")
+        gf.write(self.root, os.path.join("tools", "gates", "lib", "__pycache__", "n.cpython-39.pyc"), "x")
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+
+    def test_a_staged_report_passes_when_it_is_committed_as_is(self):
+        report = os.path.join("docs", "reviews", "r.md")
+        gf.write(self.root, report, "register: true\n")
+        gf.git(self.root, "add", report)
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+
     def test_a_tree_without_the_gates_cannot_commit(self):
         gf.git(self.root, "rm", "-r", "-q", "tools")
         p = self.commit()
@@ -5379,6 +5934,251 @@ class GitHooks(unittest.TestCase):
         p = self.commit()
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
+    def push(self):
+        """`git push` of HEAD to a fresh bare remote; returns (process, the ref the remote holds or "")."""
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
+        p = subprocess.run(["git", "push", "-q", remote, "HEAD:refs/heads/main"], cwd=self.root,
+                           capture_output=True, text=True, env=env, check=False, timeout=60)   # a looping hook is an error
+        got = subprocess.run(["git", "--git-dir", remote, "rev-parse", "-q", "--verify", "refs/heads/main"],
+                             capture_output=True, text=True, env=isolated_env(), check=False)
+        return p, got.stdout.strip()
+
+    def test_install_writes_both_shims(self):
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(["install-hooks: pre-commit -> tools/gates/hooks/git-pre-commit.sh (%s)" % self.hook,
+                          "install-hooks: pre-push -> tools/gates/hooks/git-pre-push.sh (%s)" % self.pre_push],
+                         [l.replace(os.path.realpath(self.root), self.root) for l in p.stdout.splitlines()])
+        for path, script in ((self.hook, "git-pre-commit.sh"), (self.pre_push, "git-pre-push.sh")):
+            with open(path) as fh:
+                text = fh.read()
+            self.assertEqual("#!/bin/sh\n# strict-delivery-gates-hook\n", text[:len("#!/bin/sh\n# strict-delivery-gates-hook\n")])
+            self.assertIn("/tools/gates/hooks/%s\"" % script, text)
+            self.assertNotIn("@HOOK@", text)
+            self.assertTrue(os.access(path, os.X_OK), path)
+        with open(self.pre_push) as fh:
+            self.assertIn("FAIL pre-push.missing", fh.read())
+
+    def test_a_foreign_pre_push_hook_is_moved_aside(self):
+        gf.write(self.root, ".git/hooks/pre-push", "#!/bin/sh\necho mine\n")
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("moved the existing pre-push hook", p.stdout)
+        self.assertNotIn("moved the existing pre-commit hook", p.stdout)
+        with open(self.pre_push + ".pre-strict-delivery") as fh:
+            self.assertEqual("#!/bin/sh\necho mine\n", fh.read())
+        with open(self.pre_push) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+        # a refusal for one hook installs neither
+        gf.write(self.root, ".git/hooks/pre-push", "#!/bin/sh\necho two\n")
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho three\n")
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-push.pre-strict-delivery already exists", p.stderr)
+        with open(self.hook) as fh:
+            self.assertEqual("#!/bin/sh\necho three\n", fh.read())
+        self.assertFalse(os.path.exists(self.hook + ".pre-strict-delivery"))
+
+    def test_pre_push_blocks_a_failing_register(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.commit_all(self.root, "orphan")      # gitfixture commits without hooks: a commit made with --no-verify
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stdout + p.stderr)
+        self.assertEqual("", got)
+
+    def test_pre_push_blocks_unstaged_register_edits(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n# edited\n")   # not staged
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertIn("findings.yml", p.stderr)
+        self.assertEqual("", got)
+        gf.git(self.root, "add", "-A")        # staged but not committed: HEAD, which is pushed, differs
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertEqual("", got)
+        gf.git(self.root, "reset", "-q")
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")      # back to HEAD
+        gf.write(self.root, os.path.join("docs", "reviews", "new.md"), "x\n")     # untracked
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertIn("docs/reviews/new.md", p.stderr)
+        self.assertEqual("", got)
+
+    def test_pre_push_passes_a_clean_tree(self):
+        gf.write(self.root, "x.txt", "x\n")      # outside the guarded paths: neither staged nor not
+        p, got = self.push()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertEqual(gf.git(self.root, "rev-parse", "HEAD"), got)
+
+    def test_a_tree_without_the_gates_cannot_push(self):
+        gf.git(self.root, "rm", "-r", "-q", "tools")
+        gf.commit_all(self.root, "no gates")
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.missing", p.stderr)
+        self.assertEqual("", got)
+
+    def push_to(self, *refspecs):
+        """`git push origin <refspecs>` to a fresh bare remote (origin); returns (process, the remote's refs)."""
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        if "origin" in gf.git(self.root, "remote").split():
+            gf.git(self.root, "remote", "remove", "origin")
+        gf.git(self.root, "remote", "add", "origin", remote)
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
+        p = subprocess.run(["git", "push", "-q", "origin", *refspecs], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        refs = subprocess.run(["git", "ls-remote", remote], capture_output=True, text=True, env=isolated_env(),
+                              check=False).stdout
+        return p, refs
+
+    def evidence_row(self, path):
+        sha = gf.git(self.root, "rev-parse", "--short=7", "HEAD")
+        return ORPHAN.replace("T1-ORPHAN-1", "T1-EV-1").replace("owner: null", "owner: {kind: issue, number: 1}") \
+            .replace("evidence: []", "evidence: [%s]" % path).replace("aaaaaaa", sha)
+
+    def test_an_untracked_evidence_file_is_refused_by_commit_and_push(self):     # b3 F1
+        gf.write(self.root, ".gitignore", "ignored/\n")
+        gf.commit_all(self.root, "ignore")
+        for path in ("notes/r.md", "ignored/r.md"):     # untracked, ignored
+            gf.write(self.root, path, "a report\n")
+            gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), self.evidence_row(path))
+            gf.git(self.root, "add", os.path.join(gf.STATE, "findings.yml"))
+            p = self.commit()
+            self.assertNotEqual(0, p.returncode, path)
+            self.assertIn("FAIL register.evidence.T1-EV-1: evidence: '%s' is neither a commit sha nor a file "
+                          "tracked at the repo root" % path, p.stdout + p.stderr)
+        gf.git(self.root, "commit", "-q", "-m", "row")       # gitfixture commits without hooks (--no-verify)
+        p, refs = self.push_to("HEAD:refs/heads/main")
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.evidence.T1-EV-1", p.stdout + p.stderr)
+        self.assertNotIn("refs/heads/main", refs)
+        gf.git(self.root, "add", "-f", "ignored/r.md")       # staged, not committed: a push sends HEAD, without it
+        p, refs = self.push_to("HEAD:refs/heads/main")
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.evidence.T1-EV-1: evidence: 'ignored/r.md' is neither", p.stdout + p.stderr)
+        self.assertNotIn("refs/heads/main", refs)
+        p = self.commit()                                   # committed: commit and push pass
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        p, refs = self.push_to("HEAD:refs/heads/main")
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertIn("refs/heads/main", refs)
+
+    def test_a_tracked_symlink_as_evidence_is_refused_by_commit(self):     # b3 re-review N1
+        gf.write(self.root, ".gitignore", "ignored/\n")
+        gf.write(self.root, "ignored/r.md", "a report\n")
+        os.makedirs(os.path.join(self.root, "notes"))
+        os.symlink(os.path.join("..", "ignored", "r.md"), os.path.join(self.root, "notes", "r.md"))
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), self.evidence_row("notes/r.md"))
+        gf.git(self.root, "add", "-A")
+        self.assertTrue(gf.git(self.root, "ls-files", "-s", "notes/r.md").startswith("120000 "))
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.evidence.T1-EV-1: evidence: 'notes/r.md' is neither a commit sha nor a file "
+                      "tracked at the repo root", p.stdout + p.stderr)
+
+    def test_pre_push_from_an_unborn_head(self):     # b3 re-review N4
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        gf.git(self.root, "push", "-q", remote, "HEAD:refs/heads/old")       # gitfixture pushes without hooks
+        sha = gf.git(self.root, "rev-parse", "HEAD")
+        gf.git(self.root, "checkout", "-q", "--orphan", "unborn")
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
+        p = subprocess.run(["git", "push", "-q", remote, sha + ":refs/heads/new"], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.not-head: %s (%s) pushed from an unborn HEAD" % (sha, sha[:7]), p.stderr)
+        self.assertNotIn("fatal:", p.stderr)
+        p = subprocess.run(["git", "push", "-q", remote, ":refs/heads/old"], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        self.assertEqual((0, ""), (p.returncode, p.stderr))
+        self.assertEqual("", gf.git(remote, "for-each-ref"))
+
+    def test_pre_push_refuses_a_ref_that_is_not_head(self):     # DEC-0006
+        gf.git(self.root, "checkout", "-q", "-b", "bad")
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        bad = gf.commit_all(self.root, "orphan")      # gitfixture commits without hooks: a commit made with --no-verify
+        gf.git(self.root, "checkout", "-q", "main")
+        gf.git(self.root, "tag", "-a", "tbad", "-m", "an annotated tag of a commit that is not HEAD", bad)
+        tag_object = gf.git(self.root, "rev-parse", "tbad")
+        blob = gf.git(self.root, "rev-parse", "HEAD:README.md")
+        blob_push = (blob + ":refs/tags/blob", blob, blob)     # not a commit: refused too
+        # DEC-0006, read literally: every pushed local sha, whatever the ref kind, must be HEAD (or a delete)
+        for spec, local_ref, sha in (("bad", "refs/heads/bad", bad), ("bad~0:refs/heads/y", "bad~0", bad),
+                                     (bad + ":refs/heads/z", bad, bad),
+                                     ("refs/tags/tbad:refs/heads/w", "refs/tags/tbad", tag_object),
+                                     ("tbad", "refs/tags/tbad", tag_object)) + (blob_push,):
+            p, refs = self.push_to(spec)
+            self.assertNotEqual(0, p.returncode, spec)
+            self.assertIn("FAIL pre-push.not-head: %s (%s) is not the checked-out HEAD; check it out and push "
+                          "from it, so the gates see its tree" % (local_ref, sha[:7]), p.stderr)
+            self.assertNotIn("register", p.stdout + p.stderr, spec)     # refused before any gate ran
+            self.assertNotIn("expected commit type", p.stderr, spec)
+            self.assertEqual("", refs, spec)
+
+    def test_pre_push_of_head_by_name_passes(self):
+        gf.git(self.root, "branch", "other", "HEAD")
+        p, refs = self.push_to("main", "HEAD:refs/heads/x", "other")    # every pushed sha is HEAD's
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        for ref in ("refs/heads/main", "refs/heads/x", "refs/heads/other"):
+            self.assertIn("%s\t%s" % (head, ref), refs)
+
+    def test_pre_push_of_a_tag_and_a_delete_pass(self):
+        gf.git(self.root, "tag", "t1")                                   # lightweight, of HEAD
+        gf.git(self.root, "tag", "-a", "t2", "-m", "annotated, of HEAD")  # its object is not HEAD: peeled to HEAD
+        p, refs = self.push_to("t1", "t2", "HEAD:refs/heads/gone")
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertIn("%s\trefs/tags/t1" % gf.git(self.root, "rev-parse", "HEAD"), refs)
+        self.assertIn("%s\trefs/tags/t2" % gf.git(self.root, "rev-parse", "t2"), refs)
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
+        p = subprocess.run(["git", "push", "-q", "origin", ":refs/heads/gone"], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        refs = gf.git(self.root, "ls-remote", "origin")
+        self.assertNotIn("refs/heads/gone", refs)
+        self.assertIn("refs/tags/t1", refs)
+
+    def test_a_symlinked_hook_is_moved_aside_not_written_through(self):
+        # a hook linked to the tracked script (S4's plan did this before DEC-0007): a write through the
+        # link would replace the tracked script by the shim, which then execs itself
+        for hook, path in (("pre-commit", self.hook), ("pre-push", self.pre_push)):
+            os.remove(path)
+            os.symlink(os.path.join("..", "..", "tools", "gates", "hooks", "git-%s.sh" % hook), path)
+        os.symlink("/nonexistent-target", self.pre_push + ".dangling")
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("moved the existing pre-commit hook", p.stdout)
+        self.assertIn("moved the existing pre-push hook", p.stdout)
+        self.assertEqual("", gf.git(self.root, "status", "--porcelain", "--", "tools"))    # the tracked scripts are untouched
+        for hook, path in (("pre-commit", self.hook), ("pre-push", self.pre_push)):
+            self.assertFalse(os.path.islink(path), path)
+            with open(path) as fh:
+                self.assertIn("/tools/gates/hooks/git-%s.sh\"" % hook, fh.read())
+            self.assertEqual(os.path.join("..", "..", "tools", "gates", "hooks", "git-%s.sh" % hook),
+                             os.readlink(path + ".pre-strict-delivery"))
+        p, got = self.push()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertEqual(gf.git(self.root, "rev-parse", "HEAD"), got)
+        # a backup that is a dangling symlink still counts: a symlinked hook over it is refused
+        os.remove(self.pre_push)
+        os.remove(self.pre_push + ".pre-strict-delivery")
+        os.rename(self.pre_push + ".dangling", self.pre_push + ".pre-strict-delivery")
+        os.symlink("/bin/true", self.pre_push)
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-push.pre-strict-delivery already exists", p.stderr)
+        self.assertEqual("/bin/true", os.readlink(self.pre_push))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -5387,7 +6187,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: FAIL/ERROR. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file`, and the `GitHooks.setUp` assertion fails because `install-hooks.sh` is missing.
+Expected: `FAILED (failures=46, errors=1)`, 47 tests. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file` (`test_hook_fails_closed_when_script_errors` errors with `FileNotFoundError` on the copy), and the `GitHooks.setUp` assertion fails (30 times, `0 != 127`) because `install-hooks.sh` is missing.
 
 - [ ] **Step 3: Write the hook scripts**
 
@@ -5399,49 +6199,247 @@ mkdir -p tools/gates/hooks
 
 ```python
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol").
+"""Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol"; owner decision DEC-0005).
 
-Reads one JSON event on stdin. At strict-delivery block b3 only the Bash branch gates:
-`git commit` and `git push` run the register and claim gates on the git toplevel of the event's
-`cwd`; every other command, and every other tool (Agent included, until S2 adds gate_dispatch),
-exits 0 silently. A failing gate exits 2 with the gate's lines on stderr; any internal error also
-exits 2 (fail closed). Limits: a commit run in another tree via `cd <dir> && git commit` is gated
-here against the session's cwd -- the git pre-commit hook gates the tree actually committed.
+Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so this
+script sees every Bash call. At strict-delivery block b3 only the Bash branch gates; every other
+tool (Agent included, until S2 adds gate_dispatch) exits 0 silently. This hook is a best-effort
+textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-0005).
+
+1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
+   _GLOBAL, _SYSTEM or _NOSYSTEM assignment (`=` or `+=`) anywhere, in any Bash command; a HOME or
+   XDG_CONFIG_HOME assignment (`=` or `+=`, `env HOME=...` too) before a gated verb (it moves the
+   global git config, which can set core.hooksPath); `--no-verify` (or an abbreviation git
+   accepts), `-n` or a short-option cluster holding n in the arguments of a gated verb, quoted
+   (`git "push"`) or not (arguments_end: up to an unquoted separator outside every parenthesis
+   the arguments open, an unpaired `)`, quote or backtick, so the rest of an enclosing `$(...)` is
+   not read; quotes, `$'...'`, `${...}`, backticks, `$(...)`, `<(...)`, `>(...)`, `$((...))` at
+   any depth and the redirections `>&`, `<&`, `&>`, `>|` do not end them; `-n` is --no-verify for
+   commit and --dry-run for push, blocked for both). Every gated verb gets its own argument scan,
+   so a verb mentioned in a quoted string, a heredoc or a comment never hides a later verb's flag
+   (`echo "git push"; git commit -n`). Each exits 2 with `FAIL hook.bypass: <form found>` before
+   any gate runs.
+2. Gated: `git [options] commit|push`, matched in the text wherever it stands (after any separator,
+   `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the git word in any case (`GIT`,
+   `Git`: a case-insensitive file system runs them, so a prose `Git push` runs the gates too), the
+   verb a whole word (`commits`, `pushd`, `commit-graph`, `--push-option` are not verbs). The
+   options are git 2.50.1's global options (OPTION; each checked with `git <option> version`),
+   read left to right as git does, plus a `$X` word; an option value may hold `$(...)` or
+   backticks. A backslash-newline is removed first. No data/code analysis: a mention inside
+   quotes, a heredoc or a comment (`echo "git push"`) runs the gates too -- on a healthy tree that
+   costs well under a second.
+3. Tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the directory of
+   a leading `cd <dir>` or `cd -- <dir>` followed by `&&`, `||` (the `|| exit` / `|| return`
+   idiom), `;` or a newline, else from the event's `cwd`; `git -C <dir> rev-parse --show-toplevel`
+   must succeed (`FAIL hook.target: <dir>: <git stderr>`), a missing cwd is `FAIL hook.input`.
+   Every tree named is gated once: run_all register + claims; a failure exits 2 with the gate
+   lines on stderr. Any internal error exits 2 (`FAIL hook.internal`, fail closed).
+
+Documented limits (DEC-0005): A verb hidden behind an expansion, alias, function, `eval`, a payload
+file, or a wrapper the regex does not see (`$G push`, `git $V`, `eval "$CMD"`, `bash
+script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this hook. The
+git hooks gate it: pre-commit for commits, pre-push for pushes. Likewise a git word or verb with a
+quoted or escaped piece (`g"it" push`, `git p"ush"`); a tree changed in a way the hook does not
+follow (a later `cd`, a leading `cd` in a form item 3 does not name such as `cd -P <dir>`,
+`pushd`, a subshell, `GIT_DIR=`, `--git-dir`, `--work-tree`, `env -C`), where
+the hook gates the tree it can name and the git hooks gate the real one; an option value the hook
+cannot read as one word (`git -C $(dirname $(pwd)) commit`) or a global option git adds after
+2.50.1, where the verb is not seen and so neither is a bypass flag after it; a quoted or escaped
+bypass flag (`--no-"verify"`, `core.hooks\\Path`); a flag after a `case` pattern's `)` inside a
+substitution (`$(case x in x) ...;; esac)`) or after a double-quoted `$(...)` that both nests
+parentheses and quotes (`"$(a $(b ")"))"`), where the argument scan ends early; a bypass in a form
+the text does not name as one (`include.path`, a config file or hook script edited by other
+means). A `-C` or `cd` directory is not expanded: one holding a variable, `$(...)` or a backtick
+(`cd "$WT" &&`, `git -C $(pwd)`) is `FAIL hook.target`, a block of a real command; name the
+directory literally. A HOME or XDG_CONFIG_HOME assignment that only precedes a verb in data is
+blocked as a bypass too. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a
+word, or a `-n` inside a substitution in the arguments (`git commit -m "$(echo -n x)"`), is
+blocked as a bypass: write the message to a file and use `git commit -F <file>`. So is, rarely, a
+`-n` after the arguments: a scan that meets an earlier verb's scan deeper inside a parenthesis
+reads on to the end of the command (arguments_end). Every scan is linear in the command length.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-GIT_VERB = re.compile(r"\bgit\b(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?))*\s+(commit|push)\b")
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
+# One shell word: pieces that start with different characters, so a word parses one way only (linear).
+VALUE = r"""(?:"[^"]*"|'[^']*'|\\.|\$\([^()]*\)|`[^`]*`|[^\s"'\\;&|<>()`])+"""
+GIT_WORD = re.compile(r"(?<![\w.-])git[\"']?", re.I)   # `git`, `/usr/bin/git`, `$(git`, `"git"`, `GIT`
+OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +   # one option git takes before the verb
+                    r"|--(?:git-dir|work-tree|namespace|config-env|attr-source|shallow-file)(?:=|[ \t]+)" + VALUE +
+                    r"|--(?:exec-path|list-cmds)(?:=" + VALUE + r")?"
+                    r"|--(?:no-pager|paginate|bare|html-path|man-path|info-path|literal-pathspecs|no-literal-pathspecs"
+                    r"|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-replace-objects|no-optional-locks|no-lazy-fetch"
+                    r"|no-advice)|-[pP]|\$\{?\w+\}?)")
+GIT_VERB = re.compile(r"[ \t]+(?P<q>[\"']?)(commit|push)(?![\w-])")   # the verb right after the option run
+LEADING_CD = re.compile(r"\s*cd(?:[ \t]+--)?[ \t]+(" + VALUE + r")[ \t]*(?:&&|\|\||;|\n)")
+# one token of a gated verb's arguments (see arguments_end; a "..." whose $(...) holds quotes is
+# found by dq_closes); every alternative starts differently or is tried once per position (linear)
+ARG_TOKEN = re.compile(
+    r"""(?:"(?:[^"\\]|\\.)*"                                                 # "...", its $(...) may nest
+    |\$'(?:[^'\\]|\\.)*'|'[^']*'|`[^`]*`|\$\{[^{}]*\}|\\.|[<>]&|&>|>\|)      # $'...', '...', `...`, ${...}, \x, redirections
+    |(?P<stop>["'`])|(?P<sep>[;&|\n])|(?P<open>[$<>]?\()|(?P<close>\))
+    |[^\S\n]+|[^\s"'`\\;&|()<>$]+|.""", re.S | re.X)   # blanks, a word, one char
+BYPASS = (
+    (re.compile(r"core\.hookspath", re.I), "core.hooksPath (it moves the git hooks away)"),
+    (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)\+?="),
+     "a GIT_CONFIG_* assignment (it can set core.hooksPath)"),
+)
+CONFIG_HOME = re.compile(r"(?<![\w$])(?:HOME|XDG_CONFIG_HOME)\+?=")   # before a gated verb: a bypass
+NO_VERIFY = re.compile(r"""(?:^|(?<=[\s"']))(--no-veri(?:fy?)?|-[A-Za-z]+)(?=[\s"'()<>;&|`]|$)""")   # after a gated verb
+
+
+class Blocked(Exception):
+    """A refusal with its own FAIL id (hook.bypass, hook.input, hook.target)."""
+    def __init__(self, code: str, reason: str):
+        super().__init__(reason)
+        self.code = code
+
+
+def bash_command(event: dict):
+    """The Bash command with each backslash-newline removed (the shell joins the lines with nothing
+    between them); None for any other tool."""
+    if event.get("tool_name") != "Bash":
+        return None
+    command = (event.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        raise ValueError("Bash event without tool_input.command")
+    return command.replace("\\\n", "")
+
+
+def git_calls(command: str) -> list:
+    """(options text, verb, verb end) of each gated `git [options] commit|push`, one per verb. The
+    option run after a git word is memoised by position, so every scan is linear."""
+    memo, calls, seen = {}, [], set()
+    for g in GIT_WORD.finditer(command):
+        pos, path = g.end(), []
+        while pos not in memo:
+            path.append(pos)
+            m = OPTION.match(command, pos)
+            if not m:
+                memo[pos] = pos
+                break
+            pos = m.end()
+        end = memo[pos]
+        for p in path:
+            memo[p] = end
+        v = GIT_VERB.match(command, end)
+        if v:
+            stop = v.end() + 1 if v.group("q") and command.startswith(v.group("q"), v.end()) else v.end()
+            if stop not in seen:      # a quoted verb (`git "push"`) ends after its closing quote
+                seen.add(stop)
+                calls.append((command[g.end():end], v.group(2), stop))
+    return calls
 
 
 def gates_for(event: dict) -> list:
     """Gate names an event needs, in order, without duplicates; [] = not gated."""
-    if event.get("tool_name") != "Bash":
-        return []
-    command = (event.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        raise ValueError("Bash event without tool_input.command")
     names = []
-    for m in GIT_VERB.finditer(command):
-        for n in GATED[m.group(1)]:
-            if n not in names:
-                names.append(n)
+    for _, verb, _ in git_calls(bash_command(event) or ""):
+        names += [n for n in GATED[verb] if n not in names]
     return names
 
 
-def project_root(event: dict) -> str:
-    cwd = event.get("cwd") or os.getcwd()
-    p = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+def dq_closes(command: str) -> list:
+    """For each index i: the index of the `"` that closes a double-quoted string whose text starts
+    at i, or -1. A `$(...)` in it may hold quoted strings with any character (`"$(echo ")")"`) but
+    no other parenthesis. Read once, right to left, so no scan retries a long string (linear)."""
+    n = len(command)
+    text, sub, last = [-1] * (n + 2), [-1] * (n + 2), {'"': -1, "'": -1}
+    for i in range(n - 1, -1, -1):
+        c = command[i]
+        if c in last:       # sub: the `)` that closes a `$(` whose text starts at i
+            sub[i] = sub[last[c] + 1] if last[c] >= 0 else -1
+            last[c] = i
+        elif c != "(":
+            sub[i] = i if c == ")" else sub[i + 1]
+        if c == '"':
+            text[i] = i
+        elif c == "$" and command.startswith("(", i + 1):
+            text[i] = text[sub[i + 2] + 1] if sub[i + 2] >= 0 else -1
+        else:
+            text[i] = text[i + 2] if c == "\\" else text[i + 1]
+    return text
+
+
+def arguments_end(command: str, pos: int, seen: dict = None, closes: list = None) -> tuple:
+    """(end, more) for the arguments of a gated verb that ends at `pos`: they end at an unquoted
+    separator outside every parenthesis they open (`$(`, `<(`, `>(`, `(`, `$((` count), at an
+    unpaired `)` or at an unpaired quote or backtick. So `out=$(git push; ls -n)` stops at the `;`
+    and `git push $(a $(b)) -n` reads the -n. One token per step. `seen` maps each token start an
+    earlier scan read to its depth there: from a start read at the same or a greater depth this scan
+    reads what that one read, so it stops there; from one read at a smaller depth its arguments may
+    run on past that scan's, so it stops with `more` true and the caller reads on to the end of the
+    command. Each token start is read once, and a verb an earlier scan read inside a quoted string
+    (`echo "git push"; git commit -n`) still gets its own scan."""
+    seen = {} if seen is None else seen
+    closes = dq_closes(command) if closes is None else closes
+    depth = 0
+    while pos < len(command):
+        if pos in seen:
+            return pos, depth > seen[pos]
+        seen[pos] = depth
+        if command[pos] == '"' and closes[pos + 1] >= 0:      # "...", its $(...) may hold quotes
+            pos = closes[pos + 1] + 1
+            continue
+        t = ARG_TOKEN.match(command, pos)
+        if t.group("stop") or (depth == 0 and (t.group("sep") or t.group("close"))):
+            return pos, False
+        depth += 1 if t.group("open") else -1 if t.group("close") else 0
+        pos = t.end()
+    return pos, False
+
+
+def bypass(command: str, calls: list):
+    """The hook bypass the command holds, or None (see the module docstring, item 1)."""
+    for pattern, reason in BYPASS:
+        if pattern.search(command):
+            return reason
+    home = CONFIG_HOME.search(command)
+    if home and any(home.start() < end for _, _, end in calls):
+        return "a HOME or XDG_CONFIG_HOME assignment before a gated git verb (it moves the global git config)"
+    seen, ranges, rest, closes = {}, [], len(command), dq_closes(command) if calls else []
+    for verb in sorted(end for _, _, end in calls):
+        end, more = arguments_end(command, verb, seen, closes)
+        ranges.append((verb, end))
+        rest = min(rest, end) if more else rest
+    for start, end in ranges + [(rest, len(command))]:
+        for w in NO_VERIFY.finditer(command, start, end):
+            if w.group(1).startswith("--") or "n" in w.group(1):
+                return "%s after a gated git verb (--no-verify; -n is --no-verify for commit, --dry-run for push)" % w.group(1)
+    return None
+
+
+def _directory(word: str, base: str) -> str:
+    return os.path.normpath(os.path.join(base, os.path.expanduser(shlex.split(word)[0])))
+
+
+def tree_for(event: dict, command: str, options: str = "") -> str:
+    """The directory a git call runs in: the event's cwd, moved by a leading `cd <dir>`, then by each
+    `-C <dir>` in `options` (as git applies them)."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        raise Blocked("hook.input", "the event has no cwd")
+    lead = LEADING_CD.match(command)
+    base = _directory(lead.group(1), cwd) if lead else cwd
+    for m in OPTION.finditer(options):
+        if m.group("v") is not None:
+            base = _directory(m.group("v"), base)
+    return base
+
+
+def toplevel(directory: str) -> str:
+    p = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
                        capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        raise RuntimeError(f"git -C {cwd} rev-parse --show-toplevel: {p.stderr.strip()}")
+        raise Blocked("hook.target", f"{directory}: {p.stderr.strip()}")
     return p.stdout.strip()
 
 
@@ -5449,21 +6447,38 @@ def main() -> int:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
-    names = gates_for(event)
-    if not names:
+    command = bash_command(event)
+    if command is None:
         return 0
+    calls = git_calls(command)
+    reason = bypass(command, calls)
+    if reason:
+        raise Blocked("hook.bypass", reason)
+    if not calls:
+        return 0
+    dirs, roots = [], []
+    for options, _, _ in calls:
+        d = tree_for(event, command, options)
+        if d not in dirs:
+            dirs.append(d)
+    for d in dirs:    # resolve every tree first: an unusable one fails closed before any gate runs
+        top = toplevel(d)
+        if top not in roots:
+            roots.append(top)
     sys.path.insert(0, CODE_ROOT)
     from tools.gates import run_all   # lazy: an ungated command never needs PyYAML
-    result = run_all.run(names, {"root": project_root(event)})
-    if result.ok():
-        return 0
-    print(result.render(False), file=sys.stderr)
-    return 2
+    failed = [r for r in (run_all.run(gates_for(event), {"root": top}) for top in roots) if not r.ok()]
+    for r in failed:
+        print(r.render(False), file=sys.stderr)
+    return 2 if failed else 0
 
 
 if __name__ == "__main__":
     try:
         rc = main()
+    except Blocked as exc:
+        print(f"FAIL {exc.code}: {exc}", file=sys.stderr)
+        rc = 2
     except Exception as exc:  # fail closed: a broken hook blocks, it never waves through
         print(f"FAIL hook.internal: {type(exc).__name__}: {exc}", file=sys.stderr)
         rc = 2
@@ -5476,72 +6491,183 @@ if __name__ == "__main__":
 #!/bin/sh
 # strict-delivery-gates-hook
 # git pre-commit (spec §8 "Git hooks"): the register and claim gates on the tree being committed.
-# The gates read the working tree, so the registers must have no unstaged edits -- then what is
-# checked is exactly what is committed. Installed by tools/gates/install-hooks.sh.
+# git-pre-push.sh runs this script with --pre-push for the tree being pushed (owner decision
+# DEC-0005). The gates read the working tree, so every path they read must have no worktree-side
+# change: no unstaged edit, no untracked or ignored file, no file removed from the index but left
+# on disk. Staged-only changes pass a commit, so the tree the gates see equals the tree being
+# committed for those paths; a push sends HEAD, so --pre-push also refuses staged changes and
+# runs the gates with an index built from HEAD (git ls-files then lists what is pushed) (the
+# FAIL ids name the hook: pre-commit.unstaged, pre-push.uncommitted). The paths: the registers,
+# briefs and the state README (docs/superpowers/state), the registered reports (docs/reviews;
+# gate_register opens EVERY file under it, so an ignored .md counts, and only the Finder's
+# .DS_Store, which can never hold the marker line, is exempt), and the code the gates import. The
+# import path: `python3 tools/gates/run_all.py` starts with sys.path[0] = tools/gates, and
+# run_all.py then inserts the repository root ahead of it, so imports search the root, then
+# tools/gates, then the stdlib and site-packages. An untracked module or package in either
+# directory (yaml.py, yaml/__init__.py, a sourceless .pyc or an extension .so) is imported in
+# place of PyYAML or the stdlib and decides the verdict. So the guard covers all of tools/gates
+# (the gate code; the installed shim runs the working-tree copy of this script) and every
+# root-level *.py, *.pyc, *.so and */__init__.* (a package's __init__ may be a .py, .pyc or .so).
+# Exempt: tools/gates/tests and README.md (not inputs to the verdict), __pycache__ directories and
+# .DS_Store (a sourceless .pyc outside __pycache__ is importable, so it is not exempt).
+# A finding's evidence file may lie anywhere in the repository: the register gates it itself (it
+# must be a file git tracks, else FAIL register.evidence), not this path guard.
+# Installed by tools/gates/install-hooks.sh.
 set -eu
-unset CLAUDE_PROJECT_DIR   # gate the tree being committed (e.g. a worktree), not the session's project
+# gate the tree git commits or pushes (a worktree too), not the session's project
+unset CLAUDE_PROJECT_DIR
+staged=0
+if [ "${1-}" = "--pre-push" ]; then staged=1; fi
 root=$(git rev-parse --show-toplevel)
 cd "$root"
-if ! git diff --quiet -- docs/superpowers/state; then
-  echo "FAIL pre-commit.unstaged: docs/superpowers/state has unstaged edits; stage them (git add docs/superpowers/state) or revert them" >&2
+# porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is
+# worktree-side, and with --pre-push any line (a non-blank X too) differs from HEAD
+dirty=$(git status --porcelain --untracked-files=all --ignored -- \
+  docs/superpowers/state docs/reviews tools/gates ':(exclude)tools/gates/tests' ':(exclude)tools/gates/README.md' \
+  ':(glob)*.py' ':(glob)*.pyc' ':(glob)*.so' ':(glob)*/__init__.*' \
+  ':(exclude,glob)**/.DS_Store' ':(exclude,glob)tools/gates/**/__pycache__/**' \
+  | awk -v staged="$staged" 'staged || substr($0, 2, 1) != " "')
+if [ -n "$dirty" ]; then
+  if [ "$staged" = 1 ]; then
+    echo "FAIL pre-push.uncommitted: the gates read or run from these paths and they differ from HEAD, which is what a push sends; commit them, or revert, delete or move them:" >&2
+  else
+    echo "FAIL pre-commit.unstaged: the gates read or run from these paths and they differ from the index; stage them (git add <path>) to commit them, or revert, delete or move them:" >&2
+  fi
+  echo "$dirty" >&2
   exit 1
 fi
+if [ "$staged" = 1 ]; then
+  # a push sends HEAD, not the index: the gates read HEAD's file list (a tracked evidence file,
+  # staged files) from a temporary index built from HEAD
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/strict-delivery-pre-push.XXXXXX")
+  trap 'rm -rf "$tmp"' EXIT
+  GIT_INDEX_FILE="$tmp/index"
+  export GIT_INDEX_FILE
+  git read-tree HEAD
+  python3 tools/gates/run_all.py --only register,claims
+  exit 0
+fi
 exec python3 tools/gates/run_all.py --only register,claims
+```
+
+`tools/gates/hooks/git-pre-push.sh` (Task 8b, owner decision DEC-0005):
+
+```bash
+#!/bin/sh
+# strict-delivery-gates-hook
+# git pre-push (spec §8 "Git hooks"; owner decisions DEC-0005, DEC-0006): the register and claim
+# gates on the tree being pushed, however the push was launched (the Claude Code hook sees only a
+# literal `git push` in the command text). git passes <remote> <url> as arguments (ignored) and one
+# `<local ref> <local sha> <remote ref> <remote sha>` line per ref on stdin. The gates read the
+# working tree, which is HEAD's, so every pushed local sha must be HEAD (DEC-0006, read literally):
+# each is peeled to a commit (an annotated tag of HEAD is HEAD; an object that is not a commit is
+# refused) and a line whose commit is not HEAD is refused first (FAIL pre-push.not-head), whatever
+# the ref kind: a branch, `bad~0:refs/heads/y`, `<sha>:refs/heads/z`, a tag of an older commit.
+# Push it from that commit checked out. `HEAD:refs/heads/x`, a tag of HEAD and a delete (the
+# all-zero local sha) pass. From an unborn HEAD (no commit yet) only deletes pass, and then
+# nothing is pushed, so no gate runs. stdin is read to the end, then git-pre-commit.sh runs in its
+# --pre-push mode: the paths the gates read must not differ from HEAD (FAIL pre-push.uncommitted),
+# then `run_all.py --only register,claims`. S4 (merge-readiness) extends this script.
+# Installed by tools/gates/install-hooks.sh.
+set -eu
+head=$(git rev-parse --verify -q HEAD 2>/dev/null || true)     # empty: an unborn HEAD
+refused=0
+see="so the gates see its tree"
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac     # all zeros: a delete
+  short=$(printf '%.7s' "$local_sha")
+  if [ -z "$head" ]; then
+    echo "FAIL pre-push.not-head: $local_ref ($short) pushed from an unborn HEAD;" \
+      "check out the commit and push from it, $see" >&2
+    refused=1
+    continue
+  fi
+  commit=$(git rev-parse --verify -q "$local_sha^{commit}" 2>/dev/null || true)
+  if [ "$commit" != "$head" ]; then
+    echo "FAIL pre-push.not-head: $local_ref ($short) is not the checked-out HEAD;" \
+      "check it out and push from it, $see" >&2
+    refused=1
+  fi
+done
+if [ "$refused" = 1 ]; then exit 1; fi
+if [ -z "$head" ]; then exit 0; fi      # deletes only, from an unborn HEAD: nothing is pushed
+exec sh "$(dirname "$0")/git-pre-commit.sh" --pre-push </dev/null
 ```
 
 `tools/gates/install-hooks.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Installs the strict-delivery git hooks (spec §8 "Git hooks"). Idempotent. The installed
-# pre-commit is a shim carrying the marker line below; it runs the TRACKED
-# tools/gates/hooks/git-pre-commit.sh of whichever tree is being committed, so an update to the
-# script needs no re-install. A foreign pre-commit is moved aside, never overwritten.
+# Installs the strict-delivery git hooks (spec §8 "Git hooks"; pre-push from S1 block b3, owner
+# decision DEC-0005). Idempotent. Each installed hook (pre-commit, pre-push) is a shim carrying the
+# marker line below; it runs the TRACKED tools/gates/hooks/git-<hook>.sh of whichever tree git runs
+# in, so an update to the scripts needs no re-install. A foreign hook is moved aside, never
+# overwritten; a symlink is foreign too (the link itself is moved, so nothing is written through
+# it); every hook is checked before any is written, so a refusal installs nothing.
 set -euo pipefail
 MARKER='# strict-delivery-gates-hook'
+HOOKS=(pre-commit pre-push)
 root=$(git rev-parse --show-toplevel)
 hooks=$(git -C "$root" rev-parse --git-path hooks)
 case "$hooks" in /*) ;; *) hooks="$root/$hooks" ;; esac
+common=$(cd "$root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+if [ -d "$hooks" ]; then real=$(cd "$hooks" && pwd -P); else real="$hooks"; fi
+case "$real" in
+  "$common"/*) ;;
+  *) echo "install-hooks: refusing: the hooks directory $hooks (core.hooksPath?) is outside $common; it may be shared with other repositories" >&2; exit 1 ;;
+esac
+foreign() { [ -L "$1" ] || { [ -e "$1" ] && ! grep -qF "$MARKER" "$1"; }; }
+exists() { [ -e "$1" ] || [ -L "$1" ]; }    # a dangling symlink exists too
+for hook in "${HOOKS[@]}"; do
+  dst="$hooks/$hook"
+  if foreign "$dst" && exists "$dst.pre-strict-delivery"; then
+    echo "install-hooks: refusing: $dst.pre-strict-delivery already exists and $dst is not ours; merge or remove one of them" >&2
+    exit 1
+  fi
+done
 mkdir -p "$hooks"
-dst="$hooks/pre-commit"
-if [ -e "$dst" ] && ! grep -qF "$MARKER" "$dst"; then
-  mv "$dst" "$dst.pre-strict-delivery"
-  echo "install-hooks: moved the existing pre-commit hook to $dst.pre-strict-delivery (it no longer runs)"
-fi
-cat > "$dst" <<'SHIM'
+for hook in "${HOOKS[@]}"; do
+  dst="$hooks/$hook"
+  if foreign "$dst"; then
+    mv "$dst" "$dst.pre-strict-delivery"
+    echo "install-hooks: moved the existing $hook hook to $dst.pre-strict-delivery (it no longer runs)"
+  fi
+  sed "s/@HOOK@/$hook/g" > "$dst" <<'SHIM'
 #!/bin/sh
 # strict-delivery-gates-hook
-# Installed by tools/gates/install-hooks.sh. Runs the tracked script of the tree being committed;
-# a tree without it cannot commit (fail closed).
-script="$(git rev-parse --show-toplevel)/tools/gates/hooks/git-pre-commit.sh"
+# Installed by tools/gates/install-hooks.sh. Runs the tracked script of the tree git runs in;
+# a tree without it is refused (fail closed).
+script="$(git rev-parse --show-toplevel)/tools/gates/hooks/git-@HOOK@.sh"
 if [ ! -f "$script" ]; then
-  echo "FAIL pre-commit.missing: this tree has no tools/gates/hooks/git-pre-commit.sh (it predates the strict-delivery gates); rebase it onto main or ask the owner" >&2
+  echo "FAIL @HOOK@.missing: this tree has no tools/gates/hooks/git-@HOOK@.sh (it predates the strict-delivery gates); rebase it onto main or ask the owner" >&2
   exit 1
 fi
 exec sh "$script" "$@"
 SHIM
-chmod +x "$dst"
-echo "install-hooks: pre-commit -> tools/gates/hooks/git-pre-commit.sh ($dst)"
+  chmod +x "$dst"
+  echo "install-hooks: $hook -> tools/gates/hooks/git-$hook.sh ($dst)"
+done
 ```
 
 ```bash
-chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh tools/gates/install-hooks.sh
+chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh tools/gates/hooks/git-pre-push.sh tools/gates/install-hooks.sh
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass, then install the hook in this checkout**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 234 tests ... OK
+python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 47 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 271 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
-grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
+                                                     # install-hooks: pre-push -> ... (.git/hooks/pre-push)
+grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit .git/hooks/pre-push   # 1 each
 ```
 
-Mutation check: remove the `try/except` wrapper around `main()` in `pre_tool_use.py` (call `sys.exit(main())`). `test_hook_fails_closed_when_script_errors` must fail (rc 1 with a traceback, not 2). Restore. Then delete the `unset CLAUDE_PROJECT_DIR` line from `git-pre-commit.sh`. `test_pre_commit_blocks_a_failing_register` must fail: the gates read `/nonexistent-project`, and `FAIL register.input` is printed instead of `register.owner`. Restore and run again: OK.
+Mutation checks (run at Task 8b in a private clone; each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: catch only `ZeroDivisionError` around `main()` (`test_hook_fails_closed_when_script_errors`, `test_malformed_stdin_fails_closed`); `GATED["push"] = []`, drop the backslash-newline join or the `$X` option word (`test_push_with_options_is_gated_too`); `(?![\w-])` -> `\b` after the verb (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); refuse a `/` before the git word (`test_path_qualified_git_and_prefixes_are_gated`); refuse a quote before it (`test_a_mention_in_data_runs_the_gates`); ignore `-C` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_two_trees_are_each_gated_once`), resolve each `-C` from the cwd instead of the directory before it, or ignore the leading `cd` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`); gate every toplevel without de-duplicating (`test_two_trees_are_each_gated_once`); fall back to the process cwd for a missing `cwd` (`test_cwd_outside_a_repo_fails_closed`); let a non-repo directory pass (`test_a_named_directory_that_is_not_a_repo_fails_closed`, `test_cwd_outside_a_repo_fails_closed`); reset the option-run memo per git word, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout); skip the bypass check, match `core.hooksPath` case-sensitively, keep only `GIT_CONFIG_PARAMETERS`, accept only `--no-verify` and `-n` spelled out, block every short option, split simple commands without quote-awareness, or let the verb's segment run to the end of the command (`test_hook_bypasses_are_blocked`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`, `test_pre_push_blocks_a_failing_register`, `test_pre_push_passes_a_clean_tree`); `--pre-push` without the staged-change check (`test_pre_push_blocks_unstaged_register_edits`); read the index column instead of the worktree column (`test_pre_commit_blocks_unstaged_register_edits`, `test_a_staged_report_passes_when_it_is_committed_as_is`); drop `docs/reviews` (`test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit`, `test_pre_commit_blocks_an_untracked_file_the_gates_read`); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); drop the root-level `*.py` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`); drop the `tests` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). One equivalent mutant: dropping `--untracked-files=all` (git then lists an untracked directory as one `?? dir/` line, which still blocks; the flag only names each file). `git-pre-push.sh`: `exit 0` in place of the `exec` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`). `install-hooks.sh`: `HOOKS=(pre-commit)` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`, `test_install_writes_both_shims`, `test_a_tree_without_the_gates_cannot_push`); disable the shim's `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`, `test_a_tree_without_the_gates_cannot_push`); replace the `mv` by `true`, or put `exit 0` right after it (`test_a_foreign_hook_is_moved_aside`, `test_a_foreign_pre_push_hook_is_moved_aside`); skip the check-all-first loop (`test_a_foreign_pre_push_hook_is_moved_aside`, `test_a_second_foreign_hook_does_not_overwrite_the_first_backup`); disable the hooks-path guard (`test_a_hooks_path_outside_the_repository_is_refused`). Fix round 1: in `pre_tool_use.py`, the bypass-flag lookahead back to whitespace/quote/end, `SEGMENT` splitting at the `&` of a redirection or inside an unquoted `$(...)`, `VALUE` without `$(...)` and backticks (also `test_a_named_directory_that_is_not_a_repo_fails_closed`), `OPTION` without `--shallow-file` or `--no-literal-pathspecs` (also `test_push_with_options_is_gated_too`) (`test_hook_bypasses_are_blocked`); in `install-hooks.sh`, judge a symlink by its target, or ignore a dangling-symlink backup (`test_a_symlinked_hook_is_moved_aside_not_written_through`). Fix round 2: `ARGS` ending at `>|`, reading only `$(...)` as a piece (not `<(...)`/`>(...)`), not ending at an unpaired parenthesis or backtick, or without the backtick piece (`test_hook_bypasses_are_blocked`); rescan the arguments for every verb, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout). Fix round 3: end a quoted verb before its closing quote, never count parenthesis depth, never decrement it, drop the double-quoted `$(...)` that holds quotes, the plain double-quoted fallback, the `$'...'` token or the `${...}` token (`test_hook_bypasses_are_blocked`); bound `${...}` by `}` only, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook`). Fix round 4: skip a verb that lies inside the range an earlier scan read, the round-3 shortcut that let a quoted mention hide a later verb's flag; drop the `"..."` token that `dq_closes` finds; ignore `more`, or never read the tail after a deeper meeting (`test_hook_bypasses_are_blocked`); a fresh memo per verb, a plain word that runs across blanks, or the round-3 rich double-quote regex in place of `dq_closes`, each quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout). b3 final-review fix wave: `_tracked_under` without `rel in tracked(root)` (`test_evidence_files_must_be_tracked_by_git`, `test_an_evidence_file_must_be_tracked`, `test_an_untracked_evidence_file_is_refused_by_commit_and_push`); `git-pre-commit.sh` without the HEAD index in `--pre-push` mode (`test_an_untracked_evidence_file_is_refused_by_commit_and_push`); `git-pre-push.sh` without the sha comparison, or skipping lines whose local ref is not under `refs/heads/` (`test_pre_push_refuses_a_ref_that_is_not_head`), or comparing the raw sha without the peel (`test_pre_push_of_a_tag_and_a_delete_pass`: an annotated tag of HEAD is refused); round 3: `tracked_files` accepting any mode (`test_a_tracked_symlink_or_an_unnormalised_name_is_not_evidence`, `test_a_tracked_symlink_as_evidence_is_refused_by_commit`), no pin-transcript tracked check or no `cite_problem` in `_tracked_under` (the first of those), no unborn-HEAD refusal or no unborn delete exit (`test_pre_push_from_an_unborn_head`); `GIT_WORD` without `re.I`, `GIT_CONFIG_*` without `\+?`, the HOME/XDG_CONFIG_HOME check disabled (`test_any_case_git_word_and_config_carriers_are_bypasses`); `LEADING_CD` without `||` or without `--` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`).
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
-Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 13 OK` to the ledger under `## Block b3 (branch block/strict-delivery-b3)` with `- base BASE_B3=<sha>`.
+Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 47 OK; suite 271 OK on 3.9.6 and 3.12.14; run_all 15 PASS` (the counts a fresh execution of the re-synced plan gives; the live ledger's b3 T7 line carries the historical first-pass counts, and its fix-round and fix-wave lines carry the final ones) to the ledger under the existing `## Block b3 (branch block/strict-delivery-b3)` section (the heading and `- base BASE_B3=<sha>` line were written at b3 setup).
 
 ```bash
 git add tools/gates/hooks tools/gates/install-hooks.sh tools/gates/tests/test_hooks.py docs/superpowers/state/strict-delivery/ledger.md
@@ -5555,11 +6681,11 @@ Expected: the commit output first shows the 10 PASS lines of `run_all --only reg
 
 **Files:**
 - Create: `tools/gates/hooks/session_start.py`, `tools/gates/hooks/user_prompt_submit.py`, `.claude/settings.json`, `CLAUDE.md`
-- Modify: `tools/gates/tests/test_hooks.py` (insert three classes above the `if __name__ == "__main__":` line), `tools/gates/README.md` (append the Hooks section)
+- Modify: `tools/gates/tests/test_hooks.py` (insert the three classes below, `SessionStart`, `UserPromptSubmit`, `ProjectWiring`, above the `if __name__ == "__main__":` line; the Task 7 block above is the file without them), `tools/gates/README.md` (append the Hooks section)
 
 **Interfaces:**
 - Consumes: `install-hooks.sh` and its marker (Task 7); `hook()`, `copy_gates()` and `ORPHAN` in `test_hooks.py` (Task 7).
-- Produces: `session_start.py` prints `strict-delivery: gates installed in <root> ...` or `strict-delivery: gates NOT installed in <root> ...`, one `strict-delivery: handoff <path> ...` line per `docs/superpowers/state/*/handoff.md`, the install-hooks output when the pre-commit is not ours, and `strict-delivery: invoke the strict-delivery skill before any other action`. Exit 2 on install failure (`FAIL hook.install: ...`) or internal error. `user_prompt_submit.py` prints one line starting `strict-delivery: `. `.claude/settings.json` is the umbrella's JSON without the `Stop` and `SubagentStop` entries. **S2 adds those two entries, together with `stop.py` and `subagent_stop.py`.** Until then a `Stop` entry would call a script that does not exist, and fail closed on every turn.
+- Produces: `session_start.py` prints `strict-delivery: gates installed in <root> ...` or `strict-delivery: gates NOT installed in <root> ...`, one `strict-delivery: handoff <path> ...` line per `docs/superpowers/state/*/handoff.md`, the install-hooks output when the repository's pre-commit or pre-push hook is not ours, and `strict-delivery: invoke the strict-delivery skill before any other action`. It always exits 0: SessionStart cannot block and only exit-0 stdout reaches the model, so every failure (`FAIL hook.install: ...` for an install-hooks.sh failure or refusal, `FAIL hook.input: ...` for a missing or non-directory `cwd`, `FAIL hook.internal: ...`) is a line on stdout (and echoed on stderr) followed by the skill line (owner ruling 5). `user_prompt_submit.py` prints one line starting `strict-delivery: `. `.claude/settings.json` is the umbrella's JSON without the `Stop` and `SubagentStop` entries; its Bash handler has no `if` filter (owner ruling 5: `if` uses permission-rule matching and never offered `/usr/bin/git push`, `bash -c`, `env -C` or `sudo git push` to the script; the umbrella's block carries the same JSON plus the two lines). **S2 adds those two entries, together with `stop.py` and `subagent_stop.py`.** Until then a `Stop` entry would call a script that does not exist, and fail closed on every turn.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5568,7 +6694,7 @@ Insert into `tools/gates/tests/test_hooks.py`, directly above `if __name__ == "_
 ```python
 class SessionStart(unittest.TestCase):
     def setUp(self):
-        self.root = gf.new_repo()
+        self.root = new_repo()
 
     def tearDown(self):
         gf.remove(self.root)
@@ -5596,12 +6722,92 @@ class SessionStart(unittest.TestCase):
         self.assertNotIn("install-hooks:", p.stdout)
         self.assertIn("invoke the strict-delivery skill", p.stdout)
 
-    def test_install_failure_exits_2(self):
+    def test_session_start_installs_a_missing_pre_push_shim(self):
+        copy_gates(self.root)
+        self.assertEqual(0, hook("session_start.py", self.event()).returncode)
+        pre_push = os.path.join(self.root, ".git", "hooks", "pre-push")
+        os.remove(pre_push)                                 # pre-commit is still ours
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("install-hooks: pre-push ->", p.stdout)
+        self.assertNotIn("FAIL", p.stdout)
+        with open(pre_push) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+        os.remove(pre_push)                                 # a symlink to the tracked script carries the marker: not ours
+        os.symlink(os.path.join("..", "..", "tools", "gates", "hooks", "git-pre-push.sh"), pre_push)
+        p = hook("session_start.py", self.event())
+        self.assertIn("install-hooks: moved the existing pre-push hook", p.stdout)
+        self.assertFalse(os.path.islink(pre_push))
+
+    def assert_failure_reaches_the_model(self, p, line):
+        """SessionStart cannot block and only exit-0 stdout reaches the model: the FAIL is on stdout
+        (context) and echoed on stderr (owner), the skill line follows it, the exit code is 0."""
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn(line, p.stdout.splitlines()[-2], p.stdout)
+        self.assertIn(line, p.stderr)
+        self.assertEqual("strict-delivery: invoke the strict-delivery skill before any other action",
+                         p.stdout.splitlines()[-1])
+
+    def test_install_failure_is_reported_on_stdout_and_exits_0(self):
         copy_gates(self.root)
         gf.write(self.root, "tools/gates/install-hooks.sh", "echo boom >&2; exit 3\n")
         p = hook("session_start.py", self.event())
-        self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.install: install-hooks.sh exit 3: boom", p.stderr)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.install: install-hooks.sh exit 3: boom")
+        self.assertIn("strict-delivery: gates installed in", p.stdout)
+
+    def test_a_non_utf8_foreign_hook_is_moved_aside(self):
+        copy_gates(self.root)
+        with open(os.path.join(self.root, ".git", "hooks", "pre-commit"), "wb") as fh:
+            fh.write(b"#!/bin/sh\n# \xff\xfe\n")
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertNotIn("FAIL", p.stdout)
+        self.assertIn("install-hooks: moved the existing pre-commit hook", p.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, ".git", "hooks", "pre-commit.pre-strict-delivery")))
+
+    def test_a_refusal_of_install_hooks_is_reported_and_exits_0(self):
+        copy_gates(self.root)
+        hooks = os.path.join(self.root, ".git", "hooks")
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
+        gf.write(self.root, ".git/hooks/pre-commit.pre-strict-delivery", "#!/bin/sh\necho older\n")
+        p = hook("session_start.py", self.event())
+        self.assert_failure_reaches_the_model(p, "FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing:")
+        with open(os.path.join(hooks, "pre-commit")) as fh:
+            self.assertIn("echo mine", fh.read())           # the foreign hook was not touched
+        gf.git(self.root, "config", "core.hooksPath", os.path.join(self.root, "..", "shared-hooks"))
+        os.remove(os.path.join(hooks, "pre-commit"))
+        p = hook("session_start.py", self.event())
+        self.assert_failure_reaches_the_model(
+            p, "FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing: the hooks directory")
+
+    def test_a_cwd_that_is_not_a_repository_fails_closed(self):
+        outside = tempfile.mkdtemp()
+        try:
+            event = self.event()
+            event["cwd"] = outside
+            p = hook("session_start.py", event)
+        finally:
+            shutil.rmtree(outside)
+        self.assert_failure_reaches_the_model(p, "FAIL hook.internal: RuntimeError: git -C")
+
+    def test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback(self):
+        for cwd, line in ((None, "FAIL hook.input: the event has no cwd"), ("", "FAIL hook.input: the event has no cwd"),
+                          (7, "FAIL hook.input: the event has no cwd"),
+                          (os.path.join(self.root, "nope"), "FAIL hook.input: cwd %s is not a directory"
+                           % os.path.join(self.root, "nope"))):
+            event = self.event()
+            if cwd is None:
+                del event["cwd"]
+            else:
+                event["cwd"] = cwd
+            p = hook("session_start.py", event)       # the hook's own process cwd is this repository: it must not be used
+            self.assert_failure_reaches_the_model(p, line)
+            self.assertNotIn("gates installed", p.stdout)
+
+    def test_malformed_stdin_is_reported_and_exits_0(self):
+        for raw, line in (("nope", "FAIL hook.internal: JSONDecodeError:"), ("[]", "FAIL hook.internal: ValueError: stdin is not a JSON object")):
+            p = hook("session_start.py", raw)
+            self.assert_failure_reaches_the_model(p, line)
 
 
 class UserPromptSubmit(unittest.TestCase):
@@ -5612,23 +6818,36 @@ class UserPromptSubmit(unittest.TestCase):
         self.assertTrue(p.stdout.startswith("strict-delivery: "))
 
     def test_malformed_stdin_fails_closed(self):
-        p = hook("user_prompt_submit.py", "nope")
-        self.assertEqual(2, p.returncode)
+        for raw, line in (("nope", "FAIL hook.internal: JSONDecodeError:"),
+                          ("[]", "FAIL hook.internal: ValueError: stdin is not a JSON object")):
+            p = hook("user_prompt_submit.py", raw)
+            self.assertEqual(2, p.returncode, raw)
+            self.assertIn(line, p.stderr)
+            self.assertEqual("", p.stdout)
 
 
 class ProjectWiring(unittest.TestCase):
-    def test_settings_json_wires_existing_hook_scripts_without_stop_hooks(self):
+    def test_settings_json_is_the_expected_wiring_without_stop_hooks(self):
+        def command(script, timeout=None):
+            h = {"type": "command", "command": 'python3 "${CLAUDE_PROJECT_DIR}/tools/gates/hooks/%s"' % script}
+            if timeout:
+                h["timeout"] = timeout
+            return {"hooks": [h]}
+        # No "if" on the Bash handler: pre_tool_use.py alone decides what is gated (owner ruling 5).
+        # No Stop/SubagentStop: S2 adds them together with their scripts.
+        expected = {"hooks": {
+            "PreToolUse": [dict(command("pre_tool_use.py", 300), matcher="Agent"),
+                           dict(command("pre_tool_use.py", 900), matcher="Bash")],
+            "SessionStart": [command("session_start.py")],
+            "UserPromptSubmit": [command("user_prompt_submit.py")]}}
         with open(os.path.join(gf.REPO, ".claude", "settings.json")) as fh:
-            hooks = json.load(fh)["hooks"]
-        self.assertEqual({"PreToolUse", "SessionStart", "UserPromptSubmit"}, set(hooks))  # Stop/SubagentStop: S2
-        self.assertEqual(["Agent", "Bash"], [m["matcher"] for m in hooks["PreToolUse"]])
-        commands = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
-        self.assertEqual(5, len(commands))
-        for c in commands:
-            script = c.split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
-            self.assertTrue(os.path.isfile(script), c)
+            self.assertEqual(expected, json.load(fh))
+        for groups in expected["hooks"].values():
+            for g in groups:
+                script = g["hooks"][0]["command"].split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
+                self.assertTrue(os.path.isfile(script), script)
 
-    def test_claude_md_carries_spec_section_12_verbatim(self):
+    def test_claude_md_carries_spec_section_12_verbatim_and_nothing_else(self):
         with open(os.path.join(gf.REPO, "docs/superpowers/specs/2026-10-17-strict-delivery-design.md")) as fh:
             spec = fh.read()
         section = spec.split("## 12. ", 1)[1].split("\n## 13. ", 1)[0]
@@ -5636,14 +6855,13 @@ class ProjectWiring(unittest.TestCase):
         self.assertEqual(11, len(bullets))
         with open(os.path.join(gf.REPO, "CLAUDE.md")) as fh:
             claude = fh.read().splitlines()
-        for b in bullets:
-            self.assertIn(b, claude)
+        self.assertEqual(bullets, [l for l in claude if l.startswith("- ")])
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: the 7 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 13 Task 7 tests still pass.
+Expected: `FAILED (failures=11, errors=2)`, 60 tests: the 13 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `.../user_prompt_submit.py`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 47 Task 7 tests still pass.
 
 - [ ] **Step 3: Write the hooks, the settings and CLAUDE.md**
 
@@ -5653,8 +6871,12 @@ Expected: the 7 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, 
 #!/usr/bin/env python3
 """Claude Code SessionStart hook (spec §8). Prints to stdout (injected as context): whether the
 gates are installed in the event's project, every handoff document, and the skill instruction;
-installs the git hooks when .git/hooks/pre-commit is not ours. Exit 2 (shown to the owner) when
-the install fails or the hook itself breaks."""
+installs the git hooks when the repository's pre-commit or pre-push hook (git rev-parse --git-path
+hooks/<hook>) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
+exit-0 hook into the model's context. So every failure -- install-hooks.sh refusing or failing, a
+missing or invalid cwd, any internal error -- is a `FAIL ...` line on stdout (the model sees it),
+followed by the skill instruction, and the exit code is 0. The same line is copied to stderr, which
+Claude Code shows to neither the model nor the owner on exit 0 (a debug-log copy only)."""
 from __future__ import annotations
 
 import glob
@@ -5674,31 +6896,46 @@ def toplevel(cwd: str) -> str:
     return p.stdout.strip()
 
 
-def pre_commit_path(root: str) -> str:
-    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", "hooks/pre-commit"],
+def hook_path(root: str, hook: str) -> str:
+    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", f"hooks/{hook}"],
                        capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        raise RuntimeError(f"git rev-parse --git-path hooks/pre-commit: {p.stderr.strip()}")
+        raise RuntimeError(f"git rev-parse --git-path hooks/{hook}: {p.stderr.strip()}")
     return os.path.join(root, p.stdout.strip())
 
 
 def ours(path: str) -> bool:
+    if os.path.islink(path):               # install-hooks.sh moves a symlinked hook aside
+        return False
     try:
-        with open(path, encoding="utf-8") as fh:
-            return MARKER in fh.read()
+        with open(path, "rb") as fh:       # bytes: a foreign hook need not be UTF-8
+            return MARKER.encode() in fh.read()
     except OSError:
         return False
 
 
-def main() -> int:
+def fail(code: str, reason: str) -> None:
+    line = f"FAIL {code}: {reason}"
+    print(line)
+    print(line, file=sys.stderr)
+
+
+def main() -> None:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
-    root = toplevel(event.get("cwd") or os.getcwd())
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        fail("hook.input", "the event has no cwd")
+        return
+    if not os.path.isdir(cwd):
+        fail("hook.input", f"cwd {cwd} is not a directory")
+        return
+    root = toplevel(cwd)
     if not os.path.isfile(os.path.join(root, "tools", "gates", "run_all.py")):
         print(f"strict-delivery: gates NOT installed in {root} (no tools/gates/run_all.py); apply the "
               "skill's judgment rules and state that the gates are missing")
-        return 0
+        return
     try:
         import yaml  # noqa: F401
         yaml_state = "PyYAML ok"
@@ -5708,25 +6945,22 @@ def main() -> int:
     print(f"strict-delivery: gates installed in {root} (tools/gates/run_all.py); {yaml_state}")
     for h in sorted(glob.glob(os.path.join(root, "docs", "superpowers", "state", "*", "handoff.md"))):
         print(f"strict-delivery: handoff {os.path.relpath(h, root)} -- read it before any dispatch")
-    rc = 0
-    if not ours(pre_commit_path(root)):
+    if not all(ours(hook_path(root, h)) for h in ("pre-commit", "pre-push")):
         p = subprocess.run(["bash", os.path.join(root, "tools", "gates", "install-hooks.sh")],
                            cwd=root, capture_output=True, text=True, check=False)
-        print(p.stdout.strip())
+        if p.stdout.strip():
+            print(p.stdout.strip())
         if p.returncode != 0:
-            print(f"FAIL hook.install: install-hooks.sh exit {p.returncode}: {p.stderr.strip()}", file=sys.stderr)
-            rc = 2
-    print("strict-delivery: invoke the strict-delivery skill before any other action")
-    return rc
+            fail("hook.install", f"install-hooks.sh exit {p.returncode}: {p.stderr.strip()}")
 
 
 if __name__ == "__main__":
     try:
-        rc = main()
-    except Exception as exc:  # fail closed
-        print(f"FAIL hook.internal: {type(exc).__name__}: {exc}", file=sys.stderr)
-        rc = 2
-    sys.exit(rc)
+        main()
+    except Exception as exc:  # reported, never raised: SessionStart cannot block
+        fail("hook.internal", f"{type(exc).__name__}: {exc}")
+    print("strict-delivery: invoke the strict-delivery skill before any other action")
+    sys.exit(0)
 ```
 
 `tools/gates/hooks/user_prompt_submit.py`:
@@ -5768,8 +7002,7 @@ if __name__ == "__main__":
 {"hooks": {
   "PreToolUse": [
     {"matcher": "Agent", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 300}]},
-    {"matcher": "Bash", "hooks": [{"type": "command", "if": "Bash(git *)", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900},
-                                  {"type": "command", "if": "Bash(gh *)",  "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
+    {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
   ],
   "SessionStart": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/session_start.py\""}]}],
   "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/user_prompt_submit.py\""}]}]
@@ -5815,34 +7048,143 @@ Append to `tools/gates/README.md`:
 
 ## Hooks
 
-`.claude/settings.json` wires `hooks/pre_tool_use.py` (Bash: `git commit` / `git push` run
-register + claims), `hooks/session_start.py` and `hooks/user_prompt_submit.py`. Every hook exits 2
-with the failing lines on stderr, and exits 2 on any internal error (fail closed).
-`install-hooks.sh` installs the git `pre-commit` shim (marker `# strict-delivery-gates-hook`),
-which runs `hooks/git-pre-commit.sh` of the tree being committed; SessionStart installs it when
-missing.
+`.claude/settings.json` wires `hooks/pre_tool_use.py` (matchers `Agent` and `Bash`, the Bash entry
+without an `if` filter, so the script sees every Bash call), `hooks/session_start.py` and
+`hooks/user_prompt_submit.py`; a new Claude Code session loads it. `Stop` and `SubagentStop` arrive
+with S2.
+
+Design (owner decision DEC-0005): the Claude Code Bash hook is a best-effort textual check with
+documented limits; the git hooks, pre-commit and pre-push, are the enforcement. They run for every
+commit and push, however it was launched.
+
+- `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
+  (`FAIL hook.internal`, fail closed). Bash, in order:
+  1. Hook bypasses exit 2 with `FAIL hook.bypass: <form found>` before any gate runs:
+     `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`,
+     `_SYSTEM` or `_NOSYSTEM` assignment (`=` or `+=`) anywhere in any Bash command (a
+     `git config core.hooksPath` on its own would move the hooks for every later command), a
+     `HOME` or `XDG_CONFIG_HOME` assignment (`=` or `+=`, `env HOME=...` too) before a gated verb
+     (it moves the global git config, which can set `core.hooksPath`), and `--no-verify` (or the
+     abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
+     in the arguments of a gated verb, quoted (`git "push"`) or not: up to an unquoted separator
+     outside every parenthesis the arguments open, or an unpaired `)`, quote or backtick (so the
+     rest of an enclosing `$(...)` is not read); quotes, `$'...'`, `${...}`, backticks, `$(...)`,
+     `<(...)`, `>(...)`, `$((...))` at any depth and the redirections `>&`, `<&`, `&>`, `>|` do
+     not end them. `-n` is `--no-verify` for commit and `--dry-run` for push; it is blocked for
+     both. Every gated verb gets its own argument scan, so a verb mentioned in a quoted string, a
+     heredoc or a comment never hides a later verb's flag (`echo "git push"; git commit -n`).
+  2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
+     `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
+     (`/usr/bin/git`), the git word in any case (`GIT`, `Git`: a case-insensitive file system runs
+     them, so a prose `Git push` runs the gates too). The options are git 2.50.1's global options,
+     each checked with
+     `git <option> version` (`-C <dir>`, `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`,
+     `--config-env`, `--attr-source`, `--shallow-file`, `--no-pager`, `-p`, `--bare`, `--exec-path`,
+     the pathspec flags, ...; quoted values and values holding `$(...)` or backticks included), read
+     left to right as git does, plus a `$X` word (`git $X commit` is gated). The verb is a whole
+     word (`commit-graph`, `pushd`, `--push-option` are not verbs). A backslash-newline is removed
+     first. There is no data/code analysis: a mention inside quotes, a heredoc or a comment
+     (`echo "git push"`, a python heredoc that prints it) runs the gates too; on a healthy tree that
+     costs well under a second and blocks
+     nothing.
+  3. The tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the
+     directory of a leading `cd <dir>` or `cd -- <dir>` followed by `&&`, `||` (the `|| exit` /
+     `|| return` idiom), `;` or a newline, else from the event's `cwd`. A
+     directory that is not in a repository exits 2 with `FAIL hook.target: <dir>: <git stderr>`; a
+     missing `cwd` with `FAIL hook.input`. Every tree named is gated once with the register and
+     claim gates.
+
+  Documented limits (DEC-0005): A verb hidden behind an expansion, alias, function, `eval`, a
+  payload file, or a wrapper the regex does not see (`$G push`, `git $V`, `eval "$CMD"`,
+  `bash script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this
+  hook. The git hooks gate it: pre-commit for commits, pre-push for pushes. The same holds for a git
+  word or verb with a quoted or escaped piece (`g"it" push`, `git p"ush"`); for a tree changed in a
+  way the hook does not follow (a later `cd`, a leading `cd` in a form item 3 does not name such
+  as `cd -P <dir>`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
+  `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the
+  real one; for an option value the hook cannot read as one word
+  (`git -C $(dirname $(pwd)) commit`) or a global option git adds after 2.50.1, where the verb is
+  not seen and so neither is a bypass flag after it; for a quoted or escaped bypass flag
+  (`--no-"verify"`, `core.hooks\Path`); for a flag after a `case` pattern's `)` inside a
+  substitution (`$(case x in x) ...;; esac)`) or after a double-quoted `$(...)` that both nests
+  parentheses and quotes (`"$(a $(b ")"))"`), where the argument scan ends early; and for a bypass
+  in a form the text does not name as one (`include.path`, a config file or hook script edited by
+  other means). A `-C` or `cd` directory is not expanded: one holding a variable, `$(...)` or a
+  backtick (`cd "$WT" &&`, `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real
+  command; name the directory literally. A `HOME` or `XDG_CONFIG_HOME` assignment that only
+  precedes a verb in data is blocked as a bypass too. A commit message that holds `-n`,
+  `--no-verify` or `core.hooksPath` as a word, or a `-n` inside a substitution in the arguments
+  (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the message to a file and use
+  `git commit -F <file>`. So is, rarely, a `-n` after the arguments: a scan that meets an earlier
+  verb's scan deeper inside a parenthesis reads on to the end of the command. Every scan is linear
+  in the command length. Every other command and tool exits 0 silently, after one python3 start;
+  the `Agent` branch (the dispatch gate) arrives with S2.
+- `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
+  hook, so this hook always exits 0. It prints whether the gates are installed in the event's
+  project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
+  the repository's pre-commit or pre-push hook (`$(git rev-parse --git-path hooks)/<hook>`) is not
+  ours (a symlink never is), and the instruction to invoke the strict-delivery skill. Every failure
+  is a `FAIL ...` line on stdout (the model sees it), then the instruction line (the line is also
+  copied to stderr, which Claude Code shows neither the model nor the owner on exit 0; it appears in
+  the debug log only):
+  `FAIL hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the
+  repository's git directory, or a second foreign hook over an existing `<hook>.pre-strict-delivery`
+  backup), `FAIL hook.input` for a missing or non-directory `cwd`, `FAIL hook.internal` for anything
+  else (a cwd outside a repository, malformed stdin).
+- `user_prompt_submit.py`: one reminder line; malformed stdin exits 2 with `FAIL hook.internal`.
+- `install-hooks.sh` installs two git shims (marker `# strict-delivery-gates-hook`): `pre-commit`,
+  which runs `hooks/git-pre-commit.sh`, and `pre-push`, which runs `hooks/git-pre-push.sh`, each
+  from the tree git runs in (`FAIL pre-commit.missing` / `FAIL pre-push.missing` for a tree without
+  the script). A foreign hook, or a symlink (even one to the tracked script: the link itself is
+  moved, never written through), is moved to `<hook>.pre-strict-delivery`; an existing backup is
+  never overwritten, and then nothing is installed. `git-pre-commit.sh` runs
+  `run_all.py --only register,claims` and refuses (`FAIL pre-commit.unstaged`) while a worktree-side
+  change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,
+  `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with
+  the commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store`
+  and the `__pycache__` directories under `tools/gates`. A finding's evidence file is gated by the
+  register itself: it must be a regular file git tracks (`register.evidence`), so an untracked or
+  ignored one, or a tracked symlink, fails the gate wherever it lies. `git-pre-push.sh` ignores its
+  `<remote> <url>` arguments and reads the ref lines on stdin: every pushed local sha, whatever
+  the ref kind, is peeled to a commit and must be HEAD (DEC-0006, read literally), else it is
+  refused first (`FAIL pre-push.not-head`; a branch, `bad~0:refs/heads/y`, a tag of an older
+  commit or a non-commit object alike: push it from that commit checked out, so the gates see its
+  tree); `HEAD:refs/heads/x`, a tag of HEAD and a delete pass; from an unborn HEAD only deletes
+  pass (`FAIL pre-push.not-head: ... pushed from an unborn HEAD`), and then no gate runs. Then it
+  runs `git-pre-commit.sh` with `--pre-push`: the same paths must not differ from HEAD at all,
+  staged changes included, because a push sends commits, not the index
+  (`FAIL pre-push.uncommitted`); then the same two gates. S4 extends it with merge-readiness.
 ````
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 241 tests ... OK
-python3 tools/gates/run_all.py                            # 15 PASS
+python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 60 tests ... OK
+python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 284 tests ... OK
+tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 284 tests ... OK (3.12)
+python3 tools/gates/run_all.py                                                    # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
-git add -A && git diff --cached --check && echo whitespace-clean
+# strict-delivery: gates installed in <root> (tools/gates/run_all.py); PyYAML ok
+# strict-delivery: handoff docs/superpowers/state/strict-delivery/handoff.md -- read it before any dispatch
+# strict-delivery: invoke the strict-delivery skill before any other action
+diff <(sed -n '/^{"hooks": {/,/^}}/p' docs/superpowers/plans/2026-10-17-strict-delivery.md | grep -v -e '"Stop":' -e '"SubagentStop":') .claude/settings.json   # no output
+git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md \
+  docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md && git diff --cached --check && echo whitespace-clean
 ```
 
-Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\""}]}],` to `.claude/settings.json`. `test_settings_json_wires_existing_hook_scripts_without_stop_hooks` must fail. Restore.
+Mutation checks (run at Task 8b in a private clone; each restored, then `OK` again; all killed by the test named). `session_start.py`: the install condition to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_is_reported_on_stdout_and_exits_0`, `test_a_refusal_of_install_hooks_is_reported_and_exits_0`, `test_a_non_utf8_foreign_hook_is_moved_aside`, `test_session_start_installs_a_missing_pre_push_shim`); check only `pre-commit`, or let a symlink be ours (`test_session_start_installs_a_missing_pre_push_shim`); `ours()` reading UTF-8 text (`test_a_non_utf8_foreign_hook_is_moved_aside`); `fail()` without the stdout print or without the stderr echo (`test_install_failure_is_reported_on_stdout_and_exits_0`, `test_malformed_stdin_is_reported_and_exits_0`); the final `sys.exit(0)` to `sys.exit(2)` (`test_a_cwd_that_is_not_a_repository_fails_closed`, `test_malformed_stdin_is_reported_and_exits_0`); drop the `os.path.isdir` check (`test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback`); a handoff glob that finds nothing (`test_installs_git_hooks_and_lists_handoffs`). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix (`test_one_line_reminder`); drop the FAIL line (`UserPromptSubmit::test_malformed_stdin_fails_closed`). Settings: `"timeout": 900` to `1` (`test_settings_json_is_the_expected_wiring_without_stop_hooks`); append a bullet to `CLAUDE.md` (`test_claude_md_carries_spec_section_12_verbatim_and_nothing_else`).
+
+Whole-file check (each prints nothing): `diff <(sed -n 'A,Bp' PLAN) FILE` with A,B the first and last line of each code block above, for `session_start.py`, `user_prompt_submit.py`, `.claude/settings.json`, `CLAUDE.md` and the README Hooks section (`sed -n '/^## Hooks/,$p' tools/gates/README.md` equals the block minus its first, empty line); the Task 8 test block equals `sed -n '/^class SessionStart/,/^if __name__/p' tools/gates/tests/test_hooks.py` minus its last line and the blank lines before it; the Task 7 test block equals `test_hooks.py` without those lines.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 241 OK` to the ledger.
+Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 60 OK (47 + 13); suite 284 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` (the counts a fresh execution of the re-synced plan gives; the live ledger's b3 T8 line carries the historical first-pass counts, and its fix-round and fix-wave lines carry the final ones) to the ledger under the existing `## Block b3` section.
 
 ```bash
-git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md
+git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md \
+  docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md docs/superpowers/state/strict-delivery/ledger.md
 git commit -m "feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides" \
-  -m "Strict-delivery S1 Task 8 (spec §8, §12). settings.json = the umbrella's hooks without Stop/SubagentStop (S2 adds them with their scripts). CLAUDE.md carries spec §12 verbatim, pinned by a test."
+  -m "Strict-delivery S1 Task 8 (spec §8, §12). settings.json = the umbrella's hooks without Stop/SubagentStop (S2 adds them with their scripts), the Bash handler unfiltered. CLAUDE.md carries spec §12 verbatim, pinned by a test."
 ```
 
 The owner restarts the Claude Code session after this block merges: hooks in a new `.claude/settings.json` load at session start.
@@ -5877,7 +7219,7 @@ for r in controller implementer reviewer verifier exception-reviewer investigato
   [ -f "$f" ] || { echo "MISSING $f"; bad=1; continue; }
   n=$(wc -c < "$f"); [ "$n" -le 4000 ] || { echo "$r.md is $n bytes (> 4000)"; bad=1; }
   [ "$(tail -c 1 "$f" | od -An -c | tr -d ' ')" = '\n' ] || { echo "$r.md: no trailing newline"; bad=1; }
-  for p in "Verification method." "by contradiction" "Zero bugs." "Owner-only decisions." "NEEDS_DECISION" "Budget." "Report contract." 'first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`'; do need "$f" "$p"; done
+  for p in "Verification method." "by contradiction" "Zero bugs." "Owner-only decisions." "NEEDS_DECISION" "Budget." "Background work." "Report contract." 'first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`'; do need "$f" "$p"; done
   if [ "$r" = controller ]; then need "$f" "You are the only role that dispatches."; else need "$f" "No subagents."; fi
   case "$r" in reviewer|verifier)
     for p in "Execute, never trust." "Re-run every gate" "Re-run each mutation transcript" "Sibling check" "Contradiction pass on the new surface"; do need "$f" "$p"; done ;;
@@ -6015,6 +7357,8 @@ Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code d
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
 
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
+
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
 
@@ -6036,6 +7380,8 @@ No subagents. Do not dispatch agents, workflows or background tasks, and never a
 Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code direction, plan scope, a merge grant, hardware, model or cost policy, closing an issue, or narrowing or widening a finding's class: write the question with at least two options and their cost under "Decision needed" and stop with status NEEDS_DECISION. Never decide it; never assume the likely answer. Hardware: never flash, never open a serial port.
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
+
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
 
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
@@ -6061,6 +7407,8 @@ Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code d
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
 
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
+
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
 
@@ -6085,6 +7433,8 @@ Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code d
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
 
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
+
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
 
@@ -6106,6 +7456,8 @@ No subagents. Do not dispatch agents, workflows or background tasks, and never a
 Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code direction, plan scope, a merge grant, hardware, model or cost policy, closing an issue, or narrowing or widening a finding's class: write the question with at least two options and their cost under "Decision needed" and stop with status NEEDS_DECISION. Never decide it; never assume the likely answer. Hardware: never flash, never open a serial port.
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
+
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
 
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
@@ -6129,6 +7481,8 @@ Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code d
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
 
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
+
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
 
@@ -6150,6 +7504,8 @@ No subagents. Do not dispatch agents, workflows or background tasks, and never a
 Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code direction, plan scope, a merge grant, hardware, model or cost policy, closing an issue, or narrowing or widening a finding's class: write the question with at least two options and their cost under "Decision needed" and stop with status NEEDS_DECISION. Never decide it; never assume the likely answer. Hardware: never flash, never open a serial port.
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
+
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
 
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
@@ -6173,13 +7529,15 @@ Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code d
 
 Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
 
+Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
+
 Report contract. Write the full report to the dispatch's ## Report path. Its first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`. Then, in order: commits (sha + subject); gates run (command + result line); claims (claim | direct command | contradiction command | output excerpt | PASS/FAIL); findings raised (ids or proposed register rows); denials (verbatim); budget used. Your final reply is at most 10 lines with the same fields.
 ```
 
 - [ ] **Step 4: Run the acceptance check**
 
 Run: `bash .superpowers/sdd/strict-delivery/check-skill.sh && wc -c ~/.claude/skills/strict-delivery/prompts/*.md`
-Expected: `skill skeleton OK`; sizes between 2,600 and 3,700 bytes each (prototype: audit-reviewer 2897, audit-verifier 2775, controller 3442, exception-reviewer 2949, implementer 2993, investigator 2611, reviewer 3584, verifier 3647).
+Expected: `skill skeleton OK`; sizes between 2,800 and 4,000 bytes each (prototype: audit-reviewer 3165, audit-verifier 3043, controller 3710, exception-reviewer 3217, implementer 3261, investigator 2879, reviewer 3852, verifier 3915).
 
 Mutation check: delete the sentence starting `Sibling check:` from `verifier.md`. The check must print `MISSING in verifier.md: Sibling check` and exit 1. Restore and run again: OK.
 
@@ -6216,7 +7574,7 @@ For each task T in this block, with `B` = the commit before the task and `H` = t
 
 ```bash
 P=.superpowers/sdd/strict-delivery/review/b3/T<n>; mkdir -p "$P"
-git log --oneline B..H > "$P/commits.txt"
+git log --format='%h %s%n%b' B..H > "$P/commits.txt"
 git diff -U10 B..H > "$P/diff.patch"
 { python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/run_all.py; } > "$P/gates.txt" 2>&1
 ```

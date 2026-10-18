@@ -46,11 +46,15 @@ def with_(row, **kw):
 class Loaders(unittest.TestCase):
     def test_bootstrapped_registers_are_valid(self):
         root = lib.CODE_ROOT
-        self.assertEqual([], reg.load_findings(root))
+        findings = reg.load_findings(root)     # the live register grows (B3-S4PREPUSH-1 at b3): every row valid
+        self.assertEqual([[]] * len(findings), [reg.validate_finding(f) for f in findings])
+        self.assertEqual([], [e for f in findings for e in reg.transition_errors(f)])
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0004"], [d["id"] for d in decisions])
-        self.assertEqual([[], [], [], []], [reg.validate_decision(d) for d in decisions])
+        ids = [d["id"] for d in decisions]       # the live register grows (DEC-0005 at b3): pin the order, not a count
+        self.assertEqual(["DEC-%04d" % n for n in range(1, len(ids) + 1)], ids)
+        self.assertLessEqual(4, len(ids))
+        self.assertEqual([[]] * len(ids), [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -146,8 +150,10 @@ class Transitions(unittest.TestCase):
 class Evidence(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="gate-ev-")
+        gf.git(self.root, "init", "-q")
         gf.write(self.root, MUT + "T1-PIN-1.txt", "finding: T1-PIN-1\n")
         gf.write(self.root, "st/demo/review/T1.md", "status: DONE\n")
+        gf.git(self.root, "add", "-A")     # an evidence file must be tracked: staged counts
 
     def tearDown(self):
         gf.remove(self.root)
@@ -174,8 +180,25 @@ class Evidence(unittest.TestCase):
                       reg.evidence_errors(self.pinned(evidence=["bbbbbbb"]), self.root, []))
 
     def test_evidence_entries_must_exist(self):
-        self.assertIn("evidence: 'st/nope.md' is neither a commit sha nor a file under the repo root",
+        self.assertIn("evidence: 'st/nope.md' is neither a commit sha nor a file tracked at the repo root",
                       reg.evidence_errors(self.pinned(evidence=["st/nope.md"]), self.root, []))
+
+    def test_evidence_files_must_be_tracked_by_git(self):                                # b3 F1
+        tracked = "evidence: {!r} is neither a commit sha nor a file tracked at the repo root"
+        gf.write(self.root, "notes/r.md", "untracked\n")
+        gf.write(self.root, ".gitignore", "ignored/\n")
+        gf.write(self.root, "ignored/r.md", "ignored\n")
+        for p in ("notes/r.md", "ignored/r.md", "st/demo/review", "st/demo/review/", "./st/demo/review/T1.md",
+                  "st//demo/review/T1.md", ":st/demo/review/T1.md", "st/demo/review/*.md", "ST/demo/review/T1.md"):
+            errs = reg.evidence_errors(self.pinned(evidence=[p]), self.root, [])
+            self.assertIn(tracked.format(p), errs, p)
+            self.assertIn("evidence: pinned needs the reviewer's confirming report path in evidence", errs, p)
+        self.assertEqual([], reg.evidence_errors(self.pinned(), self.root, []))      # staged, never committed
+        gf.git(self.root, "commit", "-q", "-m", "x")
+        gf.write(self.root, "st/demo/review/T1.md", "modified\n")                        # tracked and modified
+        self.assertEqual([], reg.evidence_errors(self.pinned(), self.root, []))
+        gf.git(self.root, "rm", "-q", "--cached", "st/demo/review/T1.md")               # removed from the index, left on disk
+        self.assertIn(tracked.format("st/demo/review/T1.md"), reg.evidence_errors(self.pinned(), self.root, []))
 
     def test_evidence_paths_cannot_escape_the_repo_root(self):
         outside = os.path.join(os.path.dirname(self.root), os.path.basename(self.root) + "-out.md")
@@ -183,7 +206,7 @@ class Evidence(unittest.TestCase):
             fh.write("x\n")
         self.addCleanup(os.remove, outside)
         for p in ("../" + os.path.basename(outside),):
-            self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file under the repo root",
+            self.assertIn(f"evidence: {p!r} is neither a commit sha nor a file tracked at the repo root",
                           reg.evidence_errors(self.pinned(evidence=[p]), self.root, []), p)
         escaped = {"test": "test_x", "transcript": MUT + "../../../../../" + os.path.basename(outside)}
         self.assertIn(f"evidence: pin transcript must be docs/superpowers/state/<plan>/mutations/<file>, got {escaped['transcript']!r}",
@@ -198,7 +221,7 @@ class Evidence(unittest.TestCase):
         self.assertIn("evidence: pin transcript: must be relative to the repo root", errs)
         self.assertFalse(any("does not exist" in e for e in errs), errs)
         nul = "st/a\0b.md"
-        self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file under the repo root",
+        self.assertIn(f"evidence: {nul!r} is neither a commit sha nor a file tracked at the repo root",
                       reg.evidence_errors(self.pinned(evidence=[nul]), self.root, []))
         bad = {"test": "test_x", "transcript": MUT + "a\0b.txt"}
         self.assertIn(f"evidence: pin transcript {MUT}a\0b.txt does not exist",
@@ -440,6 +463,8 @@ class FixWave(unittest.TestCase):
         gf.write(root, "README.md", "x\n")
         gf.write(root, MUT + "T1-PIN-1.txt", "t\n")
         gf.write(root, "docs/superpowers/state/demo/review/T1.md", "r\n")
+        gf.git(root, "init", "-q")
+        gf.git(root, "add", "-A")
         base = with_(FINDING, state="pinned", evidence=["docs/superpowers/state/demo/review/T1.md"],
                      history=[{"state": s, "sha": "aaaaaaa", "by": "x"}
                               for s in ("open", "planned", "in-progress", "pinned")])

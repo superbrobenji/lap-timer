@@ -75,8 +75,8 @@ tools/gates/gate_state_docs.py                   Create                         
 tools/gates/gate_merge_ready.py                  Create                                                   T5
 tools/gates/hooks/pr_verbs.py                    Create (PR-verb branch of the Bash hook)                 T5
 tools/gates/hooks/pre_tool_use.py                Modify: call pr_verbs from the Bash branch               T5
-tools/gates/hooks/git-pre-push.sh                Create                                                   T5
-tools/gates/install-hooks.sh                     Modify: install pre-push                                 T5
+tools/gates/hooks/git-pre-push.sh                Modify: add merge-readiness                              T5
+tools/gates/install-hooks.sh                     unchanged: S1 b3 installs the pre-push shim (DEC-0007)   T5
 tools/gates/postmerge.py                         Create (no commit on main; leaves 2 files pending)       T6
 tools/gates/tests/s4kit.py                       Create (fixture repos, register rows, fake gh)           T1
 tools/gates/tests/fixtures/fakegh/gh             Create (executable fake gh)                              T1
@@ -2738,8 +2738,8 @@ Mutation: `sed -i.bak 's/^                    if new == body:$/                 
 **Register:** SD-S4-T5. **Siblings:** git pre-push; `gh pr ready`; `gh pr merge`; `git merge` on `main`; StatusContext checks. **Gates:** `run_all.py`, gate-test suite.
 
 **Files:**
-- Create: `tools/gates/gate_merge_ready.py`, `tools/gates/hooks/pr_verbs.py`, `tools/gates/hooks/git-pre-push.sh`, `tools/gates/tests/test_gate_merge_ready.py`
-- Modify: `tools/gates/hooks/pre_tool_use.py` (Bash branch), `tools/gates/install-hooks.sh`, `tools/gates/tests/test_hooks_s4.py`, `tools/gates/run_all.py`, `tools/gates/README.md`
+- Create: `tools/gates/gate_merge_ready.py`, `tools/gates/hooks/pr_verbs.py`, `tools/gates/tests/test_gate_merge_ready.py`
+- Modify: `tools/gates/hooks/pre_tool_use.py` (Bash branch), `tools/gates/hooks/git-pre-push.sh` (add merge-readiness; S1 b3 ships it), `tools/gates/tests/test_hooks_s4.py`, `tools/gates/run_all.py`, `tools/gates/README.md`
 
 **Interfaces:**
 - Consumes: Task 4 gitinfo helpers; `registers.load_findings/load_claims/load_decisions/grant_for`; `gitinfo.head_sha/branch/changed_files/pr_for_branch/tags_at`; `config.load` (`merge_markers`, `tag_pattern`).
@@ -3385,6 +3385,8 @@ class PrVerbsTest(unittest.TestCase):
 
 - [ ] **Step 5: git pre-push hook**
 
+S1 block b3 (Task 8b, owner decisions DEC-0005, DEC-0006) already ships `tools/gates/hooks/git-pre-push.sh`: it refuses every pushed local sha whose commit is not HEAD, branch or tag (`FAIL pre-push.not-head`), then runs register + claims through `git-pre-commit.sh --pre-push`. `install-hooks.sh` (S1 b3) already installs the pre-push shim that runs that script with `sh` from the tree git runs in, so S4 modifies `git-pre-push.sh` only: no install line and no symlink (DEC-0007; a symlinked hook is moved aside by every later install). The pre-flight re-reads the S1 script and keeps its behaviour when it adds the merge-readiness code below.
+
 `tools/gates/hooks/git-pre-push.sh` (executable):
 ```bash
 #!/usr/bin/env bash
@@ -3398,11 +3400,7 @@ export CLAUDE_PROJECT_DIR="$root"
 python3 "$gates/run_all.py" --only register,claims,comments,bench
 python3 "$gates/gate_merge_ready.py" --pre-push
 ```
-`tools/gates/install-hooks.sh`: next to S1's pre-commit install line, add
-```bash
-ln -sf "$root/tools/gates/hooks/git-pre-push.sh" "$(git rev-parse --git-common-dir)/hooks/pre-push"
-```
-(`$root` is S1's variable for the toplevel; use S1's name.) Append to `test_hooks_s4.py`:
+Append to `test_hooks_s4.py` (the fixture carries the gates and installs the hooks with S1's `install-hooks.sh`):
 ```python
 class PrePushTest(unittest.TestCase):
     def test_pre_push_blocks_a_plan06_comment_committed_with_no_verify(self):
@@ -3411,9 +3409,10 @@ class PrePushTest(unittest.TestCase):
         bare = s4kit.make_repo()
         s4kit.sh(bare, "git", "config", "receive.denyCurrentBranch", "ignore")
         s4kit.sh(root, "git", "remote", "add", "origin", bare)
-        hooks = os.path.join(root, ".git", "hooks")
-        os.symlink(os.path.join(s4kit.REPO, "tools", "gates", "hooks", "git-pre-push.sh"),
-                   os.path.join(hooks, "pre-push"))
+        import shutil   # the pre-push shim runs this tree's tracked tools/gates/hooks/git-pre-push.sh
+        shutil.copytree(os.path.join(s4kit.REPO, "tools", "gates"), os.path.join(root, "tools", "gates"),
+                        dirs_exist_ok=True, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        s4kit.sh(root, "bash", "tools/gates/install-hooks.sh")
         with open(os.path.join(s4kit.FIXTURES, "comments", "plan06.c")) as fh:
             s4kit.write(root, {"src/plan06.c": fh.read()})
         s4kit.sh(root, "git", "add", "-A")

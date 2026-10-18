@@ -77,7 +77,7 @@ tools/gates/hooks/subagent_stop.py          Claude Code SubagentStop (report con
 tools/gates/hooks/session_start.py          Claude Code SessionStart                S1
 tools/gates/hooks/user_prompt_submit.py     reminder                                S1
 tools/gates/hooks/git-pre-commit.sh         git hook                                S1
-tools/gates/hooks/git-pre-push.sh           git hook                                S4
+tools/gates/hooks/git-pre-push.sh           git hook                                S1 (b3, DEC-0005); S4 extends
 tools/gates/install-hooks.sh                installs git hooks                      S1
 tools/gates/postmerge.py                    cleanup + tag + state regen             S4
 tools/gates/tests/test_*.py + fixtures/     one test module per gate/hook           S1–S4
@@ -215,17 +215,16 @@ All subprocess calls use `subprocess.run([...], capture_output=True, text=True, 
 
 Claude Code hooks read one JSON object on stdin. Common fields: `session_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`; when the call comes from a subagent also `agent_id`, `agent_type` (hooks from `.claude/settings.json` DO run inside subagents, so every subagent commit and dispatch is gated too). `PreToolUse` adds `tool_name`, `tool_input`, `tool_use_id`; `tool_input` for `Bash` has `command`, `description`; for `Agent` has `prompt`, `description`, `subagent_type`, `model` (optional alias). `Stop` adds `stop_hook_active` (true when Claude is already continuing because of a stop hook — the hook must exit 0 then, loop guard), `last_assistant_message`, `background_tasks`. `SubagentStop` adds `stop_hook_active`, `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`. `SessionStart` adds `source` ∈ {startup, resume, clear, compact, fork}. `UserPromptSubmit` adds `prompt`.
 
-Blocking: exit code 2 with the gate's rendered lines on stderr (Claude receives them as the reason). Exit 0 with no output = no decision (normal flow continues). `SessionStart` injects context by printing to stdout. Every hook wraps its body in `try/except Exception: print("FAIL hook.internal: <exc>", file=sys.stderr); sys.exit(2)` — hooks fail closed. Hooks call gate modules through `run_all.run(names, args) -> Result` so output is identical to the CLI. `CLAUDE_PROJECT_DIR` is the project root and stays fixed inside worktrees; hooks resolve the repo for the *current* `cwd` with `git rev-parse --show-toplevel` when gating a worktree.
+Blocking: exit code 2 with the gate's rendered lines on stderr (Claude receives them as the reason). Exit 0 with no output = no decision (normal flow continues). `SessionStart` injects context by printing to stdout. Every hook wraps its body in `try/except Exception: print("FAIL hook.internal: <exc>", file=sys.stderr); sys.exit(2)` — hooks fail closed. `SessionStart` is the exception (owner ruling 5b, S1 b3): it cannot block, so it prints `FAIL hook.<id>: ...` on stdout, where the model sees it, and exits 0. Hooks call gate modules through `run_all.run(names, args) -> Result` so output is identical to the CLI. `CLAUDE_PROJECT_DIR` is the project root and stays fixed inside worktrees; hooks resolve the repo for the *current* `cwd` with `git rev-parse --show-toplevel` when gating a worktree.
 
-Matcher: a value of letters/digits/`_-,| ` is an exact list; `"Agent|Bash"` matches exactly those two tools. The `if` field (permission-rule syntax, tool events only) narrows the Bash handler to the verbs we gate so ordinary commands are not slowed.
+Matcher: a value of letters/digits/`_-,| ` is an exact list; `"Agent|Bash"` matches exactly those two tools. The Bash handler carries no `if` filter: `if` uses permission-rule matching, which does not see `/usr/bin/git push`, `bash -c 'git push'`, `env -C <dir> git push` or `sudo git push`, so `pre_tool_use.py` receives every Bash call and alone decides what is gated (an ungated command exits 0 silently; owner ruling 5, S1 Task 8 review).
 
 `.claude/settings.json` (committed):
 ```json
 {"hooks": {
   "PreToolUse": [
     {"matcher": "Agent", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 300}]},
-    {"matcher": "Bash", "hooks": [{"type": "command", "if": "Bash(git *)", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900},
-                                  {"type": "command", "if": "Bash(gh *)",  "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
+    {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/pre_tool_use.py\"", "timeout": 900}]}
   ],
   "Stop":         [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\"", "timeout": 300}]}],
   "SubagentStop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/subagent_stop.py\"", "timeout": 60}]}],
@@ -344,7 +343,7 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 | **S1** `2026-10-17-strict-delivery-S1-registers-core-gates.md` | b1: lib + schemas + registers + `gate_register`; b2: `gate_claims` + `gate_decisions` + `run_all` + CI job `gates`; b3: hooks (`pre_tool_use` for Bash verbs, `session_start`, `user_prompt_submit`, git pre-commit, `install-hooks.sh`), `CLAUDE.md`, skill skeleton + prompt files | 9 | 1, 2 |
 | **S2** `2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md` | b4: `gate_dispatch` + Agent matcher in `pre_tool_use`; b5: `gate_review_package` + `gate_plan`; b6: `gate_checkpoint` + `stop.py` + handoff format + checklists + state dir per plan (ledger) | 9 | 3 |
 | **S3** `2026-10-17-strict-delivery-S3-p10-reach.md` | b7: rules 1 (call graph), 2 (loop bounds), 3 (full heap census) + probes; b8: rules 5 (density, exclusions), 9 (typedef/struct fn-ptrs, pointed-to set) + all trees incl. devcontroller and test harness allowance + `gate_p10` wrapper; b9: deviation register two-tier columns + scoring check + grace-list removal (violations → register rows) | 9 | 4 |
-| **S4** `2026-10-17-strict-delivery-S4-remaining-gates-workflows.md` | b10: `gate_comments` + `gate_tools_py` + `gate_bench`; b11: `gate_state_docs` (generators for roadmap/README facts + owner tables) + `gate_merge_ready` + `git-pre-push.sh` + `postmerge.py` (cleanup, tag, regen); b12: workflows `audit.js` + `block.js` | 9 | 5, 6 |
+| **S4** `2026-10-17-strict-delivery-S4-remaining-gates-workflows.md` | b10: `gate_comments` + `gate_tools_py` + `gate_bench`; b11: `gate_state_docs` (generators for roadmap/README facts + owner tables) + `gate_merge_ready` + extends the b3 `git-pre-push.sh` with merge-readiness + `postmerge.py` (cleanup, tag, regen); b12: workflows `audit.js` + `block.js` | 9 | 5, 6 |
 | **S5** `2026-10-17-strict-delivery-S5-validation-bootstrap-conformance.md` | b13: skill red/green scenarios + dry run + final SKILL.md; then the bootstrap load and the conformance sweep are run AS audit/fix work through the installed pipeline (they are plans of their own, written by `audit.js`'s output and the owner's decisions; S5 writes only their briefs and gates) | 3 + 2 generated plans | 7, 8, 9 |
 
 Order: S1 → S2 → S3 → S4 → S5. Each sub-plan starts with the gates its predecessors installed; the dispatch hook is live from b4 onwards, `gate_checkpoint` from b6, `gate_merge_ready` from b11 (before b11, the controller runs the merge-readiness checklist in `checklists/block-end.md` by hand and ledgers it).
