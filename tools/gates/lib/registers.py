@@ -114,8 +114,9 @@ def _file_under(root, rel) -> bool:
 def _tracked_under(root, rel, tracked) -> bool:
     """True when `rel` is a normalised repo-relative path (DEC-0004: no leading ':', no '..', not
     absolute) naming a regular file inside `root` that git tracks there as a regular file (in the
-    index with mode 100644 or 100755, so a staged new file counts and an untracked or ignored file, a
-    tracked symlink or a submodule does not): the register reads the same on every machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
+    index with mode 100644 or 100755, so a staged new file counts and an untracked or ignored
+    file, a tracked symlink or a submodule does not): the register reads the same on every
+    machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
     return (isinstance(rel, str) and cite_problem(rel) == "" and not rel.endswith("/")
             and _file_under(root, rel) and rel in tracked(root))
 
@@ -213,15 +214,17 @@ def transition_errors(f: dict) -> list:
 
 
 def evidence_errors(f: dict, root, decisions: list, owner=None, tracked=None) -> list:
-    """What each state must carry (spec §4.1). Call only on a valid row. An evidence path must be a
-    file git tracks at `root` (_tracked_under); `tracked(root)` defaults to gitinfo.tracked_files."""
+    """What each state must carry (spec §4.1). Call only on a valid row. An evidence path must be
+    a file git tracks at `root` (_tracked_under); `tracked(root)` defaults to
+    gitinfo.tracked_files."""
     tracked = gitinfo.tracked_files if tracked is None else tracked
     errs = []
     for e in f["evidence"]:
         if not _sha(e) and os.path.isabs(e):
             errs.append(f"evidence: path must be relative to the repo root: {e!r}")
         elif not _sha(e) and not _tracked_under(root, e, tracked):
-            errs.append(f"evidence: {e!r} is neither a commit sha nor a file tracked at the repo root")
+            errs.append(f"evidence: {e!r} is neither a commit sha nor a file tracked at the "
+                        "repo root")
     states = [h["state"] for h in f["history"]]
     if "pinned" in states:
         pin = f["pin"]
@@ -238,7 +241,8 @@ def evidence_errors(f: dict, root, decisions: list, owner=None, tracked=None) ->
             elif not _file_under(root, pin["transcript"]):
                 errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
             elif not _tracked_under(root, pin["transcript"], tracked):
-                errs.append(f"evidence: pin transcript {pin['transcript']} is not a file tracked at the repo root")
+                errs.append(f"evidence: pin transcript {pin['transcript']} is not a file tracked "
+                            "at the repo root")
         if not any(not _sha(e) and _tracked_under(root, e, tracked) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":

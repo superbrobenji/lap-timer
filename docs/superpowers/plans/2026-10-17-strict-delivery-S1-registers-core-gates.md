@@ -2050,8 +2050,9 @@ def _file_under(root, rel) -> bool:
 def _tracked_under(root, rel, tracked) -> bool:
     """True when `rel` is a normalised repo-relative path (DEC-0004: no leading ':', no '..', not
     absolute) naming a regular file inside `root` that git tracks there as a regular file (in the
-    index with mode 100644 or 100755, so a staged new file counts and an untracked or ignored file, a
-    tracked symlink or a submodule does not): the register reads the same on every machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
+    index with mode 100644 or 100755, so a staged new file counts and an untracked or ignored
+    file, a tracked symlink or a submodule does not): the register reads the same on every
+    machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
     return (isinstance(rel, str) and cite_problem(rel) == "" and not rel.endswith("/")
             and _file_under(root, rel) and rel in tracked(root))
 
@@ -2149,15 +2150,17 @@ def transition_errors(f: dict) -> list:
 
 
 def evidence_errors(f: dict, root, decisions: list, owner=None, tracked=None) -> list:
-    """What each state must carry (spec §4.1). Call only on a valid row. An evidence path must be a
-    file git tracks at `root` (_tracked_under); `tracked(root)` defaults to gitinfo.tracked_files."""
+    """What each state must carry (spec §4.1). Call only on a valid row. An evidence path must be
+    a file git tracks at `root` (_tracked_under); `tracked(root)` defaults to
+    gitinfo.tracked_files."""
     tracked = gitinfo.tracked_files if tracked is None else tracked
     errs = []
     for e in f["evidence"]:
         if not _sha(e) and os.path.isabs(e):
             errs.append(f"evidence: path must be relative to the repo root: {e!r}")
         elif not _sha(e) and not _tracked_under(root, e, tracked):
-            errs.append(f"evidence: {e!r} is neither a commit sha nor a file tracked at the repo root")
+            errs.append(f"evidence: {e!r} is neither a commit sha nor a file tracked at the "
+                        "repo root")
     states = [h["state"] for h in f["history"]]
     if "pinned" in states:
         pin = f["pin"]
@@ -2174,7 +2177,8 @@ def evidence_errors(f: dict, root, decisions: list, owner=None, tracked=None) ->
             elif not _file_under(root, pin["transcript"]):
                 errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
             elif not _tracked_under(root, pin["transcript"], tracked):
-                errs.append(f"evidence: pin transcript {pin['transcript']} is not a file tracked at the repo root")
+                errs.append(f"evidence: pin transcript {pin['transcript']} is not a file tracked "
+                            "at the repo root")
         if not any(not _sha(e) and _tracked_under(root, e, tracked) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":
@@ -6560,25 +6564,28 @@ exec python3 tools/gates/run_all.py --only register,claims
 # refused) and a line whose commit is not HEAD is refused first (FAIL pre-push.not-head), whatever
 # the ref kind: a branch, `bad~0:refs/heads/y`, `<sha>:refs/heads/z`, a tag of an older commit.
 # Push it from that commit checked out. `HEAD:refs/heads/x`, a tag of HEAD and a delete (the
-# all-zero local sha) pass. From an unborn HEAD (no commit yet) only deletes pass, and then nothing
-# is pushed, so no gate runs. stdin is read to the end, then git-pre-commit.sh runs in its --pre-push
-# mode: the paths the gates read must not differ from HEAD (FAIL pre-push.uncommitted), then
-# `run_all.py --only register,claims`. S4 (merge-readiness) extends this script.
+# all-zero local sha) pass. From an unborn HEAD (no commit yet) only deletes pass, and then
+# nothing is pushed, so no gate runs. stdin is read to the end, then git-pre-commit.sh runs in its
+# --pre-push mode: the paths the gates read must not differ from HEAD (FAIL pre-push.uncommitted),
+# then `run_all.py --only register,claims`. S4 (merge-readiness) extends this script.
 # Installed by tools/gates/install-hooks.sh.
 set -eu
 head=$(git rev-parse --verify -q HEAD 2>/dev/null || true)     # empty: an unborn HEAD
 refused=0
+see="so the gates see its tree"
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$local_sha" in *[!0]*) ;; *) continue ;; esac     # all zeros: a delete
   short=$(printf '%.7s' "$local_sha")
   if [ -z "$head" ]; then
-    echo "FAIL pre-push.not-head: $local_ref ($short) pushed from an unborn HEAD; check out the commit and push from it, so the gates see its tree" >&2
+    echo "FAIL pre-push.not-head: $local_ref ($short) pushed from an unborn HEAD;" \
+      "check out the commit and push from it, $see" >&2
     refused=1
     continue
   fi
   commit=$(git rev-parse --verify -q "$local_sha^{commit}" 2>/dev/null || true)
   if [ "$commit" != "$head" ]; then
-    echo "FAIL pre-push.not-head: $local_ref ($short) is not the checked-out HEAD; check it out and push from it, so the gates see its tree" >&2
+    echo "FAIL pre-push.not-head: $local_ref ($short) is not the checked-out HEAD;" \
+      "check it out and push from it, $see" >&2
     refused=1
   fi
 done
