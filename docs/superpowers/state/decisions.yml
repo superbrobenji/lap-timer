@@ -66,3 +66,43 @@
   asked_at: {sha: "151f2bb", by: session}
   answer: "edit-S4-now (owner answered \"for dec-0006 and 0007 do recommended\" in chat, 2026-10-18; the session had recommended edit-S4-now)"
   answered_at: {sha: "151f2bb", by: superbrobenji}
+
+- id: DEC-0008
+  class: scope
+  question: "Block b4 was interrupted by a usage-limit 429 (the opus sub-controller, after Task 2 fix round 1 bd17dd2, 2026-10-18 about 23:15 SAST). Spec §3.1: a 429 checkpoints at the current task boundary. Tasks 1-2 are complete and pinned at a5ce134 (332 tests OK on both interpreters, run_all 15 PASS); the limit has reset. Where does Task 3 (gate_dispatch --config-check, run_all registration, README) run?"
+  options:
+    - {label: continue-in-b4, cost: "one more opus sub-controller round for Task 3 now, then CHECKPOINT b4 with Tasks 1-3 as planned; departs from the literal §3.1 by one task after the limit reset; Task 1 review F2 (the Task 3 plan block re-adds the --json option Task 1 removed) is corrected in that dispatch"}
+    - {label: checkpoint-now, cost: "CHECKPOINT b4 with Tasks 1-2 (the Agent hook is live; run_all lacks dispatch until the next block); Task 3 becomes a one-task block before b5: S2 plan and umbrella block-table re-slice, one extra PR and tag"}
+  asked_at: {sha: "07d7b29", by: session}
+  answer: null
+  answered_at: null
+
+- id: DEC-0009
+  class: scope
+  question: "b4 Task 1 review D1: the umbrella dispatch grammar (2026-10-17-strict-delivery.md:242) says `## Brief:` is required for implementer/reviewer roles; the shipped gate_dispatch.BRIEF_ROLES is the implementers plus task_reviewer, final_reviewer, final_verifier and exception_reviewer, so audit_reviewer and audit_verifier may pass `Brief: none`. The spec does not settle it. Must the audit roles carry a brief file?"
+  options:
+    - {label: keep-code, cost: "amend the umbrella line to name the roles; audit dispatches stay brief-optional"}
+    - {label: require-brief, cost: "add audit_reviewer and audit_verifier to BRIEF_ROLES with a test (b4 fix wave or Task 3); every audit dispatch carries a brief file"}
+  asked_at: {sha: "07d7b29", by: session}
+  answer: null
+  answered_at: null
+
+- id: DEC-0010
+  class: scope
+  question: "b4 Task 1 review D2: the umbrella (:253) names the decision-id pattern `DEC-[0-9]{4}`; the shipped gate_dispatch.DEC_RE is gate_decisions.REF (merged b2), four digits followed by a no-digit lookahead, so with DEC-0002 open the prompt text `DEC-00021` passes both gates while the umbrella pattern would FAIL it (and the regex digit class admits non-ASCII digits, which fail closed as unknown ids). Which pattern binds?"
+  options:
+    - {label: keep-lookahead, cost: "amend the umbrella line; a malformed five-digit id is never flagged"}
+    - {label: umbrella-pattern, cost: "change the shared REF to the umbrella's four ASCII digits without the lookahead in gate_decisions and gate_dispatch, with tests (a b2 file changes); `DEC-00021` then FAILs as a mention of DEC-0002"}
+  asked_at: {sha: "07d7b29", by: session}
+  answer: null
+  answered_at: null
+
+- id: DEC-0011
+  class: spec-direction
+  question: "b4 Task 2 review U1: spec §7 (line 195) lists gate_register's invokers as `pre-commit, CI, dispatch hook`, but spec §8 (line 212) says PreToolUse Agent runs `gate_dispatch, gate_claims, gate_decisions, model map`. The shipped handle_agent follows §8. Which section binds?"
+  options:
+    - {label: follow-s8, cost: "amend the §7 table cell to `pre-commit, CI`; the Agent branch stays dispatch + claims + decisions"}
+    - {label: follow-s7, cost: "add gate_register to the Agent branch with a test (b4 fix wave or Task 3); every dispatch also walks docs/reviews and the register (tens of ms); amend §8"}
+  asked_at: {sha: "07d7b29", by: session}
+  answer: null
+  answered_at: null
