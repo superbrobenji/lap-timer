@@ -1070,7 +1070,7 @@ class AgentDispatchHook(unittest.TestCase):
         self.assertEqual(2, p.returncode, p.stderr)
         lines = [l for l in p.stderr.splitlines() if l.startswith("FAIL decisions.open-ref.DEC-0002")]
         self.assertEqual(1, len(lines), p.stderr)
-        self.assertIn("<tool_input.prompt>", lines[0])
+        self.assertTrue(lines[0].startswith("FAIL decisions.open-ref.DEC-0002: <tool_input.prompt>:"), lines[0])
         self.assertNotIn("sd-dispatch-", p.stderr)
 
     def test_tool_model_disagreeing_with_model_line_blocks(self):
