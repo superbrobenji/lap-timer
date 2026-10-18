@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 217 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (230, 237) are expected values derived from that count, not yet run.
+Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 218 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (231, 238) are expected values derived from that count, not yet run.
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -71,7 +71,7 @@ Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config
 8. **"Every id in any audit or review report exists here"** (spec §7) is built in Task 3 to owner ruling 5's grammar. A registered report is a file under `docs/reviews/` or `docs/superpowers/state/briefs/` whose first 20 lines contain the exact line `register: true` (DEC-0002: any line that starts `register:` (any case, optionally after a BOM) but is not exactly the marker, such as `register: yes`, `register: "true"` or a BOM before the marker, is a `FAIL register.marker.<file>`, never a silent un-register). Its ids are table first cells and leading list-item ids matching the finding regex, bare or wrapped in `**` / backticks, after an optional checkbox, followed by a space, tab, colon, comma, period or the end of the line. Unmarked files are ignored, so today's four reviews (none carries the marker, verified with `head -20 | grep -qx 'register: true'`) pass until the bootstrap marks them. `docs/reviews` must exist; `docs/superpowers/state/briefs` may be absent.
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
 10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
-11. **DEC-0002 and DEC-0003** (owner-delegated 2026-10-17, recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it. **DEC-0004** (owner answered "Yes, add the schema rule" in chat, 2026-10-17, at the b2 final review): every claim cite is a normalised repo-relative path that exists at `verified_at` (a directory only with a trailing `/`); see Task 4 and the state README.
+11. **DEC-0002, DEC-0003 and DEC-0004** (owner-delegated 2026-10-17, recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it. **DEC-0004** (owner answered "Yes, add the schema rule" in chat, 2026-10-17, at the b2 final review): every claim cite is a normalised repo-relative path that exists at `verified_at` (a directory only with a trailing `/`); see Task 4 and the state README.
 
 ## Files (S1 creates or modifies exactly these)
 
@@ -1061,20 +1061,14 @@ def changed_files(root, base: str, head: str = "HEAD") -> list:
 
 
 def path_type(root, rev: str, path: str):
-    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule) or None when `path` does not exist
-    at `rev` (`git cat-file -t <rev>:<path>`); any other git failure is a GateError."""
-    cmd = ["git", "cat-file", "-t", f"{rev}:{path}"]
-    _check_root(cmd, str(root))
-    try:
-        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False, env=_env())
-    except OSError as exc:
-        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
-    if p.returncode == 0:
-        return p.stdout.strip()
-    if p.returncode == 128 and any(m in p.stderr for m in ("does not exist in", "exists on disk, but not in",
-                                                  "Not a valid object name", "could not get object info")):
-        return None
-    raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
+    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule gitlink) or None when `path` (no
+    trailing '/') is not an entry at `rev` (`git ls-tree -z <rev> -- <path>`); other git failures are a GateError."""
+    out = _git(root, "ls-tree", "-z", rev, "--", path)
+    for entry in out.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if name == path:
+            return meta.split()[1]
+    return None
 
 
 def staged_files(root) -> list:
@@ -3525,8 +3519,8 @@ grep -n 'answer:' docs/superpowers/state/decisions.yml   # DEC-0001 answer: "yes
 - Test: `tools/gates/tests/test_gate_claims.py`
 
 **Interfaces:**
-- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`, `path_type`; `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `row_id`, `memo_commit_exists`, `CLAIM_ID`, `STATE_DIR`.
-- Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root; an empty or unknown `--head` is `FAIL claims.input`), `--mark-stale --base <sha>` (refuses to rewrite claims.yml, `FAIL claims.input`, unless every row validates and no id repeats; the rewrite drops YAML comments); `main(argv=None)`; `hits(cites, changed) -> list[str]`; `cite_errors(root, claim) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`: well-formed, `verified`, every cite present, not stale). `--base` must name a commit like `--head` (empty or unknown is `FAIL claims.input`) and reaches git after `--end-of-options`. **Cites (DEC-0004):** `validate_claim` requires every cite to be a normalised repo-relative path (`registers.cite_problem`: a non-empty string, no surrounding whitespace or NUL, no leading `/`, no `.` or `..` segment, equal to `os.path.normpath`; a directory cite ends in exactly one `/`), and a `verified` row whose cite is not a file (a directory with the trailing `/`) at `verified_at` is `claims.stale.<id>`: such a row could never go stale. Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
+- Consumes: `GateError`, `Result`, `gate_args`, `repo_root`, `run_gate`; `gitinfo.changed_files`, `staged_files`, `head_sha`, `path_type` (`git ls-tree`: blob, tree, commit or None); `registers.load_claims`, `load_findings`, `validate_claim`, `claim_commit_errors`, `finding_by_id`, `row_id`, `memo_commit_exists`, `CLAIM_ID`, `STATE_DIR`.
+- Produces: `gate_claims.check(args) -> Result` with args `--root <tree>`, `--head <sha>` (default HEAD of root; an empty or unknown `--head` is `FAIL claims.input`), `--mark-stale --base <sha>` (refuses to rewrite claims.yml, `FAIL claims.input`, unless every row validates and no id repeats; the rewrite drops YAML comments); `main(argv=None)`; `hits(cites, changed) -> list[str]`; `cite_errors(root, claim) -> list[str]`; `stale_reason(root, claim, head, staged) -> str` (`""` = holds); `verified_at_head(root, claim, head) -> bool` (for S2 `gate_dispatch`: well-formed, `verified`, every cite present, not stale). `--base` must name a commit like `--head` (empty or unknown is `FAIL claims.input`) and reaches git after `--end-of-options`. **Cites (DEC-0004):** `validate_claim` requires every cite to be a normalised repo-relative path (`registers.cite_problem`: a non-empty string, no surrounding whitespace or NUL, no leading `/`, no `.` or `..` segment, equal to `os.path.normpath`; a directory cite ends in exactly one `/`), and a `verified` row whose cite is not a file (a submodule gitlink counts as a file; a directory needs the trailing `/`) at `verified_at` is `claims.stale.<id>`: such a row could never go stale. Line ids: `claims.{schema|duplicate|false|stale}.<claim id>` on FAIL (`entry-<i>` when the id is not a well-formed claim id; a `verified_at` that is not a commit of the gated repository is `claims.stale.<id>`, DEC-0003); an empty `--root` is `FAIL claims.input`; `PASS claims.marked-stale.<id>` or `PASS claims.marked-stale.none` in mark mode; one `PASS claims.<category>` per clean category that every row reached (schema, duplicate, false, stale; a schema-invalid row skips false and stale).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3891,6 +3885,28 @@ class ClaimsRepo(unittest.TestCase):
         rc, out = self.run_gate()
         self.assertEqual(0, rc, out)
 
+    def claims_only(self, text):
+        gf.write(self.root, CLAIMS, text)    # commit_all's `add -A` would drop a gitlink with no checkout
+        gf.git(self.root, "add", CLAIMS)
+        gf.git(self.root, "commit", "-q", "-m", "claims")
+
+    def test_a_submodule_cite_is_a_file_form_cite_and_goes_stale_with_its_commit(self):
+        gf.git(self.root, "update-index", "--add", "--cacheinfo", f"160000,{self.v},mod")
+        gf.git(self.root, "commit", "-q", "-m", "gitlink")
+        v = gf.git(self.root, "rev-parse", "HEAD")
+        self.claims_only(row(verified_at=f'"{v}"', cites="mod"))
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+        gf.git(self.root, "update-index", "--cacheinfo", f"160000,{v},mod")
+        gf.git(self.root, "commit", "-q", "-m", "bump the submodule")
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cited file(s) changed since verified_at", out)
+        self.assertEqual(1, rc)
+        self.claims_only(row(verified_at=f'"{v}"', cites='"mod/"'))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite mod/ is not a directory at verified_at", out)
+        self.assertEqual(1, rc)
+
     def test_a_cite_only_needs_to_exist_on_a_verified_row(self):
         self.claims(row(state="unverified", verified_at="null", by="null", cites="src/typo.c"))
         rc, out = self.run_gate()
@@ -3921,7 +3937,7 @@ A row is "verified at HEAD" when its state is `verified` and no file it cites di
 `verified_at` and HEAD, nor is staged for the next commit. (`verified_at` cannot literally equal
 the HEAD that contains the row: a commit cannot hold its own sha.) A cite ending in "/" covers
 every file under that directory. Every cite is a normalised repo-relative path (DEC-0004) that
-exists at `verified_at` -- a blob, or a tree when the cite ends in "/" -- else the verified row is a
+exists at `verified_at` -- a blob or submodule, or a tree when the cite ends in "/" -- else the verified row is a
 FAIL claims.stale.<id> (it could never go stale). --base must name a commit like --head. --mark-stale rewrites every `verified` row whose cites
 intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. It
 rewrites claims.yml with yaml.safe_dump, so YAML comments and hand formatting are lost, and it
@@ -3956,8 +3972,8 @@ def cite_errors(root, claim: dict) -> list:
     """Why a cite of a verified claim names nothing at verified_at (DEC-0004); [] when all exist."""
     errs = []
     for c in claim["cites"]:
-        want, kind = ("tree", "directory") if c.endswith("/") else ("blob", "file")
-        if gitinfo.path_type(root, claim["verified_at"], c) != want:
+        want, kind = (("tree",), "directory") if c.endswith("/") else (("blob", "commit"), "file")
+        if gitinfo.path_type(root, claim["verified_at"], c.rstrip("/")) not in want:    # a gitlink is a file-form cite
             errs.append(f"cite {c} is not a {kind} at verified_at {claim['verified_at']}")
     return errs
 
@@ -4086,15 +4102,15 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 33 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_claims -v   # Ran 34 tests ... OK
 python3 tools/gates/gate_claims.py; echo rc=$?              # 4 PASS lines (0 claims), rc=0
 ```
 
-Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `registers.row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails. Fix-wave mutations, each killed by the test it names: drop the `registers.validate_claim(claim)` call in `verified_at_head` or let a `stale` row through (`test_verified_at_head_is_false_for_a_stale_or_malformed_row`); drop `claim_commit_errors` from the `--mark-stale` refusal (`test_mark_stale_refuses_a_row_whose_verified_at_is_not_a_commit`); `head = head or gitinfo.head_sha(root)` -> `head = gitinfo.head_sha(root)` (`test_head_is_honoured_in_mark_stale_mode`); `p.startswith(c)` -> `p.startswith(c.rstrip("/"))` in `hits` (`test_a_directory_cite_does_not_cover_a_sibling_with_the_same_prefix`); drop the `exists(root, ns.base)` check (`test_a_bad_base_is_an_input_failure_and_never_reaches_git_as_an_option`) or `--end-of-options` in `gitinfo.changed_files` (`test_changed_files_treats_an_option_shaped_revision_as_a_revision`); drop `cite_errors` from `stale_reason`, swap the file/directory test or drop one clause of `registers.cite_problem` (`test_a_cite_that_names_no_tracked_path_fails`, `test_a_directory_cite_needs_a_directory_and_a_file_cite_a_file`, `test_registers.ClaimSchema.test_a_cite_is_a_normalised_repo_relative_path`).
+Mutation check: in `check`, change `staged = gitinfo.staged_files(root)` to `staged = []`. `test_staged_change_to_a_cited_file_fails_before_the_commit` must fail. Restore. Then in `hits` drop the `c.endswith("/")` clause. `test_directory_cite_covers_its_files` must fail. Restore. Then remove the `claim_commit_errors` call (`test_verified_at_unknown_commit_fails` and `test_one_commit_lookup_per_distinct_sha` fail), drop `and cat not in skipped` (`test_categories_whose_rows_were_skipped_never_pass` fails), un-memoise `exists` (`test_one_commit_lookup_per_distinct_sha` fails), drop the empty-root check (`test_an_empty_root_is_a_fail_not_the_cwd_repo` fails) and make `registers.row_id` return the raw id (`test_a_malformed_id_prints_as_entry_index` fails). Restore each and run again: OK. Then for the false rule moved before the commit check (`test_a_false_row_with_an_unknown_commit_still_needs_its_finding`), the `--head` checks (`test_a_bad_head_is_an_input_failure`), the mark-stale refusal and its duplicate-id clause (`test_mark_stale_refuses_to_rewrite_an_invalid_register`), the `except GateError` in `stale_reason` (`test_an_unknown_verified_at_is_not_comparable`) and `registers.memo_commit_exists` / `row_id` (`test_registers` and `test_gate_register` tests): remove each and confirm a test fails. Fix-wave mutations, each killed by the test it names: drop the `registers.validate_claim(claim)` call in `verified_at_head` or let a `stale` row through (`test_verified_at_head_is_false_for_a_stale_or_malformed_row`); drop `claim_commit_errors` from the `--mark-stale` refusal (`test_mark_stale_refuses_a_row_whose_verified_at_is_not_a_commit`); `head = head or gitinfo.head_sha(root)` -> `head = gitinfo.head_sha(root)` (`test_head_is_honoured_in_mark_stale_mode`); `p.startswith(c)` -> `p.startswith(c.rstrip("/"))` in `hits` (`test_a_directory_cite_does_not_cover_a_sibling_with_the_same_prefix`); drop the `exists(root, ns.base)` check (`test_a_bad_base_is_an_input_failure_and_never_reaches_git_as_an_option`) or `--end-of-options` in `gitinfo.changed_files` (`test_changed_files_treats_an_option_shaped_revision_as_a_revision`); drop `cite_errors` from `stale_reason`, swap the file/directory test or drop one clause of `registers.cite_problem` (`test_a_cite_that_names_no_tracked_path_fails`, `test_a_directory_cite_needs_a_directory_and_a_file_cite_a_file`, `test_registers.ClaimSchema.test_a_cite_is_a_normalised_repo_relative_path`); round 2: drop `commit` from the file-form types or accept it for a directory cite (`test_a_submodule_cite_is_a_file_form_cite_and_goes_stale_with_its_commit`), drop the `rstrip("/")` before `path_type` (`test_directory_cite_covers_its_files`).
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T4 feat(gates): gate_claims -- test_gate_claims 33 OK` to the end of `docs/superpowers/state/strict-delivery/ledger.md` (the `## Block b2 (branch block/strict-delivery-b2)` heading and its base line already exist).
+Append `- T4 feat(gates): gate_claims -- test_gate_claims 34 OK` to the end of `docs/superpowers/state/strict-delivery/ledger.md` (the `## Block b2 (branch block/strict-delivery-b2)` heading and its base line already exist).
 
 ```bash
 git add tools/gates/gate_claims.py tools/gates/tests/test_gate_claims.py docs/superpowers/state/strict-delivery/ledger.md
@@ -4874,7 +4890,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 -m unittest tools.gates.tests.test_run_all -v     # Ran 24 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .    # Ran 217 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .    # Ran 218 tests ... OK
 python3 tools/gates/run_all.py; echo rc=$?                # 15 PASS lines (6 register, 4 claims, 5 decisions), rc=0
 ```
 
@@ -4889,7 +4905,7 @@ Mutation checks (each run under `PYTHONDONTWRITEBYTECODE=1`, restored afterwards
 - `run` loses its `if name in ran:` branch: `test_a_gate_named_twice_runs_once_and_fails` fails.
 - `gate_argv` drops the `--scan` list: `test_decisions_scans_the_plans` fails.
 - fix wave: `gate_argv` loses `root = os.path.abspath(root)`: `test_a_relative_root_works_from_any_cwd`; the extra `--scan` replacing the plans: `test_an_extra_scan_adds_to_the_plans_never_replaces_them`; `run_check` loses its `exc.code == 0` branch: `test_cli_help_is_not_called_bad_arguments`.
-- `main` returns 0 instead of `run_gate(...)`, or `check` parses with a plain `argparse.ArgumentParser`: the CLI tests (`test_cli_bad_arguments_are_a_fail_line`, `test_cli_help_goes_to_stderr_and_json_stdout_stays_json`, `test_cli_only_and_rc`) fail.
+- `main` returns 0 instead of `run_gate(...)`: `test_cli_only_and_rc`, `test_cli_json`, `test_cli_unknown_gate_is_rc_1`, `test_cli_bad_arguments_are_a_fail_line` and `test_cli_help_goes_to_stderr_and_json_stdout_stays_json` fail; `check` parses with a plain `argparse.ArgumentParser` (only `--root`) instead of `gate_args`: `test_cli_bad_arguments_are_a_fail_line`, `test_cli_help_goes_to_stderr_and_json_stdout_stays_json` and `test_cli_help_is_not_called_bad_arguments` fail (`test_cli_only_and_rc` does not).
 
 - [ ] **Step 5: Write the CI job and the README**
 
@@ -4986,7 +5002,7 @@ git grep -nIE 'lands in [0-9]|arrives in [0-9]|lands with the|later sessions?|st
 
 - [ ] **Step 6: Ledger line, then commit**
 
-Append `- T6 feat(gates): run_all + CI job gates + README -- suite 217 OK; run_all 15 PASS` to the ledger.
+Append `- T6 feat(gates): run_all + CI job gates + README -- suite 218 OK; run_all 15 PASS` to the ledger.
 
 ```bash
 git add tools/gates/run_all.py tools/gates/tests/test_run_all.py .github/workflows/gates.yml tools/gates/README.md docs/superpowers/state/strict-delivery/ledger.md
@@ -5485,7 +5501,7 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 230 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 231 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
@@ -5780,7 +5796,7 @@ missing.
 
 ```bash
 python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 237 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 238 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -5790,7 +5806,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 237 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 238 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md

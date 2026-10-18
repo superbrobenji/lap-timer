@@ -356,6 +356,28 @@ class ClaimsRepo(unittest.TestCase):
         rc, out = self.run_gate()
         self.assertEqual(0, rc, out)
 
+    def claims_only(self, text):
+        gf.write(self.root, CLAIMS, text)    # commit_all's `add -A` would drop a gitlink with no checkout
+        gf.git(self.root, "add", CLAIMS)
+        gf.git(self.root, "commit", "-q", "-m", "claims")
+
+    def test_a_submodule_cite_is_a_file_form_cite_and_goes_stale_with_its_commit(self):
+        gf.git(self.root, "update-index", "--add", "--cacheinfo", f"160000,{self.v},mod")
+        gf.git(self.root, "commit", "-q", "-m", "gitlink")
+        v = gf.git(self.root, "rev-parse", "HEAD")
+        self.claims_only(row(verified_at=f'"{v}"', cites="mod"))
+        rc, out = self.run_gate()
+        self.assertEqual(0, rc, out)
+        gf.git(self.root, "update-index", "--cacheinfo", f"160000,{v},mod")
+        gf.git(self.root, "commit", "-q", "-m", "bump the submodule")
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cited file(s) changed since verified_at", out)
+        self.assertEqual(1, rc)
+        self.claims_only(row(verified_at=f'"{v}"', cites='"mod/"'))
+        rc, out = self.run_gate()
+        self.assertIn("FAIL claims.stale.C-demo-1: cite mod/ is not a directory at verified_at", out)
+        self.assertEqual(1, rc)
+
     def test_a_cite_only_needs_to_exist_on_a_verified_row(self):
         self.claims(row(state="unverified", verified_at="null", by="null", cites="src/typo.c"))
         rc, out = self.run_gate()

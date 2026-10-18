@@ -70,20 +70,14 @@ def changed_files(root, base: str, head: str = "HEAD") -> list:
 
 
 def path_type(root, rev: str, path: str):
-    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule) or None when `path` does not exist
-    at `rev` (`git cat-file -t <rev>:<path>`); any other git failure is a GateError."""
-    cmd = ["git", "cat-file", "-t", f"{rev}:{path}"]
-    _check_root(cmd, str(root))
-    try:
-        p = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, check=False, env=_env())
-    except OSError as exc:
-        raise GateError(f"{' '.join(cmd)}: {exc.strerror or exc}") from None
-    if p.returncode == 0:
-        return p.stdout.strip()
-    if p.returncode == 128 and any(m in p.stderr for m in ("does not exist in", "exists on disk, but not in",
-                                                  "Not a valid object name", "could not get object info")):
-        return None
-    raise GateError(f"{' '.join(cmd)}: {p.stderr.strip()}")
+    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule gitlink) or None when `path` (no
+    trailing '/') is not an entry at `rev` (`git ls-tree -z <rev> -- <path>`); other git failures are a GateError."""
+    out = _git(root, "ls-tree", "-z", rev, "--", path)
+    for entry in out.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if name == path:
+            return meta.split()[1]
+    return None
 
 
 def staged_files(root) -> list:

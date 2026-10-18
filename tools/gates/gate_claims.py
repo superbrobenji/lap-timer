@@ -8,7 +8,7 @@ A row is "verified at HEAD" when its state is `verified` and no file it cites di
 `verified_at` and HEAD, nor is staged for the next commit. (`verified_at` cannot literally equal
 the HEAD that contains the row: a commit cannot hold its own sha.) A cite ending in "/" covers
 every file under that directory. Every cite is a normalised repo-relative path (DEC-0004) that
-exists at `verified_at` -- a blob, or a tree when the cite ends in "/" -- else the verified row is a
+exists at `verified_at` -- a blob or submodule, or a tree when the cite ends in "/" -- else the verified row is a
 FAIL claims.stale.<id> (it could never go stale). --base must name a commit like --head. --mark-stale rewrites every `verified` row whose cites
 intersect changed_files(base, HEAD) + the staged files to `stale`, then checks the result. It
 rewrites claims.yml with yaml.safe_dump, so YAML comments and hand formatting are lost, and it
@@ -43,8 +43,8 @@ def cite_errors(root, claim: dict) -> list:
     """Why a cite of a verified claim names nothing at verified_at (DEC-0004); [] when all exist."""
     errs = []
     for c in claim["cites"]:
-        want, kind = ("tree", "directory") if c.endswith("/") else ("blob", "file")
-        if gitinfo.path_type(root, claim["verified_at"], c) != want:
+        want, kind = (("tree",), "directory") if c.endswith("/") else (("blob", "commit"), "file")
+        if gitinfo.path_type(root, claim["verified_at"], c.rstrip("/")) not in want:    # a gitlink is a file-form cite
             errs.append(f"cite {c} is not a {kind} at verified_at {claim['verified_at']}")
     return errs
 
