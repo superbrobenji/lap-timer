@@ -75,3 +75,13 @@ CHECKPOINT b2 tip 5f9c467 -- gates: suite 221 OK (3.9.6 + 3.12, -W error), run_a
 - T8b fix round 2: fix(gates): Task 8b re-review 1 -- bypass scan reads the verb's own arguments: >| and process substitutions kept, the rest of an enclosing $(...) not read -- test_hooks 53 OK; suite 274 OK on 3.9.6 and 3.12.14; run_all 15 PASS
 - T8b fix round 3: fix(gates): Task 8b re-review 2 -- a quoted verb and nested substitutions keep the bypass scan; argument scan counts parenthesis depth; hook text wrapped -- test_hooks 53 OK; suite 274 OK on 3.9.6 and 3.12.14; run_all 15 PASS
 - T8b fix round 4: fix(gates): Task 8b re-review 3 -- a quoted mention of a verb no longer hides a later verb's bypass flag; argument scans share a linear memo; pre-push comment spans kept whole -- test_hooks 53 OK; suite 274 OK on 3.9.6 and 3.12.14; run_all 15 PASS
+- T9 skill skeleton + 8 prompt blocks at ~/.claude/skills/strict-delivery (outside the repo); sha256:
+  - a8d85b93e61f8446aa48f1acecb4232d3b6d673ab18c4d450cff50d1929c722f  SKILL.md
+  - bb6c77a7e6f7de9bfa17560509ee93a3822f59a00840f6c6f350461f44b4547a  prompts/audit-reviewer.md
+  - c753996c714425d866009349d3f8abbff1a8446d351d505fd10bb842eee4e13b  prompts/audit-verifier.md
+  - 0c322b0b9f7755351d04b9c3a190191c20ea2c710f0c99d46b2827dfb68ea944  prompts/controller.md
+  - 79046f397fad6a43634f71199403f152ec1f8143f715eea94bad368d74751cd5  prompts/exception-reviewer.md
+  - a0deb52620ae568f6408c5b8b43f792a55b467a989e562a02026b986a72ec788  prompts/implementer.md
+  - 7a143fb0f0ed048c4b51db2ef5979c1cd22e4237bbbab9d8e4e15d9851c22146  prompts/investigator.md
+  - 9c955de0acc42818dc93f4ca2abb8db7a4f4f5f4f70031daffe6f7cd580af86d  prompts/reviewer.md
+  - 99bd26fda08397c55a98f18c62a906e5c3268c00a6efe4e2d8b2e407ce106af2  prompts/verifier.md
