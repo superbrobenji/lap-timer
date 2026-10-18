@@ -5202,7 +5202,7 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 
 - [ ] **Step 1: Write the failing tests**
 
-`tools/gates/tests/test_hooks.py` (its `new_repo()` helper adds the empty `docs/reviews/` directory `gate_register` requires, because `gitfixture.new_repo` stays bare for `test_gate_register`'s missing-directory FAIL; the `GIT_VERB` quoting cases in `test_push_with_options_is_gated_too` pin quoted and separate-word option values):
+`tools/gates/tests/test_hooks.py` (its `new_repo()` helper adds the empty `docs/reviews/` directory `gate_register` requires, because `gitfixture.new_repo` stays bare for `test_gate_register`'s missing-directory FAIL; `isolated_env()` keeps the developer's global git config out of the fixtures; the `GIT_VERB` cases in `test_push_with_options_is_gated_too` pin quoted, escaped, continued and separate-word option values):
 
 ```python
 #!/usr/bin/env python3
@@ -5210,11 +5210,14 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 runs as a subprocess with a JSON event on stdin -- the way Claude Code runs it. Run from the repo
 root: python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from tools.gates.tests import gitfixture as gf
@@ -5258,6 +5261,15 @@ def new_repo():
     return root
 
 
+def isolated_env(**extra):
+    """The environment for git and install calls on a fixture: no CLAUDE_PROJECT_DIR, and neither the
+    developer's global nor system git config (core.hooksPath, gpgsign, templates) reaches the fixture."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    env.update(extra)
+    return env
+
+
 def copy_gates(dst):
     """The real tools/gates (code + scripts) copied into a throwaway repo, without test fixtures."""
     shutil.copytree(os.path.join(gf.REPO, "tools", "gates"), os.path.join(dst, "tools", "gates"),
@@ -5267,6 +5279,8 @@ def copy_gates(dst):
 class PreToolUse(unittest.TestCase):
     def setUp(self):
         self.root = new_repo()
+        self.spaced = os.path.join(self.root, "a b")    # a directory name with a space, inside the failing repo
+        os.makedirs(self.spaced)
 
     def tearDown(self):
         gf.remove(self.root)
@@ -5283,14 +5297,54 @@ class PreToolUse(unittest.TestCase):
         p = hook("pre_tool_use.py", bash_event(self.root, "cd . && git -C . --no-pager push origin HEAD"))
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr)
-        for cmd in ('git -C "/a b" commit -m x', "git -c 'a=b c' push", "git --git-dir /x commit",
-                    "git --work-tree=/x commit"):   # quoted values and separate-word option values
+        for cmd in ('git -C "%s" commit -m x' % self.spaced, "git -c 'a=b c' push", "git --git-dir /x commit",
+                    "git --work-tree=/x commit",                # quoted values and separate-word option values
+                    "git -C . \\\n  commit -m x",               # backslash-newline continuation
+                    "git -C %s commit -m x" % self.spaced.replace(" ", "\\ "),   # escaped space
+                    "git --config-env a=B commit", '"git" commit -m x', "'git' push",
+                    "git ${X} commit -m x", "git $X push"):     # unexpandable option word: gated conservatively
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
         self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
+
+    def test_a_verb_that_only_shares_a_prefix_is_not_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("git commit-graph write", "git push-to-checkout x"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+
+    def test_the_tree_named_by_dash_C_or_cd_is_the_one_gated(self):
+        bad = new_repo()
+        self.addCleanup(gf.remove, bad)
+        gf.write(bad, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        # failing tree named from a clean cwd: blocked
+        for cmd in ("git -C %s commit -m x" % bad, "cd %s && git push" % bad, "cd '%s'; git commit -m x" % bad,
+                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root))):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+        # clean tree named from a failing cwd: passes
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        clean = new_repo()
+        self.addCleanup(gf.remove, clean)
+        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+        # a relative -C resolves against the event cwd
+        p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
+        self.assertEqual(0, p.returncode, p.stderr)
+
+    def test_a_named_directory_that_is_not_a_repo_fails_closed(self):
+        outside = tempfile.mkdtemp(prefix="gate-test-outside-")
+        self.addCleanup(gf.remove, outside)
+        for cmd in ("git -C %s commit -m x" % outside, "cd %s && git push" % outside, "git -C /nonexistent-dir push"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr, cmd)
 
     def test_ungated_commands_and_tools_pass_even_on_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
@@ -5330,17 +5384,19 @@ class GitHooks(unittest.TestCase):
         self.root = new_repo()
         copy_gates(self.root)
         gf.commit_all(self.root, "gates")
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
         self.assertEqual(0, p.returncode, p.stderr)
         self.hook = os.path.join(self.root, ".git", "hooks", "pre-commit")
 
     def tearDown(self):
         gf.remove(self.root)
 
+    def install(self):
+        return subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root, capture_output=True,
+                              text=True, env=isolated_env(), check=False)
+
     def commit(self):
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-        env["CLAUDE_PROJECT_DIR"] = "/nonexistent-project"   # the hook must ignore it
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
         return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
                                "commit", "-q", "-m", "x"], cwd=self.root, capture_output=True, text=True,
                               env=env, check=False)
@@ -5349,8 +5405,7 @@ class GitHooks(unittest.TestCase):
         with open(self.hook) as fh:
             first = fh.read()
         self.assertIn("# strict-delivery-gates-hook", first)
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
         self.assertEqual(0, p.returncode)
         self.assertNotIn("moved the existing", p.stdout)
         with open(self.hook) as fh:
@@ -5358,11 +5413,34 @@ class GitHooks(unittest.TestCase):
 
     def test_a_foreign_hook_is_moved_aside(self):
         gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
         self.assertIn("moved the existing pre-commit hook", p.stdout)
         with open(self.hook + ".pre-strict-delivery") as fh:
             self.assertEqual("#!/bin/sh\necho mine\n", fh.read())
+        with open(self.hook) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+
+    def test_a_second_foreign_hook_does_not_overwrite_the_first_backup(self):
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho one\n")
+        self.assertEqual(0, self.install().returncode)
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho two\n")
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-strict-delivery already exists", p.stderr)
+        with open(self.hook + ".pre-strict-delivery") as fh:
+            self.assertEqual("#!/bin/sh\necho one\n", fh.read())
+        with open(self.hook) as fh:
+            self.assertEqual("#!/bin/sh\necho two\n", fh.read())
+
+    def test_a_hooks_path_outside_the_repository_is_refused(self):
+        shared = tempfile.mkdtemp(prefix="gate-test-shared-hooks-")
+        self.addCleanup(gf.remove, shared)
+        gf.git(self.root, "config", "core.hooksPath", shared)
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("install-hooks: refusing: the hooks directory", p.stderr)
+        self.assertEqual([], os.listdir(shared))
 
     def test_pre_commit_blocks_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
@@ -5378,6 +5456,39 @@ class GitHooks(unittest.TestCase):
         p = self.commit()
         self.assertNotEqual(0, p.returncode)
         self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+
+    def test_pre_commit_blocks_a_register_removed_from_the_index_but_left_on_disk(self):
+        gf.git(self.root, "rm", "--cached", "-q", os.path.join(gf.STATE, "findings.yml"))
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("findings.yml", p.stderr)
+
+    def test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit(self):
+        report = os.path.join("docs", "reviews", "r.md")
+        gf.write(self.root, report, "register: true\n- T1-GHOST-1: x\n")
+        gf.git(self.root, "add", report)
+        gf.write(self.root, report, "register: true\n")    # the unstaged edit drops the line the index cites
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("docs/reviews/r.md", p.stderr)
+
+    def test_pre_commit_blocks_an_untracked_file_the_gates_read(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("docs", "reviews", "new.md"), "register: true\n- T1-GHOST-1: x\n")
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("docs/reviews/new.md", p.stderr)
+
+    def test_a_staged_report_passes_when_it_is_committed_as_is(self):
+        report = os.path.join("docs", "reviews", "r.md")
+        gf.write(self.root, report, "register: true\n")
+        gf.git(self.root, "add", report)
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
     def test_a_tree_without_the_gates_cannot_commit(self):
         gf.git(self.root, "rm", "-r", "-q", "tools")
@@ -5399,7 +5510,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `FAILED (failures=12, errors=1)`, 13 tests. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file`, and the `GitHooks.setUp` assertion fails (6 times, `0 != 127`) because `install-hooks.sh` is missing.
+Expected: `FAILED (failures=21, errors=1)`, 22 tests. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file`, and the `GitHooks.setUp` assertion fails (12 times, `0 != 127`) because `install-hooks.sh` is missing.
 
 - [ ] **Step 3: Write the hook scripts**
 
@@ -5416,46 +5527,88 @@ mkdir -p tools/gates/hooks
 Reads one JSON event on stdin. At strict-delivery block b3 only the Bash branch gates:
 `git commit` and `git push` run the register and claim gates on the git toplevel of the event's
 `cwd`; every other command, and every other tool (Agent included, until S2 adds gate_dispatch),
-exits 0 silently. A failing gate exits 2 with the gate's lines on stderr; any internal error also
-exits 2 (fail closed). Limits: a commit run in another tree via `cd <dir> && git commit` is gated
-here against the session's cwd -- the git pre-commit hook gates the tree actually committed.
+exits 0 silently. The tree gated is the one the command names: the cwd, moved by a leading
+`cd <dir> &&`/`;` and by each `git -C <dir>` (cumulative, as git does); a named directory that is
+not inside a repo fails closed. A failing gate exits 2 with the gate's lines on stderr; any internal
+error also exits 2 (fail closed). Limits: the match is textual (aliases, `eval`, `$(...)` and a
+`-C $VAR` directory are not followed; an unexpandable -C word gates the tree before it).
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-_ARG = r"""(?:"[^"]*"|'[^']*'|\S+)"""   # a shell word; quotes may hold spaces
-GIT_VERB = re.compile(r"\bgit\b(?:\s+(?:-[Cc]\s+" + _ARG + r"|--(?:git-dir|work-tree|namespace)\s+" + _ARG
-                      + r"|--?[A-Za-z][\w-]*(?:=" + _ARG + r")?))*\s+(commit|push)\b")
+_ARG = r"""(?:"[^"]*"|'[^']*'|(?:\\.|\S)+)"""   # a shell word; quotes may hold spaces, a backslash escapes
+_OPT = (r"(?:-[Cc]\s+" + _ARG                                             # -C <dir>, -c <k=v>
+        + r"|--(?:git-dir|work-tree|namespace|config-env)\s+" + _ARG        # separate-word long options
+        + r"|--?[A-Za-z][\w-]*(?:=" + _ARG + r")?"                         # flags, --opt=value
+        + r"|\$\S+)")                                                      # $X / ${X}: unknown, gate conservatively
+GIT_VERB = re.compile(r"\bgit\b[\"']?(?P<opts>(?:\s+" + _OPT + r")*)\s+(?P<verb>commit|push)(?![\w-])")
+GIT_DIR_OPT = re.compile(r"(?:^|\s)-C\s+(" + _ARG + r")")
+LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
+
+
+def _command(event: dict):
+    """The Bash command with backslash-newline continuations joined; None for any other tool."""
+    if event.get("tool_name") != "Bash":
+        return None
+    command = (event.get("tool_input") or {}).get("command")
+    if not isinstance(command, str):
+        raise ValueError("Bash event without tool_input.command")
+    return command.replace("\\\n", " ")
 
 
 def gates_for(event: dict) -> list:
     """Gate names an event needs, in order, without duplicates; [] = not gated."""
-    if event.get("tool_name") != "Bash":
-        return []
-    command = (event.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        raise ValueError("Bash event without tool_input.command")
+    command = _command(event)
     names = []
-    for m in GIT_VERB.finditer(command):
-        for n in GATED[m.group(1)]:
+    for m in GIT_VERB.finditer(command or ""):
+        for n in GATED[m.group("verb")]:
             if n not in names:
                 names.append(n)
     return names
 
 
-def project_root(event: dict) -> str:
-    cwd = event.get("cwd") or os.getcwd()
-    p = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+def _word(arg: str, base: str):
+    """`base` joined with the directory a shell word names; None when it cannot be known statically."""
+    if "$" in arg or "`" in arg:
+        return None
+    words = shlex.split(arg)
+    if len(words) != 1:
+        raise ValueError(f"cannot read directory word: {arg}")
+    return os.path.normpath(os.path.join(base, os.path.expanduser(words[0])))
+
+
+def target_dirs(event: dict) -> list:
+    """Directories the gated git commands run in: the event cwd, moved by a leading `cd <dir> &&`
+    or `;`, then by each `-C <dir>` of the command (cumulative, as git does). An unexpandable
+    directory word keeps the directory before it (conservative: that tree is still gated)."""
+    command = _command(event)
+    base = event.get("cwd") or os.getcwd()
+    lead = LEADING_CD.match(command or "")
+    if lead:
+        base = _word(lead.group(1), base) or base
+    dirs = []
+    for m in GIT_VERB.finditer(command or ""):
+        cur = base
+        for c in GIT_DIR_OPT.finditer(m.group("opts")):
+            cur = _word(c.group(1), cur) or cur
+        if cur not in dirs:
+            dirs.append(cur)
+    return dirs
+
+
+def toplevel(directory: str) -> str:
+    p = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
                        capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        raise RuntimeError(f"git -C {cwd} rev-parse --show-toplevel: {p.stderr.strip()}")
+        raise RuntimeError(f"git -C {directory} rev-parse --show-toplevel: {p.stderr.strip()}")
     return p.stdout.strip()
 
 
@@ -5468,11 +5621,15 @@ def main() -> int:
         return 0
     sys.path.insert(0, CODE_ROOT)
     from tools.gates import run_all   # lazy: an ungated command never needs PyYAML
-    result = run_all.run(names, {"root": project_root(event)})
-    if result.ok():
-        return 0
-    print(result.render(False), file=sys.stderr)
-    return 2
+    roots = []
+    for d in target_dirs(event):    # resolve every tree first: an unusable one fails closed before any gate runs
+        top = toplevel(d)
+        if top not in roots:
+            roots.append(top)
+    failed = [r for r in (run_all.run(names, {"root": top}) for top in roots) if not r.ok()]
+    for r in failed:
+        print(r.render(False), file=sys.stderr)
+    return 2 if failed else 0
 
 
 if __name__ == "__main__":
@@ -5490,14 +5647,22 @@ if __name__ == "__main__":
 #!/bin/sh
 # strict-delivery-gates-hook
 # git pre-commit (spec §8 "Git hooks"): the register and claim gates on the tree being committed.
-# The gates read the working tree, so the registers must have no unstaged edits -- then what is
-# checked is exactly what is committed. Installed by tools/gates/install-hooks.sh.
+# The gates read the working tree, so every path they read must have no worktree-side change: no
+# unstaged edit, no untracked or ignored file, no file removed from the index but left on disk.
+# Staged-only changes pass, so the tree the gates see equals the tree being committed for those
+# paths. The paths: the registers, briefs and the state README (docs/superpowers/state), the
+# registered reports (docs/reviews) and the gate config (tools/gates/config.yml).
+# Installed by tools/gates/install-hooks.sh.
 set -eu
 unset CLAUDE_PROJECT_DIR   # gate the tree being committed (e.g. a worktree), not the session's project
 root=$(git rev-parse --show-toplevel)
 cd "$root"
-if ! git diff --quiet -- docs/superpowers/state; then
-  echo "FAIL pre-commit.unstaged: docs/superpowers/state has unstaged edits; stage them (git add docs/superpowers/state) or revert them" >&2
+# porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is worktree-side
+dirty=$(git status --porcelain --untracked-files=all --ignored -- \
+  docs/superpowers/state docs/reviews tools/gates/config.yml | awk 'substr($0, 2, 1) != " "')
+if [ -n "$dirty" ]; then
+  echo "FAIL pre-commit.unstaged: the gates read these paths and they differ from the index (stage them with git add, or revert or move them):" >&2
+  echo "$dirty" >&2
   exit 1
 fi
 exec python3 tools/gates/run_all.py --only register,claims
@@ -5516,9 +5681,19 @@ MARKER='# strict-delivery-gates-hook'
 root=$(git rev-parse --show-toplevel)
 hooks=$(git -C "$root" rev-parse --git-path hooks)
 case "$hooks" in /*) ;; *) hooks="$root/$hooks" ;; esac
+common=$(cd "$root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+if [ -d "$hooks" ]; then real=$(cd "$hooks" && pwd -P); else real="$hooks"; fi
+case "$real" in
+  "$common"/*) ;;
+  *) echo "install-hooks: refusing: the hooks directory $hooks (core.hooksPath?) is outside $common; it may be shared with other repositories" >&2; exit 1 ;;
+esac
 mkdir -p "$hooks"
 dst="$hooks/pre-commit"
 if [ -e "$dst" ] && ! grep -qF "$MARKER" "$dst"; then
+  if [ -e "$dst.pre-strict-delivery" ]; then
+    echo "install-hooks: refusing: $dst.pre-strict-delivery already exists and $dst is not ours; merge or remove one of them" >&2
+    exit 1
+  fi
   mv "$dst" "$dst.pre-strict-delivery"
   echo "install-hooks: moved the existing pre-commit hook to $dst.pre-strict-delivery (it no longer runs)"
 fi
@@ -5545,17 +5720,17 @@ chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh t
 - [ ] **Step 4: Run the tests to verify they pass, then install the hook in this checkout**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 13 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 234 tests ... OK
+python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 22 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 243 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
 
-Mutation checks (each restored, then `OK` again). Remove the `try/except` wrapper around `main()` in `pre_tool_use.py` (call `sys.exit(main())`): `test_hook_fails_closed_when_script_errors`, `test_malformed_stdin_fails_closed` and `test_cwd_outside_a_repo_fails_closed` fail (rc 1 with a traceback, not 2). Delete the `unset CLAUDE_PROJECT_DIR` line from `git-pre-commit.sh`: `test_pre_commit_blocks_a_failing_register` and `test_pre_commit_passes_a_clean_tree` fail (the gates read `/nonexistent-project`, so `FAIL register.input` is printed). Disable the `git diff --quiet` test: `test_pre_commit_blocks_unstaged_register_edits` fails. Disable the `[ ! -f "$script" ]` branch of the shim: `test_a_tree_without_the_gates_cannot_commit` fails. Replace the `mv` of a foreign hook with `true`: `test_a_foreign_hook_is_moved_aside` errors. Set `GATED["push"]` to `[]`, or reduce `_ARG` to `\S+`: `test_push_with_options_is_gated_too` fails.
+Mutation checks (each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: remove the `try/except` around `main()` (3 fail-closed tests); `GATED["push"] = []` or `_ARG = \S+` (`test_push_with_options_is_gated_too`); drop the backslash-newline join, `config-env`, the `$X` option word or the `"git"` quote (the same test); `(?![\w-])` -> `\b` (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); ignore `-C` or the leading `cd`, or let a non-repo directory pass (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_a_named_directory_that_is_not_a_repo_fails_closed`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`); replace the `git status` check by `git diff --name-only -- docs/superpowers/state`, drop `--untracked-files=all` or drop `docs/reviews` (the register-removed-from-index, staged-report-with-unstaged-edit and untracked-file tests). `install-hooks.sh`: disable the `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`); replace the `mv` by `true` (`test_a_foreign_hook_is_moved_aside`); put `exit 0` right after the `mv` (the same test, through its rc and marker assertions); allow overwriting the backup or disable the hooks-path guard (`test_a_second_foreign_hook_does_not_overwrite_the_first_backup`, `test_a_hooks_path_outside_the_repository_is_refused`).
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
-Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 13 OK; suite 234 OK on 3.9.6 and 3.12.14; run_all 15 PASS` to the ledger under the existing `## Block b3 (branch block/strict-delivery-b3)` section (the heading and `- base BASE_B3=<sha>` line were written at b3 setup).
+Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 22 OK; suite 243 OK on 3.9.6 and 3.12.14; run_all 15 PASS` to the ledger under the existing `## Block b3 (branch block/strict-delivery-b3)` section (the heading and `- base BASE_B3=<sha>` line were written at b3 setup).
 
 ```bash
 git add tools/gates/hooks tools/gates/install-hooks.sh tools/gates/tests/test_hooks.py docs/superpowers/state/strict-delivery/ledger.md
@@ -5657,7 +5832,7 @@ class ProjectWiring(unittest.TestCase):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: the 7 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 13 Task 7 tests still pass.
+Expected: the 7 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 22 Task 7 tests still pass.
 
 - [ ] **Step 3: Write the hooks, the settings and CLAUDE.md**
 
@@ -5840,8 +6015,8 @@ missing.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 20 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 241 tests ... OK
+python3 -m unittest tools.gates.tests.test_hooks -v      # Ran 29 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 250 tests ... OK
 python3 tools/gates/run_all.py                            # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 git add -A && git diff --cached --check && echo whitespace-clean
@@ -5851,7 +6026,7 @@ Mutation check: add `"Stop": [{"hooks": [{"type": "command", "command": "python3
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 20 OK; suite 241 OK` to the ledger.
+Append `- T8 feat(gates): SessionStart/UserPromptSubmit hooks, .claude/settings.json, CLAUDE.md -- test_hooks 29 OK; suite 250 OK` to the ledger.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md docs/superpowers/state/strict-delivery/ledger.md
