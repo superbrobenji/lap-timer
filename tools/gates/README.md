@@ -63,7 +63,8 @@ commit and push, however it was launched.
      rest of an enclosing `$(...)` is not read); quotes, `$'...'`, `${...}`, backticks, `$(...)`,
      `<(...)`, `>(...)`, `$((...))` at any depth and the redirections `>&`, `<&`, `&>`, `>|` do
      not end them. `-n` is `--no-verify` for commit and `--dry-run` for push; it is blocked for
-     both.
+     both. Every gated verb gets its own argument scan, so a verb mentioned in a quoted string, a
+     heredoc or a comment never hides a later verb's flag (`echo "git push"; git commit -n`).
   2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
      `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
      (`/usr/bin/git`). The options are git 2.50.1's global options, each checked with
@@ -100,9 +101,11 @@ commit and push, however it was launched.
   `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real command; name the directory
   literally. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a
   `-n` inside a substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a
-  bypass: write the message to a file and use `git commit -F <file>`. Every scan is linear in the
-  command length. Every other command and tool exits 0 silently, after one python3 start; the
-  `Agent` branch (the dispatch gate) arrives with S2.
+  bypass: write the message to a file and use `git commit -F <file>`. So is, rarely, a `-n` after
+  the arguments: a scan that meets an earlier verb's scan deeper inside a parenthesis reads on to
+  the end of the command. Every scan is linear in the command length. Every other command and
+  tool exits 0 silently, after one python3 start; the `Agent` branch (the dispatch gate) arrives
+  with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when

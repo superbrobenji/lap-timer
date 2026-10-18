@@ -243,7 +243,20 @@ class PreToolUse(unittest.TestCase):
                           # option values with substitutions and the rest of git's global options are read
                           ("git -C $(pwd) commit -m x --no-verify", "--no-verify after"), ("git -C `pwd` push -n", "-n after"),
                           ("git --shallow-file x commit --no-verify", "--no-verify after"),
-                          ("git --no-literal-pathspecs push --no-verify", "--no-verify after")):
+                          ("git --no-literal-pathspecs push --no-verify", "--no-verify after"),
+                          # a verb mentioned in quotes, a heredoc or a comment does not hide a later real verb's flag
+                          ('echo "git push"; git commit -m "x" --no-verify', "--no-verify after"),
+                          ('echo "git push" && git push origin "main" -n', "-n after"),
+                          ("printf '%s' 'git commit'; git push 'origin' --no-verify", "--no-verify after"),
+                          ("echo 'git push'; git commit -m 'x' -n", "-n after"),
+                          ("echo $'git push' || git commit -m \"it's\" --no-verify", "--no-verify after"),
+                          ('echo "git push \'" | git push \'origin\' -n', "-n after"),
+                          ("x='git commit \"'\ngit push \"origin\" -n", "-n after"),
+                          ("cat <<'EOF'\ngit push \"x\nEOF\ngit commit -m \"y\" -n", "-n after"),
+                          ("# don't git push\ngit commit -m 'x' -n", "-n after"),
+                          # the later scan meets the earlier one deeper inside $(...): it reads on past the earlier end
+                          ("echo 'git push'; git commit $(echo \\' ; date) -n", "-n after"),
+                          ('echo "a" "git commit" & git "push" -m "$(date)" -n', "-n after")):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
@@ -265,6 +278,8 @@ class PreToolUse(unittest.TestCase):
                     "git push $(echo $(date)); ls -n", "git push $((1+2)) && ls -n", 'git "push" && ls -n',
                     "git 'commit' -m x; sort -n f", "x=$(git push $(echo a)); ls -n", "git commit -F - <<EOF\n-n\nEOF",
                     "( git push ) | wc -l", "git push & sort -n", 'x="$(git push)"; ls -n',
+                    'echo "git push"; ls -n', "echo 'git push'; git commit -m 'x'; sort -n f",
+                    'echo "git push" "a"; ls -n', "cat <<EOF\ngit push\nEOF\nls -n",
                     # documented limits (DEC-0005): the argument scan ends early, the git hooks gate these
                     "git push $(case x in x) echo;; esac) -n", 'git commit -m "$(a $(b ")"))" -n'):
             self.assert_silent(cmd)
@@ -285,7 +300,10 @@ class PreToolUse(unittest.TestCase):
                     "git push `" * 30000, "git push <(" * 30000, "git push ) " * 30000, "git commit '" * 30000,
                     "git push \"" * 30000, "git push >|" * 30000, "git push ${" * 30000, 'git push "$(' * 30000,
                     'git push "$("' * 30000, "git push $'" * 30000, "git push " + "(" * 100000,
-                    "git push " + "$(" * 50000 + ")" * 50000):
+                    "git push " + "$(" * 50000 + ")" * 50000,
+                    # verbs inside quoted strings of earlier scans; a "..." whose $(...) holds a quote, retried
+                    'echo "git push \'' * 30000, "echo 'git push \"" * 30000, 'git push $(")' * 30000,
+                    "git push }$(\"" * 30000):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])

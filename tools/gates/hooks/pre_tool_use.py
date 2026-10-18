@@ -13,7 +13,9 @@ textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-000
    parenthesis the arguments open, an unpaired `)`, quote or backtick, so the rest of an enclosing
    `$(...)` is not read; quotes, `$'...'`, `${...}`, backticks, `$(...)`, `<(...)`, `>(...)`,
    `$((...))` at any depth and the redirections `>&`, `<&`, `&>`, `>|` do not end them; `-n` is
-   --no-verify for commit and --dry-run for push, blocked for both). Each exits 2 with
+   --no-verify for commit and --dry-run for push, blocked for both). Every gated verb gets its
+   own argument scan, so a verb mentioned in a quoted string, a heredoc or a comment never hides a
+   later verb's flag (`echo "git push"; git commit -n`). Each exits 2 with
    `FAIL hook.bypass: <form found>` before any gate runs.
 2. Gated: `git [options] commit|push`, matched in the text wherever it stands (after any separator,
    `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the verb a whole word (`commits`,
@@ -45,7 +47,9 @@ directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "
 `git -C $(pwd)`) is `FAIL hook.target`, a block of a real command; name the directory literally. A
 commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a `-n` inside a
 substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the
-message to a file and use `git commit -F <file>`. Every scan is linear in the command length.
+message to a file and use `git commit -F <file>`. So is, rarely, a `-n` after the arguments: a
+scan that meets an earlier verb's scan deeper inside a parenthesis reads on to the end of the
+command (arguments_end). Every scan is linear in the command length.
 """
 from __future__ import annotations
 
@@ -69,14 +73,13 @@ OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +
                     r"|no-advice)|-[pP]|\$\{?\w+\}?)")
 GIT_VERB = re.compile(r"[ \t]+(?P<q>[\"']?)(commit|push)(?![\w-])")   # the verb right after the option run
 LEADING_CD = re.compile(r"\s*cd[ \t]+(" + VALUE + r")[ \t]*(?:&&|;|\n)")
-# one token of a gated verb's arguments (see arguments_end); every alternative starts differently or is
-# tried once per position, so a scan is linear
+# one token of a gated verb's arguments (see arguments_end; a "..." whose $(...) holds quotes is
+# found by dq_closes); every alternative starts differently or is tried once per position (linear)
 ARG_TOKEN = re.compile(
-    r"""(?:"(?:[^"\\$]|\\.|\$\((?:[^()"']|"[^"]*"|'[^']*')*\)|\$(?!\())*"   # "...", its $(...) may quote
-    |"(?:[^"\\]|\\.)*"                                                     # "...", its $(...) may nest
+    r"""(?:"(?:[^"\\]|\\.)*"                                                 # "...", its $(...) may nest
     |\$'(?:[^'\\]|\\.)*'|'[^']*'|`[^`]*`|\$\{[^{}]*\}|\\.|[<>]&|&>|>\|)      # $'...', '...', `...`, ${...}, \x, redirections
     |(?P<stop>["'`])|(?P<sep>[;&|\n])|(?P<open>[$<>]?\()|(?P<close>\))
-    |[^"'`\\;&|\n()<>$]+|.""", re.S | re.X)
+    |[^\S\n]+|[^\s"'`\\;&|()<>$]+|.""", re.S | re.X)   # blanks, a word, one char
 BYPASS = (
     (re.compile(r"core\.hookspath", re.I), "core.hooksPath (it moves the git hooks away)"),
     (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)="),
@@ -136,19 +139,54 @@ def gates_for(event: dict) -> list:
     return names
 
 
-def arguments_end(command: str, pos: int) -> int:
-    """Where the arguments of a gated verb that ends at `pos` end: at an unquoted separator outside every
-    parenthesis the arguments open (`$(`, `<(`, `>(`, `(`, `$((` count), at an unpaired `)` or at an
-    unpaired quote or backtick. So `out=$(git push; ls -n)` stops at the `;` and `git push $(a $(b)) -n`
-    reads the -n. One token per step, each read once."""
+def dq_closes(command: str) -> list:
+    """For each index i: the index of the `"` that closes a double-quoted string whose text starts
+    at i, or -1. A `$(...)` in it may hold quoted strings with any character (`"$(echo ")")"`) but
+    no other parenthesis. Read once, right to left, so no scan retries a long string (linear)."""
+    n = len(command)
+    text, sub, last = [-1] * (n + 2), [-1] * (n + 2), {'"': -1, "'": -1}
+    for i in range(n - 1, -1, -1):
+        c = command[i]
+        if c in last:       # sub: the `)` that closes a `$(` whose text starts at i
+            sub[i] = sub[last[c] + 1] if last[c] >= 0 else -1
+            last[c] = i
+        elif c != "(":
+            sub[i] = i if c == ")" else sub[i + 1]
+        if c == '"':
+            text[i] = i
+        elif c == "$" and command.startswith("(", i + 1):
+            text[i] = text[sub[i + 2] + 1] if sub[i + 2] >= 0 else -1
+        else:
+            text[i] = text[i + 2] if c == "\\" else text[i + 1]
+    return text
+
+
+def arguments_end(command: str, pos: int, seen: dict = None, closes: list = None) -> tuple:
+    """(end, more) for the arguments of a gated verb that ends at `pos`: they end at an unquoted
+    separator outside every parenthesis they open (`$(`, `<(`, `>(`, `(`, `$((` count), at an
+    unpaired `)` or at an unpaired quote or backtick. So `out=$(git push; ls -n)` stops at the `;`
+    and `git push $(a $(b)) -n` reads the -n. One token per step. `seen` maps each token start an
+    earlier scan read to its depth there: from a start read at the same or a greater depth this scan
+    reads what that one read, so it stops there; from one read at a smaller depth its arguments may
+    run on past that scan's, so it stops with `more` true and the caller reads on to the end of the
+    command. Each token start is read once, and a verb an earlier scan read inside a quoted string
+    (`echo "git push"; git commit -n`) still gets its own scan."""
+    seen = {} if seen is None else seen
+    closes = dq_closes(command) if closes is None else closes
     depth = 0
     while pos < len(command):
+        if pos in seen:
+            return pos, depth > seen[pos]
+        seen[pos] = depth
+        if command[pos] == '"' and closes[pos + 1] >= 0:      # "...", its $(...) may hold quotes
+            pos = closes[pos + 1] + 1
+            continue
         t = ARG_TOKEN.match(command, pos)
         if t.group("stop") or (depth == 0 and (t.group("sep") or t.group("close"))):
-            return pos
+            return pos, False
         depth += 1 if t.group("open") else -1 if t.group("close") else 0
         pos = t.end()
-    return pos
+    return pos, False
 
 
 def bypass(command: str, calls: list):
@@ -156,12 +194,13 @@ def bypass(command: str, calls: list):
     for pattern, reason in BYPASS:
         if pattern.search(command):
             return reason
-    scanned = -1
+    seen, ranges, rest, closes = {}, [], len(command), dq_closes(command) if calls else []
     for verb in sorted(end for _, _, end in calls):
-        if verb < scanned:      # inside the arguments already read: its own arguments lie within them (linear)
-            continue
-        scanned = arguments_end(command, verb)
-        for w in NO_VERIFY.finditer(command, verb, scanned):
+        end, more = arguments_end(command, verb, seen, closes)
+        ranges.append((verb, end))
+        rest = min(rest, end) if more else rest
+    for start, end in ranges + [(rest, len(command))]:
+        for w in NO_VERIFY.finditer(command, start, end):
             if w.group(1).startswith("--") or "n" in w.group(1):
                 return "%s after a gated git verb (--no-verify; -n is --no-verify for commit, --dry-run for push)" % w.group(1)
     return None
