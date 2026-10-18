@@ -3,11 +3,14 @@
 runs as a subprocess with a JSON event on stdin -- the way Claude Code runs it. Run from the repo
 root: python3 -m unittest discover -s tools/gates/tests -t .
 """
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from tools.gates.tests import gitfixture as gf
@@ -51,6 +54,15 @@ def new_repo():
     return root
 
 
+def isolated_env(**extra):
+    """The environment for git and install calls on a fixture: no CLAUDE_PROJECT_DIR, and neither the
+    developer's global nor system git config (core.hooksPath, gpgsign, templates) reaches the fixture."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    env.update(extra)
+    return env
+
+
 def copy_gates(dst):
     """The real tools/gates (code + scripts) copied into a throwaway repo, without test fixtures."""
     shutil.copytree(os.path.join(gf.REPO, "tools", "gates"), os.path.join(dst, "tools", "gates"),
@@ -60,6 +72,8 @@ def copy_gates(dst):
 class PreToolUse(unittest.TestCase):
     def setUp(self):
         self.root = new_repo()
+        self.spaced = os.path.join(self.root, "a b")    # a directory name with a space, inside the failing repo
+        os.makedirs(self.spaced)
 
     def tearDown(self):
         gf.remove(self.root)
@@ -76,14 +90,54 @@ class PreToolUse(unittest.TestCase):
         p = hook("pre_tool_use.py", bash_event(self.root, "cd . && git -C . --no-pager push origin HEAD"))
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr)
-        for cmd in ('git -C "/a b" commit -m x', "git -c 'a=b c' push", "git --git-dir /x commit",
-                    "git --work-tree=/x commit"):   # quoted values and separate-word option values
+        for cmd in ('git -C "%s" commit -m x' % self.spaced, "git -c 'a=b c' push", "git --git-dir /x commit",
+                    "git --work-tree=/x commit",                # quoted values and separate-word option values
+                    "git -C . \\\n  commit -m x",               # backslash-newline continuation
+                    "git -C %s commit -m x" % self.spaced.replace(" ", "\\ "),   # escaped space
+                    "git --config-env a=B commit", '"git" commit -m x', "'git' push",
+                    "git ${X} commit -m x", "git $X push"):     # unexpandable option word: gated conservatively
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
         self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
+
+    def test_a_verb_that_only_shares_a_prefix_is_not_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("git commit-graph write", "git push-to-checkout x"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+
+    def test_the_tree_named_by_dash_C_or_cd_is_the_one_gated(self):
+        bad = new_repo()
+        self.addCleanup(gf.remove, bad)
+        gf.write(bad, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        # failing tree named from a clean cwd: blocked
+        for cmd in ("git -C %s commit -m x" % bad, "cd %s && git push" % bad, "cd '%s'; git commit -m x" % bad,
+                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root))):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+        # clean tree named from a failing cwd: passes
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        clean = new_repo()
+        self.addCleanup(gf.remove, clean)
+        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+        # a relative -C resolves against the event cwd
+        p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
+        self.assertEqual(0, p.returncode, p.stderr)
+
+    def test_a_named_directory_that_is_not_a_repo_fails_closed(self):
+        outside = tempfile.mkdtemp(prefix="gate-test-outside-")
+        self.addCleanup(gf.remove, outside)
+        for cmd in ("git -C %s commit -m x" % outside, "cd %s && git push" % outside, "git -C /nonexistent-dir push"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr, cmd)
 
     def test_ungated_commands_and_tools_pass_even_on_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
@@ -123,17 +177,19 @@ class GitHooks(unittest.TestCase):
         self.root = new_repo()
         copy_gates(self.root)
         gf.commit_all(self.root, "gates")
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
         self.assertEqual(0, p.returncode, p.stderr)
         self.hook = os.path.join(self.root, ".git", "hooks", "pre-commit")
 
     def tearDown(self):
         gf.remove(self.root)
 
+    def install(self):
+        return subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root, capture_output=True,
+                              text=True, env=isolated_env(), check=False)
+
     def commit(self):
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-        env["CLAUDE_PROJECT_DIR"] = "/nonexistent-project"   # the hook must ignore it
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
         return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
                                "commit", "-q", "-m", "x"], cwd=self.root, capture_output=True, text=True,
                               env=env, check=False)
@@ -142,8 +198,7 @@ class GitHooks(unittest.TestCase):
         with open(self.hook) as fh:
             first = fh.read()
         self.assertIn("# strict-delivery-gates-hook", first)
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
         self.assertEqual(0, p.returncode)
         self.assertNotIn("moved the existing", p.stdout)
         with open(self.hook) as fh:
@@ -151,11 +206,34 @@ class GitHooks(unittest.TestCase):
 
     def test_a_foreign_hook_is_moved_aside(self):
         gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
-        p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
-                           capture_output=True, text=True, check=False)
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
         self.assertIn("moved the existing pre-commit hook", p.stdout)
         with open(self.hook + ".pre-strict-delivery") as fh:
             self.assertEqual("#!/bin/sh\necho mine\n", fh.read())
+        with open(self.hook) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+
+    def test_a_second_foreign_hook_does_not_overwrite_the_first_backup(self):
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho one\n")
+        self.assertEqual(0, self.install().returncode)
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho two\n")
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-strict-delivery already exists", p.stderr)
+        with open(self.hook + ".pre-strict-delivery") as fh:
+            self.assertEqual("#!/bin/sh\necho one\n", fh.read())
+        with open(self.hook) as fh:
+            self.assertEqual("#!/bin/sh\necho two\n", fh.read())
+
+    def test_a_hooks_path_outside_the_repository_is_refused(self):
+        shared = tempfile.mkdtemp(prefix="gate-test-shared-hooks-")
+        self.addCleanup(gf.remove, shared)
+        gf.git(self.root, "config", "core.hooksPath", shared)
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("install-hooks: refusing: the hooks directory", p.stderr)
+        self.assertEqual([], os.listdir(shared))
 
     def test_pre_commit_blocks_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
@@ -171,6 +249,39 @@ class GitHooks(unittest.TestCase):
         p = self.commit()
         self.assertNotEqual(0, p.returncode)
         self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+
+    def test_pre_commit_blocks_a_register_removed_from_the_index_but_left_on_disk(self):
+        gf.git(self.root, "rm", "--cached", "-q", os.path.join(gf.STATE, "findings.yml"))
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("findings.yml", p.stderr)
+
+    def test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit(self):
+        report = os.path.join("docs", "reviews", "r.md")
+        gf.write(self.root, report, "register: true\n- T1-GHOST-1: x\n")
+        gf.git(self.root, "add", report)
+        gf.write(self.root, report, "register: true\n")    # the unstaged edit drops the line the index cites
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("docs/reviews/r.md", p.stderr)
+
+    def test_pre_commit_blocks_an_untracked_file_the_gates_read(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("docs", "reviews", "new.md"), "register: true\n- T1-GHOST-1: x\n")
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("docs/reviews/new.md", p.stderr)
+
+    def test_a_staged_report_passes_when_it_is_committed_as_is(self):
+        report = os.path.join("docs", "reviews", "r.md")
+        gf.write(self.root, report, "register: true\n")
+        gf.git(self.root, "add", report)
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
     def test_a_tree_without_the_gates_cannot_commit(self):
         gf.git(self.root, "rm", "-r", "-q", "tools")

@@ -8,9 +8,19 @@ MARKER='# strict-delivery-gates-hook'
 root=$(git rev-parse --show-toplevel)
 hooks=$(git -C "$root" rev-parse --git-path hooks)
 case "$hooks" in /*) ;; *) hooks="$root/$hooks" ;; esac
+common=$(cd "$root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+if [ -d "$hooks" ]; then real=$(cd "$hooks" && pwd -P); else real="$hooks"; fi
+case "$real" in
+  "$common"/*) ;;
+  *) echo "install-hooks: refusing: the hooks directory $hooks (core.hooksPath?) is outside $common; it may be shared with other repositories" >&2; exit 1 ;;
+esac
 mkdir -p "$hooks"
 dst="$hooks/pre-commit"
 if [ -e "$dst" ] && ! grep -qF "$MARKER" "$dst"; then
+  if [ -e "$dst.pre-strict-delivery" ]; then
+    echo "install-hooks: refusing: $dst.pre-strict-delivery already exists and $dst is not ours; merge or remove one of them" >&2
+    exit 1
+  fi
   mv "$dst" "$dst.pre-strict-delivery"
   echo "install-hooks: moved the existing pre-commit hook to $dst.pre-strict-delivery (it no longer runs)"
 fi
