@@ -417,7 +417,7 @@ class GitHooks(unittest.TestCase):
 
 
 class PreToolUseCommandPosition(unittest.TestCase):
-    """The unfiltered Bash handler sees every command: a gated verb counts in command position only."""
+    """The unfiltered Bash handler sees every command: quoted data is blanked, then the verb is matched."""
     def setUp(self):
         self.root = new_repo()
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)    # a failing register
@@ -430,32 +430,49 @@ class PreToolUseCommandPosition(unittest.TestCase):
 
     def assert_gated(self, cmd):
         p = self.run_hook(cmd)
-        self.assertEqual(2, p.returncode, (cmd, p.stderr))
-        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd[:80])
 
     def assert_silent(self, cmd):
         p = self.run_hook(cmd)
-        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd)
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd[:80])
 
-    def test_a_verb_that_is_only_mentioned_is_not_gated(self):
+    def test_a_verb_inside_data_is_not_gated(self):
         for cmd in ("grep -rn 'git push' docs", "echo 'run git push and git commit later'", 'rg "git commit" docs',
-                    "echo git push", "echo git commit -m x", "cat <<EOF\ngit push\nEOF", "cat <<'EOF'\ngit push\nEOF",
-                    "cat <<-EOF\n\tgit commit\n\tEOF", "gh pr create --title t --body 'then git push'",
-                    "git log --grep='git push'", "git log --grep 'git commit'", "cd missing && echo git push",
+                    "cat <<EOF\ngit push\nEOF", "cat <<'EOF'\ngit push\nEOF", 'cat <<"EOF"\ngit push\nEOF',
+                    "cat <<\\EOF\ngit push\nEOF", "cat <<\\EOF\n$(git push)\nEOF", "cat <<-EOF\n\tgit commit\n\tEOF",
+                    "gh pr create --title t --body 'then git push'", "git log --grep='git push'", "git log --grep 'git commit'",
                     "echo hi # git push", "echo \"x git push\"", "printf '%s' \"git commit\" | wc -c",
-                    "echo \"$(cat <<'EOF'\ngit push\nEOF\n)\"", "ls; echo git push; ls",
-                    "git status 2>&1 | grep 'git commit'", "echo a\\ git push",
+                    "echo \"$(cat <<'EOF'\ngit push\nEOF\n)\"", "git status 2>&1 | grep 'git commit'",
                     "echo 'x; git push'", "grep 'a && git commit' f", "echo 'x $(git push)'", "echo `echo 'y; git push'`",
-                    "cat <<'EOF'\n$(git push)\nEOF", "echo hi # a && git push", "echo ok # $(git push)"):
+                    "cat <<'EOF'\n$(git push)\nEOF", "echo hi # a && git push", "echo ok # $(git push)",
+                    "cat <<EOF\n$(echo a)\n git push\nEOF",       # unquoted delimiter: only the substitution runs
+                    "cat <<EOF\n`echo a`\nx git push\nEOF", "echo \"$(echo a) then git push\"",
+                    "echo ${#X}; echo 'git push'", "echo $# 'git push'"):
             self.assert_silent(cmd)
 
-    def test_a_verb_in_command_position_is_gated(self):
+    def test_a_verb_that_is_not_in_data_is_gated(self):
         for cmd in ('echo "$(git push)"', "x=$(git commit -m y)", "echo `git push`", "echo \"`git commit -m y`\"",
                     "echo hi && git push", "echo hi; git push", "ls | git commit -m x", "echo hi & git push",
                     "if git push; then echo ok; fi", "! git push", "{ git push; }", "(git push)", "true || git commit -m x",
                     "echo hi\ngit push", "2>&1 git push", "cat <<EOF\n$(git push)\nEOF", "cat <<EOF\nx $(echo a; git push)\nEOF",
                     "cat <<EOF\ngit push", "git commit -m \"$(cat <<'EOF'\nfix git push in the notes\nEOF\n)\"",
-                    "echo 'git push' && git push", "cat <<'EOF' > /dev/null\nx\nEOF\ngit push"):
+                    "echo 'git push' && git push", "cat <<'EOF' > /dev/null\nx\nEOF\ngit push",
+                    # an unquoted mention is gated too (fail closed; the cost is a blocked echo)
+                    "echo git push", "echo git commit -m x", "ls; echo git push; ls", "echo a\\ git push",
+                    "cd missing && echo git push",
+                    # no cap on prefix words, word length or path length; wrappers need no list
+                    "A=1 " * 13 + "git push", "FOO=" + "x" * 300 + " git push", "/" + "d/" * 200 + "git push",
+                    "env X=" + "y" * 260 + " git push", "timeout 1.5 git push", "sudo --user nobody git push",
+                    "> /tmp/log git push", "2> err git push", "echo ${#X}; git push", "echo $# && git push",
+                    "arch -arm64 git push", "xcrun git push", "flock /tmp/l git push", "watch git push", "chronic git push",
+                    "unbuffer git push", "script -q /dev/null git push", "coproc git push", "nohup nice -n 5 git commit -m x",
+                    "echo \"unclosed; git push", "echo 'unclosed; git push"):     # an unterminated quote is not blanked
+            p = self.run_hook(cmd)
+            self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
+            self.assertTrue("FAIL register.owner.T1-ORPHAN-1" in p.stderr or "FAIL hook." in p.stderr, (cmd[:80], p.stderr))
+        for cmd in ('echo "$(git push)"', "echo ${#X}; git push", "arch -arm64 git push", "timeout 1.5 git push",
+                    "A=1 " * 13 + "git push", "> /tmp/log git push", "git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\""):
             self.assert_gated(cmd)
 
     def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
@@ -473,8 +490,11 @@ class PreToolUseCommandPosition(unittest.TestCase):
             self.assert_silent(cmd)
 
     def test_scans_stay_linear(self):
-        for cmd in (";" * 30000 + "ls", "$(" * 10000, "`" * 20000, '"' * 20000, "sudo -a; " * 5000 + "ls",
-                    "echo $(" * 5000, "( " * 20000, "git commit -m \"" + "$(" * 5000, "<<A\n" * 20000):
+        distinct = "".join("cat <<D%d\n" % k for k in range(8000))
+        for cmd in (";" * 30000 + "ls", "$(" * 10000, "`" * 20000, '"' * 20000, "'" * 20000, "sudo -a; " * 5000 + "ls",
+                    "echo $(" * 5000, "( " * 20000, "git commit -m \"" + "$(" * 5000, "<<A\n" * 20000,
+                    distinct, distinct + "git push", "x" * 200000, "git " + "-c a=b " * 20000 + "status",
+                    "echo \"" * 5000, "# x\n" * 20000, "<<'A'\n" * 20000, "<<A\n$(" * 5000, "A=1 " * 40000):
             start = time.monotonic()
             p = self.run_hook(cmd)
             self.assertLess(time.monotonic() - start, 2.0, cmd[:20])

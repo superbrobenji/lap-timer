@@ -3,17 +3,18 @@
 
 Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so
 this script sees every Bash call and alone decides what is gated. At strict-delivery block b3 only
-the Bash branch gates: `git commit` and `git push` in COMMAND POSITION (the first word of a simple
-command, after `VAR=val`, shell keywords and wrappers such as `sudo`, `env`, `nohup`, `time`; also
-inside `$(...)` and backticks; the git word may be path-qualified or quoted) run the register and
-claim gates on the git toplevel of the event's `cwd`; every other command, and every other tool
-(Agent included, until S2 adds gate_dispatch), exits 0 silently. A verb that is only mentioned
-(`echo git push`, `grep 'git push'`, a commit message, a heredoc body, a comment) is data. The tree
-gated is the one the command names: the cwd, moved by a leading `cd <dir> &&`/`;` and by each
-`git -C <dir>` (cumulative, as git does); a named directory that is not inside a repo fails closed.
-A failing gate exits 2 with the gate's lines on stderr; any internal error also exits 2 (fail
-closed). Limits: the match is textual (aliases and a `-C $VAR` directory are not followed; a
-wrapper not in WRAPPERS hides the verb). A gated command whose tree it cannot tell (another `cd`,
+the Bash branch gates: `git commit` and `git push` run the register and claim gates on the git
+toplevel of the event's `cwd`; every other command, and every other tool (Agent included, until S2
+adds gate_dispatch), exits 0 silently. The verb is matched textually, anywhere in the command (any
+wrapper, assignment, redirection or path-qualified git word before it), after the data is blanked:
+single-quoted spans, quoted-delimiter heredoc bodies, comments, and the text of double-quoted spans
+and unquoted-delimiter heredoc bodies outside `$(...)` and backticks. So `grep 'git push' docs`
+passes while `echo git push` and `echo "$(git push)"` are gated (a mention outside quotes costs a
+blocked command: fail closed). The tree gated is the one the command names: the cwd, moved by a leading
+`cd <dir> &&`/`;` and by each `git -C <dir>` (cumulative, as git does); a named directory that is
+not inside a repo fails closed. A failing gate exits 2 with the gate's lines on stderr; any internal
+error also exits 2 (fail closed). Limits: aliases and a `-C $VAR` directory are not followed; an
+unterminated quote or heredoc is not blanked. A gated command whose tree it cannot tell (another `cd`,
 `pushd`, a subshell, `-C`/`cd` with an expansion, --git-dir/--work-tree, GIT_DIR=) exits 2 with
 `FAIL hook.target`, and so does a command that holds a launcher -- a nested shell or a moved one:
 `bash -c`, `bash -o pipefail -c`, `bash <<EOF`, `| sh`, `eval`, `xargs`, `-exec`/`-execdir`,
@@ -22,6 +23,7 @@ before the verb (`git $X commit`) gates the cwd tree. Every scan is linear in th
 """
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import re
@@ -39,21 +41,11 @@ _OPT = (r"(?:" + _TAKES_WORD + r"\s+" + _ARG                                    
         + r"|\$\S+)")                                                      # $X / ${X}: unknown, gate conservatively
 GIT_REST = re.compile(r"(?P<opts>(?:\s+" + _OPT + r")*)\s+(?P<verb>commit|push)(?![\w-])")   # after the git word
 GIT_TEXT = re.compile(r"\bgit\b[\"']?" + GIT_REST.pattern)   # the verb anywhere in the text, quoted or not
-WORD = re.compile(r"[ \t]*(" + _ARG + r")")
-ASSIGN = re.compile(r"[A-Za-z_]\w*=")
-REDIRECT = re.compile(r"\d*[<>]\S*")
-SEPARATORS = " \t\n;&|(){}`"
-KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!"}
-WRAPPERS = {"sudo", "doas", "command", "builtin", "nohup", "time", "timeout", "exec", "nice", "ionice", "setsid",
-            "stdbuf", "env", "noglob", "caffeinate"}
-VALUE_OPTS = {"-u", "-g", "-h", "-p", "-r", "-t", "-T", "-U", "-C", "-D", "-n", "-s", "-k", "-S", "-P", "-c", "-d", "-R"}
-MAX_WORD = 256
-MAX_PREFIX = 12      # words before the git word (assignments, wrappers and their options) that are read
 GIT_DIR_OPT = re.compile(r"(?:^|\s)-C\s+(" + _ARG + r")")
 LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
 CD_WORD = re.compile(r"(?:^|[;&|(){}`\s])(?:cd|pushd|popd)(?=[\s;&|)]|$)")
 TREE_ENV = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?GIT_(?:DIR|WORK_TREE)=")
-HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)(\w+)\1")   # <<EOF, <<-EOF, <<'EOF'; not <<< or <<<<
+HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:(?P<q>['\"])(?P<qd>\w+)(?P=q)|(?P<bs>\\)?(?P<d>\w+))")   # <<EOF, <<-EOF, <<'EOF', <<\EOF; not <<< or <<<<
 QUOTED = re.compile(r"\"([^\"]*)\"|'([^']*)'")
 PLAIN = re.compile(r"[\w./=+-]+")       # a quoted word with no space or shell syntax in it: read as the bare word
 SEP = re.compile(r"(\|\||&&|\|&|[;&|\n(){}`])")   # ends a simple command; a lone | or |& feeds the next one
@@ -83,145 +75,163 @@ def _command(event: dict):
     return command.replace("\\\n", " ")
 
 
-def _command_starts(command: str) -> list:
-    """Offsets where a simple command starts in code that runs: the start of the text, after a separator
-    (`; & | ( ) { }` newline, `&&`, `||`), after `$(` and after a backtick, also inside double quotes.
-    Not inside single quotes, a quoted-delimiter heredoc body, a comment, or double-quoted text outside
-    `$(...)`/backticks (a message or an argument). An unquoted heredoc body is data except around its
-    `$(` and backticks (starts are added after each separator following the first one on a line). A
-    heredoc with no terminator line is scanned as code. One pass (linear)."""
+def _heredoc(m) -> tuple:
+    """(delimiter, quoted) of a HEREDOC_OPEN match; <<'E', <<"E" and <<\\E are quoted (the body is literal)."""
+    if m.group("q"):
+        return m.group("qd"), True
+    return m.group("d"), bool(m.group("bs"))
+
+
+def _blank_data(command: str) -> str:
+    """`command` with the data blanked, same length (every blanked character becomes a space, newlines
+    stay): single-quoted spans; the bodies of heredocs with a quoted delimiter; comments (a `#` that
+    starts a word, so not `${#X}` or `$#`); and, inside double-quoted spans and the bodies of heredocs
+    with an unquoted delimiter, everything except the contents of `$(...)` and backticks, which run and
+    stay code, recursively. A quoted span that is one plain word (`'git'`, `"commit"`) stays. An
+    unterminated single quote, double quote or heredoc is not blanked (fail closed). One left-to-right
+    pass; the terminator lines of all heredocs are indexed once, so any number of unclosed delimiters is
+    still linear."""
     n = len(command)
-    starts = [0]
-    stack = []          # ["dq"], ["sub", open parentheses], ["bt"]
-    pending = []        # heredocs opened on this line: (delimiter, quoted)
-    open_ended = set()  # delimiters with no terminator line from some offset on, so none after it either
+    out = list(command)
+    stack = []              # ["dq", start, plain], ["hd", until, start], ["sub", open parentheses], ["bt"]
+    pending = []            # heredocs opened on the current line: (delimiter, quoted)
+    jobs = []               # unquoted heredoc bodies still to scan: (start, until), in order
+    after = 0               # where code resumes once the jobs are done
+    terminators = None      # delimiter -> offsets of the lines that are exactly that word
+
+    def blank(lo, hi):
+        for k in range(lo, hi):
+            if out[k] != "\n":
+                out[k] = " "
+
     i = 0
     while i < n:
         c = command[i]
         top = stack[-1] if stack else None
-        if top is not None and top[0] == "dq":
-            if c == "\\":
-                i += 2
-            elif c == '"':
+        if top is not None and top[0] in ("dq", "hd"):
+            if top[0] == "hd" and i >= top[1]:
                 stack.pop()
-                i += 1
-            elif command.startswith("$(", i):
+                if jobs:
+                    start, until = jobs.pop(0)
+                    stack.append(["hd", until, start])
+                    i = start
+                else:
+                    i = after
+                continue
+            if c == "$" and command.startswith("$(", i):
                 stack.append(["sub", 1])
-                starts.append(i + 2)
+                if top[0] == "dq":
+                    top[2] = False
                 i += 2
             elif c == "`":
                 stack.append(["bt"])
-                starts.append(i + 1)
+                if top[0] == "dq":
+                    top[2] = False
+                i += 1
+            elif top[0] == "dq" and c == '"':
+                stack.pop()
+                if top[2]:
+                    out[top[1] + 1:i] = command[top[1] + 1:i]       # a plain word stays
                 i += 1
             else:
-                i += 1
+                step = 2 if c == "\\" else 1
+                blank(i, min(i + step, n))
+                if top[0] == "dq" and not (c.isalnum() or c in "_./=+-"):
+                    top[2] = False
+                i += step
             continue
         if c == "\\":
             i += 2
         elif c == "'":
             j = command.find("'", i + 1)
-            i = n if j < 0 else j + 1
+            if j < 0:
+                i += 1                              # unterminated: stays code
+            else:
+                if not re.fullmatch(r"[\w./=+-]+", command[i + 1:j]):
+                    blank(i + 1, j)
+                i = j + 1
         elif c == '"':
-            stack.append(["dq"])
+            stack.append(["dq", i, True])
             i += 1
-        elif command.startswith("$(", i):
+        elif c == "$" and command.startswith("$(", i):
             stack.append(["sub", 1])
-            starts.append(i + 2)
             i += 2
         elif c == "`":
             if top is not None and top[0] == "bt":
                 stack.pop()
             else:
                 stack.append(["bt"])
-            starts.append(i + 1)
             i += 1
-        elif c == "#" and (i == 0 or command[i - 1] in SEPARATORS):
+        elif c == "#" and (i == 0 or command[i - 1] in " \t\n;&|("):
             j = command.find("\n", i)
-            i = n if j < 0 else j
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
         elif c == "<" and HEREDOC_OPEN.match(command, i):
             m = HEREDOC_OPEN.match(command, i)
-            if m.group(2) not in open_ended:
-                pending.append((m.group(2), m.group(1) != ""))
+            pending.append(_heredoc(m))
             i = m.end()
-        elif c in "(){};&|":
-            if c == "(" and top is not None and top[0] == "sub":
-                top[1] += 1
-            elif c == ")" and top is not None and top[0] == "sub":
-                top[1] -= 1
-                if top[1] == 0:
-                    stack.pop()
-            starts.append(i + 1)
+        elif c == "(" and top is not None and top[0] == "sub":
+            top[1] += 1
             i += 1
-        elif c == "\n":
+        elif c == ")" and top is not None and top[0] == "sub":
+            top[1] -= 1
+            if top[1] == 0:
+                stack.pop()
             i += 1
-            while pending:
-                delim, quoted = pending.pop(0)
-                j = i
-                while j < n:
-                    k = command.find("\n", j)
-                    line = command[j:] if k < 0 else command[j:k]
-                    if line.strip(" \t") == delim:
-                        break
-                    j = n if k < 0 else k + 1
-                if j >= n:
-                    open_ended.add(delim)       # no terminator: the rest is scanned as code
-                    continue
-                if not quoted:
-                    body = command[i:j]
-                    seen = False
-                    for m in re.finditer(r"\$\(|`|[;&|]", body):
-                        seen = seen or m.group() in ("$(", "`")
-                        if seen:
-                            starts.append(i + m.end())
-                i = j
-            starts.append(i)
+        elif c == "\n" and pending:
+            i += 1
+            if terminators is None:
+                terminators = {}
+                pos = 0
+                while pos <= n:
+                    k = command.find("\n", pos)
+                    k = n if k < 0 else k
+                    word = command[pos:k].strip(" \t")
+                    if re.fullmatch(r"\w+", word):
+                        terminators.setdefault(word, []).append(pos)
+                    pos = k + 1
+            body_from = i
+            scan = []
+            for delim, quoted in pending:
+                offs = terminators.get(delim, [])
+                at = bisect.bisect_left(offs, body_from)
+                if at == len(offs):
+                    continue                        # no terminator line: the body stays code
+                end = offs[at]
+                if quoted:
+                    blank(body_from, end)
+                else:
+                    scan.append((body_from, end))
+                k = command.find("\n", end)
+                body_from = n if k < 0 else k + 1
+            pending = []
+            if scan:
+                jobs = scan[1:]
+                after = body_from
+                stack.append(["hd", scan[0][1], scan[0][0]])
+                i = scan[0][0]
+            else:
+                i = max(i, body_from)
         else:
             i += 1
-    return starts
-
-
-def _git_word_end(command: str, start: int):
-    """Offset just past the `git` word when the simple command starting at `start` runs git: the words
-    before it are only keywords, assignments, redirections, wrappers (`sudo`, `env`, `nohup`, ...) with
-    their options, and the word itself may be path-qualified or quoted. None otherwise."""
-    pos = start
-    while pos < len(command) and command[pos] in " \t":
-        pos += 1
-    wrapper = skip_value = False
-    for _ in range(MAX_PREFIX + 1):
-        m = WORD.match(command, pos, pos + MAX_WORD)       # a longer word is not a wrapper, an option or git
-        if not m:
-            return None
-        word = m.group(1)
-        plain = re.sub(r"[\\\"']", "", word)
-        pos = m.end()
-        if os.path.basename(plain) == "git":
-            return pos
-        if wrapper and skip_value:
-            skip_value = False
-        elif word in KEYWORDS or ASSIGN.match(word) or REDIRECT.fullmatch(word):
-            pass
-        elif os.path.basename(plain) in WRAPPERS:
-            wrapper = True
-        elif wrapper and (plain.startswith("-") or re.fullmatch(r"\d+[smhd]?", plain)):
-            skip_value = plain in VALUE_OPTS
-        else:
-            return None
-    return None
+    for frame in stack:                             # an unterminated double quote or heredoc: fail closed
+        if frame[0] == "dq":
+            out[frame[1] + 1:] = command[frame[1] + 1:]
+            break
+    return "".join(out)
 
 
 def git_calls(command: str) -> list:
-    """The gated git commands (commit, push) the command runs. A verb counts in command position only
-    (the first word of a simple command, after assignments and wrappers): `echo git push`, `grep 'git push'`,
-    a commit message or a heredoc body are data. When the command also holds a launcher (`bash -c`, `eval`,
-    `xargs`, `| sh`, `env -C` ...) whose payload may hold the verb, a textual match counts too, and
-    target_dirs then blocks it as a tree it cannot tell."""
-    calls = []
-    for s in _command_starts(command):
-        end = _git_word_end(command, s)
-        m = GIT_REST.match(command, end) if end is not None else None
-        if m:
-            calls.append(Call(m.group("opts"), m.group("verb")))
+    """The gated git commands (commit, push) the command may run: the textual match GIT_TEXT on the
+    command with its data blanked (_blank_data), wherever the verb stands (an unquoted `echo git push`
+    is gated, a mention in quotes, a comment or a heredoc body is not). The options are read from the
+    original text at the same offsets, so a quoted directory still resolves. When nothing matches and the
+    command holds a launcher (`bash -c`, `eval`, `xargs`, `| sh`, `find -exec`, `env -C` ...) whose payload
+    may hold the verb, the textual matches of the unblanked command count, and target_dirs then blocks
+    them as a tree it cannot tell."""
+    calls = [Call(command[m.start("opts"):m.end("opts")], m.group("verb"))
+             for m in GIT_TEXT.finditer(_blank_data(command))]
     if not calls and _launcher(_blank_heredocs(command)):
         calls = [Call(m.group("opts"), m.group("verb")) for m in GIT_TEXT.finditer(command)]
     return calls
@@ -260,7 +270,7 @@ def _blank_heredocs(text: str) -> str:
         i += 1
         for m in HEREDOC_OPEN.finditer(line):
             j = i
-            while j < len(lines) and lines[j].strip(" \t") != m.group(2):
+            while j < len(lines) and lines[j].strip(" \t") != _heredoc(m)[0]:
                 j += 1
             if j == len(lines):
                 return "\n".join(out + lines[i:])

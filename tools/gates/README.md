@@ -48,19 +48,21 @@ without an `if` filter, so the script sees every Bash call), `hooks/session_star
 with S2.
 
 - `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
-  (`FAIL hook.internal`, fail closed). Bash: `git commit` and `git push` in command position (the
-  first word of a simple command, bare, path-qualified or quoted, after `VAR=val`, `if`/`then`/`do`/`!`
-  and the wrappers `sudo`, `doas`, `command`, `builtin`, `nohup`, `time`, `timeout`, `exec`, `nice`,
-  `ionice`, `setsid`, `stdbuf`, `env`, `noglob`, `caffeinate` with their options; also inside
-  `$(...)` and backticks) run the register and claim gates on the tree the command names: the
-  event's cwd, moved by a leading `cd <dir> &&` or `;` and by each `git -C <dir>`. A verb that is
-  only mentioned (`echo git push`, `grep 'git push' docs`, a quoted argument or commit message, a
-  heredoc body, a comment) is data and is not gated. A gated command whose tree it cannot tell
-  (another `cd`, `pushd`, a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word)
-  exits 2 with `FAIL hook.target`; so does any command that holds a launcher (`bash -c`, `eval`,
-  `xargs`, `| sh`, a shell fed a heredoc, `find -exec`/`-execdir`, `env -C`, `sudo -D`) and also
-  names the verb anywhere, quoted or not. Every other command and tool exits 0 silently, after one
-  python3 start; the `Agent` branch (the dispatch gate) arrives with S2.
+  (`FAIL hook.internal`, fail closed). Bash: the command is first stripped of its data, then
+  `git commit` and `git push` are matched textually anywhere in what remains (so any wrapper,
+  `VAR=val`, redirection or path-qualified git word before the verb is covered) and run the register
+  and claim gates on the tree the command names: the event's cwd, moved by a leading `cd <dir> &&` or
+  `;` and by each `git -C <dir>`. Data is: single-quoted spans; heredoc bodies with a quoted delimiter
+  (`<<'E'`, `<<"E"`, `<<\E`); comments (a `#` that starts a word); and the text of double-quoted spans
+  and unquoted-delimiter heredoc bodies outside `$(...)` and backticks, which execute and are scanned
+  recursively. So `grep 'git push' docs` and `gh pr create --body '...git push...'` pass, while
+  `echo "$(git push)"` and a mention outside quotes (`echo git push`) are gated: a blocked command is
+  the cost of failing closed. An unterminated quote or heredoc is not blanked. A gated command whose
+  tree it cannot tell (another `cd`, `pushd`, a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an
+  expanded `-C` word) exits 2 with `FAIL hook.target`; so does any command that holds a launcher
+  (`bash -c`, `eval`, `xargs`, `| sh`, a shell fed a heredoc, `find -exec`/`-execdir`, `env -C`,
+  `sudo -D`) and also names the verb anywhere, quoted or not. Every other command and tool exits 0
+  silently, after one python3 start; the `Agent` branch (the dispatch gate) arrives with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
