@@ -48,7 +48,8 @@ without an `if` filter, so the script sees every Bash call), `hooks/session_star
 with S2.
 
 - `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
-  (`FAIL hook.internal`, fail closed). Bash: one linear pass splits the command into data and code.
+  (`FAIL hook.internal`, fail closed). Bash: a backslash-newline is removed (the shell joins the
+  lines with nothing between them), then one linear pass splits the command into data and code.
   Data: single-quoted spans and escaped characters, ANSI-C `$'...'` spans (escapes decoded),
   quoted-delimiter heredoc bodies (`<<'E'`, `<<"E"`, `<<\E`), the text of double-quoted spans and
   unquoted-delimiter heredoc bodies outside `$(...)`, backticks and `${...}`, and every character of a
@@ -59,19 +60,24 @@ with S2.
   `VAR=val`, redirection or path-qualified git word before the verb) and run the register and claim
   gates on the tree the command names: the event's cwd, moved by a leading `cd <dir> &&` or `;` and
   by each `git -C <dir>`. So `echo "$(git push)"` and a mention outside quotes (`echo git push`) are
-  gated: a blocked command is the cost of failing closed. A verb in data, or one the hook cannot read
-  (`git p*`, `git "$V"`, `git $V`, `$G push`, `{git,} push`), exits 2 with `FAIL hook.target: cannot
-  tell which tree <verb> runs in, or whether it runs` unless every command on the way keeps it as
-  text: the head is echo, printf (without `-v`), grep, egrep, fgrep, rg, gh, cat, tee, jq or git with
-  a subcommand among commit, push, log, show, tag, notes, stash, merge, shortlog, status, diff, add,
-  branch, rev-list, describe, blame (no `-c`/`--config-env`); the data is not in a `VAR=val` or
+  gated: a blocked command is the cost of failing closed. A `git` word in data with a verb word
+  after it in the same pipeline (a lone verb word only when the code holds a shell launcher, so
+  `python3 -c "print('push')"` passes), or a git call the hook cannot read (`git p*`, `git "$V"`,
+  `git $V`, `echo push | xargs git`, `$G push`, `{git,} push`), exits 2 with `FAIL hook.target:
+  cannot tell which tree <verb> runs in, or whether it runs` unless every command on the way keeps it
+  as text: the head is echo, printf (without `-v`), grep, egrep, fgrep, rg, gh, cat, tee, jq, awk
+  (no `system`, `getline`, `|` or `-f`), xargs running echo, grep, egrep, fgrep, rg, cat, jq, head,
+  tail or wc, or git with a subcommand among commit, push, log, show, tag, notes, stash, merge,
+  shortlog, status, diff, add, branch, rev-list, describe, blame (no `-c`/`--config-env`); sed is not
+  one (GNU sed `e` runs its pattern space); the data is not in a `VAR=val` or
   redirection prefix; there is no `>(...)`; the output is piped only into those commands or head,
   tail, wc, sort, uniq, cut, less, more, tr, nl, column, fold; and the same holds for each command
   whose word holds it (a heredoc body belongs to the command on its opener line). So
-  `grep -rn 'git push' docs | head`, `git log --grep='git push'` and
+  `grep -rn 'git push' docs | head`, `grep 'git push' f | awk '{print $1}'`,
+  `find . | xargs grep -l 'git push'`, `git log --grep='git push'` and
   `gh pr create --body "$(cat <<'EOF' ...)"` pass, while `bash -c 'git push'`, `eval`, `watch`,
-  `su -c`, `python3 -c`, a heredoc fed to an interpreter, `| sh`, `sudo sh -c`, `env`, `xargs` or an
-  unknown command holding it fail. A gated command whose tree it cannot tell (another `cd`, `pushd`,
+  `su -c`, `python3 -c`, a heredoc fed to an interpreter, `| sh`, `sed`, `sudo sh -c`, `env`,
+  `xargs sh` or an unknown command holding it fail. A gated command whose tree it cannot tell (another `cd`, `pushd`,
   a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word) or that holds a launcher
   in its code (`bash -c`, `eval`, `xargs`, `| sh`, a shell fed a heredoc, `find -exec`/`-execdir`,
   `env -C`, `sudo -D`) also exits 2 with `FAIL hook.target`. A `$X` word between git and the

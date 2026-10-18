@@ -464,7 +464,14 @@ class PreToolUseCommandPosition(unittest.TestCase):
                     "echo ${v:-'git push'}", "git stash push -m 'before git push'", "jq '.[0].commit' f",
                     "echo 'git push' | grep push | wc -l", "printf '%s\\n' 'git push' | tee notes.txt",
                     "git tag -a v1 -F - <<'EOF'\nthen git push\nEOF", "echo \"$(echo 'git push')\"",
-                    "echo $(echo git) push", "git log --oneline | grep 'push'", "sed -n '/commit/p' f"):
+                    "echo $(echo git) push", "git log --oneline | grep 'push'", "sed -n '/commit/p' f",
+                    # a lone verb word in data names no git call; awk and xargs that only read text
+                    "python3 - <<'EOF'\nprint('the commit is done')\nEOF", "curl -s -X POST -d '{\"commit\": \"abc\"}' https://x",
+                    "npm version patch -m 'release commit %s'", "pytest -k 'push or commit'", "python3 -c \"print('push')\"",
+                    "node -e 'console.log(\"push\")'", "awk '/push/ {n++} END {print n}' f", "python3 -c print\\(\\\"push\\\"\\)",
+                    "grep 'git push' f | awk '{print $1}'", "find . -name '*.md' | xargs grep -l 'git push'",
+                    "grep -rl 'git push' docs | xargs -n 1 wc -l", "awk '/git push/' notes.md",
+                    "jq 'select(.msg == \"git push\")' f"):
             self.assert_silent(cmd)
 
     def test_a_verb_that_is_not_in_data_is_gated(self):
@@ -493,7 +500,8 @@ class PreToolUseCommandPosition(unittest.TestCase):
     def test_quote_removal_joins_quoted_pieces_into_the_word(self):
         for cmd in ('g"it" push', "'g'it push", "gi\\t push", 'git "push"', "git 'push'", 'git p"ush"', "git pu\\sh",
                     "$'git' push", "$'\\x67it' push", "''git push", 'git"" push', "\\git push", "git -C . 'com'mit -m x",
-                    "sudo g'i't push", "echo ok; gi\\t commit -m x"):
+                    "sudo g'i't push", "echo ok; gi\\t commit -m x",
+                    "git p\\\nush", "gi\\\nt push", "true && git p\\\nush"):     # a continuation joins with nothing
             self.assert_gated(cmd)
         clean = new_repo()
         self.addCleanup(gf.remove, clean)
@@ -520,13 +528,18 @@ class PreToolUseCommandPosition(unittest.TestCase):
                     "bash -c \"$'\\147it' push\"", "echo \"$(case x in a) bash -c 'git push';; esac)\"",
                     "git -c core.editor='git push' commit", "bash -c '${G}it push'", "bash -c \"gi\\$'t' \\$V\"",
                     "bash -c \"$'\\147it' \\$V\"", "bash -c \"g\\\"it\\\" \\$V\"",
-                    "X=\"$(echo 'git push')\" grep x f", "python3 -c print\\(\\\"push\\\"\\)"):
+                    "X=\"$(echo 'git push')\" grep x f", "bash -c 'echo push'", "python3 -c os.system\\(\\\"git\\ push\\\"\\)",
+                    # awk that can run a command, xargs running a shell, sed (GNU sed `e` executes)
+                    "grep 'git push' f | awk '{system($0)}'", "echo 'git push' | awk '{print | \"sh\"}'",
+                    "awk 'BEGIN { system(\"git push\") }'", "awk -f prog.awk <<'EOF'\ngit push\nEOF",
+                    "find . | xargs sh -c 'git push'", "sed -n '/git push/p' f", "grep 'git push' f | sed 's/x/y/'"):
             self.assert_unknown(cmd)
 
     def test_an_expansion_in_place_of_the_git_word_or_the_verb_is_blocked(self):
         for cmd in ("$(echo git) push", "${G:-git} push", "{git,} push", "`echo git` push", "G=git; $G push", "sudo $G push",
                     "git p*", "git pu{sh,}", "git $V", "git --no-pager \"$V\"", "git -C . ${V};", "sudo git pus?",
-                    "${G:-git} p*", "\"$(which git)\" pu$V", "$G $(echo push)"):
+                    "${G:-git} p*", "\"$(which git)\" pu$V", "$G $(echo push)", "git$V",
+                    "echo push | xargs git", "printf push | xargs -n 1 git -C .", "xargs -a verbs.txt /usr/bin/git"):
             self.assert_unknown(cmd)
         for cmd in ("git $x status", "git -C \"$PWD\" log", "echo $(echo git) push", "git log $range", "$EDITOR notes.md"):
             p = self.run_hook(cmd)
@@ -565,7 +578,10 @@ class PreToolUseCommandPosition(unittest.TestCase):
                     "$(" * 5000 + "echo 'git push'" + ")" * 5000, "${" * 10000, '"' + "${" * 10000, "$'" + "\\'" * 50000,
                     "x\\ " * 30000, "$(case x in a) " * 5000, ">(" * 10000, "git " + "$x " * 20000,
                     "cat <<'EOF'\n" + "git push\n" * 50000 + "EOF\n", "cat <<EOF\n" + "$(echo a) git push\n" * 20000 + "EOF\n",
-                    "git commit " * 20000 + "'push' " * 20000, "bash -c 'g\"it\" " + "x " * 50000 + "'"):
+                    "git commit " * 20000 + "'push' " * 20000, "bash -c 'g\"it\" " + "x " * 50000 + "'",
+                    # unterminated nested substitutions in double quotes; option runs that hold git words
+                    '"$(' * 10000, 'git "$(' * 10000, '"`' * 10000, "git -C " * 20000, "git $(git " * 10000,
+                    "xargs git " * 10000, "echo 'git push' | awk '{print}' | " * 5000 + "cat"):
             start = time.monotonic()
             p = self.run_hook(cmd)
             self.assertLess(time.monotonic() - start, 2.0, cmd[:20])

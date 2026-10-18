@@ -7,9 +7,10 @@ the Bash branch gates: `git commit` and `git push` run the register and claim ga
 toplevel of the event's `cwd`; every other command, and every other tool (Agent included, until S2
 adds gate_dispatch), exits 0 silently.
 
-One linear pass (Scan) splits the command into data and code. Data: single-quoted spans and
-escaped characters, ANSI-C `$'...'` spans (escapes decoded), quoted-delimiter heredoc bodies, the
-text of double-quoted spans and unquoted-delimiter heredoc bodies outside `$(...)`, backticks and
+A backslash-newline is removed first (the shell joins the lines with nothing between them:
+`git p\\<newline>ush` is `git push`). One linear pass (Scan) then splits the command into data and
+code. Data: single-quoted spans and escaped characters, ANSI-C `$'...'` spans (escapes decoded),
+quoted-delimiter heredoc bodies, the text of double-quoted spans and unquoted-delimiter heredoc bodies outside `$(...)`, backticks and
 `${...}`, and every character of a word that holds one of these. A quoted span or escaped character
 made only of `[A-Za-z0-9_./=+-]` (or empty) is code, so quote removal joins it to its word: `g"it"
 push`, `gi\\t push`, `git p"ush"` and `$'git' push` are `git push`. A comment (a `#` that starts a
@@ -23,21 +24,26 @@ holds it, its pipeline, and where its first word with an expansion, glob or brac
    So `echo "$(git push)"` and an unquoted mention (`echo git push`) are gated: a blocked echo is
    the cost of failing closed.
 2. FAIL hook.target `cannot tell which tree <verb> runs in, or whether it runs`, unless every
-   command on the way keeps it as text: a `commit`/`push` word in data; a `git` word in data with a
-   verb word after it in the same pipeline; a git word whose subcommand word holds an expansion,
-   substitution, quoted text, brace expansion or glob, or is missing after a `$X` option (`git p*`,
-   `git "$V"`, `git $V`); a verb word after a word with an expansion, glob or brace expansion that is
-   not the verb of a match of 1 (`$G push`, `{git,} push`). A command keeps it as text when its head
-   is echo, printf (without -v), grep, egrep, fgrep, rg, gh, cat, tee, jq or git (only with the
-   subcommand commit, push, log, show, tag, notes, stash, merge, shortlog, status, diff, add, branch,
-   rev-list, describe or blame and without -c/--config-env), the data is not in its `VAR=val` or
-   redirection prefix, it has no `>(...)`, and it pipes only into those commands or head, tail, wc,
-   sort, uniq, cut, less, more, tr, nl, column or fold; the same holds for each command whose word
-   holds it (a substitution) and a subshell group passes it through. A heredoc body belongs to the
-   command on its opener line. So `grep -rn 'git push' docs | head`, `git log --grep='git push'`,
+   command on the way keeps it as text: a `git` word in data with a `commit`/`push` word after it in
+   the same pipeline; a lone verb word in data only when the code holds a shell launcher
+   (`bash -c 'echo push'`), so `python3 -c "print('push')"` or `pytest -k 'push or commit'` pass; a
+   git word whose subcommand word holds an expansion, substitution, quoted text, brace expansion or
+   glob, or is missing after a `$X` option or after `xargs git` (`git p*`, `git "$V"`, `git $V`,
+   `echo push | xargs git`); a verb word after a word with an expansion, glob or brace expansion that
+   is not the verb of a match of 1 (`$G push`, `{git,} push`). A command keeps it as text when its
+   head is echo, printf (without -v), grep, egrep, fgrep, rg, gh, cat, tee, jq, awk (with no system,
+   getline, | or -f in its words), xargs running echo, grep, egrep, fgrep, rg, cat, jq, head, tail or
+   wc, or git (only with the subcommand commit, push, log, show, tag, notes, stash, merge, shortlog,
+   status, diff, add, branch, rev-list, describe or blame and without -c/--config-env), the data is not
+   in its `VAR=val` or redirection prefix, it has no `>(...)`, and it pipes only into those commands
+   or head, tail, wc, sort, uniq, cut, less, more, tr, nl, column or fold; the same holds for each
+   command whose word holds it (a substitution) and a subshell group passes it through. sed is not one
+   (GNU sed `e` runs its pattern space). A heredoc body belongs to the command on its opener line. So
+   `grep -rn 'git push' docs | head`, `grep 'git push' f | awk '{print $1}'`,
+   `find . | xargs grep -l 'git push'`, `git log --grep='git push'`,
    `gh pr create --body "$(cat <<'EOF' ...)"` and `git commit -m "$(cat <<'EOF' ... EOF\n)"` (gated
    as a commit) pass, while bash -c, eval, watch, su -c, python3 -c, a heredoc fed to an interpreter,
-   `| sh`, sudo, env, xargs or an unknown command holding the verb fail.
+   `| sh`, sed, sudo, env, xargs sh or an unknown command holding `git push` fail.
 
 The tree gated is the one the command names: the cwd, moved by a leading `cd <dir> &&`/`;` and by
 each `git -C <dir>` (cumulative, as git does); a named directory that is not inside a repo fails
@@ -68,16 +74,14 @@ CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.p
 # quote, a backslash, anything else), so one word parses one way only -- overlapping alternatives
 # backtrack exponentially on a failing match. The code view has no quote or backslash left: a word is \S+.
 _ARG = r"""(?:"[^"]*"|'[^']*'|\\.|[^\s\\"'])+"""
-_TAKES_WORD = r"(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env))(?=\s|$)"    # option whose value is the next word
-_KNOWN_OPT = (r"(?:" + _TAKES_WORD + r"\s+\S+"                                    # -C <dir>, -c <k=v>, --git-dir <dir>
-              + r"|(?!" + _TAKES_WORD + r")--?[A-Za-z][\w-]*(?:=\S+)?)")            # flags, --opt=value
-_OPT = r"(?:" + _KNOWN_OPT + r"|\$\S+)"                                    # $X / ${X}: unknown, gate conservatively
-GIT_REST = re.compile(r"(?P<opts>(?:\s+" + _OPT + r")*)\s+(?P<verb>commit|push)(?![\w-])")   # after the git word
-GIT_TEXT = re.compile(r"\bgit\b" + GIT_REST.pattern)    # the verb anywhere in the code view
-# a git word (also the last word of a substitution or brace: `$(which git)`, `${G:-git}`, `{git,}`) and all
-# the option words after it (a `$X` word reads as an option, as in GIT_TEXT), then the subcommand word
-GIT_OPTS = re.compile(r"(?<![\w.])git[)}`,]*(?P<opts>(?:\s+(?:" + _KNOWN_OPT + r"|\$[^\s;&|)]+))*)"
-                      r"(?!\s+(?:" + _KNOWN_OPT + r"|\$))[ \t]*(?P<sub>[^\s;&|)]*)")
+# The git words of a view are read word by word (_git_words): every regex below matches one word.
+TAKES_WORD = re.compile(r"-[Cc]|--(?:git-dir|work-tree|namespace|config-env)")    # option whose value is the next word
+FLAG = re.compile(r"--?[A-Za-z][\w-]*(?:=\S+)?")                                  # -x, --x, --x=value
+VERB = re.compile(r"(?:commit|push)(?![\w-])")                                   # a gated verb at a word start
+GIT_END = re.compile(r"\bgit\Z")                     # a word ending in the git word (`git`, `/usr/bin/git`, `$(git`)
+GIT_IN = re.compile(r"(?<![\w.])git[)}`,]*")         # also closing a substitution or brace (`$(which git)`, `{git,}`)
+WORD = re.compile(r"\S+")
+SEPARATOR = re.compile(r"[;&|)]")
 UNKNOWN_WORD = re.compile(r"[$`_{*?\[]")      # an expansion, a substitution, data (`_`), a brace expansion or a glob
 GIT_DIR_OPT = re.compile(r"(?:^|\s)-C\s+(\S+)")
 LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
@@ -97,6 +101,9 @@ SINKS = ("head", "tail", "wc", "sort", "uniq", "cut", "less", "more", "tr", "nl"
 GIT_DATA_SUBCOMMANDS = ("commit", "push", "log", "show", "tag", "notes", "stash", "merge", "shortlog", "status",
                         "diff", "add", "branch", "rev-list", "describe", "blame")
 KEYWORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "time")
+XARGS_HOLDERS = ("echo", "grep", "egrep", "fgrep", "rg", "cat", "jq", "head", "tail", "wc")   # xargs <these>: a holder
+XARGS_TAKES = ("-I", "-n", "-L", "-P", "-s", "-d", "-E", "-a")       # xargs options whose value is the next word
+AWK_EXEC = re.compile(r"system|getline|\|")    # an awk program that can run a command (or read one from a pipe)
 CODE_STOP = re.compile(r"[ \t\n;&|()<>'\"\\$`#{}*?\[]")
 BRACE_STOP = re.compile(r"[}'\"$`\\]")
 DQ_STOP = re.compile(r"[\"$`\\]")
@@ -130,13 +137,14 @@ GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
 
 
 def _command(event: dict):
-    """The Bash command with backslash-newline continuations joined; None for any other tool."""
+    """The Bash command with each backslash-newline continuation removed (the shell joins the two lines with
+    nothing between them: `git p\\<newline>ush` is `git push`); None for any other tool."""
     if event.get("tool_name") != "Bash":
         return None
     command = (event.get("tool_input") or {}).get("command")
     if not isinstance(command, str):
         raise ValueError("Bash event without tool_input.command")
-    return command.replace("\\\n", " ")
+    return command.replace("\\\n", "")
 
 
 def _heredoc(m) -> tuple:
@@ -168,15 +176,16 @@ def _dequote(word: str) -> str:
 class Seg:
     """One simple command: its head word, where that word starts, the command whose word holds this
     one (parent), the pipeline it belongs to (group), and the command its output is piped into."""
-    __slots__ = ("parent", "group", "at", "head", "head_lo", "sub", "skip", "gitc", "printf_v", "procsub",
-                 "pipe_next", "pipe_bad", "bad", "expand_lo", "expand_before")
+    __slots__ = ("parent", "group", "at", "head", "head_lo", "sub", "xcmd", "skip", "gitc", "printf_v", "awk_exec",
+                 "procsub", "pipe_next", "pipe_bad", "bad", "expand_lo", "expand_before")
 
     def __init__(self, parent, group: int, at: int):
         self.parent, self.group, self.at = parent, group, at
         self.head = None
         self.head_lo = -1
-        self.sub = None
-        self.skip = self.gitc = self.printf_v = self.procsub = self.pipe_bad = False
+        self.sub = None                     # git's subcommand (also after `xargs git`)
+        self.xcmd = None                    # the command xargs runs
+        self.skip = self.gitc = self.printf_v = self.awk_exec = self.procsub = self.pipe_bad = False
         self.pipe_next = None
         self.bad = None
         self.expand_lo = sys.maxsize        # where its first word with an expansion, glob or brace starts
@@ -255,19 +264,22 @@ class Scan:
         if lo is None:
             return
         f.word_lo = None
-        dirty, quoted, runs = f.dirty, f.quoted, f.runs
+        dirty, quoted, expand, runs = f.dirty, f.quoted, f.expand, f.runs
         seg = f.seg
-        if f.expand:
+        if expand:
             seg.expand_lo = min(seg.expand_lo, lo)
         f.dirty = f.quoted = f.expand = False
         f.runs = []
         if quoted:
             for a, b in runs:
                 self.blank(a, b)
-        if seg.head is not None and seg.head != "printf" and not (seg.head == "git" and seg.sub is None):
+        head = seg.head
+        if not (head is None or head in ("printf", "awk") or head == "git" and seg.sub is None
+                or head == "xargs" and (seg.xcmd is None or seg.xcmd == "git" and seg.sub is None)):
             return
-        word = "?" if dirty or quoted else _dequote(self.s[lo:end])
-        if seg.head is None:
+        # a word with an expansion may hold substitutions (nested text): never sliced, so the pass stays linear
+        word = "?" if dirty or quoted or expand else _dequote(self.s[lo:end])
+        if head is None:
             if ASSIGN.match(self.s, lo, end) or (word in KEYWORDS and self.s[lo:end] == word):
                 return
             seg.head, seg.head_lo = word, lo
@@ -275,8 +287,17 @@ class Scan:
                 f.case += 1
             elif word == "esac" and f.case:
                 f.case -= 1
-        elif seg.head == "printf":
+        elif head == "printf":
             seg.printf_v = seg.printf_v or word == "-v"
+        elif head == "awk":
+            seg.awk_exec = seg.awk_exec or expand or word.startswith("-f") or bool(AWK_EXEC.search(self.s, lo, end))
+        elif head == "xargs" and seg.xcmd is None:
+            if seg.skip:
+                seg.skip = False
+            elif word in XARGS_TAKES:
+                seg.skip = True
+            elif not word.startswith("-"):
+                seg.xcmd = os.path.basename(word)
         elif seg.skip:
             seg.skip = False
         elif word.startswith(("-c", "--config-env")):
@@ -687,6 +708,10 @@ def _consumer(seg) -> bool:
         return not seg.gitc and seg.sub in GIT_DATA_SUBCOMMANDS
     if seg.head == "printf":
         return not seg.printf_v
+    if seg.head == "awk":
+        return not seg.awk_exec
+    if seg.head == "xargs":
+        return seg.xcmd in XARGS_HOLDERS
     return seg.head in CONSUMERS
 
 
@@ -724,29 +749,74 @@ def _judge(segs: list):
         seg.expand_before = p is not None and (p.expand_lo <= seg.at or p.expand_before)
 
 
-def _git_unknown(view: str) -> list:
-    """The GIT_OPTS matches whose subcommand word is unknown: it holds an expansion, substitution, data,
-    brace expansion or glob (`git p*`, `git "$V"`), or it is missing after a `$X` option word (`git $V`)."""
-    found = []
-    for m in GIT_OPTS.finditer(view):
-        sub, opts = m.group("sub"), m.group("opts").split()
-        if sub:
-            unknown = UNKNOWN_WORD.search(sub) is not None
+def _git_words(view: str) -> tuple:
+    """(calls, unknown) of a view, in one linear pass over its words: `end[i]` (a dynamic programme from
+    the right) is the first word at or after i that is not an option, so no word is re-read per git word.
+    Options: `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env` with the next word as
+    value, `-x`/`--x[=v]` flags, and `$X` words (unknown, read as options). calls: (git offset, options
+    start, verb offset) of each `git [options] commit|push`, git ending its word (`/usr/bin/git`, `$(git`).
+    unknown: (git offset, subcommand offset) of each git word (also `$(which git)`, `{git,}`, `git$V`)
+    whose subcommand word holds an expansion, substitution, data (`_`), brace expansion or glob, or is
+    missing after a `$X` word (a `$X;` word ends the command)."""
+    words = [(m.start(), m.end()) for m in WORD.finditer(view)]
+    n = len(words)
+    kinds = []                                      # 2 takes a value, 1 flag, 3 $X, 4 $X ending the command
+    for s, e in words:
+        if TAKES_WORD.fullmatch(view, s, e):
+            kinds.append(2)
+        elif FLAG.fullmatch(view, s, e):
+            kinds.append(1)
+        elif view.startswith("$", s) and e - s > 1 and view[s + 1] not in ";&|)":
+            kinds.append(4 if SEPARATOR.search(view, s, e) else 3)
         else:
-            unknown = bool(opts) and opts[-1].startswith("$")
-        if unknown:
-            found.append(m)
-    return found
+            kinds.append(0)
+    end, end_u, ended = [n] * (n + 2), [n] * (n + 2), [False] * (n + 2)
+    for i in range(n - 1, -1, -1):
+        k = kinds[i]
+        if k == 2 and i + 1 < n:
+            end[i], end_u[i], ended[i] = end[i + 2], end_u[i + 2], ended[i + 2]
+        elif k in (1, 3):
+            end[i], end_u[i], ended[i] = end[i + 1], end_u[i + 1], ended[i + 1]
+        elif k == 4:
+            end[i], end_u[i], ended[i] = end[i + 1], i + 1, True
+        else:
+            end[i], end_u[i] = i, i
+    calls, unknown = [], []
+    after = 0                                       # matches do not overlap: a match ends at its verb word
+    for g, (s, e) in enumerate(words):
+        if g < after or not GIT_END.search(view, s, e):
+            continue
+        v = end[g + 1]
+        if v < n and VERB.match(view, words[v][0]):
+            calls.append((e - 3, e, words[v][0]))
+            after = v
+    for g, (s, e) in enumerate(words):
+        for m in GIT_IN.finditer(view, s, e):
+            if m.end() < e:                         # a subcommand glued to the git word: `git$V`
+                cut = SEPARATOR.search(view, m.end(), e)
+                if UNKNOWN_WORD.search(view, m.end(), cut.start() if cut else e):
+                    unknown.append((m.start(), m.end()))
+                continue
+            v = end_u[g + 1]
+            if ended[g + 1] or v >= n or "\n" in view[words[v - 1][1] if v > g + 1 else e:words[v][0]]:
+                if v > g + 1 and view.startswith("$", words[v - 1][0]):
+                    unknown.append((m.start(), len(view) if v >= n else words[v][0]))
+                continue
+            cut = SEPARATOR.search(view, words[v][0], words[v][1])
+            if UNKNOWN_WORD.search(view, words[v][0], cut.start() if cut else words[v][1]):
+                unknown.append((m.start(), words[v][0]))
+    return calls, unknown
 
 
-def _held(scan: Scan, verbs_at: set, unknown_at: list):
+def _held(scan: Scan, verbs_at: set, unknown_at: list, launcher: bool):
     """(verb, why) when the command may run a gated verb this hook cannot read as a git call; None
-    otherwise. Counted: a verb word in data; a `git` word in data with a verb word after it in the same
-    pipeline; a git word whose subcommand is unknown (_git_unknown), in code (`unknown_at`) or in data;
-    and a verb word in code that is not the verb of a matched git call but follows a word with an
-    expansion, substitution, brace expansion or glob (`$G push`, `{git,} push`). Each is allowed only
-    when the command holding it, and every command whose word holds that one, keeps it as text
-    (_judge); data in a `VAR=val` or redirection prefix never is."""
+    otherwise. Counted: a `git` word in data with a verb word after it in the same pipeline; a verb word
+    alone in data only when the code holds a shell launcher (_launcher: `bash -c '${G}it push'`); a git
+    word whose subcommand is unknown (_git_words), in code (`unknown_at`) or in data, or missing after
+    `xargs git` (xargs supplies it); and a verb word in code that is not the verb of a matched git call
+    but follows a word with an expansion, substitution, brace expansion or glob (`$G push`,
+    `{git,} push`). Each is allowed only when the command holding it, and every command whose word
+    holds that one, keeps it as text (_judge); data in a `VAR=val` or redirection prefix never is."""
     data, pos = _view(scan, False)
     toks = sorted([(m.start(), None) for m in DATA_GIT.finditer(data)]
                   + [(m.start(), m.group()) for m in DATA_VERB.finditer(data)])
@@ -758,17 +828,19 @@ def _held(scan: Scan, verbs_at: set, unknown_at: list):
         isdata = scan.mask[at] == DATA
         if verb is not None:
             later[seg.group] = verb
-            if isdata:
+            if isdata and launcher:
                 hits.append((verb, "data", seg, at))
             elif at not in verbs_at:
                 hits.append((verb, "code", seg, at))
         elif isdata and seg.group in later:
             hits.append((later[seg.group], "data", seg, at))
-    for m in _git_unknown(data):
-        at = next((pos[k] for k in (m.start("sub"), m.start()) if k < len(pos) and scan.mask[pos[k]] == DATA), None)
+    for git_at, sub_at in _git_words(data)[1]:
+        at = next((pos[k] for k in (sub_at, git_at) if k < len(pos) and scan.mask[pos[k]] == DATA), None)
         if at is not None:
             hits.append(("commit or push", "data", scan.owner(at), at))
     hits.extend(("commit or push", "unknown", scan.owner(at), at) for at in unknown_at)
+    hits.extend(("commit or push", "unknown", seg, seg.head_lo) for seg in scan.segs
+                if seg.head == "xargs" and seg.xcmd == "git" and seg.sub is None)
     if not hits:
         return None
     _judge(scan.segs)
@@ -776,11 +848,12 @@ def _held(scan: Scan, verbs_at: set, unknown_at: list):
         if kind == "data" and (seg.head is None or at < seg.head_lo):
             return verb, "a `VAR=...` assignment or redirection prefix holds the %s in its data" % verb
         if kind == "data" and seg.bad:
-            return verb, "%s may run the %s its quoted or heredoc data names (only %s keep such data as text)" % (
-                seg.bad, verb, ", ".join(CONSUMERS))
+            return verb, ("%s may run the %s its quoted or heredoc data names (only %s, awk without system, "
+                          "getline or | and xargs running %s keep such data as text)"
+                          % (seg.bad, verb, ", ".join(CONSUMERS), "/".join(XARGS_HOLDERS)))
         if kind == "unknown" and seg.bad:
             return verb, ("%s may run git with a subcommand word that holds an expansion, substitution, quoted "
-                          "text, brace expansion or glob, or with none after a $X word" % seg.bad)
+                          "text, brace expansion or glob, or with none after a $X word or `xargs git`" % seg.bad)
         if kind == "code" and seg.bad and (seg.expand_lo <= at or seg.expand_before):
             return verb, "%s may run the %s after an expansion, substitution, brace expansion or glob" % (
                 seg.bad, verb)
@@ -794,15 +867,15 @@ def _analyse(command: str) -> tuple:
     code, pos = _view(scan, True)
     calls = []
     starts, verbs_at = set(), set()
-    for m in GIT_TEXT.finditer(code):
-        a = m.start("opts")
-        opts = m.group("opts")
+    found, unknown = _git_words(code)
+    for git_at, a, verb_at in found:
+        opts = code[a:verb_at].rstrip()
         dirs = [_orig(command, pos, a + d.start(1), a + d.end(1)) for d in GIT_DIR_OPT.finditer(opts)]
-        calls.append(Call(opts, m.group("verb"), dirs))
-        starts.add(m.start())
-        verbs_at.add(pos[m.start("verb")])
-    unknown_at = [pos[m.start()] for m in _git_unknown(code) if m.start() not in starts]
-    return calls, _held(scan, verbs_at, unknown_at), code, pos
+        calls.append(Call(opts, VERB.match(code, verb_at).group(), dirs))
+        starts.add(git_at)
+        verbs_at.add(pos[verb_at])
+    unknown_at = [pos[git_at] for git_at, _ in unknown if git_at not in starts]
+    return calls, _held(scan, verbs_at, unknown_at, _launcher(code)), code, pos
 
 
 def git_calls(command: str) -> list:
