@@ -5202,7 +5202,7 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 
 - [ ] **Step 1: Write the failing tests**
 
-`tools/gates/tests/test_hooks.py`:
+`tools/gates/tests/test_hooks.py` (its `new_repo()` helper adds the empty `docs/reviews/` directory `gate_register` requires, because `gitfixture.new_repo` stays bare for `test_gate_register`'s missing-directory FAIL; the `GIT_VERB` quoting cases in `test_push_with_options_is_gated_too` pin quoted and separate-word option values):
 
 ```python
 #!/usr/bin/env python3
@@ -5250,6 +5250,14 @@ def bash_event(root, command):
             "tool_input": {"command": command, "description": "d"}}
 
 
+def new_repo():
+    """gitfixture.new_repo plus the empty docs/reviews directory gate_register requires (a missing
+    one is FAIL register.input); gitfixture.new_repo stays bare because test_gate_register pins that."""
+    root = gf.new_repo()
+    os.makedirs(os.path.join(root, "docs", "reviews"))
+    return root
+
+
 def copy_gates(dst):
     """The real tools/gates (code + scripts) copied into a throwaway repo, without test fixtures."""
     shutil.copytree(os.path.join(gf.REPO, "tools", "gates"), os.path.join(dst, "tools", "gates"),
@@ -5258,7 +5266,7 @@ def copy_gates(dst):
 
 class PreToolUse(unittest.TestCase):
     def setUp(self):
-        self.root = gf.new_repo()
+        self.root = new_repo()
 
     def tearDown(self):
         gf.remove(self.root)
@@ -5275,6 +5283,10 @@ class PreToolUse(unittest.TestCase):
         p = hook("pre_tool_use.py", bash_event(self.root, "cd . && git -C . --no-pager push origin HEAD"))
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr)
+        for cmd in ('git -C "/a b" commit -m x', "git -c 'a=b c' push", "git --git-dir /x commit",
+                    "git --work-tree=/x commit"):   # quoted values and separate-word option values
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
@@ -5315,7 +5327,7 @@ class PreToolUse(unittest.TestCase):
 
 class GitHooks(unittest.TestCase):
     def setUp(self):
-        self.root = gf.new_repo()
+        self.root = new_repo()
         copy_gates(self.root)
         gf.commit_all(self.root, "gates")
         p = subprocess.run(["bash", "tools/gates/install-hooks.sh"], cwd=self.root,
@@ -5387,7 +5399,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: FAIL/ERROR. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file`, and the `GitHooks.setUp` assertion fails because `install-hooks.sh` is missing.
+Expected: `FAILED (failures=12, errors=1)`, 13 tests. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file`, and the `GitHooks.setUp` assertion fails (6 times, `0 != 127`) because `install-hooks.sh` is missing.
 
 - [ ] **Step 3: Write the hook scripts**
 
@@ -5417,7 +5429,9 @@ import subprocess
 import sys
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-GIT_VERB = re.compile(r"\bgit\b(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z][\w-]*(?:=\S+)?))*\s+(commit|push)\b")
+_ARG = r"""(?:"[^"]*"|'[^']*'|\S+)"""   # a shell word; quotes may hold spaces
+GIT_VERB = re.compile(r"\bgit\b(?:\s+(?:-[Cc]\s+" + _ARG + r"|--(?:git-dir|work-tree|namespace)\s+" + _ARG
+                      + r"|--?[A-Za-z][\w-]*(?:=" + _ARG + r")?))*\s+(commit|push)\b")
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
 
 
@@ -5537,11 +5551,11 @@ bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
 
-Mutation check: remove the `try/except` wrapper around `main()` in `pre_tool_use.py` (call `sys.exit(main())`). `test_hook_fails_closed_when_script_errors` must fail (rc 1 with a traceback, not 2). Restore. Then delete the `unset CLAUDE_PROJECT_DIR` line from `git-pre-commit.sh`. `test_pre_commit_blocks_a_failing_register` must fail: the gates read `/nonexistent-project`, and `FAIL register.input` is printed instead of `register.owner`. Restore and run again: OK.
+Mutation checks (each restored, then `OK` again). Remove the `try/except` wrapper around `main()` in `pre_tool_use.py` (call `sys.exit(main())`): `test_hook_fails_closed_when_script_errors`, `test_malformed_stdin_fails_closed` and `test_cwd_outside_a_repo_fails_closed` fail (rc 1 with a traceback, not 2). Delete the `unset CLAUDE_PROJECT_DIR` line from `git-pre-commit.sh`: `test_pre_commit_blocks_a_failing_register` and `test_pre_commit_passes_a_clean_tree` fail (the gates read `/nonexistent-project`, so `FAIL register.input` is printed). Disable the `git diff --quiet` test: `test_pre_commit_blocks_unstaged_register_edits` fails. Disable the `[ ! -f "$script" ]` branch of the shim: `test_a_tree_without_the_gates_cannot_commit` fails. Replace the `mv` of a foreign hook with `true`: `test_a_foreign_hook_is_moved_aside` errors. Set `GATED["push"]` to `[]`, or reduce `_ARG` to `\S+`: `test_push_with_options_is_gated_too` fails.
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
-Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 13 OK` to the ledger under `## Block b3 (branch block/strict-delivery-b3)` with `- base BASE_B3=<sha>`.
+Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 13 OK; suite 234 OK on 3.9.6 and 3.12.14; run_all 15 PASS` to the ledger under the existing `## Block b3 (branch block/strict-delivery-b3)` section (the heading and `- base BASE_B3=<sha>` line were written at b3 setup).
 
 ```bash
 git add tools/gates/hooks tools/gates/install-hooks.sh tools/gates/tests/test_hooks.py docs/superpowers/state/strict-delivery/ledger.md
