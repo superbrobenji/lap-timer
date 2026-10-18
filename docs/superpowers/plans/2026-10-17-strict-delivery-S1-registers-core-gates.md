@@ -3344,7 +3344,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests and the gate itself**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 42 tests ... OK
+python3 -m unittest tools.gates.tests.test_gate_register -v      # Ran 45 tests ... OK
 python3 -m unittest discover -s tools/gates/tests -t .           # Ran 134 tests ... OK
 python3 tools/gates/gate_register.py; echo rc=$?                 # needs full history (the registers name `main` commits; a shallow clone FAILs `register.evidence` by design, CI uses `fetch-depth: 0`); 6 PASS lines (docs/reviews has no marked report yet), rc=0
 python3 tools/gates/gate_register.py --root tools/gates/tests/fixtures/register/illegal_transition; echo rc=$?   # FAIL register.transition.T1-JUMP-1 ..., rc=1
@@ -5198,7 +5198,7 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 
 **Interfaces:**
 - Consumes: `run_all.run(names, {"root": <toplevel>}) -> Result` (Task 6); the hook protocol in the umbrella (stdin JSON: `tool_name`, `tool_input.command`, `cwd`; exit 2 + stderr to block; exit 0 silent to allow).
-- Produces: `pre_tool_use.py`. `Bash` event whose command contains `git [opts] commit` or `git [opts] push` → `run_all.run(["register", "claims"], {"root": git toplevel of cwd})`. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `GIT_VERB`, `GATED`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); then `run_all.py --only register,claims`. `install-hooks.sh`: writes the marked shim to `$(git rev-parse --git-path hooks)/pre-commit` and moves a foreign hook to `pre-commit.pre-strict-delivery`. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing`.
+- Produces: `pre_tool_use.py`. `Bash` event whose command runs `git [opts] commit` or `git [opts] push` in command position (the Task 8 review made the match positional: a mention in quoted data is not a command) → `run_all.run(["register", "claims"], {"root": git toplevel of cwd})`. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `git_calls(command) -> list[Call]`, `GATED`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); then `run_all.py --only register,claims`. `install-hooks.sh`: writes the marked shim to `$(git rev-parse --git-path hooks)/pre-commit` and moves a foreign hook to `pre-commit.pre-strict-delivery`. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5306,22 +5306,6 @@ class PreToolUse(unittest.TestCase):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
-
-    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
-        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
-        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
-                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
-                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
-                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
-        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL hook.target", p.stderr, cmd)
-        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push"):
-            self.assertEqual(0, hook("pre_tool_use.py", bash_event(self.root, cmd)).returncode, cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
@@ -5660,20 +5644,24 @@ mkdir -p tools/gates/hooks
 #!/usr/bin/env python3
 """Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol").
 
-Reads one JSON event on stdin. At strict-delivery block b3 only the Bash branch gates:
-`git commit` and `git push` run the register and claim gates on the git toplevel of the event's
-`cwd`; every other command, and every other tool (Agent included, until S2 adds gate_dispatch),
-exits 0 silently. The tree gated is the one the command names: the cwd, moved by a leading
-`cd <dir> &&`/`;` and by each `git -C <dir>` (cumulative, as git does); a named directory that is
-not inside a repo fails closed. A failing gate exits 2 with the gate's lines on stderr; any internal
-error also exits 2 (fail closed). Limits: the match is textual (aliases, `eval`, `$(...)` and a
-`-C $VAR` directory are not followed). A gated command whose tree it cannot tell (another `cd`,
+Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so
+this script sees every Bash call and alone decides what is gated. At strict-delivery block b3 only
+the Bash branch gates: `git commit` and `git push` in COMMAND POSITION (the first word of a simple
+command, after `VAR=val`, shell keywords and wrappers such as `sudo`, `env`, `nohup`, `time`; also
+inside `$(...)` and backticks; the git word may be path-qualified or quoted) run the register and
+claim gates on the git toplevel of the event's `cwd`; every other command, and every other tool
+(Agent included, until S2 adds gate_dispatch), exits 0 silently. A verb that is only mentioned
+(`echo git push`, `grep 'git push'`, a commit message, a heredoc body, a comment) is data. The tree
+gated is the one the command names: the cwd, moved by a leading `cd <dir> &&`/`;` and by each
+`git -C <dir>` (cumulative, as git does); a named directory that is not inside a repo fails closed.
+A failing gate exits 2 with the gate's lines on stderr; any internal error also exits 2 (fail
+closed). Limits: the match is textual (aliases and a `-C $VAR` directory are not followed; a
+wrapper not in WRAPPERS hides the verb). A gated command whose tree it cannot tell (another `cd`,
 `pushd`, a subshell, `-C`/`cd` with an expansion, --git-dir/--work-tree, GIT_DIR=) exits 2 with
-`FAIL hook.target` (so does a nested shell or a moved one: `bash -c`, `bash -o pipefail -c`,
-`bash <<EOF`, `| sh`, `eval`, `xargs`, `-execdir`, `env -C`, `sudo -D`); a gated verb that only
-appears inside a quoted string or a heredoc body is data and is not blocked for that; an
-unexpandable option word before the verb (`git $X commit`) gates the cwd tree. Every scan is linear
-in the command length.
+`FAIL hook.target`, and so does a command that holds a launcher -- a nested shell or a moved one:
+`bash -c`, `bash -o pipefail -c`, `bash <<EOF`, `| sh`, `eval`, `xargs`, `-exec`/`-execdir`,
+`env -C`, `sudo -D` -- and names the verb anywhere, quoted or not. An unexpandable option word
+before the verb (`git $X commit`) gates the cwd tree. Every scan is linear in the command length.
 """
 from __future__ import annotations
 
@@ -5692,7 +5680,18 @@ _TAKES_WORD = r"(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env))(?=\s|$)" 
 _OPT = (r"(?:" + _TAKES_WORD + r"\s+" + _ARG                                      # -C <dir>, -c <k=v>, --git-dir <dir>
         + r"|(?!" + _TAKES_WORD + r")--?[A-Za-z][\w-]*(?:=" + _ARG + r")?"         # flags, --opt=value
         + r"|\$\S+)")                                                      # $X / ${X}: unknown, gate conservatively
-GIT_VERB = re.compile(r"\bgit\b[\"']?(?P<opts>(?:\s+" + _OPT + r")*)\s+(?P<verb>commit|push)(?![\w-])")
+GIT_REST = re.compile(r"(?P<opts>(?:\s+" + _OPT + r")*)\s+(?P<verb>commit|push)(?![\w-])")   # after the git word
+GIT_TEXT = re.compile(r"\bgit\b[\"']?" + GIT_REST.pattern)   # the verb anywhere in the text, quoted or not
+WORD = re.compile(r"[ \t]*(" + _ARG + r")")
+ASSIGN = re.compile(r"[A-Za-z_]\w*=")
+REDIRECT = re.compile(r"\d*[<>]\S*")
+SEPARATORS = " \t\n;&|(){}`"
+KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!"}
+WRAPPERS = {"sudo", "doas", "command", "builtin", "nohup", "time", "timeout", "exec", "nice", "ionice", "setsid",
+            "stdbuf", "env", "noglob", "caffeinate"}
+VALUE_OPTS = {"-u", "-g", "-h", "-p", "-r", "-t", "-T", "-U", "-C", "-D", "-n", "-s", "-k", "-S", "-P", "-c", "-d", "-R"}
+MAX_WORD = 256
+MAX_PREFIX = 12      # words before the git word (assignments, wrappers and their options) that are read
 GIT_DIR_OPT = re.compile(r"(?:^|\s)-C\s+(" + _ARG + r")")
 LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
 CD_WORD = re.compile(r"(?:^|[;&|(){}`\s])(?:cd|pushd|popd)(?=[\s;&|)]|$)")
@@ -5703,6 +5702,13 @@ PLAIN = re.compile(r"[\w./=+-]+")       # a quoted word with no space or shell s
 SEP = re.compile(r"(\|\||&&|\|&|[;&|\n(){}`])")   # ends a simple command; a lone | or |& feeds the next one
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 TREE_OPT = re.compile(r"(?:^|\s)--(?:git-dir|work-tree)(?:[=\s]|$)")
+
+
+class Call:
+    """One gated git command: the options between `git` and the verb, and the verb."""
+    def __init__(self, opts: str, verb: str):
+        self.opts = opts
+        self.verb = verb
 
 
 class TargetError(Exception):
@@ -5720,12 +5726,156 @@ def _command(event: dict):
     return command.replace("\\\n", " ")
 
 
+def _command_starts(command: str) -> list:
+    """Offsets where a simple command starts in code that runs: the start of the text, after a separator
+    (`; & | ( ) { }` newline, `&&`, `||`), after `$(` and after a backtick, also inside double quotes.
+    Not inside single quotes, a quoted-delimiter heredoc body, a comment, or double-quoted text outside
+    `$(...)`/backticks (a message or an argument). An unquoted heredoc body is data except around its
+    `$(` and backticks (starts are added after each separator following the first one on a line). A
+    heredoc with no terminator line is scanned as code. One pass (linear)."""
+    n = len(command)
+    starts = [0]
+    stack = []          # ["dq"], ["sub", open parentheses], ["bt"]
+    pending = []        # heredocs opened on this line: (delimiter, quoted)
+    open_ended = set()  # delimiters with no terminator line from some offset on, so none after it either
+    i = 0
+    while i < n:
+        c = command[i]
+        top = stack[-1] if stack else None
+        if top is not None and top[0] == "dq":
+            if c == "\\":
+                i += 2
+            elif c == '"':
+                stack.pop()
+                i += 1
+            elif command.startswith("$(", i):
+                stack.append(["sub", 1])
+                starts.append(i + 2)
+                i += 2
+            elif c == "`":
+                stack.append(["bt"])
+                starts.append(i + 1)
+                i += 1
+            else:
+                i += 1
+            continue
+        if c == "\\":
+            i += 2
+        elif c == "'":
+            j = command.find("'", i + 1)
+            i = n if j < 0 else j + 1
+        elif c == '"':
+            stack.append(["dq"])
+            i += 1
+        elif command.startswith("$(", i):
+            stack.append(["sub", 1])
+            starts.append(i + 2)
+            i += 2
+        elif c == "`":
+            if top is not None and top[0] == "bt":
+                stack.pop()
+            else:
+                stack.append(["bt"])
+            starts.append(i + 1)
+            i += 1
+        elif c == "#" and (i == 0 or command[i - 1] in SEPARATORS):
+            j = command.find("\n", i)
+            i = n if j < 0 else j
+        elif c == "<" and HEREDOC_OPEN.match(command, i):
+            m = HEREDOC_OPEN.match(command, i)
+            if m.group(2) not in open_ended:
+                pending.append((m.group(2), m.group(1) != ""))
+            i = m.end()
+        elif c in "(){};&|":
+            if c == "(" and top is not None and top[0] == "sub":
+                top[1] += 1
+            elif c == ")" and top is not None and top[0] == "sub":
+                top[1] -= 1
+                if top[1] == 0:
+                    stack.pop()
+            starts.append(i + 1)
+            i += 1
+        elif c == "\n":
+            i += 1
+            while pending:
+                delim, quoted = pending.pop(0)
+                j = i
+                while j < n:
+                    k = command.find("\n", j)
+                    line = command[j:] if k < 0 else command[j:k]
+                    if line.strip(" \t") == delim:
+                        break
+                    j = n if k < 0 else k + 1
+                if j >= n:
+                    open_ended.add(delim)       # no terminator: the rest is scanned as code
+                    continue
+                if not quoted:
+                    body = command[i:j]
+                    seen = False
+                    for m in re.finditer(r"\$\(|`|[;&|]", body):
+                        seen = seen or m.group() in ("$(", "`")
+                        if seen:
+                            starts.append(i + m.end())
+                i = j
+            starts.append(i)
+        else:
+            i += 1
+    return starts
+
+
+def _git_word_end(command: str, start: int):
+    """Offset just past the `git` word when the simple command starting at `start` runs git: the words
+    before it are only keywords, assignments, redirections, wrappers (`sudo`, `env`, `nohup`, ...) with
+    their options, and the word itself may be path-qualified or quoted. None otherwise."""
+    pos = start
+    while pos < len(command) and command[pos] in " \t":
+        pos += 1
+    wrapper = skip_value = False
+    for _ in range(MAX_PREFIX + 1):
+        m = WORD.match(command, pos, pos + MAX_WORD)       # a longer word is not a wrapper, an option or git
+        if not m:
+            return None
+        word = m.group(1)
+        plain = re.sub(r"[\\\"']", "", word)
+        pos = m.end()
+        if os.path.basename(plain) == "git":
+            return pos
+        if wrapper and skip_value:
+            skip_value = False
+        elif word in KEYWORDS or ASSIGN.match(word) or REDIRECT.fullmatch(word):
+            pass
+        elif os.path.basename(plain) in WRAPPERS:
+            wrapper = True
+        elif wrapper and (plain.startswith("-") or re.fullmatch(r"\d+[smhd]?", plain)):
+            skip_value = plain in VALUE_OPTS
+        else:
+            return None
+    return None
+
+
+def git_calls(command: str) -> list:
+    """The gated git commands (commit, push) the command runs. A verb counts in command position only
+    (the first word of a simple command, after assignments and wrappers): `echo git push`, `grep 'git push'`,
+    a commit message or a heredoc body are data. When the command also holds a launcher (`bash -c`, `eval`,
+    `xargs`, `| sh`, `env -C` ...) whose payload may hold the verb, a textual match counts too, and
+    target_dirs then blocks it as a tree it cannot tell."""
+    calls = []
+    for s in _command_starts(command):
+        end = _git_word_end(command, s)
+        m = GIT_REST.match(command, end) if end is not None else None
+        if m:
+            calls.append(Call(m.group("opts"), m.group("verb")))
+    if not calls and _launcher(_blank_heredocs(command)):
+        calls = [Call(m.group("opts"), m.group("verb")) for m in GIT_TEXT.finditer(command)]
+    return calls
+
+
 def gates_for(event: dict) -> list:
     """Gate names an event needs, in order, without duplicates; [] = not gated."""
     command = _command(event)
     names = []
-    for m in GIT_VERB.finditer(command or ""):
-        for n in GATED[m.group("verb")]:
+    for call in git_calls(command or ""):
+        for n in GATED[call.verb]:
             if n not in names:
                 names.append(n)
     return names
@@ -5787,7 +5937,7 @@ def _launcher(text: str) -> bool:
         for w in parts[k].replace("<<", " << ").split():
             name = os.path.basename(w)
             opts = _short_opts(w)
-            if name in ("eval", "xargs") or w in ("-execdir", "-okdir"):
+            if name in ("eval", "xargs") or w in ("-exec", "-execdir", "-ok", "-okdir"):
                 return True
             if shell and ("c" in opts or w.startswith("<<")):
                 return True
@@ -5811,10 +5961,10 @@ def target_dirs(event: dict) -> list:
     tree cannot be told -- another `cd`, `pushd`/`popd`, a subshell, a `$` or backtick in a followed
     directory word, --git-dir/--work-tree, GIT_DIR=/GIT_WORK_TREE= -- raises TargetError."""
     command = _command(event)
-    matches = list(GIT_VERB.finditer(command or ""))
+    matches = git_calls(command or "")
     if not matches:
         return []
-    why = "cannot tell which tree %s runs in" % matches[0].group("verb")
+    why = "cannot tell which tree %s runs in" % matches[0].verb
     hint = "; use git -C <dir> or a leading cd <dir> &&"
     base = event.get("cwd") or os.getcwd()
     rest = command
@@ -5834,10 +5984,10 @@ def target_dirs(event: dict) -> list:
         raise TargetError(why + " (a nested shell, eval, xargs, -execdir, env -C or sudo -D the hook does not follow)" + hint)
     dirs = []
     for m in matches:
-        if TREE_OPT.search(m.group("opts")):
+        if TREE_OPT.search(m.opts):
             raise TargetError(why + " (--git-dir/--work-tree)" + hint)
         cur = base
-        for c in GIT_DIR_OPT.finditer(m.group("opts")):
+        for c in GIT_DIR_OPT.finditer(m.opts):
             cur = _word(c.group(1), cur)
             if cur is None:
                 raise TargetError(why + " (git -C with a shell expansion)" + hint)
@@ -5984,7 +6134,7 @@ bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
 
-Mutation checks (each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: remove the `try/except` around `main()` (3 fail-closed tests); `GATED["push"] = []` or `_ARG = \S+` (`test_push_with_options_is_gated_too`); drop the backslash-newline join, `config-env`, the `$X` option word or the `"git"` quote (the same test); `(?![\w-])` -> `\b` (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); ignore `-C` or the leading `cd`, or let a non-repo directory pass; restore the overlapping option alternatives or the backtracking `_ARG`, or the backtracking heredoc (`(.*?)` to a terminator) or nested-shell regexes in place of the line and word scans (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook`, which times out or exceeds its 2 s limit); stop detecting another `cd`, `GIT_DIR=`, `--git-dir`, an expanded `-C` or leading-`cd` word, stop stripping quoted words or heredoc bodies, drop the nested-shell/`eval`/`xargs`/`env -C` check, accept only a bare `-c` after the shell word, end the shell's word search at an option value (`bash -o pipefail -c`), stop reading plain quoted words as bare words (`'bash' -c`), or drop the piped-shell, `-execdir`, `sudo -D` or `<<` word split (`bash<<EOF`) (`test_a_gated_command_whose_tree_cannot_be_told_is_blocked`) (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_a_named_directory_that_is_not_a_repo_fails_closed`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`); replace the `git status` check by `git diff --name-only -- docs/superpowers/state`, drop `--untracked-files=all` or drop `docs/reviews` (the register-removed-from-index, staged-report-with-unstaged-edit and untracked-file tests); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); exclude `run_all.py`, `lib` or `hooks` from the `tools/gates` guard (`test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict`), narrow the guard to a list of files (`run_all.py`, `__init__.py`, `gate_*.py`, `lib`, `config.yml`, `hooks/git-pre-commit.sh`) exempt `*.pyc` outside `__pycache__`, or drop the root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`: an untracked `yaml.py` in the root or in tools/gates would shadow PyYAML), drop the `tests` or `README.md` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). `install-hooks.sh`: disable the `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`); replace the `mv` by `true` (`test_a_foreign_hook_is_moved_aside`); put `exit 0` right after the `mv` (the same test, through its rc and marker assertions); allow overwriting the backup or disable the hooks-path guard (`test_a_second_foreign_hook_does_not_overwrite_the_first_backup`, `test_a_hooks_path_outside_the_repository_is_refused`).
+Mutation checks (each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: remove the `try/except` around `main()` (3 fail-closed tests); `GATED["push"] = []` or `_ARG = \S+` (`test_push_with_options_is_gated_too`); drop the backslash-newline join, `config-env`, the `$X` option word or the quote stripping of the git word in `_git_word_end` (the same test); `(?![\w-])` -> `\b` (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); ignore `-C` or the leading `cd`, or let a non-repo directory pass; restore the overlapping option alternatives or the backtracking `_ARG`, or the backtracking heredoc (`(.*?)` to a terminator) or nested-shell regexes in place of the line and word scans (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook`, which times out or exceeds its 2 s limit); stop detecting another `cd`, `GIT_DIR=`, `--git-dir`, an expanded `-C` or leading-`cd` word, stop stripping quoted words or heredoc bodies, drop the nested-shell/`eval`/`xargs`/`env -C` check, accept only a bare `-c` after the shell word, end the shell's word search at an option value (`bash -o pipefail -c`), stop reading plain quoted words as bare words (`'bash' -c`), or drop the piped-shell, `-execdir`, `sudo -D` or `<<` word split (`bash<<EOF`) (`test_a_gated_command_whose_tree_cannot_be_told_is_blocked`) (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_a_named_directory_that_is_not_a_repo_fails_closed`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`); replace the `git status` check by `git diff --name-only -- docs/superpowers/state`, drop `--untracked-files=all` or drop `docs/reviews` (the register-removed-from-index, staged-report-with-unstaged-edit and untracked-file tests); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); exclude `run_all.py`, `lib` or `hooks` from the `tools/gates` guard (`test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict`), narrow the guard to a list of files (`run_all.py`, `__init__.py`, `gate_*.py`, `lib`, `config.yml`, `hooks/git-pre-commit.sh`) exempt `*.pyc` outside `__pycache__`, or drop the root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`: an untracked `yaml.py` in the root or in tools/gates would shadow PyYAML), drop the `tests` or `README.md` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). `install-hooks.sh`: disable the `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`); replace the `mv` by `true` (`test_a_foreign_hook_is_moved_aside`); put `exit 0` right after the `mv` (the same test, through its rc and marker assertions); allow overwriting the backup or disable the hooks-path guard (`test_a_second_foreign_hook_does_not_overwrite_the_first_backup`, `test_a_hooks_path_outside_the_repository_is_refused`).
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
@@ -6002,7 +6152,7 @@ Expected: the commit output first shows the 10 PASS lines of `run_all --only reg
 
 **Files:**
 - Create: `tools/gates/hooks/session_start.py`, `tools/gates/hooks/user_prompt_submit.py`, `.claude/settings.json`, `CLAUDE.md`
-- Modify: `tools/gates/tests/test_hooks.py` (insert the three classes below, `SessionStart`, `UserPromptSubmit`, `ProjectWiring`, above the `if __name__ == "__main__":` line; the Task 7 block above is the file without them), `tools/gates/README.md` (append the Hooks section)
+- Modify: `tools/gates/tests/test_hooks.py` (insert the four classes below, `PreToolUseCommandPosition`, `SessionStart`, `UserPromptSubmit`, `ProjectWiring`, above the `if __name__ == "__main__":` line; the Task 7 block above is the file without them), `tools/gates/README.md` (append the Hooks section)
 
 **Interfaces:**
 - Consumes: `install-hooks.sh` and its marker (Task 7); `hook()`, `copy_gates()` and `ORPHAN` in `test_hooks.py` (Task 7).
@@ -6013,6 +6163,71 @@ Expected: the commit output first shows the 10 PASS lines of `run_all --only reg
 Insert into `tools/gates/tests/test_hooks.py`, directly above `if __name__ == "__main__":`:
 
 ```python
+class PreToolUseCommandPosition(unittest.TestCase):
+    """The unfiltered Bash handler sees every command: a gated verb counts in command position only."""
+    def setUp(self):
+        self.root = new_repo()
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)    # a failing register
+
+    def tearDown(self):
+        gf.remove(self.root)
+
+    def run_hook(self, cmd):
+        return hook("pre_tool_use.py", bash_event(self.root, cmd))
+
+    def assert_gated(self, cmd):
+        p = self.run_hook(cmd)
+        self.assertEqual(2, p.returncode, (cmd, p.stderr))
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+
+    def assert_silent(self, cmd):
+        p = self.run_hook(cmd)
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd)
+
+    def test_a_verb_that_is_only_mentioned_is_not_gated(self):
+        for cmd in ("grep -rn 'git push' docs", "echo 'run git push and git commit later'", 'rg "git commit" docs',
+                    "echo git push", "echo git commit -m x", "cat <<EOF\ngit push\nEOF", "cat <<'EOF'\ngit push\nEOF",
+                    "cat <<-EOF\n\tgit commit\n\tEOF", "gh pr create --title t --body 'then git push'",
+                    "git log --grep='git push'", "git log --grep 'git commit'", "cd missing && echo git push",
+                    "echo hi # git push", "echo \"x git push\"", "printf '%s' \"git commit\" | wc -c",
+                    "echo \"$(cat <<'EOF'\ngit push\nEOF\n)\"", "ls; echo git push; ls",
+                    "git status 2>&1 | grep 'git commit'", "echo a\\ git push",
+                    "echo 'x; git push'", "grep 'a && git commit' f", "echo 'x $(git push)'", "echo `echo 'y; git push'`",
+                    "cat <<'EOF'\n$(git push)\nEOF", "echo hi # a && git push", "echo ok # $(git push)"):
+            self.assert_silent(cmd)
+
+    def test_a_verb_in_command_position_is_gated(self):
+        for cmd in ('echo "$(git push)"', "x=$(git commit -m y)", "echo `git push`", "echo \"`git commit -m y`\"",
+                    "echo hi && git push", "echo hi; git push", "ls | git commit -m x", "echo hi & git push",
+                    "if git push; then echo ok; fi", "! git push", "{ git push; }", "(git push)", "true || git commit -m x",
+                    "echo hi\ngit push", "2>&1 git push", "cat <<EOF\n$(git push)\nEOF", "cat <<EOF\nx $(echo a; git push)\nEOF",
+                    "cat <<EOF\ngit push", "git commit -m \"$(cat <<'EOF'\nfix git push in the notes\nEOF\n)\"",
+                    "echo 'git push' && git push", "cat <<'EOF' > /dev/null\nx\nEOF\ngit push"):
+            self.assert_gated(cmd)
+
+    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push"):
+            self.assert_gated(cmd)
+        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'",
+                    "bash -c 'git push'", "echo 'git push' | sh", "find . -exec git push \\;", "xargs git push"):
+            p = self.run_hook(cmd)
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL hook.target", p.stderr, cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log"):
+            self.assert_silent(cmd)
+
+    def test_scans_stay_linear(self):
+        for cmd in (";" * 30000 + "ls", "$(" * 10000, "`" * 20000, '"' * 20000, "sudo -a; " * 5000 + "ls",
+                    "echo $(" * 5000, "( " * 20000, "git commit -m \"" + "$(" * 5000, "<<A\n" * 20000):
+            start = time.monotonic()
+            p = self.run_hook(cmd)
+            self.assertLess(time.monotonic() - start, 2.0, cmd[:20])
+            self.assertIn(p.returncode, (0, 2), (cmd[:20], p.stderr))
+
+
 class SessionStart(unittest.TestCase):
     def setUp(self):
         self.root = new_repo()
@@ -6165,7 +6380,7 @@ class ProjectWiring(unittest.TestCase):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `FAILED (failures=10, errors=2)`, 42 tests: 12 of the 13 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). `PreToolUse::test_path_qualified_git_and_wrapper_prefixes_are_gated` passes at once: `pre_tool_use.py` already gates those forms, and the test pins them for the Bash handler that now sees every command. The 29 Task 7 tests still pass.
+Expected: `FAILED (failures=10, errors=2)`, 45 tests: 12 of the 16 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 4 `PreToolUseCommandPosition` tests pass at once: they pin `pre_tool_use.py` as the unfiltered Bash handler needs it (command position, wrappers, launchers, linear scans), and the script (Task 7's, re-written in the Task 8 review round) already satisfies them; `UserPromptSubmit::test_malformed_stdin_fails_closed` fails on its FAIL-text assertions. The 29 Task 7 tests still pass. (They live in a Task 8 class so that Task 7's own counts, 29 tests and a 250 suite, stay true.)
 
 - [ ] **Step 3: Write the hooks, the settings and CLAUDE.md**
 
@@ -6177,10 +6392,10 @@ Expected: `FAILED (failures=10, errors=2)`, 42 tests: 12 of the 13 new tests FAI
 gates are installed in the event's project, every handoff document, and the skill instruction;
 installs the git hooks when the repository's pre-commit hook (git rev-parse --git-path
 hooks/pre-commit) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
-exit-0 hook into the model's context (exit-2 stderr reaches the owner alone). So every failure --
-install-hooks.sh refusing or failing, a missing or invalid cwd, any internal error -- is a `FAIL ...`
-line on stdout (the model sees it) and on stderr (the owner sees it), followed by the skill
-instruction, and the exit code is 0."""
+exit-0 hook into the model's context. So every failure -- install-hooks.sh refusing or failing, a
+missing or invalid cwd, any internal error -- is a `FAIL ...` line on stdout (the model sees it),
+followed by the skill instruction, and the exit code is 0. The same line is copied to stderr, which
+Claude Code shows to neither the model nor the owner on exit 0 (a debug-log copy only)."""
 from __future__ import annotations
 
 import glob
@@ -6356,20 +6571,26 @@ without an `if` filter, so the script sees every Bash call), `hooks/session_star
 with S2.
 
 - `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
-  (`FAIL hook.internal`, fail closed). Bash: `git commit` and `git push` (bare, path-qualified,
-  quoted, or after `sudo`, `command`, `nohup`, `time`, `timeout`, `env [VAR=val|options]`, `VAR=val`)
-  run the register and claim gates on the tree the command names: the event's cwd, moved by a leading
-  `cd <dir> &&` or `;` and by each `git -C <dir>`. A gated command whose tree it cannot tell (another
-  `cd`, `pushd`, a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word, a nested
-  shell such as `bash -c`, `eval`, `xargs`, `-execdir`, `env -C`, `sudo -D`) exits 2 with
-  `FAIL hook.target`. Every other command and tool exits 0 silently, after one python3 start; the
-  `Agent` branch (the dispatch gate) arrives with S2.
+  (`FAIL hook.internal`, fail closed). Bash: `git commit` and `git push` in command position (the
+  first word of a simple command, bare, path-qualified or quoted, after `VAR=val`, `if`/`then`/`do`/`!`
+  and the wrappers `sudo`, `doas`, `command`, `builtin`, `nohup`, `time`, `timeout`, `exec`, `nice`,
+  `ionice`, `setsid`, `stdbuf`, `env`, `noglob`, `caffeinate` with their options; also inside
+  `$(...)` and backticks) run the register and claim gates on the tree the command names: the
+  event's cwd, moved by a leading `cd <dir> &&` or `;` and by each `git -C <dir>`. A verb that is
+  only mentioned (`echo git push`, `grep 'git push' docs`, a quoted argument or commit message, a
+  heredoc body, a comment) is data and is not gated. A gated command whose tree it cannot tell
+  (another `cd`, `pushd`, a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word)
+  exits 2 with `FAIL hook.target`; so does any command that holds a launcher (`bash -c`, `eval`,
+  `xargs`, `| sh`, a shell fed a heredoc, `find -exec`/`-execdir`, `env -C`, `sudo -D`) and also
+  names the verb anywhere, quoted or not. Every other command and tool exits 0 silently, after one
+  python3 start; the `Agent` branch (the dispatch gate) arrives with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
   the repository's pre-commit hook (`$(git rev-parse --git-path hooks)/pre-commit`) is not ours, and
   the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line on stdout
-  (the model sees it) echoed on stderr (the owner sees it), then the instruction line: `FAIL
+  (the model sees it), then the instruction line (the line is also copied to stderr, which Claude Code
+  shows neither the model nor the owner on exit 0; it appears in the debug log only): `FAIL
   hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the repository's
   git directory, or a second foreign pre-commit over an existing `pre-commit.pre-strict-delivery`
   backup), `FAIL hook.input` for a missing or non-directory `cwd`, `FAIL hook.internal` for anything
@@ -6387,9 +6608,9 @@ with S2.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 42 tests ... OK
-python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 263 tests ... OK
-tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 263 tests ... OK (3.12)
+python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 45 tests ... OK
+python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 266 tests ... OK
+tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 266 tests ... OK (3.12)
 python3 tools/gates/run_all.py                                                    # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 # strict-delivery: gates installed in <root> (tools/gates/run_all.py); PyYAML ok
@@ -6400,13 +6621,13 @@ git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md 
   docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md && git diff --cached --check && echo whitespace-clean
 ```
 
-Mutation checks (each restored, then `OK` again; all killed by the test named). `session_start.py`: `if not ours(...)` to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_is_reported_on_stdout_and_exits_0`, `test_a_refusal_of_install_hooks_is_reported_and_exits_0`, `test_a_non_utf8_foreign_hook_is_moved_aside`); `ours()` reading UTF-8 text (`test_a_non_utf8_foreign_hook_is_moved_aside`); `fail()` without the stdout print, without the stderr echo, or the final `sys.exit(0)` to `sys.exit(2)` (the failure tests through `assert_failure_reaches_the_model`); the `hook.install` call or the `hook.internal` report removed (the install tests; `test_a_cwd_that_is_not_a_repository_fails_closed`, `test_malformed_stdin_is_reported_and_exits_0`); `event.get("cwd") or os.getcwd()` or the `os.path.isdir` check dropped (`test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback`); empty the handoff glob (`test_installs_git_hooks_and_lists_handoffs`). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix (`test_one_line_reminder`); drop the FAIL line, or replace the script by `sys.exit(2)` (`UserPromptSubmit::test_malformed_stdin_fails_closed`). `pre_tool_use.py` (pinned for the unfiltered handler): `\bgit\b` to `(?<![/\w])git\b`, `env = env or ...` to `env = False`, or the `sudo -D` check removed (`test_path_qualified_git_and_wrapper_prefixes_are_gated`). Settings: add `"Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\""}]}],`, add an `if` back to the Bash handler, or change `"timeout": 900` to `1` (`test_settings_json_is_the_expected_wiring_without_stop_hooks`); append a bullet to `CLAUDE.md` or delete one (`test_claude_md_carries_spec_section_12_verbatim_and_nothing_else`).
+Mutation checks (each restored, then `OK` again; all killed by the test named). `session_start.py`: `if not ours(...)` to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_is_reported_on_stdout_and_exits_0`, `test_a_refusal_of_install_hooks_is_reported_and_exits_0`, `test_a_non_utf8_foreign_hook_is_moved_aside`); `ours()` reading UTF-8 text (`test_a_non_utf8_foreign_hook_is_moved_aside`); `fail()` without the stdout print, without the stderr echo, or the final `sys.exit(0)` to `sys.exit(2)` (the failure tests through `assert_failure_reaches_the_model`); the `hook.install` call or the `hook.internal` report removed (the install tests; `test_a_cwd_that_is_not_a_repository_fails_closed`, `test_malformed_stdin_is_reported_and_exits_0`); `event.get("cwd") or os.getcwd()` or the `os.path.isdir` check dropped (`test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback`); empty the handoff glob (`test_installs_git_hooks_and_lists_handoffs`). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix (`test_one_line_reminder`); drop the FAIL line, or replace the script by `sys.exit(2)` (`UserPromptSubmit::test_malformed_stdin_fails_closed`). `pre_tool_use.py` (each killed by a `PreToolUseCommandPosition` test unless noted): single quotes no longer data, double quotes ignoring `$(` and backticks, heredoc bodies not skipped, a quoted heredoc scanned like an unquoted one, comments scanned as code, the launcher fallback off, `nohup` or `-exec` removed, value-taking wrapper options off, a path-qualified git word not read (`plain == "git"`), `VAR=val` not skipped, a start recorded before a heredoc body, `MAX_WORD` off or the `open_ended` set off (`test_scans_stay_linear`, which times out), and `git_calls` finding no positional call (eight `PreToolUse` tests). Settings: add `"Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\""}]}],`, add an `if` back to the Bash handler, or change `"timeout": 900` to `1` (`test_settings_json_is_the_expected_wiring_without_stop_hooks`); append a bullet to `CLAUDE.md` or delete one (`test_claude_md_carries_spec_section_12_verbatim_and_nothing_else`).
 
 Whole-file check (each prints nothing): `diff <(sed -n 'A,Bp' PLAN) FILE` with A,B the first and last line of each code block above, for `session_start.py`, `user_prompt_submit.py`, `.claude/settings.json` and `CLAUDE.md`; the Task 8 test block equals `sed -n '/^class SessionStart/,/^if __name__/p' tools/gates/tests/test_hooks.py` minus its last line and the blank lines before it; the Task 7 test block equals `test_hooks.py` without those lines.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 42 OK (29 + 13); suite 263 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` to the ledger under the existing `## Block b3` section.
+Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 45 OK (29 + 16); suite 266 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` to the ledger under the existing `## Block b3` section.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md \

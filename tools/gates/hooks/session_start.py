@@ -3,10 +3,10 @@
 gates are installed in the event's project, every handoff document, and the skill instruction;
 installs the git hooks when the repository's pre-commit hook (git rev-parse --git-path
 hooks/pre-commit) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
-exit-0 hook into the model's context (exit-2 stderr reaches the owner alone). So every failure --
-install-hooks.sh refusing or failing, a missing or invalid cwd, any internal error -- is a `FAIL ...`
-line on stdout (the model sees it) and on stderr (the owner sees it), followed by the skill
-instruction, and the exit code is 0."""
+exit-0 hook into the model's context. So every failure -- install-hooks.sh refusing or failing, a
+missing or invalid cwd, any internal error -- is a `FAIL ...` line on stdout (the model sees it),
+followed by the skill instruction, and the exit code is 0. The same line is copied to stderr, which
+Claude Code shows to neither the model nor the owner on exit 0 (a debug-log copy only)."""
 from __future__ import annotations
 
 import glob

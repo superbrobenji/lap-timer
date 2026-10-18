@@ -100,22 +100,6 @@ class PreToolUse(unittest.TestCase):
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
 
-    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
-        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
-        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
-                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
-                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
-                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
-        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL hook.target", p.stderr, cmd)
-        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push"):
-            self.assertEqual(0, hook("pre_tool_use.py", bash_event(self.root, cmd)).returncode, cmd)
-
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
         self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
@@ -430,6 +414,71 @@ class GitHooks(unittest.TestCase):
         gf.git(self.root, "add", "x.txt")
         p = self.commit()
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+
+
+class PreToolUseCommandPosition(unittest.TestCase):
+    """The unfiltered Bash handler sees every command: a gated verb counts in command position only."""
+    def setUp(self):
+        self.root = new_repo()
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)    # a failing register
+
+    def tearDown(self):
+        gf.remove(self.root)
+
+    def run_hook(self, cmd):
+        return hook("pre_tool_use.py", bash_event(self.root, cmd))
+
+    def assert_gated(self, cmd):
+        p = self.run_hook(cmd)
+        self.assertEqual(2, p.returncode, (cmd, p.stderr))
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+
+    def assert_silent(self, cmd):
+        p = self.run_hook(cmd)
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd)
+
+    def test_a_verb_that_is_only_mentioned_is_not_gated(self):
+        for cmd in ("grep -rn 'git push' docs", "echo 'run git push and git commit later'", 'rg "git commit" docs',
+                    "echo git push", "echo git commit -m x", "cat <<EOF\ngit push\nEOF", "cat <<'EOF'\ngit push\nEOF",
+                    "cat <<-EOF\n\tgit commit\n\tEOF", "gh pr create --title t --body 'then git push'",
+                    "git log --grep='git push'", "git log --grep 'git commit'", "cd missing && echo git push",
+                    "echo hi # git push", "echo \"x git push\"", "printf '%s' \"git commit\" | wc -c",
+                    "echo \"$(cat <<'EOF'\ngit push\nEOF\n)\"", "ls; echo git push; ls",
+                    "git status 2>&1 | grep 'git commit'", "echo a\\ git push",
+                    "echo 'x; git push'", "grep 'a && git commit' f", "echo 'x $(git push)'", "echo `echo 'y; git push'`",
+                    "cat <<'EOF'\n$(git push)\nEOF", "echo hi # a && git push", "echo ok # $(git push)"):
+            self.assert_silent(cmd)
+
+    def test_a_verb_in_command_position_is_gated(self):
+        for cmd in ('echo "$(git push)"', "x=$(git commit -m y)", "echo `git push`", "echo \"`git commit -m y`\"",
+                    "echo hi && git push", "echo hi; git push", "ls | git commit -m x", "echo hi & git push",
+                    "if git push; then echo ok; fi", "! git push", "{ git push; }", "(git push)", "true || git commit -m x",
+                    "echo hi\ngit push", "2>&1 git push", "cat <<EOF\n$(git push)\nEOF", "cat <<EOF\nx $(echo a; git push)\nEOF",
+                    "cat <<EOF\ngit push", "git commit -m \"$(cat <<'EOF'\nfix git push in the notes\nEOF\n)\"",
+                    "echo 'git push' && git push", "cat <<'EOF' > /dev/null\nx\nEOF\ngit push"):
+            self.assert_gated(cmd)
+
+    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push"):
+            self.assert_gated(cmd)
+        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'",
+                    "bash -c 'git push'", "echo 'git push' | sh", "find . -exec git push \\;", "xargs git push"):
+            p = self.run_hook(cmd)
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertIn("FAIL hook.target", p.stderr, cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log"):
+            self.assert_silent(cmd)
+
+    def test_scans_stay_linear(self):
+        for cmd in (";" * 30000 + "ls", "$(" * 10000, "`" * 20000, '"' * 20000, "sudo -a; " * 5000 + "ls",
+                    "echo $(" * 5000, "( " * 20000, "git commit -m \"" + "$(" * 5000, "<<A\n" * 20000):
+            start = time.monotonic()
+            p = self.run_hook(cmd)
+            self.assertLess(time.monotonic() - start, 2.0, cmd[:20])
+            self.assertIn(p.returncode, (0, 2), (cmd[:20], p.stderr))
 
 
 class SessionStart(unittest.TestCase):
