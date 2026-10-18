@@ -35,3 +35,14 @@
   asked_at: {sha: "e2a20af", by: session}
   answer: "require (owner answered \"Yes, add the schema rule\" in chat, 2026-10-17)"
   answered_at: {sha: "e2a20af", by: superbrobenji}
+
+- id: DEC-0005
+  class: scope
+  question: "S1 block b3 Task 8: the PreToolUse Bash hook grew from the plan's 70-line verb regex into a 1020-line shell parser over 5 review rounds, still lets a BSD `xargs -J` form push ungated (verified at 4bb2185) and false-blocks ordinary commands that only mention the verb words (python heredocs, sed, brace groups; verified). Which hook design does b3 ship?"
+  options:
+    - {label: plan-design-plus-prepush, cost: "pre_tool_use.py returns to the plan's best-effort textual check (verb regex on code, tree from -C or a leading cd, fail closed on internal error, documented limits) and additionally blocks hook bypasses (--no-verify, -n, -c core.hooksPath=, GIT_CONFIG*); the git pre-push shim moves from S4 b11 into b3 and runs register + claims on every push however launched (S4 extends it with merge-readiness); about 600 hook lines and their tests are discarded; one implementer round, one review, D3 re-sync; the open classes the parser never closed (aliases, functions, payload files) are closed by the git hooks instead"}
+    - {label: plan-design-only, cost: "same cut of pre_tool_use.py, no pre-push shim until S4 b11 as the umbrella says; a push launched through a wrapper the regex does not see has no gate until then"}
+    - {label: keep-parser, cost: "a 6th fix round for W1-W3 under the current parser; the hook stays a 1020-line shell parser with a closed data-holder allowlist that every new tool or shell form must be added to; agents in this repository keep hitting FAIL hook.target on heredocs and sed that mention commit/push; later review rounds of the same shape are likely"}
+  asked_at: {sha: "151f2bb", by: session}
+  answer: null
+  answered_at: null
