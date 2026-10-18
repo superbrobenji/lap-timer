@@ -359,21 +359,24 @@ class GitHooks(unittest.TestCase):
                 fh.write(orig)
 
     def test_pre_commit_blocks_an_untracked_module_in_the_gate_code(self):
-        # run_all.py puts tools/gates first on sys.path: an untracked yaml.py would replace PyYAML and pass
+        # run_all.py searches the repo root, then tools/gates, before PyYAML and the stdlib: an untracked
+        # yaml.py in either would be imported in place of PyYAML and pass
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         gf.git(self.root, "add", "-A")
         head = gf.git(self.root, "rev-parse", "HEAD")
-        for rel in ("yaml.py", "glob/__init__.py", "datetime.pyc", "lib/extra.py", "hooks/new.py"):
-            path = os.path.join("tools", "gates", *rel.split("/"))
-            gf.write(self.root, path, "raise SystemExit(0)\n")
+        for rel in ("tools/gates/yaml.py", "tools/gates/glob/__init__.py", "tools/gates/datetime.pyc",
+                    "tools/gates/lib/extra.py", "tools/gates/hooks/new.py",
+                    "yaml.py", "yaml/__init__.py", "glob.pyc", "_yaml.so"):
+            gf.write(self.root, rel, "raise SystemExit(0)\n")
             p = self.commit()
             self.assertNotEqual(0, p.returncode, rel)
             self.assertIn("FAIL pre-commit.unstaged", p.stderr, rel)
-            self.assertIn("tools/gates/" + rel, p.stderr)
+            self.assertIn(rel, p.stderr)
             self.assertEqual(head, gf.git(self.root, "rev-parse", "HEAD"), rel)
-            os.remove(os.path.join(self.root, path))
-            if not os.listdir(os.path.dirname(os.path.join(self.root, path))):
-                os.rmdir(os.path.dirname(os.path.join(self.root, path)))      # the new glob/ package
+            path = os.path.join(self.root, *rel.split("/"))
+            os.remove(path)
+            if not os.listdir(os.path.dirname(path)):
+                os.rmdir(os.path.dirname(path))      # the new glob/ and yaml/ packages
 
     def test_edits_to_gate_tests_and_readme_do_not_block_a_commit(self):
         gf.write(self.root, "x.txt", "x\n")

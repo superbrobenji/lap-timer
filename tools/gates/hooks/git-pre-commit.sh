@@ -7,11 +7,15 @@
 # paths. The paths: the registers, briefs and the state README (docs/superpowers/state), the
 # registered reports (docs/reviews; gate_register opens EVERY file under it, so an ignored .md
 # counts, and only the Finder's .DS_Store, which can never hold the marker line, is exempt), and the
-# gate code tree tools/gates, whose working-tree content decides the verdict: run_all.py puts
-# tools/gates first on sys.path, so even an untracked module or package there (yaml.py, glob/) is
-# imported in place of PyYAML or the stdlib, and the installed shim runs the working-tree copy of
-# this script. Exempt: tools/gates/tests and README.md (not inputs to the verdict), __pycache__
-# directories and .DS_Store (a sourceless .pyc outside __pycache__ is importable, so it is not exempt).
+# code the gates import. The import path: `python3 tools/gates/run_all.py` starts with
+# sys.path[0] = tools/gates, and run_all.py then inserts the repository root ahead of it, so imports
+# search the root, then tools/gates, then the stdlib and site-packages. An untracked module or
+# package in either directory (yaml.py, yaml/__init__.py, a sourceless .pyc or an extension .so) is
+# imported in place of PyYAML or the stdlib and decides the verdict. So the guard covers all of
+# tools/gates (the gate code; the installed shim runs the working-tree copy of this script) and every
+# root-level *.py, *.pyc, *.so and */__init__.py. Exempt: tools/gates/tests and README.md (not inputs
+# to the verdict), __pycache__ directories and .DS_Store (a sourceless .pyc outside __pycache__ is
+# importable, so it is not exempt).
 # Installed by tools/gates/install-hooks.sh.
 set -eu
 unset CLAUDE_PROJECT_DIR   # gate the tree being committed (e.g. a worktree), not the session's project
@@ -20,6 +24,7 @@ cd "$root"
 # porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is worktree-side
 dirty=$(git status --porcelain --untracked-files=all --ignored -- \
   docs/superpowers/state docs/reviews tools/gates ':(exclude)tools/gates/tests' ':(exclude)tools/gates/README.md' \
+  ':(glob)*.py' ':(glob)*.pyc' ':(glob)*.so' ':(glob)*/__init__.py' \
   ':(exclude,glob)**/.DS_Store' ':(exclude,glob)tools/gates/**/__pycache__/**' \
   | awk 'substr($0, 2, 1) != " "')
 if [ -n "$dirty" ]; then
