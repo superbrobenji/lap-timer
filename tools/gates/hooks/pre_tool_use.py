@@ -2,9 +2,13 @@
 """Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol"; owner decision DEC-0005).
 
 Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so this
-script sees every Bash call. At strict-delivery block b3 only the Bash branch gates; every other
-tool (Agent included, until S2 adds gate_dispatch) exits 0 silently. This hook is a best-effort
-textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-0005).
+script sees every Bash call. Two branches gate: Bash (items 1-3 below) and Agent (handle_agent: the
+dispatch prompt runs gate_dispatch, gate_claims and gate_decisions in the tree of the event's cwd --
+a missing or empty cwd is `FAIL hook.input`, a cwd outside a repository `FAIL hook.target`, an empty
+prompt `FAIL dispatch.input`, a tool_input.model that is unset or differs from the prompt's
+`## Model:` line `FAIL dispatch.model.agree`; the register gate is not run for Agent); every other
+tool exits 0 silently. This hook is a best-effort textual check; the git hooks (pre-commit,
+pre-push) are the enforcement (DEC-0005).
 
 1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
    _GLOBAL, _SYSTEM or _NOSYSTEM assignment (`=` or `+=`) anywhere, in any Bash command; a HOME or
@@ -66,6 +70,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
@@ -243,10 +248,50 @@ def toplevel(directory: str) -> str:
     return p.stdout.strip()
 
 
+def handle_agent(event: dict) -> int:
+    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
+    names), gate_claims and gate_decisions in the tree of the event's cwd. tool_input.model must be
+    set and equal the prompt's '## Model:' line (umbrella dispatch grammar). 0 = allow, 2 = block.
+    gate_dispatch runs directly (not via run_all.run), so the hook does not depend on run_all.GATES."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        raise Blocked("hook.input", "the event has no cwd")
+    root = toplevel(cwd)
+    tool_input = event.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
+        return 2
+    model = tool_input.get("model")
+    sys.path.insert(0, CODE_ROOT)
+    from tools.gates import gate_dispatch, run_all   # lazy, as in main()
+    from tools.gates.lib import run_check
+    fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(prompt)
+        argv = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
+        if prompts:
+            argv += ["--prompts-dir", prompts]
+        # dispatch runs directly, not through run_all: run_all.GATES lists it only from S2 Task 3
+        res = run_all.run(["claims", "decisions"], {"root": root, "decisions": ["--scan", path]})
+        res.lines[:0] = run_check("dispatch", gate_dispatch.check, ["--root", root] + argv).lines
+    finally:
+        os.unlink(path)
+    if res.ok():
+        return 0
+    print(res.render(False), file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
+    if event.get("tool_name") == "Agent":
+        return handle_agent(event)
     command = bash_command(event)
     if command is None:
         return 0

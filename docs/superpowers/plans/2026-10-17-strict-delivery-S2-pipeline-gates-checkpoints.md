@@ -989,126 +989,146 @@ Expected: `gate_register` all `PASS`.
 ### Task 2: PreToolUse Agent branch
 
 **Files:**
-- Modify: `tools/gates/hooks/pre_tool_use.py` (S1 file: add `handle_agent`, route `tool_name == "Agent"` to it)
-- Test: `tools/gates/tests/test_hooks.py` (S1 file: append class `AgentDispatchHook`)
+- Modify: `tools/gates/hooks/pre_tool_use.py` (S1 file: add `import tempfile`, `handle_agent`, route `tool_name == "Agent"` to it, rewrite the module docstring's tool sentence)
+- Modify: `tools/gates/README.md` (S1 file: Hooks section, the `Agent` branch)
+- Test: `tools/gates/tests/test_hooks.py` (S1 file: `repo_fixture` import, `hook()` takes extra environment variables, append class `AgentDispatchHook`, update the Agent case of `PreToolUse.test_ungated_commands_and_tools_pass_even_on_a_failing_register`)
 
 **Findings:** SD-S2-T2
 
 **Interfaces:**
-- Consumes: `gate_dispatch` CLI (Task 1); S1 `run_all.run(names, {"root": ..., "<gate>": [argv]}) -> Result`, `pre_tool_use.{CODE_ROOT, project_root, main}`, `gate_decisions --scan <paths...>`; `repo_fixture` (Task 1).
-- Produces: `handle_agent(event: dict) -> int` in `pre_tool_use.py` (0 = allow, 2 = block, lines on stderr). Test-only environment override `SD_PROMPTS_DIR` → `--prompts-dir`.
+- Consumes: `gate_dispatch.check` (Task 1); S1 `run_all.run(names, {"root": ..., "<gate>": [argv]}) -> Result` for `claims` and `decisions`, `lib.run_check`, `pre_tool_use.{CODE_ROOT, Blocked, toplevel, main}`; `repo_fixture` (Task 1, incl. `docs/superpowers/plans/fixture-plan.md` in `DISPATCH_FILES`, which lets run_all's decisions argv resolve).
+- Produces: `handle_agent(event: dict) -> int` in `pre_tool_use.py` (0 = allow, 2 = block, lines on stderr). Test-only environment override `SD_PROMPTS_DIR` → `--prompts-dir`. The gated tree is `toplevel(event cwd)`: missing/empty cwd → `Blocked("hook.input")`, non-repository cwd → `FAIL hook.target` (S1's `project_root` does not exist). `dispatch` runs directly via `run_check("dispatch", gate_dispatch.check, ...)`, not through `run_all.run`, because `run_all.GATES` gains `dispatch` only in Task 3.
 
-- [ ] **Step 1: Write the failing tests** — append to `tools/gates/tests/test_hooks.py`:
+- [ ] **Step 1: Write the failing tests** — in `tools/gates/tests/test_hooks.py`: add `from tools.gates.tests import repo_fixture as rf` after the `gitfixture` import; change `hook()` to `def hook(script, event, hooks_dir=HOOKS, **extra_env):` with `env = isolated_env(**extra_env)`; in `PreToolUse.test_ungated_commands_and_tools_pass_even_on_a_failing_register` replace the Agent assertion `self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))` by
+```python
+        p = hook("pre_tool_use.py", agent)    # the Agent branch runs dispatch, claims, decisions -- never register
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.grammar", p.stderr)
+        self.assertNotIn("register.", p.stderr)
+```
+and append above the `if __name__` line:
 
 ```python
-# --- strict-delivery S2 Task 2: PreToolUse Agent branch -----------------------------------------
-import json as _json  # noqa: E402
-import os as _os  # noqa: E402
-import shutil as _shutil  # noqa: E402
-import subprocess as _sp  # noqa: E402
-import sys as _sys  # noqa: E402
-import unittest as _ut  # noqa: E402
-
-from tools.gates.tests import repo_fixture as _rf  # noqa: E402
-
-_HOOK = _os.path.join(_rf.REAL, "tools", "gates", "hooks", "pre_tool_use.py")
-_DFIX = _os.path.join(_rf.FIX, "dispatch")
+DISPATCH_FIX = os.path.join(rf.FIX, "dispatch")
 
 
-def _agent_event(root, prompt, model="sonnet"):
+def agent_event(cwd, prompt, model="sonnet"):
     tool_input = {"prompt": prompt, "description": "fixture", "subagent_type": "general-purpose"}
     if model is not None:
         tool_input["model"] = model
-    return {"session_id": "fx", "transcript_path": "/dev/null", "cwd": root, "permission_mode": "default",
-            "hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": tool_input,
-            "tool_use_id": "fx-1"}
+    event = {"session_id": "fx", "transcript_path": "/dev/null", "permission_mode": "default",
+             "hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": tool_input, "tool_use_id": "fx-1"}
+    if cwd is not None:
+        event["cwd"] = cwd
+    return event
 
 
-def _run_hook(root, event):
-    env = dict(_os.environ, CLAUDE_PROJECT_DIR=root, SD_PROMPTS_DIR=_os.path.join(_DFIX, "prompts"))
-    return _sp.run([_sys.executable, _HOOK], input=_json.dumps(event), capture_output=True, text=True,
-                   cwd=root, env=env, check=False)
+class AgentDispatchHook(unittest.TestCase):
+    """PreToolUse Agent branch (S2 Task 2), through the hook as a subprocess."""
 
-
-class AgentDispatchHook(_ut.TestCase):
     @classmethod
     def setUpClass(cls):
-        rows = _rf.load_rows()
+        rows = rf.load_rows()
         rows["decisions"] = [d for d in rows["decisions"] if d["id"] == "DEC-0001"]
         clean = dict(rows, claims=[c for c in rows["claims"] if c["id"] == "C-fx.ok"])
         stale = dict(rows, claims=[c for c in rows["claims"] if c["id"] in ("C-fx.ok", "C-fx.stale")])
-        cls.root = _rf.make_repo(_rf.DISPATCH_FILES, clean)
-        cls.stale_root = _rf.make_repo(_rf.DISPATCH_FILES, stale)
-        with open(_os.path.join(_DFIX, "good_implementer.md"), encoding="utf-8", newline="") as f:
+        cls.root = rf.make_repo(rf.DISPATCH_FILES, clean)
+        cls.stale_root = rf.make_repo(rf.DISPATCH_FILES, stale)
+        with open(os.path.join(DISPATCH_FIX, "good_implementer.md"), encoding="utf-8", newline="") as f:
             cls.good = f.read()
 
     @classmethod
     def tearDownClass(cls):
-        _shutil.rmtree(cls.root, ignore_errors=True)
-        _shutil.rmtree(cls.stale_root, ignore_errors=True)
+        gf.remove(cls.root)
+        gf.remove(cls.stale_root)
+
+    def run_agent(self, root, prompt, model="sonnet", cwd=True):
+        event = agent_event(root if cwd is True else cwd, prompt, model)
+        return hook("pre_tool_use.py", event, SD_PROMPTS_DIR=os.path.join(DISPATCH_FIX, "prompts"))
 
     def test_good_dispatch_passes(self):
-        r = _run_hook(self.root, _agent_event(self.root, self.good))
-        self.assertEqual(0, r.returncode, r.stderr)
+        p = self.run_agent(self.root, self.good)
+        self.assertEqual((0, ""), (p.returncode, p.stderr))
 
     def test_agent_dispatch_blocked_on_stale_claim(self):
         prompt = self.good.replace("## Claims: C-fx.ok", "## Claims: C-fx.stale")
-        r = _run_hook(self.stale_root, _agent_event(self.stale_root, prompt))
-        self.assertEqual(2, r.returncode, r.stderr)
-        self.assertIn("dispatch.claims.C-fx.stale", r.stderr)
+        p = self.run_agent(self.stale_root, prompt)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("dispatch.claims.C-fx.stale", p.stderr)
 
     def test_tool_model_disagreeing_with_model_line_blocks(self):
-        r = _run_hook(self.root, _agent_event(self.root, self.good, model="opus"))
-        self.assertEqual(2, r.returncode, r.stderr)
-        self.assertIn("model.agree", r.stderr)
+        p = self.run_agent(self.root, self.good, model="opus")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("model.agree", p.stderr)
 
     def test_missing_tool_model_blocks(self):
-        r = _run_hook(self.root, _agent_event(self.root, self.good, model=None))
-        self.assertEqual(2, r.returncode, r.stderr)
-        self.assertIn("model.agree", r.stderr)
+        p = self.run_agent(self.root, self.good, model=None)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("model.agree", p.stderr)
 
     def test_empty_prompt_blocks(self):
-        r = _run_hook(self.root, _agent_event(self.root, "   "))
-        self.assertEqual(2, r.returncode, r.stderr)
-        self.assertIn("dispatch.input", r.stderr)
+        p = self.run_agent(self.root, "   ")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("dispatch.input", p.stderr)
 
     def test_fable_implementer_blocks_even_when_both_lines_agree(self):
         prompt = self.good.replace("## Model: sonnet", "## Model: fable")
-        r = _run_hook(self.root, _agent_event(self.root, prompt, model="fable"))
-        self.assertEqual(2, r.returncode, r.stderr)
-        self.assertIn("model.fable", r.stderr)
+        p = self.run_agent(self.root, prompt, model="fable")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("model.fable", p.stderr)
+
+    def test_missing_or_empty_cwd_fails_closed(self):
+        for cwd in (None, ""):
+            p = self.run_agent(self.root, self.good, cwd=cwd)
+            self.assertEqual(2, p.returncode, (cwd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.input: "), (cwd, p.stderr))
+
+    def test_cwd_outside_a_repository_is_hook_target(self):
+        outside = tempfile.mkdtemp(prefix="gate-test-outside-")
+        self.addCleanup(gf.remove, outside)
+        p = self.run_agent(self.root, self.good, cwd=outside)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % outside), p.stderr)
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook -v`
-Expected: `test_good_dispatch_passes` may pass (S1 lets `Agent` through); the five blocking tests FAIL with `AssertionError: 2 != 0`.
+Expected: `test_good_dispatch_passes` passes (S1 lets `Agent` through); the other seven new tests and the updated S1 case FAIL (`AssertionError: 2 != 0`, or `startswith` for the cwd cases).
 
-- [ ] **Step 3: Implement** — in `tools/gates/hooks/pre_tool_use.py` add this function above the S1 entry point:
+- [ ] **Step 3: Implement** — in `tools/gates/hooks/pre_tool_use.py` add `import tempfile` after `import sys`, rewrite the module docstring's tool sentence (Bash and Agent branches), add this function above `main()`:
 
 ```python
 def handle_agent(event: dict) -> int:
-    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch, gate_claims and gate_decisions.
-    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch grammar)."""
-    import tempfile
-    sys.path.insert(0, CODE_ROOT)
-    from tools.gates import run_all
-    tool_input = event.get("tool_input") or {}
+    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
+    names), gate_claims and gate_decisions in the tree of the event's cwd. tool_input.model must be
+    set and equal the prompt's '## Model:' line (umbrella dispatch grammar). 0 = allow, 2 = block.
+    gate_dispatch runs directly (not via run_all.run), so the hook does not depend on run_all.GATES."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        raise Blocked("hook.input", "the event has no cwd")
+    root = toplevel(cwd)
+    tool_input = event.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
     prompt = tool_input.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
         return 2
     model = tool_input.get("model")
+    sys.path.insert(0, CODE_ROOT)
+    from tools.gates import gate_dispatch, run_all   # lazy, as in main()
+    from tools.gates.lib import run_check
     fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(prompt)
         argv = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
-        prompts = os.environ.get("SD_PROMPTS_DIR")  # test override; unset in real sessions
+        prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
         if prompts:
             argv += ["--prompts-dir", prompts]
-        res = run_all.run(["dispatch", "claims", "decisions"],
-                          {"root": project_root(event), "dispatch": argv, "decisions": ["--scan", path]})
+        # dispatch runs directly, not through run_all: run_all.GATES lists it only from S2 Task 3
+        res = run_all.run(["claims", "decisions"], {"root": root, "decisions": ["--scan", path]})
+        res.lines[:0] = run_check("dispatch", gate_dispatch.check, ["--root", root] + argv).lines
     finally:
         os.unlink(path)
     if res.ok():
@@ -1116,22 +1136,22 @@ def handle_agent(event: dict) -> int:
     print(res.render(False), file=sys.stderr)
     return 2
 ```
-and in S1's `main()`, directly after the `if not isinstance(event, dict): raise ...` check and before `names = gates_for(event)`, insert:
+and in `main()`, directly after the `if not isinstance(event, dict): raise ...` check and before `command = bash_command(event)`, insert:
 ```python
     if event.get("tool_name") == "Agent":
         return handle_agent(event)
 ```
-`os` and `sys` are already imported by S1's hook (check with `grep -n "^import" tools/gates/hooks/pre_tool_use.py`; add `import os` / `import sys` at the top if either is absent). The S1 fail-closed wrapper (`except Exception` → exit 2) already surrounds the dispatch.
+In `tools/gates/README.md` replace the sentence "the `Agent` branch (the dispatch gate) arrives with S2." by the description of the shipped Agent branch (see the file). The S1 fail-closed wrapper (`except Exception` → exit 2) already surrounds the dispatch.
 
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `OK` (S1's hook tests and the six new ones). Then `python3 tools/gates/run_all.py` → only `PASS`.
+Expected: `OK` (60 S1 hook tests, one updated, and the eight new ones: 68). Then `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tools/gates/hooks/pre_tool_use.py tools/gates/tests/test_hooks.py
+git add tools/gates/hooks/pre_tool_use.py tools/gates/tests/test_hooks.py tools/gates/README.md
 git commit -m "feat(hooks): PreToolUse Agent branch -- every dispatch through gate_dispatch, claims, decisions; tool model must equal the Model line"
 ```
 

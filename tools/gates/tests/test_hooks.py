@@ -15,6 +15,7 @@ import time
 import unittest
 
 from tools.gates.tests import gitfixture as gf
+from tools.gates.tests import repo_fixture as rf
 
 HOOKS = os.path.join(gf.REPO, "tools", "gates", "hooks")
 ORPHAN = """- id: T1-ORPHAN-1
@@ -34,8 +35,8 @@ ORPHAN = """- id: T1-ORPHAN-1
 """
 
 
-def hook(script, event, hooks_dir=HOOKS):
-    env = isolated_env()    # defined below: a hook that runs git or install-hooks.sh on a fixture must not read the developer's git config
+def hook(script, event, hooks_dir=HOOKS, **extra_env):
+    env = isolated_env(**extra_env)    # defined below: a hook that runs git or install-hooks.sh on a fixture must not read the developer's git config
     raw = event if isinstance(event, str) else json.dumps(event)
     return subprocess.run([sys.executable, os.path.join(hooks_dir, script)], input=raw,
                           capture_output=True, text=True, env=env, check=False, timeout=20)   # a stalled hook is an error
@@ -356,8 +357,10 @@ class PreToolUse(unittest.TestCase):
             self.assert_silent(cmd)
         agent = dict(bash_event(self.root, ""), tool_name="Agent",
                      tool_input={"prompt": "git push --no-verify", "description": "d", "subagent_type": "general-purpose"})
-        p = hook("pre_tool_use.py", agent)
-        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
+        p = hook("pre_tool_use.py", agent)    # the Agent branch runs dispatch, claims, decisions -- never register
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.grammar", p.stderr)
+        self.assertNotIn("register.", p.stderr)
 
     def test_hook_fails_closed_when_script_errors(self):
         broken = os.path.join(self.root, "broken")
@@ -994,6 +997,88 @@ class ProjectWiring(unittest.TestCase):
         with open(os.path.join(gf.REPO, "CLAUDE.md")) as fh:
             claude = fh.read().splitlines()
         self.assertEqual(bullets, [l for l in claude if l.startswith("- ")])
+
+
+DISPATCH_FIX = os.path.join(rf.FIX, "dispatch")
+
+
+def agent_event(cwd, prompt, model="sonnet"):
+    tool_input = {"prompt": prompt, "description": "fixture", "subagent_type": "general-purpose"}
+    if model is not None:
+        tool_input["model"] = model
+    event = {"session_id": "fx", "transcript_path": "/dev/null", "permission_mode": "default",
+             "hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": tool_input, "tool_use_id": "fx-1"}
+    if cwd is not None:
+        event["cwd"] = cwd
+    return event
+
+
+class AgentDispatchHook(unittest.TestCase):
+    """PreToolUse Agent branch (S2 Task 2), through the hook as a subprocess."""
+
+    @classmethod
+    def setUpClass(cls):
+        rows = rf.load_rows()
+        rows["decisions"] = [d for d in rows["decisions"] if d["id"] == "DEC-0001"]
+        clean = dict(rows, claims=[c for c in rows["claims"] if c["id"] == "C-fx.ok"])
+        stale = dict(rows, claims=[c for c in rows["claims"] if c["id"] in ("C-fx.ok", "C-fx.stale")])
+        cls.root = rf.make_repo(rf.DISPATCH_FILES, clean)
+        cls.stale_root = rf.make_repo(rf.DISPATCH_FILES, stale)
+        with open(os.path.join(DISPATCH_FIX, "good_implementer.md"), encoding="utf-8", newline="") as f:
+            cls.good = f.read()
+
+    @classmethod
+    def tearDownClass(cls):
+        gf.remove(cls.root)
+        gf.remove(cls.stale_root)
+
+    def run_agent(self, root, prompt, model="sonnet", cwd=True):
+        event = agent_event(root if cwd is True else cwd, prompt, model)
+        return hook("pre_tool_use.py", event, SD_PROMPTS_DIR=os.path.join(DISPATCH_FIX, "prompts"))
+
+    def test_good_dispatch_passes(self):
+        p = self.run_agent(self.root, self.good)
+        self.assertEqual((0, ""), (p.returncode, p.stderr))
+
+    def test_agent_dispatch_blocked_on_stale_claim(self):
+        prompt = self.good.replace("## Claims: C-fx.ok", "## Claims: C-fx.stale")
+        p = self.run_agent(self.stale_root, prompt)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("dispatch.claims.C-fx.stale", p.stderr)
+
+    def test_tool_model_disagreeing_with_model_line_blocks(self):
+        p = self.run_agent(self.root, self.good, model="opus")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("model.agree", p.stderr)
+
+    def test_missing_tool_model_blocks(self):
+        p = self.run_agent(self.root, self.good, model=None)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("model.agree", p.stderr)
+
+    def test_empty_prompt_blocks(self):
+        p = self.run_agent(self.root, "   ")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("dispatch.input", p.stderr)
+
+    def test_fable_implementer_blocks_even_when_both_lines_agree(self):
+        prompt = self.good.replace("## Model: sonnet", "## Model: fable")
+        p = self.run_agent(self.root, prompt, model="fable")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("model.fable", p.stderr)
+
+    def test_missing_or_empty_cwd_fails_closed(self):
+        for cwd in (None, ""):
+            p = self.run_agent(self.root, self.good, cwd=cwd)
+            self.assertEqual(2, p.returncode, (cwd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.input: "), (cwd, p.stderr))
+
+    def test_cwd_outside_a_repository_is_hook_target(self):
+        outside = tempfile.mkdtemp(prefix="gate-test-outside-")
+        self.addCleanup(gf.remove, outside)
+        p = self.run_agent(self.root, self.good, cwd=outside)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % outside), p.stderr)
 
 
 if __name__ == "__main__":

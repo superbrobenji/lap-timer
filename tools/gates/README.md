@@ -111,8 +111,14 @@ commit and push, however it was launched.
   (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the message to a file and use
   `git commit -F <file>`. So is, rarely, a `-n` after the arguments: a scan that meets an earlier
   verb's scan deeper inside a parenthesis reads on to the end of the command. Every scan is linear
-  in the command length. Every other command and tool exits 0 silently, after one python3 start;
-  the `Agent` branch (the dispatch gate) arrives with S2.
+  in the command length. Every other command and tool exits 0 silently, after one python3 start.
+  The `Agent` branch gates every subagent dispatch: it runs `dispatch`, `claims` and `decisions`
+  (never `register`) in the tree of the event's `cwd` (a missing or empty `cwd` is `FAIL hook.input`,
+  a `cwd` outside a repository `FAIL hook.target`), with the prompt (`tool_input.prompt`) written to a
+  temporary file for `gate_dispatch --prompt` and `gate_decisions --scan`, and `tool_input.model` as
+  `--tool-model`. An empty or missing prompt is `FAIL dispatch.input`; a missing or disagreeing
+  `tool_input.model` is `FAIL dispatch.model.agree` (the subagent would otherwise inherit the session
+  model). `SD_PROMPTS_DIR` overrides `--prompts-dir` (tests only). Exit 2 prints the gate lines on stderr.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
