@@ -58,10 +58,12 @@ commit and push, however it was launched.
      `_SYSTEM` or `_NOSYSTEM` assignment anywhere in any Bash command (a `git config core.hooksPath`
      on its own would move the hooks for every later command), and `--no-verify` (or the
      abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
-     in the arguments of a gated verb: up to an unquoted separator or an unpaired parenthesis or
-     backtick (so the rest of an enclosing `$(...)` is not read); the redirections `>&`, `<&`, `&>`,
-     `>|` and a `$(...)`, `<(...)`, `>(...)` or backtick piece without nesting do not end them.
-     `-n` is `--no-verify` for commit and `--dry-run` for push; it is blocked for both.
+     in the arguments of a gated verb, quoted (`git "push"`) or not: up to an unquoted separator
+     outside every parenthesis the arguments open, or an unpaired `)`, quote or backtick (so the
+     rest of an enclosing `$(...)` is not read); quotes, `$'...'`, `${...}`, backticks, `$(...)`,
+     `<(...)`, `>(...)`, `$((...))` at any depth and the redirections `>&`, `<&`, `&>`, `>|` do
+     not end them. `-n` is `--no-verify` for commit and `--dry-run` for push; it is blocked for
+     both.
   2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
      `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
      (`/usr/bin/git`). The options are git 2.50.1's global options, each checked with
@@ -70,8 +72,9 @@ commit and push, however it was launched.
      the pathspec flags, ...; quoted values and values holding `$(...)` or backticks included), read
      left to right as git does, plus a `$X` word (`git $X commit` is gated). The verb is a whole
      word (`commit-graph`, `pushd`, `--push-option` are not verbs). A backslash-newline is removed
-     first. There is no data/code analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`, a python heredoc
-     that prints it) runs the gates too; on a healthy tree that costs well under a second and blocks
+     first. There is no data/code analysis: a mention inside quotes, a heredoc or a comment
+     (`echo "git push"`, a python heredoc that prints it) runs the gates too; on a healthy tree that
+     costs well under a second and blocks
      nothing.
   3. The tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the
      directory of a leading `cd <dir> &&` (or `;`, or a newline), else from the event's `cwd`. A
@@ -85,11 +88,14 @@ commit and push, however it was launched.
   hook. The git hooks gate it: pre-commit for commits, pre-push for pushes. The same holds for a git
   word or verb with a quoted or escaped piece (`g"it" push`, `git p"ush"`); for a tree changed in a
   way the hook does not follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
-  `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the real
-  one; for an option value the hook cannot read as one word (`git -C $(dirname $(pwd)) commit`) or
-  a global option git adds after 2.50.1, where the verb is not seen and so neither is a bypass flag
-  after it; for a quoted or escaped bypass flag (`--no-"verify"`, `core.hooks\Path`); and for a
-  bypass the text does not show (a config file or hook script edited by other means). A `-C` or
+  `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the
+  real one; for an option value the hook cannot read as one word
+  (`git -C $(dirname $(pwd)) commit`) or a global option git adds after 2.50.1, where the verb is
+  not seen and so neither is a bypass flag after it; for a quoted or escaped bypass flag
+  (`--no-"verify"`, `core.hooks\Path`); for a flag after a `case` pattern's `)` inside a
+  substitution (`$(case x in x) ...;; esac)`) or after a double-quoted `$(...)` that both nests
+  parentheses and quotes (`"$(a $(b ")"))"`), where the argument scan ends early; and for a bypass
+  the text does not show (a config file or hook script edited by other means). A `-C` or
   `cd` directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "$WT" &&`,
   `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real command; name the directory
   literally. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a
@@ -118,9 +124,9 @@ commit and push, however it was launched.
   never overwritten, and then nothing is installed. `git-pre-commit.sh` runs
   `run_all.py --only register,claims` and refuses (`FAIL pre-commit.unstaged`) while a worktree-side
   change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,
-  `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with the
-  commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store` and the
-  `__pycache__` directories under `tools/gates`. `git-pre-push.sh` runs the same script with
+  `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with
+  the commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store`
+  and the `__pycache__` directories under `tools/gates`. `git-pre-push.sh` runs the same script with
   `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because a
   push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. It
   ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness over

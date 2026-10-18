@@ -9,11 +9,12 @@ textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-000
 1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
    _GLOBAL, _SYSTEM or _NOSYSTEM assignment anywhere, in any Bash command; `--no-verify` (or an
    abbreviation git accepts), `-n` or a short-option cluster holding n in the arguments of a gated
-   verb (ARGS: up to an unquoted separator or an unpaired parenthesis or backtick, so the rest of an
-   enclosing `$(...)` is not read; the redirections `>&`, `<&`, `&>`, `>|` and a `$(...)`, `<(...)`,
-   `>(...)` or backtick piece without nesting do not end it; `-n` is --no-verify for commit and
-   --dry-run for push, blocked for both). Each exits 2 with `FAIL hook.bypass: <form found>` before
-   any gate runs.
+   verb, quoted (`git "push"`) or not (arguments_end: up to an unquoted separator outside every
+   parenthesis the arguments open, an unpaired `)`, quote or backtick, so the rest of an enclosing
+   `$(...)` is not read; quotes, `$'...'`, `${...}`, backticks, `$(...)`, `<(...)`, `>(...)`,
+   `$((...))` at any depth and the redirections `>&`, `<&`, `&>`, `>|` do not end them; `-n` is
+   --no-verify for commit and --dry-run for push, blocked for both). Each exits 2 with
+   `FAIL hook.bypass: <form found>` before any gate runs.
 2. Gated: `git [options] commit|push`, matched in the text wherever it stands (after any separator,
    `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the verb a whole word (`commits`,
    `pushd`, `commit-graph`, `--push-option` are not verbs). The options are git 2.50.1's global
@@ -36,13 +37,15 @@ follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`, `--work-tree
 the hook gates the tree it can name and the git hooks gate the real one; an option value the hook
 cannot read as one word (`git -C $(dirname $(pwd)) commit`) or a global option git adds after
 2.50.1, where the verb is not seen and so neither is a bypass flag after it; a quoted or escaped
-bypass flag (`--no-"verify"`, `core.hooks\\Path`); a bypass in a form the text does not show (a
-config file or hook script edited by other means). A `-C` or `cd` directory is not expanded: one
-holding a variable, `$(...)` or a backtick (`cd "$WT" &&`, `git -C $(pwd)`) is `FAIL hook.target`,
-a block of a real command; name the directory literally. A commit message that holds `-n`,
-`--no-verify` or `core.hooksPath` as a word, or a `-n` inside a substitution in the arguments
-(`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the message to a file and use
-`git commit -F <file>`. Every scan is linear in the command length.
+bypass flag (`--no-"verify"`, `core.hooks\\Path`); a flag after a `case` pattern's `)` inside a
+substitution (`$(case x in x) ...;; esac)`) or after a double-quoted `$(...)` that both nests
+parentheses and quotes (`"$(a $(b ")"))"`), where the argument scan ends early; a bypass in a form
+the text does not show (a config file or hook script edited by other means). A `-C` or `cd`
+directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "$WT" &&`,
+`git -C $(pwd)`) is `FAIL hook.target`, a block of a real command; name the directory literally. A
+commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a `-n` inside a
+substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the
+message to a file and use `git commit -F <file>`. Every scan is linear in the command length.
 """
 from __future__ import annotations
 
@@ -64,11 +67,16 @@ OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +
                     r"|--(?:no-pager|paginate|bare|html-path|man-path|info-path|literal-pathspecs|no-literal-pathspecs"
                     r"|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-replace-objects|no-optional-locks|no-lazy-fetch"
                     r"|no-advice)|-[pP]|\$\{?\w+\}?)")
-GIT_VERB = re.compile(r"[ \t]+[\"']?(commit|push)(?![\w-])")   # the verb right after the option run
+GIT_VERB = re.compile(r"[ \t]+(?P<q>[\"']?)(commit|push)(?![\w-])")   # the verb right after the option run
 LEADING_CD = re.compile(r"\s*cd[ \t]+(" + VALUE + r")[ \t]*(?:&&|;|\n)")
-# the arguments of a gated verb: up to an unquoted separator or an unpaired parenthesis or backtick; the
-# redirections `>&`, `<&`, `&>`, `>|` and a `$(...)`, `<(...)`, `>(...)` or backtick piece without nesting do not end them
-ARGS = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[<>]&|&>|>\||[$<>]\([^()]*\)|`[^`]*`|[^"'\\;&|\n()`])*""")
+# one token of a gated verb's arguments (see arguments_end); every alternative starts differently or is
+# tried once per position, so a scan is linear
+ARG_TOKEN = re.compile(
+    r"""(?:"(?:[^"\\$]|\\.|\$\((?:[^()"']|"[^"]*"|'[^']*')*\)|\$(?!\())*"   # "...", its $(...) may quote
+    |"(?:[^"\\]|\\.)*"                                                     # "...", its $(...) may nest
+    |\$'(?:[^'\\]|\\.)*'|'[^']*'|`[^`]*`|\$\{[^{}]*\}|\\.|[<>]&|&>|>\|)      # $'...', '...', `...`, ${...}, \x, redirections
+    |(?P<stop>["'`])|(?P<sep>[;&|\n])|(?P<open>[$<>]?\()|(?P<close>\))
+    |[^"'`\\;&|\n()<>$]+|.""", re.S | re.X)
 BYPASS = (
     (re.compile(r"core\.hookspath", re.I), "core.hooksPath (it moves the git hooks away)"),
     (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)="),
@@ -112,9 +120,11 @@ def git_calls(command: str) -> list:
         for p in path:
             memo[p] = end
         v = GIT_VERB.match(command, end)
-        if v and v.end() not in seen:
-            seen.add(v.end())
-            calls.append((command[g.end():end], v.group(1), v.end()))
+        if v:
+            stop = v.end() + 1 if v.group("q") and command.startswith(v.group("q"), v.end()) else v.end()
+            if stop not in seen:      # a quoted verb (`git "push"`) ends after its closing quote
+                seen.add(stop)
+                calls.append((command[g.end():end], v.group(2), stop))
     return calls
 
 
@@ -126,6 +136,21 @@ def gates_for(event: dict) -> list:
     return names
 
 
+def arguments_end(command: str, pos: int) -> int:
+    """Where the arguments of a gated verb that ends at `pos` end: at an unquoted separator outside every
+    parenthesis the arguments open (`$(`, `<(`, `>(`, `(`, `$((` count), at an unpaired `)` or at an
+    unpaired quote or backtick. So `out=$(git push; ls -n)` stops at the `;` and `git push $(a $(b)) -n`
+    reads the -n. One token per step, each read once."""
+    depth = 0
+    while pos < len(command):
+        t = ARG_TOKEN.match(command, pos)
+        if t.group("stop") or (depth == 0 and (t.group("sep") or t.group("close"))):
+            return pos
+        depth += 1 if t.group("open") else -1 if t.group("close") else 0
+        pos = t.end()
+    return pos
+
+
 def bypass(command: str, calls: list):
     """The hook bypass the command holds, or None (see the module docstring, item 1)."""
     for pattern, reason in BYPASS:
@@ -135,7 +160,7 @@ def bypass(command: str, calls: list):
     for verb in sorted(end for _, _, end in calls):
         if verb < scanned:      # inside the arguments already read: its own arguments lie within them (linear)
             continue
-        scanned = ARGS.match(command, verb).end()
+        scanned = arguments_end(command, verb)
         for w in NO_VERIFY.finditer(command, verb, scanned):
             if w.group(1).startswith("--") or "n" in w.group(1):
                 return "%s after a gated git verb (--no-verify; -n is --no-verify for commit, --dry-run for push)" % w.group(1)
