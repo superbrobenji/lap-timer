@@ -79,6 +79,15 @@ class PreToolUse(unittest.TestCase):
     def tearDown(self):
         gf.remove(self.root)
 
+    def assert_gated(self, cmd, root=None):
+        p = hook("pre_tool_use.py", bash_event(root or self.root, cmd))
+        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd[:80])
+
+    def assert_silent(self, cmd, root=None):
+        p = hook("pre_tool_use.py", bash_event(root or self.root, cmd))
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd[:80])
+
     def test_commit_on_a_failing_register_is_blocked(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
@@ -95,10 +104,10 @@ class PreToolUse(unittest.TestCase):
                     "git -C . \\\n  commit -m x",               # backslash-newline continuation
                     "git -C %s commit -m x" % self.spaced.replace(" ", "\\ "),   # escaped space
                     "git --config-env a=B commit", '"git" commit -m x', "'git' push",
-                    "git ${X} commit -m x", "git $X push"):     # unexpandable option word: gated conservatively
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+                    "git ${X} commit -m x", "git $X push",      # unexpandable option word: gated conservatively
+                    "git p\\\nush", "git --git-dir=.git --work-tree . -p --bare --exec-path --literal-pathspecs push",
+                    "git --namespace n --no-replace-objects --no-optional-locks --html-path -c x.y=\"a b\" commit"):
+            self.assert_gated(cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
@@ -106,9 +115,9 @@ class PreToolUse(unittest.TestCase):
 
     def test_a_verb_that_only_shares_a_prefix_is_not_gated(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
-        for cmd in ("git commit-graph write", "git push-to-checkout x"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+        for cmd in ("git commit-graph write", "git push-to-checkout x", "git commits", "git pushd",
+                    "git --push-option x", "git stash push -m x", "git -C . log --grep commit"):
+            self.assert_silent(cmd)
 
     def test_the_tree_named_by_dash_C_or_cd_is_the_one_gated(self):
         bad = new_repo()
@@ -116,65 +125,113 @@ class PreToolUse(unittest.TestCase):
         gf.write(bad, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         # failing tree named from a clean cwd: blocked
         for cmd in ("git -C %s commit -m x" % bad, "cd %s && git push" % bad, "cd '%s'; git commit -m x" % bad,
-                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root))):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root)),
+                    "cd %s\ngit push" % bad, "cd %s && git -C %s push" % (os.path.dirname(bad), os.path.basename(bad))):
+            self.assert_gated(cmd)
         # clean tree named from a failing cwd: passes
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         clean = new_repo()
         self.addCleanup(gf.remove, clean)
-        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean,
+                    "cd %s && git -C %s push" % (os.path.dirname(clean), os.path.basename(clean))):
+            self.assert_silent(cmd)
         # a relative -C resolves against the event cwd
         p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
         self.assertEqual(0, p.returncode, p.stderr)
 
-    def test_a_gated_command_whose_tree_cannot_be_told_is_blocked(self):
-        for cmd in ("cd /a && cd /b && git push", "export X=1 && cd /b && git push", "(cd /b && git push)",
-                    "pushd /b && git push", "git commit -m x && cd /y", 'git -C "$WT" push', "git -C `pwd` push",
-                    'cd "$WT" && git push', "git --git-dir=/b/.git push", "git --work-tree /b commit",
-                    "GIT_DIR=/b/.git git push", "export GIT_WORK_TREE=/b; git push",
-                    "bash -c 'cd /wt && git push'", 'sh -c "cd /wt && git commit -m x"', "/bin/zsh -lc 'git push'",
-                    "env -C /wt git push", "env --chdir=/wt git push", "eval 'git push'", "git ls-files | xargs git commit",
-                    "bash <<EOF\ngit push\nEOF", "echo 'git push' | sh",
-                    "bash -o pipefail -c 'cd /wt && git push'", "bash --rcfile x -c 'git push'",   # an option with a value first
-                    "/bin/bash -ec 'git push'", "nohup bash -xc 'git push'", "'bash' -c 'git push'", 'bash "-c" "git push"',
-                    "bash -s <<'EOF'\ngit push\nEOF", "bash<<EOF\ngit push\nEOF", "bash <<< 'git push'",
-                    "cat <<EOF | bash\ncd /wt && git push\nEOF", "find /wt -execdir git push \\;", "sudo -D /wt git push",
-                    "git commit -F - <<EOF\nbody\nEOF\ncd /elsewhere"):   # a real cd after the heredoc terminator
+    def test_two_trees_are_each_gated_once(self):
+        one, two = new_repo(), new_repo()
+        self.addCleanup(gf.remove, one)
+        self.addCleanup(gf.remove, two)
+        gf.write(one, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.write(two, os.path.join(gf.STATE, "findings.yml"), ORPHAN.replace("T1-ORPHAN-1", "T1-ORPHAN-2"))
+        p = hook("pre_tool_use.py", bash_event(self.root, "git -C %s commit -m x && git -C %s push" % (one, two)))
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-1:"), p.stderr)
+        self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-2:"), p.stderr)
+        for cmd in ("git commit -m x && git push && git -C . push",       # one tree, three calls
+                    "git -C docs commit -m x && git push"):               # one tree named by two directories
+            p = hook("pre_tool_use.py", bash_event(one, cmd))
+            self.assertEqual(2, p.returncode, p.stderr)
+            self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-1:"), (cmd, p.stderr))
+        p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m x; git -C %s push" % two))   # clean cwd, failing two
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertEqual(["FAIL register.owner.T1-ORPHAN-2"], [l.split(":")[0] for l in p.stderr.splitlines()
+                                                              if l.startswith("FAIL")])
+
+    def test_documented_limits_are_not_gated(self):
+        # DEC-0005: the git hooks gate these (pre-commit for commits, pre-push for pushes)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("G=git; $G push", "git $V", 'eval "$CMD"', "bash script-that-pushes.sh",
+                    "echo push | xargs git", "xargs -a verbs.txt /usr/bin/git", 'g"it" push', "git p\"ush\"",
+                    "alias gp='git p''ush'; gp"):
+            self.assert_silent(cmd)
+
+    def test_a_mention_in_data_runs_the_gates(self):
+        cmds = ('echo "git push"', "python3 - <<'EOF'\nprint('then git commit the change')\nEOF",
+                "grep -rn 'git push' docs", "echo hi # git push", "cat <<'EOF'\ngit push\nEOF")
+        for cmd in cmds:
+            self.assert_silent(cmd)          # a clean register: the gates run and pass, nothing printed
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in cmds:
+            self.assert_gated(cmd)
+
+    def test_path_qualified_git_and_prefixes_are_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push",
+                    "echo hi && git push", "echo hi; git push", "true || git commit -m x", "ls | git commit -m x",
+                    "echo hi\ngit push", "x=$(git commit -m y)", "echo `git push`", "(git push)", "{ git push; }",
+                    "if git push; then echo ok; fi", "A=1 " * 13 + "git push", "FOO=" + "x" * 300 + " git push"):
+            self.assert_gated(cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log",
+                    "my-git push", "x.git push"):
+            self.assert_silent(cmd)
+
+    def test_hook_bypasses_are_blocked(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd, form in (("git commit --no-verify -m x", "--no-verify after a gated git verb"),
+                          ("git commit -m x --no-verif", "--no-verif after"), ("git push --no-veri", "--no-veri after"),
+                          ("git commit -n -m x", "-n after"), ("git commit -anm x", "-anm after"),
+                          ("git push -n origin HEAD", "-n after"), ("git push --no-verify origin", "--no-verify after"),
+                          ("git commit -m 'a; b' --no-verify", "--no-verify after"),
+                          ("git commit -m x \"-n\"", "-n after"), ("git add f && git commit -qn -m x", "-qn after"),
+                          ("git -c core.hooksPath=/dev/null commit -m x", "core.hooksPath"),
+                          ("git --config-env=core.hooksPath=H commit -m x", "core.hooksPath"),
+                          ("git config core.hooksPath /tmp/h", "core.hooksPath"),
+                          ("git -c CORE.HOOKSPATH=x push", "core.hooksPath"),
+                          ("GIT_CONFIG_PARAMETERS=\"'a.b'='c'\" git push", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=a.b GIT_CONFIG_VALUE_0=c git push", "GIT_CONFIG_* assignment"),
+                          ("env GIT_CONFIG_GLOBAL=/tmp/g git commit -m x", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_SYSTEM=/x git push", "GIT_CONFIG_* assignment"),
+                          ("export GIT_CONFIG_NOSYSTEM=1; git push", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_KEY_0=a.b ls", "GIT_CONFIG_* assignment")):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, cmd)
-            self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree "), (cmd, p.stderr))
-            self.assertIn("use git -C <dir> or a leading cd <dir> &&", p.stderr)
-        for cmd in ('git commit -m "cd elsewhere, GIT_DIR=x"', "git -C . push", "cd . && git push", "cd .; git commit -m x",
-                    'git commit -m "then run git push and bash -c x"', "bash build.sh && git push", "env FOO=1 git push",
-                    "git commit -m \"$(cat <<'EOF'\nfix cd and git push; bash -c x; GIT_DIR=/y\nEOF\n)\"",
-                    "git commit -F - <<'EOF'\nmentions cd /x, GIT_DIR=/y and eval\nEOF",
-                    'git commit -F - <<"EOF"\ncd /x\nEOF', "git commit -F - <<-EOF\n\tcd /x\n\tEOF",
-                    "git commit -m \"$(cat <<'EOF'\nuses bash -c, xargs and eval | sh\nEOF\n)\" && git push 2>&1 | tail -3",
-                    "git commit -m 'run: bash -o pipefail -c x'", "echo $((1<<3)) && git push", "git commit -S -m x"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))   # followed forms and quoted words still work
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
+            self.assertIn(form, p.stderr, cmd)
+            self.assertEqual(1, len(p.stderr.splitlines()), (cmd, p.stderr))     # no gate ran
+            self.assertNotIn("register", p.stderr, cmd)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
+        for cmd in ("git commit -m x && grep -n y f", "git push --dry-run", "nice -n 5 git push", "git log -n 3",
+                    "git commit --amend --no-edit", "git push --set-upstream origin x", "git commit -m x\nls -n",
+                    "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD"):
+            self.assert_silent(cmd)
 
     def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
         for cmd in ("git -c x=" + "\\" * 300 + " status", "git " + "-c " * 300 + "status", "git " + "-C " * 300 + "status",
                     "git " + '-c "a" ' * 300 + "status", "git " + "$x " * 300 + "status",
-                    "git " + "--git-dir " * 300 + "status", "git -C " + "\\ " * 300 + "status"):
+                    "git " + "--git-dir " * 300 + "status", "git -C " + "\\ " * 300 + "status",
+                    # git words inside option runs, verbs, segments and option-like words: every scan is linear
+                    "git -c " * 30000 + "status", "git -C " * 30000, 'git -c "' * 30000, "git $x " * 30000,
+                    "git commit -m x " + "<<A\n" * 20000, "git commit -m x && " + "bash -o x " * 10000 + "-c y",
+                    "git commit " * 30000, "git commit -m 'x' ; " * 20000, "git commit " + "-aaaaaaaaa! " * 20000,
+                    "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit"):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(0, p.returncode, (cmd[:30], p.stderr))
-            self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
-        # heredoc openers without a terminator, shell words, options before -c, quotes: every scan is linear
-        for cmd, rc in (("git commit -m x " + "<<A\n" * 20000, 0), ("git commit -m x\n" + "<<A\n" * 20000 + "A", 0),
-                        ("git commit -m x && " + "sh " * 20000, 0), ("git commit -m x && " + "'a' " * 20000, 0),
-                        ("git commit -m x && " + "bash -o x " * 10000 + "-c y", 2),
-                        ("git commit -m x && bash " + "<<A " * 20000, 2), ("git commit -m x " + "export " * 20000, 0)):
-            start = time.monotonic()
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(rc, p.returncode, (cmd[:30], p.stderr))
-            self.assertTrue(rc == 0 or p.stderr.startswith("FAIL hook.target: "), (cmd[:30], p.stderr))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])
             self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
         gated = "git -c x=" + "\\" * 300 + " commit -m x"      # same runs before a real verb: still gated, still fast
         start = time.monotonic()
@@ -186,19 +243,20 @@ class PreToolUse(unittest.TestCase):
     def test_a_named_directory_that_is_not_a_repo_fails_closed(self):
         outside = tempfile.mkdtemp(prefix="gate-test-outside-")
         self.addCleanup(gf.remove, outside)
-        for cmd in ("git -C %s commit -m x" % outside, "cd %s && git push" % outside, "git -C /nonexistent-dir push"):
+        for cmd, d in (("git -C %s commit -m x" % outside, outside), ("cd %s && git push" % outside, outside),
+                       ("git -C /nonexistent-dir push", "/nonexistent-dir"), ('git -C "$WT" push', "%s/$WT" % self.root)):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr, cmd)
+            self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % d), (cmd, p.stderr))
 
     def test_ungated_commands_and_tools_pass_even_on_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         for cmd in ("git status", "git log --grep commit", "gh pr view", "ls"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(0, p.returncode, (cmd, p.stderr))
+            self.assert_silent(cmd)
         agent = dict(bash_event(self.root, ""), tool_name="Agent",
-                     tool_input={"prompt": "p", "description": "d", "subagent_type": "general-purpose"})
-        self.assertEqual(0, hook("pre_tool_use.py", agent).returncode)
+                     tool_input={"prompt": "git push --no-verify", "description": "d", "subagent_type": "general-purpose"})
+        p = hook("pre_tool_use.py", agent)
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
 
     def test_hook_fails_closed_when_script_errors(self):
         broken = os.path.join(self.root, "broken")
@@ -212,7 +270,8 @@ class PreToolUse(unittest.TestCase):
         self.assertEqual("FAIL hook.internal: RuntimeError: gate exploded\n", p.stderr)
 
     def test_malformed_stdin_fails_closed(self):
-        for raw in ("", "not json", "[1, 2]"):
+        for raw in ("", "not json", "[1, 2]", json.dumps(dict(bash_event(self.root, ""), tool_input={"command": 7})),
+                    json.dumps(dict(bash_event(self.root, ""), tool_input=None))):
             p = hook("pre_tool_use.py", raw)
             self.assertEqual(2, p.returncode, raw)
             self.assertTrue(p.stderr.startswith("FAIL hook.internal: "), p.stderr)
@@ -221,7 +280,15 @@ class PreToolUse(unittest.TestCase):
         outside = os.path.dirname(self.root)
         p = hook("pre_tool_use.py", bash_event(outside, "git commit -m x"))
         self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr)
+        self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % outside), p.stderr)
+        for cwd in (None, "", 7):
+            event = bash_event(self.root, "git commit -m x")
+            if cwd is None:
+                del event["cwd"]
+            else:
+                event["cwd"] = cwd
+            p = hook("pre_tool_use.py", event)       # the hook's own process cwd is this repository: it must not be used
+            self.assertEqual((2, "FAIL hook.input: the event has no cwd\n"), (p.returncode, p.stderr), cwd)
 
 
 class GitHooks(unittest.TestCase):
@@ -232,6 +299,7 @@ class GitHooks(unittest.TestCase):
         p = self.install()
         self.assertEqual(0, p.returncode, p.stderr)
         self.hook = os.path.join(self.root, ".git", "hooks", "pre-commit")
+        self.pre_push = os.path.join(self.root, ".git", "hooks", "pre-push")
 
     def tearDown(self):
         gf.remove(self.root)
@@ -415,177 +483,96 @@ class GitHooks(unittest.TestCase):
         p = self.commit()
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
+    def push(self):
+        """`git push` of HEAD to a fresh bare remote; returns (process, the ref the remote holds or "")."""
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
+        p = subprocess.run(["git", "push", "-q", remote, "HEAD:refs/heads/main"], cwd=self.root,
+                           capture_output=True, text=True, env=env, check=False)
+        got = subprocess.run(["git", "--git-dir", remote, "rev-parse", "-q", "--verify", "refs/heads/main"],
+                             capture_output=True, text=True, env=isolated_env(), check=False)
+        return p, got.stdout.strip()
 
-class PreToolUseCommandPosition(unittest.TestCase):
-    """The unfiltered Bash handler sees every command: the git verb is matched in the code after quote
-    removal, and a verb in data passes only when every command holding it keeps it as text."""
-    def setUp(self):
-        self.root = new_repo()
-        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)    # a failing register
+    def test_install_writes_both_shims(self):
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(["install-hooks: pre-commit -> tools/gates/hooks/git-pre-commit.sh (%s)" % self.hook,
+                          "install-hooks: pre-push -> tools/gates/hooks/git-pre-push.sh (%s)" % self.pre_push],
+                         [l.replace(os.path.realpath(self.root), self.root) for l in p.stdout.splitlines()])
+        for path, script in ((self.hook, "git-pre-commit.sh"), (self.pre_push, "git-pre-push.sh")):
+            with open(path) as fh:
+                text = fh.read()
+            self.assertEqual("#!/bin/sh\n# strict-delivery-gates-hook\n", text[:len("#!/bin/sh\n# strict-delivery-gates-hook\n")])
+            self.assertIn("/tools/gates/hooks/%s\"" % script, text)
+            self.assertNotIn("@HOOK@", text)
+            self.assertTrue(os.access(path, os.X_OK), path)
+        with open(self.pre_push) as fh:
+            self.assertIn("FAIL pre-push.missing", fh.read())
 
-    def tearDown(self):
-        gf.remove(self.root)
+    def test_a_foreign_pre_push_hook_is_moved_aside(self):
+        gf.write(self.root, ".git/hooks/pre-push", "#!/bin/sh\necho mine\n")
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("moved the existing pre-push hook", p.stdout)
+        self.assertNotIn("moved the existing pre-commit hook", p.stdout)
+        with open(self.pre_push + ".pre-strict-delivery") as fh:
+            self.assertEqual("#!/bin/sh\necho mine\n", fh.read())
+        with open(self.pre_push) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+        # a refusal for one hook installs neither
+        gf.write(self.root, ".git/hooks/pre-push", "#!/bin/sh\necho two\n")
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho three\n")
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-push.pre-strict-delivery already exists", p.stderr)
+        with open(self.hook) as fh:
+            self.assertEqual("#!/bin/sh\necho three\n", fh.read())
+        self.assertFalse(os.path.exists(self.hook + ".pre-strict-delivery"))
 
-    def run_hook(self, cmd):
-        return hook("pre_tool_use.py", bash_event(self.root, cmd))
+    def test_pre_push_blocks_a_failing_register(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.commit_all(self.root, "orphan")      # gitfixture commits without hooks: a commit made with --no-verify
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stdout + p.stderr)
+        self.assertEqual("", got)
 
-    def assert_gated(self, cmd):
-        p = self.run_hook(cmd)
-        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
-        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd[:80])
+    def test_pre_push_blocks_unstaged_register_edits(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n# edited\n")   # not staged
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertIn("findings.yml", p.stderr)
+        self.assertEqual("", got)
+        gf.git(self.root, "add", "-A")        # staged but not committed: HEAD, which is pushed, differs
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertEqual("", got)
+        gf.git(self.root, "reset", "-q")
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")      # back to HEAD
+        gf.write(self.root, os.path.join("docs", "reviews", "new.md"), "x\n")     # untracked
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertIn("docs/reviews/new.md", p.stderr)
+        self.assertEqual("", got)
 
-    def assert_silent(self, cmd):
-        p = self.run_hook(cmd)
-        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd[:80])
+    def test_pre_push_passes_a_clean_tree(self):
+        gf.write(self.root, "x.txt", "x\n")      # outside the guarded paths: neither staged nor not
+        p, got = self.push()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertEqual(gf.git(self.root, "rev-parse", "HEAD"), got)
 
-    def assert_unknown(self, cmd):
-        p = self.run_hook(cmd)
-        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
-        self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree "), (cmd[:80], p.stderr))
-        self.assertIn(" runs in, or whether it runs: ", p.stderr, cmd[:80])
-        self.assertTrue(p.stderr.endswith("; use git -C <dir> or a leading cd <dir> &&\n"), (cmd[:80], p.stderr))
-
-    def test_a_verb_inside_data_is_not_gated(self):
-        for cmd in ("grep -rn 'git push' docs", "echo 'run git push and git commit later'", 'rg "git commit" docs',
-                    "cat <<EOF\ngit push\nEOF", "cat <<'EOF'\ngit push\nEOF", 'cat <<"EOF"\ngit push\nEOF',
-                    "cat <<\\EOF\ngit push\nEOF", "cat <<\\EOF\n$(git push)\nEOF", "cat <<-EOF\n\tgit commit\n\tEOF",
-                    "gh pr create --title t --body 'then git push'", "git log --grep='git push'", "git log --grep 'git commit'",
-                    "echo hi # git push", "echo \"x git push\"", "printf '%s' \"git commit\" | wc -c",
-                    "echo \"$(cat <<'EOF'\ngit push\nEOF\n)\"", "git status 2>&1 | grep 'git commit'",
-                    "echo 'x; git push'", "grep 'a && git commit' f", "echo 'x $(git push)'", "echo `echo 'y; git push'`",
-                    "cat <<'EOF'\n$(git push)\nEOF", "echo hi # a && git push", "echo ok # $(git push)",
-                    "cat <<EOF\n$(echo a)\n git push\nEOF",       # unquoted delimiter: only the substitution runs
-                    "cat <<EOF\n`echo a`\nx git push\nEOF", "echo \"$(echo a) then git push\"",
-                    "echo ${#X}; echo 'git push'", "echo $# 'git push'", "echo a\\ git push",   # an escaped space quotes
-                    # the Claude Code forms and other holders that keep the data as text
-                    "gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\nthen git push\nEOF\n)\"",
-                    "grep -rn 'git push' docs | head -5", "cat > notes.md <<'EOF'\ngit push\nEOF",
-                    "(cd docs && grep -rn 'git push' .)", "if grep -q 'git push' f; then echo y; fi", "X=1 grep 'git push' f",
-                    "echo ${v:-'git push'}", "git stash push -m 'before git push'", "jq '.[0].commit' f",
-                    "echo 'git push' | grep push | wc -l", "printf '%s\\n' 'git push' | tee notes.txt",
-                    "git tag -a v1 -F - <<'EOF'\nthen git push\nEOF", "echo \"$(echo 'git push')\"",
-                    "echo $(echo git) push", "git log --oneline | grep 'push'", "sed -n '/commit/p' f",
-                    # a lone verb word in data names no git call; awk and xargs that only read text
-                    "python3 - <<'EOF'\nprint('the commit is done')\nEOF", "curl -s -X POST -d '{\"commit\": \"abc\"}' https://x",
-                    "npm version patch -m 'release commit %s'", "pytest -k 'push or commit'", "python3 -c \"print('push')\"",
-                    "node -e 'console.log(\"push\")'", "awk '/push/ {n++} END {print n}' f", "python3 -c print\\(\\\"push\\\"\\)",
-                    "grep 'git push' f | awk '{print $1}'", "find . -name '*.md' | xargs grep -l 'git push'",
-                    "grep -rl 'git push' docs | xargs -n 1 wc -l", "awk '/git push/' notes.md",
-                    "jq 'select(.msg == \"git push\")' f"):
-            self.assert_silent(cmd)
-
-    def test_a_verb_that_is_not_in_data_is_gated(self):
-        for cmd in ('echo "$(git push)"', "x=$(git commit -m y)", "echo `git push`", "echo \"`git commit -m y`\"",
-                    "echo hi && git push", "echo hi; git push", "ls | git commit -m x", "echo hi & git push",
-                    "if git push; then echo ok; fi", "! git push", "{ git push; }", "(git push)", "true || git commit -m x",
-                    "echo hi\ngit push", "2>&1 git push", "cat <<EOF\n$(git push)\nEOF", "cat <<EOF\nx $(echo a; git push)\nEOF",
-                    "cat <<EOF\ngit push", "git commit -m \"$(cat <<'EOF'\nfix git push in the notes\nEOF\n)\"",
-                    "echo 'git push' && git push", "cat <<'EOF' > /dev/null\nx\nEOF\ngit push",
-                    # an unquoted mention is gated too (fail closed; the cost is a blocked echo)
-                    "echo git push", "echo git commit -m x", "ls; echo git push; ls", "cd missing && echo git push",
-                    # no cap on prefix words, word length or path length; wrappers need no list
-                    "A=1 " * 13 + "git push", "FOO=" + "x" * 300 + " git push", "/" + "d/" * 200 + "git push",
-                    "env X=" + "y" * 260 + " git push", "timeout 1.5 git push", "sudo --user nobody git push",
-                    "> /tmp/log git push", "2> err git push", "echo ${#X}; git push", "echo $# && git push",
-                    "arch -arm64 git push", "xcrun git push", "flock /tmp/l git push", "watch git push", "chronic git push",
-                    "unbuffer git push", "script -q /dev/null git push", "coproc git push", "nohup nice -n 5 git commit -m x",
-                    "echo \"unclosed; git push", "echo 'unclosed; git push"):     # an unterminated quote is code
-            p = self.run_hook(cmd)
-            self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
-            self.assertTrue("FAIL register.owner.T1-ORPHAN-1" in p.stderr or "FAIL hook." in p.stderr, (cmd[:80], p.stderr))
-        for cmd in ('echo "$(git push)"', "echo ${#X}; git push", "arch -arm64 git push", "timeout 1.5 git push",
-                    "A=1 " * 13 + "git push", "> /tmp/log git push", "git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\""):
-            self.assert_gated(cmd)
-
-    def test_quote_removal_joins_quoted_pieces_into_the_word(self):
-        for cmd in ('g"it" push', "'g'it push", "gi\\t push", 'git "push"', "git 'push'", 'git p"ush"', "git pu\\sh",
-                    "$'git' push", "$'\\x67it' push", "''git push", 'git"" push', "\\git push", "git -C . 'com'mit -m x",
-                    "sudo g'i't push", "echo ok; gi\\t commit -m x",
-                    "git p\\\nush", "gi\\\nt push", "true && git p\\\nush"):     # a continuation joins with nothing
-            self.assert_gated(cmd)
-        clean = new_repo()
-        self.addCleanup(gf.remove, clean)
-        self.assertEqual((0, ""), (self.run_hook('git -"C" %s push' % clean).returncode, ""))   # the -C dir is followed
-        self.assert_gated("git %s . push" % "$'\\x2d'C")       # an ANSI-C escape decoded into an option
-        for cmd in ("c'd' %s && git push" % clean, "\\cd %s && git push" % clean):
-            p = self.run_hook(cmd)
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree push runs in (a cd"), p.stderr)
-
-    def test_data_a_command_may_run_is_blocked(self):
-        for cmd in ("watch 'git push'", "su -c 'git push'", "flock /tmp/l -c 'git push'", "script -q -c 'git push' /dev/null",
-                    "python3 -c 'import os; os.system(\"git push\")'", "perl -e 'system(\"git push\")'",
-                    "python3 <<'EOF'\nimport os\nos.system('git push')\nEOF", "ruby -e 'system(\"git commit -m x\")'",
-                    "cat <<'EOF' | python3\nimport os\nos.system('git push')\nEOF", "echo 'git push' | python3 -",
-                    "sudo sh -c 'git push'", "env bash -c 'git push'", "xargs -I{} sh -c 'git push'",
-                    "bash -c 'gi''t push'", "bash -c 'git \"$0\"' push", "bash -c git\\ push", "bash -c \"gi\\$'t' push\"",
-                    "bash -c 'g\"it\" pu{sh,}'", "x=$(echo 'git push'); $x", "X='git push' ls", "GIT_EDITOR='git push;' git commit",
-                    "git -c alias.p='!git push' p", "git submodule foreach 'git push'", "git rebase -x 'git push' HEAD~1",
-                    "printf -v c 'git push'; $c", "echo 'git push' > >(sh)", "echo 'git push' | tee >(sh)",
-                    "(echo 'git push') | sh", "{ echo 'git push'; } | sh", "eval \"$(echo 'git push')\"", "sh <(echo 'git push')",
-                    "echo \"$(python3 -c 'git push')\"", "while read l; do $l; done <<< 'git push'",
-                    "echo 'git push' | grep push | sh", "printf '%s' 'git push' | xargs -0 sh -c",
-                    "bash -c \"$'\\147it' push\"", "echo \"$(case x in a) bash -c 'git push';; esac)\"",
-                    "git -c core.editor='git push' commit", "bash -c '${G}it push'", "bash -c \"gi\\$'t' \\$V\"",
-                    "bash -c \"$'\\147it' \\$V\"", "bash -c \"g\\\"it\\\" \\$V\"",
-                    "X=\"$(echo 'git push')\" grep x f", "bash -c 'echo push'", "python3 -c os.system\\(\\\"git\\ push\\\"\\)",
-                    # awk that can run a command, xargs running a shell, sed (GNU sed `e` executes)
-                    "grep 'git push' f | awk '{system($0)}'", "echo 'git push' | awk '{print | \"sh\"}'",
-                    "awk 'BEGIN { system(\"git push\") }'", "awk -f prog.awk <<'EOF'\ngit push\nEOF",
-                    "find . | xargs sh -c 'git push'", "sed -n '/git push/p' f", "grep 'git push' f | sed 's/x/y/'"):
-            self.assert_unknown(cmd)
-
-    def test_an_expansion_in_place_of_the_git_word_or_the_verb_is_blocked(self):
-        for cmd in ("$(echo git) push", "${G:-git} push", "{git,} push", "`echo git` push", "G=git; $G push", "sudo $G push",
-                    "git p*", "git pu{sh,}", "git $V", "git --no-pager \"$V\"", "git -C . ${V};", "sudo git pus?",
-                    "${G:-git} p*", "\"$(which git)\" pu$V", "$G $(echo push)", "git$V",
-                    "echo push | xargs git", "printf push | xargs -n 1 git -C .", "xargs -a verbs.txt /usr/bin/git"):
-            self.assert_unknown(cmd)
-        for cmd in ("git $x status", "git -C \"$PWD\" log", "echo $(echo git) push", "git log $range", "$EDITOR notes.md"):
-            p = self.run_hook(cmd)
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
-
-    def test_parameter_expansion_and_ansi_c_quotes_are_parsed(self):
-        for cmd in ("echo ${v:- #x}; git push", "$'it\\'s' ; git push; echo 'x'", 'echo "${x:-"}"}"; git push',
-                    "echo ${v:-a;b} && git push", "echo $'a\\\\' ; git push",
-                    "cat <<EOF\n${x:-\"}\nEOF\ngit push; echo \"x\""):    # a heredoc body ends at its terminator
-            self.assert_gated(cmd)
-        for cmd in ("echo ${v:-'git push'}", "echo ${#v} 'git push'", "echo $'git\\tpush'", "echo \"${v:-git push}\""):
-            self.assert_silent(cmd)
-
-    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
-        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
-                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
-                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
-                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push"):
-            self.assert_gated(cmd)
-        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'",
-                    "bash -c 'git push'", "echo 'git push' | sh", "find . -exec git push \\;", "xargs git push"):
-            p = self.run_hook(cmd)
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL hook.target", p.stderr, cmd)
-        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log"):
-            self.assert_silent(cmd)
-
-    def test_scans_stay_linear(self):
-        distinct = "".join("cat <<D%d\n" % k for k in range(8000))
-        for cmd in (";" * 30000 + "ls", "$(" * 10000, "`" * 20000, '"' * 20000, "'" * 20000, "sudo -a; " * 5000 + "ls",
-                    "echo $(" * 5000, "( " * 20000, "git commit -m \"" + "$(" * 5000, "<<A\n" * 20000,
-                    distinct, distinct + "git push", "x" * 200000, "git " + "-c a=b " * 20000 + "status",
-                    "echo \"" * 5000, "# x\n" * 20000, "<<'A'\n" * 20000, "<<A\n$(" * 5000, "A=1 " * 40000,
-                    # quote removal, data holders, pipes, nesting, parameter expansions, ANSI-C quotes, case patterns
-                    'g"it" ' * 20000, "echo 'git push' | " * 5000 + "cat", "python3 -c 'git push' | " * 3000,
-                    "$(" * 5000 + "echo 'git push'" + ")" * 5000, "${" * 10000, '"' + "${" * 10000, "$'" + "\\'" * 50000,
-                    "x\\ " * 30000, "$(case x in a) " * 5000, ">(" * 10000, "git " + "$x " * 20000,
-                    "cat <<'EOF'\n" + "git push\n" * 50000 + "EOF\n", "cat <<EOF\n" + "$(echo a) git push\n" * 20000 + "EOF\n",
-                    "git commit " * 20000 + "'push' " * 20000, "bash -c 'g\"it\" " + "x " * 50000 + "'",
-                    # unterminated nested substitutions in double quotes; option runs that hold git words
-                    '"$(' * 10000, 'git "$(' * 10000, '"`' * 10000, "git -C " * 20000, "git $(git " * 10000,
-                    "xargs git " * 10000, "echo 'git push' | awk '{print}' | " * 5000 + "cat"):
-            start = time.monotonic()
-            p = self.run_hook(cmd)
-            self.assertLess(time.monotonic() - start, 2.0, cmd[:20])
-            self.assertIn(p.returncode, (0, 2), (cmd[:20], p.stderr))
+    def test_a_tree_without_the_gates_cannot_push(self):
+        gf.git(self.root, "rm", "-r", "-q", "tools")
+        gf.commit_all(self.root, "no gates")
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.missing", p.stderr)
+        self.assertEqual("", got)
 
 
 class SessionStart(unittest.TestCase):
@@ -617,6 +604,18 @@ class SessionStart(unittest.TestCase):
         p = hook("session_start.py", self.event())          # second start: already ours
         self.assertNotIn("install-hooks:", p.stdout)
         self.assertIn("invoke the strict-delivery skill", p.stdout)
+
+    def test_session_start_installs_a_missing_pre_push_shim(self):
+        copy_gates(self.root)
+        self.assertEqual(0, hook("session_start.py", self.event()).returncode)
+        pre_push = os.path.join(self.root, ".git", "hooks", "pre-push")
+        os.remove(pre_push)                                 # pre-commit is still ours
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("install-hooks: pre-push ->", p.stdout)
+        self.assertNotIn("FAIL", p.stdout)
+        with open(pre_push) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
 
     def assert_failure_reaches_the_model(self, p, line):
         """SessionStart cannot block and only exit-0 stdout reaches the model: the FAIL is on stdout

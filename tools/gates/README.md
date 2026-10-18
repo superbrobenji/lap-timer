@@ -47,61 +47,71 @@ without an `if` filter, so the script sees every Bash call), `hooks/session_star
 `hooks/user_prompt_submit.py`; a new Claude Code session loads it. `Stop` and `SubagentStop` arrive
 with S2.
 
+Design (owner decision DEC-0005): the Claude Code Bash hook is a best-effort textual check with
+documented limits; the git hooks, pre-commit and pre-push, are the enforcement. They run for every
+commit and push, however it was launched.
+
 - `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
-  (`FAIL hook.internal`, fail closed). Bash: a backslash-newline is removed (the shell joins the
-  lines with nothing between them), then one linear pass splits the command into data and code.
-  Data: single-quoted spans and escaped characters, ANSI-C `$'...'` spans (escapes decoded),
-  quoted-delimiter heredoc bodies (`<<'E'`, `<<"E"`, `<<\E`), the text of double-quoted spans and
-  unquoted-delimiter heredoc bodies outside `$(...)`, backticks and `${...}`, and every character of a
-  word that holds one of these. A quoted span or escaped character made only of `[A-Za-z0-9_./=+-]`
-  is code, so quote removal joins it to its word (`g"it" push`, `gi\t push`, `git p"ush"` are
-  `git push`); a comment (a `#` that starts a word, never inside `${...}`) is neither.
-  `git commit` and `git push` are then matched textually in the code anywhere (any wrapper,
-  `VAR=val`, redirection or path-qualified git word before the verb) and run the register and claim
-  gates on the tree the command names: the event's cwd, moved by a leading `cd <dir> &&` or `;` and
-  by each `git -C <dir>`. So `echo "$(git push)"` and a mention outside quotes (`echo git push`) are
-  gated: a blocked command is the cost of failing closed. A `git` word in data with a verb word
-  after it in the same pipeline (a lone verb word only when the code holds a shell launcher, so
-  `python3 -c "print('push')"` passes), or a git call the hook cannot read (`git p*`, `git "$V"`,
-  `git $V`, `echo push | xargs git`, `$G push`, `{git,} push`), exits 2 with `FAIL hook.target:
-  cannot tell which tree <verb> runs in, or whether it runs` unless every command on the way keeps it
-  as text: the head is echo, printf (without `-v`), grep, egrep, fgrep, rg, gh, cat, tee, jq, awk
-  (no `system`, `getline`, `|` or `-f`), xargs running echo, grep, egrep, fgrep, rg, cat, jq, head,
-  tail or wc, or git with a subcommand among commit, push, log, show, tag, notes, stash, merge,
-  shortlog, status, diff, add, branch, rev-list, describe, blame (no `-c`/`--config-env`); sed is not
-  one (GNU sed `e` runs its pattern space); the data is not in a `VAR=val` or
-  redirection prefix; there is no `>(...)`; the output is piped only into those commands or head,
-  tail, wc, sort, uniq, cut, less, more, tr, nl, column, fold; and the same holds for each command
-  whose word holds it (a heredoc body belongs to the command on its opener line). So
-  `grep -rn 'git push' docs | head`, `grep 'git push' f | awk '{print $1}'`,
-  `find . | xargs grep -l 'git push'`, `git log --grep='git push'` and
-  `gh pr create --body "$(cat <<'EOF' ...)"` pass, while `bash -c 'git push'`, `eval`, `watch`,
-  `su -c`, `python3 -c`, a heredoc fed to an interpreter, `| sh`, `sed`, `sudo sh -c`, `env`,
-  `xargs sh` or an unknown command holding it fail. A gated command whose tree it cannot tell (another `cd`, `pushd`,
-  a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word) or that holds a launcher
-  in its code (`bash -c`, `eval`, `xargs`, `| sh`, a shell fed a heredoc, `find -exec`/`-execdir`,
-  `env -C`, `sudo -D`) also exits 2 with `FAIL hook.target`. A `$X` word between git and the
-  subcommand reads as an option (`git $X commit` gates the cwd tree). Not followed: aliases and
-  functions defined earlier, a git word and a subcommand that are both variables or globs (`$G $V`),
-  a `-C $VAR` directory, a payload written to a file and run later, text a program assembles at run
-  time; an unterminated quote or heredoc is code. Every other command and tool exits 0 silently,
-  after one python3 start; the `Agent` branch (the dispatch gate) arrives with S2.
+  (`FAIL hook.internal`, fail closed). Bash, in order:
+  1. Hook bypasses exit 2 with `FAIL hook.bypass: <form found>` before any gate runs:
+     `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`,
+     `_SYSTEM` or `_NOSYSTEM` assignment anywhere in any Bash command (a `git config core.hooksPath`
+     on its own would move the hooks for every later command), and `--no-verify` (or the
+     abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
+     after a gated verb, up to the end of its simple command (quote-aware). `-n` is `--no-verify`
+     for commit and `--dry-run` for push; it is blocked for both.
+  2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
+     `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
+     (`/usr/bin/git`). The options are the ones git takes before a subcommand (`-C <dir>`,
+     `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--no-pager`, `-p`,
+     `--bare`, `--exec-path`, ...; quoted values included), read left to right as git does, plus a
+     `$X` word (`git $X commit` is gated). The verb is a whole word (`commit-graph`, `pushd`,
+     `--push-option` are not verbs). A backslash-newline is removed first. There is no data/code
+     analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`, a python heredoc
+     that prints it) runs the gates too; on a healthy tree that costs well under a second and blocks
+     nothing.
+  3. The tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the
+     directory of a leading `cd <dir> &&` (or `;`, or a newline), else from the event's `cwd`. A
+     directory that is not in a repository exits 2 with `FAIL hook.target: <dir>: <git stderr>`; a
+     missing `cwd` with `FAIL hook.input`. Every tree named is gated once with the register and
+     claim gates.
+
+  Documented limits (DEC-0005): A verb hidden behind an expansion, alias, function, `eval`, a
+  payload file, or a wrapper the regex does not see (`$G push`, `git $V`, `eval "$CMD"`,
+  `bash script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this
+  hook. The git hooks gate it: pre-commit for commits, pre-push for pushes. The same holds for a git
+  word or verb with a quoted or escaped piece (`g"it" push`, `git p"ush"`); for a tree changed in a
+  way the hook does not follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
+  `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the real
+  one; and for a bypass the text does not show (a config file or hook script edited by other
+  means). A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word is blocked
+  as a bypass: write the message to a file and use `git commit -F <file>`. Every scan is linear in
+  the command length. Every other command and tool exits 0 silently, after one python3 start; the
+  `Agent` branch (the dispatch gate) arrives with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
-  the repository's pre-commit hook (`$(git rev-parse --git-path hooks)/pre-commit`) is not ours, and
-  the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line on stdout
-  (the model sees it), then the instruction line (the line is also copied to stderr, which Claude Code
-  shows neither the model nor the owner on exit 0; it appears in the debug log only): `FAIL
-  hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the repository's
-  git directory, or a second foreign pre-commit over an existing `pre-commit.pre-strict-delivery`
+  the repository's pre-commit or pre-push hook (`$(git rev-parse --git-path hooks)/<hook>`) is not
+  ours, and the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line
+  on stdout (the model sees it), then the instruction line (the line is also copied to stderr, which
+  Claude Code shows neither the model nor the owner on exit 0; it appears in the debug log only):
+  `FAIL hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the
+  repository's git directory, or a second foreign hook over an existing `<hook>.pre-strict-delivery`
   backup), `FAIL hook.input` for a missing or non-directory `cwd`, `FAIL hook.internal` for anything
   else (a cwd outside a repository, malformed stdin).
 - `user_prompt_submit.py`: one reminder line; malformed stdin exits 2 with `FAIL hook.internal`.
-- `install-hooks.sh` installs the git `pre-commit` shim (marker `# strict-delivery-gates-hook`),
-  which runs `hooks/git-pre-commit.sh` of the tree being committed (`FAIL pre-commit.missing` for a
-  tree without it). That script runs `run_all.py --only register,claims` and refuses
-  (`FAIL pre-commit.unstaged`) while a worktree-side change, an untracked or an ignored file sits
-  under `docs/superpowers/state`, `docs/reviews`, `tools/gates` or among the root-level `*.py`,
-  `*.pyc`, `*.so` and `*/__init__.*`: stage it with the commit or remove it. Exempt: `tools/gates/tests`,
-  `tools/gates/README.md`, any `.DS_Store` and the `__pycache__` directories under `tools/gates`.
+- `install-hooks.sh` installs two git shims (marker `# strict-delivery-gates-hook`): `pre-commit`,
+  which runs `hooks/git-pre-commit.sh`, and `pre-push`, which runs `hooks/git-pre-push.sh`, each
+  from the tree git runs in (`FAIL pre-commit.missing` / `FAIL pre-push.missing` for a tree without
+  the script). A foreign hook is moved to `<hook>.pre-strict-delivery`; an existing backup is never
+  overwritten, and then nothing is installed. `git-pre-commit.sh` runs
+  `run_all.py --only register,claims` and refuses (`FAIL pre-commit.unstaged`) while a worktree-side
+  change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,
+  `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with the
+  commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store` and the
+  `__pycache__` directories under `tools/gates`. `git-pre-push.sh` runs the same script with
+  `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because a
+  push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. It
+  ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness over
+  the ref lines). The gates check the working tree, which equals HEAD for those paths; a push of a
+  ref other than HEAD is checked against HEAD.

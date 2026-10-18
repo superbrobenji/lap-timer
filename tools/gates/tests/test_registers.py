@@ -49,8 +49,10 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0004"], [d["id"] for d in decisions])
-        self.assertEqual([[], [], [], []], [reg.validate_decision(d) for d in decisions])
+        ids = [d["id"] for d in decisions]       # the live register grows (DEC-0005 at b3): pin the order, not a count
+        self.assertEqual(["DEC-%04d" % n for n in range(1, len(ids) + 1)], ids)
+        self.assertLessEqual(4, len(ids))
+        self.assertEqual([[]] * len(ids), [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 

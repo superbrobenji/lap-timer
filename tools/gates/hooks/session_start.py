@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Claude Code SessionStart hook (spec §8). Prints to stdout (injected as context): whether the
 gates are installed in the event's project, every handoff document, and the skill instruction;
-installs the git hooks when the repository's pre-commit hook (git rev-parse --git-path
-hooks/pre-commit) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
+installs the git hooks when the repository's pre-commit or pre-push hook (git rev-parse --git-path
+hooks/<hook>) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
 exit-0 hook into the model's context. So every failure -- install-hooks.sh refusing or failing, a
 missing or invalid cwd, any internal error -- is a `FAIL ...` line on stdout (the model sees it),
 followed by the skill instruction, and the exit code is 0. The same line is copied to stderr, which
@@ -26,11 +26,11 @@ def toplevel(cwd: str) -> str:
     return p.stdout.strip()
 
 
-def pre_commit_path(root: str) -> str:
-    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", "hooks/pre-commit"],
+def hook_path(root: str, hook: str) -> str:
+    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", f"hooks/{hook}"],
                        capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        raise RuntimeError(f"git rev-parse --git-path hooks/pre-commit: {p.stderr.strip()}")
+        raise RuntimeError(f"git rev-parse --git-path hooks/{hook}: {p.stderr.strip()}")
     return os.path.join(root, p.stdout.strip())
 
 
@@ -73,7 +73,7 @@ def main() -> None:
     print(f"strict-delivery: gates installed in {root} (tools/gates/run_all.py); {yaml_state}")
     for h in sorted(glob.glob(os.path.join(root, "docs", "superpowers", "state", "*", "handoff.md"))):
         print(f"strict-delivery: handoff {os.path.relpath(h, root)} -- read it before any dispatch")
-    if not ours(pre_commit_path(root)):
+    if not all(ours(hook_path(root, h)) for h in ("pre-commit", "pre-push")):
         p = subprocess.run(["bash", os.path.join(root, "tools", "gates", "install-hooks.sh")],
                            cwd=root, capture_output=True, text=True, check=False)
         if p.stdout.strip():
