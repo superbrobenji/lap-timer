@@ -5198,7 +5198,7 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 
 **Interfaces:**
 - Consumes: `run_all.run(names, {"root": <toplevel>}) -> Result` (Task 6); the hook protocol in the umbrella (stdin JSON: `tool_name`, `tool_input.command`, `cwd`; exit 2 + stderr to block; exit 0 silent to allow).
-- Produces: `pre_tool_use.py`. `Bash` event whose command contains `git [opts] commit` or `git [opts] push` → `run_all.run(["register", "claims"], {"root": git toplevel of cwd})`. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `GIT_VERB`, `GATED`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store` (`FAIL pre-commit.unstaged`); then `run_all.py --only register,claims`. `install-hooks.sh`: writes the marked shim to `$(git rev-parse --git-path hooks)/pre-commit` and moves a foreign hook to `pre-commit.pre-strict-delivery`. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing`.
+- Produces: `pre_tool_use.py`. `Bash` event whose command contains `git [opts] commit` or `git [opts] push` → `run_all.run(["register", "claims"], {"root": git toplevel of cwd})`. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `GIT_VERB`, `GATED`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.py` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); then `run_all.py --only register,claims`. `install-hooks.sh`: writes the marked shim to `$(git rev-parse --git-path hooks)/pre-commit` and moves a foreign hook to `pre-commit.pre-strict-delivery`. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5566,21 +5566,24 @@ class GitHooks(unittest.TestCase):
                 fh.write(orig)
 
     def test_pre_commit_blocks_an_untracked_module_in_the_gate_code(self):
-        # run_all.py puts tools/gates first on sys.path: an untracked yaml.py would replace PyYAML and pass
+        # run_all.py searches the repo root, then tools/gates, before PyYAML and the stdlib: an untracked
+        # yaml.py in either would be imported in place of PyYAML and pass
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         gf.git(self.root, "add", "-A")
         head = gf.git(self.root, "rev-parse", "HEAD")
-        for rel in ("yaml.py", "glob/__init__.py", "datetime.pyc", "lib/extra.py", "hooks/new.py"):
-            path = os.path.join("tools", "gates", *rel.split("/"))
-            gf.write(self.root, path, "raise SystemExit(0)\n")
+        for rel in ("tools/gates/yaml.py", "tools/gates/glob/__init__.py", "tools/gates/datetime.pyc",
+                    "tools/gates/lib/extra.py", "tools/gates/hooks/new.py",
+                    "yaml.py", "yaml/__init__.py", "glob.pyc", "_yaml.so"):
+            gf.write(self.root, rel, "raise SystemExit(0)\n")
             p = self.commit()
             self.assertNotEqual(0, p.returncode, rel)
             self.assertIn("FAIL pre-commit.unstaged", p.stderr, rel)
-            self.assertIn("tools/gates/" + rel, p.stderr)
+            self.assertIn(rel, p.stderr)
             self.assertEqual(head, gf.git(self.root, "rev-parse", "HEAD"), rel)
-            os.remove(os.path.join(self.root, path))
-            if not os.listdir(os.path.dirname(os.path.join(self.root, path))):
-                os.rmdir(os.path.dirname(os.path.join(self.root, path)))      # the new glob/ package
+            path = os.path.join(self.root, *rel.split("/"))
+            os.remove(path)
+            if not os.listdir(os.path.dirname(path)):
+                os.rmdir(os.path.dirname(path))      # the new glob/ and yaml/ packages
 
     def test_edits_to_gate_tests_and_readme_do_not_block_a_commit(self):
         gf.write(self.root, "x.txt", "x\n")
@@ -5879,11 +5882,15 @@ if __name__ == "__main__":
 # paths. The paths: the registers, briefs and the state README (docs/superpowers/state), the
 # registered reports (docs/reviews; gate_register opens EVERY file under it, so an ignored .md
 # counts, and only the Finder's .DS_Store, which can never hold the marker line, is exempt), and the
-# gate code tree tools/gates, whose working-tree content decides the verdict: run_all.py puts
-# tools/gates first on sys.path, so even an untracked module or package there (yaml.py, glob/) is
-# imported in place of PyYAML or the stdlib, and the installed shim runs the working-tree copy of
-# this script. Exempt: tools/gates/tests and README.md (not inputs to the verdict), __pycache__
-# directories and .DS_Store (a sourceless .pyc outside __pycache__ is importable, so it is not exempt).
+# code the gates import. The import path: `python3 tools/gates/run_all.py` starts with
+# sys.path[0] = tools/gates, and run_all.py then inserts the repository root ahead of it, so imports
+# search the root, then tools/gates, then the stdlib and site-packages. An untracked module or
+# package in either directory (yaml.py, yaml/__init__.py, a sourceless .pyc or an extension .so) is
+# imported in place of PyYAML or the stdlib and decides the verdict. So the guard covers all of
+# tools/gates (the gate code; the installed shim runs the working-tree copy of this script) and every
+# root-level *.py, *.pyc, *.so and */__init__.py. Exempt: tools/gates/tests and README.md (not inputs
+# to the verdict), __pycache__ directories and .DS_Store (a sourceless .pyc outside __pycache__ is
+# importable, so it is not exempt).
 # Installed by tools/gates/install-hooks.sh.
 set -eu
 unset CLAUDE_PROJECT_DIR   # gate the tree being committed (e.g. a worktree), not the session's project
@@ -5892,6 +5899,7 @@ cd "$root"
 # porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is worktree-side
 dirty=$(git status --porcelain --untracked-files=all --ignored -- \
   docs/superpowers/state docs/reviews tools/gates ':(exclude)tools/gates/tests' ':(exclude)tools/gates/README.md' \
+  ':(glob)*.py' ':(glob)*.pyc' ':(glob)*.so' ':(glob)*/__init__.py' \
   ':(exclude,glob)**/.DS_Store' ':(exclude,glob)tools/gates/**/__pycache__/**' \
   | awk 'substr($0, 2, 1) != " "')
 if [ -n "$dirty" ]; then
@@ -5960,7 +5968,7 @@ bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
 ```
 
-Mutation checks (each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: remove the `try/except` around `main()` (3 fail-closed tests); `GATED["push"] = []` or `_ARG = \S+` (`test_push_with_options_is_gated_too`); drop the backslash-newline join, `config-env`, the `$X` option word or the `"git"` quote (the same test); `(?![\w-])` -> `\b` (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); ignore `-C` or the leading `cd`, or let a non-repo directory pass; restore the overlapping option alternatives or the backtracking `_ARG`, or the backtracking heredoc (`(.*?)` to a terminator) or nested-shell regexes in place of the line and word scans (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook`, which times out or exceeds its 2 s limit); stop detecting another `cd`, `GIT_DIR=`, `--git-dir`, an expanded `-C` or leading-`cd` word, stop stripping quoted words or heredoc bodies, drop the nested-shell/`eval`/`xargs`/`env -C` check, accept only a bare `-c` after the shell word, end the shell's word search at an option value (`bash -o pipefail -c`), stop reading plain quoted words as bare words (`'bash' -c`), or drop the piped-shell, `-execdir`, `sudo -D` or `<<` word split (`bash<<EOF`) (`test_a_gated_command_whose_tree_cannot_be_told_is_blocked`) (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_a_named_directory_that_is_not_a_repo_fails_closed`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`); replace the `git status` check by `git diff --name-only -- docs/superpowers/state`, drop `--untracked-files=all` or drop `docs/reviews` (the register-removed-from-index, staged-report-with-unstaged-edit and untracked-file tests); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); exclude `run_all.py`, `lib` or `hooks` from the `tools/gates` guard (`test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict`), narrow the guard to a list of files (`run_all.py`, `__init__.py`, `gate_*.py`, `lib`, `config.yml`, `hooks/git-pre-commit.sh`) or exempt `*.pyc` outside `__pycache__` (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`: an untracked `yaml.py` would shadow PyYAML), drop the `tests` or `README.md` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). `install-hooks.sh`: disable the `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`); replace the `mv` by `true` (`test_a_foreign_hook_is_moved_aside`); put `exit 0` right after the `mv` (the same test, through its rc and marker assertions); allow overwriting the backup or disable the hooks-path guard (`test_a_second_foreign_hook_does_not_overwrite_the_first_backup`, `test_a_hooks_path_outside_the_repository_is_refused`).
+Mutation checks (each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: remove the `try/except` around `main()` (3 fail-closed tests); `GATED["push"] = []` or `_ARG = \S+` (`test_push_with_options_is_gated_too`); drop the backslash-newline join, `config-env`, the `$X` option word or the `"git"` quote (the same test); `(?![\w-])` -> `\b` (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); ignore `-C` or the leading `cd`, or let a non-repo directory pass; restore the overlapping option alternatives or the backtracking `_ARG`, or the backtracking heredoc (`(.*?)` to a terminator) or nested-shell regexes in place of the line and word scans (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook`, which times out or exceeds its 2 s limit); stop detecting another `cd`, `GIT_DIR=`, `--git-dir`, an expanded `-C` or leading-`cd` word, stop stripping quoted words or heredoc bodies, drop the nested-shell/`eval`/`xargs`/`env -C` check, accept only a bare `-c` after the shell word, end the shell's word search at an option value (`bash -o pipefail -c`), stop reading plain quoted words as bare words (`'bash' -c`), or drop the piped-shell, `-execdir`, `sudo -D` or `<<` word split (`bash<<EOF`) (`test_a_gated_command_whose_tree_cannot_be_told_is_blocked`) (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_a_named_directory_that_is_not_a_repo_fails_closed`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`); replace the `git status` check by `git diff --name-only -- docs/superpowers/state`, drop `--untracked-files=all` or drop `docs/reviews` (the register-removed-from-index, staged-report-with-unstaged-edit and untracked-file tests); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); exclude `run_all.py`, `lib` or `hooks` from the `tools/gates` guard (`test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict`), narrow the guard to a list of files (`run_all.py`, `__init__.py`, `gate_*.py`, `lib`, `config.yml`, `hooks/git-pre-commit.sh`) exempt `*.pyc` outside `__pycache__`, or drop the root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.py` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`: an untracked `yaml.py` in the root or in tools/gates would shadow PyYAML), drop the `tests` or `README.md` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). `install-hooks.sh`: disable the `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`); replace the `mv` by `true` (`test_a_foreign_hook_is_moved_aside`); put `exit 0` right after the `mv` (the same test, through its rc and marker assertions); allow overwriting the backup or disable the hooks-path guard (`test_a_second_foreign_hook_does_not_overwrite_the_first_backup`, `test_a_hooks_path_outside_the_repository_is_refused`).
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
