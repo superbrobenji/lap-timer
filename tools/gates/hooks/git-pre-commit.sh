@@ -13,9 +13,9 @@
 # package in either directory (yaml.py, yaml/__init__.py, a sourceless .pyc or an extension .so) is
 # imported in place of PyYAML or the stdlib and decides the verdict. So the guard covers all of
 # tools/gates (the gate code; the installed shim runs the working-tree copy of this script) and every
-# root-level *.py, *.pyc, *.so and */__init__.py. Exempt: tools/gates/tests and README.md (not inputs
-# to the verdict), __pycache__ directories and .DS_Store (a sourceless .pyc outside __pycache__ is
-# importable, so it is not exempt).
+# root-level *.py, *.pyc, *.so and */__init__.* (a package's __init__ may be a .py, .pyc or .so).
+# Exempt: tools/gates/tests and README.md (not inputs to the verdict), __pycache__ directories and
+# .DS_Store (a sourceless .pyc outside __pycache__ is importable, so it is not exempt).
 # Installed by tools/gates/install-hooks.sh.
 set -eu
 unset CLAUDE_PROJECT_DIR   # gate the tree being committed (e.g. a worktree), not the session's project
@@ -24,7 +24,7 @@ cd "$root"
 # porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is worktree-side
 dirty=$(git status --porcelain --untracked-files=all --ignored -- \
   docs/superpowers/state docs/reviews tools/gates ':(exclude)tools/gates/tests' ':(exclude)tools/gates/README.md' \
-  ':(glob)*.py' ':(glob)*.pyc' ':(glob)*.so' ':(glob)*/__init__.py' \
+  ':(glob)*.py' ':(glob)*.pyc' ':(glob)*.so' ':(glob)*/__init__.*' \
   ':(exclude,glob)**/.DS_Store' ':(exclude,glob)tools/gates/**/__pycache__/**' \
   | awk 'substr($0, 2, 1) != " "')
 if [ -n "$dirty" ]; then

@@ -366,7 +366,7 @@ class GitHooks(unittest.TestCase):
         head = gf.git(self.root, "rev-parse", "HEAD")
         for rel in ("tools/gates/yaml.py", "tools/gates/glob/__init__.py", "tools/gates/datetime.pyc",
                     "tools/gates/lib/extra.py", "tools/gates/hooks/new.py",
-                    "yaml.py", "yaml/__init__.py", "glob.pyc", "_yaml.so"):
+                    "yaml.py", "yaml/__init__.py", "yaml/__init__.pyc", "glob/__init__.so", "glob.pyc", "_yaml.so"):
             gf.write(self.root, rel, "raise SystemExit(0)\n")
             p = self.commit()
             self.assertNotEqual(0, p.returncode, rel)
