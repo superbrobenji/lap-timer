@@ -135,12 +135,20 @@ class PreToolUse(unittest.TestCase):
         for cmd in ("cd /a && cd /b && git push", "export X=1 && cd /b && git push", "(cd /b && git push)",
                     "pushd /b && git push", "git commit -m x && cd /y", 'git -C "$WT" push', "git -C `pwd` push",
                     'cd "$WT" && git push', "git --git-dir=/b/.git push", "git --work-tree /b commit",
-                    "GIT_DIR=/b/.git git push", "export GIT_WORK_TREE=/b; git push"):
+                    "GIT_DIR=/b/.git git push", "export GIT_WORK_TREE=/b; git push",
+                    "bash -c 'cd /wt && git push'", 'sh -c "cd /wt && git commit -m x"', "/bin/zsh -lc 'git push'",
+                    "env -C /wt git push", "env --chdir=/wt git push", "eval 'git push'", "git ls-files | xargs git commit",
+                    "bash <<EOF\ngit push\nEOF", "echo 'git push' | sh",
+                    "git commit -F - <<EOF\nbody\nEOF\ncd /elsewhere"):   # a real cd after the heredoc terminator
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, cmd)
             self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree "), (cmd, p.stderr))
             self.assertIn("use git -C <dir> or a leading cd <dir> &&", p.stderr)
-        for cmd in ('git commit -m "cd elsewhere, GIT_DIR=x"', "git -C . push", "cd . && git push", "cd .; git commit -m x"):
+        for cmd in ('git commit -m "cd elsewhere, GIT_DIR=x"', "git -C . push", "cd . && git push", "cd .; git commit -m x",
+                    'git commit -m "then run git push and bash -c x"', "bash build.sh && git push", "env FOO=1 git push",
+                    "git commit -m \"$(cat <<'EOF'\nfix cd and git push; bash -c x; GIT_DIR=/y\nEOF\n)\"",
+                    "git commit -F - <<'EOF'\nmentions cd /x, GIT_DIR=/y and eval\nEOF",
+                    'git commit -F - <<"EOF"\ncd /x\nEOF', "git commit -F - <<-EOF\n\tcd /x\n\tEOF"):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))   # followed forms and quoted words still work
             self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
 
@@ -318,11 +326,11 @@ class GitHooks(unittest.TestCase):
         self.assertIn("FAIL pre-commit.unstaged", p.stderr)
         self.assertIn("ignored.md", p.stderr)
 
-    def test_pre_commit_blocks_an_unstaged_edit_to_the_gate_config_or_code(self):
+    def test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict(self):
         gf.write(self.root, "x.txt", "x\n")
         gf.git(self.root, "add", "x.txt")
-        for rel in (os.path.join("tools", "gates", "config.yml"), os.path.join("tools", "gates", "gate_register.py")):
-            path = os.path.join(self.root, rel)
+        for rel in ("config.yml", "gate_register.py", "run_all.py", "lib/registers.py", "hooks/git-pre-commit.sh"):
+            path = os.path.join(self.root, "tools", "gates", *rel.split("/"))
             with open(path) as fh:
                 orig = fh.read()
             with open(path, "w") as fh:
@@ -330,9 +338,19 @@ class GitHooks(unittest.TestCase):
             p = self.commit()
             self.assertNotEqual(0, p.returncode, rel)
             self.assertIn("FAIL pre-commit.unstaged", p.stderr)
-            self.assertIn(rel.replace(os.sep, "/"), p.stderr)
+            self.assertIn("tools/gates/" + rel, p.stderr)
             with open(path, "w") as fh:
                 fh.write(orig)
+
+    def test_edits_to_gate_tests_and_readme_do_not_block_a_commit(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("tools", "gates", "tests", "new_test.py"), "x = 1\n")
+        path = os.path.join(self.root, "tools", "gates", "README.md")
+        with open(path, "a") as fh:
+            fh.write("\nedited\n")
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
     def test_bytecode_caches_under_the_gates_do_not_block_a_commit(self):
         gf.write(self.root, "x.txt", "x\n")

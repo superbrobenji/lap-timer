@@ -10,7 +10,8 @@ not inside a repo fails closed. A failing gate exits 2 with the gate's lines on 
 error also exits 2 (fail closed). Limits: the match is textual (aliases, `eval`, `$(...)` and a
 `-C $VAR` directory are not followed). A gated command whose tree it cannot tell (another `cd`,
 `pushd`, a subshell, `-C`/`cd` with an expansion, --git-dir/--work-tree, GIT_DIR=) exits 2 with
-`FAIL hook.target`; an unexpandable option word before the verb (`git $X commit`) gates the cwd tree.
+`FAIL hook.target` (so does a nested shell: `bash -c`, `eval`, `xargs`, `env -C`); a gated verb
+that only appears inside a quoted string or a heredoc body is data and is not blocked for that; an unexpandable option word before the verb (`git $X commit`) gates the cwd tree.
 """
 from __future__ import annotations
 
@@ -35,6 +36,14 @@ LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
 QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")
 CD_WORD = re.compile(r"(?:^|[;&|(){}`\s])(?:cd|pushd|popd)(?=[\s;&|)]|$)")
 TREE_ENV = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?GIT_(?:DIR|WORK_TREE)=")
+HEREDOC = re.compile(r"(<<-?[ \t]*(['\"]?)(\w+)\2[^\n]*\n)(.*?)^[ \t]*\3[ \t]*$", re.S | re.M)
+_SHELL = r"(?:\S*/)?(?:sh|bash|zsh|dash|ksh)"
+LAUNCHER = re.compile(
+    r"(?:^|[;&|(\s])" + _SHELL + r"\s+(?:-[A-Za-z-]+\s+)*-[A-Za-z]*c\b"      # sh -c '...'
+    r"|(?:^|[;&|(\s])" + _SHELL + r"\b[^;&|\n]*<<"                           # bash <<EOF
+    r"|\|\s*" + _SHELL + r"\b"                                              # ... | sh
+    r"|(?:^|[;&|(\s])(?:eval|xargs)\b"                                       # eval '...', xargs git push
+    r"|(?:^|[;&|(\s])env\b[^;&|\n]*\s(?:-C|--chdir|-S|--split-string)\b")   # env -C <dir> git push
 TREE_OPT = re.compile(r"(?:^|\s)--(?:git-dir|work-tree)(?:[=\s]|$)")
 
 
@@ -93,9 +102,13 @@ def target_dirs(event: dict) -> list:
         if base is None:
             raise TargetError(why + " (the leading cd directory is not a plain word)" + hint)
         rest = command[lead.end():]
-    bare = QUOTED.sub('""', rest)    # a quoted commit message may mention cd or GIT_DIR
+    # A heredoc body is data (a commit message) unless a shell reads it: blank it first, then the quoted
+    # words, so a message that mentions cd or GIT_DIR= passes. LAUNCHER sees `bash <<EOF` before the blanking.
+    bare = QUOTED.sub('""', HEREDOC.sub(r"\1", rest))
     if CD_WORD.search(bare) or TREE_ENV.search(bare):
         raise TargetError(why + " (a cd, pushd, popd, subshell or GIT_DIR/GIT_WORK_TREE the hook does not follow)" + hint)
+    if LAUNCHER.search(bare):
+        raise TargetError(why + " (a nested shell, eval, xargs or env -C the hook does not follow)" + hint)
     dirs = []
     for m in matches:
         if TREE_OPT.search(m.group("opts")):
