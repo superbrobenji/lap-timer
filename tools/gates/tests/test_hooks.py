@@ -35,7 +35,7 @@ ORPHAN = """- id: T1-ORPHAN-1
 
 
 def hook(script, event, hooks_dir=HOOKS):
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env = isolated_env()    # defined below: a hook that runs git or install-hooks.sh on a fixture must not read the developer's git config
     raw = event if isinstance(event, str) else json.dumps(event)
     return subprocess.run([sys.executable, os.path.join(hooks_dir, script)], input=raw,
                           capture_output=True, text=True, env=env, check=False, timeout=20)   # a stalled hook is an error
@@ -414,6 +414,114 @@ class GitHooks(unittest.TestCase):
         gf.git(self.root, "add", "x.txt")
         p = self.commit()
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+
+
+class SessionStart(unittest.TestCase):
+    def setUp(self):
+        self.root = new_repo()
+
+    def tearDown(self):
+        gf.remove(self.root)
+
+    def event(self):
+        return {"session_id": "s", "transcript_path": "/dev/null", "cwd": self.root,
+                "hook_event_name": "SessionStart", "source": "startup"}
+
+    def test_reports_missing_gates(self):
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("strict-delivery: gates NOT installed in", p.stdout)
+
+    def test_installs_git_hooks_and_lists_handoffs(self):
+        copy_gates(self.root)
+        gf.write(self.root, "docs/superpowers/state/demo/handoff.md", "---\nplan: x\n---\n")
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("strict-delivery: gates installed in", p.stdout)
+        self.assertIn("strict-delivery: handoff docs/superpowers/state/demo/handoff.md", p.stdout)
+        self.assertIn("install-hooks: pre-commit ->", p.stdout)
+        with open(os.path.join(self.root, ".git", "hooks", "pre-commit")) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+        p = hook("session_start.py", self.event())          # second start: already ours
+        self.assertNotIn("install-hooks:", p.stdout)
+        self.assertIn("invoke the strict-delivery skill", p.stdout)
+
+    def test_install_failure_exits_2(self):
+        copy_gates(self.root)
+        gf.write(self.root, "tools/gates/install-hooks.sh", "echo boom >&2; exit 3\n")
+        p = hook("session_start.py", self.event())
+        self.assertEqual(2, p.returncode)
+        self.assertIn("FAIL hook.install: install-hooks.sh exit 3: boom", p.stderr)
+
+    def test_a_refusal_of_install_hooks_exits_2(self):
+        copy_gates(self.root)
+        hooks = os.path.join(self.root, ".git", "hooks")
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho mine\n")
+        gf.write(self.root, ".git/hooks/pre-commit.pre-strict-delivery", "#!/bin/sh\necho older\n")
+        p = hook("session_start.py", self.event())
+        self.assertEqual(2, p.returncode)
+        self.assertIn("FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing:", p.stderr)
+        self.assertIn("strict-delivery: invoke the strict-delivery skill", p.stdout)
+        with open(os.path.join(hooks, "pre-commit")) as fh:
+            self.assertIn("echo mine", fh.read())           # the foreign hook was not touched
+        gf.git(self.root, "config", "core.hooksPath", os.path.join(self.root, "..", "shared-hooks"))
+        os.remove(os.path.join(hooks, "pre-commit"))
+        p = hook("session_start.py", self.event())
+        self.assertEqual(2, p.returncode)
+        self.assertIn("FAIL hook.install: install-hooks.sh exit 1: install-hooks: refusing: the hooks directory", p.stderr)
+
+    def test_a_cwd_that_is_not_a_repository_fails_closed(self):
+        outside = tempfile.mkdtemp()
+        try:
+            event = self.event()
+            event["cwd"] = outside
+            p = hook("session_start.py", event)
+        finally:
+            shutil.rmtree(outside)
+        self.assertEqual(2, p.returncode)
+        self.assertIn("FAIL hook.internal:", p.stderr)
+
+    def test_malformed_stdin_fails_closed(self):
+        for raw in ("nope", "[]"):
+            p = hook("session_start.py", raw)
+            self.assertEqual(2, p.returncode, raw)
+            self.assertIn("FAIL hook.internal:", p.stderr)
+
+
+class UserPromptSubmit(unittest.TestCase):
+    def test_one_line_reminder(self):
+        p = hook("user_prompt_submit.py", {"hook_event_name": "UserPromptSubmit", "prompt": "hi", "cwd": "/"})
+        self.assertEqual(0, p.returncode)
+        self.assertEqual(1, len(p.stdout.splitlines()))
+        self.assertTrue(p.stdout.startswith("strict-delivery: "))
+
+    def test_malformed_stdin_fails_closed(self):
+        p = hook("user_prompt_submit.py", "nope")
+        self.assertEqual(2, p.returncode)
+
+
+class ProjectWiring(unittest.TestCase):
+    def test_settings_json_wires_existing_hook_scripts_without_stop_hooks(self):
+        with open(os.path.join(gf.REPO, ".claude", "settings.json")) as fh:
+            hooks = json.load(fh)["hooks"]
+        self.assertEqual({"PreToolUse", "SessionStart", "UserPromptSubmit"}, set(hooks))  # Stop/SubagentStop: S2
+        self.assertEqual(["Agent", "Bash"], [m["matcher"] for m in hooks["PreToolUse"]])
+        commands = [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
+        self.assertEqual(5, len(commands))
+        for c in commands:
+            script = c.split('"')[1].replace("${CLAUDE_PROJECT_DIR}", gf.REPO)
+            self.assertTrue(os.path.isfile(script), c)
+
+    def test_claude_md_carries_spec_section_12_verbatim(self):
+        with open(os.path.join(gf.REPO, "docs/superpowers/specs/2026-10-17-strict-delivery-design.md")) as fh:
+            spec = fh.read()
+        section = spec.split("## 12. ", 1)[1].split("\n## 13. ", 1)[0]
+        bullets = [l for l in section.splitlines() if l.startswith("- ")]
+        self.assertEqual(11, len(bullets))
+        with open(os.path.join(gf.REPO, "CLAUDE.md")) as fh:
+            claude = fh.read().splitlines()
+        for b in bullets:
+            self.assertIn(b, claude)
 
 
 if __name__ == "__main__":

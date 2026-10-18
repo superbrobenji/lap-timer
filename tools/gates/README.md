@@ -39,3 +39,30 @@ python3 tools/gates/gate_register.py --json
 ```
 
 CI: `.github/workflows/gates.yml`, job `gates` (the unit tests on Python 3.9 and 3.12, then `run_all.py`; one job, full history checkout).
+
+## Hooks
+
+`.claude/settings.json` wires `hooks/pre_tool_use.py`, `hooks/session_start.py` and
+`hooks/user_prompt_submit.py`; a new Claude Code session loads it. Every hook exits 2 with the
+failing lines on stderr, and also on any internal error (`FAIL hook.internal`, fail closed).
+
+- `pre_tool_use.py` (Bash): `git commit` and `git push` run the register and claim gates on the
+  tree the command names (the event's cwd, moved by a leading `cd <dir> &&` and by each `git -C
+  <dir>`). A gated command whose tree it cannot tell (another `cd`, a subshell, `--git-dir`,
+  `GIT_DIR=`, an expanded `-C` word, a nested shell, `eval`, `xargs`, `env -C`) exits 2 with
+  `FAIL hook.target`. Every other command and tool exits 0 silently; the `Agent` branch (the
+  dispatch gate) arrives with S2.
+- `session_start.py`: prints whether the gates are installed in the project, one line per
+  `docs/superpowers/state/*/handoff.md` and the instruction to invoke the strict-delivery skill;
+  runs `install-hooks.sh` when `.git/hooks/pre-commit` is not ours. A refusal of
+  `install-hooks.sh` (a hooks directory outside the repository's git directory, or a second foreign
+  pre-commit over an existing `pre-commit.pre-strict-delivery` backup) exits 2 with
+  `FAIL hook.install`.
+- `user_prompt_submit.py`: one reminder line.
+- `install-hooks.sh` installs the git `pre-commit` shim (marker `# strict-delivery-gates-hook`),
+  which runs `hooks/git-pre-commit.sh` of the tree being committed (`FAIL pre-commit.missing` for a
+  tree without it). That script runs `run_all.py --only register,claims` and refuses
+  (`FAIL pre-commit.unstaged`) while a worktree-side change, an untracked or an ignored file sits
+  under `docs/superpowers/state`, `docs/reviews`, `tools/gates` (except `tests/` and `README.md`)
+  or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with the commit or
+  remove it.
