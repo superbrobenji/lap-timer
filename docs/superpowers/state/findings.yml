@@ -1,19 +1,251 @@
 - id: B3-S4PREPUSH-1
   source: review
   severity: MEDIUM
-  class: >-
-    S4 Task 5 Step 5's git-pre-push.sh block is written for a hook symlinked to a bash script, but
-    the S1 b3 shim runs the tracked script with sh: BASH_SOURCE and set -o pipefail are bash-only
-    (a dash /bin/sh breaks the hook), and the block replaces S1's git-pre-commit.sh --pre-push
-    guard and the DEC-0006 not-head refusal instead of extending them.
+  class: 'S4 Task 5 Step 5''s git-pre-push.sh block is written for a hook symlinked
+    to a bash script, but the S1 b3 shim runs the tracked script with sh: BASH_SOURCE
+    and set -o pipefail are bash-only (a dash /bin/sh breaks the hook), and the block
+    replaces S1''s git-pre-commit.sh --pre-push guard and the DEC-0006 not-head refusal
+    instead of extending them.'
   siblings: []
   cites:
-    - {file: docs/superpowers/plans/2026-10-17-strict-delivery-S4-remaining-gates-workflows.md, lines: "3388-3400", sha: "151f2bb"}
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery-S4-remaining-gates-workflows.md
+    lines: 3388-3400
+    sha: 151f2bb
   repro: null
-  owner: {kind: plan, plan: 2026-10-17-strict-delivery-S4-remaining-gates-workflows, task: 5}
+  owner:
+    kind: plan
+    plan: 2026-10-17-strict-delivery-S4-remaining-gates-workflows
+    task: 5
   state: open
   pin: null
   ruling: null
   evidence: []
   history:
-    - {state: open, sha: "151f2bb", by: b3-fixwave}
+  - state: open
+    sha: 151f2bb
+    by: b3-fixwave
+- id: SD-S2-T1
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_dispatch'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T1
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T2
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: PreToolUse Agent branch'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T2
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T3
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: dispatch config check and run_all registration'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T4
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_review_package'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T4
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T5
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: make_review_package'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T5
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T6
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_plan'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T6
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T7
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_checkpoint'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T7
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T8
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: Stop and SubagentStop hooks'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T8
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T9
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: per-plan state creator and checklists'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T9
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
