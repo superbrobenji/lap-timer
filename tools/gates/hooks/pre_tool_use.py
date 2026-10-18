@@ -8,7 +8,9 @@ exits 0 silently. The tree gated is the one the command names: the cwd, moved by
 `cd <dir> &&`/`;` and by each `git -C <dir>` (cumulative, as git does); a named directory that is
 not inside a repo fails closed. A failing gate exits 2 with the gate's lines on stderr; any internal
 error also exits 2 (fail closed). Limits: the match is textual (aliases, `eval`, `$(...)` and a
-`-C $VAR` directory are not followed; an unexpandable -C word gates the tree before it).
+`-C $VAR` directory are not followed). A gated command whose tree it cannot tell (another `cd`,
+`pushd`, a subshell, `-C`/`cd` with an expansion, --git-dir/--work-tree, GIT_DIR=) exits 2 with
+`FAIL hook.target`; an unexpandable option word before the verb (`git $X commit`) gates the cwd tree.
 """
 from __future__ import annotations
 
@@ -20,14 +22,24 @@ import subprocess
 import sys
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-_ARG = r"""(?:"[^"]*"|'[^']*'|(?:\\.|\S)+)"""   # a shell word; quotes may hold spaces, a backslash escapes
-_OPT = (r"(?:-[Cc]\s+" + _ARG                                             # -C <dir>, -c <k=v>
-        + r"|--(?:git-dir|work-tree|namespace|config-env)\s+" + _ARG        # separate-word long options
-        + r"|--?[A-Za-z][\w-]*(?:=" + _ARG + r")?"                         # flags, --opt=value
+# A shell word: pieces that start with different characters (a quote, a backslash, anything else), so
+# one word parses one way only -- overlapping alternatives backtrack exponentially on a failing match.
+_ARG = r"""(?:"[^"]*"|'[^']*'|\\.|[^\s\\"'])+"""
+_TAKES_WORD = r"(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env))(?=\s|$)"    # option whose value is the next word
+_OPT = (r"(?:" + _TAKES_WORD + r"\s+" + _ARG                                      # -C <dir>, -c <k=v>, --git-dir <dir>
+        + r"|(?!" + _TAKES_WORD + r")--?[A-Za-z][\w-]*(?:=" + _ARG + r")?"         # flags, --opt=value
         + r"|\$\S+)")                                                      # $X / ${X}: unknown, gate conservatively
 GIT_VERB = re.compile(r"\bgit\b[\"']?(?P<opts>(?:\s+" + _OPT + r")*)\s+(?P<verb>commit|push)(?![\w-])")
 GIT_DIR_OPT = re.compile(r"(?:^|\s)-C\s+(" + _ARG + r")")
 LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
+QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")
+CD_WORD = re.compile(r"(?:^|[;&|(){}`\s])(?:cd|pushd|popd)(?=[\s;&|)]|$)")
+TREE_ENV = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?GIT_(?:DIR|WORK_TREE)=")
+TREE_OPT = re.compile(r"(?:^|\s)--(?:git-dir|work-tree)(?:[=\s]|$)")
+
+
+class TargetError(Exception):
+    """A gated git command whose working tree this hook cannot determine: blocked, not guessed."""
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
 
 
@@ -64,18 +76,35 @@ def _word(arg: str, base: str):
 
 def target_dirs(event: dict) -> list:
     """Directories the gated git commands run in: the event cwd, moved by a leading `cd <dir> &&`
-    or `;`, then by each `-C <dir>` of the command (cumulative, as git does). An unexpandable
-    directory word keeps the directory before it (conservative: that tree is still gated)."""
+    or `;`, then by each `-C <dir>` of the command (cumulative, as git does). A gated command whose
+    tree cannot be told -- another `cd`, `pushd`/`popd`, a subshell, a `$` or backtick in a followed
+    directory word, --git-dir/--work-tree, GIT_DIR=/GIT_WORK_TREE= -- raises TargetError."""
     command = _command(event)
+    matches = list(GIT_VERB.finditer(command or ""))
+    if not matches:
+        return []
+    why = "cannot tell which tree %s runs in" % matches[0].group("verb")
+    hint = "; use git -C <dir> or a leading cd <dir> &&"
     base = event.get("cwd") or os.getcwd()
-    lead = LEADING_CD.match(command or "")
+    rest = command
+    lead = LEADING_CD.match(command)
     if lead:
-        base = _word(lead.group(1), base) or base
+        base = _word(lead.group(1), base)
+        if base is None:
+            raise TargetError(why + " (the leading cd directory is not a plain word)" + hint)
+        rest = command[lead.end():]
+    bare = QUOTED.sub('""', rest)    # a quoted commit message may mention cd or GIT_DIR
+    if CD_WORD.search(bare) or TREE_ENV.search(bare):
+        raise TargetError(why + " (a cd, pushd, popd, subshell or GIT_DIR/GIT_WORK_TREE the hook does not follow)" + hint)
     dirs = []
-    for m in GIT_VERB.finditer(command or ""):
+    for m in matches:
+        if TREE_OPT.search(m.group("opts")):
+            raise TargetError(why + " (--git-dir/--work-tree)" + hint)
         cur = base
         for c in GIT_DIR_OPT.finditer(m.group("opts")):
-            cur = _word(c.group(1), cur) or cur
+            cur = _word(c.group(1), cur)
+            if cur is None:
+                raise TargetError(why + " (git -C with a shell expansion)" + hint)
         if cur not in dirs:
             dirs.append(cur)
     return dirs
@@ -112,6 +141,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         rc = main()
+    except TargetError as exc:
+        print(f"FAIL hook.target: {exc}", file=sys.stderr)
+        rc = 2
     except Exception as exc:  # fail closed: a broken hook blocks, it never waves through
         print(f"FAIL hook.internal: {type(exc).__name__}: {exc}", file=sys.stderr)
         rc = 2

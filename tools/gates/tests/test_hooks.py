@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from tools.gates.tests import gitfixture as gf
@@ -37,7 +38,7 @@ def hook(script, event, hooks_dir=HOOKS):
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     raw = event if isinstance(event, str) else json.dumps(event)
     return subprocess.run([sys.executable, os.path.join(hooks_dir, script)], input=raw,
-                          capture_output=True, text=True, env=env, check=False)
+                          capture_output=True, text=True, env=env, check=False, timeout=20)   # a stalled hook is an error
 
 
 def bash_event(root, command):
@@ -90,8 +91,7 @@ class PreToolUse(unittest.TestCase):
         p = hook("pre_tool_use.py", bash_event(self.root, "cd . && git -C . --no-pager push origin HEAD"))
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr)
-        for cmd in ('git -C "%s" commit -m x' % self.spaced, "git -c 'a=b c' push", "git --git-dir /x commit",
-                    "git --work-tree=/x commit",                # quoted values and separate-word option values
+        for cmd in ('git -C "%s" commit -m x' % self.spaced, "git -c 'a=b c' push",       # quoted values
                     "git -C . \\\n  commit -m x",               # backslash-newline continuation
                     "git -C %s commit -m x" % self.spaced.replace(" ", "\\ "),   # escaped space
                     "git --config-env a=B commit", '"git" commit -m x', "'git' push",
@@ -130,6 +130,34 @@ class PreToolUse(unittest.TestCase):
         # a relative -C resolves against the event cwd
         p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
         self.assertEqual(0, p.returncode, p.stderr)
+
+    def test_a_gated_command_whose_tree_cannot_be_told_is_blocked(self):
+        for cmd in ("cd /a && cd /b && git push", "export X=1 && cd /b && git push", "(cd /b && git push)",
+                    "pushd /b && git push", "git commit -m x && cd /y", 'git -C "$WT" push', "git -C `pwd` push",
+                    'cd "$WT" && git push', "git --git-dir=/b/.git push", "git --work-tree /b commit",
+                    "GIT_DIR=/b/.git git push", "export GIT_WORK_TREE=/b; git push"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, cmd)
+            self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree "), (cmd, p.stderr))
+            self.assertIn("use git -C <dir> or a leading cd <dir> &&", p.stderr)
+        for cmd in ('git commit -m "cd elsewhere, GIT_DIR=x"', "git -C . push", "cd . && git push", "cd .; git commit -m x"):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))   # followed forms and quoted words still work
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+
+    def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
+        for cmd in ("git -c x=" + "\\" * 300 + " status", "git " + "-c " * 300 + "status", "git " + "-C " * 300 + "status",
+                    "git " + '-c "a" ' * 300 + "status", "git " + "$x " * 300 + "status",
+                    "git " + "--git-dir " * 300 + "status", "git -C " + "\\ " * 300 + "status"):
+            start = time.monotonic()
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(0, p.returncode, (cmd[:30], p.stderr))
+            self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
+        gated = "git -c x=" + "\\" * 300 + " commit -m x"      # same runs before a real verb: still gated, still fast
+        start = time.monotonic()
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        p = hook("pre_tool_use.py", bash_event(self.root, gated))
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertLess(time.monotonic() - start, 2.0)
 
     def test_a_named_directory_that_is_not_a_repo_fails_closed(self):
         outside = tempfile.mkdtemp(prefix="gate-test-outside-")
@@ -275,6 +303,44 @@ class GitHooks(unittest.TestCase):
         self.assertNotEqual(0, p.returncode)
         self.assertIn("FAIL pre-commit.unstaged", p.stderr)
         self.assertIn("docs/reviews/new.md", p.stderr)
+
+    def test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store(self):
+        gf.write(self.root, ".gitignore", "ignored.md\n.DS_Store\n")
+        gf.git(self.root, "add", ".gitignore")
+        gf.write(self.root, os.path.join("docs", "reviews", ".DS_Store"), "\x00bud1\n")
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)     # a Finder file no gate can read a marker from
+        gf.write(self.root, os.path.join("docs", "reviews", "ignored.md"), "register: true\n- T1-GHOST-1: x\n")
+        gf.write(self.root, "y.txt", "y\n")
+        gf.git(self.root, "add", "y.txt")
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)                       # ignored, yet gate_register opens it
+        self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+        self.assertIn("ignored.md", p.stderr)
+
+    def test_pre_commit_blocks_an_unstaged_edit_to_the_gate_config_or_code(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        for rel in (os.path.join("tools", "gates", "config.yml"), os.path.join("tools", "gates", "gate_register.py")):
+            path = os.path.join(self.root, rel)
+            with open(path) as fh:
+                orig = fh.read()
+            with open(path, "w") as fh:
+                fh.write(orig + "\n# edited\n")
+            p = self.commit()
+            self.assertNotEqual(0, p.returncode, rel)
+            self.assertIn("FAIL pre-commit.unstaged", p.stderr)
+            self.assertIn(rel.replace(os.sep, "/"), p.stderr)
+            with open(path, "w") as fh:
+                fh.write(orig)
+
+    def test_bytecode_caches_under_the_gates_do_not_block_a_commit(self):
+        gf.write(self.root, "x.txt", "x\n")
+        gf.git(self.root, "add", "x.txt")
+        gf.write(self.root, os.path.join("tools", "gates", "__pycache__", "m.cpython-39.pyc"), "x")
+        gf.write(self.root, os.path.join("tools", "gates", "lib", "__pycache__", "n.cpython-39.pyc"), "x")
+        p = self.commit()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
     def test_a_staged_report_passes_when_it_is_committed_as_is(self):
         report = os.path.join("docs", "reviews", "r.md")
