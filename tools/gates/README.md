@@ -58,14 +58,16 @@ commit and push, however it was launched.
      `_SYSTEM` or `_NOSYSTEM` assignment anywhere in any Bash command (a `git config core.hooksPath`
      on its own would move the hooks for every later command), and `--no-verify` (or the
      abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
-     after a gated verb, up to the end of its simple command (quote-aware). `-n` is `--no-verify`
-     for commit and `--dry-run` for push; it is blocked for both.
+     after a gated verb, up to the end of its simple command (quote-aware; `>&`, `<&`, `&>` and an
+     unquoted `$(...)` without nested parentheses do not end it). `-n` is `--no-verify` for commit
+     and `--dry-run` for push; it is blocked for both.
   2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
      `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
-     (`/usr/bin/git`). The options are the ones git takes before a subcommand (`-C <dir>`,
-     `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--no-pager`, `-p`,
-     `--bare`, `--exec-path`, ...; quoted values included), read left to right as git does, plus a
-     `$X` word (`git $X commit` is gated). The verb is a whole word (`commit-graph`, `pushd`,
+     (`/usr/bin/git`). The options are git 2.50.1's global options, each checked with
+     `git <option> version` (`-C <dir>`, `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`,
+     `--config-env`, `--attr-source`, `--shallow-file`, `--no-pager`, `-p`, `--bare`, `--exec-path`,
+     the pathspec flags, ...; quoted values and values holding `$(...)` or backticks included), read
+     left to right as git does, plus a `$X` word (`git $X commit` is gated). The verb is a whole word (`commit-graph`, `pushd`,
      `--push-option` are not verbs). A backslash-newline is removed first. There is no data/code
      analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`, a python heredoc
      that prints it) runs the gates too; on a healthy tree that costs well under a second and blocks
@@ -83,8 +85,13 @@ commit and push, however it was launched.
   word or verb with a quoted or escaped piece (`g"it" push`, `git p"ush"`); for a tree changed in a
   way the hook does not follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
   `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the real
-  one; and for a bypass the text does not show (a config file or hook script edited by other
-  means). A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word is blocked
+  one; for an option value the hook cannot read as one word (`git -C $(dirname $(pwd)) commit`) or
+  a global option git adds after 2.50.1, where the verb is not seen and so neither is a bypass flag
+  after it; for a quoted or escaped bypass flag (`--no-"verify"`, `core.hooks\Path`); and for a
+  bypass the text does not show (a config file or hook script edited by other means). A `-C` or
+  `cd` directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "$WT" &&`,
+  `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real command; name the directory
+  literally. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word is blocked
   as a bypass: write the message to a file and use `git commit -F <file>`. Every scan is linear in
   the command length. Every other command and tool exits 0 silently, after one python3 start; the
   `Agent` branch (the dispatch gate) arrives with S2.
@@ -92,7 +99,7 @@ commit and push, however it was launched.
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
   the repository's pre-commit or pre-push hook (`$(git rev-parse --git-path hooks)/<hook>`) is not
-  ours, and the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line
+  ours (a symlink never is), and the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line
   on stdout (the model sees it), then the instruction line (the line is also copied to stderr, which
   Claude Code shows neither the model nor the owner on exit 0; it appears in the debug log only):
   `FAIL hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the
@@ -103,7 +110,8 @@ commit and push, however it was launched.
 - `install-hooks.sh` installs two git shims (marker `# strict-delivery-gates-hook`): `pre-commit`,
   which runs `hooks/git-pre-commit.sh`, and `pre-push`, which runs `hooks/git-pre-push.sh`, each
   from the tree git runs in (`FAIL pre-commit.missing` / `FAIL pre-push.missing` for a tree without
-  the script). A foreign hook is moved to `<hook>.pre-strict-delivery`; an existing backup is never
+  the script). A foreign hook, or a symlink (even one to the tracked script: the link itself is
+  moved, never written through), is moved to `<hook>.pre-strict-delivery`; an existing backup is never
   overwritten, and then nothing is installed. `git-pre-commit.sh` runs
   `run_all.py --only register,claims` and refuses (`FAIL pre-commit.unstaged`) while a worktree-side
   change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,

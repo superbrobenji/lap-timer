@@ -3,7 +3,8 @@
 # decision DEC-0005). Idempotent. Each installed hook (pre-commit, pre-push) is a shim carrying the
 # marker line below; it runs the TRACKED tools/gates/hooks/git-<hook>.sh of whichever tree git runs
 # in, so an update to the scripts needs no re-install. A foreign hook is moved aside, never
-# overwritten; every hook is checked before any is written, so a refusal installs nothing.
+# overwritten; a symlink is foreign too (the link itself is moved, so nothing is written through
+# it); every hook is checked before any is written, so a refusal installs nothing.
 set -euo pipefail
 MARKER='# strict-delivery-gates-hook'
 HOOKS=(pre-commit pre-push)
@@ -16,10 +17,11 @@ case "$real" in
   "$common"/*) ;;
   *) echo "install-hooks: refusing: the hooks directory $hooks (core.hooksPath?) is outside $common; it may be shared with other repositories" >&2; exit 1 ;;
 esac
-foreign() { [ -e "$1" ] && ! grep -qF "$MARKER" "$1"; }
+foreign() { [ -L "$1" ] || { [ -e "$1" ] && ! grep -qF "$MARKER" "$1"; }; }
+exists() { [ -e "$1" ] || [ -L "$1" ]; }    # a dangling symlink exists too
 for hook in "${HOOKS[@]}"; do
   dst="$hooks/$hook"
-  if foreign "$dst" && [ -e "$dst.pre-strict-delivery" ]; then
+  if foreign "$dst" && exists "$dst.pre-strict-delivery"; then
     echo "install-hooks: refusing: $dst.pre-strict-delivery already exists and $dst is not ours; merge or remove one of them" >&2
     exit 1
   fi

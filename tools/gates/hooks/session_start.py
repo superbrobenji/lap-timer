@@ -35,6 +35,8 @@ def hook_path(root: str, hook: str) -> str:
 
 
 def ours(path: str) -> bool:
+    if os.path.islink(path):               # install-hooks.sh moves a symlinked hook aside
+        return False
     try:
         with open(path, "rb") as fh:       # bytes: a foreign hook need not be UTF-8
             return MARKER.encode() in fh.read()

@@ -106,7 +106,8 @@ class PreToolUse(unittest.TestCase):
                     "git --config-env a=B commit", '"git" commit -m x', "'git' push",
                     "git ${X} commit -m x", "git $X push",      # unexpandable option word: gated conservatively
                     "git p\\\nush", "git --git-dir=.git --work-tree . -p --bare --exec-path --literal-pathspecs push",
-                    "git --namespace n --no-replace-objects --no-optional-locks --html-path -c x.y=\"a b\" commit"):
+                    "git --namespace n --no-replace-objects --no-optional-locks --html-path -c x.y=\"a b\" commit",
+                    "git --shallow-file x --attr-source=HEAD --no-literal-pathspecs --glob-pathspecs --no-advice push"):
             self.assert_gated(cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
@@ -207,7 +208,18 @@ class PreToolUse(unittest.TestCase):
                           ("env GIT_CONFIG_GLOBAL=/tmp/g git commit -m x", "GIT_CONFIG_* assignment"),
                           ("GIT_CONFIG_SYSTEM=/x git push", "GIT_CONFIG_* assignment"),
                           ("export GIT_CONFIG_NOSYSTEM=1; git push", "GIT_CONFIG_* assignment"),
-                          ("GIT_CONFIG_KEY_0=a.b ls", "GIT_CONFIG_* assignment")):
+                          ("GIT_CONFIG_KEY_0=a.b ls", "GIT_CONFIG_* assignment"),
+                          # a flag before `)`, a backtick or a redirection; `>&`, `&>` and `$(...;...)` inside the command
+                          ("(git commit -m x --no-verify)", "--no-verify after"), ("out=$(git push --no-verify)", "--no-verify after"),
+                          ("out=`git push -n`", "-n after"), ("git commit -m x 2>&1 --no-verify", "--no-verify after"),
+                          ("git commit -m x &>/dev/null --no-verify", "--no-verify after"),
+                          ("git commit -m x --no-verify>/dev/null", "--no-verify after"), ("git push -n</dev/null", "-n after"),
+                          ("git commit -m $(date; true) --no-verify", "--no-verify after"),
+                          ("git push >&2 --no-verify", "--no-verify after"), ("git commit -m x --no-verify;", "--no-verify after"),
+                          # option values with substitutions and the rest of git's global options are read
+                          ("git -C $(pwd) commit -m x --no-verify", "--no-verify after"), ("git -C `pwd` push -n", "-n after"),
+                          ("git --shallow-file x commit --no-verify", "--no-verify after"),
+                          ("git --no-literal-pathspecs push --no-verify", "--no-verify after")):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
@@ -217,7 +229,10 @@ class PreToolUse(unittest.TestCase):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
         for cmd in ("git commit -m x && grep -n y f", "git push --dry-run", "nice -n 5 git push", "git log -n 3",
                     "git commit --amend --no-edit", "git push --set-upstream origin x", "git commit -m x\nls -n",
-                    "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD"):
+                    "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD",
+                    "git commit -m x 2>&1 && ls -n", "git push 2>&1 | grep -n x", "x=$(git log -n 3)",
+                    "(git commit -m x) && ls -n", "git commit -m x &>/dev/null; ls -n", "git push >&2; sort -n f",
+                    "git commit -m x & ls -n", "echo $(git push) | wc -l"):
             self.assert_silent(cmd)
 
     def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
@@ -228,7 +243,10 @@ class PreToolUse(unittest.TestCase):
                     "git -c " * 30000 + "status", "git -C " * 30000, 'git -c "' * 30000, "git $x " * 30000,
                     "git commit -m x " + "<<A\n" * 20000, "git commit -m x && " + "bash -o x " * 10000 + "-c y",
                     "git commit " * 30000, "git commit -m 'x' ; " * 20000, "git commit " + "-aaaaaaaaa! " * 20000,
-                    "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit"):
+                    "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit",
+                    # unterminated substitutions and backticks in option values and segments, redirection runs
+                    "git -C $(" * 20000, "git -C `" * 20000, "git commit $(" * 20000, "git commit " + ">&" * 50000,
+                    "$(a" * 30000 + ")", "cd " + "$(" * 30000, "cd `" + "x" * 100000):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])
@@ -244,7 +262,8 @@ class PreToolUse(unittest.TestCase):
         outside = tempfile.mkdtemp(prefix="gate-test-outside-")
         self.addCleanup(gf.remove, outside)
         for cmd, d in (("git -C %s commit -m x" % outside, outside), ("cd %s && git push" % outside, outside),
-                       ("git -C /nonexistent-dir push", "/nonexistent-dir"), ('git -C "$WT" push', "%s/$WT" % self.root)):
+                       ("git -C /nonexistent-dir push", "/nonexistent-dir"), ('git -C "$WT" push', "%s/$WT" % self.root),
+                       ("git -C $(pwd) push", "%s/$(pwd)" % self.root), ("cd `pwd` && git push", "%s/`pwd`" % self.root)):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
             self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % d), (cmd, p.stderr))
@@ -490,7 +509,7 @@ class GitHooks(unittest.TestCase):
         gf.git(remote, "init", "-q", "--bare")
         env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
         p = subprocess.run(["git", "push", "-q", remote, "HEAD:refs/heads/main"], cwd=self.root,
-                           capture_output=True, text=True, env=env, check=False)
+                           capture_output=True, text=True, env=env, check=False, timeout=60)   # a looping hook is an error
         got = subprocess.run(["git", "--git-dir", remote, "rev-parse", "-q", "--verify", "refs/heads/main"],
                              capture_output=True, text=True, env=isolated_env(), check=False)
         return p, got.stdout.strip()
@@ -574,6 +593,37 @@ class GitHooks(unittest.TestCase):
         self.assertIn("FAIL pre-push.missing", p.stderr)
         self.assertEqual("", got)
 
+    def test_a_symlinked_hook_is_moved_aside_not_written_through(self):
+        # S4's plan links pre-push to the tracked script: a write through the link would replace the
+        # tracked script by the shim, which then execs itself
+        for hook, path in (("pre-commit", self.hook), ("pre-push", self.pre_push)):
+            os.remove(path)
+            os.symlink(os.path.join("..", "..", "tools", "gates", "hooks", "git-%s.sh" % hook), path)
+        os.symlink("/nonexistent-target", self.pre_push + ".dangling")
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("moved the existing pre-commit hook", p.stdout)
+        self.assertIn("moved the existing pre-push hook", p.stdout)
+        self.assertEqual("", gf.git(self.root, "status", "--porcelain", "--", "tools"))    # the tracked scripts are untouched
+        for hook, path in (("pre-commit", self.hook), ("pre-push", self.pre_push)):
+            self.assertFalse(os.path.islink(path), path)
+            with open(path) as fh:
+                self.assertIn("/tools/gates/hooks/git-%s.sh\"" % hook, fh.read())
+            self.assertEqual(os.path.join("..", "..", "tools", "gates", "hooks", "git-%s.sh" % hook),
+                             os.readlink(path + ".pre-strict-delivery"))
+        p, got = self.push()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertEqual(gf.git(self.root, "rev-parse", "HEAD"), got)
+        # a backup that is a dangling symlink still counts: a symlinked hook over it is refused
+        os.remove(self.pre_push)
+        os.remove(self.pre_push + ".pre-strict-delivery")
+        os.rename(self.pre_push + ".dangling", self.pre_push + ".pre-strict-delivery")
+        os.symlink("/bin/true", self.pre_push)
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-push.pre-strict-delivery already exists", p.stderr)
+        self.assertEqual("/bin/true", os.readlink(self.pre_push))
+
 
 class SessionStart(unittest.TestCase):
     def setUp(self):
@@ -616,6 +666,11 @@ class SessionStart(unittest.TestCase):
         self.assertNotIn("FAIL", p.stdout)
         with open(pre_push) as fh:
             self.assertIn("# strict-delivery-gates-hook", fh.read())
+        os.remove(pre_push)                                 # a symlink to the tracked script carries the marker: not ours
+        os.symlink(os.path.join("..", "..", "tools", "gates", "hooks", "git-pre-push.sh"), pre_push)
+        p = hook("session_start.py", self.event())
+        self.assertIn("install-hooks: moved the existing pre-push hook", p.stdout)
+        self.assertFalse(os.path.islink(pre_push))
 
     def assert_failure_reaches_the_model(self, p, line):
         """SessionStart cannot block and only exit-0 stdout reaches the model: the FAIL is on stdout
