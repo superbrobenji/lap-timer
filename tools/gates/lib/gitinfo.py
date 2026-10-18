@@ -81,10 +81,16 @@ def path_type(root, rev: str, path: str):
     return None
 
 
+REGULAR_MODES = ("100644", "100755")    # a symlink (120000) or a submodule (160000) is not a file
+
+
 def tracked_files(root) -> frozenset:
-    """Every path in the index of the repository at `root`, relative to `root` (`git ls-files -z`:
-    tracked files, a staged new file included; -z means no C-quoting of non-ASCII paths)."""
-    return frozenset(l for l in _git(root, "ls-files", "-z").split("\0") if l)
+    """Every regular file in the index of the repository at `root`, relative to `root`
+    (`git ls-files -s -z`: a staged new file included, a tracked symlink or submodule not; -z means
+    no C-quoting of non-ASCII paths)."""
+    out = _git(root, "ls-files", "-s", "-z")
+    entries = (l.partition("\t") for l in out.split("\0") if l)
+    return frozenset(path for meta, _, path in entries if meta.split(" ")[0] in REGULAR_MODES)
 
 
 def staged_files(root) -> list:

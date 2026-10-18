@@ -106,13 +106,13 @@ commit and push, however it was launched.
   other means). A `-C` or `cd` directory is not expanded: one holding a variable, `$(...)` or a
   backtick (`cd "$WT" &&`, `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real
   command; name the directory literally. A `HOME` or `XDG_CONFIG_HOME` assignment that only
-  precedes a verb in data is blocked as a bypass too. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a
-  `-n` inside a substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a
-  bypass: write the message to a file and use `git commit -F <file>`. So is, rarely, a `-n` after
-  the arguments: a scan that meets an earlier verb's scan deeper inside a parenthesis reads on to
-  the end of the command. Every scan is linear in the command length. Every other command and
-  tool exits 0 silently, after one python3 start; the `Agent` branch (the dispatch gate) arrives
-  with S2.
+  precedes a verb in data is blocked as a bypass too. A commit message that holds `-n`,
+  `--no-verify` or `core.hooksPath` as a word, or a `-n` inside a substitution in the arguments
+  (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the message to a file and use
+  `git commit -F <file>`. So is, rarely, a `-n` after the arguments: a scan that meets an earlier
+  verb's scan deeper inside a parenthesis reads on to the end of the command. Every scan is linear
+  in the command length. Every other command and tool exits 0 silently, after one python3 start;
+  the `Agent` branch (the dispatch gate) arrives with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
@@ -137,13 +137,14 @@ commit and push, however it was launched.
   `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with
   the commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store`
   and the `__pycache__` directories under `tools/gates`. A finding's evidence file is gated by the
-  register itself: it must be a file git tracks (`register.evidence`), so an untracked or ignored
-  one fails the gate wherever it lies. `git-pre-push.sh` ignores its `<remote> <url>` arguments
-  and reads the ref lines on stdin: every pushed local sha, whatever the ref kind, is peeled to a
-  commit and must be HEAD (DEC-0006, read literally), else it is refused first
-  (`FAIL pre-push.not-head`; a branch, `bad~0:refs/heads/y`, a tag of an older commit or a
-  non-commit object alike: push it from that commit checked out, so the gates see its tree);
-  `HEAD:refs/heads/x`, a tag of HEAD and a delete pass. Then it runs `git-pre-commit.sh` with
-  `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because
-  a push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. S4
-  extends it with merge-readiness.
+  register itself: it must be a regular file git tracks (`register.evidence`), so an untracked or
+  ignored one, or a tracked symlink, fails the gate wherever it lies. `git-pre-push.sh` ignores its
+  `<remote> <url>` arguments and reads the ref lines on stdin: every pushed local sha, whatever
+  the ref kind, is peeled to a commit and must be HEAD (DEC-0006, read literally), else it is
+  refused first (`FAIL pre-push.not-head`; a branch, `bad~0:refs/heads/y`, a tag of an older
+  commit or a non-commit object alike: push it from that commit checked out, so the gates see its
+  tree); `HEAD:refs/heads/x`, a tag of HEAD and a delete pass; from an unborn HEAD only deletes
+  pass (`FAIL pre-push.not-head: ... pushed from an unborn HEAD`), and then no gate runs. Then it
+  runs `git-pre-commit.sh` with `--pre-push`: the same paths must not differ from HEAD at all,
+  staged changes included, because a push sends commits, not the index
+  (`FAIL pre-push.uncommitted`); then the same two gates. S4 extends it with merge-readiness.

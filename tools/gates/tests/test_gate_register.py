@@ -570,6 +570,40 @@ class FixWave(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertIn("PASS register.evidence\n", out)
 
+    # b3 re-review N1, N2 -- a tracked symlink is not a tracked file; a tracked name that is not a DEC-0004 path fails
+    def test_a_tracked_symlink_or_an_unnormalised_name_is_not_evidence(self):
+        root = fixture_repo("valid")
+        self.addCleanup(gf.remove, root)
+        self.assertEqual(0, main_out(root)[0])                     # the regular files: PASS
+        gf.write(root, ".gitignore", "ignored/\n")
+        gf.write(root, "ignored/r.md", "ignored\n")
+        for rel in ("docs/superpowers/state/demo/review/T1-PIN-1.md", "docs/superpowers/state/demo/mutations/T1-PIN-1.txt"):
+            os.remove(os.path.join(root, rel))
+            os.symlink(os.path.relpath(os.path.join(root, "ignored", "r.md"), os.path.dirname(os.path.join(root, rel))),
+                       os.path.join(root, rel))
+        gf.git(root, "add", "-A")
+        self.assertIn("120000", gf.git(root, "ls-files", "-s", "docs/superpowers/state/demo"))
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertIn("FAIL register.evidence.T1-PIN-1: evidence: 'docs/superpowers/state/demo/review/T1-PIN-1.md' "
+                      "is neither a commit sha nor a file tracked at the repo root\n", out)
+        self.assertIn("FAIL register.evidence.T1-PIN-1: evidence: pin transcript "
+                      "docs/superpowers/state/demo/mutations/T1-PIN-1.txt is not a file tracked at the repo root\n", out)
+        self.assertIn("FAIL register.evidence.T1-PIN-1: evidence: pinned needs the reviewer's confirming report path "
+                      "in evidence\n", out)
+        # a tracked file whose name is not a normalised repo-relative path (DEC-0004)
+        sha = gf.git(root, "rev-parse", "--short=7", "HEAD")
+        for name in (":r.md", " r.md"):
+            gf.write(root, name, "x\n")
+            gf.git(root, "add", "--", ":(literal)" + name)
+            gf.git(root, "ls-files", "--error-unmatch", "--", ":(literal)" + name)    # tracked (raises if not)
+            row = findings_text(owner="{kind: issue, number: 2}", evidence='["%s"]' % name).replace("aaaaaaa", sha)
+            gf.write(root, os.path.join(gf.STATE, "findings.yml"), row)
+            rc, out = main_out(root)
+            self.assertEqual(1, rc, name)
+            self.assertIn("FAIL register.evidence.T1-ORPHAN-1: evidence: %r is neither a commit sha nor a file tracked "
+                          "at the repo root\n" % name, out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,9 +28,11 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   (`by: postmerge`).
 - An evidence entry is a commit sha or a file git tracks at the repository root, written as a
   normalised repo-relative path (DEC-0004: no leading `:`, no `..`, not absolute). Tracked means
-  in the index: a staged new file counts; an untracked or ignored file (anything under the
-  gitignored `.superpowers/`) does not, nor does a directory. `gate_register` fails any other
-  entry (`register.evidence`), so the register reads the same on every machine.
+  in the index as a regular file (mode 100644 or 100755): a staged new file counts; an untracked
+  or ignored file (anything under the gitignored `.superpowers/`) does not, nor does a directory, a
+  tracked symlink or a submodule. A pinned row's `pin.transcript` must be tracked the same way.
+  `gate_register` fails any other entry (`register.evidence`), so the register reads the same on
+  every machine.
 - Every sha (history, cites, evidence entries shaped like a sha, `asked_at.sha`, `answered_at.sha`,
   `verified_at`) must name a commit of this repository: `gate_register` checks each with
   `git cat-file -e <sha>^{commit}` (decision DEC-0003). The registers name commits on `main`, so the

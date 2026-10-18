@@ -113,9 +113,9 @@ def _file_under(root, rel) -> bool:
 
 def _tracked_under(root, rel, tracked) -> bool:
     """True when `rel` is a normalised repo-relative path (DEC-0004: no leading ':', no '..', not
-    absolute) naming a regular file inside `root` that git tracks there (in the index, so a staged new
-    file counts and an untracked or ignored one does not): the register reads the same on every
-    machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
+    absolute) naming a regular file inside `root` that git tracks there as a regular file (in the
+    index with mode 100644 or 100755, so a staged new file counts and an untracked or ignored file, a
+    tracked symlink or a submodule does not): the register reads the same on every machine. `tracked(root)` is the set of tracked paths (gitinfo.tracked_files or memo_tracked)."""
     return (isinstance(rel, str) and cite_problem(rel) == "" and not rel.endswith("/")
             and _file_under(root, rel) and rel in tracked(root))
 
@@ -237,6 +237,8 @@ def evidence_errors(f: dict, root, decisions: list, owner=None, tracked=None) ->
                             f"got {pin['transcript']!r}")
             elif not _file_under(root, pin["transcript"]):
                 errs.append(f"evidence: pin transcript {pin['transcript']} does not exist")
+            elif not _tracked_under(root, pin["transcript"], tracked):
+                errs.append(f"evidence: pin transcript {pin['transcript']} is not a file tracked at the repo root")
         if not any(not _sha(e) and _tracked_under(root, e, tracked) for e in f["evidence"]):
             errs.append("evidence: pinned needs the reviewer's confirming report path in evidence")
     if f["state"] == "deferred":

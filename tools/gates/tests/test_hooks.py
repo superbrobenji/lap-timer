@@ -722,6 +722,37 @@ class GitHooks(unittest.TestCase):
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
         self.assertIn("refs/heads/main", refs)
 
+    def test_a_tracked_symlink_as_evidence_is_refused_by_commit(self):     # b3 re-review N1
+        gf.write(self.root, ".gitignore", "ignored/\n")
+        gf.write(self.root, "ignored/r.md", "a report\n")
+        os.makedirs(os.path.join(self.root, "notes"))
+        os.symlink(os.path.join("..", "ignored", "r.md"), os.path.join(self.root, "notes", "r.md"))
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), self.evidence_row("notes/r.md"))
+        gf.git(self.root, "add", "-A")
+        self.assertTrue(gf.git(self.root, "ls-files", "-s", "notes/r.md").startswith("120000 "))
+        p = self.commit()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.evidence.T1-EV-1: evidence: 'notes/r.md' is neither a commit sha nor a file "
+                      "tracked at the repo root", p.stdout + p.stderr)
+
+    def test_pre_push_from_an_unborn_head(self):     # b3 re-review N4
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        gf.git(self.root, "push", "-q", remote, "HEAD:refs/heads/old")       # gitfixture pushes without hooks
+        sha = gf.git(self.root, "rev-parse", "HEAD")
+        gf.git(self.root, "checkout", "-q", "--orphan", "unborn")
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
+        p = subprocess.run(["git", "push", "-q", remote, sha + ":refs/heads/new"], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.not-head: %s (%s) pushed from an unborn HEAD" % (sha, sha[:7]), p.stderr)
+        self.assertNotIn("fatal:", p.stderr)
+        p = subprocess.run(["git", "push", "-q", remote, ":refs/heads/old"], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        self.assertEqual((0, ""), (p.returncode, p.stderr))
+        self.assertEqual("", gf.git(remote, "for-each-ref"))
+
     def test_pre_push_refuses_a_ref_that_is_not_head(self):     # DEC-0006
         gf.git(self.root, "checkout", "-q", "-b", "bad")
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
