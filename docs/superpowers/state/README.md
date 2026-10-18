@@ -8,8 +8,8 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
 | File | Holds | Gate |
 |---|---|---|
 | `findings.yml` | one row per finding, with owner, lifecycle state and evidence | `gate_register` |
-| `claims.yml` | one row per factual statement in a tracked document | `gate_claims` (arrives in block b2) |
-| `decisions.yml` | owner questions and merge grants (`grant:<plan>`) | `gate_decisions` (arrives in block b2) |
+| `claims.yml` | one row per factual statement in a tracked document | `gate_claims` |
+| `decisions.yml` | owner questions and merge grants (`grant:<plan>`) | `gate_decisions` |
 | `<plan>/ledger.md` | the plan's progress ledger, rulings, `CHECKPOINT b<N>` lines | by hand |
 | `<plan>/handoff.md` | the checkpoint handoff | by hand |
 | `<plan>/mutations/<id>.txt` | mutation transcripts that pin a finding | `gate_register` |
@@ -32,9 +32,14 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   gate needs full history: a shallow clone FAILs `register.evidence` by design, and CI checks out
   with `fetch-depth: 0`.
 - Claims: `verified` needs `verified_at` and `by`; a verified row whose cited file changes goes
-  stale (the `gate_claims` gate and its `--mark-stale` command arrive in block b2; the command
-  rewrites `claims.yml` through PyYAML, so comments in it are not kept: keep none there).
-  `false` needs `finding` = a registered finding id.
+  stale (`gate_claims` fails it; `gate_claims.py --mark-stale --base <sha>` rewrites such rows as
+  `stale` through PyYAML, so comments in `claims.yml` are not kept: keep none there). Every cite is a
+  normalised repo-relative path (decision DEC-0004): no `./`, `..`, leading `/`, `//`, NUL or
+  surrounding space, and never a leading `:` (git pathspec magic is rejected per row); a directory
+  cite ends in exactly one `/`, and a git submodule is cited in the file form, without a trailing
+  `/`. `gate_claims` also fails a `verified` row whose cite is not a file (a submodule counts as a
+  file; or, with a trailing `/`, a directory) at `verified_at`, because such a row could never go
+  stale. `false` needs `finding` = a registered finding id.
 - Decisions: only the owner answers. The owner states the answer in chat; the session records it
   verbatim (a quoted string) with `answered_at.by: superbrobenji`, the owner handle in
   `tools/gates/config.yml`, and quotes the owner's words in the commit message. An agent never

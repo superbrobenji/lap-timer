@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import stat
 
 from . import CODE_ROOT, GateError, config, gitinfo, load_yaml
 
@@ -27,6 +28,7 @@ SHA = re.compile(r"^[0-9a-f]{7,40}$")
 STATE_DIR = os.path.join("docs", "superpowers", "state")
 PIN_TEST = re.compile(r"^test_[A-Za-z0-9_]+(::test_[A-Za-z0-9_]+)?$")
 PIN_TRANSCRIPT = re.compile(r"^docs/superpowers/state/(?!\.\.?/)[^/]+/mutations/(?!\.\.?$)[^/]+$")
+OWNER_ANSWER_ERROR = "answered_at.by: only the owner"    # the prefix of validate_decision's non-owner-answer error
 POSTMERGE = "postmerge"   # the only `by` allowed on a history entry that sets `merged`
 
 FINDING_KEYS = ["id", "source", "severity", "class", "siblings", "cites", "repro", "owner", "state",
@@ -248,6 +250,25 @@ def evidence_errors(f: dict, root, decisions: list, owner=None) -> list:
     return errs
 
 
+def cite_problem(cite) -> str:
+    """'' when `cite` is a normalised repo-relative path (DEC-0004), else why it is not. A directory
+    cite ends in exactly one '/'. The path must also exist at verified_at (gate_claims checks that)."""
+    if not isinstance(cite, str) or not cite:
+        return "is not a non-empty string"
+    if cite != cite.strip() or "\0" in cite:
+        return "has leading or trailing whitespace or a NUL"
+    if cite.startswith("/"):
+        return "is absolute: write a path relative to the repository root"
+    if cite.startswith(":"):
+        return "starts with ':' (git pathspec magic, not a path)"
+    body = cite[:-1] if cite.endswith("/") else cite
+    if body == "." or ".." in body.split("/"):
+        return "climbs out of or names the repository root ('.' or '..')"
+    if os.path.normpath(body) != body:
+        return "is not normalised: no './' segment, '//' or repeated trailing '/'"
+    return ""
+
+
 def validate_claim(c: dict) -> list:
     errs = _keys(c, CLAIM_KEYS)
     if any(e.startswith("keys: missing") for e in errs):
@@ -257,8 +278,13 @@ def validate_claim(c: dict) -> list:
     for k in ("doc", "anchor", "text", "direct", "contra"):
         if not _text(c[k]):
             errs.append(f"{k}: must be a non-empty string" + _hint(c[k]))
-    if not isinstance(c["cites"], list) or not c["cites"] or not all(_text(p) for p in c["cites"]):
+    if not isinstance(c["cites"], list) or not c["cites"]:
         errs.append("cites: must be a non-empty list of paths (a claim citing nothing can never go stale)")
+    else:
+        for p in c["cites"]:
+            why = cite_problem(p)
+            if why:
+                errs.append(f"cites: {p!r} {why} (a cite that names no changed path can never go stale)")
     if c["state"] is False:
         errs.append('state: YAML read false as a boolean; quote it: state: "false"')
     elif c["state"] not in CLAIM_STATES:
@@ -313,18 +339,71 @@ def validate_decision(d: dict, owner=None) -> list:
             errs.append("answered_at: must be null or {sha, by}")
         else:
             errs += _sha_problem("answered_at.sha", at["sha"])
-            if owner is None:
-                owner = config.load(CODE_ROOT)["owner"]["handle"]
+            owner = owner_handle(owner)
             if at["by"] != owner:
-                errs.append(f"answered_at.by: only the owner ({owner}) answers a decision, got {at['by']!r}")
+                errs.append(f"{OWNER_ANSWER_ERROR} ({owner}) answers a decision, got {at['by']!r}")
     if (ans is None) != (at is None):
         errs.append("answered_at: answer and answered_at are both null or both set")
     return errs
 
 
+class PathError(GateError):
+    """A GateError worded `<path relative to root>: <reason>` (machine-independent); `reason` is the bare
+    reason, `not_regular` says the path exists but is not a regular file."""
+
+    def __init__(self, root, path, reason, not_regular=False):
+        super().__init__(f"{os.path.relpath(path, root)}: {reason}")
+        self.reason = reason
+        self.not_regular = not_regular
+
+
+def rel_error(root, path, exc) -> PathError:
+    """A PathError worded `<path relative to root>: <strerror>`."""
+    return PathError(root, path, exc.strerror or str(exc))
+
+
+def require_regular(root, path) -> None:
+    """`path` must be a regular file (after following symlinks): opening a FIFO would hang.
+    Anything else, or a path that cannot be examined, is a PathError (a GateError)."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        raise rel_error(root, path, exc) from None
+    if not stat.S_ISREG(mode):
+        raise PathError(root, path, "not a regular file", not_regular=True)
+
+
+def safe_text(rel: str) -> str:
+    """A path for a line id: control characters (a newline in a file name) are escaped, so the
+    name cannot split or forge a result line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
+
+
 def _commit_errors(pairs, root, exists) -> list:
     return [f"{field}: sha {sha} is not a commit in this repository"
             for field, sha in pairs if _sha(sha) and not exists(root, sha)]
+
+
+def row_id(row, index, pattern) -> str:
+    """The id to print in a result line id: the row's own id only when it is a str matching
+    `pattern`, else `entry-<index>` (a raw malformed id could carry a newline and forge or split a
+    result line)."""
+    rid = row.get("id")
+    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
+
+
+def memo_commit_exists():
+    """An `exists(root, sha) -> bool` for the *_commit_errors functions that asks git once per
+    distinct (root, sha) and remembers the answer (a GateError is not remembered)."""
+    seen = {}
+
+    def exists(root, sha):
+        key = (str(root), sha)
+        if key not in seen:
+            seen[key] = gitinfo.commit_exists(root, sha)
+        return seen[key]
+
+    return exists
 
 
 def finding_commit_errors(f: dict, root, exists=gitinfo.commit_exists) -> list:
@@ -347,21 +426,30 @@ def decision_commit_errors(d: dict, root, exists=gitinfo.commit_exists) -> list:
     return _commit_errors(pairs, root, exists)
 
 
+def owner_handle(owner=None) -> str:
+    """`owner`, or config owner.handle when it is None."""
+    return config.load(CODE_ROOT)["owner"]["handle"] if owner is None else owner
+
+
 def finding_by_id(findings, id):
     return next((f for f in findings if f.get("id") == id), None)
 
 
-def open_decisions(decisions) -> list:
-    """Decisions whose answer is None (the owner has not answered)."""
-    return [d for d in decisions if d.get("answer") is None]
+def open_decisions(decisions, *, owner=None) -> list:
+    """Every decision the owner has not answered (owner defaults to config owner.handle): `answer` is
+    None, `answered_at` is not a mapping, or `answered_at.by` is not the owner. Only the owner's answer
+    is an answer (spec §5), so a row answered by an agent is still open."""
+    owner = owner_handle(owner)
+    return [d for d in decisions
+            if d.get("answer") is None or not isinstance(d.get("answered_at"), dict)
+            or d["answered_at"].get("by") != owner]
 
 
 def grant_for(decisions, plan: str, *, owner=None):
     """The merge grant for <plan>: a schema-valid decision of class merge-grant whose question is
     'grant:<plan>' (optionally followed by a space and free text), answered "yes" (case-insensitive)
     by the owner (default: config owner.handle). Any other row is no grant."""
-    if owner is None:
-        owner = config.load(CODE_ROOT)["owner"]["handle"]
+    owner = owner_handle(owner)
     for d in decisions:
         if validate_decision(d, owner) != [] or d["class"] != "merge-grant":
             continue

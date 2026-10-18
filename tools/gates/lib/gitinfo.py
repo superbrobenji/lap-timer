@@ -63,9 +63,22 @@ def worktrees(root) -> list:
 
 
 def changed_files(root, base: str, head: str = "HEAD") -> list:
-    """Paths that differ between two commits (`git diff --name-only -z --no-renames`; -z means no C-quoting of non-ASCII paths)."""
-    out = _git(root, "diff", "--name-only", "-z", "--no-renames", base, head)
+    """Paths that differ between two commits (`git diff --name-only -z --no-renames --end-of-options`; -z means no C-quoting of non-ASCII
+    paths, --end-of-options means a revision shaped like an option is a revision, never an option)."""
+    out = _git(root, "diff", "--name-only", "-z", "--no-renames", "--end-of-options", base, head)
     return [l for l in out.split("\0") if l]
+
+
+def path_type(root, rev: str, path: str):
+    """'blob' (a file), 'tree' (a directory), 'commit' (a submodule gitlink) or None when `path` (no
+    trailing '/') is not an entry at `rev` (`git --literal-pathspecs ls-tree -z <rev> -- <path>`, so
+    a path is never read as pathspec magic); other git failures are a GateError."""
+    out = _git(root, "--literal-pathspecs", "ls-tree", "-z", rev, "--", path)    # never pathspec magic
+    for entry in out.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if name == path:
+            return meta.split()[1]
+    return None
 
 
 def staged_files(root) -> list:

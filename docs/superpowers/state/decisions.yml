@@ -25,3 +25,13 @@
   asked_at: {sha: "73cd3cc", by: session}
   answer: "verify (delegated: owner said \"you may pick ideal for both 002 and 003\", 2026-10-17)"
   answered_at: {sha: "73cd3cc", by: superbrobenji}
+
+- id: DEC-0004
+  class: scope
+  question: "May the claim schema require every cite to be a normalised repo-relative path that exists at verified_at (a directory only with a trailing /)?"
+  options:
+    - {label: require, cost: "schema rule plus tests; existing rows must conform"}
+    - {label: document, cost: "non-matching cites never go stale; Review Focus row 3 only partly met"}
+  asked_at: {sha: "e2a20af", by: session}
+  answer: "require (owner answered \"Yes, add the schema rule\" in chat, 2026-10-17)"
+  answered_at: {sha: "e2a20af", by: superbrobenji}

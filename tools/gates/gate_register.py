@@ -22,13 +22,12 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
-from tools.gates.lib import gitinfo, registers  # noqa: E402
+from tools.gates.lib import registers  # noqa: E402
 
 CATEGORIES = ["schema", "owner", "duplicate", "transition", "evidence", "report"]
 REPORT_DIRS = [os.path.join("docs", "reviews"), os.path.join("docs", "superpowers", "state", "briefs")]
@@ -39,27 +38,6 @@ MARKER_LINES = 20
 MARKER_ATTEMPT = re.compile(r"^\ufeff?\s*register\s*:", re.I)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]+[.)])\s+(?:\[[ xX]\]\s+)?"
                        r"(?:\*\*([^\s*]+)\*\*|`([^`\s]+)`|([^\s:,.*`]+))(?=[\s:,.]|$)")
-
-
-def _rel_error(root, path, exc) -> GateError:
-    """A GateError worded `<path relative to root>: <strerror>`, so the output is machine-independent."""
-    return GateError(f"{os.path.relpath(path, root)}: {exc.strerror or exc}")
-
-
-def _require_regular(root, path) -> None:
-    """A report entry must be a regular file (after following symlinks): opening a FIFO would hang."""
-    try:
-        mode = os.stat(path).st_mode
-    except OSError as exc:
-        raise _rel_error(root, path, exc) from None
-    if not stat.S_ISREG(mode):
-        raise GateError(f"{os.path.relpath(path, root)}: not a regular file")
-
-
-def _safe(rel: str) -> str:
-    """A path for a line id: control characters (a newline in a file name) are escaped, so the
-    name cannot split or forge a result line."""
-    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in rel)
 
 
 def _first_visit(seen, path) -> bool:
@@ -89,17 +67,17 @@ def registered_reports(root) -> tuple:
             raise GateError(f"{d}: not a directory")
         if not _first_visit(seen, top):
             continue    # this directory was already walked through a symlink
-        for dirpath, dirnames, filenames in os.walk(top, onerror=lambda exc: _raise(_rel_error(root, exc.filename, exc)), followlinks=True):
+        for dirpath, dirnames, filenames in os.walk(top, onerror=lambda exc: _raise(registers.rel_error(root, exc.filename, exc)), followlinks=True):
             dirnames.sort()
             dirnames[:] = [n for n in dirnames if _first_visit(seen, os.path.join(dirpath, n))]
             for name in sorted(filenames):
                 path = os.path.join(dirpath, name)
-                _require_regular(root, path)
+                registers.require_regular(root, path)
                 try:
                     with open(path, encoding="utf-8", errors="replace") as fh:
                         head = [next(fh, "").rstrip("\r\n") for _ in range(MARKER_LINES)]
                 except OSError as exc:
-                    raise _rel_error(root, path, exc) from None
+                    raise registers.rel_error(root, path, exc) from None
                 attempts = [l for l in head if MARKER_ATTEMPT.match(l)]
                 wrong = next((l for l in attempts if l != MARKER), None)
                 if wrong is not None:
@@ -121,12 +99,12 @@ def report_ids(path, root) -> list:
     """Finding ids a registered report cites: table first cells and leading list-item ids.
     An unreadable file is a GateError worded relative to `root`."""
     ids = []
-    _require_regular(root, path)
+    registers.require_regular(root, path)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError as exc:
-        raise _rel_error(root, path, exc) from None
+        raise registers.rel_error(root, path, exc) from None
     for line in lines:
         s = line.strip()
         if s.startswith("|"):
@@ -140,13 +118,6 @@ def report_ids(path, root) -> list:
             if registers.FINDING_ID.fullmatch(token):
                 ids.append(token)
     return ids
-
-
-def _row_id(row, index, pattern) -> str:
-    """The id to print in a line id: the row's own id only when it is well-formed, else entry-<index>
-    (a raw malformed id could carry a newline and forge or split a result line)."""
-    rid = row.get("id")
-    return rid if isinstance(rid, str) and pattern.fullmatch(rid) else f"entry-{index}"
 
 
 def _categories(error: str) -> list:
@@ -169,16 +140,11 @@ def check(args: list) -> Result:
     decisions = registers.load_decisions(root)
     r = Result("register")
     skipped = set()    # categories in which some row was not evaluated: they never print a PASS line
-    commits = {}
-
-    def exists(root, sha):    # one git call per distinct sha
-        if sha not in commits:
-            commits[sha] = gitinfo.commit_exists(root, sha)
-        return commits[sha]
+    exists = registers.memo_commit_exists()    # one git call per distinct sha
 
     seen = set()
     for i, f in enumerate(findings):
-        fid = _row_id(f, i, registers.FINDING_ID)
+        fid = registers.row_id(f, i, registers.FINDING_ID)
         if fid in seen:
             r.fail(f"register.duplicate.{fid}", "id appears more than once")
         seen.add(fid)
@@ -195,7 +161,7 @@ def check(args: list) -> Result:
             r.fail(f"register.evidence.{fid}", e)
     seen = set()
     for i, d in enumerate(decisions):
-        did = _row_id(d, i, registers.DECISION_ID)
+        did = registers.row_id(d, i, registers.DECISION_ID)
         if did in seen:
             r.fail(f"register.duplicate.{did}", "id appears more than once")
         seen.add(did)
@@ -211,12 +177,12 @@ def check(args: list) -> Result:
              if isinstance(f.get("id"), str) and registers.FINDING_ID.fullmatch(f["id"])}
     reports, bad = registered_reports(root)
     for path, line in bad:
-        r.fail(f"register.marker.{_safe(os.path.relpath(path, root))}",
+        r.fail(f"register.marker.{registers.safe_text(os.path.relpath(path, root))}",
                f"marker must be exactly '{MARKER}' (found {line!r})")
     if bad:
         skipped.add("report")
     for path in reports:
-        rel = _safe(os.path.relpath(path, root))
+        rel = registers.safe_text(os.path.relpath(path, root))
         for rid in sorted(set(report_ids(path, root)) - known):
             r.fail(f"register.report.{rel}.{rid}", "not in register")
     failed = {l.id.split(".")[1] for l in r.lines}

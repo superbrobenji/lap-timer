@@ -1,0 +1,34 @@
+name: gates
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    # Strict-delivery gate suite (docs/superpowers/specs/2026-10-17-strict-delivery-design.md §7-§8).
+    # A missing gate script, register or config is a FAIL, never a skip: unlike ci.yml's
+    # host-tests there is deliberately no "Probe inputs" / "Nothing to do" step here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # claim rows are compared against verified_at..HEAD; a shallow clone has no history
+      - uses: actions/setup-python@v5
+        with:
+          # Both interpreters in this one job (no matrix: a matrix would rename the required check).
+          # The last version listed is the default `python3` (here 3.12); every step names its own.
+          python-version: |
+            3.9
+            3.12
+      - name: Install PyYAML (pinned in tools/requirements.txt)
+        run: |
+          python3.9 -m pip install PyYAML==6.0.2
+          python3.12 -m pip install PyYAML==6.0.2
+      - name: Gate-script tests (Python 3.9)
+        run: python3.9 -m unittest discover -v -s tools/gates/tests -t .
+      - name: Gate-script tests (Python 3.12)
+        run: python3.12 -m unittest discover -v -s tools/gates/tests -t .
+      - name: Gates at HEAD
+        run: python3.12 tools/gates/run_all.py
