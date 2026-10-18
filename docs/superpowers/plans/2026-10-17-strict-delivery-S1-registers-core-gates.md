@@ -5201,7 +5201,7 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 
 **Interfaces:**
 - Consumes: `run_all.run(names, {"root": <toplevel>}) -> Result` (Task 6); the hook protocol in the umbrella (stdin JSON: `tool_name`, `tool_input.command`, `cwd`; exit 2 + stderr to block; exit 0 silent to allow).
-- Produces: `pre_tool_use.py` (owner decision DEC-0005, Task 8b: a best-effort textual check; the git hooks are the enforcement). `Bash` event: a hook bypass -- `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`, `_SYSTEM` or `_NOSYSTEM` assignment anywhere in the command, or `--no-verify` (also `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding n after a gated verb in its simple command (quote-aware; `>&`, `<&`, `&>` and an unquoted `$(...)` do not end it; the flag may stand before `)`, a backtick, a redirection or a separator) -- → `FAIL hook.bypass: <form>`, exit 2, before any gate runs. `git [opts] commit|push` matched in the text wherever it stands (quotes, heredocs and comments included; a path-qualified git word; any prefix), the options (git 2.50.1's global options; values may hold `$(...)` or backticks) read left to right as git reads them → `run_all.run(["register", "claims"], {"root": <toplevel>})` once per tree named: each `-C <dir>` applied in turn from a leading `cd <dir>` or the event's `cwd`; a directory outside a repository → `FAIL hook.target: <dir>: <git stderr>`; a missing `cwd` → `FAIL hook.input`. The documented limits (a verb behind an expansion, alias, function, `eval`, a payload file or a wrapper the regex does not see; a quoted piece in the git word or the verb; a tree changed by a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`/`--work-tree`) are gated by the git hooks. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `git_calls(command) -> list[(options, verb, verb_end)]`, `bypass(command, calls) -> str | None`, `tree_for(event, command, options="") -> str`, `GIT_VERB`, `GATED`, `BYPASS`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); with `--pre-push` it also refuses staged changes there, because a push sends HEAD (`FAIL pre-push.uncommitted`); then `run_all.py --only register,claims`. `git-pre-push.sh`: runs `git-pre-commit.sh --pre-push`; ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness). `install-hooks.sh`: checks both hooks, then writes the marked shims `pre-commit` and `pre-push` to `$(git rev-parse --git-path hooks)/` and moves a foreign hook, or any symlink (the link itself), to `<hook>.pre-strict-delivery`; an existing backup is never overwritten and then nothing is installed. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing` / `FAIL pre-push.missing`.
+- Produces: `pre_tool_use.py` (owner decision DEC-0005, Task 8b: a best-effort textual check; the git hooks are the enforcement). `Bash` event: a hook bypass -- `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`, `_SYSTEM` or `_NOSYSTEM` assignment anywhere in the command, or `--no-verify` (also `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding n in the arguments of a gated verb (quote-aware, up to an unquoted separator or an unpaired parenthesis or backtick, so the rest of an enclosing `$(...)` is not read; `>&`, `<&`, `&>`, `>|` and a `$(...)`, `<(...)`, `>(...)` or backtick piece do not end them; the flag may stand before `)`, a backtick, a redirection or a separator) -- → `FAIL hook.bypass: <form>`, exit 2, before any gate runs. `git [opts] commit|push` matched in the text wherever it stands (quotes, heredocs and comments included; a path-qualified git word; any prefix), the options (git 2.50.1's global options; values may hold `$(...)` or backticks) read left to right as git reads them → `run_all.run(["register", "claims"], {"root": <toplevel>})` once per tree named: each `-C <dir>` applied in turn from a leading `cd <dir>` or the event's `cwd`; a directory outside a repository → `FAIL hook.target: <dir>: <git stderr>`; a missing `cwd` → `FAIL hook.input`. The documented limits (a verb behind an expansion, alias, function, `eval`, a payload file or a wrapper the regex does not see; a quoted piece in the git word or the verb; a tree changed by a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`/`--work-tree`) are gated by the git hooks. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `git_calls(command) -> list[(options, verb, verb_end)]`, `bypass(command, calls) -> str | None`, `tree_for(event, command, options="") -> str`, `GIT_VERB`, `GATED`, `BYPASS`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); with `--pre-push` it also refuses staged changes there, because a push sends HEAD (`FAIL pre-push.uncommitted`); then `run_all.py --only register,claims`. `git-pre-push.sh`: runs `git-pre-commit.sh --pre-push`; ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness). `install-hooks.sh`: checks both hooks, then writes the marked shims `pre-commit` and `pre-push` to `$(git rev-parse --git-path hooks)/` and moves a foreign hook, or any symlink (the link itself), to `<hook>.pre-strict-delivery`; an existing backup is never overwritten and then nothing is installed. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing` / `FAIL pre-push.missing`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -5426,6 +5426,11 @@ class PreToolUse(unittest.TestCase):
                           ("git commit -m x --no-verify>/dev/null", "--no-verify after"), ("git push -n</dev/null", "-n after"),
                           ("git commit -m $(date; true) --no-verify", "--no-verify after"),
                           ("git push >&2 --no-verify", "--no-verify after"), ("git commit -m x --no-verify;", "--no-verify after"),
+                          # `>|` and process substitutions holding `;` keep the arguments; a flag right before the `)` of $(...)
+                          ("git push >|out --no-verify", "--no-verify after"), ("git push >| out -n", "-n after"),
+                          ("git push 2>|out --no-verify", "--no-verify after"), ("git push <(echo; echo) --no-verify", "--no-verify after"),
+                          ("git push >(cat; cat) -n", "-n after"), ("x=$(git commit -m y --no-verify; ls)", "--no-verify after"),
+                          ("git commit -m `date` -n", "-n after"), ("git commit -m x; git push -n", "-n after"),
                           # option values with substitutions and the rest of git's global options are read
                           ("git -C $(pwd) commit -m x --no-verify", "--no-verify after"), ("git -C `pwd` push -n", "-n after"),
                           ("git --shallow-file x commit --no-verify", "--no-verify after"),
@@ -5442,7 +5447,11 @@ class PreToolUse(unittest.TestCase):
                     "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD",
                     "git commit -m x 2>&1 && ls -n", "git push 2>&1 | grep -n x", "x=$(git log -n 3)",
                     "(git commit -m x) && ls -n", "git commit -m x &>/dev/null; ls -n", "git push >&2; sort -n f",
-                    "git commit -m x & ls -n", "echo $(git push) | wc -l"):
+                    "git commit -m x & ls -n", "echo $(git push) | wc -l",
+                    # another command after the verb inside the same substitution, subshell or backticks is not its argument
+                    "out=$(git push 2>&1; echo -n done)", "x=$(git commit -m y; ls -n)", "x=`git push; ls -n`",
+                    "(git commit -m x; ls -n)", "echo $(git push) -n", "echo `git push` -n", "git push >|out; ls -n",
+                    "git push <(echo) | grep -n x"):
             self.assert_silent(cmd)
 
     def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
@@ -5456,7 +5465,10 @@ class PreToolUse(unittest.TestCase):
                     "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit",
                     # unterminated substitutions and backticks in option values and segments, redirection runs
                     "git -C $(" * 20000, "git -C `" * 20000, "git commit $(" * 20000, "git commit " + ">&" * 50000,
-                    "$(a" * 30000 + ")", "cd " + "$(" * 30000, "cd `" + "x" * 100000):
+                    "$(a" * 30000 + ")", "cd " + "$(" * 30000, "cd `" + "x" * 100000,
+                    # one argument scan per verb: unpaired backticks, process substitutions, parentheses, quotes
+                    "git push `" * 30000, "git push <(" * 30000, "git push ) " * 30000, "git commit '" * 30000,
+                    "git push \"" * 30000, "git push >|" * 30000):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])
@@ -5863,16 +5875,19 @@ textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-000
 
 1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
    _GLOBAL, _SYSTEM or _NOSYSTEM assignment anywhere, in any Bash command; `--no-verify` (or an
-   abbreviation git accepts), `-n` or a short-option cluster holding n after a gated verb, up to the
-   end of its simple command (quote-aware; `>&`, `<&`, `&>` and an unquoted `$(...)` without nested
-   parentheses do not end it; `-n` is --no-verify for commit and --dry-run for push, blocked for
-   both). Each exits 2 with `FAIL hook.bypass: <form found>` before any gate runs.
+   abbreviation git accepts), `-n` or a short-option cluster holding n in the arguments of a gated
+   verb (ARGS: up to an unquoted separator or an unpaired parenthesis or backtick, so the rest of an
+   enclosing `$(...)` is not read; the redirections `>&`, `<&`, `&>`, `>|` and a `$(...)`, `<(...)`,
+   `>(...)` or backtick piece without nesting do not end it; `-n` is --no-verify for commit and
+   --dry-run for push, blocked for both). Each exits 2 with `FAIL hook.bypass: <form found>` before
+   any gate runs.
 2. Gated: `git [options] commit|push`, matched in the text wherever it stands (after any separator,
    `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the verb a whole word (`commits`,
    `pushd`, `commit-graph`, `--push-option` are not verbs). The options are git 2.50.1's global
-   options (OPTION; each checked with `git <option> version`), read left to right as git does, plus a
-   `$X` word; an option value may hold `$(...)` or backticks. A backslash-newline is removed first. No data/code analysis: a mention inside quotes, a heredoc or a comment
-   (`echo "git push"`) runs the gates too -- on a healthy tree that costs well under a second.
+   options (OPTION; each checked with `git <option> version`), read left to right as git does, plus
+   a `$X` word; an option value may hold `$(...)` or backticks. A backslash-newline is removed
+   first. No data/code analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`)
+   runs the gates too -- on a healthy tree that costs well under a second.
 3. Tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the directory of
    a leading `cd <dir> &&` / `;` / newline, else from the event's `cwd`; `git -C <dir> rev-parse
    --show-toplevel` must succeed (`FAIL hook.target: <dir>: <git stderr>`), a missing cwd is
@@ -5890,14 +5905,14 @@ cannot read as one word (`git -C $(dirname $(pwd)) commit`) or a global option g
 2.50.1, where the verb is not seen and so neither is a bypass flag after it; a quoted or escaped
 bypass flag (`--no-"verify"`, `core.hooks\\Path`); a bypass in a form the text does not show (a
 config file or hook script edited by other means). A `-C` or `cd` directory is not expanded: one
-holding a variable, `$(...)` or a backtick (`cd "$WT" &&`, `git -C $(pwd)`) is `FAIL hook.target`, a
-block of a real command; name the directory literally. A commit message that holds
-`-n`, `--no-verify` or `core.hooksPath` as a word is blocked as a bypass: write it to a file and
-use `git commit -F <file>`. Every scan is linear in the command length.
+holding a variable, `$(...)` or a backtick (`cd "$WT" &&`, `git -C $(pwd)`) is `FAIL hook.target`,
+a block of a real command; name the directory literally. A commit message that holds `-n`,
+`--no-verify` or `core.hooksPath` as a word, or a `-n` inside a substitution in the arguments
+(`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the message to a file and use
+`git commit -F <file>`. Every scan is linear in the command length.
 """
 from __future__ import annotations
 
-import bisect
 import json
 import os
 import re
@@ -5918,8 +5933,9 @@ OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +
                     r"|no-advice)|-[pP]|\$\{?\w+\}?)")
 GIT_VERB = re.compile(r"[ \t]+[\"']?(commit|push)(?![\w-])")   # the verb right after the option run
 LEADING_CD = re.compile(r"\s*cd[ \t]+(" + VALUE + r")[ \t]*(?:&&|;|\n)")
-# one simple command: `>&`, `<&` and `&>` are redirections, an unquoted `$(...)` without nested parentheses is one piece
-SEGMENT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[<>]&|&>|\$\([^()]*\)|[^"'\\;&|\n])+""")
+# the arguments of a gated verb: up to an unquoted separator or an unpaired parenthesis or backtick; the
+# redirections `>&`, `<&`, `&>`, `>|` and a `$(...)`, `<(...)`, `>(...)` or backtick piece without nesting do not end them
+ARGS = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[<>]&|&>|>\||[$<>]\([^()]*\)|`[^`]*`|[^"'\\;&|\n()`])*""")
 BYPASS = (
     (re.compile(r"core\.hookspath", re.I), "core.hooksPath (it moves the git hooks away)"),
     (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)="),
@@ -5982,13 +5998,12 @@ def bypass(command: str, calls: list):
     for pattern, reason in BYPASS:
         if pattern.search(command):
             return reason
-    verbs = sorted(end for _, _, end in calls)
-    for seg in SEGMENT.finditer(command):
-        i = bisect.bisect_right(verbs, seg.start())
-        if i == len(verbs) or verbs[i] > seg.end():
+    scanned = -1
+    for verb in sorted(end for _, _, end in calls):
+        if verb < scanned:      # inside the arguments already read: its own arguments lie within them (linear)
             continue
-        first = verbs[i]
-        for w in NO_VERIFY.finditer(command, first, seg.end()):
+        scanned = ARGS.match(command, verb).end()
+        for w in NO_VERIFY.finditer(command, verb, scanned):
             if w.group(1).startswith("--") or "n" in w.group(1):
                 return "%s after a gated git verb (--no-verify; -n is --no-verify for commit, --dry-run for push)" % w.group(1)
     return None
@@ -6198,7 +6213,7 @@ bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit
 grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit .git/hooks/pre-push   # 1 each
 ```
 
-Mutation checks (run at Task 8b in a private clone; each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: catch only `ZeroDivisionError` around `main()` (`test_hook_fails_closed_when_script_errors`, `test_malformed_stdin_fails_closed`); `GATED["push"] = []`, drop the backslash-newline join or the `$X` option word (`test_push_with_options_is_gated_too`); `(?![\w-])` -> `\b` after the verb (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); refuse a `/` before the git word (`test_path_qualified_git_and_prefixes_are_gated`); refuse a quote before it (`test_a_mention_in_data_runs_the_gates`); ignore `-C` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_two_trees_are_each_gated_once`), resolve each `-C` from the cwd instead of the directory before it, or ignore the leading `cd` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`); gate every toplevel without de-duplicating (`test_two_trees_are_each_gated_once`); fall back to the process cwd for a missing `cwd` (`test_cwd_outside_a_repo_fails_closed`); let a non-repo directory pass (`test_a_named_directory_that_is_not_a_repo_fails_closed`, `test_cwd_outside_a_repo_fails_closed`); reset the option-run memo per git word, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout); skip the bypass check, match `core.hooksPath` case-sensitively, keep only `GIT_CONFIG_PARAMETERS`, accept only `--no-verify` and `-n` spelled out, block every short option, split simple commands without quote-awareness, or let the verb's segment run to the end of the command (`test_hook_bypasses_are_blocked`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`, `test_pre_push_blocks_a_failing_register`, `test_pre_push_passes_a_clean_tree`); `--pre-push` without the staged-change check (`test_pre_push_blocks_unstaged_register_edits`); read the index column instead of the worktree column (`test_pre_commit_blocks_unstaged_register_edits`, `test_a_staged_report_passes_when_it_is_committed_as_is`); drop `docs/reviews` (`test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit`, `test_pre_commit_blocks_an_untracked_file_the_gates_read`); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); drop the root-level `*.py` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`); drop the `tests` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). One equivalent mutant: dropping `--untracked-files=all` (git then lists an untracked directory as one `?? dir/` line, which still blocks; the flag only names each file). `git-pre-push.sh`: `exit 0` in place of the `exec` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`). `install-hooks.sh`: `HOOKS=(pre-commit)` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`, `test_install_writes_both_shims`, `test_a_tree_without_the_gates_cannot_push`); disable the shim's `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`, `test_a_tree_without_the_gates_cannot_push`); replace the `mv` by `true`, or put `exit 0` right after it (`test_a_foreign_hook_is_moved_aside`, `test_a_foreign_pre_push_hook_is_moved_aside`); skip the check-all-first loop (`test_a_foreign_pre_push_hook_is_moved_aside`, `test_a_second_foreign_hook_does_not_overwrite_the_first_backup`); disable the hooks-path guard (`test_a_hooks_path_outside_the_repository_is_refused`). Fix round 1: in `pre_tool_use.py`, the bypass-flag lookahead back to whitespace/quote/end, `SEGMENT` splitting at the `&` of a redirection or inside an unquoted `$(...)`, `VALUE` without `$(...)` and backticks (also `test_a_named_directory_that_is_not_a_repo_fails_closed`), `OPTION` without `--shallow-file` or `--no-literal-pathspecs` (also `test_push_with_options_is_gated_too`) (`test_hook_bypasses_are_blocked`); in `install-hooks.sh`, judge a symlink by its target, or ignore a dangling-symlink backup (`test_a_symlinked_hook_is_moved_aside_not_written_through`).
+Mutation checks (run at Task 8b in a private clone; each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: catch only `ZeroDivisionError` around `main()` (`test_hook_fails_closed_when_script_errors`, `test_malformed_stdin_fails_closed`); `GATED["push"] = []`, drop the backslash-newline join or the `$X` option word (`test_push_with_options_is_gated_too`); `(?![\w-])` -> `\b` after the verb (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); refuse a `/` before the git word (`test_path_qualified_git_and_prefixes_are_gated`); refuse a quote before it (`test_a_mention_in_data_runs_the_gates`); ignore `-C` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_two_trees_are_each_gated_once`), resolve each `-C` from the cwd instead of the directory before it, or ignore the leading `cd` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`); gate every toplevel without de-duplicating (`test_two_trees_are_each_gated_once`); fall back to the process cwd for a missing `cwd` (`test_cwd_outside_a_repo_fails_closed`); let a non-repo directory pass (`test_a_named_directory_that_is_not_a_repo_fails_closed`, `test_cwd_outside_a_repo_fails_closed`); reset the option-run memo per git word, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout); skip the bypass check, match `core.hooksPath` case-sensitively, keep only `GIT_CONFIG_PARAMETERS`, accept only `--no-verify` and `-n` spelled out, block every short option, split simple commands without quote-awareness, or let the verb's segment run to the end of the command (`test_hook_bypasses_are_blocked`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`, `test_pre_push_blocks_a_failing_register`, `test_pre_push_passes_a_clean_tree`); `--pre-push` without the staged-change check (`test_pre_push_blocks_unstaged_register_edits`); read the index column instead of the worktree column (`test_pre_commit_blocks_unstaged_register_edits`, `test_a_staged_report_passes_when_it_is_committed_as_is`); drop `docs/reviews` (`test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit`, `test_pre_commit_blocks_an_untracked_file_the_gates_read`); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); drop the root-level `*.py` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`); drop the `tests` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). One equivalent mutant: dropping `--untracked-files=all` (git then lists an untracked directory as one `?? dir/` line, which still blocks; the flag only names each file). `git-pre-push.sh`: `exit 0` in place of the `exec` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`). `install-hooks.sh`: `HOOKS=(pre-commit)` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`, `test_install_writes_both_shims`, `test_a_tree_without_the_gates_cannot_push`); disable the shim's `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`, `test_a_tree_without_the_gates_cannot_push`); replace the `mv` by `true`, or put `exit 0` right after it (`test_a_foreign_hook_is_moved_aside`, `test_a_foreign_pre_push_hook_is_moved_aside`); skip the check-all-first loop (`test_a_foreign_pre_push_hook_is_moved_aside`, `test_a_second_foreign_hook_does_not_overwrite_the_first_backup`); disable the hooks-path guard (`test_a_hooks_path_outside_the_repository_is_refused`). Fix round 1: in `pre_tool_use.py`, the bypass-flag lookahead back to whitespace/quote/end, `SEGMENT` splitting at the `&` of a redirection or inside an unquoted `$(...)`, `VALUE` without `$(...)` and backticks (also `test_a_named_directory_that_is_not_a_repo_fails_closed`), `OPTION` without `--shallow-file` or `--no-literal-pathspecs` (also `test_push_with_options_is_gated_too`) (`test_hook_bypasses_are_blocked`); in `install-hooks.sh`, judge a symlink by its target, or ignore a dangling-symlink backup (`test_a_symlinked_hook_is_moved_aside_not_written_through`). Fix round 2: `ARGS` ending at `>|`, reading only `$(...)` as a piece (not `<(...)`/`>(...)`), not ending at an unpaired parenthesis or backtick, or without the backtick piece (`test_hook_bypasses_are_blocked`); rescan the arguments for every verb, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout).
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
@@ -6599,18 +6614,19 @@ commit and push, however it was launched.
      `_SYSTEM` or `_NOSYSTEM` assignment anywhere in any Bash command (a `git config core.hooksPath`
      on its own would move the hooks for every later command), and `--no-verify` (or the
      abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
-     after a gated verb, up to the end of its simple command (quote-aware; `>&`, `<&`, `&>` and an
-     unquoted `$(...)` without nested parentheses do not end it). `-n` is `--no-verify` for commit
-     and `--dry-run` for push; it is blocked for both.
+     in the arguments of a gated verb: up to an unquoted separator or an unpaired parenthesis or
+     backtick (so the rest of an enclosing `$(...)` is not read); the redirections `>&`, `<&`, `&>`,
+     `>|` and a `$(...)`, `<(...)`, `>(...)` or backtick piece without nesting do not end them.
+     `-n` is `--no-verify` for commit and `--dry-run` for push; it is blocked for both.
   2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
      `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
      (`/usr/bin/git`). The options are git 2.50.1's global options, each checked with
      `git <option> version` (`-C <dir>`, `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`,
      `--config-env`, `--attr-source`, `--shallow-file`, `--no-pager`, `-p`, `--bare`, `--exec-path`,
      the pathspec flags, ...; quoted values and values holding `$(...)` or backticks included), read
-     left to right as git does, plus a `$X` word (`git $X commit` is gated). The verb is a whole word (`commit-graph`, `pushd`,
-     `--push-option` are not verbs). A backslash-newline is removed first. There is no data/code
-     analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`, a python heredoc
+     left to right as git does, plus a `$X` word (`git $X commit` is gated). The verb is a whole
+     word (`commit-graph`, `pushd`, `--push-option` are not verbs). A backslash-newline is removed
+     first. There is no data/code analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`, a python heredoc
      that prints it) runs the gates too; on a healthy tree that costs well under a second and blocks
      nothing.
   3. The tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the
@@ -6632,17 +6648,19 @@ commit and push, however it was launched.
   bypass the text does not show (a config file or hook script edited by other means). A `-C` or
   `cd` directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "$WT" &&`,
   `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real command; name the directory
-  literally. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word is blocked
-  as a bypass: write the message to a file and use `git commit -F <file>`. Every scan is linear in
-  the command length. Every other command and tool exits 0 silently, after one python3 start; the
+  literally. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a
+  `-n` inside a substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a
+  bypass: write the message to a file and use `git commit -F <file>`. Every scan is linear in the
+  command length. Every other command and tool exits 0 silently, after one python3 start; the
   `Agent` branch (the dispatch gate) arrives with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
   the repository's pre-commit or pre-push hook (`$(git rev-parse --git-path hooks)/<hook>`) is not
-  ours (a symlink never is), and the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line
-  on stdout (the model sees it), then the instruction line (the line is also copied to stderr, which
-  Claude Code shows neither the model nor the owner on exit 0; it appears in the debug log only):
+  ours (a symlink never is), and the instruction to invoke the strict-delivery skill. Every failure
+  is a `FAIL ...` line on stdout (the model sees it), then the instruction line (the line is also
+  copied to stderr, which Claude Code shows neither the model nor the owner on exit 0; it appears in
+  the debug log only):
   `FAIL hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the
   repository's git directory, or a second foreign hook over an existing `<hook>.pre-strict-delivery`
   backup), `FAIL hook.input` for a missing or non-directory `cwd`, `FAIL hook.internal` for anything
@@ -6652,8 +6670,8 @@ commit and push, however it was launched.
   which runs `hooks/git-pre-commit.sh`, and `pre-push`, which runs `hooks/git-pre-push.sh`, each
   from the tree git runs in (`FAIL pre-commit.missing` / `FAIL pre-push.missing` for a tree without
   the script). A foreign hook, or a symlink (even one to the tracked script: the link itself is
-  moved, never written through), is moved to `<hook>.pre-strict-delivery`; an existing backup is never
-  overwritten, and then nothing is installed. `git-pre-commit.sh` runs
+  moved, never written through), is moved to `<hook>.pre-strict-delivery`; an existing backup is
+  never overwritten, and then nothing is installed. `git-pre-commit.sh` runs
   `run_all.py --only register,claims` and refuses (`FAIL pre-commit.unstaged`) while a worktree-side
   change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,
   `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with the

@@ -216,6 +216,11 @@ class PreToolUse(unittest.TestCase):
                           ("git commit -m x --no-verify>/dev/null", "--no-verify after"), ("git push -n</dev/null", "-n after"),
                           ("git commit -m $(date; true) --no-verify", "--no-verify after"),
                           ("git push >&2 --no-verify", "--no-verify after"), ("git commit -m x --no-verify;", "--no-verify after"),
+                          # `>|` and process substitutions holding `;` keep the arguments; a flag right before the `)` of $(...)
+                          ("git push >|out --no-verify", "--no-verify after"), ("git push >| out -n", "-n after"),
+                          ("git push 2>|out --no-verify", "--no-verify after"), ("git push <(echo; echo) --no-verify", "--no-verify after"),
+                          ("git push >(cat; cat) -n", "-n after"), ("x=$(git commit -m y --no-verify; ls)", "--no-verify after"),
+                          ("git commit -m `date` -n", "-n after"), ("git commit -m x; git push -n", "-n after"),
                           # option values with substitutions and the rest of git's global options are read
                           ("git -C $(pwd) commit -m x --no-verify", "--no-verify after"), ("git -C `pwd` push -n", "-n after"),
                           ("git --shallow-file x commit --no-verify", "--no-verify after"),
@@ -232,7 +237,11 @@ class PreToolUse(unittest.TestCase):
                     "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD",
                     "git commit -m x 2>&1 && ls -n", "git push 2>&1 | grep -n x", "x=$(git log -n 3)",
                     "(git commit -m x) && ls -n", "git commit -m x &>/dev/null; ls -n", "git push >&2; sort -n f",
-                    "git commit -m x & ls -n", "echo $(git push) | wc -l"):
+                    "git commit -m x & ls -n", "echo $(git push) | wc -l",
+                    # another command after the verb inside the same substitution, subshell or backticks is not its argument
+                    "out=$(git push 2>&1; echo -n done)", "x=$(git commit -m y; ls -n)", "x=`git push; ls -n`",
+                    "(git commit -m x; ls -n)", "echo $(git push) -n", "echo `git push` -n", "git push >|out; ls -n",
+                    "git push <(echo) | grep -n x"):
             self.assert_silent(cmd)
 
     def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
@@ -246,7 +255,10 @@ class PreToolUse(unittest.TestCase):
                     "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit",
                     # unterminated substitutions and backticks in option values and segments, redirection runs
                     "git -C $(" * 20000, "git -C `" * 20000, "git commit $(" * 20000, "git commit " + ">&" * 50000,
-                    "$(a" * 30000 + ")", "cd " + "$(" * 30000, "cd `" + "x" * 100000):
+                    "$(a" * 30000 + ")", "cd " + "$(" * 30000, "cd `" + "x" * 100000,
+                    # one argument scan per verb: unpaired backticks, process substitutions, parentheses, quotes
+                    "git push `" * 30000, "git push <(" * 30000, "git push ) " * 30000, "git commit '" * 30000,
+                    "git push \"" * 30000, "git push >|" * 30000):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])
