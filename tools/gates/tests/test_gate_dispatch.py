@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -40,17 +41,38 @@ class GateDispatch(unittest.TestCase):
         cls.root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows(),
                                 after={"docs/moved.md": "moved twice\n"})
         cls.conf = config.load(rf.REAL)
+        # one prompt file per prompt name the umbrella lists, each ending in a newline
+        cls.allp = tempfile.mkdtemp(prefix="gate-prompts-")
+        for name in sorted(set(gate_dispatch.ROLE_PROMPT.values())):
+            with open(os.path.join(cls.allp, name + ".md"), "w", encoding="utf-8", newline="") as f:
+                f.write(f"You are the {name}.\n")
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.root, ignore_errors=True)
+        shutil.rmtree(cls.allp, ignore_errors=True)
 
-    def dispatch(self, text, *extra, root=None):
+    def role_prompt(self, role, *, brief="docs/brief.md", findings=None, budget="tokens=1000 minutes=10",
+                    report="reports/x.md", prompts=None):
+        """A well-formed prompt for `role` over the all-roles prompts dir (or `prompts`)."""
+        if findings is None:
+            findings = "SD-FX-1" if role in gate_dispatch.IMPLEMENTERS else "SD-FX-2"
+        name = gate_dispatch.ROLE_PROMPT[role]
+        with open(os.path.join(prompts or self.allp, name + ".md"), encoding="utf-8", newline="") as f:
+            block = f.read()
+        return (f"## Role: {role}\n## Brief: {brief}\n## Findings: {findings}\n## Claims: none\n"
+                f"## Budget: {budget}\n## Model: {self.conf['models'][role]}\n## Report: {report}\n"
+                f"## Strict block\n{block}## Task\nDo the fixture task.\n")
+
+    def dispatch_role(self, text, prompts=None):
+        return self.dispatch(text, prompts=prompts or self.allp)
+
+    def dispatch(self, text, *extra, root=None, prompts=None):
         root = root or self.root
         path = os.path.join(root, "prompt.under-test.md")
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
-        return gate(root, ["--prompt", path, "--prompts-dir", PROMPTS, *extra])
+        return gate(root, ["--prompt", path, "--prompts-dir", prompts or PROMPTS, *extra])
 
     def variant(self, old, new, base=GOOD):
         text = base.replace(old, new, 1)
@@ -204,6 +226,61 @@ class GateDispatch(unittest.TestCase):
     def test_json_flag_after_other_arguments_fails(self):
         rc, out = self.dispatch(GOOD, "--json")
         self.assertFailLine(rc, out, "dispatch.input")
+
+    def test_report_naming_a_directory_fails(self):
+        for value in ("reports", "reports/"):
+            rc, out = self.dispatch(self.variant("## Report: reports/t1.md", f"## Report: {value}"))
+            self.assertFailLine(rc, out, "dispatch.report")
+            self.assertIn("names a directory", out)
+
+    def test_every_role_passes_with_its_prompt_file(self):
+        self.assertEqual({"controller", "implementer", "reviewer", "verifier", "exception-reviewer",
+                          "audit-reviewer", "audit-verifier", "investigator"},
+                         set(gate_dispatch.ROLE_PROMPT.values()))
+        self.assertEqual(set(gate_dispatch.ROLES), set(gate_dispatch.ROLE_PROMPT))
+        for role in gate_dispatch.ROLES:
+            rc, out = self.dispatch_role(self.role_prompt(role))
+            self.assertEqual(0, rc, f"{role}: {out}")
+
+    def test_audit_and_investigator_roles_may_name_no_findings_and_no_brief(self):
+        for role in ("audit_reviewer", "audit_verifier", "investigator"):
+            rc, out = self.dispatch_role(self.role_prompt(role, brief="none", findings="none"))
+            self.assertEqual(0, rc, f"{role}: {out}")
+
+    def test_controller_budget_caps(self):
+        rc, out = self.dispatch_role(self.role_prompt("controller", budget="tokens=250000 minutes=90"))
+        self.assertEqual(0, rc, out)
+        for budget in ("tokens=250001 minutes=90", "tokens=250000 minutes=91"):
+            rc, out = self.dispatch_role(self.role_prompt("controller", budget=budget))
+            self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_reviewer_token_cap(self):
+        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", budget="tokens=120000 minutes=30"))
+        self.assertEqual(0, rc, out)
+        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", budget="tokens=120001 minutes=30"))
+        self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_zero_budget_fails(self):
+        for budget in ("tokens=0 minutes=10", "tokens=1000 minutes=0"):
+            rc, out = self.dispatch_role(self.role_prompt("implementer", budget=budget))
+            self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_prompt_file_without_final_newline_fails(self):
+        bad = tempfile.mkdtemp(prefix="gate-prompts-")
+        self.addCleanup(shutil.rmtree, bad, ignore_errors=True)
+        with open(os.path.join(bad, "implementer.md"), "w", encoding="utf-8", newline="") as f:
+            f.write("You are the implementer.")
+        rc, out = self.dispatch_role(self.role_prompt("implementer"), prompts=bad)
+        self.assertFailLine(rc, out, "dispatch.strict")
+        self.assertIn("must end with a newline", out)
+
+    def test_transcription_implementer_needs_a_planned_row(self):
+        rc, out = self.dispatch_role(self.role_prompt("implementer_transcription", findings="SD-FX-2"))
+        self.assertFailLine(rc, out, "dispatch.findings.SD-FX-2")
+
+    def test_reviewer_needs_a_brief(self):
+        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", brief="none"))
+        self.assertFailLine(rc, out, "dispatch.brief")
 
     def test_prompt_from_stdin_passes(self):
         with mock.patch("sys.stdin", io.StringIO(GOOD)):

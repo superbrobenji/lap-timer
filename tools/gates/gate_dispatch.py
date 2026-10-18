@@ -19,6 +19,7 @@ if _ROOT not in sys.path:
 from tools.gates.lib import CODE_ROOT, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import config as gconfig  # noqa: E402
 from tools.gates.gate_claims import stale_reason, verified_at_head  # noqa: E402
+from tools.gates.gate_decisions import REF as DEC_RE  # noqa: E402    # one scan pattern for both gates
 from tools.gates.lib import gitinfo, registers  # noqa: E402
 
 ROLES = ["controller", "implementer", "implementer_transcription", "task_reviewer", "final_reviewer",
@@ -34,7 +35,6 @@ BRIEF_ROLES = IMPLEMENTERS | {"task_reviewer", "final_reviewer", "final_verifier
 FINDINGS_NONE_ROLES = {"investigator", "audit_reviewer", "audit_verifier"}
 HEADERS = ["Role", "Brief", "Findings", "Claims", "Budget", "Model", "Report"]
 STRICT, TASK = "## Strict block\n", "## Task\n"
-DEC_RE = re.compile(r"DEC-\d{4}(?!\d)")    # the scan pattern of gate_decisions (REF)
 BUDGET_RE = re.compile(r"^tokens=(\d+) minutes=(\d+)$")
 DEFAULT_PROMPTS = os.path.expanduser("~/.claude/skills/strict-delivery/prompts")
 
@@ -183,8 +183,11 @@ def _budget(conf, role, value, res):
 
 
 def _report(root, value, res):
-    folder = os.path.dirname(resolve(root, value))
-    if os.path.isdir(folder):
+    target = resolve(root, value)
+    folder = os.path.dirname(target)
+    if value.endswith("/") or os.path.isdir(target):
+        res.fail("dispatch.report", f"report path {value!r} names a directory; it must name a file")
+    elif os.path.isdir(folder):
         res.passed("dispatch.report")
     else:
         res.fail("dispatch.report", f"report directory {os.path.dirname(value) or '.'!r} does not exist")
