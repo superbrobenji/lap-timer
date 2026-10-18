@@ -7,49 +7,56 @@ tool (Agent included, until S2 adds gate_dispatch) exits 0 silently. This hook i
 textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-0005).
 
 1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
-   _GLOBAL, _SYSTEM or _NOSYSTEM assignment anywhere, in any Bash command; `--no-verify` (or an
-   abbreviation git accepts), `-n` or a short-option cluster holding n in the arguments of a gated
-   verb, quoted (`git "push"`) or not (arguments_end: up to an unquoted separator outside every
-   parenthesis the arguments open, an unpaired `)`, quote or backtick, so the rest of an enclosing
-   `$(...)` is not read; quotes, `$'...'`, `${...}`, backticks, `$(...)`, `<(...)`, `>(...)`,
-   `$((...))` at any depth and the redirections `>&`, `<&`, `&>`, `>|` do not end them; `-n` is
-   --no-verify for commit and --dry-run for push, blocked for both). Every gated verb gets its
-   own argument scan, so a verb mentioned in a quoted string, a heredoc or a comment never hides a
-   later verb's flag (`echo "git push"; git commit -n`). Each exits 2 with
-   `FAIL hook.bypass: <form found>` before any gate runs.
+   _GLOBAL, _SYSTEM or _NOSYSTEM assignment (`=` or `+=`) anywhere, in any Bash command; a HOME or
+   XDG_CONFIG_HOME assignment (`=` or `+=`, `env HOME=...` too) before a gated verb (it moves the
+   global git config, which can set core.hooksPath); `--no-verify` (or an abbreviation git
+   accepts), `-n` or a short-option cluster holding n in the arguments of a gated verb, quoted
+   (`git "push"`) or not (arguments_end: up to an unquoted separator outside every parenthesis
+   the arguments open, an unpaired `)`, quote or backtick, so the rest of an enclosing `$(...)` is
+   not read; quotes, `$'...'`, `${...}`, backticks, `$(...)`, `<(...)`, `>(...)`, `$((...))` at
+   any depth and the redirections `>&`, `<&`, `&>`, `>|` do not end them; `-n` is --no-verify for
+   commit and --dry-run for push, blocked for both). Every gated verb gets its own argument scan,
+   so a verb mentioned in a quoted string, a heredoc or a comment never hides a later verb's flag
+   (`echo "git push"; git commit -n`). Each exits 2 with `FAIL hook.bypass: <form found>` before
+   any gate runs.
 2. Gated: `git [options] commit|push`, matched in the text wherever it stands (after any separator,
-   `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the verb a whole word (`commits`,
-   `pushd`, `commit-graph`, `--push-option` are not verbs). The options are git 2.50.1's global
-   options (OPTION; each checked with `git <option> version`), read left to right as git does, plus
-   a `$X` word; an option value may hold `$(...)` or backticks. A backslash-newline is removed
-   first. No data/code analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`)
-   runs the gates too -- on a healthy tree that costs well under a second.
+   `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the git word in any case (`GIT`,
+   `Git`: a case-insensitive file system runs them, so a prose `Git push` runs the gates too), the
+   verb a whole word (`commits`, `pushd`, `commit-graph`, `--push-option` are not verbs). The
+   options are git 2.50.1's global options (OPTION; each checked with `git <option> version`),
+   read left to right as git does, plus a `$X` word; an option value may hold `$(...)` or
+   backticks. A backslash-newline is removed first. No data/code analysis: a mention inside
+   quotes, a heredoc or a comment (`echo "git push"`) runs the gates too -- on a healthy tree that
+   costs well under a second.
 3. Tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the directory of
-   a leading `cd <dir> &&` / `;` / newline, else from the event's `cwd`; `git -C <dir> rev-parse
-   --show-toplevel` must succeed (`FAIL hook.target: <dir>: <git stderr>`), a missing cwd is
-   `FAIL hook.input`. Every tree named is gated once: run_all register + claims; a failure exits 2
-   with the gate lines on stderr. Any internal error exits 2 (`FAIL hook.internal`, fail closed).
+   a leading `cd <dir>` or `cd -- <dir>` followed by `&&`, `||` (the `|| exit` / `|| return`
+   idiom), `;` or a newline, else from the event's `cwd`; `git -C <dir> rev-parse --show-toplevel`
+   must succeed (`FAIL hook.target: <dir>: <git stderr>`), a missing cwd is `FAIL hook.input`.
+   Every tree named is gated once: run_all register + claims; a failure exits 2 with the gate
+   lines on stderr. Any internal error exits 2 (`FAIL hook.internal`, fail closed).
 
 Documented limits (DEC-0005): A verb hidden behind an expansion, alias, function, `eval`, a payload
 file, or a wrapper the regex does not see (`$G push`, `git $V`, `eval "$CMD"`, `bash
 script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this hook. The
 git hooks gate it: pre-commit for commits, pre-push for pushes. Likewise a git word or verb with a
 quoted or escaped piece (`g"it" push`, `git p"ush"`); a tree changed in a way the hook does not
-follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`, `--work-tree`, `env -C`), where
+follow (a later `cd`, a leading `cd` in a form item 3 does not name such as `cd -P <dir>`,
+`pushd`, a subshell, `GIT_DIR=`, `--git-dir`, `--work-tree`, `env -C`), where
 the hook gates the tree it can name and the git hooks gate the real one; an option value the hook
 cannot read as one word (`git -C $(dirname $(pwd)) commit`) or a global option git adds after
 2.50.1, where the verb is not seen and so neither is a bypass flag after it; a quoted or escaped
 bypass flag (`--no-"verify"`, `core.hooks\\Path`); a flag after a `case` pattern's `)` inside a
 substitution (`$(case x in x) ...;; esac)`) or after a double-quoted `$(...)` that both nests
 parentheses and quotes (`"$(a $(b ")"))"`), where the argument scan ends early; a bypass in a form
-the text does not show (a config file or hook script edited by other means). A `-C` or `cd`
-directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "$WT" &&`,
-`git -C $(pwd)`) is `FAIL hook.target`, a block of a real command; name the directory literally. A
-commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a `-n` inside a
-substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the
-message to a file and use `git commit -F <file>`. So is, rarely, a `-n` after the arguments: a
-scan that meets an earlier verb's scan deeper inside a parenthesis reads on to the end of the
-command (arguments_end). Every scan is linear in the command length.
+the text does not name as one (`include.path`, a config file or hook script edited by other
+means). A `-C` or `cd` directory is not expanded: one holding a variable, `$(...)` or a backtick
+(`cd "$WT" &&`, `git -C $(pwd)`) is `FAIL hook.target`, a block of a real command; name the
+directory literally. A HOME or XDG_CONFIG_HOME assignment that only precedes a verb in data is
+blocked as a bypass too. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a
+word, or a `-n` inside a substitution in the arguments (`git commit -m "$(echo -n x)"`), is
+blocked as a bypass: write the message to a file and use `git commit -F <file>`. So is, rarely, a
+`-n` after the arguments: a scan that meets an earlier verb's scan deeper inside a parenthesis
+reads on to the end of the command (arguments_end). Every scan is linear in the command length.
 """
 from __future__ import annotations
 
@@ -64,7 +71,7 @@ CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.p
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
 # One shell word: pieces that start with different characters, so a word parses one way only (linear).
 VALUE = r"""(?:"[^"]*"|'[^']*'|\\.|\$\([^()]*\)|`[^`]*`|[^\s"'\\;&|<>()`])+"""
-GIT_WORD = re.compile(r"(?<![\w.-])git[\"']?")       # `git`, `/usr/bin/git`, `$(git`, `"git"`
+GIT_WORD = re.compile(r"(?<![\w.-])git[\"']?", re.I)   # `git`, `/usr/bin/git`, `$(git`, `"git"`, `GIT`
 OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +   # one option git takes before the verb
                     r"|--(?:git-dir|work-tree|namespace|config-env|attr-source|shallow-file)(?:=|[ \t]+)" + VALUE +
                     r"|--(?:exec-path|list-cmds)(?:=" + VALUE + r")?"
@@ -72,7 +79,7 @@ OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +
                     r"|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-replace-objects|no-optional-locks|no-lazy-fetch"
                     r"|no-advice)|-[pP]|\$\{?\w+\}?)")
 GIT_VERB = re.compile(r"[ \t]+(?P<q>[\"']?)(commit|push)(?![\w-])")   # the verb right after the option run
-LEADING_CD = re.compile(r"\s*cd[ \t]+(" + VALUE + r")[ \t]*(?:&&|;|\n)")
+LEADING_CD = re.compile(r"\s*cd(?:[ \t]+--)?[ \t]+(" + VALUE + r")[ \t]*(?:&&|\|\||;|\n)")
 # one token of a gated verb's arguments (see arguments_end; a "..." whose $(...) holds quotes is
 # found by dq_closes); every alternative starts differently or is tried once per position (linear)
 ARG_TOKEN = re.compile(
@@ -82,9 +89,10 @@ ARG_TOKEN = re.compile(
     |[^\S\n]+|[^\s"'`\\;&|()<>$]+|.""", re.S | re.X)   # blanks, a word, one char
 BYPASS = (
     (re.compile(r"core\.hookspath", re.I), "core.hooksPath (it moves the git hooks away)"),
-    (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)="),
+    (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)\+?="),
      "a GIT_CONFIG_* assignment (it can set core.hooksPath)"),
 )
+CONFIG_HOME = re.compile(r"(?<![\w$])(?:HOME|XDG_CONFIG_HOME)\+?=")   # before a gated verb: a bypass
 NO_VERIFY = re.compile(r"""(?:^|(?<=[\s"']))(--no-veri(?:fy?)?|-[A-Za-z]+)(?=[\s"'()<>;&|`]|$)""")   # after a gated verb
 
 
@@ -194,6 +202,9 @@ def bypass(command: str, calls: list):
     for pattern, reason in BYPASS:
         if pattern.search(command):
             return reason
+    home = CONFIG_HOME.search(command)
+    if home and any(home.start() < end for _, _, end in calls):
+        return "a HOME or XDG_CONFIG_HOME assignment before a gated git verb (it moves the global git config)"
     seen, ranges, rest, closes = {}, [], len(command), dq_closes(command) if calls else []
     for verb in sorted(end for _, _, end in calls):
         end, more = arguments_end(command, verb, seen, closes)

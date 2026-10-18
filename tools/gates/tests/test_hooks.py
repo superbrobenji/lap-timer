@@ -127,14 +127,16 @@ class PreToolUse(unittest.TestCase):
         # failing tree named from a clean cwd: blocked
         for cmd in ("git -C %s commit -m x" % bad, "cd %s && git push" % bad, "cd '%s'; git commit -m x" % bad,
                     "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root)),
-                    "cd %s\ngit push" % bad, "cd %s && git -C %s push" % (os.path.dirname(bad), os.path.basename(bad))):
+                    "cd %s\ngit push" % bad, "cd %s && git -C %s push" % (os.path.dirname(bad), os.path.basename(bad)),
+                    "cd %s || exit 1; git push" % bad, "cd -- %s && git push" % bad, "cd -- '%s' || return; git commit" % bad):
             self.assert_gated(cmd)
         # clean tree named from a failing cwd: passes
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         clean = new_repo()
         self.addCleanup(gf.remove, clean)
         for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean,
-                    "cd %s && git -C %s push" % (os.path.dirname(clean), os.path.basename(clean))):
+                    "cd %s && git -C %s push" % (os.path.dirname(clean), os.path.basename(clean)),
+                    "cd %s || exit 1; git push" % clean, "cd -- %s && git push" % clean):
             self.assert_silent(cmd)
         # a relative -C resolves against the event cwd
         p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
@@ -282,6 +284,29 @@ class PreToolUse(unittest.TestCase):
                     'echo "git push" "a"; ls -n', "cat <<EOF\ngit push\nEOF\nls -n",
                     # documented limits (DEC-0005): the argument scan ends early, the git hooks gate these
                     "git push $(case x in x) echo;; esac) -n", 'git commit -m "$(a $(b ")"))" -n'):
+            self.assert_silent(cmd)
+
+    def test_any_case_git_word_and_config_carriers_are_bypasses(self):      # b3 m-1, m-2, m-3
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        carrier = "a HOME or XDG_CONFIG_HOME assignment before a gated git verb"
+        for cmd, form in (("GIT commit -n -m x", "-n after"), ("Git push --no-verify", "--no-verify after"),
+                          ("/usr/bin/GIT commit -n", "-n after"),
+                          ("GIT_CONFIG_GLOBAL+=/x git commit -m x", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_COUNT+=1 git push", "GIT_CONFIG_* assignment"),
+                          ("HOME=/x git commit -m x", carrier), ("HOME+=/x git push", carrier),
+                          ("env HOME=/x git push", carrier), ("XDG_CONFIG_HOME=/x git commit -m x", carrier),
+                          ("XDG_CONFIG_HOME+=/x git push", carrier), ("env XDG_CONFIG_HOME=/x git commit", carrier),
+                          ("export HOME=/x; git push", carrier), ("env -i HOME=/x Git push", carrier)):
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
+            self.assertIn(form, p.stderr, cmd)
+            self.assertEqual(1, len(p.stderr.splitlines()), (cmd, p.stderr))     # no gate ran
+        for cmd in ("GIT push", "Git commit -m x", "gIt -C . push"):           # any case runs the gates
+            self.assert_gated(cmd)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
+        for cmd in ("HOME=/x ls", "git push; HOME=/x ls", "echo $HOME && git push", "MYHOME=/x git push",
+                    "XDG_CONFIG_HOMES=/x ls", "git commit -m x && export HOME=/x", "cd $HOME/x || ls; ls"):
             self.assert_silent(cmd)
 
     def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
@@ -650,9 +675,92 @@ class GitHooks(unittest.TestCase):
         self.assertIn("FAIL pre-push.missing", p.stderr)
         self.assertEqual("", got)
 
+    def push_to(self, *refspecs):
+        """`git push origin <refspecs>` to a fresh bare remote (origin); returns (process, the remote's refs)."""
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        if "origin" in gf.git(self.root, "remote").split():
+            gf.git(self.root, "remote", "remove", "origin")
+        gf.git(self.root, "remote", "add", "origin", remote)
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
+        p = subprocess.run(["git", "push", "-q", "origin", *refspecs], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        refs = subprocess.run(["git", "ls-remote", remote], capture_output=True, text=True, env=isolated_env(),
+                              check=False).stdout
+        return p, refs
+
+    def evidence_row(self, path):
+        sha = gf.git(self.root, "rev-parse", "--short=7", "HEAD")
+        return ORPHAN.replace("T1-ORPHAN-1", "T1-EV-1").replace("owner: null", "owner: {kind: issue, number: 1}") \
+            .replace("evidence: []", "evidence: [%s]" % path).replace("aaaaaaa", sha)
+
+    def test_an_untracked_evidence_file_is_refused_by_commit_and_push(self):     # b3 F1
+        gf.write(self.root, ".gitignore", "ignored/\n")
+        gf.commit_all(self.root, "ignore")
+        for path in ("notes/r.md", "ignored/r.md"):     # untracked, ignored
+            gf.write(self.root, path, "a report\n")
+            gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), self.evidence_row(path))
+            gf.git(self.root, "add", os.path.join(gf.STATE, "findings.yml"))
+            p = self.commit()
+            self.assertNotEqual(0, p.returncode, path)
+            self.assertIn("FAIL register.evidence.T1-EV-1: evidence: '%s' is neither a commit sha nor a file "
+                          "tracked at the repo root" % path, p.stdout + p.stderr)
+        gf.git(self.root, "commit", "-q", "-m", "row")       # gitfixture commits without hooks (--no-verify)
+        p, refs = self.push_to("HEAD:refs/heads/main")
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.evidence.T1-EV-1", p.stdout + p.stderr)
+        self.assertNotIn("refs/heads/main", refs)
+        gf.git(self.root, "add", "-f", "ignored/r.md")       # staged, not committed: a push sends HEAD, without it
+        p, refs = self.push_to("HEAD:refs/heads/main")
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.evidence.T1-EV-1: evidence: 'ignored/r.md' is neither", p.stdout + p.stderr)
+        self.assertNotIn("refs/heads/main", refs)
+        p = self.commit()                                   # committed: commit and push pass
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        p, refs = self.push_to("HEAD:refs/heads/main")
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertIn("refs/heads/main", refs)
+
+    def test_pre_push_refuses_a_ref_that_is_not_head(self):     # DEC-0006
+        gf.git(self.root, "checkout", "-q", "-b", "bad")
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        bad = gf.commit_all(self.root, "orphan")      # gitfixture commits without hooks: a commit made with --no-verify
+        gf.git(self.root, "checkout", "-q", "main")
+        p, refs = self.push_to("bad")
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.not-head: refs/heads/bad (%s) is not the checked-out HEAD; check it out and push "
+                      "from it, so the gates see its tree" % bad[:7], p.stderr)
+        self.assertNotIn("register", p.stdout + p.stderr)     # refused before any gate ran
+        self.assertNotIn("refs/heads/bad", refs)
+
+    def test_pre_push_of_head_by_name_passes(self):
+        gf.git(self.root, "branch", "other", "HEAD")
+        p, refs = self.push_to("main", "HEAD:refs/heads/x", "other")    # every pushed sha is HEAD's
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        for ref in ("refs/heads/main", "refs/heads/x", "refs/heads/other"):
+            self.assertIn("%s\t%s" % (head, ref), refs)
+
+    def test_pre_push_of_a_tag_and_a_delete_pass(self):
+        old = gf.git(self.root, "rev-parse", "HEAD")
+        gf.write(self.root, "x.txt", "x\n")
+        gf.commit_all(self.root, "x")
+        gf.git(self.root, "tag", "t1", old)                 # a tag on a commit that is not HEAD
+        p, refs = self.push_to("t1", "HEAD:refs/heads/gone")
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertIn("%s\trefs/tags/t1" % old, refs)
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
+        p = subprocess.run(["git", "push", "-q", "origin", ":refs/heads/gone"], cwd=self.root, capture_output=True,
+                           text=True, env=env, check=False, timeout=60)
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        refs = gf.git(self.root, "ls-remote", "origin")
+        self.assertNotIn("refs/heads/gone", refs)
+        self.assertIn("refs/tags/t1", refs)
+
     def test_a_symlinked_hook_is_moved_aside_not_written_through(self):
-        # S4's plan links pre-push to the tracked script: a write through the link would replace the
-        # tracked script by the shim, which then execs itself
+        # a hook linked to the tracked script (S4's plan did this before DEC-0007): a write through the
+        # link would replace the tracked script by the shim, which then execs itself
         for hook, path in (("pre-commit", self.hook), ("pre-push", self.pre_push)):
             os.remove(path)
             os.symlink(os.path.join("..", "..", "tools", "gates", "hooks", "git-%s.sh" % hook), path)

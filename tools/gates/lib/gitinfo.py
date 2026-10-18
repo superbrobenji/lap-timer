@@ -81,6 +81,12 @@ def path_type(root, rev: str, path: str):
     return None
 
 
+def tracked_files(root) -> frozenset:
+    """Every path in the index of the repository at `root`, relative to `root` (`git ls-files -z`:
+    tracked files, a staged new file included; -z means no C-quoting of non-ASCII paths)."""
+    return frozenset(l for l in _git(root, "ls-files", "-z").split("\0") if l)
+
+
 def staged_files(root) -> list:
     out = _git(root, "diff", "--cached", "--name-only", "-z", "--no-renames")
     return [l for l in out.split("\0") if l]

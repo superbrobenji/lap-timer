@@ -55,8 +55,10 @@ commit and push, however it was launched.
   (`FAIL hook.internal`, fail closed). Bash, in order:
   1. Hook bypasses exit 2 with `FAIL hook.bypass: <form found>` before any gate runs:
      `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`,
-     `_SYSTEM` or `_NOSYSTEM` assignment anywhere in any Bash command (a `git config core.hooksPath`
-     on its own would move the hooks for every later command), and `--no-verify` (or the
+     `_SYSTEM` or `_NOSYSTEM` assignment (`=` or `+=`) anywhere in any Bash command (a
+     `git config core.hooksPath` on its own would move the hooks for every later command), a
+     `HOME` or `XDG_CONFIG_HOME` assignment (`=` or `+=`, `env HOME=...` too) before a gated verb
+     (it moves the global git config, which can set `core.hooksPath`), and `--no-verify` (or the
      abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
      in the arguments of a gated verb, quoted (`git "push"`) or not: up to an unquoted separator
      outside every parenthesis the arguments open, or an unpaired `)`, quote or backtick (so the
@@ -67,7 +69,9 @@ commit and push, however it was launched.
      heredoc or a comment never hides a later verb's flag (`echo "git push"; git commit -n`).
   2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
      `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
-     (`/usr/bin/git`). The options are git 2.50.1's global options, each checked with
+     (`/usr/bin/git`), the git word in any case (`GIT`, `Git`: a case-insensitive file system runs
+     them, so a prose `Git push` runs the gates too). The options are git 2.50.1's global options,
+     each checked with
      `git <option> version` (`-C <dir>`, `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`,
      `--config-env`, `--attr-source`, `--shallow-file`, `--no-pager`, `-p`, `--bare`, `--exec-path`,
      the pathspec flags, ...; quoted values and values holding `$(...)` or backticks included), read
@@ -78,7 +82,8 @@ commit and push, however it was launched.
      costs well under a second and blocks
      nothing.
   3. The tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the
-     directory of a leading `cd <dir> &&` (or `;`, or a newline), else from the event's `cwd`. A
+     directory of a leading `cd <dir>` or `cd -- <dir>` followed by `&&`, `||` (the `|| exit` /
+     `|| return` idiom), `;` or a newline, else from the event's `cwd`. A
      directory that is not in a repository exits 2 with `FAIL hook.target: <dir>: <git stderr>`; a
      missing `cwd` with `FAIL hook.input`. Every tree named is gated once with the register and
      claim gates.
@@ -88,7 +93,8 @@ commit and push, however it was launched.
   `bash script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this
   hook. The git hooks gate it: pre-commit for commits, pre-push for pushes. The same holds for a git
   word or verb with a quoted or escaped piece (`g"it" push`, `git p"ush"`); for a tree changed in a
-  way the hook does not follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
+  way the hook does not follow (a later `cd`, a leading `cd` in a form item 3 does not name such
+  as `cd -P <dir>`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
   `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the
   real one; for an option value the hook cannot read as one word
   (`git -C $(dirname $(pwd)) commit`) or a global option git adds after 2.50.1, where the verb is
@@ -96,10 +102,11 @@ commit and push, however it was launched.
   (`--no-"verify"`, `core.hooks\Path`); for a flag after a `case` pattern's `)` inside a
   substitution (`$(case x in x) ...;; esac)`) or after a double-quoted `$(...)` that both nests
   parentheses and quotes (`"$(a $(b ")"))"`), where the argument scan ends early; and for a bypass
-  the text does not show (a config file or hook script edited by other means). A `-C` or
-  `cd` directory is not expanded: one holding a variable, `$(...)` or a backtick (`cd "$WT" &&`,
-  `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real command; name the directory
-  literally. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a
+  in a form the text does not name as one (`include.path`, a config file or hook script edited by
+  other means). A `-C` or `cd` directory is not expanded: one holding a variable, `$(...)` or a
+  backtick (`cd "$WT" &&`, `git -C $(pwd)`) exits 2 with `FAIL hook.target`, a block of a real
+  command; name the directory literally. A `HOME` or `XDG_CONFIG_HOME` assignment that only
+  precedes a verb in data is blocked as a bypass too. A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word, or a
   `-n` inside a substitution in the arguments (`git commit -m "$(echo -n x)"`), is blocked as a
   bypass: write the message to a file and use `git commit -F <file>`. So is, rarely, a `-n` after
   the arguments: a scan that meets an earlier verb's scan deeper inside a parenthesis reads on to
@@ -129,9 +136,12 @@ commit and push, however it was launched.
   change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,
   `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with
   the commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store`
-  and the `__pycache__` directories under `tools/gates`. `git-pre-push.sh` runs the same script with
-  `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because a
-  push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. It
-  ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness over
-  the ref lines). The gates check the working tree, which equals HEAD for those paths; a push of a
-  ref other than HEAD is checked against HEAD.
+  and the `__pycache__` directories under `tools/gates`. A finding's evidence file is gated by the
+  register itself: it must be a file git tracks (`register.evidence`), so an untracked or ignored
+  one fails the gate wherever it lies. `git-pre-push.sh` ignores its `<remote> <url>` arguments
+  and reads the ref lines on stdin: a branch (a local ref under `refs/heads/`) whose local sha is
+  not HEAD is refused first (`FAIL pre-push.not-head`; check it out and push from it, so the gates
+  see its tree); `HEAD:refs/heads/x`, tags and deletes pass. Then it runs `git-pre-commit.sh` with
+  `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because
+  a push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. S4
+  extends it with merge-readiness.

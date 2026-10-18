@@ -5,7 +5,8 @@
 # DEC-0005). The gates read the working tree, so every path they read must have no worktree-side
 # change: no unstaged edit, no untracked or ignored file, no file removed from the index but left
 # on disk. Staged-only changes pass a commit, so the tree the gates see equals the tree being
-# committed for those paths; a push sends HEAD, so --pre-push also refuses staged changes (the
+# committed for those paths; a push sends HEAD, so --pre-push also refuses staged changes and
+# runs the gates with an index built from HEAD (git ls-files then lists what is pushed) (the
 # FAIL ids name the hook: pre-commit.unstaged, pre-push.uncommitted). The paths: the registers,
 # briefs and the state README (docs/superpowers/state), the registered reports (docs/reviews;
 # gate_register opens EVERY file under it, so an ignored .md counts, and only the Finder's
@@ -19,6 +20,8 @@
 # root-level *.py, *.pyc, *.so and */__init__.* (a package's __init__ may be a .py, .pyc or .so).
 # Exempt: tools/gates/tests and README.md (not inputs to the verdict), __pycache__ directories and
 # .DS_Store (a sourceless .pyc outside __pycache__ is importable, so it is not exempt).
+# A finding's evidence file may lie anywhere in the repository: the register gates it itself (it
+# must be a file git tracks, else FAIL register.evidence), not this path guard.
 # Installed by tools/gates/install-hooks.sh.
 set -eu
 # gate the tree git commits or pushes (a worktree too), not the session's project
@@ -42,5 +45,16 @@ if [ -n "$dirty" ]; then
   fi
   echo "$dirty" >&2
   exit 1
+fi
+if [ "$staged" = 1 ]; then
+  # a push sends HEAD, not the index: the gates read HEAD's file list (a tracked evidence file,
+  # staged files) from a temporary index built from HEAD
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/strict-delivery-pre-push.XXXXXX")
+  trap 'rm -rf "$tmp"' EXIT
+  GIT_INDEX_FILE="$tmp/index"
+  export GIT_INDEX_FILE
+  git read-tree HEAD
+  python3 tools/gates/run_all.py --only register,claims
+  exit 0
 fi
 exec python3 tools/gates/run_all.py --only register,claims

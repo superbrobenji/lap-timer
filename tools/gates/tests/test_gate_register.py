@@ -32,6 +32,7 @@ def fixture_repo(case):
                 text = fh.read()
             gf.write(root, os.path.relpath(os.path.join(dirpath, name), top),
                      text.replace("aaaaaaa", first).replace("bbbbbbb", second))
+    gf.git(root, "add", "-A")      # staged: an evidence file must be tracked (b3 F1)
     return root
 
 
@@ -543,6 +544,31 @@ class FixWave(unittest.TestCase):
         rc, out = main_out(root)
         self.assertEqual(0, rc, out)
         self.assertFalse(os.path.exists(os.path.join(root, "docs", "superpowers", "state", "briefs")))
+
+    # b3 F1 -- an evidence path must be a file git tracks: an untracked or ignored one fails
+    def test_an_evidence_file_must_be_tracked(self):
+        row = findings_text(owner="{kind: issue, number: 2}", evidence="[notes/r.md]")
+        rc, out, root = self.gate(registers={"findings": row}, files={".gitignore": "ignored/\n"})
+        self.assertEqual(1, rc)
+        missing = "FAIL register.evidence.T1-ORPHAN-1: evidence: 'notes/r.md' is neither a commit sha nor a file tracked at the repo root\n"
+        self.assertIn(missing, out)
+        row = row.replace("aaaaaaa", gf.git(root, "rev-parse", "--short=7", "HEAD"))   # a commit of this repo
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row)
+        gf.write(root, "notes/r.md", "untracked\n")
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertIn(missing, out)
+        self.assertNotIn("PASS register.evidence", out)
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row.replace("notes/r.md", "ignored/r.md"))
+        gf.write(root, "ignored/r.md", "ignored\n")
+        rc, out = main_out(root)
+        self.assertEqual(1, rc)
+        self.assertIn(missing.replace("notes/r.md", "ignored/r.md"), out)
+        gf.write(root, os.path.join(gf.STATE, "findings.yml"), row)
+        gf.commit_all(root)
+        rc, out = main_out(root)
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS register.evidence\n", out)
 
 
 if __name__ == "__main__":

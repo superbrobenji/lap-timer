@@ -26,6 +26,11 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   report path in `evidence`; `deferred` needs `ruling` = a valid, unique decision that the owner
   answered; `closed` needs evidence; `merged` is written only by the post-merge script
   (`by: postmerge`).
+- An evidence entry is a commit sha or a file git tracks at the repository root, written as a
+  normalised repo-relative path (DEC-0004: no leading `:`, no `..`, not absolute). Tracked means
+  in the index: a staged new file counts; an untracked or ignored file (anything under the
+  gitignored `.superpowers/`) does not, nor does a directory. `gate_register` fails any other
+  entry (`register.evidence`), so the register reads the same on every machine.
 - Every sha (history, cites, evidence entries shaped like a sha, `asked_at.sha`, `answered_at.sha`,
   `verified_at`) must name a commit of this repository: `gate_register` checks each with
   `git cat-file -e <sha>^{commit}` (decision DEC-0003). The registers name commits on `main`, so the
@@ -46,4 +51,9 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
   writes an answer of its own. `asked_at.sha` / `answered_at.sha` are the `main` commit at the time the
   row was created/answered (a question asked before the register existed records the register's
   creating commit).
-- A git pre-commit hook that refuses a commit while this directory has unstaged edits arrives in block b3.
+- Two git hooks guard this directory (`tools/gates/install-hooks.sh` installs them). The
+  pre-commit hook refuses a commit while it has an unstaged edit or an untracked or ignored file
+  (`FAIL pre-commit.unstaged`); the pre-push hook refuses a push while it differs from HEAD, staged
+  changes included (`FAIL pre-push.uncommitted`), and a push of a branch that is not the checked-out
+  HEAD (`FAIL pre-push.not-head`). A tree without the hook scripts can neither commit
+  (`FAIL pre-commit.missing`) nor push (`FAIL pre-push.missing`).
