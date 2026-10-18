@@ -133,7 +133,7 @@ Note for the controller: after Task 2's commit the Agent hook is live in this ch
 
 **Interfaces:**
 - Consumes: S1 `Result`, `GateError`, `CODE_ROOT`, `gate_args(prog)` (adds `--root`), `repo_root()`, `run_gate()`, `config.load(CODE_ROOT)` (config is never read from `--root`), `registers.load_findings/load_claims/load_decisions/finding_by_id`, `gitinfo.head_sha/staged_files`, `gate_claims.verified_at_head(root, claim, head) -> bool` and `gate_claims.stale_reason(root, claim, head, staged) -> str` (S1's claim-freshness rule: state verified and no cited path changed since `verified_at` or staged; never sha equality); test helper `gitfixture`.
-- Produces: `gate_dispatch.check(args: list) -> Result`, `main(argv=None) -> int`; `parse(text) -> tuple[dict, int]`; `claim_fresh(root: str, claim: dict, head: str) -> str | None` (None = verified at `head`; used by Task 7); constants `ROLES`, `ROLE_PROMPT`, `DEFAULT_PROMPTS`. CLI: `--prompt P|- [--tool-model M] [--prompts-dir D] [--json]`. Line ids: `dispatch.{length,grammar,role,model.known,model.rank,model.fable,model.agree,brief,findings[.<id>],claims[.<id>],budget,report,decisions[.<id>],strict,task}`.
+- Produces: `gate_dispatch.check(args: list) -> Result`, `main(argv=None) -> int`; `parse(text) -> tuple[dict, int]`; `claim_fresh(root: str, claim: dict, head: str) -> str | None` (None = verified at `head`; used by Task 7); constants `ROLES`, `ROLE_PROMPT`, `DEFAULT_PROMPTS`. CLI: `[--json] --prompt P|- [--tool-model M] [--prompts-dir D]` (`--json` only as the first argument, as for every S1 gate). Line ids: `dispatch.{input,length,grammar,role,model.known,model.rank,model.fable,model.agree,brief,findings[.<id>],claims[.<id>],budget,report,decisions[.<id>],strict,task}`.
 - Produces (tests): `repo_fixture.{REAL, FIX, STATE, DISPATCH_FILES, git, write, remove, commit, load_rows, write_registers, make_repo}` over S1's `gitfixture` (reused, not duplicated).
 
 - [ ] **Step 1: Write the test helper and fixtures**
@@ -162,6 +162,7 @@ DISPATCH_FILES = {
     "docs/moved.md": "moved once\n",
     "docs/brief.md": "# Brief\nfixture task 1\n",
     "reports/.gitkeep": "",
+    "docs/superpowers/plans/fixture-plan.md": "# Fixture plan\n",
 }
 git, write, remove = gf.git, gf.write, gf.remove
 
@@ -346,6 +347,7 @@ Run from the repo root: python3 -m unittest tools.gates.tests.test_gate_dispatch
 """
 import contextlib
 import io
+import json
 import os
 import shutil
 import unittest
@@ -370,7 +372,8 @@ REVIEWER = fixture("good_reviewer.md")
 
 def gate(root, argv):
     buf = io.StringIO()
-    with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}), contextlib.redirect_stdout(buf):
+    with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": root}), contextlib.redirect_stdout(buf), \
+            contextlib.redirect_stderr(io.StringIO()):    # argparse usage goes to stderr
         rc = gate_dispatch.main(argv)
     return rc, buf.getvalue()
 
@@ -386,11 +389,12 @@ class GateDispatch(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def dispatch(self, text, *extra):
-        path = os.path.join(self.root, "prompt.under-test.md")
+    def dispatch(self, text, *extra, root=None):
+        root = root or self.root
+        path = os.path.join(root, "prompt.under-test.md")
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
-        return gate(self.root, ["--prompt", path, "--prompts-dir", PROMPTS, *extra])
+        return gate(root, ["--prompt", path, "--prompts-dir", PROMPTS, *extra])
 
     def variant(self, old, new, base=GOOD):
         text = base.replace(old, new, 1)
@@ -457,6 +461,23 @@ class GateDispatch(unittest.TestCase):
         rc, out = self.dispatch(GOOD + "Scope follows DEC-0404.\n")
         self.assertFailLine(rc, out, "dispatch.decisions.DEC-0404")
 
+    def test_decision_answered_by_a_non_owner_fails(self):
+        rows = rf.load_rows()
+        rows["decisions"].append({
+            "id": "DEC-0003", "class": "scope", "question": "Does fixture task 4 enter the plan?",
+            "options": [{"label": "enter", "cost": "one more task"}, {"label": "defer", "cost": "none"}],
+            "asked_at": {"sha": "@BASE@", "by": "fixture"}, "answer": "defer",
+            "answered_at": {"sha": "@BASE@", "by": "fixture"}})
+        root = rf.make_repo(rf.DISPATCH_FILES, rows)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-0003.\n", root=root)
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0003")
+        self.assertIn("unanswered", out)
+
+    def test_decision_id_inside_a_word_fails(self):
+        rc, out = self.dispatch(GOOD + "Scope follows_DEC-0002.\n")
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
+
     def test_answered_decision_passes(self):
         rc, out = self.dispatch(GOOD + "Merge under DEC-0001.\n")
         self.assertEqual(0, rc, out)
@@ -514,6 +535,20 @@ class GateDispatch(unittest.TestCase):
         rc, out = gate(self.root, [])
         self.assertFailLine(rc, out, "dispatch.input")
 
+    def test_json_flag_first_prints_json(self):
+        rc, out = self.dispatch(GOOD, "--tool-model", "sonnet")
+        self.assertEqual(0, rc, out)
+        path = os.path.join(self.root, "prompt.under-test.md")
+        rc, out = gate(self.root, ["--json", "--prompt", path, "--prompts-dir", PROMPTS])
+        self.assertEqual(0, rc, out)
+        doc = json.loads(out)
+        self.assertEqual("dispatch", doc["gate"])
+        self.assertTrue(doc["ok"])
+
+    def test_json_flag_after_other_arguments_fails(self):
+        rc, out = self.dispatch(GOOD, "--json")
+        self.assertFailLine(rc, out, "dispatch.input")
+
     def test_prompt_from_stdin_passes(self):
         with mock.patch("sys.stdin", io.StringIO(GOOD)):
             rc, out = gate(self.root, ["--prompt", "-", "--prompts-dir", PROMPTS])
@@ -536,7 +571,8 @@ Expected: ERROR `ImportError: cannot import name 'gate_dispatch'` (or `ModuleNot
 """gate_dispatch -- a subagent dispatch prompt obeys the strict-delivery dispatch grammar.
 
 Grammar and rules: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Dispatch prompt grammar".
-Usage: gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D] [--json]
+Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D]
+(--json is read by run_gate and only as the first argument, like every S1 gate.)
 """
 from __future__ import annotations
 
@@ -549,7 +585,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import CODE_ROOT, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import config as gconfig  # noqa: E402
 from tools.gates.gate_claims import stale_reason, verified_at_head  # noqa: E402
 from tools.gates.lib import gitinfo, registers  # noqa: E402
@@ -567,10 +603,9 @@ BRIEF_ROLES = IMPLEMENTERS | {"task_reviewer", "final_reviewer", "final_verifier
 FINDINGS_NONE_ROLES = {"investigator", "audit_reviewer", "audit_verifier"}
 HEADERS = ["Role", "Brief", "Findings", "Claims", "Budget", "Model", "Report"]
 STRICT, TASK = "## Strict block\n", "## Task\n"
-DEC_RE = re.compile(r"\bDEC-\d{4}\b")
+DEC_RE = re.compile(r"DEC-\d{4}(?!\d)")    # the scan pattern of gate_decisions (REF)
 BUDGET_RE = re.compile(r"^tokens=(\d+) minutes=(\d+)$")
 DEFAULT_PROMPTS = os.path.expanduser("~/.claude/skills/strict-delivery/prompts")
-
 
 
 class Grammar(Exception):
@@ -623,6 +658,7 @@ def claim_fresh(root: str, claim: dict, head: str) -> str | None:
     if verified_at_head(root, claim, head):
         return None
     return stale_reason(root, claim, head, gitinfo.staged_files(root)) or "row fails the claims schema"
+
 
 def _model(conf, role, model, tool_model, res):
     rank, need, fable = conf["model_rank"], conf["models"][role], conf["fable_roles"]
@@ -728,12 +764,13 @@ def _decisions(root, text, res):
     if not ids:
         res.passed("dispatch.decisions")
         return
-    by_id = {d["id"]: d for d in registers.load_decisions(root)}
+    decisions = registers.load_decisions(root)
+    known = {d.get("id") for d in decisions}
+    unanswered = {d.get("id") for d in registers.open_decisions(decisions, owner=registers.owner_handle())}
     for did in ids:
-        d = by_id.get(did)
-        if d is None:
+        if did not in known:
             res.fail(f"dispatch.decisions.{did}", "not in docs/superpowers/state/decisions.yml")
-        elif d.get("answer") is None:
+        elif did in unanswered:
             res.fail(f"dispatch.decisions.{did}", "unanswered owner decision; the path halts until the owner answers")
         else:
             res.passed(f"dispatch.decisions.{did}")
@@ -797,7 +834,6 @@ def check(args: list) -> Result:
     p.add_argument("--prompt", required=True)
     p.add_argument("--tool-model")
     p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
-    p.add_argument("--json", action="store_true")
     a = p.parse_args(args)
     root = a.root or repo_root()
     res = Result("dispatch")
@@ -816,7 +852,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
-Expected: `OK` (25 tests). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+Expected: `OK` (29 tests). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
 
 - [ ] **Step 6: Commit**
 

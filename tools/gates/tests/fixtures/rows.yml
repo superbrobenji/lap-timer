@@ -1,0 +1,80 @@
+# Register rows for the S2 gate tests. "@BASE@" becomes the sha of the first fixture commit.
+findings:
+  - id: SD-FX-1
+    source: docs/cited.md
+    severity: LOW
+    class: fixture class one
+    siblings: [sib-a]
+    cites: [{file: docs/cited.md, lines: "1", sha: "@BASE@"}]
+    repro: null
+    owner: {kind: plan, plan: fx, task: "1"}
+    state: planned
+    pin: null
+    ruling: null
+    evidence: []
+    history:
+      - {state: open, sha: "@BASE@", by: fixture}
+      - {state: planned, sha: "@BASE@", by: fixture}
+  - id: SD-FX-2
+    source: docs/cited.md
+    severity: LOW
+    class: fixture class two
+    siblings: []
+    cites: [{file: docs/cited.md, lines: "1", sha: "@BASE@"}]
+    repro: null
+    owner: {kind: plan, plan: fx, task: "2"}
+    state: open
+    pin: null
+    ruling: null
+    evidence: []
+    history:
+      - {state: open, sha: "@BASE@", by: fixture}
+claims:
+  - id: C-fx.ok
+    doc: docs/cited.md
+    anchor: L1
+    text: docs/cited.md says cited
+    direct: grep -n cited docs/cited.md
+    contra: grep -c uncited docs/cited.md
+    cites: [docs/cited.md]
+    verified_at: "@BASE@"
+    by: fixture
+    state: verified
+    finding: null
+  - id: C-fx.stale
+    doc: docs/cited.md
+    anchor: L1
+    text: docs/cited.md says cited
+    direct: grep -n cited docs/cited.md
+    contra: grep -c uncited docs/cited.md
+    cites: [docs/cited.md]
+    verified_at: "@BASE@"
+    by: fixture
+    state: stale
+    finding: null
+  - id: C-fx.moved
+    doc: docs/moved.md
+    anchor: L1
+    text: docs/moved.md says moved once
+    direct: grep -n "moved once" docs/moved.md
+    contra: grep -c "moved twice" docs/moved.md
+    cites: [docs/moved.md]
+    verified_at: "@BASE@"
+    by: fixture
+    state: verified
+    finding: null
+decisions:
+  - id: DEC-0001
+    class: merge-grant
+    question: "grant:fx"
+    options: []
+    asked_at: {sha: "@BASE@", by: fixture}
+    answer: "yes"
+    answered_at: {sha: "@BASE@", by: superbrobenji}
+  - id: DEC-0002
+    class: scope
+    question: Does fixture task 3 enter the plan?
+    options: [{label: enter, cost: one more task}, {label: defer, cost: none}]
+    asked_at: {sha: "@BASE@", by: fixture}
+    answer: null
+    answered_at: null
