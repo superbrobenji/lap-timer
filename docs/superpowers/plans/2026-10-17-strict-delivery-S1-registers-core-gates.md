@@ -57,7 +57,7 @@ The umbrella Review Focus rows that S1 owns are pinned under the names the umbre
 | `core.hooksPath` unset; no `.git/hooks/pre-commit` | `git config --get core.hooksPath; ls .git/hooks \| grep -v sample` | rc 1; nothing |
 | git version | `git --version` | 2.50.1 |
 
-Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 221 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. The totals of Tasks 7-9 (234, 241) are expected values derived from that count, not yet run.
+Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config.yml, the state README, gates.yml, the gates README) is byte-equal to the file shipped at block b2; the blocks that give only a starting point (DEC-0001 with its sha placeholder; DEC-0002..0004 are appended by the session, note 11, the ledger's opening lines, the ci.yml insertion) equal the matching lines of the live file. At b2 221 tests pass on Python 3.9.6 and 3.12.14 and `run_all.py` gives 15 PASS lines. Tasks 7 and 8 bring the suite to 260 and 273 tests (run at block b3, Task 8b).
 
 ## Interface notes (additions and readings the owner should see; nothing below changes an umbrella signature)
 
@@ -72,6 +72,7 @@ Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config
 9. **Review packages at S1** are written under `.superpowers/sdd/strict-delivery/review/` (gitignored), not under the umbrella's `docs/superpowers/state/<plan>/review/`. A tracked `diff.patch` fails `ci.yml:14` (`git diff --check`): an unchanged blank line is a context line holding one space, which counts as trailing whitespace. S2 must settle the tracked location.
 10. **Spec and plans are not on `main`** (facts table). Owner ruling 6: a docs-only PR from `pre-bench-wrap-up` merges first (b1 setup Step 0), and b1 and every later block branch from `main`.
 11. **DEC-0002, DEC-0003 and DEC-0004** (DEC-0002 and DEC-0003 owner-delegated 2026-10-17, DEC-0004 answered by the owner directly in chat; each recorded in `decisions.yml` with the owner's quoted words): DEC-0002 = tighten the ruling-5 id grammar and fail near-miss markers; DEC-0003 = verify, every sha in the three registers (`history`, `cites`, evidence entries shaped like a sha, `asked_at`, `answered_at`, `verified_at`) must name a commit of the gated repository (`git cat-file -e <sha>^{commit}`). Fixtures therefore run in throwaway git repos (Task 3 `fixture_repo`), and S4's post-merge step must re-point a block branch's shas to the squash commit when it sets `merged`. `validate_decision(d, owner=None)` also requires `answered_at.by` to be the owner (umbrella schema), so `deferred` evidence and `grant_for` both rest on it. **DEC-0004** (owner answered "Yes, add the schema rule" in chat, 2026-10-17, at the b2 final review): every claim cite is a normalised repo-relative path that exists at `verified_at` (a directory only with a trailing `/`); see Task 4 and the state README.
+12. **DEC-0005** (owner answered "plan-design-plus-prepush" in chat, 2026-10-18, at the Task 8 review breaker; Task 8b): `pre_tool_use.py` is a best-effort textual check with documented limits (a verb behind an expansion, alias, function, `eval`, payload file or unseen wrapper is not gated by it), and it blocks hook bypasses (`--no-verify`, `-n`, `core.hooksPath`, `GIT_CONFIG_*`) with `FAIL hook.bypass`. The git hooks are the enforcement: the `pre-push` shim ships in b3 with register + claims (umbrella: S4), and S4 b11 extends `git-pre-push.sh` with merge-readiness.
 
 ## Files (S1 creates or modifies exactly these)
 
@@ -91,7 +92,7 @@ Every Task 1-6 code block that gives a whole file (code, tests, fixtures, config
 | `tools/gates/gate_claims.py`, `tools/gates/tests/test_gate_claims.py` | 4 | the claims gate |
 | `tools/gates/gate_decisions.py`, `tools/gates/tests/test_gate_decisions.py` | 5 | the decisions gate |
 | `tools/gates/run_all.py`, `tools/gates/tests/test_run_all.py`, `.github/workflows/gates.yml`, `tools/gates/README.md` | 6 | aggregation, CI job `gates`, docs |
-| `tools/gates/hooks/{pre_tool_use.py,git-pre-commit.sh}`, `tools/gates/install-hooks.sh`, `tools/gates/tests/test_hooks.py` | 7 | Bash gating, git hook |
+| `tools/gates/hooks/{pre_tool_use.py,git-pre-commit.sh,git-pre-push.sh}`, `tools/gates/install-hooks.sh`, `tools/gates/tests/test_hooks.py` | 7 | Bash gating, git hooks (`git-pre-push.sh`: Task 8b, DEC-0005) |
 | `tools/gates/hooks/{session_start.py,user_prompt_submit.py}`, `.claude/settings.json`, `CLAUDE.md`, `tools/gates/README.md` (Hooks section), `test_hooks.py` (more classes) | 8 | session hooks, wiring, overrides |
 | `~/.claude/skills/strict-delivery/SKILL.md`, `~/.claude/skills/strict-delivery/prompts/*.md` (8 files) | 9 | skill skeleton + prompt blocks (outside the repo; ledgered by sha256) |
 
@@ -1335,8 +1336,10 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_findings(root))
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
-        self.assertEqual(["DEC-0001", "DEC-0002", "DEC-0003", "DEC-0004"], [d["id"] for d in decisions])
-        self.assertEqual([[], [], [], []], [reg.validate_decision(d) for d in decisions])
+        ids = [d["id"] for d in decisions]       # the live register grows (DEC-0005 at b3): pin the order, not a count
+        self.assertEqual(["DEC-%04d" % n for n in range(1, len(ids) + 1)], ids)
+        self.assertLessEqual(4, len(ids))
+        self.assertEqual([[]] * len(ids), [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
         self.assertEqual("grant:strict-delivery", decisions[0]["question"])
 
@@ -5193,16 +5196,16 @@ python3 -m unittest discover -s tools/gates/tests -t . && python3 tools/gates/ru
 ### Task 7: `pre_tool_use.py` (Bash branch), git pre-commit, `install-hooks.sh`
 
 **Files:**
-- Create: `tools/gates/hooks/pre_tool_use.py`, `tools/gates/hooks/git-pre-commit.sh`, `tools/gates/install-hooks.sh`
+- Create: `tools/gates/hooks/pre_tool_use.py`, `tools/gates/hooks/git-pre-commit.sh`, `tools/gates/hooks/git-pre-push.sh` (Task 8b, DEC-0005), `tools/gates/install-hooks.sh`
 - Test: `tools/gates/tests/test_hooks.py` (classes `PreToolUse`, `GitHooks`; Task 8 adds more)
 
 **Interfaces:**
 - Consumes: `run_all.run(names, {"root": <toplevel>}) -> Result` (Task 6); the hook protocol in the umbrella (stdin JSON: `tool_name`, `tool_input.command`, `cwd`; exit 2 + stderr to block; exit 0 silent to allow).
-- Produces: `pre_tool_use.py`. `Bash` event whose command runs `git [opts] commit` or `git [opts] push` in its code (matched after quote removal, with the data blanked: quoted spans, escaped characters, heredoc bodies, comments; the Task 8 review added this, so `grep 'git push' docs` passes) → `run_all.run(["register", "claims"], {"root": git toplevel of cwd})`; a verb in data that a command may run, or one the hook cannot read (`bash -c 'git push'`, `git p*`), → `FAIL hook.target` (also the Task 8 review). Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `git_calls(command) -> list[Call]`, `GATED`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); then `run_all.py --only register,claims`. `install-hooks.sh`: writes the marked shim to `$(git rev-parse --git-path hooks)/pre-commit` and moves a foreign hook to `pre-commit.pre-strict-delivery`. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing`.
+- Produces: `pre_tool_use.py` (owner decision DEC-0005, Task 8b: a best-effort textual check; the git hooks are the enforcement). `Bash` event: a hook bypass -- `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`, `_SYSTEM` or `_NOSYSTEM` assignment anywhere in the command, or `--no-verify` (also `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding n after a gated verb in its simple command -- → `FAIL hook.bypass: <form>`, exit 2, before any gate runs. `git [opts] commit|push` matched in the text wherever it stands (quotes, heredocs and comments included; a path-qualified git word; any prefix), the options read left to right as git reads them → `run_all.run(["register", "claims"], {"root": <toplevel>})` once per tree named: each `-C <dir>` applied in turn from a leading `cd <dir>` or the event's `cwd`; a directory outside a repository → `FAIL hook.target: <dir>: <git stderr>`; a missing `cwd` → `FAIL hook.input`. The documented limits (a verb behind an expansion, alias, function, `eval`, a payload file or a wrapper the regex does not see; a quoted piece in the git word or the verb; a tree changed by a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`/`--work-tree`) are gated by the git hooks. Any other command or tool, `Agent` included, exits 0 at this block; S2 adds the Agent branch. Fail closed on any exception: `FAIL hook.internal: <Type>: <msg>`, exit 2. Also `gates_for(event) -> list[str]`, `git_calls(command) -> list[(options, verb, verb_end)]`, `bypass(command, calls) -> str | None`, `tree_for(event, command, options="") -> str`, `GIT_VERB`, `GATED`, `BYPASS`. `git-pre-commit.sh`: unsets `CLAUDE_PROJECT_DIR`; refuses any worktree-side change (unstaged edit, untracked or ignored file) under `docs/superpowers/state`, `docs/reviews` and `tools/gates` except `tools/gates/tests`, `README.md`, `__pycache__` and `.DS_Store`, and in any root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` (run_all.py searches the root first on sys.path) (`FAIL pre-commit.unstaged`); with `--pre-push` it also refuses staged changes there, because a push sends HEAD (`FAIL pre-push.uncommitted`); then `run_all.py --only register,claims`. `git-pre-push.sh`: runs `git-pre-commit.sh --pre-push`; ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness). `install-hooks.sh`: checks both hooks, then writes the marked shims `pre-commit` and `pre-push` to `$(git rev-parse --git-path hooks)/` and moves a foreign hook to `<hook>.pre-strict-delivery`; an existing backup is never overwritten and then nothing is installed. The marker line is exactly `# strict-delivery-gates-hook`. A tree without the script → `FAIL pre-commit.missing` / `FAIL pre-push.missing`.
 
 - [ ] **Step 1: Write the failing tests**
 
-`tools/gates/tests/test_hooks.py` (its `new_repo()` helper adds the empty `docs/reviews/` directory `gate_register` requires, because `gitfixture.new_repo` stays bare for `test_gate_register`'s missing-directory FAIL; `isolated_env()` keeps the developer's global git config out of the fixtures (`hook()` runs every hook under it, so the SessionStart tests of Task 8 are isolated too); the option cases in `test_push_with_options_is_gated_too` pin quoted, escaped, continued and separate-word option values):
+`tools/gates/tests/test_hooks.py` (its `new_repo()` helper adds the empty `docs/reviews/` directory `gate_register` requires, because `gitfixture.new_repo` stays bare for `test_gate_register`'s missing-directory FAIL; `isolated_env()` keeps the developer's global git config out of the fixtures (`hook()` runs every hook under it, so the SessionStart tests of Task 8 are isolated too); the option cases in `test_push_with_options_is_gated_too` pin quoted, escaped, continued and separate-word option values; the pre-push tests push to a `git init --bare` remote and check whether it received the ref):
 
 ```python
 #!/usr/bin/env python3
@@ -5286,6 +5289,15 @@ class PreToolUse(unittest.TestCase):
     def tearDown(self):
         gf.remove(self.root)
 
+    def assert_gated(self, cmd, root=None):
+        p = hook("pre_tool_use.py", bash_event(root or self.root, cmd))
+        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd[:80])
+
+    def assert_silent(self, cmd, root=None):
+        p = hook("pre_tool_use.py", bash_event(root or self.root, cmd))
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd[:80])
+
     def test_commit_on_a_failing_register_is_blocked(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
@@ -5302,10 +5314,10 @@ class PreToolUse(unittest.TestCase):
                     "git -C . \\\n  commit -m x",               # backslash-newline continuation
                     "git -C %s commit -m x" % self.spaced.replace(" ", "\\ "),   # escaped space
                     "git --config-env a=B commit", '"git" commit -m x', "'git' push",
-                    "git ${X} commit -m x", "git $X push"):     # unexpandable option word: gated conservatively
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+                    "git ${X} commit -m x", "git $X push",      # unexpandable option word: gated conservatively
+                    "git p\\\nush", "git --git-dir=.git --work-tree . -p --bare --exec-path --literal-pathspecs push",
+                    "git --namespace n --no-replace-objects --no-optional-locks --html-path -c x.y=\"a b\" commit"):
+            self.assert_gated(cmd)
 
     def test_commit_on_a_clean_register_passes_silently(self):
         p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m 'x'"))
@@ -5313,9 +5325,9 @@ class PreToolUse(unittest.TestCase):
 
     def test_a_verb_that_only_shares_a_prefix_is_not_gated(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
-        for cmd in ("git commit-graph write", "git push-to-checkout x"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+        for cmd in ("git commit-graph write", "git push-to-checkout x", "git commits", "git pushd",
+                    "git --push-option x", "git stash push -m x", "git -C . log --grep commit"):
+            self.assert_silent(cmd)
 
     def test_the_tree_named_by_dash_C_or_cd_is_the_one_gated(self):
         bad = new_repo()
@@ -5323,65 +5335,113 @@ class PreToolUse(unittest.TestCase):
         gf.write(bad, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         # failing tree named from a clean cwd: blocked
         for cmd in ("git -C %s commit -m x" % bad, "cd %s && git push" % bad, "cd '%s'; git commit -m x" % bad,
-                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root))):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd)
+                    "git -C .. -C %s/%s push" % (self.root, os.path.relpath(bad, self.root)),
+                    "cd %s\ngit push" % bad, "cd %s && git -C %s push" % (os.path.dirname(bad), os.path.basename(bad))):
+            self.assert_gated(cmd)
         # clean tree named from a failing cwd: passes
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         clean = new_repo()
         self.addCleanup(gf.remove, clean)
-        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+        for cmd in ("git -C %s commit -m x" % clean, "cd %s && git push" % clean,
+                    "cd %s && git -C %s push" % (os.path.dirname(clean), os.path.basename(clean))):
+            self.assert_silent(cmd)
         # a relative -C resolves against the event cwd
         p = hook("pre_tool_use.py", bash_event(bad, "git -C %s commit" % os.path.relpath(clean, bad)))
         self.assertEqual(0, p.returncode, p.stderr)
 
-    def test_a_gated_command_whose_tree_cannot_be_told_is_blocked(self):
-        for cmd in ("cd /a && cd /b && git push", "export X=1 && cd /b && git push", "(cd /b && git push)",
-                    "pushd /b && git push", "git commit -m x && cd /y", 'git -C "$WT" push', "git -C `pwd` push",
-                    'cd "$WT" && git push', "git --git-dir=/b/.git push", "git --work-tree /b commit",
-                    "GIT_DIR=/b/.git git push", "export GIT_WORK_TREE=/b; git push",
-                    "bash -c 'cd /wt && git push'", 'sh -c "cd /wt && git commit -m x"', "/bin/zsh -lc 'git push'",
-                    "env -C /wt git push", "env --chdir=/wt git push", "eval 'git push'", "git ls-files | xargs git commit",
-                    "bash <<EOF\ngit push\nEOF", "echo 'git push' | sh",
-                    "bash -o pipefail -c 'cd /wt && git push'", "bash --rcfile x -c 'git push'",   # an option with a value first
-                    "/bin/bash -ec 'git push'", "nohup bash -xc 'git push'", "'bash' -c 'git push'", 'bash "-c" "git push"',
-                    "bash -s <<'EOF'\ngit push\nEOF", "bash<<EOF\ngit push\nEOF", "bash <<< 'git push'",
-                    "cat <<EOF | bash\ncd /wt && git push\nEOF", "find /wt -execdir git push \\;", "sudo -D /wt git push",
-                    "git commit -F - <<EOF\nbody\nEOF\ncd /elsewhere"):   # a real cd after the heredoc terminator
+    def test_two_trees_are_each_gated_once(self):
+        one, two = new_repo(), new_repo()
+        self.addCleanup(gf.remove, one)
+        self.addCleanup(gf.remove, two)
+        gf.write(one, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.write(two, os.path.join(gf.STATE, "findings.yml"), ORPHAN.replace("T1-ORPHAN-1", "T1-ORPHAN-2"))
+        p = hook("pre_tool_use.py", bash_event(self.root, "git -C %s commit -m x && git -C %s push" % (one, two)))
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-1:"), p.stderr)
+        self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-2:"), p.stderr)
+        for cmd in ("git commit -m x && git push && git -C . push",       # one tree, three calls
+                    "git -C docs commit -m x && git push"):               # one tree named by two directories
+            p = hook("pre_tool_use.py", bash_event(one, cmd))
+            self.assertEqual(2, p.returncode, p.stderr)
+            self.assertEqual(1, p.stderr.count("FAIL register.owner.T1-ORPHAN-1:"), (cmd, p.stderr))
+        p = hook("pre_tool_use.py", bash_event(self.root, "git commit -m x; git -C %s push" % two))   # clean cwd, failing two
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertEqual(["FAIL register.owner.T1-ORPHAN-2"], [l.split(":")[0] for l in p.stderr.splitlines()
+                                                              if l.startswith("FAIL")])
+
+    def test_documented_limits_are_not_gated(self):
+        # DEC-0005: the git hooks gate these (pre-commit for commits, pre-push for pushes)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("G=git; $G push", "git $V", 'eval "$CMD"', "bash script-that-pushes.sh",
+                    "echo push | xargs git", "xargs -a verbs.txt /usr/bin/git", 'g"it" push', "git p\"ush\"",
+                    "alias gp='git p''ush'; gp"):
+            self.assert_silent(cmd)
+
+    def test_a_mention_in_data_runs_the_gates(self):
+        cmds = ('echo "git push"', "python3 - <<'EOF'\nprint('then git commit the change')\nEOF",
+                "grep -rn 'git push' docs", "echo hi # git push", "cat <<'EOF'\ngit push\nEOF")
+        for cmd in cmds:
+            self.assert_silent(cmd)          # a clean register: the gates run and pass, nothing printed
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in cmds:
+            self.assert_gated(cmd)
+
+    def test_path_qualified_git_and_prefixes_are_gated(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
+                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
+                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
+                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push",
+                    "echo hi && git push", "echo hi; git push", "true || git commit -m x", "ls | git commit -m x",
+                    "echo hi\ngit push", "x=$(git commit -m y)", "echo `git push`", "(git push)", "{ git push; }",
+                    "if git push; then echo ok; fi", "A=1 " * 13 + "git push", "FOO=" + "x" * 300 + " git push"):
+            self.assert_gated(cmd)
+        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log",
+                    "my-git push", "x.git push"):
+            self.assert_silent(cmd)
+
+    def test_hook_bypasses_are_blocked(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        for cmd, form in (("git commit --no-verify -m x", "--no-verify after a gated git verb"),
+                          ("git commit -m x --no-verif", "--no-verif after"), ("git push --no-veri", "--no-veri after"),
+                          ("git commit -n -m x", "-n after"), ("git commit -anm x", "-anm after"),
+                          ("git push -n origin HEAD", "-n after"), ("git push --no-verify origin", "--no-verify after"),
+                          ("git commit -m 'a; b' --no-verify", "--no-verify after"),
+                          ("git commit -m x \"-n\"", "-n after"), ("git add f && git commit -qn -m x", "-qn after"),
+                          ("git -c core.hooksPath=/dev/null commit -m x", "core.hooksPath"),
+                          ("git --config-env=core.hooksPath=H commit -m x", "core.hooksPath"),
+                          ("git config core.hooksPath /tmp/h", "core.hooksPath"),
+                          ("git -c CORE.HOOKSPATH=x push", "core.hooksPath"),
+                          ("GIT_CONFIG_PARAMETERS=\"'a.b'='c'\" git push", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=a.b GIT_CONFIG_VALUE_0=c git push", "GIT_CONFIG_* assignment"),
+                          ("env GIT_CONFIG_GLOBAL=/tmp/g git commit -m x", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_SYSTEM=/x git push", "GIT_CONFIG_* assignment"),
+                          ("export GIT_CONFIG_NOSYSTEM=1; git push", "GIT_CONFIG_* assignment"),
+                          ("GIT_CONFIG_KEY_0=a.b ls", "GIT_CONFIG_* assignment")):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(2, p.returncode, cmd)
-            self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree "), (cmd, p.stderr))
-            self.assertIn("use git -C <dir> or a leading cd <dir> &&", p.stderr)
-        for cmd in ('git commit -m "cd elsewhere, GIT_DIR=x"', "git -C . push", "cd . && git push", "cd .; git commit -m x",
-                    'git commit -m "then run git push and bash -c x"', "bash build.sh && git push", "env FOO=1 git push",
-                    "git commit -m \"$(cat <<'EOF'\nfix cd and git push; bash -c x; GIT_DIR=/y\nEOF\n)\"",
-                    "git commit -F - <<'EOF'\nmentions cd /x, GIT_DIR=/y and eval\nEOF",
-                    'git commit -F - <<"EOF"\ncd /x\nEOF', "git commit -F - <<-EOF\n\tcd /x\n\tEOF",
-                    "git commit -m \"$(cat <<'EOF'\nuses bash -c, xargs and eval | sh\nEOF\n)\" && git push 2>&1 | tail -3",
-                    "git commit -m 'run: bash -o pipefail -c x'", "echo $((1<<3)) && git push", "git commit -S -m x"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))   # followed forms and quoted words still work
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
+            self.assertEqual(2, p.returncode, (cmd, p.stderr))
+            self.assertTrue(p.stderr.startswith("FAIL hook.bypass: "), (cmd, p.stderr))
+            self.assertIn(form, p.stderr, cmd)
+            self.assertEqual(1, len(p.stderr.splitlines()), (cmd, p.stderr))     # no gate ran
+            self.assertNotIn("register", p.stderr, cmd)
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")
+        for cmd in ("git commit -m x && grep -n y f", "git push --dry-run", "nice -n 5 git push", "git log -n 3",
+                    "git commit --amend --no-edit", "git push --set-upstream origin x", "git commit -m x\nls -n",
+                    "git config --get user.name", "echo GIT_CONFIG", "git push -u origin HEAD"):
+            self.assert_silent(cmd)
 
     def test_long_runs_of_backslashes_and_options_do_not_stall_the_hook(self):
         for cmd in ("git -c x=" + "\\" * 300 + " status", "git " + "-c " * 300 + "status", "git " + "-C " * 300 + "status",
                     "git " + '-c "a" ' * 300 + "status", "git " + "$x " * 300 + "status",
-                    "git " + "--git-dir " * 300 + "status", "git -C " + "\\ " * 300 + "status"):
+                    "git " + "--git-dir " * 300 + "status", "git -C " + "\\ " * 300 + "status",
+                    # git words inside option runs, verbs, segments and option-like words: every scan is linear
+                    "git -c " * 30000 + "status", "git -C " * 30000, 'git -c "' * 30000, "git $x " * 30000,
+                    "git commit -m x " + "<<A\n" * 20000, "git commit -m x && " + "bash -o x " * 10000 + "-c y",
+                    "git commit " * 30000, "git commit -m 'x' ; " * 20000, "git commit " + "-aaaaaaaaa! " * 20000,
+                    "git commit \"" + "\\\"" * 50000, "-" + "a" * 100000, '"' * 50000 + "git commit"):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(0, p.returncode, (cmd[:30], p.stderr))
-            self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
-        # heredoc openers without a terminator, shell words, options before -c, quotes: every scan is linear
-        for cmd, rc in (("git commit -m x " + "<<A\n" * 20000, 0), ("git commit -m x\n" + "<<A\n" * 20000 + "A", 0),
-                        ("git commit -m x && " + "sh " * 20000, 0), ("git commit -m x && " + "'a' " * 20000, 0),
-                        ("git commit -m x && " + "bash -o x " * 10000 + "-c y", 2),
-                        ("git commit -m x && bash " + "<<A " * 20000, 2), ("git commit -m x " + "export " * 20000, 0)):
-            start = time.monotonic()
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(rc, p.returncode, (cmd[:30], p.stderr))
-            self.assertTrue(rc == 0 or p.stderr.startswith("FAIL hook.target: "), (cmd[:30], p.stderr))
+            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd[:30])
             self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
         gated = "git -c x=" + "\\" * 300 + " commit -m x"      # same runs before a real verb: still gated, still fast
         start = time.monotonic()
@@ -5393,19 +5453,20 @@ class PreToolUse(unittest.TestCase):
     def test_a_named_directory_that_is_not_a_repo_fails_closed(self):
         outside = tempfile.mkdtemp(prefix="gate-test-outside-")
         self.addCleanup(gf.remove, outside)
-        for cmd in ("git -C %s commit -m x" % outside, "cd %s && git push" % outside, "git -C /nonexistent-dir push"):
+        for cmd, d in (("git -C %s commit -m x" % outside, outside), ("cd %s && git push" % outside, outside),
+                       ("git -C /nonexistent-dir push", "/nonexistent-dir"), ('git -C "$WT" push', "%s/$WT" % self.root)):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr, cmd)
+            self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % d), (cmd, p.stderr))
 
     def test_ungated_commands_and_tools_pass_even_on_a_failing_register(self):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         for cmd in ("git status", "git log --grep commit", "gh pr view", "ls"):
-            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
-            self.assertEqual(0, p.returncode, (cmd, p.stderr))
+            self.assert_silent(cmd)
         agent = dict(bash_event(self.root, ""), tool_name="Agent",
-                     tool_input={"prompt": "p", "description": "d", "subagent_type": "general-purpose"})
-        self.assertEqual(0, hook("pre_tool_use.py", agent).returncode)
+                     tool_input={"prompt": "git push --no-verify", "description": "d", "subagent_type": "general-purpose"})
+        p = hook("pre_tool_use.py", agent)
+        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr))
 
     def test_hook_fails_closed_when_script_errors(self):
         broken = os.path.join(self.root, "broken")
@@ -5419,7 +5480,8 @@ class PreToolUse(unittest.TestCase):
         self.assertEqual("FAIL hook.internal: RuntimeError: gate exploded\n", p.stderr)
 
     def test_malformed_stdin_fails_closed(self):
-        for raw in ("", "not json", "[1, 2]"):
+        for raw in ("", "not json", "[1, 2]", json.dumps(dict(bash_event(self.root, ""), tool_input={"command": 7})),
+                    json.dumps(dict(bash_event(self.root, ""), tool_input=None))):
             p = hook("pre_tool_use.py", raw)
             self.assertEqual(2, p.returncode, raw)
             self.assertTrue(p.stderr.startswith("FAIL hook.internal: "), p.stderr)
@@ -5428,7 +5490,15 @@ class PreToolUse(unittest.TestCase):
         outside = os.path.dirname(self.root)
         p = hook("pre_tool_use.py", bash_event(outside, "git commit -m x"))
         self.assertEqual(2, p.returncode)
-        self.assertIn("FAIL hook.internal: RuntimeError: git -C", p.stderr)
+        self.assertTrue(p.stderr.startswith("FAIL hook.target: %s: " % outside), p.stderr)
+        for cwd in (None, "", 7):
+            event = bash_event(self.root, "git commit -m x")
+            if cwd is None:
+                del event["cwd"]
+            else:
+                event["cwd"] = cwd
+            p = hook("pre_tool_use.py", event)       # the hook's own process cwd is this repository: it must not be used
+            self.assertEqual((2, "FAIL hook.input: the event has no cwd\n"), (p.returncode, p.stderr), cwd)
 
 
 class GitHooks(unittest.TestCase):
@@ -5439,6 +5509,7 @@ class GitHooks(unittest.TestCase):
         p = self.install()
         self.assertEqual(0, p.returncode, p.stderr)
         self.hook = os.path.join(self.root, ".git", "hooks", "pre-commit")
+        self.pre_push = os.path.join(self.root, ".git", "hooks", "pre-push")
 
     def tearDown(self):
         gf.remove(self.root)
@@ -5622,6 +5693,97 @@ class GitHooks(unittest.TestCase):
         p = self.commit()
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
 
+    def push(self):
+        """`git push` of HEAD to a fresh bare remote; returns (process, the ref the remote holds or "")."""
+        remote = tempfile.mkdtemp(prefix="gate-test-remote-")
+        self.addCleanup(gf.remove, remote)
+        gf.git(remote, "init", "-q", "--bare")
+        env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")   # the hook must ignore it
+        p = subprocess.run(["git", "push", "-q", remote, "HEAD:refs/heads/main"], cwd=self.root,
+                           capture_output=True, text=True, env=env, check=False)
+        got = subprocess.run(["git", "--git-dir", remote, "rev-parse", "-q", "--verify", "refs/heads/main"],
+                             capture_output=True, text=True, env=isolated_env(), check=False)
+        return p, got.stdout.strip()
+
+    def test_install_writes_both_shims(self):
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(["install-hooks: pre-commit -> tools/gates/hooks/git-pre-commit.sh (%s)" % self.hook,
+                          "install-hooks: pre-push -> tools/gates/hooks/git-pre-push.sh (%s)" % self.pre_push],
+                         [l.replace(os.path.realpath(self.root), self.root) for l in p.stdout.splitlines()])
+        for path, script in ((self.hook, "git-pre-commit.sh"), (self.pre_push, "git-pre-push.sh")):
+            with open(path) as fh:
+                text = fh.read()
+            self.assertEqual("#!/bin/sh\n# strict-delivery-gates-hook\n", text[:len("#!/bin/sh\n# strict-delivery-gates-hook\n")])
+            self.assertIn("/tools/gates/hooks/%s\"" % script, text)
+            self.assertNotIn("@HOOK@", text)
+            self.assertTrue(os.access(path, os.X_OK), path)
+        with open(self.pre_push) as fh:
+            self.assertIn("FAIL pre-push.missing", fh.read())
+
+    def test_a_foreign_pre_push_hook_is_moved_aside(self):
+        gf.write(self.root, ".git/hooks/pre-push", "#!/bin/sh\necho mine\n")
+        p = self.install()
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("moved the existing pre-push hook", p.stdout)
+        self.assertNotIn("moved the existing pre-commit hook", p.stdout)
+        with open(self.pre_push + ".pre-strict-delivery") as fh:
+            self.assertEqual("#!/bin/sh\necho mine\n", fh.read())
+        with open(self.pre_push) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
+        # a refusal for one hook installs neither
+        gf.write(self.root, ".git/hooks/pre-push", "#!/bin/sh\necho two\n")
+        gf.write(self.root, ".git/hooks/pre-commit", "#!/bin/sh\necho three\n")
+        p = self.install()
+        self.assertEqual(1, p.returncode)
+        self.assertIn("pre-push.pre-strict-delivery already exists", p.stderr)
+        with open(self.hook) as fh:
+            self.assertEqual("#!/bin/sh\necho three\n", fh.read())
+        self.assertFalse(os.path.exists(self.hook + ".pre-strict-delivery"))
+
+    def test_pre_push_blocks_a_failing_register(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.commit_all(self.root, "orphan")      # gitfixture commits without hooks: a commit made with --no-verify
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stdout + p.stderr)
+        self.assertEqual("", got)
+
+    def test_pre_push_blocks_unstaged_register_edits(self):
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n# edited\n")   # not staged
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertIn("findings.yml", p.stderr)
+        self.assertEqual("", got)
+        gf.git(self.root, "add", "-A")        # staged but not committed: HEAD, which is pushed, differs
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertEqual("", got)
+        gf.git(self.root, "reset", "-q")
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), "[]\n")      # back to HEAD
+        gf.write(self.root, os.path.join("docs", "reviews", "new.md"), "x\n")     # untracked
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.uncommitted", p.stderr)
+        self.assertIn("docs/reviews/new.md", p.stderr)
+        self.assertEqual("", got)
+
+    def test_pre_push_passes_a_clean_tree(self):
+        gf.write(self.root, "x.txt", "x\n")      # outside the guarded paths: neither staged nor not
+        p, got = self.push()
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertEqual(gf.git(self.root, "rev-parse", "HEAD"), got)
+
+    def test_a_tree_without_the_gates_cannot_push(self):
+        gf.git(self.root, "rm", "-r", "-q", "tools")
+        gf.commit_all(self.root, "no gates")
+        p, got = self.push()
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn("FAIL pre-push.missing", p.stderr)
+        self.assertEqual("", got)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -5630,7 +5792,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `FAILED (failures=28, errors=1)`, 29 tests. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file`, and the `GitHooks.setUp` assertion fails (17 times, `0 != 127`) because `install-hooks.sh` is missing.
+Expected: `FAILED (failures=38, errors=1)`, 39 tests. `pre_tool_use.py` does not exist, so the subprocess exits 2 with `can't open file` (`test_hook_fails_closed_when_script_errors` errors with `FileNotFoundError` on the copy), and the `GitHooks.setUp` assertion fails (23 times, `0 != 127`) because `install-hooks.sh` is missing.
 
 - [ ] **Step 3: Write the hook scripts**
 
@@ -5642,69 +5804,44 @@ mkdir -p tools/gates/hooks
 
 ```python
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol").
+"""Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol"; owner decision DEC-0005).
 
-Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so
-this script sees every Bash call and alone decides what is gated. At strict-delivery block b3 only
-the Bash branch gates: `git commit` and `git push` run the register and claim gates on the git
-toplevel of the event's `cwd`; every other command, and every other tool (Agent included, until S2
-adds gate_dispatch), exits 0 silently.
+Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so this
+script sees every Bash call. At strict-delivery block b3 only the Bash branch gates; every other
+tool (Agent included, until S2 adds gate_dispatch) exits 0 silently. This hook is a best-effort
+textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-0005).
 
-A backslash-newline is removed first (the shell joins the lines with nothing between them:
-`git p\\<newline>ush` is `git push`). One linear pass (Scan) then splits the command into data and
-code. Data: single-quoted spans and escaped characters, ANSI-C `$'...'` spans (escapes decoded),
-quoted-delimiter heredoc bodies, the text of double-quoted spans and unquoted-delimiter heredoc bodies outside `$(...)`, backticks and
-`${...}`, and every character of a word that holds one of these. A quoted span or escaped character
-made only of `[A-Za-z0-9_./=+-]` (or empty) is code, so quote removal joins it to its word: `g"it"
-push`, `gi\\t push`, `git p"ush"` and `$'git' push` are `git push`. A comment (a `#` that starts a
-word, never inside `${...}`) is neither. The pass also records each simple command (split at `;`,
-`&`, `&&`, `||`, `|`, `|&`, newlines, `(`, `)`, `$(`, backticks, case patterns): its head word (after
-`VAR=val` words and the keywords if then else elif do while until ! time), the command whose word
-holds it, its pipeline, and where its first word with an expansion, glob or brace expansion starts.
+1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
+   _GLOBAL, _SYSTEM or _NOSYSTEM assignment anywhere, in any Bash command; `--no-verify` (or an
+   abbreviation git accepts), `-n` or a short-option cluster holding n after a gated verb, up to the
+   end of its simple command (quote-aware; `-n` is --no-verify for commit and --dry-run for push,
+   blocked for both). Each exits 2 with `FAIL hook.bypass: <form found>` before any gate runs.
+2. Gated: `git [options] commit|push`, matched in the text wherever it stands (after any separator,
+   `$(`, backtick, `VAR=val`, wrapper or path: `/usr/bin/git`), the verb a whole word (`commits`,
+   `pushd`, `commit-graph`, `--push-option` are not verbs). The options are the ones git takes before
+   a subcommand (see OPTION), read left to right as git does, plus a `$X` word. A backslash-newline
+   is removed first. No data/code analysis: a mention inside quotes, a heredoc or a comment
+   (`echo "git push"`) runs the gates too -- on a healthy tree that costs well under a second.
+3. Tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the directory of
+   a leading `cd <dir> &&` / `;` / newline, else from the event's `cwd`; `git -C <dir> rev-parse
+   --show-toplevel` must succeed (`FAIL hook.target: <dir>: <git stderr>`), a missing cwd is
+   `FAIL hook.input`. Every tree named is gated once: run_all register + claims; a failure exits 2
+   with the gate lines on stderr. Any internal error exits 2 (`FAIL hook.internal`, fail closed).
 
-1. Gated: `git [options] commit|push` matched textually in the code (data blanked, quotes removed),
-   wherever it stands (any wrapper, assignment, redirection or path-qualified git word before it).
-   So `echo "$(git push)"` and an unquoted mention (`echo git push`) are gated: a blocked echo is
-   the cost of failing closed.
-2. FAIL hook.target `cannot tell which tree <verb> runs in, or whether it runs`, unless every
-   command on the way keeps it as text: a `git` word in data with a `commit`/`push` word after it in
-   the same pipeline; a lone verb word in data only when the code holds a shell launcher
-   (`bash -c 'echo push'`), so `python3 -c "print('push')"` or `pytest -k 'push or commit'` pass; a
-   git word whose subcommand word holds an expansion, substitution, quoted text, brace expansion or
-   glob, or is missing after a `$X` option or after `xargs git` (`git p*`, `git "$V"`, `git $V`,
-   `echo push | xargs git`); a verb word after a word with an expansion, glob or brace expansion that
-   is not the verb of a match of 1 (`$G push`, `{git,} push`). A command keeps it as text when its
-   head is echo, printf (without -v), grep, egrep, fgrep, rg, gh, cat, tee, jq, awk (with no system,
-   getline, | or -f in its words), xargs running echo, grep, egrep, fgrep, rg, cat, jq, head, tail or
-   wc, or git (only with the subcommand commit, push, log, show, tag, notes, stash, merge, shortlog,
-   status, diff, add, branch, rev-list, describe or blame and without -c/--config-env), the data is not
-   in its `VAR=val` or redirection prefix, it has no `>(...)`, and it pipes only into those commands
-   or head, tail, wc, sort, uniq, cut, less, more, tr, nl, column or fold; the same holds for each
-   command whose word holds it (a substitution) and a subshell group passes it through. sed is not one
-   (GNU sed `e` runs its pattern space). A heredoc body belongs to the command on its opener line. So
-   `grep -rn 'git push' docs | head`, `grep 'git push' f | awk '{print $1}'`,
-   `find . | xargs grep -l 'git push'`, `git log --grep='git push'`,
-   `gh pr create --body "$(cat <<'EOF' ...)"` and `git commit -m "$(cat <<'EOF' ... EOF\n)"` (gated
-   as a commit) pass, while bash -c, eval, watch, su -c, python3 -c, a heredoc fed to an interpreter,
-   `| sh`, sed, sudo, env, xargs sh or an unknown command holding `git push` fail.
-
-The tree gated is the one the command names: the cwd, moved by a leading `cd <dir> &&`/`;` and by
-each `git -C <dir>` (cumulative, as git does); a named directory that is not inside a repo fails
-closed. A gated command whose tree it cannot tell (another `cd`, `pushd`, a subshell, `-C`/`cd` with
-an expansion, --git-dir/--work-tree, GIT_DIR=) or that holds a launcher in its code (`bash -c`,
-`| sh`, a shell fed a heredoc, `eval`, `xargs`, `-exec`/`-execdir`, `env -C`/`-S`, `sudo -D`) exits 2
-with `FAIL hook.target`. A `$X` word between git and the subcommand reads as an option, so
-`git $X commit` gates the cwd tree and `git $X status` passes. A failing gate exits 2 with the
-gate's lines on stderr; any internal error also exits 2. Limits: aliases and functions defined
-earlier, a git word and a subcommand that are both variables or globs (`$G $V`, `$G p*`), a `-C $VAR`
-directory, a payload written to a file and run later, and text a program assembles at run time
-(base64, string concatenation in an interpreter) are not followed; an unterminated quote or heredoc
-is code. Every scan is linear in the command length.
+Documented limits (DEC-0005): A verb hidden behind an expansion, alias, function, `eval`, a payload
+file, or a wrapper the regex does not see (`$G push`, `git $V`, `eval "$CMD"`, `bash
+script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this hook. The
+git hooks gate it: pre-commit for commits, pre-push for pushes. Likewise a git word or verb with a
+quoted or escaped piece (`g"it" push`, `git p"ush"`); a tree changed in a way the hook does not
+follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`, `--work-tree`, `env -C`), where
+the hook gates the tree it can name and the git hooks gate the real one; a bypass in a form the text
+does not show (a config file or hook script edited by other means). A commit message that holds
+`-n`, `--no-verify` or `core.hooksPath` as a word is blocked as a bypass: write it to a file and
+use `git commit -F <file>`. Every scan is linear in the command length.
 """
 from __future__ import annotations
 
 import bisect
-import functools
 import json
 import os
 import re
@@ -5713,75 +5850,37 @@ import subprocess
 import sys
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-# A shell word of the original text (the leading cd): pieces that start with different characters (a
-# quote, a backslash, anything else), so one word parses one way only -- overlapping alternatives
-# backtrack exponentially on a failing match. The code view has no quote or backslash left: a word is \S+.
-_ARG = r"""(?:"[^"]*"|'[^']*'|\\.|[^\s\\"'])+"""
-# The git words of a view are read word by word (_git_words): every regex below matches one word.
-TAKES_WORD = re.compile(r"-[Cc]|--(?:git-dir|work-tree|namespace|config-env)")    # option whose value is the next word
-FLAG = re.compile(r"--?[A-Za-z][\w-]*(?:=\S+)?")                                  # -x, --x, --x=value
-VERB = re.compile(r"(?:commit|push)(?![\w-])")                                   # a gated verb at a word start
-GIT_END = re.compile(r"\bgit\Z")                     # a word ending in the git word (`git`, `/usr/bin/git`, `$(git`)
-GIT_IN = re.compile(r"(?<![\w.])git[)}`,]*")         # also closing a substitution or brace (`$(which git)`, `{git,}`)
-WORD = re.compile(r"\S+")
-SEPARATOR = re.compile(r"[;&|)]")
-UNKNOWN_WORD = re.compile(r"[$`_{*?\[]")      # an expansion, a substitution, data (`_`), a brace expansion or a glob
-GIT_DIR_OPT = re.compile(r"(?:^|\s)-C\s+(\S+)")
-LEADING_CD = re.compile(r"^\s*cd\s+(" + _ARG + r")\s*(?:&&|;)")
-CD_WORD = re.compile(r"(?:^|[;&|(){}`\s])(?:cd|pushd|popd)(?=[\s;&|)]|$)")
-TREE_ENV = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?GIT_(?:DIR|WORK_TREE)=")
-HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:(?P<q>['\"])(?P<qd>\w+)(?P=q)|(?P<bs>\\)?(?P<d>\w+))")   # <<EOF, <<-EOF, <<'EOF', <<\EOF; not <<< or <<<<
-SEP = re.compile(r"(\|\||&&|\|&|[;&|\n(){}`])")   # ends a simple command; a lone | or |& feeds the next one
-SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
-TREE_OPT = re.compile(r"(?:^|\s)--(?:git-dir|work-tree)(?:[=\s]|$)")
-PLAIN = re.compile(r"[\w./=+-]+")       # a quoted span or escaped character made of these is code (quote removal)
-ASSIGN = re.compile(r"[A-Za-z_]\w*\+?=")
-DATA_GIT = re.compile(r"(?<![\w.])git(?![\w-])")
-DATA_VERB = re.compile(r"\b(?:commit|push)\b")
-# commands that keep their data as text, and the ones that may also read it from a pipe
-CONSUMERS = ("echo", "printf", "grep", "egrep", "fgrep", "rg", "gh", "cat", "tee", "jq", "git")
-SINKS = ("head", "tail", "wc", "sort", "uniq", "cut", "less", "more", "tr", "nl", "column", "fold")
-GIT_DATA_SUBCOMMANDS = ("commit", "push", "log", "show", "tag", "notes", "stash", "merge", "shortlog", "status",
-                        "diff", "add", "branch", "rev-list", "describe", "blame")
-KEYWORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "time")
-XARGS_HOLDERS = ("echo", "grep", "egrep", "fgrep", "rg", "cat", "jq", "head", "tail", "wc")   # xargs <these>: a holder
-XARGS_TAKES = ("-I", "-n", "-L", "-P", "-s", "-d", "-E", "-a")       # xargs options whose value is the next word
-AWK_EXEC = re.compile(r"system|getline|\|")    # an awk program that can run a command (or read one from a pipe)
-CODE_STOP = re.compile(r"[ \t\n;&|()<>'\"\\$`#{}*?\[]")
-BRACE_STOP = re.compile(r"[}'\"$`\\]")
-DQ_STOP = re.compile(r"[\"$`\\]")
-DQB_STOP = re.compile(r"[\"$`\\}]")
-HD_STOP = re.compile(r"[$`\\]")
-ANSI_STOP = re.compile(r"[\\']")
-ANSI_ESC = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c(.)|(.))", re.S)
-ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
-               "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
-RUNS = re.compile(rb"\x01+|\x02+")    # runs of data or comment in the mask
-# a data piece as a nested shell or an escape-decoding program may read it: \xHH, \uHHHH, \NNN decoded,
-# any other backslash dropped, quote characters and a `$` before a quote dropped
-DATA_PIECE = re.compile(r"\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|(.))"
-                        r"|['\"]|[^\\'\"$]+|\$", re.S)
-QUOTE_OR_BS = re.compile(r"['\"\\]")
-DATA, COMMENT = 1, 2
-
-
-class Call:
-    """One gated git command: the options between `git` and the verb (code view), the verb, and the
-    original text of each `-C` directory word."""
-    def __init__(self, opts: str, verb: str, dirs: list):
-        self.opts = opts
-        self.verb = verb
-        self.dirs = dirs
-
-
-class TargetError(Exception):
-    """A gated git command whose working tree this hook cannot determine: blocked, not guessed."""
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
+# One shell word: pieces that start with different characters, so a word parses one way only (linear).
+VALUE = r"""(?:"[^"]*"|'[^']*'|\\.|[^\s"'\\;&|<>()`])+"""
+GIT_WORD = re.compile(r"(?<![\w.-])git[\"']?")       # `git`, `/usr/bin/git`, `$(git`, `"git"`
+OPTION = re.compile(r"[ \t]+(?:-C[ \t]+(?P<v>" + VALUE + r")|-c[ \t]+" + VALUE +   # one option git takes before the verb
+                    r"|--(?:git-dir|work-tree|namespace|config-env|attr-source|super-prefix)(?:=|[ \t]+)" + VALUE +
+                    r"|--(?:exec-path|list-cmds)(?:=" + VALUE + r")?"
+                    r"|--(?:no-pager|paginate|bare|html-path|man-path|info-path|literal-pathspecs|glob-pathspecs"
+                    r"|noglob-pathspecs|icase-pathspecs|no-replace-objects|no-optional-locks|no-lazy-fetch"
+                    r"|no-advice)|-[pP]|\$\{?\w+\}?)")
+GIT_VERB = re.compile(r"[ \t]+[\"']?(commit|push)(?![\w-])")   # the verb right after the option run
+LEADING_CD = re.compile(r"\s*cd[ \t]+(" + VALUE + r")[ \t]*(?:&&|;|\n)")
+SEGMENT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^"'\\;&|\n])+""")   # one simple command
+BYPASS = (
+    (re.compile(r"core\.hookspath", re.I), "core.hooksPath (it moves the git hooks away)"),
+    (re.compile(r"(?<!\w)GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\w*|GLOBAL|SYSTEM|NOSYSTEM)="),
+     "a GIT_CONFIG_* assignment (it can set core.hooksPath)"),
+)
+NO_VERIFY = re.compile(r"""(?:^|(?<=[\s"']))(--no-veri(?:fy?)?|-[A-Za-z]+)(?=[\s"']|$)""")   # after a gated verb
 
 
-def _command(event: dict):
-    """The Bash command with each backslash-newline continuation removed (the shell joins the two lines with
-    nothing between them: `git p\\<newline>ush` is `git push`); None for any other tool."""
+class Blocked(Exception):
+    """A refusal with its own FAIL id (hook.bypass, hook.input, hook.target)."""
+    def __init__(self, code: str, reason: str):
+        super().__init__(reason)
+        self.code = code
+
+
+def bash_command(event: dict):
+    """The Bash command with each backslash-newline removed (the shell joins the lines with nothing
+    between them); None for any other tool."""
     if event.get("tool_name") != "Bash":
         return None
     command = (event.get("tool_input") or {}).get("command")
@@ -5790,844 +5889,77 @@ def _command(event: dict):
     return command.replace("\\\n", "")
 
 
-def _heredoc(m) -> tuple:
-    """(delimiter, quoted) of a HEREDOC_OPEN match; <<'E', <<"E" and <<\\E are quoted (the body is literal)."""
-    if m.group("q"):
-        return m.group("qd"), True
-    return m.group("d"), bool(m.group("bs"))
-
-
-def _ansi_char(m) -> str:
-    """One escape of an ANSI-C `$'...'` span, decoded as bash does."""
-    if m.group(1):
-        return chr(int(m.group(1), 16))
-    if m.group(2) or m.group(3):
-        code = int(m.group(2) or m.group(3), 16)
-        return chr(code) if code <= 0x10FFFF else "?"
-    if m.group(4):
-        return chr(int(m.group(4), 8) & 0xFF)
-    if m.group(5) is not None:
-        return chr(ord(m.group(5)) & 0x1F)
-    return ANSI_SIMPLE.get(m.group(6), "\\" + m.group(6))
-
-
-def _dequote(word: str) -> str:
-    """A word without its quote characters and backslashes (quote removal of a word with no expansion)."""
-    return re.sub(r"\\(.)|['\"]", lambda m: m.group(1) or "", word)
-
-
-class Seg:
-    """One simple command: its head word, where that word starts, the command whose word holds this
-    one (parent), the pipeline it belongs to (group), and the command its output is piped into."""
-    __slots__ = ("parent", "group", "at", "head", "head_lo", "sub", "xcmd", "skip", "gitc", "printf_v", "awk_exec",
-                 "procsub", "pipe_next", "pipe_bad", "bad", "expand_lo", "expand_before")
-
-    def __init__(self, parent, group: int, at: int):
-        self.parent, self.group, self.at = parent, group, at
-        self.head = None
-        self.head_lo = -1
-        self.sub = None                     # git's subcommand (also after `xargs git`)
-        self.xcmd = None                    # the command xargs runs
-        self.skip = self.gitc = self.printf_v = self.awk_exec = self.procsub = self.pipe_bad = False
-        self.pipe_next = None
-        self.bad = None
-        self.expand_lo = sys.maxsize        # where its first word with an expansion, glob or brace starts
-        self.expand_before = False          # an enclosing command has such a word before this one
-
-
-class Frame:
-    """One nesting level of the scan: code (top level, `$(`, `(`, backticks), `${...}` in code (brace),
-    a double-quoted span (dq), `${...}` inside data (dqbrace), an unquoted heredoc body (hd), or the
-    heredoc bodies that follow one line (hdset)."""
-    __slots__ = ("kind", "seg", "start", "closer", "owner", "until", "word_lo", "dirty", "quoted", "expand", "runs",
-                 "case", "plain", "bodies", "idx", "resume")
-
-    def __init__(self, kind: str, seg, start: int = 0, closer=None, owner=None, until: int = 0):
-        self.kind, self.seg, self.start, self.closer, self.owner, self.until = kind, seg, start, closer, owner, until
-        self.word_lo = None
-        self.dirty = self.quoted = self.expand = False
-        self.runs = []
-        self.case = self.idx = self.resume = 0
-        self.plain = True
-        self.bodies = []
-
-
-class Scan:
-    """One left-to-right pass over a command: `mask` marks each data (1) and comment (2) character,
-    `repl` holds the decoded ANSI-C spans, `segs` the simple commands, and `marks`/`owners` which
-    command each offset belongs to (a heredoc body belongs to its opener's command). The terminator
-    lines of all heredocs are indexed once, so any number of unclosed delimiters is still linear."""
-
-    def __init__(self, command: str):
-        self.s = command
-        self.n = len(command)
-        self.mask = bytearray(self.n)
-        self.repl = []
-        self.segs = []
-        self.groups = 0
-        self.marks, self.owners = [], []
-        self.pending = []
-        self.untils = []
-        self.terminators = None
-        self.limit = self.n
-        self.stack = [Frame("code", self.new_seg(None, None, 0))]
-        self.mark(0)
-        self.run()
-
-    # -- bookkeeping
-    def new_seg(self, parent, group, at: int):
-        if group is None:
-            group = self.groups
-            self.groups += 1
-        seg = Seg(parent, group, at)
-        self.segs.append(seg)
-        return seg
-
-    def mark(self, i: int):
-        seg = self.stack[-1].seg
-        if not self.owners or self.owners[-1] is not seg:
-            self.marks.append(i)
-            self.owners.append(seg)
-
-    def blank(self, lo: int, hi: int, kind: int = DATA):
-        if hi > lo:
-            self.mask[lo:hi] = bytes((kind,)) * (hi - lo)
-
-    def word(self, w, i: int, dirty: bool = False, expand: bool = False):
-        if w is not None:
-            if w.word_lo is None:
-                w.word_lo = i
-            w.dirty = w.dirty or dirty or expand
-            w.expand = w.expand or expand
-
-    def word_end(self, f, end: int):
-        """Close the open word of code frame `f`: blank it whole when it holds data, and read it as the
-        head of its command (or as a git option/subcommand, or printf's -v)."""
-        lo = f.word_lo
-        if lo is None:
-            return
-        f.word_lo = None
-        dirty, quoted, expand, runs = f.dirty, f.quoted, f.expand, f.runs
-        seg = f.seg
-        if expand:
-            seg.expand_lo = min(seg.expand_lo, lo)
-        f.dirty = f.quoted = f.expand = False
-        f.runs = []
-        if quoted:
-            for a, b in runs:
-                self.blank(a, b)
-        head = seg.head
-        if not (head is None or head in ("printf", "awk") or head == "git" and seg.sub is None
-                or head == "xargs" and (seg.xcmd is None or seg.xcmd == "git" and seg.sub is None)):
-            return
-        # a word with an expansion may hold substitutions (nested text): never sliced, so the pass stays linear
-        word = "?" if dirty or quoted or expand else _dequote(self.s[lo:end])
-        if head is None:
-            if ASSIGN.match(self.s, lo, end) or (word in KEYWORDS and self.s[lo:end] == word):
-                return
-            seg.head, seg.head_lo = word, lo
-            if word == "case":
-                f.case += 1
-            elif word == "esac" and f.case:
-                f.case -= 1
-        elif head == "printf":
-            seg.printf_v = seg.printf_v or word == "-v"
-        elif head == "awk":
-            seg.awk_exec = seg.awk_exec or expand or word.startswith("-f") or bool(AWK_EXEC.search(self.s, lo, end))
-        elif head == "xargs" and seg.xcmd is None:
-            if seg.skip:
-                seg.skip = False
-            elif word in XARGS_TAKES:
-                seg.skip = True
-            elif not word.startswith("-"):
-                seg.xcmd = os.path.basename(word)
-        elif seg.skip:
-            seg.skip = False
-        elif word.startswith(("-c", "--config-env")):
-            seg.gitc = True
-            seg.skip = word in ("-c", "--config-env")
-        elif word in ("-C", "--git-dir", "--work-tree", "--namespace"):
-            seg.skip = True
-        elif not word.startswith("-"):
-            seg.sub = word
-
-    def next_seg(self, f, at: int, pipe: bool):
-        old = f.seg
-        seg = self.new_seg(old.parent, old.group if pipe or old.parent is not None else None, old.at)
-        if pipe:
-            old.pipe_next = seg
-        f.seg = seg
-        self.mark(at)
-
-    def child(self, f, at: int, j: int, closer: str) -> int:
-        self.stack.append(Frame("code", self.new_seg(f.seg, f.seg.group, at), start=at, closer=closer))
-        self.mark(j)
-        return j
-
-    def pop(self, i: int, j: int):
-        f = self.stack.pop()
-        if f.kind == "code":
-            self.word_end(f, i)
-        self.mark(j)
-
-    def redirect(self, f, i: int):
-        if f.seg.head is None:
-            f.seg.head, f.seg.head_lo = "<redirect>", i
-
-    # -- the loop
-    def run(self):
-        stack, n = self.stack, self.n
-        i = 0
-        while True:
-            top = stack[-1]
-            if top.kind == "hd" and i >= top.until:
-                stack.pop()
-                self.untils.pop()
-                self.mark(i)
-                continue
-            if self.untils and i >= self.untils[-1]:     # a frame inside a heredoc body ends with the body
-                self.pop(i, i)
-                continue
-            if top.kind == "hdset":
-                i = self.next_body(top, i)
-                continue
-            if i >= n:
-                break
-            self.limit = self.untils[-1] if self.untils else n
-            i = getattr(self, "k_" + top.kind)(top, i)
-        first = next((f for f in stack if f.kind in ("dq", "dqbrace")), None)
-        for f in reversed(stack):
-            if f.kind == "code":
-                self.word_end(f, n)
-        if first is not None:                            # an unterminated double quote: code (fail closed)
-            self.mask[first.start + 1:] = bytes(n - first.start - 1)
-
-    # -- code: the top level, $(...), (...), backticks
-    def k_code(self, f, i: int) -> int:
-        s = self.s
-        c = s[i]
-        if c in " \t":
-            self.word_end(f, i)
-            return i + 1
-        if c == "\n" or c == ";":
-            self.word_end(f, i)
-            self.next_seg(f, i + 1, False)
-            return self.heredocs(f, i + 1) if c == "\n" and self.pending else i + 1
-        if c == "&" and not (i and s[i - 1] in "<>") and not s.startswith(">", i + 1):
-            self.word_end(f, i)
-            j = i + 2 if s.startswith("&&", i) else i + 1
-            self.next_seg(f, j, False)
-            return j
-        if c == "|":
-            self.word_end(f, i)
-            if s.startswith("||", i):
-                self.next_seg(f, i + 2, False)
-                return i + 2
-            j = i + 2 if s.startswith("|&", i) else i + 1
-            self.next_seg(f, j, True)
-            return j
-        if c == "(":
-            if f.word_lo is None and f.seg.head is None:
-                f.seg.head, f.seg.head_lo = "(", i         # a subshell group: its commands hold the data
-            else:
-                self.word(f, i, expand=True)
-            return self.child(f, i, i + 1, ")")
-        if c == ")":
-            self.word_end(f, i)                         # first: an `esac` word ends the case
-            if f.closer == ")" and not f.case:
-                self.pop(i, i + 1)
-                return i + 1
-            self.next_seg(f, i + 1, False)              # a case pattern, or a stray parenthesis
-            return i + 1
-        if c == "`":
-            if f.closer == "`":
-                self.pop(i, i + 1)
-                return i + 1
-            self.word(f, i, expand=True)
-            return self.child(f, i, i + 1, "`")
-        if c == "'":
-            return self.single(i, f)
-        if c == '"':
-            return self.open_dq(f, i, f)
-        if c == "$":
-            return self.dollar(f, i, f)
-        if c == "#" and f.word_lo is None:
-            j = s.find("\n", i, self.limit)
-            j = self.limit if j < 0 else j
-            self.blank(i, j, COMMENT)
-            return j
-        if c in "<>":
-            m = HEREDOC_OPEN.match(s, i) if c == "<" else None
-            if m:
-                self.word_end(f, i)
-                self.redirect(f, i)
-                self.pending.append(_heredoc(m) + (f.seg,))
-                return m.end()
-            if s.startswith("(", i + 1):                 # <(...) / >(...)
-                self.word(f, i, expand=True)
-                f.seg.procsub = f.seg.procsub or c == ">"
-                return self.child(f, i, i + 2, ")")
-            self.word_end(f, i)
-            self.redirect(f, i)
-            return i + 1
-        if c == "\\":
-            return self.escape(i, f)
-        if c in "{}*?[":
-            self.word(f, i, expand=True)
-            f.runs.append((i, i + 1))
-            return i + 1
-        m = CODE_STOP.search(s, i + 1, self.limit)
-        j = m.start() if m else self.limit
-        self.word(f, i)
-        f.runs.append((i, j))
-        return j
-
-    def single(self, i: int, w) -> int:
-        j = self.s.find("'", i + 1, self.limit)
-        self.word(w, i)
-        if j < 0:                                       # unterminated: code
-            if w is not None:
-                w.runs.append((i, i + 1))
-            return i + 1
-        if j == i + 1 or PLAIN.fullmatch(self.s, i + 1, j):
-            if w is not None:
-                w.runs.append((i + 1, j))
-        else:
-            self.blank(i + 1, j)
-            if w is not None:
-                w.quoted = True
-        return j + 1
-
-    def escape(self, i: int, w) -> int:
-        self.word(w, i)
-        if PLAIN.fullmatch(self.s, i + 1, min(i + 2, self.n)):
-            if w is not None:
-                w.runs.append((i, i + 2))
-        else:
-            self.blank(i, min(i + 2, self.n))
-            if w is not None:
-                w.quoted = True
-        return i + 2
-
-    def open_dq(self, f, i: int, w) -> int:
-        self.word(w, i)
-        self.stack.append(Frame("dq", f.seg, start=i, owner=w))
-        return i + 1
-
-    def dollar(self, f, i: int, w) -> int:
-        nxt = self.s[i + 1:i + 2]
-        self.word(w, i, True, nxt != "'")
-        if nxt == "(":
-            return self.child(f, i, i + 2, ")")
-        if nxt == "{":
-            self.stack.append(Frame("brace", f.seg, start=i, owner=w))
-            return i + 2
-        if nxt == "'":
-            return self.ansi(i, w)
-        return i + 1
-
-    def ansi(self, i: int, w) -> int:
-        j = i + 2
-        while True:
-            m = ANSI_STOP.search(self.s, j, self.limit)
-            if m is None:                               # unterminated: `$` then an unterminated single quote
-                return i + 1
-            if self.s[m.start()] != "\\":
-                break
-            j = m.start() + 2
-        k = m.start()
-        text = ANSI_ESC.sub(_ansi_char, self.s[i + 2:k])
-        plain = not text or bool(PLAIN.fullmatch(text))
-        if plain:
-            if w is not None:
-                w.runs.append((i, i + 1))
-        else:
-            self.blank(i + 2, k)
-            if w is not None:
-                w.quoted = True
-        self.repl.append((i, k + 1, text, plain))
-        return k + 1
-
-    # -- ${...} in code: code, but no word or command breaks and no comments
-    def k_brace(self, f, i: int) -> int:
-        c = self.s[i]
-        if c == "}":
-            self.stack.pop()
-            return i + 1
-        if c == "'":
-            return self.single(i, f.owner)
-        if c == '"':
-            return self.open_dq(f, i, f.owner)
-        if c == "$":
-            return self.dollar(f, i, f.owner)
-        if c == "`":
-            return self.child(f, i, i + 1, "`")
-        if c == "\\":
-            return self.escape(i, f.owner)
-        m = BRACE_STOP.search(self.s, i + 1, self.limit)
-        return m.start() if m else self.limit
-
-    # -- data with substitutions: double quotes, ${...} inside them, unquoted heredoc bodies
-    def k_dq(self, f, i: int) -> int:
-        s = self.s
-        c = s[i]
-        if c == '"' and f.kind == "dq":
-            self.stack.pop()
-            if f.owner is None:                         # nested in data: the quote is data too
-                self.blank(i, i + 1)
-            elif f.plain:                               # one plain word: code (quote removal)
-                self.mask[f.start + 1:i] = bytes(i - f.start - 1)
-                f.owner.runs.append((f.start + 1, i))
-            else:
-                f.owner.quoted = True
-            return i + 1
-        if c == '"' and f.kind == "dqbrace":            # "${x:-"..."}": a nested double-quoted span
-            self.blank(i, i + 1)
-            self.stack.append(Frame("dq", f.seg, start=i))
-            return i + 1
-        if c == "}" and f.kind == "dqbrace":
-            self.blank(i, i + 1)
-            self.stack.pop()
-            return i + 1
-        if c in "$`" and f.owner is not None:          # an expansion inside a code-level double quote
-            f.owner.expand = True
-        if c == "$" and s.startswith("(", i + 1):
-            f.plain = False
-            return self.child(f, i, i + 2, ")")
-        if c == "$" and s.startswith("{", i + 1):
-            f.plain = False
-            self.blank(i, i + 2)
-            self.stack.append(Frame("dqbrace", f.seg, start=i))
-            return i + 2
-        if c == "`":
-            f.plain = False
-            return self.child(f, i, i + 1, "`")
-        if c == "\\":
-            f.plain = False
-            j = min(i + 2, self.limit)
-            self.blank(i, j)
-            return j
-        stop = HD_STOP if f.kind == "hd" else DQ_STOP if f.kind == "dq" else DQB_STOP
-        m = stop.search(s, i + 1, self.limit)
-        j = m.start() if m else self.limit
-        if f.plain and not PLAIN.fullmatch(s, i, j):
-            f.plain = False
-        self.blank(i, j)
-        return j
-
-    k_dqbrace = k_dq
-    k_hd = k_dq
-
-    # -- heredocs
-    def heredocs(self, f, i: int) -> int:
-        """Queue the bodies of the heredocs opened on the line that ends at `i`. A delimiter with no
-        terminator line (before the end of an enclosing body) leaves that body and the rest as code."""
-        s, n = self.s, self.n
-        if self.terminators is None:
-            self.terminators = {}
-            pos = 0
-            while pos <= n:
-                k = s.find("\n", pos)
-                k = n if k < 0 else k
-                word = s[pos:k].strip(" \t")
-                if re.fullmatch(r"\w+", word):
-                    self.terminators.setdefault(word, []).append(pos)
-                pos = k + 1
-        bodies = []
-        body_from = i
-        for delim, quoted, owner in self.pending:
-            offs = self.terminators.get(delim, [])
-            at = bisect.bisect_left(offs, body_from)
-            if at == len(offs) or offs[at] >= self.limit:
-                break
-            end = offs[at]
-            bodies.append((body_from, end, quoted, owner))
-            k = s.find("\n", end)
-            body_from = n if k < 0 else k + 1
-        self.pending = []
-        if bodies:
-            hs = Frame("hdset", f.seg)
-            hs.bodies, hs.resume = bodies, body_from
-            self.stack.append(hs)
-        return i
-
-    def next_body(self, f, i: int) -> int:
-        while f.idx < len(f.bodies):
-            lo, hi, quoted, owner = f.bodies[f.idx]
-            f.idx += 1
-            if lo < i:                                  # already scanned as code: stays code
-                continue
-            if quoted:
-                self.blank(lo, hi)
-                self.marks.append(lo)
-                self.owners.append(owner)
-                i = hi
-                continue
-            self.stack.append(Frame("hd", owner, start=lo, until=hi))
-            self.untils.append(hi)
-            self.mark(lo)
-            return lo
-        self.stack.pop()
-        i = max(i, f.resume)
-        self.mark(i)
-        return i
-
-    def owner(self, at: int):
-        return self.owners[bisect.bisect_right(self.marks, at) - 1]
-
-
-def _view(scan: Scan, code: bool) -> tuple:
-    """(text, offsets): the command after quote removal, with each character's offset in the command.
-    Code view: each run of data is one `_` (a word character, so it joins its word) and comments are
-    dropped. Data view: the data is kept too (without quote characters and backslashes)."""
-    s, n, mask, repl = scan.s, scan.n, scan.mask, scan.repl
-    runs = [(m.start(), m.end(), mask[m.start()]) for m in RUNS.finditer(mask)]
-    out, pos = [], []
-    r = k = i = 0
-    while i < n:
-        nxt = repl[r][0] if r < len(repl) else n
-        if i == nxt:
-            lo, hi, text, plain = repl[r]
-            r += 1
-            if code and (not plain or mask[lo]):
-                if text:
-                    out.append("_")
-                    pos.append(lo)
-            elif text:
-                at = lo if plain else lo + 2
-                out.append(text)
-                pos.extend([at] * len(text))
-            i = hi
-            continue
-        while k < len(runs) and runs[k][1] <= i:
-            k += 1
-        if k < len(runs) and runs[k][0] <= i:
-            j = min(runs[k][1], nxt)
-            if runs[k][2] == DATA:
-                if code:
-                    out.append("_")
-                    pos.append(i)
-                else:
-                    for t in DATA_PIECE.finditer(s, i, j):
-                        g = t.group()
-                        if g[0] == "\\":
-                            num = t.group(1) or t.group(2) or t.group(3)
-                            g = (chr(min(int(num, 16), 0x10FFFF)) if num else chr(int(t.group(4), 8) & 0xFF)
-                                 if t.group(4) else t.group(5))
-                        if g in ("'", '"') or g == "$" and s[t.end():t.end() + 1] in ("'", '"'):
-                            continue
-                        out.append(g)
-                        pos.extend(range(t.start(), t.start() + len(g)) if len(g) > 1 else [t.start()])
-            i = j
-            continue
-        c = s[i]
-        if c in "'\"":
-            i += 1
-            continue
-        if c == "\\":
-            if i + 1 < n:
-                out.append(s[i + 1])
-                pos.append(i + 1)
-            i += 2
-            continue
-        j = min(runs[k][0] if k < len(runs) else n, nxt)
-        m = QUOTE_OR_BS.search(s, i, j)
-        j = m.start() if m else j
-        out.append(s[i:j])
-        pos.extend(range(i, j))
-        i = j
-    return "".join(out), pos
-
-
-def _orig(s: str, pos: list, a: int, b: int) -> str:
-    """The command text of the code-view span [a, b), with the quote characters around it."""
-    lo = pos[a - 1] + 1 if a > 0 else 0
-    hi = pos[b] if b < len(pos) else len(s)
-    return s[lo:hi].strip()
-
-
-def _consumer(seg) -> bool:
-    if seg.head == "git":
-        return not seg.gitc and seg.sub in GIT_DATA_SUBCOMMANDS
-    if seg.head == "printf":
-        return not seg.printf_v
-    if seg.head == "awk":
-        return not seg.awk_exec
-    if seg.head == "xargs":
-        return seg.xcmd in XARGS_HOLDERS
-    return seg.head in CONSUMERS
-
-
-def _name(head) -> str:
-    if head is None:
-        return "a command with no name (only assignments or redirections)"
-    if head == "?":
-        return "a command the hook cannot name (an expansion or quoted word)"
-    if head == "(":
-        return "the subshell group"
-    if head == "<redirect>":
-        return "a command that starts with a redirection"
-    return "`%s`" % head[:40]
-
-
-def _judge(segs: list):
-    """Set seg.bad: why a command may run what its data names (None: it, and every command whose word
-    holds it, keeps the data as text); and seg.expand_before."""
-    for seg in reversed(segs):
-        nxt = seg.pipe_next
-        seg.pipe_bad = nxt is not None and (nxt.procsub or nxt.pipe_bad or not (_consumer(nxt) or nxt.head in SINKS))
-    for seg in segs:
-        p = seg.parent
-        if p is not None and (p.head is None or seg.at < p.head_lo):
-            why = "a `VAR=...` assignment or redirection prefix"
-        elif seg.head != "(" and not _consumer(seg):
-            why = _name(seg.head)
-        elif seg.procsub:
-            why = "the >(...) process substitution of %s" % _name(seg.head)
-        elif seg.pipe_bad:
-            why = "the command that %s pipes its output into" % _name(seg.head)
-        else:
-            why = None
-        seg.bad = why or (p.bad if p is not None else None)
-        seg.expand_before = p is not None and (p.expand_lo <= seg.at or p.expand_before)
-
-
-def _git_words(view: str) -> tuple:
-    """(calls, unknown) of a view, in one linear pass over its words: `end[i]` (a dynamic programme from
-    the right) is the first word at or after i that is not an option, so no word is re-read per git word.
-    Options: `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env` with the next word as
-    value, `-x`/`--x[=v]` flags, and `$X` words (unknown, read as options). calls: (git offset, options
-    start, verb offset) of each `git [options] commit|push`, git ending its word (`/usr/bin/git`, `$(git`).
-    unknown: (git offset, subcommand offset) of each git word (also `$(which git)`, `{git,}`, `git$V`)
-    whose subcommand word holds an expansion, substitution, data (`_`), brace expansion or glob, or is
-    missing after a `$X` word (a `$X;` word ends the command)."""
-    words = [(m.start(), m.end()) for m in WORD.finditer(view)]
-    n = len(words)
-    kinds = []                                      # 2 takes a value, 1 flag, 3 $X, 4 $X ending the command
-    for s, e in words:
-        if TAKES_WORD.fullmatch(view, s, e):
-            kinds.append(2)
-        elif FLAG.fullmatch(view, s, e):
-            kinds.append(1)
-        elif view.startswith("$", s) and e - s > 1 and view[s + 1] not in ";&|)":
-            kinds.append(4 if SEPARATOR.search(view, s, e) else 3)
-        else:
-            kinds.append(0)
-    end, end_u, ended = [n] * (n + 2), [n] * (n + 2), [False] * (n + 2)
-    for i in range(n - 1, -1, -1):
-        k = kinds[i]
-        if k == 2 and i + 1 < n:
-            end[i], end_u[i], ended[i] = end[i + 2], end_u[i + 2], ended[i + 2]
-        elif k in (1, 3):
-            end[i], end_u[i], ended[i] = end[i + 1], end_u[i + 1], ended[i + 1]
-        elif k == 4:
-            end[i], end_u[i], ended[i] = end[i + 1], i + 1, True
-        else:
-            end[i], end_u[i] = i, i
-    calls, unknown = [], []
-    after = 0                                       # matches do not overlap: a match ends at its verb word
-    for g, (s, e) in enumerate(words):
-        if g < after or not GIT_END.search(view, s, e):
-            continue
-        v = end[g + 1]
-        if v < n and VERB.match(view, words[v][0]):
-            calls.append((e - 3, e, words[v][0]))
-            after = v
-    for g, (s, e) in enumerate(words):
-        for m in GIT_IN.finditer(view, s, e):
-            if m.end() < e:                         # a subcommand glued to the git word: `git$V`
-                cut = SEPARATOR.search(view, m.end(), e)
-                if UNKNOWN_WORD.search(view, m.end(), cut.start() if cut else e):
-                    unknown.append((m.start(), m.end()))
-                continue
-            v = end_u[g + 1]
-            if ended[g + 1] or v >= n or "\n" in view[words[v - 1][1] if v > g + 1 else e:words[v][0]]:
-                if v > g + 1 and view.startswith("$", words[v - 1][0]):
-                    unknown.append((m.start(), len(view) if v >= n else words[v][0]))
-                continue
-            cut = SEPARATOR.search(view, words[v][0], words[v][1])
-            if UNKNOWN_WORD.search(view, words[v][0], cut.start() if cut else words[v][1]):
-                unknown.append((m.start(), words[v][0]))
-    return calls, unknown
-
-
-def _held(scan: Scan, verbs_at: set, unknown_at: list, launcher: bool):
-    """(verb, why) when the command may run a gated verb this hook cannot read as a git call; None
-    otherwise. Counted: a `git` word in data with a verb word after it in the same pipeline; a verb word
-    alone in data only when the code holds a shell launcher (_launcher: `bash -c '${G}it push'`); a git
-    word whose subcommand is unknown (_git_words), in code (`unknown_at`) or in data, or missing after
-    `xargs git` (xargs supplies it); and a verb word in code that is not the verb of a matched git call
-    but follows a word with an expansion, substitution, brace expansion or glob (`$G push`,
-    `{git,} push`). Each is allowed only when the command holding it, and every command whose word
-    holds that one, keeps it as text (_judge); data in a `VAR=val` or redirection prefix never is."""
-    data, pos = _view(scan, False)
-    toks = sorted([(m.start(), None) for m in DATA_GIT.finditer(data)]
-                  + [(m.start(), m.group()) for m in DATA_VERB.finditer(data)])
-    hits = []                                       # (verb, kind, command, offset), last first
-    later = {}
-    for k, verb in reversed(toks):
-        at = pos[k]
-        seg = scan.owner(at)
-        isdata = scan.mask[at] == DATA
-        if verb is not None:
-            later[seg.group] = verb
-            if isdata and launcher:
-                hits.append((verb, "data", seg, at))
-            elif at not in verbs_at:
-                hits.append((verb, "code", seg, at))
-        elif isdata and seg.group in later:
-            hits.append((later[seg.group], "data", seg, at))
-    for git_at, sub_at in _git_words(data)[1]:
-        at = next((pos[k] for k in (sub_at, git_at) if k < len(pos) and scan.mask[pos[k]] == DATA), None)
-        if at is not None:
-            hits.append(("commit or push", "data", scan.owner(at), at))
-    hits.extend(("commit or push", "unknown", scan.owner(at), at) for at in unknown_at)
-    hits.extend(("commit or push", "unknown", seg, seg.head_lo) for seg in scan.segs
-                if seg.head == "xargs" and seg.xcmd == "git" and seg.sub is None)
-    if not hits:
-        return None
-    _judge(scan.segs)
-    for verb, kind, seg, at in reversed(hits):
-        if kind == "data" and (seg.head is None or at < seg.head_lo):
-            return verb, "a `VAR=...` assignment or redirection prefix holds the %s in its data" % verb
-        if kind == "data" and seg.bad:
-            return verb, ("%s may run the %s its quoted or heredoc data names (only %s, awk without system, "
-                          "getline or | and xargs running %s keep such data as text)"
-                          % (seg.bad, verb, ", ".join(CONSUMERS), "/".join(XARGS_HOLDERS)))
-        if kind == "unknown" and seg.bad:
-            return verb, ("%s may run git with a subcommand word that holds an expansion, substitution, quoted "
-                          "text, brace expansion or glob, or with none after a $X word or `xargs git`" % seg.bad)
-        if kind == "code" and seg.bad and (seg.expand_lo <= at or seg.expand_before):
-            return verb, "%s may run the %s after an expansion, substitution, brace expansion or glob" % (
-                seg.bad, verb)
-    return None
-
-
-@functools.lru_cache(maxsize=8)
-def _analyse(command: str) -> tuple:
-    """(calls, held, code view, code offsets) of a command; see the module docstring."""
-    scan = Scan(command)
-    code, pos = _view(scan, True)
-    calls = []
-    starts, verbs_at = set(), set()
-    found, unknown = _git_words(code)
-    for git_at, a, verb_at in found:
-        opts = code[a:verb_at].rstrip()
-        dirs = [_orig(command, pos, a + d.start(1), a + d.end(1)) for d in GIT_DIR_OPT.finditer(opts)]
-        calls.append(Call(opts, VERB.match(code, verb_at).group(), dirs))
-        starts.add(git_at)
-        verbs_at.add(pos[verb_at])
-    unknown_at = [pos[git_at] for git_at, _ in unknown if git_at not in starts]
-    return calls, _held(scan, verbs_at, unknown_at, _launcher(code)), code, pos
-
-
 def git_calls(command: str) -> list:
-    """The gated git commands (commit, push) the code of the command may run (see the module docstring)."""
-    return _analyse(command)[0]
+    """(options text, verb, verb end) of each gated `git [options] commit|push`, one per verb. The
+    option run after a git word is memoised by position, so every scan is linear."""
+    memo, calls, seen = {}, [], set()
+    for g in GIT_WORD.finditer(command):
+        pos, path = g.end(), []
+        while pos not in memo:
+            path.append(pos)
+            m = OPTION.match(command, pos)
+            if not m:
+                memo[pos] = pos
+                break
+            pos = m.end()
+        end = memo[pos]
+        for p in path:
+            memo[p] = end
+        v = GIT_VERB.match(command, end)
+        if v and v.end() not in seen:
+            seen.add(v.end())
+            calls.append((command[g.end():end], v.group(1), v.end()))
+    return calls
 
 
 def gates_for(event: dict) -> list:
     """Gate names an event needs, in order, without duplicates; [] = not gated."""
-    calls, held, _, _ = _analyse(_command(event) or "")
     names = []
-    for verb in [c.verb for c in calls] + (["commit", "push"] if held else []):
-        for n in GATED[verb]:
-            if n not in names:
-                names.append(n)
+    for _, verb, _ in git_calls(bash_command(event) or ""):
+        names += [n for n in GATED[verb] if n not in names]
     return names
 
 
-def _word(arg: str, base: str):
-    """`base` joined with the directory a shell word names; None when it cannot be known statically."""
-    if "$" in arg or "`" in arg:
-        return None
-    words = shlex.split(arg)
-    if len(words) != 1:
-        raise ValueError(f"cannot read directory word: {arg}")
-    return os.path.normpath(os.path.join(base, os.path.expanduser(words[0])))
+def bypass(command: str, calls: list):
+    """The hook bypass the command holds, or None (see the module docstring, item 1)."""
+    for pattern, reason in BYPASS:
+        if pattern.search(command):
+            return reason
+    verbs = sorted(end for _, _, end in calls)
+    for seg in SEGMENT.finditer(command):
+        i = bisect.bisect_right(verbs, seg.start())
+        if i == len(verbs) or verbs[i] > seg.end():
+            continue
+        first = verbs[i]
+        for w in NO_VERIFY.finditer(command, first, seg.end()):
+            if w.group(1).startswith("--") or "n" in w.group(1):
+                return "%s after a gated git verb (--no-verify; -n is --no-verify for commit, --dry-run for push)" % w.group(1)
+    return None
 
 
-def _short_opts(word: str) -> str:
-    """The letters of a short-option cluster (`-ec` -> `ec`); "" for any other word."""
-    return word[1:] if word[:1] == "-" and word[1:].isalpha() else ""
+def _directory(word: str, base: str) -> str:
+    return os.path.normpath(os.path.join(base, os.path.expanduser(shlex.split(word)[0])))
 
 
-def _launcher(text: str) -> bool:
-    """True when a simple command in `text` (a code view: data blanked, quotes removed) runs code this
-    hook cannot read: a shell word (sh, bash, zsh, dash, ksh, by any path) followed in the same simple
-    command by `-c` or a short-option cluster holding c (`-o pipefail -c`, `-ec`) or by a heredoc or
-    here-string (`<<`), a shell fed by a pipe, `eval`, `xargs`, `-exec`/`-execdir`/`-ok`/`-okdir`,
-    `env -C/--chdir/-S/--split-string` or `sudo -D/--chdir`. One pass over the words (linear)."""
-    parts = SEP.split(text)
-    for k in range(0, len(parts), 2):
-        piped = k > 0 and parts[k - 1] in ("|", "|&")
-        shell = env = sudo = False
-        for w in parts[k].replace("<<", " << ").split():
-            name = os.path.basename(w)
-            opts = _short_opts(w)
-            if name in ("eval", "xargs") or w in ("-exec", "-execdir", "-ok", "-okdir"):
-                return True
-            if shell and ("c" in opts or w.startswith("<<")):
-                return True
-            if env and (w.startswith(("--chdir", "--split-string")) or "C" in opts or "S" in opts
-                        or w.startswith(("-C", "-S"))):
-                return True
-            if sudo and (w.startswith("--chdir") or "D" in opts or w.startswith("-D")):
-                return True
-            if name in SHELLS:
-                if piped:
-                    return True
-                shell = True
-            env = env or name == "env"
-            sudo = sudo or name == "sudo"
-    return False
-
-
-def target_dirs(event: dict) -> list:
-    """Directories the gated git commands run in: the event cwd, moved by a leading `cd <dir> &&`
-    or `;`, then by each `-C <dir>` of the command (cumulative, as git does). Raises TargetError for
-    data a command may run (see the module docstring) and for a gated command whose tree cannot be
-    told -- another `cd`, `pushd`/`popd`, a subshell, a launcher, a `$` or backtick in a followed
-    directory word, --git-dir/--work-tree, GIT_DIR=/GIT_WORK_TREE=."""
-    command = _command(event) or ""
-    calls, held, code, pos = _analyse(command)
-    hint = "; use git -C <dir> or a leading cd <dir> &&"
-    if held:
-        raise TargetError("cannot tell which tree %s runs in, or whether it runs: %s%s" % (held + (hint,)))
-    if not calls:
-        return []
-    why = "cannot tell which tree %s runs in" % calls[0].verb
-    base = event.get("cwd") or os.getcwd()
-    rest = code
+def tree_for(event: dict, command: str, options: str = "") -> str:
+    """The directory a git call runs in: the event's cwd, moved by a leading `cd <dir>`, then by each
+    `-C <dir>` in `options` (as git applies them)."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        raise Blocked("hook.input", "the event has no cwd")
     lead = LEADING_CD.match(command)
-    if lead:
-        base = _word(lead.group(1), base)
-        if base is None:
-            raise TargetError(why + " (the leading cd directory is not a plain word)" + hint)
-        rest = code[bisect.bisect_left(pos, lead.end()):]
-    if CD_WORD.search(rest) or TREE_ENV.search(rest):
-        raise TargetError(why + " (a cd, pushd, popd, subshell or GIT_DIR/GIT_WORK_TREE the hook does not follow)" + hint)
-    if _launcher(rest):
-        raise TargetError(why + " (a nested shell, eval, xargs, -execdir, env -C or sudo -D the hook does not follow)" + hint)
-    dirs = []
-    for call in calls:
-        if TREE_OPT.search(call.opts):
-            raise TargetError(why + " (--git-dir/--work-tree)" + hint)
-        cur = base
-        for d in call.dirs:
-            cur = _word(d, cur)
-            if cur is None:
-                raise TargetError(why + " (git -C with a shell expansion)" + hint)
-        if cur not in dirs:
-            dirs.append(cur)
-    return dirs
+    base = _directory(lead.group(1), cwd) if lead else cwd
+    for m in OPTION.finditer(options):
+        if m.group("v") is not None:
+            base = _directory(m.group("v"), base)
+    return base
 
 
 def toplevel(directory: str) -> str:
     p = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
                        capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        raise RuntimeError(f"git -C {directory} rev-parse --show-toplevel: {p.stderr.strip()}")
+        raise Blocked("hook.target", f"{directory}: {p.stderr.strip()}")
     return p.stdout.strip()
 
 
@@ -6635,17 +5967,27 @@ def main() -> int:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
-    names = gates_for(event)
-    if not names:
+    command = bash_command(event)
+    if command is None:
         return 0
-    sys.path.insert(0, CODE_ROOT)
-    from tools.gates import run_all   # lazy: an ungated command never needs PyYAML
-    roots = []
-    for d in target_dirs(event):    # resolve every tree first: an unusable one fails closed before any gate runs
+    calls = git_calls(command)
+    reason = bypass(command, calls)
+    if reason:
+        raise Blocked("hook.bypass", reason)
+    if not calls:
+        return 0
+    dirs, roots = [], []
+    for options, _, _ in calls:
+        d = tree_for(event, command, options)
+        if d not in dirs:
+            dirs.append(d)
+    for d in dirs:    # resolve every tree first: an unusable one fails closed before any gate runs
         top = toplevel(d)
         if top not in roots:
             roots.append(top)
-    failed = [r for r in (run_all.run(names, {"root": top}) for top in roots) if not r.ok()]
+    sys.path.insert(0, CODE_ROOT)
+    from tools.gates import run_all   # lazy: an ungated command never needs PyYAML
+    failed = [r for r in (run_all.run(gates_for(event), {"root": top}) for top in roots) if not r.ok()]
     for r in failed:
         print(r.render(False), file=sys.stderr)
     return 2 if failed else 0
@@ -6654,8 +5996,8 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         rc = main()
-    except TargetError as exc:
-        print(f"FAIL hook.target: {exc}", file=sys.stderr)
+    except Blocked as exc:
+        print(f"FAIL {exc.code}: {exc}", file=sys.stderr)
         rc = 2
     except Exception as exc:  # fail closed: a broken hook blocks, it never waves through
         print(f"FAIL hook.internal: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -6669,13 +6011,15 @@ if __name__ == "__main__":
 #!/bin/sh
 # strict-delivery-gates-hook
 # git pre-commit (spec §8 "Git hooks"): the register and claim gates on the tree being committed.
+# git-pre-push.sh runs this script with --pre-push for the tree being pushed (owner decision DEC-0005).
 # The gates read the working tree, so every path they read must have no worktree-side change: no
 # unstaged edit, no untracked or ignored file, no file removed from the index but left on disk.
-# Staged-only changes pass, so the tree the gates see equals the tree being committed for those
-# paths. The paths: the registers, briefs and the state README (docs/superpowers/state), the
-# registered reports (docs/reviews; gate_register opens EVERY file under it, so an ignored .md
-# counts, and only the Finder's .DS_Store, which can never hold the marker line, is exempt), and the
-# code the gates import. The import path: `python3 tools/gates/run_all.py` starts with
+# Staged-only changes pass a commit, so the tree the gates see equals the tree being committed for
+# those paths; a push sends HEAD, so --pre-push also refuses staged changes (the FAIL ids name the
+# hook: pre-commit.unstaged, pre-push.uncommitted). The paths: the registers, briefs and the state
+# README (docs/superpowers/state), the registered reports (docs/reviews; gate_register opens EVERY
+# file under it, so an ignored .md counts, and only the Finder's .DS_Store, which can never hold the
+# marker line, is exempt), and the code the gates import. The import path: `python3 tools/gates/run_all.py` starts with
 # sys.path[0] = tools/gates, and run_all.py then inserts the repository root ahead of it, so imports
 # search the root, then tools/gates, then the stdlib and site-packages. An untracked module or
 # package in either directory (yaml.py, yaml/__init__.py, a sourceless .pyc or an extension .so) is
@@ -6686,33 +6030,60 @@ if __name__ == "__main__":
 # .DS_Store (a sourceless .pyc outside __pycache__ is importable, so it is not exempt).
 # Installed by tools/gates/install-hooks.sh.
 set -eu
-unset CLAUDE_PROJECT_DIR   # gate the tree being committed (e.g. a worktree), not the session's project
+unset CLAUDE_PROJECT_DIR   # gate the tree being committed or pushed (e.g. a worktree), not the session's project
+staged=0
+if [ "${1-}" = "--pre-push" ]; then staged=1; fi
 root=$(git rev-parse --show-toplevel)
 cd "$root"
-# porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is worktree-side
+# porcelain XY: X = index vs HEAD, Y = worktree vs index; a non-blank Y (incl. ?? and !!) is worktree-side,
+# and with --pre-push any line (a non-blank X too) differs from HEAD
 dirty=$(git status --porcelain --untracked-files=all --ignored -- \
   docs/superpowers/state docs/reviews tools/gates ':(exclude)tools/gates/tests' ':(exclude)tools/gates/README.md' \
   ':(glob)*.py' ':(glob)*.pyc' ':(glob)*.so' ':(glob)*/__init__.*' \
   ':(exclude,glob)**/.DS_Store' ':(exclude,glob)tools/gates/**/__pycache__/**' \
-  | awk 'substr($0, 2, 1) != " "')
+  | awk -v staged="$staged" 'staged || substr($0, 2, 1) != " "')
 if [ -n "$dirty" ]; then
-  echo "FAIL pre-commit.unstaged: the gates read or run from these paths and they differ from the index; stage them (git add <path>) to commit them, or revert, delete or move them:" >&2
+  if [ "$staged" = 1 ]; then
+    echo "FAIL pre-push.uncommitted: the gates read or run from these paths and they differ from HEAD, which is what a push sends; commit them, or revert, delete or move them:" >&2
+  else
+    echo "FAIL pre-commit.unstaged: the gates read or run from these paths and they differ from the index; stage them (git add <path>) to commit them, or revert, delete or move them:" >&2
+  fi
   echo "$dirty" >&2
   exit 1
 fi
 exec python3 tools/gates/run_all.py --only register,claims
 ```
 
+`tools/gates/hooks/git-pre-push.sh` (Task 8b, owner decision DEC-0005):
+
+```bash
+#!/bin/sh
+# strict-delivery-gates-hook
+# git pre-push (spec §8 "Git hooks"; owner decision DEC-0005): the register and claim gates on the
+# tree being pushed, however the push was launched (the Claude Code hook sees only a literal
+# `git push` in the command text). The check is git-pre-commit.sh's, in its --pre-push mode: the
+# paths the gates read must not differ from HEAD (FAIL pre-push.uncommitted), then
+# `run_all.py --only register,claims`. git passes <remote> <url> as arguments and one line per ref on
+# stdin; both are ignored at S1 block b3, and nothing here reads stdin, so S4 (merge-readiness) can
+# read the ref lines in a loop before the exec. The gates read the working tree, which then equals
+# HEAD for the paths they read; a push of a ref other than HEAD is checked against HEAD.
+# Installed by tools/gates/install-hooks.sh.
+set -eu
+exec sh "$(dirname "$0")/git-pre-commit.sh" --pre-push
+```
+
 `tools/gates/install-hooks.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Installs the strict-delivery git hooks (spec §8 "Git hooks"). Idempotent. The installed
-# pre-commit is a shim carrying the marker line below; it runs the TRACKED
-# tools/gates/hooks/git-pre-commit.sh of whichever tree is being committed, so an update to the
-# script needs no re-install. A foreign pre-commit is moved aside, never overwritten.
+# Installs the strict-delivery git hooks (spec §8 "Git hooks"; pre-push from S1 block b3, owner
+# decision DEC-0005). Idempotent. Each installed hook (pre-commit, pre-push) is a shim carrying the
+# marker line below; it runs the TRACKED tools/gates/hooks/git-<hook>.sh of whichever tree git runs
+# in, so an update to the scripts needs no re-install. A foreign hook is moved aside, never
+# overwritten; every hook is checked before any is written, so a refusal installs nothing.
 set -euo pipefail
 MARKER='# strict-delivery-gates-hook'
+HOOKS=(pre-commit pre-push)
 root=$(git rev-parse --show-toplevel)
 hooks=$(git -C "$root" rev-parse --git-path hooks)
 case "$hooks" in /*) ;; *) hooks="$root/$hooks" ;; esac
@@ -6722,50 +6093,57 @@ case "$real" in
   "$common"/*) ;;
   *) echo "install-hooks: refusing: the hooks directory $hooks (core.hooksPath?) is outside $common; it may be shared with other repositories" >&2; exit 1 ;;
 esac
-mkdir -p "$hooks"
-dst="$hooks/pre-commit"
-if [ -e "$dst" ] && ! grep -qF "$MARKER" "$dst"; then
-  if [ -e "$dst.pre-strict-delivery" ]; then
+foreign() { [ -e "$1" ] && ! grep -qF "$MARKER" "$1"; }
+for hook in "${HOOKS[@]}"; do
+  dst="$hooks/$hook"
+  if foreign "$dst" && [ -e "$dst.pre-strict-delivery" ]; then
     echo "install-hooks: refusing: $dst.pre-strict-delivery already exists and $dst is not ours; merge or remove one of them" >&2
     exit 1
   fi
-  mv "$dst" "$dst.pre-strict-delivery"
-  echo "install-hooks: moved the existing pre-commit hook to $dst.pre-strict-delivery (it no longer runs)"
-fi
-cat > "$dst" <<'SHIM'
+done
+mkdir -p "$hooks"
+for hook in "${HOOKS[@]}"; do
+  dst="$hooks/$hook"
+  if foreign "$dst"; then
+    mv "$dst" "$dst.pre-strict-delivery"
+    echo "install-hooks: moved the existing $hook hook to $dst.pre-strict-delivery (it no longer runs)"
+  fi
+  sed "s/@HOOK@/$hook/g" > "$dst" <<'SHIM'
 #!/bin/sh
 # strict-delivery-gates-hook
-# Installed by tools/gates/install-hooks.sh. Runs the tracked script of the tree being committed;
-# a tree without it cannot commit (fail closed).
-script="$(git rev-parse --show-toplevel)/tools/gates/hooks/git-pre-commit.sh"
+# Installed by tools/gates/install-hooks.sh. Runs the tracked script of the tree git runs in;
+# a tree without it is refused (fail closed).
+script="$(git rev-parse --show-toplevel)/tools/gates/hooks/git-@HOOK@.sh"
 if [ ! -f "$script" ]; then
-  echo "FAIL pre-commit.missing: this tree has no tools/gates/hooks/git-pre-commit.sh (it predates the strict-delivery gates); rebase it onto main or ask the owner" >&2
+  echo "FAIL @HOOK@.missing: this tree has no tools/gates/hooks/git-@HOOK@.sh (it predates the strict-delivery gates); rebase it onto main or ask the owner" >&2
   exit 1
 fi
 exec sh "$script" "$@"
 SHIM
-chmod +x "$dst"
-echo "install-hooks: pre-commit -> tools/gates/hooks/git-pre-commit.sh ($dst)"
+  chmod +x "$dst"
+  echo "install-hooks: $hook -> tools/gates/hooks/git-$hook.sh ($dst)"
+done
 ```
 
 ```bash
-chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh tools/gates/install-hooks.sh
+chmod +x tools/gates/hooks/pre_tool_use.py tools/gates/hooks/git-pre-commit.sh tools/gates/hooks/git-pre-push.sh tools/gates/install-hooks.sh
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass, then install the hook in this checkout**
 
 ```bash
-python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 29 tests ... OK
-python3 -m unittest discover -s tools/gates/tests -t .   # Ran 250 tests ... OK
+python3 -m unittest tools.gates.tests.test_hooks -v   # Ran 39 tests ... OK
+python3 -m unittest discover -s tools/gates/tests -t .   # Ran 260 tests ... OK
 bash tools/gates/install-hooks.sh                    # install-hooks: pre-commit -> ... (.git/hooks/pre-commit)
-grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit   # 1
+                                                     # install-hooks: pre-push -> ... (.git/hooks/pre-push)
+grep -c 'strict-delivery-gates-hook' .git/hooks/pre-commit .git/hooks/pre-push   # 1 each
 ```
 
-Mutation checks (each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: remove the `try/except` around `main()` (3 fail-closed tests); `GATED["push"] = []`, drop the backslash-newline join, `config-env` from `TAKES_WORD` or the `$X` option word, keep a plain double-quoted word as data (`"git" commit`) or slice the `-C` directory from the code view instead of the original text (`test_push_with_options_is_gated_too`); `(?![\w-])` -> `\b` (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); ignore `-C` or the leading `cd` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`), or let a non-repo directory pass (`test_a_named_directory_that_is_not_a_repo_fails_closed`, `test_cwd_outside_a_repo_fails_closed`); rebuild the heredoc terminator index per line, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout); stop detecting another `cd` or `GIT_DIR=`, `--git-dir`/`--work-tree`, an expanded `-C` word, a launcher in the code or data a command may run, or read heredoc bodies as code (`test_a_gated_command_whose_tree_cannot_be_told_is_blocked`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`); replace the `git status` check by `git diff --name-only -- docs/superpowers/state`, drop `--untracked-files=all` or drop `docs/reviews` (the register-removed-from-index, staged-report-with-unstaged-edit and untracked-file tests); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); exclude `run_all.py`, `lib` or `hooks` from the `tools/gates` guard (`test_pre_commit_blocks_an_unstaged_edit_to_a_file_that_decides_the_verdict`), narrow the guard to a list of files (`run_all.py`, `__init__.py`, `gate_*.py`, `lib`, `config.yml`, `hooks/git-pre-commit.sh`) exempt `*.pyc` outside `__pycache__`, or drop the root-level `*.py`, `*.pyc`, `*.so` or `*/__init__.*` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`: an untracked `yaml.py` in the root or in tools/gates would shadow PyYAML), drop the `tests` or `README.md` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). `install-hooks.sh`: disable the `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`); replace the `mv` by `true` (`test_a_foreign_hook_is_moved_aside`); put `exit 0` right after the `mv` (the same test, through its rc and marker assertions); allow overwriting the backup or disable the hooks-path guard (`test_a_second_foreign_hook_does_not_overwrite_the_first_backup`, `test_a_hooks_path_outside_the_repository_is_refused`).
+Mutation checks (run at Task 8b in a private clone; each restored, then `OK` again; all killed by the test named). `pre_tool_use.py`: catch only `ZeroDivisionError` around `main()` (`test_hook_fails_closed_when_script_errors`, `test_malformed_stdin_fails_closed`); `GATED["push"] = []`, drop the backslash-newline join or the `$X` option word (`test_push_with_options_is_gated_too`); `(?![\w-])` -> `\b` after the verb (`test_a_verb_that_only_shares_a_prefix_is_not_gated`); refuse a `/` before the git word (`test_path_qualified_git_and_prefixes_are_gated`); refuse a quote before it (`test_a_mention_in_data_runs_the_gates`); ignore `-C` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`, `test_two_trees_are_each_gated_once`), resolve each `-C` from the cwd instead of the directory before it, or ignore the leading `cd` (`test_the_tree_named_by_dash_C_or_cd_is_the_one_gated`); gate every toplevel without de-duplicating (`test_two_trees_are_each_gated_once`); fall back to the process cwd for a missing `cwd` (`test_cwd_outside_a_repo_fails_closed`); let a non-repo directory pass (`test_a_named_directory_that_is_not_a_repo_fails_closed`, `test_cwd_outside_a_repo_fails_closed`); reset the option-run memo per git word, which is quadratic (`test_long_runs_of_backslashes_and_options_do_not_stall_the_hook` errors at its 20 s subprocess timeout); skip the bypass check, match `core.hooksPath` case-sensitively, keep only `GIT_CONFIG_PARAMETERS`, accept only `--no-verify` and `-n` spelled out, block every short option, split simple commands without quote-awareness, or let the verb's segment run to the end of the command (`test_hook_bypasses_are_blocked`). `git-pre-commit.sh`: delete `unset CLAUDE_PROJECT_DIR` (`test_pre_commit_blocks_a_failing_register`, `test_pre_commit_passes_a_clean_tree`, `test_pre_push_blocks_a_failing_register`, `test_pre_push_passes_a_clean_tree`); `--pre-push` without the staged-change check (`test_pre_push_blocks_unstaged_register_edits`); read the index column instead of the worktree column (`test_pre_commit_blocks_unstaged_register_edits`, `test_a_staged_report_passes_when_it_is_committed_as_is`); drop `docs/reviews` (`test_pre_commit_blocks_a_staged_report_with_an_unstaged_edit`, `test_pre_commit_blocks_an_untracked_file_the_gates_read`); drop `--ignored` or the `.DS_Store` exemption (`test_pre_commit_blocks_an_ignored_file_the_gates_open_but_not_a_ds_store`); drop the root-level `*.py` pathspec (`test_pre_commit_blocks_an_untracked_module_in_the_gate_code`); drop the `tests` exclusion (`test_edits_to_gate_tests_and_readme_do_not_block_a_commit`) or the `__pycache__` exemption (`test_bytecode_caches_under_the_gates_do_not_block_a_commit`). One equivalent mutant: dropping `--untracked-files=all` (git then lists an untracked directory as one `?? dir/` line, which still blocks; the flag only names each file). `git-pre-push.sh`: `exit 0` in place of the `exec` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`). `install-hooks.sh`: `HOOKS=(pre-commit)` (`test_pre_push_blocks_a_failing_register`, `test_pre_push_blocks_unstaged_register_edits`, `test_install_writes_both_shims`, `test_a_tree_without_the_gates_cannot_push`); disable the shim's `[ ! -f "$script" ]` branch (`test_a_tree_without_the_gates_cannot_commit`, `test_a_tree_without_the_gates_cannot_push`); replace the `mv` by `true`, or put `exit 0` right after it (`test_a_foreign_hook_is_moved_aside`, `test_a_foreign_pre_push_hook_is_moved_aside`); skip the check-all-first loop (`test_a_foreign_pre_push_hook_is_moved_aside`, `test_a_second_foreign_hook_does_not_overwrite_the_first_backup`); disable the hooks-path guard (`test_a_hooks_path_outside_the_repository_is_refused`).
 
 - [ ] **Step 5: Ledger line, then commit (the new pre-commit hook gates this commit)**
 
-Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 29 OK; suite 250 OK on 3.9.6 and 3.12.14; run_all 15 PASS` to the ledger under the existing `## Block b3 (branch block/strict-delivery-b3)` section (the heading and `- base BASE_B3=<sha>` line were written at b3 setup).
+Append `- T7 feat(gates): PreToolUse Bash gating, git pre-commit, install-hooks -- test_hooks 39 OK; suite 260 OK on 3.9.6 and 3.12.14; run_all 15 PASS` to the ledger under the existing `## Block b3 (branch block/strict-delivery-b3)` section (the heading and `- base BASE_B3=<sha>` line were written at b3 setup).
 
 ```bash
 git add tools/gates/hooks tools/gates/install-hooks.sh tools/gates/tests/test_hooks.py docs/superpowers/state/strict-delivery/ledger.md
@@ -6779,189 +6157,17 @@ Expected: the commit output first shows the 10 PASS lines of `run_all --only reg
 
 **Files:**
 - Create: `tools/gates/hooks/session_start.py`, `tools/gates/hooks/user_prompt_submit.py`, `.claude/settings.json`, `CLAUDE.md`
-- Modify: `tools/gates/tests/test_hooks.py` (insert the four classes below, `PreToolUseCommandPosition`, `SessionStart`, `UserPromptSubmit`, `ProjectWiring`, above the `if __name__ == "__main__":` line; the Task 7 block above is the file without them), `tools/gates/README.md` (append the Hooks section)
+- Modify: `tools/gates/tests/test_hooks.py` (insert the three classes below, `SessionStart`, `UserPromptSubmit`, `ProjectWiring`, above the `if __name__ == "__main__":` line; the Task 7 block above is the file without them), `tools/gates/README.md` (append the Hooks section)
 
 **Interfaces:**
 - Consumes: `install-hooks.sh` and its marker (Task 7); `hook()`, `copy_gates()` and `ORPHAN` in `test_hooks.py` (Task 7).
-- Produces: `session_start.py` prints `strict-delivery: gates installed in <root> ...` or `strict-delivery: gates NOT installed in <root> ...`, one `strict-delivery: handoff <path> ...` line per `docs/superpowers/state/*/handoff.md`, the install-hooks output when the repository's pre-commit hook is not ours, and `strict-delivery: invoke the strict-delivery skill before any other action`. It always exits 0: SessionStart cannot block and only exit-0 stdout reaches the model, so every failure (`FAIL hook.install: ...` for an install-hooks.sh failure or refusal, `FAIL hook.input: ...` for a missing or non-directory `cwd`, `FAIL hook.internal: ...`) is a line on stdout (and echoed on stderr) followed by the skill line (owner ruling 5). `user_prompt_submit.py` prints one line starting `strict-delivery: `. `.claude/settings.json` is the umbrella's JSON without the `Stop` and `SubagentStop` entries; its Bash handler has no `if` filter (owner ruling 5: `if` uses permission-rule matching and never offered `/usr/bin/git push`, `bash -c`, `env -C` or `sudo git push` to the script; the umbrella's block carries the same JSON plus the two lines). **S2 adds those two entries, together with `stop.py` and `subagent_stop.py`.** Until then a `Stop` entry would call a script that does not exist, and fail closed on every turn.
+- Produces: `session_start.py` prints `strict-delivery: gates installed in <root> ...` or `strict-delivery: gates NOT installed in <root> ...`, one `strict-delivery: handoff <path> ...` line per `docs/superpowers/state/*/handoff.md`, the install-hooks output when the repository's pre-commit or pre-push hook is not ours, and `strict-delivery: invoke the strict-delivery skill before any other action`. It always exits 0: SessionStart cannot block and only exit-0 stdout reaches the model, so every failure (`FAIL hook.install: ...` for an install-hooks.sh failure or refusal, `FAIL hook.input: ...` for a missing or non-directory `cwd`, `FAIL hook.internal: ...`) is a line on stdout (and echoed on stderr) followed by the skill line (owner ruling 5). `user_prompt_submit.py` prints one line starting `strict-delivery: `. `.claude/settings.json` is the umbrella's JSON without the `Stop` and `SubagentStop` entries; its Bash handler has no `if` filter (owner ruling 5: `if` uses permission-rule matching and never offered `/usr/bin/git push`, `bash -c`, `env -C` or `sudo git push` to the script; the umbrella's block carries the same JSON plus the two lines). **S2 adds those two entries, together with `stop.py` and `subagent_stop.py`.** Until then a `Stop` entry would call a script that does not exist, and fail closed on every turn.
 
 - [ ] **Step 1: Write the failing tests**
 
 Insert into `tools/gates/tests/test_hooks.py`, directly above `if __name__ == "__main__":`:
 
 ```python
-class PreToolUseCommandPosition(unittest.TestCase):
-    """The unfiltered Bash handler sees every command: the git verb is matched in the code after quote
-    removal, and a verb in data passes only when every command holding it keeps it as text."""
-    def setUp(self):
-        self.root = new_repo()
-        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)    # a failing register
-
-    def tearDown(self):
-        gf.remove(self.root)
-
-    def run_hook(self, cmd):
-        return hook("pre_tool_use.py", bash_event(self.root, cmd))
-
-    def assert_gated(self, cmd):
-        p = self.run_hook(cmd)
-        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
-        self.assertIn("FAIL register.owner.T1-ORPHAN-1", p.stderr, cmd[:80])
-
-    def assert_silent(self, cmd):
-        p = self.run_hook(cmd)
-        self.assertEqual((0, "", ""), (p.returncode, p.stdout, p.stderr), cmd[:80])
-
-    def assert_unknown(self, cmd):
-        p = self.run_hook(cmd)
-        self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
-        self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree "), (cmd[:80], p.stderr))
-        self.assertIn(" runs in, or whether it runs: ", p.stderr, cmd[:80])
-        self.assertTrue(p.stderr.endswith("; use git -C <dir> or a leading cd <dir> &&\n"), (cmd[:80], p.stderr))
-
-    def test_a_verb_inside_data_is_not_gated(self):
-        for cmd in ("grep -rn 'git push' docs", "echo 'run git push and git commit later'", 'rg "git commit" docs',
-                    "cat <<EOF\ngit push\nEOF", "cat <<'EOF'\ngit push\nEOF", 'cat <<"EOF"\ngit push\nEOF',
-                    "cat <<\\EOF\ngit push\nEOF", "cat <<\\EOF\n$(git push)\nEOF", "cat <<-EOF\n\tgit commit\n\tEOF",
-                    "gh pr create --title t --body 'then git push'", "git log --grep='git push'", "git log --grep 'git commit'",
-                    "echo hi # git push", "echo \"x git push\"", "printf '%s' \"git commit\" | wc -c",
-                    "echo \"$(cat <<'EOF'\ngit push\nEOF\n)\"", "git status 2>&1 | grep 'git commit'",
-                    "echo 'x; git push'", "grep 'a && git commit' f", "echo 'x $(git push)'", "echo `echo 'y; git push'`",
-                    "cat <<'EOF'\n$(git push)\nEOF", "echo hi # a && git push", "echo ok # $(git push)",
-                    "cat <<EOF\n$(echo a)\n git push\nEOF",       # unquoted delimiter: only the substitution runs
-                    "cat <<EOF\n`echo a`\nx git push\nEOF", "echo \"$(echo a) then git push\"",
-                    "echo ${#X}; echo 'git push'", "echo $# 'git push'", "echo a\\ git push",   # an escaped space quotes
-                    # the Claude Code forms and other holders that keep the data as text
-                    "gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\nthen git push\nEOF\n)\"",
-                    "grep -rn 'git push' docs | head -5", "cat > notes.md <<'EOF'\ngit push\nEOF",
-                    "(cd docs && grep -rn 'git push' .)", "if grep -q 'git push' f; then echo y; fi", "X=1 grep 'git push' f",
-                    "echo ${v:-'git push'}", "git stash push -m 'before git push'", "jq '.[0].commit' f",
-                    "echo 'git push' | grep push | wc -l", "printf '%s\\n' 'git push' | tee notes.txt",
-                    "git tag -a v1 -F - <<'EOF'\nthen git push\nEOF", "echo \"$(echo 'git push')\"",
-                    "echo $(echo git) push", "git log --oneline | grep 'push'", "sed -n '/commit/p' f",
-                    # a lone verb word in data names no git call; awk and xargs that only read text
-                    "python3 - <<'EOF'\nprint('the commit is done')\nEOF", "curl -s -X POST -d '{\"commit\": \"abc\"}' https://x",
-                    "npm version patch -m 'release commit %s'", "pytest -k 'push or commit'", "python3 -c \"print('push')\"",
-                    "node -e 'console.log(\"push\")'", "awk '/push/ {n++} END {print n}' f", "python3 -c print\\(\\\"push\\\"\\)",
-                    "grep 'git push' f | awk '{print $1}'", "find . -name '*.md' | xargs grep -l 'git push'",
-                    "grep -rl 'git push' docs | xargs -n 1 wc -l", "awk '/git push/' notes.md",
-                    "jq 'select(.msg == \"git push\")' f"):
-            self.assert_silent(cmd)
-
-    def test_a_verb_that_is_not_in_data_is_gated(self):
-        for cmd in ('echo "$(git push)"', "x=$(git commit -m y)", "echo `git push`", "echo \"`git commit -m y`\"",
-                    "echo hi && git push", "echo hi; git push", "ls | git commit -m x", "echo hi & git push",
-                    "if git push; then echo ok; fi", "! git push", "{ git push; }", "(git push)", "true || git commit -m x",
-                    "echo hi\ngit push", "2>&1 git push", "cat <<EOF\n$(git push)\nEOF", "cat <<EOF\nx $(echo a; git push)\nEOF",
-                    "cat <<EOF\ngit push", "git commit -m \"$(cat <<'EOF'\nfix git push in the notes\nEOF\n)\"",
-                    "echo 'git push' && git push", "cat <<'EOF' > /dev/null\nx\nEOF\ngit push",
-                    # an unquoted mention is gated too (fail closed; the cost is a blocked echo)
-                    "echo git push", "echo git commit -m x", "ls; echo git push; ls", "cd missing && echo git push",
-                    # no cap on prefix words, word length or path length; wrappers need no list
-                    "A=1 " * 13 + "git push", "FOO=" + "x" * 300 + " git push", "/" + "d/" * 200 + "git push",
-                    "env X=" + "y" * 260 + " git push", "timeout 1.5 git push", "sudo --user nobody git push",
-                    "> /tmp/log git push", "2> err git push", "echo ${#X}; git push", "echo $# && git push",
-                    "arch -arm64 git push", "xcrun git push", "flock /tmp/l git push", "watch git push", "chronic git push",
-                    "unbuffer git push", "script -q /dev/null git push", "coproc git push", "nohup nice -n 5 git commit -m x",
-                    "echo \"unclosed; git push", "echo 'unclosed; git push"):     # an unterminated quote is code
-            p = self.run_hook(cmd)
-            self.assertEqual(2, p.returncode, (cmd[:80], p.stderr))
-            self.assertTrue("FAIL register.owner.T1-ORPHAN-1" in p.stderr or "FAIL hook." in p.stderr, (cmd[:80], p.stderr))
-        for cmd in ('echo "$(git push)"', "echo ${#X}; git push", "arch -arm64 git push", "timeout 1.5 git push",
-                    "A=1 " * 13 + "git push", "> /tmp/log git push", "git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\""):
-            self.assert_gated(cmd)
-
-    def test_quote_removal_joins_quoted_pieces_into_the_word(self):
-        for cmd in ('g"it" push', "'g'it push", "gi\\t push", 'git "push"', "git 'push'", 'git p"ush"', "git pu\\sh",
-                    "$'git' push", "$'\\x67it' push", "''git push", 'git"" push', "\\git push", "git -C . 'com'mit -m x",
-                    "sudo g'i't push", "echo ok; gi\\t commit -m x",
-                    "git p\\\nush", "gi\\\nt push", "true && git p\\\nush"):     # a continuation joins with nothing
-            self.assert_gated(cmd)
-        clean = new_repo()
-        self.addCleanup(gf.remove, clean)
-        self.assertEqual((0, ""), (self.run_hook('git -"C" %s push' % clean).returncode, ""))   # the -C dir is followed
-        self.assert_gated("git %s . push" % "$'\\x2d'C")       # an ANSI-C escape decoded into an option
-        for cmd in ("c'd' %s && git push" % clean, "\\cd %s && git push" % clean):
-            p = self.run_hook(cmd)
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertTrue(p.stderr.startswith("FAIL hook.target: cannot tell which tree push runs in (a cd"), p.stderr)
-
-    def test_data_a_command_may_run_is_blocked(self):
-        for cmd in ("watch 'git push'", "su -c 'git push'", "flock /tmp/l -c 'git push'", "script -q -c 'git push' /dev/null",
-                    "python3 -c 'import os; os.system(\"git push\")'", "perl -e 'system(\"git push\")'",
-                    "python3 <<'EOF'\nimport os\nos.system('git push')\nEOF", "ruby -e 'system(\"git commit -m x\")'",
-                    "cat <<'EOF' | python3\nimport os\nos.system('git push')\nEOF", "echo 'git push' | python3 -",
-                    "sudo sh -c 'git push'", "env bash -c 'git push'", "xargs -I{} sh -c 'git push'",
-                    "bash -c 'gi''t push'", "bash -c 'git \"$0\"' push", "bash -c git\\ push", "bash -c \"gi\\$'t' push\"",
-                    "bash -c 'g\"it\" pu{sh,}'", "x=$(echo 'git push'); $x", "X='git push' ls", "GIT_EDITOR='git push;' git commit",
-                    "git -c alias.p='!git push' p", "git submodule foreach 'git push'", "git rebase -x 'git push' HEAD~1",
-                    "printf -v c 'git push'; $c", "echo 'git push' > >(sh)", "echo 'git push' | tee >(sh)",
-                    "(echo 'git push') | sh", "{ echo 'git push'; } | sh", "eval \"$(echo 'git push')\"", "sh <(echo 'git push')",
-                    "echo \"$(python3 -c 'git push')\"", "while read l; do $l; done <<< 'git push'",
-                    "echo 'git push' | grep push | sh", "printf '%s' 'git push' | xargs -0 sh -c",
-                    "bash -c \"$'\\147it' push\"", "echo \"$(case x in a) bash -c 'git push';; esac)\"",
-                    "git -c core.editor='git push' commit", "bash -c '${G}it push'", "bash -c \"gi\\$'t' \\$V\"",
-                    "bash -c \"$'\\147it' \\$V\"", "bash -c \"g\\\"it\\\" \\$V\"",
-                    "X=\"$(echo 'git push')\" grep x f", "bash -c 'echo push'", "python3 -c os.system\\(\\\"git\\ push\\\"\\)",
-                    # awk that can run a command, xargs running a shell, sed (GNU sed `e` executes)
-                    "grep 'git push' f | awk '{system($0)}'", "echo 'git push' | awk '{print | \"sh\"}'",
-                    "awk 'BEGIN { system(\"git push\") }'", "awk -f prog.awk <<'EOF'\ngit push\nEOF",
-                    "find . | xargs sh -c 'git push'", "sed -n '/git push/p' f", "grep 'git push' f | sed 's/x/y/'"):
-            self.assert_unknown(cmd)
-
-    def test_an_expansion_in_place_of_the_git_word_or_the_verb_is_blocked(self):
-        for cmd in ("$(echo git) push", "${G:-git} push", "{git,} push", "`echo git` push", "G=git; $G push", "sudo $G push",
-                    "git p*", "git pu{sh,}", "git $V", "git --no-pager \"$V\"", "git -C . ${V};", "sudo git pus?",
-                    "${G:-git} p*", "\"$(which git)\" pu$V", "$G $(echo push)", "git$V",
-                    "echo push | xargs git", "printf push | xargs -n 1 git -C .", "xargs -a verbs.txt /usr/bin/git"):
-            self.assert_unknown(cmd)
-        for cmd in ("git $x status", "git -C \"$PWD\" log", "echo $(echo git) push", "git log $range", "$EDITOR notes.md"):
-            p = self.run_hook(cmd)
-            self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
-
-    def test_parameter_expansion_and_ansi_c_quotes_are_parsed(self):
-        for cmd in ("echo ${v:- #x}; git push", "$'it\\'s' ; git push; echo 'x'", 'echo "${x:-"}"}"; git push',
-                    "echo ${v:-a;b} && git push", "echo $'a\\\\' ; git push",
-                    "cat <<EOF\n${x:-\"}\nEOF\ngit push; echo \"x\""):    # a heredoc body ends at its terminator
-            self.assert_gated(cmd)
-        for cmd in ("echo ${v:-'git push'}", "echo ${#v} 'git push'", "echo $'git\\tpush'", "echo \"${v:-git push}\""):
-            self.assert_silent(cmd)
-
-    def test_path_qualified_git_and_wrapper_prefixes_are_gated(self):
-        for cmd in ("/usr/bin/git push", "./git push", "'/usr/bin/git' commit -m x", "sudo git push",
-                    "sudo -u nobody git commit -m x", "command git push", "nohup git push", "time git push",
-                    "env git push", "env FOO=1 git push", "env -i -u X git push", "/usr/bin/env FOO=1 /usr/bin/git push",
-                    "timeout 5 git push", "FOO=1 /usr/bin/git commit -m x", "nice -n 5 git push", "sudo -E nohup git push"):
-            self.assert_gated(cmd)
-        for cmd in ("env -C /tmp git push", "sudo -D /tmp git push", "/usr/bin/env -S 'git push'",
-                    "bash -c 'git push'", "echo 'git push' | sh", "find . -exec git push \\;", "xargs git push"):
-            p = self.run_hook(cmd)
-            self.assertEqual(2, p.returncode, (cmd, p.stderr))
-            self.assertIn("FAIL hook.target", p.stderr, cmd)
-        for cmd in ("/usr/bin/git status", "sudo ls", "env FOO=1 ls", "mygit push", "echo git-push", "sudo git log"):
-            self.assert_silent(cmd)
-
-    def test_scans_stay_linear(self):
-        distinct = "".join("cat <<D%d\n" % k for k in range(8000))
-        for cmd in (";" * 30000 + "ls", "$(" * 10000, "`" * 20000, '"' * 20000, "'" * 20000, "sudo -a; " * 5000 + "ls",
-                    "echo $(" * 5000, "( " * 20000, "git commit -m \"" + "$(" * 5000, "<<A\n" * 20000,
-                    distinct, distinct + "git push", "x" * 200000, "git " + "-c a=b " * 20000 + "status",
-                    "echo \"" * 5000, "# x\n" * 20000, "<<'A'\n" * 20000, "<<A\n$(" * 5000, "A=1 " * 40000,
-                    # quote removal, data holders, pipes, nesting, parameter expansions, ANSI-C quotes, case patterns
-                    'g"it" ' * 20000, "echo 'git push' | " * 5000 + "cat", "python3 -c 'git push' | " * 3000,
-                    "$(" * 5000 + "echo 'git push'" + ")" * 5000, "${" * 10000, '"' + "${" * 10000, "$'" + "\\'" * 50000,
-                    "x\\ " * 30000, "$(case x in a) " * 5000, ">(" * 10000, "git " + "$x " * 20000,
-                    "cat <<'EOF'\n" + "git push\n" * 50000 + "EOF\n", "cat <<EOF\n" + "$(echo a) git push\n" * 20000 + "EOF\n",
-                    "git commit " * 20000 + "'push' " * 20000, "bash -c 'g\"it\" " + "x " * 50000 + "'",
-                    # unterminated nested substitutions in double quotes; option runs that hold git words
-                    '"$(' * 10000, 'git "$(' * 10000, '"`' * 10000, "git -C " * 20000, "git $(git " * 10000,
-                    "xargs git " * 10000, "echo 'git push' | awk '{print}' | " * 5000 + "cat"):
-            start = time.monotonic()
-            p = self.run_hook(cmd)
-            self.assertLess(time.monotonic() - start, 2.0, cmd[:20])
-            self.assertIn(p.returncode, (0, 2), (cmd[:20], p.stderr))
-
-
 class SessionStart(unittest.TestCase):
     def setUp(self):
         self.root = new_repo()
@@ -6991,6 +6197,18 @@ class SessionStart(unittest.TestCase):
         p = hook("session_start.py", self.event())          # second start: already ours
         self.assertNotIn("install-hooks:", p.stdout)
         self.assertIn("invoke the strict-delivery skill", p.stdout)
+
+    def test_session_start_installs_a_missing_pre_push_shim(self):
+        copy_gates(self.root)
+        self.assertEqual(0, hook("session_start.py", self.event()).returncode)
+        pre_push = os.path.join(self.root, ".git", "hooks", "pre-push")
+        os.remove(pre_push)                                 # pre-commit is still ours
+        p = hook("session_start.py", self.event())
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("install-hooks: pre-push ->", p.stdout)
+        self.assertNotIn("FAIL", p.stdout)
+        with open(pre_push) as fh:
+            self.assertIn("# strict-delivery-gates-hook", fh.read())
 
     def assert_failure_reaches_the_model(self, p, line):
         """SessionStart cannot block and only exit-0 stdout reaches the model: the FAIL is on stdout
@@ -7114,7 +6332,7 @@ class ProjectWiring(unittest.TestCase):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `FAILED (failures=10, errors=2)`, 49 tests: 12 of the 20 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 8 `PreToolUseCommandPosition` tests pass at once: they pin `pre_tool_use.py` as the unfiltered Bash handler needs it (quote removal, then the verb matched in the code; data a command may run; an expansion in place of git or the verb; parameter expansions and ANSI-C quotes; any wrapper or prefix; launchers; linear scans), and the script (Task 7's, re-written in the Task 8 review rounds) already satisfies them; `UserPromptSubmit::test_malformed_stdin_fails_closed` fails on its FAIL-text assertions. The 29 Task 7 tests still pass. (They live in a Task 8 class so that Task 7's own counts, 29 tests and a 250 suite, stay true.)
+Expected: `FAILED (failures=11, errors=2)`, 52 tests: the 13 new tests FAIL/ERROR (`can't open file '.../session_start.py'`, `.../user_prompt_submit.py`, `FileNotFoundError: .../.claude/settings.json`, `.../CLAUDE.md`). The 39 Task 7 tests still pass.
 
 - [ ] **Step 3: Write the hooks, the settings and CLAUDE.md**
 
@@ -7124,8 +6342,8 @@ Expected: `FAILED (failures=10, errors=2)`, 49 tests: 12 of the 20 new tests FAI
 #!/usr/bin/env python3
 """Claude Code SessionStart hook (spec §8). Prints to stdout (injected as context): whether the
 gates are installed in the event's project, every handoff document, and the skill instruction;
-installs the git hooks when the repository's pre-commit hook (git rev-parse --git-path
-hooks/pre-commit) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
+installs the git hooks when the repository's pre-commit or pre-push hook (git rev-parse --git-path
+hooks/<hook>) is not ours. SessionStart cannot block, and Claude Code puts only the stdout of an
 exit-0 hook into the model's context. So every failure -- install-hooks.sh refusing or failing, a
 missing or invalid cwd, any internal error -- is a `FAIL ...` line on stdout (the model sees it),
 followed by the skill instruction, and the exit code is 0. The same line is copied to stderr, which
@@ -7149,11 +6367,11 @@ def toplevel(cwd: str) -> str:
     return p.stdout.strip()
 
 
-def pre_commit_path(root: str) -> str:
-    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", "hooks/pre-commit"],
+def hook_path(root: str, hook: str) -> str:
+    p = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", f"hooks/{hook}"],
                        capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        raise RuntimeError(f"git rev-parse --git-path hooks/pre-commit: {p.stderr.strip()}")
+        raise RuntimeError(f"git rev-parse --git-path hooks/{hook}: {p.stderr.strip()}")
     return os.path.join(root, p.stdout.strip())
 
 
@@ -7196,7 +6414,7 @@ def main() -> None:
     print(f"strict-delivery: gates installed in {root} (tools/gates/run_all.py); {yaml_state}")
     for h in sorted(glob.glob(os.path.join(root, "docs", "superpowers", "state", "*", "handoff.md"))):
         print(f"strict-delivery: handoff {os.path.relpath(h, root)} -- read it before any dispatch")
-    if not ours(pre_commit_path(root)):
+    if not all(ours(hook_path(root, h)) for h in ("pre-commit", "pre-push")):
         p = subprocess.run(["bash", os.path.join(root, "tools", "gates", "install-hooks.sh")],
                            cwd=root, capture_output=True, text=True, check=False)
         if p.stdout.strip():
@@ -7304,72 +6522,82 @@ without an `if` filter, so the script sees every Bash call), `hooks/session_star
 `hooks/user_prompt_submit.py`; a new Claude Code session loads it. `Stop` and `SubagentStop` arrive
 with S2.
 
+Design (owner decision DEC-0005): the Claude Code Bash hook is a best-effort textual check with
+documented limits; the git hooks, pre-commit and pre-push, are the enforcement. They run for every
+commit and push, however it was launched.
+
 - `pre_tool_use.py`: exits 2 with the failing lines on stderr, also on any internal error
-  (`FAIL hook.internal`, fail closed). Bash: a backslash-newline is removed (the shell joins the
-  lines with nothing between them), then one linear pass splits the command into data and code.
-  Data: single-quoted spans and escaped characters, ANSI-C `$'...'` spans (escapes decoded),
-  quoted-delimiter heredoc bodies (`<<'E'`, `<<"E"`, `<<\E`), the text of double-quoted spans and
-  unquoted-delimiter heredoc bodies outside `$(...)`, backticks and `${...}`, and every character of a
-  word that holds one of these. A quoted span or escaped character made only of `[A-Za-z0-9_./=+-]`
-  is code, so quote removal joins it to its word (`g"it" push`, `gi\t push`, `git p"ush"` are
-  `git push`); a comment (a `#` that starts a word, never inside `${...}`) is neither.
-  `git commit` and `git push` are then matched textually in the code anywhere (any wrapper,
-  `VAR=val`, redirection or path-qualified git word before the verb) and run the register and claim
-  gates on the tree the command names: the event's cwd, moved by a leading `cd <dir> &&` or `;` and
-  by each `git -C <dir>`. So `echo "$(git push)"` and a mention outside quotes (`echo git push`) are
-  gated: a blocked command is the cost of failing closed. A `git` word in data with a verb word
-  after it in the same pipeline (a lone verb word only when the code holds a shell launcher, so
-  `python3 -c "print('push')"` passes), or a git call the hook cannot read (`git p*`, `git "$V"`,
-  `git $V`, `echo push | xargs git`, `$G push`, `{git,} push`), exits 2 with `FAIL hook.target:
-  cannot tell which tree <verb> runs in, or whether it runs` unless every command on the way keeps it
-  as text: the head is echo, printf (without `-v`), grep, egrep, fgrep, rg, gh, cat, tee, jq, awk
-  (no `system`, `getline`, `|` or `-f`), xargs running echo, grep, egrep, fgrep, rg, cat, jq, head,
-  tail or wc, or git with a subcommand among commit, push, log, show, tag, notes, stash, merge,
-  shortlog, status, diff, add, branch, rev-list, describe, blame (no `-c`/`--config-env`); sed is not
-  one (GNU sed `e` runs its pattern space); the data is not in a `VAR=val` or
-  redirection prefix; there is no `>(...)`; the output is piped only into those commands or head,
-  tail, wc, sort, uniq, cut, less, more, tr, nl, column, fold; and the same holds for each command
-  whose word holds it (a heredoc body belongs to the command on its opener line). So
-  `grep -rn 'git push' docs | head`, `grep 'git push' f | awk '{print $1}'`,
-  `find . | xargs grep -l 'git push'`, `git log --grep='git push'` and
-  `gh pr create --body "$(cat <<'EOF' ...)"` pass, while `bash -c 'git push'`, `eval`, `watch`,
-  `su -c`, `python3 -c`, a heredoc fed to an interpreter, `| sh`, `sed`, `sudo sh -c`, `env`,
-  `xargs sh` or an unknown command holding it fail. A gated command whose tree it cannot tell (another `cd`, `pushd`,
-  a subshell, `--git-dir`, `--work-tree`, `GIT_DIR=`, an expanded `-C` word) or that holds a launcher
-  in its code (`bash -c`, `eval`, `xargs`, `| sh`, a shell fed a heredoc, `find -exec`/`-execdir`,
-  `env -C`, `sudo -D`) also exits 2 with `FAIL hook.target`. A `$X` word between git and the
-  subcommand reads as an option (`git $X commit` gates the cwd tree). Not followed: aliases and
-  functions defined earlier, a git word and a subcommand that are both variables or globs (`$G $V`),
-  a `-C $VAR` directory, a payload written to a file and run later, text a program assembles at run
-  time; an unterminated quote or heredoc is code. Every other command and tool exits 0 silently,
-  after one python3 start; the `Agent` branch (the dispatch gate) arrives with S2.
+  (`FAIL hook.internal`, fail closed). Bash, in order:
+  1. Hook bypasses exit 2 with `FAIL hook.bypass: <form found>` before any gate runs:
+     `core.hooksPath` (any case) or a `GIT_CONFIG_PARAMETERS`, `_COUNT`, `_KEY_*`, `_GLOBAL`,
+     `_SYSTEM` or `_NOSYSTEM` assignment anywhere in any Bash command (a `git config core.hooksPath`
+     on its own would move the hooks for every later command), and `--no-verify` (or the
+     abbreviations `--no-veri`, `--no-verif`), `-n` or a short-option cluster holding `n` (`-anm`)
+     after a gated verb, up to the end of its simple command (quote-aware). `-n` is `--no-verify`
+     for commit and `--dry-run` for push; it is blocked for both.
+  2. `git [options] commit|push` is matched in the text wherever it stands: after any separator,
+     `$(`, a backtick, `VAR=val`, a wrapper (`sudo`, `env`, `nice`, `time`, ...) or a path
+     (`/usr/bin/git`). The options are the ones git takes before a subcommand (`-C <dir>`,
+     `-c <k=v>`, `--git-dir`, `--work-tree`, `--namespace`, `--config-env`, `--no-pager`, `-p`,
+     `--bare`, `--exec-path`, ...; quoted values included), read left to right as git does, plus a
+     `$X` word (`git $X commit` is gated). The verb is a whole word (`commit-graph`, `pushd`,
+     `--push-option` are not verbs). A backslash-newline is removed first. There is no data/code
+     analysis: a mention inside quotes, a heredoc or a comment (`echo "git push"`, a python heredoc
+     that prints it) runs the gates too; on a healthy tree that costs well under a second and blocks
+     nothing.
+  3. The tree: each `-C <dir>` of the gated git word, applied in turn as git does, from the
+     directory of a leading `cd <dir> &&` (or `;`, or a newline), else from the event's `cwd`. A
+     directory that is not in a repository exits 2 with `FAIL hook.target: <dir>: <git stderr>`; a
+     missing `cwd` with `FAIL hook.input`. Every tree named is gated once with the register and
+     claim gates.
+
+  Documented limits (DEC-0005): A verb hidden behind an expansion, alias, function, `eval`, a
+  payload file, or a wrapper the regex does not see (`$G push`, `git $V`, `eval "$CMD"`,
+  `bash script-that-pushes.sh`, `xargs ... git` without a literal `git push`) is not gated by this
+  hook. The git hooks gate it: pre-commit for commits, pre-push for pushes. The same holds for a git
+  word or verb with a quoted or escaped piece (`g"it" push`, `git p"ush"`); for a tree changed in a
+  way the hook does not follow (a later `cd`, `pushd`, a subshell, `GIT_DIR=`, `--git-dir`,
+  `--work-tree`, `env -C`), where the hook gates the tree it can name and the git hooks gate the real
+  one; and for a bypass the text does not show (a config file or hook script edited by other
+  means). A commit message that holds `-n`, `--no-verify` or `core.hooksPath` as a word is blocked
+  as a bypass: write the message to a file and use `git commit -F <file>`. Every scan is linear in
+  the command length. Every other command and tool exits 0 silently, after one python3 start; the
+  `Agent` branch (the dispatch gate) arrives with S2.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
-  the repository's pre-commit hook (`$(git rev-parse --git-path hooks)/pre-commit`) is not ours, and
-  the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line on stdout
-  (the model sees it), then the instruction line (the line is also copied to stderr, which Claude Code
-  shows neither the model nor the owner on exit 0; it appears in the debug log only): `FAIL
-  hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the repository's
-  git directory, or a second foreign pre-commit over an existing `pre-commit.pre-strict-delivery`
+  the repository's pre-commit or pre-push hook (`$(git rev-parse --git-path hooks)/<hook>`) is not
+  ours, and the instruction to invoke the strict-delivery skill. Every failure is a `FAIL ...` line
+  on stdout (the model sees it), then the instruction line (the line is also copied to stderr, which
+  Claude Code shows neither the model nor the owner on exit 0; it appears in the debug log only):
+  `FAIL hook.install` when `install-hooks.sh` fails or refuses (a hooks directory outside the
+  repository's git directory, or a second foreign hook over an existing `<hook>.pre-strict-delivery`
   backup), `FAIL hook.input` for a missing or non-directory `cwd`, `FAIL hook.internal` for anything
   else (a cwd outside a repository, malformed stdin).
 - `user_prompt_submit.py`: one reminder line; malformed stdin exits 2 with `FAIL hook.internal`.
-- `install-hooks.sh` installs the git `pre-commit` shim (marker `# strict-delivery-gates-hook`),
-  which runs `hooks/git-pre-commit.sh` of the tree being committed (`FAIL pre-commit.missing` for a
-  tree without it). That script runs `run_all.py --only register,claims` and refuses
-  (`FAIL pre-commit.unstaged`) while a worktree-side change, an untracked or an ignored file sits
-  under `docs/superpowers/state`, `docs/reviews`, `tools/gates` or among the root-level `*.py`,
-  `*.pyc`, `*.so` and `*/__init__.*`: stage it with the commit or remove it. Exempt: `tools/gates/tests`,
-  `tools/gates/README.md`, any `.DS_Store` and the `__pycache__` directories under `tools/gates`.
+- `install-hooks.sh` installs two git shims (marker `# strict-delivery-gates-hook`): `pre-commit`,
+  which runs `hooks/git-pre-commit.sh`, and `pre-push`, which runs `hooks/git-pre-push.sh`, each
+  from the tree git runs in (`FAIL pre-commit.missing` / `FAIL pre-push.missing` for a tree without
+  the script). A foreign hook is moved to `<hook>.pre-strict-delivery`; an existing backup is never
+  overwritten, and then nothing is installed. `git-pre-commit.sh` runs
+  `run_all.py --only register,claims` and refuses (`FAIL pre-commit.unstaged`) while a worktree-side
+  change, an untracked or an ignored file sits under `docs/superpowers/state`, `docs/reviews`,
+  `tools/gates` or among the root-level `*.py`, `*.pyc`, `*.so` and `*/__init__.*`: stage it with the
+  commit or remove it. Exempt: `tools/gates/tests`, `tools/gates/README.md`, any `.DS_Store` and the
+  `__pycache__` directories under `tools/gates`. `git-pre-push.sh` runs the same script with
+  `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because a
+  push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. It
+  ignores its `<remote> <url>` arguments and reads nothing from stdin (S4 adds merge-readiness over
+  the ref lines). The gates check the working tree, which equals HEAD for those paths; a push of a
+  ref other than HEAD is checked against HEAD.
 ````
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 49 tests ... OK
-python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 270 tests ... OK
-tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 270 tests ... OK (3.12)
+python3 -W error -m unittest tools.gates.tests.test_hooks -v                      # Ran 52 tests ... OK
+python3 -W error -m unittest discover -s tools/gates/tests -t .                   # Ran 273 tests ... OK
+tools/.venv/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .   # Ran 273 tests ... OK (3.12)
 python3 tools/gates/run_all.py                                                    # 15 PASS
 echo '{"cwd": "'"$PWD"'", "hook_event_name": "SessionStart", "source": "startup"}' | python3 tools/gates/hooks/session_start.py
 # strict-delivery: gates installed in <root> (tools/gates/run_all.py); PyYAML ok
@@ -7380,13 +6608,13 @@ git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md 
   docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md && git diff --cached --check && echo whitespace-clean
 ```
 
-Mutation checks (each restored, then `OK` again; all killed by the test named). `session_start.py`: `if not ours(...)` to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_is_reported_on_stdout_and_exits_0`, `test_a_refusal_of_install_hooks_is_reported_and_exits_0`, `test_a_non_utf8_foreign_hook_is_moved_aside`); `ours()` reading UTF-8 text (`test_a_non_utf8_foreign_hook_is_moved_aside`); `fail()` without the stdout print, without the stderr echo, or the final `sys.exit(0)` to `sys.exit(2)` (the failure tests through `assert_failure_reaches_the_model`); the `hook.install` call or the `hook.internal` report removed (the install tests; `test_a_cwd_that_is_not_a_repository_fails_closed`, `test_malformed_stdin_is_reported_and_exits_0`); `event.get("cwd") or os.getcwd()` or the `os.path.isdir` check dropped (`test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback`); empty the handoff glob (`test_installs_git_hooks_and_lists_handoffs`). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix (`test_one_line_reminder`); drop the FAIL line, or replace the script by `sys.exit(2)` (`UserPromptSubmit::test_malformed_stdin_fails_closed`). `pre_tool_use.py` (each killed by the `PreToolUseCommandPosition` test named unless noted): keep quote characters or escape backslashes in the code view, keep a plain single- or double-quoted span or a plain escape as data, skip ANSI-C decoding, check `cd`/`GIT_DIR=` in the original text, or join a backslash-newline with a space (`test_quote_removal_joins_quoted_pieces_into_the_word`; the double-quoted one also `PreToolUse::test_push_with_options_is_gated_too`); close an ANSI-C span at `\'`, drop the `${...}` frame or let a frame outlive its heredoc body (`test_parameter_expansion_and_ansi_c_quotes_are_parsed`); read `#` anywhere as a comment or keep an unterminated double quote as data (`test_a_verb_that_is_not_in_data_is_gated`); add python3 to the holders; stop judging pipes, `>(...)`, a substitution or data in a `VAR=val` prefix, or the enclosing commands; let git keep data for any subcommand or with `-c`; ignore printf `-v`; let an awk that can run commands keep data, or any xargs; ignore a lone data verb under a shell launcher; drop the data unknown-subcommand check; keep a `$` before a quote or skip octal/hex decoding in the data view; let a case pattern close `$(` or read `esac` after its `)`; stop blanking a quoted word whole (`test_data_a_command_may_run_is_blocked`); stop judging a verb after an expansion, an enclosing expansion, an unknown, glued (`git$V`) or missing subcommand word, `xargs git` without a subcommand, or the code unknown-subcommand matches (`test_an_expansion_in_place_of_the_git_word_or_the_verb_is_blocked`); judge a subshell group as a command, read `if`/`while` as the head, refuse the pipe sinks, jq, awk or xargs grep, read an xargs option value as its command, count a lone data verb without a launcher, scan a quoted heredoc body as unquoted, or give a heredoc body to the next command (`test_a_verb_inside_data_is_not_gated`); slice the `-C` directory from the code view (`PreToolUse::test_push_with_options_is_gated_too`); restart the view's run pointer, rebuild the terminator index per line, slice and dequote a word with an expansion, or walk each git word's option run instead of the `end` table, all quadratic (`test_scans_stay_linear` exceeds 2 s or errors at the 20 s timeout). One equivalent mutant: letting a double quote in an unquoted heredoc body open a nested span (the body ends at its terminator either way and both mask the text). Settings: add `"Stop": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PROJECT_DIR}/tools/gates/hooks/stop.py\""}]}],`, add an `if` back to the Bash handler, or change `"timeout": 900` to `1` (`test_settings_json_is_the_expected_wiring_without_stop_hooks`); append a bullet to `CLAUDE.md` or delete one (`test_claude_md_carries_spec_section_12_verbatim_and_nothing_else`).
+Mutation checks (run at Task 8b in a private clone; each restored, then `OK` again; all killed by the test named). `session_start.py`: the install condition to `if False` (`test_installs_git_hooks_and_lists_handoffs`, `test_install_failure_is_reported_on_stdout_and_exits_0`, `test_a_refusal_of_install_hooks_is_reported_and_exits_0`, `test_a_non_utf8_foreign_hook_is_moved_aside`, `test_session_start_installs_a_missing_pre_push_shim`); check only `pre-commit` (`test_session_start_installs_a_missing_pre_push_shim`); `ours()` reading UTF-8 text (`test_a_non_utf8_foreign_hook_is_moved_aside`); `fail()` without the stdout print or without the stderr echo (`test_install_failure_is_reported_on_stdout_and_exits_0`, `test_malformed_stdin_is_reported_and_exits_0`); the final `sys.exit(0)` to `sys.exit(2)` (`test_a_cwd_that_is_not_a_repository_fails_closed`, `test_malformed_stdin_is_reported_and_exits_0`); drop the `os.path.isdir` check (`test_a_missing_or_invalid_cwd_is_a_failure_not_a_fallback`); a handoff glob that finds nothing (`test_installs_git_hooks_and_lists_handoffs`). `user_prompt_submit.py`: drop the `strict-delivery: ` prefix (`test_one_line_reminder`); drop the FAIL line (`UserPromptSubmit::test_malformed_stdin_fails_closed`). Settings: `"timeout": 900` to `1` (`test_settings_json_is_the_expected_wiring_without_stop_hooks`); append a bullet to `CLAUDE.md` (`test_claude_md_carries_spec_section_12_verbatim_and_nothing_else`).
 
-Whole-file check (each prints nothing): `diff <(sed -n 'A,Bp' PLAN) FILE` with A,B the first and last line of each code block above, for `session_start.py`, `user_prompt_submit.py`, `.claude/settings.json` and `CLAUDE.md`; the Task 8 test block equals `sed -n '/^class PreToolUseCommandPosition/,/^if __name__/p' tools/gates/tests/test_hooks.py` minus its last line and the blank lines before it; the Task 7 test block equals `test_hooks.py` without those lines.
+Whole-file check (each prints nothing): `diff <(sed -n 'A,Bp' PLAN) FILE` with A,B the first and last line of each code block above, for `session_start.py`, `user_prompt_submit.py`, `.claude/settings.json`, `CLAUDE.md` and the README Hooks section (`sed -n '/^## Hooks/,$p' tools/gates/README.md` equals the block minus its first, empty line); the Task 8 test block equals `sed -n '/^class SessionStart/,/^if __name__/p' tools/gates/tests/test_hooks.py` minus its last line and the blank lines before it; the Task 7 test block equals `test_hooks.py` without those lines.
 
 - [ ] **Step 5: Ledger line, then commit**
 
-Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 49 OK (29 + 20); suite 270 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` to the ledger under the existing `## Block b3` section.
+Append `- T8 feat(gates): session hooks, committed .claude/settings.json, CLAUDE.md overrides -- test_hooks 52 OK (39 + 13); suite 273 OK on 3.9.6 and 3.12.14; run_all 15 PASS; plan Task 7/8 blocks re-synced` to the ledger under the existing `## Block b3` section.
 
 ```bash
 git add tools/gates/hooks tools/gates/tests/test_hooks.py tools/gates/README.md .claude/settings.json CLAUDE.md \

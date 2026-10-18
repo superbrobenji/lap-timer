@@ -75,8 +75,8 @@ tools/gates/gate_state_docs.py                   Create                         
 tools/gates/gate_merge_ready.py                  Create                                                   T5
 tools/gates/hooks/pr_verbs.py                    Create (PR-verb branch of the Bash hook)                 T5
 tools/gates/hooks/pre_tool_use.py                Modify: call pr_verbs from the Bash branch               T5
-tools/gates/hooks/git-pre-push.sh                Create                                                   T5
-tools/gates/install-hooks.sh                     Modify: install pre-push                                 T5
+tools/gates/hooks/git-pre-push.sh                Modify: add merge-readiness                              T5
+tools/gates/install-hooks.sh                     already installs pre-push (S1 b3)                        T5
 tools/gates/postmerge.py                         Create (no commit on main; leaves 2 files pending)       T6
 tools/gates/tests/s4kit.py                       Create (fixture repos, register rows, fake gh)           T1
 tools/gates/tests/fixtures/fakegh/gh             Create (executable fake gh)                              T1
@@ -3384,6 +3384,8 @@ class PrVerbsTest(unittest.TestCase):
 ```
 
 - [ ] **Step 5: git pre-push hook**
+
+S1 block b3 (Task 8b, owner decision DEC-0005) already ships `tools/gates/hooks/git-pre-push.sh` (register + claims through `git-pre-commit.sh --pre-push`) and installs its shim from `install-hooks.sh`; this step modifies that script to add merge-readiness, and its pre-flight re-reads both files before using the code below.
 
 `tools/gates/hooks/git-pre-push.sh` (executable):
 ```bash
