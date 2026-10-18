@@ -3385,7 +3385,7 @@ class PrVerbsTest(unittest.TestCase):
 
 - [ ] **Step 5: git pre-push hook**
 
-S1 block b3 (Task 8b, owner decisions DEC-0005, DEC-0006) already ships `tools/gates/hooks/git-pre-push.sh`: it refuses a branch push whose local sha is not HEAD (`FAIL pre-push.not-head`), then runs register + claims through `git-pre-commit.sh --pre-push`. `install-hooks.sh` (S1 b3) already installs the pre-push shim that runs that script with `sh` from the tree git runs in, so S4 modifies `git-pre-push.sh` only: no install line and no symlink (DEC-0007; a symlinked hook is moved aside by every later install). The pre-flight re-reads the S1 script and keeps its behaviour when it adds the merge-readiness code below.
+S1 block b3 (Task 8b, owner decisions DEC-0005, DEC-0006) already ships `tools/gates/hooks/git-pre-push.sh`: it refuses every pushed local sha whose commit is not HEAD, branch or tag (`FAIL pre-push.not-head`), then runs register + claims through `git-pre-commit.sh --pre-push`. `install-hooks.sh` (S1 b3) already installs the pre-push shim that runs that script with `sh` from the tree git runs in, so S4 modifies `git-pre-push.sh` only: no install line and no symlink (DEC-0007; a symlinked hook is moved aside by every later install). The pre-flight re-reads the S1 script and keeps its behaviour when it adds the merge-readiness code below.
 
 `tools/gates/hooks/git-pre-push.sh` (executable):
 ```bash

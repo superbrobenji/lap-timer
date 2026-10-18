@@ -46,7 +46,9 @@ def with_(row, **kw):
 class Loaders(unittest.TestCase):
     def test_bootstrapped_registers_are_valid(self):
         root = lib.CODE_ROOT
-        self.assertEqual([], reg.load_findings(root))
+        findings = reg.load_findings(root)     # the live register grows (B3-S4PREPUSH-1 at b3): every row valid
+        self.assertEqual([[]] * len(findings), [reg.validate_finding(f) for f in findings])
+        self.assertEqual([], [e for f in findings for e in reg.transition_errors(f)])
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
         ids = [d["id"] for d in decisions]       # the live register grows (DEC-0005 at b3): pin the order, not a count

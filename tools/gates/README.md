@@ -139,9 +139,11 @@ commit and push, however it was launched.
   and the `__pycache__` directories under `tools/gates`. A finding's evidence file is gated by the
   register itself: it must be a file git tracks (`register.evidence`), so an untracked or ignored
   one fails the gate wherever it lies. `git-pre-push.sh` ignores its `<remote> <url>` arguments
-  and reads the ref lines on stdin: a branch (a local ref under `refs/heads/`) whose local sha is
-  not HEAD is refused first (`FAIL pre-push.not-head`; check it out and push from it, so the gates
-  see its tree); `HEAD:refs/heads/x`, tags and deletes pass. Then it runs `git-pre-commit.sh` with
+  and reads the ref lines on stdin: every pushed local sha, whatever the ref kind, is peeled to a
+  commit and must be HEAD (DEC-0006, read literally), else it is refused first
+  (`FAIL pre-push.not-head`; a branch, `bad~0:refs/heads/y`, a tag of an older commit or a
+  non-commit object alike: push it from that commit checked out, so the gates see its tree);
+  `HEAD:refs/heads/x`, a tag of HEAD and a delete pass. Then it runs `git-pre-commit.sh` with
   `--pre-push`: the same paths must not differ from HEAD at all, staged changes included, because
   a push sends commits, not the index (`FAIL pre-push.uncommitted`); then the same two gates. S4
   extends it with merge-readiness.

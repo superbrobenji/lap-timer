@@ -727,12 +727,22 @@ class GitHooks(unittest.TestCase):
         gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
         bad = gf.commit_all(self.root, "orphan")      # gitfixture commits without hooks: a commit made with --no-verify
         gf.git(self.root, "checkout", "-q", "main")
-        p, refs = self.push_to("bad")
-        self.assertNotEqual(0, p.returncode)
-        self.assertIn("FAIL pre-push.not-head: refs/heads/bad (%s) is not the checked-out HEAD; check it out and push "
-                      "from it, so the gates see its tree" % bad[:7], p.stderr)
-        self.assertNotIn("register", p.stdout + p.stderr)     # refused before any gate ran
-        self.assertNotIn("refs/heads/bad", refs)
+        gf.git(self.root, "tag", "-a", "tbad", "-m", "an annotated tag of a commit that is not HEAD", bad)
+        tag_object = gf.git(self.root, "rev-parse", "tbad")
+        blob = gf.git(self.root, "rev-parse", "HEAD:README.md")
+        blob_push = (blob + ":refs/tags/blob", blob, blob)     # not a commit: refused too
+        # DEC-0006, read literally: every pushed local sha, whatever the ref kind, must be HEAD (or a delete)
+        for spec, local_ref, sha in (("bad", "refs/heads/bad", bad), ("bad~0:refs/heads/y", "bad~0", bad),
+                                     (bad + ":refs/heads/z", bad, bad),
+                                     ("refs/tags/tbad:refs/heads/w", "refs/tags/tbad", tag_object),
+                                     ("tbad", "refs/tags/tbad", tag_object)) + (blob_push,):
+            p, refs = self.push_to(spec)
+            self.assertNotEqual(0, p.returncode, spec)
+            self.assertIn("FAIL pre-push.not-head: %s (%s) is not the checked-out HEAD; check it out and push "
+                          "from it, so the gates see its tree" % (local_ref, sha[:7]), p.stderr)
+            self.assertNotIn("register", p.stdout + p.stderr, spec)     # refused before any gate ran
+            self.assertNotIn("expected commit type", p.stderr, spec)
+            self.assertEqual("", refs, spec)
 
     def test_pre_push_of_head_by_name_passes(self):
         gf.git(self.root, "branch", "other", "HEAD")
@@ -743,13 +753,12 @@ class GitHooks(unittest.TestCase):
             self.assertIn("%s\t%s" % (head, ref), refs)
 
     def test_pre_push_of_a_tag_and_a_delete_pass(self):
-        old = gf.git(self.root, "rev-parse", "HEAD")
-        gf.write(self.root, "x.txt", "x\n")
-        gf.commit_all(self.root, "x")
-        gf.git(self.root, "tag", "t1", old)                 # a tag on a commit that is not HEAD
-        p, refs = self.push_to("t1", "HEAD:refs/heads/gone")
+        gf.git(self.root, "tag", "t1")                                   # lightweight, of HEAD
+        gf.git(self.root, "tag", "-a", "t2", "-m", "annotated, of HEAD")  # its object is not HEAD: peeled to HEAD
+        p, refs = self.push_to("t1", "t2", "HEAD:refs/heads/gone")
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
-        self.assertIn("%s\trefs/tags/t1" % old, refs)
+        self.assertIn("%s\trefs/tags/t1" % gf.git(self.root, "rev-parse", "HEAD"), refs)
+        self.assertIn("%s\trefs/tags/t2" % gf.git(self.root, "rev-parse", "t2"), refs)
         env = isolated_env(CLAUDE_PROJECT_DIR="/nonexistent-project")
         p = subprocess.run(["git", "push", "-q", "origin", ":refs/heads/gone"], cwd=self.root, capture_output=True,
                            text=True, env=env, check=False, timeout=60)

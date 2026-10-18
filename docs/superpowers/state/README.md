@@ -54,6 +54,6 @@ plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Registers"; enforc
 - Two git hooks guard this directory (`tools/gates/install-hooks.sh` installs them). The
   pre-commit hook refuses a commit while it has an unstaged edit or an untracked or ignored file
   (`FAIL pre-commit.unstaged`); the pre-push hook refuses a push while it differs from HEAD, staged
-  changes included (`FAIL pre-push.uncommitted`), and a push of a branch that is not the checked-out
-  HEAD (`FAIL pre-push.not-head`). A tree without the hook scripts can neither commit
-  (`FAIL pre-commit.missing`) nor push (`FAIL pre-push.missing`).
+  changes included (`FAIL pre-push.uncommitted`), and a push of any commit, branch or tag, that is
+  not the checked-out HEAD (`FAIL pre-push.not-head`). A tree without the hook scripts can neither
+  commit (`FAIL pre-commit.missing`) nor push (`FAIL pre-push.missing`).
