@@ -139,6 +139,10 @@ class PreToolUse(unittest.TestCase):
                     "bash -c 'cd /wt && git push'", 'sh -c "cd /wt && git commit -m x"', "/bin/zsh -lc 'git push'",
                     "env -C /wt git push", "env --chdir=/wt git push", "eval 'git push'", "git ls-files | xargs git commit",
                     "bash <<EOF\ngit push\nEOF", "echo 'git push' | sh",
+                    "bash -o pipefail -c 'cd /wt && git push'", "bash --rcfile x -c 'git push'",   # an option with a value first
+                    "/bin/bash -ec 'git push'", "nohup bash -xc 'git push'", "'bash' -c 'git push'", 'bash "-c" "git push"',
+                    "bash -s <<'EOF'\ngit push\nEOF", "bash<<EOF\ngit push\nEOF", "bash <<< 'git push'",
+                    "cat <<EOF | bash\ncd /wt && git push\nEOF", "find /wt -execdir git push \\;", "sudo -D /wt git push",
                     "git commit -F - <<EOF\nbody\nEOF\ncd /elsewhere"):   # a real cd after the heredoc terminator
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(2, p.returncode, cmd)
@@ -148,7 +152,9 @@ class PreToolUse(unittest.TestCase):
                     'git commit -m "then run git push and bash -c x"', "bash build.sh && git push", "env FOO=1 git push",
                     "git commit -m \"$(cat <<'EOF'\nfix cd and git push; bash -c x; GIT_DIR=/y\nEOF\n)\"",
                     "git commit -F - <<'EOF'\nmentions cd /x, GIT_DIR=/y and eval\nEOF",
-                    'git commit -F - <<"EOF"\ncd /x\nEOF', "git commit -F - <<-EOF\n\tcd /x\n\tEOF"):
+                    'git commit -F - <<"EOF"\ncd /x\nEOF', "git commit -F - <<-EOF\n\tcd /x\n\tEOF",
+                    "git commit -m \"$(cat <<'EOF'\nuses bash -c, xargs and eval | sh\nEOF\n)\" && git push 2>&1 | tail -3",
+                    "git commit -m 'run: bash -o pipefail -c x'", "echo $((1<<3)) && git push", "git commit -S -m x"):
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))   # followed forms and quoted words still work
             self.assertEqual((0, ""), (p.returncode, p.stderr), cmd)
 
@@ -159,6 +165,16 @@ class PreToolUse(unittest.TestCase):
             start = time.monotonic()
             p = hook("pre_tool_use.py", bash_event(self.root, cmd))
             self.assertEqual(0, p.returncode, (cmd[:30], p.stderr))
+            self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
+        # heredoc openers without a terminator, shell words, options before -c, quotes: every scan is linear
+        for cmd, rc in (("git commit -m x " + "<<A\n" * 20000, 0), ("git commit -m x\n" + "<<A\n" * 20000 + "A", 0),
+                        ("git commit -m x && " + "sh " * 20000, 0), ("git commit -m x && " + "'a' " * 20000, 0),
+                        ("git commit -m x && " + "bash -o x " * 10000 + "-c y", 2),
+                        ("git commit -m x && bash " + "<<A " * 20000, 2), ("git commit -m x " + "export " * 20000, 0)):
+            start = time.monotonic()
+            p = hook("pre_tool_use.py", bash_event(self.root, cmd))
+            self.assertEqual(rc, p.returncode, (cmd[:30], p.stderr))
+            self.assertTrue(rc == 0 or p.stderr.startswith("FAIL hook.target: "), (cmd[:30], p.stderr))
             self.assertLess(time.monotonic() - start, 2.0, cmd[:30])
         gated = "git -c x=" + "\\" * 300 + " commit -m x"      # same runs before a real verb: still gated, still fast
         start = time.monotonic()
@@ -341,6 +357,23 @@ class GitHooks(unittest.TestCase):
             self.assertIn("tools/gates/" + rel, p.stderr)
             with open(path, "w") as fh:
                 fh.write(orig)
+
+    def test_pre_commit_blocks_an_untracked_module_in_the_gate_code(self):
+        # run_all.py puts tools/gates first on sys.path: an untracked yaml.py would replace PyYAML and pass
+        gf.write(self.root, os.path.join(gf.STATE, "findings.yml"), ORPHAN)
+        gf.git(self.root, "add", "-A")
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        for rel in ("yaml.py", "glob/__init__.py", "datetime.pyc", "lib/extra.py", "hooks/new.py"):
+            path = os.path.join("tools", "gates", *rel.split("/"))
+            gf.write(self.root, path, "raise SystemExit(0)\n")
+            p = self.commit()
+            self.assertNotEqual(0, p.returncode, rel)
+            self.assertIn("FAIL pre-commit.unstaged", p.stderr, rel)
+            self.assertIn("tools/gates/" + rel, p.stderr)
+            self.assertEqual(head, gf.git(self.root, "rev-parse", "HEAD"), rel)
+            os.remove(os.path.join(self.root, path))
+            if not os.listdir(os.path.dirname(os.path.join(self.root, path))):
+                os.rmdir(os.path.dirname(os.path.join(self.root, path)))      # the new glob/ package
 
     def test_edits_to_gate_tests_and_readme_do_not_block_a_commit(self):
         gf.write(self.root, "x.txt", "x\n")
