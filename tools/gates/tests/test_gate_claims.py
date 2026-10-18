@@ -378,6 +378,31 @@ class ClaimsRepo(unittest.TestCase):
         self.assertIn("FAIL claims.stale.C-demo-1: cite mod/ is not a directory at verified_at", out)
         self.assertEqual(1, rc)
 
+    def test_a_pathspec_shaped_cite_fails_its_own_row_and_hides_no_other(self):
+        for n, cite in enumerate((":/src/a.c", ":(top)src/a.c", ":(glob)src/*.c", ":!src/a.c")):
+            other = row(verified_at=f'"{self.v}"', cites="src/b.c").replace("C-demo-1", "C-demo-2")
+            self.claims(row(verified_at=f'"{self.v}"', cites=f'"{cite}"') + other)
+            gf.write(self.root, "src/a.c", f"int a(void) {{ return {n + 40}; }}\n")
+            gf.commit_all(self.root, "touch")
+            rc, out = self.run_gate()
+            self.assertEqual(1, rc, (cite, out))
+            self.assertRegex(out, r"FAIL claims\.schema\.C-demo-1: cites: ", cite)
+            self.assertNotIn("claims.input", out, cite)
+            self.assertNotIn("C-demo-2", out, cite)    # the valid row still got its verdict: no failure line
+
+    def test_path_type_never_reads_a_path_as_a_pathspec(self):
+        for path in (":/src/a.c", ":(top)src/a.c", ":(glob)src/*.c", "src/*.c", "sr?/a.c"):
+            self.assertIsNone(gitinfo.path_type(self.root, self.v, path), path)
+        self.assertEqual("blob", gitinfo.path_type(self.root, self.v, "src/a.c"))
+        self.assertEqual("tree", gitinfo.path_type(self.root, self.v, "src"))
+
+    def test_path_type_matches_the_exact_entry_name_only(self):
+        listing = "100644 blob " + "a" * 40 + "\tsrc/other.c\0"
+        with mock.patch.object(gitinfo, "_git", return_value=listing):
+            self.assertIsNone(gitinfo.path_type(self.root, self.v, "src/a.c"))
+        with mock.patch.object(gitinfo, "_git", return_value=listing.replace("other", "a")):
+            self.assertEqual("blob", gitinfo.path_type(self.root, self.v, "src/a.c"))
+
     def test_a_cite_only_needs_to_exist_on_a_verified_row(self):
         self.claims(row(state="unverified", verified_at="null", by="null", cites="src/typo.c"))
         rc, out = self.run_gate()

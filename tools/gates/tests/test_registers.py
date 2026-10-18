@@ -258,6 +258,7 @@ class ClaimSchema(unittest.TestCase):
                "whitespace or a NUL": [" ", "src/a.c ", " src/a.c", "a\0b", "src/\n"],
                "is absolute": ["/src/a.c", "/", "//", "//x"],
                "climbs out": ["..", ".", "./", "../x.c", "src/..", "src/../a.c", "src/../"],
+               "pathspec": [":/src/a.c", ":(top)src/a.c", ":(glob)src/*.c", ":!x"],
                "not normalised": ["./src/a.c", "src//a.c", "src//", "src/./a.c", "src/a.c/.", "src/a.c//"]}
         for why, cites in bad.items():
             for cite in cites:

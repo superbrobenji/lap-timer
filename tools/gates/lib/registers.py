@@ -259,6 +259,8 @@ def cite_problem(cite) -> str:
         return "has leading or trailing whitespace or a NUL"
     if cite.startswith("/"):
         return "is absolute: write a path relative to the repository root"
+    if cite.startswith(":"):
+        return "starts with ':' (git pathspec magic, not a path)"
     body = cite[:-1] if cite.endswith("/") else cite
     if body == "." or ".." in body.split("/"):
         return "climbs out of or names the repository root ('.' or '..')"
