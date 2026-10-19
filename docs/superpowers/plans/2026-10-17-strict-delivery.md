@@ -350,7 +350,7 @@ Order: S1 → S2 → S3 → S4 → S5. Each sub-plan starts with the gates its p
 
 ## Checkpoint protocol for this plan (applies from Block 1, by hand until b6 automates it)
 
-At every block end: run `python3 tools/gates/run_all.py`; dispatch final reviewer (opus) + final verifier (Fable) with the block's review packages; `gh pr ready`; wait for every check; merge with `gh pr merge --squash` only if `decisions.yml` has `grant:strict-delivery` answered `yes` by the owner; tag `strict-delivery-b<N>` on the squash commit and push the tag; delete branch + worktrees; write `docs/superpowers/state/strict-delivery/handoff.md`; append `CHECKPOINT b<N>` to the ledger; post the status update and the resume prompt; stop.
+At every block end: run `python3 tools/gates/run_all.py`; dispatch final reviewer (opus) + final verifier (Fable) with the block's review packages; `gh pr ready`; wait for every check; merge with `gh pr merge --squash` only if `decisions.yml` has `grant:strict-delivery` answered `yes` by the owner; tag `strict-delivery-b<N>` on the squash commit. Before the block branch is deleted, push an annotated tag `strict-delivery-b<N>-tip` at the branch tip (the handoff commit, the PR head) so every block commit the registers cite stays reachable in a fresh clone (DEC-0015 tip-tag; the gates CI job on `main` went red after the b4 squash until `strict-delivery-b4-tip` was pushed) on the squash commit and push the tag; delete branch + worktrees; write `docs/superpowers/state/strict-delivery/handoff.md`; append `CHECKPOINT b<N>` to the ledger; post the status update and the resume prompt; stop.
 
 Resume prompt template:
 ```

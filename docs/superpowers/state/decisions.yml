@@ -144,5 +144,25 @@
     - {label: rewrite-shas, cost: "keep squash; at merge rewrite every history and cites sha of the block's rows to the squash sha (b4 rows now, in the b5 PR; S4 postmerge.py automates it); the per-task sha audit trail of pins and cites is lost (spec D7 evidence weaker), and pinned rows are edited after the fact"}
     - {label: fast-forward, cost: "stop squashing: after the PR is green, push the block branch to main as a fast-forward (protection allows it: no PR requirement, linear history, strict checks pass on the branch tip); every block commit lands on main, shas stay valid, the PR closes as merged; the umbrella checkpoint protocol, the b6 gate_checkpoint --post design (main = one commit on base) and S4 postmerge need a redesign, and main carries every fix-round commit"}
   asked_at: {sha: "d6f4135", by: session}
+  answer: "tip-tag (owner answered \"dec-0015. 1. the recommended\" in chat, 2026-10-19; the session had recommended tip-tag). Applied: tag strict-delivery-b4-tip pushed at the b4 PR head 7f406c2 (parent 9704065, the handoff head; the tip is the checkpoint commit); the failed gates run 39241177093 on main re-run -> success"
+  answered_at: {sha: "054865f", by: superbrobenji}
+- id: DEC-0016
+  class: spec-direction
+  question: "b5 Task 6 review R6-5: spec §6 step 3 (spec:181) says plans carry added header blocks (register ids per task, sibling lists, pinning step, gate list, block boundaries) and the spec gate table (spec:198) lists gate_plan as 'header blocks; register ids per task; id-coverage table; file-overlap table; block size <=3; placeholder scan'. The S2 plan's Task 6 scope and the shipped gate_plan (054865f, 4 reviews) check the writing-plans headers plus Files, Findings and Mode per task, id coverage, PARALLEL overlap, block size and placeholders; no S2 task carries a per-task sibling list or gate list, and pin steps exist only as 'Mutation run and pin' steps. Does gate_plan also check sibling lists, a pinning step and a gate list per task?"
+  options:
+    - {label: ship-and-register, cost: "Task 6 ships the current check set; the gap is registered as a finding with an issue, owned by a later plan (S5 b13 or an S2 follow-up the owner slices); plans approved before then are not checked for those three blocks"}
+    - {label: add-checks-now, cost: "one more fix round in b5 with a new per-task field grammar (Siblings, Pin step, Gate list) and every in-flight plan gains those fields (the S2 plan's nine tasks now, S3-S5 before they go in flight) or run_all goes red"}
+    - {label: amend-spec, cost: "spec:181 and :198 reworded so sibling lists, pin step and gate list are brief content checked by the reviewer, not gate_plan checks; the check never exists"}
+  asked_at: {sha: "054865f", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0017
+  class: spec-direction
+  question: "b5 Task 6 reviews R3-1, R4-1, R4-2: neither the spec nor the S2 plan defines how a Files item of a plan task is written, and gate_plan's file-overlap table depends on parsing it; three fix rounds of parser picks each reopened a fail-open case (a path inside parentheses, a root file without a slash, an unclosed parenthesis or backtick dropping later paths). Which Files-item grammar binds every plan from now on?"
+  options:
+    - {label: one-path-per-item, cost: "each Files item holds exactly one backticked path; any second backticked span on the item FAILs plan.files; prose after the path carries no backticks; the S2 plan's Files items that carry backticked symbols (e.g. GATES, DEFAULT_ARGV) are rewritten in the b5 fix round and S3-S5 plans before they go in flight (items listing several files are split); no parser heuristics"}
+    - {label: multi-span-strict, cost: "keep multi-span parsing; any whitespace-free backticked span inside parentheses that holds a slash or a dot FAILs, and an unbalanced parenthesis or backtick FAILs; dotted symbols such as registers.PIN_TEST inside parentheses must be rewritten; the parser keeps growing with each edge case"}
+    - {label: tracked-path-only, cost: "as multi-span-strict but a span inside parentheses FAILs only when it names a tracked path; a file still to be created, without a slash and inside parentheses, is missed (fail-open)"}
+  asked_at: {sha: "054865f", by: session}
   answer: null
   answered_at: null
