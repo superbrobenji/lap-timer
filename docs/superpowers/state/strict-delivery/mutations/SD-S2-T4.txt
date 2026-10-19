@@ -1,0 +1,5 @@
+finding: SD-S2-T4
+test: test_claims_fail_row_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
+step 2 (fix reverted: perl empties the FAIL-row list in tools/gates/gate_review_package.py): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
