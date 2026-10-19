@@ -307,7 +307,7 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 |---|---|
 | Any gate | `python3 tools/gates/gate_<name>.py [--json] [gate args]`; `check(args)` receives argv without `--json`; rc 0/1 |
 | `run_all.py` | `python3 tools/gates/run_all.py [--json] [--only a,b]` |
-| `gate_review_package.py` | `--dir docs/superpowers/state/<plan>/review/<task>` |
+| `gate_review_package.py` | `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored; see "Review package") or `--all` (run_all's default, CI) |
 | `gate_plan.py` | `--plan <path> [--source <report-or-register>]` |
 | `gate_dispatch.py` | `[--json] --prompt <file>` (or `-` for stdin) `[--tool-model <m>] [--prompts-dir <dir>]`, or `[--json] --config-check` (run_all's default, CI) |
 | `gate_merge_ready.py` | `--pr <number> [--post]` |

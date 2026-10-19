@@ -126,3 +126,13 @@
   asked_at: {sha: "07d7b29", by: session}
   answer: "keep-s2-form (owner answered \"recommended for both\" in chat, 2026-10-19; the session had recommended keep-s2-form)"
   answered_at: {sha: "07d7b29", by: superbrobenji}
+- id: DEC-0014
+  class: scope
+  question: "Block b5's opus sub-controller stopped on its dispatch budget (the spec §3.1 controller trigger of 90 min; 80 % reached at 15:00 during Task 4 fix round 1) after finishing and pinning Task 4 at 9c94595 (suite 423 OK on both interpreters, run_all 40 PASS, package gate PASS). Tasks 5 (make_review_package) and 6 (gate_plan) are not started. Task 4 alone took 4 h 20 min wall-clock over four review rounds, so one fresh 90-minute round covers about one task. Where do Tasks 5 and 6 run, and does the answer stand for later blocks?"
+  options:
+    - {label: continue-standing, cost: "a fresh opus sub-controller round per remaining task in the same block, now and in every later block where a sub-controller stops on budget or a 429 at a task boundary; the session stays the umbrella controller until the block's CHECKPOINT (as DEC-0008 did for b4); one opus context per round, no re-slice, no further question of this class"}
+    - {label: continue-in-b5-only, cost: "the same for b5 only; every later stop of this kind asks again (one decision round-trip per stop)"}
+    - {label: checkpoint-now, cost: "CHECKPOINT b5 with Task 4 only; Tasks 5-6 become a separate block before b6: S2 plan and umbrella block-table re-slice, one extra PR and tag; b6 still waits for Task 6's ledger contract"}
+  asked_at: {sha: "9c94595", by: session}
+  answer: null
+  answered_at: null

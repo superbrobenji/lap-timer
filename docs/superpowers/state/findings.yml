@@ -344,3 +344,29 @@
   - state: pinned
     sha: 7e5684c2930757c66e20bfcd157f46a3ee73d66b
     by: controller
+- id: B5-U1
+  source: review
+  severity: LOW
+  class: 'tools/gates/tests/test_hooks.py:333-342 (test_long_runs_of_backslashes_and_options_do_not_stall_the_hook)
+    asserts the PreToolUse hook''s wall-clock under 2.0 s per pathological command;
+    under CPU load (10 busy loops) one run took 2.04 s and the suite FAILs: a timing-dependent
+    assertion makes the gate suite flaky under load (from b3 at 07d7b29; not caused
+    by b5)'
+  siblings: []
+  cites:
+  - file: tools/gates/tests/test_hooks.py
+    lines: 333-342
+    sha: 9c9459559b2d62d25571e7d02e92b51582f6227c
+  repro: ten busy loops, then PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_hooks.PreToolUse.test_long_runs_of_backslashes_and_options_do_not_stall_the_hook
+    -> FAILED at 2.04 s
+  owner:
+    kind: issue
+    number: 145
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 9c9459559b2d62d25571e7d02e92b51582f6227c
+    by: session
