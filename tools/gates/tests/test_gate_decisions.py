@@ -96,10 +96,24 @@ class GateDecisions(unittest.TestCase):
         self.assertNotIn("PASS decisions.open-ref", out)
         self.assertEqual(1, rc)
 
-    def test_a_longer_id_is_not_a_reference_to_a_shorter_one(self):
+    def test_a_five_digit_text_is_a_mention_of_its_first_four_digits(self):
+        """DEC-0010 (umbrella pattern DEC-[0-9]{4}, no lookahead): DEC-90012 cites DEC-9001."""
         gf.write(self.root, "docs/plan.md", "See DEC-90012 for the long form.\n")
         rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
-        self.assertEqual(0, rc, out)
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/plan.md:1 references unanswered decision DEC-9001", out)
+        self.assertEqual(1, rc)
+
+    def test_a_non_ascii_digit_after_four_ascii_digits_is_still_a_mention(self):
+        gf.write(self.root, "docs/plan.md", "See DEC-9001\u0663 (Arabic-Indic three).\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001", out)
+        self.assertEqual(1, rc)
+
+    def test_non_ascii_digits_never_form_an_id(self):
+        gf.write(self.root, "docs/plan.md", "Fullwidth DEC-\uff19\uff10\uff10\uff11 is not an id.\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertEqual(PASS_ALL, out)
+        self.assertEqual(0, rc)
 
     def test_unknown_ids_are_not_open_references(self):
         gf.write(self.root, "docs/plan.md", "Example id DEC-9999 in prose.\n")

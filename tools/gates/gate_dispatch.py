@@ -2,7 +2,7 @@
 """gate_dispatch -- a subagent dispatch prompt obeys the strict-delivery dispatch grammar.
 
 Grammar and rules: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Dispatch prompt grammar".
-Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D]
+Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check
 (--json is read by run_gate and only as the first argument, like every S1 gate.)
 """
 from __future__ import annotations
@@ -263,15 +263,51 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res) -> None:
     _strict(text, start, role, prompts_dir, res)
 
 
+def check_config(conf: dict, res: Result) -> None:
+    """CI mode: the model map, fable_roles and the prompt cap agree with the dispatch grammar."""
+    models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
+    for role in ROLES:
+        need = models.get(role)
+        if need not in rank:
+            res.fail(f"dispatch.config.{role}", f"minimum model {need!r} not in model_rank")
+        elif need == "fable" and role not in fable:
+            res.fail(f"dispatch.config.{role}", "minimum model fable but the role is not in fable_roles")
+        elif ROLE_PROMPT.get(role) is None:
+            res.fail(f"dispatch.config.{role}", "no prompt file mapped for the role")
+        else:
+            res.passed(f"dispatch.config.{role}")
+    extra = sorted(set(models) - set(ROLES))
+    if extra:
+        res.fail("dispatch.config.models", f"roles outside the dispatch grammar: {', '.join(extra)}")
+    else:
+        res.passed("dispatch.config.models")
+    stray = sorted(fable - set(ROLES))
+    if stray:
+        res.fail("dispatch.config.fable_roles", f"unknown roles: {', '.join(stray)}")
+    else:
+        res.passed("dispatch.config.fable_roles")
+    cap = conf["dispatch"]["max_prompt_chars"]
+    if isinstance(cap, int) and cap > 0:
+        res.passed("dispatch.config.max_prompt_chars")
+    else:
+        res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
+
+
 def check(args: list) -> Result:
     p = gate_args("gate_dispatch")
-    p.add_argument("--prompt", required=True)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prompt")
+    mode.add_argument("--config-check", action="store_true")
     p.add_argument("--tool-model")
     p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
     a = p.parse_args(args)
     root = a.root or repo_root()
+    conf = gconfig.load(CODE_ROOT)
     res = Result("dispatch")
-    check_prompt(root, gconfig.load(CODE_ROOT), read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
+    if a.config_check:
+        check_config(conf, res)
+        return res
+    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
     return res
 
 

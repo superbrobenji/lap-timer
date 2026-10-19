@@ -252,9 +252,10 @@ def toplevel(directory: str) -> str:
 
 def handle_agent(event: dict) -> int:
     """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
-    names), gate_claims and gate_decisions in the tree of the event's cwd. tool_input.model must be
-    set and equal the prompt's '## Model:' line (umbrella dispatch grammar). 0 = allow, 2 = block.
-    gate_dispatch runs directly (not via run_all.run), so the hook does not depend on run_all.GATES."""
+    names), gate_claims and gate_decisions in the tree of the event's cwd (all three through
+    run_all.run; the dispatch argv given here replaces run_all.DEFAULT_ARGV's --config-check).
+    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch
+    grammar). 0 = allow, 2 = block."""
     cwd = event.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         raise Blocked("hook.input", "the event has no cwd")
@@ -267,19 +268,17 @@ def handle_agent(event: dict) -> int:
         return 2
     model = tool_input.get("model")
     sys.path.insert(0, CODE_ROOT)
-    from tools.gates import gate_dispatch, run_all   # lazy, as in main()
-    from tools.gates.lib import run_check
+    from tools.gates import run_all   # lazy, as in main()
     fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(prompt)
-        argv = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        dispatch = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
         prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
         if prompts:
-            argv += ["--prompts-dir", prompts]
-        # dispatch runs directly, not through run_all: run_all.GATES lists it only from S2 Task 3
-        res = run_all.run(["claims", "decisions"], {"root": root, "decisions": ["--scan", path]})
-        res.lines[:0] = run_check("dispatch", gate_dispatch.check, ["--root", root] + argv).lines
+            dispatch += ["--prompts-dir", prompts]
+        res = run_all.run(["dispatch", "claims", "decisions"],
+                          {"root": root, "dispatch": dispatch, "decisions": ["--scan", path]})
     finally:
         os.unlink(path)
     if res.ok():

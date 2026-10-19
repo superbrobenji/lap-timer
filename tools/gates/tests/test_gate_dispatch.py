@@ -156,6 +156,16 @@ class GateDispatch(unittest.TestCase):
         rc, out = self.dispatch(GOOD + "Scope follows_DEC-0002.\n")
         self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
 
+    def test_a_five_digit_text_is_a_mention_of_its_first_four_digits(self):
+        """DEC-0010 (umbrella pattern DEC-[0-9]{4}, no lookahead): DEC-00021 cites DEC-0002."""
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-00021.\n")
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
+
+    def test_non_ascii_digits_never_form_an_id(self):
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-\uff10\uff10\uff10\uff12 (fullwidth).\n")
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("dispatch.decisions.DEC-", out.replace("PASS dispatch.decisions\n", ""))
+
     def test_answered_decision_passes(self):
         rc, out = self.dispatch(GOOD + "Merge under DEC-0001.\n")
         self.assertEqual(0, rc, out)
@@ -286,6 +296,49 @@ class GateDispatch(unittest.TestCase):
         with mock.patch("sys.stdin", io.StringIO(GOOD)):
             rc, out = gate(self.root, ["--prompt", "-", "--prompts-dir", PROMPTS])
         self.assertEqual(0, rc, out)
+
+
+class ConfigCheck(unittest.TestCase):
+    def with_config(self, edit):
+        """Config is read from CODE_ROOT (S1), so a bad config is injected at config.load."""
+        conf = config.load(rf.REAL)
+        edit(conf)
+        return mock.patch("tools.gates.lib.config.load", return_value=conf)
+
+    def test_config_check_passes_on_repo_config(self):
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.implementer", out)
+
+    def test_config_check_fails_when_implementer_minimum_is_fable(self):
+        with self.with_config(lambda c: c["models"].__setitem__("implementer", "fable")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.implementer", out)
+
+    def test_config_check_fails_on_an_unknown_role(self):
+        with self.with_config(lambda c: c["models"].__setitem__("helper", "opus")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.models", out)
+
+    def test_config_check_fails_on_a_non_positive_cap(self):
+        with self.with_config(lambda c: c["dispatch"].__setitem__("max_prompt_chars", 0)):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_prompt_and_config_check_are_exclusive(self):
+        rc, out = gate(rf.REAL, ["--config-check", "--prompt", "x.md"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.input", out)
+
+    def test_run_all_runs_dispatch_in_config_check_mode(self):
+        from tools.gates import run_all
+        self.assertIn("dispatch", run_all.GATES)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": rf.REAL}), contextlib.redirect_stdout(buf):
+            rc = run_all.main(["--only", "dispatch"])
+        self.assertEqual(0, rc, buf.getvalue())
+        self.assertIn("dispatch.config.implementer", buf.getvalue())
 
 
 if __name__ == "__main__":

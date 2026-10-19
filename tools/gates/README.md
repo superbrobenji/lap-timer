@@ -21,6 +21,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
 | `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
@@ -154,3 +155,18 @@ commit and push, however it was launched.
   runs `git-pre-commit.sh` with `--pre-push`: the same paths must not differ from HEAD at all,
   staged changes included, because a push sends commits, not the index
   (`FAIL pre-push.uncommitted`); then the same two gates. S4 extends it with merge-readiness.
+
+## gate_dispatch (S2)
+
+`python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D]` checks one dispatch
+prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
+Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; a brief file
+exists for the implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier and
+exception_reviewer roles (`BRIEF_ROLES`; the other roles may say `none`); implementer findings
+`planned`/`in-progress`; claim rows `verified` with no cited file changed since `verified_at`; report
+directory exists; no unanswered `DEC-nnnn` (pattern `DEC-[0-9]{4}`, no lookahead: `DEC-00021` cites `DEC-0002`)
+anywhere; length <= `dispatch.max_prompt_chars`; the strict block equals
+`~/.claude/skills/strict-delivery/prompts/<file>.md` byte for byte (role -> file map: `ROLE_PROMPT`). The
+PreToolUse hook runs it, with `claims` and `decisions` (never `register`), on every Agent call through
+`run_all.run`, with `--tool-model <tool_input.model>`. `--config-check` (run_all's default for `dispatch`,
+`run_all.DEFAULT_ARGV`) checks the model map and the cap.

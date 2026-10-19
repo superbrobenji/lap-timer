@@ -28,7 +28,7 @@ from tools.gates.lib import registers  # noqa: E402
 
 # spec §5: "Decision classes (owner-only, always)" -- every class in the register.
 OWNER_ONLY_CLASSES = list(registers.DECISION_CLASSES)
-REF = re.compile(r"DEC-\d{4}(?!\d)")
+REF = re.compile(r"DEC-[0-9]{4}")    # DEC-0010 (umbrella pattern): four ASCII digits, no lookahead; DEC-00021 cites DEC-0002
 CATEGORIES = ["schema", "duplicate", "owner", "open-ref", "scan"]
 
 

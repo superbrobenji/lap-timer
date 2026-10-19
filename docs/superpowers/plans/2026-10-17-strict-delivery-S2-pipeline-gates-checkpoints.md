@@ -4,7 +4,7 @@
 
 **Goal:** Install the four pipeline gates (`gate_dispatch`, `gate_review_package`, `gate_plan`, `gate_checkpoint`), the Agent branch of the PreToolUse hook, the Stop and SubagentStop hooks, the per-plan state layout and the checkpoint/resume/block-end checklists, so that from block b4 every dispatch, from b5 every review package and plan, and from b6 every block end is machine-checked.
 
-**Architecture:** Each gate is one module under `tools/gates/` exposing `check(args) -> Result` and `main(argv)` over the S1 library (`tools/gates/lib/`), registered in `run_all.GATES` with a default argv that is meaningful in CI (`--config-check`, `--all`, `--in-flight`, `--structure`); the moment-of-truth modes (`--prompt`, `--dir`, `--plan`) are what hooks and the controller call. Hooks are thin: parse the event, call `run_all.run` (the Agent branch runs `gate_dispatch.check` through `lib.run_check` directly until Task 3 registers `dispatch` in `run_all.GATES`), exit 2 with the rendered lines. Tests drive `main()` (the production path) against throwaway git repositories built by one helper.
+**Architecture:** Each gate is one module under `tools/gates/` exposing `check(args) -> Result` and `main(argv)` over the S1 library (`tools/gates/lib/`), registered in `run_all.GATES` with a default argv that is meaningful in CI (`--config-check`, `--all`, `--in-flight`, `--structure`); the moment-of-truth modes (`--prompt`, `--dir`, `--plan`) are what hooks and the controller call. Hooks are thin: parse the event, call `run_all.run` (the Agent branch runs `dispatch`, `claims` and `decisions` through it; Task 2 ships it calling `gate_dispatch.check` through `lib.run_check` because `run_all.GATES` lacks `dispatch`, and Task 3 moves it onto `run_all.run`), exit 2 with the rendered lines. Tests drive `main()` (the production path) against throwaway git repositories built by one helper.
 
 **Tech Stack:** Python 3.9+ (local `python3` is 3.9.6; every module starts with `from __future__ import annotations`), PyYAML 6 (6.0.3 installed locally; pinned in `tools/requirements.txt` by S1), `python3 -m unittest`, git ≥ 2.28 (`git init -b`; local 2.50.1), `gh` (faked in tests), Claude Code hooks.
 
@@ -1220,22 +1220,26 @@ git commit -m "chore(state): SD-S2-T2 pinned (mutation transcript)"
 
 - [ ] **Step 7: Ledger (controller, after the task review is ✅)** — append `- S2-T2 DONE <task head sha> Agent hook branch; review <report path>`; commit `chore(state): ledger S2-T2`. From here every dispatch in this checkout is gated.
 
-### Task 3: dispatch config check, run_all registration, README
+### Task 3: dispatch config check, run_all registration, README, DEC-0010 pattern, hook on run_all
 
 **Files:**
-- Modify: `tools/gates/gate_dispatch.py` (`check()` parser; add `check_config`)
-- Modify: `tools/gates/run_all.py` (S1 file: `GATES`, `DEFAULT_ARGV`)
-- Modify: `tools/gates/README.md` (S1 file: append the gate_dispatch section)
-- Modify: `.github/workflows/gates.yml` (S1 file: only if it lists test modules explicitly)
-- Test: `tools/gates/tests/test_gate_dispatch.py` (append class `ConfigCheck`)
+- Modify: `tools/gates/gate_dispatch.py` (`check()` parser; add `check_config`; docstring usage)
+- Modify: `tools/gates/gate_decisions.py` (b2 file: `REF`, owner ruling DEC-0010)
+- Modify: `tools/gates/run_all.py` (S1 file: `GATES`, `DEFAULT_ARGV`, `gate_argv`)
+- Modify: `tools/gates/hooks/pre_tool_use.py` (`handle_agent` runs `dispatch` through `run_all.run`)
+- Modify: `tools/gates/README.md` (S1 file: table row + the gate_dispatch section)
+- Modify: `.github/workflows/gates.yml` (no change: the job uses `unittest discover`, verified `grep -n unittest .github/workflows/gates.yml`)
+- Test: `tools/gates/tests/test_gate_dispatch.py` (append class `ConfigCheck`; two DEC-0010 tests in `GateDispatch`), `test_gate_decisions.py` (the longer-id test inverted, two siblings), `test_run_all.py` (`GATES` pin and the unknown-gate line)
 
 **Findings:** SD-S2-T3
 
 **Interfaces:**
-- Consumes: Task 1 `gate_dispatch`; S1 `run_all`.
-- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`.
+- Consumes: Task 1 `gate_dispatch`; Task 2 `handle_agent`; S1 `run_all`.
+- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`; exclusive with `--prompt`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`; `gate_decisions.REF == re.compile(r"DEC-[0-9]{4}")` (owner decision DEC-0010, the umbrella pattern: four ASCII digits, no lookahead, so `DEC-00021` cites `DEC-0002`; `gate_dispatch` consumes it as `DEC_RE`); `handle_agent` runs `["dispatch", "claims", "decisions"]` through `run_all.run` (owner decisions DEC-0009 keep `BRIEF_ROLES`, DEC-0011 follow the spec: no code change).
+- Item A (Task 1 review F2): `check()` has no `--json` option (`run_gate` reads `--json` only as argv[0]; `test_json_flag_after_other_arguments_fails` pins it), so the docstring usage reads `Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check`.
 
-- [ ] **Step 1: Write the failing tests** — append to `tools/gates/tests/test_gate_dispatch.py` above the `if __name__` line:
+- [ ] **Step 1: Write the failing tests**
+  1. Append to `tools/gates/tests/test_gate_dispatch.py` above the `if __name__` line:
 
 ```python
 class ConfigCheck(unittest.TestCase):
@@ -1279,12 +1283,49 @@ class ConfigCheck(unittest.TestCase):
             rc = run_all.main(["--only", "dispatch"])
         self.assertEqual(0, rc, buf.getvalue())
         self.assertIn("dispatch.config.implementer", buf.getvalue())
+
 ```
+  2. In `GateDispatch` (same file), insert directly above `test_answered_decision_passes`:
+
+```python
+    def test_a_five_digit_text_is_a_mention_of_its_first_four_digits(self):
+        """DEC-0010 (umbrella pattern DEC-[0-9]{4}, no lookahead): DEC-00021 cites DEC-0002."""
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-00021.\n")
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
+
+    def test_non_ascii_digits_never_form_an_id(self):
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-\uff10\uff10\uff10\uff12 (fullwidth).\n")
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("dispatch.decisions.DEC-", out.replace("PASS dispatch.decisions\n", ""))
+```
+  3. In `tools/gates/tests/test_gate_decisions.py` replace `test_a_longer_id_is_not_a_reference_to_a_shorter_one` (it pinned the lookahead behaviour DEC-0010 reverses) by:
+
+```python
+    def test_a_five_digit_text_is_a_mention_of_its_first_four_digits(self):
+        """DEC-0010 (umbrella pattern DEC-[0-9]{4}, no lookahead): DEC-90012 cites DEC-9001."""
+        gf.write(self.root, "docs/plan.md", "See DEC-90012 for the long form.\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001: docs/plan.md:1 references unanswered decision DEC-9001", out)
+        self.assertEqual(1, rc)
+
+    def test_a_non_ascii_digit_after_four_ascii_digits_is_still_a_mention(self):
+        gf.write(self.root, "docs/plan.md", "See DEC-9001\u0663 (Arabic-Indic three).\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertIn("FAIL decisions.open-ref.DEC-9001", out)
+        self.assertEqual(1, rc)
+
+    def test_non_ascii_digits_never_form_an_id(self):
+        gf.write(self.root, "docs/plan.md", "Fullwidth DEC-\uff19\uff10\uff10\uff11 is not an id.\n")
+        rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
+        self.assertEqual(PASS_ALL, out)
+        self.assertEqual(0, rc)
+```
+  4. In `tools/gates/tests/test_run_all.py`: `test_gates_at_this_block` asserts `["register", "claims", "decisions", "dispatch"]`, and `test_cli_unknown_gate_is_rc_1` expects `(installed: register, claims, decisions, dispatch)`.
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck -v`
-Expected: FAIL — `--config-check` is an unknown argument (`FAIL dispatch.input`), `dispatch` not in `GATES`.
+Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch tools.gates.tests.test_gate_decisions tools.gates.tests.test_run_all`
+Expected: FAIL — `--config-check` is an unknown argument (`FAIL dispatch.input`), `dispatch` not in `GATES`, `DEC-00021` and `DEC-9001` + U+0663 not read as mentions, fullwidth digits read as an unknown id (`FAIL dispatch.decisions.DEC-０００２`).
 
 - [ ] **Step 3: Implement the mode** — in `tools/gates/gate_dispatch.py`, add above `check()`:
 
@@ -1327,7 +1368,6 @@ def check(args: list) -> Result:
     mode.add_argument("--config-check", action="store_true")
     p.add_argument("--tool-model")
     p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
-    p.add_argument("--json", action="store_true")
     a = p.parse_args(args)
     root = a.root or repo_root()
     conf = gconfig.load(CODE_ROOT)
@@ -1339,7 +1379,7 @@ def check(args: list) -> Result:
     return res
 ```
 Also change the module docstring's usage line to:
-`Usage: gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D] [--json] | --config-check [--json]`
+`Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check`
 
 - [ ] **Step 4: Register in run_all** — in `tools/gates/run_all.py` set:
 ```python
@@ -1352,33 +1392,92 @@ DEFAULT_ARGV = {"dispatch": ["--config-check"]}
 ```python
     return argv + (list(args[name]) if name in args else list(DEFAULT_ARGV.get(name, [])))
 ```
-S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged (`test_run_all.py` stays green).
+S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged.
 
-- [ ] **Step 6: README** — append to `tools/gates/README.md`:
+- [ ] **Step 5b: The DEC-0010 pattern** — in `tools/gates/gate_decisions.py` replace `REF = re.compile(r"DEC-\d{4}(?!\d)")` by
+```python
+REF = re.compile(r"DEC-[0-9]{4}")    # DEC-0010 (umbrella pattern): four ASCII digits, no lookahead; DEC-00021 cites DEC-0002
+```
+(`gate_dispatch` imports it as `DEC_RE`; `registers.DECISION_ID` is already `^DEC-[0-9]{4}$`; `git grep -nE 'REF|DEC_RE' -- tools` lists no other user.)
+
+- [ ] **Step 5c: The Agent hook runs dispatch through run_all** — in `tools/gates/hooks/pre_tool_use.py` replace `handle_agent` (Task 2's copy ran `gate_dispatch.check` through `lib.run_check` because `run_all.GATES` lacked `dispatch`; the hook must hand `dispatch` its prompt argv, which replaces `DEFAULT_ARGV`'s `--config-check`) by:
+
+```python
+def handle_agent(event: dict) -> int:
+    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
+    names), gate_claims and gate_decisions in the tree of the event's cwd (all three through
+    run_all.run; the dispatch argv given here replaces run_all.DEFAULT_ARGV's --config-check).
+    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch
+    grammar). 0 = allow, 2 = block."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        raise Blocked("hook.input", "the event has no cwd")
+    root = toplevel(cwd)
+    tool_input = event.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
+        return 2
+    model = tool_input.get("model")
+    sys.path.insert(0, CODE_ROOT)
+    from tools.gates import run_all   # lazy, as in main()
+    fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(prompt)
+        dispatch = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
+        if prompts:
+            dispatch += ["--prompts-dir", prompts]
+        res = run_all.run(["dispatch", "claims", "decisions"],
+                          {"root": root, "dispatch": dispatch, "decisions": ["--scan", path]})
+    finally:
+        os.unlink(path)
+    if res.ok():
+        return 0
+    # the temporary file is gone when the reader sees a reason: name the prompt, not the path
+    forms = {path, os.path.realpath(path), os.path.relpath(path, root), os.path.relpath(os.path.realpath(path), root)}
+    for line in res.lines:
+        for form in sorted(forms, key=len, reverse=True):
+            line.reason = line.reason.replace(form, PROMPT_LABEL)
+    print(res.render(False), file=sys.stderr)
+    return 2
+```
+
+- [ ] **Step 6: README** — in `tools/gates/README.md` add this row below the `gate_decisions.py` row of the "Installed gates" table:
+```markdown
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
+```
+and append:
 ```markdown
 ## gate_dispatch (S2)
 
 `python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D]` checks one dispatch
 prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
-Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; brief exists for
-implementer and reviewer roles; implementer findings `planned`/`in-progress`; claim rows `verified` with no cited
-file changed since `verified_at`; report directory exists; no unanswered `DEC-nnnn` anywhere; length <=
-`dispatch.max_prompt_chars`; the strict block equals `~/.claude/skills/strict-delivery/prompts/<file>.md` byte
-for byte (role -> file map: `ROLE_PROMPT`). The PreToolUse hook runs it on every Agent call with
-`--tool-model <tool_input.model>`. `--config-check` (run_all's default) checks the model map and the cap.
+Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; a brief file
+exists for the implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier and
+exception_reviewer roles (`BRIEF_ROLES`; the other roles may say `none`); implementer findings
+`planned`/`in-progress`; claim rows `verified` with no cited file changed since `verified_at`; report
+directory exists; no unanswered `DEC-nnnn` (pattern `DEC-[0-9]{4}`, no lookahead: `DEC-00021` cites `DEC-0002`)
+anywhere; length <= `dispatch.max_prompt_chars`; the strict block equals
+`~/.claude/skills/strict-delivery/prompts/<file>.md` byte for byte (role -> file map: `ROLE_PROMPT`). The
+PreToolUse hook runs it, with `claims` and `decisions` (never `register`), on every Agent call through
+`run_all.run`, with `--tool-model <tool_input.model>`. `--config-check` (run_all's default for `dispatch`,
+`run_all.DEFAULT_ARGV`) checks the model map and the cap.
 ```
 
-- [ ] **Step 7: CI** — run `grep -n "unittest" .github/workflows/gates.yml`. If the job uses `discover`, nothing to change. If it lists modules, append `tools.gates.tests.test_gate_dispatch` to that list (the `test_hooks` entry already exists).
+- [ ] **Step 7: CI** — run `grep -n "unittest" .github/workflows/gates.yml`. The job uses `discover` (lines `python3.9 -m unittest discover -v -s tools/gates/tests -t .` and the 3.12 twin): nothing to change.
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch tools.gates.tests.test_hooks -v` → `OK`; `python3 tools/gates/run_all.py` → only `PASS`, including `dispatch.config.*` lines.
+Run: `python3 -m unittest discover -s tools/gates/tests -t .` → `OK` (342 tests: 332 + 6 `ConfigCheck` + 2 `GateDispatch` DEC-0010 + 2 net `GateDecisions`); `python3 tools/gates/run_all.py` → only `PASS` (28 lines: the 15 of b3 + 13 `dispatch.config.*`).
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add tools/gates/gate_dispatch.py tools/gates/run_all.py tools/gates/README.md tools/gates/tests/test_gate_dispatch.py .github/workflows/gates.yml
-git commit -m "feat(gates): gate_dispatch --config-check; dispatch joins run_all"
+git add tools/gates/gate_dispatch.py tools/gates/gate_decisions.py tools/gates/run_all.py tools/gates/hooks/pre_tool_use.py tools/gates/README.md tools/gates/tests/test_gate_dispatch.py tools/gates/tests/test_gate_decisions.py tools/gates/tests/test_run_all.py docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+git commit -m "feat(gates): gate_dispatch --config-check; dispatch joins run_all; DEC-0010 pattern"
 ```
 
 - [ ] **Step 10: Mutation run and pin**
