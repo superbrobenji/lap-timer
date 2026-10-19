@@ -676,6 +676,17 @@ class Branches(unittest.TestCase):
             self.assertIn(word, task6)
         self.assertNotIn("title contains `pin`", task6)
 
+    def test_s2_plan_global_constraints_state_the_pin_word(self):
+        """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and PIN_TITLE."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
+                  encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines()
+                     if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
+        self.assertEqual(1, len(lines))
+        self.assertIn("a step whose title holds the word `pin` (case-insensitive, `\\bpin\\b`", lines[0])
+        self.assertIn("B5-FIX-3", lines[0])
+        self.assertNotIn("title contains `pin`", lines[0])
+
     def test_pin_is_a_whole_word_in_the_title(self):
         """B5-FIX-3 (a): 'pin' inside another word names no pin step, so the task has none."""
         for title in ("Mapping table", "Spinner", "PINNED row", "Mutation run and pinning", "pins", "spin_up", "pin2", "Tailspin"):

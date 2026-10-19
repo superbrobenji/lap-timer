@@ -385,7 +385,10 @@ class GateDispatch(unittest.TestCase):
                 self.assertNotIn("dispatch.model.fallback", out)
 
     def test_fable_stays_allowed_with_the_fallback_on(self):
-        for fallback in ("opus", None):
+        """A model that meets the role's rank passes dispatch.model.rank whatever fable_fallback holds: the fallback
+        branch is taken only when the rank check would fail, so even an invalid value ('fable', 'gpt'; --config-check
+        fails those) prints no dispatch.model.fallback line for a fable dispatch (R1-3)."""
+        for fallback in ("opus", None, "fable", "gpt"):
             with self.subTest(fallback=fallback):
                 rc, out = self.fable_role_on("final_verifier", "fable", fallback)
                 self.assertEqual(0, rc, out)
@@ -572,11 +575,44 @@ class ConfigCheck(unittest.TestCase):
 
     # -- DEC-0018: the fable_fallback key (B5-FIX-2)
     def test_config_check_passes_the_repo_fallback(self):
+        """The real config passes in whichever state the owner's switch is in (R1-1): set, its PASS line names
+        the value; absent, the off line."""
         rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(0, rc, out)
-        self.assertIn("PASS dispatch.config.fable_fallback: opus: the fable_roles run on opus while Fable is "
-                      "unavailable (DEC-0018)\n", out + "\n")
+        conf = config.load(rf.REAL)
+        if "fable_fallback" in conf:
+            v = conf["fable_fallback"]
+            want = f"PASS dispatch.config.fable_fallback: {v}: the fable_roles run on {v} while Fable is unavailable (DEC-0018)"
+        else:
+            want = "PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)"
+        self.assertIn(want + "\n", out + "\n")
         self.assertEqual(15, len(out.splitlines()), out)
+
+    def test_config_text_sets_the_key_whether_or_not_the_repo_has_it(self):
+        """R1-1: the fixtures set or remove the key themselves, so the suite does not depend on the repo's switch.
+        A copy of the real config with the key cleared (and one with it set) gives the same fixture configs."""
+        with open(os.path.join(rf.REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
+            real = f.read()
+        bare = rf.FALLBACK_LINE.sub("", real)
+        self.assertNotIn("\nfable_fallback:", "\n" + bare)
+        for state, text in (("cleared", bare), ("set", bare + "fable_fallback: opus\n")):
+            d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
+            self.addCleanup(shutil.rmtree, d, True)
+            rf.write(d, "tools/gates/config.yml", text)
+            with self.subTest(state), mock.patch.object(rf, "REAL", d):
+                self.assertEqual(bare, rf.config_text(None))
+                self.assertEqual(bare + "fable_fallback: sonnet\n", rf.config_text("sonnet"))
+                with config_with_fallback(None) as load:
+                    self.assertNotIn("fable_fallback", load.return_value)
+                    rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+                with config_with_fallback("opus") as load:
+                    self.assertEqual("opus", load.return_value["fable_fallback"])
+        d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
+        self.addCleanup(shutil.rmtree, d, True)
+        rf.write(d, "tools/gates/config.yml", bare + "fable_fallback: opus\nfable_fallback: opus\n")
+        with mock.patch.object(rf, "REAL", d), self.assertRaisesRegex(AssertionError, "holds 2 fable_fallback lines"):
+            rf.config_text(None)
 
     def test_config_check_passes_an_absent_fallback(self):
         with config_with_fallback(None) as load:

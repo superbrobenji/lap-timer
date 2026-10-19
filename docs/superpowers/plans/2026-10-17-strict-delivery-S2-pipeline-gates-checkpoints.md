@@ -26,7 +26,7 @@
 - Commit trailers: subagents use their own model's trailer; the squash commit carries the session's.
 - Repo fact (verified 2026-10-17 with `gh api repos/superbrobenji/lap-timer/branches/main/protection`): `main` requires status checks (strict), linear history, and `enforce_admins: true` — no commit can be pushed to `main` directly. Every state commit (handoff, ledger, register transitions) therefore rides inside the block PR: the handoff is committed on the block branch before the merge, `gate_checkpoint --plan <slug>` checks it there (pre-merge) and `--post` checks the squash on `main` afterwards (Task 7). `merged` register states are written only by S4's `postmerge.py` (`by: postmerge`, S1 rule); until S4 lands, S2 rows stay `pinned` after their block merges.
 - Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the controller after the task review's clean verdict (b4 ruling 3), together with the reviewer's report at `docs/superpowers/state/<plan>/reviews/S2-T<n>.md`.
-- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title contains `pin` (case-insensitive) and whose body names a test named `test_<module>::test_<name>`.
+- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, `\bpin\b`: "Mutation run and pin", "Pin step" and "pin:" count; "Mapping", "Spinner" and "pinned" do not; B5-FIX-3) and whose body names a test named `test_<module>::test_<name>`.
 - Block branches are named `<plan>/b<N>` (here `block/strict-delivery-b4`…`b6`), never `<plan>-b<N>`, so a branch never shares a name with its tag.
 
 ## Review Focus
@@ -154,6 +154,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 
 import yaml
 
@@ -170,6 +171,19 @@ DISPATCH_FILES = {
     "docs/superpowers/plans/fixture-plan.md": "# Fixture plan\n",
 }
 git, write, remove = gf.git, gf.write, gf.remove
+FALLBACK_LINE = re.compile(r"^fable_fallback:.*\n", re.M)
+
+
+def config_text(fallback: str | None = None) -> str:
+    """The real tools/gates/config.yml with its fable_fallback line removed if it has one (the owner's
+    switch may be on or off, R1-1), then 'fable_fallback: <fallback>' appended (None: the key is absent,
+    the DEC-0018 fallback is off)."""
+    with open(os.path.join(REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
+        real = f.read()
+    text, n = FALLBACK_LINE.subn("", real)
+    if n > 1:
+        raise AssertionError(f"tools/gates/config.yml holds {n} fable_fallback lines, expected 0 or 1")
+    return text if fallback is None else text + f"fable_fallback: {fallback}\n"
 
 
 def commit(root: str, message: str) -> str:
@@ -382,6 +396,18 @@ def gate(root, argv):
             contextlib.redirect_stderr(io.StringIO()):    # argparse usage goes to stderr
         rc = gate_dispatch.main(argv)
     return rc, buf.getvalue()
+
+
+def config_with_fallback(fallback=None):
+    """The real config.yml with fable_fallback set to `fallback` (None: absent), parsed by config.load
+    from a throwaway tree and injected at config.load (gates read config from CODE_ROOT, S1)."""
+    d = tempfile.mkdtemp(prefix="gate-cfg-")
+    try:
+        rf.write(d, "tools/gates/config.yml", rf.config_text(fallback))
+        conf = config.load(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return mock.patch("tools.gates.lib.config.load", return_value=conf)
 
 
 class GateDispatch(unittest.TestCase):
@@ -694,6 +720,114 @@ class GateDispatch(unittest.TestCase):
             rc, out = gate(self.root, ["--prompt", "-", "--prompts-dir", PROMPTS])
         self.assertEqual(0, rc, out)
 
+    # -- DEC-0018: the fable_fallback key (B5-FIX-2)
+    def fable_role_on(self, role, model, fallback, tool_model=None):
+        text = self.role_prompt(role).replace("## Model: fable\n", f"## Model: {model}\n", 1)
+        self.assertIn(f"## Model: {model}\n", text)
+        extra = [] if tool_model is None else ["--tool-model", tool_model]
+        with config_with_fallback(fallback):
+            return self.dispatch(text, *extra, prompts=self.allp)
+
+    def test_fallback_on_lets_a_fable_role_run_on_opus(self):
+        for role in ("final_verifier", "exception_reviewer"):
+            with self.subTest(role):
+                rc, out = self.fable_role_on(role, "opus", "opus", tool_model="opus")
+                self.assertEqual(0, rc, out)
+                lines = [l for l in out.splitlines() if l.startswith("PASS dispatch.model.fallback: ")]
+                self.assertEqual(1, len(lines), out)
+                self.assertIn("DEC-0018", lines[0])
+                self.assertIn(f"{role} on opus", lines[0])
+                self.assertNotIn("dispatch.model.rank", out)
+                self.assertIn("PASS dispatch.model.agree", out)
+
+    def test_fallback_absent_keeps_the_rank_failure(self):
+        for role in ("final_verifier", "exception_reviewer"):
+            with self.subTest(role):
+                rc, out = self.fable_role_on(role, "opus", None)
+                self.assertFailLine(rc, out, f"dispatch.model.rank: role {role} needs at least fable, got opus")
+                self.assertNotIn("dispatch.model.fallback", out)
+
+    def test_fable_stays_allowed_with_the_fallback_on(self):
+        """A model that meets the role's rank passes dispatch.model.rank whatever fable_fallback holds: the fallback
+        branch is taken only when the rank check would fail, so even an invalid value ('fable', 'gpt'; --config-check
+        fails those) prints no dispatch.model.fallback line for a fable dispatch (R1-3)."""
+        for fallback in ("opus", None, "fable", "gpt"):
+            with self.subTest(fallback=fallback):
+                rc, out = self.fable_role_on("final_verifier", "fable", fallback)
+                self.assertEqual(0, rc, out)
+                self.assertIn("PASS dispatch.model.rank\n", out)
+                self.assertNotIn("dispatch.model.fallback", out)
+
+    def test_a_model_below_the_fallback_still_fails_rank(self):
+        for model in ("sonnet", "haiku"):
+            with self.subTest(model):
+                rc, out = self.fable_role_on("final_verifier", model, "opus")
+                self.assertFailLine(rc, out, f"dispatch.model.rank: role final_verifier needs at least fable, got {model}")
+                self.assertNotIn("dispatch.model.fallback", out)
+
+    def test_an_invalid_fallback_admits_no_lower_model(self):
+        for fallback in ("sonnet", "haiku"):
+            with self.subTest(fallback):
+                rc, out = self.fable_role_on("final_verifier", fallback, fallback)
+                self.assertFailLine(rc, out, "dispatch.model.fallback: ")
+                self.assertIn(f"fable_fallback {fallback!r} must be a model_rank model ranked at least opus and below fable", out)
+                self.assertNotIn("PASS dispatch.model.fallback", out)
+
+    def test_non_fable_roles_are_unchanged_by_the_fallback(self):
+        with config_with_fallback("opus"):
+            rc, out = self.dispatch(self.variant("## Model: sonnet", "## Model: fable"))
+            self.assertFailLine(rc, out, "dispatch.model.fable")
+            self.assertNotIn("dispatch.model.fallback", out)
+            rc, out = self.dispatch(GOOD)
+            self.assertEqual(0, rc, out)
+            self.assertNotIn("dispatch.model.fallback", out)
+            rc, out = self.dispatch(self.variant("## Model: sonnet", "## Model: haiku"))
+            self.assertFailLine(rc, out, "dispatch.model.rank")
+            for role in ("task_reviewer", "controller"):
+                rc, out = self.dispatch_role(self.role_prompt(role))
+                self.assertEqual(0, rc, f"{role}: {out}")
+                self.assertIn("PASS dispatch.model.rank\n", out)
+                self.assertNotIn("dispatch.model.fallback", out)
+        with config_with_fallback("opus") as load:    # a fable minimum outside fable_roles (--config-check fails it)
+            load.return_value["models"]["task_reviewer"] = "fable"
+            rc, out = self.dispatch_role(self.role_prompt("task_reviewer"))    # ## Model: opus
+            self.assertFailLine(rc, out, "dispatch.model.rank: role task_reviewer needs at least fable, got opus")
+            self.assertNotIn("dispatch.model.fallback", out)
+
+    def test_readme_describes_the_fallback(self):
+        """Sibling 'README gate_dispatch section' (B5-FIX-2): the section and the table row name the key, its
+        validation, the fallback PASS line and DEC-0018."""
+        with open(os.path.join(rf.REAL, "tools", "gates", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        section = readme[readme.index("## gate_dispatch (S2)\n"):readme.index("\n## make_review_package")]
+        for word in ("`fable_fallback`", "PASS dispatch.model.fallback", "FAIL dispatch.config.fable_fallback",
+                     "DEC-0018", "ranked at", "15 lines."):
+            self.assertIn(word, section)
+        row = [l for l in readme.splitlines() if l.startswith("| `gate_dispatch.py` |")]
+        self.assertEqual(1, len(row))
+        for word in ("`fable_fallback`", "DEC-0018", "PASS dispatch.model.fallback"):
+            self.assertIn(word, row[0])
+
+    def test_spec_and_config_name_the_fallback(self):
+        """Sibling 'spec D18/§5 text' (B5-FIX-2): the spec and tools/gates/config.yml agree on the key."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/specs/2026-10-17-strict-delivery-design.md"),
+                  encoding="utf-8") as f:
+            spec = f.read().splitlines()
+        d18 = [l for l in spec if l.startswith("| D18 |")]
+        self.assertEqual(1, len(d18), "spec D18 row")
+        for word in ("`fable_fallback`", "DEC-0018", "run on opus"):
+            self.assertIn(word, d18[0])
+        for row in ("| Final adversarial verifier |", "| Exception (P10) reviewer |"):
+            hits = [l for l in spec if l.startswith(row)]
+            self.assertEqual(1, len(hits), row)
+            self.assertIn("Fable (opus while the DEC-0018 fallback is on)", hits[0])
+        with open(os.path.join(rf.REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertRegex(text, r"(?m)^# .*\bDEC-0018\b.*$")
+        self.assertRegex(text, r"(?m)^# .*\bfable_fallback\b.*$")
+        conf = config.load(rf.REAL)
+        self.assertIn(conf.get("fable_fallback", "opus"), ("opus",), "the spec names opus as the fallback")
+
 
 class ConfigCheck(unittest.TestCase):
     def with_config(self, edit):
@@ -801,6 +935,79 @@ class ConfigCheck(unittest.TestCase):
         rc, out = gate(rf.REAL, ["--config-check", "--prompt", "x.md"])
         self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.input", out)
+
+    # -- DEC-0018: the fable_fallback key (B5-FIX-2)
+    def test_config_check_passes_the_repo_fallback(self):
+        """The real config passes in whichever state the owner's switch is in (R1-1): set, its PASS line names
+        the value; absent, the off line."""
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        conf = config.load(rf.REAL)
+        if "fable_fallback" in conf:
+            v = conf["fable_fallback"]
+            want = f"PASS dispatch.config.fable_fallback: {v}: the fable_roles run on {v} while Fable is unavailable (DEC-0018)"
+        else:
+            want = "PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)"
+        self.assertIn(want + "\n", out + "\n")
+        self.assertEqual(15, len(out.splitlines()), out)
+
+    def test_config_text_sets_the_key_whether_or_not_the_repo_has_it(self):
+        """R1-1: the fixtures set or remove the key themselves, so the suite does not depend on the repo's switch.
+        A copy of the real config with the key cleared (and one with it set) gives the same fixture configs."""
+        with open(os.path.join(rf.REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
+            real = f.read()
+        bare = rf.FALLBACK_LINE.sub("", real)
+        self.assertNotIn("\nfable_fallback:", "\n" + bare)
+        for state, text in (("cleared", bare), ("set", bare + "fable_fallback: opus\n")):
+            d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
+            self.addCleanup(shutil.rmtree, d, True)
+            rf.write(d, "tools/gates/config.yml", text)
+            with self.subTest(state), mock.patch.object(rf, "REAL", d):
+                self.assertEqual(bare, rf.config_text(None))
+                self.assertEqual(bare + "fable_fallback: sonnet\n", rf.config_text("sonnet"))
+                with config_with_fallback(None) as load:
+                    self.assertNotIn("fable_fallback", load.return_value)
+                    rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+                with config_with_fallback("opus") as load:
+                    self.assertEqual("opus", load.return_value["fable_fallback"])
+        d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
+        self.addCleanup(shutil.rmtree, d, True)
+        rf.write(d, "tools/gates/config.yml", bare + "fable_fallback: opus\nfable_fallback: opus\n")
+        with mock.patch.object(rf, "REAL", d), self.assertRaisesRegex(AssertionError, "holds 2 fable_fallback lines"):
+            rf.config_text(None)
+
+    def test_config_check_passes_an_absent_fallback(self):
+        with config_with_fallback(None) as load:
+            self.assertNotIn("fable_fallback", load.return_value)
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+        self.assertEqual(15, len(out.splitlines()), out)
+
+    def test_config_check_fails_an_invalid_fallback(self):
+        for value in ("sonnet", "haiku", "fable", "gpt", "null", "[opus]", "3", "Opus"):
+            with self.subTest(value), config_with_fallback(value):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback ", out)
+                self.assertIn("must be a model_rank model ranked at least opus and below fable", out)
+                self.assertNotIn("PASS dispatch.config.fable_fallback", out)
+
+    def test_config_check_ranks_the_fallback_by_model_rank(self):
+        """A model_rank that ranks sonnet with opus admits sonnet; one that ranks opus with fable admits nothing."""
+        with config_with_fallback("sonnet") as load:
+            load.return_value["model_rank"] = {"haiku": 1, "sonnet": 3, "opus": 3, "fable": 4}
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("PASS dispatch.config.fable_fallback: sonnet: ", out)
+        with config_with_fallback("opus") as load:
+            load.return_value["model_rank"] = {"haiku": 1, "sonnet": 2, "opus": 4, "fable": 4}
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback 'opus' ", out)
+        with config_with_fallback("opus") as load:    # no fable rank: fail closed, no KeyError
+            load.return_value["model_rank"].pop("fable")
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback 'opus' ", out)
 
     def test_run_all_runs_dispatch_in_config_check_mode(self):
         from tools.gates import run_all
@@ -919,13 +1126,31 @@ def claim_fresh(root: str, claim: dict, head: str) -> str | None:
     return stale_reason(root, claim, head, gitinfo.staged_files(root)) or "row fails the claims schema"
 
 
+def fallback_error(conf) -> str | None:
+    """None when config's optional fable_fallback (DEC-0018) is a model_rank model ranked at least opus and
+    strictly below fable; otherwise the reason. Absent is never an error (the fallback is off)."""
+    if "fable_fallback" not in conf:
+        return None
+    value, rank = conf["fable_fallback"], conf["model_rank"]
+    ok = isinstance(value, str) and value in rank and all(isinstance(rank.get(m), int) for m in ("opus", "fable")) \
+        and rank["opus"] <= rank[value] < rank["fable"]
+    return None if ok else f"fable_fallback {value!r} must be a model_rank model ranked at least opus and below fable"
+
+
 def _model(conf, role, model, tool_model, res):
     rank, need, fable = conf["model_rank"], conf["models"][role], conf["fable_roles"]
     if model not in rank:
         res.fail("dispatch.model.known", f"model {model!r} not in model_rank {sorted(rank)}")
         return
     res.passed("dispatch.model.known")
-    if rank[model] < rank[need]:
+    if rank[model] < rank[need] and role in fable and "fable_fallback" in conf and model == conf["fable_fallback"]:
+        err = fallback_error(conf)    # DEC-0018: the owner-switched fallback replaces the rank check
+        if err:
+            res.fail("dispatch.model.fallback", err)
+        else:
+            res.passed("dispatch.model.fallback", f"{role} on {model}: config fable_fallback is on while Fable is "
+                       "unavailable (DEC-0018)")
+    elif rank[model] < rank[need]:
         res.fail("dispatch.model.rank", f"role {role} needs at least {need}, got {model}")
     else:
         res.passed("dispatch.model.rank")
@@ -1105,8 +1330,9 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res, subagent_type=N
 
 
 def check_config(conf: dict, res: Result) -> None:
-    """CI mode: the model map, fable_roles, model_rank and the prompt cap agree with the dispatch grammar
-    (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders haiku < sonnet < opus < fable)."""
+    """CI mode: the model map, fable_roles, model_rank, the prompt cap and the optional fable_fallback agree with
+    the dispatch grammar (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders
+    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, ranks at least opus and below fable)."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -1144,6 +1370,14 @@ def check_config(conf: dict, res: Result) -> None:
         res.passed("dispatch.config.max_prompt_chars")
     else:
         res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
+    err = fallback_error(conf)
+    if err:
+        res.fail("dispatch.config.fable_fallback", err)
+    elif "fable_fallback" in conf:
+        res.passed("dispatch.config.fable_fallback", f"{conf['fable_fallback']}: the fable_roles run on "
+                   f"{conf['fable_fallback']} while Fable is unavailable (DEC-0018)")
+    else:
+        res.passed("dispatch.config.fable_fallback", "absent: the fallback is off (DEC-0018)")
 
 
 def check(args: list) -> Result:
@@ -4159,6 +4393,17 @@ class Branches(unittest.TestCase):
             self.assertIn(word, task6)
         self.assertNotIn("title contains `pin`", task6)
 
+    def test_s2_plan_global_constraints_state_the_pin_word(self):
+        """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and PIN_TITLE."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
+                  encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines()
+                     if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
+        self.assertEqual(1, len(lines))
+        self.assertIn("a step whose title holds the word `pin` (case-insensitive, `\\bpin\\b`", lines[0])
+        self.assertIn("B5-FIX-3", lines[0])
+        self.assertNotIn("title contains `pin`", lines[0])
+
     def test_pin_is_a_whole_word_in_the_title(self):
         """B5-FIX-3 (a): 'pin' inside another word names no pin step, so the task has none."""
         for title in ("Mapping table", "Spinner", "PINNED row", "Mutation run and pinning", "pins", "spin_up", "pin2", "Tailspin"):
@@ -4893,7 +5138,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

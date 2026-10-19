@@ -28,13 +28,14 @@ FALLBACK_LINE = re.compile(r"^fable_fallback:.*\n", re.M)
 
 
 def config_text(fallback: str | None = None) -> str:
-    """The real tools/gates/config.yml with its one fable_fallback line removed, then
-    'fable_fallback: <fallback>' appended (None: the key is absent, the DEC-0018 fallback is off)."""
+    """The real tools/gates/config.yml with its fable_fallback line removed if it has one (the owner's
+    switch may be on or off, R1-1), then 'fable_fallback: <fallback>' appended (None: the key is absent,
+    the DEC-0018 fallback is off)."""
     with open(os.path.join(REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
         real = f.read()
     text, n = FALLBACK_LINE.subn("", real)
-    if n != 1:
-        raise AssertionError(f"tools/gates/config.yml holds {n} fable_fallback lines, expected 1")
+    if n > 1:
+        raise AssertionError(f"tools/gates/config.yml holds {n} fable_fallback lines, expected 0 or 1")
     return text if fallback is None else text + f"fable_fallback: {fallback}\n"
 
 
