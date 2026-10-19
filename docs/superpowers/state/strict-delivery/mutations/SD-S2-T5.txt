@@ -1,0 +1,5 @@
+finding: SD-S2-T5
+test: test_empty_range_fails
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
+step 2 (fix reverted: perl -pi -e 's/    if n == 0:/    if False:/' tools/gates/make_review_package.py replaces the empty-range guard with False): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
