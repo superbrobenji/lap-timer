@@ -375,6 +375,7 @@ class Branches(unittest.TestCase):
         extra = []
         for rid, src, task in (("SD-FX-3", "docs/cited.md §2", "3"), ("SD-FX-4", "docs/cited.md#sec", "4"),
                                ("SD-FX-5", "docs/cited.md:7", "5"), ("SD-FX-6", "docs/cited.mdx", "6"),
+                               ("SD-FX-8", "./docs/cited.md", "8"), ("SD-FX-9", "docs/./cited.md#sec", "9"),
                                ("SD-FX-7", "xdocs/cited.md", "7")):
             row = copy.deepcopy(rows["findings"][0])
             row.update(id=rid, source=src)
@@ -391,7 +392,7 @@ class Branches(unittest.TestCase):
         for spelled in ("docs/cited.md", "./docs/cited.md", os.path.join(root, "docs", "cited.md")):
             with self.subTest(spelled):
                 rc, out = gate(root, ["--plan", plan, "--source", spelled])
-                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5"):
+                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5", "SD-FX-8", "SD-FX-9"):
                     self.assertIn(f"FAIL plan.coverage.{rid}: in no task", out)
                 for rid in ("SD-FX-6", "SD-FX-7"):
                     self.assertNotIn(rid, out)
@@ -435,6 +436,30 @@ class Branches(unittest.TestCase):
         self.assertNotIn("plan.task.9", out)
         rc, out = self.check(GOOD + f"\n{item}    {FENCE}\n    code\n    {FENCE}\n### Task 9: after\n")
         self.assertIn("FAIL plan.task.9.files", out)
+
+    def test_every_backticked_path_of_a_files_item_counts(self):
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py`, `src/alpha.py`")
+        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (`src/alpha.py` is only a comment)")
+        self.ok(text)
+
+    def test_a_second_mode_line_fails(self):
+        text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/alpha.py`",
+                            "**Mode:** PARALLEL\n**Mode:** SERIAL\n\n**Files:**\n- Create: `src/alpha.py`")
+        self.fail(text, "plan.task.1.mode", "a second **Mode:** line")
+
+    def test_only_level_two_headings_are_blocks(self):
+        for level in ("###", "####", "#"):
+            with self.subTest(level):
+                out = self.ok(self.variant("### Task 2: beta", f"{level} Block b9 notes\n\n### Task 2: beta"))
+                self.assertIn("PASS plan.block.order", out)
+
+    def test_an_unclosed_fence_fails_and_names_its_line(self):
+        text = self.variant("## Block b2 — second", f"{FENCE}\n## Block b2 — second").replace(
+            "**Findings:** none — fixture maintenance with no register row", "**Findings:** SD-FX-1")
+        line = text.split("\n").index(FENCE) + 1
+        self.fail(text, "plan.fence", f"line {line}: code fence never closed")
+        self.assertIn("PASS plan.fence", self.ok(GOOD))
 
     def test_first_matching_header_line_wins(self):
         out = self.ok(GOOD + "\n**Spec:** `docs/none.md`\n")

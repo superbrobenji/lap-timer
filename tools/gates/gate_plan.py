@@ -39,14 +39,15 @@ HEADERS = {
     "global-constraints": re.compile(r"^## Global Constraints\s*$"),
     "review-focus": re.compile(r"^## Review Focus\s*$"),
 }
-BLOCK_RE = re.compile(r"^#{2,} Block b?(\d+)\b")
+BLOCK_RE = re.compile(r"^## Block b?(\d+)\b")
 FENCE_RE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
 LIST_ITEM = re.compile(r"^( *)([-*+]|\d{1,9}[.)])( +)\S")
 FIELD_RE = re.compile(r"^\*\*[^*\n]+:\*\*")
 STEP_RE = re.compile(r"^- \[[ xX]\] \*\*Step\b")
 TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
 CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
-FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): `([^`]+)`")
+FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): (?=`)(.*)$")
+SPAN_RE = re.compile(r"`([^`]+)`")
 FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
 MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(.*?)\s*$")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
@@ -89,6 +90,7 @@ class Plan:
     tasks: list
     placeholders: list
     block_errors: list = field(default_factory=list)
+    fence_error: str = ""
 
 
 def _read(path: str) -> str:
@@ -135,19 +137,20 @@ def _fence_close(line: str, fence: tuple) -> bool:
 
 
 def _file_item(task: Task, line: str) -> bool:
+    """A Files item: every backticked path before the first ' (' counts (text after it is a comment)."""
     fm = FILE_RE.match(line)
     if not fm:
         return False
-    path = posixpath.normpath(fm.group(1).split(":")[0].strip())
-    if path in ("", "."):
+    paths = [posixpath.normpath(s.split(":")[0].strip()) for s in SPAN_RE.findall(fm.group(1).split(" (")[0])]
+    if not paths or any(p in ("", ".") for p in paths):
         return False
-    task.files.append(path)
+    task.files.extend(paths)
     return True
 
 
 def parse_plan(text: str) -> Plan:
     headers, tasks, placeholders, block_errors = {}, [], [], []
-    fence, item_col, block, closed, cur, in_files = None, None, 1, False, None, False
+    fence, fence_line, item_col, block, closed, cur, in_files = None, 0, None, 1, False, None, False
     used, first_head = 0, None
     for n, line in enumerate(text.splitlines(), 1):
         if any(rx.search(line) for rx in PLACEHOLDERS):
@@ -161,7 +164,7 @@ def parse_plan(text: str) -> Plan:
             fence, item_col = None, None    # a line left of the list item's content ends the item and its fence
         opened = _fence_open(line, item_col)
         if opened:
-            fence, in_files = opened, False
+            fence, in_files, fence_line = opened, False, n
             continue
         if line.strip():
             lm = LIST_ITEM.match(line)
@@ -211,6 +214,8 @@ def parse_plan(text: str) -> Plan:
             continue
         m = MODE_RE.match(line)
         if m:
+            if cur.mode_seen:
+                cur.mode_error = "a second **Mode:** line in one task"
             cur.mode_seen = True
             cur.parallel = m.group(1) == "PARALLEL"
             if m.group(1) not in ("PARALLEL", "SERIAL"):
@@ -219,7 +224,8 @@ def parse_plan(text: str) -> Plan:
         for t in tasks:
             if t.line < first_head:
                 block_errors.append(f"line {t.line}: Task {t.num} comes before the first 'Block' heading")
-    return Plan(headers, tasks, placeholders, block_errors)
+    err = f"line {fence_line}: code fence never closed" if fence is not None else ""
+    return Plan(headers, tasks, placeholders, block_errors, err)
 
 
 def parse_query(query: str) -> dict:
@@ -252,8 +258,10 @@ def source_ids(root: str, source: str, findings: list) -> list[str]:
 
 
 def _names(source: str, path: str) -> bool:
-    """A register row's `source` names the repo-relative `path`: equal, or followed by ' ', '#' or ':'."""
-    return source == path or source.startswith((path + " ", path + "#", path + ":"))
+    """A register row's `source` names the repo-relative `path`: its first word (up to ' ', '#' or ':'),
+    normalised like the argument, equals it."""
+    head = re.split(r"[ #:]", source.strip(), maxsplit=1)[0]
+    return posixpath.normpath(head) == path
 
 
 def _verdict(res, lid, ok, reason):
@@ -300,6 +308,7 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
         else:
             _verdict(res, f"{pfx}.id.{fid}", len(nums) == 1,
                      f"routed to tasks {', '.join(nums)}; each id belongs to exactly one task")
+    _verdict(res, f"{pfx}.fence", not plan.fence_error, plan.fence_error)
     for err in plan.block_errors:
         res.fail(f"{pfx}.block.order", err)
     if not plan.block_errors:

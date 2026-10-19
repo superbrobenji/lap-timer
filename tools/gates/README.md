@@ -192,14 +192,14 @@ before a reviewer is dispatched.
 `gate_plan.py --plan P --source <report | register:key=pat[,pat][&key=pat]>` prints the header, id-coverage, overlap,
 block-size and placeholder lines at plan approval. Register keys: `plan` (owner.plan), `task` (owner.task), `state`,
 `severity`; patterns are fnmatch; a repeated key or an empty pattern is `FAIL plan.input`. A report `--source` file is
-normalised to a repo-relative path and matches a register row whose `source` is that path, or starts with it and then ` `, `#` or `:`. The S2 plan's approval check is
+normalised to a repo-relative path and matches a register row whose `source`, up to its first ` `, `#` or `:`, normalises to that path. The S2 plan's approval check is
 `--source 'register:plan=strict-delivery&task=S2-T*'` (`task=S2-*` also matches `B4-FIX-1`, whose owner.task is
 `S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step; a heading number that does
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
 `FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
-`PARALLEL` or `SERIAL` is `FAIL plan.task.N.mode`. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
-indent relative to the list item, closed by the same character, a run at least as long and no info string).
+`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked path before the first ` (` of a Files item counts. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is exactly `## Block bN` (level 2).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the

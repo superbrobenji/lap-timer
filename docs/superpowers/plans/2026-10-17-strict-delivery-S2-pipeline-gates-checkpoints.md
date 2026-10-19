@@ -3357,7 +3357,7 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture`.
-- Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool}`, `Plan.{headers, tasks, placeholders, block_errors}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
+- Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool}`, `Plan.{headers, tasks, placeholders, block_errors, fence_error}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
 - **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** when the last non-empty ledger line is not a `CHECKPOINT` line in the working tree **or** in the `HEAD` commit (or the ledger is not committed).
 
 - [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
@@ -3803,6 +3803,7 @@ class Branches(unittest.TestCase):
         extra = []
         for rid, src, task in (("SD-FX-3", "docs/cited.md §2", "3"), ("SD-FX-4", "docs/cited.md#sec", "4"),
                                ("SD-FX-5", "docs/cited.md:7", "5"), ("SD-FX-6", "docs/cited.mdx", "6"),
+                               ("SD-FX-8", "./docs/cited.md", "8"), ("SD-FX-9", "docs/./cited.md#sec", "9"),
                                ("SD-FX-7", "xdocs/cited.md", "7")):
             row = copy.deepcopy(rows["findings"][0])
             row.update(id=rid, source=src)
@@ -3819,7 +3820,7 @@ class Branches(unittest.TestCase):
         for spelled in ("docs/cited.md", "./docs/cited.md", os.path.join(root, "docs", "cited.md")):
             with self.subTest(spelled):
                 rc, out = gate(root, ["--plan", plan, "--source", spelled])
-                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5"):
+                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5", "SD-FX-8", "SD-FX-9"):
                     self.assertIn(f"FAIL plan.coverage.{rid}: in no task", out)
                 for rid in ("SD-FX-6", "SD-FX-7"):
                     self.assertNotIn(rid, out)
@@ -3863,6 +3864,30 @@ class Branches(unittest.TestCase):
         self.assertNotIn("plan.task.9", out)
         rc, out = self.check(GOOD + f"\n{item}    {FENCE}\n    code\n    {FENCE}\n### Task 9: after\n")
         self.assertIn("FAIL plan.task.9.files", out)
+
+    def test_every_backticked_path_of_a_files_item_counts(self):
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py`, `src/alpha.py`")
+        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (`src/alpha.py` is only a comment)")
+        self.ok(text)
+
+    def test_a_second_mode_line_fails(self):
+        text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/alpha.py`",
+                            "**Mode:** PARALLEL\n**Mode:** SERIAL\n\n**Files:**\n- Create: `src/alpha.py`")
+        self.fail(text, "plan.task.1.mode", "a second **Mode:** line")
+
+    def test_only_level_two_headings_are_blocks(self):
+        for level in ("###", "####", "#"):
+            with self.subTest(level):
+                out = self.ok(self.variant("### Task 2: beta", f"{level} Block b9 notes\n\n### Task 2: beta"))
+                self.assertIn("PASS plan.block.order", out)
+
+    def test_an_unclosed_fence_fails_and_names_its_line(self):
+        text = self.variant("## Block b2 — second", f"{FENCE}\n## Block b2 — second").replace(
+            "**Findings:** none — fixture maintenance with no register row", "**Findings:** SD-FX-1")
+        line = text.split("\n").index(FENCE) + 1
+        self.fail(text, "plan.fence", f"line {line}: code fence never closed")
+        self.assertIn("PASS plan.fence", self.ok(GOOD))
 
     def test_first_matching_header_line_wins(self):
         out = self.ok(GOOD + "\n**Spec:** `docs/none.md`\n")
@@ -4016,14 +4041,15 @@ HEADERS = {
     "global-constraints": re.compile(r"^## Global Constraints\s*$"),
     "review-focus": re.compile(r"^## Review Focus\s*$"),
 }
-BLOCK_RE = re.compile(r"^#{2,} Block b?(\d+)\b")
+BLOCK_RE = re.compile(r"^## Block b?(\d+)\b")
 FENCE_RE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
 LIST_ITEM = re.compile(r"^( *)([-*+]|\d{1,9}[.)])( +)\S")
 FIELD_RE = re.compile(r"^\*\*[^*\n]+:\*\*")
 STEP_RE = re.compile(r"^- \[[ xX]\] \*\*Step\b")
 TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
 CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
-FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): `([^`]+)`")
+FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): (?=`)(.*)$")
+SPAN_RE = re.compile(r"`([^`]+)`")
 FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
 MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(.*?)\s*$")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
@@ -4066,6 +4092,7 @@ class Plan:
     tasks: list
     placeholders: list
     block_errors: list = field(default_factory=list)
+    fence_error: str = ""
 
 
 def _read(path: str) -> str:
@@ -4112,19 +4139,20 @@ def _fence_close(line: str, fence: tuple) -> bool:
 
 
 def _file_item(task: Task, line: str) -> bool:
+    """A Files item: every backticked path before the first ' (' counts (text after it is a comment)."""
     fm = FILE_RE.match(line)
     if not fm:
         return False
-    path = posixpath.normpath(fm.group(1).split(":")[0].strip())
-    if path in ("", "."):
+    paths = [posixpath.normpath(s.split(":")[0].strip()) for s in SPAN_RE.findall(fm.group(1).split(" (")[0])]
+    if not paths or any(p in ("", ".") for p in paths):
         return False
-    task.files.append(path)
+    task.files.extend(paths)
     return True
 
 
 def parse_plan(text: str) -> Plan:
     headers, tasks, placeholders, block_errors = {}, [], [], []
-    fence, item_col, block, closed, cur, in_files = None, None, 1, False, None, False
+    fence, fence_line, item_col, block, closed, cur, in_files = None, 0, None, 1, False, None, False
     used, first_head = 0, None
     for n, line in enumerate(text.splitlines(), 1):
         if any(rx.search(line) for rx in PLACEHOLDERS):
@@ -4138,7 +4166,7 @@ def parse_plan(text: str) -> Plan:
             fence, item_col = None, None    # a line left of the list item's content ends the item and its fence
         opened = _fence_open(line, item_col)
         if opened:
-            fence, in_files = opened, False
+            fence, in_files, fence_line = opened, False, n
             continue
         if line.strip():
             lm = LIST_ITEM.match(line)
@@ -4188,6 +4216,8 @@ def parse_plan(text: str) -> Plan:
             continue
         m = MODE_RE.match(line)
         if m:
+            if cur.mode_seen:
+                cur.mode_error = "a second **Mode:** line in one task"
             cur.mode_seen = True
             cur.parallel = m.group(1) == "PARALLEL"
             if m.group(1) not in ("PARALLEL", "SERIAL"):
@@ -4196,7 +4226,8 @@ def parse_plan(text: str) -> Plan:
         for t in tasks:
             if t.line < first_head:
                 block_errors.append(f"line {t.line}: Task {t.num} comes before the first 'Block' heading")
-    return Plan(headers, tasks, placeholders, block_errors)
+    err = f"line {fence_line}: code fence never closed" if fence is not None else ""
+    return Plan(headers, tasks, placeholders, block_errors, err)
 
 
 def parse_query(query: str) -> dict:
@@ -4229,8 +4260,10 @@ def source_ids(root: str, source: str, findings: list) -> list[str]:
 
 
 def _names(source: str, path: str) -> bool:
-    """A register row's `source` names the repo-relative `path`: equal, or followed by ' ', '#' or ':'."""
-    return source == path or source.startswith((path + " ", path + "#", path + ":"))
+    """A register row's `source` names the repo-relative `path`: its first word (up to ' ', '#' or ':'),
+    normalised like the argument, equals it."""
+    head = re.split(r"[ #:]", source.strip(), maxsplit=1)[0]
+    return posixpath.normpath(head) == path
 
 
 def _verdict(res, lid, ok, reason):
@@ -4277,6 +4310,7 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
         else:
             _verdict(res, f"{pfx}.id.{fid}", len(nums) == 1,
                      f"routed to tasks {', '.join(nums)}; each id belongs to exactly one task")
+    _verdict(res, f"{pfx}.fence", not plan.fence_error, plan.fence_error)
     for err in plan.block_errors:
         res.fail(f"{pfx}.block.order", err)
     if not plan.block_errors:
@@ -4420,14 +4454,14 @@ before a reviewer is dispatched.
 `gate_plan.py --plan P --source <report | register:key=pat[,pat][&key=pat]>` prints the header, id-coverage, overlap,
 block-size and placeholder lines at plan approval. Register keys: `plan` (owner.plan), `task` (owner.task), `state`,
 `severity`; patterns are fnmatch; a repeated key or an empty pattern is `FAIL plan.input`. A report `--source` file is
-normalised to a repo-relative path and matches a register row whose `source` is that path, or starts with it and then ` `, `#` or `:`. The S2 plan's approval check is
+normalised to a repo-relative path and matches a register row whose `source`, up to its first ` `, `#` or `:`, normalises to that path. The S2 plan's approval check is
 `--source 'register:plan=strict-delivery&task=S2-T*'` (`task=S2-*` also matches `B4-FIX-1`, whose owner.task is
 `S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step; a heading number that does
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
 `FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
-`PARALLEL` or `SERIAL` is `FAIL plan.task.N.mode`. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
-indent relative to the list item, closed by the same character, a run at least as long and no info string).
+`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked path before the first ` (` of a Files item counts. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is exactly `## Block bN` (level 2).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
@@ -4438,7 +4472,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (69 tests); the full suite 522 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 92 lines (51 before this task + 41 `plan.strict-delivery.*` lines for this very plan file), 103 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (73 tests); the full suite 526 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 93 lines (51 before this task + 42 `plan.strict-delivery.*` lines for this very plan file), 104 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 
