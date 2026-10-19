@@ -20,9 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tools.gates.lib import GateError, Line, Result, gate_args, repo_root, run_check, run_gate  # noqa: E402
 
-GATES = ["register", "claims", "decisions", "dispatch", "review_package"]
+GATES = ["register", "claims", "decisions", "dispatch", "review_package", "plan"]
 # argv an S2+ gate gets when run() is handed nothing for it: the gate's CI-meaningful mode
-DEFAULT_ARGV = {"dispatch": ["--config-check"], "review_package": ["--all"]}
+DEFAULT_ARGV = {"dispatch": ["--config-check"], "review_package": ["--all"], "plan": ["--in-flight"]}
 PLANS_GLOB = os.path.join("docs", "superpowers", "plans", "*.md")
 
 

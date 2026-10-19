@@ -3347,9 +3347,11 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 - Create: `tools/gates/gate_plan.py`
 - Create: `tools/gates/tests/fixtures/plan/good.md`
 - Modify: `tools/gates/run_all.py` (`GATES`, `DEFAULT_ARGV`)
-- Modify: `tools/gates/README.md` (append review_package/plan section)
-- Modify: `docs/superpowers/state/strict-delivery/ledger.md` (line 1 `plan:` header; `mutations/.gitkeep`)
-- Modify: `.github/workflows/gates.yml` (only if it lists test modules)
+- Modify: `tools/gates/README.md` (one gate table row; append the make_review_package/gate_plan section)
+- Modify: `docs/superpowers/state/strict-delivery/ledger.md` (line 1 `plan:` header replaces the `# strict-delivery ledger` title; one appended ledger line)
+- Create: `docs/superpowers/state/strict-delivery/mutations/.gitkeep`
+- Modify: `tools/gates/tests/test_run_all.py` (`test_gates_at_this_block` and `test_cli_unknown_gate_is_rc_1` pin the gate list)
+- Not modified: `.github/workflows/gates.yml` (lines 30 and 32 run `unittest discover`, which finds the new test module; verified `grep -n unittest .github/workflows/gates.yml`)
 - Test: `tools/gates/tests/test_gate_plan.py`
 
 **Findings:** SD-S2-T6
@@ -3947,9 +3949,9 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "plan", "dispatch", "review_package"]` (umbrella order); add `"plan": ["--in-flight"]` to `DEFAULT_ARGV`.
+- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package", "plan"]` (session ruling 2b of b5: `plan` last; the umbrella order with `plan` in the middle is superseded); add `"plan": ["--in-flight"]` to `DEFAULT_ARGV`. Update the two pins in `tools/gates/tests/test_run_all.py`: `test_gates_at_this_block` expects the six-gate list; `test_cli_unknown_gate_is_rc_1` expects `(installed: register, claims, decisions, dispatch, review_package, plan)`.
 
-- [ ] **Step 6: Give the live strict-delivery ledger the contract header** (from this commit, `run_all` checks in-flight plans):
+- [ ] **Step 6: Give the live strict-delivery ledger the contract header** (from this commit, `run_all` checks in-flight plans; line 1 `# strict-delivery ledger` becomes the `plan:` line, every other line stays):
 
 ```bash
 python3 - <<'EOF'
@@ -3957,48 +3959,66 @@ import os
 d = "docs/superpowers/state/strict-delivery"
 p = f"{d}/ledger.md"
 plan = "plan: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md\n"
-text = open(p, encoding="utf-8").read() if os.path.exists(p) else "# Ledger: strict-delivery\n"
-if text.startswith("plan: "):
-    text = text.split("\n", 1)[1]
-os.makedirs(d, exist_ok=True)
-open(p, "w", encoding="utf-8").write(plan + text)
+note = "- ledger header added (line numbers shift by one; next handoff resume_line counts it)\n"
+text = open(p, encoding="utf-8").read()
+first, _, rest = text.partition("\n")
+assert first == "# strict-delivery ledger" or first.startswith("plan: "), first
+text = plan + rest
+if note not in text:
+    text += note
 os.makedirs(f"{d}/mutations", exist_ok=True)
+open(p, "w", encoding="utf-8").write(text)
 open(f"{d}/mutations/.gitkeep", "a").close()
 os.makedirs(".superpowers/sdd/strict-delivery/review", exist_ok=True)   # git-ignored package root
 EOF
 head -1 docs/superpowers/state/strict-delivery/ledger.md
 ```
-Expected: the `plan:` line. Ledger it: append `- ledger header added (line numbers shift by one; next handoff resume_line counts it)`.
+Expected: the `plan:` line.
 
-- [ ] **Step 7: README + CI** — append to `tools/gates/README.md`:
+- [ ] **Step 7: README + CI** — in `tools/gates/README.md` add this row after the `gate_review_package.py` row of the "Installed gates" table, then append the section below:
 ```markdown
-## gate_review_package, make_review_package, gate_plan (S2)
-
-`make_review_package.py <plan> <task> <base> <head>` writes the git-ignored `.superpowers/sdd/<plan>/review/<task>/`
-`commits.txt`, `diff.patch`, `gates.txt`; the implementer adds `mutation-<id>.txt`, `siblings.md`, `claims.md`.
-`gate_review_package.py --dir <that dir>` (ids = rows owned by `<plan>`/`<task>` + mutation files) must pass before a reviewer is dispatched;
-`--all` (run_all's default) re-checks every committed package. `gate_plan.py --plan P --source <report |
-register:plan=<name>&task=<pattern>>` prints the header, id-coverage, overlap, block-size and placeholder
-lines at plan approval; `--in-flight` (run_all's default) checks the plan named on line 1 of every ledger
-that does not end in a committed `CHECKPOINT b<N>` line.
+| `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` and `**Findings:**` per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
 ```
-Run `grep -n "unittest" .github/workflows/gates.yml`; if modules are listed, append `tools.gates.tests.test_gate_review_package tools.gates.tests.test_make_review_package tools.gates.tests.test_gate_plan`.
+```markdown
+## make_review_package, gate_plan (S2)
+
+`python3 tools/gates/make_review_package.py <plan> <task> <base> <head> [--only gate,gate]` writes `commits.txt`,
+`diff.patch` and `gates.txt` (`run_all` at HEAD minus `review_package` and `merge_ready`) into the git-ignored
+`.superpowers/sdd/<plan>/review/<task>/`, in the forms `gate_review_package` reads whatever the caller's git
+config says; it refuses a dirty tree, because `gates.txt` must describe HEAD. The implementer adds
+`mutation-<id>.txt`, `siblings.md` and `claims.md`; `gate_review_package.py --dir <that directory>` must pass
+before a reviewer is dispatched.
+
+`gate_plan.py --plan P --source <report | register:key=pat[,pat][&key=pat]>` prints the header, id-coverage, overlap,
+block-size and placeholder lines at plan approval. Register keys: `plan` (owner.plan), `task` (owner.task), `state`,
+`severity`; patterns are fnmatch. The S2 plan's approval check is
+`--source 'register:plan=strict-delivery&task=S2-T*'` (`task=S2-*` also matches `B4-FIX-1`, whose owner.task is
+`S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step.
+
+Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
+ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
+working tree and in `HEAD` (an uncommitted ledger is in flight); `--in-flight` checks every plan in flight, and a
+ledger without the `plan:` line is `FAIL plan.input`.
+```
+CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both `unittest discover -v -s tools/gates/tests -t .`: the new test modules are found without a list, so `.github/workflows/gates.yml` is not edited.
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (26 tests). Then `python3 tools/gates/run_all.py` → only `PASS`, including `plan.strict-delivery.*` lines for this very plan file. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-*'` → only `PASS` (each SD-S2-Tn in exactly one task).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (26 tests); the full suite 479 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 91 lines (51 before this task + 40 `plan.strict-delivery.*` lines for this very plan file), 102 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add tools/gates/gate_plan.py tools/gates/tests/fixtures/plan/good.md tools/gates/tests/test_gate_plan.py \
-        tools/gates/run_all.py tools/gates/README.md .github/workflows/gates.yml docs/superpowers/state/strict-delivery
+        tools/gates/run_all.py tools/gates/tests/test_run_all.py tools/gates/README.md \
+        docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md docs/superpowers/state/strict-delivery
 git commit -m "feat(gates): gate_plan -- headers, findings per task, id coverage, PARALLEL overlap, block cap, placeholders; ledger contract"
 ```
 
 - [ ] **Step 10: Mutation run and pin**
 
 ```bash
+export PYTHONDONTWRITEBYTECODE=1
 T=tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail
 python3 -m unittest $T                                                     # expect OK
 perl -pi -e 's/shared = sorted\(set\(a\.files\) & set\(b\.files\)\)/shared = []/' tools/gates/gate_plan.py
@@ -4012,8 +4032,14 @@ Write `.superpowers/sdd/strict-delivery/review/S2-T6/mutation-SD-S2-T6.txt` (the
 finding: SD-S2-T6
 test: test_parallel_tasks_sharing_a_file_fail
 step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
-step 2 (fix reverted: perl empties the shared-file set in tools/gates/gate_plan.py): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> FAIL
+step 2 (fix reverted: perl -pi -e 's/shared = sorted\(set\(a\.files\) & set\(b\.files\)\)/shared = []/' tools/gates/gate_plan.py empties the shared-file set): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
+```
+Write `siblings.md` (header `| sibling | test or finding |` and its separator row; the register row's list, header-only when it is empty) and `claims.md` (`| claim | direct | contradiction | output | verdict |`, every row PASS) beside it. On a clean tree build and gate the package:
+```bash
+python3 tools/gates/make_review_package.py strict-delivery S2-T6 <base> <head>
+python3 tools/gates/gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T6   # only PASS
+python3 tools/gates/run_all.py                                                                 # only PASS
 ```
 After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T6.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash

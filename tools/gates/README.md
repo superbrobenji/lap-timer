@@ -23,6 +23,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 | `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable) and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
 | `gate_review_package.py` | `--all` (run_all's default; no package is a PASS) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list, a claims table with no FAIL row |
+| `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` and `**Findings:**` per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
@@ -179,3 +180,23 @@ DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minim
 (`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
 strictly with integer ranks (`dispatch.config.model_rank`): 14 lines, so `run_all.py` prints 29 PASS on a
 healthy tree.
+
+## make_review_package, gate_plan (S2)
+
+`python3 tools/gates/make_review_package.py <plan> <task> <base> <head> [--only gate,gate]` writes `commits.txt`,
+`diff.patch` and `gates.txt` (`run_all` at HEAD minus `review_package` and `merge_ready`) into the git-ignored
+`.superpowers/sdd/<plan>/review/<task>/`, in the forms `gate_review_package` reads whatever the caller's git
+config says; it refuses a dirty tree, because `gates.txt` must describe HEAD. The implementer adds
+`mutation-<id>.txt`, `siblings.md` and `claims.md`; `gate_review_package.py --dir <that directory>` must pass
+before a reviewer is dispatched.
+
+`gate_plan.py --plan P --source <report | register:key=pat[,pat][&key=pat]>` prints the header, id-coverage, overlap,
+block-size and placeholder lines at plan approval. Register keys: `plan` (owner.plan), `task` (owner.task), `state`,
+`severity`; patterns are fnmatch. The S2 plan's approval check is
+`--source 'register:plan=strict-delivery&task=S2-T*'` (`task=S2-*` also matches `B4-FIX-1`, whose owner.task is
+`S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step.
+
+Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
+ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
+working tree and in `HEAD` (an uncommitted ledger is in flight); `--in-flight` checks every plan in flight, and a
+ledger without the `plan:` line is `FAIL plan.input`.
