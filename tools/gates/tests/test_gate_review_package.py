@@ -429,6 +429,53 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertNotIn("noreview", out)
 
+    # --- fix round 3 (R2-R4 of task-4-review3.md) ---
+    def both_modes(self, dir_arg=PKG):
+        for argv in (["--dir", dir_arg], ["--all"]):
+            rc, out = gate(self.root, argv)
+            self.assertEqual(0, rc, (argv, out))
+
+    def external(self, rel):
+        """Move <root>/rel to a fresh external directory and leave a symlink in its place."""
+        ext = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, ext, True)
+        src = os.path.join(self.root, rel)
+        dst = os.path.join(ext, os.path.basename(rel))
+        shutil.move(src, dst)
+        os.symlink(dst, src)
+
+    def test_symlinked_dot_superpowers_gives_the_same_verdict_in_both_modes(self):
+        self.external(".superpowers")
+        self.both_modes()
+
+    def test_symlinked_review_dir_gives_the_same_verdict_in_both_modes(self):
+        self.external(".superpowers/sdd/fx/review")
+        self.both_modes()
+
+    def test_symlinked_task_dir_is_followed_and_keeps_its_own_name(self):
+        # review/1 -> review/2: the link's name (task 1, row SD-FX-1) owns the package; the target's name
+        # (task 2) would own SD-FX-2, which has no transcript here
+        review = os.path.join(self.root, ".superpowers/sdd/fx/review")
+        os.rename(os.path.join(review, "1"), os.path.join(review, "2"))
+        os.symlink("2", os.path.join(review, "1"))
+        rc, out = gate(self.root, ["--dir", PKG])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS review_package.mutation.SD-FX-1", out)
+        self.assertNotIn("SD-FX-2", out)
+
+    def test_task_with_two_findings_needs_the_longest_siblings_list_only(self):
+        def two(rows):
+            rows["findings"][1]["owner"]["task"] = "1"
+            rows["findings"][1]["siblings"] = ["sib-a", "sib-b"]
+            rows["findings"][1]["state"] = "planned"
+        self.with_rows(two)
+        self.put({"mutation-SD-FX-2.txt": MUT.replace("SD-FX-1", "SD-FX-2"),
+                  "siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-a | test_a |\n| sib-b | test_b |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-a | test_a |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings", "1 row(s) for a register siblings list of 2")
+
     def test_registered_in_run_all(self):
         from tools.gates import run_all
         self.assertIn("review_package", run_all.GATES)

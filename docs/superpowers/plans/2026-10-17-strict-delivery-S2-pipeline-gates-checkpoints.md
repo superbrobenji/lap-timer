@@ -2361,6 +2361,53 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertNotIn("noreview", out)
 
+    # --- fix round 3 (R2-R4 of task-4-review3.md) ---
+    def both_modes(self, dir_arg=PKG):
+        for argv in (["--dir", dir_arg], ["--all"]):
+            rc, out = gate(self.root, argv)
+            self.assertEqual(0, rc, (argv, out))
+
+    def external(self, rel):
+        """Move <root>/rel to a fresh external directory and leave a symlink in its place."""
+        ext = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, ext, True)
+        src = os.path.join(self.root, rel)
+        dst = os.path.join(ext, os.path.basename(rel))
+        shutil.move(src, dst)
+        os.symlink(dst, src)
+
+    def test_symlinked_dot_superpowers_gives_the_same_verdict_in_both_modes(self):
+        self.external(".superpowers")
+        self.both_modes()
+
+    def test_symlinked_review_dir_gives_the_same_verdict_in_both_modes(self):
+        self.external(".superpowers/sdd/fx/review")
+        self.both_modes()
+
+    def test_symlinked_task_dir_is_followed_and_keeps_its_own_name(self):
+        # review/1 -> review/2: the link's name (task 1, row SD-FX-1) owns the package; the target's name
+        # (task 2) would own SD-FX-2, which has no transcript here
+        review = os.path.join(self.root, ".superpowers/sdd/fx/review")
+        os.rename(os.path.join(review, "1"), os.path.join(review, "2"))
+        os.symlink("2", os.path.join(review, "1"))
+        rc, out = gate(self.root, ["--dir", PKG])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS review_package.mutation.SD-FX-1", out)
+        self.assertNotIn("SD-FX-2", out)
+
+    def test_task_with_two_findings_needs_the_longest_siblings_list_only(self):
+        def two(rows):
+            rows["findings"][1]["owner"]["task"] = "1"
+            rows["findings"][1]["siblings"] = ["sib-a", "sib-b"]
+            rows["findings"][1]["state"] = "planned"
+        self.with_rows(two)
+        self.put({"mutation-SD-FX-2.txt": MUT.replace("SD-FX-1", "SD-FX-2"),
+                  "siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-a | test_a |\n| sib-b | test_b |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-a | test_a |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings", "1 row(s) for a register siblings list of 2")
+
     def test_registered_in_run_all(self):
         from tools.gates import run_all
         self.assertIn("review_package", run_all.GATES)
@@ -2617,12 +2664,14 @@ def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, p
     _claims(pkg, res, pfx)
 
 
-def _layout(root: str, pkg: str) -> tuple[str, str]:
-    """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task>; GateError for any other path."""
-    parts = os.path.relpath(pkg, root).split(os.sep)    # both already realpath-resolved by check()
-    if len(parts) != 5 or parts[:2] != SDD.split("/") or parts[3] != "review":
-        raise GateError(f"--dir {pkg} is not <root>/{SDD}/<plan>/review/<task>")
-    return parts[2], parts[4]
+def _layout(roots: tuple, wanted: str) -> tuple[str, str]:
+    """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task> for the root as given or its realpath;
+    lexical only (no component below the root is resolved, so --dir agrees with --all); else GateError."""
+    for root in roots:
+        parts = os.path.relpath(wanted, root).split(os.sep)
+        if len(parts) == 5 and parts[:2] == SDD.split("/") and parts[3] == "review":
+            return parts[2], parts[4]
+    raise GateError(f"--dir {wanted} is not <root>/{SDD}/<plan>/review/<task>")
 
 
 def _check_all(root: str, findings: list, res: Result) -> None:
@@ -2660,15 +2709,16 @@ def check(args: list) -> Result:
     a = p.parse_args(args)
     if a.all == bool(a.dir):
         raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
-    root = os.path.realpath(a.root or repo_root())
+    given = os.path.abspath(a.root or repo_root())
+    root = os.path.realpath(given)
     findings = registers.load_findings(root)
     res = Result("review_package")
     if a.all:
         _check_all(root, findings, res)
         return res
-    wanted = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
-    pkg = os.path.join(os.path.realpath(os.path.dirname(wanted)), os.path.basename(wanted))
-    plan, task = _layout(root, pkg)
+    wanted = os.path.normpath(os.path.join(given, a.dir))    # an absolute --dir wins in join
+    plan, task = _layout((given, root), wanted)
+    pkg = os.path.join(root, SDD, plan, "review", task)    # symlinks below the root are followed, as in --all
     if not os.path.isdir(pkg):
         raise GateError(f"--dir {a.dir}: no such directory")
     ids = task_findings(findings, pkg)
@@ -2690,7 +2740,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (58 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 419 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
 
 - [ ] **Step 6: Commit**
 

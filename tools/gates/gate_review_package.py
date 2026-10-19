@@ -233,12 +233,14 @@ def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, p
     _claims(pkg, res, pfx)
 
 
-def _layout(root: str, pkg: str) -> tuple[str, str]:
-    """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task>; GateError for any other path."""
-    parts = os.path.relpath(pkg, root).split(os.sep)    # both already realpath-resolved by check()
-    if len(parts) != 5 or parts[:2] != SDD.split("/") or parts[3] != "review":
-        raise GateError(f"--dir {pkg} is not <root>/{SDD}/<plan>/review/<task>")
-    return parts[2], parts[4]
+def _layout(roots: tuple, wanted: str) -> tuple[str, str]:
+    """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task> for the root as given or its realpath;
+    lexical only (no component below the root is resolved, so --dir agrees with --all); else GateError."""
+    for root in roots:
+        parts = os.path.relpath(wanted, root).split(os.sep)
+        if len(parts) == 5 and parts[:2] == SDD.split("/") and parts[3] == "review":
+            return parts[2], parts[4]
+    raise GateError(f"--dir {wanted} is not <root>/{SDD}/<plan>/review/<task>")
 
 
 def _check_all(root: str, findings: list, res: Result) -> None:
@@ -276,15 +278,16 @@ def check(args: list) -> Result:
     a = p.parse_args(args)
     if a.all == bool(a.dir):
         raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
-    root = os.path.realpath(a.root or repo_root())
+    given = os.path.abspath(a.root or repo_root())
+    root = os.path.realpath(given)
     findings = registers.load_findings(root)
     res = Result("review_package")
     if a.all:
         _check_all(root, findings, res)
         return res
-    wanted = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
-    pkg = os.path.join(os.path.realpath(os.path.dirname(wanted)), os.path.basename(wanted))
-    plan, task = _layout(root, pkg)
+    wanted = os.path.normpath(os.path.join(given, a.dir))    # an absolute --dir wins in join
+    plan, task = _layout((given, root), wanted)
+    pkg = os.path.join(root, SDD, plan, "review", task)    # symlinks below the root are followed, as in --all
     if not os.path.isdir(pkg):
         raise GateError(f"--dir {a.dir}: no such directory")
     ids = task_findings(findings, pkg)
