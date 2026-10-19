@@ -198,8 +198,8 @@ normalised to a repo-relative path and matches a register row whose `source`, up
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
 `FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
-`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked path before the first ` (` of a Files item counts. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
-indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is exactly `## Block bN` (level 2).
+`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked span of a Files item outside parentheses is a path; inside parentheses a span holding a `/` and no whitespace is `FAIL plan.task.N.files` (a hidden path), any other span (a symbol, a command line) is a comment. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the

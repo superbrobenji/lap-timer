@@ -3803,7 +3803,7 @@ class Branches(unittest.TestCase):
         extra = []
         for rid, src, task in (("SD-FX-3", "docs/cited.md §2", "3"), ("SD-FX-4", "docs/cited.md#sec", "4"),
                                ("SD-FX-5", "docs/cited.md:7", "5"), ("SD-FX-6", "docs/cited.mdx", "6"),
-                               ("SD-FX-8", "./docs/cited.md", "8"), ("SD-FX-9", "docs/./cited.md#sec", "9"),
+                               ("SD-FX-8", "./docs/cited.md", "8"), ("SD-FX-10", "  docs/cited.md", "10"), ("SD-FX-9", "docs/./cited.md#sec", "9"),
                                ("SD-FX-7", "xdocs/cited.md", "7")):
             row = copy.deepcopy(rows["findings"][0])
             row.update(id=rid, source=src)
@@ -3820,7 +3820,7 @@ class Branches(unittest.TestCase):
         for spelled in ("docs/cited.md", "./docs/cited.md", os.path.join(root, "docs", "cited.md")):
             with self.subTest(spelled):
                 rc, out = gate(root, ["--plan", plan, "--source", spelled])
-                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5", "SD-FX-8", "SD-FX-9"):
+                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5", "SD-FX-8", "SD-FX-9", "SD-FX-10"):
                     self.assertIn(f"FAIL plan.coverage.{rid}: in no task", out)
                 for rid in ("SD-FX-6", "SD-FX-7"):
                     self.assertNotIn(rid, out)
@@ -3868,8 +3868,31 @@ class Branches(unittest.TestCase):
     def test_every_backticked_path_of_a_files_item_counts(self):
         text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py`, `src/alpha.py`")
         self.fail(text, "plan.overlap.1-2", "src/alpha.py")
-        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (`src/alpha.py` is only a comment)")
-        self.ok(text)
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (helper), `src/alpha.py`")
+        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+
+    def test_spans_inside_parentheses(self):
+        for comment in ("(`GATES`, `DEFAULT_ARGV`)", "(verified `grep -n x src/alpha.py`)"):
+            with self.subTest(comment):
+                self.ok(self.variant("- Create: `src/beta.py`", f"- Create: `src/beta.py` {comment}"))
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (and `src/alpha.py`)")
+        self.fail(text, "plan.task.2.files", "path-like span `src/alpha.py` inside parentheses")
+
+    def test_a_dot_path_is_not_a_files_item(self):
+        for spelled in (".", "./", "a/.."):
+            with self.subTest(spelled):
+                self.fail(self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`"), "plan.task.2.files")
+
+    def test_block_heading_forms(self):
+        for heading in ("##  Block b7 — second", "##\tBlock b7 — second", "## Block 7 — second", "##  Block  7 — second"):
+            with self.subTest(heading):
+                out = self.ok(self.variant("## Block b2 — second", heading))
+                self.assertIn("PASS plan.block.7", out)
+                self.assertNotIn("plan.block.2", out)
+        for heading in ("### Block b7 — second", "##Block b7 — second", " ## Block b7 — second"):
+            with self.subTest(heading):
+                out = self.ok(self.variant("## Block b2 — second", heading))
+                self.assertNotIn("plan.block.7", out)
 
     def test_a_second_mode_line_fails(self):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/alpha.py`",
@@ -4006,7 +4029,9 @@ Expected: ERROR `cannot import name 'gate_plan'`.
 Checks: writing-plans header blocks; '**Files:**' and '**Findings:**' per task; every routed id registered
 and in exactly one task; with --source, every source id in exactly one task; file overlap between PARALLEL
 tasks of one block; tasks per block <= config block.max_tasks (blocks: '## Block bN' headings or CHECKPOINT
-steps; heading numbers increase); the writing-plans "No Placeholders" list over the whole file, code included.
+steps; heading numbers increase; '## Block N' or '## Block bN', level 2); the writing-plans "No Placeholders" list over the whole file, code included.
+A Files item names every backticked span outside parentheses as a path; inside parentheses a span with a '/'
+and no whitespace fails (a hidden path), any other span is a comment.
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -4041,7 +4066,7 @@ HEADERS = {
     "global-constraints": re.compile(r"^## Global Constraints\s*$"),
     "review-focus": re.compile(r"^## Review Focus\s*$"),
 }
-BLOCK_RE = re.compile(r"^## Block b?(\d+)\b")
+BLOCK_RE = re.compile(r"^##[ \t]+Block[ \t]+b?(\d+)\b")
 FENCE_RE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
 LIST_ITEM = re.compile(r"^( *)([-*+]|\d{1,9}[.)])( +)\S")
 FIELD_RE = re.compile(r"^\*\*[^*\n]+:\*\*")
@@ -4049,7 +4074,6 @@ STEP_RE = re.compile(r"^- \[[ xX]\] \*\*Step\b")
 TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
 CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
 FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): (?=`)(.*)$")
-SPAN_RE = re.compile(r"`([^`]+)`")
 FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
 MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(.*?)\s*$")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
@@ -4138,12 +4162,38 @@ def _fence_close(line: str, fence: tuple) -> bool:
         and len(m.group(1)) <= base + 3
 
 
+def _spans(text: str):
+    """(backticked span, parenthesis depth) in order; a '(' or ')' inside a span is part of the span."""
+    out, depth, i = [], 0, 0
+    while i < len(text):
+        c = text[i]
+        if c == "`":
+            j = text.find("`", i + 1)
+            if j < 0:
+                break
+            out.append((text[i + 1:j], depth))
+            i = j
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+        i += 1
+    return out
+
+
 def _file_item(task: Task, line: str) -> bool:
-    """A Files item: every backticked path before the first ' (' counts (text after it is a comment)."""
+    """A Files item: every backticked span outside parentheses is a path; inside parentheses a span with a '/'
+    and no whitespace is refused as a hidden path (write it outside); any other span there (a symbol such as
+    `GATES`, a command line with spaces) is a comment and is ignored."""
     fm = FILE_RE.match(line)
     if not fm:
         return False
-    paths = [posixpath.normpath(s.split(":")[0].strip()) for s in SPAN_RE.findall(fm.group(1).split(" (")[0])]
+    paths = []
+    for span, depth in _spans(fm.group(1)):
+        if depth == 0:
+            paths.append(posixpath.normpath(span.split(":")[0].strip()))
+        elif "/" in span and not any(ch.isspace() for ch in span):
+            task.files_errors.append(f"path-like span `{span}` inside parentheses: write it outside them")
     if not paths or any(p in ("", ".") for p in paths):
         return False
     task.files.extend(paths)
@@ -4204,7 +4254,7 @@ def parse_plan(text: str) -> Plan:
             if _file_item(cur, line):
                 continue
             if not (line.startswith("#") or FIELD_RE.match(line) or STEP_RE.match(line)):
-                cur.files_errors.append(line.strip()[:80])
+                cur.files_errors.append(f"not a '- Create|Modify|Test|Delete: `path`' item inside **Files:**: {line.strip()[:80]!r}")
                 continue
             in_files = False
         if line.startswith("**Files:**"):
@@ -4292,7 +4342,7 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
     for t in plan.tasks:
         tid = f"{pfx}.task.{t.num}"
         if t.files_errors:
-            res.fail(f"{tid}.files", f"not a '- Create|Modify|Test|Delete: `path`' item inside **Files:**: {t.files_errors[0]!r}")
+            res.fail(f"{tid}.files", t.files_errors[0])
         else:
             _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
         if t.mode_seen:
@@ -4460,8 +4510,8 @@ normalised to a repo-relative path and matches a register row whose `source`, up
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
 `FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
-`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked path before the first ` (` of a Files item counts. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
-indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is exactly `## Block bN` (level 2).
+`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked span of a Files item outside parentheses is a path; inside parentheses a span holding a `/` and no whitespace is `FAIL plan.task.N.files` (a hidden path), any other span (a symbol, a command line) is a comment. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
@@ -4472,7 +4522,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (73 tests); the full suite 526 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 93 lines (51 before this task + 42 `plan.strict-delivery.*` lines for this very plan file), 104 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (76 tests); the full suite 529 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 93 lines (51 before this task + 42 `plan.strict-delivery.*` lines for this very plan file), 104 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

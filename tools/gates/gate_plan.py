@@ -4,7 +4,9 @@
 Checks: writing-plans header blocks; '**Files:**' and '**Findings:**' per task; every routed id registered
 and in exactly one task; with --source, every source id in exactly one task; file overlap between PARALLEL
 tasks of one block; tasks per block <= config block.max_tasks (blocks: '## Block bN' headings or CHECKPOINT
-steps; heading numbers increase); the writing-plans "No Placeholders" list over the whole file, code included.
+steps; heading numbers increase; '## Block N' or '## Block bN', level 2); the writing-plans "No Placeholders" list over the whole file, code included.
+A Files item names every backticked span outside parentheses as a path; inside parentheses a span with a '/'
+and no whitespace fails (a hidden path), any other span is a comment.
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -39,7 +41,7 @@ HEADERS = {
     "global-constraints": re.compile(r"^## Global Constraints\s*$"),
     "review-focus": re.compile(r"^## Review Focus\s*$"),
 }
-BLOCK_RE = re.compile(r"^## Block b?(\d+)\b")
+BLOCK_RE = re.compile(r"^##[ \t]+Block[ \t]+b?(\d+)\b")
 FENCE_RE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
 LIST_ITEM = re.compile(r"^( *)([-*+]|\d{1,9}[.)])( +)\S")
 FIELD_RE = re.compile(r"^\*\*[^*\n]+:\*\*")
@@ -47,7 +49,6 @@ STEP_RE = re.compile(r"^- \[[ xX]\] \*\*Step\b")
 TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
 CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
 FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): (?=`)(.*)$")
-SPAN_RE = re.compile(r"`([^`]+)`")
 FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
 MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(.*?)\s*$")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
@@ -136,12 +137,38 @@ def _fence_close(line: str, fence: tuple) -> bool:
         and len(m.group(1)) <= base + 3
 
 
+def _spans(text: str):
+    """(backticked span, parenthesis depth) in order; a '(' or ')' inside a span is part of the span."""
+    out, depth, i = [], 0, 0
+    while i < len(text):
+        c = text[i]
+        if c == "`":
+            j = text.find("`", i + 1)
+            if j < 0:
+                break
+            out.append((text[i + 1:j], depth))
+            i = j
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+        i += 1
+    return out
+
+
 def _file_item(task: Task, line: str) -> bool:
-    """A Files item: every backticked path before the first ' (' counts (text after it is a comment)."""
+    """A Files item: every backticked span outside parentheses is a path; inside parentheses a span with a '/'
+    and no whitespace is refused as a hidden path (write it outside); any other span there (a symbol such as
+    `GATES`, a command line with spaces) is a comment and is ignored."""
     fm = FILE_RE.match(line)
     if not fm:
         return False
-    paths = [posixpath.normpath(s.split(":")[0].strip()) for s in SPAN_RE.findall(fm.group(1).split(" (")[0])]
+    paths = []
+    for span, depth in _spans(fm.group(1)):
+        if depth == 0:
+            paths.append(posixpath.normpath(span.split(":")[0].strip()))
+        elif "/" in span and not any(ch.isspace() for ch in span):
+            task.files_errors.append(f"path-like span `{span}` inside parentheses: write it outside them")
     if not paths or any(p in ("", ".") for p in paths):
         return False
     task.files.extend(paths)
@@ -202,7 +229,7 @@ def parse_plan(text: str) -> Plan:
             if _file_item(cur, line):
                 continue
             if not (line.startswith("#") or FIELD_RE.match(line) or STEP_RE.match(line)):
-                cur.files_errors.append(line.strip()[:80])
+                cur.files_errors.append(f"not a '- Create|Modify|Test|Delete: `path`' item inside **Files:**: {line.strip()[:80]!r}")
                 continue
             in_files = False
         if line.startswith("**Files:**"):
@@ -290,7 +317,7 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
     for t in plan.tasks:
         tid = f"{pfx}.task.{t.num}"
         if t.files_errors:
-            res.fail(f"{tid}.files", f"not a '- Create|Modify|Test|Delete: `path`' item inside **Files:**: {t.files_errors[0]!r}")
+            res.fail(f"{tid}.files", t.files_errors[0])
         else:
             _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
         if t.mode_seen:

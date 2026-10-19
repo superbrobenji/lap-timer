@@ -375,7 +375,7 @@ class Branches(unittest.TestCase):
         extra = []
         for rid, src, task in (("SD-FX-3", "docs/cited.md §2", "3"), ("SD-FX-4", "docs/cited.md#sec", "4"),
                                ("SD-FX-5", "docs/cited.md:7", "5"), ("SD-FX-6", "docs/cited.mdx", "6"),
-                               ("SD-FX-8", "./docs/cited.md", "8"), ("SD-FX-9", "docs/./cited.md#sec", "9"),
+                               ("SD-FX-8", "./docs/cited.md", "8"), ("SD-FX-10", "  docs/cited.md", "10"), ("SD-FX-9", "docs/./cited.md#sec", "9"),
                                ("SD-FX-7", "xdocs/cited.md", "7")):
             row = copy.deepcopy(rows["findings"][0])
             row.update(id=rid, source=src)
@@ -392,7 +392,7 @@ class Branches(unittest.TestCase):
         for spelled in ("docs/cited.md", "./docs/cited.md", os.path.join(root, "docs", "cited.md")):
             with self.subTest(spelled):
                 rc, out = gate(root, ["--plan", plan, "--source", spelled])
-                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5", "SD-FX-8", "SD-FX-9"):
+                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5", "SD-FX-8", "SD-FX-9", "SD-FX-10"):
                     self.assertIn(f"FAIL plan.coverage.{rid}: in no task", out)
                 for rid in ("SD-FX-6", "SD-FX-7"):
                     self.assertNotIn(rid, out)
@@ -440,8 +440,31 @@ class Branches(unittest.TestCase):
     def test_every_backticked_path_of_a_files_item_counts(self):
         text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py`, `src/alpha.py`")
         self.fail(text, "plan.overlap.1-2", "src/alpha.py")
-        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (`src/alpha.py` is only a comment)")
-        self.ok(text)
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (helper), `src/alpha.py`")
+        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+
+    def test_spans_inside_parentheses(self):
+        for comment in ("(`GATES`, `DEFAULT_ARGV`)", "(verified `grep -n x src/alpha.py`)"):
+            with self.subTest(comment):
+                self.ok(self.variant("- Create: `src/beta.py`", f"- Create: `src/beta.py` {comment}"))
+        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (and `src/alpha.py`)")
+        self.fail(text, "plan.task.2.files", "path-like span `src/alpha.py` inside parentheses")
+
+    def test_a_dot_path_is_not_a_files_item(self):
+        for spelled in (".", "./", "a/.."):
+            with self.subTest(spelled):
+                self.fail(self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`"), "plan.task.2.files")
+
+    def test_block_heading_forms(self):
+        for heading in ("##  Block b7 — second", "##\tBlock b7 — second", "## Block 7 — second", "##  Block  7 — second"):
+            with self.subTest(heading):
+                out = self.ok(self.variant("## Block b2 — second", heading))
+                self.assertIn("PASS plan.block.7", out)
+                self.assertNotIn("plan.block.2", out)
+        for heading in ("### Block b7 — second", "##Block b7 — second", " ## Block b7 — second"):
+            with self.subTest(heading):
+                out = self.ok(self.variant("## Block b2 — second", heading))
+                self.assertNotIn("plan.block.7", out)
 
     def test_a_second_mode_line_fails(self):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/alpha.py`",
