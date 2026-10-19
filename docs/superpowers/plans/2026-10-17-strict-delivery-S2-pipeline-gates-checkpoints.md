@@ -2820,14 +2820,24 @@ Run from the repo root: python3 -m unittest tools.gates.tests.test_make_review_p
 import contextlib
 import io
 import os
+import re
 import shutil
 import unittest
 from unittest import mock
 
+from tools.gates import gate_review_package as grp
 from tools.gates import make_review_package as mrp
 from tools.gates.tests import repo_fixture as rf
 
 REVIEW = ".superpowers/sdd/fx/review"
+MUTATION = ("finding: SD-FX-1\n"
+            "test: test_fx\n"
+            "step 1 (fix present): python3 -m unittest t.T.test_fx -> PASS\n"
+            "step 2 (fix reverted: git stash push src/fx.py): python3 -m unittest t.T.test_fx -> FAIL\n"
+            "step 3 (fix restored): python3 -m unittest t.T.test_fx -> PASS\n")
+SIBLINGS = "| sibling | test or finding |\n|---|---|\n| sib-a | test_sib_a |\n"
+CLAIMS = ("| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
+          "| fx fixed | grep -n fixed src/fx.py | grep -c unfixed src/fx.py | 1:fixed = True / 0 | PASS |\n")
 
 
 def read(root, rel):
@@ -2839,18 +2849,22 @@ class MakeReviewPackage(unittest.TestCase):
     def setUp(self):
         files = dict(rf.DISPATCH_FILES)
         files["docs/superpowers/state/fx/mutations/.gitkeep"] = ""
+        files["docs/reviews/.gitkeep"] = ""    # gate_register needs the report directory
         self.root = rf.make_repo(files, rf.load_rows())
         self.addCleanup(shutil.rmtree, self.root, True)
         self.base = rf.git(self.root, "rev-parse", "HEAD")
         rf.write(self.root, "src/fx.py", "fixed = True\n")
         self.head = rf.commit(self.root, "feat: fixture fix")
 
-    def make(self, *argv):
+    def run_main(self, main, *argv):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.root}), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = mrp.main(list(argv))
+            rc = main(list(argv))
         return rc, out.getvalue() + err.getvalue()
+
+    def make(self, *argv):
+        return self.run_main(mrp.main, *argv)
 
     def test_writes_commits_diff_and_gates(self):
         rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
@@ -2903,6 +2917,47 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertEqual(1, rc, out)
         self.assertIn("FAIL", read(self.root, f"{REVIEW}/1/gates.txt"))
 
+    def test_decorated_log_config_does_not_reach_commits_txt(self):
+        rf.git(self.root, "config", "log.decorate", "short")
+        rf.git(self.root, "tag", "task-tip", self.head)
+        self.assertIn("tag: task-tip", rf.git(self.root, "log", "--oneline", "-1"))    # the config does decorate
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        commits = read(self.root, f"{REVIEW}/1/commits.txt")
+        self.assertRegex(commits, r"^[0-9a-f]{7,40} feat: fixture fix\n$")
+        self.assertNotIn("tag:", commits)
+
+    def test_diff_prefix_config_does_not_reach_diff_patch(self):
+        rf.git(self.root, "config", "diff.noprefix", "true")
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertTrue(read(self.root, f"{REVIEW}/1/diff.patch").startswith("diff --git a/src/fx.py b/src/fx.py"))
+
+    def test_empty_diff_fails(self):
+        rf.git(self.root, "commit", "-q", "--allow-empty", "-m", "no change")
+        head = rf.git(self.root, "rev-parse", "HEAD")
+        rc, out = self.make("fx", "1", head + "~1", head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("empty diff", out)
+
+    def test_task_name_cannot_leave_the_package_dir(self):
+        rc, out = self.make("fx", "../x", self.base, self.head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("not a directory name", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".superpowers/sdd/fx/x")))
+
+    def test_package_passes_gate_review_package(self):
+        rc, out = self.make("fx", "1", self.base, self.head)
+        self.assertEqual(0, rc, out)
+        self.assertRegex(read(self.root, f"{REVIEW}/1/gates.txt"), r"(?m)^PASS register\.")
+        for name, text in (("mutation-SD-FX-1.txt", MUTATION), ("siblings.md", SIBLINGS), ("claims.md", CLAIMS)):
+            rf.write(self.root, f"{REVIEW}/1/{name}", text)
+        rc, out = self.run_main(grp.main, "--dir", f"{REVIEW}/1")
+        self.assertEqual(0, rc, out)
+        lines = [l for l in out.splitlines() if l.strip()]
+        self.assertTrue(lines and all(l.startswith("PASS ") for l in lines), out)
+        self.assertTrue(any(re.match(r"PASS review_package\.gates", l) for l in lines), out)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -2919,9 +2974,12 @@ Expected: ERROR `cannot import name 'make_review_package'`.
 #!/usr/bin/env python3
 """make_review_package -- build .superpowers/sdd/<plan>/review/<task>/ (git-ignored) for one task's BASE..HEAD.
 
-Writes commits.txt (git log --oneline), diff.patch (git diff -U10) and gates.txt
+Writes commits.txt (git log --oneline --no-decorate), diff.patch (git diff -U10) and gates.txt
 (run_all at HEAD minus the gates that judge the package or the PR). The implementer adds
 mutation-<finding-id>.txt, siblings.md and claims.md; this script never touches those.
+The output is what gate_review_package accepts: commit lines '<sha> <subject>', a diff starting
+'diff --git a/', gate lines 'PASS|FAIL <id>'. git is run with the options that fix those forms
+whatever the user's git config says (decorations, diff prefixes, external diff, colour).
 Same range guards as superpowers' subagent-driven-development scripts/review-package.
 Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
 """
@@ -2929,6 +2987,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -2937,32 +2996,41 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from tools.gates import run_all  # noqa: E402
-from tools.gates.lib import gitinfo, repo_root  # noqa: E402
+from tools.gates.lib import GateError, gitinfo, repo_root  # noqa: E402
 
 STATE = "docs/superpowers/state"
 SDD = ".superpowers/sdd"
 EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# options that pin the forms gate_review_package reads, against the caller's git config
+PLAIN = ("-c", "color.ui=never", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
+         "-c", "diff.external=", "-c", "log.showSignature=false")
 
 
 class Refused(Exception):
     pass
 
 
-def _git(root: str, *args: str) -> str:
-    r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+def _git(root: str, *args: str) -> bytes:
+    r = subprocess.run(["git", "--no-pager", *args], cwd=root, capture_output=True, check=False,
+                       env={**os.environ, "LC_ALL": "C"})
     if r.returncode != 0:
-        raise Refused(f"git {' '.join(args)}: {r.stderr.strip() or 'exit ' + str(r.returncode)}")
+        err = r.stderr.decode("utf-8", "replace").strip()
+        raise Refused(f"git {' '.join(args)}: {err or 'exit ' + str(r.returncode)}")
     return r.stdout
 
 
+def _sha(root: str, rev: str) -> str:
+    return _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
+
+
 def _range(root: str, base: str, head: str) -> tuple[str, str, int]:
-    b = _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").strip()
-    h = _git(root, "rev-parse", "--verify", "--quiet", f"{head}^{{commit}}").strip()
+    b, h = _sha(root, base), _sha(root, head)
     anc = subprocess.run(["git", "merge-base", "--is-ancestor", b, h], cwd=root, capture_output=True, check=False)
     if anc.returncode != 0:
         raise Refused(f"HEAD is not a descendant of BASE: {base}..{head}")
-    n = int(_git(root, "rev-list", "--count", f"{b}..{h}").strip())
+    n = int(_git(root, "rev-list", "--count", f"{b}..{h}").decode().strip())
     if n == 0:
         raise Refused(f"empty commit range: {base}..{head}")
     if h != gitinfo.head_sha(root):
@@ -2970,9 +3038,29 @@ def _range(root: str, base: str, head: str) -> tuple[str, str, int]:
     return b, h, n
 
 
-def _write(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
+def _write(path: str, data) -> None:
+    with open(path, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+
+def _package(root: str, a) -> tuple[str, int]:
+    for label, value in (("plan", a.plan), ("task", a.task)):
+        if not NAME.match(value):
+            raise Refused(f"{label} {value!r} is not a directory name ({NAME.pattern})")
+    if not os.path.isdir(os.path.join(root, STATE, a.plan)):
+        raise Refused(f"{STATE}/{a.plan}/ missing: run tools/gates/new_plan_state.py {a.plan} first")
+    b, h, n = _range(root, a.base, a.head)
+    diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "-U10", f"{b}..{h}")
+    if not diff.strip():
+        raise Refused(f"empty diff for {a.base}..{a.head}: the commits change no file")
+    pkg = os.path.join(root, SDD, a.plan, "review", a.task)
+    try:
+        os.makedirs(pkg, exist_ok=True)
+        _write(os.path.join(pkg, "commits.txt"), _git(root, *PLAIN, "log", "--oneline", "--no-decorate", f"{b}..{h}"))
+        _write(os.path.join(pkg, "diff.patch"), diff)
+    except OSError as e:
+        raise Refused(f"cannot write {os.path.relpath(pkg, root)}: {e.strerror or e}") from None
+    return pkg, n
 
 
 def main(argv=None) -> int:
@@ -2984,25 +3072,22 @@ def main(argv=None) -> int:
     p.add_argument("--only", help="comma-separated gates for gates.txt (default: run_all.GATES minus "
                                   + ", ".join(EXCLUDE) + ")")
     a = p.parse_args(argv)
-    root = repo_root()
     try:
-        plan_dir = os.path.join(root, STATE, a.plan)
-        if not os.path.isdir(plan_dir):
-            raise Refused(f"{STATE}/{a.plan}/ missing: run tools/gates/new_plan_state.py {a.plan} first")
-        b, h, n = _range(root, a.base, a.head)
-        pkg = os.path.join(root, SDD, a.plan, "review", a.task)
-        os.makedirs(pkg, exist_ok=True)
-        _write(os.path.join(pkg, "commits.txt"), _git(root, "log", "--oneline", f"{b}..{h}"))
-        _write(os.path.join(pkg, "diff.patch"), _git(root, "diff", "-U10", f"{b}..{h}"))
-    except Refused as e:
+        root = repo_root()
+        pkg, n = _package(root, a)
+    except (Refused, GateError) as e:
         print(f"make_review_package: {e}", file=sys.stderr)
         return 1
-    names = a.only.split(",") if a.only else [g for g in run_all.GATES if g not in EXCLUDE]
+    names = [x.strip() for x in a.only.split(",")] if a.only else [g for g in run_all.GATES if g not in EXCLUDE]
     res = run_all.run(names, {"root": root})
-    _write(os.path.join(pkg, "gates.txt"), res.render(False) + "\n")
-    pending = [f for f in IMPLEMENTER_FILES if not os.path.isfile(os.path.join(pkg, f))]
-    if not any(f.startswith("mutation-") for f in os.listdir(pkg)):
-        pending.append("mutation-<finding-id>.txt")
+    try:
+        _write(os.path.join(pkg, "gates.txt"), res.render(False) + "\n")
+        pending = [f for f in IMPLEMENTER_FILES if not os.path.isfile(os.path.join(pkg, f))]
+        if not any(f.startswith("mutation-") for f in os.listdir(pkg)):
+            pending.append("mutation-<finding-id>.txt")
+    except OSError as e:
+        print(f"make_review_package: cannot write gates.txt: {e.strerror or e}", file=sys.stderr)
+        return 1
     print(f"wrote {os.path.relpath(pkg, root)}: {n} commit(s); gates {'PASS' if res.ok() else 'FAIL'}")
     if pending:
         print(f"the implementer still adds: {', '.join(pending)}")
@@ -3015,7 +3100,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (7 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (12 tests); `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
