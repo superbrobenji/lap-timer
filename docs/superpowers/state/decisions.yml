@@ -154,8 +154,8 @@
     - {label: add-checks-now, cost: "one more fix round in b5 with a new per-task field grammar (Siblings, Pin step, Gate list) and every in-flight plan gains those fields (the S2 plan's nine tasks now, S3-S5 before they go in flight) or run_all goes red"}
     - {label: amend-spec, cost: "spec:181 and :198 reworded so sibling lists, pin step and gate list are brief content checked by the reviewer, not gate_plan checks; the check never exists"}
   asked_at: {sha: "054865f", by: session}
-  answer: null
-  answered_at: null
+  answer: "add-checks-now (owner in chat, 2026-10-19: \"dec-0016 add-checks-now\"; the session had recommended ship-and-register)"
+  answered_at: {sha: "4bf208e", by: superbrobenji}
 - id: DEC-0017
   class: spec-direction
   question: "b5 Task 6 reviews R3-1, R4-1, R4-2: neither the spec nor the S2 plan defines how a Files item of a plan task is written, and gate_plan's file-overlap table depends on parsing it; three fix rounds of parser picks each reopened a fail-open case (a path inside parentheses, a root file without a slash, an unclosed parenthesis or backtick dropping later paths). Which Files-item grammar binds every plan from now on?"
@@ -164,8 +164,8 @@
     - {label: multi-span-strict, cost: "keep multi-span parsing; any whitespace-free backticked span inside parentheses that holds a slash or a dot FAILs, and an unbalanced parenthesis or backtick FAILs; dotted symbols such as registers.PIN_TEST inside parentheses must be rewritten; the parser keeps growing with each edge case"}
     - {label: tracked-path-only, cost: "as multi-span-strict but a span inside parentheses FAILs only when it names a tracked path; a file still to be created, without a slash and inside parentheses, is missed (fail-open)"}
   asked_at: {sha: "054865f", by: session}
-  answer: null
-  answered_at: null
+  answer: "one-path-per-item (owner in chat, 2026-10-19: \"dec-0017 one-line-per-item\", read as the option one-path-per-item, the session's recommendation)"
+  answered_at: {sha: "4bf208e", by: superbrobenji}
 - id: DEC-0018
   class: model-policy
   question: "Fable usage limits are hit mid-plan (owner, 2026-10-19). Spec D18 and §5 put the final adversarial verifier and the exception reviewer on Fable with no fallback, and gate_dispatch refuses any lower model for those roles (rank check, gate_dispatch.py:97-107). What runs those roles while Fable is unavailable?"
@@ -182,5 +182,5 @@
     - {label: b5-fixwave, cost: "one opus implementer fix wave at CHECKPOINT b5 (B4-FIX-1 precedent), reviewed by a scoped opus re-review; the b5 final verifier then runs on opus under the fallback; b5 PR grows by about two files"}
     - {label: b6-task, cost: "b6 gains the change as part of Task 7-9 or a fourth task (block cap 3: a re-slice); the b5 final verifier waits for Fable or the b5 merge waits for b6"}
   asked_at: {sha: "11a632e", by: session}
-  answer: null
-  answered_at: null
+  answer: "b5-fixwave (owner in chat, 2026-10-19: \"dec-0019 b5-fixwave\"; the session had recommended b5-fixwave)"
+  answered_at: {sha: "4bf208e", by: superbrobenji}

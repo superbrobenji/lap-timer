@@ -436,11 +436,14 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-fixwave
-  state: open
+  state: planned
   pin: null
   ruling: null
   evidence: []
   history:
   - state: open
     sha: 11a632e
+    by: session
+  - state: planned
+    sha: 4bf208e
     by: session
