@@ -7,7 +7,8 @@ mutation-<finding-id>.txt, siblings.md and claims.md; this script never touches 
 The output is what gate_review_package accepts: commit lines '<sha> <subject>', a diff starting
 'diff --git a/', gate lines 'PASS|FAIL <id>'. git is run with the options that fix those forms
 whatever the user's git config says (decorations, diff prefixes, external diff, colour).
-Same range guards as superpowers' subagent-driven-development scripts/review-package.
+Same range guards as superpowers' subagent-driven-development scripts/review-package; a dirty tree is
+refused, because gates.txt must describe HEAD, not the working tree.
 Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
 """
 from __future__ import annotations
@@ -31,8 +32,7 @@ EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # options that pin the forms gate_review_package reads, against the caller's git config
-PLAIN = ("-c", "color.ui=never", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
-         "-c", "diff.external=", "-c", "log.showSignature=false")
+PLAIN = ("-c", "color.ui=never", "-c", "diff.noprefix=false", "-c", "log.showSignature=false")
 
 
 class Refused(Exception):
@@ -48,12 +48,15 @@ def _git(root: str, *args: str) -> bytes:
     return r.stdout
 
 
-def _sha(root: str, rev: str) -> str:
-    return _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
+def _sha(root: str, rev: str, label: str) -> str:
+    try:
+        return _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
+    except Refused:
+        raise Refused(f"unknown revision for {label}: {rev}") from None
 
 
 def _range(root: str, base: str, head: str) -> tuple[str, str, int]:
-    b, h = _sha(root, base), _sha(root, head)
+    b, h = _sha(root, base, "base"), _sha(root, head, "head")
     anc = subprocess.run(["git", "merge-base", "--is-ancestor", b, h], cwd=root, capture_output=True, check=False)
     if anc.returncode != 0:
         raise Refused(f"HEAD is not a descendant of BASE: {base}..{head}")
@@ -76,6 +79,9 @@ def _package(root: str, a) -> tuple[str, int]:
             raise Refused(f"{label} {value!r} is not a directory name ({NAME.pattern})")
     if not os.path.isdir(os.path.join(root, STATE, a.plan)):
         raise Refused(f"{STATE}/{a.plan}/ missing: run tools/gates/new_plan_state.py {a.plan} first")
+    if not gitinfo.status_clean(root):
+        raise Refused("working tree is not clean: gates.txt must describe the commit under review; "
+                      "commit or stash first (the ignored .superpowers/ does not count)")
     b, h, n = _range(root, a.base, a.head)
     diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "-U10", f"{b}..{h}")
     if not diff.strip():
@@ -105,7 +111,8 @@ def main(argv=None) -> int:
     except (Refused, GateError) as e:
         print(f"make_review_package: {e}", file=sys.stderr)
         return 1
-    names = [x.strip() for x in a.only.split(",")] if a.only else [g for g in run_all.GATES if g not in EXCLUDE]
+    names = ([x.strip() for x in a.only.split(",") if x.strip()] if a.only is not None
+             else [g for g in run_all.GATES if g not in EXCLUDE])    # as run_all --only
     res = run_all.run(names, {"root": root})
     try:
         _write(os.path.join(pkg, "gates.txt"), res.render(False) + "\n")

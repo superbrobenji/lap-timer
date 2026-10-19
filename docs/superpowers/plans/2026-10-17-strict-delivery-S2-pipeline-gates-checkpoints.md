@@ -2822,6 +2822,8 @@ import io
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -2850,6 +2852,7 @@ class MakeReviewPackage(unittest.TestCase):
         files = dict(rf.DISPATCH_FILES)
         files["docs/superpowers/state/fx/mutations/.gitkeep"] = ""
         files["docs/reviews/.gitkeep"] = ""    # gate_register needs the report directory
+        files[".gitignore"] = ".superpowers/\n"    # as in the real repo: the package dir is not "dirty"
         self.root = rf.make_repo(files, rf.load_rows())
         self.addCleanup(shutil.rmtree, self.root, True)
         self.base = rf.git(self.root, "rev-parse", "HEAD")
@@ -2946,6 +2949,125 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertIn("not a directory name", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, ".superpowers/sdd/fx/x")))
 
+    def test_dot_names_are_refused(self):
+        for plan, task in (("fx", ".."), ("fx", "."), ("..", "1"), (".", "1"), ("fx", ".hidden")):
+            with self.subTest(plan=plan, task=task):
+                rc, out = self.make(plan, task, self.base, self.head, "--only", "register")
+                self.assertEqual(1, rc, out)
+                self.assertIn("not a directory name", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".superpowers/sdd/fx/commits.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".superpowers/sdd/review")))
+
+    def test_dirty_tree_fails_before_writing(self):
+        rf.write(self.root, "docs/superpowers/state/findings.yml", "not: [valid\n")
+        rf.commit(self.root, "break the register")
+        head = rf.git(self.root, "rev-parse", "HEAD")
+        rf.git(self.root, "checkout", "-q", self.base, "--", "docs/superpowers/state/findings.yml")    # fix, uncommitted
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("working tree is not clean", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def test_untracked_file_fails_before_writing(self):
+        rf.write(self.root, "stray.txt", "x\n")
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("working tree is not clean", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def test_color_config_does_not_reach_the_package(self):
+        rf.git(self.root, "config", "color.ui", "always")
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("\x1b", read(self.root, f"{REVIEW}/1/commits.txt"))
+        self.assertTrue(read(self.root, f"{REVIEW}/1/diff.patch").startswith("diff --git a/"))
+
+    def test_textconv_driver_does_not_reach_diff_patch(self):
+        rf.write(self.root, ".gitattributes", "*.x diff=up\n")
+        rf.write(self.root, "data.x", "hi\n")
+        head = rf.commit(self.root, "add data.x")
+        rf.git(self.root, "config", "diff.up.textconv", "false")    # a converter that fails
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertIn("+hi\n", read(self.root, f"{REVIEW}/1/diff.patch"))
+
+    def test_diff_has_ten_lines_of_context(self):
+        rf.write(self.root, "ctx.txt", "".join(f"line{n:02d}\n" for n in range(1, 31)))
+        mid = rf.commit(self.root, "add ctx.txt")
+        rf.write(self.root, "ctx.txt", "".join(f"line{n:02d}\n" if n != 15 else "changed\n" for n in range(1, 31)))
+        head = rf.commit(self.root, "change line 15")
+        rc, out = self.make("fx", "1", mid, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        diff = read(self.root, f"{REVIEW}/1/diff.patch")
+        self.assertIn(" line05", diff.splitlines())
+        self.assertNotIn(" line04", diff.splitlines())
+
+    def test_show_signature_config_does_not_reach_commits_txt(self):
+        if shutil.which("ssh-keygen") is None:
+            self.skipTest("ssh-keygen is needed to sign a fixture commit")
+        keydir = tempfile.mkdtemp(prefix="mrp-key-")
+        self.addCleanup(shutil.rmtree, keydir, True)
+        key = os.path.join(keydir, "key")
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key], check=True)
+        rf.git(self.root, "config", "gpg.format", "ssh")
+        rf.git(self.root, "config", "user.signingkey", key + ".pub")
+        rf.write(self.root, "src/signed.py", "signed = True\n")
+        rf.git(self.root, "add", "-A")
+        rf.git(self.root, "commit", "-q", "-S", "-m", "feat: signed")
+        head = rf.git(self.root, "rev-parse", "HEAD")
+        rf.git(self.root, "config", "log.showSignature", "true")
+        self.assertGreater(len(rf.git(self.root, "log", "--oneline", "-1").splitlines()), 1)    # the config does add lines
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        commits = read(self.root, f"{REVIEW}/1/commits.txt")
+        self.assertEqual(2, len(commits.splitlines()), commits)
+
+    def test_annotated_tag_head_is_accepted(self):
+        rf.git(self.root, "tag", "-a", "-m", "task tip", "task-tip", self.head)
+        rc, out = self.make("fx", "1", self.base, "task-tip", "--only", "register")
+        self.assertEqual(0, rc, out)
+
+    def test_unknown_revisions_name_the_argument(self):
+        for label, argv in (("base", ("nosuchrev", self.head)), ("head", (self.base, "nosuchrev"))):
+            with self.subTest(label=label):
+                rc, out = self.make("fx", "1", *argv, "--only", "register")
+                self.assertEqual(1, rc, out)
+                self.assertIn(f"unknown revision for {label}: nosuchrev", out)
+
+    def test_not_a_git_repository_fails(self):
+        plain = tempfile.mkdtemp(prefix="mrp-plain-")
+        self.addCleanup(shutil.rmtree, plain, True)
+        os.makedirs(os.path.join(plain, "docs/superpowers/state/fx"))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": plain}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = mrp.main(["fx", "1", "a", "b"])
+        self.assertEqual(1, rc, err.getvalue())
+        self.assertIn("not a git repository", err.getvalue())
+
+    def test_package_path_that_is_a_file_fails(self):
+        rf.write(self.root, f"{REVIEW}/1", "in the way\n")
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("cannot write", out)
+
+    def test_gates_txt_that_is_a_directory_fails(self):
+        os.makedirs(os.path.join(self.root, REVIEW, "1", "gates.txt"))
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("cannot write gates.txt", out)
+
+    def test_only_drops_empty_entries(self):
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register, ,")
+        self.assertEqual(0, rc, out)
+        gates = read(self.root, f"{REVIEW}/1/gates.txt")
+        self.assertTrue(gates and all(l.startswith("PASS register.") for l in gates.splitlines()), gates)
+
+    def test_only_with_no_gate_name_fails_like_run_all(self):
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "")
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL run_all.empty", read(self.root, f"{REVIEW}/1/gates.txt"))
+
     def test_package_passes_gate_review_package(self):
         rc, out = self.make("fx", "1", self.base, self.head)
         self.assertEqual(0, rc, out)
@@ -2980,7 +3102,8 @@ mutation-<finding-id>.txt, siblings.md and claims.md; this script never touches 
 The output is what gate_review_package accepts: commit lines '<sha> <subject>', a diff starting
 'diff --git a/', gate lines 'PASS|FAIL <id>'. git is run with the options that fix those forms
 whatever the user's git config says (decorations, diff prefixes, external diff, colour).
-Same range guards as superpowers' subagent-driven-development scripts/review-package.
+Same range guards as superpowers' subagent-driven-development scripts/review-package; a dirty tree is
+refused, because gates.txt must describe HEAD, not the working tree.
 Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
 """
 from __future__ import annotations
@@ -3004,8 +3127,7 @@ EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # options that pin the forms gate_review_package reads, against the caller's git config
-PLAIN = ("-c", "color.ui=never", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
-         "-c", "diff.external=", "-c", "log.showSignature=false")
+PLAIN = ("-c", "color.ui=never", "-c", "diff.noprefix=false", "-c", "log.showSignature=false")
 
 
 class Refused(Exception):
@@ -3021,12 +3143,15 @@ def _git(root: str, *args: str) -> bytes:
     return r.stdout
 
 
-def _sha(root: str, rev: str) -> str:
-    return _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
+def _sha(root: str, rev: str, label: str) -> str:
+    try:
+        return _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
+    except Refused:
+        raise Refused(f"unknown revision for {label}: {rev}") from None
 
 
 def _range(root: str, base: str, head: str) -> tuple[str, str, int]:
-    b, h = _sha(root, base), _sha(root, head)
+    b, h = _sha(root, base, "base"), _sha(root, head, "head")
     anc = subprocess.run(["git", "merge-base", "--is-ancestor", b, h], cwd=root, capture_output=True, check=False)
     if anc.returncode != 0:
         raise Refused(f"HEAD is not a descendant of BASE: {base}..{head}")
@@ -3049,6 +3174,9 @@ def _package(root: str, a) -> tuple[str, int]:
             raise Refused(f"{label} {value!r} is not a directory name ({NAME.pattern})")
     if not os.path.isdir(os.path.join(root, STATE, a.plan)):
         raise Refused(f"{STATE}/{a.plan}/ missing: run tools/gates/new_plan_state.py {a.plan} first")
+    if not gitinfo.status_clean(root):
+        raise Refused("working tree is not clean: gates.txt must describe the commit under review; "
+                      "commit or stash first (the ignored .superpowers/ does not count)")
     b, h, n = _range(root, a.base, a.head)
     diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "-U10", f"{b}..{h}")
     if not diff.strip():
@@ -3078,7 +3206,8 @@ def main(argv=None) -> int:
     except (Refused, GateError) as e:
         print(f"make_review_package: {e}", file=sys.stderr)
         return 1
-    names = [x.strip() for x in a.only.split(",")] if a.only else [g for g in run_all.GATES if g not in EXCLUDE]
+    names = ([x.strip() for x in a.only.split(",") if x.strip()] if a.only is not None
+             else [g for g in run_all.GATES if g not in EXCLUDE])    # as run_all --only
     res = run_all.run(names, {"root": root})
     try:
         _write(os.path.join(pkg, "gates.txt"), res.render(False) + "\n")
@@ -3100,7 +3229,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (12 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (26 tests); `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
@@ -3125,7 +3254,7 @@ Write `.superpowers/sdd/strict-delivery/review/S2-T5/mutation-SD-S2-T5.txt` (the
 finding: SD-S2-T5
 test: test_empty_range_fails
 step 1 (fix present): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
-step 2 (fix reverted: perl replaces the empty-range guard in tools/gates/make_review_package.py with False): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> FAIL
+step 2 (fix reverted: perl -pi -e 's/    if n == 0:/    if False:/' tools/gates/make_review_package.py replaces the empty-range guard with False): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
 ```
 After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T5.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
