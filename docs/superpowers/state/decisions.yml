@@ -106,3 +106,13 @@
   asked_at: {sha: "07d7b29", by: session}
   answer: "follow-s8 (owner answered \"do recomended for all\" in chat, 2026-10-19; the session had recommended follow-s8)"
   answered_at: {sha: "07d7b29", by: superbrobenji}
+
+- id: DEC-0012
+  class: model-policy
+  question: "b4 Task 3 review Q1: gate_dispatch --config-check passes when tools/gates/config.yml fable_roles lists a role whose minimum model is not fable (reproduced: adding implementer to fable_roles gives rc 0, all PASS), so such a config would let an implementer be dispatched on Fable against spec D18 and §5. Today's config is correct. Must --config-check require fable_roles to equal the set of roles whose minimum is fable?"
+  options:
+    - {label: require-equal, cost: "about 10 lines in check_config plus one test and a mutation step; a stricter CI check (fits the b4 fix wave or the next block)"}
+    - {label: keep, cost: "none now; the Fable policy rests on config review alone"}
+  asked_at: {sha: "07d7b29", by: session}
+  answer: null
+  answered_at: null

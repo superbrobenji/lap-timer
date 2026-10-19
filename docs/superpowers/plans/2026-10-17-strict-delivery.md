@@ -309,7 +309,7 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 | `run_all.py` | `python3 tools/gates/run_all.py [--json] [--only a,b]` |
 | `gate_review_package.py` | `--dir docs/superpowers/state/<plan>/review/<task>` |
 | `gate_plan.py` | `--plan <path> [--source <report-or-register>]` |
-| `gate_dispatch.py` | `--prompt <file>` (or stdin) `[--prompts-dir <dir>]` |
+| `gate_dispatch.py` | `[--json] --prompt <file>` (or `-` for stdin) `[--tool-model <m>] [--prompts-dir <dir>]`, or `[--json] --config-check` (run_all's default, CI) |
 | `gate_merge_ready.py` | `--pr <number> [--post]` |
 | `gate_checkpoint.py` | `--plan <slug>` (reads `docs/superpowers/state/<slug>/handoff.md`) |
 | `gate_claims.py` | `[--mark-stale --base <sha>]` |
