@@ -1917,6 +1917,8 @@ Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/ha
 **Files:**
 - Create: `tools/gates/gate_review_package.py`
 - Modify: `tools/gates/run_all.py` (`GATES`, `DEFAULT_ARGV`)
+- Modify: `tools/gates/tests/test_run_all.py` (`test_gates_at_this_block` and `test_cli_unknown_gate_is_rc_1` pin the gate list)
+- Modify: `tools/gates/README.md` (one gate table row)
 - Test: `tools/gates/tests/test_gate_review_package.py`
 
 **Findings:** SD-S2-T4
@@ -2092,12 +2094,11 @@ Expected: ERROR `cannot import name 'gate_review_package'`.
 Layout and mutation transcript format: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Review package".
 Extends superpowers' subagent-driven-development review-package (commits + diff) with gates.txt, one
 mutation-<finding-id>.txt per finding the task closes, siblings.md and claims.md.
-Usage: gate_review_package.py --dir .superpowers/sdd/<plan>/review/<task> [--json] | --all [--json]
+Usage: gate_review_package.py [--json] --dir .superpowers/sdd/<plan>/review/<task> | [--json] --all
 The task's ids: register rows owned by {kind: plan, plan: <plan>, task: <task>} plus mutation-<id>.txt files.
 """
 from __future__ import annotations
 
-import argparse
 import glob
 import os
 import re
@@ -2107,7 +2108,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from tools.gates.lib import CODE_ROOT, GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
+from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import registers  # noqa: E402
 
 STATE = "docs/superpowers/state"
@@ -2117,7 +2118,6 @@ STEP1 = re.compile(r"^step 1 \(fix present\): (?P<cmd>.+) -> PASS$")
 STEP2 = re.compile(r"^step 2 \(fix reverted: (?P<how>.+?)\): (?P<cmd>.+) -> FAIL$")
 STEP3 = re.compile(r"^step 3 \(fix restored\): (?P<cmd>.+) -> PASS$")
 SEPARATOR = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
-
 
 
 def _read(path: str) -> str:
@@ -2248,7 +2248,6 @@ def check(args: list) -> Result:
     p = gate_args("gate_review_package")
     p.add_argument("--dir")
     p.add_argument("--all", action="store_true")
-    p.add_argument("--json", action="store_true")
     a = p.parse_args(args)
     if a.all == bool(a.dir):
         raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
@@ -2289,16 +2288,16 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 4: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package"]`; add `"review_package": ["--all"]` to `DEFAULT_ARGV`.
+- [ ] **Step 4: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package"]`; add `"review_package": ["--all"]` to `DEFAULT_ARGV`. Update the two pins in `tools/gates/tests/test_run_all.py`: `test_gates_at_this_block` expects the five-gate list; `test_cli_unknown_gate_is_rc_1` expects `(installed: register, claims, decisions, dispatch, review_package)`. Add the gate's row to the table in `tools/gates/README.md`.
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (18 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (18 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 379 tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tools/gates/gate_review_package.py tools/gates/run_all.py tools/gates/tests/test_gate_review_package.py
+git add tools/gates/gate_review_package.py tools/gates/run_all.py tools/gates/tests/test_gate_review_package.py tools/gates/tests/test_run_all.py tools/gates/README.md
 git commit -m "feat(gates): gate_review_package -- required files, PASS/FAIL/PASS mutation transcript, sibling and claims tables"
 ```
 

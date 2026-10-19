@@ -22,6 +22,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 | `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable) and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
+| `gate_review_package.py` | `--all` (run_all's default; no package is a PASS) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list, a claims table with no FAIL row |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every

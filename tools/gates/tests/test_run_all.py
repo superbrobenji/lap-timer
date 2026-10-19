@@ -38,7 +38,7 @@ class RunAll(unittest.TestCase):
                               env=env, check=False)
 
     def test_gates_at_this_block(self):
-        self.assertEqual(["register", "claims", "decisions", "dispatch"], run_all.GATES)
+        self.assertEqual(["register", "claims", "decisions", "dispatch", "review_package"], run_all.GATES)
 
     def test_clean_tree_passes_and_lines_carry_the_gate_prefix(self):
         res = run_all.run(run_all.GATES, {"root": self.root})
@@ -189,7 +189,7 @@ class RunAll(unittest.TestCase):
         p = self.cli("--only", "comments")
         self.assertEqual(1, p.returncode, p.stdout + p.stderr)
         self.assertEqual("FAIL run_all.unknown: no gate named 'comments' "
-                         "(installed: register, claims, decisions, dispatch)\n", p.stdout)
+                         "(installed: register, claims, decisions, dispatch, review_package)\n", p.stdout)
 
     def test_cli_json(self):
         p = self.cli("--json", "--only", "claims")
