@@ -319,12 +319,52 @@ class ConfigCheck(unittest.TestCase):
     def test_config_check_fails_on_an_unknown_role(self):
         with self.with_config(lambda c: c["models"].__setitem__("helper", "opus")):
             rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.config.models", out)
 
     def test_config_check_fails_on_a_non_positive_cap(self):
         with self.with_config(lambda c: c["dispatch"].__setitem__("max_prompt_chars", 0)):
             rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_config_check_fails_on_a_cap_that_is_not_an_integer(self):
+        for bad in (True, 1.5, "12000"):
+            with self.subTest(cap=bad), \
+                    self.with_config(lambda c, b=bad: c["dispatch"].__setitem__("max_prompt_chars", b)):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_config_check_fails_on_a_minimum_that_is_not_in_model_rank(self):
+        with self.with_config(lambda c: c["models"].__setitem__("implementer", "gpt")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.implementer: minimum model 'gpt' not in model_rank", out)
+
+    def test_config_check_fails_on_a_role_with_no_minimum(self):
+        with self.with_config(lambda c: c["models"].pop("investigator")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.investigator: minimum model None not in model_rank", out)
+
+    def test_config_check_fails_on_an_unknown_fable_role(self):
+        with self.with_config(lambda c: c["fable_roles"].append("helper")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.fable_roles: unknown roles: helper", out)
+
+    def test_config_check_fails_when_a_role_has_no_prompt_file(self):
+        patched = {k: v for k, v in gate_dispatch.ROLE_PROMPT.items() if k != "investigator"}
+        with mock.patch.object(gate_dispatch, "ROLE_PROMPT", patched):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.investigator: no prompt file mapped for the role", out)
+
+    def test_neither_prompt_nor_config_check_is_a_bad_argument(self):
+        rc, out = gate(rf.REAL, [])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.input: bad arguments", out)
 
     def test_prompt_and_config_check_are_exclusive(self):
         rc, out = gate(rf.REAL, ["--config-check", "--prompt", "x.md"])

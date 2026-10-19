@@ -1263,12 +1263,52 @@ class ConfigCheck(unittest.TestCase):
     def test_config_check_fails_on_an_unknown_role(self):
         with self.with_config(lambda c: c["models"].__setitem__("helper", "opus")):
             rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.config.models", out)
 
     def test_config_check_fails_on_a_non_positive_cap(self):
         with self.with_config(lambda c: c["dispatch"].__setitem__("max_prompt_chars", 0)):
             rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_config_check_fails_on_a_cap_that_is_not_an_integer(self):
+        for bad in (True, 1.5, "12000"):
+            with self.subTest(cap=bad), \
+                    self.with_config(lambda c, b=bad: c["dispatch"].__setitem__("max_prompt_chars", b)):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_config_check_fails_on_a_minimum_that_is_not_in_model_rank(self):
+        with self.with_config(lambda c: c["models"].__setitem__("implementer", "gpt")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.implementer: minimum model 'gpt' not in model_rank", out)
+
+    def test_config_check_fails_on_a_role_with_no_minimum(self):
+        with self.with_config(lambda c: c["models"].pop("investigator")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.investigator: minimum model None not in model_rank", out)
+
+    def test_config_check_fails_on_an_unknown_fable_role(self):
+        with self.with_config(lambda c: c["fable_roles"].append("helper")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.fable_roles: unknown roles: helper", out)
+
+    def test_config_check_fails_when_a_role_has_no_prompt_file(self):
+        patched = {k: v for k, v in gate_dispatch.ROLE_PROMPT.items() if k != "investigator"}
+        with mock.patch.object(gate_dispatch, "ROLE_PROMPT", patched):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.investigator: no prompt file mapped for the role", out)
+
+    def test_neither_prompt_nor_config_check_is_a_bad_argument(self):
+        rc, out = gate(rf.REAL, [])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.input: bad arguments", out)
 
     def test_prompt_and_config_check_are_exclusive(self):
         rc, out = gate(rf.REAL, ["--config-check", "--prompt", "x.md"])
@@ -1354,7 +1394,7 @@ def check_config(conf: dict, res: Result) -> None:
     else:
         res.passed("dispatch.config.fable_roles")
     cap = conf["dispatch"]["max_prompt_chars"]
-    if isinstance(cap, int) and cap > 0:
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
         res.passed("dispatch.config.max_prompt_chars")
     else:
         res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
@@ -1392,7 +1432,11 @@ DEFAULT_ARGV = {"dispatch": ["--config-check"]}
 ```python
     return argv + (list(args[name]) if name in args else list(DEFAULT_ARGV.get(name, [])))
 ```
-S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged.
+S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged. Also reword the `gate_argv` docstring to:
+```python
+    """argv for one gate: --root, the gate's defaults, then args[name] (a list) verbatim, or
+    DEFAULT_ARGV[name] when args has no entry for the gate (an entry replaces the default)."""
+```
 
 - [ ] **Step 5b: The DEC-0010 pattern** — in `tools/gates/gate_decisions.py` replace `REF = re.compile(r"DEC-\d{4}(?!\d)")` by
 ```python
@@ -1471,7 +1515,7 @@ PreToolUse hook runs it, with `claims` and `decisions` (never `register`), on ev
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest discover -s tools/gates/tests -t .` → `OK` (342 tests: 332 + 6 `ConfigCheck` + 2 `GateDispatch` DEC-0010 + 2 net `GateDecisions`); `python3 tools/gates/run_all.py` → only `PASS` (28 lines: the 15 of b3 + 13 `dispatch.config.*`).
+Run: `python3 -m unittest discover -s tools/gates/tests -t .` → `OK` (348 tests: 332 + 12 `ConfigCheck` + 2 `GateDispatch` DEC-0010 + 2 net `GateDecisions`); `python3 tools/gates/run_all.py` → only `PASS` (28 lines: the 15 of b3 + 13 `dispatch.config.*`).
 
 - [ ] **Step 9: Commit**
 
@@ -1504,7 +1548,7 @@ for t in $B1 $B2 $B3 $B4; do python3 -m unittest $t; done                  # exp
 git checkout -- tools/gates/gate_decisions.py
 python3 -m unittest $B1 $B2 $B3 $B4                                        # expect OK
 ```
-Write `.superpowers/sdd/strict-delivery/review/S2-T3/mutation-SD-S2-T3.txt` (the package copy):
+Fix round 1 adds one mutant per new test (reverting the one-line guard it pins, listed in steps 7-16 below). Write `.superpowers/sdd/strict-delivery/review/S2-T3/mutation-SD-S2-T3.txt` (the package copy):
 ```
 finding: SD-S2-T3
 test: test_config_check_fails_when_implementer_minimum_is_fable
@@ -1514,6 +1558,17 @@ step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.
 step 4 (DEC-0010 pins present): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_a_five_digit_text_is_a_mention_of_its_first_four_digits tools.gates.tests.test_gate_dispatch.GateDispatch.test_non_ascii_digits_never_form_an_id tools.gates.tests.test_gate_decisions.GateDecisions.test_a_five_digit_text_is_a_mention_of_its_first_four_digits tools.gates.tests.test_gate_decisions.GateDecisions.test_a_non_ascii_digit_after_four_ascii_digits_is_still_a_mention -> PASS (4 tests)
 step 5 (REF reverted to the old lookahead form r"DEC-\d{4}(?!\d)" in tools/gates/gate_decisions.py, 1 line changed): the same four tests -> FAIL each (run one by one: test_gate_dispatch five-digit FAIL, test_gate_decisions five-digit FAIL, test_gate_decisions non-ascii-after-four FAIL, test_gate_dispatch non-ascii-never-form-an-id FAIL)
 step 6 (REF restored: git checkout -- tools/gates/gate_decisions.py): the same four tests -> PASS (4 tests)
+fix round 1 (review F1-F6; each mutant run over test_gate_dispatch + test_run_all, one line changed in gate_dispatch.py, restored by writing the original back):
+step 7 (new tests present: tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_on_a_cap_that_is_not_an_integer (True, 1.5, "12000"), ...fails_on_a_minimum_that_is_not_in_model_rank, ...fails_on_a_role_with_no_minimum, ...fails_on_an_unknown_fable_role, ...fails_when_a_role_has_no_prompt_file, tools.gates.tests.test_gate_dispatch.ConfigCheck.test_neither_prompt_nor_config_check_is_a_bad_argument) -> PASS (suite 348 tests)
+step 8 (F1 fix reverted: isinstance(cap, int) and cap > 0): -> FAIL (cap=True subTest; before the fix the same test FAILed on the unfixed code)
+step 9 (F2 'if need not in rank:' -> 'if False:') -> FAIL (2 tests)
+step 10 (F3 ROLE_PROMPT branch -> 'elif False:') -> FAIL (1 test)
+step 11 (F4 stray fable_roles -> 'stray = []') -> FAIL (1 test)
+step 12 (F5 'cap > 0' without isinstance; and 'not isinstance(cap, str) and cap > 0') -> FAIL (3 tests; 2 tests)
+step 13 (F5b cap '>= 0') -> FAIL (1 test)
+step 14 (F6 required=False on the mode group) -> FAIL (1 test)
+step 15 (reviewer's other mutants, still killed: fable condition dead FAIL(1); extra roles ignored FAIL(1); cap always passes FAIL(4); modes not exclusive FAIL(2); --config-check ignored FAIL(15))
+step 16 (all fixes restored): suite for both modules -> PASS
 ```
 After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt` (what `pin.transcript` names); then move the row to `pinned`:
 ```bash

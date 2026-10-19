@@ -287,7 +287,7 @@ def check_config(conf: dict, res: Result) -> None:
     else:
         res.passed("dispatch.config.fable_roles")
     cap = conf["dispatch"]["max_prompt_chars"]
-    if isinstance(cap, int) and cap > 0:
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
         res.passed("dispatch.config.max_prompt_chars")
     else:
         res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")

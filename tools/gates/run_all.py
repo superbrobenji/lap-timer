@@ -27,7 +27,8 @@ PLANS_GLOB = os.path.join("docs", "superpowers", "plans", "*.md")
 
 
 def gate_argv(name: str, args: dict) -> list:
-    """argv for one gate: --root, the gate's defaults, then args[name] (a list) verbatim."""
+    """argv for one gate: --root, the gate's defaults, then args[name] (a list) verbatim, or
+    DEFAULT_ARGV[name] when args has no entry for the gate (an entry replaces the default)."""
     root = args["root"] if "root" in args else repo_root()
     if not isinstance(root, str):
         raise GateError("--root is not a path")
