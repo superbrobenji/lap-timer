@@ -2,9 +2,14 @@
 """Claude Code PreToolUse hook (spec §8; umbrella plan, "Hook protocol"; owner decision DEC-0005).
 
 Reads one JSON event on stdin. The Bash handler of .claude/settings.json has no `if` filter, so this
-script sees every Bash call. At strict-delivery block b3 only the Bash branch gates; every other
-tool (Agent included, until S2 adds gate_dispatch) exits 0 silently. This hook is a best-effort
-textual check; the git hooks (pre-commit, pre-push) are the enforcement (DEC-0005).
+script sees every Bash call. Two branches gate: Bash (items 1-3 below) and Agent (handle_agent: the
+dispatch prompt runs gate_dispatch, gate_claims and gate_decisions in the tree of the event's cwd --
+a missing or empty cwd is `FAIL hook.input`, a cwd outside a repository `FAIL hook.target`, an empty
+prompt `FAIL dispatch.input`, a tool_input.model that is unset or differs from the prompt's
+`## Model:` line `FAIL dispatch.model.agree`, a tool_input.subagent_type of fork (any case) or not a
+string `FAIL dispatch.fork`; the register gate is not run for Agent); every other
+tool exits 0 silently. This hook is a best-effort textual check; the git hooks (pre-commit,
+pre-push) are the enforcement (DEC-0005).
 
 1. Hook bypasses: `core.hooksPath` anywhere (any case) or a GIT_CONFIG_PARAMETERS, _COUNT, _KEY_*,
    _GLOBAL, _SYSTEM or _NOSYSTEM assignment (`=` or `+=`) anywhere, in any Bash command; a HOME or
@@ -66,6 +71,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 GATED = {"commit": ["register", "claims"], "push": ["register", "claims"]}
@@ -94,6 +100,8 @@ BYPASS = (
 )
 CONFIG_HOME = re.compile(r"(?<![\w$])(?:HOME|XDG_CONFIG_HOME)\+?=")   # before a gated verb: a bypass
 NO_VERIFY = re.compile(r"""(?:^|(?<=[\s"']))(--no-veri(?:fy?)?|-[A-Za-z]+)(?=[\s"'()<>;&|`]|$)""")   # after a gated verb
+
+PROMPT_LABEL = "<tool_input.prompt>"
 
 
 class Blocked(Exception):
@@ -243,10 +251,61 @@ def toplevel(directory: str) -> str:
     return p.stdout.strip()
 
 
+def handle_agent(event: dict) -> int:
+    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
+    names), gate_claims and gate_decisions in the tree of the event's cwd (all three through
+    run_all.run; the dispatch argv given here replaces run_all.DEFAULT_ARGV's --config-check).
+    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch
+    grammar); tool_input.subagent_type, when present, goes to gate_dispatch --subagent-type, which
+    refuses a fork (ruling 4). 0 = allow, 2 = block."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        raise Blocked("hook.input", "the event has no cwd")
+    root = toplevel(cwd)
+    tool_input = event.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
+        return 2
+    model = tool_input.get("model")
+    subagent_type = tool_input.get("subagent_type")
+    if subagent_type is not None and not isinstance(subagent_type, str):
+        print(f"FAIL dispatch.fork: tool_input.subagent_type {subagent_type!r} is not a string", file=sys.stderr)
+        return 2
+    sys.path.insert(0, CODE_ROOT)
+    from tools.gates import run_all   # lazy, as in main()
+    fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(prompt)
+        dispatch = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        if subagent_type is not None:
+            dispatch.append(f"--subagent-type={subagent_type}")    # "=": a value may start with "-"
+        prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
+        if prompts:
+            dispatch += ["--prompts-dir", prompts]
+        res = run_all.run(["dispatch", "claims", "decisions"],
+                          {"root": root, "dispatch": dispatch, "decisions": ["--scan", path]})
+    finally:
+        os.unlink(path)
+    if res.ok():
+        return 0
+    # the temporary file is gone when the reader sees a reason: name the prompt, not the path
+    forms = {path, os.path.realpath(path), os.path.relpath(path, root), os.path.relpath(os.path.realpath(path), root)}
+    for line in res.lines:
+        for form in sorted(forms, key=len, reverse=True):
+            line.reason = line.reason.replace(form, PROMPT_LABEL)
+    print(res.render(False), file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     event = json.load(sys.stdin)
     if not isinstance(event, dict):
         raise ValueError("stdin is not a JSON object")
+    if event.get("tool_name") == "Agent":
+        return handle_agent(event)
     command = bash_command(event)
     if command is None:
         return 0

@@ -20,12 +20,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tools.gates.lib import GateError, Line, Result, gate_args, repo_root, run_check, run_gate  # noqa: E402
 
-GATES = ["register", "claims", "decisions"]
+GATES = ["register", "claims", "decisions", "dispatch"]
+# argv an S2+ gate gets when run() is handed nothing for it: the gate's CI-meaningful mode
+DEFAULT_ARGV = {"dispatch": ["--config-check"]}
 PLANS_GLOB = os.path.join("docs", "superpowers", "plans", "*.md")
 
 
 def gate_argv(name: str, args: dict) -> list:
-    """argv for one gate: --root, the gate's defaults, then args[name] (a list) verbatim."""
+    """argv for one gate: --root, the gate's defaults, then args[name] (a list) verbatim, or
+    DEFAULT_ARGV[name] when args has no entry for the gate (an entry replaces the default)."""
     root = args["root"] if "root" in args else repo_root()
     if not isinstance(root, str):
         raise GateError("--root is not a path")
@@ -40,7 +43,7 @@ def gate_argv(name: str, args: dict) -> list:
         if not plans:
             raise GateError(f"no {PLANS_GLOB.replace(os.sep, '/')} under the root: nothing to scan")
         argv += ["--scan", *plans]
-    return argv + list(args.get(name, []))
+    return argv + (list(args[name]) if name in args else list(DEFAULT_ARGV.get(name, [])))
 
 
 def _check_of(name: str):

@@ -1,0 +1,5 @@
+finding: SD-S2-T2
+test: test_missing_tool_model_blocks
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> PASS
+step 2 (fix reverted: perl drops the --tool-model argument in tools/gates/hooks/pre_tool_use.py): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> PASS

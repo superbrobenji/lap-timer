@@ -1,19 +1,337 @@
 - id: B3-S4PREPUSH-1
   source: review
   severity: MEDIUM
-  class: >-
-    S4 Task 5 Step 5's git-pre-push.sh block is written for a hook symlinked to a bash script, but
-    the S1 b3 shim runs the tracked script with sh: BASH_SOURCE and set -o pipefail are bash-only
-    (a dash /bin/sh breaks the hook), and the block replaces S1's git-pre-commit.sh --pre-push
-    guard and the DEC-0006 not-head refusal instead of extending them.
+  class: 'S4 Task 5 Step 5''s git-pre-push.sh block is written for a hook symlinked
+    to a bash script, but the S1 b3 shim runs the tracked script with sh: BASH_SOURCE
+    and set -o pipefail are bash-only (a dash /bin/sh breaks the hook), and the block
+    replaces S1''s git-pre-commit.sh --pre-push guard and the DEC-0006 not-head refusal
+    instead of extending them.'
   siblings: []
   cites:
-    - {file: docs/superpowers/plans/2026-10-17-strict-delivery-S4-remaining-gates-workflows.md, lines: "3388-3400", sha: "151f2bb"}
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery-S4-remaining-gates-workflows.md
+    lines: 3388-3400
+    sha: 151f2bb
   repro: null
-  owner: {kind: plan, plan: 2026-10-17-strict-delivery-S4-remaining-gates-workflows, task: 5}
+  owner:
+    kind: plan
+    plan: 2026-10-17-strict-delivery-S4-remaining-gates-workflows
+    task: 5
   state: open
   pin: null
   ruling: null
   evidence: []
   history:
-    - {state: open, sha: "151f2bb", by: b3-fixwave}
+  - state: open
+    sha: 151f2bb
+    by: b3-fixwave
+- id: SD-S2-T1
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_dispatch'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T1
+  state: pinned
+  pin:
+    test: test_gate_dispatch::test_fable_on_implementer_fails
+    transcript: docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt
+  ruling: null
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-T1.md
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: in-progress
+    sha: 8fd19348261c8443e58196f9b0fbadaa03f256c5
+    by: controller
+  - state: pinned
+    sha: 8fd19348261c8443e58196f9b0fbadaa03f256c5
+    by: controller
+- id: SD-S2-T2
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: PreToolUse Agent branch'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T2
+  state: pinned
+  pin:
+    test: test_hooks::test_missing_tool_model_blocks
+    transcript: docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt
+  ruling: null
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-T2.md
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: in-progress
+    sha: 2e6a2fa376780eea85680b05e2a8c8cfa6c942ec
+    by: controller
+  - state: pinned
+    sha: 2e6a2fa376780eea85680b05e2a8c8cfa6c942ec
+    by: controller
+- id: SD-S2-T3
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: dispatch config check and run_all registration'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T3
+  state: pinned
+  pin:
+    test: test_gate_dispatch::test_config_check_fails_when_implementer_minimum_is_fable
+    transcript: docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt
+  ruling: null
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-T3.md
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: in-progress
+    sha: 20f807da46a34aee337c341e052d6f5d2fda3b4a
+    by: controller
+  - state: pinned
+    sha: 20f807da46a34aee337c341e052d6f5d2fda3b4a
+    by: controller
+- id: SD-S2-T4
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_review_package'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T4
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T5
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: make_review_package'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T5
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T6
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_plan'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T6
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T7
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: gate_checkpoint'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T7
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T8
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: Stop and SubagentStop hooks'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T8
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: SD-S2-T9
+  source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+  severity: INFO
+  class: 'strict-delivery rollout step 3: per-plan state creator and checklists'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 189-207
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T9
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: planned
+    sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+- id: B4-FIX-1
+  source: review
+  severity: MEDIUM
+  class: 'b4 final review F1: tools/gates/hooks/pre_tool_use.py handle_agent ignores
+    tool_input.subagent_type, so an Agent dispatch with subagent_type "fork" and a
+    matching `## Model:` line passes (rc 0) although a fork always runs on the session
+    model with the session''s full context (spec §5 forbids pasted session history
+    and D18 limits Fable to two roles; S2 Review Focus 1 exists to block a dispatch
+    that silently runs on the session model). Fix wave of b4 (ruling 4): refuse forks
+    with FAIL dispatch.fork; with it the final-review minors F2-F6 and the verifier''s
+    finding 1 (missing tests for an implementer on a pinned row, an unregistered claim
+    id and a budget with trailing text; a vacuous non-ASCII-digit test; the S2 plan''s
+    pin scripts for Tasks 1-9 produce rows gate_register rejects; the S2 plan''s Task
+    1/2 whole-file blocks not re-synced to the tip after Task 3) and DEC-0012 = require-equal
+    (--config-check requires fable_roles == the fable-minimum roles and model_rank
+    ordered haiku < sonnet < opus < fable).'
+  siblings:
+  - F2 implementer on a pinned row untested
+  - F3 unregistered claim id untested
+  - F4 budget trailing text untested
+  - F5 vacuous non-ASCII test
+  - F6 plan pin scripts
+  - V1 Task 1/2 plan blocks stale
+  - DEC-0012 config consistency
+  cites:
+  - file: tools/gates/hooks/pre_tool_use.py
+    lines: 253-290
+    sha: 2230bde
+  - file: tools/gates/gate_dispatch.py
+    lines: 266-300
+    sha: 2230bde
+  - file: tools/gates/tests/test_gate_decisions.py
+    lines: '112'
+    sha: 2230bde
+  repro: null
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b4-fixwave
+  state: pinned
+  pin:
+    test: test_hooks::test_fork_dispatch_blocks
+    transcript: docs/superpowers/state/strict-delivery/mutations/B4-FIX-1.txt
+  ruling: null
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b4-fixwave.md
+  history:
+  - state: open
+    sha: 2230bde
+    by: final-review
+  - state: planned
+    sha: 2230bde
+    by: session
+  - state: in-progress
+    sha: 7e5684c2930757c66e20bfcd157f46a3ee73d66b
+    by: controller
+  - state: pinned
+    sha: 7e5684c2930757c66e20bfcd157f46a3ee73d66b
+    by: controller

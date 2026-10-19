@@ -1,0 +1,22 @@
+finding: B4-FIX-1
+test: test_hooks::test_fork_dispatch_blocks
+step 1 (fix present): env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 python3 -W error -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_fork_dispatch_blocks -> PASS
+step 2 (fix reverted: git show HEAD:tools/gates/hooks/pre_tool_use.py and HEAD:tools/gates/gate_dispatch.py written over both files, git diff of the two files empty): env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 python3 -W error -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_fork_dispatch_blocks -> FAIL
+step 3 (fix restored: both files copied back from the scratch backup): env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 python3 -W error -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_fork_dispatch_blocks -> PASS
+one mutant per added test (each one changed line, applied by a scratch script that asserts the pattern occurs once, runs the named modules, then writes the original back; counts are the observed "FAILED (failures=N)"):
+step 4 (gate_dispatch._fork: 'if subagent_type.strip().lower() == "fork":' -> 'if False:'; test_gate_dispatch + test_hooks.AgentDispatchHook) -> FAIL, 5 failures (test_fork_dispatch_blocks; test_fork_dispatch_fails subTests 'fork', 'Fork', ' fork '; test_fork_fails_even_when_the_prompt_is_not_in_the_grammar)
+step 5 (no normalisation: '== "fork"' on the raw value; test_gate_dispatch.GateDispatch) -> FAIL, 2 failures (test_fork_dispatch_fails subTests 'Fork', ' fork ')
+step 6 (substring: '"fork" in subagent_type.lower()') -> FAIL, 1 failure (test_other_subagent_types_keep_todays_behaviour subTest 'forked')
+step 7 (_fork call removed from check_prompt) -> FAIL, 9 failures (test_fork_dispatch_fails x3, test_fork_fails_even_when_the_prompt_is_not_in_the_grammar, test_other_subagent_types_keep_todays_behaviour x5)
+step 8 (hook: the --subagent-type append -> 'pass'; test_hooks.AgentDispatchHook) -> FAIL, 1 failure (test_fork_dispatch_blocks)
+step 9 (hook: non-string check -> 'if False:') -> FAIL, 1 failure (test_a_non_string_subagent_type_fails_closed)
+step 10 (F2: implementer state set widened to ("planned", "in-progress", "pinned"); test_gate_dispatch) -> FAIL, 1 failure (test_implementer_on_a_pinned_or_merged_row_fails)
+step 11 (F3: 'reason = None if c is None else ...') -> FAIL, 1 failure (test_unregistered_claim_fails)
+step 12 (F4: '$' dropped from BUDGET_RE) -> FAIL, 1 failure (test_budget_with_trailing_text_fails)
+step 13 (F5: gate_decisions.REF -> r"DEC-\d{4}(?!\d)"; test_gate_decisions.GateDecisions.test_non_ascii_digits_never_form_an_id) -> FAIL, 1 failure
+step 14 (F5: gate_decisions.REF -> r"DEC-\d{4}") -> FAIL, 1 failure (same test)
+step 15 (DEC-0012 fable_roles equality: 'elif sorted(fable) != minimums:' -> 'elif False:'; test_gate_dispatch.ConfigCheck) -> FAIL, 3 failures (test_config_check_fails_when_fable_roles_differ_from_the_fable_minimums [extra], [missing]; test_config_check_names_both_fable_sets)
+step 16 (DEC-0012 model_rank: 'a < b' -> 'a <= b') -> FAIL, 1 failure (test_config_check_fails_when_model_rank_is_not_strictly_ordered subTest fable == opus)
+step 17 (model_rank: bool exclusion removed) -> FAIL, 1 failure (same test, subTest haiku=True)
+step 18 (model_rank: order condition -> 'or True') -> FAIL, 7 failures (every subTest of the same test)
+step 19 (all restored, git diff shows only the fix-wave edits): full suite on both interpreters -> PASS

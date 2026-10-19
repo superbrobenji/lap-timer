@@ -21,6 +21,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
 | `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable) and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
@@ -111,8 +112,17 @@ commit and push, however it was launched.
   (`git commit -m "$(echo -n x)"`), is blocked as a bypass: write the message to a file and use
   `git commit -F <file>`. So is, rarely, a `-n` after the arguments: a scan that meets an earlier
   verb's scan deeper inside a parenthesis reads on to the end of the command. Every scan is linear
-  in the command length. Every other command and tool exits 0 silently, after one python3 start;
-  the `Agent` branch (the dispatch gate) arrives with S2.
+  in the command length. Every other command and tool exits 0 silently, after one python3 start.
+  The `Agent` branch gates every subagent dispatch: it runs `dispatch`, `claims` and `decisions`
+  (never `register`) in the tree of the event's `cwd` (a missing or empty `cwd` is `FAIL hook.input`,
+  a `cwd` outside a repository `FAIL hook.target`), with the prompt (`tool_input.prompt`) written to a
+  temporary file for `gate_dispatch --prompt` and `gate_decisions --scan`, and `tool_input.model` as
+  `--tool-model`. An empty or missing prompt is `FAIL dispatch.input`; a missing or disagreeing
+  `tool_input.model` is `FAIL dispatch.model.agree` (the subagent would otherwise inherit the session
+  model). `tool_input.subagent_type`, when present, is passed as `--subagent-type`: `fork` (any case,
+  surrounding blanks ignored) is `FAIL dispatch.fork`, because a fork runs on the session model with the
+  session context whatever `tool_input.model` says (ruling 4, B4-FIX-1); a non-string value is
+  `FAIL dispatch.fork` too; any other value, or none, is checked as before. `SD_PROMPTS_DIR` overrides `--prompts-dir` (tests only). Exit 2 prints the gate lines on stderr; the temporary file in a reason is shown as `<tool_input.prompt>`.
 - `session_start.py`: SessionStart cannot block and Claude Code injects only the stdout of an exit-0
   hook, so this hook always exits 0. It prints whether the gates are installed in the event's
   project, one line per `docs/superpowers/state/*/handoff.md`, the output of `install-hooks.sh` when
@@ -148,3 +158,23 @@ commit and push, however it was launched.
   runs `git-pre-commit.sh` with `--pre-push`: the same paths must not differ from HEAD at all,
   staged changes included, because a push sends commits, not the index
   (`FAIL pre-push.uncommitted`); then the same two gates. S4 extends it with merge-readiness.
+
+## gate_dispatch (S2)
+
+`python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--subagent-type T] [--prompts-dir D]` checks one dispatch
+prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
+Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; a brief file
+exists for the implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier and
+exception_reviewer roles (`BRIEF_ROLES`; the other roles may say `none`); implementer findings
+`planned`/`in-progress`; claim rows `verified` with no cited file changed since `verified_at`; report
+directory exists; no unanswered `DEC-nnnn` (pattern `DEC-[0-9]{4}`, no lookahead: `DEC-00021` cites `DEC-0002`)
+anywhere; length <= `dispatch.max_prompt_chars`; the strict block equals
+`~/.claude/skills/strict-delivery/prompts/<file>.md` byte for byte (role -> file map: `ROLE_PROMPT`). The
+PreToolUse hook runs it, with `claims` and `decisions` (never `register`), on every Agent call through
+`run_all.run`, with `--tool-model <tool_input.model>` and `--subagent-type <tool_input.subagent_type>` (when
+present; `fork` is `FAIL dispatch.fork`, the first line, emitted even when the grammar fails). `--config-check`
+(run_all's default for `dispatch`, `run_all.DEFAULT_ARGV`) checks the model map and the cap, and, under
+DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minimum model is `fable`
+(`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
+strictly with integer ranks (`dispatch.config.model_rank`): 14 lines, so `run_all.py` prints 29 PASS on a
+healthy tree.

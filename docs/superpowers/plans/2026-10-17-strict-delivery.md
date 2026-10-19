@@ -239,7 +239,7 @@ Matcher: a value of letters/digits/`_-,| ` is an exact list; `"Agent|Bash"` matc
 A dispatch prompt is Markdown with these headed sections, in this order; `gate_dispatch` parses by heading:
 ```
 ## Role: <controller|implementer|implementer_transcription|task_reviewer|final_reviewer|final_verifier|exception_reviewer|audit_reviewer|audit_verifier|investigator>
-## Brief: <path>                       (required for implementer/reviewer roles)
+## Brief: <path>                       (required for implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier, exception_reviewer; audit_reviewer, audit_verifier, investigator and controller may give none -- DEC-0009)
 ## Findings: <id>, <id>                 (register ids; may be "none" for investigator/audit roles)
 ## Claims: <id>, <id>                   (claim ids this dispatch depends on; may be "none")
 ## Budget: tokens=<n> minutes=<n>
@@ -309,7 +309,7 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 | `run_all.py` | `python3 tools/gates/run_all.py [--json] [--only a,b]` |
 | `gate_review_package.py` | `--dir docs/superpowers/state/<plan>/review/<task>` |
 | `gate_plan.py` | `--plan <path> [--source <report-or-register>]` |
-| `gate_dispatch.py` | `--prompt <file>` (or stdin) `[--prompts-dir <dir>]` |
+| `gate_dispatch.py` | `[--json] --prompt <file>` (or `-` for stdin) `[--tool-model <m>] [--prompts-dir <dir>]`, or `[--json] --config-check` (run_all's default, CI) |
 | `gate_merge_ready.py` | `--pr <number> [--post]` |
 | `gate_checkpoint.py` | `--plan <slug>` (reads `docs/superpowers/state/<slug>/handoff.md`) |
 | `gate_claims.py` | `[--mark-stale --base <sha>]` |
@@ -319,7 +319,7 @@ Gates not yet implemented at a given block are absent from `GATES` (never stubbe
 | Gate-suite CI | job `gates` in `.github/workflows/gates.yml` runs every `tools/gates/tests/test_*.py` and `run_all.py` |
 | Owner answers | the owner states the answer in chat; the session records it verbatim with `answered_at.by: superbrobenji` (documented in `docs/superpowers/state/README.md`) |
 | Finding schema | `cites: []` is valid (filled when the cited file exists); `source` is free text |
-| Owner convention | `owner.plan` = the plan file's repo-relative path (e.g. `docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md`); `owner.task` = `T<n>` for a sub-plan task, `conformance` / `bootstrap` / `dryrun` for the S5-owned generated work; the tracker rows for a sub-plan's own tasks (`SD-S<n>-T<m>`) use the same form |
+| Owner convention | `owner.plan` = the plan's short slug (`strict-delivery` for every sub-plan of this umbrella); `owner.task` = `S<n>-T<m>` for sub-plan task `m` of S<n> (the tracker rows `SD-S<n>-T<m>` use the same form, and the review directory is named by it), `conformance` / `bootstrap` / `dryrun` for the S5-owned generated work, `S<n>-b<N>-fixwave` for a block's final-review fix wave -- DEC-0013 (keep-s2-form; the S1 b1-b3 blocks tracked no rows of their own) |
 | Prompt file per role | `controller`→`controller.md`; `implementer` and `implementer_transcription`→`implementer.md`; `task_reviewer` and `final_reviewer`→`reviewer.md`; `final_verifier`→`verifier.md`; `exception_reviewer`→`exception-reviewer.md`; `audit_reviewer`→`audit-reviewer.md`; `audit_verifier`→`audit-verifier.md`; `investigator`→`investigator.md` |
 | Waiting for the owner mid-block (e.g. an unanswered grant) | the Stop hook blocks once with the open decision ids; on the second stop (`stop_hook_active`) it allows the stop; the session's last message says "waiting for the owner: DEC-…" |
 
