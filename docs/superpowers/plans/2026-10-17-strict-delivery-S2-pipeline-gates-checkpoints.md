@@ -25,7 +25,7 @@
 - Hardware: nothing in this plan flashes or opens a serial port.
 - Commit trailers: subagents use their own model's trailer; the squash commit carries the session's.
 - Repo fact (verified 2026-10-17 with `gh api repos/superbrobenji/lap-timer/branches/main/protection`): `main` requires status checks (strict), linear history, and `enforce_admins: true` — no commit can be pushed to `main` directly. Every state commit (handoff, ledger, register transitions) therefore rides inside the block PR: the handoff is committed on the block branch before the merge, `gate_checkpoint --plan <slug>` checks it there (pre-merge) and `--post` checks the squash on `main` afterwards (Task 7). `merged` register states are written only by S4's `postmerge.py` (`by: postmerge`, S1 rule); until S4 lands, S2 rows stay `pinned` after their block merges.
-- Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the reviewer once satisfied.
+- Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the controller after the task review's clean verdict (b4 ruling 3), together with the reviewer's report at `docs/superpowers/state/<plan>/reviews/S2-T<n>.md`.
 - Block branches are named `<plan>/b<N>` (here `block/strict-delivery-b4`…`b6`), never `<plan>-b<N>`, so a branch never shares a name with its tag.
 
 ## Review Focus
@@ -462,6 +462,19 @@ class GateDispatch(unittest.TestCase):
         rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: SD-FX-2"))
         self.assertFailLine(rc, out, "dispatch.findings.SD-FX-2")
 
+    def test_implementer_on_a_pinned_or_merged_row_fails(self):
+        rows = rf.load_rows()
+        for fid, state in (("SD-FX-3", "pinned"), ("SD-FX-4", "merged"), ("SD-FX-5", "in-progress")):
+            rows["findings"].append(dict(rows["findings"][0], id=fid, state=state))
+        root = rf.make_repo(rf.DISPATCH_FILES, rows)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for fid, state in (("SD-FX-3", "pinned"), ("SD-FX-4", "merged")):
+            rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", f"## Findings: {fid}"), root=root)
+            self.assertFailLine(rc, out, f"dispatch.findings.{fid}")
+            self.assertIn(f"state {state!r}; an implementer takes only planned or in-progress rows", out)
+        rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: SD-FX-5"), root=root)
+        self.assertEqual(0, rc, out)
+
     def test_implementer_without_findings_fails(self):
         rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: none"))
         self.assertFailLine(rc, out, "dispatch.findings")
@@ -469,6 +482,11 @@ class GateDispatch(unittest.TestCase):
     def test_stale_claim_fails(self):
         rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.stale"))
         self.assertFailLine(rc, out, "dispatch.claims.C-fx.stale")
+
+    def test_unregistered_claim_fails(self):
+        rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.404"))
+        self.assertFailLine(rc, out, "dispatch.claims.C-fx.404")
+        self.assertIn("FAIL dispatch.claims.C-fx.404: not in docs/superpowers/state/claims.yml", out)
 
     def test_claim_whose_cited_file_changed_fails(self):
         rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.moved"))
@@ -499,6 +517,16 @@ class GateDispatch(unittest.TestCase):
     def test_decision_id_inside_a_word_fails(self):
         rc, out = self.dispatch(GOOD + "Scope follows_DEC-0002.\n")
         self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
+
+    def test_a_five_digit_text_is_a_mention_of_its_first_four_digits(self):
+        """DEC-0010 (umbrella pattern DEC-[0-9]{4}, no lookahead): DEC-00021 cites DEC-0002."""
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-00021.\n")
+        self.assertFailLine(rc, out, "dispatch.decisions.DEC-0002")
+
+    def test_non_ascii_digits_never_form_an_id(self):
+        rc, out = self.dispatch(GOOD + "Scope follows DEC-\uff10\uff10\uff10\uff12 (fullwidth).\n")
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("dispatch.decisions.DEC-", out.replace("PASS dispatch.decisions\n", ""))
 
     def test_answered_decision_passes(self):
         rc, out = self.dispatch(GOOD + "Merge under DEC-0001.\n")
@@ -544,6 +572,36 @@ class GateDispatch(unittest.TestCase):
     def test_budget_over_role_cap_fails(self):
         rc, out = self.dispatch(self.variant("tokens=150000", "tokens=150001"))
         self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_budget_with_trailing_text_fails(self):
+        rc, out = self.dispatch(self.variant("## Budget: tokens=150000 minutes=60\n",
+                                             "## Budget: tokens=150000 minutes=60 extra\n"))
+        self.assertFailLine(rc, out, "dispatch.budget")
+        self.assertIn("expected 'tokens=<n> minutes=<n>'", out)
+
+    def test_fork_dispatch_fails(self):
+        """Ruling 4 (B4-FIX-1): a fork runs on the session model with the session context."""
+        for value in ("fork", "Fork", " fork "):
+            with self.subTest(subagent_type=value):
+                rc, out = self.dispatch(GOOD, "--tool-model", "sonnet", "--subagent-type", value)
+                self.assertFailLine(rc, out, "dispatch.fork")
+                self.assertIn("session model", out)
+                self.assertIn("general-purpose", out)
+
+    def test_fork_fails_even_when_the_prompt_is_not_in_the_grammar(self):
+        rc, out = self.dispatch("not a dispatch prompt\n", "--subagent-type", "fork")
+        self.assertFailLine(rc, out, "dispatch.fork")
+        self.assertIn("FAIL dispatch.grammar", out)
+
+    def test_other_subagent_types_keep_todays_behaviour(self):
+        rc, base = self.dispatch(GOOD, "--tool-model", "sonnet")
+        self.assertEqual(0, rc, base)
+        self.assertNotIn("dispatch.fork", base)
+        for value in ("general-purpose", "Explore", "claude", "forked", ""):
+            with self.subTest(subagent_type=value):
+                rc, out = self.dispatch(GOOD, "--tool-model", "sonnet", "--subagent-type", value)
+                self.assertEqual(0, rc, out)
+                self.assertEqual("PASS dispatch.fork\n" + base, out)
 
     def test_tool_model_must_agree(self):
         rc, out = self.dispatch(GOOD, "--tool-model", "sonnet")
@@ -632,6 +690,123 @@ class GateDispatch(unittest.TestCase):
         self.assertEqual(0, rc, out)
 
 
+class ConfigCheck(unittest.TestCase):
+    def with_config(self, edit):
+        """Config is read from CODE_ROOT (S1), so a bad config is injected at config.load."""
+        conf = config.load(rf.REAL)
+        edit(conf)
+        return mock.patch("tools.gates.lib.config.load", return_value=conf)
+
+    def test_config_check_passes_on_repo_config(self):
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.implementer", out)
+
+    def test_config_check_fails_when_implementer_minimum_is_fable(self):
+        with self.with_config(lambda c: c["models"].__setitem__("implementer", "fable")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.implementer", out)
+
+    def test_config_check_fails_on_an_unknown_role(self):
+        with self.with_config(lambda c: c["models"].__setitem__("helper", "opus")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.models", out)
+
+    def test_config_check_fails_on_a_non_positive_cap(self):
+        with self.with_config(lambda c: c["dispatch"].__setitem__("max_prompt_chars", 0)):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_config_check_fails_on_a_cap_that_is_not_an_integer(self):
+        for bad in (True, 1.5, "12000"):
+            with self.subTest(cap=bad), \
+                    self.with_config(lambda c, b=bad: c["dispatch"].__setitem__("max_prompt_chars", b)):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.max_prompt_chars", out)
+
+    def test_config_check_fails_on_a_minimum_that_is_not_in_model_rank(self):
+        with self.with_config(lambda c: c["models"].__setitem__("implementer", "gpt")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.implementer: minimum model 'gpt' not in model_rank", out)
+
+    def test_config_check_fails_on_a_role_with_no_minimum(self):
+        with self.with_config(lambda c: c["models"].pop("investigator")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.investigator: minimum model None not in model_rank", out)
+
+    def test_config_check_fails_on_an_unknown_fable_role(self):
+        with self.with_config(lambda c: c["fable_roles"].append("helper")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.fable_roles: unknown roles: helper", out)
+
+    def test_config_check_fails_when_fable_roles_differ_from_the_fable_minimums(self):
+        """DEC-0012 = require-equal: fable_roles is exactly the roles whose minimum model is fable."""
+        for name, edit in (("extra", lambda c: c["fable_roles"].append("implementer")),
+                           ("missing", lambda c: c["fable_roles"].remove("exception_reviewer"))):
+            with self.subTest(name), self.with_config(edit):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.fable_roles: ", out)
+                self.assertIn("fable minimums ['exception_reviewer', 'final_verifier']", out)
+
+    def test_config_check_names_both_fable_sets(self):
+        with self.with_config(lambda c: c["fable_roles"].append("implementer")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_roles: fable_roles ['exception_reviewer', 'final_verifier',"
+                      " 'implementer'] != the roles whose minimum model is fable"
+                      " (fable minimums ['exception_reviewer', 'final_verifier'])", out)
+
+    def test_config_check_passes_model_rank_on_repo_config(self):
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.model_rank\n", out)
+        self.assertIn("PASS dispatch.config.fable_roles\n", out)
+
+    def test_config_check_fails_when_model_rank_is_not_strictly_ordered(self):
+        bad = ({"haiku": 1, "sonnet": 2, "opus": 5, "fable": 4}, {"haiku": 1, "sonnet": 2, "opus": 3, "fable": 3},
+               {"haiku": 2, "sonnet": 1, "opus": 3, "fable": 4}, {"haiku": 1, "sonnet": 2, "opus": 3},
+               {"haiku": 1, "sonnet": 2, "opus": 3, "fable": "4"}, {"haiku": 1, "sonnet": 2, "opus": 3, "fable": True},
+               {"haiku": True, "sonnet": 2, "opus": 3, "fable": 4})
+        for rank in bad:
+            with self.subTest(rank=rank), self.with_config(lambda c, r=rank: c.__setitem__("model_rank", dict(r))):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.model_rank: must order haiku < sonnet < opus < fable", out)
+
+    def test_config_check_fails_when_a_role_has_no_prompt_file(self):
+        patched = {k: v for k, v in gate_dispatch.ROLE_PROMPT.items() if k != "investigator"}
+        with mock.patch.object(gate_dispatch, "ROLE_PROMPT", patched):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.config.investigator: no prompt file mapped for the role", out)
+
+    def test_neither_prompt_nor_config_check_is_a_bad_argument(self):
+        rc, out = gate(rf.REAL, [])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.input: bad arguments", out)
+
+    def test_prompt_and_config_check_are_exclusive(self):
+        rc, out = gate(rf.REAL, ["--config-check", "--prompt", "x.md"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL dispatch.input", out)
+
+    def test_run_all_runs_dispatch_in_config_check_mode(self):
+        from tools.gates import run_all
+        self.assertIn("dispatch", run_all.GATES)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": rf.REAL}), contextlib.redirect_stdout(buf):
+            rc = run_all.main(["--only", "dispatch"])
+        self.assertEqual(0, rc, buf.getvalue())
+        self.assertIn("dispatch.config.implementer", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -648,7 +823,8 @@ Expected: ERROR `ImportError: cannot import name 'gate_dispatch'` (or `ModuleNot
 """gate_dispatch -- a subagent dispatch prompt obeys the strict-delivery dispatch grammar.
 
 Grammar and rules: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Dispatch prompt grammar".
-Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D]
+Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--subagent-type T] [--prompts-dir D]
+       | [--json] --config-check
 (--json is read by run_gate and only as the first argument, like every S1 gate.)
 """
 from __future__ import annotations
@@ -682,6 +858,7 @@ FINDINGS_NONE_ROLES = {"investigator", "audit_reviewer", "audit_verifier"}
 HEADERS = ["Role", "Brief", "Findings", "Claims", "Budget", "Model", "Report"]
 STRICT, TASK = "## Strict block\n", "## Task\n"
 BUDGET_RE = re.compile(r"^tokens=(\d+) minutes=(\d+)$")
+RANK_ORDER = ["haiku", "sonnet", "opus", "fable"]    # DEC-0012: model_rank orders these strictly
 DEFAULT_PROMPTS = os.path.expanduser("~/.claude/skills/strict-delivery/prompts")
 
 
@@ -759,6 +936,18 @@ def _model(conf, role, model, tool_model, res):
         res.fail("dispatch.model.agree", f"tool_input.model {tool_model!r} != '## Model: {model}'")
     else:
         res.passed("dispatch.model.agree")
+
+
+def _fork(subagent_type, res):
+    """Ruling 4 (B4-FIX-1): the Agent tool runs a fork on the session model with the session's context
+    and ignores tool_input.model, so a fork dispatch is refused whatever its prompt says."""
+    if subagent_type is None:
+        return
+    if subagent_type.strip().lower() == "fork":
+        res.fail("dispatch.fork", "a fork runs on the session model with the session context; "
+                 "dispatch a general-purpose agent with a brief")
+    else:
+        res.passed("dispatch.fork")
 
 
 def _brief(root, role, value, res):
@@ -882,7 +1071,8 @@ def _strict(text, start, role, prompts_dir, res):
         res.fail("dispatch.task", "the '## Task' section is empty")
 
 
-def check_prompt(root, conf, text, tool_model, prompts_dir, res) -> None:
+def check_prompt(root, conf, text, tool_model, prompts_dir, res, subagent_type=None) -> None:
+    _fork(subagent_type, res)
     cap = conf["dispatch"]["max_prompt_chars"]
     if len(text) > cap:
         res.fail("dispatch.length", f"{len(text)} chars > dispatch.max_prompt_chars {cap}")
@@ -909,15 +1099,64 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res) -> None:
     _strict(text, start, role, prompts_dir, res)
 
 
+def check_config(conf: dict, res: Result) -> None:
+    """CI mode: the model map, fable_roles, model_rank and the prompt cap agree with the dispatch grammar
+    (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders haiku < sonnet < opus < fable)."""
+    models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
+    for role in ROLES:
+        need = models.get(role)
+        if need not in rank:
+            res.fail(f"dispatch.config.{role}", f"minimum model {need!r} not in model_rank")
+        elif need == "fable" and role not in fable:
+            res.fail(f"dispatch.config.{role}", "minimum model fable but the role is not in fable_roles")
+        elif ROLE_PROMPT.get(role) is None:
+            res.fail(f"dispatch.config.{role}", "no prompt file mapped for the role")
+        else:
+            res.passed(f"dispatch.config.{role}")
+    extra = sorted(set(models) - set(ROLES))
+    if extra:
+        res.fail("dispatch.config.models", f"roles outside the dispatch grammar: {', '.join(extra)}")
+    else:
+        res.passed("dispatch.config.models")
+    stray = sorted(fable - set(ROLES))
+    minimums = sorted(r for r in ROLES if models.get(r) == "fable")
+    if stray:
+        res.fail("dispatch.config.fable_roles", f"unknown roles: {', '.join(stray)}")
+    elif sorted(fable) != minimums:    # DEC-0012 = require-equal
+        res.fail("dispatch.config.fable_roles", f"fable_roles {sorted(fable)} != the roles whose minimum model "
+                 f"is fable (fable minimums {minimums})")
+    else:
+        res.passed("dispatch.config.fable_roles")
+    values = [rank.get(m) for m in RANK_ORDER]
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in values) \
+            and all(a < b for a, b in zip(values, values[1:])):
+        res.passed("dispatch.config.model_rank")
+    else:
+        res.fail("dispatch.config.model_rank", f"must order {' < '.join(RANK_ORDER)} strictly with integer "
+                 f"ranks; got {', '.join(f'{m}={rank.get(m)!r}' for m in RANK_ORDER)}")
+    cap = conf["dispatch"]["max_prompt_chars"]
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        res.passed("dispatch.config.max_prompt_chars")
+    else:
+        res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
+
+
 def check(args: list) -> Result:
     p = gate_args("gate_dispatch")
-    p.add_argument("--prompt", required=True)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prompt")
+    mode.add_argument("--config-check", action="store_true")
     p.add_argument("--tool-model")
+    p.add_argument("--subagent-type")
     p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
     a = p.parse_args(args)
     root = a.root or repo_root()
+    conf = gconfig.load(CODE_ROOT)
     res = Result("dispatch")
-    check_prompt(root, gconfig.load(CODE_ROOT), read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
+    if a.config_check:
+        check_config(conf, res)
+        return res
+    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res, a.subagent_type)
     return res
 
 
@@ -932,7 +1171,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
-Expected: `OK` (38 tests). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
 
 - [ ] **Step 6: Commit**
 
@@ -961,30 +1200,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_dispatch.G
 step 2 (fix reverted: perl replaces the fable_roles condition in tools/gates/gate_dispatch.py with False): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fable_on_implementer_fails -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T1.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T1/mutation-SD-S2-T1.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T1.md
+echo "- S2-T1 DONE <task head sha> gate_dispatch; review docs/superpowers/state/strict-delivery/reviews/S2-T1.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T1"
-PIN = {"test": "tools/gates/tests/test_gate_dispatch.py::GateDispatch::test_fable_on_implementer_fails",
+PIN = {"test": "test_gate_dispatch::test_fable_on_implementer_fails",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T1.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt
-git commit -m "chore(state): SD-S2-T1 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T1.txt docs/superpowers/state/strict-delivery/reviews/S2-T1.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T1 pinned; ledger S2-T1"
 ```
-Expected: `gate_register` all `PASS`.
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 8: Ledger (controller, after the task review is ✅)** — append `- S2-T1 DONE <task head sha> gate_dispatch; review <report path>` to `docs/superpowers/state/strict-delivery/ledger.md`; commit `chore(state): ledger S2-T1`.
+- [ ] **Step 8: Ledger (controller, after the task review is ✅)** — the line `- S2-T1 DONE <task head sha> gate_dispatch; review docs/superpowers/state/strict-delivery/reviews/S2-T1.md` goes to `docs/superpowers/state/strict-delivery/ledger.md` in the pin commit above (`chore(state): SD-S2-T1 pinned; ledger S2-T1`); no separate ledger commit.
 
 ### Task 2: PreToolUse Agent branch
 
@@ -1012,8 +1257,10 @@ and append above the `if __name__` line:
 DISPATCH_FIX = os.path.join(rf.FIX, "dispatch")
 
 
-def agent_event(cwd, prompt, model="sonnet"):
-    tool_input = {"prompt": prompt, "description": "fixture", "subagent_type": "general-purpose"}
+def agent_event(cwd, prompt, model="sonnet", subagent_type="general-purpose"):
+    tool_input = {"prompt": prompt, "description": "fixture"}
+    if subagent_type is not None:
+        tool_input["subagent_type"] = subagent_type
     if model is not None:
         tool_input["model"] = model
     event = {"session_id": "fx", "transcript_path": "/dev/null", "permission_mode": "default",
@@ -1046,8 +1293,8 @@ class AgentDispatchHook(unittest.TestCase):
         gf.remove(cls.dup_root)
         gf.remove(cls.open_root)
 
-    def run_agent(self, root, prompt, model="sonnet", cwd=True):
-        event = agent_event(root if cwd is True else cwd, prompt, model)
+    def run_agent(self, root, prompt, model="sonnet", cwd=True, subagent_type="general-purpose"):
+        event = agent_event(root if cwd is True else cwd, prompt, model, subagent_type)
         return hook("pre_tool_use.py", event, SD_PROMPTS_DIR=os.path.join(DISPATCH_FIX, "prompts"))
 
     def test_good_dispatch_passes(self):
@@ -1082,6 +1329,23 @@ class AgentDispatchHook(unittest.TestCase):
         p = self.run_agent(self.root, self.good, model=None)
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("model.agree", p.stderr)
+
+    def test_fork_dispatch_blocks(self):
+        """Ruling 4 (B4-FIX-1): a fork ignores tool_input.model and inherits the session context."""
+        p = self.run_agent(self.root, self.good, subagent_type="fork")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.fork: ", p.stderr)
+        self.assertIn("session model", p.stderr)
+
+    def test_other_or_missing_subagent_types_pass(self):
+        for value in ("general-purpose", "Explore", None):
+            p = self.run_agent(self.root, self.good, subagent_type=value)
+            self.assertEqual((0, ""), (p.returncode, p.stderr), value)
+
+    def test_a_non_string_subagent_type_fails_closed(self):
+        p = self.run_agent(self.root, self.good, subagent_type=["fork"])
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.fork: ", p.stderr)
 
     def test_empty_prompt_blocks(self):
         p = self.run_agent(self.root, "   ")
@@ -1118,9 +1382,11 @@ Expected: `test_good_dispatch_passes` passes (S1 lets `Agent` through); the othe
 ```python
 def handle_agent(event: dict) -> int:
     """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
-    names), gate_claims and gate_decisions in the tree of the event's cwd. tool_input.model must be
-    set and equal the prompt's '## Model:' line (umbrella dispatch grammar). 0 = allow, 2 = block.
-    gate_dispatch runs directly (not via run_all.run), so the hook does not depend on run_all.GATES."""
+    names), gate_claims and gate_decisions in the tree of the event's cwd (all three through
+    run_all.run; the dispatch argv given here replaces run_all.DEFAULT_ARGV's --config-check).
+    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch
+    grammar); tool_input.subagent_type, when present, goes to gate_dispatch --subagent-type, which
+    refuses a fork (ruling 4). 0 = allow, 2 = block."""
     cwd = event.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         raise Blocked("hook.input", "the event has no cwd")
@@ -1132,20 +1398,24 @@ def handle_agent(event: dict) -> int:
         print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
         return 2
     model = tool_input.get("model")
+    subagent_type = tool_input.get("subagent_type")
+    if subagent_type is not None and not isinstance(subagent_type, str):
+        print(f"FAIL dispatch.fork: tool_input.subagent_type {subagent_type!r} is not a string", file=sys.stderr)
+        return 2
     sys.path.insert(0, CODE_ROOT)
-    from tools.gates import gate_dispatch, run_all   # lazy, as in main()
-    from tools.gates.lib import run_check
+    from tools.gates import run_all   # lazy, as in main()
     fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(prompt)
-        argv = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        dispatch = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        if subagent_type is not None:
+            dispatch.append(f"--subagent-type={subagent_type}")    # "=": a value may start with "-"
         prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
         if prompts:
-            argv += ["--prompts-dir", prompts]
-        # dispatch runs directly, not through run_all: run_all.GATES lists it only from S2 Task 3
-        res = run_all.run(["claims", "decisions"], {"root": root, "decisions": ["--scan", path]})
-        res.lines[:0] = run_check("dispatch", gate_dispatch.check, ["--root", root] + argv).lines
+            dispatch += ["--prompts-dir", prompts]
+        res = run_all.run(["dispatch", "claims", "decisions"],
+                          {"root": root, "dispatch": dispatch, "decisions": ["--scan", path]})
     finally:
         os.unlink(path)
     if res.ok():
@@ -1196,29 +1466,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_hooks.AgentDisp
 step 2 (fix reverted: perl drops the --tool-model argument in tools/gates/hooks/pre_tool_use.py): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook.test_missing_tool_model_blocks -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T2.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T2/mutation-SD-S2-T2.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T2.md
+echo "- S2-T2 DONE <task head sha> Agent hook branch; review docs/superpowers/state/strict-delivery/reviews/S2-T2.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T2"
-PIN = {"test": "tools/gates/tests/test_hooks.py::AgentDispatchHook::test_missing_tool_model_blocks",
+PIN = {"test": "test_hooks::test_missing_tool_model_blocks",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T2.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt
-git commit -m "chore(state): SD-S2-T2 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T2.txt docs/superpowers/state/strict-delivery/reviews/S2-T2.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T2 pinned; ledger S2-T2"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 7: Ledger (controller, after the task review is ✅)** — append `- S2-T2 DONE <task head sha> Agent hook branch; review <report path>`; commit `chore(state): ledger S2-T2`. From here every dispatch in this checkout is gated.
+- [ ] **Step 7: Ledger (controller, after the task review is ✅)** — the line `- S2-T2 DONE <task head sha> Agent hook branch; review docs/superpowers/state/strict-delivery/reviews/S2-T2.md` goes to `docs/superpowers/state/strict-delivery/ledger.md` in the pin commit above (`chore(state): SD-S2-T2 pinned; ledger S2-T2`); no separate ledger commit. From here every dispatch in this checkout is gated.
 
 ### Task 3: dispatch config check, run_all registration, README, DEC-0010 pattern, hook on run_all
 
@@ -1235,8 +1512,8 @@ git commit -m "chore(state): SD-S2-T2 pinned (mutation transcript)"
 
 **Interfaces:**
 - Consumes: Task 1 `gate_dispatch`; Task 2 `handle_agent`; S1 `run_all`.
-- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`; exclusive with `--prompt`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`; `gate_decisions.REF == re.compile(r"DEC-[0-9]{4}")` (owner decision DEC-0010, the umbrella pattern: four ASCII digits, no lookahead, so `DEC-00021` cites `DEC-0002`; `gate_dispatch` consumes it as `DEC_RE`); `handle_agent` runs `["dispatch", "claims", "decisions"]` through `run_all.run` (owner decisions DEC-0009 keep `BRIEF_ROLES`, DEC-0011 follow the spec: no code change).
-- Item A (Task 1 review F2): `check()` has no `--json` option (`run_gate` reads `--json` only as argv[0]; `test_json_flag_after_other_arguments_fails` pins it), so the docstring usage reads `Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check`.
+- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`, and from the b4 fix wave (DEC-0012 = require-equal) `dispatch.config.model_rank`, with `dispatch.config.fable_roles` also requiring equality with the fable-minimum roles; exclusive with `--prompt`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`; `gate_decisions.REF == re.compile(r"DEC-[0-9]{4}")` (owner decision DEC-0010, the umbrella pattern: four ASCII digits, no lookahead, so `DEC-00021` cites `DEC-0002`; `gate_dispatch` consumes it as `DEC_RE`); `handle_agent` runs `["dispatch", "claims", "decisions"]` through `run_all.run` (owner decisions DEC-0009 keep `BRIEF_ROLES`, DEC-0011 follow the spec: no code change).
+- Item A (Task 1 review F2): `check()` has no `--json` option (`run_gate` reads `--json` only as argv[0]; `test_json_flag_after_other_arguments_fails` pins it), so the docstring usage reads `Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check` (B4-FIX-1 later adds `[--subagent-type T]`).
 
 - [ ] **Step 1: Write the failing tests**
   1. Append to `tools/gates/tests/test_gate_dispatch.py` above the `if __name__` line:
@@ -1298,6 +1575,40 @@ class ConfigCheck(unittest.TestCase):
         self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.config.fable_roles: unknown roles: helper", out)
 
+    def test_config_check_fails_when_fable_roles_differ_from_the_fable_minimums(self):
+        """DEC-0012 = require-equal: fable_roles is exactly the roles whose minimum model is fable."""
+        for name, edit in (("extra", lambda c: c["fable_roles"].append("implementer")),
+                           ("missing", lambda c: c["fable_roles"].remove("exception_reviewer"))):
+            with self.subTest(name), self.with_config(edit):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.fable_roles: ", out)
+                self.assertIn("fable minimums ['exception_reviewer', 'final_verifier']", out)
+
+    def test_config_check_names_both_fable_sets(self):
+        with self.with_config(lambda c: c["fable_roles"].append("implementer")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_roles: fable_roles ['exception_reviewer', 'final_verifier',"
+                      " 'implementer'] != the roles whose minimum model is fable"
+                      " (fable minimums ['exception_reviewer', 'final_verifier'])", out)
+
+    def test_config_check_passes_model_rank_on_repo_config(self):
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.model_rank\n", out)
+        self.assertIn("PASS dispatch.config.fable_roles\n", out)
+
+    def test_config_check_fails_when_model_rank_is_not_strictly_ordered(self):
+        bad = ({"haiku": 1, "sonnet": 2, "opus": 5, "fable": 4}, {"haiku": 1, "sonnet": 2, "opus": 3, "fable": 3},
+               {"haiku": 2, "sonnet": 1, "opus": 3, "fable": 4}, {"haiku": 1, "sonnet": 2, "opus": 3},
+               {"haiku": 1, "sonnet": 2, "opus": 3, "fable": "4"}, {"haiku": 1, "sonnet": 2, "opus": 3, "fable": True},
+               {"haiku": True, "sonnet": 2, "opus": 3, "fable": 4})
+        for rank in bad:
+            with self.subTest(rank=rank), self.with_config(lambda c, r=rank: c.__setitem__("model_rank", dict(r))):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.model_rank: must order haiku < sonnet < opus < fable", out)
+
     def test_config_check_fails_when_a_role_has_no_prompt_file(self):
         patched = {k: v for k, v in gate_dispatch.ROLE_PROMPT.items() if k != "investigator"}
         with mock.patch.object(gate_dispatch, "ROLE_PROMPT", patched):
@@ -1323,7 +1634,6 @@ class ConfigCheck(unittest.TestCase):
             rc = run_all.main(["--only", "dispatch"])
         self.assertEqual(0, rc, buf.getvalue())
         self.assertIn("dispatch.config.implementer", buf.getvalue())
-
 ```
   2. In `GateDispatch` (same file), insert directly above `test_answered_decision_passes`:
 
@@ -1355,6 +1665,10 @@ class ConfigCheck(unittest.TestCase):
         self.assertEqual(1, rc)
 
     def test_non_ascii_digits_never_form_an_id(self):
+        """The scan pattern itself is the observable: an id formed from non-ASCII digits can never equal
+        an open (ASCII) id, so the gate's verdict cannot show it; REF must not match such text at all."""
+        for text in ("DEC-\uff19\uff10\uff10\uff11", "DEC-\u0669\u0660\u0660\u0661"):
+            self.assertEqual([], gate_decisions.REF.findall(f"Non-ASCII {text} is not an id."), text)
         gf.write(self.root, "docs/plan.md", "Fullwidth DEC-\uff19\uff10\uff10\uff11 is not an id.\n")
         rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
         self.assertEqual(PASS_ALL, out)
@@ -1371,7 +1685,8 @@ Expected: FAIL — `--config-check` is an unknown argument (`FAIL dispatch.input
 
 ```python
 def check_config(conf: dict, res: Result) -> None:
-    """CI mode: the model map, fable_roles and the prompt cap agree with the dispatch grammar."""
+    """CI mode: the model map, fable_roles, model_rank and the prompt cap agree with the dispatch grammar
+    (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders haiku < sonnet < opus < fable)."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -1389,10 +1704,21 @@ def check_config(conf: dict, res: Result) -> None:
     else:
         res.passed("dispatch.config.models")
     stray = sorted(fable - set(ROLES))
+    minimums = sorted(r for r in ROLES if models.get(r) == "fable")
     if stray:
         res.fail("dispatch.config.fable_roles", f"unknown roles: {', '.join(stray)}")
+    elif sorted(fable) != minimums:    # DEC-0012 = require-equal
+        res.fail("dispatch.config.fable_roles", f"fable_roles {sorted(fable)} != the roles whose minimum model "
+                 f"is fable (fable minimums {minimums})")
     else:
         res.passed("dispatch.config.fable_roles")
+    values = [rank.get(m) for m in RANK_ORDER]
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in values) \
+            and all(a < b for a, b in zip(values, values[1:])):
+        res.passed("dispatch.config.model_rank")
+    else:
+        res.fail("dispatch.config.model_rank", f"must order {' < '.join(RANK_ORDER)} strictly with integer "
+                 f"ranks; got {', '.join(f'{m}={rank.get(m)!r}' for m in RANK_ORDER)}")
     cap = conf["dispatch"]["max_prompt_chars"]
     if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
         res.passed("dispatch.config.max_prompt_chars")
@@ -1407,6 +1733,7 @@ def check(args: list) -> Result:
     mode.add_argument("--prompt")
     mode.add_argument("--config-check", action="store_true")
     p.add_argument("--tool-model")
+    p.add_argument("--subagent-type")
     p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
     a = p.parse_args(args)
     root = a.root or repo_root()
@@ -1415,11 +1742,12 @@ def check(args: list) -> Result:
     if a.config_check:
         check_config(conf, res)
         return res
-    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
+    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res, a.subagent_type)
     return res
 ```
 Also change the module docstring's usage line to:
 `Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check`
+(the b4 fix wave B4-FIX-1 later adds `[--subagent-type T]` after `[--tool-model M]` and wraps the line; the Task 1 Step 4 block shows that tip form).
 
 - [ ] **Step 4: Register in run_all** — in `tools/gates/run_all.py` set:
 ```python
@@ -1438,66 +1766,19 @@ S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged. Also rew
     DEFAULT_ARGV[name] when args has no entry for the gate (an entry replaces the default)."""
 ```
 
-- [ ] **Step 5b: The DEC-0010 pattern** — in `tools/gates/gate_decisions.py` replace `REF = re.compile(r"DEC-\d{4}(?!\d)")` by
-```python
-REF = re.compile(r"DEC-[0-9]{4}")    # DEC-0010 (umbrella pattern): four ASCII digits, no lookahead; DEC-00021 cites DEC-0002
-```
-(`gate_dispatch` imports it as `DEC_RE`; `registers.DECISION_ID` is already `^DEC-[0-9]{4}$`; `git grep -nE 'REF|DEC_RE' -- tools` lists no other user.)
+- [ ] **Step 5b: The DEC-0010 pattern** — in `tools/gates/gate_decisions.py` `REF` becomes `re.compile(r"DEC-[0-9]{4}")` (four ASCII digits, no lookahead; `gate_dispatch` imports it as `DEC_RE`): the Task 1/2 blocks above show the tip state, which includes this task's changes.
 
-- [ ] **Step 5c: The Agent hook runs dispatch through run_all** — in `tools/gates/hooks/pre_tool_use.py` replace `handle_agent` (Task 2's copy ran `gate_dispatch.check` through `lib.run_check` because `run_all.GATES` lacked `dispatch`; the hook must hand `dispatch` its prompt argv, which replaces `DEFAULT_ARGV`'s `--config-check`) by:
-
-```python
-def handle_agent(event: dict) -> int:
-    """PreToolUse Agent: the dispatch prompt must pass gate_dispatch (which also checks the claims it
-    names), gate_claims and gate_decisions in the tree of the event's cwd (all three through
-    run_all.run; the dispatch argv given here replaces run_all.DEFAULT_ARGV's --config-check).
-    tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch
-    grammar). 0 = allow, 2 = block."""
-    cwd = event.get("cwd")
-    if not isinstance(cwd, str) or not cwd:
-        raise Blocked("hook.input", "the event has no cwd")
-    root = toplevel(cwd)
-    tool_input = event.get("tool_input")
-    tool_input = tool_input if isinstance(tool_input, dict) else {}
-    prompt = tool_input.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
-        return 2
-    model = tool_input.get("model")
-    sys.path.insert(0, CODE_ROOT)
-    from tools.gates import run_all   # lazy, as in main()
-    fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            f.write(prompt)
-        dispatch = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
-        prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
-        if prompts:
-            dispatch += ["--prompts-dir", prompts]
-        res = run_all.run(["dispatch", "claims", "decisions"],
-                          {"root": root, "dispatch": dispatch, "decisions": ["--scan", path]})
-    finally:
-        os.unlink(path)
-    if res.ok():
-        return 0
-    # the temporary file is gone when the reader sees a reason: name the prompt, not the path
-    forms = {path, os.path.realpath(path), os.path.relpath(path, root), os.path.relpath(os.path.realpath(path), root)}
-    for line in res.lines:
-        for form in sorted(forms, key=len, reverse=True):
-            line.reason = line.reason.replace(form, PROMPT_LABEL)
-    print(res.render(False), file=sys.stderr)
-    return 2
-```
+- [ ] **Step 5c: The Agent hook runs dispatch through run_all** — `handle_agent` hands `dispatch` its prompt argv through `run_all.run` (replacing `DEFAULT_ARGV`'s `--config-check`): the Task 1/2 blocks above show the tip state, which includes this task's changes.
 
 - [ ] **Step 6: README** — in `tools/gates/README.md` add this row below the `gate_decisions.py` row of the "Installed gates" table:
 ```markdown
-| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable) and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
 ```
 and append:
 ```markdown
 ## gate_dispatch (S2)
 
-`python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--prompts-dir D]` checks one dispatch
+`python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--subagent-type T] [--prompts-dir D]` checks one dispatch
 prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
 Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; a brief file
 exists for the implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier and
@@ -1507,15 +1788,20 @@ directory exists; no unanswered `DEC-nnnn` (pattern `DEC-[0-9]{4}`, no lookahead
 anywhere; length <= `dispatch.max_prompt_chars`; the strict block equals
 `~/.claude/skills/strict-delivery/prompts/<file>.md` byte for byte (role -> file map: `ROLE_PROMPT`). The
 PreToolUse hook runs it, with `claims` and `decisions` (never `register`), on every Agent call through
-`run_all.run`, with `--tool-model <tool_input.model>`. `--config-check` (run_all's default for `dispatch`,
-`run_all.DEFAULT_ARGV`) checks the model map and the cap.
+`run_all.run`, with `--tool-model <tool_input.model>` and `--subagent-type <tool_input.subagent_type>` (when
+present; `fork` is `FAIL dispatch.fork`, the first line, emitted even when the grammar fails). `--config-check`
+(run_all's default for `dispatch`, `run_all.DEFAULT_ARGV`) checks the model map and the cap, and, under
+DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minimum model is `fable`
+(`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
+strictly with integer ranks (`dispatch.config.model_rank`): 14 lines, so `run_all.py` prints 29 PASS on a
+healthy tree.
 ```
 
 - [ ] **Step 7: CI** — run `grep -n "unittest" .github/workflows/gates.yml`. The job uses `discover` (lines `python3.9 -m unittest discover -v -s tools/gates/tests -t .` and the 3.12 twin): nothing to change.
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest discover -s tools/gates/tests -t .` → `OK` (348 tests: 332 + 12 `ConfigCheck` + 2 `GateDispatch` DEC-0010 + 2 net `GateDecisions`); `python3 tools/gates/run_all.py` → only `PASS` (28 lines: the 15 of b3 + 13 `dispatch.config.*`).
+Run: `python3 -m unittest discover -s tools/gates/tests -t .` → `OK` (348 tests: 332 + 12 `ConfigCheck` + 2 `GateDispatch` DEC-0010 + 2 net `GateDecisions`); `python3 tools/gates/run_all.py` → only `PASS` (28 lines: the 15 of b3 + 13 `dispatch.config.*`). After the b4 fix wave (B4-FIX-1): 361 tests, and 29 `PASS` lines (+ `dispatch.config.model_rank`).
 
 - [ ] **Step 9: Commit**
 
@@ -1570,29 +1856,36 @@ step 14 (F5: mode group required=False) -> FAIL, 1 failure (test_neither_prompt_
 step 15 (review 1 mutants M2, M4, M8, M9, M11, still killed): M2 fable condition dead FAIL, 1 failure (test_config_check_fails_when_implementer_minimum_is_fable); M4 extra roles ignored FAIL, 1 failure (test_config_check_fails_on_an_unknown_role); M8 cap always passes FAIL, 4 failures (3 subTests of test_config_check_fails_on_a_cap_that_is_not_an_integer + test_config_check_fails_on_a_non_positive_cap); M9 modes not exclusive FAIL, 2 failures (test_neither_prompt_nor_config_check_is_a_bad_argument, test_prompt_and_config_check_are_exclusive); M11 --config-check ignored FAIL, 15 failures (3 of them subTests of test_config_check_fails_on_a_cap_that_is_not_an_integer)
 step 16 (all restored): both modules -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T3.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T3/mutation-SD-S2-T3.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T3.md
+echo "- S2-T3 DONE <task head sha> dispatch config check + run_all; review docs/superpowers/state/strict-delivery/reviews/S2-T3.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T3"
-PIN = {"test": "tools/gates/tests/test_gate_dispatch.py::ConfigCheck::test_config_check_fails_when_implementer_minimum_is_fable",
+PIN = {"test": "test_gate_dispatch::test_config_check_fails_when_implementer_minimum_is_fable",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T3.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt
-git commit -m "chore(state): SD-S2-T3 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt docs/superpowers/state/strict-delivery/reviews/S2-T3.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T3 pinned; ledger S2-T3"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 11: Ledger (controller, after the task review is ✅)** — append `- S2-T3 DONE <task head sha> dispatch config check + run_all; review <report path>`; commit `chore(state): ledger S2-T3`.
+- [ ] **Step 11: Ledger (controller, after the task review is ✅)** — the line `- S2-T3 DONE <task head sha> dispatch config check + run_all; review docs/superpowers/state/strict-delivery/reviews/S2-T3.md` goes to `docs/superpowers/state/strict-delivery/ledger.md` in the pin commit above (`chore(state): SD-S2-T3 pinned; ledger S2-T3`); no separate ledger commit.
 
 ### b4 checkpoint
 
@@ -2028,29 +2321,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_review_pac
 step 2 (fix reverted: perl empties the FAIL-row list in tools/gates/gate_review_package.py): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T4.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T4/mutation-SD-S2-T4.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T4.md
+echo "- S2-T4 DONE <task head sha> gate_review_package; review docs/superpowers/state/strict-delivery/reviews/S2-T4.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T4"
-PIN = {"test": "tools/gates/tests/test_gate_review_package.py::GateReviewPackage::test_claims_fail_row_fails",
+PIN = {"test": "test_gate_review_package::test_claims_fail_row_fails",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T4.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt
-git commit -m "chore(state): SD-S2-T4 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt docs/superpowers/state/strict-delivery/reviews/S2-T4.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T4 pinned; ledger S2-T4"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 8: Ledger (controller, after the task review is ✅)** — append `- S2-T4 DONE <task head sha> gate_review_package; review <report path>`; commit `chore(state): ledger S2-T4`.
+- [ ] **Step 8: Ledger (controller, after the task review is ✅)** — the line `- S2-T4 DONE <task head sha> gate_review_package; review docs/superpowers/state/strict-delivery/reviews/S2-T4.md` goes to `docs/superpowers/state/strict-delivery/ledger.md` in the pin commit above (`chore(state): SD-S2-T4 pinned; ledger S2-T4`); no separate ledger commit.
 
 ### Task 5: make_review_package helper
 
@@ -2296,29 +2596,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_make_review_pac
 step 2 (fix reverted: perl replaces the empty-range guard in tools/gates/make_review_package.py with False): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_empty_range_fails -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T5.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T5/mutation-SD-S2-T5.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T5.md
+echo "- S2-T5 DONE <task head sha> make_review_package; review docs/superpowers/state/strict-delivery/reviews/S2-T5.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T5"
-PIN = {"test": "tools/gates/tests/test_make_review_package.py::MakeReviewPackage::test_empty_range_fails",
+PIN = {"test": "test_make_review_package::test_empty_range_fails",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T5.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt
-git commit -m "chore(state): SD-S2-T5 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T5.txt docs/superpowers/state/strict-delivery/reviews/S2-T5.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T5 pinned; ledger S2-T5"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 7: Ledger (controller, after the task review is ✅)** — append `- S2-T5 DONE <task head sha> make_review_package; review <report path>`; commit `chore(state): ledger S2-T5`.
+- [ ] **Step 7: Ledger (controller, after the task review is ✅)** — the line `- S2-T5 DONE <task head sha> make_review_package; review docs/superpowers/state/strict-delivery/reviews/S2-T5.md` goes to `docs/superpowers/state/strict-delivery/ledger.md` in the pin commit above (`chore(state): SD-S2-T5 pinned; ledger S2-T5`); no separate ledger commit.
 
 ### Task 6: gate_plan and the ledger contract
 
@@ -2994,29 +3301,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_plan.GateP
 step 2 (fix reverted: perl empties the shared-file set in tools/gates/gate_plan.py): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T6.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T6/mutation-SD-S2-T6.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T6.md
+echo "- S2-T6 DONE <task head sha> gate_plan; review docs/superpowers/state/strict-delivery/reviews/S2-T6.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T6"
-PIN = {"test": "tools/gates/tests/test_gate_plan.py::GatePlan::test_parallel_tasks_sharing_a_file_fail",
+PIN = {"test": "test_gate_plan::test_parallel_tasks_sharing_a_file_fail",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T6.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt
-git commit -m "chore(state): SD-S2-T6 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt docs/superpowers/state/strict-delivery/reviews/S2-T6.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T6 pinned; ledger S2-T6"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 11: Ledger (controller, after the task review is ✅)** — append `- S2-T6 DONE <task head sha> gate_plan; review <package path>`; commit `chore(state): ledger S2-T6`.
+- [ ] **Step 11: Ledger (controller, after the task review is ✅)** — the line `- S2-T6 DONE <task head sha> gate_plan; review docs/superpowers/state/strict-delivery/reviews/S2-T6.md` goes to `docs/superpowers/state/strict-delivery/ledger.md` in the pin commit above (`chore(state): SD-S2-T6 pinned; ledger S2-T6`); no separate ledger commit.
 
 ### b5 checkpoint
 
@@ -3671,29 +3985,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_checkpoint
 step 2 (fix reverted: perl makes the post-merge tree verdict always pass in tools/gates/gate_checkpoint.py): python3 -m unittest tools.gates.tests.test_gate_checkpoint.PostMerge.test_post_tree_mismatch_fails -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_checkpoint.PostMerge.test_post_tree_mismatch_fails -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T7.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T7/mutation-SD-S2-T7.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T7.md
+echo "- S2-T7 DONE <task head sha> gate_checkpoint; review docs/superpowers/state/strict-delivery/reviews/S2-T7.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T7"
-PIN = {"test": "tools/gates/tests/test_gate_checkpoint.py::PostMerge::test_post_tree_mismatch_fails",
+PIN = {"test": "test_gate_checkpoint::test_post_tree_mismatch_fails",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T7.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt
-git commit -m "chore(state): SD-S2-T7 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T7.txt docs/superpowers/state/strict-delivery/reviews/S2-T7.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T7 pinned; ledger S2-T7"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 9: Review package and ledger (controller)** — before the reviewer: `python3 tools/gates/make_review_package.py strict-delivery S2-T7 <task base> <task head>`; the implementer's `mutation-SD-S2-T7.txt`, `siblings.md` (header + separator only: the row has no siblings) and `claims.md` in `.superpowers/sdd/strict-delivery/review/S2-T7/`; `python3 tools/gates/gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T7` → `PASS`; reviewer; after ✅ and the pin commit append `- S2-T7 DONE <task head sha> gate_checkpoint; review <package path>`; commit `chore(state): ledger S2-T7`.
+- [ ] **Step 9: Review package and ledger (controller)** — before the reviewer: `python3 tools/gates/make_review_package.py strict-delivery S2-T7 <task base> <task head>`; the implementer's `mutation-SD-S2-T7.txt`, `siblings.md` (header + separator only: the row has no siblings) and `claims.md` in `.superpowers/sdd/strict-delivery/review/S2-T7/`; `python3 tools/gates/gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T7` → `PASS`; reviewer; after ✅ the controller runs Step 8's pin, whose commit carries the ledger line `- S2-T7 DONE <task head sha> gate_checkpoint; review docs/superpowers/state/strict-delivery/reviews/S2-T7.md`.
 
 ### Task 8: Stop and SubagentStop hooks
 
@@ -4140,29 +4461,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_hook_stop.Subag
 step 2 (fix reverted: perl replaces the status check in tools/gates/hooks/subagent_stop.py with False): python3 -m unittest tools.gates.tests.test_hook_stop.SubagentStopHook.test_subagent_bad_status_blocks -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_hook_stop.SubagentStopHook.test_subagent_bad_status_blocks -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T8.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T8/mutation-SD-S2-T8.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T8.md
+echo "- S2-T8 DONE <task head sha> Stop + SubagentStop hooks; review docs/superpowers/state/strict-delivery/reviews/S2-T8.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T8"
-PIN = {"test": "tools/gates/tests/test_hook_stop.py::SubagentStopHook::test_subagent_bad_status_blocks",
+PIN = {"test": "test_hook_stop::test_subagent_bad_status_blocks",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T8.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt
-git commit -m "chore(state): SD-S2-T8 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T8.txt docs/superpowers/state/strict-delivery/reviews/S2-T8.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T8 pinned; ledger S2-T8"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 8: Review package and ledger (controller)** — `make_review_package.py strict-delivery S2-T8 <task base> <task head>`, implementer files, `gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T8` → `PASS`, reviewer; after ✅ append `- S2-T8 DONE <task head sha> Stop + SubagentStop hooks; review <package path>`; commit `chore(state): ledger S2-T8`.
+- [ ] **Step 8: Review package and ledger (controller)** — `make_review_package.py strict-delivery S2-T8 <task base> <task head>`, implementer files, `gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T8` → `PASS`, reviewer; after ✅ the controller runs the pin step above, whose commit carries the ledger line `- S2-T8 DONE <task head sha> Stop + SubagentStop hooks; review docs/superpowers/state/strict-delivery/reviews/S2-T8.md`.
 
 ### Task 9: per-plan state creator and the checklists
 
@@ -4459,29 +4787,36 @@ step 1 (fix present): python3 -m unittest tools.gates.tests.test_new_plan_state.
 step 2 (fix reverted: perl turns the ledger's 'plan:' line into a comment in tools/gates/new_plan_state.py): python3 -m unittest tools.gates.tests.test_new_plan_state.NewPlanState.test_ledger_starts_with_plan_line -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_new_plan_state.NewPlanState.test_ledger_starts_with_plan_line -> PASS
 ```
-After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt` (what `pin.transcript` names); then move the row to `pinned`:
+After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T9.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
+mkdir -p docs/superpowers/state/strict-delivery/mutations docs/superpowers/state/strict-delivery/reviews
+cp .superpowers/sdd/strict-delivery/review/S2-T9/mutation-SD-S2-T9.txt docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt
+cp <the reviewer's report file> docs/superpowers/state/strict-delivery/reviews/S2-T9.md
+echo "- S2-T9 DONE <task head sha> new_plan_state + checklists; review docs/superpowers/state/strict-delivery/reviews/S2-T9.md" >> docs/superpowers/state/strict-delivery/ledger.md
 SHA=$(git rev-parse HEAD) python3 - <<'EOF'
 import os, yaml
 P = "docs/superpowers/state/findings.yml"; FID = "SD-S2-T9"
-PIN = {"test": "tools/gates/tests/test_new_plan_state.py::NewPlanState::test_ledger_starts_with_plan_line",
+PIN = {"test": "test_new_plan_state::test_ledger_starts_with_plan_line",
        "transcript": "docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt"}
 text = open(P, encoding="utf-8").read()
 header = "".join(l for l in text.splitlines(True) if l.startswith("#"))
 doc = yaml.safe_load(text)
 rows = doc if isinstance(doc, list) else next(v for v in doc.values() if isinstance(v, list))
 row = next(r for r in rows if r["id"] == FID)
+assert row["state"] == "planned", row["state"]
 row["state"], row["pin"] = "pinned", PIN
-row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "implementer"},
-                   {"state": "pinned", "sha": os.environ["SHA"], "by": "implementer"}]
+row["evidence"] = ["docs/superpowers/state/strict-delivery/reviews/S2-T9.md"]
+row["history"] += [{"state": "in-progress", "sha": os.environ["SHA"], "by": "controller"},
+                   {"state": "pinned", "sha": os.environ["SHA"], "by": "controller"}]
 open(P, "w", encoding="utf-8").write(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
 EOF
-python3 tools/gates/gate_register.py
-git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt
-git commit -m "chore(state): SD-S2-T9 pinned (mutation transcript)"
+git add docs/superpowers/state/findings.yml docs/superpowers/state/strict-delivery/mutations/SD-S2-T9.txt docs/superpowers/state/strict-delivery/reviews/S2-T9.md docs/superpowers/state/strict-delivery/ledger.md
+python3 tools/gates/gate_register.py                                       # evidence must be tracked: stage first
+git commit -m "chore(state): SD-S2-T9 pinned; ledger S2-T9"
 ```
+Expected: `gate_register` all `PASS` (on the staged files); then both suites and `python3 tools/gates/run_all.py` (all `PASS`) before the commit.
 
-- [ ] **Step 9: Review package and ledger (controller)** — `make_review_package.py strict-delivery S2-T9 <task base> <task head>`, implementer files, `gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T9` → `PASS`, reviewer; after ✅ append `- S2-T9 DONE <task head sha> new_plan_state + checklists; review <package path>`; commit `chore(state): ledger S2-T9`.
+- [ ] **Step 9: Review package and ledger (controller)** — `make_review_package.py strict-delivery S2-T9 <task base> <task head>`, implementer files, `gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-T9` → `PASS`, reviewer; after ✅ the controller runs the pin step above, whose commit carries the ledger line `- S2-T9 DONE <task head sha> new_plan_state + checklists; review docs/superpowers/state/strict-delivery/reviews/S2-T9.md`.
 
 ### b6 checkpoint
 
