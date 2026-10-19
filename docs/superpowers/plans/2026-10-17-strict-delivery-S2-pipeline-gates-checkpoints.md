@@ -3351,14 +3351,13 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 - Modify: `docs/superpowers/state/strict-delivery/ledger.md` (line 1 `plan:` header replaces the `# strict-delivery ledger` title; one appended ledger line)
 - Create: `docs/superpowers/state/strict-delivery/mutations/.gitkeep`
 - Modify: `tools/gates/tests/test_run_all.py` (`test_gates_at_this_block` and `test_cli_unknown_gate_is_rc_1` pin the gate list)
-- Not modified: `.github/workflows/gates.yml` (lines 30 and 32 run `unittest discover`, which finds the new test module; verified `grep -n unittest .github/workflows/gates.yml`)
 - Test: `tools/gates/tests/test_gate_plan.py`
 
 **Findings:** SD-S2-T6
 
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture`.
-- Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
+- Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool}`, `Plan.{headers, tasks, placeholders, block_errors}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
 - **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** when the last non-empty ledger line is not a `CHECKPOINT` line in the working tree **or** in the `HEAD` commit (or the ledger is not committed).
 
 - [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
@@ -3431,9 +3430,12 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 Run from the repo root: python3 -m unittest tools.gates.tests.test_gate_plan -v
 """
 import contextlib
+import copy
 import io
 import os
 import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -3621,6 +3623,346 @@ class InFlight(unittest.TestCase):
         self.assertEqual(0, rc, buf.getvalue())
 
 
+def words(*parts):
+    """A phrase assembled from pieces, so this file never contains a writing-plans placeholder itself."""
+    return "".join(parts)
+
+
+PLACEHOLDER_TOKENS = (words("T", "BD"), words("TO", "DO"))
+PHRASES = [words("T", "BD"), words("TO", "DO"), words("implement lat", "er"), words("fill in detai", "ls"),
+           words("add appropriate error handl", "ing"), words("add valid", "ation"), words("handle edge cas", "es"),
+           words("write tests for the abo", "ve"), words("similar to tas", "k 3")]
+
+
+class Branches(unittest.TestCase):
+    """One production-path test per load-bearing branch of gate_plan (review R6-6)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = plan_repo()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def check(self, text, *extra):
+        path = os.path.join(self.root, "plan.under-test.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return gate(self.root, ["--plan", path, *extra])
+
+    def variant(self, old, new, base=GOOD):
+        text = base.replace(old, new, 1)
+        self.assertNotEqual(base, text, f"fixture lacks {old!r}")
+        return text
+
+    def fail(self, text, line_id, message="", *extra):
+        rc, out = self.check(text, *extra)
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL {line_id}", out)
+        self.assertIn(message, out)
+        return out
+
+    def ok(self, text, *extra):
+        rc, out = self.check(text, *extra)
+        self.assertEqual(0, rc, out)
+        return out
+
+    # -- PARALLEL overlap and the Mode line
+    def test_parallel_tasks_in_different_blocks_may_share_a_file(self):
+        out = self.ok(self.variant("### Task 3: gamma\n\n", "### Task 3: gamma\n\n**Mode:** PARALLEL\n\n"))
+        self.assertNotIn("overlap.2-3", out)
+        self.assertNotIn("overlap.1-3", out)
+
+    def test_parallel_and_serial_pair_may_share_a_file(self):
+        text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
+                            "**Mode:** SERIAL\n\n**Files:**\n- Create: `src/alpha.py`")
+        out = self.ok(text)
+        self.assertIn("PASS plan.task.2.mode", out)
+        self.assertIn("PASS plan.overlap\n", out + "\n")
+
+    def test_mode_with_a_suffix_fails(self):
+        text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
+                            "**Mode:** PARALLEL (with Task 1)\n\n**Files:**\n- Create: `src/alpha.py`")
+        self.fail(text, "plan.task.2.mode", "exactly PARALLEL or SERIAL")
+
+    def test_lowercase_mode_fails(self):
+        self.fail(self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
+                               "**Mode:** parallel\n\n**Files:**\n- Create: `src/beta.py`"),
+                  "plan.task.2.mode", "'parallel'")
+
+    def test_overlap_names_the_shared_file(self):
+        out = self.fail(self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py`"), "plan.overlap.1-2",
+                        "PARALLEL tasks share src/alpha.py")
+        self.assertNotIn("tests/test_alpha.py", out)
+
+    def test_unnormalised_paths_do_not_hide_an_overlap(self):
+        for spelled in ("./src/alpha.py", "src/../src/alpha.py", "src/alpha.py ", "src//alpha.py", "src/alpha.py:3-4"):
+            with self.subTest(spelled):
+                text = self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`")
+                self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+
+    # -- the Files list
+    def test_prose_line_inside_files_list_fails_and_is_quoted(self):
+        text = self.variant("- Create: `src/beta.py`\n", "- Create: `src/beta.py`\n- Not modified: `x.yml` (a note)\n")
+        self.fail(text, "plan.task.2.files", "- Not modified: `x.yml` (a note)")
+
+    def test_blank_line_inside_files_list_keeps_collecting(self):
+        text = self.variant("- Create: `src/beta.py`\n", "- Create: `src/beta.py`\n\n- Modify: `src/alpha.py`\n")
+        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+
+    def test_blank_line_before_the_first_files_item_is_skipped(self):
+        out = self.ok(self.variant("**Files:**\n- Modify: `src/shared.py`\n", "**Files:**\n\n- Modify: `src/shared.py`\n"))
+        self.assertIn("PASS plan.task.3.files", out)
+
+    def test_files_list_ends_at_a_fence_a_step_or_a_field(self):
+        for tail in (f"{FENCE}\nx\n{FENCE}\nprose line\n", "- [ ] **Step 1: go**\nprose line\n", "**Mode:** SERIAL\nprose\n",
+                     "## Notes\nprose line\n"):
+            with self.subTest(tail):
+                text = self.variant("**Files:**\n- Modify: `src/shared.py`\n", f"**Files:**\n- Modify: `src/shared.py`\n{tail}")
+                self.ok(text)
+
+    def test_stray_files_after_a_block_heading_do_not_join_the_previous_task(self):
+        text = self.variant("## Block b2 — second\n", "## Block b2 — second\n\n**Files:**\n- Create: `src/alpha.py`\n")
+        self.ok(text)
+
+    # -- placeholders
+    def test_every_placeholder_phrase_fails(self):
+        for phrase in PHRASES:
+            # the two tokens are exact-case; the phrases are case-insensitive
+            spellings = [phrase] if phrase in PLACEHOLDER_TOKENS else [phrase, phrase.upper(), phrase.title()]
+            for spelled in spellings:
+                with self.subTest(spelled):
+                    rc, out = self.check(GOOD + f"\nStep detail: {spelled}\n")
+                    self.assertEqual(1, rc, out)
+                    self.assertIn("FAIL plan.placeholder.L", out)
+
+    def test_placeholder_line_number_and_text_are_reported(self):
+        rc, out = self.check(GOOD + f"\nStep detail: {PHRASES[0]}\n")
+        self.assertRegex(out, r"FAIL plan\.placeholder\.L\d+: Step detail: ")
+
+    # -- Findings forms
+    def test_backtick_ids_are_accepted(self):
+        out = self.ok(self.variant("**Findings:** SD-FX-2", "**Findings:** `SD-FX-2`"), "--source", "register:plan=fx")
+        self.assertIn("PASS plan.coverage.SD-FX-2", out)
+
+    def test_none_forms(self):
+        for form in ("none - ascii hyphen", "none -- double hyphen", "none — dash"):
+            with self.subTest(form):
+                out = self.ok(self.variant("none — fixture maintenance with no register row", form))
+                self.assertIn("PASS plan.task.3.findings", out)
+        self.fail(self.variant("none — fixture maintenance with no register row", "none"), "plan.task.3.findings",
+                  "not register ids")
+
+    def test_non_id_in_a_list_is_named(self):
+        out = self.fail(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-2, see audit"),
+                        "plan.task.2.findings", "'see audit'")
+        self.assertNotIn("plan.id.SD-FX-2", out)    # nothing is routed from a bad line
+        self.assertNotIn("plan.id.see", out)
+
+    def test_source_id_in_two_tasks_fails_coverage_with_both_numbers(self):
+        text = self.variant("**Findings:** none — fixture maintenance with no register row", "**Findings:** SD-FX-1")
+        rc, out = self.check(text, "--source", "register:plan=fx")
+        self.assertIn("FAIL plan.coverage.SD-FX-1: in tasks 1, 3", out)
+
+    # -- the register query
+    def test_query_grammar_errors_are_messages_not_crashes(self):
+        for q, msg in (("plan=fx&&task=1", "bad register query part ''"), ("owner=fx", "bad register query part 'owner=fx'"),
+                       ("plan", "bad register query part 'plan'"), ("plan=", "bad register query part 'plan='"),
+                       ("plan=fx&task=1&plan=fy", "duplicate register query key 'plan'"),
+                       ("task=1,", "empty pattern in register query part 'task=1,'"),
+                       ("task=,1", "empty pattern")):
+            with self.subTest(q):
+                self.fail(GOOD, "plan.input", msg, "--source", f"register:{q}")
+
+    def test_query_keys_are_anded_and_patterns_are_ored(self):
+        rc, out = self.check(GOOD, "--source", "register:plan=fx&task=2")
+        self.assertIn("PASS plan.coverage.SD-FX-2", out)
+        self.assertNotIn("coverage.SD-FX-1", out)
+        rc, out = self.check(GOOD, "--source", "register:plan=fx,fz&task=1,2")
+        self.assertIn("PASS plan.coverage.SD-FX-1", out)
+        self.assertIn("PASS plan.coverage.SD-FX-2", out)
+        self.fail(GOOD, "plan.source", "yields no register ids", "--source", "register:plan=fx&task=9")
+
+    def test_query_state_and_severity_keys(self):
+        rc, out = self.check(GOOD, "--source", "register:state=planned&severity=LOW")
+        self.assertIn("PASS plan.coverage.SD-FX-1", out)
+        self.assertNotIn("coverage.SD-FX-2", out)
+
+    # -- report sources
+    def test_missing_source_file_fails_with_its_name(self):
+        self.fail(GOOD, "plan.input", "--source docs/none.md: no such file", "--source", "docs/none.md")
+
+    def test_report_source_matches_rows_by_their_source_field(self):
+        rc, out = self.check(GOOD, "--source", "docs/cited.md")
+        self.assertIn("PASS plan.coverage.SD-FX-1", out)
+        self.assertIn("PASS plan.coverage.SD-FX-2", out)
+
+    def test_report_source_path_forms_and_row_source_suffixes(self):
+        rows = rf.load_rows()
+        extra = []
+        for rid, src, task in (("SD-FX-3", "docs/cited.md §2", "3"), ("SD-FX-4", "docs/cited.md#sec", "4"),
+                               ("SD-FX-5", "docs/cited.md:7", "5"), ("SD-FX-6", "docs/cited.mdx", "6"),
+                               ("SD-FX-7", "xdocs/cited.md", "7")):
+            row = copy.deepcopy(rows["findings"][0])
+            row.update(id=rid, source=src)
+            row["owner"] = {"kind": "plan", "plan": "other", "task": task}
+            extra.append(row)
+        rows["findings"] = rows["findings"] + extra
+        files = dict(rf.DISPATCH_FILES)
+        files["docs/superpowers/plans/fx.md"] = GOOD
+        root = rf.make_repo(files, rows)
+        self.addCleanup(shutil.rmtree, root, True)
+        plan = os.path.join(root, "plan.under-test.md")
+        with open(plan, "w", encoding="utf-8") as f:
+            f.write(GOOD)
+        for spelled in ("docs/cited.md", "./docs/cited.md", os.path.join(root, "docs", "cited.md")):
+            with self.subTest(spelled):
+                rc, out = gate(root, ["--plan", plan, "--source", spelled])
+                for rid in ("SD-FX-3", "SD-FX-4", "SD-FX-5"):
+                    self.assertIn(f"FAIL plan.coverage.{rid}: in no task", out)
+                for rid in ("SD-FX-6", "SD-FX-7"):
+                    self.assertNotIn(rid, out)
+
+    def test_source_given_through_a_symlinked_root(self):
+        link = tempfile.mkdtemp(prefix="gate-link-")
+        self.addCleanup(shutil.rmtree, link, True)
+        os.symlink(self.root, os.path.join(link, "tree"))
+        rc, out = self.check(GOOD, "--source", os.path.join(link, "tree", "docs", "cited.md"))
+        self.assertIn("PASS plan.coverage.SD-FX-1", out)
+
+    # -- code fences (CommonMark)
+    def test_fences_hide_task_headings(self):
+        inner = "### Task 9: not a task\n"
+        for name, text in (
+                ("tilde", f"~~~\n{inner}~~~\n"),
+                ("four backticks around three", f"{FENCE}`\n{FENCE}python\n{inner}{FENCE}\n{inner}{FENCE}`\n"),
+                ("indented", f"paragraph\n\n  {FENCE}\n{inner}  {FENCE}\n"),
+                ("info string does not close", f"{FENCE}\n{FENCE}python\n{inner}{FENCE}\n"),
+                ("other character does not close", f"{FENCE}\n~~~\n{inner}{FENCE}\n"),
+                ("shorter run does not close", f"{FENCE}`\n{FENCE}\n{inner}{FENCE}`\n"),
+                ("longer tilde run closes", f"~~~\n{inner}~~~~\n")):
+            with self.subTest(name):
+                out = self.ok(GOOD + "\n" + text)
+                self.assertNotIn("plan.task.9", out)
+
+    def test_text_after_a_closed_fence_is_parsed_again(self):
+        for name, text in (("info string closes nothing", f"{FENCE}\nx\n{FENCE}python\n### Task 9: swallowed\n"),
+                           ("indent of four is no fence", f"text\n\n    {FENCE}\n### Task 9: real\n"),
+                           ("inline code is no fence", f"{FENCE}inline{FENCE}\n### Task 9: real\n"),
+                           ("tilde closed by backticks", f"~~~\nx\n{FENCE}\n### Task 9: swallowed\n")):
+            with self.subTest(name):
+                rc, out = self.check(GOOD + "\n" + text)
+                self.assertEqual("real" in text, "plan.task.9.files" in out, out)
+
+    def test_list_item_fences(self):
+        item = "- an item\n"
+        rc, out = self.check(GOOD + f"\n{item}  {FENCE}\n### Task 9: left of the item ends it\n  {FENCE}\n")
+        self.assertIn("FAIL plan.task.9.files", out)
+        rc, out = self.check(GOOD + f"\ntext\n\n  {FENCE}\n### Task 9: inside a plain fence\n  {FENCE}\n")
+        self.assertNotIn("plan.task.9", out)
+        rc, out = self.check(GOOD + f"\n{item}    {FENCE}\n    code\n    {FENCE}\n### Task 9: after\n")
+        self.assertIn("FAIL plan.task.9.files", out)
+
+    def test_first_matching_header_line_wins(self):
+        out = self.ok(GOOD + "\n**Spec:** `docs/none.md`\n")
+        self.assertIn("PASS plan.header.spec-path", out)
+
+    # -- block order and plan-level failures
+    def test_tasks_before_the_first_block_heading_fail(self):
+        self.fail(self.variant("## Block b1 — first\n", ""), "plan.block.order", "before the first 'Block' heading")
+
+    def test_block_numbers_must_increase(self):
+        self.fail(self.variant("## Block b2 — second", "## Block b1 — second"), "plan.block.order",
+                  "'Block b1' does not follow block 1")
+        self.fail(self.variant("## Block b2 — second", "## Block b2 — second\n\n## Block b2 — again"), "plan.block.order",
+                  "'Block b2' does not follow block 2")
+
+    def test_a_heading_cannot_reuse_a_checkpoint_split_block(self):
+        text = self.variant("## Block b2 — second\n", "") + "\n## Block b2 — again\n"
+        self.fail(text, "plan.block.order", "'Block b2' does not follow block 2")
+
+    def test_missing_plan_file_fails(self):
+        rc, out = gate(self.root, ["--plan", "docs/none-plan.md"])
+        self.assertIn("FAIL plan.file: docs/none-plan.md: no such plan file", out)
+
+    def test_plan_without_tasks_fails(self):
+        self.fail(GOOD.split("---")[0], "plan.tasks", "no '### Task N' headings")
+
+    def test_plan_and_in_flight_together_fail(self):
+        self.fail(GOOD, "plan.input", "exactly one of", "--in-flight")
+
+    def test_source_with_in_flight_fails(self):
+        rc, out = gate(self.root, ["--in-flight", "--source", "docs/cited.md"])
+        self.assertIn("FAIL plan.input: --source goes with --plan", out)
+
+
+class Ledgers(unittest.TestCase):
+    def repo(self, ledger):
+        root = plan_repo(ledger)
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def append(self, root, text):
+        with open(os.path.join(root, "docs/superpowers/state/fx/ledger.md"), "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_line_one_rule_names_the_ledger(self):
+        for first in ("# Ledger: fx", "", "plan:docs/superpowers/plans/fx.md", "plan:  x y"):
+            with self.subTest(first):
+                root = self.repo(first + "\n- T1 DONE\n")
+                rc, out = gate(root, ["--in-flight"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL plan.input: docs/superpowers/state/fx/ledger.md: line 1 must be 'plan:", out)
+
+    def test_head_closed_but_working_tree_appended_is_in_flight(self):
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        self.assertEqual([], gate_plan.plans_in_flight(root))
+        self.append(root, "- T2 DONE\n")
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
+
+    def test_working_tree_closed_but_head_open_is_in_flight(self):
+        root = self.repo(LEDGER)
+        self.append(root, "CHECKPOINT b1 abc1234\n")
+        self.assertEqual(1, len(gate_plan.plans_in_flight(root)))
+
+    def test_only_the_last_line_closes_a_ledger(self):
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n- T2 DONE\n")
+        self.assertEqual(1, len(gate_plan.plans_in_flight(root)))
+        rc, out = gate(root, ["--in-flight"])
+        self.assertIn("PASS plan.fx.header.goal", out)
+
+    def test_trailing_blank_lines_do_not_hide_the_checkpoint(self):
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n\n  \n")
+        self.assertEqual([], gate_plan.plans_in_flight(root))
+
+    def test_a_repository_without_a_commit_is_in_flight(self):
+        root = tempfile.mkdtemp(prefix="gate-test-")
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        rf.write_registers(root, rf.load_rows(), "0" * 40)
+        rf.write(root, "docs/superpowers/plans/fx.md", GOOD)
+        rf.write(root, "docs/cited.md", "cited\n")
+        rf.write(root, "docs/superpowers/state/fx/ledger.md", LEDGER + "CHECKPOINT b1 abc1234\n")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.fx.header.goal", out)
+
+    def test_two_ledgers_are_each_judged(self):
+        root = self.repo(LEDGER)
+        rf.write(root, "docs/superpowers/state/gx/ledger.md", LEDGER + "CHECKPOINT b1 abc1234\n")
+        rf.commit(root, "second ledger")
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
+
+    def test_missing_state_directory_fails(self):
+        root = rf.make_repo(dict(rf.DISPATCH_FILES), rf.load_rows())
+        self.addCleanup(shutil.rmtree, root, True)
+        shutil.rmtree(os.path.join(root, "docs/superpowers/state"), ignore_errors=True)
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL plan.input", out)
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -3639,7 +3981,7 @@ Expected: ERROR `cannot import name 'gate_plan'`.
 Checks: writing-plans header blocks; '**Files:**' and '**Findings:**' per task; every routed id registered
 and in exactly one task; with --source, every source id in exactly one task; file overlap between PARALLEL
 tasks of one block; tasks per block <= config block.max_tasks (blocks: '## Block bN' headings or CHECKPOINT
-steps); the writing-plans "No Placeholders" list over the whole file, code included.
+steps; heading numbers increase); the writing-plans "No Placeholders" list over the whole file, code included.
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -3650,6 +3992,7 @@ import argparse
 import fnmatch
 import glob
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -3674,11 +4017,15 @@ HEADERS = {
     "review-focus": re.compile(r"^## Review Focus\s*$"),
 }
 BLOCK_RE = re.compile(r"^#{2,} Block b?(\d+)\b")
+FENCE_RE = re.compile(r"^( *)(`{3,}|~{3,})(.*)$")
+LIST_ITEM = re.compile(r"^( *)([-*+]|\d{1,9}[.)])( +)\S")
+FIELD_RE = re.compile(r"^\*\*[^*\n]+:\*\*")
+STEP_RE = re.compile(r"^- \[[ xX]\] \*\*Step\b")
 TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
 CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
 FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): `([^`]+)`")
 FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
-MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(PARALLEL|SERIAL)\s*$")
+MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(.*?)\s*$")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
 SPEC_PATH = re.compile(r"`([^`]+)`")
@@ -3708,6 +4055,9 @@ class Task:
     findings: list | None = None
     findings_error: str = ""
     parallel: bool = False
+    files_errors: list = field(default_factory=list)
+    mode_error: str = ""
+    mode_seen: bool = False
 
 
 @dataclass
@@ -3715,6 +4065,7 @@ class Plan:
     headers: dict
     tasks: list
     placeholders: list
+    block_errors: list = field(default_factory=list)
 
 
 def _read(path: str) -> str:
@@ -3738,25 +4089,76 @@ def _findings_value(task: Task, value: str) -> None:
         task.findings_error = f"not register ids: {', '.join(repr(b) for b in bad)} (or write 'none — <reason>')"
 
 
+def _fence_open(line: str, item_col):
+    """(char, run length, base column) when `line` opens a code fence, else None. CommonMark: up to 3 spaces
+    of indent, relative to the content column of the list item the line continues; a backtick fence's info
+    string holds no backtick."""
+    m = FENCE_RE.match(line)
+    if not m:
+        return None
+    indent, run, info = len(m.group(1)), m.group(2), m.group(3)
+    if run[0] == "`" and "`" in info:
+        return None
+    base = item_col if item_col is not None and indent >= item_col else 0
+    return (run[0], len(run), base) if indent - base <= 3 else None
+
+
+def _fence_close(line: str, fence: tuple) -> bool:
+    """Same character, a run at least as long as the opener's, no info string, indent <= 3 past the base."""
+    m = FENCE_RE.match(line)
+    char, size, base = fence
+    return bool(m) and not m.group(3).strip() and m.group(2)[0] == char and len(m.group(2)) >= size \
+        and len(m.group(1)) <= base + 3
+
+
+def _file_item(task: Task, line: str) -> bool:
+    fm = FILE_RE.match(line)
+    if not fm:
+        return False
+    path = posixpath.normpath(fm.group(1).split(":")[0].strip())
+    if path in ("", "."):
+        return False
+    task.files.append(path)
+    return True
+
+
 def parse_plan(text: str) -> Plan:
-    headers, tasks, placeholders = {}, [], []
-    fence, block, closed, cur, in_files = False, 1, False, None, False
+    headers, tasks, placeholders, block_errors = {}, [], [], []
+    fence, item_col, block, closed, cur, in_files = None, None, 1, False, None, False
+    used, first_head = 0, None
     for n, line in enumerate(text.splitlines(), 1):
         if any(rx.search(line) for rx in PLACEHOLDERS):
             placeholders.append((n, line.strip()[:80]))
-        if line.startswith("`" * 3):
-            fence, in_files = not fence, False
+        if fence is not None:
+            if _fence_close(line, fence):
+                fence = None
+                continue
+            if not (fence[2] and line.strip() and len(line) - len(line.lstrip(" ")) < fence[2]):
+                continue
+            fence, item_col = None, None    # a line left of the list item's content ends the item and its fence
+        opened = _fence_open(line, item_col)
+        if opened:
+            fence, in_files = opened, False
             continue
-        if fence:
-            continue
+        if line.strip():
+            lm = LIST_ITEM.match(line)
+            if lm:
+                item_col = len(lm.group(1)) + len(lm.group(2)) + len(lm.group(3))
+            elif item_col is not None and len(line) - len(line.lstrip(" ")) < item_col:
+                item_col = None
         m = BLOCK_RE.match(line)
         if m:
-            block, closed, cur, in_files = int(m.group(1)), False, None, False
+            num = int(m.group(1))
+            if num <= used:
+                block_errors.append(f"line {n}: 'Block b{num}' does not follow block {used}")
+            used, first_head = max(used, num), first_head or n
+            block, closed, cur, in_files = num, False, None, False
             continue
         m = TASK_RE.match(line)
         if m:
             if closed:
                 block, closed = block + 1, False
+            used = max(used, block)
             cur, in_files = Task(m.group(1), n, block), False
             tasks.append(cur)
             continue
@@ -3768,33 +4170,45 @@ def parse_plan(text: str) -> Plan:
                 headers[key] = line
         if cur is None:
             continue
+        if in_files:
+            if not line.strip():
+                continue
+            if _file_item(cur, line):
+                continue
+            if not (line.startswith("#") or FIELD_RE.match(line) or STEP_RE.match(line)):
+                cur.files_errors.append(line.strip()[:80])
+                continue
+            in_files = False
         if line.startswith("**Files:**"):
             in_files = True
             continue
-        if in_files:
-            fm = FILE_RE.match(line)
-            if fm:
-                cur.files.append(fm.group(1).split(":")[0])
-                continue
-            if not line.strip() and not cur.files:
-                continue
-            in_files = False
         m = FINDINGS_RE.match(line)
         if m:
             _findings_value(cur, m.group(1))
             continue
         m = MODE_RE.match(line)
         if m:
+            cur.mode_seen = True
             cur.parallel = m.group(1) == "PARALLEL"
-    return Plan(headers, tasks, placeholders)
+            if m.group(1) not in ("PARALLEL", "SERIAL"):
+                cur.mode_error = f"**Mode:** must be exactly PARALLEL or SERIAL, found {m.group(1)!r}"
+    if first_head is not None:
+        for t in tasks:
+            if t.line < first_head:
+                block_errors.append(f"line {t.line}: Task {t.num} comes before the first 'Block' heading")
+    return Plan(headers, tasks, placeholders, block_errors)
 
 
 def parse_query(query: str) -> dict:
     out = {}
     for part in query.split("&"):
         key, sep, value = part.partition("=")
-        if not sep or key not in QUERY_KEYS or not value:
+        if key not in QUERY_KEYS or not value:
             raise GateError(f"bad register query part {part!r}: use key=pattern[,pattern] with key in {sorted(QUERY_KEYS)}")
+        if key in out:
+            raise GateError(f"duplicate register query key {key!r}: one key=pattern[,pattern] per key")
+        if "" in value.split(","):
+            raise GateError(f"empty pattern in register query part {part!r}")
         out[key] = value.split(",")
     return out
 
@@ -3809,8 +4223,14 @@ def source_ids(root: str, source: str, findings: list) -> list[str]:
         raise GateError(f"--source {source}: no such file")
     known = {f["id"] for f in findings}
     in_text = {t for t in TOKEN_RE.findall(_read(path)) if t in known}
-    by_source = {f["id"] for f in findings if str(f.get("source") or "").startswith(source)}
+    rel = posixpath.normpath(os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/"))
+    by_source = {f["id"] for f in findings if _names(str(f.get("source") or ""), rel)}
     return sorted(in_text | by_source)
+
+
+def _names(source: str, path: str) -> bool:
+    """A register row's `source` names the repo-relative `path`: equal, or followed by ' ', '#' or ':'."""
+    return source == path or source.startswith((path + " ", path + "#", path + ":"))
 
 
 def _verdict(res, lid, ok, reason):
@@ -3838,7 +4258,12 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
     routed = {}
     for t in plan.tasks:
         tid = f"{pfx}.task.{t.num}"
-        _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
+        if t.files_errors:
+            res.fail(f"{tid}.files", f"not a '- Create|Modify|Test|Delete: `path`' item inside **Files:**: {t.files_errors[0]!r}")
+        else:
+            _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
+        if t.mode_seen:
+            _verdict(res, f"{tid}.mode", not t.mode_error, t.mode_error)
         if t.findings is None:
             res.fail(f"{tid}.findings", "no **Findings:** line (register ids, or 'none — <reason>')")
         else:
@@ -3852,6 +4277,10 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
         else:
             _verdict(res, f"{pfx}.id.{fid}", len(nums) == 1,
                      f"routed to tasks {', '.join(nums)}; each id belongs to exactly one task")
+    for err in plan.block_errors:
+        res.fail(f"{pfx}.block.order", err)
+    if not plan.block_errors:
+        res.passed(f"{pfx}.block.order")
     cap = conf["block"]["max_tasks"]
     by_block = {}
     for t in plan.tasks:
@@ -3884,16 +4313,15 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
                  "in no task" if not nums else f"in tasks {', '.join(nums)}")
 
 
-def _closed(text: str | None) -> bool:
-    if text is None:
-        return False
+def _closed(text: str) -> bool:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     return bool(lines) and bool(CHECKPOINT_LINE.match(lines[-1]))
 
 
-def _committed(root: str, rel: str) -> str | None:
+def _committed(root: str, rel: str) -> str:
+    """The ledger at HEAD; empty when there is no HEAD or the file is not in it."""
     r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, text=True, check=False)
-    return r.stdout if r.returncode == 0 else None
+    return r.stdout if r.returncode == 0 else ""
 
 
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
@@ -3991,9 +4419,15 @@ before a reviewer is dispatched.
 
 `gate_plan.py --plan P --source <report | register:key=pat[,pat][&key=pat]>` prints the header, id-coverage, overlap,
 block-size and placeholder lines at plan approval. Register keys: `plan` (owner.plan), `task` (owner.task), `state`,
-`severity`; patterns are fnmatch. The S2 plan's approval check is
+`severity`; patterns are fnmatch; a repeated key or an empty pattern is `FAIL plan.input`. A report `--source` file is
+normalised to a repo-relative path and matches a register row whose `source` is that path, or starts with it and then ` `, `#` or `:`. The S2 plan's approval check is
 `--source 'register:plan=strict-delivery&task=S2-T*'` (`task=S2-*` also matches `B4-FIX-1`, whose owner.task is
-`S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step.
+`S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step; a heading number that does
+not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
+`**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
+`FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
+`PARALLEL` or `SERIAL` is `FAIL plan.task.N.mode`. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+indent relative to the list item, closed by the same character, a run at least as long and no info string).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
@@ -4004,7 +4438,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (26 tests); the full suite 479 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 91 lines (51 before this task + 40 `plan.strict-delivery.*` lines for this very plan file), 102 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (69 tests); the full suite 522 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 92 lines (51 before this task + 41 `plan.strict-delivery.*` lines for this very plan file), 103 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

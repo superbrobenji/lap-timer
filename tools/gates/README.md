@@ -178,8 +178,7 @@ present; `fork` is `FAIL dispatch.fork`, the first line, emitted even when the g
 (run_all's default for `dispatch`, `run_all.DEFAULT_ARGV`) checks the model map and the cap, and, under
 DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minimum model is `fable`
 (`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
-strictly with integer ranks (`dispatch.config.model_rank`): 14 lines, so `run_all.py` prints 29 PASS on a
-healthy tree.
+strictly with integer ranks (`dispatch.config.model_rank`): 14 lines.
 
 ## make_review_package, gate_plan (S2)
 
@@ -192,9 +191,15 @@ before a reviewer is dispatched.
 
 `gate_plan.py --plan P --source <report | register:key=pat[,pat][&key=pat]>` prints the header, id-coverage, overlap,
 block-size and placeholder lines at plan approval. Register keys: `plan` (owner.plan), `task` (owner.task), `state`,
-`severity`; patterns are fnmatch. The S2 plan's approval check is
+`severity`; patterns are fnmatch; a repeated key or an empty pattern is `FAIL plan.input`. A report `--source` file is
+normalised to a repo-relative path and matches a register row whose `source` is that path, or starts with it and then ` `, `#` or `:`. The S2 plan's approval check is
 `--source 'register:plan=strict-delivery&task=S2-T*'` (`task=S2-*` also matches `B4-FIX-1`, whose owner.task is
-`S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step.
+`S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step; a heading number that does
+not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
+`**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
+`FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
+`PARALLEL` or `SERIAL` is `FAIL plan.task.N.mode`. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+indent relative to the list item, closed by the same character, a run at least as long and no info string).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
