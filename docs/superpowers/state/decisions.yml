@@ -134,5 +134,5 @@
     - {label: continue-in-b5-only, cost: "the same for b5 only; every later stop of this kind asks again (one decision round-trip per stop)"}
     - {label: checkpoint-now, cost: "CHECKPOINT b5 with Task 4 only; Tasks 5-6 become a separate block before b6: S2 plan and umbrella block-table re-slice, one extra PR and tag; b6 still waits for Task 6's ledger contract"}
   asked_at: {sha: "9c94595", by: session}
-  answer: null
-  answered_at: null
+  answer: "continue-standing (owner answered \"for dec-0014 use 1. the recommended\" in chat, 2026-10-19; the session had recommended continue-standing)"
+  answered_at: {sha: "8124529", by: superbrobenji}
