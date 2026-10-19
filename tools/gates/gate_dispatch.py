@@ -2,7 +2,8 @@
 """gate_dispatch -- a subagent dispatch prompt obeys the strict-delivery dispatch grammar.
 
 Grammar and rules: docs/superpowers/plans/2026-10-17-strict-delivery.md, "Dispatch prompt grammar".
-Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check
+Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--subagent-type T] [--prompts-dir D]
+       | [--json] --config-check
 (--json is read by run_gate and only as the first argument, like every S1 gate.)
 """
 from __future__ import annotations
@@ -36,6 +37,7 @@ FINDINGS_NONE_ROLES = {"investigator", "audit_reviewer", "audit_verifier"}
 HEADERS = ["Role", "Brief", "Findings", "Claims", "Budget", "Model", "Report"]
 STRICT, TASK = "## Strict block\n", "## Task\n"
 BUDGET_RE = re.compile(r"^tokens=(\d+) minutes=(\d+)$")
+RANK_ORDER = ["haiku", "sonnet", "opus", "fable"]    # DEC-0012: model_rank orders these strictly
 DEFAULT_PROMPTS = os.path.expanduser("~/.claude/skills/strict-delivery/prompts")
 
 
@@ -113,6 +115,18 @@ def _model(conf, role, model, tool_model, res):
         res.fail("dispatch.model.agree", f"tool_input.model {tool_model!r} != '## Model: {model}'")
     else:
         res.passed("dispatch.model.agree")
+
+
+def _fork(subagent_type, res):
+    """Ruling 4 (B4-FIX-1): the Agent tool runs a fork on the session model with the session's context
+    and ignores tool_input.model, so a fork dispatch is refused whatever its prompt says."""
+    if subagent_type is None:
+        return
+    if subagent_type.strip().lower() == "fork":
+        res.fail("dispatch.fork", "a fork runs on the session model with the session context; "
+                 "dispatch a general-purpose agent with a brief")
+    else:
+        res.passed("dispatch.fork")
 
 
 def _brief(root, role, value, res):
@@ -236,7 +250,8 @@ def _strict(text, start, role, prompts_dir, res):
         res.fail("dispatch.task", "the '## Task' section is empty")
 
 
-def check_prompt(root, conf, text, tool_model, prompts_dir, res) -> None:
+def check_prompt(root, conf, text, tool_model, prompts_dir, res, subagent_type=None) -> None:
+    _fork(subagent_type, res)
     cap = conf["dispatch"]["max_prompt_chars"]
     if len(text) > cap:
         res.fail("dispatch.length", f"{len(text)} chars > dispatch.max_prompt_chars {cap}")
@@ -264,7 +279,8 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res) -> None:
 
 
 def check_config(conf: dict, res: Result) -> None:
-    """CI mode: the model map, fable_roles and the prompt cap agree with the dispatch grammar."""
+    """CI mode: the model map, fable_roles, model_rank and the prompt cap agree with the dispatch grammar
+    (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders haiku < sonnet < opus < fable)."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -282,10 +298,21 @@ def check_config(conf: dict, res: Result) -> None:
     else:
         res.passed("dispatch.config.models")
     stray = sorted(fable - set(ROLES))
+    minimums = sorted(r for r in ROLES if models.get(r) == "fable")
     if stray:
         res.fail("dispatch.config.fable_roles", f"unknown roles: {', '.join(stray)}")
+    elif sorted(fable) != minimums:    # DEC-0012 = require-equal
+        res.fail("dispatch.config.fable_roles", f"fable_roles {sorted(fable)} != the roles whose minimum model "
+                 f"is fable (fable minimums {minimums})")
     else:
         res.passed("dispatch.config.fable_roles")
+    values = [rank.get(m) for m in RANK_ORDER]
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in values) \
+            and all(a < b for a, b in zip(values, values[1:])):
+        res.passed("dispatch.config.model_rank")
+    else:
+        res.fail("dispatch.config.model_rank", f"must order {' < '.join(RANK_ORDER)} strictly with integer "
+                 f"ranks; got {', '.join(f'{m}={rank.get(m)!r}' for m in RANK_ORDER)}")
     cap = conf["dispatch"]["max_prompt_chars"]
     if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
         res.passed("dispatch.config.max_prompt_chars")
@@ -299,6 +326,7 @@ def check(args: list) -> Result:
     mode.add_argument("--prompt")
     mode.add_argument("--config-check", action="store_true")
     p.add_argument("--tool-model")
+    p.add_argument("--subagent-type")
     p.add_argument("--prompts-dir", default=DEFAULT_PROMPTS)
     a = p.parse_args(args)
     root = a.root or repo_root()
@@ -307,7 +335,7 @@ def check(args: list) -> Result:
     if a.config_check:
         check_config(conf, res)
         return res
-    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res)
+    check_prompt(root, conf, read_prompt(a.prompt), a.tool_model, a.prompts_dir, res, a.subagent_type)
     return res
 
 

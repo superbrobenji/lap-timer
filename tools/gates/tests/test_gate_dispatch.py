@@ -118,6 +118,19 @@ class GateDispatch(unittest.TestCase):
         rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: SD-FX-2"))
         self.assertFailLine(rc, out, "dispatch.findings.SD-FX-2")
 
+    def test_implementer_on_a_pinned_or_merged_row_fails(self):
+        rows = rf.load_rows()
+        for fid, state in (("SD-FX-3", "pinned"), ("SD-FX-4", "merged"), ("SD-FX-5", "in-progress")):
+            rows["findings"].append(dict(rows["findings"][0], id=fid, state=state))
+        root = rf.make_repo(rf.DISPATCH_FILES, rows)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for fid, state in (("SD-FX-3", "pinned"), ("SD-FX-4", "merged")):
+            rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", f"## Findings: {fid}"), root=root)
+            self.assertFailLine(rc, out, f"dispatch.findings.{fid}")
+            self.assertIn(f"state {state!r}; an implementer takes only planned or in-progress rows", out)
+        rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: SD-FX-5"), root=root)
+        self.assertEqual(0, rc, out)
+
     def test_implementer_without_findings_fails(self):
         rc, out = self.dispatch(self.variant("## Findings: SD-FX-1", "## Findings: none"))
         self.assertFailLine(rc, out, "dispatch.findings")
@@ -125,6 +138,11 @@ class GateDispatch(unittest.TestCase):
     def test_stale_claim_fails(self):
         rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.stale"))
         self.assertFailLine(rc, out, "dispatch.claims.C-fx.stale")
+
+    def test_unregistered_claim_fails(self):
+        rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.404"))
+        self.assertFailLine(rc, out, "dispatch.claims.C-fx.404")
+        self.assertIn("FAIL dispatch.claims.C-fx.404: not in docs/superpowers/state/claims.yml", out)
 
     def test_claim_whose_cited_file_changed_fails(self):
         rc, out = self.dispatch(self.variant("## Claims: C-fx.ok", "## Claims: C-fx.moved"))
@@ -210,6 +228,36 @@ class GateDispatch(unittest.TestCase):
     def test_budget_over_role_cap_fails(self):
         rc, out = self.dispatch(self.variant("tokens=150000", "tokens=150001"))
         self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_budget_with_trailing_text_fails(self):
+        rc, out = self.dispatch(self.variant("## Budget: tokens=150000 minutes=60\n",
+                                             "## Budget: tokens=150000 minutes=60 extra\n"))
+        self.assertFailLine(rc, out, "dispatch.budget")
+        self.assertIn("expected 'tokens=<n> minutes=<n>'", out)
+
+    def test_fork_dispatch_fails(self):
+        """Ruling 4 (B4-FIX-1): a fork runs on the session model with the session context."""
+        for value in ("fork", "Fork", " fork "):
+            with self.subTest(subagent_type=value):
+                rc, out = self.dispatch(GOOD, "--tool-model", "sonnet", "--subagent-type", value)
+                self.assertFailLine(rc, out, "dispatch.fork")
+                self.assertIn("session model", out)
+                self.assertIn("general-purpose", out)
+
+    def test_fork_fails_even_when_the_prompt_is_not_in_the_grammar(self):
+        rc, out = self.dispatch("not a dispatch prompt\n", "--subagent-type", "fork")
+        self.assertFailLine(rc, out, "dispatch.fork")
+        self.assertIn("FAIL dispatch.grammar", out)
+
+    def test_other_subagent_types_keep_todays_behaviour(self):
+        rc, base = self.dispatch(GOOD, "--tool-model", "sonnet")
+        self.assertEqual(0, rc, base)
+        self.assertNotIn("dispatch.fork", base)
+        for value in ("general-purpose", "Explore", "claude", "forked", ""):
+            with self.subTest(subagent_type=value):
+                rc, out = self.dispatch(GOOD, "--tool-model", "sonnet", "--subagent-type", value)
+                self.assertEqual(0, rc, out)
+                self.assertEqual("PASS dispatch.fork\n" + base, out)
 
     def test_tool_model_must_agree(self):
         rc, out = self.dispatch(GOOD, "--tool-model", "sonnet")
@@ -353,6 +401,40 @@ class ConfigCheck(unittest.TestCase):
             rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.config.fable_roles: unknown roles: helper", out)
+
+    def test_config_check_fails_when_fable_roles_differ_from_the_fable_minimums(self):
+        """DEC-0012 = require-equal: fable_roles is exactly the roles whose minimum model is fable."""
+        for name, edit in (("extra", lambda c: c["fable_roles"].append("implementer")),
+                           ("missing", lambda c: c["fable_roles"].remove("exception_reviewer"))):
+            with self.subTest(name), self.with_config(edit):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.fable_roles: ", out)
+                self.assertIn("fable minimums ['exception_reviewer', 'final_verifier']", out)
+
+    def test_config_check_names_both_fable_sets(self):
+        with self.with_config(lambda c: c["fable_roles"].append("implementer")):
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_roles: fable_roles ['exception_reviewer', 'final_verifier',"
+                      " 'implementer'] != the roles whose minimum model is fable"
+                      " (fable minimums ['exception_reviewer', 'final_verifier'])", out)
+
+    def test_config_check_passes_model_rank_on_repo_config(self):
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.model_rank\n", out)
+        self.assertIn("PASS dispatch.config.fable_roles\n", out)
+
+    def test_config_check_fails_when_model_rank_is_not_strictly_ordered(self):
+        bad = ({"haiku": 1, "sonnet": 2, "opus": 5, "fable": 4}, {"haiku": 1, "sonnet": 2, "opus": 3, "fable": 3},
+               {"haiku": 2, "sonnet": 1, "opus": 3, "fable": 4}, {"haiku": 1, "sonnet": 2, "opus": 3},
+               {"haiku": 1, "sonnet": 2, "opus": 3, "fable": "4"}, {"haiku": 1, "sonnet": 2, "opus": 3, "fable": True},
+               {"haiku": True, "sonnet": 2, "opus": 3, "fable": 4})
+        for rank in bad:
+            with self.subTest(rank=rank), self.with_config(lambda c, r=rank: c.__setitem__("model_rank", dict(r))):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.model_rank: must order haiku < sonnet < opus < fable", out)
 
     def test_config_check_fails_when_a_role_has_no_prompt_file(self):
         patched = {k: v for k, v in gate_dispatch.ROLE_PROMPT.items() if k != "investigator"}

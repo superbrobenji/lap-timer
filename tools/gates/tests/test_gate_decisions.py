@@ -110,6 +110,10 @@ class GateDecisions(unittest.TestCase):
         self.assertEqual(1, rc)
 
     def test_non_ascii_digits_never_form_an_id(self):
+        """The scan pattern itself is the observable: an id formed from non-ASCII digits can never equal
+        an open (ASCII) id, so the gate's verdict cannot show it; REF must not match such text at all."""
+        for text in ("DEC-\uff19\uff10\uff10\uff11", "DEC-\u0669\u0660\u0660\u0661"):
+            self.assertEqual([], gate_decisions.REF.findall(f"Non-ASCII {text} is not an id."), text)
         gf.write(self.root, "docs/plan.md", "Fullwidth DEC-\uff19\uff10\uff10\uff11 is not an id.\n")
         rc, out = self.run_gate(OPEN, "--scan", "docs/plan.md")
         self.assertEqual(PASS_ALL, out)

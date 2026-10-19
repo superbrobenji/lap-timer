@@ -6,7 +6,8 @@ script sees every Bash call. Two branches gate: Bash (items 1-3 below) and Agent
 dispatch prompt runs gate_dispatch, gate_claims and gate_decisions in the tree of the event's cwd --
 a missing or empty cwd is `FAIL hook.input`, a cwd outside a repository `FAIL hook.target`, an empty
 prompt `FAIL dispatch.input`, a tool_input.model that is unset or differs from the prompt's
-`## Model:` line `FAIL dispatch.model.agree`; the register gate is not run for Agent); every other
+`## Model:` line `FAIL dispatch.model.agree`, a tool_input.subagent_type of fork (any case) or not a
+string `FAIL dispatch.fork`; the register gate is not run for Agent); every other
 tool exits 0 silently. This hook is a best-effort textual check; the git hooks (pre-commit,
 pre-push) are the enforcement (DEC-0005).
 
@@ -255,7 +256,8 @@ def handle_agent(event: dict) -> int:
     names), gate_claims and gate_decisions in the tree of the event's cwd (all three through
     run_all.run; the dispatch argv given here replaces run_all.DEFAULT_ARGV's --config-check).
     tool_input.model must be set and equal the prompt's '## Model:' line (umbrella dispatch
-    grammar). 0 = allow, 2 = block."""
+    grammar); tool_input.subagent_type, when present, goes to gate_dispatch --subagent-type, which
+    refuses a fork (ruling 4). 0 = allow, 2 = block."""
     cwd = event.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         raise Blocked("hook.input", "the event has no cwd")
@@ -267,6 +269,10 @@ def handle_agent(event: dict) -> int:
         print("FAIL dispatch.input: Agent tool_input.prompt is missing or empty", file=sys.stderr)
         return 2
     model = tool_input.get("model")
+    subagent_type = tool_input.get("subagent_type")
+    if subagent_type is not None and not isinstance(subagent_type, str):
+        print(f"FAIL dispatch.fork: tool_input.subagent_type {subagent_type!r} is not a string", file=sys.stderr)
+        return 2
     sys.path.insert(0, CODE_ROOT)
     from tools.gates import run_all   # lazy, as in main()
     fd, path = tempfile.mkstemp(prefix="sd-dispatch-", suffix=".md")
@@ -274,6 +280,8 @@ def handle_agent(event: dict) -> int:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(prompt)
         dispatch = ["--prompt", path, "--tool-model", model if isinstance(model, str) else ""]
+        if subagent_type is not None:
+            dispatch.append(f"--subagent-type={subagent_type}")    # "=": a value may start with "-"
         prompts = os.environ.get("SD_PROMPTS_DIR")    # test override; unset in real sessions
         if prompts:
             dispatch += ["--prompts-dir", prompts]

@@ -1002,8 +1002,10 @@ class ProjectWiring(unittest.TestCase):
 DISPATCH_FIX = os.path.join(rf.FIX, "dispatch")
 
 
-def agent_event(cwd, prompt, model="sonnet"):
-    tool_input = {"prompt": prompt, "description": "fixture", "subagent_type": "general-purpose"}
+def agent_event(cwd, prompt, model="sonnet", subagent_type="general-purpose"):
+    tool_input = {"prompt": prompt, "description": "fixture"}
+    if subagent_type is not None:
+        tool_input["subagent_type"] = subagent_type
     if model is not None:
         tool_input["model"] = model
     event = {"session_id": "fx", "transcript_path": "/dev/null", "permission_mode": "default",
@@ -1036,8 +1038,8 @@ class AgentDispatchHook(unittest.TestCase):
         gf.remove(cls.dup_root)
         gf.remove(cls.open_root)
 
-    def run_agent(self, root, prompt, model="sonnet", cwd=True):
-        event = agent_event(root if cwd is True else cwd, prompt, model)
+    def run_agent(self, root, prompt, model="sonnet", cwd=True, subagent_type="general-purpose"):
+        event = agent_event(root if cwd is True else cwd, prompt, model, subagent_type)
         return hook("pre_tool_use.py", event, SD_PROMPTS_DIR=os.path.join(DISPATCH_FIX, "prompts"))
 
     def test_good_dispatch_passes(self):
@@ -1072,6 +1074,23 @@ class AgentDispatchHook(unittest.TestCase):
         p = self.run_agent(self.root, self.good, model=None)
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("model.agree", p.stderr)
+
+    def test_fork_dispatch_blocks(self):
+        """Ruling 4 (B4-FIX-1): a fork ignores tool_input.model and inherits the session context."""
+        p = self.run_agent(self.root, self.good, subagent_type="fork")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.fork: ", p.stderr)
+        self.assertIn("session model", p.stderr)
+
+    def test_other_or_missing_subagent_types_pass(self):
+        for value in ("general-purpose", "Explore", None):
+            p = self.run_agent(self.root, self.good, subagent_type=value)
+            self.assertEqual((0, ""), (p.returncode, p.stderr), value)
+
+    def test_a_non_string_subagent_type_fails_closed(self):
+        p = self.run_agent(self.root, self.good, subagent_type=["fork"])
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.fork: ", p.stderr)
 
     def test_empty_prompt_blocks(self):
         p = self.run_agent(self.root, "   ")
