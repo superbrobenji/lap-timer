@@ -32,7 +32,13 @@
 
 **Findings:** SD-FX-1
 
+**Siblings:** sib-a
+
+**Gates:** run_all
+
 - [ ] **Step 1: Write the failing test**
+
+- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.
 
 ### Task 2: beta
 
@@ -41,10 +47,21 @@
 **Files:**
 - Create: `src/beta.py`
 - Modify: `src/shared.py:10-20`
+- Create: `tools/gates/gate_beta.py`
 
 **Findings:** SD-FX-2
 
-- [ ] **Step 1: CHECKPOINT b1**
+**Siblings:** none -- the register row lists no siblings
+
+**Gates:** run_all, beta
+
+- [ ] **Step 1: Pin**
+
+```bash
+python3 -m unittest tools.gates.tests.test_beta  # pin test_beta::test_beta_fails
+```
+
+- [ ] **Step 2: CHECKPOINT b1**
 
 ## Block b2 — second
 
@@ -54,5 +71,9 @@
 - Modify: `src/shared.py`
 
 **Findings:** none — fixture maintenance with no register row
+
+**Siblings:** none -- no register row
+
+**Gates:** beta
 
 - [ ] **Step 1: CHECKPOINT b2**

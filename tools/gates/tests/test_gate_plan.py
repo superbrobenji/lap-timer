@@ -228,7 +228,7 @@ class Branches(unittest.TestCase):
         self.assertNotEqual(base, text, f"fixture lacks {old!r}")
         return text
 
-    def fail(self, text, line_id, message="", *extra):
+    def fail_line(self, text, line_id, message="", *extra):
         rc, out = self.check(text, *extra)
         self.assertEqual(1, rc, out)
         self.assertIn(f"FAIL {line_id}", out)
@@ -256,15 +256,15 @@ class Branches(unittest.TestCase):
     def test_mode_with_a_suffix_fails(self):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
                             "**Mode:** PARALLEL (with Task 1)\n\n**Files:**\n- Create: `src/alpha.py`")
-        self.fail(text, "plan.task.2.mode", "exactly PARALLEL or SERIAL")
+        self.fail_line(text, "plan.task.2.mode", "exactly PARALLEL or SERIAL")
 
     def test_lowercase_mode_fails(self):
-        self.fail(self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
+        self.fail_line(self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
                                "**Mode:** parallel\n\n**Files:**\n- Create: `src/beta.py`"),
                   "plan.task.2.mode", "'parallel'")
 
     def test_overlap_names_the_shared_file(self):
-        out = self.fail(self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py`"), "plan.overlap.1-2",
+        out = self.fail_line(self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py`"), "plan.overlap.1-2",
                         "PARALLEL tasks share src/alpha.py")
         self.assertNotIn("tests/test_alpha.py", out)
 
@@ -272,16 +272,16 @@ class Branches(unittest.TestCase):
         for spelled in ("./src/alpha.py", "src/../src/alpha.py", "src/alpha.py ", "src//alpha.py", "src/alpha.py:3-4"):
             with self.subTest(spelled):
                 text = self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`")
-                self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+                self.fail_line(text, "plan.overlap.1-2", "src/alpha.py")
 
     # -- the Files list
     def test_prose_line_inside_files_list_fails_and_is_quoted(self):
         text = self.variant("- Create: `src/beta.py`\n", "- Create: `src/beta.py`\n- Not modified: `x.yml` (a note)\n")
-        self.fail(text, "plan.task.2.files", "- Not modified: `x.yml` (a note)")
+        self.fail_line(text, "plan.task.2.files", "- Not modified: `x.yml` (a note)")
 
     def test_blank_line_inside_files_list_keeps_collecting(self):
         text = self.variant("- Create: `src/beta.py`\n", "- Create: `src/beta.py`\n\n- Modify: `src/alpha.py`\n")
-        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+        self.fail_line(text, "plan.overlap.1-2", "src/alpha.py")
 
     def test_blank_line_before_the_first_files_item_is_skipped(self):
         out = self.ok(self.variant("**Files:**\n- Modify: `src/shared.py`\n", "**Files:**\n\n- Modify: `src/shared.py`\n"))
@@ -323,11 +323,11 @@ class Branches(unittest.TestCase):
             with self.subTest(form):
                 out = self.ok(self.variant("none — fixture maintenance with no register row", form))
                 self.assertIn("PASS plan.task.3.findings", out)
-        self.fail(self.variant("none — fixture maintenance with no register row", "none"), "plan.task.3.findings",
+        self.fail_line(self.variant("none — fixture maintenance with no register row", "none"), "plan.task.3.findings",
                   "not register ids")
 
     def test_non_id_in_a_list_is_named(self):
-        out = self.fail(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-2, see audit"),
+        out = self.fail_line(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-2, see audit"),
                         "plan.task.2.findings", "'see audit'")
         self.assertNotIn("plan.id.SD-FX-2", out)    # nothing is routed from a bad line
         self.assertNotIn("plan.id.see", out)
@@ -345,7 +345,7 @@ class Branches(unittest.TestCase):
                        ("task=1,", "empty pattern in register query part 'task=1,'"),
                        ("task=,1", "empty pattern")):
             with self.subTest(q):
-                self.fail(GOOD, "plan.input", msg, "--source", f"register:{q}")
+                self.fail_line(GOOD, "plan.input", msg, "--source", f"register:{q}")
 
     def test_query_keys_are_anded_and_patterns_are_ored(self):
         rc, out = self.check(GOOD, "--source", "register:plan=fx&task=2")
@@ -354,7 +354,7 @@ class Branches(unittest.TestCase):
         rc, out = self.check(GOOD, "--source", "register:plan=fx,fz&task=1,2")
         self.assertIn("PASS plan.coverage.SD-FX-1", out)
         self.assertIn("PASS plan.coverage.SD-FX-2", out)
-        self.fail(GOOD, "plan.source", "yields no register ids", "--source", "register:plan=fx&task=9")
+        self.fail_line(GOOD, "plan.source", "yields no register ids", "--source", "register:plan=fx&task=9")
 
     def test_query_state_and_severity_keys(self):
         rc, out = self.check(GOOD, "--source", "register:state=planned&severity=LOW")
@@ -363,7 +363,7 @@ class Branches(unittest.TestCase):
 
     # -- report sources
     def test_missing_source_file_fails_with_its_name(self):
-        self.fail(GOOD, "plan.input", "--source docs/none.md: no such file", "--source", "docs/none.md")
+        self.fail_line(GOOD, "plan.input", "--source docs/none.md: no such file", "--source", "docs/none.md")
 
     def test_report_source_matches_rows_by_their_source_field(self):
         rc, out = self.check(GOOD, "--source", "docs/cited.md")
@@ -437,23 +437,28 @@ class Branches(unittest.TestCase):
         rc, out = self.check(GOOD + f"\n{item}    {FENCE}\n    code\n    {FENCE}\n### Task 9: after\n")
         self.assertIn("FAIL plan.task.9.files", out)
 
-    def test_every_backticked_path_of_a_files_item_counts(self):
-        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py`, `src/alpha.py`")
-        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
-        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (helper), `src/alpha.py`")
-        self.fail(text, "plan.overlap.1-2", "src/alpha.py")
+    def test_a_files_item_holds_exactly_one_backticked_path(self):
+        for item, msg in (("- Create: `src/beta.py`, `src/alpha.py`", "a second backticked span"),
+                          ("- Create: `src/beta.py` (helper), `src/alpha.py`", "a second backticked span"),
+                          ("- Create: `src/beta.py` (`GATES`, `DEFAULT_ARGV`)", "a second backticked span"),
+                          ("- Create: `src/beta.py` (and `CLAUDE.md`)", "a second backticked span"),
+                          ("- Create: `src/beta.py`, `src/alpha.py", "unclosed backtick"),
+                          ("- Create: `src/beta.py` (note `x", "unclosed backtick"),
+                          ("- Create: src/beta.py", "no backticked path"),
+                          ("- Create:", "no backticked path"),
+                          ("- Create: the helper `src/beta.py`", "must start with the backticked path")):
+            with self.subTest(item):
+                self.fail_line(self.variant("- Create: `src/beta.py`", item), "plan.task.2.files", msg)
 
-    def test_spans_inside_parentheses(self):
-        for comment in ("(`GATES`, `DEFAULT_ARGV`)", "(verified `grep -n x src/alpha.py`)"):
-            with self.subTest(comment):
-                self.ok(self.variant("- Create: `src/beta.py`", f"- Create: `src/beta.py` {comment}"))
-        text = self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (and `src/alpha.py`)")
-        self.fail(text, "plan.task.2.files", "path-like span `src/alpha.py` inside parentheses")
+    def test_prose_after_the_path_is_a_comment(self):
+        out = self.ok(self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (GATES, DEFAULT_ARGV; a (nested) note)"))
+        self.assertIn("PASS plan.task.2.files", out)
+        self.fail_line(self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py` (moved)"), "plan.overlap.1-2", "src/alpha.py")
 
     def test_a_dot_path_is_not_a_files_item(self):
         for spelled in (".", "./", "a/.."):
             with self.subTest(spelled):
-                self.fail(self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`"), "plan.task.2.files")
+                self.fail_line(self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`"), "plan.task.2.files")
 
     def test_block_heading_forms(self):
         for heading in ("##  Block b7 — second", "##\tBlock b7 — second", "## Block 7 — second", "##  Block  7 — second"):
@@ -469,7 +474,7 @@ class Branches(unittest.TestCase):
     def test_a_second_mode_line_fails(self):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/alpha.py`",
                             "**Mode:** PARALLEL\n**Mode:** SERIAL\n\n**Files:**\n- Create: `src/alpha.py`")
-        self.fail(text, "plan.task.1.mode", "a second **Mode:** line")
+        self.fail_line(text, "plan.task.1.mode", "a second **Mode:** line")
 
     def test_only_level_two_headings_are_blocks(self):
         for level in ("###", "####", "#"):
@@ -480,8 +485,8 @@ class Branches(unittest.TestCase):
     def test_an_unclosed_fence_fails_and_names_its_line(self):
         text = self.variant("## Block b2 — second", f"{FENCE}\n## Block b2 — second").replace(
             "**Findings:** none — fixture maintenance with no register row", "**Findings:** SD-FX-1")
-        line = text.split("\n").index(FENCE) + 1
-        self.fail(text, "plan.fence", f"line {line}: code fence never closed")
+        line = text.split("\n").index("## Block b2 — second")    # the fence sits on the line above it (1-based)
+        self.fail_line(text, "plan.fence", f"line {line}: code fence never closed")
         self.assertIn("PASS plan.fence", self.ok(GOOD))
 
     def test_first_matching_header_line_wins(self):
@@ -490,31 +495,149 @@ class Branches(unittest.TestCase):
 
     # -- block order and plan-level failures
     def test_tasks_before_the_first_block_heading_fail(self):
-        self.fail(self.variant("## Block b1 — first\n", ""), "plan.block.order", "before the first 'Block' heading")
+        self.fail_line(self.variant("## Block b1 — first\n", ""), "plan.block.order", "before the first 'Block' heading")
 
     def test_block_numbers_must_increase(self):
-        self.fail(self.variant("## Block b2 — second", "## Block b1 — second"), "plan.block.order",
+        self.fail_line(self.variant("## Block b2 — second", "## Block b1 — second"), "plan.block.order",
                   "'Block b1' does not follow block 1")
-        self.fail(self.variant("## Block b2 — second", "## Block b2 — second\n\n## Block b2 — again"), "plan.block.order",
+        self.fail_line(self.variant("## Block b2 — second", "## Block b2 — second\n\n## Block b2 — again"), "plan.block.order",
                   "'Block b2' does not follow block 2")
 
     def test_a_heading_cannot_reuse_a_checkpoint_split_block(self):
         text = self.variant("## Block b2 — second\n", "") + "\n## Block b2 — again\n"
-        self.fail(text, "plan.block.order", "'Block b2' does not follow block 2")
+        self.fail_line(text, "plan.block.order", "'Block b2' does not follow block 2")
 
     def test_missing_plan_file_fails(self):
         rc, out = gate(self.root, ["--plan", "docs/none-plan.md"])
         self.assertIn("FAIL plan.file: docs/none-plan.md: no such plan file", out)
 
     def test_plan_without_tasks_fails(self):
-        self.fail(GOOD.split("---")[0], "plan.tasks", "no '### Task N' headings")
+        self.fail_line(GOOD.split("---")[0], "plan.tasks", "no '### Task N' headings")
 
     def test_plan_and_in_flight_together_fail(self):
-        self.fail(GOOD, "plan.input", "exactly one of", "--in-flight")
+        self.fail_line(GOOD, "plan.input", "exactly one of", "--in-flight")
 
     def test_source_with_in_flight_fails(self):
         rc, out = gate(self.root, ["--in-flight", "--source", "docs/cited.md"])
         self.assertIn("FAIL plan.input: --source goes with --plan", out)
+
+
+    # -- Siblings, Gates and the pin step (DEC-0016)
+    def test_siblings_must_list_every_register_sibling(self):
+        out = self.fail_line(self.variant("**Siblings:** sib-a", "**Siblings:** none -- forgot"), "plan.siblings.1", "missing sib-a")
+        self.assertIn("PASS plan.siblings.2", out)
+        for value in ("sib-ab", "xsib-a", "sib-a-x, y"):
+            with self.subTest(value):
+                self.fail_line(self.variant("**Siblings:** sib-a", f"**Siblings:** {value}"), "plan.siblings.1", "missing sib-a")
+        out = self.ok(self.variant("**Siblings:** sib-a", "**Siblings:** other, sib-a"))
+        self.assertIn("PASS plan.siblings.1", out)
+
+    def test_a_sibling_holding_a_comma_matches_verbatim(self):
+        rows = rf.load_rows()
+        rows["findings"][0]["siblings"] = ["sib-a, part two", "sib-b"]
+        files = dict(rf.DISPATCH_FILES)
+        root = rf.make_repo(files, rows)
+        self.addCleanup(shutil.rmtree, root, True)
+        plan = os.path.join(root, "plan.under-test.md")
+        for value, rc_want in (("sib-a, part two, sib-b", 0), ("sib-b, sib-a, part two", 0), ("sib-a, sib-b", 1)):
+            with self.subTest(value):
+                rf.write(root, "plan.under-test.md", self.variant("**Siblings:** sib-a", f"**Siblings:** {value}"))
+                rc, out = gate(root, ["--plan", plan])
+                self.assertEqual(rc_want, rc, out)
+
+    def test_siblings_line_forms(self):
+        self.fail_line(self.variant("**Siblings:** none -- no register row\n", ""), "plan.siblings.3", "no **Siblings:** line")
+        for bare in ("none", "None", "NONE"):
+            with self.subTest(bare):
+                self.fail_line(self.variant("**Siblings:** none -- no register row", f"**Siblings:** {bare}"), "plan.siblings.3",
+                               "'none -- <reason>'")
+        self.fail_line(self.variant("**Siblings:** sib-a", "**Siblings:** sib-a,, x"), "plan.siblings.1", "empty entry")
+        out = self.ok(self.variant("**Siblings:** none -- no register row", "**Siblings:** none -- a reason,, with commas"))
+        self.assertIn("PASS plan.siblings.3", out)
+        self.fail_line(self.variant("**Siblings:** sib-a", "**Siblings:** sib-a\n**Siblings:** sib-a"), "plan.siblings.1",
+                  "a second **Siblings:** line")
+
+    def test_siblings_of_an_unregistered_id_fail_once_on_the_id(self):
+        out = self.fail_line(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-404"), "plan.id.SD-FX-404")
+        self.assertIn("PASS plan.siblings.2", out)
+
+    def test_gates_names_must_exist(self):
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** run_all, nosuch\n"), "plan.gates.1", "nosuch")
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** run_all, beta\n"), "plan.gates.1", "beta")
+        self.fail_line(self.variant("**Gates:** run_all\n", ""), "plan.gates.1", "no **Gates:** line")
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:**\n"), "plan.gates.1", "empty")
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** run_all, ../x\n"), "plan.gates.1", "'../x'")
+        rf.write(self.root, "tools/gates/gate_sub/x.py", "")
+        self.addCleanup(shutil.rmtree, os.path.join(self.root, "tools/gates/gate_sub"), True)
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** sub/x\n"), "plan.gates.1", "'sub/x'")
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** run_all\n**Gates:** run_all\n"), "plan.gates.1",
+                  "a second **Gates:** line")
+        out = self.ok(GOOD)
+        for n in ("1", "2", "3"):
+            self.assertIn(f"PASS plan.gates.{n}", out)
+
+    def test_a_gate_at_the_plan_root_counts(self):
+        rf.write(self.root, "tools/gates/gate_rooted.py", "")
+        self.addCleanup(os.remove, os.path.join(self.root, "tools/gates/gate_rooted.py"))
+        self.ok(self.variant("**Gates:** run_all\n", "**Gates:** rooted\n"))
+
+    def test_a_gate_created_in_a_test_or_modify_item_does_not_count(self):
+        text = self.variant("- Test: `tests/test_alpha.py`\n", "- Test: `tests/test_alpha.py`\n- Modify: `tools/gates/gate_mod.py`\n")
+        self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** mod\n", base=text), "plan.gates.1", "mod")
+
+    def test_ids_need_a_pin_step_naming_a_pin_test(self):
+        self.fail_line(self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n", ""),
+                  "plan.pin.1", "no '- [ ] **Step N: ... pin ...**' step")
+        self.fail_line(self.variant("**Step 2: Mutation run and pin**", "**Step 2: Mutation run**"), "plan.pin.1",
+                  "no '- [ ] **Step N: ... pin ...**' step")
+        self.fail_line(self.variant("**Step 2: Mutation run and pin**", "**Step 2: Mutation run and spinning**"), "plan.pin.1",
+                  "no '- [ ] **Step N: ... pin ...**' step")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha_fails`"), "plan.pin.1", "registers.PIN_TEST")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha::alpha_fails`"), "plan.pin.1", "registers.PIN_TEST")
+        self.fail_line(self.variant("pin test_beta::test_beta_fails", "pin test_beta"), "plan.pin.2", "registers.PIN_TEST")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`xtest_alpha::test_alpha_fails`"), "plan.pin.1",
+                       "registers.PIN_TEST")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha::test_`"), "plan.pin.1", "registers.PIN_TEST")
+
+    def test_pin_step_forms_that_pass(self):
+        out = self.ok(GOOD)
+        for n in ("1", "2", "3"):
+            self.assertIn(f"PASS plan.pin.{n}", out)
+        out = self.ok(self.variant("**Step 2: Mutation run and pin**", "**Step 2: PIN the row**"))
+        self.assertIn("PASS plan.pin.1", out)
+
+    def test_the_pin_test_must_be_in_the_pin_step_body(self):
+        text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
+                            "- [ ] **Step 2: Mutation run and pin**\n\n- [ ] **Step 3: Other** — `test_alpha::test_alpha_fails`\n")
+        self.fail_line(text, "plan.pin.1", "registers.PIN_TEST")
+        text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
+                            "- [ ] **Step 2: Mutation run and pin**\n\n## Notes\n`test_alpha::test_alpha_fails`\n")
+        self.fail_line(text, "plan.pin.1", "registers.PIN_TEST")
+        text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
+                            "- [ ] **Step 2: Mutation run and pin**\n\nA later body line names `test_alpha::test_alpha_fails`.\n")
+        self.assertIn("PASS plan.pin.1", self.ok(text))
+
+    def test_steps_outside_a_task_and_unclosed_step_titles(self):
+        out = self.ok(self.variant("## Block b2 — second\n", "## Block b2 — second\n\n- [ ] **Step 1: Branch** — no task yet\n"))
+        self.assertIn("PASS plan.pin.3", out)
+        self.fail_line(self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
+                                    "- [ ] **Step 2: Mutation run and pin `test_alpha::test_alpha_fails`\n"),
+                       "plan.pin.1", "registers.PIN_TEST")
+
+    def test_a_task_or_block_heading_ends_the_pin_step_body(self):
+        text = self.variant("the pin test is `test_alpha::test_alpha_fails`.", "no test here.")
+        text = self.variant("### Task 2: beta\n", "### Task 2: beta\n\n`test_alpha::test_alpha_fails`\n", base=text)
+        self.fail_line(text, "plan.pin.1", "registers.PIN_TEST")
+        text = self.variant("pin test_beta::test_beta_fails", "pin", base=GOOD)
+        text = self.variant("- [ ] **Step 2: CHECKPOINT b1**\n\n## Block b2 — second\n",
+                            "## Block b2 — second\n\n`test_beta::test_beta_fails`\n", base=text)
+        self.fail_line(text, "plan.pin.2", "registers.PIN_TEST")
+
+    def test_a_pin_step_of_another_task_does_not_count(self):
+        text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n", "")
+        text = self.variant("- [ ] **Step 1: CHECKPOINT b2**", "- [ ] **Step 1: pin** `test_alpha::test_alpha_fails`\n\n"
+                            "- [ ] **Step 2: CHECKPOINT b2**", base=text)
+        self.fail_line(text, "plan.pin.1", "no '- [ ] **Step N")
 
 
 class Ledgers(unittest.TestCase):

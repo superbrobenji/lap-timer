@@ -5,8 +5,11 @@ Checks: writing-plans header blocks; '**Files:**' and '**Findings:**' per task; 
 and in exactly one task; with --source, every source id in exactly one task; file overlap between PARALLEL
 tasks of one block; tasks per block <= config block.max_tasks (blocks: '## Block bN' headings or CHECKPOINT
 steps; heading numbers increase; '## Block N' or '## Block bN', level 2); the writing-plans "No Placeholders" list over the whole file, code included.
-A Files item names every backticked span outside parentheses as a path; inside parentheses a span with a '/'
-and no whitespace fails (a hidden path), any other span is a comment.
+A Files item ('- Create|Modify|Test|Delete: `path` prose') starts with exactly one backticked span, the path;
+the prose after it holds no backtick (DEC-0017). Per task also (DEC-0016): '**Siblings:**' lists every sibling
+of the register rows its Findings name; '**Gates:**' names run_all or gates X whose tools/gates/gate_X.py is at
+the root or a Create item of this or an earlier task; Findings that name ids need a pin step (a step title with
+the word 'pin' whose body names a test test_<module>::test_<name>).
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -48,9 +51,16 @@ FIELD_RE = re.compile(r"^\*\*[^*\n]+:\*\*")
 STEP_RE = re.compile(r"^- \[[ xX]\] \*\*Step\b")
 TASK_RE = re.compile(r"^### Task (\d+[A-Za-z]?)\b")
 CHECKPOINT_STEP = re.compile(r"^- \[[ xX]\] \*\*Step \d+: CHECKPOINT\b")
-FILE_RE = re.compile(r"^- (?:Create|Modify|Test|Delete): (?=`)(.*)$")
+FILE_RE = re.compile(r"^- (Create|Modify|Test|Delete):(.*)$")
+FILE_PATH = re.compile(r"^`([^`]+)`")
 FINDINGS_RE = re.compile(r"^\*\*Findings:\*\*\s*(.*)$")
 MODE_RE = re.compile(r"^\*\*Mode:\*\*\s*(.*?)\s*$")
+SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
+GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
+GATE_NAME = re.compile(r"^[a-z0-9_]+$")
+STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
+PIN_TITLE = re.compile(r"\bpin\b", re.I)
+PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
 SPEC_PATH = re.compile(r"`([^`]+)`")
@@ -83,6 +93,19 @@ class Task:
     files_errors: list = field(default_factory=list)
     mode_error: str = ""
     mode_seen: bool = False
+    creates: list = field(default_factory=list)
+    siblings: list | None = None
+    siblings_value: str = ""
+    siblings_error: str = ""
+    gates: list | None = None
+    gates_error: str = ""
+    steps: list = field(default_factory=list)
+
+
+@dataclass
+class Step:
+    title: str
+    body: list
 
 
 @dataclass
@@ -137,48 +160,66 @@ def _fence_close(line: str, fence: tuple) -> bool:
         and len(m.group(1)) <= base + 3
 
 
-def _spans(text: str):
-    """(backticked span, parenthesis depth) in order; a '(' or ')' inside a span is part of the span."""
-    out, depth, i = [], 0, 0
-    while i < len(text):
-        c = text[i]
-        if c == "`":
-            j = text.find("`", i + 1)
-            if j < 0:
-                break
-            out.append((text[i + 1:j], depth))
-            i = j
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth = max(0, depth - 1)
-        i += 1
-    return out
-
-
 def _file_item(task: Task, line: str) -> bool:
-    """A Files item: every backticked span outside parentheses is a path; inside parentheses a span with a '/'
-    and no whitespace is refused as a hidden path (write it outside); any other span there (a symbol such as
-    `GATES`, a command line with spaces) is a comment and is ignored."""
+    """A Files item: '- Create|Modify|Test|Delete: ' then exactly one backticked span, the path (a ':' suffix
+    is a line range), then prose holding no backtick. Any other shape is a files error (fail closed)."""
     fm = FILE_RE.match(line)
     if not fm:
         return False
-    paths = []
-    for span, depth in _spans(fm.group(1)):
-        if depth == 0:
-            paths.append(posixpath.normpath(span.split(":")[0].strip()))
-        elif "/" in span and not any(ch.isspace() for ch in span):
-            task.files_errors.append(f"path-like span `{span}` inside parentheses: write it outside them")
-    if not paths or any(p in ("", ".") for p in paths):
-        return False
-    task.files.extend(paths)
+    rest = fm.group(2).strip()
+    ticks = rest.count("`")
+    m = FILE_PATH.match(rest)
+    path = posixpath.normpath(m.group(1).split(":")[0].strip()) if m else ""
+    if ticks == 0:
+        task.files_errors.append(f"no backticked path: {line.strip()[:80]!r}")
+    elif ticks % 2:
+        task.files_errors.append(f"unclosed backtick: {line.strip()[:80]!r}")
+    elif ticks > 2:
+        task.files_errors.append(f"a second backticked span (one path per item; symbols go in plain prose): {line.strip()[:80]!r}")
+    elif not m:
+        task.files_errors.append(f"the item must start with the backticked path: {line.strip()[:80]!r}")
+    elif path in ("", "."):
+        task.files_errors.append(f"not a path: {line.strip()[:80]!r}")
+    else:
+        task.files.append(path)
+        if fm.group(1) == "Create":
+            task.creates.append(path)
     return True
+
+
+def _siblings_value(task: Task, value: str) -> None:
+    if task.siblings is not None:
+        task.siblings_error = "a second **Siblings:** line in one task"
+        return
+    task.siblings_value = value
+    if NONE_RE.match(value):
+        task.siblings = []
+        return
+    task.siblings = [v.strip() for v in value.split(",")]
+    if value.lower() == "none":
+        task.siblings_error = "write 'none -- <reason>' or a comma-separated list"
+    elif "" in task.siblings:
+        task.siblings_error = f"empty entry in **Siblings:** {value!r}"
+
+
+def _gates_value(task: Task, value: str) -> None:
+    if task.gates is not None:
+        task.gates_error = "a second **Gates:** line in one task"
+        return
+    task.gates = [v.strip() for v in value.split(",")]
+    if "" in task.gates:
+        task.gates_error = f"empty gate name in **Gates:** {value!r}"
+
+
+def _listed(sibling: str, value: str) -> bool:
+    """`sibling` is one whole comma-separated entry of `value`, verbatim (an entry may itself hold a comma)."""
+    return re.search(r"(?:^|,)\s*" + re.escape(sibling) + r"\s*(?:,|$)", value) is not None
 
 
 def parse_plan(text: str) -> Plan:
     headers, tasks, placeholders, block_errors = {}, [], [], []
     fence, fence_line, item_col, block, closed, cur, in_files = None, 0, None, 1, False, None, False
-    used, first_head = 0, None
+    used, first_head, step = 0, None, None
     for n, line in enumerate(text.splitlines(), 1):
         if any(rx.search(line) for rx in PLACEHOLDERS):
             placeholders.append((n, line.strip()[:80]))
@@ -187,6 +228,8 @@ def parse_plan(text: str) -> Plan:
                 fence = None
                 continue
             if not (fence[2] and line.strip() and len(line) - len(line.lstrip(" ")) < fence[2]):
+                if step is not None:
+                    step.body.append(line)    # code inside a step is part of its body
                 continue
             fence, item_col = None, None    # a line left of the list item's content ends the item and its fence
         opened = _fence_open(line, item_col)
@@ -205,16 +248,25 @@ def parse_plan(text: str) -> Plan:
             if num <= used:
                 block_errors.append(f"line {n}: 'Block b{num}' does not follow block {used}")
             used, first_head = max(used, num), first_head or n
-            block, closed, cur, in_files = num, False, None, False
+            block, closed, cur, in_files, step = num, False, None, False, None
             continue
         m = TASK_RE.match(line)
         if m:
             if closed:
                 block, closed = block + 1, False
             used = max(used, block)
-            cur, in_files = Task(m.group(1), n, block), False
+            cur, in_files, step = Task(m.group(1), n, block), False, None
             tasks.append(cur)
             continue
+        if STEP_RE.match(line):
+            sm = STEP_TITLE.match(line)
+            step = Step(sm.group(1), [sm.group(2)]) if sm else Step(line, [])
+            if cur is not None:
+                cur.steps.append(step)
+        elif line.startswith("#"):
+            step = None
+        elif step is not None:
+            step.body.append(line)
         if CHECKPOINT_STEP.match(line):
             closed, in_files = True, False
             continue
@@ -238,6 +290,14 @@ def parse_plan(text: str) -> Plan:
         m = FINDINGS_RE.match(line)
         if m:
             _findings_value(cur, m.group(1))
+            continue
+        m = SIBLINGS_RE.match(line)
+        if m:
+            _siblings_value(cur, m.group(1))
+            continue
+        m = GATES_RE.match(line)
+        if m:
+            _gates_value(cur, m.group(1))
             continue
         m = MODE_RE.match(line)
         if m:
@@ -298,6 +358,40 @@ def _verdict(res, lid, ok, reason):
         res.fail(lid, reason)
 
 
+def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None:
+    """Siblings, Gates and the pin step of one task (DEC-0016). An id with no register row adds no siblings:
+    plan.id.<id> already fails it."""
+    lid = f"{pfx}.siblings.{t.num}"
+    if t.siblings is None:
+        res.fail(lid, "no **Siblings:** line ('none -- <reason>' or the register rows' siblings, comma-separated)")
+    elif t.siblings_error:
+        res.fail(lid, t.siblings_error)
+    else:
+        need = [s for fid in t.findings or [] for s in (rows.get(fid) or {}).get("siblings") or []]
+        missing = [s for s in need if not _listed(s, t.siblings_value)]
+        _verdict(res, lid, not missing, f"missing {', '.join(missing)} (register siblings of {', '.join(t.findings or [])})")
+    lid = f"{pfx}.gates.{t.num}"
+    if t.gates is None:
+        res.fail(lid, "no **Gates:** line (run_all or gate names, comma-separated)")
+    elif t.gates_error:
+        res.fail(lid, t.gates_error)
+    else:
+        bad = [g for g in t.gates if g != "run_all" and not (
+            GATE_NAME.match(g) and (os.path.isfile(os.path.join(root, "tools", "gates", f"gate_{g}.py"))
+                                    or f"tools/gates/gate_{g}.py" in created))]
+        _verdict(res, lid, not bad, f"unknown gate {', '.join(repr(g) for g in bad)}: no tools/gates/gate_<name>.py "
+                                    "at the root or in a Create item of this or an earlier task")
+    lid = f"{pfx}.pin.{t.num}"
+    pins = [s for s in t.steps if PIN_TITLE.search(s.title)]
+    if not t.findings:
+        res.passed(lid)
+    elif not pins:
+        res.fail(lid, "no '- [ ] **Step N: ... pin ...**' step (the Findings line names ids)")
+    else:
+        named = any(PIN_NAME.search(line) for s in pins for line in s.body)
+        _verdict(res, lid, named, "the pin step names no test in registers.PIN_TEST form test_<module>::test_<name>")
+
+
 def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: str | None,
                res: Result, pfx: str) -> None:
     full = _resolve(root, plan_path)
@@ -328,7 +422,12 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
             _verdict(res, f"{tid}.findings", not t.findings_error, t.findings_error)
         for fid in t.findings or []:
             routed.setdefault(fid, []).append(t.num)
-    known = {f["id"] for f in findings}
+    rows = {f["id"]: f for f in findings}
+    created = set()
+    for t in plan.tasks:
+        created.update(t.creates)
+        _fields(res, root, pfx, t, rows, created)
+    known = set(rows)
     for fid, nums in sorted(routed.items()):
         if fid not in known:
             res.fail(f"{pfx}.id.{fid}", "not in docs/superpowers/state/findings.yml")

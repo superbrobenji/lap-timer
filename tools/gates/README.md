@@ -23,7 +23,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 | `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable) and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
 | `gate_review_package.py` | `--all` (run_all's default; no package is a PASS) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list, a claims table with no FAIL row |
-| `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` and `**Findings:**` per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
+| `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` (one backticked path per item), `**Findings:**`, `**Siblings:**`, `**Gates:**` and a pin step per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
 prefix; `--only a,b` selects, `--root <tree>` gates another tree (`--json` first, as for every
@@ -198,7 +198,17 @@ normalised to a repo-relative path and matches a register row whose `source`, up
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
 `FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
-`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`; every backticked span of a Files item outside parentheses is a path; inside parentheses a span holding a `/` and no whitespace is `FAIL plan.task.N.files` (a hidden path), any other span (a symbol, a command line) is a comment. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
+`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`. A Files item (DEC-0017) is
+`- Create|Modify|Test|Delete: ` then exactly one backticked span, the path (a `:` suffix is a line range), then prose
+holding no backtick: an item with no backticked path, an unclosed backtick, a second backticked span or text before
+the path is `FAIL plan.task.N.files` (an item naming two files is two items; symbols go in plain prose). Per task
+(DEC-0016): `**Siblings:** none -- <reason>` or a comma-separated list holding, as whole entries, every `siblings`
+entry of the register rows the task's Findings name (an id with no row adds nothing: `plan.id.<id>` fails it), else
+`FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each `run_all` or an X for which `tools/gates/gate_X.py`
+is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
+ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (any case) and whose body (up to the next
+step or heading, code included) names a test `test_<module>::test_<name>` (`registers.PIN_TEST` with the module),
+else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
 indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
