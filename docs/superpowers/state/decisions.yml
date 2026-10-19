@@ -114,8 +114,8 @@
     - {label: require-equal, cost: "about 10-15 lines in check_config plus tests and mutation steps: fable_roles must equal the set of roles whose minimum is fable, and model_rank must order haiku < sonnet < opus < fable (the b4 verifier also found a model_rank with fable below opus passing); a stricter CI check (fits the b4 fix wave)"}
     - {label: keep, cost: "none now; the Fable policy rests on config review alone"}
   asked_at: {sha: "07d7b29", by: session}
-  answer: null
-  answered_at: null
+  answer: "require-equal (owner answered \"recommended for both\" in chat, 2026-10-19; the session had recommended require-equal)"
+  answered_at: {sha: "07d7b29", by: superbrobenji}
 
 - id: DEC-0013
   class: scope
@@ -124,5 +124,5 @@
     - {label: keep-s2-form, cost: "amend the umbrella convention row to the S2 form (plan slug strict-delivery, task S2-T<n>); no row or S2 plan change"}
     - {label: umbrella-form, cost: "rewrite nine rows (three pinned, with history) and the S2 plan's preamble script, Task 4-5 review-dir naming and pin scripts to the path/T<n> form; a b4 fix-wave item plus S2 plan edits"}
   asked_at: {sha: "07d7b29", by: session}
-  answer: null
-  answered_at: null
+  answer: "keep-s2-form (owner answered \"recommended for both\" in chat, 2026-10-19; the session had recommended keep-s2-form)"
+  answered_at: {sha: "07d7b29", by: superbrobenji}

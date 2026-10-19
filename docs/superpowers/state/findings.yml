@@ -276,3 +276,31 @@
   - state: planned
     sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
     by: controller
+- id: B4-FIX-1
+  source: review
+  severity: MEDIUM
+  class: >-
+    b4 final review F1: tools/gates/hooks/pre_tool_use.py handle_agent ignores tool_input.subagent_type,
+    so an Agent dispatch with subagent_type "fork" and a matching `## Model:` line passes (rc 0) although a
+    fork always runs on the session model with the session's full context (spec §5 forbids pasted session
+    history and D18 limits Fable to two roles; S2 Review Focus 1 exists to block a dispatch that silently
+    runs on the session model). Fix wave of b4 (ruling 4): refuse forks with FAIL dispatch.fork; with it the
+    final-review minors F2-F6 and the verifier's finding 1 (missing tests for an implementer on a pinned row,
+    an unregistered claim id and a budget with trailing text; a vacuous non-ASCII-digit test; the S2 plan's
+    pin scripts for Tasks 1-9 produce rows gate_register rejects; the S2 plan's Task 1/2 whole-file blocks
+    not re-synced to the tip after Task 3) and DEC-0012 = require-equal (--config-check requires fable_roles
+    == the fable-minimum roles and model_rank ordered haiku < sonnet < opus < fable).
+  siblings: [F2 implementer on a pinned row untested, F3 unregistered claim id untested, F4 budget trailing text untested, F5 vacuous non-ASCII test, F6 plan pin scripts, V1 Task 1/2 plan blocks stale, DEC-0012 config consistency]
+  cites:
+    - {file: tools/gates/hooks/pre_tool_use.py, lines: "253-290", sha: "2230bde"}
+    - {file: tools/gates/gate_dispatch.py, lines: "266-300", sha: "2230bde"}
+    - {file: tools/gates/tests/test_gate_decisions.py, lines: "112", sha: "2230bde"}
+  repro: null
+  owner: {kind: plan, plan: strict-delivery, task: S2-b4-fixwave}
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+    - {state: open, sha: "2230bde", by: final-review}
+    - {state: planned, sha: "2230bde", by: session}
