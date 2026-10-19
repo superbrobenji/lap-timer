@@ -456,3 +456,40 @@
   - state: planned
     sha: 4bf208e
     by: session
+- id: B5-FIX-3
+  source: review
+  severity: MEDIUM
+  class: 'gate_plan per-task rules written from the session''s b5 round-4 brief: (a)
+    the pin-step title rule is a bare case-insensitive substring (PIN_TITLE = re.compile(''pin'',
+    re.I), gate_plan.py:62), so a step titled ''Mapping ...'' or ''Spinner ...'' whose
+    body names a test in PIN_TEST form counts as the task''s pin step and a task with
+    no pin step passes (fail open); (b) per-task check ids use two forms: Findings/Mode
+    faults as plan.<slug>.task.<N>, every other per-task check as plan.<slug>.<check>.<N>'
+  siblings:
+  - pin title word boundary
+  - pin step id form
+  - findings/mode id form
+  - README gate_plan section
+  - S2 plan Task 6 text
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 62-63
+    sha: c73b3ba
+  repro: 'a plan task with Findings ids and no pin step but a step ''- [ ] **Step
+    3: Mapping table**'' whose body names test_x::test_y -> gate_plan --plan <file>
+    prints PASS plan.<slug>.pin.<N>'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fixwave
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: c73b3ba
+    by: session
+  - state: planned
+    sha: c73b3ba
+    by: session
