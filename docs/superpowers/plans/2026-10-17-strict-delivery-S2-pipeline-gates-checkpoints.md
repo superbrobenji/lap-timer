@@ -1925,7 +1925,7 @@ Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/ha
 
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture` (Task 1).
-- Produces: `gate_review_package.check(args) -> Result`, `main(argv=None)`; `REQUIRED` (list of file names); `table_rows(text) -> list[list[str]] | None`; `mutation_errors(text, finding_id) -> list[str]`. `task_findings(findings, pkg) -> list[str]`. CLI (umbrella table): `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored) | `--all` (every package under `.superpowers/sdd/*/review/*`; none is a PASS — CI has none); the task's ids are the register rows with owner `{kind: plan, plan: <plan>, task: <task>}` plus every `mutation-<id>.txt` present, so the review dir is named by the row's `owner.task` (here `S2-T<n>`). Line ids add `review_package.findings` (no owned row). Line ids: `<pfx>.file.<name>`, `<pfx>.diff`, `<pfx>.gates`, `<pfx>.finding.<id>`, `<pfx>.mutation[.<id>]`, `<pfx>.siblings`, `<pfx>.claims`, with `<pfx>` = `review_package` (single) or `review_package.<plan>.<task>` (`--all`); `review_package.all` when no package exists.
+- Produces: `gate_review_package.check(args) -> Result`, `main(argv=None)`; `REQUIRED` (list of file names); `table_rows(text) -> list[list[str]] | None`; `mutation_errors(text, finding_id, pin_test=None) -> list[str]`. `task_findings(findings, pkg) -> list[str]`. CLI (umbrella table): `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored) | `--all` (every package under `.superpowers/sdd/*/review/*`; none is a PASS — CI has none); the task's ids are the register rows with owner `{kind: plan, plan: <plan>, task: <task>}` plus every `mutation-<id>.txt` present, so the review dir is named by the row's `owner.task` (here `S2-T<n>`). Line ids add `review_package.findings` (no owned row). Line ids: `<pfx>.file.<name>`, `<pfx>.commits`, `<pfx>.diff`, `<pfx>.gates`, `<pfx>.finding.<id>`, `<pfx>.mutation[.<id>]`, `<pfx>.siblings`, `<pfx>.claims`, with `<pfx>` = `review_package` (single) or `review_package.<plan>.<task>` (`--all`); `review_package.all` when no package exists; `<pfx>.input` for a non-directory entry under `review/` (`--all`); `--dir` outside `<root>/.superpowers/sdd/<plan>/review/<task>` is `review_package.input`.
 
 - [ ] **Step 1: Write the failing tests** — `tools/gates/tests/test_gate_review_package.py`:
 
@@ -1937,6 +1937,8 @@ import contextlib
 import io
 import os
 import shutil
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -1951,7 +1953,7 @@ MUT = ("finding: SD-FX-1\n"
        "step 3 (fix restored): python3 -m unittest t.T.test_fx -> PASS\n")
 GOOD = {
     "commits.txt": "abc1234 feat: fixture\n",
-    "diff.patch": "diff --git a/src/fx.py b/src/fx.py\n+fixed\n",
+    "diff.patch": "diff --git a/src/fx.py b/src/fx.py\n--- a/src/fx.py\n+++ b/src/fx.py\n@@ -1 +1 @@\n+fixed\n",
     "gates.txt": "PASS register.schema\n",
     "siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-a | test_sib_a |\n",
     "claims.md": ("| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
@@ -1980,14 +1982,26 @@ class GateReviewPackage(unittest.TestCase):
     def check(self):
         return gate(self.root, ["--dir", PKG])
 
-    def assertFailLine(self, rc, out, line_id):
+    def assertFailLine(self, rc, out, line_id, reason=""):
         self.assertEqual(1, rc, out)
         self.assertIn(f"FAIL {line_id}", out)
+        line = next(l for l in out.splitlines() if l.startswith(f"FAIL {line_id}"))
+        self.assertIn(reason, line)
+
+    def with_rows(self, edit):
+        rows = rf.load_rows()
+        edit(rows)
+        self.root = rf.make_repo(rf.DISPATCH_FILES, rows)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.put(GOOD)
 
     def test_good_package_passes(self):
         rc, out = self.check()
         self.assertEqual(0, rc, out)
         self.assertNotIn("FAIL", out)
+        for lid in ("file.commits.txt", "file.diff.patch", "file.gates.txt", "file.siblings.md", "file.claims.md",
+                    "commits", "diff", "gates", "mutation.SD-FX-1", "siblings", "claims"):
+            self.assertIn(f"PASS review_package.{lid}\n", out + "\n")
 
     def test_each_missing_file_fails(self):
         expect = {n: f"review_package.file.{n}" for n in grp.REQUIRED}
@@ -2067,6 +2081,209 @@ class GateReviewPackage(unittest.TestCase):
     def test_no_mode_fails(self):
         self.assertFailLine(*gate(self.root, []), "review_package.input")
 
+    # --- fix round 1 (F1-F9 of task-4-review1.md); every test goes through main() ---
+    def test_each_empty_file_fails(self):
+        for name in grp.REQUIRED:
+            with self.subTest(name=name):
+                self.put({name: ""})
+                self.assertFailLine(*self.check(), f"review_package.file.{name}", "missing or empty")
+                self.put({name: GOOD[name]})
+
+    def test_gates_txt_must_hold_gate_output(self):
+        for text in (" \n", "hello\n", "Traceback (most recent call last):\nerror\n", "fail register.schema\n",
+                     "PASS a\n  FAIL b: x\n", "PASS\n"):
+            with self.subTest(text=text):
+                self.put({"gates.txt": text})
+                self.assertFailLine(*self.check(), "review_package.gates", "gates.txt needs gate output")
+
+    def test_gates_txt_blank_lines_and_crlf_pass(self):
+        self.put({"gates.txt": "PASS a.b\r\n\nPASS c: note\r\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_claims_empty_cells_fail(self):
+        head = "| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
+        for row in ("| x |  | c | o | PASS |\n", "| x | d |  | o | PASS |\n", "|  | d | c | o | PASS |\n",
+                    "| x | d | c |  | PASS |\n"):
+            with self.subTest(row=row):
+                self.put({"claims.md": head + row})
+                self.assertFailLine(*self.check(), "review_package.claims", "first four cells filled")
+
+    def test_claims_malformed_rows_fail(self):
+        head = "| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
+        for row in ("| x | d | c | PASS |\n", "| x | d | c | o | pass |\n", "| x | d | c | o | PASS | z |\n"):
+            with self.subTest(row=row):
+                self.put({"claims.md": head + row})
+                self.assertFailLine(*self.check(), "review_package.claims", "not 'claim |")
+
+    def test_claims_and_siblings_must_be_tables(self):
+        self.put({"claims.md": "just prose | with a bar\n"})
+        self.assertFailLine(*self.check(), "review_package.claims", "not a Markdown table")
+        self.put({"claims.md": GOOD["claims.md"], "siblings.md": "| sibling | test or finding |\n| x | y |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings", "not a Markdown table")
+
+    def test_only_the_first_table_counts(self):
+        self.put({"claims.md": GOOD["claims.md"] + "\n| a | b |\n|---|---|\n| x | y |\n",
+                  "siblings.md": GOOD["siblings.md"] + "\n| a | b |\n|---|---|\n| x | y |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_mutation_must_be_exactly_five_lines(self):
+        self.put({"mutation-SD-FX-1.txt": "\n".join(MUT.splitlines()[:4]) + "\n"})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "exactly five lines")
+        self.put({"mutation-SD-FX-1.txt": MUT + "step 4 (again): python3 -m unittest t.T.test_fx -> FAIL\n"})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "exactly five lines")
+        self.put({"mutation-SD-FX-1.txt": "\n" + MUT.replace("\n", "\n\n")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_mutation_test_line_is_required(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("test: test_fx", "test: ")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "line 2 must be")
+
+    def test_mutation_step_one_and_three_must_pass(self):
+        for n, tail in ((1, "(fix present): python3 -m unittest t.T.test_fx -> PASS"),
+                        (3, "(fix restored): python3 -m unittest t.T.test_fx -> PASS")):
+            with self.subTest(step=n):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace(tail, tail[:-4] + "WARN")})
+                self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", f"step {n} malformed")
+
+    def test_mutation_step_two_names_how(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("(fix reverted: git stash push src/fx.py)", "(fix reverted:  )")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "names no way")
+
+    def test_mutation_test_name_is_a_whole_component(self):
+        for cmd in ("t.T.test_fx_other", "t.T.xtest_fx", "t.test_fx.T"):
+            with self.subTest(cmd=cmd):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", cmd)})
+                self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "does not name the test")
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "tests/t.py::T::test_fx")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_mutation_test_must_equal_the_pinned_test(self):
+        def pin(rows, test):
+            rows["findings"][0]["pin"] = {"test": test, "transcript": "docs/x.txt"}
+        self.with_rows(lambda r: pin(r, "test_other::test_elsewhere"))
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "pinned test")
+        self.with_rows(lambda r: pin(r, "test_mod::test_fx"))
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.with_rows(lambda r: pin(r, "test_fx"))
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_siblings_match_the_exact_first_cell(self):
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n| sib-abc | test_x |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings", "not listed: sib-a")
+
+    def test_sibling_second_cell_is_a_test_or_a_registered_id(self):
+        head = "| sibling | test or finding |\n|---|---|\n"
+        for cell in ("-", "FAIL", "not a test", "SD-FX-404", ""):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                self.assertFailLine(*self.check(), "review_package.siblings", "are not 'sibling |")
+        for cell in ("SD-FX-2", "t.T.test_sib", "tests/t.py::T::test_sib", "test_sib"):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+
+    def test_sibling_rows_need_two_cells_and_a_name(self):
+        head = "| sibling | test or finding |\n|---|---|\n"
+        for row in ("| sib-a |\n", "|  | test_x |\n", "| sib-a | test_x | extra |\n"):
+            with self.subTest(row=row):
+                self.put({"siblings.md": head + "| sib-a | test_a |\n" + row})
+                self.assertFailLine(*self.check(), "review_package.siblings", "are not 'sibling |")
+
+    def test_commits_txt_holds_sha_subject_lines(self):
+        for text in ("\n", "not a commit\n", "abc1234 ok\nnot a commit\n", "abc123 short\n", "abc1234\n"):
+            with self.subTest(text=text):
+                self.put({"commits.txt": text})
+                self.assertFailLine(*self.check(), "review_package.commits", "<sha> <subject>")
+        self.put({"commits.txt": "abc1234 one\n\n" + "0" * 40 + " two\r\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_diff_needs_a_header_and_a_body(self):
+        self.put({"diff.patch": "diff --git a/x b/x\n"})
+        self.assertFailLine(*self.check(), "review_package.diff", "no hunk or file line")
+        self.put({"diff.patch": "diff --git x\n--- a/x\n"})
+        self.assertFailLine(*self.check(), "review_package.diff", "does not start with")
+        self.put({"diff.patch": "diff --git a/x b/x\nBinary files a/x and b/x differ\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_dir_must_be_the_package_layout(self):
+        other = ".superpowers/sdd/fx/notreview/1"
+        for name in grp.REQUIRED:
+            rf.write(self.root, f"{other}/{name}", GOOD[name])
+        for d in (other, "/", "..", ".", ".superpowers/sdd/fx", f"{PKG}/x"):
+            with self.subTest(dir=d):
+                rc, out = gate(self.root, ["--dir", d])
+                self.assertFailLine(rc, out, "review_package.input", "is not <root>/.superpowers/sdd/<plan>/review/<task>")
+                self.assertNotIn("index", out)
+
+    def test_dir_must_exist(self):
+        self.assertFailLine(*gate(self.root, ["--dir", ".superpowers/sdd/fx/review/77"]),
+                            "review_package.input", "no such directory")
+
+    def test_dir_accepts_an_absolute_path(self):
+        rc, out = gate(self.root, ["--dir", os.path.join(self.root, PKG)])
+        self.assertEqual(0, rc, out)
+
+    def test_dir_and_all_together_or_neither_fail(self):
+        self.assertFailLine(*gate(self.root, ["--dir", PKG, "--all"]), "review_package.input", "exactly one")
+        self.assertFailLine(*gate(self.root, ["--dir", ""]), "review_package.input", "exactly one")
+
+    def test_missing_register_is_input_fail(self):
+        os.remove(os.path.join(self.root, rf.STATE, "findings.yml"))
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.input")
+        self.assertFailLine(*self.check(), "review_package.input")
+
+    def test_package_under_another_plan_does_not_own_the_row(self):
+        other = ".superpowers/sdd/other/review/1"
+        for name in grp.REQUIRED:
+            rf.write(self.root, f"{other}/{name}", GOOD[name])
+        self.assertFailLine(*gate(self.root, ["--dir", other]), "review_package.findings", "plan: other, task: 1")
+
+    def test_all_mode_package_with_no_owner_and_no_transcript_fails(self):
+        other = ".superpowers/sdd/fx/review/5"
+        for name in grp.REQUIRED:
+            rf.write(self.root, f"{other}/{name}", GOOD[name])
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx.5.mutation", "no register row owns")
+
+    def test_all_mode_non_directory_entry_fails(self):
+        rf.write(self.root, ".superpowers/sdd/fx/review/2", "a stray file\n")
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx.2.input", "is not a directory")
+
+    def test_all_mode_lone_stray_file_fails_too(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        rf.write(self.root, ".superpowers/sdd/fx/review/2", "a stray file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertFailLine(rc, out, "review_package.fx.2.input")
+        self.assertNotIn("review_package.all", out)
+
+    def test_blanks_indentation_and_prose_around_tables(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("\n", "\n \t\n"),
+                  "gates.txt": " \nPASS a.b\n \n",
+                  "commits.txt": "  \nabc1234 one\n",
+                  "claims.md": "Claims |\n\n  " + GOOD["claims.md"].replace("\n", "\n  ").rstrip(" ") + "after the table |\n",
+                  "siblings.md": "Siblings |\n\n" + GOOD["siblings.md"] + "closing prose |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_mutation_test_value_is_stripped(self):
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("test: test_fx", "test:   test_fx")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_script_runs_as_a_program(self):
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.root)
+        p = subprocess.run([sys.executable, grp.__file__, "--all"], capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertIn("PASS review_package.fx.1.claims", p.stdout)
+
     def test_registered_in_run_all(self):
         from tools.gates import run_all
         self.assertIn("review_package", run_all.GATES)
@@ -2111,13 +2328,17 @@ if _ROOT not in sys.path:
 from tools.gates.lib import GateError, Result, gate_args, repo_root, run_gate  # noqa: E402
 from tools.gates.lib import registers  # noqa: E402
 
-STATE = "docs/superpowers/state"
 SDD = ".superpowers/sdd"          # git-ignored; packages live at .superpowers/sdd/<plan>/review/<task>/
 REQUIRED = ["commits.txt", "diff.patch", "gates.txt", "siblings.md", "claims.md"]
 STEP1 = re.compile(r"^step 1 \(fix present\): (?P<cmd>.+) -> PASS$")
 STEP2 = re.compile(r"^step 2 \(fix reverted: (?P<how>.+?)\): (?P<cmd>.+) -> FAIL$")
 STEP3 = re.compile(r"^step 3 \(fix restored\): (?P<cmd>.+) -> PASS$")
 SEPARATOR = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
+COMMIT_LINE = re.compile(r"^[0-9a-f]{7,40} \S")
+GATE_LINE = re.compile(r"^(PASS|FAIL) \S+")
+DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mode|old mode|new mode"
+                       r"|similarity index|rename |copy |Binary files )")
+TEST_NAME = re.compile(r"^(?:[\w.\-/]+::)*(?:\w+\.)*test_\w+$")
 
 
 def _read(path: str) -> str:
@@ -2125,18 +2346,35 @@ def _read(path: str) -> str:
         return f.read()
 
 
+def _lines(text: str) -> list[str]:
+    return [l.rstrip() for l in text.splitlines() if l.strip()]
+
+
 def table_rows(text: str) -> list[list[str]] | None:
-    """Data rows of the first Markdown table in text; None when there is no header + separator."""
-    lines = [l.strip() for l in text.splitlines() if l.strip().startswith("|")]
-    if len(lines) < 2 or not SEPARATOR.match(lines[1]):
+    """Data rows of the first Markdown table: the first '|' line is the header, the next line must be the
+    separator, and the table ends at the first line that does not start with '|'. None when there is
+    no header + separator."""
+    lines = [l.strip() for l in text.splitlines()]
+    start = next((i for i, l in enumerate(lines) if l.startswith("|")), None)
+    if start is None or start + 1 >= len(lines) or not SEPARATOR.match(lines[start + 1]):
         return None
-    return [[c.strip() for c in l.strip("|").split("|")] for l in lines[2:]]
+    rows = []
+    for l in lines[start + 2:]:
+        if not l.startswith("|"):
+            break
+        rows.append([c.strip() for c in l.strip("|").split("|")])
+    return rows
 
 
-def mutation_errors(text: str, fid: str) -> list[str]:
-    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
-    if len(lines) < 5:
-        return ["fewer than five lines (finding, test, step 1, step 2, step 3)"]
+def names_test(cmd: str, test: str) -> bool:
+    """True when test is a whole component of cmd: a token's last dotted component or its part after '::'."""
+    return any(tok.split("::")[-1].split(".")[-1] == test for tok in cmd.split())
+
+
+def mutation_errors(text: str, fid: str, pin_test: str | None = None) -> list[str]:
+    lines = _lines(text)
+    if len(lines) != 5:
+        return [f"want exactly five lines (finding, test, step 1, step 2, step 3), got {len(lines)}"]
     errs = []
     if lines[0] != f"finding: {fid}":
         errs.append(f"line 1 must be 'finding: {fid}'")
@@ -2147,12 +2385,16 @@ def mutation_errors(text: str, fid: str) -> list[str]:
     for n, m in enumerate(steps, 1):
         if not m:
             errs.append(f"step {n} malformed or wrong verdict (want PASS/FAIL/PASS): {lines[n + 1][:80]!r}")
+    if steps[1] and not steps[1].group("how").strip():
+        errs.append("step 2 names no way the fix was reverted")
     if all(steps):
         cmds = {m.group("cmd") for m in steps}
         if len(cmds) != 1:
             errs.append("steps 1-3 must run the same command")
-        elif test and test not in steps[0].group("cmd"):
+        elif test and not names_test(steps[0].group("cmd"), test):
             errs.append(f"the command does not name the test {test!r}")
+    if pin_test is not None and test and test != pin_test.split("::")[-1]:
+        errs.append(f"test {test!r} is not the register's pinned test {pin_test!r}")
     return errs
 
 
@@ -2163,7 +2405,40 @@ def _verdict(res, lid, ok, reason):
         res.fail(lid, reason)
 
 
-def _siblings(pkg, needed, res, pfx):
+def _commits(pkg, res, pfx):
+    path = os.path.join(pkg, "commits.txt")
+    if os.path.isfile(path):
+        lines = _lines(_read(path))
+        bad = [l for l in lines if not COMMIT_LINE.match(l)]
+        _verdict(res, f"{pfx}.commits", lines and not bad,
+                 f"commits.txt needs one '<sha> <subject>' line per commit; "
+                 f"{len(bad)} bad of {len(lines)}: {bad[0][:60] if bad else '-'!r}")
+
+
+def diff_error(text: str) -> str:
+    if not text.startswith("diff --git a/"):
+        return "diff.patch does not start with 'diff --git a/'"
+    if not any(DIFF_BODY.match(l) for l in text.splitlines()[1:]):
+        return "diff.patch has no hunk or file line after 'diff --git'"
+    return ""
+
+
+def _gates(pkg, res, pfx):
+    path = os.path.join(pkg, "gates.txt")
+    if os.path.isfile(path):
+        lines = _lines(_read(path))
+        bad = [l for l in lines if not GATE_LINE.match(l)]
+        red = [l for l in lines if l.startswith("FAIL ")]
+        _verdict(res, f"{pfx}.gates", lines and not bad and not red,
+                 f"gates.txt needs gate output ('PASS|FAIL <id>' lines, no FAIL): {len(lines)} line(s), "
+                 f"{len(bad)} not gate lines, {len(red)} FAIL; first: {(bad or red or [''])[0][:60]!r}")
+
+
+def _sibling_ok(cell: str, findings: list) -> bool:
+    return bool(TEST_NAME.match(cell)) or registers.finding_by_id(findings, cell) is not None
+
+
+def _siblings(pkg, needed, findings, res, pfx):
     path = os.path.join(pkg, "siblings.md")
     if not os.path.isfile(path):
         return
@@ -2171,13 +2446,12 @@ def _siblings(pkg, needed, res, pfx):
     if rows is None:
         res.fail(f"{pfx}.siblings", "siblings.md is not a Markdown table (header row + separator)")
         return
-    bad = [r for r in rows if len(r) < 2 or not r[0] or not r[1]]
-    missing = [s for s in needed if not any(s in r[0] for r in rows)]
+    bad = [r for r in rows if len(r) != 2 or not r[0] or not _sibling_ok(r[1], findings)]
+    missing = [s for s in needed if not any(s == r[0] for r in rows)]
     if bad:
-        res.fail(f"{pfx}.siblings", f"{len(bad)} row(s) lack 'sibling | test name or finding id'")
-    elif len(rows) < len(needed) or missing:
-        res.fail(f"{pfx}.siblings", f"{len(rows)} row(s) for {len(needed)} register sibling(s); "
-                 f"not listed: {', '.join(missing) or '-'}")
+        res.fail(f"{pfx}.siblings", f"{len(bad)} row(s) are not 'sibling | test name or registered finding id'")
+    elif missing:
+        res.fail(f"{pfx}.siblings", f"register sibling(s) not listed: {', '.join(missing)}")
     else:
         res.passed(f"{pfx}.siblings")
 
@@ -2190,12 +2464,13 @@ def _claims(pkg, res, pfx):
     if rows is None:
         res.fail(f"{pfx}.claims", "claims.md is not a Markdown table (header row + separator)")
         return
-    malformed = [r for r in rows if len(r) != 5 or r[4] not in ("PASS", "FAIL")]
+    malformed = [r for r in rows if len(r) != 5 or not all(r[:4]) or r[4] not in ("PASS", "FAIL")]
     failed = [r[0] for r in rows if len(r) == 5 and r[4] == "FAIL"]
     if not rows:
         res.fail(f"{pfx}.claims", "no executed claims; a claim with no executable check is a finding")
     elif malformed:
-        res.fail(f"{pfx}.claims", f"{len(malformed)} row(s) not 'claim | direct | contradiction | output | PASS/FAIL'")
+        res.fail(f"{pfx}.claims", f"{len(malformed)} row(s) not 'claim | direct | contradiction | output | PASS/FAIL' "
+                 "with the first four cells filled")
     elif failed:
         res.fail(f"{pfx}.claims", f"FAIL rows: {'; '.join(failed)}")
     else:
@@ -2215,33 +2490,67 @@ def task_findings(findings: list, pkg: str) -> list[str]:
     return sorted(owned | files)
 
 
-def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, pfx: str) -> None:
-    for name in REQUIRED:
-        path = os.path.join(pkg, name)
-        _verdict(res, f"{pfx}.file.{name}", os.path.isfile(path) and os.path.getsize(path) > 0,
-                 f"{os.path.relpath(path, root)} missing or empty")
-    diff = os.path.join(pkg, "diff.patch")
-    if os.path.isfile(diff):
-        _verdict(res, f"{pfx}.diff", _read(diff).startswith("diff --git"), "diff.patch does not start with 'diff --git'")
-    gates = os.path.join(pkg, "gates.txt")
-    if os.path.isfile(gates):
-        red = [l for l in _read(gates).splitlines() if l.startswith("FAIL ")]
-        _verdict(res, f"{pfx}.gates", not red, f"gates.txt has {len(red)} FAIL line(s); first: {red[0] if red else ''}")
+def _pin_test(row: dict):
+    pin = row.get("pin")
+    test = pin.get("test") if isinstance(pin, dict) else None
+    return test if isinstance(test, str) else None
+
+
+def _mutations(pkg, ids, findings, res, pfx):
     needed = []
     for fid in ids:
         f = registers.finding_by_id(findings, fid)
         if f is None:
             res.fail(f"{pfx}.finding.{fid}", "not in docs/superpowers/state/findings.yml")
             continue
-        needed.extend(str(s) for s in (f.get("siblings") or []))
+        needed.extend(str(s) for s in (f.get("siblings") or []) if str(s) not in needed)
         path = os.path.join(pkg, f"mutation-{fid}.txt")
         if not os.path.isfile(path):
             res.fail(f"{pfx}.mutation.{fid}", f"mutation-{fid}.txt missing")
             continue
-        errs = mutation_errors(_read(path), fid)
+        errs = mutation_errors(_read(path), fid, _pin_test(f))
         _verdict(res, f"{pfx}.mutation.{fid}", not errs, "; ".join(errs))
-    _siblings(pkg, needed, res, pfx)
+    return needed
+
+
+def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, pfx: str) -> None:
+    for name in REQUIRED:
+        path = os.path.join(pkg, name)
+        _verdict(res, f"{pfx}.file.{name}", os.path.isfile(path) and os.path.getsize(path) > 0,
+                 f"{os.path.relpath(path, root)} missing or empty")
+    _commits(pkg, res, pfx)
+    diff = os.path.join(pkg, "diff.patch")
+    if os.path.isfile(diff):
+        err = diff_error(_read(diff))
+        _verdict(res, f"{pfx}.diff", not err, err)
+    _gates(pkg, res, pfx)
+    needed = _mutations(pkg, ids, findings, res, pfx)
+    _siblings(pkg, needed, findings, res, pfx)
     _claims(pkg, res, pfx)
+
+
+def _layout(root: str, pkg: str) -> tuple[str, str]:
+    """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task>; GateError for any other path."""
+    parts = os.path.relpath(pkg, root).split(os.sep)
+    if len(parts) != 5 or parts[:2] != SDD.split("/") or parts[3] != "review":
+        raise GateError(f"--dir {pkg} is not <root>/{SDD}/<plan>/review/<task>")
+    return parts[2], parts[4]
+
+
+def _check_all(root: str, findings: list, res: Result) -> None:
+    entries = sorted(glob.glob(os.path.join(root, SDD, "*", "review", "*")))
+    if not entries:
+        res.passed("review_package.all")
+    for pkg in entries:
+        parts = os.path.normpath(pkg).split(os.sep)
+        pfx = f"review_package.{parts[-3]}.{parts[-1]}"
+        if not os.path.isdir(pkg):
+            res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)} is not a directory")
+            continue
+        ids = task_findings(findings, pkg)
+        if not ids:
+            res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
+        check_package(root, pkg, ids, findings, res, pfx)
 
 
 def check(args: list) -> Result:
@@ -2251,30 +2560,18 @@ def check(args: list) -> Result:
     a = p.parse_args(args)
     if a.all == bool(a.dir):
         raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
-    root = a.root or repo_root()
+    root = os.path.abspath(a.root or repo_root())
     findings = registers.load_findings(root)
     res = Result("review_package")
     if a.all:
-        if not os.path.isdir(os.path.join(root, STATE)):
-            raise GateError(f"{STATE}/ missing")
-        pkgs = sorted(d for d in glob.glob(os.path.join(root, SDD, "*", "review", "*")) if os.path.isdir(d))
-        if not pkgs:
-            res.passed("review_package.all")
-            return res
-        for pkg in pkgs:
-            parts = os.path.normpath(pkg).split(os.sep)
-            pfx = f"review_package.{parts[-3]}.{parts[-1]}"
-            ids = task_findings(findings, pkg)
-            if not ids:
-                res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
-            check_package(root, pkg, ids, findings, res, pfx)
+        _check_all(root, findings, res)
         return res
-    pkg = os.path.normpath(a.dir if os.path.isabs(a.dir) else os.path.join(root, a.dir))
+    pkg = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
+    plan, task = _layout(root, pkg)
     if not os.path.isdir(pkg):
         raise GateError(f"--dir {a.dir}: no such directory")
     ids = task_findings(findings, pkg)
     if not ids:
-        plan, task = pkg.split(os.sep)[-3], pkg.split(os.sep)[-1]
         res.fail("review_package.findings", f"no register row has owner {{kind: plan, plan: {plan}, task: {task}}}")
     check_package(root, pkg, ids, findings, res, "review_package")
     return res
@@ -2292,7 +2589,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (18 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 379 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (48 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 409 tests.
 
 - [ ] **Step 6: Commit**
 
