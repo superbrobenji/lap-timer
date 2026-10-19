@@ -93,13 +93,31 @@ def claim_fresh(root: str, claim: dict, head: str) -> str | None:
     return stale_reason(root, claim, head, gitinfo.staged_files(root)) or "row fails the claims schema"
 
 
+def fallback_error(conf) -> str | None:
+    """None when config's optional fable_fallback (DEC-0018) is a model_rank model ranked at least opus and
+    strictly below fable; otherwise the reason. Absent is never an error (the fallback is off)."""
+    if "fable_fallback" not in conf:
+        return None
+    value, rank = conf["fable_fallback"], conf["model_rank"]
+    ok = isinstance(value, str) and value in rank and all(isinstance(rank.get(m), int) for m in ("opus", "fable")) \
+        and rank["opus"] <= rank[value] < rank["fable"]
+    return None if ok else f"fable_fallback {value!r} must be a model_rank model ranked at least opus and below fable"
+
+
 def _model(conf, role, model, tool_model, res):
     rank, need, fable = conf["model_rank"], conf["models"][role], conf["fable_roles"]
     if model not in rank:
         res.fail("dispatch.model.known", f"model {model!r} not in model_rank {sorted(rank)}")
         return
     res.passed("dispatch.model.known")
-    if rank[model] < rank[need]:
+    if rank[model] < rank[need] and role in fable and "fable_fallback" in conf and model == conf["fable_fallback"]:
+        err = fallback_error(conf)    # DEC-0018: the owner-switched fallback replaces the rank check
+        if err:
+            res.fail("dispatch.model.fallback", err)
+        else:
+            res.passed("dispatch.model.fallback", f"{role} on {model}: config fable_fallback is on while Fable is "
+                       "unavailable (DEC-0018)")
+    elif rank[model] < rank[need]:
         res.fail("dispatch.model.rank", f"role {role} needs at least {need}, got {model}")
     else:
         res.passed("dispatch.model.rank")
@@ -279,8 +297,9 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res, subagent_type=N
 
 
 def check_config(conf: dict, res: Result) -> None:
-    """CI mode: the model map, fable_roles, model_rank and the prompt cap agree with the dispatch grammar
-    (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders haiku < sonnet < opus < fable)."""
+    """CI mode: the model map, fable_roles, model_rank, the prompt cap and the optional fable_fallback agree with
+    the dispatch grammar (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders
+    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, ranks at least opus and below fable)."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -318,6 +337,14 @@ def check_config(conf: dict, res: Result) -> None:
         res.passed("dispatch.config.max_prompt_chars")
     else:
         res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
+    err = fallback_error(conf)
+    if err:
+        res.fail("dispatch.config.fable_fallback", err)
+    elif "fable_fallback" in conf:
+        res.passed("dispatch.config.fable_fallback", f"{conf['fable_fallback']}: the fable_roles run on "
+                   f"{conf['fable_fallback']} while Fable is unavailable (DEC-0018)")
+    else:
+        res.passed("dispatch.config.fable_fallback", "absent: the fallback is off (DEC-0018)")
 
 
 def check(args: list) -> Result:

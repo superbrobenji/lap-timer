@@ -32,3 +32,6 @@ exceptions:
   cost: {blast: {tooling: 1, ui: 2, timing: 3, data-integrity: 3, supervision: 3}, verifiability: [0, 2], reach: {transient: 0, stored_or_3plus: 2}}
   benefit: {complexity: {helper: 1, module: 2, task_or_60_lines: 3}, runtime: [0, 2]}
 tag_pattern: '^[a-z0-9-]+-b[0-9]+$'
+# DEC-0018: fable_fallback names the model the fable_roles run on while Fable is unavailable (usage limit);
+# absent = off; set and cleared only by the session on the owner's word (gate_dispatch, --config-check)
+fable_fallback: opus

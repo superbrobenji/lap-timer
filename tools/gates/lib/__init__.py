@@ -38,8 +38,8 @@ class Result:
     def fail(self, id: str, reason: str) -> None:
         self.lines.append(Line("FAIL", id, reason))
 
-    def passed(self, id: str) -> None:
-        self.lines.append(Line("PASS", id))
+    def passed(self, id: str, reason: str = "") -> None:
+        self.lines.append(Line("PASS", id, reason))
 
     def render(self, as_json: bool) -> str:
         if as_json:

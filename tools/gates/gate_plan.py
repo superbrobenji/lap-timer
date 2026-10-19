@@ -9,7 +9,8 @@ A Files item ('- Create|Modify|Test|Delete: `path` prose') starts with exactly o
 the prose after it holds no backtick (DEC-0017). Per task also (DEC-0016): '**Siblings:**' lists every sibling
 of the register rows its Findings name; '**Gates:**' names run_all or gates X whose tools/gates/gate_X.py is at
 the root or a Create item of this or an earlier task; Findings that name ids need a pin step (a step title that
-contains 'pin', case-insensitive, whose body names a test test_<module>::test_<name>).
+holds the word 'pin', case-insensitive, whose body names a test test_<module>::test_<name>). Per-task line ids
+are all <prefix>.<check>.<N> for the checks files, mode, findings, siblings, gates and pin (B5-FIX-3).
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -59,7 +60,7 @@ SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
 GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
-PIN_TITLE = re.compile(r"pin", re.I)
+PIN_TITLE = re.compile(r"\bpin\b", re.I)    # B5-FIX-3: the word, not a substring ("Mapping")
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
@@ -411,17 +412,16 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
         res.fail(f"{pfx}.tasks", "no '### Task N' headings outside code fences")
     routed = {}
     for t in plan.tasks:
-        tid = f"{pfx}.task.{t.num}"
         if t.files_errors:
             res.fail(f"{pfx}.files.{t.num}", t.files_errors[0])
         else:
             _verdict(res, f"{pfx}.files.{t.num}", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
         if t.mode_seen:
-            _verdict(res, f"{tid}.mode", not t.mode_error, t.mode_error)
+            _verdict(res, f"{pfx}.mode.{t.num}", not t.mode_error, t.mode_error)
         if t.findings is None:
-            res.fail(f"{tid}.findings", "no **Findings:** line (register ids, or 'none — <reason>')")
+            res.fail(f"{pfx}.findings.{t.num}", "no **Findings:** line (register ids, or 'none — <reason>')")
         else:
-            _verdict(res, f"{tid}.findings", not t.findings_error, t.findings_error)
+            _verdict(res, f"{pfx}.findings.{t.num}", not t.findings_error, t.findings_error)
         for fid in t.findings or []:
             routed.setdefault(fid, []).append(t.num)
     rows = {f["id"]: f for f in findings}

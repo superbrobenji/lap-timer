@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 
 import yaml
 
@@ -23,6 +24,18 @@ DISPATCH_FILES = {
     "docs/superpowers/plans/fixture-plan.md": "# Fixture plan\n",
 }
 git, write, remove = gf.git, gf.write, gf.remove
+FALLBACK_LINE = re.compile(r"^fable_fallback:.*\n", re.M)
+
+
+def config_text(fallback: str | None = None) -> str:
+    """The real tools/gates/config.yml with its one fable_fallback line removed, then
+    'fable_fallback: <fallback>' appended (None: the key is absent, the DEC-0018 fallback is off)."""
+    with open(os.path.join(REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
+        real = f.read()
+    text, n = FALLBACK_LINE.subn("", real)
+    if n != 1:
+        raise AssertionError(f"tools/gates/config.yml holds {n} fable_fallback lines, expected 1")
+    return text if fallback is None else text + f"fable_fallback: {fallback}\n"
 
 
 def commit(root: str, message: str) -> str:

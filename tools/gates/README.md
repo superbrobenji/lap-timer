@@ -21,7 +21,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
 | `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
-| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable) and the prompt cap agree with the dispatch grammar; `--prompt`: one dispatch prompt (see the gate_dispatch section) |
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable), the prompt cap and the optional `fable_fallback` (DEC-0018: absent = off, else a model ranked at least opus and below fable) agree with the dispatch grammar; `--prompt`: one dispatch prompt, where a `fable_roles` role on the `fable_fallback` model is `PASS dispatch.model.fallback` (see the gate_dispatch section) |
 | `gate_review_package.py` | `--all` (run_all's default; no package is a PASS) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list, a claims table with no FAIL row |
 | `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` (one backticked path per item), `**Findings:**`, `**Siblings:**`, `**Gates:**` and a pin step per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
 
@@ -165,7 +165,10 @@ commit and push, however it was launched.
 
 `python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--subagent-type T] [--prompts-dir D]` checks one dispatch
 prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
-Strict block, Task in that order; model rank >= the role minimum; fable only for `fable_roles`; a brief file
+Strict block, Task in that order; model rank >= the role minimum, except that a `fable_roles` role on the model
+`fable_fallback` names, while that key is set, is `PASS dispatch.model.fallback` (naming DEC-0018) in place of the
+rank line (an invalid key is `FAIL dispatch.model.fallback`; a model below it still fails `dispatch.model.rank`);
+fable only for `fable_roles`; a brief file
 exists for the implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier and
 exception_reviewer roles (`BRIEF_ROLES`; the other roles may say `none`); implementer findings
 `planned`/`in-progress`; claim rows `verified` with no cited file changed since `verified_at`; report
@@ -178,7 +181,11 @@ present; `fork` is `FAIL dispatch.fork`, the first line, emitted even when the g
 (run_all's default for `dispatch`, `run_all.DEFAULT_ARGV`) checks the model map and the cap, and, under
 DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minimum model is `fable`
 (`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
-strictly with integer ranks (`dispatch.config.model_rank`): 14 lines.
+strictly with integer ranks (`dispatch.config.model_rank`), and, under DEC-0018 (the owner's opus fallback for
+the Fable roles while Fable is unavailable), the optional `fable_fallback` key of `tools/gates/config.yml`: absent
+means off (`PASS dispatch.config.fable_fallback: absent: ...`); present, it must be a `model_rank` model ranked at
+least opus and strictly below fable, else `FAIL dispatch.config.fable_fallback`; the session sets and clears it
+only on the owner's word: 15 lines.
 
 ## make_review_package, gate_plan (S2)
 
@@ -198,7 +205,8 @@ normalised to a repo-relative path and matches a register row whose `source`, up
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
 `FAIL plan.files.N`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
-`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`. A Files item (DEC-0017) is
+`PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.mode.N`; a missing `**Findings:**` line or one that
+is neither register ids nor `none — <reason>` is `FAIL plan.findings.N`. A Files item (DEC-0017) is
 `- Create|Modify|Test|Delete: ` then exactly one backticked span, the path (a `:` suffix is a line range), then prose
 holding no backtick: an item with no backticked path, an unclosed backtick, a second backticked span or text before
 the path is `FAIL plan.files.N` (an item naming two files is two items; symbols go in plain prose). Per task
@@ -207,10 +215,13 @@ list; any other value starting with `none`, in any case, not followed by a lette
 entries, every `siblings` entry of the register rows the task's Findings name (an id with no row adds nothing:
 `plan.id.<id>` fails it), else `FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each exactly `run_all` or an X for which `tools/gates/gate_X.py`
 is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
-ids has a step `- [ ] **Step N: ...**` whose title contains `pin` (case-insensitive) and whose body (up to the next
+ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, `\bpin\b`: `Pin step` and
+`pin:` count, `Mapping`, `Spinner` and `pinned` do not) and whose body (up to the next
 step or heading, code included) names a test named `test_<module>::test_<name>`,
 else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
-indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
+indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. Per-task line ids have one form (B5-FIX-3),
+`plan.<check>.<N>` (`plan.<slug>.<check>.<N>` under `--in-flight`), for the checks `files`, `mode`, `findings`,
+`siblings`, `gates` and `pin`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
 ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the

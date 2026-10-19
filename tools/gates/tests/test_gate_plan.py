@@ -19,6 +19,8 @@ with open(os.path.join(rf.FIX, "plan", "good.md"), encoding="utf-8") as _f:
 FENCE = "`" * 3
 PH = "T" + "BD"   # a writing-plans placeholder, assembled so this file never contains one
 LEDGER = "plan: docs/superpowers/plans/fx.md\n# Ledger: fx\n- T1 DONE\n"
+NO_TASK_9 = r"(?m)^(PASS|FAIL) plan\.[a-z_-]+\.9\b"    # any per-task line of a Task 9 (B5-FIX-3: one id form)
+PER_TASK = ("files", "findings", "siblings", "gates", "pin")
 
 
 def gate(root, argv):
@@ -81,11 +83,11 @@ class GatePlan(unittest.TestCase):
 
     def test_task_without_findings_line_fails(self):
         text = self.variant("**Findings:** none — fixture maintenance with no register row\n", "")
-        self.assertFailLine(*self.check(text), "plan.task.3.findings")
+        self.assertFailLine(*self.check(text), "plan.findings.3")
 
     def test_findings_line_with_a_non_id_fails(self):
         self.assertFailLine(*self.check(self.variant("**Findings:** SD-FX-2", "**Findings:** see audit")),
-                            "plan.task.2.findings")
+                            "plan.findings.2")
 
     def test_task_without_files_fails(self):
         self.assertFailLine(*self.check(self.variant("- Modify: `src/shared.py`\n", "")), "plan.files.3")
@@ -124,7 +126,7 @@ class GatePlan(unittest.TestCase):
     def test_task_heading_inside_code_fence_is_ignored(self):
         rc, out = self.check(GOOD + f"\n{FENCE}\n### Task 9: not a task\n{FENCE}\n")
         self.assertEqual(0, rc, out)
-        self.assertNotIn("plan.task.9", out)
+        self.assertNotRegex(out, NO_TASK_9)
 
     def test_id_in_two_tasks_fails(self):
         text = self.variant("**Findings:** none — fixture maintenance with no register row", "**Findings:** SD-FX-1")
@@ -159,6 +161,11 @@ class InFlight(unittest.TestCase):
         rc, out = gate(root, ["--in-flight"])
         self.assertEqual(0, rc, out)
         self.assertIn("PASS plan.fx.header.goal", out)
+        for n in ("1", "2", "3"):
+            for check in PER_TASK:
+                self.assertIn(f"PASS plan.fx.{check}.{n}\n", out + "\n")
+        self.assertIn("PASS plan.fx.mode.1\n", out)
+        self.assertNotIn(".task.", out)
 
     def test_closed_ledger_is_not_in_flight(self):
         root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
@@ -250,18 +257,18 @@ class Branches(unittest.TestCase):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
                             "**Mode:** SERIAL\n\n**Files:**\n- Create: `src/alpha.py`")
         out = self.ok(text)
-        self.assertIn("PASS plan.task.2.mode", out)
+        self.assertIn("PASS plan.mode.2", out)
         self.assertIn("PASS plan.overlap\n", out + "\n")
 
     def test_mode_with_a_suffix_fails(self):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
                             "**Mode:** PARALLEL (with Task 1)\n\n**Files:**\n- Create: `src/alpha.py`")
-        self.fail_line(text, "plan.task.2.mode", "exactly PARALLEL or SERIAL")
+        self.fail_line(text, "plan.mode.2", "exactly PARALLEL or SERIAL")
 
     def test_lowercase_mode_fails(self):
         self.fail_line(self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
                                "**Mode:** parallel\n\n**Files:**\n- Create: `src/beta.py`"),
-                  "plan.task.2.mode", "'parallel'")
+                  "plan.mode.2", "'parallel'")
 
     def test_overlap_names_the_shared_file(self):
         out = self.fail_line(self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py`"), "plan.overlap.1-2",
@@ -322,13 +329,13 @@ class Branches(unittest.TestCase):
         for form in ("none - ascii hyphen", "none -- double hyphen", "none — dash"):
             with self.subTest(form):
                 out = self.ok(self.variant("none — fixture maintenance with no register row", form))
-                self.assertIn("PASS plan.task.3.findings", out)
-        self.fail_line(self.variant("none — fixture maintenance with no register row", "none"), "plan.task.3.findings",
+                self.assertIn("PASS plan.findings.3", out)
+        self.fail_line(self.variant("none — fixture maintenance with no register row", "none"), "plan.findings.3",
                   "not register ids")
 
     def test_non_id_in_a_list_is_named(self):
         out = self.fail_line(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-2, see audit"),
-                        "plan.task.2.findings", "'see audit'")
+                        "plan.findings.2", "'see audit'")
         self.assertNotIn("plan.id.SD-FX-2", out)    # nothing is routed from a bad line
         self.assertNotIn("plan.id.see", out)
 
@@ -417,7 +424,7 @@ class Branches(unittest.TestCase):
                 ("longer tilde run closes", f"~~~\n{inner}~~~~\n")):
             with self.subTest(name):
                 out = self.ok(GOOD + "\n" + text)
-                self.assertNotIn("plan.task.9", out)
+                self.assertNotRegex(out, NO_TASK_9)
 
     def test_text_after_a_closed_fence_is_parsed_again(self):
         for name, text in (("info string closes nothing", f"{FENCE}\nx\n{FENCE}python\n### Task 9: swallowed\n"),
@@ -433,7 +440,7 @@ class Branches(unittest.TestCase):
         rc, out = self.check(GOOD + f"\n{item}  {FENCE}\n### Task 9: left of the item ends it\n  {FENCE}\n")
         self.assertIn("FAIL plan.files.9", out)
         rc, out = self.check(GOOD + f"\ntext\n\n  {FENCE}\n### Task 9: inside a plain fence\n  {FENCE}\n")
-        self.assertNotIn("plan.task.9", out)
+        self.assertNotRegex(out, NO_TASK_9)
         rc, out = self.check(GOOD + f"\n{item}    {FENCE}\n    code\n    {FENCE}\n### Task 9: after\n")
         self.assertIn("FAIL plan.files.9", out)
 
@@ -474,7 +481,7 @@ class Branches(unittest.TestCase):
     def test_a_second_mode_line_fails(self):
         text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/alpha.py`",
                             "**Mode:** PARALLEL\n**Mode:** SERIAL\n\n**Files:**\n- Create: `src/alpha.py`")
-        self.fail_line(text, "plan.task.1.mode", "a second **Mode:** line")
+        self.fail_line(text, "plan.mode.1", "a second **Mode:** line")
 
     def test_only_level_two_headings_are_blocks(self):
         for level in ("###", "####", "#"):
@@ -625,10 +632,56 @@ class Branches(unittest.TestCase):
             self.assertIn(f"PASS plan.pin.{n}", out)
         out = self.ok(self.variant("**Step 2: Mutation run and pin**", "**Step 2: PIN the row**"))
         self.assertIn("PASS plan.pin.1", out)
-        for title in ("Mutation run and pinning", "Mutation run and spinning", "PINNED row", "re-Pin"):
+        for title in ("Pin step", "pin: the row", "re-Pin", "Mutation run, pin"):
             with self.subTest(title):
                 out = self.ok(self.variant("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.assertIn("PASS plan.pin.1", out)
+
+    def test_every_per_task_check_has_the_one_id_form(self):
+        """B5-FIX-3 (b): plan.<check>.<N> for every per-task check, Findings and Mode included."""
+        out = self.ok(GOOD)
+        for n in ("1", "2", "3"):
+            for check in PER_TASK:
+                self.assertEqual(1, out.count(f"PASS plan.{check}.{n}\n"), f"{check}.{n}: {out}")
+        for n in ("1", "2"):
+            self.assertEqual(1, out.count(f"PASS plan.mode.{n}\n"), out)
+        self.assertNotIn("plan.mode.3", out)    # Task 3 has no Mode line
+        self.assertNotIn(".task.", out)
+        text = self.variant("**Findings:** SD-FX-2", "**Findings:** see audit")
+        text = self.variant("**Mode:** PARALLEL\n\n**Files:**\n- Create: `src/beta.py`",
+                            "**Mode:** parallel\n\n**Files:**\n- Create: `src/beta.py`", base=text)
+        out = self.fail_line(text, "plan.findings.2: ")
+        self.assertIn("FAIL plan.mode.2: ", out)
+        self.assertNotIn(".task.", out)
+
+    def test_readme_lists_the_id_forms_and_the_pin_word(self):
+        """Sibling 'README gate_plan section' (B5-FIX-3)."""
+        with open(os.path.join(rf.REAL, "tools", "gates", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        section = readme[readme.index("## make_review_package, gate_plan (S2)\n"):]
+        for word in ("`FAIL plan.mode.N`", "`FAIL plan.findings.N`", "`plan.<check>.<N>`", "`plan.<slug>.<check>.<N>`",
+                     "holds the word `pin`", "`Mapping`, `Spinner` and `pinned` do not"):
+            self.assertIn(word, section)
+        self.assertNotIn("plan.task.", readme)
+        self.assertNotIn("title contains `pin`", readme)
+
+    def test_s2_plan_task_6_lists_the_id_forms(self):
+        """Sibling 'S2 plan Task 6 text' (B5-FIX-3): Task 6's grammar line states the pin word and the id forms."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
+                  encoding="utf-8") as f:
+            plan = f.read()
+        task6 = plan[plan.index("### Task 6: gate_plan and the ledger contract\n"):plan.index("- [ ] **Step 1: Fixture plan**")]
+        for word in ("holds the word `pin`", "`plan.files.N`, `plan.mode.N`, `plan.findings.N`, `plan.siblings.N`, "
+                     "`plan.gates.N`, `plan.pin.N`", "`plan.<slug>.<check>.N`"):
+            self.assertIn(word, task6)
+        self.assertNotIn("title contains `pin`", task6)
+
+    def test_pin_is_a_whole_word_in_the_title(self):
+        """B5-FIX-3 (a): 'pin' inside another word names no pin step, so the task has none."""
+        for title in ("Mapping table", "Spinner", "PINNED row", "Mutation run and pinning", "pins", "spin_up", "pin2", "Tailspin"):
+            with self.subTest(title):
+                self.fail_line(self.variant("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"),
+                               "plan.pin.1", "no '- [ ] **Step N: ... pin ...**' step")
 
     def test_the_pin_test_must_be_in_the_pin_step_body(self):
         text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
