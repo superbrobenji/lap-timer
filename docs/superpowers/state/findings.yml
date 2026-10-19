@@ -106,16 +106,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-T3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_dispatch::test_config_check_fails_when_implementer_minimum_is_fable
+    transcript: docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-T3.md
   history:
   - state: open
     sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
     by: controller
   - state: planned
     sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: in-progress
+    sha: 20f807da46a34aee337c341e052d6f5d2fda3b4a
+    by: controller
+  - state: pinned
+    sha: 20f807da46a34aee337c341e052d6f5d2fda3b4a
     by: controller
 - id: SD-S2-T4
   source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
