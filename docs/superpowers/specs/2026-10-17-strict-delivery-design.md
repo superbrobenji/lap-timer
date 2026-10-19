@@ -29,7 +29,7 @@ This document designs the process that prevents each mechanism from recurring. I
 | D15 | Audits: coverage lists before review, verbatim finding capture into the register, an adversarial verifier per reviewer, bench rows only with runnability transcripts. |
 | D16 | Sibling sweep per fix; contradiction pass on the fix's new surface; final whole-branch review = opus reviewer + Fable adversarial verifier re-running every gate and every pin. |
 | D17 | Hooks block the loop: `PreToolUse` on Agent and on git/gh commands, `Stop` at block end; git hooks and CI run the same scripts. No logging hook. |
-| D18 | Models: controllers, task reviewers, final reviewer, audit reviewers and verifiers on opus; implementers on sonnet (haiku only for transcription of complete code); Fable on the per-plan final adversarial verifier and the exception reviewer only; the dispatch hook enforces the map. |
+| D18 | Models: controllers, task reviewers, final reviewer, audit reviewers and verifiers on opus; implementers on sonnet (haiku only for transcription of complete code); Fable on the per-plan final adversarial verifier and the exception reviewer only; while Fable is unavailable (usage limit) those two roles run on opus until it is available again, switched on and off by the owner (config `fable_fallback`), and work verified under the fallback is not re-verified on Fable (DEC-0018); the dispatch hook enforces the map. |
 | D19 | Validation: red/green tests for gate scripts (probe fixtures) and for the skill text (writing-skills pressure scenarios), then a dry run on a throwaway finding. |
 | D20 | The skill applies to every change, with no size threshold. |
 | D21 | Build both A (data-driven gates + thin skill) and B (Workflow scripts for the audit fan-out and the block loop). |
@@ -152,8 +152,8 @@ The existing backlog (audit-1 residuals, audit-2's 169 findings, the drift analy
 | Implementer | sonnet; haiku only when the brief carries complete code | one task | code, tests, mutation transcript, report |
 | Task reviewer | opus | one review | review report with executed claims |
 | Final branch reviewer | opus | one branch | report |
-| Final adversarial verifier | Fable | one branch | report |
-| Exception (P10) reviewer | Fable | one row | adversarial cost report |
+| Final adversarial verifier | Fable (opus while the DEC-0018 fallback is on) | one branch | report |
+| Exception (P10) reviewer | Fable (opus while the DEC-0018 fallback is on) | one row | adversarial cost report |
 | Audit reviewer / verifier | opus | one area | reports, reproducers, register rows |
 | Investigator (read-only) | opus | one question | report |
 

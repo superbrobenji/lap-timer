@@ -410,3 +410,37 @@
   - state: open
     sha: d6f4135480b7c008adae88fa82b3fae65e42c234
     by: session
+- id: B5-FIX-2
+  source: review
+  severity: MEDIUM
+  class: 'DEC-0018 opus fallback for the Fable roles (final_verifier, exception_reviewer)
+    is not implemented: gate_dispatch refuses opus for a fable-minimum role (rank
+    check) and --config-check has no fallback key, so no Fable-role dispatch can run
+    while Fable is unavailable without bypassing the Agent hook'
+  siblings:
+  - gate_dispatch rank check
+  - gate_dispatch --config-check
+  - pre_tool_use Agent branch
+  - README gate_dispatch section
+  - spec D18/§5 text
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: 97-109
+    sha: 11a632e
+  - file: tools/gates/config.yml
+    lines: 6-17
+    sha: 11a632e
+  repro: 'a final_verifier dispatch prompt with ## Model: opus -> python3 tools/gates/gate_dispatch.py
+    --prompt <file> --tool-model opus -> FAIL dispatch.model.rank'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fixwave
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 11a632e
+    by: session

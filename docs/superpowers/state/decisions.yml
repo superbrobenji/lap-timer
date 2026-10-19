@@ -166,3 +166,21 @@
   asked_at: {sha: "054865f", by: session}
   answer: null
   answered_at: null
+- id: DEC-0018
+  class: model-policy
+  question: "Fable usage limits are hit mid-plan (owner, 2026-10-19). Spec D18 and §5 put the final adversarial verifier and the exception reviewer on Fable with no fallback, and gate_dispatch refuses any lower model for those roles (rank check, gate_dispatch.py:97-107). What runs those roles while Fable is unavailable?"
+  options:
+    - {label: opus-fallback, cost: "the Fable roles run on opus (Opus 5.5) until Fable is available again; spec D18 and §5 amended; gate_dispatch and --config-check gain an owner-switched fallback (code change through the pipeline); work verified under the fallback is not re-verified on Fable"}
+    - {label: wait-for-fable, cost: "every block end waits for the Fable limit to reset; no code change"}
+  asked_at: {sha: "11a632e", by: session}
+  answer: "opus-fallback (owner in chat, 2026-10-19: \"continue without fable for now. use opus 5.5 in its stead. we can probably add to the spec that when the fable limits are hit, we continue with opus 5.5 until fable is available again\")"
+  answered_at: {sha: "11a632e", by: superbrobenji}
+- id: DEC-0019
+  class: scope
+  question: "DEC-0018 (opus fallback for the Fable roles) needs a code change before the b5 final verifier can be dispatched on opus: the live Agent hook refuses opus for final_verifier. Proposed shape: tools/gates/config.yml gains fable_fallback (absent = off; opus = on, set and cleared only by the session on the owner's word); gate_dispatch accepts the fallback model for fable_roles only while it is set and prints PASS dispatch.model.fallback naming it; --config-check validates the key; tests through main() and the hook; row B5-FIX-2. Where does it land?"
+  options:
+    - {label: b5-fixwave, cost: "one opus implementer fix wave at CHECKPOINT b5 (B4-FIX-1 precedent), reviewed by a scoped opus re-review; the b5 final verifier then runs on opus under the fallback; b5 PR grows by about two files"}
+    - {label: b6-task, cost: "b6 gains the change as part of Task 7-9 or a fourth task (block cap 3: a re-slice); the b5 final verifier waits for Fable or the b5 merge waits for b6"}
+  asked_at: {sha: "11a632e", by: session}
+  answer: null
+  answered_at: null
