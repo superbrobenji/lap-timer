@@ -208,16 +208,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-T6
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_parallel_tasks_sharing_a_file_fail
+    transcript: docs/superpowers/state/strict-delivery/mutations/SD-S2-T6.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-T6.md
   history:
   - state: open
     sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
     by: controller
   - state: planned
     sha: 07d7b29a6291e0dec39c1da0ec463ce4bc88e0ef
+    by: controller
+  - state: in-progress
+    sha: 02398e320e9264ce4ed5c5644b0384a4ac358ffb
+    by: controller
+  - state: pinned
+    sha: 02398e320e9264ce4ed5c5644b0384a4ac358ffb
     by: controller
 - id: SD-S2-T7
   source: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md

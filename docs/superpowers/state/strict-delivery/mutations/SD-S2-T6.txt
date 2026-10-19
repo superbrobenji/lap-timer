@@ -1,0 +1,5 @@
+finding: SD-S2-T6
+test: test_parallel_tasks_sharing_a_file_fail
+step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
+step 2 (fix reverted: perl -pi -e 's/shared = sorted\(set\(a\.files\) & set\(b\.files\)\)/shared = []/' tools/gates/gate_plan.py empties the shared-file set): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> FAIL
+step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_plan.GatePlan.test_parallel_tasks_sharing_a_file_fail -> PASS
