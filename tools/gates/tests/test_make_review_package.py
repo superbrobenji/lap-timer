@@ -175,6 +175,54 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertIn("+hi\n", read(self.root, f"{REVIEW}/1/diff.patch"))
 
+    def test_external_diff_driver_does_not_reach_diff_patch(self):
+        script = os.path.join(self.root, "..", os.path.basename(self.root) + "-extdiff.sh")
+        rf.write(os.path.dirname(script), os.path.basename(script), "#!/bin/sh\necho EXTERNAL $1\n")
+        os.chmod(script, 0o755)
+        self.addCleanup(os.remove, script)
+        rf.git(self.root, "config", "diff.external", script)
+        self.assertIn("EXTERNAL", rf.git(self.root, "diff", f"{self.base}..{self.head}"))    # the config does replace the diff
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertTrue(read(self.root, f"{REVIEW}/1/diff.patch").startswith("diff --git a/"))
+
+    def test_src_dst_prefix_config_gives_a_diff_the_gate_accepts(self):
+        rf.git(self.root, "config", "diff.srcPrefix", "SRC/")
+        rf.git(self.root, "config", "diff.dstPrefix", "DST/")
+        rc, out = self.make("fx", "1", self.base, self.head)
+        self.assertEqual(0, rc, out)
+        for name, text in (("mutation-SD-FX-1.txt", MUTATION), ("siblings.md", SIBLINGS), ("claims.md", CLAIMS)):
+            rf.write(self.root, f"{REVIEW}/1/{name}", text)
+        rc, out = self.run_main(grp.main, "--dir", f"{REVIEW}/1")
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS review_package.diff", out)
+        self.assertEqual("diff --git a/src/fx.py b/src/fx.py", read(self.root, f"{REVIEW}/1/diff.patch").splitlines()[0])
+
+    def test_assume_unchanged_tracked_file_is_not_clean(self):
+        self.hide_a_fix("--assume-unchanged")
+        rc, out = self.make("fx", "1", self.base, self.broken, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("hidden from git status", out)
+        self.assertIn("findings.yml", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def test_skip_worktree_tracked_file_is_not_clean(self):
+        self.hide_a_fix("--skip-worktree")
+        rc, out = self.make("fx", "1", self.base, self.broken, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("hidden from git status", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def hide_a_fix(self, flag):
+        """HEAD holds a broken register; the good one is back in the worktree, hidden from git status."""
+        rf.write(self.root, "docs/superpowers/state/findings.yml", "not: [valid\n")
+        rf.commit(self.root, "break the register")
+        self.broken = rf.git(self.root, "rev-parse", "HEAD")
+        rf.git(self.root, "update-index", flag, "docs/superpowers/state/findings.yml")
+        rf.write(self.root, "docs/superpowers/state/findings.yml",
+                 rf.git(self.root, "show", f"{self.base}:docs/superpowers/state/findings.yml") + "\n")
+        self.assertEqual("", rf.git(self.root, "status", "--porcelain"))    # git status does not see it
+
     def test_diff_has_ten_lines_of_context(self):
         rf.write(self.root, "ctx.txt", "".join(f"line{n:02d}\n" for n in range(1, 31)))
         mid = rf.commit(self.root, "add ctx.txt")

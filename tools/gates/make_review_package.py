@@ -32,7 +32,7 @@ EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # options that pin the forms gate_review_package reads, against the caller's git config
-PLAIN = ("-c", "color.ui=never", "-c", "diff.noprefix=false", "-c", "log.showSignature=false")
+PLAIN = ("-c", "color.ui=never", "-c", "log.showSignature=false")
 
 
 class Refused(Exception):
@@ -82,8 +82,13 @@ def _package(root: str, a) -> tuple[str, int]:
     if not gitinfo.status_clean(root):
         raise Refused("working tree is not clean: gates.txt must describe the commit under review; "
                       "commit or stash first (the ignored .superpowers/ does not count)")
+    hidden = [l[2:] for l in _git(root, "ls-files", "-v").decode("utf-8", "replace").splitlines()
+              if l[:1].islower() or l[:1] == "S"]    # assume-unchanged / skip-worktree: status cannot see them
+    if hidden:
+        raise Refused(f"tracked file(s) hidden from git status (assume-unchanged or skip-worktree): "
+                      f"{', '.join(hidden[:5])}; clear the flag so gates.txt describes HEAD")
     b, h, n = _range(root, a.base, a.head)
-    diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "-U10", f"{b}..{h}")
+    diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "-U10", f"{b}..{h}")
     if not diff.strip():
         raise Refused(f"empty diff for {a.base}..{a.head}: the commits change no file")
     pkg = os.path.join(root, SDD, a.plan, "review", a.task)
