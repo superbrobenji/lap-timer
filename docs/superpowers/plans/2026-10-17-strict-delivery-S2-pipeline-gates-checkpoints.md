@@ -1491,6 +1491,19 @@ python3 -m unittest $T                                                     # exp
 git checkout -- tools/gates/gate_dispatch.py
 python3 -m unittest $T                                                     # expect OK
 ```
+Then the DEC-0010 pins (owner decision; the old lookahead form is the reverted fix):
+```bash
+B1=tools.gates.tests.test_gate_dispatch.GateDispatch.test_a_five_digit_text_is_a_mention_of_its_first_four_digits
+B2=tools.gates.tests.test_gate_dispatch.GateDispatch.test_non_ascii_digits_never_form_an_id
+B3=tools.gates.tests.test_gate_decisions.GateDecisions.test_a_five_digit_text_is_a_mention_of_its_first_four_digits
+B4=tools.gates.tests.test_gate_decisions.GateDecisions.test_a_non_ascii_digit_after_four_ascii_digits_is_still_a_mention
+python3 -m unittest $B1 $B2 $B3 $B4                                        # expect OK (4 tests)
+perl -pi -e 's/^REF = re\.compile\(r"DEC-\[0-9\]\{4\}"\)/REF = re.compile(r"DEC-\\d{4}(?!\\d)")/' tools/gates/gate_decisions.py
+git diff --stat                                                            # expect 1 line changed
+for t in $B1 $B2 $B3 $B4; do python3 -m unittest $t; done                  # expect FAILED four times
+git checkout -- tools/gates/gate_decisions.py
+python3 -m unittest $B1 $B2 $B3 $B4                                        # expect OK
+```
 Write `.superpowers/sdd/strict-delivery/review/S2-T3/mutation-SD-S2-T3.txt` (the package copy):
 ```
 finding: SD-S2-T3
@@ -1498,6 +1511,9 @@ test: test_config_check_fails_when_implementer_minimum_is_fable
 step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable -> PASS
 step 2 (fix reverted: perl replaces the fable-minimum condition in check_config with False): python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable -> FAIL
 step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_when_implementer_minimum_is_fable -> PASS
+step 4 (DEC-0010 pins present): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_a_five_digit_text_is_a_mention_of_its_first_four_digits tools.gates.tests.test_gate_dispatch.GateDispatch.test_non_ascii_digits_never_form_an_id tools.gates.tests.test_gate_decisions.GateDecisions.test_a_five_digit_text_is_a_mention_of_its_first_four_digits tools.gates.tests.test_gate_decisions.GateDecisions.test_a_non_ascii_digit_after_four_ascii_digits_is_still_a_mention -> PASS (4 tests)
+step 5 (REF reverted to the old lookahead form r"DEC-\d{4}(?!\d)" in tools/gates/gate_decisions.py, 1 line changed): the same four tests -> FAIL each (run one by one: test_gate_dispatch five-digit FAIL, test_gate_decisions five-digit FAIL, test_gate_decisions non-ascii-after-four FAIL, test_gate_dispatch non-ascii-never-form-an-id FAIL)
+step 6 (REF restored: git checkout -- tools/gates/gate_decisions.py): the same four tests -> PASS (4 tests)
 ```
 After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt` (what `pin.transcript` names); then move the row to `pinned`:
 ```bash
