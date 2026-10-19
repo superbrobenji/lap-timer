@@ -26,7 +26,7 @@
 - Commit trailers: subagents use their own model's trailer; the squash commit carries the session's.
 - Repo fact (verified 2026-10-17 with `gh api repos/superbrobenji/lap-timer/branches/main/protection`): `main` requires status checks (strict), linear history, and `enforce_admins: true` — no commit can be pushed to `main` directly. Every state commit (handoff, ledger, register transitions) therefore rides inside the block PR: the handoff is committed on the block branch before the merge, `gate_checkpoint --plan <slug>` checks it there (pre-merge) and `--post` checks the squash on `main` afterwards (Task 7). `merged` register states are written only by S4's `postmerge.py` (`by: postmerge`, S1 rule); until S4 lands, S2 rows stay `pinned` after their block merges.
 - Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the controller after the task review's clean verdict (b4 ruling 3), together with the reviewer's report at `docs/superpowers/state/<plan>/reviews/S2-T<n>.md`.
-- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>`, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (`run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title holds the word pin and whose body names its test as `test_<module>::test_<name>`.
+- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title contains `pin` (case-insensitive) and whose body names a test named `test_<module>::test_<name>`.
 - Block branches are named `<plan>/b<N>` (here `block/strict-delivery-b4`…`b6`), never `<plan>-b<N>`, so a branch never shares a name with its tag.
 
 ## Review Focus
@@ -3385,7 +3385,7 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture`.
 - Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool, creates: list[str], siblings: list[str] | None, siblings_value: str, siblings_error: str, gates: list[str] | None, gates_error: str, steps: list[Step]}`, `Step.{title: str, body: list[str]}`, `Plan.{headers, tasks, placeholders, block_errors, fence_error}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
-- **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.task.N.files`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (`FAIL plan.siblings.N`), `**Gates:**` names `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step titled with the word pin whose body names a `test_<module>::test_<name>` (`FAIL plan.pin.N`).
+- **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.files.N`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (lower-case none, a non-empty reason after ` -- `; the empty list) (`FAIL plan.siblings.N`), `**Gates:**` names exactly `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step whose title contains `pin` (case-insensitive) and whose body names a test named `test_<module>::test_<name>` (`FAIL plan.pin.N`).
 - **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** when the last non-empty ledger line is not a `CHECKPOINT` line in the working tree **or** in the `HEAD` commit (or the ledger is not committed).
 
 - [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
@@ -3565,7 +3565,7 @@ class GatePlan(unittest.TestCase):
                             "plan.task.2.findings")
 
     def test_task_without_files_fails(self):
-        self.assertFailLine(*self.check(self.variant("- Modify: `src/shared.py`\n", "")), "plan.task.3.files")
+        self.assertFailLine(*self.check(self.variant("- Modify: `src/shared.py`\n", "")), "plan.files.3")
 
     def test_parallel_tasks_sharing_a_file_fail(self):
         text = self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py`")
@@ -3754,7 +3754,7 @@ class Branches(unittest.TestCase):
     # -- the Files list
     def test_prose_line_inside_files_list_fails_and_is_quoted(self):
         text = self.variant("- Create: `src/beta.py`\n", "- Create: `src/beta.py`\n- Not modified: `x.yml` (a note)\n")
-        self.fail_line(text, "plan.task.2.files", "- Not modified: `x.yml` (a note)")
+        self.fail_line(text, "plan.files.2", "- Not modified: `x.yml` (a note)")
 
     def test_blank_line_inside_files_list_keeps_collecting(self):
         text = self.variant("- Create: `src/beta.py`\n", "- Create: `src/beta.py`\n\n- Modify: `src/alpha.py`\n")
@@ -3762,7 +3762,7 @@ class Branches(unittest.TestCase):
 
     def test_blank_line_before_the_first_files_item_is_skipped(self):
         out = self.ok(self.variant("**Files:**\n- Modify: `src/shared.py`\n", "**Files:**\n\n- Modify: `src/shared.py`\n"))
-        self.assertIn("PASS plan.task.3.files", out)
+        self.assertIn("PASS plan.files.3", out)
 
     def test_files_list_ends_at_a_fence_a_step_or_a_field(self):
         for tail in (f"{FENCE}\nx\n{FENCE}\nprose line\n", "- [ ] **Step 1: go**\nprose line\n", "**Mode:** SERIAL\nprose\n",
@@ -3903,16 +3903,16 @@ class Branches(unittest.TestCase):
                            ("tilde closed by backticks", f"~~~\nx\n{FENCE}\n### Task 9: swallowed\n")):
             with self.subTest(name):
                 rc, out = self.check(GOOD + "\n" + text)
-                self.assertEqual("real" in text, "plan.task.9.files" in out, out)
+                self.assertEqual("real" in text, "plan.files.9" in out, out)
 
     def test_list_item_fences(self):
         item = "- an item\n"
         rc, out = self.check(GOOD + f"\n{item}  {FENCE}\n### Task 9: left of the item ends it\n  {FENCE}\n")
-        self.assertIn("FAIL plan.task.9.files", out)
+        self.assertIn("FAIL plan.files.9", out)
         rc, out = self.check(GOOD + f"\ntext\n\n  {FENCE}\n### Task 9: inside a plain fence\n  {FENCE}\n")
         self.assertNotIn("plan.task.9", out)
         rc, out = self.check(GOOD + f"\n{item}    {FENCE}\n    code\n    {FENCE}\n### Task 9: after\n")
-        self.assertIn("FAIL plan.task.9.files", out)
+        self.assertIn("FAIL plan.files.9", out)
 
     def test_a_files_item_holds_exactly_one_backticked_path(self):
         for item, msg in (("- Create: `src/beta.py`, `src/alpha.py`", "a second backticked span"),
@@ -3925,17 +3925,17 @@ class Branches(unittest.TestCase):
                           ("- Create:", "no backticked path"),
                           ("- Create: the helper `src/beta.py`", "must start with the backticked path")):
             with self.subTest(item):
-                self.fail_line(self.variant("- Create: `src/beta.py`", item), "plan.task.2.files", msg)
+                self.fail_line(self.variant("- Create: `src/beta.py`", item), "plan.files.2", msg)
 
     def test_prose_after_the_path_is_a_comment(self):
         out = self.ok(self.variant("- Create: `src/beta.py`", "- Create: `src/beta.py` (GATES, DEFAULT_ARGV; a (nested) note)"))
-        self.assertIn("PASS plan.task.2.files", out)
+        self.assertIn("PASS plan.files.2", out)
         self.fail_line(self.variant("- Create: `src/beta.py`", "- Create: `src/alpha.py` (moved)"), "plan.overlap.1-2", "src/alpha.py")
 
     def test_a_dot_path_is_not_a_files_item(self):
         for spelled in (".", "./", "a/.."):
             with self.subTest(spelled):
-                self.fail_line(self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`"), "plan.task.2.files")
+                self.fail_line(self.variant("- Create: `src/beta.py`", f"- Create: `{spelled}`"), "plan.files.2")
 
     def test_block_heading_forms(self):
         for heading in ("##  Block b7 — second", "##\tBlock b7 — second", "## Block 7 — second", "##  Block  7 — second"):
@@ -4034,6 +4034,23 @@ class Branches(unittest.TestCase):
         self.fail_line(self.variant("**Siblings:** sib-a", "**Siblings:** sib-a\n**Siblings:** sib-a"), "plan.siblings.1",
                   "a second **Siblings:** line")
 
+    def test_a_none_siblings_line_needs_a_reason_after_a_double_hyphen(self):
+        for value in ("none --", "none -- ", "none -", "none - a reason", "None -- r", "NONE -- r", "none — a reason",
+                      "none --reason", "none  -- r", "none r"):
+            with self.subTest(value):
+                self.fail_line(self.variant("**Siblings:** none -- no register row", f"**Siblings:** {value}"),
+                               "plan.siblings.3", "'none -- <reason>'")
+        out = self.ok(self.variant("**Siblings:** none -- no register row", "**Siblings:** none -- r"))
+        self.assertIn("PASS plan.siblings.3", out)
+        for value in ("noneish, sib-a", "none_x, sib-a"):
+            with self.subTest(value):
+                self.assertIn("PASS plan.siblings.1", self.ok(self.variant("**Siblings:** sib-a", f"**Siblings:** {value}")))
+
+    def test_a_none_siblings_line_is_the_empty_list(self):
+        for value in ("none -- reason, sib-a", "none -- sib-a", "none -- reason,sib-a"):
+            with self.subTest(value):
+                self.fail_line(self.variant("**Siblings:** sib-a", f"**Siblings:** {value}"), "plan.siblings.1", "missing sib-a")
+
     def test_siblings_of_an_unregistered_id_fail_once_on_the_id(self):
         out = self.fail_line(self.variant("**Findings:** SD-FX-2", "**Findings:** SD-FX-404"), "plan.id.SD-FX-404")
         self.assertIn("PASS plan.siblings.2", out)
@@ -4044,6 +4061,9 @@ class Branches(unittest.TestCase):
         self.fail_line(self.variant("**Gates:** run_all\n", ""), "plan.gates.1", "no **Gates:** line")
         self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:**\n"), "plan.gates.1", "empty")
         self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** run_all, ../x\n"), "plan.gates.1", "'../x'")
+        for name in ("run_allx", "run_all_x", "Run_all", "run_al"):
+            with self.subTest(name):
+                self.fail_line(self.variant("**Gates:** run_all\n", f"**Gates:** {name}\n"), "plan.gates.1", repr(name))
         rf.write(self.root, "tools/gates/gate_sub/x.py", "")
         self.addCleanup(shutil.rmtree, os.path.join(self.root, "tools/gates/gate_sub"), True)
         self.fail_line(self.variant("**Gates:** run_all\n", "**Gates:** sub/x\n"), "plan.gates.1", "'sub/x'")
@@ -4067,14 +4087,14 @@ class Branches(unittest.TestCase):
                   "plan.pin.1", "no '- [ ] **Step N: ... pin ...**' step")
         self.fail_line(self.variant("**Step 2: Mutation run and pin**", "**Step 2: Mutation run**"), "plan.pin.1",
                   "no '- [ ] **Step N: ... pin ...**' step")
-        self.fail_line(self.variant("**Step 2: Mutation run and pin**", "**Step 2: Mutation run and spinning**"), "plan.pin.1",
+        self.fail_line(self.variant("**Step 2: Mutation run and pin**", "**Step 2: Mutation run and p-i-n**"), "plan.pin.1",
                   "no '- [ ] **Step N: ... pin ...**' step")
-        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha_fails`"), "plan.pin.1", "registers.PIN_TEST")
-        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha::alpha_fails`"), "plan.pin.1", "registers.PIN_TEST")
-        self.fail_line(self.variant("pin test_beta::test_beta_fails", "pin test_beta"), "plan.pin.2", "registers.PIN_TEST")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha_fails`"), "plan.pin.1", "a test named test_<module>::test_<name>")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha::alpha_fails`"), "plan.pin.1", "a test named test_<module>::test_<name>")
+        self.fail_line(self.variant("pin test_beta::test_beta_fails", "pin test_beta"), "plan.pin.2", "a test named test_<module>::test_<name>")
         self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`xtest_alpha::test_alpha_fails`"), "plan.pin.1",
-                       "registers.PIN_TEST")
-        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha::test_`"), "plan.pin.1", "registers.PIN_TEST")
+                       "a test named test_<module>::test_<name>")
+        self.fail_line(self.variant("`test_alpha::test_alpha_fails`", "`test_alpha::test_`"), "plan.pin.1", "a test named test_<module>::test_<name>")
 
     def test_pin_step_forms_that_pass(self):
         out = self.ok(GOOD)
@@ -4082,14 +4102,18 @@ class Branches(unittest.TestCase):
             self.assertIn(f"PASS plan.pin.{n}", out)
         out = self.ok(self.variant("**Step 2: Mutation run and pin**", "**Step 2: PIN the row**"))
         self.assertIn("PASS plan.pin.1", out)
+        for title in ("Mutation run and pinning", "Mutation run and spinning", "PINNED row", "re-Pin"):
+            with self.subTest(title):
+                out = self.ok(self.variant("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
+                self.assertIn("PASS plan.pin.1", out)
 
     def test_the_pin_test_must_be_in_the_pin_step_body(self):
         text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
                             "- [ ] **Step 2: Mutation run and pin**\n\n- [ ] **Step 3: Other** — `test_alpha::test_alpha_fails`\n")
-        self.fail_line(text, "plan.pin.1", "registers.PIN_TEST")
+        self.fail_line(text, "plan.pin.1", "a test named test_<module>::test_<name>")
         text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
                             "- [ ] **Step 2: Mutation run and pin**\n\n## Notes\n`test_alpha::test_alpha_fails`\n")
-        self.fail_line(text, "plan.pin.1", "registers.PIN_TEST")
+        self.fail_line(text, "plan.pin.1", "a test named test_<module>::test_<name>")
         text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
                             "- [ ] **Step 2: Mutation run and pin**\n\nA later body line names `test_alpha::test_alpha_fails`.\n")
         self.assertIn("PASS plan.pin.1", self.ok(text))
@@ -4099,16 +4123,16 @@ class Branches(unittest.TestCase):
         self.assertIn("PASS plan.pin.3", out)
         self.fail_line(self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n",
                                     "- [ ] **Step 2: Mutation run and pin `test_alpha::test_alpha_fails`\n"),
-                       "plan.pin.1", "registers.PIN_TEST")
+                       "plan.pin.1", "a test named test_<module>::test_<name>")
 
     def test_a_task_or_block_heading_ends_the_pin_step_body(self):
         text = self.variant("the pin test is `test_alpha::test_alpha_fails`.", "no test here.")
         text = self.variant("### Task 2: beta\n", "### Task 2: beta\n\n`test_alpha::test_alpha_fails`\n", base=text)
-        self.fail_line(text, "plan.pin.1", "registers.PIN_TEST")
+        self.fail_line(text, "plan.pin.1", "a test named test_<module>::test_<name>")
         text = self.variant("pin test_beta::test_beta_fails", "pin", base=GOOD)
         text = self.variant("- [ ] **Step 2: CHECKPOINT b1**\n\n## Block b2 — second\n",
                             "## Block b2 — second\n\n`test_beta::test_beta_fails`\n", base=text)
-        self.fail_line(text, "plan.pin.2", "registers.PIN_TEST")
+        self.fail_line(text, "plan.pin.2", "a test named test_<module>::test_<name>")
 
     def test_a_pin_step_of_another_task_does_not_count(self):
         text = self.variant("- [ ] **Step 2: Mutation run and pin** — the pin test is `test_alpha::test_alpha_fails`.\n", "")
@@ -4205,8 +4229,8 @@ steps; heading numbers increase; '## Block N' or '## Block bN', level 2); the wr
 A Files item ('- Create|Modify|Test|Delete: `path` prose') starts with exactly one backticked span, the path;
 the prose after it holds no backtick (DEC-0017). Per task also (DEC-0016): '**Siblings:**' lists every sibling
 of the register rows its Findings name; '**Gates:**' names run_all or gates X whose tools/gates/gate_X.py is at
-the root or a Create item of this or an earlier task; Findings that name ids need a pin step (a step title with
-the word 'pin' whose body names a test test_<module>::test_<name>).
+the root or a Create item of this or an earlier task; Findings that name ids need a pin step (a step title that
+contains 'pin', case-insensitive, whose body names a test test_<module>::test_<name>).
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -4256,10 +4280,12 @@ SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
 GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
-PIN_TITLE = re.compile(r"\bpin\b", re.I)
+PIN_TITLE = re.compile(r"pin", re.I)
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
+SIBLINGS_NONE = re.compile(r"^none -- \S")
+SIBLINGS_NONE_WORD = re.compile(r"^none(?![A-Za-z0-9_])", re.I)
 SPEC_PATH = re.compile(r"`([^`]+)`")
 TOKEN_RE = re.compile(r"\b[A-Z0-9]+(?:-[A-Za-z0-9]+)+\b")
 # writing-plans "No Placeholders"; each phrase is split so this file never matches itself
@@ -4389,12 +4415,12 @@ def _siblings_value(task: Task, value: str) -> None:
         task.siblings_error = "a second **Siblings:** line in one task"
         return
     task.siblings_value = value
-    if NONE_RE.match(value):
+    if SIBLINGS_NONE.match(value):
         task.siblings = []
         return
     task.siblings = [v.strip() for v in value.split(",")]
-    if value.lower() == "none":
-        task.siblings_error = "write 'none -- <reason>' or a comma-separated list"
+    if SIBLINGS_NONE_WORD.match(value):
+        task.siblings_error = f"write 'none -- <reason>' (lower-case none, a reason after ' -- ') or a comma-separated list: {value!r}"
     elif "" in task.siblings:
         task.siblings_error = f"empty entry in **Siblings:** {value!r}"
 
@@ -4565,7 +4591,7 @@ def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None
         res.fail(lid, t.siblings_error)
     else:
         need = [s for fid in t.findings or [] for s in (rows.get(fid) or {}).get("siblings") or []]
-        missing = [s for s in need if not _listed(s, t.siblings_value)]
+        missing = [s for s in need if not (t.siblings and _listed(s, t.siblings_value))]
         _verdict(res, lid, not missing, f"missing {', '.join(missing)} (register siblings of {', '.join(t.findings or [])})")
     lid = f"{pfx}.gates.{t.num}"
     if t.gates is None:
@@ -4586,7 +4612,7 @@ def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None
         res.fail(lid, "no '- [ ] **Step N: ... pin ...**' step (the Findings line names ids)")
     else:
         named = any(PIN_NAME.search(line) for s in pins for line in s.body)
-        _verdict(res, lid, named, "the pin step names no test in registers.PIN_TEST form test_<module>::test_<name>")
+        _verdict(res, lid, named, "the pin step body does not name a test named test_<module>::test_<name>")
 
 
 def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: str | None,
@@ -4608,9 +4634,9 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
     for t in plan.tasks:
         tid = f"{pfx}.task.{t.num}"
         if t.files_errors:
-            res.fail(f"{tid}.files", t.files_errors[0])
+            res.fail(f"{pfx}.files.{t.num}", t.files_errors[0])
         else:
-            _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
+            _verdict(res, f"{pfx}.files.{t.num}", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
         if t.mode_seen:
             _verdict(res, f"{tid}.mode", not t.mode_error, t.mode_error)
         if t.findings is None:
@@ -4780,17 +4806,18 @@ normalised to a repo-relative path and matches a register row whose `source`, up
 `S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step; a heading number that does
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
-`FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
+`FAIL plan.files.N`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
 `PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`. A Files item (DEC-0017) is
 `- Create|Modify|Test|Delete: ` then exactly one backticked span, the path (a `:` suffix is a line range), then prose
 holding no backtick: an item with no backticked path, an unclosed backtick, a second backticked span or text before
-the path is `FAIL plan.task.N.files` (an item naming two files is two items; symbols go in plain prose). Per task
-(DEC-0016): `**Siblings:** none -- <reason>` or a comma-separated list holding, as whole entries, every `siblings`
-entry of the register rows the task's Findings name (an id with no row adds nothing: `plan.id.<id>` fails it), else
-`FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each `run_all` or an X for which `tools/gates/gate_X.py`
+the path is `FAIL plan.files.N` (an item naming two files is two items; symbols go in plain prose). Per task
+(DEC-0016): `**Siblings:** none -- <reason>` (lower-case `none`, a literal ` -- `, a non-empty reason; it is the empty
+list; any other value starting with `none`, in any case, not followed by a letter, digit or `_`, fails) or a comma-separated list holding, as whole
+entries, every `siblings` entry of the register rows the task's Findings name (an id with no row adds nothing:
+`plan.id.<id>` fails it), else `FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each exactly `run_all` or an X for which `tools/gates/gate_X.py`
 is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
-ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (any case) and whose body (up to the next
-step or heading, code included) names a test `test_<module>::test_<name>` (`registers.PIN_TEST` with the module),
+ids has a step `- [ ] **Step N: ...**` whose title contains `pin` (case-insensitive) and whose body (up to the next
+step or heading, code included) names a test named `test_<module>::test_<name>`,
 else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
 indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
@@ -4803,7 +4830,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (89 tests); the full suite 542 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

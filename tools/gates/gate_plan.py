@@ -8,8 +8,8 @@ steps; heading numbers increase; '## Block N' or '## Block bN', level 2); the wr
 A Files item ('- Create|Modify|Test|Delete: `path` prose') starts with exactly one backticked span, the path;
 the prose after it holds no backtick (DEC-0017). Per task also (DEC-0016): '**Siblings:**' lists every sibling
 of the register rows its Findings name; '**Gates:**' names run_all or gates X whose tools/gates/gate_X.py is at
-the root or a Create item of this or an earlier task; Findings that name ids need a pin step (a step title with
-the word 'pin' whose body names a test test_<module>::test_<name>).
+the root or a Create item of this or an earlier task; Findings that name ids need a pin step (a step title that
+contains 'pin', case-insensitive, whose body names a test test_<module>::test_<name>).
 Also owns the per-plan ledger contract the hooks use: plans_in_flight(root).
 Usage: gate_plan.py --plan P [--source FILE | --source register:key=pat[,pat][&key=pat]] [--json]
        gate_plan.py --in-flight [--json]
@@ -59,10 +59,12 @@ SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
 GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
-PIN_TITLE = re.compile(r"\bpin\b", re.I)
+PIN_TITLE = re.compile(r"pin", re.I)
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
+SIBLINGS_NONE = re.compile(r"^none -- \S")
+SIBLINGS_NONE_WORD = re.compile(r"^none(?![A-Za-z0-9_])", re.I)
 SPEC_PATH = re.compile(r"`([^`]+)`")
 TOKEN_RE = re.compile(r"\b[A-Z0-9]+(?:-[A-Za-z0-9]+)+\b")
 # writing-plans "No Placeholders"; each phrase is split so this file never matches itself
@@ -192,12 +194,12 @@ def _siblings_value(task: Task, value: str) -> None:
         task.siblings_error = "a second **Siblings:** line in one task"
         return
     task.siblings_value = value
-    if NONE_RE.match(value):
+    if SIBLINGS_NONE.match(value):
         task.siblings = []
         return
     task.siblings = [v.strip() for v in value.split(",")]
-    if value.lower() == "none":
-        task.siblings_error = "write 'none -- <reason>' or a comma-separated list"
+    if SIBLINGS_NONE_WORD.match(value):
+        task.siblings_error = f"write 'none -- <reason>' (lower-case none, a reason after ' -- ') or a comma-separated list: {value!r}"
     elif "" in task.siblings:
         task.siblings_error = f"empty entry in **Siblings:** {value!r}"
 
@@ -368,7 +370,7 @@ def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None
         res.fail(lid, t.siblings_error)
     else:
         need = [s for fid in t.findings or [] for s in (rows.get(fid) or {}).get("siblings") or []]
-        missing = [s for s in need if not _listed(s, t.siblings_value)]
+        missing = [s for s in need if not (t.siblings and _listed(s, t.siblings_value))]
         _verdict(res, lid, not missing, f"missing {', '.join(missing)} (register siblings of {', '.join(t.findings or [])})")
     lid = f"{pfx}.gates.{t.num}"
     if t.gates is None:
@@ -389,7 +391,7 @@ def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None
         res.fail(lid, "no '- [ ] **Step N: ... pin ...**' step (the Findings line names ids)")
     else:
         named = any(PIN_NAME.search(line) for s in pins for line in s.body)
-        _verdict(res, lid, named, "the pin step names no test in registers.PIN_TEST form test_<module>::test_<name>")
+        _verdict(res, lid, named, "the pin step body does not name a test named test_<module>::test_<name>")
 
 
 def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: str | None,
@@ -411,9 +413,9 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
     for t in plan.tasks:
         tid = f"{pfx}.task.{t.num}"
         if t.files_errors:
-            res.fail(f"{tid}.files", t.files_errors[0])
+            res.fail(f"{pfx}.files.{t.num}", t.files_errors[0])
         else:
-            _verdict(res, f"{tid}.files", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
+            _verdict(res, f"{pfx}.files.{t.num}", bool(t.files), "no '- Create|Modify|Test|Delete: `path`' lines under **Files:**")
         if t.mode_seen:
             _verdict(res, f"{tid}.mode", not t.mode_error, t.mode_error)
         if t.findings is None:

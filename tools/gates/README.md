@@ -197,17 +197,18 @@ normalised to a repo-relative path and matches a register row whose `source`, up
 `S2-b4-fixwave`). Blocks are `## Block bN` headings, else the tasks up to a `CHECKPOINT` step; a heading number that does
 not increase, or a task above the first heading, is `FAIL plan.block.order`. A `**Files:**` list runs to the next
 `**Field:**` line, heading, step line or fence; blank lines inside it are skipped and any other non-item line is
-`FAIL plan.task.N.files`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
+`FAIL plan.files.N`. File paths are compared after `posixpath.normpath`; a `**Mode:**` line other than exactly
 `PARALLEL` or `SERIAL`, or a second one in a task, is `FAIL plan.task.N.mode`. A Files item (DEC-0017) is
 `- Create|Modify|Test|Delete: ` then exactly one backticked span, the path (a `:` suffix is a line range), then prose
 holding no backtick: an item with no backticked path, an unclosed backtick, a second backticked span or text before
-the path is `FAIL plan.task.N.files` (an item naming two files is two items; symbols go in plain prose). Per task
-(DEC-0016): `**Siblings:** none -- <reason>` or a comma-separated list holding, as whole entries, every `siblings`
-entry of the register rows the task's Findings name (an id with no row adds nothing: `plan.id.<id>` fails it), else
-`FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each `run_all` or an X for which `tools/gates/gate_X.py`
+the path is `FAIL plan.files.N` (an item naming two files is two items; symbols go in plain prose). Per task
+(DEC-0016): `**Siblings:** none -- <reason>` (lower-case `none`, a literal ` -- `, a non-empty reason; it is the empty
+list; any other value starting with `none`, in any case, not followed by a letter, digit or `_`, fails) or a comma-separated list holding, as whole
+entries, every `siblings` entry of the register rows the task's Findings name (an id with no row adds nothing:
+`plan.id.<id>` fails it), else `FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each exactly `run_all` or an X for which `tools/gates/gate_X.py`
 is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
-ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (any case) and whose body (up to the next
-step or heading, code included) names a test `test_<module>::test_<name>` (`registers.PIN_TEST` with the module),
+ids has a step `- [ ] **Step N: ...**` whose title contains `pin` (case-insensitive) and whose body (up to the next
+step or heading, code included) names a test named `test_<module>::test_<name>`,
 else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
 indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
