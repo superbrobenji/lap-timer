@@ -239,7 +239,7 @@ Matcher: a value of letters/digits/`_-,| ` is an exact list; `"Agent|Bash"` matc
 A dispatch prompt is Markdown with these headed sections, in this order; `gate_dispatch` parses by heading:
 ```
 ## Role: <controller|implementer|implementer_transcription|task_reviewer|final_reviewer|final_verifier|exception_reviewer|audit_reviewer|audit_verifier|investigator>
-## Brief: <path>                       (required for implementer/reviewer roles)
+## Brief: <path>                       (required for implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier, exception_reviewer; audit_reviewer, audit_verifier, investigator and controller may give none -- DEC-0009)
 ## Findings: <id>, <id>                 (register ids; may be "none" for investigator/audit roles)
 ## Claims: <id>, <id>                   (claim ids this dispatch depends on; may be "none")
 ## Budget: tokens=<n> minutes=<n>

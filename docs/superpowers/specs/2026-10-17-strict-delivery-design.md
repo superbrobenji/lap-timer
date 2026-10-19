@@ -192,7 +192,7 @@ Common contract: one script, one concern; exit 0/1; output a table of named line
 
 | Gate | Checks | Invoked by |
 |---|---|---|
-| `gate_register` | schema; every id in reports present; owner on every row; legal transitions and their evidence | pre-commit, CI, dispatch hook |
+| `gate_register` | schema; every id in reports present; owner on every row; legal transitions and their evidence | pre-commit, CI (DEC-0011: not the dispatch hook, which runs the three gates named in §8) |
 | `gate_claims` | schema; rows cited by a brief `verified` at HEAD; stale marking on cited-file change; `false` rows resolved | pre-commit, CI, dispatch hook |
 | `gate_decisions` | no reference to an unanswered id; owner-only classes never answered by an agent (answer author = owner) | dispatch hook, CI |
 | `gate_plan` | header blocks; register ids per task; id-coverage table; file-overlap table; block size ≤3; placeholder scan | plan approval, dispatch hook |
