@@ -1558,17 +1558,17 @@ step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_dispatch.
 step 4 (DEC-0010 pins present): python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_a_five_digit_text_is_a_mention_of_its_first_four_digits tools.gates.tests.test_gate_dispatch.GateDispatch.test_non_ascii_digits_never_form_an_id tools.gates.tests.test_gate_decisions.GateDecisions.test_a_five_digit_text_is_a_mention_of_its_first_four_digits tools.gates.tests.test_gate_decisions.GateDecisions.test_a_non_ascii_digit_after_four_ascii_digits_is_still_a_mention -> PASS (4 tests)
 step 5 (REF reverted to the old lookahead form r"DEC-\d{4}(?!\d)" in tools/gates/gate_decisions.py, 1 line changed): the same four tests -> FAIL each (run one by one: test_gate_dispatch five-digit FAIL, test_gate_decisions five-digit FAIL, test_gate_decisions non-ascii-after-four FAIL, test_gate_dispatch non-ascii-never-form-an-id FAIL)
 step 6 (REF restored: git checkout -- tools/gates/gate_decisions.py): the same four tests -> PASS (4 tests)
-fix round 1 (review F1-F6; each mutant run over test_gate_dispatch + test_run_all, one line changed in gate_dispatch.py, restored by writing the original back):
-step 7 (new tests present: tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_on_a_cap_that_is_not_an_integer (True, 1.5, "12000"), ...fails_on_a_minimum_that_is_not_in_model_rank, ...fails_on_a_role_with_no_minimum, ...fails_on_an_unknown_fable_role, ...fails_when_a_role_has_no_prompt_file, tools.gates.tests.test_gate_dispatch.ConfigCheck.test_neither_prompt_nor_config_check_is_a_bad_argument) -> PASS (suite 348 tests)
-step 8 (F1 fix reverted: isinstance(cap, int) and cap > 0): -> FAIL (cap=True subTest; before the fix the same test FAILed on the unfixed code)
-step 9 (F2 'if need not in rank:' -> 'if False:') -> FAIL (2 tests)
-step 10 (F3 ROLE_PROMPT branch -> 'elif False:') -> FAIL (1 test)
-step 11 (F4 stray fable_roles -> 'stray = []') -> FAIL (1 test)
-step 12 (F5 'cap > 0' without isinstance; and 'not isinstance(cap, str) and cap > 0') -> FAIL (3 tests; 2 tests)
-step 13 (F5b cap '>= 0') -> FAIL (1 test)
-step 14 (F6 required=False on the mode group) -> FAIL (1 test)
-step 15 (reviewer's other mutants, still killed: fable condition dead FAIL(1); extra roles ignored FAIL(1); cap always passes FAIL(4); modes not exclusive FAIL(2); --config-check ignored FAIL(15))
-step 16 (all fixes restored): suite for both modules -> PASS
+fix round 1 and 2 (finding ids are review 1's; each mutant is one changed line in gate_dispatch.py, run over test_gate_dispatch + test_run_all, then restored by writing the original back; counts are the observed "FAILED (failures=N)" and name the failing tests):
+step 7 (new tests present: tools.gates.tests.test_gate_dispatch.ConfigCheck.test_config_check_fails_on_a_cap_that_is_not_an_integer (subTests True, 1.5, "12000"), ...fails_on_a_minimum_that_is_not_in_model_rank, ...fails_on_a_role_with_no_minimum, ...fails_on_an_unknown_fable_role, ...fails_when_a_role_has_no_prompt_file, ...test_neither_prompt_nor_config_check_is_a_bad_argument) -> PASS (suite 348 tests)
+step 8 (F1: bool exclusion removed, isinstance(cap, int) and cap > 0) -> FAIL, 1 failure (subTest cap=True of test_config_check_fails_on_a_cap_that_is_not_an_integer)
+step 9 (F2: 'if need not in rank:' -> 'if False:') -> FAIL, 2 failures (test_config_check_fails_on_a_minimum_that_is_not_in_model_rank, test_config_check_fails_on_a_role_with_no_minimum)
+step 10 (F6: ROLE_PROMPT branch -> 'elif False:') -> FAIL, 1 failure (test_config_check_fails_when_a_role_has_no_prompt_file)
+step 11 (F3: stray fable_roles -> 'stray = []') -> FAIL, 1 failure (test_config_check_fails_on_an_unknown_fable_role)
+step 12 (F4: non-int cap accepted) -> 'if cap > 0:' FAIL, 3 failures (subTests cap=True, 1.5, "12000" of test_config_check_fails_on_a_cap_that_is_not_an_integer); 'if not isinstance(cap, str) and cap > 0:' FAIL, 2 failures (subTests cap=True, 1.5 of the same test)
+step 13 (review 1 mutant M6, no finding: cap '>= 0') -> FAIL, 1 failure (test_config_check_fails_on_a_non_positive_cap)
+step 14 (F5: mode group required=False) -> FAIL, 1 failure (test_neither_prompt_nor_config_check_is_a_bad_argument)
+step 15 (review 1 mutants M2, M4, M8, M9, M11, still killed): M2 fable condition dead FAIL, 1 failure (test_config_check_fails_when_implementer_minimum_is_fable); M4 extra roles ignored FAIL, 1 failure (test_config_check_fails_on_an_unknown_role); M8 cap always passes FAIL, 4 failures (3 subTests of test_config_check_fails_on_a_cap_that_is_not_an_integer + test_config_check_fails_on_a_non_positive_cap); M9 modes not exclusive FAIL, 2 failures (test_neither_prompt_nor_config_check_is_a_bad_argument, test_prompt_and_config_check_are_exclusive); M11 --config-check ignored FAIL, 15 failures (3 of them subTests of test_config_check_fails_on_a_cap_that_is_not_an_integer)
+step 16 (all restored): both modules -> PASS
 ```
 After the task review is ✅, the reviewer copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T3.txt` (what `pin.transcript` names); then move the row to `pinned`:
 ```bash
