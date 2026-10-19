@@ -136,3 +136,13 @@
   asked_at: {sha: "9c94595", by: session}
   answer: "continue-standing (owner answered \"for dec-0014 use 1. the recommended\" in chat, 2026-10-19; the session had recommended continue-standing)"
   answered_at: {sha: "8124529", by: superbrobenji}
+- id: DEC-0015
+  class: spec-direction
+  question: "The gates workflow on main is red since the b4 squash merge fe3f146 (13 register.evidence FAIL lines; issue #146, row B5-U2): register history and cites shas record block-branch commits (the S2 pin step uses the task head sha), and a squash merge plus branch deletion leaves them unreachable, so gate_register fails in every fresh clone while a long-lived checkout passes. The b5 rows add 5b82a32, 9c94595 and 869ed10. The gates job is not a required check on main. Every orphaned sha is an ancestor of the b4 handoff head 9704065, which still exists locally. Which policy binds, now and for every later block?"
+  options:
+    - {label: tip-tag, cost: "before a block branch is deleted, push a tag <plan>-b<N>-tip at the handoff head (the branch tip) so every block commit stays reachable; now: push strict-delivery-b4-tip at 9704065 and re-run the gates workflow on main (expected green: actions/checkout fetch-depth 0 fetches tags; if not, gates.yml gains fetch-tags: true); the umbrella checkpoint protocol step 7, the S2 b5/b6 checkpoint text, b6 Task 7 (gate_checkpoint --post checks the tip tag equals the handoff head) and S4 postmerge.py gain the step; the register sha policy and the pin audit trail stay as they are; main history stays one squash per block; the -tip suffix keeps the tag outside config tag_pattern"}
+    - {label: rewrite-shas, cost: "keep squash; at merge rewrite every history and cites sha of the block's rows to the squash sha (b4 rows now, in the b5 PR; S4 postmerge.py automates it); the per-task sha audit trail of pins and cites is lost (spec D7 evidence weaker), and pinned rows are edited after the fact"}
+    - {label: fast-forward, cost: "stop squashing: after the PR is green, push the block branch to main as a fast-forward (protection allows it: no PR requirement, linear history, strict checks pass on the branch tip); every block commit lands on main, shas stay valid, the PR closes as merged; the umbrella checkpoint protocol, the b6 gate_checkpoint --post design (main = one commit on base) and S4 postmerge need a redesign, and main carries every fix-round commit"}
+  asked_at: {sha: "d6f4135", by: session}
+  answer: null
+  answered_at: null

@@ -379,3 +379,34 @@
   - state: open
     sha: 9c9459559b2d62d25571e7d02e92b51582f6227c
     by: session
+- id: B5-U2
+  source: review
+  severity: HIGH
+  class: 'register history and cites shas record block-branch commits (the S2 pin
+    step uses the task head sha); a squash merge plus branch deletion makes them unreachable
+    from any ref, so gate_register''s sha check (gitinfo.is_commit, git cat-file -e
+    <sha>^{commit}) FAILs in every fresh clone: the gates workflow on main is red
+    since the b4 squash fe3f146 (13 register.evidence FAIL lines) while a long-lived
+    checkout passes; every later squash repeats it (from b4; not caused by b5)'
+  siblings: []
+  cites:
+  - file: tools/gates/lib/gitinfo.py
+    lines: 134-142
+    sha: d6f4135480b7c008adae88fa82b3fae65e42c234
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery.md
+    lines: 351-370
+    sha: d6f4135480b7c008adae88fa82b3fae65e42c234
+  repro: git clone -q https://github.com/superbrobenji/lap-timer <dir> && cd <dir>
+    && git checkout -q fe3f146 && python3 tools/gates/gate_register.py -> 13 FAIL
+    register.evidence.* lines
+  owner:
+    kind: issue
+    number: 146
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d6f4135480b7c008adae88fa82b3fae65e42c234
+    by: session
