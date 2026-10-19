@@ -9,7 +9,6 @@ The task's ids: register rows owned by {kind: plan, plan: <plan>, task: <task>} 
 """
 from __future__ import annotations
 
-import glob
 import os
 import re
 import sys
@@ -45,8 +44,8 @@ def _lines(text: str) -> list[str]:
 
 def table_rows(text: str) -> list[list[str]] | None:
     """Data rows of the first Markdown table: the first '|' line is the header, the next line must be the
-    separator, and the table ends at the first line that does not start with '|'. None when there is
-    no header + separator."""
+    separator, and the table ends at the first line that does not start with '|'. Cells split on an
+    unescaped '|' only; '\\|' inside a cell is a literal '|'. None when there is no header + separator."""
     lines = [l.strip() for l in text.splitlines()]
     start = next((i for i, l in enumerate(lines) if l.startswith("|")), None)
     if start is None or start + 1 >= len(lines) or not SEPARATOR.match(lines[start + 1]):
@@ -55,8 +54,15 @@ def table_rows(text: str) -> list[list[str]] | None:
     for l in lines[start + 2:]:
         if not l.startswith("|"):
             break
-        rows.append([c.strip() for c in l.strip("|").split("|")])
+        rows.append(_cells(l))
     return rows
+
+
+def _cells(line: str) -> list[str]:
+    inner = line[1:]
+    if inner.endswith("|") and not inner.endswith("\\|"):
+        inner = inner[:-1]
+    return [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", inner)]
 
 
 def names_test(cmd: str, test: str) -> bool:
@@ -131,7 +137,7 @@ def _sibling_ok(cell: str, findings: list) -> bool:
     return bool(TEST_NAME.match(cell)) or registers.finding_by_id(findings, cell) is not None
 
 
-def _siblings(pkg, needed, findings, res, pfx):
+def _siblings(pkg, needed, longest, findings, res, pfx):
     path = os.path.join(pkg, "siblings.md")
     if not os.path.isfile(path):
         return
@@ -141,7 +147,9 @@ def _siblings(pkg, needed, findings, res, pfx):
         return
     bad = [r for r in rows if len(r) != 2 or not r[0] or not _sibling_ok(r[1], findings)]
     missing = [s for s in needed if not any(s == r[0] for r in rows)]
-    if bad:
+    if len(rows) < longest:
+        res.fail(f"{pfx}.siblings", f"{len(rows)} row(s) for a register siblings list of {longest}")
+    elif bad:
         res.fail(f"{pfx}.siblings", f"{len(bad)} row(s) are not 'sibling | test name or registered finding id'")
     elif missing:
         res.fail(f"{pfx}.siblings", f"register sibling(s) not listed: {', '.join(missing)}")
@@ -190,20 +198,23 @@ def _pin_test(row: dict):
 
 
 def _mutations(pkg, ids, findings, res, pfx):
-    needed = []
+    """(register siblings still to list, longest register siblings list among the task's findings)."""
+    needed, longest = [], 0
     for fid in ids:
         f = registers.finding_by_id(findings, fid)
         if f is None:
             res.fail(f"{pfx}.finding.{fid}", "not in docs/superpowers/state/findings.yml")
             continue
-        needed.extend(str(s) for s in (f.get("siblings") or []) if str(s) not in needed)
+        listed = [str(s).strip() for s in (f.get("siblings") or [])]
+        longest = max(longest, len(listed))
+        needed.extend(s for s in listed if s not in needed)
         path = os.path.join(pkg, f"mutation-{fid}.txt")
         if not os.path.isfile(path):
             res.fail(f"{pfx}.mutation.{fid}", f"mutation-{fid}.txt missing")
             continue
         errs = mutation_errors(_read(path), fid, _pin_test(f))
         _verdict(res, f"{pfx}.mutation.{fid}", not errs, "; ".join(errs))
-    return needed
+    return needed, longest
 
 
 def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, pfx: str) -> None:
@@ -217,33 +228,45 @@ def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, p
         err = diff_error(_read(diff))
         _verdict(res, f"{pfx}.diff", not err, err)
     _gates(pkg, res, pfx)
-    needed = _mutations(pkg, ids, findings, res, pfx)
-    _siblings(pkg, needed, findings, res, pfx)
+    needed, longest = _mutations(pkg, ids, findings, res, pfx)
+    _siblings(pkg, needed, longest, findings, res, pfx)
     _claims(pkg, res, pfx)
 
 
 def _layout(root: str, pkg: str) -> tuple[str, str]:
     """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task>; GateError for any other path."""
-    parts = os.path.relpath(pkg, root).split(os.sep)
+    parts = os.path.relpath(pkg, root).split(os.sep)    # both already realpath-resolved by check()
     if len(parts) != 5 or parts[:2] != SDD.split("/") or parts[3] != "review":
         raise GateError(f"--dir {pkg} is not <root>/{SDD}/<plan>/review/<task>")
     return parts[2], parts[4]
 
 
 def _check_all(root: str, findings: list, res: Result) -> None:
-    entries = sorted(glob.glob(os.path.join(root, SDD, "*", "review", "*")))
-    if not entries:
-        res.passed("review_package.all")
-    for pkg in entries:
-        parts = os.path.normpath(pkg).split(os.sep)
-        pfx = f"review_package.{parts[-3]}.{parts[-1]}"
-        if not os.path.isdir(pkg):
-            res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)} is not a directory")
+    """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included."""
+    sdd = os.path.join(root, SDD)
+    seen = False
+    for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
+        review = os.path.join(sdd, plan, "review")
+        if not os.path.lexists(review):
             continue
-        ids = task_findings(findings, pkg)
-        if not ids:
-            res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
-        check_package(root, pkg, ids, findings, res, pfx)
+        seen = True
+        if not os.path.isdir(review):
+            res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)} is not a directory")
+            continue
+        for task in sorted(os.listdir(review)):
+            _check_entry(root, os.path.join(review, task), f"review_package.{plan}.{task}", findings, res)
+    if not seen:
+        res.passed("review_package.all")
+
+
+def _check_entry(root: str, pkg: str, pfx: str, findings: list, res: Result) -> None:
+    if not os.path.isdir(pkg):
+        res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)} is not a directory")
+        return
+    ids = task_findings(findings, pkg)
+    if not ids:
+        res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
+    check_package(root, pkg, ids, findings, res, pfx)
 
 
 def check(args: list) -> Result:
@@ -253,13 +276,14 @@ def check(args: list) -> Result:
     a = p.parse_args(args)
     if a.all == bool(a.dir):
         raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
-    root = os.path.abspath(a.root or repo_root())
+    root = os.path.realpath(a.root or repo_root())
     findings = registers.load_findings(root)
     res = Result("review_package")
     if a.all:
         _check_all(root, findings, res)
         return res
-    pkg = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
+    wanted = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
+    pkg = os.path.join(os.path.realpath(os.path.dirname(wanted)), os.path.basename(wanted))
     plan, task = _layout(root, pkg)
     if not os.path.isdir(pkg):
         raise GateError(f"--dir {a.dir}: no such directory")

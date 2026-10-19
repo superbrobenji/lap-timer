@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -351,6 +352,82 @@ class GateReviewPackage(unittest.TestCase):
         p = subprocess.run([sys.executable, grp.__file__, "--all"], capture_output=True, text=True, env=env, check=False)
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
         self.assertIn("PASS review_package.fx.1.claims", p.stdout)
+
+    # --- fix round 2 (N1-N5 of task-4-review2.md) ---
+    def test_dir_with_a_wrong_prefix_is_not_the_layout(self):
+        other = "a/b/fx/review/1"
+        for name in grp.REQUIRED:
+            rf.write(self.root, f"{other}/{name}", GOOD[name])
+        rf.write(self.root, f"{other}/mutation-SD-FX-1.txt", MUT)
+        self.assertFailLine(*gate(self.root, ["--dir", other]), "review_package.input", "is not <root>/")
+
+    def test_dir_by_realpath_under_a_symlinked_root_passes(self):
+        link = os.path.join(tempfile.mkdtemp(), "link")
+        self.addCleanup(shutil.rmtree, os.path.dirname(link), True)
+        os.symlink(self.root, link)
+        for d in (os.path.join(os.path.realpath(self.root), PKG), os.path.join(link, PKG), PKG):
+            with self.subTest(dir=d):
+                rc, out = gate(link, ["--dir", d])
+                self.assertEqual(0, rc, out)
+        rc, out = gate(link, ["--all"])
+        self.assertEqual(0, rc, out)
+
+    def test_siblings_rows_at_least_the_registers_list_length(self):
+        def dup(rows):
+            rows["findings"][0]["siblings"] = ["sib-a", "sib-a"]
+        self.with_rows(dup)
+        self.assertFailLine(*self.check(), "review_package.siblings", "1 row(s) for a register siblings list of 2")
+        row = "| sib-a | test_sib_a |\n"
+        self.put({"siblings.md": GOOD["siblings.md"] + row})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_all_mode_sweeps_hidden_entries(self):
+        hidden = ".superpowers/sdd/fx/review/.hidden"
+        rf.write(self.root, f"{hidden}/x", "stray\n")
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx..hidden.mutation")
+        shutil.rmtree(os.path.join(self.root, hidden))
+        rf.write(self.root, ".superpowers/sdd/fx/review/.DS_Store", "x\n")
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx..DS_Store.input", "is not a directory")
+
+    def test_all_mode_review_that_is_a_file_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        rf.write(self.root, ".superpowers/sdd/zz/review", "a file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertFailLine(rc, out, "review_package.zz.input", "is not a directory")
+        self.assertNotIn("review_package.all", out)
+
+    def test_register_sibling_with_outer_whitespace_or_a_pipe_is_listable(self):
+        for sibling, cell in (("sib-a ", "sib-a"), (" sib-a", "sib-a"), ("a|b", "a\\|b")):
+            with self.subTest(sibling=sibling):
+                self.with_rows(lambda rows: rows["findings"][0].update(siblings=[sibling]))
+                self.put({"siblings.md": f"| sibling | test or finding |\n|---|---|\n| {cell} | test_x |\n"})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+
+    def test_unescaped_pipe_splits_a_cell(self):
+        self.with_rows(lambda rows: rows["findings"][0].update(siblings=["a|b"]))
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n| a|b | test_x |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings", "are not 'sibling |")
+
+    def test_escaped_pipe_in_a_claims_cell(self):
+        self.put({"claims.md": GOOD["claims.md"].replace("python3 -m unittest t |", "python3 -m unittest t \\| tail |")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_table_rows_without_spaces_or_a_trailing_pipe(self):
+        head = "| sibling | test or finding |\n|---|---|\n"
+        for row in ("|sib-a|test_x|\n", "| sib-a | test_x\n", "|sib-a|test_x\n"):
+            with self.subTest(row=row):
+                self.put({"siblings.md": head + row})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+
+    def test_all_mode_skips_a_plan_without_a_review_dir(self):
+        rf.write(self.root, ".superpowers/sdd/noreview/notes.md", "notes\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("noreview", out)
 
     def test_registered_in_run_all(self):
         from tools.gates import run_all

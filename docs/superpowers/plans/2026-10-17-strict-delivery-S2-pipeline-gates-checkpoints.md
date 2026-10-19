@@ -1925,7 +1925,7 @@ Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/ha
 
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture` (Task 1).
-- Produces: `gate_review_package.check(args) -> Result`, `main(argv=None)`; `REQUIRED` (list of file names); `table_rows(text) -> list[list[str]] | None`; `mutation_errors(text, finding_id, pin_test=None) -> list[str]`. `task_findings(findings, pkg) -> list[str]`. CLI (umbrella table): `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored) | `--all` (every package under `.superpowers/sdd/*/review/*`; none is a PASS — CI has none); the task's ids are the register rows with owner `{kind: plan, plan: <plan>, task: <task>}` plus every `mutation-<id>.txt` present, so the review dir is named by the row's `owner.task` (here `S2-T<n>`). Line ids add `review_package.findings` (no owned row). Line ids: `<pfx>.file.<name>`, `<pfx>.commits`, `<pfx>.diff`, `<pfx>.gates`, `<pfx>.finding.<id>`, `<pfx>.mutation[.<id>]`, `<pfx>.siblings`, `<pfx>.claims`, with `<pfx>` = `review_package` (single) or `review_package.<plan>.<task>` (`--all`); `review_package.all` when no package exists; `<pfx>.input` for a non-directory entry under `review/` (`--all`); `--dir` outside `<root>/.superpowers/sdd/<plan>/review/<task>` is `review_package.input`.
+- Produces: `gate_review_package.check(args) -> Result`, `main(argv=None)`; `REQUIRED` (list of file names); `table_rows(text) -> list[list[str]] | None`; `mutation_errors(text, finding_id, pin_test=None) -> list[str]`. `task_findings(findings, pkg) -> list[str]`. CLI (umbrella table): `--dir .superpowers/sdd/<plan>/review/<task>` (git-ignored) | `--all` (every package under `.superpowers/sdd/*/review/*`; none is a PASS — CI has none); the task's ids are the register rows with owner `{kind: plan, plan: <plan>, task: <task>}` plus every `mutation-<id>.txt` present, so the review dir is named by the row's `owner.task` (here `S2-T<n>`). Line ids add `review_package.findings` (no owned row). Line ids: `<pfx>.file.<name>`, `<pfx>.commits`, `<pfx>.diff`, `<pfx>.gates`, `<pfx>.finding.<id>`, `<pfx>.mutation[.<id>]`, `<pfx>.siblings`, `<pfx>.claims`, with `<pfx>` = `review_package` (single) or `review_package.<plan>.<task>` (`--all`); `review_package.all` when no package exists; `<pfx>.input` for a non-directory entry under `review/` (`--all`, dot-entries included) and `review_package.<plan>.input` for a `review` path that is not a directory; `--dir` outside `<root>/.superpowers/sdd/<plan>/review/<task>` is `review_package.input`.
 
 - [ ] **Step 1: Write the failing tests** — `tools/gates/tests/test_gate_review_package.py`:
 
@@ -1939,6 +1939,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -2284,6 +2285,82 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, p.returncode, p.stdout + p.stderr)
         self.assertIn("PASS review_package.fx.1.claims", p.stdout)
 
+    # --- fix round 2 (N1-N5 of task-4-review2.md) ---
+    def test_dir_with_a_wrong_prefix_is_not_the_layout(self):
+        other = "a/b/fx/review/1"
+        for name in grp.REQUIRED:
+            rf.write(self.root, f"{other}/{name}", GOOD[name])
+        rf.write(self.root, f"{other}/mutation-SD-FX-1.txt", MUT)
+        self.assertFailLine(*gate(self.root, ["--dir", other]), "review_package.input", "is not <root>/")
+
+    def test_dir_by_realpath_under_a_symlinked_root_passes(self):
+        link = os.path.join(tempfile.mkdtemp(), "link")
+        self.addCleanup(shutil.rmtree, os.path.dirname(link), True)
+        os.symlink(self.root, link)
+        for d in (os.path.join(os.path.realpath(self.root), PKG), os.path.join(link, PKG), PKG):
+            with self.subTest(dir=d):
+                rc, out = gate(link, ["--dir", d])
+                self.assertEqual(0, rc, out)
+        rc, out = gate(link, ["--all"])
+        self.assertEqual(0, rc, out)
+
+    def test_siblings_rows_at_least_the_registers_list_length(self):
+        def dup(rows):
+            rows["findings"][0]["siblings"] = ["sib-a", "sib-a"]
+        self.with_rows(dup)
+        self.assertFailLine(*self.check(), "review_package.siblings", "1 row(s) for a register siblings list of 2")
+        row = "| sib-a | test_sib_a |\n"
+        self.put({"siblings.md": GOOD["siblings.md"] + row})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_all_mode_sweeps_hidden_entries(self):
+        hidden = ".superpowers/sdd/fx/review/.hidden"
+        rf.write(self.root, f"{hidden}/x", "stray\n")
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx..hidden.mutation")
+        shutil.rmtree(os.path.join(self.root, hidden))
+        rf.write(self.root, ".superpowers/sdd/fx/review/.DS_Store", "x\n")
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx..DS_Store.input", "is not a directory")
+
+    def test_all_mode_review_that_is_a_file_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        rf.write(self.root, ".superpowers/sdd/zz/review", "a file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertFailLine(rc, out, "review_package.zz.input", "is not a directory")
+        self.assertNotIn("review_package.all", out)
+
+    def test_register_sibling_with_outer_whitespace_or_a_pipe_is_listable(self):
+        for sibling, cell in (("sib-a ", "sib-a"), (" sib-a", "sib-a"), ("a|b", "a\\|b")):
+            with self.subTest(sibling=sibling):
+                self.with_rows(lambda rows: rows["findings"][0].update(siblings=[sibling]))
+                self.put({"siblings.md": f"| sibling | test or finding |\n|---|---|\n| {cell} | test_x |\n"})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+
+    def test_unescaped_pipe_splits_a_cell(self):
+        self.with_rows(lambda rows: rows["findings"][0].update(siblings=["a|b"]))
+        self.put({"siblings.md": "| sibling | test or finding |\n|---|---|\n| a|b | test_x |\n"})
+        self.assertFailLine(*self.check(), "review_package.siblings", "are not 'sibling |")
+
+    def test_escaped_pipe_in_a_claims_cell(self):
+        self.put({"claims.md": GOOD["claims.md"].replace("python3 -m unittest t |", "python3 -m unittest t \\| tail |")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_table_rows_without_spaces_or_a_trailing_pipe(self):
+        head = "| sibling | test or finding |\n|---|---|\n"
+        for row in ("|sib-a|test_x|\n", "| sib-a | test_x\n", "|sib-a|test_x\n"):
+            with self.subTest(row=row):
+                self.put({"siblings.md": head + row})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+
+    def test_all_mode_skips_a_plan_without_a_review_dir(self):
+        rf.write(self.root, ".superpowers/sdd/noreview/notes.md", "notes\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual(0, rc, out)
+        self.assertNotIn("noreview", out)
+
     def test_registered_in_run_all(self):
         from tools.gates import run_all
         self.assertIn("review_package", run_all.GATES)
@@ -2316,7 +2393,6 @@ The task's ids: register rows owned by {kind: plan, plan: <plan>, task: <task>} 
 """
 from __future__ import annotations
 
-import glob
 import os
 import re
 import sys
@@ -2352,8 +2428,8 @@ def _lines(text: str) -> list[str]:
 
 def table_rows(text: str) -> list[list[str]] | None:
     """Data rows of the first Markdown table: the first '|' line is the header, the next line must be the
-    separator, and the table ends at the first line that does not start with '|'. None when there is
-    no header + separator."""
+    separator, and the table ends at the first line that does not start with '|'. Cells split on an
+    unescaped '|' only; '\\|' inside a cell is a literal '|'. None when there is no header + separator."""
     lines = [l.strip() for l in text.splitlines()]
     start = next((i for i, l in enumerate(lines) if l.startswith("|")), None)
     if start is None or start + 1 >= len(lines) or not SEPARATOR.match(lines[start + 1]):
@@ -2362,8 +2438,15 @@ def table_rows(text: str) -> list[list[str]] | None:
     for l in lines[start + 2:]:
         if not l.startswith("|"):
             break
-        rows.append([c.strip() for c in l.strip("|").split("|")])
+        rows.append(_cells(l))
     return rows
+
+
+def _cells(line: str) -> list[str]:
+    inner = line[1:]
+    if inner.endswith("|") and not inner.endswith("\\|"):
+        inner = inner[:-1]
+    return [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", inner)]
 
 
 def names_test(cmd: str, test: str) -> bool:
@@ -2438,7 +2521,7 @@ def _sibling_ok(cell: str, findings: list) -> bool:
     return bool(TEST_NAME.match(cell)) or registers.finding_by_id(findings, cell) is not None
 
 
-def _siblings(pkg, needed, findings, res, pfx):
+def _siblings(pkg, needed, longest, findings, res, pfx):
     path = os.path.join(pkg, "siblings.md")
     if not os.path.isfile(path):
         return
@@ -2448,7 +2531,9 @@ def _siblings(pkg, needed, findings, res, pfx):
         return
     bad = [r for r in rows if len(r) != 2 or not r[0] or not _sibling_ok(r[1], findings)]
     missing = [s for s in needed if not any(s == r[0] for r in rows)]
-    if bad:
+    if len(rows) < longest:
+        res.fail(f"{pfx}.siblings", f"{len(rows)} row(s) for a register siblings list of {longest}")
+    elif bad:
         res.fail(f"{pfx}.siblings", f"{len(bad)} row(s) are not 'sibling | test name or registered finding id'")
     elif missing:
         res.fail(f"{pfx}.siblings", f"register sibling(s) not listed: {', '.join(missing)}")
@@ -2497,20 +2582,23 @@ def _pin_test(row: dict):
 
 
 def _mutations(pkg, ids, findings, res, pfx):
-    needed = []
+    """(register siblings still to list, longest register siblings list among the task's findings)."""
+    needed, longest = [], 0
     for fid in ids:
         f = registers.finding_by_id(findings, fid)
         if f is None:
             res.fail(f"{pfx}.finding.{fid}", "not in docs/superpowers/state/findings.yml")
             continue
-        needed.extend(str(s) for s in (f.get("siblings") or []) if str(s) not in needed)
+        listed = [str(s).strip() for s in (f.get("siblings") or [])]
+        longest = max(longest, len(listed))
+        needed.extend(s for s in listed if s not in needed)
         path = os.path.join(pkg, f"mutation-{fid}.txt")
         if not os.path.isfile(path):
             res.fail(f"{pfx}.mutation.{fid}", f"mutation-{fid}.txt missing")
             continue
         errs = mutation_errors(_read(path), fid, _pin_test(f))
         _verdict(res, f"{pfx}.mutation.{fid}", not errs, "; ".join(errs))
-    return needed
+    return needed, longest
 
 
 def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, pfx: str) -> None:
@@ -2524,33 +2612,45 @@ def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, p
         err = diff_error(_read(diff))
         _verdict(res, f"{pfx}.diff", not err, err)
     _gates(pkg, res, pfx)
-    needed = _mutations(pkg, ids, findings, res, pfx)
-    _siblings(pkg, needed, findings, res, pfx)
+    needed, longest = _mutations(pkg, ids, findings, res, pfx)
+    _siblings(pkg, needed, longest, findings, res, pfx)
     _claims(pkg, res, pfx)
 
 
 def _layout(root: str, pkg: str) -> tuple[str, str]:
     """(plan, task) of <root>/.superpowers/sdd/<plan>/review/<task>; GateError for any other path."""
-    parts = os.path.relpath(pkg, root).split(os.sep)
+    parts = os.path.relpath(pkg, root).split(os.sep)    # both already realpath-resolved by check()
     if len(parts) != 5 or parts[:2] != SDD.split("/") or parts[3] != "review":
         raise GateError(f"--dir {pkg} is not <root>/{SDD}/<plan>/review/<task>")
     return parts[2], parts[4]
 
 
 def _check_all(root: str, findings: list, res: Result) -> None:
-    entries = sorted(glob.glob(os.path.join(root, SDD, "*", "review", "*")))
-    if not entries:
-        res.passed("review_package.all")
-    for pkg in entries:
-        parts = os.path.normpath(pkg).split(os.sep)
-        pfx = f"review_package.{parts[-3]}.{parts[-1]}"
-        if not os.path.isdir(pkg):
-            res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)} is not a directory")
+    """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included."""
+    sdd = os.path.join(root, SDD)
+    seen = False
+    for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
+        review = os.path.join(sdd, plan, "review")
+        if not os.path.lexists(review):
             continue
-        ids = task_findings(findings, pkg)
-        if not ids:
-            res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
-        check_package(root, pkg, ids, findings, res, pfx)
+        seen = True
+        if not os.path.isdir(review):
+            res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)} is not a directory")
+            continue
+        for task in sorted(os.listdir(review)):
+            _check_entry(root, os.path.join(review, task), f"review_package.{plan}.{task}", findings, res)
+    if not seen:
+        res.passed("review_package.all")
+
+
+def _check_entry(root: str, pkg: str, pfx: str, findings: list, res: Result) -> None:
+    if not os.path.isdir(pkg):
+        res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)} is not a directory")
+        return
+    ids = task_findings(findings, pkg)
+    if not ids:
+        res.fail(f"{pfx}.mutation", "no register row owns this task and no mutation-<finding-id>.txt exists")
+    check_package(root, pkg, ids, findings, res, pfx)
 
 
 def check(args: list) -> Result:
@@ -2560,13 +2660,14 @@ def check(args: list) -> Result:
     a = p.parse_args(args)
     if a.all == bool(a.dir):
         raise GateError("give exactly one of --all or --dir .superpowers/sdd/<plan>/review/<task>")
-    root = os.path.abspath(a.root or repo_root())
+    root = os.path.realpath(a.root or repo_root())
     findings = registers.load_findings(root)
     res = Result("review_package")
     if a.all:
         _check_all(root, findings, res)
         return res
-    pkg = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
+    wanted = os.path.normpath(os.path.join(root, a.dir))    # an absolute --dir wins in join
+    pkg = os.path.join(os.path.realpath(os.path.dirname(wanted)), os.path.basename(wanted))
     plan, task = _layout(root, pkg)
     if not os.path.isdir(pkg):
         raise GateError(f"--dir {a.dir}: no such directory")
@@ -2589,7 +2690,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (48 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 409 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (58 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 419 tests.
 
 - [ ] **Step 6: Commit**
 
