@@ -550,7 +550,7 @@
   owner:
     kind: plan
     plan: strict-delivery
-    task: S2-b5-fixwave
+    task: S2-b5-finalfix
   state: planned
   pin: null
   ruling: null
