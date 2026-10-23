@@ -551,10 +551,13 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-4.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix.md
   history:
   - state: open
     sha: 77b1271
@@ -562,3 +565,9 @@
   - state: planned
     sha: 77b1271
     by: session
+  - state: in-progress
+    sha: 173ae2d
+    by: controller
+  - state: pinned
+    sha: 173ae2d
+    by: controller

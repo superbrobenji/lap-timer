@@ -1,0 +1,5 @@
+finding: B5-FIX-4
+test: test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.InFlight.test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight -> PASS
+step 2 (fix reverted: perl -pi -e 's/_raw\(ledger\) == _committed\(root, rel\)/_closed((_committed(root, rel) or b"").decode())/' tools/gates/gate_plan.py puts back the same-kind-of-last-line check (any CHECKPOINT at HEAD closes the plan), restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.InFlight.test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.InFlight.test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight -> PASS
