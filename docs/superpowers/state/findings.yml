@@ -631,3 +631,35 @@
   - state: open
     sha: ce40e09
     by: session
+- id: B5-FIX-6
+  source: review
+  severity: LOW
+  class: 'gate_review_package --all PASSes (review_package.all, rc 0) when .superpowers/sdd
+    is a regular file, while <plan>/review as a regular file FAILs .input; DEC-0022
+    = absent-packages-pass: a non-directory where a directory is expected is a missing
+    input and FAILs (this block''s Task 4 code)'
+  siblings:
+  - .superpowers/sdd as a file
+  - <plan>/review as a file
+  - README and docstring state DEC-0021 and DEC-0022
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 262-280
+    sha: 2568b89
+  repro: 'in a fixture repo: rm -r .superpowers/sdd && touch .superpowers/sdd && python3
+    tools/gates/gate_review_package.py --all -> PASS review_package.all rc 0'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix2
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2568b89
+    by: final-review
+  - state: planned
+    sha: 2568b89
+    by: session

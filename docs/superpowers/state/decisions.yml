@@ -200,8 +200,8 @@
     - {label: valid-at-pin-sha, cost: "a transcript is evidence at the row's pinned history sha; verifiers replay it in a checkout of that sha; a later change to the pinned code needs no transcript update; spec D7 gains one sentence; gate_review_package and the verifier prompt text say so"}
     - {label: replay-at-tip, cost: "every later change to pinned code updates that row's transcript (tracked file, plan text) in the same commit series; the b5 fix wave writes a tip-valid B5-FIX-3 transcript now; transcripts stay runnable at HEAD for every verifier, at the cost of churn on each fix"}
   asked_at: {sha: "ce40e09", by: session}
-  answer: null
-  answered_at: null
+  answer: "valid-at-pin-sha (owner in chat, 2026-10-23: \"recommended for all\"; the session had recommended valid-at-pin-sha)"
+  answered_at: {sha: "2568b89", by: superbrobenji}
 - id: DEC-0022
   class: spec-direction
   question: "b5 second-pass review D-1 (not new in b5): spec §7 (spec:191) says 'a missing input is a FAIL, never nothing to do', while the approved S2 plan (test_all_mode_with_no_packages_passes) and README:25 make gate_review_package --all PASS when no review package exists (CI has none: packages are git-ignored), and B5-FIX-4 F1 extended that PASS to an empty review/ directory. Observation O-1: .superpowers/sdd as a regular file also PASSes, while <plan>/review as a regular file FAILs. Which binds?"
@@ -209,8 +209,8 @@
     - {label: absent-packages-pass, cost: "spec §7 gains: for a sweep over git-ignored artefacts, no artefact is not a missing input; --all stays PASS on none and on an empty review/; a non-directory where a directory is expected (.superpowers/sdd or <plan>/review as a file) FAILs .input; one small fix (O-1) in the b5 wave"}
     - {label: absent-packages-fail, cost: "--all FAILs when no package exists; run_all's default for review_package changes (CI has no packages) to a mode that is meaningful in CI, or review_package leaves run_all's default set; plan, README, tests and the CI gate list change"}
   asked_at: {sha: "ce40e09", by: session}
-  answer: null
-  answered_at: null
+  answer: "absent-packages-pass (owner in chat, 2026-10-23: \"recommended for all\"; the session had recommended absent-packages-pass)"
+  answered_at: {sha: "2568b89", by: superbrobenji}
 - id: DEC-0023
   class: model-policy
   question: "Both b5 final-review passes (final reviewer and adversarial verifier, opus) stopped on the 120k reviewer token cap (config triggers.reviewer, spec D22) with part of the branch unreviewed: the b5 branch is 31+ commits, 32 files, a 496 KB diff. Each partial pass cost a full fix wave plus another pass. How is the final review sized, now and for every later block?"
@@ -219,5 +219,5 @@
     - {label: raise-final-cap, cost: "final_reviewer and final_verifier get their own cap (e.g. 300k tokens) in config triggers and spec D22; one pair per block as today; gate_dispatch's budget check reads the role-specific cap (code change); bigger contexts, fewer agents"}
     - {label: accept-partial, cost: "a final pass that stops on budget with no open finding counts as clean for the reviewed scope; unreviewed scope is ledgered; cheapest; the rest of the branch merges without a final review"}
   asked_at: {sha: "ce40e09", by: session}
-  answer: null
-  answered_at: null
+  answer: "split-by-area (owner in chat, 2026-10-23: \"recommended for all\"; the session had recommended split-by-area)"
+  answered_at: {sha: "2568b89", by: superbrobenji}
