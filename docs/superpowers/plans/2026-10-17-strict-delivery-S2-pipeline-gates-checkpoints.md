@@ -1761,7 +1761,7 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 
 **Interfaces:**
 - Consumes: Task 1 `gate_dispatch`; Task 2 `handle_agent`; S1 `run_all`.
-- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`, and from the b4 fix wave (DEC-0012 = require-equal) `dispatch.config.model_rank`, with `dispatch.config.fable_roles` also requiring equality with the fable-minimum roles; exclusive with `--prompt`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`; `gate_decisions.REF == re.compile(r"DEC-[0-9]{4}")` (owner decision DEC-0010, the umbrella pattern: four ASCII digits, no lookahead, so `DEC-00021` cites `DEC-0002`; `gate_dispatch` consumes it as `DEC_RE`); `handle_agent` runs `["dispatch", "claims", "decisions"]` through `run_all.run` (owner decisions DEC-0009 keep `BRIEF_ROLES`, DEC-0011 follow the spec: no code change).
+- Produces: CLI mode `gate_dispatch.py --config-check` (line ids `dispatch.config.<role>`, `dispatch.config.models`, `dispatch.config.fable_roles`, `dispatch.config.max_prompt_chars`, and from the b4 fix wave (DEC-0012 = require-equal) `dispatch.config.model_rank`, with `dispatch.config.fable_roles` also requiring equality with the fable-minimum roles, and from the b5 fix wave (DEC-0018, B5-FIX-2) `dispatch.config.fable_fallback`; exclusive with `--prompt`); `run_all.GATES == ["register", "claims", "decisions", "dispatch"]`; `run_all.DEFAULT_ARGV == {"dispatch": ["--config-check"]}`; `gate_decisions.REF == re.compile(r"DEC-[0-9]{4}")` (owner decision DEC-0010, the umbrella pattern: four ASCII digits, no lookahead, so `DEC-00021` cites `DEC-0002`; `gate_dispatch` consumes it as `DEC_RE`); `handle_agent` runs `["dispatch", "claims", "decisions"]` through `run_all.run` (owner decisions DEC-0009 keep `BRIEF_ROLES`, DEC-0011 follow the spec: no code change).
 - Item A (Task 1 review F2): `check()` has no `--json` option (`run_gate` reads `--json` only as argv[0]; `test_json_flag_after_other_arguments_fails` pins it), so the docstring usage reads `Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check` (B4-FIX-1 later adds `[--subagent-type T]`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -1875,6 +1875,79 @@ class ConfigCheck(unittest.TestCase):
         self.assertEqual(1, rc, out)
         self.assertIn("FAIL dispatch.input", out)
 
+    # -- DEC-0018: the fable_fallback key (B5-FIX-2)
+    def test_config_check_passes_the_repo_fallback(self):
+        """The real config passes in whichever state the owner's switch is in (R1-1): set, its PASS line names
+        the value; absent, the off line."""
+        rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        conf = config.load(rf.REAL)
+        if "fable_fallback" in conf:
+            v = conf["fable_fallback"]
+            want = f"PASS dispatch.config.fable_fallback: {v}: the fable_roles run on {v} while Fable is unavailable (DEC-0018)"
+        else:
+            want = "PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)"
+        self.assertIn(want + "\n", out + "\n")
+        self.assertEqual(15, len(out.splitlines()), out)
+
+    def test_config_text_sets_the_key_whether_or_not_the_repo_has_it(self):
+        """R1-1: the fixtures set or remove the key themselves, so the suite does not depend on the repo's switch.
+        A copy of the real config with the key cleared (and one with it set) gives the same fixture configs."""
+        with open(os.path.join(rf.REAL, "tools", "gates", "config.yml"), encoding="utf-8") as f:
+            real = f.read()
+        bare = rf.FALLBACK_LINE.sub("", real)
+        self.assertNotIn("\nfable_fallback:", "\n" + bare)
+        for state, text in (("cleared", bare), ("set", bare + "fable_fallback: opus\n")):
+            d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
+            self.addCleanup(shutil.rmtree, d, True)
+            rf.write(d, "tools/gates/config.yml", text)
+            with self.subTest(state), mock.patch.object(rf, "REAL", d):
+                self.assertEqual(bare, rf.config_text(None))
+                self.assertEqual(bare + "fable_fallback: sonnet\n", rf.config_text("sonnet"))
+                with config_with_fallback(None) as load:
+                    self.assertNotIn("fable_fallback", load.return_value)
+                    rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+                with config_with_fallback("opus") as load:
+                    self.assertEqual("opus", load.return_value["fable_fallback"])
+        d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
+        self.addCleanup(shutil.rmtree, d, True)
+        rf.write(d, "tools/gates/config.yml", bare + "fable_fallback: opus\nfable_fallback: opus\n")
+        with mock.patch.object(rf, "REAL", d), self.assertRaisesRegex(AssertionError, "holds 2 fable_fallback lines"):
+            rf.config_text(None)
+
+    def test_config_check_passes_an_absent_fallback(self):
+        with config_with_fallback(None) as load:
+            self.assertNotIn("fable_fallback", load.return_value)
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+        self.assertEqual(15, len(out.splitlines()), out)
+
+    def test_config_check_fails_an_invalid_fallback(self):
+        for value in ("sonnet", "haiku", "fable", "gpt", "null", "[opus]", "3", "Opus"):
+            with self.subTest(value), config_with_fallback(value):
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback ", out)
+                self.assertIn("must be a model_rank model ranked at least opus and below fable", out)
+                self.assertNotIn("PASS dispatch.config.fable_fallback", out)
+
+    def test_config_check_ranks_the_fallback_by_model_rank(self):
+        """A model_rank that ranks sonnet with opus admits sonnet; one that ranks opus with fable admits nothing."""
+        with config_with_fallback("sonnet") as load:
+            load.return_value["model_rank"] = {"haiku": 1, "sonnet": 3, "opus": 3, "fable": 4}
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("PASS dispatch.config.fable_fallback: sonnet: ", out)
+        with config_with_fallback("opus") as load:
+            load.return_value["model_rank"] = {"haiku": 1, "sonnet": 2, "opus": 4, "fable": 4}
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback 'opus' ", out)
+        with config_with_fallback("opus") as load:    # no fable rank: fail closed, no KeyError
+            load.return_value["model_rank"].pop("fable")
+            rc, out = gate(rf.REAL, ["--config-check"])
+        self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback 'opus' ", out)
+
     def test_run_all_runs_dispatch_in_config_check_mode(self):
         from tools.gates import run_all
         self.assertIn("dispatch", run_all.GATES)
@@ -1934,8 +2007,9 @@ Expected: FAIL — `--config-check` is an unknown argument (`FAIL dispatch.input
 
 ```python
 def check_config(conf: dict, res: Result) -> None:
-    """CI mode: the model map, fable_roles, model_rank and the prompt cap agree with the dispatch grammar
-    (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders haiku < sonnet < opus < fable)."""
+    """CI mode: the model map, fable_roles, model_rank, the prompt cap and the optional fable_fallback agree with
+    the dispatch grammar (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders
+    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, ranks at least opus and below fable)."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -1973,6 +2047,14 @@ def check_config(conf: dict, res: Result) -> None:
         res.passed("dispatch.config.max_prompt_chars")
     else:
         res.fail("dispatch.config.max_prompt_chars", f"must be a positive integer, got {cap!r}")
+    err = fallback_error(conf)
+    if err:
+        res.fail("dispatch.config.fable_fallback", err)
+    elif "fable_fallback" in conf:
+        res.passed("dispatch.config.fable_fallback", f"{conf['fable_fallback']}: the fable_roles run on "
+                   f"{conf['fable_fallback']} while Fable is unavailable (DEC-0018)")
+    else:
+        res.passed("dispatch.config.fable_fallback", "absent: the fallback is off (DEC-0018)")
 ```
 and replace the body of `check()` with:
 ```python
