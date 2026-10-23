@@ -1716,7 +1716,7 @@ In `tools/gates/README.md` replace the sentence "the `Agent` branch (the dispatc
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks -v`
-Expected: `OK` (60 S1 hook tests, one updated, and the ten new ones: 70). Then `python3 tools/gates/run_all.py` → only `PASS`.
+Expected: `OK` (60 S1 hook tests, one updated, and the ten new ones: 70; the block above is the tip form, which also holds the three tests of the b4 fix wave B4-FIX-1 and the two of the b5 fix wave B5-FIX-2: 75). Then `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
