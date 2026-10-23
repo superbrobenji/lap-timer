@@ -206,6 +206,12 @@ class InFlight(unittest.TestCase):
             f.write(LEDGER + "- T2 DONE z\nCHECKPOINT b1 abc1234\n")
         self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
 
+    def test_uncommitted_blank_line_after_a_committed_checkpoint_is_in_flight(self):
+        # B5-FIX-4 V-3: byte-equal, not equal after stripping; the last non-empty line is still the CHECKPOINT
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        self.append(root, "\n")
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
+
     def test_hyphen_compound_pin_titles_fail_through_main(self):
         # B5-FIX-4 V-4: a hyphen joins a compound, it is not a word boundary for the pin step
         for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin"):
