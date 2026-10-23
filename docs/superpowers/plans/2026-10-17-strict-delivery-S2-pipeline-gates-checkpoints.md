@@ -16,7 +16,7 @@
 - Block = PR, at most 3 tasks per block; a block ends in a clean tree (spec §3.4); one block per context; the session stops after each block for the owner's `/clear` (spec §3.5).
 - Merge only on all-green (every CI job incl. advisory) under a per-plan grant entry `grant:<plan>` in `decisions.yml` (spec D22). The grant for this plan is decision `DEC-0001`.
 - Tags: `strict-delivery-b4`, `strict-delivery-b5`, `strict-delivery-b6` on the squash commits.
-- Model map (spec §5): controllers opus; implementers sonnet (haiku only for transcription of complete code); task reviewers opus; final branch reviewer opus; final adversarial verifier Fable; exception reviewer Fable. Never any other Fable use.
+- Model map (spec §5): controllers opus; implementers sonnet (haiku only for transcription of complete code); task reviewers opus; final branch reviewer opus; final adversarial verifier Fable; exception reviewer Fable (both opus while the DEC-0018 fallback is on). Never any other Fable use.
 - Triggers (spec §3.1): controller 3 tasks / 250k tokens / 90 min; implementer 1 task / 150k; reviewer 1 review / 120k; any 429 → checkpoint at the task boundary.
 - Zero warnings; zero gate failures at every commit once the gate exists; every Python script exits non-zero on any failure path; a missing input is a FAIL never "nothing to do" (spec §7).
 - Pinned = production-path test + mutation transcript (spec D7). For gate scripts "production path" = the script's `main()` invoked on a fixture, never a helper called in isolation.
@@ -1410,7 +1410,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
-Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
 
 - [ ] **Step 6: Commit**
 
@@ -2115,7 +2115,7 @@ Also change the module docstring's usage line to:
 `Usage: gate_dispatch.py [--json] --prompt P|- [--tool-model M] [--prompts-dir D] | [--json] --config-check`
 (the b4 fix wave B4-FIX-1 later adds `[--subagent-type T]` after `[--tool-model M]` and wraps the line; the Task 1 Step 4 block shows that tip form).
 
-- [ ] **Step 4: Register in run_all** — in `tools/gates/run_all.py` set:
+- [ ] **Step 4: Register in run_all** — in `tools/gates/run_all.py` set (Tasks 4 and 6 extend the list; at the tip it names six gates):
 ```python
 GATES = ["register", "claims", "decisions", "dispatch"]
 # argv an S2+ gate gets when run() is handed nothing for it: the gate's CI-meaningful mode

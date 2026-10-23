@@ -184,3 +184,12 @@
   asked_at: {sha: "11a632e", by: session}
   answer: "b5-fixwave (owner in chat, 2026-10-19: \"dec-0019 b5-fixwave\"; the session had recommended b5-fixwave)"
   answered_at: {sha: "4bf208e", by: superbrobenji}
+- id: DEC-0020
+  class: finding-class
+  question: "The b5 final reviewer asks the owner to confirm two session readings: (D1) the DEC-0016 field grammar the session wrote into the round-4 brief and gate_plan now enforces: per task a '**Siblings:** none -- <reason>' or comma list holding every register sibling of the task's findings, a '**Gates:**' list of run_all or gate names that exist or are created by this or an earlier task, and a pin step (a step whose title holds the whole word pin and whose body names a test_<module>::test_<name>) when the task has findings; (D2) the owner's 'dec-0017 one-line-per-item' recorded as the option one-path-per-item (exactly one backticked path per Files item). Confirm both?"
+  options:
+    - {label: confirm-both, cost: "no change; the grammar and the reading stand as shipped and ledgered"}
+    - {label: change, cost: "the owner states the intended grammar or reading; one more fix round in b5 rewrites gate_plan, its tests, the S2 plan fields and README to it"}
+  asked_at: {sha: "77b1271", by: session}
+  answer: null
+  answered_at: null

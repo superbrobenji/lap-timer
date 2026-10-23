@@ -511,3 +511,54 @@
   - state: pinned
     sha: 73bdf9f77e2eb68e33fb17f79a1c1088e9fe3193
     by: controller
+- id: B5-FIX-4
+  source: review
+  severity: MEDIUM
+  class: 'b5 final review and adversarial verify findings in this block''s own code:
+    V-1 make_review_package pins only color.ui=never, so a caller''s color.diff=always
+    (or color.log, color.status) puts ANSI codes in diff.patch and commits.txt while
+    the helper reports PASS rc 0 and gate_review_package then FAILs (make_review_package.py:35,
+    reproduced); V-2 core.abbrev=4 shas fail COMMIT_LINE and a UTF-16 i18n.logOutputEncoding
+    drops subjects, against the helper docstring (make_review_package.py:9-10, gate_review_package.py:28);
+    V-3 plans_in_flight treats a plan as closed when the working-tree ledger ends
+    in an uncommitted CHECKPOINT b<N+1> line and HEAD ends in CHECKPOINT b<N> (gate_plan.py:501,
+    reproduced; Review Focus 5 class); V-4 the whole-word pin title still accepts
+    ''pin-less'' (PIN_TITLE); V-5 the SD-S2-T4 mutation transcript''s step 2 names
+    no runnable revert command; F1 an empty .superpowers/sdd/<plan>/review/ directory
+    FAILs review_package.empty and run_all rc 1, against README:25 ''no package is
+    a PASS'', untested (gate_review_package.py:262-277)'
+  siblings:
+  - V-1 color.* pins
+  - V-2 abbrev and log encoding
+  - V-3 committed vs working CHECKPOINT block number
+  - V-4 pin title hyphen forms
+  - V-5 SD-S2-T4 transcript step 2
+  - F1 empty review dir
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: 9-35
+    sha: 77b1271
+  - file: tools/gates/gate_plan.py
+    lines: 487-503
+    sha: 77b1271
+  - file: tools/gates/gate_review_package.py
+    lines: 262-277
+    sha: 77b1271
+  repro: git -c color.ui=never -c color.diff=always diff -U1 fe3f146..d533315 | head
+    -1 -> ESC[1mdiff --git; ledger HEAD ends CHECKPOINT b5, working tree appends CHECKPOINT
+    b6 -> gate_plan --in-flight prints no plan.strict-delivery line
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fixwave
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 77b1271
+    by: final-review
+  - state: planned
+    sha: 77b1271
+    by: session
