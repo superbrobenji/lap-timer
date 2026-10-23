@@ -445,10 +445,13 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-fixwave
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_dispatch::test_fallback_on_lets_a_fable_role_run_on_opus
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-2.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-fixwave.md
   history:
   - state: open
     sha: 11a632e
@@ -456,6 +459,12 @@
   - state: planned
     sha: 4bf208e
     by: session
+  - state: in-progress
+    sha: 73bdf9f77e2eb68e33fb17f79a1c1088e9fe3193
+    by: controller
+  - state: pinned
+    sha: 73bdf9f77e2eb68e33fb17f79a1c1088e9fe3193
+    by: controller
 - id: B5-FIX-3
   source: review
   severity: MEDIUM
@@ -482,10 +491,13 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-fixwave
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_pin_is_a_whole_word_in_the_title
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-3.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-fixwave.md
   history:
   - state: open
     sha: c73b3ba
@@ -493,3 +505,9 @@
   - state: planned
     sha: c73b3ba
     by: session
+  - state: in-progress
+    sha: 73bdf9f77e2eb68e33fb17f79a1c1088e9fe3193
+    by: controller
+  - state: pinned
+    sha: 73bdf9f77e2eb68e33fb17f79a1c1088e9fe3193
+    by: controller

@@ -1,0 +1,5 @@
+finding: B5-FIX-3
+test: test_pin_is_a_whole_word_in_the_title
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.Branches.test_pin_is_a_whole_word_in_the_title -> PASS
+step 2 (fix reverted: perl -pi -e 's/re\.compile\(r"\\bpin\\b", re\.I\)/re.compile(r"pin", re.I)/' tools/gates/gate_plan.py makes PIN_TITLE the bare substring again, restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.Branches.test_pin_is_a_whole_word_in_the_title -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.Branches.test_pin_is_a_whole_word_in_the_title -> PASS

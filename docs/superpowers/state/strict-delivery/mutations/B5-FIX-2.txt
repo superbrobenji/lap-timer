@@ -1,0 +1,5 @@
+finding: B5-FIX-2
+test: test_fallback_on_lets_a_fable_role_run_on_opus
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fallback_on_lets_a_fable_role_run_on_opus -> PASS
+step 2 (fix reverted: perl -pi -e 's/if rank\[model\] < rank\[need\] and role in fable and "fable_fallback" in conf and model == conf\["fable_fallback"\]:/if False:/' tools/gates/gate_dispatch.py turns the DEC-0018 fallback branch off, restored by git checkout -- tools/gates/gate_dispatch.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fallback_on_lets_a_fable_role_run_on_opus -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_fallback_on_lets_a_fable_role_run_on_opus -> PASS
