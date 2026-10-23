@@ -60,8 +60,11 @@ SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
 GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
-# B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping") and not a hyphen compound ("pin-less", "non-pin")
-PIN_TITLE = re.compile(r"(?<![A-Za-z0-9_-])pin(?![A-Za-z0-9_-])", re.I)
+# B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping", "pin\u00f1") and not a hyphen compound ("pin-less",
+# "non-pin"): no Unicode word character (\w), combining mark (U+0300-U+036F), hyphen-minus, soft hyphen (U+00AD),
+# hyphen (U+2010) or non-breaking hyphen (U+2011) on either side; dashes (U+2012-U+2015) separate words and stay out
+PIN_JOIN = r"\w\-\u00ad\u2010\u2011\u0300-\u036f"
+PIN_TITLE = re.compile(rf"(?<![{PIN_JOIN}])pin(?![{PIN_JOIN}])", re.I)
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")

@@ -215,8 +215,8 @@ list; any other value starting with `none`, in any case, not followed by a lette
 entries, every `siblings` entry of the register rows the task's Findings name (an id with no row adds nothing:
 `plan.id.<id>` fails it), else `FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each exactly `run_all` or an X for which `tools/gates/gate_X.py`
 is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
-ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on
-either side: `Pin step`, `pin:` and `pin.` count, `Mapping`, `Spinner`, `pinned`, `pin-less` and `non-pin` do not) and whose body (up to the next
+ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, combining mark or hyphen (`-`, U+00AD,
+U+2010, U+2011) joined on either side: `Pin step`, `pin:` and `pin.` count, `Mapping`, `Spinner`, `pinned`, `pin-less` and `non-pin` do not) and whose body (up to the next
 step or heading, code included) names a test named `test_<module>::test_<name>`,
 else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
 indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. Per-task line ids have one form (B5-FIX-3),

@@ -214,7 +214,8 @@ class InFlight(unittest.TestCase):
 
     def test_hyphen_compound_pin_titles_fail_through_main(self):
         # B5-FIX-4 V-4: a hyphen joins a compound, it is not a word boundary for the pin step
-        for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin"):
+        for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin", "pin\u00f1 run", "\u00f1pin run",
+                      "pin\u2010less run", "non\u2011pin step", "pin\u00adless run", "pin\u0303 run"):
             with self.subTest(title):
                 root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.addCleanup(shutil.rmtree, root, True)
@@ -222,7 +223,8 @@ class InFlight(unittest.TestCase):
                 self.assertEqual(1, rc, out)
                 self.assertRegex(out, r"(?m)^FAIL plan\.fx\.pin\.1: ")
                 self.assertIn("PASS plan.fx.pin.2", out)
-        for title in ("Pin step", "pin: the row", "Mutation run and pin", "Mutation run, pin."):
+        for title in ("Pin step", "pin: the row", "Mutation run and pin", "Mutation run, pin.", "Mutation run \u2014 pin",
+                      "pin \u2013 the row", "\u00abpin\u00bb"):
             with self.subTest(title):
                 root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.addCleanup(shutil.rmtree, root, True)
@@ -732,8 +734,8 @@ class Branches(unittest.TestCase):
             lines = [l for l in f.read().splitlines()
                      if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
         self.assertEqual(1, len(lines))
-        self.assertIn("a step whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on "
-                      "either side", lines[0])
+        self.assertIn("a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, "
+                      "combining mark or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side", lines[0])
         self.assertIn("B5-FIX-3, B5-FIX-4", lines[0])
         self.assertNotIn("title contains `pin`", lines[0])
 
