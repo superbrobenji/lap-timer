@@ -571,3 +571,63 @@
   - state: pinned
     sha: 173ae2d
     by: controller
+- id: B5-FIX-5
+  source: review
+  severity: LOW
+  class: 'gate_plan.plans_in_flight (this block''s Task 6 code, gate_plan.py:493-511)
+    reads an uncommitted ledger change as ''not in flight'' in two cases the b5 second-pass
+    verifier reproduced: (a) a ledger deleted in the working tree while it ends in
+    CHECKPOINT at HEAD (the working-tree glob never sees it); (b) extra ledger lines
+    staged in the index while the working file equals HEAD (only working bytes are
+    compared with HEAD)'
+  siblings:
+  - ledger deleted in the working tree
+  - ledger lines staged only
+  - ledger absent at HEAD
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 493-511
+    sha: ce40e09
+  repro: commit a ledger ending CHECKPOINT b5; then (a) rm it, or (b) append a line,
+    git add it, git checkout -- it; gate_plan --in-flight prints no plan.<slug> line
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix2
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: ce40e09
+    by: final-review
+  - state: planned
+    sha: ce40e09
+    by: session
+- id: B5-U3
+  source: review
+  severity: MEDIUM
+  class: the commit-time gates (git pre-commit hook and the PreToolUse Bash branch
+    for git commit) run only gate_register and gate_claims, so a commit that turns
+    another installed gate red is not refused (6ea362f landed with run_all red); S2
+    Global Constraints require zero gate failures at every commit once the gate exists
+    (from b3; not caused by b5)
+  siblings: []
+  cites:
+  - file: tools/gates/hooks/pre_tool_use.py
+    lines: '77'
+    sha: ce40e09
+  repro: 'register a row whose owner.task already has a complete package, stage, commit:
+    the commit succeeds while run_all prints FAIL review_package.<plan>.<task>.mutation.<id>'
+  owner:
+    kind: issue
+    number: 147
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: ce40e09
+    by: session

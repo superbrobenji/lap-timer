@@ -191,5 +191,33 @@
     - {label: confirm-both, cost: "no change; the grammar and the reading stand as shipped and ledgered"}
     - {label: change, cost: "the owner states the intended grammar or reading; one more fix round in b5 rewrites gate_plan, its tests, the S2 plan fields and README to it"}
   asked_at: {sha: "77b1271", by: session}
+  answer: "confirm-both (owner in chat, 2026-10-23: \"use recommended for both\"; the session had proposed confirm-both)"
+  answered_at: {sha: "ce40e09", by: superbrobenji}
+- id: DEC-0021
+  class: spec-direction
+  question: "b5 second-pass review F-a: the pinned transcript docs/superpowers/state/strict-delivery/mutations/B5-FIX-3.txt step 2 (a perl revert of the pin-title regex) matches nothing at the tip, because the later B5-FIX-4 fix rewrote that line; at the pin sha 1bd14e3 it still kills the test (FAILED, 8). Spec D7 says pinned = production-path test + mutation transcript but does not say at which commit a transcript must replay. What binds for every pinned row?"
+  options:
+    - {label: valid-at-pin-sha, cost: "a transcript is evidence at the row's pinned history sha; verifiers replay it in a checkout of that sha; a later change to the pinned code needs no transcript update; spec D7 gains one sentence; gate_review_package and the verifier prompt text say so"}
+    - {label: replay-at-tip, cost: "every later change to pinned code updates that row's transcript (tracked file, plan text) in the same commit series; the b5 fix wave writes a tip-valid B5-FIX-3 transcript now; transcripts stay runnable at HEAD for every verifier, at the cost of churn on each fix"}
+  asked_at: {sha: "ce40e09", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0022
+  class: spec-direction
+  question: "b5 second-pass review D-1 (not new in b5): spec §7 (spec:191) says 'a missing input is a FAIL, never nothing to do', while the approved S2 plan (test_all_mode_with_no_packages_passes) and README:25 make gate_review_package --all PASS when no review package exists (CI has none: packages are git-ignored), and B5-FIX-4 F1 extended that PASS to an empty review/ directory. Observation O-1: .superpowers/sdd as a regular file also PASSes, while <plan>/review as a regular file FAILs. Which binds?"
+  options:
+    - {label: absent-packages-pass, cost: "spec §7 gains: for a sweep over git-ignored artefacts, no artefact is not a missing input; --all stays PASS on none and on an empty review/; a non-directory where a directory is expected (.superpowers/sdd or <plan>/review as a file) FAILs .input; one small fix (O-1) in the b5 wave"}
+    - {label: absent-packages-fail, cost: "--all FAILs when no package exists; run_all's default for review_package changes (CI has no packages) to a mode that is meaningful in CI, or review_package leaves run_all's default set; plan, README, tests and the CI gate list change"}
+  asked_at: {sha: "ce40e09", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0023
+  class: model-policy
+  question: "Both b5 final-review passes (final reviewer and adversarial verifier, opus) stopped on the 120k reviewer token cap (config triggers.reviewer, spec D22) with part of the branch unreviewed: the b5 branch is 31+ commits, 32 files, a 496 KB diff. Each partial pass cost a full fix wave plus another pass. How is the final review sized, now and for every later block?"
+  options:
+    - {label: split-by-area, cost: "the final review of a block is split into areas (one per task plus one for session-side and plan/spec text), each area a final_reviewer and a final_verifier within the 120k cap; about 4 areas x 2 agents for b5; no config or spec change beyond one sentence in the umbrella checkpoint protocol; more agents, each finishing"}
+    - {label: raise-final-cap, cost: "final_reviewer and final_verifier get their own cap (e.g. 300k tokens) in config triggers and spec D22; one pair per block as today; gate_dispatch's budget check reads the role-specific cap (code change); bigger contexts, fewer agents"}
+    - {label: accept-partial, cost: "a final pass that stops on budget with no open finding counts as clean for the reviewed scope; unreviewed scope is ledgered; cheapest; the rest of the branch merges without a final review"}
+  asked_at: {sha: "ce40e09", by: session}
   answer: null
   answered_at: null
