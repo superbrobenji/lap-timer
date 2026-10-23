@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import glob
 import os
 import posixpath
 import re
@@ -90,6 +89,7 @@ PLACEHOLDERS = [re.compile(r"\bT" r"BD\b"), re.compile(r"\bTO" r"DO\b")] + [re.c
     r"add valid" r"ation", r"handle edge cas" r"es", r"write tests for the abo" r"ve",
     r"similar to tas" r"k \d+")]
 LEDGER_PLAN = re.compile(r"^plan: (\S+)\s*$")
+LEDGER_PATH = re.compile(r"^" + re.escape(STATE) + r"/([^/]+)/ledger\.md$")
 CHECKPOINT_LINE = re.compile(r"^CHECKPOINT b(\d+)\b")
 QUERY_KEYS = {
     "plan": lambda f: (f.get("owner") or {}).get("plan"),
@@ -494,34 +494,59 @@ def _closed(text: str) -> bool:
     return bool(lines) and bool(CHECKPOINT_LINE.match(lines[-1]))
 
 
-def _committed(root: str, rel: str) -> bytes | None:
-    """The ledger's bytes at HEAD; None when there is no HEAD or the file is not in it."""
-    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, check=False)
+def _git_bytes(root: str, spec: str) -> bytes | None:
+    """`git show <spec>` (HEAD:<rel> or :<rel>, the stage-0 index entry); None when it fails (no HEAD, not
+    in that tree or index, an unmerged entry, not a repository)."""
+    r = subprocess.run(["git", "show", spec], cwd=root, capture_output=True, check=False)
     return r.stdout if r.returncode == 0 else None
 
 
-def _raw(path: str) -> bytes:
+def _git_ledgers(root: str, cmd: list) -> set:
+    """State-dir names of the <STATE>/<name>/ledger.md paths a NUL-separated git listing prints."""
+    r = subprocess.run(["git", *cmd, "-z", "--", STATE], cwd=root, capture_output=True, check=False)
+    names = set()    # a failing listing (no HEAD, not a repository) prints nothing on stdout
+    for path in r.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        m = LEDGER_PATH.match(path)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def _work_ledgers(state: str) -> set:
+    return {n for n in os.listdir(state) if os.path.isfile(os.path.join(state, n, "ledger.md"))}
+
+
+def _raw(path: str) -> bytes | None:
+    if not os.path.isfile(path):
+        return None
     with open(path, "rb") as f:
         return f.read()
 
 
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
-    """(state-dir name, plan path) for every ledger that is in flight: closed only when the working-tree
-    ledger is byte-equal to the HEAD ledger and ends in a CHECKPOINT line (B5-FIX-4: an uncommitted
-    'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight)."""
+    """(state-dir name, plan path) for every ledger that is in flight. A ledger is any <STATE>/<name>/ledger.md
+    in the working tree, the index or HEAD (B5-FIX-5: a ledger deleted in the working tree or the index is
+    still seen). It is closed only when all three copies exist, are byte-equal and end in a CHECKPOINT
+    line (B5-FIX-4: an uncommitted 'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight;
+    B5-FIX-5: a copy missing from any of the three, or lines staged while the working tree equals HEAD, is
+    in flight; a ledger absent at HEAD is in flight). Line 1 'plan: <plan file>' is read from the newest
+    copy that exists: the working tree, else the index, else HEAD (the copy the author is changing)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
+    names = (_work_ledgers(state) | _git_ledgers(root, ["ls-files"])
+             | _git_ledgers(root, ["ls-tree", "-r", "--name-only", "HEAD"]))
     out = []
-    for ledger in sorted(glob.glob(os.path.join(state, "*", "ledger.md"))):
-        name = os.path.basename(os.path.dirname(ledger))
-        rel = os.path.relpath(ledger, root).replace(os.sep, "/")
-        text = _read(ledger)
+    for name in sorted(names):
+        rel = f"{STATE}/{name}/ledger.md"
+        copies = [_raw(os.path.join(root, rel)), _git_bytes(root, f":{rel}"), _git_bytes(root, f"HEAD:{rel}")]
+        newest = next((c for c in copies if c is not None), b"")    # b"": only an unmerged index entry
+        text = newest.decode("utf-8")
         first = text.splitlines()[0] if text else ""
         m = LEDGER_PLAN.match(first)
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
-        if not (_closed(text) and _raw(ledger) == _committed(root, rel)):
+        if not (_closed(text) and copies[0] == copies[1] == copies[2]):
             out.append((name, m.group(1)))
     return out
 

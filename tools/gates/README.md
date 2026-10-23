@@ -22,7 +22,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
 | `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable), the prompt cap and the optional `fable_fallback` (DEC-0018: absent = off, else a model ranked at least opus and below fable) agree with the dispatch grammar; `--prompt`: one dispatch prompt, where a `fable_roles` role on the `fable_fallback` model is `PASS dispatch.model.fallback` (see the gate_dispatch section) |
-| `gate_review_package.py` | `--all` (run_all's default; no package, an empty `review/` included, is `PASS review_package.all`; a non-directory entry such as `.DS_Store` is a FAIL) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list, a claims table with no FAIL row |
+| `gate_review_package.py` | `--all` (run_all's default; DEC-0022: no package is not a missing input, so no `.superpowers/sdd`, no `review/` or an empty one is `PASS review_package.all`, while a non-directory where a directory is expected FAILs: `.superpowers` or `.superpowers/sdd` as `review_package.input`, `<plan>/review` as `review_package.<plan>.input`, a `review/` entry such as `.DS_Store` as `review_package.<plan>.<entry>.input`) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list, a claims table with no FAIL row; a pinned transcript is evidence at its row's pinned history sha and replays in a checkout of that sha (DEC-0021) |
 | `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` (one backticked path per item), `**Findings:**`, `**Siblings:**`, `**Gates:**` and a pin step per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
 
 `run_all.py` runs every installed gate (`GATES`) and aggregates the lines with a `<gate>.`
@@ -224,7 +224,9 @@ indent relative to the list item, closed by the same character, a run at least a
 `siblings`, `gates` and `pin`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
-ends a block. A plan is in flight unless the working-tree ledger is byte-equal to the ledger in `HEAD` and its last
-non-empty line is a `CHECKPOINT` line (an uncommitted ledger, or uncommitted lines ending in a later `CHECKPOINT b<N+1>`,
-is in flight; B5-FIX-4); `--in-flight` checks every plan in flight, and a ledger without the `plan:` line is
-`FAIL plan.input`.
+ends a block. A ledger is any `<state>/<name>/ledger.md` in the working tree, the index or `HEAD`. A plan is in flight
+unless all three copies exist, are byte-equal and their last non-empty line is a `CHECKPOINT` line (an uncommitted
+ledger, or uncommitted lines ending in a later `CHECKPOINT b<N+1>`, is in flight: B5-FIX-4; a ledger deleted in the
+working tree or the index, lines staged while the working tree equals `HEAD`, or a ledger absent at `HEAD` is in
+flight: B5-FIX-5); line 1 is read from the working tree, else the index, else `HEAD`; `--in-flight` checks every plan
+in flight, and a ledger without the `plan:` line is `FAIL plan.input`.

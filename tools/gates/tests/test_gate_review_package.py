@@ -443,6 +443,42 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertNotIn("noreview", out)
 
+    # --- B5-FIX-6 (DEC-0022 absent-packages-pass: a non-directory where a directory is expected FAILs) ---
+    def test_all_mode_sdd_that_is_a_file_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd"))
+        rf.write(self.root, ".superpowers/sdd", "a file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.input: .superpowers/sdd is not a directory\n"), (rc, out))
+
+    def test_all_mode_superpowers_that_is_a_file_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers"))
+        rf.write(self.root, ".superpowers", "a file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.input: .superpowers is not a directory\n"), (rc, out))
+
+    def test_all_mode_dangling_sdd_symlink_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd"))
+        os.symlink("nowhere", os.path.join(self.root, ".superpowers/sdd"))
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.input: .superpowers/sdd is not a directory\n"), (rc, out))
+
+    def test_all_mode_without_superpowers_or_sdd_passes(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd"))
+        self.assertEqual((0, "PASS review_package.all\n"), gate(self.root, ["--all"]))
+        shutil.rmtree(os.path.join(self.root, ".superpowers"))
+        self.assertEqual((0, "PASS review_package.all\n"), gate(self.root, ["--all"]))
+
+    def test_readme_and_docstring_state_dec_0021_and_dec_0022(self):
+        with open(os.path.join(rf.REAL, "tools/gates/README.md"), encoding="utf-8") as f:
+            row = next(l for l in f if l.startswith("| `gate_review_package.py` |"))
+        for text in (row, grp.__doc__):
+            with self.subTest(text=text[:40]):
+                self.assertIn("DEC-0021", text)
+                self.assertIn("DEC-0022", text)
+                self.assertIn("no package is not a missing input", text)
+                self.assertIn("a non-directory where a directory is expected FAILs", text)
+                self.assertIn("evidence at its row's pinned history sha", text)
+
     # --- fix round 3 (R2-R4 of task-4-review3.md) ---
     def both_modes(self, dir_arg=PKG):
         for argv in (["--dir", dir_arg], ["--all"]):

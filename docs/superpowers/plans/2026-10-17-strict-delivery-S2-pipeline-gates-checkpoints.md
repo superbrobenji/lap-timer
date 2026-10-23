@@ -2751,6 +2751,42 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertNotIn("noreview", out)
 
+    # --- B5-FIX-6 (DEC-0022 absent-packages-pass: a non-directory where a directory is expected FAILs) ---
+    def test_all_mode_sdd_that_is_a_file_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd"))
+        rf.write(self.root, ".superpowers/sdd", "a file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.input: .superpowers/sdd is not a directory\n"), (rc, out))
+
+    def test_all_mode_superpowers_that_is_a_file_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers"))
+        rf.write(self.root, ".superpowers", "a file\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.input: .superpowers is not a directory\n"), (rc, out))
+
+    def test_all_mode_dangling_sdd_symlink_fails(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd"))
+        os.symlink("nowhere", os.path.join(self.root, ".superpowers/sdd"))
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.input: .superpowers/sdd is not a directory\n"), (rc, out))
+
+    def test_all_mode_without_superpowers_or_sdd_passes(self):
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd"))
+        self.assertEqual((0, "PASS review_package.all\n"), gate(self.root, ["--all"]))
+        shutil.rmtree(os.path.join(self.root, ".superpowers"))
+        self.assertEqual((0, "PASS review_package.all\n"), gate(self.root, ["--all"]))
+
+    def test_readme_and_docstring_state_dec_0021_and_dec_0022(self):
+        with open(os.path.join(rf.REAL, "tools/gates/README.md"), encoding="utf-8") as f:
+            row = next(l for l in f if l.startswith("| `gate_review_package.py` |"))
+        for text in (row, grp.__doc__):
+            with self.subTest(text=text[:40]):
+                self.assertIn("DEC-0021", text)
+                self.assertIn("DEC-0022", text)
+                self.assertIn("no package is not a missing input", text)
+                self.assertIn("a non-directory where a directory is expected FAILs", text)
+                self.assertIn("evidence at its row's pinned history sha", text)
+
     # --- fix round 3 (R2-R4 of task-4-review3.md) ---
     def both_modes(self, dir_arg=PKG):
         for argv in (["--dir", dir_arg], ["--all"]):
@@ -2827,6 +2863,11 @@ Extends superpowers' subagent-driven-development review-package (commits + diff)
 mutation-<finding-id>.txt per finding the task closes, siblings.md and claims.md.
 Usage: gate_review_package.py [--json] --dir .superpowers/sdd/<plan>/review/<task> | [--json] --all
 The task's ids: register rows owned by {kind: plan, plan: <plan>, task: <task>} plus mutation-<id>.txt files.
+--all (DEC-0022, absent-packages-pass): no package is not a missing input (no .superpowers/sdd, no review/ or
+only empty ones is one PASS review_package.all), but a non-directory where a directory is expected FAILs
+(.superpowers or .superpowers/sdd: review_package.input; <plan>/review or a review/ entry: <prefix>.input).
+A mutation transcript is evidence at its row's pinned history sha and replays in a checkout of that sha;
+a later change to the pinned code needs no transcript update (DEC-0021).
 """
 from __future__ import annotations
 
@@ -3066,7 +3107,13 @@ def _layout(roots: tuple, wanted: str) -> tuple[str, str]:
 
 def _check_all(root: str, findings: list, res: Result) -> None:
     """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included; no entry at all
-    (no review/, or only empty ones: B5-FIX-4 F1) is one PASS review_package.all."""
+    (no review/, or only empty ones: B5-FIX-4 F1) is one PASS review_package.all; .superpowers or
+    .superpowers/sdd that exists but is not a directory is FAIL review_package.input (B5-FIX-6, DEC-0022)."""
+    for rel in (".superpowers", SDD):    # DEC-0022: a non-directory where a directory is expected
+        path = os.path.join(root, rel)
+        if os.path.lexists(path) and not os.path.isdir(path):
+            res.fail("review_package.input", f"{rel} is not a directory")
+            return
     sdd = os.path.join(root, SDD)
     seen = False
     for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
@@ -3132,7 +3179,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4; 69 after the b5 fix wave B5-FIX-6); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -3802,7 +3849,7 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 - Consumes: S1 lib; `repo_fixture`.
 - Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool, creates: list[str], siblings: list[str] | None, siblings_value: str, siblings_error: str, gates: list[str] | None, gates_error: str, steps: list[Step]}`, `Step.{title: str, body: list[str]}`, `Plan.{headers, tasks, placeholders, block_errors, fence_error}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
 - **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.files.N`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (lower-case none, a non-empty reason after ` -- `; the empty list) (`FAIL plan.siblings.N`), `**Gates:**` names exactly `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, mark (any category M) or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less", "non-pin" and "pinñ" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>` (`FAIL plan.pin.N`). Per-task line ids have one form (B5-FIX-3): `plan.files.N`, `plan.mode.N`, `plan.findings.N`, `plan.siblings.N`, `plan.gates.N`, `plan.pin.N` (`plan.<slug>.<check>.N` under `--in-flight`).
-- **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** unless the working-tree ledger is byte-equal to the `HEAD` ledger **and** its last non-empty line is a `CHECKPOINT` line (an uncommitted ledger, or uncommitted lines after a committed `CHECKPOINT b<N>` ending in `CHECKPOINT b<N+1>`, is in flight; B5-FIX-4).
+- **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** unless its working-tree, index and `HEAD` ledgers all exist, are byte-equal **and** end in a `CHECKPOINT` line as the last non-empty line (an uncommitted ledger, or uncommitted lines after a committed `CHECKPOINT b<N>` ending in `CHECKPOINT b<N+1>`, is in flight: B5-FIX-4; a ledger deleted in the working tree or the index, lines staged only, or a ledger absent at `HEAD` is in flight: B5-FIX-5).
 
 - [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
 
@@ -4741,6 +4788,111 @@ class Ledgers(unittest.TestCase):
         self.assertIn("FAIL plan.input", out)
 
 
+class LedgerCopies(unittest.TestCase):
+    """B5-FIX-5: a ledger is closed only when its HEAD, index and working-tree copies all exist, are
+    byte-equal and end in the same CHECKPOINT line; every case below is in flight through main()."""
+    REL = "docs/superpowers/state/fx/ledger.md"
+    CLOSED = LEDGER + "CHECKPOINT b5 abc1234\n"
+
+    def repo(self, ledger):
+        root = plan_repo(ledger)
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def assertInFlight(self, root):
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.fx.header.goal", out)
+        self.assertNotIn("plan.in_flight", out)
+
+    def test_closed_at_all_three_is_not_in_flight(self):
+        rc, out = gate(self.repo(self.CLOSED), ["--in-flight"])
+        self.assertEqual((0, "PASS plan.in_flight\n"), (rc, out))
+
+    def test_ledger_deleted_in_the_working_tree_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        os.remove(os.path.join(root, self.REL))
+        self.assertInFlight(root)
+
+    def test_ledger_deleted_from_the_index_only_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        rf.git(root, "rm", "-q", "--cached", self.REL)
+        self.assertInFlight(root)
+
+    def test_ledger_deleted_from_the_index_and_the_working_tree_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        rf.git(root, "rm", "-q", self.REL)
+        self.assertInFlight(root)
+
+    def test_ledger_lines_staged_only_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        with open(os.path.join(root, self.REL), "a", encoding="utf-8") as f:
+            f.write("- T2 DONE\n")
+        rf.git(root, "add", self.REL)
+        rf.write(root, self.REL, self.CLOSED)    # working tree == HEAD again; the index keeps the extra line
+        self.assertEqual("MM", rf.git(root, "status", "--porcelain", "--", self.REL)[:2])
+        self.assertInFlight(root)
+
+    def test_ledger_absent_at_head_is_in_flight(self):
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                root = self.repo(None)
+                rf.write(root, self.REL, self.CLOSED)
+                if staged:
+                    rf.git(root, "add", self.REL)
+                self.assertInFlight(root)
+
+    def test_ledger_staged_only_absent_at_head_and_in_the_working_tree_is_in_flight(self):
+        root = self.repo(None)
+        rf.write(root, self.REL, self.CLOSED)
+        rf.git(root, "add", self.REL)
+        os.remove(os.path.join(root, self.REL))
+        self.assertInFlight(root)
+
+    def test_plan_line_is_read_from_the_newest_copy(self):
+        # working tree, else index, else HEAD: the copy the author is changing names the plan
+        root = self.repo(self.CLOSED)
+        rf.write(root, "docs/superpowers/plans/gx.md", GOOD)
+        rf.write(root, self.REL, self.CLOSED.replace("plans/fx.md", "plans/gx.md"))
+        rf.git(root, "add", self.REL)
+        os.remove(os.path.join(root, self.REL))
+        self.assertEqual([("fx", "docs/superpowers/plans/gx.md")], gate_plan.plans_in_flight(root))
+        rf.write(root, self.REL, self.CLOSED.replace("plans/fx.md", "plans/hx.md"))
+        self.assertEqual([("fx", "docs/superpowers/plans/hx.md")], gate_plan.plans_in_flight(root))
+
+    def test_deleted_ledger_without_plan_line_fails(self):
+        root = self.repo("# Ledger: fx\nCHECKPOINT b1 abc1234\n")
+        os.remove(os.path.join(root, self.REL))
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL plan.input: {self.REL}: line 1 must be 'plan:", out)
+
+    def test_ledger_only_in_an_unmerged_index_fails_its_line_one(self):
+        # a modify/delete conflict: HEAD deleted the ledger (status DU), the index holds only stages 1 and 3, no working copy
+        root = self.repo(self.CLOSED)
+        rf.git(root, "checkout", "-q", "-b", "side")
+        rf.write(root, self.REL, self.CLOSED + "- T2 DONE\n")
+        rf.commit(root, "side edit")
+        rf.git(root, "checkout", "-q", "-")
+        rf.git(root, "rm", "-q", self.REL)
+        rf.commit(root, "main delete")
+        subprocess.run(rf.gf.GIT + ["-C", root, "merge", "-q", "side"], capture_output=True, check=False)    # conflicts: rc 1
+        self.assertIn("DU", rf.git(root, "status", "--porcelain", "--", self.REL))
+        os.remove(os.path.join(root, self.REL))
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL plan.input: {self.REL}: line 1 must be 'plan:", out)
+
+    def test_a_nested_or_top_level_ledger_name_is_not_a_ledger(self):
+        root = self.repo(self.CLOSED)
+        rf.write(root, "docs/superpowers/state/fx/sub/ledger.md", "# not a ledger\n")
+        rf.write(root, "docs/superpowers/state/ledger.md", "# not a ledger\n")
+        rf.commit(root, "decoys")
+        rf.git(root, "rm", "-q", "--cached", "docs/superpowers/state/fx/sub/ledger.md", "docs/superpowers/state/ledger.md")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual((0, "PASS plan.in_flight\n"), (rc, out))
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -4774,7 +4926,6 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import glob
 import os
 import posixpath
 import re
@@ -4845,6 +4996,7 @@ PLACEHOLDERS = [re.compile(r"\bT" r"BD\b"), re.compile(r"\bTO" r"DO\b")] + [re.c
     r"add valid" r"ation", r"handle edge cas" r"es", r"write tests for the abo" r"ve",
     r"similar to tas" r"k \d+")]
 LEDGER_PLAN = re.compile(r"^plan: (\S+)\s*$")
+LEDGER_PATH = re.compile(r"^" + re.escape(STATE) + r"/([^/]+)/ledger\.md$")
 CHECKPOINT_LINE = re.compile(r"^CHECKPOINT b(\d+)\b")
 QUERY_KEYS = {
     "plan": lambda f: (f.get("owner") or {}).get("plan"),
@@ -5249,34 +5401,59 @@ def _closed(text: str) -> bool:
     return bool(lines) and bool(CHECKPOINT_LINE.match(lines[-1]))
 
 
-def _committed(root: str, rel: str) -> bytes | None:
-    """The ledger's bytes at HEAD; None when there is no HEAD or the file is not in it."""
-    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, check=False)
+def _git_bytes(root: str, spec: str) -> bytes | None:
+    """`git show <spec>` (HEAD:<rel> or :<rel>, the stage-0 index entry); None when it fails (no HEAD, not
+    in that tree or index, an unmerged entry, not a repository)."""
+    r = subprocess.run(["git", "show", spec], cwd=root, capture_output=True, check=False)
     return r.stdout if r.returncode == 0 else None
 
 
-def _raw(path: str) -> bytes:
+def _git_ledgers(root: str, cmd: list) -> set:
+    """State-dir names of the <STATE>/<name>/ledger.md paths a NUL-separated git listing prints."""
+    r = subprocess.run(["git", *cmd, "-z", "--", STATE], cwd=root, capture_output=True, check=False)
+    names = set()    # a failing listing (no HEAD, not a repository) prints nothing on stdout
+    for path in r.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        m = LEDGER_PATH.match(path)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def _work_ledgers(state: str) -> set:
+    return {n for n in os.listdir(state) if os.path.isfile(os.path.join(state, n, "ledger.md"))}
+
+
+def _raw(path: str) -> bytes | None:
+    if not os.path.isfile(path):
+        return None
     with open(path, "rb") as f:
         return f.read()
 
 
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
-    """(state-dir name, plan path) for every ledger that is in flight: closed only when the working-tree
-    ledger is byte-equal to the HEAD ledger and ends in a CHECKPOINT line (B5-FIX-4: an uncommitted
-    'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight)."""
+    """(state-dir name, plan path) for every ledger that is in flight. A ledger is any <STATE>/<name>/ledger.md
+    in the working tree, the index or HEAD (B5-FIX-5: a ledger deleted in the working tree or the index is
+    still seen). It is closed only when all three copies exist, are byte-equal and end in a CHECKPOINT
+    line (B5-FIX-4: an uncommitted 'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight;
+    B5-FIX-5: a copy missing from any of the three, or lines staged while the working tree equals HEAD, is
+    in flight; a ledger absent at HEAD is in flight). Line 1 'plan: <plan file>' is read from the newest
+    copy that exists: the working tree, else the index, else HEAD (the copy the author is changing)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
+    names = (_work_ledgers(state) | _git_ledgers(root, ["ls-files"])
+             | _git_ledgers(root, ["ls-tree", "-r", "--name-only", "HEAD"]))
     out = []
-    for ledger in sorted(glob.glob(os.path.join(state, "*", "ledger.md"))):
-        name = os.path.basename(os.path.dirname(ledger))
-        rel = os.path.relpath(ledger, root).replace(os.sep, "/")
-        text = _read(ledger)
+    for name in sorted(names):
+        rel = f"{STATE}/{name}/ledger.md"
+        copies = [_raw(os.path.join(root, rel)), _git_bytes(root, f":{rel}"), _git_bytes(root, f"HEAD:{rel}")]
+        newest = next((c for c in copies if c is not None), b"")    # b"": only an unmerged index entry
+        text = newest.decode("utf-8")
         first = text.splitlines()[0] if text else ""
         m = LEDGER_PLAN.match(first)
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
-        if not (_closed(text) and _raw(ledger) == _committed(root, rel)):
+        if not (_closed(text) and copies[0] == copies[1] == copies[2]):
             out.append((name, m.group(1)))
     return out
 
@@ -5383,16 +5560,18 @@ indent relative to the list item, closed by the same character, a run at least a
 `siblings`, `gates` and `pin`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
-ends a block. A plan is in flight unless the working-tree ledger is byte-equal to the ledger in `HEAD` and its last
-non-empty line is a `CHECKPOINT` line (an uncommitted ledger, or uncommitted lines ending in a later `CHECKPOINT b<N+1>`,
-is in flight; B5-FIX-4); `--in-flight` checks every plan in flight, and a ledger without the `plan:` line is
-`FAIL plan.input`.
+ends a block. A ledger is any `<state>/<name>/ledger.md` in the working tree, the index or `HEAD`. A plan is in flight
+unless all three copies exist, are byte-equal and their last non-empty line is a `CHECKPOINT` line (an uncommitted
+ledger, or uncommitted lines ending in a later `CHECKPOINT b<N+1>`, is in flight: B5-FIX-4; a ledger deleted in the
+working tree or the index, lines staged while the working tree equals `HEAD`, or a ledger absent at `HEAD` is in
+flight: B5-FIX-5); line 1 is read from the working tree, else the index, else `HEAD`; `--in-flight` checks every plan
+in flight, and a ledger without the `plan:` line is `FAIL plan.input`.
 ```
 CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both `unittest discover -v -s tools/gates/tests -t .`: the new test modules are found without a list, so `.github/workflows/gates.yml` is not edited.
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

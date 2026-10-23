@@ -848,5 +848,110 @@ class Ledgers(unittest.TestCase):
         self.assertIn("FAIL plan.input", out)
 
 
+class LedgerCopies(unittest.TestCase):
+    """B5-FIX-5: a ledger is closed only when its HEAD, index and working-tree copies all exist, are
+    byte-equal and end in the same CHECKPOINT line; every case below is in flight through main()."""
+    REL = "docs/superpowers/state/fx/ledger.md"
+    CLOSED = LEDGER + "CHECKPOINT b5 abc1234\n"
+
+    def repo(self, ledger):
+        root = plan_repo(ledger)
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def assertInFlight(self, root):
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.fx.header.goal", out)
+        self.assertNotIn("plan.in_flight", out)
+
+    def test_closed_at_all_three_is_not_in_flight(self):
+        rc, out = gate(self.repo(self.CLOSED), ["--in-flight"])
+        self.assertEqual((0, "PASS plan.in_flight\n"), (rc, out))
+
+    def test_ledger_deleted_in_the_working_tree_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        os.remove(os.path.join(root, self.REL))
+        self.assertInFlight(root)
+
+    def test_ledger_deleted_from_the_index_only_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        rf.git(root, "rm", "-q", "--cached", self.REL)
+        self.assertInFlight(root)
+
+    def test_ledger_deleted_from_the_index_and_the_working_tree_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        rf.git(root, "rm", "-q", self.REL)
+        self.assertInFlight(root)
+
+    def test_ledger_lines_staged_only_is_in_flight(self):
+        root = self.repo(self.CLOSED)
+        with open(os.path.join(root, self.REL), "a", encoding="utf-8") as f:
+            f.write("- T2 DONE\n")
+        rf.git(root, "add", self.REL)
+        rf.write(root, self.REL, self.CLOSED)    # working tree == HEAD again; the index keeps the extra line
+        self.assertEqual("MM", rf.git(root, "status", "--porcelain", "--", self.REL)[:2])
+        self.assertInFlight(root)
+
+    def test_ledger_absent_at_head_is_in_flight(self):
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                root = self.repo(None)
+                rf.write(root, self.REL, self.CLOSED)
+                if staged:
+                    rf.git(root, "add", self.REL)
+                self.assertInFlight(root)
+
+    def test_ledger_staged_only_absent_at_head_and_in_the_working_tree_is_in_flight(self):
+        root = self.repo(None)
+        rf.write(root, self.REL, self.CLOSED)
+        rf.git(root, "add", self.REL)
+        os.remove(os.path.join(root, self.REL))
+        self.assertInFlight(root)
+
+    def test_plan_line_is_read_from_the_newest_copy(self):
+        # working tree, else index, else HEAD: the copy the author is changing names the plan
+        root = self.repo(self.CLOSED)
+        rf.write(root, "docs/superpowers/plans/gx.md", GOOD)
+        rf.write(root, self.REL, self.CLOSED.replace("plans/fx.md", "plans/gx.md"))
+        rf.git(root, "add", self.REL)
+        os.remove(os.path.join(root, self.REL))
+        self.assertEqual([("fx", "docs/superpowers/plans/gx.md")], gate_plan.plans_in_flight(root))
+        rf.write(root, self.REL, self.CLOSED.replace("plans/fx.md", "plans/hx.md"))
+        self.assertEqual([("fx", "docs/superpowers/plans/hx.md")], gate_plan.plans_in_flight(root))
+
+    def test_deleted_ledger_without_plan_line_fails(self):
+        root = self.repo("# Ledger: fx\nCHECKPOINT b1 abc1234\n")
+        os.remove(os.path.join(root, self.REL))
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL plan.input: {self.REL}: line 1 must be 'plan:", out)
+
+    def test_ledger_only_in_an_unmerged_index_fails_its_line_one(self):
+        # a modify/delete conflict: HEAD deleted the ledger (status DU), the index holds only stages 1 and 3, no working copy
+        root = self.repo(self.CLOSED)
+        rf.git(root, "checkout", "-q", "-b", "side")
+        rf.write(root, self.REL, self.CLOSED + "- T2 DONE\n")
+        rf.commit(root, "side edit")
+        rf.git(root, "checkout", "-q", "-")
+        rf.git(root, "rm", "-q", self.REL)
+        rf.commit(root, "main delete")
+        subprocess.run(rf.gf.GIT + ["-C", root, "merge", "-q", "side"], capture_output=True, check=False)    # conflicts: rc 1
+        self.assertIn("DU", rf.git(root, "status", "--porcelain", "--", self.REL))
+        os.remove(os.path.join(root, self.REL))
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL plan.input: {self.REL}: line 1 must be 'plan:", out)
+
+    def test_a_nested_or_top_level_ledger_name_is_not_a_ledger(self):
+        root = self.repo(self.CLOSED)
+        rf.write(root, "docs/superpowers/state/fx/sub/ledger.md", "# not a ledger\n")
+        rf.write(root, "docs/superpowers/state/ledger.md", "# not a ledger\n")
+        rf.commit(root, "decoys")
+        rf.git(root, "rm", "-q", "--cached", "docs/superpowers/state/fx/sub/ledger.md", "docs/superpowers/state/ledger.md")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual((0, "PASS plan.in_flight\n"), (rc, out))
+
+
 if __name__ == "__main__":
     unittest.main()

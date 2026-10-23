@@ -6,6 +6,11 @@ Extends superpowers' subagent-driven-development review-package (commits + diff)
 mutation-<finding-id>.txt per finding the task closes, siblings.md and claims.md.
 Usage: gate_review_package.py [--json] --dir .superpowers/sdd/<plan>/review/<task> | [--json] --all
 The task's ids: register rows owned by {kind: plan, plan: <plan>, task: <task>} plus mutation-<id>.txt files.
+--all (DEC-0022, absent-packages-pass): no package is not a missing input (no .superpowers/sdd, no review/ or
+only empty ones is one PASS review_package.all), but a non-directory where a directory is expected FAILs
+(.superpowers or .superpowers/sdd: review_package.input; <plan>/review or a review/ entry: <prefix>.input).
+A mutation transcript is evidence at its row's pinned history sha and replays in a checkout of that sha;
+a later change to the pinned code needs no transcript update (DEC-0021).
 """
 from __future__ import annotations
 
@@ -245,7 +250,13 @@ def _layout(roots: tuple, wanted: str) -> tuple[str, str]:
 
 def _check_all(root: str, findings: list, res: Result) -> None:
     """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included; no entry at all
-    (no review/, or only empty ones: B5-FIX-4 F1) is one PASS review_package.all."""
+    (no review/, or only empty ones: B5-FIX-4 F1) is one PASS review_package.all; .superpowers or
+    .superpowers/sdd that exists but is not a directory is FAIL review_package.input (B5-FIX-6, DEC-0022)."""
+    for rel in (".superpowers", SDD):    # DEC-0022: a non-directory where a directory is expected
+        path = os.path.join(root, rel)
+        if os.path.lexists(path) and not os.path.isdir(path):
+            res.fail("review_package.input", f"{rel} is not a directory")
+            return
     sdd = os.path.join(root, SDD)
     seen = False
     for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
