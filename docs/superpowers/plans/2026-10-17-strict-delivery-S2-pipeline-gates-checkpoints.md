@@ -26,7 +26,7 @@
 - Commit trailers: subagents use their own model's trailer; the squash commit carries the session's.
 - Repo fact (verified 2026-10-17 with `gh api repos/superbrobenji/lap-timer/branches/main/protection`): `main` requires status checks (strict), linear history, and `enforce_admins: true` — no commit can be pushed to `main` directly. Every state commit (handoff, ledger, register transitions) therefore rides inside the block PR: the handoff is committed on the block branch before the merge, `gate_checkpoint --plan <slug>` checks it there (pre-merge) and `--post` checks the squash on `main` afterwards (Task 7). `merged` register states are written only by S4's `postmerge.py` (`by: postmerge`, S1 rule); until S4 lands, S2 rows stay `pinned` after their block merges.
 - Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the controller after the task review's clean verdict (b4 ruling 3), together with the reviewer's report at `docs/superpowers/state/<plan>/reviews/S2-T<n>.md`.
-- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, combining mark or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less", "non-pin" and "pinñ" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>`.
+- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, mark (any category M) or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less", "non-pin" and "pinñ" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>`.
 - Block branches are named `<plan>/b<N>` (here `block/strict-delivery-b4`…`b6`), never `<plan>-b<N>`, so a branch never shares a name with its tag.
 
 ## Review Focus
@@ -3801,7 +3801,7 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture`.
 - Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool, creates: list[str], siblings: list[str] | None, siblings_value: str, siblings_error: str, gates: list[str] | None, gates_error: str, steps: list[Step]}`, `Step.{title: str, body: list[str]}`, `Plan.{headers, tasks, placeholders, block_errors, fence_error}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
-- **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.files.N`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (lower-case none, a non-empty reason after ` -- `; the empty list) (`FAIL plan.siblings.N`), `**Gates:**` names exactly `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, combining mark or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less", "non-pin" and "pinñ" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>` (`FAIL plan.pin.N`). Per-task line ids have one form (B5-FIX-3): `plan.files.N`, `plan.mode.N`, `plan.findings.N`, `plan.siblings.N`, `plan.gates.N`, `plan.pin.N` (`plan.<slug>.<check>.N` under `--in-flight`).
+- **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.files.N`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (lower-case none, a non-empty reason after ` -- `; the empty list) (`FAIL plan.siblings.N`), `**Gates:**` names exactly `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, mark (any category M) or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less", "non-pin" and "pinñ" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>` (`FAIL plan.pin.N`). Per-task line ids have one form (B5-FIX-3): `plan.files.N`, `plan.mode.N`, `plan.findings.N`, `plan.siblings.N`, `plan.gates.N`, `plan.pin.N` (`plan.<slug>.<check>.N` under `--in-flight`).
 - **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** unless the working-tree ledger is byte-equal to the `HEAD` ledger **and** its last non-empty line is a `CHECKPOINT` line (an uncommitted ledger, or uncommitted lines after a committed `CHECKPOINT b<N>` ending in `CHECKPOINT b<N+1>`, is in flight; B5-FIX-4).
 
 - [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
@@ -4108,7 +4108,8 @@ class InFlight(unittest.TestCase):
     def test_hyphen_compound_pin_titles_fail_through_main(self):
         # B5-FIX-4 V-4: a hyphen joins a compound, it is not a word boundary for the pin step
         for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin", "pin\u00f1 run", "\u00f1pin run",
-                      "pin\u2010less run", "non\u2011pin step", "pin\u00adless run", "pin\u0303 run"):
+                      "pin\u2010less run", "non\u2011pin step", "pin\u00adless run", "pin\u0303 run", "pin\u1dc0 run",
+                      "pin\u20d7 run", "pin\ufe20 run", "pin\u0951 run", "pin\u093e run", "\u0951pin run"):
             with self.subTest(title):
                 root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.addCleanup(shutil.rmtree, root, True)
@@ -4117,7 +4118,8 @@ class InFlight(unittest.TestCase):
                 self.assertRegex(out, r"(?m)^FAIL plan\.fx\.pin\.1: ")
                 self.assertIn("PASS plan.fx.pin.2", out)
         for title in ("Pin step", "pin: the row", "Mutation run and pin", "Mutation run, pin.", "Mutation run \u2014 pin",
-                      "pin \u2013 the row", "\u00abpin\u00bb"):
+                      "pin \u2013 the row", "\u00abpin\u00bb", "Mutation run\u2014pin",
+                      "run\u2013pin", "run\u2012pin\u2015done", "Mapping, then pin"):
             with self.subTest(title):
                 root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.addCleanup(shutil.rmtree, root, True)
@@ -4621,14 +4623,14 @@ class Branches(unittest.TestCase):
         self.assertNotIn("title contains `pin`", task6)
 
     def test_s2_plan_global_constraints_state_the_pin_word(self):
-        """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and PIN_TITLE."""
+        """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and pin_title."""
         with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
                   encoding="utf-8") as f:
             lines = [l for l in f.read().splitlines()
                      if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
         self.assertEqual(1, len(lines))
         self.assertIn("a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, "
-                      "combining mark or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side", lines[0])
+                      "mark (any category M) or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side", lines[0])
         self.assertIn("B5-FIX-3, B5-FIX-4", lines[0])
         self.assertNotIn("title contains `pin`", lines[0])
 
@@ -4778,6 +4780,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -4814,10 +4817,21 @@ GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
 # B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping", "pin\u00f1") and not a hyphen compound ("pin-less",
-# "non-pin"): no Unicode word character (\w), combining mark (U+0300-U+036F), hyphen-minus, soft hyphen (U+00AD),
-# hyphen (U+2010) or non-breaking hyphen (U+2011) on either side; dashes (U+2012-U+2015) separate words and stay out
-PIN_JOIN = r"\w\-\u00ad\u2010\u2011\u0300-\u036f"
-PIN_TITLE = re.compile(rf"(?<![{PIN_JOIN}])pin(?![{PIN_JOIN}])", re.I)
+# "non-pin"): no Unicode word character (\w), mark (any unicodedata category M*), hyphen-minus, soft hyphen
+# (U+00AD), hyphen (U+2010) or non-breaking hyphen (U+2011) on either side; dashes (U+2012-U+2015) separate words
+PIN_WORD = re.compile("pin", re.I)
+PIN_HYPHENS = "-\u00ad\u2010\u2011"
+
+
+def _pin_joins(ch: str) -> bool:
+    return bool(re.match(r"\w", ch)) or ch in PIN_HYPHENS or unicodedata.category(ch).startswith("M")
+
+
+def pin_title(title: str) -> bool:
+    """True when the step title holds the word pin with no joining neighbour on either side."""
+    return any(not (m.start() and _pin_joins(title[m.start() - 1]))
+               and not (m.end() < len(title) and _pin_joins(title[m.end()]))
+               for m in PIN_WORD.finditer(title))
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
@@ -5142,7 +5156,7 @@ def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None
         _verdict(res, lid, not bad, f"unknown gate {', '.join(repr(g) for g in bad)}: no tools/gates/gate_<name>.py "
                                     "at the root or in a Create item of this or an earlier task")
     lid = f"{pfx}.pin.{t.num}"
-    pins = [s for s in t.steps if PIN_TITLE.search(s.title)]
+    pins = [s for s in t.steps if pin_title(s.title)]
     if not t.findings:
         res.passed(lid)
     elif not pins:
@@ -5360,7 +5374,7 @@ list; any other value starting with `none`, in any case, not followed by a lette
 entries, every `siblings` entry of the register rows the task's Findings name (an id with no row adds nothing:
 `plan.id.<id>` fails it), else `FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each exactly `run_all` or an X for which `tools/gates/gate_X.py`
 is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
-ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, combining mark or hyphen (`-`, U+00AD,
+ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, mark (any category M) or hyphen (`-`, U+00AD,
 U+2010, U+2011) joined on either side: `Pin step`, `pin:` and `pin.` count, `Mapping`, `Spinner`, `pinned`, `pin-less` and `non-pin` do not) and whose body (up to the next
 step or heading, code included) names a test named `test_<module>::test_<name>`,
 else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of

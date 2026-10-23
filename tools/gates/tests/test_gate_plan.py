@@ -215,7 +215,8 @@ class InFlight(unittest.TestCase):
     def test_hyphen_compound_pin_titles_fail_through_main(self):
         # B5-FIX-4 V-4: a hyphen joins a compound, it is not a word boundary for the pin step
         for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin", "pin\u00f1 run", "\u00f1pin run",
-                      "pin\u2010less run", "non\u2011pin step", "pin\u00adless run", "pin\u0303 run"):
+                      "pin\u2010less run", "non\u2011pin step", "pin\u00adless run", "pin\u0303 run", "pin\u1dc0 run",
+                      "pin\u20d7 run", "pin\ufe20 run", "pin\u0951 run", "pin\u093e run", "\u0951pin run"):
             with self.subTest(title):
                 root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.addCleanup(shutil.rmtree, root, True)
@@ -224,7 +225,8 @@ class InFlight(unittest.TestCase):
                 self.assertRegex(out, r"(?m)^FAIL plan\.fx\.pin\.1: ")
                 self.assertIn("PASS plan.fx.pin.2", out)
         for title in ("Pin step", "pin: the row", "Mutation run and pin", "Mutation run, pin.", "Mutation run \u2014 pin",
-                      "pin \u2013 the row", "\u00abpin\u00bb"):
+                      "pin \u2013 the row", "\u00abpin\u00bb", "Mutation run\u2014pin",
+                      "run\u2013pin", "run\u2012pin\u2015done", "Mapping, then pin"):
             with self.subTest(title):
                 root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.addCleanup(shutil.rmtree, root, True)
@@ -728,14 +730,14 @@ class Branches(unittest.TestCase):
         self.assertNotIn("title contains `pin`", task6)
 
     def test_s2_plan_global_constraints_state_the_pin_word(self):
-        """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and PIN_TITLE."""
+        """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and pin_title."""
         with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
                   encoding="utf-8") as f:
             lines = [l for l in f.read().splitlines()
                      if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
         self.assertEqual(1, len(lines))
         self.assertIn("a step whose title holds the word `pin` (case-insensitive, no Unicode letter, digit, `_`, "
-                      "combining mark or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side", lines[0])
+                      "mark (any category M) or hyphen (`-`, U+00AD, U+2010, U+2011) joined on either side", lines[0])
         self.assertIn("B5-FIX-3, B5-FIX-4", lines[0])
         self.assertNotIn("title contains `pin`", lines[0])
 

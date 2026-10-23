@@ -25,6 +25,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,10 +62,21 @@ GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
 # B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping", "pin\u00f1") and not a hyphen compound ("pin-less",
-# "non-pin"): no Unicode word character (\w), combining mark (U+0300-U+036F), hyphen-minus, soft hyphen (U+00AD),
-# hyphen (U+2010) or non-breaking hyphen (U+2011) on either side; dashes (U+2012-U+2015) separate words and stay out
-PIN_JOIN = r"\w\-\u00ad\u2010\u2011\u0300-\u036f"
-PIN_TITLE = re.compile(rf"(?<![{PIN_JOIN}])pin(?![{PIN_JOIN}])", re.I)
+# "non-pin"): no Unicode word character (\w), mark (any unicodedata category M*), hyphen-minus, soft hyphen
+# (U+00AD), hyphen (U+2010) or non-breaking hyphen (U+2011) on either side; dashes (U+2012-U+2015) separate words
+PIN_WORD = re.compile("pin", re.I)
+PIN_HYPHENS = "-\u00ad\u2010\u2011"
+
+
+def _pin_joins(ch: str) -> bool:
+    return bool(re.match(r"\w", ch)) or ch in PIN_HYPHENS or unicodedata.category(ch).startswith("M")
+
+
+def pin_title(title: str) -> bool:
+    """True when the step title holds the word pin with no joining neighbour on either side."""
+    return any(not (m.start() and _pin_joins(title[m.start() - 1]))
+               and not (m.end() < len(title) and _pin_joins(title[m.end()]))
+               for m in PIN_WORD.finditer(title))
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
@@ -389,7 +401,7 @@ def _fields(res, root: str, pfx: str, t: Task, rows: dict, created: set) -> None
         _verdict(res, lid, not bad, f"unknown gate {', '.join(repr(g) for g in bad)}: no tools/gates/gate_<name>.py "
                                     "at the root or in a Create item of this or an earlier task")
     lid = f"{pfx}.pin.{t.num}"
-    pins = [s for s in t.steps if PIN_TITLE.search(s.title)]
+    pins = [s for s in t.steps if pin_title(s.title)]
     if not t.findings:
         res.passed(lid)
     elif not pins:
