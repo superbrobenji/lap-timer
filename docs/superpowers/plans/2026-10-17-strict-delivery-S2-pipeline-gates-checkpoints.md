@@ -3156,9 +3156,9 @@ Write `.superpowers/sdd/strict-delivery/review/S2-T4/mutation-SD-S2-T4.txt` (the
 ```
 finding: SD-S2-T4
 test: test_claims_fail_row_fails
-step 1 (fix present): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
-step 2 (fix reverted: perl empties the FAIL-row list in tools/gates/gate_review_package.py): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> FAIL
-step 3 (fix restored): python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
+step 2 (fix reverted: perl -pi -e 's/^(\s*failed = )\[r\[0\] for r in rows if len\(r\) == 5 and r\[4\] == "FAIL"\]$/$1\[\]/' tools/gates/gate_review_package.py empties the FAIL-row list (failed = []), restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_claims_fail_row_fails -> PASS
 ```
 After the task review's verdict is spec ✅, quality ✅, claims-executed ✅, the controller (never the reviewer, never before the review; b4 ruling 3) pins the row: it copies that file to the tracked `docs/superpowers/state/strict-delivery/mutations/SD-S2-T4.txt` (what `pin.transcript` names) and the reviewer's report, verbatim, to `docs/superpowers/state/strict-delivery/reviews/S2-T4.md` (what `evidence` names), appends the ledger line, sets `pin.test` in `registers.PIN_TEST` form and both history entries `by: controller`, and commits the four files together:
 ```bash
