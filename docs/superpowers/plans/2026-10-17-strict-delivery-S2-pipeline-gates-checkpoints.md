@@ -1590,6 +1590,41 @@ class AgentDispatchHook(unittest.TestCase):
         self.assertEqual(2, p.returncode, p.stderr)
         self.assertIn("FAIL dispatch.fork: ", p.stderr)
 
+    def run_final_verifier(self, fallback, model="opus"):
+        """A final_verifier dispatch on `model` through a copy of tools/gates whose config.yml sets
+        fable_fallback to `fallback` (None: absent); the hook reads config from its own checkout."""
+        code = tempfile.mkdtemp(prefix="gate-code-")
+        self.addCleanup(gf.remove, code)
+        copy_gates(code)
+        gf.write(code, "tools/gates/config.yml", rf.config_text(fallback))
+        prompts = tempfile.mkdtemp(prefix="gate-prompts-")
+        self.addCleanup(gf.remove, prompts)
+        shutil.copyfile(os.path.join(DISPATCH_FIX, "prompts", "implementer.md"), os.path.join(prompts, "verifier.md"))
+        prompt = self.good
+        for old, new in (("## Role: implementer\n", "## Role: final_verifier\n"),
+                         ("## Budget: tokens=150000 minutes=60\n", "## Budget: tokens=100000 minutes=60\n"),
+                         ("## Model: sonnet\n", f"## Model: {model}\n")):
+            self.assertIn(old, prompt)
+            prompt = prompt.replace(old, new, 1)
+        event = agent_event(self.root, prompt, model)
+        return hook("pre_tool_use.py", event, hooks_dir=os.path.join(code, "tools", "gates", "hooks"),
+                    SD_PROMPTS_DIR=prompts)
+
+    def test_final_verifier_on_opus_passes_while_the_fallback_is_on(self):
+        """DEC-0018 (B5-FIX-2): fable_fallback: opus lets the live hook admit an opus final_verifier."""
+        p = self.run_final_verifier("opus")
+        self.assertEqual((0, ""), (p.returncode, p.stderr))
+        p = self.run_final_verifier("opus", model="fable")
+        self.assertEqual((0, ""), (p.returncode, p.stderr))
+
+    def test_final_verifier_on_opus_blocks_while_the_fallback_is_off(self):
+        p = self.run_final_verifier(None)
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.model.rank: role final_verifier needs at least fable, got opus", p.stderr)
+        p = self.run_final_verifier("opus", model="sonnet")
+        self.assertEqual(2, p.returncode, p.stderr)
+        self.assertIn("FAIL dispatch.model.rank: role final_verifier needs at least fable, got sonnet", p.stderr)
+
     def test_empty_prompt_blocks(self):
         p = self.run_agent(self.root, "   ")
         self.assertEqual(2, p.returncode, p.stderr)
@@ -1618,7 +1653,7 @@ class AgentDispatchHook(unittest.TestCase):
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `python3 -m unittest tools.gates.tests.test_hooks.AgentDispatchHook -v`
-Expected: `test_good_dispatch_passes` passes (S1 lets `Agent` through); the other nine new tests and the updated S1 case FAIL (`AssertionError: 2 != 0`, or `startswith` for the cwd cases).
+Expected: `test_good_dispatch_passes` passes (S1 lets `Agent` through); the other nine new tests and the updated S1 case FAIL (`AssertionError: 2 != 0`, or `startswith` for the cwd cases). The two DEC-0018 tests the fix wave added (B5-FIX-2) split the same way: `test_final_verifier_on_opus_passes_while_the_fallback_is_on` passes, `test_final_verifier_on_opus_blocks_while_the_fallback_is_off` FAILs (`AssertionError: 2 != 0`).
 
 - [ ] **Step 3: Implement** — in `tools/gates/hooks/pre_tool_use.py` add `import tempfile` after `import sys`, add the module constant `PROMPT_LABEL = "<tool_input.prompt>"` above `class Blocked` (a blank line before it), rewrite the module docstring's tool sentence (Bash and Agent branches), add this function above `main()`:
 
