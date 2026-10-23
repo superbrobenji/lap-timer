@@ -60,7 +60,8 @@ SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
 GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
-PIN_TITLE = re.compile(r"\bpin\b", re.I)    # B5-FIX-3: the word, not a substring ("Mapping")
+# B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping") and not a hyphen compound ("pin-less", "non-pin")
+PIN_TITLE = re.compile(r"(?<![A-Za-z0-9_-])pin(?![A-Za-z0-9_-])", re.I)
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
@@ -478,14 +479,21 @@ def _closed(text: str) -> bool:
     return bool(lines) and bool(CHECKPOINT_LINE.match(lines[-1]))
 
 
-def _committed(root: str, rel: str) -> str:
-    """The ledger at HEAD; empty when there is no HEAD or the file is not in it."""
-    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, text=True, check=False)
-    return r.stdout if r.returncode == 0 else ""
+def _committed(root: str, rel: str) -> bytes | None:
+    """The ledger's bytes at HEAD; None when there is no HEAD or the file is not in it."""
+    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _raw(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 
 
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
-    """(state-dir name, plan path) for every ledger whose last line is not a committed CHECKPOINT line."""
+    """(state-dir name, plan path) for every ledger that is in flight: closed only when the working-tree
+    ledger is byte-equal to the HEAD ledger and ends in a CHECKPOINT line (B5-FIX-4: an uncommitted
+    'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
@@ -498,7 +506,7 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
         m = LEDGER_PLAN.match(first)
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
-        if not (_closed(text) and _closed(_committed(root, rel))):
+        if not (_closed(text) and _raw(ledger) == _committed(root, rel)):
             out.append((name, m.group(1)))
     return out
 

@@ -244,18 +244,20 @@ def _layout(roots: tuple, wanted: str) -> tuple[str, str]:
 
 
 def _check_all(root: str, findings: list, res: Result) -> None:
-    """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included."""
+    """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included; no entry at all
+    (no review/, or only empty ones: B5-FIX-4 F1) is one PASS review_package.all."""
     sdd = os.path.join(root, SDD)
     seen = False
     for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
         review = os.path.join(sdd, plan, "review")
         if not os.path.lexists(review):
             continue
-        seen = True
         if not os.path.isdir(review):
+            seen = True
             res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)} is not a directory")
             continue
         for task in sorted(os.listdir(review)):
+            seen = True
             _check_entry(root, os.path.join(review, task), f"review_package.{plan}.{task}", findings, res)
     if not seen:
         res.passed("review_package.all")

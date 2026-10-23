@@ -6,7 +6,12 @@ Writes commits.txt (git log --oneline --no-decorate), diff.patch (git diff -U10)
 mutation-<finding-id>.txt, siblings.md and claims.md; this script never touches those.
 The output is what gate_review_package accepts: commit lines '<sha> <subject>', a diff starting
 'diff --git a/', gate lines 'PASS|FAIL <id>'. git is run with the options that fix those forms
-whatever the user's git config says (decorations, diff prefixes, external diff, colour).
+whatever the user's git config says: --no-pager; -c color.ui=never, -c color.diff=never and --no-color
+(colour: color.diff, which also colours log's sha, beats color.ui); -c core.abbrev=12 (log shas of 12 hex,
+COMMIT_LINE takes 7-40); -c i18n.logOutputEncoding=UTF-8 (subjects as UTF-8); -c log.showSignature=false;
+log --oneline --no-decorate; diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/.
+color.decorate is moot under --no-decorate, color.status under status --porcelain (gitinfo); no
+other git command's output reaches the package.
 Same range guards as superpowers' subagent-driven-development scripts/review-package; a dirty tree is
 refused, because gates.txt must describe HEAD, not the working tree.
 Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
@@ -32,7 +37,8 @@ EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # options that pin the forms gate_review_package reads, against the caller's git config
-PLAIN = ("-c", "color.ui=never", "-c", "log.showSignature=false")
+PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "core.abbrev=12",
+         "-c", "i18n.logOutputEncoding=UTF-8", "-c", "log.showSignature=false")
 
 
 class Refused(Exception):
@@ -88,13 +94,15 @@ def _package(root: str, a) -> tuple[str, int]:
         raise Refused(f"tracked file(s) hidden from git status (assume-unchanged or skip-worktree): "
                       f"{', '.join(hidden[:5])}; clear the flag so gates.txt describes HEAD")
     b, h, n = _range(root, a.base, a.head)
-    diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "-U10", f"{b}..{h}")
+    diff = _git(root, *PLAIN, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/",
+                "--dst-prefix=b/", "-U10", f"{b}..{h}")
     if not diff.strip():
         raise Refused(f"empty diff for {a.base}..{a.head}: the commits change no file")
     pkg = os.path.join(root, SDD, a.plan, "review", a.task)
     try:
         os.makedirs(pkg, exist_ok=True)
-        _write(os.path.join(pkg, "commits.txt"), _git(root, *PLAIN, "log", "--oneline", "--no-decorate", f"{b}..{h}"))
+        _write(os.path.join(pkg, "commits.txt"),
+               _git(root, *PLAIN, "log", "--no-color", "--oneline", "--no-decorate", f"{b}..{h}"))
         _write(os.path.join(pkg, "diff.patch"), diff)
     except OSError as e:
         raise Refused(f"cannot write {os.path.relpath(pkg, root)}: {e.strerror or e}") from None

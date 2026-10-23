@@ -26,7 +26,7 @@
 - Commit trailers: subagents use their own model's trailer; the squash commit carries the session's.
 - Repo fact (verified 2026-10-17 with `gh api repos/superbrobenji/lap-timer/branches/main/protection`): `main` requires status checks (strict), linear history, and `enforce_admins: true` — no commit can be pushed to `main` directly. Every state commit (handoff, ledger, register transitions) therefore rides inside the block PR: the handoff is committed on the block branch before the merge, `gate_checkpoint --plan <slug>` checks it there (pre-merge) and `--post` checks the squash on `main` afterwards (Task 7). `merged` register states are written only by S4's `postmerge.py` (`by: postmerge`, S1 rule); until S4 lands, S2 rows stay `pinned` after their block merges.
 - Review packages are git-ignored at `.superpowers/sdd/<plan>/review/<task>/` (umbrella; `.superpowers/` is in `.gitignore`, verified); mutation transcripts are tracked at `docs/superpowers/state/<plan>/mutations/<finding-id>.txt`, copied there by the controller after the task review's clean verdict (b4 ruling 3), together with the reviewer's report at `docs/superpowers/state/<plan>/reviews/S2-T<n>.md`.
-- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, `\bpin\b`: "Mutation run and pin", "Pin step" and "pin:" count; "Mapping", "Spinner" and "pinned" do not; B5-FIX-3) and whose body names a test named `test_<module>::test_<name>`.
+- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (an item naming two files is two items); every task carries `**Siblings:**` (`none -- <reason>` with lower-case none and a non-empty reason, or every `siblings` entry of the register rows its Findings name, comma-separated) and `**Gates:**` (exactly `run_all` or names X whose `tools/gates/gate_X.py` exists or is created by this or an earlier task); a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less" and "non-pin" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>`.
 - Block branches are named `<plan>/b<N>` (here `block/strict-delivery-b4`…`b6`), never `<plan>-b<N>`, so a branch never shares a name with its tag.
 
 ## Review Focus
@@ -2455,6 +2455,20 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertIn("PASS review_package.all", out)
 
+    def test_all_mode_with_an_empty_review_dir_passes(self):
+        # B5-FIX-4 F1: an empty review/ holds no package, and no package is a PASS (README)
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        os.makedirs(os.path.join(self.root, ".superpowers/sdd/fx/review"))
+        self.assertEqual((0, "PASS review_package.all\n"), gate(self.root, ["--all"]))
+
+    def test_all_mode_review_dir_holding_only_a_dot_file_fails(self):
+        # B5-FIX-4 F1 / round-1 N4: a non-directory entry is never a package, and never skipped
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        rf.write(self.root, ".superpowers/sdd/fx/review/.DS_Store", "x\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertFailLine(rc, out, "review_package.fx..DS_Store.input", "is not a directory")
+        self.assertNotIn("review_package.all", out)
+
     def test_no_mode_fails(self):
         self.assertFailLine(*gate(self.root, []), "review_package.input")
 
@@ -3051,18 +3065,20 @@ def _layout(roots: tuple, wanted: str) -> tuple[str, str]:
 
 
 def _check_all(root: str, findings: list, res: Result) -> None:
-    """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included."""
+    """Every entry under <root>/.superpowers/sdd/<plan>/review/, dot-entries included; no entry at all
+    (no review/, or only empty ones: B5-FIX-4 F1) is one PASS review_package.all."""
     sdd = os.path.join(root, SDD)
     seen = False
     for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
         review = os.path.join(sdd, plan, "review")
         if not os.path.lexists(review):
             continue
-        seen = True
         if not os.path.isdir(review):
+            seen = True
             res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)} is not a directory")
             continue
         for task in sorted(os.listdir(review)):
+            seen = True
             _check_entry(root, os.path.join(review, task), f"review_package.{plan}.{task}", findings, res)
     if not seen:
         res.passed("review_package.all")
@@ -3116,7 +3132,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -3362,6 +3378,41 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertNotIn("\x1b", read(self.root, f"{REVIEW}/1/commits.txt"))
         self.assertTrue(read(self.root, f"{REVIEW}/1/diff.patch").startswith("diff --git a/"))
 
+    def assert_package_passes(self, head=None):
+        """make_review_package then gate_review_package --dir on the same package: only PASS lines."""
+        rc, out = self.make("fx", "1", self.base, head or self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        for name, text in (("mutation-SD-FX-1.txt", MUTATION), ("siblings.md", SIBLINGS), ("claims.md", CLAIMS)):
+            rf.write(self.root, f"{REVIEW}/1/{name}", text)
+        rc, out = self.run_main(grp.main, "--dir", f"{REVIEW}/1")
+        lines = [l for l in out.splitlines() if l.strip()]
+        self.assertTrue(rc == 0 and lines and all(l.startswith("PASS ") for l in lines), out)
+
+    def test_every_color_key_set_to_always_gives_a_package_that_passes(self):
+        # B5-FIX-4 V-1: color.diff beats color.ui and colours both the log sha and the diff
+        for key in ("color.ui", "color.diff", "color.decorate", "color.log", "color.status"):
+            with self.subTest(key=key):
+                rf.git(self.root, "config", key, "always")
+                try:
+                    self.assert_package_passes()
+                    self.assertNotIn("\x1b", read(self.root, f"{REVIEW}/1/commits.txt")
+                                     + read(self.root, f"{REVIEW}/1/diff.patch"))
+                finally:
+                    rf.git(self.root, "config", "--unset", key)
+
+    def test_core_abbrev_4_gives_a_package_that_passes(self):
+        rf.git(self.root, "config", "core.abbrev", "4")    # B5-FIX-4 V-2: 4-hex shas fail COMMIT_LINE
+        self.assertRegex(rf.git(self.root, "log", "--oneline", "-1"), r"^[0-9a-f]{4} ")    # the config bites
+        self.assert_package_passes()
+        self.assertRegex(read(self.root, f"{REVIEW}/1/commits.txt"), r"^[0-9a-f]{12} feat: fixture fix\n$")
+
+    def test_utf16_log_encoding_keeps_a_non_ascii_subject(self):
+        rf.write(self.root, "src/fx.py", "fixed = 'caf\u00e9'\n")
+        head = rf.commit(self.root, "fix: caf\u00e9 \u2014 na\u00efve")
+        rf.git(self.root, "config", "i18n.logOutputEncoding", "UTF-16")    # B5-FIX-4 V-2
+        self.assert_package_passes(head)
+        self.assertIn("fix: caf\u00e9 \u2014 na\u00efve\n", read(self.root, f"{REVIEW}/1/commits.txt"))
+
     def test_textconv_driver_does_not_reach_diff_patch(self):
         rf.write(self.root, ".gitattributes", "*.x diff=up\n")
         rf.write(self.root, "data.x", "hi\n")
@@ -3529,7 +3580,12 @@ Writes commits.txt (git log --oneline --no-decorate), diff.patch (git diff -U10)
 mutation-<finding-id>.txt, siblings.md and claims.md; this script never touches those.
 The output is what gate_review_package accepts: commit lines '<sha> <subject>', a diff starting
 'diff --git a/', gate lines 'PASS|FAIL <id>'. git is run with the options that fix those forms
-whatever the user's git config says (decorations, diff prefixes, external diff, colour).
+whatever the user's git config says: --no-pager; -c color.ui=never, -c color.diff=never and --no-color
+(colour: color.diff, which also colours log's sha, beats color.ui); -c core.abbrev=12 (log shas of 12 hex,
+COMMIT_LINE takes 7-40); -c i18n.logOutputEncoding=UTF-8 (subjects as UTF-8); -c log.showSignature=false;
+log --oneline --no-decorate; diff --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/.
+color.decorate is moot under --no-decorate, color.status under status --porcelain (gitinfo); no
+other git command's output reaches the package.
 Same range guards as superpowers' subagent-driven-development scripts/review-package; a dirty tree is
 refused, because gates.txt must describe HEAD, not the working tree.
 Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
@@ -3555,7 +3611,8 @@ EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # options that pin the forms gate_review_package reads, against the caller's git config
-PLAIN = ("-c", "color.ui=never", "-c", "log.showSignature=false")
+PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "core.abbrev=12",
+         "-c", "i18n.logOutputEncoding=UTF-8", "-c", "log.showSignature=false")
 
 
 class Refused(Exception):
@@ -3611,13 +3668,15 @@ def _package(root: str, a) -> tuple[str, int]:
         raise Refused(f"tracked file(s) hidden from git status (assume-unchanged or skip-worktree): "
                       f"{', '.join(hidden[:5])}; clear the flag so gates.txt describes HEAD")
     b, h, n = _range(root, a.base, a.head)
-    diff = _git(root, *PLAIN, "diff", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "-U10", f"{b}..{h}")
+    diff = _git(root, *PLAIN, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/",
+                "--dst-prefix=b/", "-U10", f"{b}..{h}")
     if not diff.strip():
         raise Refused(f"empty diff for {a.base}..{a.head}: the commits change no file")
     pkg = os.path.join(root, SDD, a.plan, "review", a.task)
     try:
         os.makedirs(pkg, exist_ok=True)
-        _write(os.path.join(pkg, "commits.txt"), _git(root, *PLAIN, "log", "--oneline", "--no-decorate", f"{b}..{h}"))
+        _write(os.path.join(pkg, "commits.txt"),
+               _git(root, *PLAIN, "log", "--no-color", "--oneline", "--no-decorate", f"{b}..{h}"))
         _write(os.path.join(pkg, "diff.patch"), diff)
     except OSError as e:
         raise Refused(f"cannot write {os.path.relpath(pkg, root)}: {e.strerror or e}") from None
@@ -3662,7 +3721,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (30 tests); `python3 tools/gates/run_all.py` → only `PASS`.
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (30 tests; 33 after the b5 final-review fix wave B5-FIX-4); `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
@@ -3742,8 +3801,8 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 **Interfaces:**
 - Consumes: S1 lib; `repo_fixture`.
 - Produces: `gate_plan.check(args) -> Result`, `main(argv=None)`; `parse_plan(text) -> Plan` with `Plan.tasks: list[Task]`, `Task.{num: str, line: int, block: int, files: list[str], findings: list[str] | None, findings_error: str, parallel: bool, files_errors: list[str], mode_error: str, mode_seen: bool, creates: list[str], siblings: list[str] | None, siblings_value: str, siblings_error: str, gates: list[str] | None, gates_error: str, steps: list[Step]}`, `Step.{title: str, body: list[str]}`, `Plan.{headers, tasks, placeholders, block_errors, fence_error}`; `plans_in_flight(root) -> list[tuple[str, str]]` (state-dir name, plan path); constants `STATE`, `LEDGER_PLAN`, `CHECKPOINT_LINE`. CLI: `--plan P [--source FILE | --source register:<query>]` | `--in-flight`. Query grammar: `key=pattern[,pattern][&key=pattern…]`, keys `plan` (owner.plan), `task` (owner.task), `state`, `severity`, fnmatch patterns.
-- **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.files.N`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (lower-case none, a non-empty reason after ` -- `; the empty list) (`FAIL plan.siblings.N`), `**Gates:**` names exactly `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, `\bpin\b`: "Mutation run and pin", "Pin step" and "pin:" count; "Mapping", "Spinner" and "pinned" do not; B5-FIX-3) and whose body names a test named `test_<module>::test_<name>` (`FAIL plan.pin.N`). Per-task line ids have one form (B5-FIX-3): `plan.files.N`, `plan.mode.N`, `plan.findings.N`, `plan.siblings.N`, `plan.gates.N`, `plan.pin.N` (`plan.<slug>.<check>.N` under `--in-flight`).
-- **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** when the last non-empty ledger line is not a `CHECKPOINT` line in the working tree **or** in the `HEAD` commit (or the ledger is not committed).
+- **Plan grammar checked (DEC-0016, DEC-0017):** a Files item is `- Create|Modify|Test|Delete: ` then exactly one backticked path, then prose with no backtick (else `FAIL plan.files.N`); per task `**Siblings:**` lists every register sibling of its Findings ids or says `none -- <reason>` (lower-case none, a non-empty reason after ` -- `; the empty list) (`FAIL plan.siblings.N`), `**Gates:**` names exactly `run_all` or gates whose `tools/gates/gate_X.py` exists at the root or is a Create item of this or an earlier task (`FAIL plan.gates.N`), and a task whose Findings names ids has a step whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on either side: "Mutation run and pin", "Pin step", "pin:" and "pin." count; "Mapping", "Spinner", "pinned", "pin-less" and "non-pin" do not; B5-FIX-3, B5-FIX-4) and whose body names a test named `test_<module>::test_<name>` (`FAIL plan.pin.N`). Per-task line ids have one form (B5-FIX-3): `plan.files.N`, `plan.mode.N`, `plan.findings.N`, `plan.siblings.N`, `plan.gates.N`, `plan.pin.N` (`plan.<slug>.<check>.N` under `--in-flight`).
+- **Ledger contract (defined here, used by Tasks 7–9):** `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <path of the plan file whose tasks are executing>`; a line `CHECKPOINT b<N> …` marks a block boundary; a plan is **in flight** unless the working-tree ledger is byte-equal to the `HEAD` ledger **and** its last non-empty line is a `CHECKPOINT` line (an uncommitted ledger, or uncommitted lines after a committed `CHECKPOINT b<N>` ending in `CHECKPOINT b<N+1>`, is in flight; B5-FIX-4).
 
 - [ ] **Step 1: Fixture plan** — `tools/gates/tests/fixtures/plan/good.md`:
 
@@ -3864,9 +3923,9 @@ def gate(root, argv):
     return rc, buf.getvalue()
 
 
-def plan_repo(ledger=None):
+def plan_repo(ledger=None, plan=None):
     files = dict(rf.DISPATCH_FILES)
-    files["docs/superpowers/plans/fx.md"] = GOOD
+    files["docs/superpowers/plans/fx.md"] = GOOD if plan is None else plan
     if ledger is not None:
         files["docs/superpowers/state/fx/ledger.md"] = ledger
     return rf.make_repo(files, rf.load_rows())
@@ -4014,6 +4073,49 @@ class InFlight(unittest.TestCase):
         self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
         rf.commit(root, "chore(state): checkpoint b1")
         self.assertEqual([], gate_plan.plans_in_flight(root))
+
+    def append(self, root, text):
+        with open(os.path.join(root, "docs/superpowers/state/fx/ledger.md"), "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight(self):
+        # B5-FIX-4 V-3: HEAD ends in CHECKPOINT b1, the working tree adds block 2 and ends in CHECKPOINT b2
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        self.assertEqual([], gate_plan.plans_in_flight(root))
+        self.append(root, "- b2 start x\n- T2 DONE y\nCHECKPOINT b2 def5678\n")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.fx.header.goal", out)
+        self.assertNotIn("plan.in_flight", out)
+        rf.commit(root, "chore(state): checkpoint b2")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual((0, "PASS plan.in_flight\n"), (rc, out))
+
+    def test_uncommitted_edit_above_a_committed_checkpoint_is_in_flight(self):
+        # B5-FIX-4 V-3: same last line at HEAD and in the working tree, but the ledgers differ
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        path = os.path.join(root, "docs/superpowers/state/fx/ledger.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(LEDGER + "- T2 DONE z\nCHECKPOINT b1 abc1234\n")
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
+
+    def test_hyphen_compound_pin_titles_fail_through_main(self):
+        # B5-FIX-4 V-4: a hyphen joins a compound, it is not a word boundary for the pin step
+        for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin"):
+            with self.subTest(title):
+                root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
+                self.addCleanup(shutil.rmtree, root, True)
+                rc, out = gate(root, ["--in-flight"])
+                self.assertEqual(1, rc, out)
+                self.assertRegex(out, r"(?m)^FAIL plan\.fx\.pin\.1: ")
+                self.assertIn("PASS plan.fx.pin.2", out)
+        for title in ("Pin step", "pin: the row", "Mutation run and pin", "Mutation run, pin."):
+            with self.subTest(title):
+                root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
+                self.addCleanup(shutil.rmtree, root, True)
+                rc, out = gate(root, ["--in-flight"])
+                self.assertEqual(0, rc, out)
+                self.assertIn("PASS plan.fx.pin.1", out)
 
     def test_ledger_without_plan_line_fails(self):
         root = self.repo("# Ledger: fx\n")
@@ -4466,7 +4568,7 @@ class Branches(unittest.TestCase):
             self.assertIn(f"PASS plan.pin.{n}", out)
         out = self.ok(self.variant("**Step 2: Mutation run and pin**", "**Step 2: PIN the row**"))
         self.assertIn("PASS plan.pin.1", out)
-        for title in ("Pin step", "pin: the row", "re-Pin", "Mutation run, pin"):
+        for title in ("Pin step", "pin: the row", "Mutation run, pin", "pin. done"):
             with self.subTest(title):
                 out = self.ok(self.variant("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.assertIn("PASS plan.pin.1", out)
@@ -4494,7 +4596,7 @@ class Branches(unittest.TestCase):
             readme = f.read()
         section = readme[readme.index("## make_review_package, gate_plan (S2)\n"):]
         for word in ("`FAIL plan.mode.N`", "`FAIL plan.findings.N`", "`plan.<check>.<N>`", "`plan.<slug>.<check>.<N>`",
-                     "holds the word `pin`", "`Mapping`, `Spinner` and `pinned` do not"):
+                     "holds the word `pin`", "`Mapping`, `Spinner`, `pinned`, `pin-less` and `non-pin` do not"):
             self.assertIn(word, section)
         self.assertNotIn("plan.task.", readme)
         self.assertNotIn("title contains `pin`", readme)
@@ -4517,8 +4619,9 @@ class Branches(unittest.TestCase):
             lines = [l for l in f.read().splitlines()
                      if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
         self.assertEqual(1, len(lines))
-        self.assertIn("a step whose title holds the word `pin` (case-insensitive, `\\bpin\\b`", lines[0])
-        self.assertIn("B5-FIX-3", lines[0])
+        self.assertIn("a step whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on "
+                      "either side", lines[0])
+        self.assertIn("B5-FIX-3, B5-FIX-4", lines[0])
         self.assertNotIn("title contains `pin`", lines[0])
 
     def test_pin_is_a_whole_word_in_the_title(self):
@@ -4702,7 +4805,8 @@ SIBLINGS_RE = re.compile(r"^\*\*Siblings:\*\*\s*(.*?)\s*$")
 GATES_RE = re.compile(r"^\*\*Gates:\*\*\s*(.*?)\s*$")
 GATE_NAME = re.compile(r"^[a-z0-9_]+$")
 STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
-PIN_TITLE = re.compile(r"\bpin\b", re.I)    # B5-FIX-3: the word, not a substring ("Mapping")
+# B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping") and not a hyphen compound ("pin-less", "non-pin")
+PIN_TITLE = re.compile(r"(?<![A-Za-z0-9_-])pin(?![A-Za-z0-9_-])", re.I)
 PIN_NAME = re.compile(r"(?<![A-Za-z0-9_])test_[A-Za-z0-9_]+::test_[A-Za-z0-9_]+")
 ID_RE = re.compile(r"^[A-Z0-9]+(-[A-Za-z0-9]+)+$")
 NONE_RE = re.compile(r"^none\s+(?:—|--|-)\s+\S")
@@ -5120,14 +5224,21 @@ def _closed(text: str) -> bool:
     return bool(lines) and bool(CHECKPOINT_LINE.match(lines[-1]))
 
 
-def _committed(root: str, rel: str) -> str:
-    """The ledger at HEAD; empty when there is no HEAD or the file is not in it."""
-    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, text=True, check=False)
-    return r.stdout if r.returncode == 0 else ""
+def _committed(root: str, rel: str) -> bytes | None:
+    """The ledger's bytes at HEAD; None when there is no HEAD or the file is not in it."""
+    r = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=root, capture_output=True, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _raw(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 
 
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
-    """(state-dir name, plan path) for every ledger whose last line is not a committed CHECKPOINT line."""
+    """(state-dir name, plan path) for every ledger that is in flight: closed only when the working-tree
+    ledger is byte-equal to the HEAD ledger and ends in a CHECKPOINT line (B5-FIX-4: an uncommitted
+    'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
@@ -5140,7 +5251,7 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
         m = LEDGER_PLAN.match(first)
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
-        if not (_closed(text) and _closed(_committed(root, rel))):
+        if not (_closed(text) and _raw(ledger) == _committed(root, rel)):
             out.append((name, m.group(1)))
     return out
 
@@ -5238,8 +5349,8 @@ list; any other value starting with `none`, in any case, not followed by a lette
 entries, every `siblings` entry of the register rows the task's Findings name (an id with no row adds nothing:
 `plan.id.<id>` fails it), else `FAIL plan.siblings.N`; `**Gates:**` names, comma-separated, each exactly `run_all` or an X for which `tools/gates/gate_X.py`
 is at the root or a `Create` item of this or an earlier task, else `FAIL plan.gates.N`; a task whose Findings names
-ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, `\bpin\b`: `Pin step` and
-`pin:` count, `Mapping`, `Spinner` and `pinned` do not) and whose body (up to the next
+ids has a step `- [ ] **Step N: ...**` whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on
+either side: `Pin step`, `pin:` and `pin.` count, `Mapping`, `Spinner`, `pinned`, `pin-less` and `non-pin` do not) and whose body (up to the next
 step or heading, code included) names a test named `test_<module>::test_<name>`,
 else `FAIL plan.pin.N`; a missing or second Siblings or Gates line fails the same line. Code fences follow CommonMark (backtick or tilde, up to 3 spaces of
 indent relative to the list item, closed by the same character, a run at least as long and no info string); a fence still open at the end of the file is `FAIL plan.fence`. Per-task line ids have one form (B5-FIX-3),
@@ -5247,15 +5358,16 @@ indent relative to the list item, closed by the same character, a run at least a
 `siblings`, `gates` and `pin`. A block heading is `## Block N` or `## Block bN` (level 2; spaces or tabs after `##` and before the number).
 
 Ledger contract: `docs/superpowers/state/<plan>/ledger.md` line 1 is `plan: <plan file>`; a line `CHECKPOINT b<N> ...`
-ends a block. A plan is in flight unless the last non-empty line of the ledger is a `CHECKPOINT` line both in the
-working tree and in `HEAD` (an uncommitted ledger is in flight); `--in-flight` checks every plan in flight, and a
-ledger without the `plan:` line is `FAIL plan.input`.
+ends a block. A plan is in flight unless the working-tree ledger is byte-equal to the ledger in `HEAD` and its last
+non-empty line is a `CHECKPOINT` line (an uncommitted ledger, or uncommitted lines ending in a later `CHECKPOINT b<N+1>`,
+is in flight; B5-FIX-4); `--in-flight` checks every plan in flight, and a ledger without the `plan:` line is
+`FAIL plan.input`.
 ```
 CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both `unittest discover -v -s tools/gates/tests -t .`: the new test modules are found without a list, so `.github/workflows/gates.yml` is not edited.
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 99 and a suite of 572 after the b5 final-review fix wave B5-FIX-4, whose `run_all` is 144 lines before the S2-b5-finalfix package exists); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

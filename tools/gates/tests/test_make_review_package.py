@@ -166,6 +166,41 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertNotIn("\x1b", read(self.root, f"{REVIEW}/1/commits.txt"))
         self.assertTrue(read(self.root, f"{REVIEW}/1/diff.patch").startswith("diff --git a/"))
 
+    def assert_package_passes(self, head=None):
+        """make_review_package then gate_review_package --dir on the same package: only PASS lines."""
+        rc, out = self.make("fx", "1", self.base, head or self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        for name, text in (("mutation-SD-FX-1.txt", MUTATION), ("siblings.md", SIBLINGS), ("claims.md", CLAIMS)):
+            rf.write(self.root, f"{REVIEW}/1/{name}", text)
+        rc, out = self.run_main(grp.main, "--dir", f"{REVIEW}/1")
+        lines = [l for l in out.splitlines() if l.strip()]
+        self.assertTrue(rc == 0 and lines and all(l.startswith("PASS ") for l in lines), out)
+
+    def test_every_color_key_set_to_always_gives_a_package_that_passes(self):
+        # B5-FIX-4 V-1: color.diff beats color.ui and colours both the log sha and the diff
+        for key in ("color.ui", "color.diff", "color.decorate", "color.log", "color.status"):
+            with self.subTest(key=key):
+                rf.git(self.root, "config", key, "always")
+                try:
+                    self.assert_package_passes()
+                    self.assertNotIn("\x1b", read(self.root, f"{REVIEW}/1/commits.txt")
+                                     + read(self.root, f"{REVIEW}/1/diff.patch"))
+                finally:
+                    rf.git(self.root, "config", "--unset", key)
+
+    def test_core_abbrev_4_gives_a_package_that_passes(self):
+        rf.git(self.root, "config", "core.abbrev", "4")    # B5-FIX-4 V-2: 4-hex shas fail COMMIT_LINE
+        self.assertRegex(rf.git(self.root, "log", "--oneline", "-1"), r"^[0-9a-f]{4} ")    # the config bites
+        self.assert_package_passes()
+        self.assertRegex(read(self.root, f"{REVIEW}/1/commits.txt"), r"^[0-9a-f]{12} feat: fixture fix\n$")
+
+    def test_utf16_log_encoding_keeps_a_non_ascii_subject(self):
+        rf.write(self.root, "src/fx.py", "fixed = 'caf\u00e9'\n")
+        head = rf.commit(self.root, "fix: caf\u00e9 \u2014 na\u00efve")
+        rf.git(self.root, "config", "i18n.logOutputEncoding", "UTF-16")    # B5-FIX-4 V-2
+        self.assert_package_passes(head)
+        self.assertIn("fix: caf\u00e9 \u2014 na\u00efve\n", read(self.root, f"{REVIEW}/1/commits.txt"))
+
     def test_textconv_driver_does_not_reach_diff_patch(self):
         rf.write(self.root, ".gitattributes", "*.x diff=up\n")
         rf.write(self.root, "data.x", "hi\n")

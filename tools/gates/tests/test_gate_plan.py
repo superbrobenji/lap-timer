@@ -30,9 +30,9 @@ def gate(root, argv):
     return rc, buf.getvalue()
 
 
-def plan_repo(ledger=None):
+def plan_repo(ledger=None, plan=None):
     files = dict(rf.DISPATCH_FILES)
-    files["docs/superpowers/plans/fx.md"] = GOOD
+    files["docs/superpowers/plans/fx.md"] = GOOD if plan is None else plan
     if ledger is not None:
         files["docs/superpowers/state/fx/ledger.md"] = ledger
     return rf.make_repo(files, rf.load_rows())
@@ -180,6 +180,49 @@ class InFlight(unittest.TestCase):
         self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
         rf.commit(root, "chore(state): checkpoint b1")
         self.assertEqual([], gate_plan.plans_in_flight(root))
+
+    def append(self, root, text):
+        with open(os.path.join(root, "docs/superpowers/state/fx/ledger.md"), "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_uncommitted_next_block_after_a_committed_checkpoint_is_in_flight(self):
+        # B5-FIX-4 V-3: HEAD ends in CHECKPOINT b1, the working tree adds block 2 and ends in CHECKPOINT b2
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        self.assertEqual([], gate_plan.plans_in_flight(root))
+        self.append(root, "- b2 start x\n- T2 DONE y\nCHECKPOINT b2 def5678\n")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(0, rc, out)
+        self.assertIn("PASS plan.fx.header.goal", out)
+        self.assertNotIn("plan.in_flight", out)
+        rf.commit(root, "chore(state): checkpoint b2")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual((0, "PASS plan.in_flight\n"), (rc, out))
+
+    def test_uncommitted_edit_above_a_committed_checkpoint_is_in_flight(self):
+        # B5-FIX-4 V-3: same last line at HEAD and in the working tree, but the ledgers differ
+        root = self.repo(LEDGER + "CHECKPOINT b1 abc1234\n")
+        path = os.path.join(root, "docs/superpowers/state/fx/ledger.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(LEDGER + "- T2 DONE z\nCHECKPOINT b1 abc1234\n")
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(root))
+
+    def test_hyphen_compound_pin_titles_fail_through_main(self):
+        # B5-FIX-4 V-4: a hyphen joins a compound, it is not a word boundary for the pin step
+        for title in ("pin-less run", "Mutation run, pin-free", "non-pin step", "re-Pin"):
+            with self.subTest(title):
+                root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
+                self.addCleanup(shutil.rmtree, root, True)
+                rc, out = gate(root, ["--in-flight"])
+                self.assertEqual(1, rc, out)
+                self.assertRegex(out, r"(?m)^FAIL plan\.fx\.pin\.1: ")
+                self.assertIn("PASS plan.fx.pin.2", out)
+        for title in ("Pin step", "pin: the row", "Mutation run and pin", "Mutation run, pin."):
+            with self.subTest(title):
+                root = plan_repo(LEDGER, GOOD.replace("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
+                self.addCleanup(shutil.rmtree, root, True)
+                rc, out = gate(root, ["--in-flight"])
+                self.assertEqual(0, rc, out)
+                self.assertIn("PASS plan.fx.pin.1", out)
 
     def test_ledger_without_plan_line_fails(self):
         root = self.repo("# Ledger: fx\n")
@@ -632,7 +675,7 @@ class Branches(unittest.TestCase):
             self.assertIn(f"PASS plan.pin.{n}", out)
         out = self.ok(self.variant("**Step 2: Mutation run and pin**", "**Step 2: PIN the row**"))
         self.assertIn("PASS plan.pin.1", out)
-        for title in ("Pin step", "pin: the row", "re-Pin", "Mutation run, pin"):
+        for title in ("Pin step", "pin: the row", "Mutation run, pin", "pin. done"):
             with self.subTest(title):
                 out = self.ok(self.variant("**Step 2: Mutation run and pin**", f"**Step 2: {title}**"))
                 self.assertIn("PASS plan.pin.1", out)
@@ -660,7 +703,7 @@ class Branches(unittest.TestCase):
             readme = f.read()
         section = readme[readme.index("## make_review_package, gate_plan (S2)\n"):]
         for word in ("`FAIL plan.mode.N`", "`FAIL plan.findings.N`", "`plan.<check>.<N>`", "`plan.<slug>.<check>.<N>`",
-                     "holds the word `pin`", "`Mapping`, `Spinner` and `pinned` do not"):
+                     "holds the word `pin`", "`Mapping`, `Spinner`, `pinned`, `pin-less` and `non-pin` do not"):
             self.assertIn(word, section)
         self.assertNotIn("plan.task.", readme)
         self.assertNotIn("title contains `pin`", readme)
@@ -683,8 +726,9 @@ class Branches(unittest.TestCase):
             lines = [l for l in f.read().splitlines()
                      if l.startswith("- Plan grammar (DEC-0016, DEC-0017; `gate_plan` checks it): ")]
         self.assertEqual(1, len(lines))
-        self.assertIn("a step whose title holds the word `pin` (case-insensitive, `\\bpin\\b`", lines[0])
-        self.assertIn("B5-FIX-3", lines[0])
+        self.assertIn("a step whose title holds the word `pin` (case-insensitive, no letter, digit, `_` or `-` joined on "
+                      "either side", lines[0])
+        self.assertIn("B5-FIX-3, B5-FIX-4", lines[0])
         self.assertNotIn("title contains `pin`", lines[0])
 
     def test_pin_is_a_whole_word_in_the_title(self):

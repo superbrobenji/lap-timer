@@ -147,6 +147,20 @@ class GateReviewPackage(unittest.TestCase):
         self.assertEqual(0, rc, out)
         self.assertIn("PASS review_package.all", out)
 
+    def test_all_mode_with_an_empty_review_dir_passes(self):
+        # B5-FIX-4 F1: an empty review/ holds no package, and no package is a PASS (README)
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        os.makedirs(os.path.join(self.root, ".superpowers/sdd/fx/review"))
+        self.assertEqual((0, "PASS review_package.all\n"), gate(self.root, ["--all"]))
+
+    def test_all_mode_review_dir_holding_only_a_dot_file_fails(self):
+        # B5-FIX-4 F1 / round-1 N4: a non-directory entry is never a package, and never skipped
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx"))
+        rf.write(self.root, ".superpowers/sdd/fx/review/.DS_Store", "x\n")
+        rc, out = gate(self.root, ["--all"])
+        self.assertFailLine(rc, out, "review_package.fx..DS_Store.input", "is not a directory")
+        self.assertNotIn("review_package.all", out)
+
     def test_no_mode_fails(self):
         self.assertFailLine(*gate(self.root, []), "review_package.input")
 
