@@ -1,0 +1,5 @@
+finding: B5-FIX-6
+test: test_all_mode_sdd_that_is_a_file_fails
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_sdd_that_is_a_file_fails -> PASS
+step 2 (fix reverted: perl -pi -e 's/^    for rel in \("\.superpowers", SDD\):/    for rel in ():/' tools/gates/gate_review_package.py removes the DEC-0022 non-directory guard (a regular-file .superpowers/sdd is again PASS review_package.all), restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_sdd_that_is_a_file_fails -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_sdd_that_is_a_file_fails -> PASS

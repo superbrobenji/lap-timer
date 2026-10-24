@@ -652,10 +652,13 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix2
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_all_mode_sdd_that_is_a_file_fails
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-6.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix2.md
   history:
   - state: open
     sha: 2568b89
@@ -663,6 +666,12 @@
   - state: planned
     sha: 2568b89
     by: session
+  - state: in-progress
+    sha: c0316eb
+    by: controller
+  - state: pinned
+    sha: c0316eb
+    by: controller
 - id: B5-FIX-7
   source: review
   severity: MEDIUM
@@ -684,8 +693,8 @@
   - file: tools/gates/gate_review_package.py
     lines: 123-124
     sha: c0316eb
-  repro: 'commit a file named café.md; make_review_package <plan> <task> <base> <head>
-    prints gates PASS; gate_review_package --dir on the package -> FAIL review_package.<...>.diff'
+  repro: commit a file named café.md; make_review_package <plan> <task> <base> <head>
+    prints gates PASS; gate_review_package --dir on the package -> FAIL review_package.<...>.diff
   owner:
     kind: plan
     plan: strict-delivery
@@ -715,8 +724,9 @@
   - file: tools/gates/gate_dispatch.py
     lines: 102-103
     sha: c0316eb
-  repro: 'fallback_error({fable_fallback: sonnet, model_rank: {haiku: 1, sonnet: x, opus:
-    3, fable: 4}}) -> TypeError; with opus: true and fable_fallback: opus -> None'
+  repro: 'fallback_error({fable_fallback: sonnet, model_rank: {haiku: 1, sonnet: x,
+    opus: 3, fable: 4}}) -> TypeError; with opus: true and fable_fallback: opus ->
+    None'
   owner:
     kind: plan
     plan: strict-delivery
@@ -736,9 +746,9 @@
   source: review
   severity: LOW
   class: 'make_review_package branches with no test that fails when they break (this
-    block''s Task 5 code): the package-name check accepting ''/'' (mutant M22) and the
-    pending mutation-file hint (make_review_package.py:132-134, mutant M29) both survive
-    the suite (b5 final review A2-R2/A2-V3)'
+    block''s Task 5 code): the package-name check accepting ''/'' (mutant M22) and
+    the pending mutation-file hint (make_review_package.py:132-134, mutant M29) both
+    survive the suite (b5 final review A2-R2/A2-V3)'
   siblings:
   - package name with a slash
   - pending mutation-file hint
@@ -746,8 +756,8 @@
   - file: tools/gates/make_review_package.py
     lines: 132-134
     sha: c0316eb
-  repro: 'mutate the NAME check to accept / or drop the pending mutation hint; the full
-    suite stays OK'
+  repro: mutate the NAME check to accept / or drop the pending mutation hint; the
+    full suite stays OK
   owner:
     kind: plan
     plan: strict-delivery
