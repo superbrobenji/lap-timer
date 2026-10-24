@@ -221,3 +221,84 @@
   asked_at: {sha: "ce40e09", by: session}
   answer: "split-by-area (owner in chat, 2026-10-23: \"recommended for all\"; the session had recommended split-by-area)"
   answered_at: {sha: "2568b89", by: superbrobenji}
+- id: DEC-0024
+  class: spec-direction
+  question: "b5 final review A5-R1/A5-V4: tools/gates/lib/__init__.py:41 passed(id, reason=\"\") (added 1a6ff7c) prints 'PASS id: reason', while spec :191 and umbrella :114 define the PASS line as 'PASS id'. Which wins?"
+  options:
+    - {label: code-to-spec, cost: "passed() takes no reason again and every PASS line is 'PASS id'; callers that pass a reason change; small code change in this block's fix wave"}
+    - {label: spec-to-code, cost: "spec :191 and umbrella :114 amended to allow 'PASS id: reason'; no code change"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "code-to-spec (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended code-to-spec)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0025
+  class: scope
+  question: "b5 final review A5-R2: S2 plan :5495 credits 'plan last' in run_all.GATES to session ruling 2(b), but ledger :131 ruling 2(b) sets no order; Task 7 Step 5 (:6267) lists plan 4th. Which gate order is in scope?"
+  options:
+    - {label: plan-last, cost: "confirm plan last in GATES as owner scope; S2 plan :5495 cites this decision instead of ruling 2(b); Task 7 Step 5 text corrected to plan last; plan text only"}
+    - {label: old-order, cost: "restore the Task 7 order (plan 4th) in run_all.GATES; code and test change"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "plan-last (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended plan-last)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0026
+  class: scope
+  question: "b5 final review A3-R1: gate_plan.py:254-257 and :297-305 silently drop a '- Modify:' (Files) item placed after a code fence or a **Field:** line inside a task, so a plan item escapes the files/overlap checks (fails open). Fix-1 design pick never asked."
+  options:
+    - {label: fail-on-stray, cost: "any Files-style item outside the Files list inside a task FAILs plan.<slug>.files.<N>; tests; this block's fix wave"}
+    - {label: document-limit, cost: "README and S2 plan state the limit; no code change; the fail-open path stays"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "fail-on-stray (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended fail-on-stray)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0027
+  class: scope
+  question: "b5 final review A3-V3: gate_plan accepts absolute and '../' Files paths."
+  options:
+    - {label: fail-paths, cost: "absolute paths and any '..' component FAIL plan.<slug>.files.<N>; tests; this block's fix wave"}
+    - {label: allow-paths, cost: "accepted as today; documented"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "fail-paths (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended fail-paths)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0028
+  class: spec-direction
+  question: "b5 final review A4-R1: gate_dispatch.py:97-105 accepts as fable_fallback any model_rank model with opus <= rank < fable, while spec D18 says the Fable roles 'run on opus' under the fallback."
+  options:
+    - {label: exact-opus, cost: "fable_fallback must be exactly opus; any other value FAILs dispatch.config; tests; this block's fix wave"}
+    - {label: amend-spec, cost: "spec D18 amended to 'a model ranked at least opus'; no code change"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "exact-opus (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended exact-opus)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0029
+  class: scope
+  question: "b5 final review A2-V2: an untracked file hidden by .git/info/exclude passes make_review_package's clean-tree check, and gates.txt then reads it."
+  options:
+    - {label: check-excluded, cost: "the clean-tree check also reports ignored or excluded files under the paths the gates read (tools/gates, docs/superpowers/state, the plan), packages dir excepted; tests; this block's fix wave"}
+    - {label: accept, cost: "documented as accepted: packages are git-ignored by design"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "check-excluded (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended check-excluded)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0030
+  class: model-policy
+  question: "b5 final review A5-V5: round 7 split the final review into five areas (A1-A3 one per task, A4 the B5-FIX-2 fallback wave, A5 session-side) while DEC-0023 says one area per task plus one session-side area."
+  options:
+    - {label: accept-five, cost: "a fix wave large enough gets its own area; DEC-0023 read as a floor; umbrella :353 says so; text only"}
+    - {label: regroup-four, cost: "A4 folded into A1-A3 and A5; the round-8 reruns use four areas"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "accept-five (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended accept-five)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0031
+  class: finding-class
+  question: "B5-FIX-6 implementer: the fix also FAILs --all when .superpowers itself is a non-directory, beyond the row's class (.superpowers/sdd and .superpowers/sdd/<plan>/review)."
+  options:
+    - {label: keep-widen, cost: "keep the guard; the B5-FIX-6 class widens to name .superpowers; row text change only"}
+    - {label: drop, cost: "remove the guard and its test"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "keep-widen (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended keep-widen)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0032
+  class: spec-direction
+  question: "b5 round-7 incident: the rule that reviewers never write to the real checkout is prose only; a probe script whose cd failed ran rm -rf .git in the checkout (2026-10-23, recovered 2026-10-24) and mutants twice. How is the rule enforced?"
+  options:
+    - {label: script-guard, cost: "every reviewer/verifier brief and the common final-review brief require set -eu and a guard that refuses to run when the resolved working dir is the checkout, before any write; text in briefs and strict blocks; a later block may add a hook check"}
+    - {label: no-checkout-path, cost: "reviewers get a workspace copy and never the checkout path; dispatch and package flow change"}
+  asked_at: {sha: "c0316eb", by: session}
+  answer: "script-guard (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended script-guard)"
+  answered_at: {sha: "c0316eb", by: superbrobenji}

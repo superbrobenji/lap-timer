@@ -663,3 +663,103 @@
   - state: planned
     sha: 2568b89
     by: session
+- id: B5-FIX-7
+  source: review
+  severity: MEDIUM
+  class: 'gate_review_package rejects valid git output that make_review_package writes
+    (this block''s Task 4 and Task 5 code): diff.patch must start with the literal
+    ''diff --git a/'' (gate_review_package.py:123), so a first changed path that git
+    quotes (non-ASCII under core.quotePath, a double quote, tab or backslash) FAILs
+    review_package.diff; COMMIT_LINE (:34) needs a non-space after the sha, so a commit
+    with an empty subject or a subject starting with a space FAILs review_package.commits;
+    the helper prints gates PASS rc 0 for such packages (b5 final review A2-R1/A2-V1)'
+  siblings:
+  - quoted first diff path
+  - empty or space-led commit subject
+  - helper and gate agree on every range git can produce
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 34-34
+    sha: c0316eb
+  - file: tools/gates/gate_review_package.py
+    lines: 123-124
+    sha: c0316eb
+  repro: 'commit a file named café.md; make_review_package <plan> <task> <base> <head>
+    prints gates PASS; gate_review_package --dir on the package -> FAIL review_package.<...>.diff'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: c0316eb
+    by: final-review
+  - state: planned
+    sha: c0316eb
+    by: controller
+- id: B5-FIX-8
+  source: review
+  severity: LOW
+  class: 'gate_dispatch.fallback_error (B5-FIX-2 code, gate_dispatch.py:102-103) does
+    not check that the fallback model''s own rank is an int: a str rank raises TypeError
+    (--config-check prints FAIL dispatch.input and loses the dispatch.config.model_rank
+    FAIL), and a bool rank passes (b5 final review A4-V1)'
+  siblings:
+  - str rank of the fallback model
+  - bool rank of opus, fable or the fallback model
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: 102-103
+    sha: c0316eb
+  repro: 'fallback_error({fable_fallback: sonnet, model_rank: {haiku: 1, sonnet: x, opus:
+    3, fable: 4}}) -> TypeError; with opus: true and fable_fallback: opus -> None'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: c0316eb
+    by: final-review
+  - state: planned
+    sha: c0316eb
+    by: controller
+- id: B5-FIX-9
+  source: review
+  severity: LOW
+  class: 'make_review_package branches with no test that fails when they break (this
+    block''s Task 5 code): the package-name check accepting ''/'' (mutant M22) and the
+    pending mutation-file hint (make_review_package.py:132-134, mutant M29) both survive
+    the suite (b5 final review A2-R2/A2-V3)'
+  siblings:
+  - package name with a slash
+  - pending mutation-file hint
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: 132-134
+    sha: c0316eb
+  repro: 'mutate the NAME check to accept / or drop the pending mutation hint; the full
+    suite stays OK'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: c0316eb
+    by: final-review
+  - state: planned
+    sha: c0316eb
+    by: controller
