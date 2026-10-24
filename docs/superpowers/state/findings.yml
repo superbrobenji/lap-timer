@@ -1182,7 +1182,7 @@
   severity: MEDIUM
   class: 'gate_review_package reads only the first table of claims.md (gate_review_package.py:50-63,
     :169-181): a FAIL row after a blank line or in a second table gives rc 0, against
-    spec §7 and umbrella :266 (''fails if claims.md has a FAIL row'') and README:25
+    umbrella :266 (''fails if claims.md has a FAIL row''; spec §7 names only a claims-executed table) and README:25
     (''a claims table with no FAIL row''); the docstring''s ''first table'' is unauthorised
     (b5 final review A1-V2)'
   siblings:
