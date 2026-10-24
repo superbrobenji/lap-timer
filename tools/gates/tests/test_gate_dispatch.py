@@ -370,10 +370,8 @@ class GateDispatch(unittest.TestCase):
             with self.subTest(role):
                 rc, out = self.fable_role_on(role, "opus", "opus", tool_model="opus")
                 self.assertEqual(0, rc, out)
-                lines = [l for l in out.splitlines() if l.startswith("PASS dispatch.model.fallback: ")]
-                self.assertEqual(1, len(lines), out)
-                self.assertIn("DEC-0018", lines[0])
-                self.assertIn(f"{role} on opus", lines[0])
+                lines = [l for l in out.splitlines() if l.startswith("PASS dispatch.model.fallback")]
+                self.assertEqual(["PASS dispatch.model.fallback"], lines, out)    # DEC-0024: no reason
                 self.assertNotIn("dispatch.model.rank", out)
                 self.assertIn("PASS dispatch.model.agree", out)
 
@@ -407,7 +405,7 @@ class GateDispatch(unittest.TestCase):
             with self.subTest(fallback):
                 rc, out = self.fable_role_on("final_verifier", fallback, fallback)
                 self.assertFailLine(rc, out, "dispatch.model.fallback: ")
-                self.assertIn(f"fable_fallback {fallback!r} must be a model_rank model ranked at least opus and below fable", out)
+                self.assertIn(f"fable_fallback {fallback!r} must be exactly 'opus' (DEC-0028)", out)
                 self.assertNotIn("PASS dispatch.model.fallback", out)
 
     def test_non_fable_roles_are_unchanged_by_the_fallback(self):
@@ -579,13 +577,7 @@ class ConfigCheck(unittest.TestCase):
         the value; absent, the off line."""
         rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(0, rc, out)
-        conf = config.load(rf.REAL)
-        if "fable_fallback" in conf:
-            v = conf["fable_fallback"]
-            want = f"PASS dispatch.config.fable_fallback: {v}: the fable_roles run on {v} while Fable is unavailable (DEC-0018)"
-        else:
-            want = "PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)"
-        self.assertIn(want + "\n", out + "\n")
+        self.assertIn("\nPASS dispatch.config.fable_fallback\n", "\n" + out + "\n")    # DEC-0024: no reason
         self.assertEqual(15, len(out.splitlines()), out)
 
     def test_config_text_sets_the_key_whether_or_not_the_repo_has_it(self):
@@ -605,7 +597,7 @@ class ConfigCheck(unittest.TestCase):
                 with config_with_fallback(None) as load:
                     self.assertNotIn("fable_fallback", load.return_value)
                     rc, out = gate(rf.REAL, ["--config-check"])
-                self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+                self.assertIn("\nPASS dispatch.config.fable_fallback\n", "\n" + out + "\n")
                 with config_with_fallback("opus") as load:
                     self.assertEqual("opus", load.return_value["fable_fallback"])
         d = tempfile.mkdtemp(prefix="gate-cfgsrc-")
@@ -619,7 +611,7 @@ class ConfigCheck(unittest.TestCase):
             self.assertNotIn("fable_fallback", load.return_value)
             rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(0, rc, out)
-        self.assertIn("PASS dispatch.config.fable_fallback: absent: the fallback is off (DEC-0018)", out)
+        self.assertIn("\nPASS dispatch.config.fable_fallback\n", "\n" + out + "\n")
         self.assertEqual(15, len(out.splitlines()), out)
 
     def test_config_check_fails_an_invalid_fallback(self):
@@ -628,15 +620,36 @@ class ConfigCheck(unittest.TestCase):
                 rc, out = gate(rf.REAL, ["--config-check"])
                 self.assertEqual(1, rc, out)
                 self.assertIn("FAIL dispatch.config.fable_fallback: fable_fallback ", out)
-                self.assertIn("must be a model_rank model ranked at least opus and below fable", out)
+                self.assertIn("must be exactly 'opus' (DEC-0028)", out)
                 self.assertNotIn("PASS dispatch.config.fable_fallback", out)
 
-    def test_config_check_ranks_the_fallback_by_model_rank(self):
-        """A model_rank that ranks sonnet with opus admits sonnet; one that ranks opus with fable admits nothing."""
-        with config_with_fallback("sonnet") as load:
-            load.return_value["model_rank"] = {"haiku": 1, "sonnet": 3, "opus": 3, "fable": 4}
-            rc, out = gate(rf.REAL, ["--config-check"])
-        self.assertIn("PASS dispatch.config.fable_fallback: sonnet: ", out)
+    def test_every_pass_line_is_the_bare_id(self):
+        """DEC-0024: every PASS line is 'PASS <id>' with no reason (spec :191); FAIL lines keep theirs."""
+        for fallback in (None, "opus"):
+            with self.subTest(fallback), config_with_fallback(fallback):
+                rc, out = gate(rf.REAL, ["--config-check"])
+            self.assertEqual(0, rc, out)
+            passes = [l for l in out.splitlines() if l.startswith("PASS ")]
+            self.assertEqual(15, len(passes), out)
+            self.assertEqual([], [l for l in passes if ":" in l or " " in l[len("PASS "):]], out)
+
+    def test_config_check_fails_a_fallback_other_than_opus_whatever_its_rank(self):
+        """DEC-0028 exact-opus: sonnet ranked with opus still FAILs; a str or bool rank FAILs without a crash and
+        leaves the model_rank line in the output (B5-FIX-8)."""
+        for fallback, ranks in (("sonnet", {"haiku": 1, "sonnet": 3, "opus": 3, "fable": 4}),
+                                ("sonnet", {"haiku": 1, "sonnet": "x", "opus": 3, "fable": 4}),
+                                ("opus", {"haiku": 1, "sonnet": 2, "opus": True, "fable": 4}),
+                                ("opus", {"haiku": 1, "sonnet": 2, "opus": 3, "fable": True}),
+                                ("sonnet", {"haiku": 1, "sonnet": True, "opus": 3, "fable": 4})):
+            with self.subTest(fallback=fallback, ranks=ranks), config_with_fallback(fallback) as load:
+                load.return_value["model_rank"] = ranks
+                rc, out = gate(rf.REAL, ["--config-check"])
+                self.assertEqual(1, rc, out)
+                self.assertIn(f"FAIL dispatch.config.fable_fallback: fable_fallback {fallback!r} ", out)
+                self.assertNotIn("dispatch.input", out)
+                self.assertIn("dispatch.config.model_rank", out)
+            with self.subTest(fallback=fallback, ranks=ranks, call="fallback_error"):
+                self.assertIsNotNone(gate_dispatch.fallback_error({"fable_fallback": fallback, "model_rank": ranks}))
         with config_with_fallback("opus") as load:
             load.return_value["model_rank"] = {"haiku": 1, "sonnet": 2, "opus": 4, "fable": 4}
             rc, out = gate(rf.REAL, ["--config-check"])

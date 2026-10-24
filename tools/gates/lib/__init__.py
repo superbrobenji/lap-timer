@@ -38,8 +38,9 @@ class Result:
     def fail(self, id: str, reason: str) -> None:
         self.lines.append(Line("FAIL", id, reason))
 
-    def passed(self, id: str, reason: str = "") -> None:
-        self.lines.append(Line("PASS", id, reason))
+    def passed(self, id: str) -> None:
+        """A PASS line is 'PASS <id>' and carries no reason (spec :191, umbrella :114; DEC-0024)."""
+        self.lines.append(Line("PASS", id, ""))
 
     def render(self, as_json: bool) -> str:
         if as_json:

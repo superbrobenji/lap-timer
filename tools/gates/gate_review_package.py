@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,7 +32,7 @@ STEP1 = re.compile(r"^step 1 \(fix present\): (?P<cmd>.+) -> PASS$")
 STEP2 = re.compile(r"^step 2 \(fix reverted: (?P<how>.+?)\): (?P<cmd>.+) -> FAIL$")
 STEP3 = re.compile(r"^step 3 \(fix restored\): (?P<cmd>.+) -> PASS$")
 SEPARATOR = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
-COMMIT_LINE = re.compile(r"^[0-9a-f]{7,40} \S")
+COMMIT_LINE = re.compile(r"^[0-9a-f]{7,40}(?: .*)?$")    # B5-FIX-7: git allows an empty or space-led subject
 GATE_LINE = re.compile(r"^(PASS|FAIL) \S+")
 DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mode|old mode|new mode"
                        r"|similarity index|rename |copy |Binary files )")
@@ -47,18 +48,26 @@ def _lines(text: str) -> list[str]:
     return [l.rstrip() for l in text.splitlines() if l.strip()]
 
 
-def table_rows(text: str) -> list[list[str]] | None:
+def table_rows(text: str, every: bool = False) -> list[list[str]] | None:
     """Data rows of the first Markdown table: the first '|' line is the header, the next line must be the
-    separator, and the table ends at the first line that does not start with '|'. Cells split on an
+    separator, and the table ends at the first line that does not start with '|'. every=True (claims.md,
+    B5-FIX-22: spec \u00a77 and umbrella :266, the gate fails 'if claims.md has a FAIL row') reads every '|' line
+    after the first header instead: a later table's header (a '|' line followed by a separator) and every
+    separator are skipped, any other '|' line is a row, after a blank line or prose too. Cells split on an
     unescaped '|' only; '\\|' inside a cell is a literal '|'. None when there is no header + separator."""
     lines = [l.strip() for l in text.splitlines()]
     start = next((i for i, l in enumerate(lines) if l.startswith("|")), None)
     if start is None or start + 1 >= len(lines) or not SEPARATOR.match(lines[start + 1]):
         return None
     rows = []
-    for l in lines[start + 2:]:
+    for i in range(start + 2, len(lines)):
+        l = lines[i]
         if not l.startswith("|"):
+            if every:
+                continue
             break
+        if every and (SEPARATOR.match(l) or (i + 1 < len(lines) and SEPARATOR.match(lines[i + 1]))):
+            continue
         rows.append(_cells(l))
     return rows
 
@@ -70,9 +79,28 @@ def _cells(line: str) -> list[str]:
     return [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", inner)]
 
 
-def names_test(cmd: str, test: str) -> bool:
-    """True when test is a whole component of cmd: a token's last dotted component or its part after '::'."""
-    return any(tok.split("::")[-1].split(".")[-1] == test for tok in cmd.split())
+def _tokens(cmd: str) -> list[str]:
+    """cmd split as the shell splits it (B5-FIX-18: a quoted test id is one token); unbalanced quotes: whitespace."""
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
+
+
+def names_test(cmd: str, test: str, module: str | None = None) -> bool:
+    """True when test is a whole component of cmd: a token's last dotted component or its part after '::'.
+    With module (B5-FIX-17: the pin's test_<module>), the same token must also name that module: a dotted
+    component of a unittest id, or the file name (<module>.py) of a pytest path."""
+    for tok in _tokens(cmd):
+        parts = tok.split("::")
+        if parts[-1].split(".")[-1] != test:
+            continue
+        if module is None:
+            return True
+        dotted = (parts[0] if len(parts) == 1 else "").split(".")
+        if module in dotted[:-1] or (len(parts) > 1 and os.path.basename(parts[0]) in (module, module + ".py")):
+            return True
+    return False
 
 
 def mutation_errors(text: str, fid: str, pin_test: str | None = None) -> list[str]:
@@ -95,9 +123,14 @@ def mutation_errors(text: str, fid: str, pin_test: str | None = None) -> list[st
         cmds = {m.group("cmd") for m in steps}
         if len(cmds) != 1:
             errs.append("steps 1-3 must run the same command")
-        elif test and not names_test(steps[0].group("cmd"), test):
+        elif test and not names_test(steps[0].group("cmd"), test.split("::")[-1]):
             errs.append(f"the command does not name the test {test!r}")
-    if pin_test is not None and test and test != pin_test.split("::")[-1]:
+        elif pin_test is not None and "::" in pin_test and \
+                not names_test(steps[0].group("cmd"), pin_test.split("::")[-1], pin_test.split("::")[0]):
+            errs.append(f"the command does not run the register's pinned test {pin_test!r} (module and name)")
+    if pin_test is not None and test and test.split("::")[-1] != pin_test.split("::")[-1]:
+        errs.append(f"test {test!r} is not the register's pinned test {pin_test!r}")
+    if pin_test is not None and "::" in test and test != pin_test:
         errs.append(f"test {test!r} is not the register's pinned test {pin_test!r}")
     return errs
 
@@ -120,8 +153,8 @@ def _commits(pkg, res, pfx):
 
 
 def diff_error(text: str) -> str:
-    if not text.startswith("diff --git a/"):
-        return "diff.patch does not start with 'diff --git a/'"
+    if not text.startswith(("diff --git a/", 'diff --git "a/')):    # B5-FIX-7: git quotes an unusual path
+        return "diff.patch does not start with 'diff --git a/' (or git's quoted 'diff --git \"a/')"
     if not any(DIFF_BODY.match(l) for l in text.splitlines()[1:]):
         return "diff.patch has no hunk or file line after 'diff --git'"
     return ""
@@ -166,7 +199,7 @@ def _claims(pkg, res, pfx):
     path = os.path.join(pkg, "claims.md")
     if not os.path.isfile(path):
         return
-    rows = table_rows(_read(path))
+    rows = table_rows(_read(path), every=True)
     if rows is None:
         res.fail(f"{pfx}.claims", "claims.md is not a Markdown table (header row + separator)")
         return
@@ -261,13 +294,25 @@ def _check_all(root: str, findings: list, res: Result) -> None:
     seen = False
     for plan in sorted(os.listdir(sdd)) if os.path.isdir(sdd) else []:
         review = os.path.join(sdd, plan, "review")
-        if not os.path.lexists(review):
+        try:
+            os.lstat(review)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as e:    # B5-FIX-21: <plan> unreadable (mode 000, or no search bit): FAIL, never skip
+            seen = True
+            res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)}: {e.strerror or e}")
             continue
         if not os.path.isdir(review):
             seen = True
             res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)} is not a directory")
             continue
-        for task in sorted(os.listdir(review)):
+        try:
+            tasks = sorted(os.listdir(review))
+        except OSError as e:    # B5-FIX-21: an unreadable review/ FAILs
+            seen = True
+            res.fail(f"review_package.{plan}.input", f"{os.path.relpath(review, root)}: {e.strerror or e}")
+            continue
+        for task in tasks:
             seen = True
             _check_entry(root, os.path.join(review, task), f"review_package.{plan}.{task}", findings, res)
     if not seen:
@@ -277,6 +322,11 @@ def _check_all(root: str, findings: list, res: Result) -> None:
 def _check_entry(root: str, pkg: str, pfx: str, findings: list, res: Result) -> None:
     if not os.path.isdir(pkg):
         res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)} is not a directory")
+        return
+    try:
+        os.listdir(pkg)
+    except OSError as e:    # B5-FIX-21: an unreadable <task> dir FAILs under its own prefix
+        res.fail(f"{pfx}.input", f"{os.path.relpath(pkg, root)}: {e.strerror or e}")
         return
     ids = task_findings(findings, pkg)
     if not ids:

@@ -205,11 +205,26 @@ class GateReviewPackage(unittest.TestCase):
         self.put({"claims.md": GOOD["claims.md"], "siblings.md": "| sibling | test or finding |\n| x | y |\n"})
         self.assertFailLine(*self.check(), "review_package.siblings", "not a Markdown table")
 
-    def test_only_the_first_table_counts(self):
-        self.put({"claims.md": GOOD["claims.md"] + "\n| a | b |\n|---|---|\n| x | y |\n",
-                  "siblings.md": GOOD["siblings.md"] + "\n| a | b |\n|---|---|\n| x | y |\n"})
+    def test_only_the_first_siblings_table_counts(self):
+        self.put({"siblings.md": GOOD["siblings.md"] + "\n| a | b |\n|---|---|\n| x | y |\n"})
         rc, out = self.check()
         self.assertEqual(0, rc, out)
+
+    def test_every_claims_row_counts(self):
+        """B5-FIX-22 (spec \u00a77, umbrella :266): a FAIL row anywhere in claims.md FAILs the claims check."""
+        fail_row = "| c | d | x | o | FAIL |\n"
+        head = "| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
+        for name, text in (("after a blank line", GOOD["claims.md"] + "\n" + fail_row),
+                           ("after prose", GOOD["claims.md"] + "some prose\n" + fail_row),
+                           ("in a second table", GOOD["claims.md"] + "\n" + head + fail_row)):
+            with self.subTest(name):
+                self.put({"claims.md": text})
+                self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: c")
+        self.put({"claims.md": GOOD["claims.md"] + "\n" + head + fail_row.replace("FAIL", "PASS")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.put({"claims.md": GOOD["claims.md"] + "\n| x | y |\n"})
+        self.assertFailLine(*self.check(), "review_package.claims", "1 row(s) not 'claim |")
 
     def test_mutation_must_be_exactly_five_lines(self):
         self.put({"mutation-SD-FX-1.txt": "\n".join(MUT.splitlines()[:4]) + "\n"})
@@ -250,6 +265,7 @@ class GateReviewPackage(unittest.TestCase):
         self.with_rows(lambda r: pin(r, "test_other::test_elsewhere"))
         self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "pinned test")
         self.with_rows(lambda r: pin(r, "test_mod::test_fx"))
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "test_mod.T.test_fx")})
         rc, out = self.check()
         self.assertEqual(0, rc, out)
         self.with_rows(lambda r: pin(r, "test_fx"))
@@ -280,13 +296,54 @@ class GateReviewPackage(unittest.TestCase):
                 self.assertFailLine(*self.check(), "review_package.siblings", "are not 'sibling |")
 
     def test_commits_txt_holds_sha_subject_lines(self):
-        for text in ("\n", "not a commit\n", "abc1234 ok\nnot a commit\n", "abc123 short\n", "abc1234\n"):
+        for text in ("\n", "not a commit\n", "abc1234 ok\nnot a commit\n", "abc123 short\n", "abc1234x\n"):
             with self.subTest(text=text):
                 self.put({"commits.txt": text})
                 self.assertFailLine(*self.check(), "review_package.commits", "<sha> <subject>")
         self.put({"commits.txt": "abc1234 one\n\n" + "0" * 40 + " two\r\n"})
         rc, out = self.check()
         self.assertEqual(0, rc, out)
+        for text in ("abc1234\n", "abc1234 \n", "abc1234   space-led\n"):    # B5-FIX-7: subjects git allows
+            with self.subTest(text=text):
+                self.put({"commits.txt": text})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+
+    def test_a_quoted_first_diff_path_passes(self):
+        """B5-FIX-7: git quotes a path holding non-ASCII (core.quotePath), '"', a tab or a backslash."""
+        self.put({"diff.patch": 'diff --git "a/caf\\303\\251.md" "b/caf\\303\\251.md"\nnew file mode 100644\n'})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.put({"diff.patch": 'diff --git "x/caf.md" "b/caf.md"\nnew file mode 100644\n'})
+        self.assertFailLine(*self.check(), "review_package.diff", "does not start with")
+
+    def test_quoted_test_ids_name_the_test(self):
+        """B5-FIX-18: the command is split as the shell splits it."""
+        for cmd in ("'t.T.test_fx'", '"t.T.test_fx"', "'tests/t.py::T::test_fx'"):
+            with self.subTest(cmd=cmd):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", cmd)})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "'t.T.test_fx_other'")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "does not name the test")
+
+    def test_the_pinned_module_must_be_the_one_the_command_runs(self):
+        """B5-FIX-17: a same-named test in another module is not the row's pinned test."""
+        self.with_rows(lambda r: r["findings"][0].update(pin={"test": "test_mod::test_fx", "transcript": "docs/x.txt"}))
+        for cmd in ("tools.gates.tests.test_other.T.test_fx", "t.T.test_fx", "tests/test_other.py::T::test_fx",
+                    "test_mod_x.T.test_fx", "x.test_fx"):
+            with self.subTest(cmd=cmd):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", cmd)})
+                self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "pinned test 'test_mod::test_fx'")
+        for cmd in ("tools.gates.tests.test_mod.T.test_fx", "test_mod.T.test_fx", "tests/test_mod.py::T::test_fx",
+                    "'tools.gates.tests.test_mod.T.test_fx'"):
+            with self.subTest(cmd=cmd):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", cmd)})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "test_mod.T.test_fx")
+                  .replace("test: test_fx", "test: test_other::test_fx")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "is not the register's pinned test")
 
     def test_diff_needs_a_header_and_a_body(self):
         self.put({"diff.patch": "diff --git a/x b/x\n"})
@@ -442,6 +499,33 @@ class GateReviewPackage(unittest.TestCase):
         rc, out = gate(self.root, ["--all"])
         self.assertEqual(0, rc, out)
         self.assertNotIn("noreview", out)
+
+    def test_all_mode_dangling_review_symlink_fails(self):
+        """B5-FIX-23: a dangling <plan>/review symlink is a non-directory where a directory is expected."""
+        shutil.rmtree(os.path.join(self.root, ".superpowers/sdd/fx/review"))
+        os.symlink("nowhere", os.path.join(self.root, ".superpowers/sdd/fx/review"))
+        rc, out = gate(self.root, ["--all"])
+        self.assertEqual((1, "FAIL review_package.fx.input: .superpowers/sdd/fx/review is not a directory\n"), (rc, out))
+
+    def unreadable(self, rel, mode):
+        path = os.path.join(self.root, rel)
+        os.chmod(path, mode)
+        self.addCleanup(os.chmod, path, 0o755)    # runs before the rmtree cleanup (LIFO)
+
+    def test_all_mode_unreadable_dirs_fail_never_skip(self):
+        """B5-FIX-21: a package under a dir --all cannot read FAILs <plan>.input or <plan>.<task>.input."""
+        self.put({"claims.md": ""})    # a broken package: a readable dir FAILs it
+        self.assertFailLine(*gate(self.root, ["--all"]), "review_package.fx.1.file.claims.md")
+        for rel, mode, line_id in ((".superpowers/sdd/fx", 0o000, "review_package.fx.input"),
+                                   (".superpowers/sdd/fx", 0o644, "review_package.fx.input"),
+                                   (".superpowers/sdd/fx/review", 0o000, "review_package.fx.input"),
+                                   (f"{PKG}", 0o000, "review_package.fx.1.input")):
+            with self.subTest(rel=rel, mode=oct(mode)):
+                self.unreadable(rel, mode)
+                rc, out = gate(self.root, ["--all"])
+                os.chmod(os.path.join(self.root, rel), 0o755)
+                self.assertFailLine(rc, out, line_id, "Permission denied")
+                self.assertNotIn("PASS review_package.all", out)
 
     # --- B5-FIX-6 (DEC-0022 absent-packages-pass: a non-directory where a directory is expected FAILs) ---
     def test_all_mode_sdd_that_is_a_file_fails(self):

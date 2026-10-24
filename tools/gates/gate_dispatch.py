@@ -93,15 +93,21 @@ def claim_fresh(root: str, claim: dict, head: str) -> str | None:
     return stale_reason(root, claim, head, gitinfo.staged_files(root)) or "row fails the claims schema"
 
 
+def _int_rank(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def fallback_error(conf) -> str | None:
-    """None when config's optional fable_fallback (DEC-0018) is a model_rank model ranked at least opus and
-    strictly below fable; otherwise the reason. Absent is never an error (the fallback is off)."""
+    """None when config's optional fable_fallback (DEC-0018) is exactly opus (DEC-0028) and model_rank ranks
+    opus and fable as ints (a bool is not one; B5-FIX-8) with opus strictly below fable; otherwise the
+    reason. Absent is never an error (the fallback is off)."""
     if "fable_fallback" not in conf:
         return None
     value, rank = conf["fable_fallback"], conf["model_rank"]
-    ok = isinstance(value, str) and value in rank and all(isinstance(rank.get(m), int) for m in ("opus", "fable")) \
-        and rank["opus"] <= rank[value] < rank["fable"]
-    return None if ok else f"fable_fallback {value!r} must be a model_rank model ranked at least opus and below fable"
+    ok = value == "opus" and isinstance(rank, dict) and all(_int_rank(rank.get(m)) for m in ("opus", "fable")) \
+        and rank["opus"] < rank["fable"]
+    return None if ok else (f"fable_fallback {value!r} must be exactly 'opus' (DEC-0028), with int model_rank "
+                            "ranks for opus and fable and opus below fable")
 
 
 def _model(conf, role, model, tool_model, res):
@@ -115,8 +121,7 @@ def _model(conf, role, model, tool_model, res):
         if err:
             res.fail("dispatch.model.fallback", err)
         else:
-            res.passed("dispatch.model.fallback", f"{role} on {model}: config fable_fallback is on while Fable is "
-                       "unavailable (DEC-0018)")
+            res.passed("dispatch.model.fallback")    # DEC-0018 on, DEC-0024: a PASS line carries no reason
     elif rank[model] < rank[need]:
         res.fail("dispatch.model.rank", f"role {role} needs at least {need}, got {model}")
     else:
@@ -340,11 +345,8 @@ def check_config(conf: dict, res: Result) -> None:
     err = fallback_error(conf)
     if err:
         res.fail("dispatch.config.fable_fallback", err)
-    elif "fable_fallback" in conf:
-        res.passed("dispatch.config.fable_fallback", f"{conf['fable_fallback']}: the fable_roles run on "
-                   f"{conf['fable_fallback']} while Fable is unavailable (DEC-0018)")
-    else:
-        res.passed("dispatch.config.fable_fallback", "absent: the fallback is off (DEC-0018)")
+    else:    # set to opus, or absent (the fallback is off); DEC-0024: a PASS line carries no reason
+        res.passed("dispatch.config.fable_fallback")
 
 
 def check(args: list) -> Result:

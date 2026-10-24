@@ -63,12 +63,14 @@ STEP_TITLE = re.compile(r"^- \[[ xX]\] \*\*(.*?)\*\*(.*)$")
 # B5-FIX-3/B5-FIX-4: the word, not a substring ("Mapping", "pin\u00f1") and not a hyphen compound ("pin-less",
 # "non-pin"): no Unicode word character (\w), mark (any unicodedata category M*), hyphen-minus, soft hyphen
 # (U+00AD), hyphen (U+2010) or non-breaking hyphen (U+2011) on either side; dashes (U+2012-U+2015) separate words
-PIN_WORD = re.compile("pin", re.I)
+PIN_WORD = re.compile("[pP][iI][nN]")    # B5-FIX-15: ASCII case only; re.I would fold U+0131/U+0130 into i
+# B5-FIX-15: a Unicode format character (category Cf: U+200D, U+2060, U+FEFF, ...) joins like a letter
 PIN_HYPHENS = "-\u00ad\u2010\u2011"
 
 
 def _pin_joins(ch: str) -> bool:
-    return bool(re.match(r"\w", ch)) or ch in PIN_HYPHENS or unicodedata.category(ch).startswith("M")
+    cat = unicodedata.category(ch)
+    return bool(re.match(r"\w", ch)) or ch in PIN_HYPHENS or cat.startswith("M") or cat == "Cf"
 
 
 def pin_title(title: str) -> bool:
@@ -188,7 +190,8 @@ def _file_item(task: Task, line: str) -> bool:
     rest = fm.group(2).strip()
     ticks = rest.count("`")
     m = FILE_PATH.match(rest)
-    path = posixpath.normpath(m.group(1).split(":")[0].strip()) if m else ""
+    raw = m.group(1).split(":")[0].strip() if m else ""
+    path = posixpath.normpath(raw) if m else ""
     if ticks == 0:
         task.files_errors.append(f"no backticked path: {line.strip()[:80]!r}")
     elif ticks % 2:
@@ -200,7 +203,9 @@ def _file_item(task: Task, line: str) -> bool:
     elif path in ("", "."):
         task.files_errors.append(f"not a path: {line.strip()[:80]!r}")
     else:
-        task.files.append(path)
+        if raw.startswith(("/", "\\")) or ".." in re.split(r"[/\\]", raw):    # DEC-0027 fail-paths; still
+            task.files_errors.append(f"an absolute path or a '..' component (DEC-0027): {line.strip()[:80]!r}")
+        task.files.append(path)    # collected either way, so the overlap check still sees it
         if fm.group(1) == "Create":
             task.creates.append(path)
     return True
@@ -305,6 +310,10 @@ def parse_plan(text: str) -> Plan:
             in_files = False
         if line.startswith("**Files:**"):
             in_files = True
+            continue
+        if FILE_RE.match(line):    # DEC-0026 fail-on-stray: a Files-style item outside the task's **Files:** list
+            cur.files_errors.append(f"a '- Create|Modify|Test|Delete:' item outside the **Files:** list (DEC-0026): "
+                                    f"{line.strip()[:80]!r}")
             continue
         m = FINDINGS_RE.match(line)
         if m:
@@ -470,7 +479,7 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
             if not (a.parallel and b.parallel and a.block == b.block):
                 continue
             pairs += 1
-            shared = sorted(set(a.files) & set(b.files))
+            shared = _shared(a.files, b.files)
             _verdict(res, f"{pfx}.overlap.{a.num}-{b.num}", not shared, f"PARALLEL tasks share {', '.join(shared)}")
     if not pairs:
         res.passed(f"{pfx}.overlap")
@@ -487,6 +496,20 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
         nums = routed.get(fid, [])
         _verdict(res, f"{pfx}.coverage.{fid}", len(nums) == 1,
                  "in no task" if not nums else f"in tasks {', '.join(nums)}")
+
+
+def _overlap_key(path: str) -> str:
+    """B5-FIX-14: one spelling per file: '\\' read as '/', normalised, case-folded (APFS is case-insensitive)."""
+    return posixpath.normpath(path.replace("\\", "/")).casefold()
+
+
+def _shared(xs: list, ys: list) -> list[str]:
+    """Paths of xs that name the same file as, or a directory holding, or a file inside, a path of ys."""
+    def hit(p, q):
+        return p == q or q.startswith(p + "/") or p.startswith(q + "/")
+    keyed = [(y, _overlap_key(y)) for y in ys]
+    return sorted({x if _overlap_key(x) == ky else f"{x} ~ {y}" for x in xs for y, ky in keyed
+                   if hit(_overlap_key(x), ky)})
 
 
 def _closed(text: str) -> bool:
@@ -539,9 +562,13 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
     out = []
     for name in sorted(names):
         rel = f"{STATE}/{name}/ledger.md"
-        copies = [_raw(os.path.join(root, rel)), _git_bytes(root, f":{rel}"), _git_bytes(root, f"HEAD:{rel}")]
+        # ':./<rel>' and 'HEAD:./<rel>' resolve against cwd=root, as the working-tree path does (B5-FIX-20)
+        copies = [_raw(os.path.join(root, rel)), _git_bytes(root, f":./{rel}"), _git_bytes(root, f"HEAD:./{rel}")]
         newest = next((c for c in copies if c is not None), b"")    # b"": only an unmerged index entry
-        text = newest.decode("utf-8")
+        try:
+            text = newest.decode("utf-8")
+        except UnicodeDecodeError as e:    # B5-FIX-25: the FAIL names the ledger
+            raise GateError(f"{rel}: not UTF-8 ({e.reason} at byte {e.start})") from None
         first = text.splitlines()[0] if text else ""
         m = LEDGER_PLAN.match(first)
         if not m:

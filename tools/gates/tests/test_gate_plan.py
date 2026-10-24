@@ -782,6 +782,59 @@ class Branches(unittest.TestCase):
         self.fail_line(text, "plan.pin.1", "no '- [ ] **Step N")
 
 
+class FixWave3(unittest.TestCase):
+    """S2-b5-finalfix3 rows, each through main() on a plan file (Branches' fixture and helpers, not its tests)."""
+    setUpClass, tearDownClass = Branches.__dict__["setUpClass"], Branches.__dict__["tearDownClass"]
+    check, variant, fail_line, ok = Branches.check, Branches.variant, Branches.fail_line, Branches.ok
+
+    def test_a_files_style_item_outside_the_files_list_fails(self):    # B5-FIX-12, DEC-0026
+        item = "- Modify: `tests/test_alpha.py`\n"
+        for name, anchor in (("after a **Field:** line", "**Siblings:** none -- the register row lists no siblings\n"),
+                             ("after a code fence", "test_beta::test_beta_fails\n```\n"),
+                             ("after a step", "- [ ] **Step 1: Pin**\n")):
+            with self.subTest(name):
+                self.fail_line(self.variant(anchor, anchor + item), "plan.files.2", "outside the **Files:** list (DEC-0026)")
+
+    def test_absolute_and_dot_dot_paths_fail(self):    # B5-FIX-13, DEC-0027
+        for path in ("/etc/passwd", "../../x.py", "src/../x.py", "\\\\server\\x.py", "src\\..\\x.py"):
+            with self.subTest(path):
+                self.fail_line(self.variant("- Test: `tests/test_alpha.py`", f"- Test: `{path}`"), "plan.files.1", "DEC-0027")
+
+    def test_overlap_folds_case_backslashes_and_directories(self):    # B5-FIX-14
+        for path in ("SRC/Alpha.py", "src\\alpha.py", "src", "src/", "Tests"):
+            with self.subTest(path):
+                self.fail_line(self.variant("- Create: `src/beta.py`", f"- Create: `{path}`"), "plan.overlap.1-2", "PARALLEL tasks share")
+        out = self.ok(self.variant("- Create: `src/beta.py`", "- Create: `src/alph`"))
+        self.assertIn("PASS plan.overlap.1-2", out)
+
+    def test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour(self):    # B5-FIX-15
+        for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b"):
+            with self.subTest(title=ascii(title)):
+                self.fail_line(self.variant("**Step 1: Pin**", f"**Step 1: {title}**"), "plan.pin.2")
+        self.ok(self.variant("**Step 1: Pin**", "**Step 1: PIN it**"))
+
+    def test_a_closing_fence_indented_four_spaces_does_not_close(self):    # B5-FIX-19 (:179 close-indent)
+        text = self.variant("python3 -m unittest tools.gates.tests.test_beta",
+                            "    ```\n### Task 9: hidden\npython3 -m unittest tools.gates.tests.test_beta")
+        out = self.ok(text)
+        self.assertNotRegex(out, NO_TASK_9)
+
+    def test_a_block_of_exactly_max_tasks_passes(self):    # B5-FIX-19 (:465 cap)
+        out = self.ok(self.variant("- [ ] **Step 2: CHECKPOINT b1**\n\n## Block b2 — second\n\n", ""))
+        self.assertIn("PASS plan.block.1\n", out)
+        self.assertNotIn("plan.block.2", out)
+
+    def test_a_checkpoint_step_ends_the_files_list(self):    # B5-FIX-19 (:290 ckpt-endfiles)
+        out = self.ok(self.variant("- Modify: `src/shared.py`\n",
+                                   "- Modify: `src/shared.py`\n- [ ] **Step 0: CHECKPOINT b2**\nprose after it\n"))
+        self.assertIn("PASS plan.files.3", out)
+
+    def test_a_source_that_is_a_directory_is_no_such_file(self):    # B5-FIX-5 round 1 (:357 sibling)
+        rc, out = self.check(GOOD, "--source", "docs")
+        self.assertEqual(1, rc, out)
+        self.assertIn("FAIL plan.input: --source docs: no such file", out)
+
+
 class Ledgers(unittest.TestCase):
     def repo(self, ledger):
         root = plan_repo(ledger)
@@ -942,6 +995,60 @@ class LedgerCopies(unittest.TestCase):
         rc, out = gate(root, ["--in-flight"])
         self.assertEqual(1, rc, out)
         self.assertIn(f"FAIL plan.input: {self.REL}: line 1 must be 'plan:", out)
+
+    def test_ledger_md_that_is_a_directory_or_dangling_symlink_is_in_flight(self):    # B5-FIX-5 round 1 (:520)
+        for kind in ("directory", "dangling symlink"):
+            with self.subTest(kind):
+                root = self.repo(self.CLOSED)
+                path = os.path.join(root, self.REL)
+                os.remove(path)
+                os.mkdir(path) if kind == "directory" else os.symlink("nowhere", path)
+                self.assertInFlight(root)
+
+    def test_a_state_dir_without_ledger_md_is_not_a_ledger(self):    # B5-FIX-24 (:516)
+        root = self.repo(self.CLOSED)
+        os.makedirs(os.path.join(root, "docs/superpowers/state/hx"))
+        self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+
+    def test_a_missing_state_dir_raises_naming_it(self):    # B5-FIX-24 (:535; main() fails in load_findings first)
+        root = tempfile.mkdtemp(prefix="gate-test-")
+        self.addCleanup(shutil.rmtree, root, True)
+        with self.assertRaisesRegex(gate_plan.GateError, "^docs/superpowers/state/ missing$"):
+            gate_plan.plans_in_flight(root)
+
+    def test_a_non_utf8_ledger_fails_naming_the_ledger(self):    # B5-FIX-25
+        root = self.repo(self.CLOSED)
+        with open(os.path.join(root, self.REL), "ab") as f:
+            f.write(b"\xff\n")
+        rc, out = gate(root, ["--in-flight"])
+        self.assertEqual(1, rc, out)
+        self.assertIn(f"FAIL plan.input: {self.REL}: not UTF-8", out)
+
+    def sub_repo(self, top=None):
+        """A repository whose gate root is its subdirectory sub/ (B5-FIX-20); top: a ledger at the top-level path."""
+        files = {f"sub/{k}": v for k, v in rf.DISPATCH_FILES.items()}
+        files["sub/docs/superpowers/plans/fx.md"] = GOOD
+        if top is not None:
+            files[self.REL] = top
+        root = rf.make_repo(files, rf.load_rows())
+        self.addCleanup(shutil.rmtree, root, True)
+        sub = os.path.join(root, "sub")
+        rf.write_registers(sub, rf.load_rows(), rf.git(root, "rev-parse", "HEAD"))
+        return root, sub
+
+    def test_root_a_subdirectory_reads_its_own_index_and_head_copies(self):    # B5-FIX-20
+        root, sub = self.sub_repo()
+        rf.write(sub, self.REL, self.CLOSED)
+        rf.write(sub, "docs/superpowers/state/gx/ledger.md", self.CLOSED)
+        rf.commit(root, "closed sub ledgers")
+        self.assertEqual((0, "PASS plan.in_flight\n"), gate(sub, ["--in-flight"]))    # siblings 1 and 3
+        root, sub = self.sub_repo(top=self.CLOSED)
+        rf.write(sub, self.REL, LEDGER)
+        rf.commit(root, "open sub ledger")
+        rf.write(sub, self.REL, self.CLOSED)    # uncommitted CHECKPOINT, byte-equal to the top-level copy
+        self.assertEqual([("fx", "docs/superpowers/plans/fx.md")], gate_plan.plans_in_flight(sub))    # sibling 2
+        rc, out = gate(sub, ["--in-flight"])
+        self.assertIn("plan.fx.header.goal", out)
 
     def test_a_nested_or_top_level_ledger_name_is_not_a_ledger(self):
         root = self.repo(self.CLOSED)

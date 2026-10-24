@@ -63,6 +63,15 @@ class GateFramework(unittest.TestCase):
         self.assertEqual((0, "PASS demo.a\n"), run(check, []))
         self.assertEqual((1, "PASS demo.a\nFAIL demo.b: broken\n"), run(check, ["bad"]))
 
+    def test_passed_takes_no_reason(self):
+        """DEC-0024 code-to-spec (spec :191): passed() takes only the id, so no PASS line can carry a reason."""
+        r = Result("demo")
+        with self.assertRaises(TypeError):
+            r.passed("demo.a", "a reason")
+        r.passed("demo.a")
+        self.assertEqual("PASS demo.a", r.render(False))
+        self.assertEqual("", r.lines[0].reason)
+
     def test_json_flag_is_stripped_and_renders_json(self):
         seen = []
         def check(args):
