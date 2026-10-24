@@ -393,8 +393,8 @@
   severity: HIGH
   class: 'register history and cites shas record block-branch commits (the S2 pin
     step uses the task head sha); a squash merge plus branch deletion makes them unreachable
-    from any ref, so gate_register''s sha check (gitinfo.is_commit, git cat-file -e
-    <sha>^{commit}) FAILs in every fresh clone: the gates workflow on main is red
+    from any ref, so gate_register''s sha check (gitinfo.commit_exists, git cat-file
+    -e <sha>^{commit}) FAILs in every fresh clone: the gates workflow on main is red
     since the b4 squash fe3f146 (13 register.evidence FAIL lines) while a long-lived
     checkout passes; every later squash repeats it (from b4; not caused by b5)'
   siblings: []
@@ -589,7 +589,9 @@
     lines: 493-511
     sha: ce40e09
   repro: commit a ledger ending CHECKPOINT b5; then (a) rm it, or (b) append a line,
-    git add it, git checkout -- it; gate_plan --in-flight prints no plan.<slug> line
+    git add it, then restore the work tree to the HEAD bytes (git show HEAD:<ledger>
+    > <ledger>, the MM state; git checkout -- restores from the index and does not
+    reproduce); gate_plan --in-flight prints no plan.<slug> line
   owner:
     kind: plan
     plan: strict-delivery
@@ -637,11 +639,13 @@
   class: 'gate_review_package --all PASSes (review_package.all, rc 0) when .superpowers/sdd
     is a regular file, while <plan>/review as a regular file FAILs .input; DEC-0022
     = absent-packages-pass: a non-directory where a directory is expected is a missing
-    input and FAILs (this block''s Task 4 code)'
+    input and FAILs (this block''s Task 4 code); DEC-0031 keep-widen: the class also
+    names .superpowers itself as a non-directory'
   siblings:
   - .superpowers/sdd as a file
   - <plan>/review as a file
   - README and docstring state DEC-0021 and DEC-0022
+  - .superpowers as a file (DEC-0031)
   cites:
   - file: tools/gates/gate_review_package.py
     lines: 262-280
@@ -716,10 +720,12 @@
   class: 'gate_dispatch.fallback_error (B5-FIX-2 code, gate_dispatch.py:102-103) does
     not check that the fallback model''s own rank is an int: a str rank raises TypeError
     (--config-check prints FAIL dispatch.input and loses the dispatch.config.model_rank
-    FAIL), and a bool rank passes (b5 final review A4-V1)'
+    FAIL), and a bool rank passes (b5 final review A4-V1); DEC-0028 exact-opus: a
+    fable_fallback other than opus FAILs dispatch.config (b5 final review A4-R1)'
   siblings:
   - str rank of the fallback model
   - bool rank of opus, fable or the fallback model
+  - fable_fallback other than opus (DEC-0028)
   cites:
   - file: tools/gates/gate_dispatch.py
     lines: 102-103
@@ -772,4 +778,533 @@
     by: final-review
   - state: planned
     sha: c0316eb
+    by: controller
+- id: B5-FIX-10
+  source: review
+  severity: MEDIUM
+  class: 'Result.passed takes a reason and render prints ''PASS id: reason'' (tools/gates/lib/__init__.py:41-50,
+    added 1a6ff7c), against spec :191 and umbrella :114 ''PASS id''; DEC-0024 code-to-spec:
+    passed() takes no reason and every PASS line is ''PASS id'' (b5 final review A5-R1/A5-V4)'
+  siblings:
+  - passed() signature takes no reason
+  - every caller passing a reason (gate_dispatch.py:118, :344, :347)
+  - tests asserting PASS-line text
+  cites:
+  - file: tools/gates/lib/__init__.py
+    lines: 41-50
+    sha: 4be15f8
+  - file: tools/gates/gate_dispatch.py
+    lines: 118-118
+    sha: 4be15f8
+  - file: tools/gates/gate_dispatch.py
+    lines: 344-347
+    sha: 4be15f8
+  repro: 'python3 tools/gates/gate_dispatch.py --config-check -> ''PASS dispatch.config.fable_fallback:
+    opus: ...'''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-11
+  source: review
+  severity: LOW
+  class: 'S2 plan text credits ''plan last'' in run_all.GATES to ''session ruling
+    2b of b5'' (plan :5495) while ledger ruling 2(b) sets no order, and Task 7 Step
+    5 lists plan 4th; DEC-0025 plan-last: :5495 cites DEC-0025, Task 7 Step 5 lists
+    plan last (b5 final review A5-R2; plan text, D3 re-sync)'
+  siblings:
+  - Task 6 Step 5 cite
+  - Task 7 Step 5 GATES order
+  cites:
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+    lines: 5495-5495
+    sha: 4be15f8
+  repro: grep -n 'session ruling 2b' <S2 plan> -> :5495; grep -n '"plan", "dispatch",
+    "review_package", "checkpoint"' <S2 plan> -> Task 7 Step 5
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-12
+  source: review
+  severity: MEDIUM
+  class: 'gate_plan drops a Files-style item (''- Create|Modify|Test|Delete: `path`'')
+    that sits inside a task but outside its **Files:** list (after a fence or a **Field:**
+    line), so it escapes the files and PARALLEL overlap checks (gate_plan.py:254-257,
+    :297-305; fails open); DEC-0026 fail-on-stray: such an item FAILs plan.<slug>.files.<N>
+    (b5 final review A3-R1)'
+  siblings:
+  - item after a code fence
+  - item after a **Field:** line
+  - item after a step
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 250-306
+    sha: 4be15f8
+  repro: 'good.md Task 2: after **Siblings:** add ''- Modify: `tests/test_alpha.py`''
+    -> gate_plan --plan rc 0, no FAIL (control without the field: FAIL plan.overlap.1-2)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-13
+  source: review
+  severity: LOW
+  class: 'gate_plan accepts absolute Files paths and paths with a ''..'' component
+    (gate_plan.py:196-204); DEC-0027 fail-paths: both FAIL plan.<slug>.files.<N> (b5
+    final review A3-V3)'
+  siblings:
+  - absolute path
+  - '''..'' component'
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 196-204
+    sha: 4be15f8
+  repro: 'good.md Task 1: ''- Create: `/etc/passwd`'' or ''- Create: `../../x.py`''
+    -> gate_plan --plan rc 0'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-14
+  source: review
+  severity: LOW
+  class: 'the PARALLEL overlap check compares raw Files strings after ./ and .. normalisation
+    only (gate_plan.py:473): a case variant (SRC/Alpha.py vs src/alpha.py, one file
+    on case-insensitive APFS), a directory item that contains the other task''s file,
+    and a backslash spelling all pass (b5 final review A3-V1)'
+  siblings:
+  - case variant
+  - directory containing a file
+  - backslash spelling
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 468-474
+    sha: 4be15f8
+  repro: 'good.md PARALLEL Task 2 ''- Create: `SRC/Alpha.py`'' against Task 1 ''src/alpha.py''
+    -> rc 0, no FAIL plan.overlap'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-15
+  source: review
+  severity: LOW
+  class: 'pin_title accepts non-ASCII spellings and invisible joins as the word pin:
+    re.I folds U+0131 and U+0130 (''pın'', ''PİN'' -> True), and Unicode format characters
+    (category Cf: U+2060, U+200D, U+FEFF) are not joiners (''pin\u2060less'', ''s\u200dpin''
+    -> True) (gate_plan.py:66-78; b5 final review A3-R2/A3-V2)'
+  siblings:
+  - re.I special folds (U+0131, U+0130, U+017F)
+  - category Cf neighbours
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 60-78
+    sha: 4be15f8
+  repro: 'python3 -c "import sys; sys.path.insert(0,''tools/gates''); import gate_plan
+    as g; print(g.pin_title(''Step 2: pın''), g.pin_title(''pin\u2060less''))" ->
+    True True'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-16
+  source: review
+  severity: LOW
+  class: 'make_review_package''s clean-tree check (make_review_package.py:88-95) sees
+    only git status, so an untracked file hidden by .git/info/exclude or .gitignore
+    under a path the gates read (tools/gates, docs/superpowers/state, the plan) passes
+    and gates.txt then reads it; DEC-0029 check-excluded: the check also reports ignored
+    or excluded files under those paths, the packages dir excepted (b5 final review
+    A2-V2)'
+  siblings:
+  - file hidden by .git/info/exclude
+  - file hidden by .gitignore
+  - packages dir stays allowed
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: 88-95
+    sha: 4be15f8
+  repro: echo tools/gates/zz.py >> .git/info/exclude; touch tools/gates/zz.py; make_review_package
+    ... -> no Refused
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-17
+  source: review
+  severity: MEDIUM
+  class: gate_review_package's pin cross-check compares only the test name after the
+    last '::' (gate_review_package.py:100) and names_test accepts any token whose
+    last dotted part is the name (:75), so a transcript that runs a same-named test
+    in another module passes as the row's pinned mutation (b5 final review A1-R1)
+  siblings:
+  - module half of pin.test ignored (:100)
+  - names_test matches another module's test (:75)
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 73-101
+    sha: 4be15f8
+  repro: mutation_errors(<five-line transcript whose commands run tools.gates.tests.test_hooks.<Class>.<name>>,
+    'X', pin_test='test_gate_review_package::<name>') -> []
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-18
+  source: review
+  severity: LOW
+  class: names_test splits the transcript command on whitespace without shell parsing
+    (gate_review_package.py:75), so a correctly quoted unittest id ('tools.gates.tests.x.C.test_y')
+    FAILs review_package.mutation 'does not name the test' (fails closed; b5 final
+    review A1-R3)
+  siblings:
+  - single-quoted test id
+  - double-quoted test id
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 73-75
+    sha: 4be15f8
+  repro: transcript commands python3 -m unittest 'tools.gates.tests.test_gate_review_package.G.test_x'
+    -> FAIL ...mutation the command does not name the test
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-19
+  source: review
+  severity: MEDIUM
+  class: 'gate_plan branches with no test that fails when they break (this block''s
+    Task 6 code, against the ''a test per branch'' claim of aa22d0c): a closing fence
+    indented more than 3 spaces (gate_plan.py:179), a block of exactly block.max_tasks
+    tasks passing (:465), a CHECKPOINT step right after a Files list ending the list
+    (:290); mutants close-indent, cap, ckpt-endfiles survive the suite (b5 final review
+    A3-R3)'
+  siblings:
+  - closing fence indented more than 3 spaces
+  - block of exactly max_tasks tasks
+  - CHECKPOINT step ends the Files list
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 179-179
+    sha: 4be15f8
+  - file: tools/gates/gate_plan.py
+    lines: 290-290
+    sha: 4be15f8
+  - file: tools/gates/gate_plan.py
+    lines: 465-465
+    sha: 4be15f8
+  repro: mutate gate_plan.py:179 (close-indent), :465 (cap off by one) or :290 (ckpt-endfiles);
+    test_gate_plan stays OK
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-20
+  source: review
+  severity: MEDIUM
+  class: 'plans_in_flight reads the working-tree ledger and lists ledgers relative
+    to root but reads the index and HEAD copies with git '':<path>'' / ''HEAD:<path>'',
+    which are relative to the repository top (gate_plan.py:506, :540-542): with root
+    a subdirectory of a repository the three copies come from different files, so
+    a closed committed ledger reads in flight and an uncommitted CHECKPOINT reads
+    closed when the top holds the same path (fails open; b5 final review A3-R4)'
+  siblings:
+  - 'root a subdirectory: closed ledger reads in flight'
+  - 'root a subdirectory: uncommitted CHECKPOINT reads closed'
+  - 'root a subdirectory: every committed closed ledger reads in flight (A3-V5)'
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 500-545
+    sha: 4be15f8
+  repro: repo with <sub>/docs/superpowers/state/<p>/ledger.md committed closed; gate_plan
+    --root <sub> --in-flight -> plan.<p> in flight
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-21
+  source: review
+  severity: MEDIUM
+  class: 'gate_review_package --all skips a .superpowers/sdd/<plan> whose review/
+    cannot be stat''ed: with <plan> mode 000 or 644, os.path.lexists(<plan>/review)
+    is False, so a broken package there gives PASS review_package.all rc 0 while the
+    same package in a readable dir FAILs (gate_review_package.py:263-265; fails open;
+    b5 final review A1-V1)'
+  siblings:
+  - <plan> dir mode 000
+  - <plan> dir without search permission (644)
+  - unreadable review/ or <task> dir
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 258-268
+    sha: 4be15f8
+  repro: 'fixture: a package with an empty claims.md under .superpowers/sdd/p/review/t;
+    chmod 000 .superpowers/sdd/p; gate_review_package --all -> PASS review_package.all
+    rc 0'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-22
+  source: review
+  severity: MEDIUM
+  class: 'gate_review_package reads only the first table of claims.md (gate_review_package.py:50-63,
+    :169-181): a FAIL row after a blank line or in a second table gives rc 0, against
+    spec §7 and umbrella :266 (''fails if claims.md has a FAIL row'') and README:25
+    (''a claims table with no FAIL row''); the docstring''s ''first table'' is unauthorised
+    (b5 final review A1-V2)'
+  siblings:
+  - FAIL row after a blank line
+  - FAIL row in a second table
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 50-63
+    sha: 4be15f8
+  - file: tools/gates/gate_review_package.py
+    lines: 169-181
+    sha: 4be15f8
+  repro: 'package claims.md: a PASS table, a blank line, then ''| c | d | x | o |
+    FAIL |'' -> gate_review_package --dir rc 0'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-23
+  source: review
+  severity: LOW
+  class: 'no test covers a dangling <plan>/review symlink in gate_review_package --all
+    (gate_review_package.py:264): the lexists->exists mutant survives the suite (behaviour
+    correct today; b5 final review A1-V3)'
+  siblings:
+  - dangling <plan>/review symlink
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 264-264
+    sha: 4be15f8
+  repro: mutate os.path.lexists(review) to os.path.exists(review) at :264; test_gate_review_package
+    stays OK
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-24
+  source: review
+  severity: LOW
+  class: 'plans_in_flight branches with no test that fails when they break (B5-FIX-5
+    code): a state dir without ledger.md (gate_plan.py:516, mutant M14), and the missing-state-dir
+    raise (:537, mutant M11) which test_missing_state_directory_fails (test_gate_plan.py:841)
+    only passes because load_findings fails first (b5 final review A3-V6/A3-V7)'
+  siblings:
+  - state dir without ledger.md
+  - missing state dir reached through main()
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 515-517
+    sha: 4be15f8
+  - file: tools/gates/gate_plan.py
+    lines: 535-538
+    sha: 4be15f8
+  - file: tools/gates/tests/test_gate_plan.py
+    lines: 841-850
+    sha: 4be15f8
+  repro: mutate :516 to drop the ledger.md isfile check, or :537 to skip the isdir
+    raise; test_gate_plan stays OK
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
+    by: controller
+- id: B5-FIX-25
+  source: review
+  severity: LOW
+  class: 'plans_in_flight decodes each ledger with a bare .decode(''utf-8'') (gate_plan.py:543):
+    a non-UTF-8 ledger gives FAIL plan.input with no file named and ends the whole
+    --in-flight run (b5 final review A3-V8)'
+  siblings:
+  - non-UTF-8 ledger names its path
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 541-545
+    sha: 4be15f8
+  repro: append a 0xff byte to a state ledger; gate_plan --in-flight -> FAIL plan.input
+    with a codec message and no ledger path
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-finalfix3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 4be15f8
+    by: final-review
+  - state: planned
+    sha: 4be15f8
     by: controller
