@@ -645,7 +645,6 @@
   - .superpowers/sdd as a file
   - <plan>/review as a file
   - README and docstring state DEC-0021 and DEC-0022
-  - .superpowers as a file (DEC-0031)
   cites:
   - file: tools/gates/gate_review_package.py
     lines: 262-280
