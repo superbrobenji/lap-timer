@@ -37,6 +37,7 @@ GATE_LINE = re.compile(r"^(PASS|FAIL) \S+")
 DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mode|old mode|new mode"
                        r"|similarity index|rename |copy |Binary files )")
 TEST_NAME = re.compile(r"^(?:[\w.\-/]+::)*(?:\w+\.)*test_\w+$")
+TEST_TREES = ("tools/gates/tests", "tools/lint", "tools/tracks", "tools")    # the dirs holding test_*.py
 
 
 def _read(path: str) -> str:
@@ -175,7 +176,38 @@ def _sibling_ok(cell: str, findings: list) -> bool:
     return bool(TEST_NAME.match(cell)) or registers.finding_by_id(findings, cell) is not None
 
 
-def _siblings(pkg, needed, longest, findings, res, pfx):
+def test_modules(root: str) -> dict:
+    """{key: source} of every .py file directly in a TEST_TREES dir; a file's keys are its root-relative
+    path, that path dotted without '.py', and its bare stem (the first tree holding a stem wins)."""
+    out = {}
+    for tree in TEST_TREES:
+        d = os.path.join(root, tree)
+        for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            path = os.path.join(d, n)
+            if n.endswith(".py") and os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                for key in (f"{tree}/{n}", f"{tree}/{n[:-3]}".replace("/", "."), n[:-3]):
+                    out.setdefault(key, text)
+    return out
+
+
+def defines_test(cell: str, modules: dict) -> bool:
+    """B5-FIX-26 (DEC-0035): the test a siblings.md cell names exists: its module (the part before the
+    first '::', else the longest dotted prefix that is a module key) defines `def <name>`; a bare
+    `test_<x>` is defined in any test module. A named module that is no key resolves nothing."""
+    parts = cell.split("::")
+    name = parts[-1].split(".")[-1]
+    defined = re.compile(rf"^[ \t]*(?:async[ \t]+)?def {name}\(", re.M)
+    dotted = parts[0].split(".")[:-1]
+    if len(parts) == 1 and not dotted:
+        return any(defined.search(t) for t in modules.values())
+    mods = parts[:1] if len(parts) > 1 else [".".join(dotted[:k]) for k in range(len(dotted), 0, -1)]
+    mod = next((m for m in mods if m in modules), None)
+    return mod is not None and bool(defined.search(modules[mod]))
+
+
+def _siblings(root, pkg, needed, longest, findings, res, pfx):
     path = os.path.join(pkg, "siblings.md")
     if not os.path.isfile(path):
         return
@@ -185,12 +217,17 @@ def _siblings(pkg, needed, longest, findings, res, pfx):
         return
     bad = [r for r in rows if len(r) != 2 or not r[0] or not _sibling_ok(r[1], findings)]
     missing = [s for s in needed if not any(s == r[0] for r in rows)]
+    modules = test_modules(root)
+    undefined = [r[1] for r in rows if r not in bad and registers.finding_by_id(findings, r[1]) is None
+                 and not defines_test(r[1], modules)]
     if len(rows) < longest:
         res.fail(f"{pfx}.siblings", f"{len(rows)} row(s) for a register siblings list of {longest}")
     elif bad:
         res.fail(f"{pfx}.siblings", f"{len(bad)} row(s) are not 'sibling | test name or registered finding id'")
     elif missing:
         res.fail(f"{pfx}.siblings", f"register sibling(s) not listed: {', '.join(missing)}")
+    elif undefined:
+        res.fail(f"{pfx}.siblings", f"test(s) defined in no test module named: {', '.join(undefined)}")
     else:
         res.passed(f"{pfx}.siblings")
 
@@ -267,7 +304,7 @@ def check_package(root: str, pkg: str, ids: list, findings: list, res: Result, p
         _verdict(res, f"{pfx}.diff", not err, err)
     _gates(pkg, res, pfx)
     needed, longest = _mutations(pkg, ids, findings, res, pfx)
-    _siblings(pkg, needed, longest, findings, res, pfx)
+    _siblings(root, pkg, needed, longest, findings, res, pfx)
     _claims(pkg, res, pfx)
 
 

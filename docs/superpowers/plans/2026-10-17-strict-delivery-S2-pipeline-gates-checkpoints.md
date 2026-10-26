@@ -5492,7 +5492,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package", "plan"]` (session ruling 2b of b5: `plan` last; the umbrella order with `plan` in the middle is superseded); add `"plan": ["--in-flight"]` to `DEFAULT_ARGV`. Update the two pins in `tools/gates/tests/test_run_all.py`: `test_gates_at_this_block` expects the six-gate list; `test_cli_unknown_gate_is_rc_1` expects `(installed: register, claims, decisions, dispatch, review_package, plan)`.
+- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package", "plan"]` (DEC-0025: `plan` last; the umbrella order with `plan` in the middle is superseded); add `"plan": ["--in-flight"]` to `DEFAULT_ARGV`. Update the two pins in `tools/gates/tests/test_run_all.py`: `test_gates_at_this_block` expects the six-gate list; `test_cli_unknown_gate_is_rc_1` expects `(installed: register, claims, decisions, dispatch, review_package, plan)`.
 
 - [ ] **Step 6: Give the live strict-delivery ledger the contract header** (from this commit, `run_all` checks in-flight plans; line 1 `# strict-delivery ledger` becomes the `plan:` line, every other line stays):
 
@@ -6264,7 +6264,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "plan", "dispatch", "review_package", "checkpoint"]`; add `"checkpoint": ["--structure"]` to `DEFAULT_ARGV`.
+- [ ] **Step 5: Register in run_all** — `GATES = ["register", "claims", "decisions", "dispatch", "review_package", "checkpoint", "plan"]`; add `"checkpoint": ["--structure"]` to `DEFAULT_ARGV`.
 
 - [ ] **Step 6: Run to verify they pass**
 

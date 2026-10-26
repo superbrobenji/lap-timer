@@ -37,6 +37,7 @@ class MakeReviewPackage(unittest.TestCase):
         files["docs/superpowers/state/fx/mutations/.gitkeep"] = ""
         files["docs/reviews/.gitkeep"] = ""    # gate_register needs the report directory
         files[".gitignore"] = ".superpowers/\n"    # as in the real repo: the package dir is not "dirty"
+        files["tools/gates/tests/test_fx.py"] = "def test_sib_a():\n    pass\n"    # SIBLINGS' test resolves (B5-FIX-26)
         self.root = rf.make_repo(files, rf.load_rows())
         self.addCleanup(shutil.rmtree, self.root, True)
         self.base = rf.git(self.root, "rev-parse", "HEAD")
@@ -133,6 +134,48 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertIn("not a directory name", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, ".superpowers/sdd/fx/x")))
 
+    def test_package_name_with_a_slash_is_refused(self):    # B5-FIX-9 (M22)
+        for plan, task in (("fx/mutations", "1"), ("fx", "a/b"), ("fx", "a\\b")):
+            with self.subTest(plan=plan, task=task):
+                rc, out = self.make(plan, task, self.base, self.head, "--only", "register")
+                self.assertEqual(1, rc, out)
+                self.assertIn("not a directory name", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".superpowers/sdd/fx/mutations")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW, "a")))
+
+    def test_pending_hint_names_the_mutation_file_until_one_exists(self):    # B5-FIX-9 (M29)
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertIn("the implementer still adds: siblings.md, claims.md, mutation-<finding-id>.txt\n", out)
+        rf.write(self.root, f"{REVIEW}/1/mutation-SD-FX-1.txt", MUTATION)
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertIn("the implementer still adds: siblings.md, claims.md\n", out)
+        rf.write(self.root, f"{REVIEW}/1/siblings.md", SIBLINGS)
+        rf.write(self.root, f"{REVIEW}/1/claims.md", CLAIMS)
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual((0, False), (rc, "still adds" in out), out)
+
+    def test_helper_and_gate_agree_on_a_quoted_path_and_an_empty_subject(self):    # B5-FIX-7 sibling 3
+        for what in ("caf\u00e9.md", "empty subject", "space-led subject"):
+            with self.subTest(what):
+                base = rf.git(self.root, "rev-parse", "HEAD")
+                if what.endswith(".md"):
+                    rf.write(self.root, what, "x\n")
+                    head = rf.commit(self.root, "feat: add a quoted path")
+                else:
+                    rf.write(self.root, "src/fx.py", f"fixed = {what!r}\n")
+                    rf.git(self.root, "add", "-A")
+                    rf.git(self.root, "commit", "-q", "--allow-empty-message", "-m", "" if what[0] == "e" else " led")
+                    head = rf.git(self.root, "rev-parse", "HEAD")
+                rc, out = self.make("fx", "1", base, head)
+                self.assertEqual(0, rc, out)
+                self.assertIn("gates PASS", out)
+                for name, text in (("mutation-SD-FX-1.txt", MUTATION), ("siblings.md", SIBLINGS), ("claims.md", CLAIMS)):
+                    rf.write(self.root, f"{REVIEW}/1/{name}", text)
+                rc, out = self.run_main(grp.main, "--dir", f"{REVIEW}/1")
+                self.assertEqual(0, rc, out)
+                self.assertNotIn("FAIL", out)
+
     def test_dot_names_are_refused(self):
         for plan, task in (("fx", ".."), ("fx", "."), ("..", "1"), (".", "1"), ("fx", ".hidden")):
             with self.subTest(plan=plan, task=task):
@@ -158,6 +201,48 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertEqual(1, rc, out)
         self.assertIn("working tree is not clean", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def test_file_hidden_by_info_exclude_or_gitignore_fails_before_writing(self):    # B5-FIX-16 (DEC-0029)
+        rf.write(self.root, "docs/superpowers/plans/fx.md", "# plan\n")
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan: docs/superpowers/plans/fx.md\n")
+        base = rf.commit(self.root, "ledger names the plan")
+        rf.write(self.root, "src/fx.py", "fixed = 2\n")
+        head = rf.commit(self.root, "feat: second fix")
+        for how, rel in (("info/exclude", "tools/gates/lib/planted.py"), ("info/exclude", "docs/superpowers/state/x.yml"),
+                         (".gitignore", "tools/gates/gate_planted.py"), (".gitignore", "tools/gates/__pycache__/notes.txt"), (".gitignore", "tools/gates/lib/stray.pyc"),
+                         (".gitignore", "docs/superpowers/plans/fx.md")):    # the plan last: it stays untracked
+            with self.subTest(how=how, rel=rel):
+                ignore = os.path.join(self.root, ".git/info/exclude" if how == "info/exclude" else ".gitignore")
+                with open(ignore, encoding="utf-8") as f:
+                    kept = f.read()
+                self.addCleanup(rf.write, self.root, os.path.relpath(ignore, self.root), kept)
+                rf.write(self.root, rel, "planted = True\n")
+                with open(ignore, "a", encoding="utf-8") as f:
+                    f.write(f"/{rel}\n")
+                if rel.endswith("fx.md"):
+                    rf.git(self.root, "rm", "-q", "--cached", rel)
+                if how == ".gitignore":
+                    rf.commit(self.root, "ignore it")
+                    head = rf.git(self.root, "rev-parse", "HEAD")
+                self.assertTrue(rf.git(self.root, "check-ignore", rel))
+                rc, out = self.make("fx", "1", base, head, "--only", "register")
+                self.assertEqual(1, rc, out)
+                self.assertIn(f"ignored file(s) under the paths the gates read: {rel}", out)
+                self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+                os.remove(os.path.join(self.root, rel))
+
+    def test_packages_dir_and_pycache_stay_allowed(self):    # B5-FIX-16 (DEC-0029, DEC-0033)
+        rf.write(self.root, f"{REVIEW}/0/notes.md", "kept\n")    # the packages dir: ignored by .gitignore
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan:\n")    # names no plan: no extra path
+        rf.write(self.root, "tools/gates/__pycache__/gate_x.cpython-39.pyc", "pyc\n")
+        rf.write(self.root, "tools/gates/lib/__pycache__/__init__.cpython-312.pyc", "pyc\n")
+        with open(os.path.join(self.root, ".gitignore"), "a", encoding="utf-8") as f:
+            f.write("__pycache__/\n")
+        rf.commit(self.root, "ignore pycache")
+        head = rf.git(self.root, "rev-parse", "HEAD")
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
 
     def test_color_config_does_not_reach_the_package(self):
         rf.git(self.root, "config", "color.ui", "always")

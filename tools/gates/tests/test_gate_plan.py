@@ -1005,6 +1005,36 @@ class LedgerCopies(unittest.TestCase):
                 os.mkdir(path) if kind == "directory" else os.symlink("nowhere", path)
                 self.assertInFlight(root)
 
+    def test_ledger_replaced_by_a_symlink_in_the_work_tree_is_in_flight(self):    # B5-FIX-5 DEC-0034
+        root = self.repo(self.CLOSED)
+        path = os.path.join(root, self.REL)
+        rf.write(root, "docs/superpowers/state/fx/real.md", self.CLOSED)    # same bytes, reached through a link
+        os.remove(path)
+        os.symlink("real.md", path)
+        self.assertInFlight(root)
+
+    def test_ledger_mode_change_staged_is_in_flight(self):    # B5-FIX-5 DEC-0034
+        for work_too in (False, True):
+            with self.subTest(work_too=work_too):
+                root = self.repo(self.CLOSED)
+                rf.git(root, "update-index", "--chmod=+x", self.REL)
+                if work_too:
+                    os.chmod(os.path.join(root, self.REL), 0o755)
+                self.assertInFlight(root)
+
+    def test_ledger_mode_change_in_the_work_tree_only_is_in_flight(self):    # B5-FIX-5 DEC-0034
+        root = self.repo(self.CLOSED)
+        os.chmod(os.path.join(root, self.REL), 0o755)
+        self.assertInFlight(root)
+
+    def test_state_dir_replaced_by_a_symlink_is_in_flight(self):    # B5-FIX-5 DEC-0034
+        root = self.repo(self.CLOSED)
+        state = os.path.join(root, "docs/superpowers/state")
+        os.rename(os.path.join(state, "fx"), os.path.join(root, "fx-real"))
+        os.symlink(os.path.join("..", "..", "..", "fx-real"), os.path.join(state, "fx"))
+        self.assertTrue(os.path.isfile(os.path.join(root, self.REL)))
+        self.assertInFlight(root)
+
     def test_a_state_dir_without_ledger_md_is_not_a_ledger(self):    # B5-FIX-24 (:516)
         root = self.repo(self.CLOSED)
         os.makedirs(os.path.join(root, "docs/superpowers/state/hx"))

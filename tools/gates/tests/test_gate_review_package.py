@@ -30,6 +30,10 @@ GOOD = {
     "mutation-SD-FX-1.txt": MUT,
 }
 
+TESTS = ("tools/gates/tests/test_fx.py",    # the module every fixture test cell resolves in (B5-FIX-26)
+         "class T:\n" + "".join(f"    def {n}(self):\n        pass\n"
+                                 for n in ("test_sib_a", "test_sib", "test_a", "test_b", "test_x", "test_z")))
+
 
 def gate(root, argv):
     buf = io.StringIO()
@@ -42,6 +46,7 @@ class GateReviewPackage(unittest.TestCase):
     def setUp(self):
         self.root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows())
         self.addCleanup(shutil.rmtree, self.root, True)
+        rf.write(self.root, *TESTS)
         self.put(GOOD)
 
     def put(self, files):
@@ -62,6 +67,7 @@ class GateReviewPackage(unittest.TestCase):
         edit(rows)
         self.root = rf.make_repo(rf.DISPATCH_FILES, rows)
         self.addCleanup(shutil.rmtree, self.root, True)
+        rf.write(self.root, *TESTS)
         self.put(GOOD)
 
     def test_good_package_passes(self):
@@ -282,11 +288,46 @@ class GateReviewPackage(unittest.TestCase):
             with self.subTest(cell=cell):
                 self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
                 self.assertFailLine(*self.check(), "review_package.siblings", "are not 'sibling |")
-        for cell in ("SD-FX-2", "t.T.test_sib", "tests/t.py::T::test_sib", "test_sib"):
+        for cell in ("SD-FX-2", "test_fx.T.test_sib", "tools/gates/tests/test_fx.py::T::test_sib", "test_sib"):
             with self.subTest(cell=cell):
                 self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
                 rc, out = self.check()
                 self.assertEqual(0, rc, out)
+
+    def test_sibling_test_name_that_no_test_defines_fails(self):    # B5-FIX-26 (DEC-0035)
+        head = "| sibling | test or finding |\n|---|---|\n"
+        rf.write(self.root, "tools/gates/tests/notes.md", "def test_in_notes():\n")    # not a .py module
+        os.makedirs(os.path.join(self.root, "tools/gates/tests/test_dir.py"))    # a directory is no module
+        for cell in ("test_nowhere", "test_fx::test_nowhere", "test_fx.T.test_nowhere",
+                     "tools/gates/tests/test_fx.py::T::test_nowhere", "test_si", "test_in_notes", "test_dir::test_x"):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_sibling_test_module_that_does_not_exist_fails(self):    # B5-FIX-26 (DEC-0035)
+        head = "| sibling | test or finding |\n|---|---|\n"
+        rf.write(self.root, "src/test_src.py", "def test_sib():\n    pass\n")    # not under a test tree
+        for cell in ("test_missing::test_sib", "test_missing.T.test_sib", "T.test_sib", "src/test_src.py::test_sib",
+                     "tools/gates/tests/test_missing.py::T::test_sib", "test_src::test_sib"):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_sibling_name_defined_only_in_another_test_module_fails(self):    # B5-FIX-26 (DEC-0035)
+        head = "| sibling | test or finding |\n|---|---|\n"
+        rf.write(self.root, "tools/gates/tests/test_other.py", "def test_only_here():\n    pass\n")
+        rf.write(self.root, "tools/lint/test_lint.py", "class L:\n    async def test_lint_only(self):\n        pass\n")
+        rf.write(self.root, "tools/gates/tests/tools.py", "x = 1\n")    # a shorter dotted prefix that is a module too
+        for cell, ok in (("test_fx::test_only_here", False), ("test_fx.T.test_only_here", False),
+                         ("test_other::test_only_here", True), ("tools.gates.tests.test_other.test_only_here", True),
+                         ("test_only_here", True), ("test_lint.L.test_lint_only", True), ("tools.gates.tests.test_fx.T.test_sib", True), ("test_fx::test_lint_only", False)):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                if ok:
+                    rc, out = self.check()
+                    self.assertEqual(0, rc, out)
+                else:
+                    self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
 
     def test_sibling_rows_need_two_cells_and_a_name(self):
         head = "| sibling | test or finding |\n|---|---|\n"

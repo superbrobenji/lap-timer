@@ -546,13 +546,34 @@ def _raw(path: str) -> bytes | None:
         return f.read()
 
 
+def _git_mode(root: str, cmd: list, rel: str) -> str | None:
+    """Mode (first field) of the first entry `git ls-files -s` / `git ls-tree HEAD` lists for <rel>; None
+    when the listing fails or is empty. An unmerged or directory entry has no `git show` copy either, so
+    the byte comparison already holds that ledger in flight."""
+    r = subprocess.run(["git", *cmd, "--", rel], cwd=root, capture_output=True, check=False)
+    fields = r.stdout.decode("utf-8", "surrogateescape").split()
+    return fields[0] if fields else None
+
+
+def _work_mode(root: str, rel: str) -> str:
+    """Git-style mode of the working-tree <rel>: 120000 when it or any directory on its path under root is
+    a symlink (DEC-0034: a state dir replaced by a symlink), else 100755 or 100644 by the owner exec bit."""
+    path = root
+    for part in rel.split("/"):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            return "120000"
+    return "100755" if os.stat(path).st_mode & 0o100 else "100644"
+
+
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
     """(state-dir name, plan path) for every ledger that is in flight. A ledger is any <STATE>/<name>/ledger.md
     in the working tree, the index or HEAD (B5-FIX-5: a ledger deleted in the working tree or the index is
     still seen). It is closed only when all three copies exist, are byte-equal and end in a CHECKPOINT
     line (B5-FIX-4: an uncommitted 'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight;
     B5-FIX-5: a copy missing from any of the three, or lines staged while the working tree equals HEAD, is
-    in flight; a ledger absent at HEAD is in flight). Line 1 'plan: <plan file>' is read from the newest
+    in flight; a ledger absent at HEAD is in flight; DEC-0034: a copy whose mode or type differs, a
+    symlink on its working-tree path included, is in flight). Line 1 'plan: <plan file>' is read from the newest
     copy that exists: the working tree, else the index, else HEAD (the copy the author is changing)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
@@ -573,7 +594,10 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
         m = LEDGER_PLAN.match(first)
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
-        if not (_closed(text) and copies[0] == copies[1] == copies[2]):
+        # DEC-0034: the copies also agree on file mode and type (a symlink, an exec bit staged or not)
+        if not (_closed(text) and copies[0] == copies[1] == copies[2]
+                and _work_mode(root, rel) == _git_mode(root, ["ls-files", "-s"], rel)
+                == _git_mode(root, ["ls-tree", "HEAD"], rel)):
             out.append((name, m.group(1)))
     return out
 

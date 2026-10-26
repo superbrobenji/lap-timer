@@ -29,6 +29,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from tools.gates import run_all  # noqa: E402
+from tools.gates.gate_plan import LEDGER_PLAN  # noqa: E402
 from tools.gates.lib import GateError, gitinfo, repo_root  # noqa: E402
 
 STATE = "docs/superpowers/state"
@@ -79,6 +80,22 @@ def _write(path: str, data) -> None:
         f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
 
 
+def _ignored(root: str, plan: str) -> list[str]:
+    """B5-FIX-16 (DEC-0029): git-ignored or excluded untracked files under the paths the gates read
+    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see; a
+    __pycache__ dir's .pyc files are exempt (DEC-0033); the packages dir lies under none of those paths."""
+    paths = ["tools/gates", STATE]
+    ledger = os.path.join(root, STATE, plan, "ledger.md")
+    if os.path.isfile(ledger):
+        with open(ledger, encoding="utf-8", errors="replace") as f:
+            m = LEDGER_PLAN.match(f.readline())    # as gate_plan reads line 1
+        if m:
+            paths.append(m.group(1))
+    out = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *paths)
+    return [p for p in out.decode("utf-8", "replace").split("\0")
+            if p and not (p.endswith(".pyc") and p.split("/")[-2:-1] == ["__pycache__"])]
+
+
 def _package(root: str, a) -> tuple[str, int]:
     for label, value in (("plan", a.plan), ("task", a.task)):
         if not NAME.match(value):
@@ -88,6 +105,10 @@ def _package(root: str, a) -> tuple[str, int]:
     if not gitinfo.status_clean(root):
         raise Refused("working tree is not clean: gates.txt must describe the commit under review; "
                       "commit or stash first (the ignored .superpowers/ does not count)")
+    ignored = _ignored(root, a.plan)
+    if ignored:
+        raise Refused(f"ignored file(s) under the paths the gates read: {', '.join(ignored[:5])}; "
+                      "delete them or move them out so gates.txt describes HEAD")
     hidden = [l[2:] for l in _git(root, "ls-files", "-v").decode("utf-8", "replace").splitlines()
               if l[:1].islower() or l[:1] == "S"]    # assume-unchanged / skip-worktree: status cannot see them
     if hidden:
