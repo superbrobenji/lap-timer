@@ -1110,6 +1110,25 @@ class LedgerCopies(unittest.TestCase):
         rf.write(root, self.REL, self.CLOSED)
         self.assertInFlight(root)
 
+    def test_core_filemode_false_spellings_and_global_level_are_honoured(self):    # B5-FIX-5 DEC-0041 (R-A23b-2)
+        """Every spelling git reads as false (no, off, 0, FALSE) and a false set only in the global config (repo
+        key unset) read an exec-bit-only work-tree change closed, as git status shows it clean."""
+        for where, value in (("local", "no"), ("local", "off"), ("local", "0"), ("local", "FALSE"),
+                             ("global", "false")):
+            with self.subTest(where=where, value=value), tempfile.TemporaryDirectory() as tmp:
+                glob_cfg = os.path.join(tmp, "gitconfig")
+                rf.write(tmp, "gitconfig", f"[core]\n\tfileMode = {value}\n" if where == "global" else "")
+                with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": glob_cfg, "GIT_CONFIG_NOSYSTEM": "1"}):
+                    root = self.repo(self.CLOSED)
+                    if where == "local":
+                        rf.git(root, "config", "core.fileMode", value)
+                    else:
+                        rf.git(root, "config", "--unset", "core.fileMode")
+                    os.chmod(os.path.join(root, self.REL), 0o755)
+                    self.assertEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                                         capture_output=True, check=True).stdout)
+                    self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+
     def test_core_filemode_true_holds_the_work_tree_exec_bit_in_flight(self):    # B5-FIX-5 DEC-0041 honour-filemode
         """core.fileMode=true, or unset at every level (git's default is true; no global or system config is
         read): an exec-bit-only work-tree change is in flight."""

@@ -14,6 +14,7 @@ a later change to the pinned code needs no transcript update (DEC-0021).
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
@@ -39,7 +40,7 @@ DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mo
                        r"|similarity index|rename |copy |Binary files )")
 TEST_NAME = re.compile(r"^(?:[\w.\-/]+::)*(?:\w+\.)*test_\w+$")
 TEST_FILE = re.compile(r"^test_\w*\.(py|c)$")    # DEC-0037: tracked test_*.py, and Unity test_*.c sources
-DEFINES = {"py": r"^[ \t]*(?:async[ \t]+)?def {name}\(", "c": r"^[ \t]*void[ \t]+{name}[ \t]*\([ \t]*void[ \t]*\)"}
+DEFINES = {"c": r"^[ \t]*void[ \t]+{name}[ \t]*\([ \t]*void[ \t]*\)"}
 
 
 def _read(path: str) -> str:
@@ -197,16 +198,27 @@ def test_modules(root: str) -> dict:
     return out
 
 
+def _py_defs(text: str) -> set:
+    """R-A1-4: the function names a Python test file defines, parsed (a `def` inside a string is none); a file
+    that does not parse defines nothing (fails closed)."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+    return {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
 def defines_test(cell: str, modules: dict) -> bool:
     """B5-FIX-26 (DEC-0035, DEC-0037): the test a siblings.md cell names exists: a file its module (the part
-    before the first '::', else the longest dotted prefix that is a module key) names defines it (`def <name>(`
-    in Python, `void <name>(void)` in Unity C); a bare `test_<x>` is defined in any tracked test file. A named
+    before the first '::', else the longest dotted prefix that is a module key) names defines it (a parsed `def <name>`
+    in Python, R-A1-4; `void <name>(void)` in Unity C); a bare `test_<x>` is defined in any tracked test file. A named
     module that is no key resolves nothing."""
     parts = cell.split("::")
     name = parts[-1].split(".")[-1]
 
     def defined(files):
-        return any(re.search(DEFINES[kind].format(name=name), text, re.M) for kind, text in files)
+        return any(name in _py_defs(text) if kind == "py" else re.search(DEFINES[kind].format(name=name), text, re.M)
+                   for kind, text in files)
     dotted = parts[0].split(".")[:-1]
     if len(parts) == 1 and not dotted:
         return any(defined(files) for files in modules.values())
@@ -241,14 +253,15 @@ def _siblings(root, pkg, needed, longest, findings, res, pfx):
 
 
 def fail_lines(text: str) -> list[str]:
-    """DEC-0038 (any-fail-line): the first cell of every claims.md line whose last '|'-separated field (the result
-    cell, a pipe-less GFM row's trailing field, or a line with no '|' as a whole) is FAIL, whatever its table
-    position: a header, a line after a separator or a blank line, a row with no leading '|'."""
+    """DEC-0038 (any-fail-line): the first cell of every claims.md line whose result cell (the fifth
+    '|'-separated cell, as 'claim | direct | contradiction | output | PASS/FAIL' places it, whatever follows it)
+    or last field (a pipe-less GFM row's trailing field, or a line with no '|' as a whole) is FAIL, whatever its
+    table position: a header, a line after a separator or a blank line, a row with no leading '|'."""
     out = []
     for l in text.splitlines():
         l = l.strip()
         cells = _cells(l if l.startswith("|") else "|" + l)
-        if cells[-1] == "FAIL":
+        if cells[-1] == "FAIL" or (len(cells) > 4 and cells[4] == "FAIL"):    # R-A1-1: the fifth cell is the result
             out.append(cells[0])
     return out
 

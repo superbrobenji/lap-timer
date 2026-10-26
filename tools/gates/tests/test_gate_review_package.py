@@ -380,6 +380,50 @@ class GateReviewPackage(unittest.TestCase):
                 else:
                     self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
 
+    def test_a_fail_result_cell_with_trailing_fields_fails(self):    # B5-FIX-22 (DEC-0038, R-A1-1, R-A1-3 N22)
+        """The result cell is the fifth cell ('claim | direct | contradiction | output | PASS/FAIL'): FAIL there
+        fails the claims check though more fields follow it; FAIL in the output (fourth) cell does not; a FAIL
+        row indented by spaces reports its first cell."""
+        for name, row in (("a trailing note", "c | d | x | o | FAIL | note\n"),
+                          ("an empty trailing field", "c | d | x | o | FAIL | |\n"),
+                          ("indented, pipes at both ends", "   | c | d | x | o | FAIL |   \n")):
+            with self.subTest(name):
+                self.put({"claims.md": GOOD["claims.md"] + "\n" + row})
+                rc, out = self.check()
+                self.assertFailLine(rc, out, "review_package.claims", "FAIL rows: c")
+                self.assertIn("FAIL review_package.claims: FAIL rows: c\n", out)
+        self.put({"claims.md": GOOD["claims.md"] + "\n| c | d | x | FAIL | PASS |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+
+    def test_sibling_name_only_inside_a_string_or_comment_does_not_resolve(self):    # B5-FIX-26 (R-A1-4, R-A1-3)
+        """A `def test_x(` line inside a Python string, a Unity line inside a C comment and a C function that
+        takes a parameter are no test definitions; a file git quotes (non-ASCII path) and a Python file that
+        does not parse (fails closed) are read as tracked files."""
+        head = "| sibling | test or finding |\n|---|---|\n"
+        self.track("t/test_doc.py", 'x = """\ndef test_ghost():\n"""\ndef test_real():\n    pass\n')
+        self.track("t/test_bad.py", "def test_broken(:\n")
+        self.track("test/test_cm.c", "// void test_in_comment(void)\nvoid test_takes_int(int x)\n{\n}\n")
+        self.track("cé/test_u.py", "def test_accented_dir():\n    pass\n")
+        for cell, ok in (("test_doc::test_ghost", False), ("test_doc::test_real", True), ("test_ghost", False),
+                         ("test_bad::test_broken", False), ("test_cm::test_in_comment", False),
+                         ("test_cm::test_takes_int", False), ("test_u::test_accented_dir", True)):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                if ok:
+                    rc, out = self.check()
+                    self.assertEqual(0, rc, out)
+                else:
+                    self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_a_root_git_cannot_list_resolves_no_test_name(self):    # B5-FIX-26 (R-A1-3 N18)
+        """Where `git ls-files` fails (the root is no repository) no test name resolves: the siblings check
+        FAILs, the gate never raises."""
+        shutil.rmtree(os.path.join(self.root, ".git"))
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": os.path.dirname(self.root)}):
+            rc, out = self.check()
+        self.assertFailLine(rc, out, "review_package.siblings", "defined in no test module named: test_sib_a")
+
     def test_module_qualified_header_and_pytest_class_token_pass(self):    # B5-FIX-17 (R-A1-1, R-A1-3)
         """A transcript header `test: test_mod::test_fx` that is the pin passes, and so does a pytest token
         `test_mod::T::test_fx` (the bare module name before '::')."""

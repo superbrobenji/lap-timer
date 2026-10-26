@@ -19,6 +19,7 @@ Usage: make_review_package.py <plan> <task> <base> <head> [--only gate,gate]
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import re
 import subprocess
@@ -83,7 +84,8 @@ def _write(path: str, data) -> None:
 def _ignored(root: str) -> list[str]:
     """B5-FIX-16 (DEC-0029): git-ignored or excluded untracked files under the paths the gates read
     (tools/gates, the state dir, and, DEC-0039 widen-all-plans, the plan the line 1 of every
-    <state>/<name>/ledger.md names, not only the package's own), which git status cannot see. Exempt:
+    <state>/<name>/ledger.md names, not only the package's own, and every docs/superpowers/plans/*.md run_all
+    hands to gate_decisions, R-A23b-1), which git status cannot see. Exempt:
     the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
     directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
     ':(exclude)tools/gates' drops nothing) and, where the filesystem folds case, case-insensitive (R-A2r10-1:
@@ -99,6 +101,8 @@ def _ignored(root: str) -> list[str]:
         m = LEDGER_PLAN.match(text.splitlines()[0] if text else "")    # line 1 as gate_plan reads it (R-A2-2)
         if m:
             paths.append(m.group(1))
+    paths += sorted(os.path.relpath(p, root).replace(os.sep, "/")    # R-A23b-1: every plan run_all hands to
+                    for p in glob.glob(os.path.join(root, run_all.PLANS_GLOB)))    # gate_decisions --scan
     magic = ":(literal,icase)" if os.path.exists(os.path.join(root, ".GIT")) else ":(literal)"    # root holds .git
     out = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
                *(magic + p for p in paths))

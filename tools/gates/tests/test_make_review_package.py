@@ -254,6 +254,25 @@ class MakeReviewPackage(unittest.TestCase):
         rc, out = self.make("fx", "1", self.base, head, "--only", "register")
         self.assertEqual(0, rc, out)
 
+    def test_ignored_plan_no_ledger_names_fails(self):    # B5-FIX-16 (DEC-0039, R-A23b-1)
+        """run_all feeds every docs/superpowers/plans/*.md to gate_decisions: an excluded plan no ledger names is
+        refused too; a file below plans/ that the glob does not match stays outside the read paths."""
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan: docs/superpowers/plans/fx.md\n")
+        rf.write(self.root, "docs/superpowers/plans/fx.md", "# plan\n")
+        head = rf.commit(self.root, "one ledger")
+        rf.write(self.root, "docs/superpowers/plans/zz.md", "# nobody's plan\n")
+        rf.write(self.root, "docs/superpowers/plans/sub/deep.md", "# not globbed\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write("/docs/superpowers/plans/zz.md\n/docs/superpowers/plans/sub/\n")
+        self.assertTrue(rf.git(self.root, "check-ignore", "docs/superpowers/plans/zz.md"))
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/zz.md;", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+        os.remove(os.path.join(self.root, "docs/superpowers/plans/zz.md"))
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+
     def test_packages_dir_and_pycache_stay_allowed(self):    # B5-FIX-16 (DEC-0029, DEC-0033)
         rf.write(self.root, f"{REVIEW}/0/notes.md", "kept\n")    # the packages dir: ignored by .gitignore
         rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan:\n")    # names no plan: no extra path
@@ -317,7 +336,7 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertIn("ignored file(s) under the paths the gates read: tools/gates/planted\ufffd.py", out)
 
     def test_a_non_utf8_line_1_still_writes_the_package(self):    # B5-FIX-16 (R-A2-4 strict-utf8)
-        rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/fx\xff.md", "docs/superpowers/plans/other.md")
+        rc, out = self.ignored_plan(b"plan: docs/superpowers/notes/fx\xff.md", "docs/superpowers/notes/other.md")
         self.assertEqual(0, rc, out)
         self.assertIn("gates PASS", out)
 
@@ -332,13 +351,14 @@ class MakeReviewPackage(unittest.TestCase):
         rf.write(self.root, "tools/gates/lib/planted.py", "planted = True\n")
         with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
             f.write("/tools/gates/lib/planted.py\n")
-        rc, out = self.ignored_plan(b"plan: :(exclude)tools/gates", "docs/superpowers/plans/none.md")
+        rc, out = self.ignored_plan(b"plan: :(exclude)tools/gates", "docs/superpowers/notes/none.md")
         self.assertEqual(1, rc, out)
         self.assertIn("ignored file(s) under the paths the gates read: tools/gates/lib/planted.py", out)
 
     def test_glob_characters_in_the_plan_path_are_literal(self):    # B5-FIX-16 (R-A2r10-1: ':(literal)' per path)
-        """gate_plan opens docs/.../f?.md, not fx.md: an ignored fx.md is not a file the gates read."""
-        rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/f?.md", "docs/superpowers/plans/fx.md")
+        """gate_plan opens docs/.../f?.md, not fx.md: an ignored fx.md is not a file the gates read (outside
+        plans/, which run_all globs whole, R-A23b-1)."""
+        rc, out = self.ignored_plan(b"plan: docs/superpowers/notes/f?.md", "docs/superpowers/notes/fx.md")
         self.assertEqual(0, rc, out)
         self.assertIn("gates PASS", out)
 
