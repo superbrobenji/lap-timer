@@ -547,12 +547,18 @@ def _raw(path: str) -> bytes | None:
 
 
 def _git_mode(root: str, cmd: list, rel: str) -> str | None:
-    """Mode (first field) of the first entry `git ls-files -s` / `git ls-tree HEAD` lists for <rel>; None
-    when the listing fails or is empty. An unmerged or directory entry has no `git show` copy either, so
-    the byte comparison already holds that ledger in flight."""
-    r = subprocess.run(["git", *cmd, "--", rel], cwd=root, capture_output=True, check=False)
-    fields = r.stdout.decode("utf-8", "surrogateescape").split()
-    return fields[0] if fields else None
+    """Mode (first field) of the entry `git ls-files -s` / `git ls-tree HEAD` lists for exactly <rel>; None
+    when the listing fails or holds no such entry. The pathspec is literal and only the entry whose path is
+    <rel> counts (R-A3-1: a state-dir name holding '?', '*' or '[' never reads another ledger's mode). An
+    unmerged or directory entry has no `git show` copy either, so the byte comparison already holds that
+    ledger in flight."""
+    r = subprocess.run(["git", "--literal-pathspecs", *cmd, "-z", "--", rel], cwd=root, capture_output=True,
+                       check=False)
+    for entry in r.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        meta, _, path = entry.partition("\t")
+        if path == rel:
+            return meta.split()[0]
+    return None
 
 
 def _work_mode(root: str, rel: str) -> str:

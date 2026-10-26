@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools.gates import gate_review_package as grp
+from tools.gates import gate_plan, gate_review_package as grp
 from tools.gates import make_review_package as mrp
 from tools.gates.tests import repo_fixture as rf
 
@@ -209,7 +209,8 @@ class MakeReviewPackage(unittest.TestCase):
         rf.write(self.root, "src/fx.py", "fixed = 2\n")
         head = rf.commit(self.root, "feat: second fix")
         for how, rel in (("info/exclude", "tools/gates/lib/planted.py"), ("info/exclude", "docs/superpowers/state/x.yml"),
-                         (".gitignore", "tools/gates/gate_planted.py"), (".gitignore", "tools/gates/__pycache__/notes.txt"), (".gitignore", "tools/gates/lib/stray.pyc"),
+                         (".gitignore", "tools/gates/gate_planted.py"), (".gitignore", "tools/gates/x__pycache__/y.pyc"), (".gitignore", "tools/gates/lib/__pycache__"),
+                         (".gitignore", "tools/gates/.superpowers/sdd/x/a.md"), (".gitignore", "tools/gates/lib/stray.pyc"),
                          (".gitignore", "docs/superpowers/plans/fx.md")):    # the plan last: it stays untracked
             with self.subTest(how=how, rel=rel):
                 ignore = os.path.join(self.root, ".git/info/exclude" if how == "info/exclude" else ".gitignore")
@@ -236,6 +237,8 @@ class MakeReviewPackage(unittest.TestCase):
         rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan:\n")    # names no plan: no extra path
         rf.write(self.root, "tools/gates/__pycache__/gate_x.cpython-39.pyc", "pyc\n")
         rf.write(self.root, "tools/gates/lib/__pycache__/__init__.cpython-312.pyc", "pyc\n")
+        rf.write(self.root, "tools/gates/__pycache__/notes.txt", "any file\n")    # DEC-0033: every file under a
+        rf.write(self.root, "tools/gates/__pycache__/sub/x.pyc", "pyc\n")       # __pycache__ component is exempt
         with open(os.path.join(self.root, ".gitignore"), "a", encoding="utf-8") as f:
             f.write("__pycache__/\n")
         rf.commit(self.root, "ignore pycache")
@@ -243,6 +246,58 @@ class MakeReviewPackage(unittest.TestCase):
         rc, out = self.make("fx", "1", self.base, head, "--only", "register")
         self.assertEqual(0, rc, out)
         self.assertIn("gates PASS", out)
+
+    def ignored_plan(self, line1, plan):
+        """Commit a ledger whose line 1 is <line1> (bytes); plant <plan> untracked and excluded; run the helper."""
+        path = os.path.join(self.root, "docs/superpowers/state/fx/ledger.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(line1 + b"\n# Ledger: fx\n")
+        head = rf.commit(self.root, "ledger")
+        rf.write(self.root, plan, "# plan\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write(f"/{plan}\n")
+        self.assertTrue(rf.git(self.root, "check-ignore", plan))
+        return self.make("fx", "1", self.base, head, "--only", "register")
+
+    def test_the_plan_named_by_line_1_is_read_as_gate_plan_reads_it(self):    # B5-FIX-16 (R-A2-2)
+        for sep in ("\x0c", "\x0b", "\x1c", "\x85", "\u2028"):
+            with self.subTest(sep=ascii(sep)):
+                line1 = f"plan: docs/superpowers/plans/fx.md{sep}note".encode("utf-8")
+                self.assertEqual("docs/superpowers/plans/fx.md",
+                                 gate_plan.LEDGER_PLAN.match(line1.decode("utf-8").splitlines()[0]).group(1))
+                rc, out = self.ignored_plan(line1, "docs/superpowers/plans/fx.md")
+                self.assertEqual(1, rc, out)
+                self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
+                os.remove(os.path.join(self.root, "docs/superpowers/plans/fx.md"))
+
+    def test_a_non_utf8_line_1_still_writes_the_package(self):    # B5-FIX-16 (R-A2-4 strict-utf8)
+        rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/fx\xff.md", "docs/superpowers/plans/other.md")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
+
+    def test_an_empty_ledger_still_writes_the_package(self):    # B5-FIX-16 (no line 1: no plan path)
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "")
+        head = rf.commit(self.root, "empty ledger")
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
+
+    def test_pathspec_magic_in_the_plan_path_is_literal(self):    # B5-FIX-16 (R-A2-3)
+        rf.write(self.root, "tools/gates/lib/planted.py", "planted = True\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write("/tools/gates/lib/planted.py\n")
+        rc, out = self.ignored_plan(b"plan: :(exclude)tools/gates", "docs/superpowers/plans/none.md")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: tools/gates/lib/planted.py", out)
+
+    def test_a_plan_in_the_packages_dir_is_excepted(self):    # B5-FIX-16 (DEC-0029 "packages dir excepted")
+        rc, out = self.ignored_plan(b"plan: .superpowers/sdd/fx/plan.md", ".superpowers/sdd/fx/plan.md")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
+        rc, out = self.ignored_plan(b"plan: .superpowers/sddx/plan.md", ".superpowers/sddx/plan.md")    # not the dir
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: .superpowers/sddx/plan.md", out)
 
     def test_color_config_does_not_reach_the_package(self):
         rf.git(self.root, "config", "color.ui", "always")

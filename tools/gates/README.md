@@ -21,7 +21,7 @@ umbrella plan `docs/superpowers/plans/2026-10-17-strict-delivery.md`, "Shared in
 | `gate_register.py` | findings schema, an owner on every row, legal transitions, evidence per state |
 | `gate_claims.py` | claims schema, every sha a commit of the repository, every cite a normalised repo-relative path that exists at `verified_at` (DEC-0004), verified rows not stale at HEAD (history + staged files), `false` rows name a registered finding; `--mark-stale --base <sha>` (a commit) rewrites stale rows |
 | `gate_decisions.py` | decisions schema (every sha a commit of the repository), owner-only answers, no `--scan` file citing an unanswered `DEC-NNNN` |
-| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable), the prompt cap and the optional `fable_fallback` (DEC-0018: absent = off, else a model ranked at least opus and below fable) agree with the dispatch grammar; `--prompt`: one dispatch prompt, where a `fable_roles` role on the `fable_fallback` model is `PASS dispatch.model.fallback` (see the gate_dispatch section) |
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable), the prompt cap and the optional `fable_fallback` (DEC-0018: absent = off, else exactly `opus`, DEC-0028) agree with the dispatch grammar; `--prompt`: one dispatch prompt, where a `fable_roles` role on the `fable_fallback` model is `PASS dispatch.model.fallback` (see the gate_dispatch section) |
 | `gate_review_package.py` | `--all` (run_all's default; DEC-0022: no package is not a missing input, so no `.superpowers/sdd`, no `review/` or an empty one is `PASS review_package.all`, while a non-directory where a directory is expected FAILs: `.superpowers` or `.superpowers/sdd` as `review_package.input`, `<plan>/review` as `review_package.<plan>.input`, a `review/` entry such as `.DS_Store` as `review_package.<plan>.<entry>.input`; a `<plan>`, `review/` or `<task>` dir that cannot be read FAILs under its own prefix, never skipped: B5-FIX-21) or `--dir .superpowers/sdd/<plan>/review/<task>`: the five package files plus one PASS/FAIL/PASS `mutation-<id>.txt` per finding the task owns, a siblings table at least as long as the register's list whose test cells each resolve to a `def <name>` in the module they name under the test trees (B5-FIX-26, DEC-0035: a missing module or name FAILs, a registered finding id passes), no FAIL row in any table of `claims.md` (B5-FIX-22: every row counts, after a blank line or in a second table); a pinned transcript is evidence at its row's pinned history sha and replays in a checkout of that sha (DEC-0021) |
 | `gate_plan.py` | `--plan P [--source report-or-register:query]`: the writing-plans header blocks, `**Files:**` (one backticked path per item), `**Findings:**`, `**Siblings:**`, `**Gates:**` and a pin step per task, every routed id registered and in exactly one task, source-id coverage, PARALLEL file overlap, tasks per block <= `block.max_tasks`, no placeholder text; `--in-flight` (run_all's default): the same checks, without a source, on the plan named on line 1 of every ledger that is in flight |
 
@@ -183,8 +183,9 @@ DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minim
 (`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
 strictly with integer ranks (`dispatch.config.model_rank`), and, under DEC-0018 (the owner's opus fallback for
 the Fable roles while Fable is unavailable), the optional `fable_fallback` key of `tools/gates/config.yml`: absent
-means off (`PASS dispatch.config.fable_fallback: absent: ...`); present, it must be a `model_rank` model ranked at
-least opus and strictly below fable, else `FAIL dispatch.config.fable_fallback`; the session sets and clears it
+means off; present, it must be exactly `opus` (DEC-0028), with opus ranked strictly below fable, else
+`FAIL dispatch.config.fable_fallback`; either way the PASS line is the bare `PASS dispatch.config.fable_fallback`
+(DEC-0024); the session sets and clears it
 only on the owner's word: 15 lines.
 
 ## make_review_package, gate_plan (S2)
@@ -193,8 +194,9 @@ only on the owner's word: 15 lines.
 `diff.patch` and `gates.txt` (`run_all` at HEAD minus `review_package` and `merge_ready`) into the git-ignored
 `.superpowers/sdd/<plan>/review/<task>/`, in the forms `gate_review_package` reads whatever the caller's git
 config says; it refuses a dirty tree, and an ignored or excluded untracked file under `tools/gates`,
-`docs/superpowers/state` or the plan the ledger names (B5-FIX-16, DEC-0029; `__pycache__` `.pyc` files are exempt,
-DEC-0033), because `gates.txt` must describe HEAD. The implementer adds
+`docs/superpowers/state` or the plan the ledger's line 1 names, read as `gate_plan` reads it, with literal
+pathspecs (B5-FIX-16, DEC-0029; exempt: the packages dir `.superpowers/sdd/` and every file under a `__pycache__`
+directory, DEC-0033), because `gates.txt` must describe HEAD. The implementer adds
 `mutation-<id>.txt`, `siblings.md` and `claims.md`; `gate_review_package.py --dir <that directory>` must pass
 before a reviewer is dispatched.
 

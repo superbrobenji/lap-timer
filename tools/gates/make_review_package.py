@@ -82,18 +82,22 @@ def _write(path: str, data) -> None:
 
 def _ignored(root: str, plan: str) -> list[str]:
     """B5-FIX-16 (DEC-0029): git-ignored or excluded untracked files under the paths the gates read
-    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see; a
-    __pycache__ dir's .pyc files are exempt (DEC-0033); the packages dir lies under none of those paths."""
+    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see. Exempt:
+    the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
+    directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
+    ':(exclude)tools/gates' drops nothing)."""
     paths = ["tools/gates", STATE]
     ledger = os.path.join(root, STATE, plan, "ledger.md")
     if os.path.isfile(ledger):
-        with open(ledger, encoding="utf-8", errors="replace") as f:
-            m = LEDGER_PLAN.match(f.readline())    # as gate_plan reads line 1
+        with open(ledger, "rb") as f:
+            text = f.read().decode("utf-8", "replace")
+        m = LEDGER_PLAN.match(text.splitlines()[0] if text else "")    # line 1 as gate_plan reads it (R-A2-2)
         if m:
             paths.append(m.group(1))
-    out = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *paths)
+    out = _git(root, "--literal-pathspecs", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
+               *paths)
     return [p for p in out.decode("utf-8", "replace").split("\0")
-            if p and not (p.endswith(".pyc") and p.split("/")[-2:-1] == ["__pycache__"])]
+            if p and not p.startswith(SDD + "/") and "__pycache__" not in p.split("/")[:-1]]
 
 
 def _package(root: str, a) -> tuple[str, int]:

@@ -5,6 +5,7 @@ import contextlib
 import copy
 import io
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -729,6 +730,18 @@ class Branches(unittest.TestCase):
             self.assertIn(word, task6)
         self.assertNotIn("title contains `pin`", task6)
 
+    def test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last(self):    # B5-FIX-11 (DEC-0025)
+        """Task 6 Step 5 credits plan-last to DEC-0025 (no session ruling); Task 7 Step 5's GATES list ends in plan."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
+                  encoding="utf-8") as f:
+            steps = [l for l in f.read().splitlines() if l.startswith("- [ ] **Step 5: Register in run_all** ")]
+        self.assertEqual(2, len(steps), steps)
+        gates = [re.search(r"`GATES = \[([^\]]*)\]`", l).group(1).replace('"', "").split(", ") for l in steps]
+        self.assertEqual(["register", "claims", "decisions", "dispatch", "review_package", "plan"], gates[0])
+        self.assertIn("(DEC-0025: `plan` last;", steps[0])
+        self.assertNotIn("session ruling", steps[0])
+        self.assertEqual(["register", "claims", "decisions", "dispatch", "review_package", "checkpoint", "plan"], gates[1])
+
     def test_s2_plan_global_constraints_state_the_pin_word(self):
         """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and pin_title."""
         with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
@@ -807,8 +820,15 @@ class FixWave3(unittest.TestCase):
         out = self.ok(self.variant("- Create: `src/beta.py`", "- Create: `src/alph`"))
         self.assertIn("PASS plan.overlap.1-2", out)
 
+    def test_a_task_1_directory_holding_a_task_2_file_overlaps(self):    # B5-FIX-14 (R-A3-2: the dir on either side)
+        for path in ("src", "SRC/", "src\\"):
+            with self.subTest(path):
+                self.fail_line(self.variant("- Create: `src/alpha.py`", f"- Create: `{path}`"), "plan.overlap.1-2",
+                               "~ src/beta.py")
+
     def test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour(self):    # B5-FIX-15
-        for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b"):
+        for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b",
+                      "\u017fpin", "pin\u017f", "P\u017fN"):    # U+017F folds to 's': never 'pin', and a letter neighbour
             with self.subTest(title=ascii(title)):
                 self.fail_line(self.variant("**Step 1: Pin**", f"**Step 1: {title}**"), "plan.pin.2")
         self.ok(self.variant("**Step 1: Pin**", "**Step 1: PIN it**"))
@@ -1021,6 +1041,30 @@ class LedgerCopies(unittest.TestCase):
                 if work_too:
                     os.chmod(os.path.join(root, self.REL), 0o755)
                 self.assertInFlight(root)
+
+    def test_ledger_mode_change_staged_under_a_glob_character_name_is_in_flight(self):    # B5-FIX-5 (R-A3-1)
+        """A state-dir name holding '?', '*' or '[' is a literal path to git, never a glob that reads ledger 0's mode."""
+        for name in ("?", "*", "[0]"):
+            with self.subTest(name=name):
+                root = self.repo(self.CLOSED)
+                for n in ("0", name):
+                    rf.write(root, f"docs/superpowers/state/{n}/ledger.md", self.CLOSED)
+                rf.commit(root, "two closed ledgers")
+                self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+                rf.git(root, "update-index", "--chmod=+x", f"docs/superpowers/state/{name}/ledger.md")
+                rc, out = gate(root, ["--in-flight"])
+                self.assertIn(f"plan.{name}.header.goal", out)
+                self.assertNotIn("plan.0.", out)
+                self.assertNotIn("plan.in_flight", out)
+
+    def test_a_group_or_other_exec_bit_alone_leaves_the_ledger_closed(self):    # B5-FIX-5 (R-A3-3: git's owner-x rule)
+        for mode in (0o645, 0o654):
+            with self.subTest(mode=oct(mode)):
+                root = self.repo(self.CLOSED)
+                os.chmod(os.path.join(root, self.REL), mode)
+                self.assertEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True,
+                                                     check=True).stdout)
+                self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
 
     def test_ledger_mode_change_in_the_work_tree_only_is_in_flight(self):    # B5-FIX-5 DEC-0034
         root = self.repo(self.CLOSED)

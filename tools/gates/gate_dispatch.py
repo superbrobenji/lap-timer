@@ -304,7 +304,7 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res, subagent_type=N
 def check_config(conf: dict, res: Result) -> None:
     """CI mode: the model map, fable_roles, model_rank, the prompt cap and the optional fable_fallback agree with
     the dispatch grammar (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders
-    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, ranks at least opus and below fable)."""
+    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, is exactly opus (DEC-0028))."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)

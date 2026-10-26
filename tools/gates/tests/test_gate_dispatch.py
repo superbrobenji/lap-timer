@@ -436,7 +436,7 @@ class GateDispatch(unittest.TestCase):
             readme = f.read()
         section = readme[readme.index("## gate_dispatch (S2)\n"):readme.index("\n## make_review_package")]
         for word in ("`fable_fallback`", "PASS dispatch.model.fallback", "FAIL dispatch.config.fable_fallback",
-                     "DEC-0018", "ranked at", "15 lines."):
+                     "DEC-0018", "exactly `opus` (DEC-0028)", "15 lines."):
             self.assertIn(word, section)
         row = [l for l in readme.splitlines() if l.startswith("| `gate_dispatch.py` |")]
         self.assertEqual(1, len(row))
@@ -572,9 +572,22 @@ class ConfigCheck(unittest.TestCase):
         self.assertIn("FAIL dispatch.input", out)
 
     # -- DEC-0018: the fable_fallback key (B5-FIX-2)
+    def test_readme_and_docstring_state_dec_0028_and_dec_0024(self):    # B5-FIX-8, B5-FIX-10 (stale text, A4)
+        with open(os.path.join(rf.REAL, "tools/gates/README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        row = next(l for l in readme.splitlines() if l.startswith("| `gate_dispatch.py` |"))
+        for text in (row, readme, gate_dispatch.check_config.__doc__):
+            with self.subTest(text=text[:40]):
+                self.assertNotIn("at least opus", text)
+                self.assertNotIn("below fable)", text)
+        self.assertIn("exactly `opus`, DEC-0028", row)
+        self.assertIn("is exactly opus (DEC-0028)", gate_dispatch.check_config.__doc__)
+        self.assertNotIn("fable_fallback: absent", readme)
+        self.assertIn("the PASS line is the bare `PASS dispatch.config.fable_fallback`\n(DEC-0024)", readme)
+
     def test_config_check_passes_the_repo_fallback(self):
-        """The real config passes in whichever state the owner's switch is in (R1-1): set, its PASS line names
-        the value; absent, the off line."""
+        """The real config passes in whichever state the owner's switch is in (R1-1): set or absent, its PASS
+        line is the bare id (DEC-0024)."""
         rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(0, rc, out)
         self.assertIn("\nPASS dispatch.config.fable_fallback\n", "\n" + out + "\n")    # DEC-0024: no reason

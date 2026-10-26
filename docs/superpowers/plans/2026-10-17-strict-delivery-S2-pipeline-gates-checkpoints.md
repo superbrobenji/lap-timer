@@ -799,7 +799,7 @@ class GateDispatch(unittest.TestCase):
             readme = f.read()
         section = readme[readme.index("## gate_dispatch (S2)\n"):readme.index("\n## make_review_package")]
         for word in ("`fable_fallback`", "PASS dispatch.model.fallback", "FAIL dispatch.config.fable_fallback",
-                     "DEC-0018", "ranked at", "15 lines."):
+                     "DEC-0018", "exactly `opus` (DEC-0028)", "15 lines."):
             self.assertIn(word, section)
         row = [l for l in readme.splitlines() if l.startswith("| `gate_dispatch.py` |")]
         self.assertEqual(1, len(row))
@@ -935,9 +935,22 @@ class ConfigCheck(unittest.TestCase):
         self.assertIn("FAIL dispatch.input", out)
 
     # -- DEC-0018: the fable_fallback key (B5-FIX-2)
+    def test_readme_and_docstring_state_dec_0028_and_dec_0024(self):    # B5-FIX-8, B5-FIX-10 (stale text, A4)
+        with open(os.path.join(rf.REAL, "tools/gates/README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        row = next(l for l in readme.splitlines() if l.startswith("| `gate_dispatch.py` |"))
+        for text in (row, readme, gate_dispatch.check_config.__doc__):
+            with self.subTest(text=text[:40]):
+                self.assertNotIn("at least opus", text)
+                self.assertNotIn("below fable)", text)
+        self.assertIn("exactly `opus`, DEC-0028", row)
+        self.assertIn("is exactly opus (DEC-0028)", gate_dispatch.check_config.__doc__)
+        self.assertNotIn("fable_fallback: absent", readme)
+        self.assertIn("the PASS line is the bare `PASS dispatch.config.fable_fallback`\n(DEC-0024)", readme)
+
     def test_config_check_passes_the_repo_fallback(self):
-        """The real config passes in whichever state the owner's switch is in (R1-1): set, its PASS line names
-        the value; absent, the off line."""
+        """The real config passes in whichever state the owner's switch is in (R1-1): set or absent, its PASS
+        line is the bare id (DEC-0024)."""
         rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(0, rc, out)
         self.assertIn("\nPASS dispatch.config.fable_fallback\n", "\n" + out + "\n")    # DEC-0024: no reason
@@ -1350,7 +1363,7 @@ def check_prompt(root, conf, text, tool_model, prompts_dir, res, subagent_type=N
 def check_config(conf: dict, res: Result) -> None:
     """CI mode: the model map, fable_roles, model_rank, the prompt cap and the optional fable_fallback agree with
     the dispatch grammar (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders
-    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, ranks at least opus and below fable)."""
+    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, is exactly opus (DEC-0028))."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -1425,7 +1438,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
-Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75, the b5 fix wave S2-b5-finalfix3 to 76). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75, the b5 fix wave S2-b5-finalfix3 to 76, its fix round 1 to 77). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
 
 - [ ] **Step 6: Commit**
 
@@ -1926,9 +1939,22 @@ class ConfigCheck(unittest.TestCase):
         self.assertIn("FAIL dispatch.input", out)
 
     # -- DEC-0018: the fable_fallback key (B5-FIX-2)
+    def test_readme_and_docstring_state_dec_0028_and_dec_0024(self):    # B5-FIX-8, B5-FIX-10 (stale text, A4)
+        with open(os.path.join(rf.REAL, "tools/gates/README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        row = next(l for l in readme.splitlines() if l.startswith("| `gate_dispatch.py` |"))
+        for text in (row, readme, gate_dispatch.check_config.__doc__):
+            with self.subTest(text=text[:40]):
+                self.assertNotIn("at least opus", text)
+                self.assertNotIn("below fable)", text)
+        self.assertIn("exactly `opus`, DEC-0028", row)
+        self.assertIn("is exactly opus (DEC-0028)", gate_dispatch.check_config.__doc__)
+        self.assertNotIn("fable_fallback: absent", readme)
+        self.assertIn("the PASS line is the bare `PASS dispatch.config.fable_fallback`\n(DEC-0024)", readme)
+
     def test_config_check_passes_the_repo_fallback(self):
-        """The real config passes in whichever state the owner's switch is in (R1-1): set, its PASS line names
-        the value; absent, the off line."""
+        """The real config passes in whichever state the owner's switch is in (R1-1): set or absent, its PASS
+        line is the bare id (DEC-0024)."""
         rc, out = gate(rf.REAL, ["--config-check"])
         self.assertEqual(0, rc, out)
         self.assertIn("\nPASS dispatch.config.fable_fallback\n", "\n" + out + "\n")    # DEC-0024: no reason
@@ -2074,7 +2100,7 @@ Expected: FAIL — `--config-check` is an unknown argument (`FAIL dispatch.input
 def check_config(conf: dict, res: Result) -> None:
     """CI mode: the model map, fable_roles, model_rank, the prompt cap and the optional fable_fallback agree with
     the dispatch grammar (DEC-0012: fable_roles equals the fable-minimum roles; model_rank orders
-    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, ranks at least opus and below fable)."""
+    haiku < sonnet < opus < fable; DEC-0018: fable_fallback, when present, is exactly opus (DEC-0028))."""
     models, rank, fable = conf["models"], conf["model_rank"], set(conf["fable_roles"])
     for role in ROLES:
         need = models.get(role)
@@ -2165,7 +2191,7 @@ S1's three gates are not in `DEFAULT_ARGV`, so their argv is unchanged. Also rew
 
 - [ ] **Step 6: README** — in `tools/gates/README.md` add this row below the `gate_decisions.py` row of the "Installed gates" table:
 ```markdown
-| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable), the prompt cap and the optional `fable_fallback` (DEC-0018: absent = off, else a model ranked at least opus and below fable) agree with the dispatch grammar; `--prompt`: one dispatch prompt, where a `fable_roles` role on the `fable_fallback` model is `PASS dispatch.model.fallback` (see the gate_dispatch section) |
+| `gate_dispatch.py` | `--config-check` (run_all's default): the model map, `fable_roles` (equal to the fable-minimum roles), `model_rank` (haiku < sonnet < opus < fable), the prompt cap and the optional `fable_fallback` (DEC-0018: absent = off, else exactly `opus`, DEC-0028) agree with the dispatch grammar; `--prompt`: one dispatch prompt, where a `fable_roles` role on the `fable_fallback` model is `PASS dispatch.model.fallback` (see the gate_dispatch section) |
 ```
 and append:
 ```markdown
@@ -2191,8 +2217,9 @@ DEC-0012 (require-equal), that `fable_roles` equals the set of roles whose minim
 (`FAIL dispatch.config.fable_roles` names both sets) and that `model_rank` orders haiku < sonnet < opus < fable
 strictly with integer ranks (`dispatch.config.model_rank`), and, under DEC-0018 (the owner's opus fallback for
 the Fable roles while Fable is unavailable), the optional `fable_fallback` key of `tools/gates/config.yml`: absent
-means off (`PASS dispatch.config.fable_fallback: absent: ...`); present, it must be a `model_rank` model ranked at
-least opus and strictly below fable, else `FAIL dispatch.config.fable_fallback`; the session sets and clears it
+means off; present, it must be exactly `opus` (DEC-0028), with opus ranked strictly below fable, else
+`FAIL dispatch.config.fable_fallback`; either way the PASS line is the bare `PASS dispatch.config.fable_fallback`
+(DEC-0024); the session sets and clears it
 only on the owner's word: 15 lines.
 ```
 
@@ -3509,7 +3536,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tools.gates import gate_review_package as grp
+from tools.gates import gate_plan, gate_review_package as grp
 from tools.gates import make_review_package as mrp
 from tools.gates.tests import repo_fixture as rf
 
@@ -3707,7 +3734,8 @@ class MakeReviewPackage(unittest.TestCase):
         rf.write(self.root, "src/fx.py", "fixed = 2\n")
         head = rf.commit(self.root, "feat: second fix")
         for how, rel in (("info/exclude", "tools/gates/lib/planted.py"), ("info/exclude", "docs/superpowers/state/x.yml"),
-                         (".gitignore", "tools/gates/gate_planted.py"), (".gitignore", "tools/gates/__pycache__/notes.txt"), (".gitignore", "tools/gates/lib/stray.pyc"),
+                         (".gitignore", "tools/gates/gate_planted.py"), (".gitignore", "tools/gates/x__pycache__/y.pyc"), (".gitignore", "tools/gates/lib/__pycache__"),
+                         (".gitignore", "tools/gates/.superpowers/sdd/x/a.md"), (".gitignore", "tools/gates/lib/stray.pyc"),
                          (".gitignore", "docs/superpowers/plans/fx.md")):    # the plan last: it stays untracked
             with self.subTest(how=how, rel=rel):
                 ignore = os.path.join(self.root, ".git/info/exclude" if how == "info/exclude" else ".gitignore")
@@ -3734,6 +3762,8 @@ class MakeReviewPackage(unittest.TestCase):
         rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan:\n")    # names no plan: no extra path
         rf.write(self.root, "tools/gates/__pycache__/gate_x.cpython-39.pyc", "pyc\n")
         rf.write(self.root, "tools/gates/lib/__pycache__/__init__.cpython-312.pyc", "pyc\n")
+        rf.write(self.root, "tools/gates/__pycache__/notes.txt", "any file\n")    # DEC-0033: every file under a
+        rf.write(self.root, "tools/gates/__pycache__/sub/x.pyc", "pyc\n")       # __pycache__ component is exempt
         with open(os.path.join(self.root, ".gitignore"), "a", encoding="utf-8") as f:
             f.write("__pycache__/\n")
         rf.commit(self.root, "ignore pycache")
@@ -3741,6 +3771,58 @@ class MakeReviewPackage(unittest.TestCase):
         rc, out = self.make("fx", "1", self.base, head, "--only", "register")
         self.assertEqual(0, rc, out)
         self.assertIn("gates PASS", out)
+
+    def ignored_plan(self, line1, plan):
+        """Commit a ledger whose line 1 is <line1> (bytes); plant <plan> untracked and excluded; run the helper."""
+        path = os.path.join(self.root, "docs/superpowers/state/fx/ledger.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(line1 + b"\n# Ledger: fx\n")
+        head = rf.commit(self.root, "ledger")
+        rf.write(self.root, plan, "# plan\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write(f"/{plan}\n")
+        self.assertTrue(rf.git(self.root, "check-ignore", plan))
+        return self.make("fx", "1", self.base, head, "--only", "register")
+
+    def test_the_plan_named_by_line_1_is_read_as_gate_plan_reads_it(self):    # B5-FIX-16 (R-A2-2)
+        for sep in ("\x0c", "\x0b", "\x1c", "\x85", "\u2028"):
+            with self.subTest(sep=ascii(sep)):
+                line1 = f"plan: docs/superpowers/plans/fx.md{sep}note".encode("utf-8")
+                self.assertEqual("docs/superpowers/plans/fx.md",
+                                 gate_plan.LEDGER_PLAN.match(line1.decode("utf-8").splitlines()[0]).group(1))
+                rc, out = self.ignored_plan(line1, "docs/superpowers/plans/fx.md")
+                self.assertEqual(1, rc, out)
+                self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
+                os.remove(os.path.join(self.root, "docs/superpowers/plans/fx.md"))
+
+    def test_a_non_utf8_line_1_still_writes_the_package(self):    # B5-FIX-16 (R-A2-4 strict-utf8)
+        rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/fx\xff.md", "docs/superpowers/plans/other.md")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
+
+    def test_an_empty_ledger_still_writes_the_package(self):    # B5-FIX-16 (no line 1: no plan path)
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "")
+        head = rf.commit(self.root, "empty ledger")
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
+
+    def test_pathspec_magic_in_the_plan_path_is_literal(self):    # B5-FIX-16 (R-A2-3)
+        rf.write(self.root, "tools/gates/lib/planted.py", "planted = True\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write("/tools/gates/lib/planted.py\n")
+        rc, out = self.ignored_plan(b"plan: :(exclude)tools/gates", "docs/superpowers/plans/none.md")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: tools/gates/lib/planted.py", out)
+
+    def test_a_plan_in_the_packages_dir_is_excepted(self):    # B5-FIX-16 (DEC-0029 "packages dir excepted")
+        rc, out = self.ignored_plan(b"plan: .superpowers/sdd/fx/plan.md", ".superpowers/sdd/fx/plan.md")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
+        rc, out = self.ignored_plan(b"plan: .superpowers/sddx/plan.md", ".superpowers/sddx/plan.md")    # not the dir
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: .superpowers/sddx/plan.md", out)
 
     def test_color_config_does_not_reach_the_package(self):
         rf.git(self.root, "config", "color.ui", "always")
@@ -4027,18 +4109,22 @@ def _write(path: str, data) -> None:
 
 def _ignored(root: str, plan: str) -> list[str]:
     """B5-FIX-16 (DEC-0029): git-ignored or excluded untracked files under the paths the gates read
-    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see; a
-    __pycache__ dir's .pyc files are exempt (DEC-0033); the packages dir lies under none of those paths."""
+    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see. Exempt:
+    the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
+    directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
+    ':(exclude)tools/gates' drops nothing)."""
     paths = ["tools/gates", STATE]
     ledger = os.path.join(root, STATE, plan, "ledger.md")
     if os.path.isfile(ledger):
-        with open(ledger, encoding="utf-8", errors="replace") as f:
-            m = LEDGER_PLAN.match(f.readline())    # as gate_plan reads line 1
+        with open(ledger, "rb") as f:
+            text = f.read().decode("utf-8", "replace")
+        m = LEDGER_PLAN.match(text.splitlines()[0] if text else "")    # line 1 as gate_plan reads it (R-A2-2)
         if m:
             paths.append(m.group(1))
-    out = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *paths)
+    out = _git(root, "--literal-pathspecs", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
+               *paths)
     return [p for p in out.decode("utf-8", "replace").split("\0")
-            if p and not (p.endswith(".pyc") and p.split("/")[-2:-1] == ["__pycache__"])]
+            if p and not p.startswith(SDD + "/") and "__pycache__" not in p.split("/")[:-1]]
 
 
 def _package(root: str, a) -> tuple[str, int]:
@@ -4113,7 +4199,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (30 tests; 33 after the b5 final-review fix wave B5-FIX-4; 38 after the b5 fix wave S2-b5-finalfix3); `python3 tools/gates/run_all.py` → only `PASS`.
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (30 tests; 33 after the b5 final-review fix wave B5-FIX-4; 38 after the b5 fix wave S2-b5-finalfix3; 43 after its fix round 1); `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
@@ -4290,6 +4376,7 @@ import contextlib
 import copy
 import io
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -5014,6 +5101,18 @@ class Branches(unittest.TestCase):
             self.assertIn(word, task6)
         self.assertNotIn("title contains `pin`", task6)
 
+    def test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last(self):    # B5-FIX-11 (DEC-0025)
+        """Task 6 Step 5 credits plan-last to DEC-0025 (no session ruling); Task 7 Step 5's GATES list ends in plan."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
+                  encoding="utf-8") as f:
+            steps = [l for l in f.read().splitlines() if l.startswith("- [ ] **Step 5: Register in run_all** ")]
+        self.assertEqual(2, len(steps), steps)
+        gates = [re.search(r"`GATES = \[([^\]]*)\]`", l).group(1).replace('"', "").split(", ") for l in steps]
+        self.assertEqual(["register", "claims", "decisions", "dispatch", "review_package", "plan"], gates[0])
+        self.assertIn("(DEC-0025: `plan` last;", steps[0])
+        self.assertNotIn("session ruling", steps[0])
+        self.assertEqual(["register", "claims", "decisions", "dispatch", "review_package", "checkpoint", "plan"], gates[1])
+
     def test_s2_plan_global_constraints_state_the_pin_word(self):
         """R1-2: the S2 plan's Global Constraints grammar line states the same pin rule as Task 6 and pin_title."""
         with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
@@ -5092,8 +5191,15 @@ class FixWave3(unittest.TestCase):
         out = self.ok(self.variant("- Create: `src/beta.py`", "- Create: `src/alph`"))
         self.assertIn("PASS plan.overlap.1-2", out)
 
+    def test_a_task_1_directory_holding_a_task_2_file_overlaps(self):    # B5-FIX-14 (R-A3-2: the dir on either side)
+        for path in ("src", "SRC/", "src\\"):
+            with self.subTest(path):
+                self.fail_line(self.variant("- Create: `src/alpha.py`", f"- Create: `{path}`"), "plan.overlap.1-2",
+                               "~ src/beta.py")
+
     def test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour(self):    # B5-FIX-15
-        for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b"):
+        for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b",
+                      "\u017fpin", "pin\u017f", "P\u017fN"):    # U+017F folds to 's': never 'pin', and a letter neighbour
             with self.subTest(title=ascii(title)):
                 self.fail_line(self.variant("**Step 1: Pin**", f"**Step 1: {title}**"), "plan.pin.2")
         self.ok(self.variant("**Step 1: Pin**", "**Step 1: PIN it**"))
@@ -5306,6 +5412,30 @@ class LedgerCopies(unittest.TestCase):
                 if work_too:
                     os.chmod(os.path.join(root, self.REL), 0o755)
                 self.assertInFlight(root)
+
+    def test_ledger_mode_change_staged_under_a_glob_character_name_is_in_flight(self):    # B5-FIX-5 (R-A3-1)
+        """A state-dir name holding '?', '*' or '[' is a literal path to git, never a glob that reads ledger 0's mode."""
+        for name in ("?", "*", "[0]"):
+            with self.subTest(name=name):
+                root = self.repo(self.CLOSED)
+                for n in ("0", name):
+                    rf.write(root, f"docs/superpowers/state/{n}/ledger.md", self.CLOSED)
+                rf.commit(root, "two closed ledgers")
+                self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+                rf.git(root, "update-index", "--chmod=+x", f"docs/superpowers/state/{name}/ledger.md")
+                rc, out = gate(root, ["--in-flight"])
+                self.assertIn(f"plan.{name}.header.goal", out)
+                self.assertNotIn("plan.0.", out)
+                self.assertNotIn("plan.in_flight", out)
+
+    def test_a_group_or_other_exec_bit_alone_leaves_the_ledger_closed(self):    # B5-FIX-5 (R-A3-3: git's owner-x rule)
+        for mode in (0o645, 0o654):
+            with self.subTest(mode=oct(mode)):
+                root = self.repo(self.CLOSED)
+                os.chmod(os.path.join(root, self.REL), mode)
+                self.assertEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True,
+                                                     check=True).stdout)
+                self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
 
     def test_ledger_mode_change_in_the_work_tree_only_is_in_flight(self):    # B5-FIX-5 DEC-0034
         root = self.repo(self.CLOSED)
@@ -5936,12 +6066,18 @@ def _raw(path: str) -> bytes | None:
 
 
 def _git_mode(root: str, cmd: list, rel: str) -> str | None:
-    """Mode (first field) of the first entry `git ls-files -s` / `git ls-tree HEAD` lists for <rel>; None
-    when the listing fails or is empty. An unmerged or directory entry has no `git show` copy either, so
-    the byte comparison already holds that ledger in flight."""
-    r = subprocess.run(["git", *cmd, "--", rel], cwd=root, capture_output=True, check=False)
-    fields = r.stdout.decode("utf-8", "surrogateescape").split()
-    return fields[0] if fields else None
+    """Mode (first field) of the entry `git ls-files -s` / `git ls-tree HEAD` lists for exactly <rel>; None
+    when the listing fails or holds no such entry. The pathspec is literal and only the entry whose path is
+    <rel> counts (R-A3-1: a state-dir name holding '?', '*' or '[' never reads another ledger's mode). An
+    unmerged or directory entry has no `git show` copy either, so the byte comparison already holds that
+    ledger in flight."""
+    r = subprocess.run(["git", "--literal-pathspecs", *cmd, "-z", "--", rel], cwd=root, capture_output=True,
+                       check=False)
+    for entry in r.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        meta, _, path = entry.partition("\t")
+        if path == rel:
+            return meta.split()[0]
+    return None
 
 
 def _work_mode(root: str, rel: str) -> str:
@@ -6062,8 +6198,9 @@ Expected: the `plan:` line.
 `diff.patch` and `gates.txt` (`run_all` at HEAD minus `review_package` and `merge_ready`) into the git-ignored
 `.superpowers/sdd/<plan>/review/<task>/`, in the forms `gate_review_package` reads whatever the caller's git
 config says; it refuses a dirty tree, and an ignored or excluded untracked file under `tools/gates`,
-`docs/superpowers/state` or the plan the ledger names (B5-FIX-16, DEC-0029; `__pycache__` `.pyc` files are exempt,
-DEC-0033), because `gates.txt` must describe HEAD. The implementer adds
+`docs/superpowers/state` or the plan the ledger's line 1 names, read as `gate_plan` reads it, with literal
+pathspecs (B5-FIX-16, DEC-0029; exempt: the packages dir `.superpowers/sdd/` and every file under a `__pycache__`
+directory, DEC-0033), because `gates.txt` must describe HEAD. The implementer adds
 `mutation-<id>.txt`, `siblings.md` and `claims.md`; `gate_review_package.py --dir <that directory>` must pass
 before a reviewer is dispatched.
 
@@ -6106,7 +6243,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 
