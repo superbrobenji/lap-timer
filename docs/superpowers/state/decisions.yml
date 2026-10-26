@@ -340,3 +340,58 @@
   asked_at: {sha: "54787fe", by: session}
   answer: "add-clause (owner in chat, 2026-10-26: \"recommended for all\"; the session had recommended add-clause)"
   answered_at: {sha: "54787fe", by: superbrobenji}
+- id: DEC-0037
+  class: scope
+  question: "b5 round 9 DQ-1 (B5-FIX-26): 'the test trees' a sibling test name resolves against is undefined; the implementation reads tools/gates/tests, tools/lint, tools/tracks, tools; a bare name resolves anywhere; Unity C test functions never resolve."
+  options:
+    - {label: tracked-tests, cost: "a name resolves against every tracked test_*.py file plus Unity C test functions (void test_<name>(void)) in tracked test sources; tests"}
+    - {label: four-trees, cost: "keep the four trees as implemented"}
+    - {label: require-module, cost: "either reading, plus the sibling must name its module or file"}
+  asked_at: {sha: "d3ed28d", by: session}
+  answer: "tracked-tests (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended tracked-tests)"
+  answered_at: {sha: "d3ed28d", by: superbrobenji}
+- id: DEC-0038
+  class: scope
+  question: "b5 round 9 DQ-2 (B5-FIX-22): in claims.md a FAIL line followed by a separator line, or a row with no leading pipe, still gives rc 0."
+  options:
+    - {label: any-fail-line, cost: "any line in claims.md whose result cell or trailing field is FAIL fails review_package.claims, whatever its table position; tests"}
+    - {label: markdown-tables, cost: "keep Markdown table semantics and document them"}
+  asked_at: {sha: "d3ed28d", by: session}
+  answer: "any-fail-line (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended any-fail-line)"
+  answered_at: {sha: "d3ed28d", by: superbrobenji}
+- id: DEC-0039
+  class: finding-class
+  question: "b5 round 9 Q3 (R-A2-1, B5-FIX-16 class): make_review_package's ignored-file check covers only the package's own plan, not other in-flight plans the gates read."
+  options:
+    - {label: widen-all-plans, cost: "B5-FIX-16's class widens from 'the plan' to every plan the gates read"}
+    - {label: new-row, cost: "register a new row"}
+  asked_at: {sha: "d3ed28d", by: session}
+  answer: "widen-all-plans (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended widen-all-plans)"
+  answered_at: {sha: "d3ed28d", by: superbrobenji}
+- id: DEC-0040
+  class: finding-class
+  question: "b5 round 9 U-A4-2: gate_review_package.py:36 GATE_LINE accepts 'PASS c: note' and test :189 asserts it, against DEC-0024 (every PASS line is 'PASS id')."
+  options:
+    - {label: widen-fix10, cost: "B5-FIX-10's class widens to the review-package GATE_LINE and its test; B5-FIX-10 pins only after that fix"}
+    - {label: new-row, cost: "register a new row"}
+  asked_at: {sha: "d3ed28d", by: session}
+  answer: "widen-fix10 (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended widen-fix10)"
+  answered_at: {sha: "d3ed28d", by: superbrobenji}
+- id: DEC-0041
+  class: scope
+  question: "b5 round 9 D-A3-1 (B5-FIX-5): with core.fileMode=false plans_in_flight holds in flight a ledger git sees as clean (fails closed)."
+  options:
+    - {label: honour-filemode, cost: "the mode comparison honours core.fileMode as git does; tests for both settings"}
+    - {label: document, cost: "accept and document the fail-closed behaviour"}
+  asked_at: {sha: "d3ed28d", by: session}
+  answer: "honour-filemode (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended honour-filemode)"
+  answered_at: {sha: "d3ed28d", by: superbrobenji}
+- id: DEC-0042
+  class: finding-class
+  question: "b5 round 9 D-A3-3 (B5-FIX-24): the sibling 'missing state dir reached through main()' cannot be reached because load_findings fails first; its test calls plans_in_flight() directly."
+  options:
+    - {label: narrow-sibling, cost: "the sibling text narrows to the plans_in_flight() call; the direct test stays"}
+    - {label: main-level, cost: "keep the sibling and require a main()-level test of the earlier FAIL"}
+  asked_at: {sha: "d3ed28d", by: session}
+  answer: "narrow-sibling (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended narrow-sibling)"
+  answered_at: {sha: "d3ed28d", by: superbrobenji}
