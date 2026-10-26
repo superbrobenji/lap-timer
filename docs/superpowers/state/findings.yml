@@ -1501,3 +1501,51 @@
   - state: planned
     sha: 5c81eea
     by: controller
+- id: B5-U4
+  source: review
+  severity: LOW
+  class: gate_dispatch accepts a model_rank key that names no known model, so a config
+    with an extra model ranked at or above a role's minimum passes every role (--config-check
+    checks only the RANK_ORDER keys; from b4, not caused by b5)
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: '333'
+    sha: 79f0d16
+  repro: 'add gpt: 9 under model_rank; --config-check prints only PASS; a prompt with
+    ## Model: gpt passes dispatch.model.rank'
+  owner:
+    kind: issue
+    number: 148
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 79f0d16
+    by: session
+- id: B5-U5
+  source: review
+  severity: LOW
+  class: gate_dispatch --config-check calls rank.get without checking that model_rank
+    is a mapping, so a list, string or null model_rank surfaces as FAIL dispatch.input
+    instead of a named dispatch.config.model_rank FAIL (from b4, not caused by b5)
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: '333'
+    sha: 79f0d16
+  repro: 'set model_rank: [1, 2]; --config-check prints only FAIL dispatch.input: ''list''
+    object has no attribute ''get'''
+  owner:
+    kind: issue
+    number: 149
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 79f0d16
+    by: session

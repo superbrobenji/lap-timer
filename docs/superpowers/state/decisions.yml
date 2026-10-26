@@ -395,3 +395,77 @@
   asked_at: {sha: "d3ed28d", by: session}
   answer: "narrow-sibling (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended narrow-sibling)"
   answered_at: {sha: "d3ed28d", by: superbrobenji}
+- id: DEC-0043
+  class: scope
+  question: "b5 round 10 Q1: a strict GATE_LINE (DEC-0040) fails --all on the reviewed packages S2-b5-fixwave, S2-b5-finalfix and S2-b5-finalfix2, whose gates.txt hold 'PASS <id>: <reason>' lines; finalfix2 holds B5-FIX-5's evidence."
+  options:
+    - {label: legacy-accepted, cost: "strict GATE_LINE for new packages; the reason form is accepted only in packages whose gates.txt predates DEC-0024 (named or detected by the commit their range ends at); about 10 lines and 2 tests; 'PASS c:' (id ending in ':') also FAILs"}
+    - {label: remake, cost: "re-make or rewrite the three packages; their gates.txt no longer describes its own HEAD"}
+    - {label: archive, cost: "archive the reviewed packages; the owner names where B5-FIX-5's evidence lives"}
+    - {label: narrow, cost: "narrow DEC-0040 to test :189"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "legacy-accepted (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended legacy-accepted)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0044
+  class: scope
+  question: "b5 round 10 Q2 (B5-FIX-16): does the DEC-0033 __pycache__ exemption cover a plan path under a __pycache__ dir (mutant E)?"
+  options:
+    - {label: gates-and-state-only, cost: "the exemption applies only under tools/gates and the state dir; a plan or spec path under __pycache__ is reported"}
+    - {label: literal, cost: "any __pycache__ dir is exempt"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "gates-and-state-only (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended gates-and-state-only)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0045
+  class: finding-class
+  question: "b5 round 10 Q3: NFC and NFD spellings of one APFS file pass plan.overlap (also at 5b900bd)."
+  options:
+    - {label: widen-fix14, cost: "B5-FIX-14 gains a Unicode-normalisation sibling"}
+    - {label: new-row, cost: "register a new row"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "widen-fix14 (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended widen-fix14)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0046
+  class: scope
+  question: "b5 round 10 Q4 (DEC-0037): should 'static void test_x(void)' count as a Unity test function (611 of 727 in the tree)?"
+  options:
+    - {label: static-counts, cost: "yes: a Unity test is 'void test_<name>(void)' with an optional leading 'static'"}
+    - {label: exact, cost: "only the exact 'void test_<name>(void)' form"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "static-counts (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended static-counts)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0047
+  class: finding-class
+  question: "b5 round 10 Q5 (D-A5-1): lib render still prints a reason on a PASS line, run_all passes it through, and the S3 plan text (:2214, :2425) relies on that."
+  options:
+    - {label: new-row-s3, cost: "register a new row owned by S3 (plan strict-delivery, S3 pre-flight); B5-FIX-10 stays as classed"}
+    - {label: widen-fix10, cost: "widen B5-FIX-10 to cover the S3 text in this block"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "new-row-s3 (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended new-row-s3)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0048
+  class: finding-class
+  question: "b5 round 10 Q6 (B5-FIX-16): the spec file gate_plan.py:434 reads is not checked for ignored files."
+  options:
+    - {label: widen-fix16, cost: "B5-FIX-16 gains the spec file as a sibling"}
+    - {label: new-row, cost: "register a new row"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "widen-fix16 (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended widen-fix16)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0049
+  class: scope
+  question: "b5 round 10 Q7 (DEC-0041): with core.symlinks=false a ledger git shows as clean is held in flight (fails closed)."
+  options:
+    - {label: honour-symlinks, cost: "the type comparison honours core.symlinks as git does; tests for both settings"}
+    - {label: document, cost: "accept and document"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "honour-symlinks (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended honour-symlinks)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0050
+  class: scope
+  question: "b5 round 10 Q8: fix 2's mutant N (non-UTF-8 file name) can be killed only on Linux; APFS refuses the name and the test skips on macOS."
+  options:
+    - {label: ci-kill, cost: "accept the CI (Linux) kill: the transcript records the macOS skip and names the CI job that runs the test"}
+    - {label: linux-before-pin, cost: "require a Linux-run transcript before B5-FIX-16 pins"}
+  asked_at: {sha: "79f0d16", by: session}
+  answer: "ci-kill (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended ci-kill)"
+  answered_at: {sha: "79f0d16", by: superbrobenji}
