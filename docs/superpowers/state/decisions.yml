@@ -302,3 +302,41 @@
   asked_at: {sha: "c0316eb", by: session}
   answer: "script-guard (owner in chat, 2026-10-24: \"recommended for all\"; the session had recommended script-guard)"
   answered_at: {sha: "c0316eb", by: superbrobenji}
+- id: DEC-0033
+  class: scope
+  question: "b5 round 8, B5-FIX-16 (DEC-0029 check-excluded): tools/gates/__pycache__ holds git-ignored .pyc files, so a literal ignored/excluded check refuses every package."
+  options:
+    - {label: exempt-pycache, cost: "__pycache__ directories (and their .pyc files) are exempt like the packages dir; one more exception, tested"}
+    - {label: author-cleans, cost: "no exemption; the author deletes __pycache__ before every package run"}
+    - {label: non-pyc-only, cost: "only non-.pyc ignored files are reported; a planted .pyc passes"}
+  asked_at: {sha: "54787fe", by: session}
+  answer: "exempt-pycache (owner in chat, 2026-10-26: \"recommended for all\"; the session had recommended exempt-pycache)"
+  answered_at: {sha: "54787fe", by: superbrobenji}
+- id: DEC-0034
+  class: finding-class
+  question: "b5 round 8 (b5r8-review1 R1-1, A3 verifier): plans_in_flight reads a ledger as closed when an uncommitted change keeps its bytes: a work-tree symlink, a mode change (staged or work tree), a state dir replaced by a symlink."
+  options:
+    - {label: widen-fix5, cost: "B5-FIX-5's class widens to compare file mode and type as well as bytes across HEAD, index and working tree; one branch and tests"}
+    - {label: new-row, cost: "register a new row for the family"}
+    - {label: accept-content, cost: "content-only equality accepted and documented in the README"}
+  asked_at: {sha: "54787fe", by: session}
+  answer: "widen-fix5 (owner in chat, 2026-10-26: \"recommended for all\"; the session had recommended widen-fix5)"
+  answered_at: {sha: "54787fe", by: superbrobenji}
+- id: DEC-0035
+  class: scope
+  question: "b5 round 8 A1-R2: gate_review_package checks a sibling's test name for syntax only; a name that no test defines passes."
+  options:
+    - {label: resolve-names, cost: "resolve `def <name>` under the test trees; a missing name FAILs; one helper and about 3 tests"}
+    - {label: syntax-only, cost: "syntax only, documented at README:25 and in the umbrella"}
+  asked_at: {sha: "54787fe", by: session}
+  answer: "resolve-names (owner in chat, 2026-10-26: \"recommended for all\"; the session had recommended resolve-names)"
+  answered_at: {sha: "54787fe", by: superbrobenji}
+- id: DEC-0036
+  class: spec-direction
+  question: "b5 round 8 A5-V6: the reviewer.md and verifier.md strict blocks carried a compact DEC-0032 sentence without the explicit pwd -P / toplevel check the other four blocks have."
+  options:
+    - {label: add-clause, cost: "both blocks name the pwd -P and git toplevel check inside the 4000-byte cap"}
+    - {label: accept, cost: "keep the compact sentence; the full guard stays in the briefs"}
+  asked_at: {sha: "54787fe", by: session}
+  answer: "add-clause (owner in chat, 2026-10-26: \"recommended for all\"; the session had recommended add-clause)"
+  answered_at: {sha: "54787fe", by: superbrobenji}
