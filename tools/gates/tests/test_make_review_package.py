@@ -338,22 +338,22 @@ class MakeReviewPackage(unittest.TestCase):
     def test_the_plan_named_by_line_1_is_read_as_gate_plan_reads_it(self):    # B5-FIX-16 (R-A2-2)
         for sep in ("\x0c", "\x0b", "\x1c", "\x85", "\u2028"):
             with self.subTest(sep=ascii(sep)):
-                line1 = f"plan: docs/superpowers/plans/fx.md{sep}note".encode("utf-8")
-                self.assertEqual("docs/superpowers/plans/fx.md",
+                line1 = f"plan: docs/superpowers/notes/fx.md{sep}note".encode("utf-8")
+                self.assertEqual("docs/superpowers/notes/fx.md",
                                  gate_plan.LEDGER_PLAN.match(line1.decode("utf-8").splitlines()[0]).group(1))
-                rc, out = self.ignored_plan(line1, "docs/superpowers/plans/fx.md")
+                rc, out = self.ignored_plan(line1, "docs/superpowers/notes/fx.md")
                 self.assertEqual(1, rc, out)
-                self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
-                os.remove(os.path.join(self.root, "docs/superpowers/plans/fx.md"))
+                self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/notes/fx.md", out)
+                os.remove(os.path.join(self.root, "docs/superpowers/notes/fx.md"))
 
     def test_a_plan_named_in_another_case_is_matched_where_the_fs_folds_case(self):    # B5-FIX-16 (R-A2r10-1)
         """gate_plan opens line 1's path through the filesystem: on a case-insensitive one, Docs/... is the
         ignored docs/... file, so the helper refuses it."""
         if not os.path.exists(os.path.join(self.root, ".GIT")):
             self.skipTest("case-sensitive filesystem: Docs/... is another file")
-        rc, out = self.ignored_plan(b"plan: Docs/Superpowers/plans/fx.md", "docs/superpowers/plans/fx.md")
+        rc, out = self.ignored_plan(b"plan: Docs/Superpowers/notes/fx.md", "docs/superpowers/notes/fx.md")
         self.assertEqual(1, rc, out)
-        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/notes/fx.md", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
 
     def test_an_ignored_file_with_a_non_utf8_name_is_refused(self):    # B5-FIX-16 (R-A2r10-3)

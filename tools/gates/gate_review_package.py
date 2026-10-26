@@ -20,6 +20,7 @@ import re
 import shlex
 import subprocess
 import sys
+import warnings
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -206,9 +207,12 @@ def test_modules(root: str) -> dict:
 
 def _py_defs(text: str) -> set:
     """R-A1-4: the function names a Python test file defines, parsed (a `def` inside a string is none); a file
-    that does not parse defines nothing (fails closed)."""
+    that does not parse defines nothing (fails closed). R-A1-5: a leading UTF-8 BOM is dropped, as Python drops
+    it; R-A1-6: the compiler's warnings are suppressed for this call, so -W error changes nothing."""
     try:
-        tree = ast.parse(text)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text[1:] if text.startswith("\ufeff") else text)
     except (SyntaxError, ValueError):
         return set()
     return {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}

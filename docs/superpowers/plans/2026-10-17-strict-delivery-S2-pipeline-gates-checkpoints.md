@@ -2375,6 +2375,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 from tools.gates import gate_review_package as grp
@@ -2834,6 +2835,30 @@ class GateReviewPackage(unittest.TestCase):
                 else:
                     self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
 
+    def test_python_defs_are_parsed_as_python_reads_the_file(self):    # B5-FIX-26 (R-A1-5, R-A1-6, R-A1-7)
+        """A file led by a UTF-8 BOM defines its functions (Python runs it); a file holding an invalid escape
+        resolves with no warning printed and under an error filter alike; a file with a NUL byte defines nothing
+        and the gate never raises; a class named test_x and a file whose first line is indented define nothing."""
+        head = "| sibling | test or finding |\n|---|---|\n"
+        self.track("t/test_bom.py", "\ufeffdef test_bom():\n    pass\n")
+        self.track("t/test_esc.py", 'import re\nP = re.compile("\\d+")\ndef test_esc():\n    pass\n')
+        self.track("t/test_nul.py", "def test_nul():\n    pass\n\x00\n")
+        self.track("t/test_cls.py", "class test_cls:\n    pass\n")
+        self.track("t/test_ind.py", "    def test_ind():\n        pass\n")
+        for cell, ok in (("test_bom::test_bom", True), ("test_esc::test_esc", True), ("test_nul::test_nul", False),
+                         ("test_cls::test_cls", False), ("test_ind::test_ind", False)):
+            for flt in ("always", "error"):
+                with self.subTest(cell=cell, filter=flt):
+                    self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter(flt)
+                        rc, out = self.check()
+                    self.assertEqual([], [str(w.message) for w in caught])
+                    if ok:
+                        self.assertEqual(0, rc, out)
+                    else:
+                        self.assertFailLine(rc, out, "review_package.siblings", f"defined in no test module named: {cell}")
+
     def test_a_root_git_cannot_list_resolves_no_test_name(self):    # B5-FIX-26 (R-A1-3 N18)
         """Where `git ls-files` fails (the root is no repository) no test name resolves: the siblings check
         FAILs, the gate never raises."""
@@ -3228,6 +3253,7 @@ import re
 import shlex
 import subprocess
 import sys
+import warnings
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
@@ -3414,9 +3440,12 @@ def test_modules(root: str) -> dict:
 
 def _py_defs(text: str) -> set:
     """R-A1-4: the function names a Python test file defines, parsed (a `def` inside a string is none); a file
-    that does not parse defines nothing (fails closed)."""
+    that does not parse defines nothing (fails closed). R-A1-5: a leading UTF-8 BOM is dropped, as Python drops
+    it; R-A1-6: the compiler's warnings are suppressed for this call, so -W error changes nothing."""
     try:
-        tree = ast.parse(text)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text[1:] if text.startswith("\ufeff") else text)
     except (SyntaxError, ValueError):
         return set()
     return {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -3657,7 +3686,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4; 69 after the b5 fix wave B5-FIX-6; 78 after the b5 fix wave S2-b5-finalfix3; 81 after its round 10; 84 after its round 10 fix 3; 87 after its round 11); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4; 69 after the b5 fix wave B5-FIX-6; 78 after the b5 fix wave S2-b5-finalfix3; 81 after its round 10; 84 after its round 10 fix 3; 87 after its round 11; 88 after its round 11 fix 1); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -4075,22 +4104,22 @@ class MakeReviewPackage(unittest.TestCase):
     def test_the_plan_named_by_line_1_is_read_as_gate_plan_reads_it(self):    # B5-FIX-16 (R-A2-2)
         for sep in ("\x0c", "\x0b", "\x1c", "\x85", "\u2028"):
             with self.subTest(sep=ascii(sep)):
-                line1 = f"plan: docs/superpowers/plans/fx.md{sep}note".encode("utf-8")
-                self.assertEqual("docs/superpowers/plans/fx.md",
+                line1 = f"plan: docs/superpowers/notes/fx.md{sep}note".encode("utf-8")
+                self.assertEqual("docs/superpowers/notes/fx.md",
                                  gate_plan.LEDGER_PLAN.match(line1.decode("utf-8").splitlines()[0]).group(1))
-                rc, out = self.ignored_plan(line1, "docs/superpowers/plans/fx.md")
+                rc, out = self.ignored_plan(line1, "docs/superpowers/notes/fx.md")
                 self.assertEqual(1, rc, out)
-                self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
-                os.remove(os.path.join(self.root, "docs/superpowers/plans/fx.md"))
+                self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/notes/fx.md", out)
+                os.remove(os.path.join(self.root, "docs/superpowers/notes/fx.md"))
 
     def test_a_plan_named_in_another_case_is_matched_where_the_fs_folds_case(self):    # B5-FIX-16 (R-A2r10-1)
         """gate_plan opens line 1's path through the filesystem: on a case-insensitive one, Docs/... is the
         ignored docs/... file, so the helper refuses it."""
         if not os.path.exists(os.path.join(self.root, ".GIT")):
             self.skipTest("case-sensitive filesystem: Docs/... is another file")
-        rc, out = self.ignored_plan(b"plan: Docs/Superpowers/plans/fx.md", "docs/superpowers/plans/fx.md")
+        rc, out = self.ignored_plan(b"plan: Docs/Superpowers/notes/fx.md", "docs/superpowers/notes/fx.md")
         self.assertEqual(1, rc, out)
-        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/notes/fx.md", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
 
     def test_an_ignored_file_with_a_non_utf8_name_is_refused(self):    # B5-FIX-16 (R-A2r10-3)
@@ -5862,6 +5891,25 @@ class LedgerCopies(unittest.TestCase):
                                                          capture_output=True, check=True).stdout)
                     self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
 
+    def test_core_filemode_repo_local_overrides_the_global_value(self):    # B5-FIX-5 DEC-0041 (R-A3r11-1)
+        """The repo-local core.fileMode wins over the global one, as git status reads it: global false + local
+        true holds an exec-bit-only work-tree change in flight; global true + local false reads it closed."""
+        for glob_value, local_value, in_flight in (("false", "true", True), ("true", "false", False)):
+            with self.subTest(glob=glob_value, local=local_value), tempfile.TemporaryDirectory() as tmp:
+                glob_cfg = os.path.join(tmp, "gitconfig")
+                rf.write(tmp, "gitconfig", f"[core]\n\tfileMode = {glob_value}\n")
+                with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": glob_cfg, "GIT_CONFIG_NOSYSTEM": "1"}):
+                    root = self.repo(self.CLOSED)
+                    rf.git(root, "config", "core.fileMode", local_value)
+                    os.chmod(os.path.join(root, self.REL), 0o755)
+                    status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True,
+                                            check=True).stdout
+                    self.assertEqual(in_flight, status != b"")
+                    if in_flight:
+                        self.assertInFlight(root)
+                    else:
+                        self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+
     def test_core_filemode_true_holds_the_work_tree_exec_bit_in_flight(self):    # B5-FIX-5 DEC-0041 honour-filemode
         """core.fileMode=true, or unset at every level (git's default is true; no global or system config is
         read): an exec-bit-only work-tree change is in flight."""
@@ -6762,7 +6810,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1; 134 and a suite of 638 after its round 10; 135 and a suite of 642 (one skipped on APFS) after its round 10 fix 2; 136 and a suite of 647 (one skipped on APFS) after its round 10 fix 3; 139 and a suite of 655 (one skipped on APFS) after its round 11); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1; 134 and a suite of 638 after its round 10; 135 and a suite of 642 (one skipped on APFS) after its round 10 fix 2; 136 and a suite of 647 (one skipped on APFS) after its round 10 fix 3; 139 and a suite of 655 (one skipped on APFS) after its round 11; 140 and a suite of 657 (one skipped on APFS) after its round 11 fix 1); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

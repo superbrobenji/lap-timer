@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 from tools.gates import gate_review_package as grp
@@ -467,6 +468,30 @@ class GateReviewPackage(unittest.TestCase):
                     self.assertEqual(0, rc, out)
                 else:
                     self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_python_defs_are_parsed_as_python_reads_the_file(self):    # B5-FIX-26 (R-A1-5, R-A1-6, R-A1-7)
+        """A file led by a UTF-8 BOM defines its functions (Python runs it); a file holding an invalid escape
+        resolves with no warning printed and under an error filter alike; a file with a NUL byte defines nothing
+        and the gate never raises; a class named test_x and a file whose first line is indented define nothing."""
+        head = "| sibling | test or finding |\n|---|---|\n"
+        self.track("t/test_bom.py", "\ufeffdef test_bom():\n    pass\n")
+        self.track("t/test_esc.py", 'import re\nP = re.compile("\\d+")\ndef test_esc():\n    pass\n')
+        self.track("t/test_nul.py", "def test_nul():\n    pass\n\x00\n")
+        self.track("t/test_cls.py", "class test_cls:\n    pass\n")
+        self.track("t/test_ind.py", "    def test_ind():\n        pass\n")
+        for cell, ok in (("test_bom::test_bom", True), ("test_esc::test_esc", True), ("test_nul::test_nul", False),
+                         ("test_cls::test_cls", False), ("test_ind::test_ind", False)):
+            for flt in ("always", "error"):
+                with self.subTest(cell=cell, filter=flt):
+                    self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                    with warnings.catch_warnings(record=True) as caught:
+                        warnings.simplefilter(flt)
+                        rc, out = self.check()
+                    self.assertEqual([], [str(w.message) for w in caught])
+                    if ok:
+                        self.assertEqual(0, rc, out)
+                    else:
+                        self.assertFailLine(rc, out, "review_package.siblings", f"defined in no test module named: {cell}")
 
     def test_a_root_git_cannot_list_resolves_no_test_name(self):    # B5-FIX-26 (R-A1-3 N18)
         """Where `git ls-files` fails (the root is no repository) no test name resolves: the siblings check
