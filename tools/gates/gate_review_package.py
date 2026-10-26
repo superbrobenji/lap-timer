@@ -35,12 +35,17 @@ STEP2 = re.compile(r"^step 2 \(fix reverted: (?P<how>.+?)\): (?P<cmd>.+) -> FAIL
 STEP3 = re.compile(r"^step 3 \(fix restored\): (?P<cmd>.+) -> PASS$")
 SEPARATOR = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
 COMMIT_LINE = re.compile(r"^[0-9a-f]{7,40}(?: .*)?$")    # B5-FIX-7: git allows an empty or space-led subject
-GATE_LINE = re.compile(r"^(PASS|FAIL) \S+")
+GATE_LINE = re.compile(r"^(?:PASS \S*[^\s:]|FAIL \S+.*)$")    # DEC-0024/0040: a PASS line is 'PASS <id>'
+LEGACY_GATE_LINE = re.compile(r"^PASS \S*[^\s:]: \S.*$")    # DEC-0043: 'PASS <id>: <reason>', legacy only
+# DEC-0043 legacy-accepted: packages whose gates.txt predates DEC-0024 (each range ends at or before c0316eb,
+# where DEC-0024 was answered) keep their 'PASS <id>: <reason>' lines; every other package is strict.
+LEGACY_PACKAGES = {("strict-delivery", "S2-b5-fixwave"), ("strict-delivery", "S2-b5-finalfix"),
+                   ("strict-delivery", "S2-b5-finalfix2")}
 DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mode|old mode|new mode"
                        r"|similarity index|rename |copy |Binary files )")
 TEST_NAME = re.compile(r"^(?:[\w.\-/]+::)*(?:\w+\.)*test_\w+$")
 TEST_FILE = re.compile(r"^test_\w*\.(py|c)$")    # DEC-0037: tracked test_*.py, and Unity test_*.c sources
-DEFINES = {"c": r"^[ \t]*void[ \t]+{name}[ \t]*\([ \t]*void[ \t]*\)"}
+DEFINES = {"c": r"^[ \t]*(?:static[ \t]+)?void[ \t]+{name}[ \t]*\([ \t]*void[ \t]*\)"}    # DEC-0046: optional static
 
 
 def _read(path: str) -> str:
@@ -168,7 +173,8 @@ def _gates(pkg, res, pfx):
     path = os.path.join(pkg, "gates.txt")
     if os.path.isfile(path):
         lines = _lines(_read(path))
-        bad = [l for l in lines if not GATE_LINE.match(l)]
+        legacy = (os.path.basename(os.path.dirname(os.path.dirname(pkg))), os.path.basename(pkg)) in LEGACY_PACKAGES
+        bad = [l for l in lines if not (GATE_LINE.match(l) or (legacy and LEGACY_GATE_LINE.match(l)))]
         red = [l for l in lines if l.startswith("FAIL ")]
         _verdict(res, f"{pfx}.gates", lines and not bad and not red,
                  f"gates.txt needs gate output ('PASS|FAIL <id>' lines, no FAIL): {len(lines)} line(s), "
@@ -211,7 +217,7 @@ def _py_defs(text: str) -> set:
 def defines_test(cell: str, modules: dict) -> bool:
     """B5-FIX-26 (DEC-0035, DEC-0037): the test a siblings.md cell names exists: a file its module (the part
     before the first '::', else the longest dotted prefix that is a module key) names defines it (a parsed `def <name>`
-    in Python, R-A1-4; `void <name>(void)` in Unity C); a bare `test_<x>` is defined in any tracked test file. A named
+    in Python, R-A1-4; `void <name>(void)`, optionally `static`, in Unity C, DEC-0046); a bare `test_<x>` is defined in any tracked test file. A named
     module that is no key resolves nothing."""
     parts = cell.split("::")
     name = parts[-1].split(".")[-1]

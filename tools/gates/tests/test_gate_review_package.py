@@ -191,9 +191,43 @@ class GateReviewPackage(unittest.TestCase):
                 self.assertFailLine(*self.check(), "review_package.gates", "gates.txt needs gate output")
 
     def test_gates_txt_blank_lines_and_crlf_pass(self):
-        self.put({"gates.txt": "PASS a.b\r\n\nPASS c: note\r\n"})
+        self.put({"gates.txt": "PASS a.b\r\n\nPASS c\r\n"})    # DEC-0040: no reason on a PASS line
         rc, out = self.check()
         self.assertEqual(0, rc, out)
+
+    def test_gates_txt_pass_line_with_a_reason_fails(self):    # B5-FIX-10 (DEC-0040, DEC-0043)
+        """A PASS line is 'PASS <id>' (DEC-0024): a reason after the id, or an id ending in ':', FAILs a
+        package that is not one of the three legacy packages; a FAIL line keeps its reason (it FAILs as red)."""
+        for text in ("PASS c: note\n", "PASS c:\n", "PASS a.b: x y\n", "PASS a.b note\n", "PASS c:\r\n"):
+            with self.subTest(text=text):
+                self.put({"gates.txt": "PASS register.schema\n" + text})
+                self.assertFailLine(*self.check(), "review_package.gates", f"first: {text.rstrip()!r}")
+        self.put({"gates.txt": "PASS register.schema\nFAIL x.y: a reason\n"})
+        self.assertFailLine(*self.check(), "review_package.gates", "0 not gate lines, 1 FAIL; first: 'FAIL x.y: a reason'")
+
+    def test_gates_txt_reason_form_passes_only_in_a_legacy_package(self):    # B5-FIX-10 (DEC-0043 legacy-accepted)
+        """The three packages whose gates.txt predates DEC-0024 keep 'PASS <id>: <reason>' lines; 'PASS c:' still
+        FAILs there, and a package of the same task name under another plan is strict."""
+        line = "PASS dispatch.config.fable_fallback: opus: the fable_roles run on opus (DEC-0018)\n"
+        for plan, task in (("strict-delivery", "S2-b5-fixwave"), ("strict-delivery", "S2-b5-finalfix"),
+                           ("strict-delivery", "S2-b5-finalfix2"), ("other", "S2-b5-finalfix2"),
+                           ("strict-delivery", "S2-b5-finalfix3")):
+            with self.subTest(plan=plan, task=task):
+                def own(rows):
+                    rows["findings"][0]["owner"] = {"kind": "plan", "plan": plan, "task": task}
+                self.with_rows(own)
+                pkg = f".superpowers/sdd/{plan}/review/{task}"
+                for name, text in {**GOOD, "gates.txt": "PASS register.schema\n" + line}.items():
+                    rf.write(self.root, f"{pkg}/{name}", text)
+                rc, out = gate(self.root, ["--dir", pkg])
+                if task == "S2-b5-finalfix3" or plan == "other":
+                    self.assertFailLine(rc, out, "review_package.gates", "1 not gate lines")
+                    continue
+                self.assertEqual(0, rc, out)
+                self.assertIn("PASS review_package.gates\n", out)
+                for bad in ("PASS c:", "PASS c:: x", "PASS c: "):
+                    rf.write(self.root, f"{pkg}/gates.txt", f"PASS register.schema\n{bad}\n")
+                    self.assertFailLine(*gate(self.root, ["--dir", pkg]), "review_package.gates", f"{bad.rstrip()!r}")
 
     def test_claims_empty_cells_fail(self):
         head = "| claim | direct | contradiction | output | verdict |\n|---|---|---|---|---|\n"
@@ -372,6 +406,24 @@ class GateReviewPackage(unittest.TestCase):
                          ("test_lap::test_not_unity", False), ("test_far::test_lap_cross", False),
                          ("test_untracked_only", False), ("test_loose::test_untracked_only", False),
                          ("test_untracked_c", False), ("test_gone::test_gone", False)):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                if ok:
+                    rc, out = self.check()
+                    self.assertEqual(0, rc, out)
+                else:
+                    self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_static_unity_test_function_resolves(self):    # B5-FIX-26 (DEC-0046 static-counts)
+        """A Unity test is `void test_<name>(void)` with an optional leading `static`; any other leading word,
+        a glued `staticvoid` or a non-void return resolves nothing."""
+        head = "| sibling | test or finding |\n|---|---|\n"
+        self.track("test/test_st.c", "static void test_st_one(void)\n{\n}\n  static\tvoid  test_st_two( void )\n{\n}\n"
+                                     "static inline void test_st_inline(void)\n{\n}\nstaticvoid test_st_glued(void)\n"
+                                     "static int test_st_int(void)\n{\n}\nextern void test_st_extern(void);\n")
+        for cell, ok in (("test_st::test_st_one", True), ("test_st::test_st_two", True), ("test_st_one", True),
+                         ("test_st::test_st_inline", False), ("test_st::test_st_glued", False),
+                         ("test_st::test_st_int", False), ("test_st::test_st_extern", False)):
             with self.subTest(cell=cell):
                 self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
                 if ok:

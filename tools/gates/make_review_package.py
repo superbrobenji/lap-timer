@@ -30,11 +30,13 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from tools.gates import run_all  # noqa: E402
+from tools.gates import gate_plan  # noqa: E402
 from tools.gates.gate_plan import LEDGER_PLAN  # noqa: E402
 from tools.gates.lib import GateError, gitinfo, repo_root  # noqa: E402
 
 STATE = "docs/superpowers/state"
 SDD = ".superpowers/sdd"
+PYCACHE_OK = ("tools/gates/", STATE + "/")    # DEC-0044: the only trees whose __pycache__ dirs are exempt
 EXCLUDE = ("review_package", "merge_ready")
 IMPLEMENTER_FILES = ("siblings.md", "claims.md")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -87,7 +89,8 @@ def _ignored(root: str) -> list[str]:
     <state>/<name>/ledger.md names, not only the package's own, and every docs/superpowers/plans/*.md run_all
     hands to gate_decisions, R-A23b-1), which git status cannot see. Exempt:
     the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
-    directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
+    directory, at any depth (DEC-0033), under tools/gates or the state dir only (DEC-0044: a plan or spec path
+    under a __pycache__ dir is reported). DEC-0048: each plan's **Spec:** file is read too. The pathspecs are literal (R-A2-3: a plan path such as
     ':(exclude)tools/gates' drops nothing) and, where the filesystem folds case, case-insensitive (R-A2r10-1:
     gate_plan opens a line-1 path Docs/... as the file docs/...)."""
     paths = ["tools/gates", STATE]
@@ -103,11 +106,30 @@ def _ignored(root: str) -> list[str]:
             paths.append(m.group(1))
     paths += sorted(os.path.relpath(p, root).replace(os.sep, "/")    # R-A23b-1: every plan run_all hands to
                     for p in glob.glob(os.path.join(root, run_all.PLANS_GLOB)))    # gate_decisions --scan
+    paths += _specs(root, paths[2:])    # DEC-0048: the **Spec:** file gate_plan checks for each plan
     magic = ":(literal,icase)" if os.path.exists(os.path.join(root, ".GIT")) else ":(literal)"    # root holds .git
     out = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
                *(magic + p for p in paths))
-    return [p for p in out.decode("utf-8", "replace").split("\0")
-            if p and not p.startswith(SDD + "/") and "__pycache__" not in p.split("/")[:-1]]
+    return [p for p in out.decode("utf-8", "replace").split("\0")    # DEC-0044: __pycache__ only under PYCACHE_OK
+            if p and not p.startswith(SDD + "/")
+            and not (p.startswith(PYCACHE_OK) and "__pycache__" in p.split("/")[:-1])]
+
+
+def _specs(root: str, plans: list) -> list:
+    """DEC-0048 widen-fix16: the root-relative **Spec:** path (gate_plan.py's header.spec-path check) of every
+    plan file in <plans>; a plan that is missing or names no spec adds nothing."""
+    out = []
+    for rel in plans:
+        full = os.path.join(root, rel)
+        if not os.path.isfile(full):
+            continue
+        with open(full, "rb") as f:
+            spec = gate_plan.parse_plan(f.read().decode("utf-8", "replace")).headers.get("spec", "")
+        m = gate_plan.SPEC_PATH.search(spec)
+        spec_rel = os.path.relpath(os.path.join(root, m.group(1)), root).replace(os.sep, "/") if m else ".."
+        if spec_rel != ".." and not spec_rel.startswith("../"):    # a spec outside the root is no git path
+            out.append(spec_rel)
+    return out
 
 
 def _package(root: str, a) -> tuple[str, int]:

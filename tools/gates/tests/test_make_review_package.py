@@ -301,6 +301,40 @@ class MakeReviewPackage(unittest.TestCase):
         self.assertTrue(rf.git(self.root, "check-ignore", plan))
         return self.make("fx", "1", self.base, head, "--only", "register")
 
+    def test_a_plan_under_a_pycache_dir_is_refused(self):    # B5-FIX-16 (DEC-0044 gates-and-state-only)
+        """The __pycache__ exemption covers tools/gates and the state dir only: an ignored plan a ledger names
+        under a __pycache__ dir is refused (round-10 mutant E)."""
+        rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/__pycache__/fx.md",
+                                    "docs/superpowers/plans/__pycache__/fx.md")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/__pycache__/fx.md", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def test_ignored_file_under_the_spec_file_the_gates_read_fails(self):    # B5-FIX-16 (DEC-0048 widen-fix16)
+        """gate_plan checks each plan's **Spec:** path: an excluded spec file is refused, whether its plan is named
+        only by a ledger (plans/sub/ is not globbed) or only by the plans glob, also one under a __pycache__ dir
+        (DEC-0044); a plan that names no spec, or a spec outside the root, adds no path."""
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan: docs/superpowers/plans/sub/fx.md\n")
+        rf.write(self.root, "docs/superpowers/state/gx/ledger.md", "plan: docs/superpowers/plans/gx.md\n")
+        rf.write(self.root, "docs/superpowers/plans/gx.md", "# plan\n\n**Spec:** `/elsewhere/spec.md`\n")
+        for plan, spec in (("docs/superpowers/plans/sub/fx.md", "docs/superpowers/specs/fx.md"),
+                           ("docs/superpowers/plans/zz.md", "docs/superpowers/specs/__pycache__/zz.md")):
+            with self.subTest(spec=spec):
+                rf.write(self.root, plan, f"# plan\n\n**Spec:** `{spec}`\n")
+                head = rf.commit(self.root, f"plan naming {spec}")
+                rf.write(self.root, spec, "# spec\n")
+                with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+                    f.write(f"/{spec}\n")
+                self.assertTrue(rf.git(self.root, "check-ignore", spec))
+                rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+                self.assertEqual(1, rc, out)
+                self.assertIn(f"ignored file(s) under the paths the gates read: {spec};", out)
+                self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+                os.remove(os.path.join(self.root, spec))
+                rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+                self.assertEqual(0, rc, out)
+                shutil.rmtree(os.path.join(self.root, REVIEW), ignore_errors=True)
+
     def test_the_plan_named_by_line_1_is_read_as_gate_plan_reads_it(self):    # B5-FIX-16 (R-A2-2)
         for sep in ("\x0c", "\x0b", "\x1c", "\x85", "\u2028"):
             with self.subTest(sep=ascii(sep)):

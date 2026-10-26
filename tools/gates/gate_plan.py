@@ -499,8 +499,9 @@ def check_plan(root: str, conf: dict, findings: list, plan_path: str, source: st
 
 
 def _overlap_key(path: str) -> str:
-    """B5-FIX-14: one spelling per file: '\\' read as '/', normalised, case-folded (APFS is case-insensitive)."""
-    return posixpath.normpath(path.replace("\\", "/")).casefold()
+    """B5-FIX-14: one spelling per file: '\\' read as '/', normalised, NFC-composed (DEC-0045: APFS reads NFC and
+    NFD spellings as one file name), case-folded (APFS is case-insensitive)."""
+    return unicodedata.normalize("NFC", posixpath.normpath(path.replace("\\", "/"))).casefold()
 
 
 def _shared(xs: list, ys: list) -> list[str]:
@@ -575,18 +576,22 @@ def _work_mode(root: str, rel: str) -> str:
 REGULAR = ("100644", "100755")
 
 
-def _file_mode(root: str) -> bool:
-    """core.fileMode as git reads it for root (DEC-0041 honour-filemode); true when unset or unreadable."""
-    r = subprocess.run(["git", "config", "--bool", "core.fileMode"], cwd=root, capture_output=True, check=False)
+def _git_bool(root: str, key: str) -> bool:
+    """A boolean core key as git reads it for root (DEC-0041 core.fileMode, DEC-0049 core.symlinks); true when
+    unset or unreadable."""
+    r = subprocess.run(["git", "config", "--bool", key], cwd=root, capture_output=True, check=False)
     return r.stdout.decode("utf-8", "replace").strip() != "false"
 
 
-def _modes_agree(root: str, rel: str, file_mode: bool) -> bool:
+def _modes_agree(root: str, rel: str, file_mode: bool, symlinks: bool) -> bool:
     """DEC-0034: the work tree, index and HEAD entries of <rel> have one mode and type; DEC-0041: with
-    core.fileMode=false a regular file's work-tree exec bit is ignored, as git ignores it. Called only once
-    all three copies exist."""
+    core.fileMode=false a regular file's work-tree exec bit is ignored, as git ignores it; DEC-0049: with
+    core.symlinks=false a work-tree regular file stands for an index symlink, as git checks one out. Called
+    only once all three copies exist."""
     index_mode, work_mode = _git_mode(root, ["ls-files", "-s"], rel), _work_mode(root, rel)
     if not file_mode and work_mode in REGULAR and index_mode in REGULAR:
+        work_mode = index_mode
+    if not symlinks and work_mode in REGULAR and index_mode == "120000":
         work_mode = index_mode
     return work_mode == index_mode == _git_mode(root, ["ls-tree", "HEAD"], rel)
 
@@ -600,14 +605,15 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
     in flight; a ledger absent at HEAD is in flight; DEC-0034: a copy whose mode or type differs, a
     symlink on its working-tree path included, is in flight; DEC-0041: with core.fileMode=false the
     working tree's exec bit is ignored as git ignores it, while a staged mode change, a type change and a
-    symlink stay in flight). Line 1 'plan: <plan file>' is read from the newest
+    symlink stay in flight; DEC-0049: with core.symlinks=false a committed symlink checked out as a regular
+    file of its target text reads closed, as git status shows it clean). Line 1 'plan: <plan file>' is read from the newest
     copy that exists: the working tree, else the index, else HEAD (the copy the author is changing)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
     names = (_work_ledgers(state) | _git_ledgers(root, ["ls-files"])
              | _git_ledgers(root, ["ls-tree", "-r", "--name-only", "HEAD"]))
-    file_mode = _file_mode(root)
+    file_mode, symlinks = _git_bool(root, "core.fileMode"), _git_bool(root, "core.symlinks")
     out = []
     for name in sorted(names):
         rel = f"{STATE}/{name}/ledger.md"
@@ -623,7 +629,7 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
         # DEC-0034: the copies also agree on file mode and type (a symlink, an exec bit staged or not)
-        if not (_closed(text) and copies[0] == copies[1] == copies[2] and _modes_agree(root, rel, file_mode)):
+        if not (_closed(text) and copies[0] == copies[1] == copies[2] and _modes_agree(root, rel, file_mode, symlinks)):
             out.append((name, m.group(1)))
     return out
 

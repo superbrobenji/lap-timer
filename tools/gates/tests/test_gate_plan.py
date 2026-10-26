@@ -828,6 +828,19 @@ class FixWave3(unittest.TestCase):
         out = self.ok(self.variant("- Create: `src/alpha.py`", "- Create: `src/bet`"))    # R-A3-2: a name prefix only
         self.assertIn("PASS plan.overlap.1-2", out)
 
+    def test_overlap_reads_nfc_and_nfd_spellings_as_one_file(self):    # B5-FIX-14 (DEC-0045 widen-fix14)
+        """caf\u00e9.py (NFC) and cafe\u0301.py (NFD) are one file name on APFS: they overlap, in either task, and a
+        directory spelled one way holding a file spelled the other way overlaps too; another letter does not."""
+        nfc, nfd = "src/caf\u00e9.py", "src/cafe\u0301.py"
+        for one, two in ((nfc, nfd), (nfd, nfc), ("Src/CAF\u00c9.py", nfd), ("caf\u00e9", "cafe\u0301/x.py")):
+            with self.subTest(one=ascii(one), two=ascii(two)):
+                text = self.variant("- Create: `src/alpha.py`", f"- Create: `{one}`")
+                self.fail_line(self.variant("- Create: `src/beta.py`", f"- Create: `{two}`", text), "plan.overlap.1-2",
+                               "PARALLEL tasks share")
+        text = self.variant("- Create: `src/alpha.py`", f"- Create: `{nfc}`")
+        out = self.ok(self.variant("- Create: `src/beta.py`", "- Create: `src/cafe\u0300.py`", text))
+        self.assertIn("PASS plan.overlap.1-2", out)
+
     def test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour(self):    # B5-FIX-15
         for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b",
                       "\u017fpin", "pin\u017f", "P\u017fN"):    # U+017F folds to 's': never 'pin', and a letter neighbour
@@ -1142,6 +1155,57 @@ class LedgerCopies(unittest.TestCase):
                 self.assertNotEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root,
                                                         capture_output=True, check=True).stdout)
                 self.assertInFlight(root)
+
+    def symlink_ledger(self, setting):
+        """A ledger committed as a symlink whose target text is the closed ledger, checked out as a regular file
+        of those bytes (what git writes with core.symlinks=false); setting None unsets the key."""
+        root = self.repo(self.CLOSED)
+        path = os.path.join(root, self.REL)
+        os.remove(path)
+        os.symlink(self.CLOSED, path)
+        rf.commit(root, "ledger as a symlink")
+        self.assertEqual("120000", rf.git(root, "ls-tree", "HEAD", self.REL).split()[0])
+        if setting:
+            rf.git(root, "config", "core.symlinks", setting)
+        else:    # unset at every level: `git config --unset` exits 5 when the repo never set the key
+            subprocess.run(["git", "config", "--unset", "core.symlinks"], cwd=root, capture_output=True, check=False)
+            self.assertEqual(1, subprocess.run(["git", "config", "core.symlinks"], cwd=root, capture_output=True).returncode)
+        os.remove(path)
+        rf.write(root, self.REL, self.CLOSED)
+        return root, subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, check=True).stdout
+
+    def test_core_symlinks_false_reads_a_checked_out_symlink_closed(self):    # B5-FIX-5 DEC-0049 honour-symlinks
+        """core.symlinks=false (any spelling git reads as false): a committed symlink checked out as a regular
+        file of its target text is clean in git status and reads closed; a work-tree edit stays in flight."""
+        for value in ("false", "no", "off", "0"):
+            with self.subTest(value=value):
+                root, status = self.symlink_ledger(value)
+                self.assertEqual(b"", status)
+                self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+        rf.write(root, self.REL, self.CLOSED + "CHECKPOINT b6 abc1234\n")
+        self.assertInFlight(root)
+
+    def test_core_symlinks_true_holds_a_checked_out_symlink_in_flight(self):    # B5-FIX-5 DEC-0049 honour-symlinks
+        """core.symlinks=true, or unset at every level (git's default is true): the same regular file is a type
+        change in git status and in flight; with core.symlinks=false a real work-tree symlink over a regular
+        index entry stays in flight too."""
+        for setting in ("true", None):
+            with self.subTest(setting=setting), mock.patch.dict(os.environ, {} if setting else
+                                                                 {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+                root, status = self.symlink_ledger(setting)
+                self.assertNotEqual(b"", status)
+                self.assertInFlight(root)
+        root = self.repo(self.CLOSED)
+        rf.git(root, "config", "core.symlinks", "false")
+        path = os.path.join(root, self.REL)
+        rf.write(root, "docs/superpowers/state/fx/real.md", self.CLOSED)
+        os.remove(path)
+        os.symlink("real.md", path)
+        self.assertInFlight(root)
+        root = self.repo(self.CLOSED)    # core.symlinks=false leaves a regular file's exec bit to core.fileMode
+        rf.git(root, "config", "core.symlinks", "false")
+        os.chmod(os.path.join(root, self.REL), 0o755)
+        self.assertInFlight(root)
 
     def test_state_dir_replaced_by_a_symlink_is_in_flight(self):    # B5-FIX-5 DEC-0034
         root = self.repo(self.CLOSED)
