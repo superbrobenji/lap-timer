@@ -988,8 +988,9 @@
   class: 'the PARALLEL overlap check compares raw Files strings after ./ and .. normalisation
     only (gate_plan.py:473): a case variant (SRC/Alpha.py vs src/alpha.py, one file
     on case-insensitive APFS), a directory item that contains the other task''s file,
-    and a backslash spelling all pass (b5 final review A3-V1); DEC-0045 widen-fix14: NFC
-    and NFD spellings of one file name (one file on APFS) also pass (b5 round 10 R-A3-1)'
+    and a backslash spelling all pass (b5 final review A3-V1); DEC-0045 widen-fix14:
+    NFC and NFD spellings of one file name (one file on APFS) also pass (b5 round
+    10 R-A3-1)'
   siblings:
   - case variant
   - directory containing a file
@@ -1069,9 +1070,9 @@
     are exempt like the packages dir; DEC-0039 widen-all-plans: ''the plan'' widens
     to every plan the gates read, so an ignored file under another in-flight plan
     is reported too (b5 round 9 R-A2-1); DEC-0044 gates-and-state-only: the __pycache__
-    exemption applies only under tools/gates and the state dir, so a plan or spec path
-    under __pycache__ is reported; DEC-0048 widen-fix16: the spec file the gates read
-    (gate_plan.py:434) is checked too (b5 round 10 A23b)'
+    exemption applies only under tools/gates and the state dir, so a plan or spec
+    path under __pycache__ is reported; DEC-0048 widen-fix16: the spec file the gates
+    read (gate_plan.py:434) is checked too (b5 round 10 A23b)'
   siblings:
   - file hidden by .git/info/exclude
   - file hidden by .gitignore
@@ -1339,16 +1340,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_every_claims_row_counts
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-22.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 46e4c17
+    by: controller
+  - state: pinned
+    sha: 46e4c17
     by: controller
 - id: B5-FIX-23
   source: review
@@ -1542,8 +1552,8 @@
   - file: tools/gates/gate_dispatch.py
     lines: '333'
     sha: 79f0d16
-  repro: 'set model_rank: [1, 2]; --config-check prints only FAIL dispatch.input: ''list''
-    object has no attribute ''get'''
+  repro: 'set model_rank: [1, 2]; --config-check prints only FAIL dispatch.input:
+    ''list'' object has no attribute ''get'''
   owner:
     kind: issue
     number: 149

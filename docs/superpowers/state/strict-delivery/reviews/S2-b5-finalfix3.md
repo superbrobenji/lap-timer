@@ -466,3 +466,184 @@ none started.
 
 ## Budget used
 about 80k of 100k tokens, about 22 of 25 minutes.
+
+## Round 11 (b5r11): pin of B5-FIX-22 at 46e4c17 (code equal to 79f0d16), area A1 phase 1; text parts reviewed by area A5 phase 1
+
+## Area A1 report (b5r11-rr-A1.md, verbatim)
+
+status: DONE_WITH_FINDINGS
+
+# b5 round 11 scoped re-review phase 1, area A1 (tools/gates/gate_review_package.py + tests) at 46e4c17
+
+Clone: $SCR/r11-rr-A1/repo at 46e4c17 (code as at 79f0d16; `git log --stat 78c604a^..46e4c17`: 78c604a, 4aad613, 4c5f908, 46e4c17 do not touch my two files; 79f0d16 changes them +65/-8). Mutants in a second clone $SCR/r11-rr-A1/mut at 46e4c17. Guard per DEC-0032 in every writing script. Packages copied from the r11-pkg-snapshot, never from the checkout. The checkout HEAD was still 46e4c17 at the end of my review; I made no edits there except this report.
+
+verdict: spec: ❌ quality: ❌ claims-executed: ✅
+(spec ❌: R-A1-5, a tracked test file with a UTF-8 BOM defines no test (DEC-0037 tracked-tests); quality ❌: R-A1-5, R-A1-6, R-A1-7)
+
+## Per row
+- B5-FIX-22: CLEAN (R-A1-1 fixed; every sibling closed through main() at HEAD, old fail-open at 5b900bd; N22 killed; the new branch's only survivor, `> 4` -> `> 5`, is equivalent; transcript replay OK/FAILED/OK)
+- B5-FIX-26: OPEN (R-A1-5 BOM files, R-A1-6 SyntaxWarning / -W error dependence, R-A1-7 survivors A1 A11 A12; one decision question (nested defs). R-A1-3 N3 N4 N9c N18 are killed; R-A1-4 is fixed. Static Unity (DEC-0046) is phase 2, not reviewed here)
+
+## Commits
+- 79f0d16 fix(gates): B5-FIX-22,-26,-16,-5 -- b5 round 10 fix 3: result-cell FAIL, parsed Python defs, every plans/*.md, core.fileMode spellings (reviewed; I made no commits)
+
+## Gates run (clone at 46e4c17, snapshot packages copied in)
+| command | result |
+|---|---|
+| env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t . | Ran 647 tests ... OK (skipped=1) |
+| same with tools/.venv/bin/python3 (3.12.14) | Ran 647 tests ... OK (skipped=1) |
+| python3 tools/gates/run_all.py | rc=0, 197 PASS, 0 FAIL |
+| python3 tools/gates/gate_review_package.py --all | rc=0, 98 PASS, 0 FAIL |
+| --dir each package | S2-b5-finalfix 11, -finalfix2 12, -finalfix3 30, -fixwave 12, S2-T4 11, S2-T5 11, S2-T6 11 PASS; all rc 0, 0 FAIL |
+
+## Sibling table (register repro through main(), finalfix3 package copy in the mut clone: HEAD gate vs the 5b900bd gate file run beside it)
+| row | sibling | state | HEAD / 5b900bd | covering test (package siblings.md) |
+|---|---|---|---|---|
+| 22 | FAIL row after a blank line | closed | `FAIL review_package.claims: FAIL rows: c` / `PASS review_package.claims` | test_gate_review_package::test_every_claims_row_counts |
+| 22 | FAIL row in a second table | closed | FAIL rows: c / PASS | test_every_claims_row_counts |
+| 22 | (DEC-0038) line with no leading pipe `c \| d \| x \| o \| FAIL` | closed | FAIL rows: c / PASS | test_every_claims_row_counts |
+| 22 | (DEC-0038, R-A1-1) result cell FAIL + trailing field `c \| d \| x \| o \| FAIL \| note` | closed | FAIL rows: c / PASS | test_a_fail_result_cell_with_trailing_fields_fails |
+| 22 | same with a leading pipe `\| c \| ... \| FAIL \| note \|` | closed | FAIL (1 row malformed) / PASS | test_every_claims_row_counts (malformed path) |
+| 26 | sibling test name that no test defines (`test_gate_plan::test_no_such_test_anywhere`) | closed | `FAIL review_package.siblings: test(s) defined in no test module named: ...` / PASS | test_sibling_test_name_that_no_test_defines_fails |
+| 26 | sibling test module that does not exist (`test_no_such_mod::test_every_claims_row_counts`) | closed | FAIL siblings / PASS | test_sibling_test_module_that_does_not_exist_fails |
+| 26 | name defined only in another test module (`test_gate_plan::test_every_claims_row_counts`) | closed | FAIL siblings / PASS | test_sibling_name_defined_only_in_another_test_module_fails |
+| 26 | (R-A1-4) def inside a string | closed | probe: `_py_defs('x = """\ndef test_s():\n"""')` -> [] | test_sibling_name_only_inside_a_string_or_comment_does_not_resolve |
+| 26 | (DEC-0037) every tracked test file | OPEN for BOM files: R-A1-5 | see R-A1-5 | none |
+
+## Claims (79f0d16 commit message and b5r10-fix3-report.md items 1-3 and the mutant line, A1 part)
+| claim | direct | contradiction | output | result |
+|---|---|---|---|---|
+| fail_lines flags a line whose fifth cell is FAIL when more fields follow | bin/probe.py fail_lines(`c\|d\|x\|o\|FAIL\|note`) | same row appended to finalfix3 claims.md through main() at HEAD and 5b900bd | ['c']; HEAD `FAIL ... FAIL rows: c`, old `PASS review_package.claims` | PASS |
+| FAIL in the output (fourth) cell of a PASS row passes | fail_lines(`\| c \| d \| x \| FAIL \| PASS \|`) | mutant A7 cells[4]->cells[3] | []; A7 KILLED (3) | PASS |
+| Python files parsed with ast; a def in a string resolves nothing | probe `string` case | mutant RA14 (old line regex restored) | [] ; RA14 KILLED (3) | PASS |
+| a file that does not parse defines nothing (fails closed) | probe `syntax` -> [] | mutant A2 (raise instead of set()) | A2 KILLED (2) | PASS |
+| ValueError also gives an empty set | probe on 3.12: NUL file -> [] ; 3.9 ast.parse raises ValueError | mutant A1 (except SyntaxError only) | A1 SURVIVES on both interpreters (R-A1-7) | claim true; untested |
+| methods in classes and async defs count | probe `method` ['test_m'], `async` ['test_a'] | mutants A3 (iter_child_nodes) A4 (no AsyncFunctionDef) | A3 KILLED (54), A4 KILLED (1) | PASS |
+| C rule unchanged | `git show 79f0d16^:...` line 42 vs HEAD line 43 | diff of the "c" regex string | identical | PASS |
+| tests kill N3 N4 N9c N18 N22 | bin/mut.py on /usr/bin/python3 | each mutant | N3 KILLED(1) N4 KILLED(1) N9c (no -z + split on newline) KILLED(1) N18 KILLED(1) N22 (=A10, drop strip) KILLED(1) | PASS |
+| `> 4` -> `> 5` equivalent (fix3 report, "not probed") | mutant A6 | reasoning: at len 5, cells[4] is cells[-1], already the first disjunct | A6 survives; equivalent | PASS |
+| test file +3 tests, suite 647 | grep -c '^    def test_' -> 84 | discover on both interpreters | 84; 647 OK (skipped=1) x2 | PASS |
+| --dir finalfix3 30 PASS | --dir | --all | 30 PASS rc 0; --all 98 PASS rc 0 | PASS |
+
+## Findings raised
+- R-A1-5 (LOW, fails closed; caused by 79f0d16; B5-FIX-26 / DEC-0037) gate_review_package.py:204 `tree = ast.parse(text)` on text that test_modules (:193) reads as plain `utf-8`, so a UTF-8 BOM stays as U+FEFF and ast.parse raises `SyntaxError: invalid non-printable character U+FEFF`: the file defines nothing. Python runs such a file. The old line regex resolved every def after line 1. Repro (mut clone): tracked zz/test_zbom.py = BOM + `def test_bom():\n    pass\n`, siblings cell `test_zbom::test_bom` -> `FAIL review_package.siblings: test(s) defined in no test module named: test_zbom::test_bom` on 3.9.6 and 3.12.14. No tracked test_*.py has a BOM today (bin/scan.py: 16 files, regex and ast agree on every test_ name, on both interpreters, with and without -W error). Fix: read with `utf-8-sig` (or strip a leading U+FEFF) before parsing; subtest.
+- R-A1-6 (LOW; caused by 79f0d16) ast.parse at :204 emits the compiler's warnings. On 3.12 a tracked test file with an invalid escape (`re.compile("\d+")`) prints `<unknown>:2: SyntaxWarning: invalid escape sequence '\d'` on the gate's stderr; under `-W error` the warning becomes a SyntaxError, the file defines nothing and `test_zesc::test_esc` FAILs siblings, while without -W error (and on 3.9) it PASSes: resolution depends on the interpreter's warning filters. Repro: mut clone, tracked zz/test_zesc.py, venv python with and without -W error (outputs above). Fix: parse inside `warnings.catch_warnings()` with `simplefilter("ignore")`; subtest under -W error.
+- R-A1-7 (LOW, test gaps: non-equivalent survivors of 79f0d16's new branches; both interpreters) A1 `except (SyntaxError, ValueError)` -> `except SyntaxError`: on 3.9 a tracked test file with a NUL byte then raises ValueError out of the gate (run_gate turns it into `FAIL review_package.input`) instead of defining nothing; A11 add ast.ClassDef to the collected nodes: `class test_x:` would resolve; A12 `ast.parse(text.lstrip())`: a file whose first line is indented (an IndentationError at HEAD) would resolve. Fix: one subtest each (NUL-byte file, a class named test_x, an indented first line).
+
+## Decision needed (finding class, owner only; not decided)
+Q-A1-1: `_py_defs` uses ast.walk, so a def nested inside another function, or under `if False:`, resolves: tracked zz/test_znest.py `def test_outer():\n    def test_inner(): ...`, cell `test_znest::test_inner` -> PASS review_package.siblings on both interpreters, though no runner collects it. B5-FIX-26's class says "a test name that no test defines passes"; DEC-0035 says "the cell's `def <name>` is resolved". The old line regex (since f13930c) also matched an indented nested def. Options: (a) keep "any def" (cost: none; nested helpers and dead-code defs resolve); (b) narrow to module-level and class-body defs, B5-FIX-26 class widened to "a def no runner collects" (cost: about 3 lines and 2 subtests; a def under a module-level `if` needs explicit handling or stops resolving).
+
+## Mutant tally (bin/mut.py, module test_gate_review_package, /usr/bin/python3 and the venv)
+New branches (A-series): killed A2 A3 A4 A5 A7 A8 A9 A10(N22) RA14; survived A1 A11 A12 (non-equivalent, R-A1-7), A6 (equivalent). Round-10 survivors re-run: N3 N4 N9c N18 killed.
+
+## Transcript replays (finalfix3 snapshot transcripts, mut clone at 46e4c17)
+- mutation-B5-FIX-22.txt: OK / FAILED (failures=9) / OK; the revert changed 1 line.
+- mutation-B5-FIX-26.txt: OK / FAILED (failures=7) / OK; the revert changed 1 line.
+
+## Observations (no finding)
+- `_py_defs` on 3.12 raises `MemoryError: Parser stack overflowed` for a file of 200000 nested unary minus (probe only; not run through main(); run_gate's docstring says any exception becomes a `.input` FAIL, so it would fail closed).
+- `fail_lines` checks for exactly `FAIL`; `**FAIL**` on a pipe-less line is not flagged (a pipe-led one is caught as malformed). Not asked by DEC-0038; noted only.
+
+## Unrelated findings
+none
+
+## Denials
+none
+
+## Background jobs
+none started
+
+## Budget used
+about 60k tokens, about 20 minutes
+
+## Area A5 report (b5r11-rr-A5.md, verbatim)
+
+status: DONE
+
+verdict: spec: ✅ quality: ✅ claims-executed: ✅ (every claims.md row re-run, except the older per-row mutant tallies listed under Not re-executed; none of those is a claim made by 78c604a or 79f0d16)
+B5-FIX-10 (README + test text): CLEAN (the DEC-0040 GATE_LINE and test :193 siblings are cell `B5-FIX-10` = DEC-0043 phase 2, not a finding at HEAD_SHA)
+B5-FIX-5 (text): CLEAN
+B5-FIX-14 (text): CLEAN (the DEC-0045 NFC/NFD sibling row is cell `B5-FIX-14`: DEC-0045 is not implemented at HEAD_SHA, phase 2)
+B5-FIX-16 (text): CLEAN (the DEC-0048 spec-file sibling row is cell `B5-FIX-16`: phase 2; README's __pycache__ text is pre-DEC-0044, phase 2)
+B5-FIX-22 (text): CLEAN
+B5-FIX-26 (text): CLEAN
+
+## Commits
+none (review only). Clone $SCR/r11-rr-A5/repo at 46e4c17 (code = 79f0d16; 46e4c17, 4c5f908, 4aad613 touch only docs/superpowers/state, checked with git log --stat). Package snapshot copied in from r11-pkg-snapshot. Clone and every worktree clean at the end (git status --short empty).
+
+## Gates (clone at 46e4c17)
+| command | result |
+|---|---|
+| env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t . | Ran 647 tests, OK (skipped=1), rc 0 |
+| same with tools/.venv/bin/python3 | Ran 647 tests, OK (skipped=1), rc 0 |
+| python3 tools/gates/run_all.py (all snapshot packages) | rc 0, 197 PASS, 0 other |
+| gate_review_package.py --dir .../S2-b5-finalfix3 | 30 PASS, 0 other |
+| make_review_package.py strict-delivery A5fresh 5b900bd 79f0d16 (fresh clone at 79f0d16) | rc 0, "15 commit(s); gates PASS"; commits.txt, diff.patch, gates.txt each cmp-EQUAL to the snapshot package |
+
+Package byte-compare contradiction: git log 5b900bd..79f0d16 = 15 commits, 5b900bd..78c604a = 13, so a make at a different head would not match commits.txt.
+
+## Module counts vs plan count lines (direct: per-module runs at HEAD; contradiction: the numbers at the earlier shas below)
+| plan line | text | run | result |
+|---|---|---|---|
+| :3602 | test_gate_review_package 84 after round 10 fix 3 | Ran 84 OK | PASS |
+| :4437 | test_make_review_package 48, one skips on a FS refusing a non-UTF-8 name | Ran 48 OK (skipped=1) | PASS |
+| :6577 | test_gate_plan 136, suite 647 (one skipped on APFS); fix 2: 135 / 642 | Ran 136 OK; suite 647 skipped=1; 78c604a suite 642 skipped=1 | PASS |
+| :1443 | test_gate_dispatch 77 (78c604a adds two assertions, no test) | Ran 77 OK | PASS |
+
+## D3 (d3.py: every fence vs git show HEAD:<path in the preceding line>)
+Every file 78c604a/79f0d16 touched that has a whole-file block is EQUAL: test_gate_dispatch.py :363 (688 lines), test_gate_review_package.py :2366 (780), gate_review_package.py :3156 (439), test_make_review_package.py :3679 (563), make_review_package.py :4252 (180), test_gate_plan.py :4606 (1210); also gate_plan.py :5826, gate_dispatch.py :1061, fixtures EQUAL. README has no whole-file block: :2197, :6518 SUB; :8068 DIFF (Task 8/9 text, unchanged, as in round 10). Plan changes outside whole-file blocks (git diff -U0 78c604a^ 46e4c17, hunks at :2207, :3602, :4437, :6528, :6568, :6577) are the README excerpts (match README :169, :197-200) and count lines (above). Contradiction: same d3 at 0455eba gives the blocks at their old line numbers/contents; no stale "def <name>(" or "last '|'-separated field" text remains in the plan outside the whole-file blocks (grep: 0).
+
+## Claims
+| claim | direct | contradiction | output | result |
+|---|---|---|---|---|
+| README :169 fallback PASS line is bare (R-A4-1) | test_gate_dispatch ConfigCheck.test_readme_and_docstring_state_dec_0028_and_dec_0024; gate_dispatch.py:124 res.passed("dispatch.model.fallback") | 3 README mutants: old form; bare + "(naming DEC-0018)"; "`PASS dispatch.model.fallback: DEC-0018`" | OK; FAILED x3; restored OK | PASS |
+| README :25 fifth (result) cell or last field FAIL fails, trailing fields included (R-A1-1) | fail_lines on '\| a \| b \| c \| d \| FAIL \| note \|', 'a \| b \| c \| d \| FAIL \| x', '\| a \| b \| c \| d \| FAIL \|' | '\| a \| FAIL \| c \| d \| PASS \|', 'prose ending FAIL', lowercase fail | ['a'] x3; [] x3 | PASS |
+| README :25 py name = a def the parsed file defines; in a string none; unparsable defines nothing (R-A1-4) | _py_defs on module/async-method/nested defs | a def inside a string; 'def test_x(:' | {test_a,test_c,test_d,f}; test_b absent; set() | PASS |
+| README :197-200 any docs/superpowers/plans/*.md, run_all hands each to gate_decisions --scan; icase where FS folds case | make_review_package.py:104-108; run_all.py:26,42,45 | mutant B1 (drop the glob) | text matches code; B1 FAILED (failures=1) | PASS |
+| run_all 167 PASS rc 0 before the finalfix3 package (0455eba) | run_all in wt-0455eba with the snapshot packages minus finalfix3 | same with no packages: 100 lines (so 167 depends on the packages present) | rc 0, 167 lines, 0 non-PASS | PASS |
+| suite 622 at 0455eba, 632 at d3ed28d, 638 at c2badae, 642 (skip 1) at 78c604a, 647 (skip 1) at 79f0d16, both interpreters | discover in each worktree, /usr/bin and venv | grep FAILED/ERROR (0) | Ran 622 OK x2; 632 OK x2; 638 OK x2; 642 OK(s=1) x2; 647 OK(s=1) x2 | PASS |
+| run_all 197 PASS rc 0 at c2badae, 78c604a, 79f0d16 | run_all in each worktree with snapshot packages | grep -vc ^PASS | 197 / 0 / rc 0 each | PASS |
+| gate_plan --in-flight and gate_dispatch --config-check only PASS at 0455eba | in wt-0455eba | grep -vc ^PASS | 0; 0 | PASS |
+| D3 at 0455eba: changed-file blocks EQUAL/SUB | d3.py in wt-0455eba | n/a beyond HEAD run | EQUAL/SUB for every gates file with a whole-file block | PASS |
+| stale grep (ci.yml:57) unchanged from stale-grep-base.txt | diff of git grep at HEAD vs base | planted '# stubbed until later' in tools/gates/lib/config.py | 0 lines; 1 'stubbed' line | PASS |
+| B5-FIX-11: no "session ruling 2b" | grep -c at 0455eba | at 5b900bd | 0; 1 | PASS |
+| siblings.md: one row per register sibling, verbatim | sib.py (findings.yml at 46e4c17, owner.task S2-b5-finalfix3) | gate line review_package.siblings | 54 register = 54 rows, 0 missing, 0 extra; PASS | PASS |
+| B5-FIX-5 R-A3-1 glob-char ledger test | test at d3ed28d | d3ed28d test over 0455eba code | OK; FAILED (failures=2) | PASS |
+| B5-FIX-16 make module at d3ed28d | module at d3ed28d | d3ed28d tests over 0455eba code | Ran 43 OK; FAILED (failures=8) | PASS |
+| B5-FIX-11 DEC-0025 test | test at d3ed28d | (round 10 A5 ran its 3 mutants) | OK | PASS |
+| DEC-0037/0038 tests at c2badae | both tests at c2badae | c2badae test file over 6aaba81 code | OK; claims test FAILED failures=5 = 4 DEC-0038 subtests + parent; siblings test FAILED failures=10 | PASS |
+| DEC-0039 D-test, DEC-0041 F-tests at c2badae | at c2badae | over 6aaba81 code | OK; FAILED (1) each | PASS |
+| R-A1-1..3 (round 9) tests at c2badae | at c2badae | (mutants M8..M14b: not re-run, see below) | OK x2 | PASS |
+| R-A4-1 test at 78c604a | at 78c604a | 78c604a test over c2badae README | OK; FAILED (1) | PASS |
+| R-A2r10-1/-3 icase, glob-literal, non-UTF-8 at 78c604a | at 78c604a | case test over c2badae code | OK (skipped=1, the non-UTF-8 one); FAILED (1) | PASS |
+| R-A3-2, R-A3-3 tests at 78c604a | at 78c604a | (M7, M18 not re-run) | OK | PASS |
+| fix-3 tests at 79f0d16 (fifth cell, string def, git-cannot-list, plans glob, filemode spellings) | 5 tests at 79f0d16 | 79f0d16 tests over 78c604a code: fifth/string FAILED (5), plans glob FAILED (1), filemode spellings OK | see left | PASS (the spellings test passes over 78c604a code because the --bool read landed in c2badae; 79f0d16 adds tests only, as its message says; the row's contradiction is mutants M5/M8, killed below) |
+| fix-3 mutant tallies A1, A2, A3, B1, M5, M8 | re-cut from the claim text in the clone | n/a | A1 FAILED(2), A2 FAILED(3), A3 FAILED(1), B1 FAILED(1), M5 FAILED(4), M8 FAILED(1): every count as claimed | PASS |
+| 19 code-row transcripts replay at f13930c (row 3) | the current transcripts in wt-f13930c | mutant-applied check | 18 OK; B5-FIX-22 MUTANT-NO-MATCH: its current step 2 targets the 79f0d16 'or' line (re-cut after f13930c), so the f13930c-era transcript is gone; the current one replays OK at HEAD | PASS (historical claim about a superseded transcript; no divergence at HEAD) |
+
+## Transcript replays (HEAD, replay.py: step 1, perl step 2 with git-diff mutant check, git checkout, step 3)
+All 20 (B5-FIX-7..-26): PASS/FAIL/PASS, mutant applied, OK. Clone clean afterwards.
+
+## Sibling table (area rows)
+All 54 S2-b5-finalfix3 register siblings have a verbatim siblings.md row; the package gate resolves every cell. Cells naming the row itself (open for phase 2, not findings at HEAD_SHA): :24 NFC/NFD (B5-FIX-14, DEC-0045), :54 spec file (B5-FIX-16, DEC-0048), :55 GATE_LINE and :56 'PASS c: note' test (B5-FIX-10, DEC-0040/0043). These rows cannot pin until phase 2 replaces those cells with tests.
+
+## Findings raised
+none.
+
+## Unrelated findings
+none.
+
+## Mutant tally
+New this round: README M5/M5b/M5c 3 of 3 killed; fix-3 A1, A2, A3, B1, M5, M8 6 of 6 killed. 20 package transcripts OK at HEAD.
+
+## Not re-executed (budget)
+The older per-row mutant tallies in claims.md rows 4, 12-13, 15-19, 20-24 (E7..E26, the 10 _ignored mutants, T1-T9, C1-C3, D1-D3, F1-F4, M8/M11/M13/M14b, ICASE-off/LITERAL-drop, M7, M18, R-A1-3 N3/N4/N9c/N18/N22): their definitions are in other reviewers' reports, not in the package. Their tests' direct and before-fix runs were re-executed above.
+
+## Denials
+none.
+
+## Background jobs
+hist.sh x5 (suites at 0455eba, d3ed28d, c2badae, 78c604a, 79f0d16): all exited, results above. make_review_package (mk clone): exited rc 0. HEAD suite/run_all job: exited rc 0. Wait job by62zsjxk and monitor b04k2uoop: exited 0. None running.
+
+## Budget used
+about 70k of 100k tokens, about 21 of 25 minutes.
