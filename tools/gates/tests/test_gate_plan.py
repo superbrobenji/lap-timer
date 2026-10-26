@@ -825,6 +825,8 @@ class FixWave3(unittest.TestCase):
             with self.subTest(path):
                 self.fail_line(self.variant("- Create: `src/alpha.py`", f"- Create: `{path}`"), "plan.overlap.1-2",
                                "~ src/beta.py")
+        out = self.ok(self.variant("- Create: `src/alpha.py`", "- Create: `src/bet`"))    # R-A3-2: a name prefix only
+        self.assertIn("PASS plan.overlap.1-2", out)
 
     def test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour(self):    # B5-FIX-15
         for title in ("P\u0131n", "P\u0130N", "Pin\u2060less", "s\u200dpin", "\ufeffpin", "pin\u200b",
@@ -1056,6 +1058,14 @@ class LedgerCopies(unittest.TestCase):
                 self.assertIn(f"plan.{name}.header.goal", out)
                 self.assertNotIn("plan.0.", out)
                 self.assertNotIn("plan.in_flight", out)
+
+    def test_a_closed_ledger_under_a_state_dir_name_holding_a_tab_reads_closed(self):    # B5-FIX-5 (R-A3-3)
+        """git's -z listing is '<meta>\\t<path>': the path is everything after the first tab, so a tab in the
+        state-dir name still finds the ledger's own index and HEAD modes."""
+        root = self.repo(self.CLOSED)
+        rf.write(root, "docs/superpowers/state/a\tb/ledger.md", self.CLOSED)
+        rf.commit(root, "a closed ledger under a tab name")
+        self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
 
     def test_a_group_or_other_exec_bit_alone_leaves_the_ledger_closed(self):    # B5-FIX-5 (R-A3-3: git's owner-x rule)
         for mode in (0o645, 0o654):

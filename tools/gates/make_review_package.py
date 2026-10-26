@@ -86,7 +86,8 @@ def _ignored(root: str) -> list[str]:
     <state>/<name>/ledger.md names, not only the package's own), which git status cannot see. Exempt:
     the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
     directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
-    ':(exclude)tools/gates' drops nothing)."""
+    ':(exclude)tools/gates' drops nothing) and, where the filesystem folds case, case-insensitive (R-A2r10-1:
+    gate_plan opens a line-1 path Docs/... as the file docs/...)."""
     paths = ["tools/gates", STATE]
     state = os.path.join(root, STATE)
     for name in sorted(os.listdir(state)):
@@ -98,8 +99,9 @@ def _ignored(root: str) -> list[str]:
         m = LEDGER_PLAN.match(text.splitlines()[0] if text else "")    # line 1 as gate_plan reads it (R-A2-2)
         if m:
             paths.append(m.group(1))
-    out = _git(root, "--literal-pathspecs", "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
-               *paths)
+    magic = ":(literal,icase)" if os.path.exists(os.path.join(root, ".GIT")) else ":(literal)"    # root holds .git
+    out = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
+               *(magic + p for p in paths))
     return [p for p in out.decode("utf-8", "replace").split("\0")
             if p and not p.startswith(SDD + "/") and "__pycache__" not in p.split("/")[:-1]]
 

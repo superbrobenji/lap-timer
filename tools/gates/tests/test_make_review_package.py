@@ -293,6 +293,29 @@ class MakeReviewPackage(unittest.TestCase):
                 self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
                 os.remove(os.path.join(self.root, "docs/superpowers/plans/fx.md"))
 
+    def test_a_plan_named_in_another_case_is_matched_where_the_fs_folds_case(self):    # B5-FIX-16 (R-A2r10-1)
+        """gate_plan opens line 1's path through the filesystem: on a case-insensitive one, Docs/... is the
+        ignored docs/... file, so the helper refuses it."""
+        if not os.path.exists(os.path.join(self.root, ".GIT")):
+            self.skipTest("case-sensitive filesystem: Docs/... is another file")
+        rc, out = self.ignored_plan(b"plan: Docs/Superpowers/plans/fx.md", "docs/superpowers/plans/fx.md")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/fx.md", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+
+    def test_an_ignored_file_with_a_non_utf8_name_is_refused(self):    # B5-FIX-16 (R-A2r10-3)
+        """Skips only where the filesystem refuses to create the name (APFS: EILSEQ); Linux, where CI runs, takes it."""
+        try:
+            with open(os.path.join(os.fsencode(self.root), b"tools/gates/planted\xff.py"), "wb") as f:
+                f.write(b"planted = True\n")
+        except OSError as e:
+            self.skipTest(f"this filesystem refuses a non-UTF-8 file name: {e}")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write("/tools/gates/planted*.py\n")
+        rc, out = self.make("fx", "1", self.base, self.head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: tools/gates/planted\ufffd.py", out)
+
     def test_a_non_utf8_line_1_still_writes_the_package(self):    # B5-FIX-16 (R-A2-4 strict-utf8)
         rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/fx\xff.md", "docs/superpowers/plans/other.md")
         self.assertEqual(0, rc, out)
@@ -312,6 +335,12 @@ class MakeReviewPackage(unittest.TestCase):
         rc, out = self.ignored_plan(b"plan: :(exclude)tools/gates", "docs/superpowers/plans/none.md")
         self.assertEqual(1, rc, out)
         self.assertIn("ignored file(s) under the paths the gates read: tools/gates/lib/planted.py", out)
+
+    def test_glob_characters_in_the_plan_path_are_literal(self):    # B5-FIX-16 (R-A2r10-1: ':(literal)' per path)
+        """gate_plan opens docs/.../f?.md, not fx.md: an ignored fx.md is not a file the gates read."""
+        rc, out = self.ignored_plan(b"plan: docs/superpowers/plans/f?.md", "docs/superpowers/plans/fx.md")
+        self.assertEqual(0, rc, out)
+        self.assertIn("gates PASS", out)
 
     def test_a_plan_in_the_packages_dir_is_excepted(self):    # B5-FIX-16 (DEC-0029 "packages dir excepted")
         rc, out = self.ignored_plan(b"plan: .superpowers/sdd/fx/plan.md", ".superpowers/sdd/fx/plan.md")

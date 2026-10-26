@@ -166,7 +166,7 @@ commit and push, however it was launched.
 `python3 tools/gates/gate_dispatch.py --prompt P|- [--tool-model M] [--subagent-type T] [--prompts-dir D]` checks one dispatch
 prompt against the umbrella's dispatch grammar: sections Role, Brief, Findings, Claims, Budget, Model, Report,
 Strict block, Task in that order; model rank >= the role minimum, except that a `fable_roles` role on the model
-`fable_fallback` names, while that key is set, is `PASS dispatch.model.fallback` (naming DEC-0018) in place of the
+`fable_fallback` names, while that key is set, is the bare `PASS dispatch.model.fallback` (DEC-0024) in place of the
 rank line (an invalid key is `FAIL dispatch.model.fallback`; a model below it still fails `dispatch.model.rank`);
 fable only for `fable_roles`; a brief file
 exists for the implementer, implementer_transcription, task_reviewer, final_reviewer, final_verifier and
@@ -196,7 +196,7 @@ only on the owner's word: 15 lines.
 config says; it refuses a dirty tree, and an ignored or excluded untracked file under `tools/gates`,
 `docs/superpowers/state` or the plan the line 1 of any `<state>/<name>/ledger.md` names (DEC-0039: every plan the
 gates read, not only the package's own), read as `gate_plan` reads it, with literal
-pathspecs (B5-FIX-16, DEC-0029; exempt: the packages dir `.superpowers/sdd/` and every file under a `__pycache__`
+pathspecs, case-insensitive where the filesystem folds case (R-A2r10-1) (B5-FIX-16, DEC-0029; exempt: the packages dir `.superpowers/sdd/` and every file under a `__pycache__`
 directory, DEC-0033), because `gates.txt` must describe HEAD. The implementer adds
 `mutation-<id>.txt`, `siblings.md` and `claims.md`; `gate_review_package.py --dir <that directory>` must pass
 before a reviewer is dispatched.

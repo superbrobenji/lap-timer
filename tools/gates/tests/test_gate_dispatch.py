@@ -584,6 +584,8 @@ class ConfigCheck(unittest.TestCase):
         self.assertIn("is exactly opus (DEC-0028)", gate_dispatch.check_config.__doc__)
         self.assertNotIn("fable_fallback: absent", readme)
         self.assertIn("the PASS line is the bare `PASS dispatch.config.fable_fallback`\n(DEC-0024)", readme)
+        self.assertNotIn("(naming DEC-0018)", readme)    # R-A4-1: the fallback PASS line is the bare id too
+        self.assertIn("is the bare `PASS dispatch.model.fallback`", readme)
 
     def test_config_check_passes_the_repo_fallback(self):
         """The real config passes in whichever state the owner's switch is in (R1-1): set or absent, its PASS
