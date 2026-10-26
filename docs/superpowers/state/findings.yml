@@ -790,15 +790,26 @@
   severity: MEDIUM
   class: 'Result.passed takes a reason and render prints ''PASS id: reason'' (tools/gates/lib/__init__.py:41-50,
     added 1a6ff7c), against spec :191 and umbrella :114 ''PASS id''; DEC-0024 code-to-spec:
-    passed() takes no reason and every PASS line is ''PASS id'' (b5 final review A5-R1/A5-V4)'
+    passed() takes no reason and every PASS line is ''PASS id'' (b5 final review A5-R1/A5-V4);
+    DEC-0040 widen-fix10: the class covers the review-package GATE_LINE (gate_review_package.py:36,
+    which accepts ''PASS c: note'') and its test (test_gate_review_package.py:189, which
+    asserts it) (b5 round 9 U-A4-2)'
   siblings:
   - passed() signature takes no reason
   - every caller passing a reason (gate_dispatch.py:118, :344, :347)
   - tests asserting PASS-line text
+  - review-package GATE_LINE refuses a PASS line with a reason (DEC-0040)
+  - review-package test asserting a PASS line with a reason (DEC-0040)
   cites:
   - file: tools/gates/lib/__init__.py
     lines: 41-50
     sha: 4be15f8
+  - file: tools/gates/gate_review_package.py
+    lines: 36-36
+    sha: d3ed28d
+  - file: tools/gates/tests/test_gate_review_package.py
+    lines: 189-189
+    sha: d3ed28d
   - file: tools/gates/gate_dispatch.py
     lines: 118-118
     sha: 4be15f8
@@ -989,12 +1000,15 @@
     and gates.txt then reads it; DEC-0029 check-excluded: the check also reports ignored
     or excluded files under those paths, the packages dir excepted (b5 final review
     A2-V2); DEC-0033 exempt-pycache: __pycache__ directories and their .pyc files are
-    exempt like the packages dir'
+    exempt like the packages dir; DEC-0039 widen-all-plans: ''the plan'' widens to every
+    plan the gates read, so an ignored file under another in-flight plan is reported
+    too (b5 round 9 R-A2-1)'
   siblings:
   - file hidden by .git/info/exclude
   - file hidden by .gitignore
   - packages dir stays allowed
   - __pycache__ stays allowed (DEC-0033)
+  - ignored file under another plan the gates read (DEC-0039)
   cites:
   - file: tools/gates/make_review_package.py
     lines: 88-95
@@ -1256,10 +1270,12 @@
   class: 'plans_in_flight branches with no test that fails when they break (B5-FIX-5
     code): a state dir without ledger.md (gate_plan.py:516, mutant M14), and the missing-state-dir
     raise (:537, mutant M11) which test_missing_state_directory_fails (test_gate_plan.py:841)
-    only passes because load_findings fails first (b5 final review A3-V6/A3-V7)'
+    only passes because load_findings fails first (b5 final review A3-V6/A3-V7); DEC-0042
+    narrow-sibling: the missing-state-dir sibling is the plans_in_flight() call, its direct
+    test stays'
   siblings:
   - state dir without ledger.md
-  - missing state dir reached through main()
+  - missing state dir reached through the plans_in_flight() call (DEC-0042)
   cites:
   - file: tools/gates/gate_plan.py
     lines: 515-517
