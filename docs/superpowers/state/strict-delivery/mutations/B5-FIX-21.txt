@@ -1,0 +1,5 @@
+finding: B5-FIX-21
+test: test_gate_review_package::test_all_mode_unreadable_dirs_fail_never_skip
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_unreadable_dirs_fail_never_skip -> PASS
+step 2 (fix reverted: perl -pi -e 's/except \(FileNotFoundError, NotADirectoryError\):/except OSError:/' tools/gates/gate_review_package.py skips a <plan> whose review/ cannot be stat'ed, restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_unreadable_dirs_fail_never_skip -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_unreadable_dirs_fail_never_skip -> PASS

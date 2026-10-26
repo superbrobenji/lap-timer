@@ -305,3 +305,164 @@ None started.
 About 75k of 100k tokens, about 25 minutes.
 
 Scratch: scratchpad/r10-rr-A2/ holds repo (6aaba81), base (5b900bd worktree of the clone), icase (scratch repo) and bin/ (mut.py, probe_a2.py, probe_case.py, probe_e.py). I did not inspect the checkout beyond reading it.
+
+## Round-10 second pin set: B5-FIX-7, -11, -17, -18, -21, -23 at c2badae
+
+B5-FIX-7 (gate part, area A1) with its helper part closed in area A2 phase 1 above; B5-FIX-17, -18, -21, -23 (area A1) and B5-FIX-11 (area A5) reviewed at c2badae, transcripts replayed OK/FAILED/OK there.
+
+## Area A1 report (b5r10-rr-A1.md, verbatim)
+
+status: DONE_WITH_FINDINGS
+
+# b5 round 10 scoped re-review, area A1 (tools/gates/gate_review_package.py + tests) at c2badae
+
+Clone: $SCR/r10-rr-A1/repo at c2badae (guard per DEC-0032; all fixtures/mutants under $SCR/r10-rr-A1/). d3ed28d does not touch my files (git log --stat); the A1 target is c2badae (test_modules, defines_test, fail_lines, _claims, new tests).
+
+verdict: spec: ❌ quality: ❌ claims-executed: ✅
+(spec ❌: R-A1-1 DEC-0038 gap and R-A1-2 DEC-0037 divergence; quality ❌: R-A1-3 survivors, R-A1-4)
+
+## Per row
+- B5-FIX-7: CLEAN (code unchanged since f13930c; transcript replay OK/FAILED/OK; siblings covered)
+- B5-FIX-17: CLEAN (M11 M13 M14b killed; replay OK/FAILED/OK)
+- B5-FIX-18: CLEAN (M8 killed; replay OK/FAILED/OK)
+- B5-FIX-21: CLEAN (replay OK/FAILED/OK)
+- B5-FIX-22: OPEN (R-A1-1: DEC-0038 "result cell" FAIL with a trailing extra field passes; R-A1-3 N22 survivor)
+- B5-FIX-23: CLEAN (replay OK/FAILED/OK)
+- B5-FIX-26: OPEN (R-A1-2 static Unity tests never resolve; R-A1-3 N3 N4 N9c N18 survivors; R-A1-4 def in a string resolves)
+
+## Commits
+- c2badae fix(gates): B5-FIX-26,-22,-16,-5,-17,-18 -- b5 round 10 ... (reviewed; no commits by me)
+
+## Gates run (clone at c2badae)
+| command | result |
+|---|---|
+| env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t . | Ran 638 tests ... OK |
+| same with tools/.venv/bin/python3 | Ran 638 tests ... OK |
+| python3 tools/gates/run_all.py | rc=0, 197 PASS lines, 0 FAIL |
+| python3 tools/gates/gate_review_package.py --all (7 packages copied in) | rc=0, 98 PASS |
+| --dir each package | S2-b5-finalfix 11, -finalfix2 12, -finalfix3 30, -fixwave 12, S2-T4 11, S2-T5 11, S2-T6 11 PASS; all rc 0, 0 FAIL |
+
+## Sibling table (register repro through main() in a copy of the clone: HEAD vs 5b900bd's gate file swapped in)
+| row | sibling | state | covering test (package siblings.md) |
+|---|---|---|---|
+| 7 | quoted first diff path | closed | test_gate_review_package::test_a_quoted_first_diff_path_passes |
+| 7 | empty or space-led commit subject | closed | test_gate_review_package::test_commits_txt_holds_sha_subject_lines |
+| 7 | helper and gate agree | closed | test_make_review_package::test_helper_and_gate_agree_on_a_quoted_path_and_an_empty_subject |
+| 17 | module half ignored / other module's test | closed | test_gate_review_package::test_the_pinned_module_must_be_the_one_the_command_runs (+ new test_module_qualified_header_and_pytest_class_token_pass) |
+| 18 | single/double-quoted id | closed | test_gate_review_package::test_quoted_test_ids_name_the_test (+ new test_unbalanced_quote_command_is_split_on_whitespace) |
+| 21 | plan 000 / 644 / unreadable review or task | closed | test_gate_review_package::test_all_mode_unreadable_dirs_fail_never_skip |
+| 22 | FAIL row after blank line | closed: HEAD `FAIL review_package.claims: FAIL rows: c`; old `PASS review_package.claims` | test_gate_review_package::test_every_claims_row_counts |
+| 22 | FAIL row in second table | closed | test_every_claims_row_counts |
+| 22 | (DEC-0038) FAIL line with no leading pipe | OPEN for the trailing-extra-field shape: R-A1-1 | test_every_claims_row_counts covers only last-field FAIL |
+| 23 | dangling review symlink | closed | test_gate_review_package::test_all_mode_dangling_review_symlink_fails |
+| 26 | undefined name | closed: HEAD `FAIL ...siblings: test(s) defined in no test module named: test_gate_plan::test_no_such_test_anywhere`; old `PASS review_package.siblings` | test_sibling_test_name_that_no_test_defines_fails |
+| 26 | module that does not exist | closed | test_sibling_test_module_that_does_not_exist_fails |
+| 26 | name only in another module | closed | test_sibling_name_defined_only_in_another_test_module_fails |
+| 26 | (DEC-0037) every tracked test file + Unity C | OPEN for static Unity tests: R-A1-2 | test_sibling_names_resolve_in_every_tracked_test_file |
+
+## Claims (implementer claims for A1; report file absent, claims from the Task text)
+| claim | direct | contradiction | output | result |
+|---|---|---|---|---|
+| names resolve against every tracked test_*.py / test_*.c; path/dotted/stem keys | bin/probe2.py on a temp git repo: t/test_a.py via `test_a::`, `t.test_a.`, `t/test_a.py::` | untracked src/test_loose.py, tracked-then-deleted file (suite subtests); non-repo root | all True; untracked/deleted False; test_modules('/private/tmp') -> {} | PASS |
+| shared stem resolves in either | test_dup subtests in suite (OK) | mutant N8 last-wins | KILLED (1 failure) | PASS |
+| C `void <name>(void)` resolves | probe3: test_bridge_filter::test_text_passes_through_unchanged True | `static void test_format_length_charset_and_nul(void)` in devcontroller/test/test_dc_psk.c (RUN_TEST'd) | False (main(): FAIL ...siblings) | PASS as worded by the implementer; see R-A1-2 vs DEC-0037 |
+| TEST_TREES removed | grep -rn TEST_TREES tools/gates | - | no hits | PASS |
+| DEC-0038: last field FAIL fails; no-'|' line is one field; prose ending FAIL passes | bin/probe.py fail_lines: `FAIL` -> ['FAIL'], `prose FAIL` -> [] , `c \| d \| x \| o \| FAIL` -> ['c'] | `c \| d \| x \| o \| FAIL \| note` through main() | rc=0 PASS review_package.claims | claim PASS; DEC-0038 not fully met (R-A1-1) |
+| M8 M11 M13 M14b killed | bin/mut.py | same | M8 KILLED(1) M11 KILLED(2) M13 KILLED(3) M14b KILLED(3) | PASS |
+| R-A1-1..3 tests exist | grep in test file | mutants above | grep -n: test_module_qualified_header_and_pytest_class_token_pass :383, test_unbalanced_quote_command_is_split_on_whitespace :395, test_sibling_names_resolve_in_every_tracked_test_file :351; they kill M8/M11/M13/M14b | PASS |
+| counts 81/44/134, suite 638 | grep -c '^    def test_' | discover on both interpreters | 81 / 44 / 134; 638 OK x2 | PASS |
+| --dir finalfix3 30 PASS | --dir | --all | 30 PASS rc 0; --all 98 PASS rc 0 | PASS |
+DEC-0039/0041, D3, README: not area A1, not checked.
+
+## Findings raised
+- R-A1-1 (MEDIUM, fails open; DEC-0038 not met) gate_review_package.py:243-253 fail_lines tests only the LAST '|' field. A claims.md line with no leading pipe whose result (5th) cell is FAIL and that has an extra trailing field passes: lines `c | d | x | o | FAIL | note` and `c | d | x | o | FAIL | |` appended after a blank line to the finalfix3 claims.md give `PASS review_package.claims`, rc 0 (GFM renders such a row with FAIL in the result column; the '|'-led variant is caught as malformed). DEC-0038 quote: "any line in claims.md whose result cell or trailing field is FAIL fails review_package.claims, whatever its table position"; docstring quote: "whose last '|'-separated field ... is FAIL". Fix: also flag a line whose 5th field is FAIL (or any field exactly FAIL), with subtests for both shapes.
+- R-A1-2 (MEDIUM, fails closed; divergence with DEC-0037) gate_review_package.py:42 DEFINES["c"] = `^[ \t]*void[ \t]+{name}...` rejects `static void test_x(void)`; 611 of 727 Unity test definitions in tracked test_*.c are static (e.g. devcontroller/test/test_dc_psk.c:9, RUN_TEST at :63). Repro: siblings cell `test_dc_psk::test_format_length_charset_and_nul` -> `FAIL review_package.siblings: test(s) defined in no test module named: ...`. DEC-0037 quote: "plus Unity C test functions (void test_<name>(void)) in tracked test sources". Fix: allow an optional `static[ \t]+` before `void`, plus a test. (If the controller reads the DEC's parenthesis as excluding static, that is a class question for the owner; I do not pick.)
+- R-A1-3 (LOW, test gaps: non-equivalent survivors in c2badae's new branches) N3 drop the `(void)` parameter check at :42 (`void test_x(int)` would resolve); N4 unanchored C regex (would resolve static); N9c drop `-z` at :185 and split on newline (a non-ASCII tracked path such as cé/test_u.py, quoted by git, stops resolving; verified True at HEAD by probe2); N18 check=False -> True at :185 (the comment's "a failing git prints nothing" behaviour is untested; mutant raises instead); N22 drop `l.strip()` at :249 (a FAIL row with trailing spaces `| c | d | x | o | FAIL |   ` -> fail_lines [] under the mutant, ['c'] at HEAD). Fix: one subtest each.
+- R-A1-4 (LOW, fails open; B5-FIX-26 class, code from f13930c kept by c2badae) DEFINES["py"] at :42 is a line regex: a `def test_x(` line inside a string literal resolves. Repro (probe2): tracked t/test_doc.py = `x = """\ndef test_ghost():\n"""` -> defines_test('test_doc::test_ghost') True. Fix: parse Python files with ast and collect FunctionDef/AsyncFunctionDef names.
+
+## Mutant tally (bin/mut.py, test_gate_review_package, 28 mutants)
+Killed 23: M8 M11 M13 M14b N1 N2 N5 N6 N7 N8 N9 N9b N11 N12 N13 N14 N15 N16 N17 N17b N19 N20 N21. Survived 5 (non-equivalent, R-A1-3): N3 N4 N9c N18 N22. (M24a/M24b/M26 are moot: TEST_TREES is gone; their replacement N5-N8 killed.)
+
+## Transcript replays (finalfix3 package, clean mut clone, step1/step2/step3)
+B5-FIX-7, -17, -18, -21, -22, -23, -26: each OK/FAILED/OK, each reverting edit changed exactly 1 line.
+
+## Observations
+- The checkout moved during review: HEAD 5beb756 "chore(state): B5-FIX-8, -9, -12, -13, -15, -19, -20, -24, -25 pinned" and uncommitted edits to the S2 plan, tools/gates/README.md, tools/gates/make_review_package.py (no edit to my files). Consistent with the controller/fix2 implementer; not verified by me who made the work-tree edits.
+
+## Denials
+none
+
+## Background jobs
+none started
+
+## Budget used
+about 45k tokens, about 20 minutes
+
+## Area A5 report (b5r10-rr-A5.md, verbatim)
+
+status: BLOCKED
+(budget: about 80 % of tokens=100000 used; the one finding R-A5-1 and the remaining checks are listed below.)
+
+verdict: spec: ❌ (R-A5-1) quality: ✅ claims-executed: ❌ (historical claims.md rows not re-run, see Remains)
+B5-FIX-10 (lib part): OPEN (R-A5-1: render still prints 'PASS id: reason' for a PASS Line built directly, so DEC-0024's rule that every PASS line is 'PASS id' is not enforced in lib; also the DEC-0040 siblings (GATE_LINE :37, test :193) are not done: their siblings.md cells name B5-FIX-10 itself)
+B5-FIX-11: CLEAN
+
+## Commits
+none (review only). Clone: $SCR/r10-rr-A5/repo at c2badae (git status clean at the end). Checkout HEAD is now 5beb756 (a controller state commit, pins), and the checkout has uncommitted changes I did not make: M tools/gates/README.md, make_review_package.py, tests/test_gate_dispatch.py, tests/test_gate_plan.py, tests/test_make_review_package.py (a concurrent fix round, I assume; the controller should confirm whose they are).
+
+## Gates (clone at c2badae)
+| command | result |
+|---|---|
+| env -u CLAUDE_PROJECT_DIR PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t . | Ran 638 tests, OK |
+| same with tools/.venv/bin/python3 | Ran 638 tests, OK |
+| python3 tools/gates/run_all.py (only the S2-b5-finalfix3 package present) | rc 0, 129 PASS, 0 other |
+| python3 tools/gates/run_all.py (every checkout package copied into the clone) | rc 0, 197 PASS, 0 other |
+| gate_review_package.py --dir .superpowers/sdd/strict-delivery/review/S2-b5-finalfix3 | rc 0, 30 PASS, 0 other |
+| make_review_package.py strict-delivery A5fresh 5b900bd c2badae | rc 0, "11 commit(s); gates PASS"; commits.txt, diff.patch, gates.txt each byte-EQUAL (cmp) to the package's |
+| gate_dispatch.py --config-check | rc 0, 15 bare PASS lines (no ': reason'); at 5b900bd lib passed() was `def passed(self, id, reason="")` (git show) |
+
+## Transcript replays (replay.py in the clone: step 1, perl step 2 plus a check that git diff shows the mutant applied, git checkout, step 3)
+All 20 package transcripts (B5-FIX-7..-26): PASS/FAIL/PASS, mutant applied, OK. Clone clean afterwards.
+
+## Claims
+| claim | direct | contradiction | output | result |
+|---|---|---|---|---|
+| lib passed() takes no reason (DEC-0024) | test_lib test_passed_takes_no_reason; lib/__init__.py:41-43 | mutation-B5-FIX-10 step 2 (reason param back) | OK; FAILED | PASS |
+| every PASS line is 'PASS id' (DEC-0024; test_lib docstring "no PASS line can carry a reason") | run_all output: grep -c '^PASS [^ ]*:' = 0 | Result with lines.append(Line("PASS","p10.tracked.X","open findings row, file not touched")); render(False) | 'PASS p10.tracked.X: open findings row, file not touched' | FAIL (R-A5-1) |
+| no production caller passes a reason or builds a PASS Line | grep -rn --include='*.py' 'Line("PASS"' / '.passed(..,' in tools/ outside tests | run_all.py:70 copies l.reason for any status | only lib:43 (reason ""); run_all:70 forwards a reason if one exists | PASS today (the path stays open, R-A5-1) |
+| B5-FIX-11: Task 6 Step 5 (plan :6346) cites DEC-0025, no "session ruling"; Task 7 Step 5 (:7121) GATES ends in plan | grep -n 'DEC-0025\|session ruling 2b' on the plan; test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last | 3 mutants in the clone: Task 7 plan 4th; Task 6 plus a "session ruling 2b" cite; Task 6 plan 4th | 0 "session ruling 2b"; OK; FAILED x3, restored OK | PASS |
+| D3: six whole-file blocks EQUAL (:2362 :3108 :3618 :4142 :4490 :5681) | d3.py (every fence, the backticked path in the line before it, vs git show HEAD:path) | same plan vs 6aaba81 and 5b900bd files | EQUAL x6 (also :147 repo_fixture, :227 rows.yml, :363 test_gate_dispatch, :1059 gate_dispatch, :4406 plan/good.md EQUAL); vs 6aaba81 and 5b900bd all six DIFF | PASS |
+| README blocks :2193 :6373 SUB, :7919 DIFF 13/14 as at base | d3.py; a line-by-line grep -xF of the :7919 block in README | n/a (the :7919 block is Task 8/9 text, not implemented) | SUB, SUB; 13 OUT, 1 blank IN | PASS |
+| other DIFF blocks are not whole-file copies | read each: :2172 (Task 3 run_all snippet, stated "Tasks 4 and 6 extend the list"), :6535 (Task 7 fake_gh append, not implemented), mutation/review templates | n/a | stated subsets or future tasks | PASS |
+| counts 81/44/134, suite 638 (plan :3541 :4321 :6428; :1441 says 77) | per-module unittest runs | n/a | review_package 81, make_review_package 44, gate_plan 134, dispatch 77; suite 638 | PASS |
+| README :25 DEC-0037 (py def, Unity void name(void), path/dotted/stem keys, bare anywhere, wrong module none) | defines_test on the real tree: test_text_passes_through_unchanged in devcontroller/test/test_bridge_filter.c bare/stem/path; test_lib name bare and dotted | test_lib::<C name>, test_gate_plan::test_passed_takes_no_reason, test_no_such_name_zz | True x5; False x3 | PASS |
+| README :25 DEC-0038 (any line whose last field is FAIL, fences and pipe-less rows included; prose ending in FAIL passes) | fail_lines on a sample | the same sample's prose line | ['x','FAIL','f','no']; prose line not listed | PASS |
+| README :188 DEC-0024 bare fable_fallback PASS line | --config-check output | n/a | 'PASS dispatch.config.fable_fallback' | PASS |
+| README :197 DEC-0039, :237 DEC-0041 match code | read make_review_package._ignored :83-104 and gate_plan._modes_agree :584-591 | n/a (code checks are areas A2/A3) | text matches the code's branches | PASS |
+| siblings.md: one row per register sibling of every S2-b5-finalfix3 row | sib.py (findings.yml rows with owner.task S2-b5-finalfix3 vs table column 1) | the gate's own review_package.siblings line | 52 register siblings, 52 rows, 0 missing, 0 extra; PASS | PASS |
+| claims.md c2badae rows: suite 638 both, run_all 197 PASS rc 0 | above | above | as stated | PASS |
+
+## Findings raised
+R-A5-1 (B5-FIX-10, MEDIUM; incomplete fix of this block's row): tools/gates/lib/__init__.py:51 render prints the reason of any line whose reason is non-empty, whatever its status, and run_all.py:70 forwards a PASS line's reason; only passed() lost its parameter. Class text: "Result.passed takes a reason and render prints 'PASS id: reason'"; DEC-0024: "every PASS line is 'PASS id'". Reproducer: r=Result("d"); r.lines.append(Line("PASS","x","why")); r.render(False) -> 'PASS x: why'. The approved S3 plan relies on this path: docs/superpowers/plans/2026-10-17-strict-delivery-S3-p10-reach.md:2425 appends Line("PASS", "p10.tracked.%s" % fid, "open findings row, file not touched") and its test :2214 asserts that PASS-with-reason text. Fix: render (text and run_all's copy) drops the reason of a PASS line, or Line refuses a PASS reason; a test through main()/run_all; the S3 plan text :2214/:2425 is a separate question (below).
+Also open on the row (not new): the DEC-0040 siblings are listed in siblings.md with the cell B5-FIX-10 (the row itself); GATE_LINE (gate_review_package.py:37) is still ^(PASS|FAIL) \S+ and test_gates_txt_blank_lines_and_crlf_pass (:193) still feeds 'PASS c: note'. The implementer reported DEC-0040 as not done (owner question); DEC-0040 is answered widen-fix10 in decisions.yml, so the row cannot pin until that fix lands.
+
+## Decision needed
+D-A5-1 (finding class, owner): the S3 plan text (:2214 test, :2425 code) that emits a PASS line with a reason. Options: (a) widen B5-FIX-10's class to name the S3 plan's PASS-with-reason text; cost: plan text edit in this block's fix wave, S3 stays unimplemented; (b) register a new row owned by the S3 plan; cost: one row, fixed when S3 is written up for execution; S3's test would fail against lib as soon as R-A5-1 is fixed.
+
+## Unrelated findings
+none beyond D-A5-1 (the S3 text dates from 73cd3cc, before 5b900bd).
+
+## Mutant tally
+B5-FIX-11 extra mutants: 3 of 3 killed. 20 package transcripts replayed OK.
+
+## Remains (budget)
+The claims.md historical rows (622 tests at 0455eba, 167 run_all lines, 632 at d3ed28d, 49 = 49 siblings at 0455eba, per-row mutant tallies T1-T9/C1-C3/D1-D3/F1-F4/M8-M14b) were not re-executed at their shas; the c2badae rows were.
+
+## Denials
+none.
+
+## Background jobs
+none started.
+
+## Budget used
+about 80k of 100k tokens, about 22 of 25 minutes.

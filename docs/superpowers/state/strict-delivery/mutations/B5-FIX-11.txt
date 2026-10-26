@@ -1,0 +1,5 @@
+finding: B5-FIX-11
+test: test_gate_plan::test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.Branches.test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last -> PASS
+step 2 (fix reverted: perl -pi -e 's/\(DEC-0025: `plan` last;/(session ruling 2b of b5: `plan` last;/' docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md puts back the old Task 6 Step 5 cite, restored by git checkout -- docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.Branches.test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.Branches.test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last -> PASS

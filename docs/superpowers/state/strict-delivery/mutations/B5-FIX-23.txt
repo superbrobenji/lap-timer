@@ -1,0 +1,5 @@
+finding: B5-FIX-23
+test: test_gate_review_package::test_all_mode_dangling_review_symlink_fails
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_dangling_review_symlink_fails -> PASS
+step 2 (fix reverted: perl -pi -e 's/os\.lstat\(review\)/os.stat(review)/' tools/gates/gate_review_package.py follows the review link, so a dangling one is skipped (the lexists->exists class), restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_dangling_review_symlink_fails -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_all_mode_dangling_review_symlink_fails -> PASS

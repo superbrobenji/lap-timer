@@ -169,3 +169,9 @@ CHECKPOINT b4 9704065 -- gates: suite 361 OK (3.9.6 + 3.12.14, -W error), run_al
 - B5-FIX-20 DONE 6aaba81 S2-b5-finalfix3 (round 10); pinned test_gate_plan::test_root_a_subdirectory_reads_its_own_index_and_head_copies; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
 - B5-FIX-24 DONE 6aaba81 S2-b5-finalfix3 (round 10); pinned test_gate_plan::test_a_state_dir_without_ledger_md_is_not_a_ledger; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
 - B5-FIX-25 DONE 6aaba81 S2-b5-finalfix3 (round 10); pinned test_gate_plan::test_a_non_utf8_ledger_fails_naming_the_ledger; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
+- B5-FIX-7 DONE c2badae S2-b5-finalfix3 (round 10); pinned test_gate_review_package::test_a_quoted_first_diff_path_passes; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
+- B5-FIX-11 DONE c2badae S2-b5-finalfix3 (round 10); pinned test_gate_plan::test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
+- B5-FIX-17 DONE c2badae S2-b5-finalfix3 (round 10); pinned test_gate_review_package::test_the_pinned_module_must_be_the_one_the_command_runs; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
+- B5-FIX-18 DONE c2badae S2-b5-finalfix3 (round 10); pinned test_gate_review_package::test_quoted_test_ids_name_the_test; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
+- B5-FIX-21 DONE c2badae S2-b5-finalfix3 (round 10); pinned test_gate_review_package::test_all_mode_unreadable_dirs_fail_never_skip; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
+- B5-FIX-23 DONE c2badae S2-b5-finalfix3 (round 10); pinned test_gate_review_package::test_all_mode_dangling_review_symlink_fails; review docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md

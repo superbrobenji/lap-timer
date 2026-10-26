@@ -710,16 +710,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_a_quoted_first_diff_path_passes
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-7.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: c0316eb
     by: final-review
   - state: planned
     sha: c0316eb
+    by: controller
+  - state: in-progress
+    sha: c2badae
+    by: controller
+  - state: pinned
+    sha: c2badae
     by: controller
 - id: B5-FIX-8
   source: review
@@ -872,16 +881,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_s2_plan_run_all_steps_cite_dec_0025_and_list_plan_last
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-11.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: c2badae
+    by: controller
+  - state: pinned
+    sha: c2badae
     by: controller
 - id: B5-FIX-12
   source: review
@@ -1096,16 +1114,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_the_pinned_module_must_be_the_one_the_command_runs
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-17.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: c2badae
+    by: controller
+  - state: pinned
+    sha: c2badae
     by: controller
 - id: B5-FIX-18
   source: review
@@ -1127,16 +1154,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_quoted_test_ids_name_the_test
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-18.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: c2badae
+    by: controller
+  - state: pinned
+    sha: c2badae
     by: controller
 - id: B5-FIX-19
   source: review
@@ -1253,16 +1289,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_all_mode_unreadable_dirs_fail_never_skip
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-21.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: c2badae
+    by: controller
+  - state: pinned
+    sha: c2badae
     by: controller
 - id: B5-FIX-22
   source: review
@@ -1317,16 +1362,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_review_package::test_all_mode_dangling_review_symlink_fails
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-23.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: c2badae
+    by: controller
+  - state: pinned
+    sha: c2badae
     by: controller
 - id: B5-FIX-24
   source: review

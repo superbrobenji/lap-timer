@@ -1,0 +1,5 @@
+finding: B5-FIX-17
+test: test_gate_review_package::test_the_pinned_module_must_be_the_one_the_command_runs
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_the_pinned_module_must_be_the_one_the_command_runs -> PASS
+step 2 (fix reverted: perl -pi -e 's/^        if module is None:$/        if True:/' tools/gates/gate_review_package.py makes names_test ignore the module half, restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_the_pinned_module_must_be_the_one_the_command_runs -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_the_pinned_module_must_be_the_one_the_command_runs -> PASS

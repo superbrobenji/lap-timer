@@ -1,0 +1,5 @@
+finding: B5-FIX-7
+test: test_gate_review_package::test_a_quoted_first_diff_path_passes
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_a_quoted_first_diff_path_passes -> PASS
+step 2 (fix reverted: perl -pi -e 's/text\.startswith\(\("diff --git a\/", .diff --git "a\/.\)\)/text.startswith("diff --git a\/")/' tools/gates/gate_review_package.py puts back the literal 'diff --git a/' start check, so a quoted first path FAILs, restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_a_quoted_first_diff_path_passes -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_a_quoted_first_diff_path_passes -> PASS

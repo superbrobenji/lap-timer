@@ -1,0 +1,5 @@
+finding: B5-FIX-18
+test: test_gate_review_package::test_quoted_test_ids_name_the_test
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_quoted_test_ids_name_the_test -> PASS
+step 2 (fix reverted: perl -pi -e 's/return shlex\.split\(cmd\)/return cmd.split()/' tools/gates/gate_review_package.py splits the command on whitespace without shell parsing, restored by git checkout -- tools/gates/gate_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_quoted_test_ids_name_the_test -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_review_package.GateReviewPackage.test_quoted_test_ids_name_the_test -> PASS
