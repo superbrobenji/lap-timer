@@ -988,11 +988,13 @@
   class: 'the PARALLEL overlap check compares raw Files strings after ./ and .. normalisation
     only (gate_plan.py:473): a case variant (SRC/Alpha.py vs src/alpha.py, one file
     on case-insensitive APFS), a directory item that contains the other task''s file,
-    and a backslash spelling all pass (b5 final review A3-V1)'
+    and a backslash spelling all pass (b5 final review A3-V1); DEC-0045 widen-fix14: NFC
+    and NFD spellings of one file name (one file on APFS) also pass (b5 round 10 R-A3-1)'
   siblings:
   - case variant
   - directory containing a file
   - backslash spelling
+  - Unicode normalisation spelling, NFC vs NFD (DEC-0045)
   cites:
   - file: tools/gates/gate_plan.py
     lines: 468-474
@@ -1066,13 +1068,17 @@
     A2-V2); DEC-0033 exempt-pycache: __pycache__ directories and their .pyc files
     are exempt like the packages dir; DEC-0039 widen-all-plans: ''the plan'' widens
     to every plan the gates read, so an ignored file under another in-flight plan
-    is reported too (b5 round 9 R-A2-1)'
+    is reported too (b5 round 9 R-A2-1); DEC-0044 gates-and-state-only: the __pycache__
+    exemption applies only under tools/gates and the state dir, so a plan or spec path
+    under __pycache__ is reported; DEC-0048 widen-fix16: the spec file the gates read
+    (gate_plan.py:434) is checked too (b5 round 10 A23b)'
   siblings:
   - file hidden by .git/info/exclude
   - file hidden by .gitignore
   - packages dir stays allowed
   - __pycache__ stays allowed (DEC-0033)
   - ignored file under another plan the gates read (DEC-0039)
+  - ignored file under the spec file the gates read (DEC-0048)
   cites:
   - file: tools/gates/make_review_package.py
     lines: 88-95
