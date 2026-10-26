@@ -1,0 +1,5 @@
+finding: B5-FIX-15
+test: test_gate_plan::test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour -> PASS
+step 2 (fix reverted: perl -pi -e 's/PIN_WORD = re\.compile\("\[pP\]\[iI\]\[nN\]"\)/PIN_WORD = re.compile("pin", re.I)/' tools/gates/gate_plan.py puts back re.I, which folds U+0131/U+0130 into i, restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour -> PASS

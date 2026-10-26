@@ -1,0 +1,5 @@
+finding: B5-FIX-20
+test: test_gate_plan::test_root_a_subdirectory_reads_its_own_index_and_head_copies
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.LedgerCopies.test_root_a_subdirectory_reads_its_own_index_and_head_copies -> PASS
+step 2 (fix reverted: perl -pi -e 's/:\.\/\{rel\}/:{rel}/g' tools/gates/gate_plan.py reads the index and HEAD copies relative to the repository top again, restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.LedgerCopies.test_root_a_subdirectory_reads_its_own_index_and_head_copies -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.LedgerCopies.test_root_a_subdirectory_reads_its_own_index_and_head_copies -> PASS

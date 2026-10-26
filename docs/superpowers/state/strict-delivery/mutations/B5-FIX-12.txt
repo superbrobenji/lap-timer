@@ -1,0 +1,5 @@
+finding: B5-FIX-12
+test: test_gate_plan::test_a_files_style_item_outside_the_files_list_fails
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_a_files_style_item_outside_the_files_list_fails -> PASS
+step 2 (fix reverted: perl -pi -e 's/cur\.files_errors\.append\(f"a /(lambda *a: None)(f"a /' tools/gates/gate_plan.py drops the stray Files-item error (the item is skipped, fails open), restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_a_files_style_item_outside_the_files_list_fails -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_a_files_style_item_outside_the_files_list_fails -> PASS

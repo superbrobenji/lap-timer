@@ -1,0 +1,5 @@
+finding: B5-FIX-13
+test: test_gate_plan::test_absolute_and_dot_dot_paths_fail
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_absolute_and_dot_dot_paths_fail -> PASS
+step 2 (fix reverted: perl -pi -e 's/task\.files_errors\.append\(f"an absolute path/(lambda *a: None)(f"an absolute path/' tools/gates/gate_plan.py drops the absolute/'..' path error, restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_absolute_and_dot_dot_paths_fail -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.FixWave3.test_absolute_and_dot_dot_paths_fail -> PASS

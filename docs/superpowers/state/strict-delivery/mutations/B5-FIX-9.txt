@@ -1,0 +1,5 @@
+finding: B5-FIX-9
+test: test_make_review_package::test_package_name_with_a_slash_is_refused
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_package_name_with_a_slash_is_refused -> PASS
+step 2 (fix reverted: perl -pi -e 's{\[A-Za-z0-9\._-\]\*\$"\)}{[A-Za-z0-9._/-]*\$")}' tools/gates/make_review_package.py lets NAME accept a slash in the package name (mutant M22), restored by git checkout -- tools/gates/make_review_package.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_package_name_with_a_slash_is_refused -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_make_review_package.MakeReviewPackage.test_package_name_with_a_slash_is_refused -> PASS

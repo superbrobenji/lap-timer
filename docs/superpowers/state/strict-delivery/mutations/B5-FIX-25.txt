@@ -1,0 +1,5 @@
+finding: B5-FIX-25
+test: test_gate_plan::test_a_non_utf8_ledger_fails_naming_the_ledger
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.LedgerCopies.test_a_non_utf8_ledger_fails_naming_the_ledger -> PASS
+step 2 (fix reverted: perl -pi -e 's/raise GateError\(f"\{rel\}: not UTF-8.*$/raise/' tools/gates/gate_plan.py re-raises the bare UnicodeDecodeError, which names no ledger, restored by git checkout -- tools/gates/gate_plan.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.LedgerCopies.test_a_non_utf8_ledger_fails_naming_the_ledger -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_plan.LedgerCopies.test_a_non_utf8_ledger_fails_naming_the_ledger -> PASS

@@ -581,8 +581,9 @@
     staged in the index while the working file equals HEAD (only working bytes are
     compared with HEAD); DEC-0034 widen-fix5: the three copies (HEAD, index, working
     tree) are compared by file mode and type as well as bytes, so an uncommitted change
-    that keeps the bytes (a work-tree symlink, a mode change staged or in the work tree,
-    a state dir replaced by a symlink) is in flight (b5r8-review1 R1-1, A3 verifier O-1)'
+    that keeps the bytes (a work-tree symlink, a mode change staged or in the work
+    tree, a state dir replaced by a symlink) is in flight (b5r8-review1 R1-1, A3 verifier
+    O-1)'
   siblings:
   - ledger deleted in the working tree
   - ledger lines staged only
@@ -743,16 +744,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_dispatch::test_config_check_fails_a_fallback_other_than_opus_whatever_its_rank
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-8.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: c0316eb
     by: final-review
   - state: planned
     sha: c0316eb
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-9
   source: review
@@ -774,16 +784,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_make_review_package::test_package_name_with_a_slash_is_refused
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-9.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: c0316eb
     by: final-review
   - state: planned
     sha: c0316eb
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-10
   source: review
@@ -792,8 +811,8 @@
     added 1a6ff7c), against spec :191 and umbrella :114 ''PASS id''; DEC-0024 code-to-spec:
     passed() takes no reason and every PASS line is ''PASS id'' (b5 final review A5-R1/A5-V4);
     DEC-0040 widen-fix10: the class covers the review-package GATE_LINE (gate_review_package.py:36,
-    which accepts ''PASS c: note'') and its test (test_gate_review_package.py:189, which
-    asserts it) (b5 round 9 U-A4-2)'
+    which accepts ''PASS c: note'') and its test (test_gate_review_package.py:189,
+    which asserts it) (b5 round 9 U-A4-2)'
   siblings:
   - passed() signature takes no reason
   - every caller passing a reason (gate_dispatch.py:118, :344, :347)
@@ -886,16 +905,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_a_files_style_item_outside_the_files_list_fails
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-12.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-13
   source: review
@@ -916,16 +944,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_absolute_and_dot_dot_paths_fail
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-13.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-14
   source: review
@@ -980,16 +1017,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_pin_title_needs_the_ascii_word_and_no_format_character_neighbour
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-15.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-16
   source: review
@@ -999,10 +1045,10 @@
     under a path the gates read (tools/gates, docs/superpowers/state, the plan) passes
     and gates.txt then reads it; DEC-0029 check-excluded: the check also reports ignored
     or excluded files under those paths, the packages dir excepted (b5 final review
-    A2-V2); DEC-0033 exempt-pycache: __pycache__ directories and their .pyc files are
-    exempt like the packages dir; DEC-0039 widen-all-plans: ''the plan'' widens to every
-    plan the gates read, so an ignored file under another in-flight plan is reported
-    too (b5 round 9 R-A2-1)'
+    A2-V2); DEC-0033 exempt-pycache: __pycache__ directories and their .pyc files
+    are exempt like the packages dir; DEC-0039 widen-all-plans: ''the plan'' widens
+    to every plan the gates read, so an ignored file under another in-flight plan
+    is reported too (b5 round 9 R-A2-1)'
   siblings:
   - file hidden by .git/info/exclude
   - file hidden by .gitignore
@@ -1121,16 +1167,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_a_block_of_exactly_max_tasks_passes
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-19.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-20
   source: review
@@ -1155,16 +1210,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_root_a_subdirectory_reads_its_own_index_and_head_copies
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-20.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-21
   source: review
@@ -1205,9 +1269,9 @@
   severity: MEDIUM
   class: 'gate_review_package reads only the first table of claims.md (gate_review_package.py:50-63,
     :169-181): a FAIL row after a blank line or in a second table gives rc 0, against
-    umbrella :266 (''fails if claims.md has a FAIL row''; spec §7 names only a claims-executed table) and README:25
-    (''a claims table with no FAIL row''); the docstring''s ''first table'' is unauthorised
-    (b5 final review A1-V2)'
+    umbrella :266 (''fails if claims.md has a FAIL row''; spec §7 names only a claims-executed
+    table) and README:25 (''a claims table with no FAIL row''); the docstring''s ''first
+    table'' is unauthorised (b5 final review A1-V2)'
   siblings:
   - FAIL row after a blank line
   - FAIL row in a second table
@@ -1271,8 +1335,8 @@
     code): a state dir without ledger.md (gate_plan.py:516, mutant M14), and the missing-state-dir
     raise (:537, mutant M11) which test_missing_state_directory_fails (test_gate_plan.py:841)
     only passes because load_findings fails first (b5 final review A3-V6/A3-V7); DEC-0042
-    narrow-sibling: the missing-state-dir sibling is the plans_in_flight() call, its direct
-    test stays'
+    narrow-sibling: the missing-state-dir sibling is the plans_in_flight() call, its
+    direct test stays'
   siblings:
   - state dir without ledger.md
   - missing state dir reached through the plans_in_flight() call (DEC-0042)
@@ -1292,16 +1356,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_a_state_dir_without_ledger_md_is_not_a_ledger
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-24.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
     by: final-review
   - state: planned
     sha: 4be15f8
+    by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
     by: controller
 - id: B5-FIX-25
   source: review
@@ -1321,10 +1394,13 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-finalfix3
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_plan::test_a_non_utf8_ledger_fails_naming_the_ledger
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-FIX-25.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-finalfix3.md
   history:
   - state: open
     sha: 4be15f8
@@ -1332,12 +1408,18 @@
   - state: planned
     sha: 4be15f8
     by: controller
+  - state: in-progress
+    sha: 6aaba81
+    by: controller
+  - state: pinned
+    sha: 6aaba81
+    by: controller
 - id: B5-FIX-26
   source: review
   severity: LOW
   class: 'gate_review_package checks a siblings.md test cell for syntax only (TEST_NAME,
-    gate_review_package.py:39, used by _sibling_ok :174-175), so a test name that no
-    test defines passes review_package.<plan>.<task>.siblings; DEC-0035 resolve-names:
+    gate_review_package.py:39, used by _sibling_ok :174-175), so a test name that
+    no test defines passes review_package.<plan>.<task>.siblings; DEC-0035 resolve-names:
     the cell''s `def <name>` is resolved under the test trees and a missing name FAILs
     (b5 final review A1-R2)'
   siblings:
