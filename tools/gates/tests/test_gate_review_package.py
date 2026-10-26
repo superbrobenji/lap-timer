@@ -46,8 +46,13 @@ class GateReviewPackage(unittest.TestCase):
     def setUp(self):
         self.root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows())
         self.addCleanup(shutil.rmtree, self.root, True)
-        rf.write(self.root, *TESTS)
+        self.track(*TESTS)
         self.put(GOOD)
+
+    def track(self, rel, text):
+        """Write a test file and git-add it (DEC-0037: only tracked test files resolve sibling cells)."""
+        rf.write(self.root, rel, text)
+        rf.git(self.root, "add", "--", rel)
 
     def put(self, files):
         for name, text in files.items():
@@ -67,7 +72,7 @@ class GateReviewPackage(unittest.TestCase):
         edit(rows)
         self.root = rf.make_repo(rf.DISPATCH_FILES, rows)
         self.addCleanup(shutil.rmtree, self.root, True)
-        rf.write(self.root, *TESTS)
+        self.track(*TESTS)
         self.put(GOOD)
 
     def test_good_package_passes(self):
@@ -226,6 +231,20 @@ class GateReviewPackage(unittest.TestCase):
             with self.subTest(name):
                 self.put({"claims.md": text})
                 self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: c")
+        sep = "|---|---|---|---|---|\n"
+        for name, text in (("a FAIL line followed by a separator (DEC-0038)", GOOD["claims.md"] + "\n" + fail_row + sep),
+                           ("a FAIL line as the first header (DEC-0038)", fail_row + sep + GOOD["claims.md"].split("\n", 2)[2]),
+                           ("a FAIL row with no leading pipe (DEC-0038)", GOOD["claims.md"] + "c | d | x | o | FAIL |\n"),
+                           ("no pipes at either end (DEC-0038)", GOOD["claims.md"] + "\nc | d | x | o | FAIL\n"),
+                           ("inside a code fence (DEC-0038)", GOOD["claims.md"] + "```\n" + fail_row + "```\n")):
+            with self.subTest(name):
+                self.put({"claims.md": text})
+                self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: c")
+        self.put({"claims.md": GOOD["claims.md"] + "\nFAIL\n"})    # a line with no '|' is its own trailing field
+        self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: FAIL")
+        self.put({"claims.md": GOOD["claims.md"] + "\nprose that ends in FAIL\n| x | FAIL is in a cell | c | o | PASS |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
         self.put({"claims.md": GOOD["claims.md"] + "\n" + head + fail_row.replace("FAIL", "PASS")})
         rc, out = self.check()
         self.assertEqual(0, rc, out)
@@ -306,7 +325,7 @@ class GateReviewPackage(unittest.TestCase):
 
     def test_sibling_test_module_that_does_not_exist_fails(self):    # B5-FIX-26 (DEC-0035)
         head = "| sibling | test or finding |\n|---|---|\n"
-        rf.write(self.root, "src/test_src.py", "def test_sib():\n    pass\n")    # not under a test tree
+        rf.write(self.root, "src/test_src.py", "def test_sib():\n    pass\n")    # untracked (DEC-0037)
         for cell in ("test_missing::test_sib", "test_missing.T.test_sib", "T.test_sib", "src/test_src.py::test_sib",
                      "tools/gates/tests/test_missing.py::T::test_sib", "test_src::test_sib"):
             with self.subTest(cell=cell):
@@ -315,8 +334,8 @@ class GateReviewPackage(unittest.TestCase):
 
     def test_sibling_name_defined_only_in_another_test_module_fails(self):    # B5-FIX-26 (DEC-0035)
         head = "| sibling | test or finding |\n|---|---|\n"
-        rf.write(self.root, "tools/gates/tests/test_other.py", "def test_only_here():\n    pass\n")
-        rf.write(self.root, "tools/lint/test_lint.py", "class L:\n    async def test_lint_only(self):\n        pass\n")
+        self.track("tools/gates/tests/test_other.py", "def test_only_here():\n    pass\n")
+        self.track("tools/lint/test_lint.py", "class L:\n    async def test_lint_only(self):\n        pass\n")
         rf.write(self.root, "tools/gates/tests/tools.py", "x = 1\n")    # a shorter dotted prefix that is a module too
         for cell, ok in (("test_fx::test_only_here", False), ("test_fx.T.test_only_here", False),
                          ("test_other::test_only_here", True), ("tools.gates.tests.test_other.test_only_here", True),
@@ -328,6 +347,59 @@ class GateReviewPackage(unittest.TestCase):
                     self.assertEqual(0, rc, out)
                 else:
                     self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_sibling_names_resolve_in_every_tracked_test_file(self):    # B5-FIX-26 (DEC-0037 tracked-tests)
+        """A cell resolves against every git-tracked test_*.py, and Unity `void test_<name>(void)` in a tracked
+        test_*.c; an untracked test file resolves nothing; a stem two tracked files share resolves in either."""
+        head = "| sibling | test or finding |\n|---|---|\n"
+        self.track("src/deep/test_far.py", "class F:\n    def test_far_away(self):\n        pass\n")
+        self.track("tools/tracks/test_trk.py", "def test_in_tracks():\n    pass\n")
+        self.track("tools/test_top.py", "def test_in_tools():\n    pass\n")
+        self.track("test/test_lap.c", "#include \"unity.h\"\nvoid test_lap_cross(void)\n{\n}\n"
+                                      "static int test_not_unity(int x) { return x; }\n")
+        self.track("a/test_dup.py", "def test_dup_a():\n    pass\n")
+        self.track("b/test_dup.py", "def test_dup_b():\n    pass\n")
+        self.track("x/test_gone.py", "def test_gone():\n    pass\n")
+        os.remove(os.path.join(self.root, "x/test_gone.py"))    # tracked, deleted in the work tree: skipped
+        rf.write(self.root, "src/test_loose.py", "def test_untracked_only():\n    pass\n")    # never git-added
+        rf.write(self.root, "test/test_loose.c", "void test_untracked_c(void)\n{\n}\n")
+        for cell, ok in (("test_far::test_far_away", True), ("src.deep.test_far.F.test_far_away", True),
+                         ("src/deep/test_far.py::F::test_far_away", True), ("test_far_away", True),
+                         ("test_trk::test_in_tracks", True), ("test_top::test_in_tools", True),
+                         ("test_lap::test_lap_cross", True), ("test_lap_cross", True), ("test/test_lap.c::test_lap_cross", True),
+                         ("test_dup::test_dup_a", True), ("test_dup::test_dup_b", True), ("a.test_dup.test_dup_a", True),
+                         ("a.test_dup.test_dup_b", False), ("test_dup::test_far_away", False),
+                         ("test_lap::test_not_unity", False), ("test_far::test_lap_cross", False),
+                         ("test_untracked_only", False), ("test_loose::test_untracked_only", False),
+                         ("test_untracked_c", False), ("test_gone::test_gone", False)):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                if ok:
+                    rc, out = self.check()
+                    self.assertEqual(0, rc, out)
+                else:
+                    self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_module_qualified_header_and_pytest_class_token_pass(self):    # B5-FIX-17 (R-A1-1, R-A1-3)
+        """A transcript header `test: test_mod::test_fx` that is the pin passes, and so does a pytest token
+        `test_mod::T::test_fx` (the bare module name before '::')."""
+        self.with_rows(lambda r: r["findings"][0].update(pin={"test": "test_mod::test_fx", "transcript": "docs/x.txt"}))
+        for cmd in ("test_mod.T.test_fx", "test_mod::T::test_fx", "test_mod::test_fx"):
+            with self.subTest(cmd=cmd):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", cmd)
+                          .replace("test: test_fx", "test: test_mod::test_fx")})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+                self.assertIn("PASS review_package.mutation.SD-FX-1\n", out)
+
+    def test_unbalanced_quote_command_is_split_on_whitespace(self):    # B5-FIX-18 (R-A1-2)
+        """A command shlex cannot parse (an unbalanced quote) is split on whitespace: `'t.T.test_fx` names
+        test_fx and PASSes; `'t.T.test_fx_other` does not and FAILs."""
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "'t.T.test_fx")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "'t.T.test_fx_other")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "does not name the test")
 
     def test_sibling_rows_need_two_cells_and_a_name(self):
         head = "| sibling | test or finding |\n|---|---|\n"

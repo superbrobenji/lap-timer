@@ -572,6 +572,25 @@ def _work_mode(root: str, rel: str) -> str:
     return "100755" if os.stat(path).st_mode & 0o100 else "100644"
 
 
+REGULAR = ("100644", "100755")
+
+
+def _file_mode(root: str) -> bool:
+    """core.fileMode as git reads it for root (DEC-0041 honour-filemode); true when unset or unreadable."""
+    r = subprocess.run(["git", "config", "--bool", "core.fileMode"], cwd=root, capture_output=True, check=False)
+    return r.stdout.decode("utf-8", "replace").strip() != "false"
+
+
+def _modes_agree(root: str, rel: str, file_mode: bool) -> bool:
+    """DEC-0034: the work tree, index and HEAD entries of <rel> have one mode and type; DEC-0041: with
+    core.fileMode=false a regular file's work-tree exec bit is ignored, as git ignores it. Called only once
+    all three copies exist."""
+    index_mode, work_mode = _git_mode(root, ["ls-files", "-s"], rel), _work_mode(root, rel)
+    if not file_mode and work_mode in REGULAR and index_mode in REGULAR:
+        work_mode = index_mode
+    return work_mode == index_mode == _git_mode(root, ["ls-tree", "HEAD"], rel)
+
+
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
     """(state-dir name, plan path) for every ledger that is in flight. A ledger is any <STATE>/<name>/ledger.md
     in the working tree, the index or HEAD (B5-FIX-5: a ledger deleted in the working tree or the index is
@@ -579,13 +598,16 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
     line (B5-FIX-4: an uncommitted 'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight;
     B5-FIX-5: a copy missing from any of the three, or lines staged while the working tree equals HEAD, is
     in flight; a ledger absent at HEAD is in flight; DEC-0034: a copy whose mode or type differs, a
-    symlink on its working-tree path included, is in flight). Line 1 'plan: <plan file>' is read from the newest
+    symlink on its working-tree path included, is in flight; DEC-0041: with core.fileMode=false the
+    working tree's exec bit is ignored as git ignores it, while a staged mode change, a type change and a
+    symlink stay in flight). Line 1 'plan: <plan file>' is read from the newest
     copy that exists: the working tree, else the index, else HEAD (the copy the author is changing)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
     names = (_work_ledgers(state) | _git_ledgers(root, ["ls-files"])
              | _git_ledgers(root, ["ls-tree", "-r", "--name-only", "HEAD"]))
+    file_mode = _file_mode(root)
     out = []
     for name in sorted(names):
         rel = f"{STATE}/{name}/ledger.md"
@@ -601,9 +623,7 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
         # DEC-0034: the copies also agree on file mode and type (a symlink, an exec bit staged or not)
-        if not (_closed(text) and copies[0] == copies[1] == copies[2]
-                and _work_mode(root, rel) == _git_mode(root, ["ls-files", "-s"], rel)
-                == _git_mode(root, ["ls-tree", "HEAD"], rel)):
+        if not (_closed(text) and copies[0] == copies[1] == copies[2] and _modes_agree(root, rel, file_mode)):
             out.append((name, m.group(1)))
     return out
 

@@ -2408,8 +2408,13 @@ class GateReviewPackage(unittest.TestCase):
     def setUp(self):
         self.root = rf.make_repo(rf.DISPATCH_FILES, rf.load_rows())
         self.addCleanup(shutil.rmtree, self.root, True)
-        rf.write(self.root, *TESTS)
+        self.track(*TESTS)
         self.put(GOOD)
+
+    def track(self, rel, text):
+        """Write a test file and git-add it (DEC-0037: only tracked test files resolve sibling cells)."""
+        rf.write(self.root, rel, text)
+        rf.git(self.root, "add", "--", rel)
 
     def put(self, files):
         for name, text in files.items():
@@ -2429,7 +2434,7 @@ class GateReviewPackage(unittest.TestCase):
         edit(rows)
         self.root = rf.make_repo(rf.DISPATCH_FILES, rows)
         self.addCleanup(shutil.rmtree, self.root, True)
-        rf.write(self.root, *TESTS)
+        self.track(*TESTS)
         self.put(GOOD)
 
     def test_good_package_passes(self):
@@ -2588,6 +2593,20 @@ class GateReviewPackage(unittest.TestCase):
             with self.subTest(name):
                 self.put({"claims.md": text})
                 self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: c")
+        sep = "|---|---|---|---|---|\n"
+        for name, text in (("a FAIL line followed by a separator (DEC-0038)", GOOD["claims.md"] + "\n" + fail_row + sep),
+                           ("a FAIL line as the first header (DEC-0038)", fail_row + sep + GOOD["claims.md"].split("\n", 2)[2]),
+                           ("a FAIL row with no leading pipe (DEC-0038)", GOOD["claims.md"] + "c | d | x | o | FAIL |\n"),
+                           ("no pipes at either end (DEC-0038)", GOOD["claims.md"] + "\nc | d | x | o | FAIL\n"),
+                           ("inside a code fence (DEC-0038)", GOOD["claims.md"] + "```\n" + fail_row + "```\n")):
+            with self.subTest(name):
+                self.put({"claims.md": text})
+                self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: c")
+        self.put({"claims.md": GOOD["claims.md"] + "\nFAIL\n"})    # a line with no '|' is its own trailing field
+        self.assertFailLine(*self.check(), "review_package.claims", "FAIL rows: FAIL")
+        self.put({"claims.md": GOOD["claims.md"] + "\nprose that ends in FAIL\n| x | FAIL is in a cell | c | o | PASS |\n"})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
         self.put({"claims.md": GOOD["claims.md"] + "\n" + head + fail_row.replace("FAIL", "PASS")})
         rc, out = self.check()
         self.assertEqual(0, rc, out)
@@ -2668,7 +2687,7 @@ class GateReviewPackage(unittest.TestCase):
 
     def test_sibling_test_module_that_does_not_exist_fails(self):    # B5-FIX-26 (DEC-0035)
         head = "| sibling | test or finding |\n|---|---|\n"
-        rf.write(self.root, "src/test_src.py", "def test_sib():\n    pass\n")    # not under a test tree
+        rf.write(self.root, "src/test_src.py", "def test_sib():\n    pass\n")    # untracked (DEC-0037)
         for cell in ("test_missing::test_sib", "test_missing.T.test_sib", "T.test_sib", "src/test_src.py::test_sib",
                      "tools/gates/tests/test_missing.py::T::test_sib", "test_src::test_sib"):
             with self.subTest(cell=cell):
@@ -2677,8 +2696,8 @@ class GateReviewPackage(unittest.TestCase):
 
     def test_sibling_name_defined_only_in_another_test_module_fails(self):    # B5-FIX-26 (DEC-0035)
         head = "| sibling | test or finding |\n|---|---|\n"
-        rf.write(self.root, "tools/gates/tests/test_other.py", "def test_only_here():\n    pass\n")
-        rf.write(self.root, "tools/lint/test_lint.py", "class L:\n    async def test_lint_only(self):\n        pass\n")
+        self.track("tools/gates/tests/test_other.py", "def test_only_here():\n    pass\n")
+        self.track("tools/lint/test_lint.py", "class L:\n    async def test_lint_only(self):\n        pass\n")
         rf.write(self.root, "tools/gates/tests/tools.py", "x = 1\n")    # a shorter dotted prefix that is a module too
         for cell, ok in (("test_fx::test_only_here", False), ("test_fx.T.test_only_here", False),
                          ("test_other::test_only_here", True), ("tools.gates.tests.test_other.test_only_here", True),
@@ -2690,6 +2709,59 @@ class GateReviewPackage(unittest.TestCase):
                     self.assertEqual(0, rc, out)
                 else:
                     self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_sibling_names_resolve_in_every_tracked_test_file(self):    # B5-FIX-26 (DEC-0037 tracked-tests)
+        """A cell resolves against every git-tracked test_*.py, and Unity `void test_<name>(void)` in a tracked
+        test_*.c; an untracked test file resolves nothing; a stem two tracked files share resolves in either."""
+        head = "| sibling | test or finding |\n|---|---|\n"
+        self.track("src/deep/test_far.py", "class F:\n    def test_far_away(self):\n        pass\n")
+        self.track("tools/tracks/test_trk.py", "def test_in_tracks():\n    pass\n")
+        self.track("tools/test_top.py", "def test_in_tools():\n    pass\n")
+        self.track("test/test_lap.c", "#include \"unity.h\"\nvoid test_lap_cross(void)\n{\n}\n"
+                                      "static int test_not_unity(int x) { return x; }\n")
+        self.track("a/test_dup.py", "def test_dup_a():\n    pass\n")
+        self.track("b/test_dup.py", "def test_dup_b():\n    pass\n")
+        self.track("x/test_gone.py", "def test_gone():\n    pass\n")
+        os.remove(os.path.join(self.root, "x/test_gone.py"))    # tracked, deleted in the work tree: skipped
+        rf.write(self.root, "src/test_loose.py", "def test_untracked_only():\n    pass\n")    # never git-added
+        rf.write(self.root, "test/test_loose.c", "void test_untracked_c(void)\n{\n}\n")
+        for cell, ok in (("test_far::test_far_away", True), ("src.deep.test_far.F.test_far_away", True),
+                         ("src/deep/test_far.py::F::test_far_away", True), ("test_far_away", True),
+                         ("test_trk::test_in_tracks", True), ("test_top::test_in_tools", True),
+                         ("test_lap::test_lap_cross", True), ("test_lap_cross", True), ("test/test_lap.c::test_lap_cross", True),
+                         ("test_dup::test_dup_a", True), ("test_dup::test_dup_b", True), ("a.test_dup.test_dup_a", True),
+                         ("a.test_dup.test_dup_b", False), ("test_dup::test_far_away", False),
+                         ("test_lap::test_not_unity", False), ("test_far::test_lap_cross", False),
+                         ("test_untracked_only", False), ("test_loose::test_untracked_only", False),
+                         ("test_untracked_c", False), ("test_gone::test_gone", False)):
+            with self.subTest(cell=cell):
+                self.put({"siblings.md": head + f"| sib-a | {cell} |\n"})
+                if ok:
+                    rc, out = self.check()
+                    self.assertEqual(0, rc, out)
+                else:
+                    self.assertFailLine(*self.check(), "review_package.siblings", f"defined in no test module named: {cell}")
+
+    def test_module_qualified_header_and_pytest_class_token_pass(self):    # B5-FIX-17 (R-A1-1, R-A1-3)
+        """A transcript header `test: test_mod::test_fx` that is the pin passes, and so does a pytest token
+        `test_mod::T::test_fx` (the bare module name before '::')."""
+        self.with_rows(lambda r: r["findings"][0].update(pin={"test": "test_mod::test_fx", "transcript": "docs/x.txt"}))
+        for cmd in ("test_mod.T.test_fx", "test_mod::T::test_fx", "test_mod::test_fx"):
+            with self.subTest(cmd=cmd):
+                self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", cmd)
+                          .replace("test: test_fx", "test: test_mod::test_fx")})
+                rc, out = self.check()
+                self.assertEqual(0, rc, out)
+                self.assertIn("PASS review_package.mutation.SD-FX-1\n", out)
+
+    def test_unbalanced_quote_command_is_split_on_whitespace(self):    # B5-FIX-18 (R-A1-2)
+        """A command shlex cannot parse (an unbalanced quote) is split on whitespace: `'t.T.test_fx` names
+        test_fx and PASSes; `'t.T.test_fx_other` does not and FAILs."""
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "'t.T.test_fx")})
+        rc, out = self.check()
+        self.assertEqual(0, rc, out)
+        self.put({"mutation-SD-FX-1.txt": MUT.replace("t.T.test_fx", "'t.T.test_fx_other")})
+        self.assertFailLine(*self.check(), "review_package.mutation.SD-FX-1", "does not name the test")
 
     def test_sibling_rows_need_two_cells_and_a_name(self):
         head = "| sibling | test or finding |\n|---|---|\n"
@@ -3053,6 +3125,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -3073,7 +3146,8 @@ GATE_LINE = re.compile(r"^(PASS|FAIL) \S+")
 DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mode|old mode|new mode"
                        r"|similarity index|rename |copy |Binary files )")
 TEST_NAME = re.compile(r"^(?:[\w.\-/]+::)*(?:\w+\.)*test_\w+$")
-TEST_TREES = ("tools/gates/tests", "tools/lint", "tools/tracks", "tools")    # the dirs holding test_*.py
+TEST_FILE = re.compile(r"^test_\w*\.(py|c)$")    # DEC-0037: tracked test_*.py, and Unity test_*.c sources
+DEFINES = {"py": r"^[ \t]*(?:async[ \t]+)?def {name}\(", "c": r"^[ \t]*void[ \t]+{name}[ \t]*\([ \t]*void[ \t]*\)"}
 
 
 def _read(path: str) -> str:
@@ -3213,34 +3287,40 @@ def _sibling_ok(cell: str, findings: list) -> bool:
 
 
 def test_modules(root: str) -> dict:
-    """{key: source} of every .py file directly in a TEST_TREES dir; a file's keys are its root-relative
-    path, that path dotted without '.py', and its bare stem (the first tree holding a stem wins)."""
+    """{key: [(kind, source), ...]} of every tracked test file (DEC-0037: `git ls-files` under root, basename
+    test_*.py or a Unity test_*.c); a file's keys are its root-relative path, that path dotted without the
+    extension, and its bare stem. A key two files share (a stem in two dirs) lists both."""
+    r = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=False)
     out = {}
-    for tree in TEST_TREES:
-        d = os.path.join(root, tree)
-        for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-            path = os.path.join(d, n)
-            if n.endswith(".py") and os.path.isfile(path):
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    text = f.read()
-                for key in (f"{tree}/{n}", f"{tree}/{n[:-3]}".replace("/", "."), n[:-3]):
-                    out.setdefault(key, text)
+    for rel in sorted(r.stdout.decode("utf-8", "surrogateescape").split("\0")):    # a failing git prints nothing
+        m = TEST_FILE.match(os.path.basename(rel))
+        path = os.path.join(root, rel)
+        if not m or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            entry = (m.group(1), f.read())
+        stem = rel[:-len(m.group(1)) - 1]
+        for key in (rel, stem.replace("/", "."), os.path.basename(stem)):
+            out.setdefault(key, []).append(entry)
     return out
 
 
 def defines_test(cell: str, modules: dict) -> bool:
-    """B5-FIX-26 (DEC-0035): the test a siblings.md cell names exists: its module (the part before the
-    first '::', else the longest dotted prefix that is a module key) defines `def <name>`; a bare
-    `test_<x>` is defined in any test module. A named module that is no key resolves nothing."""
+    """B5-FIX-26 (DEC-0035, DEC-0037): the test a siblings.md cell names exists: a file its module (the part
+    before the first '::', else the longest dotted prefix that is a module key) names defines it (`def <name>(`
+    in Python, `void <name>(void)` in Unity C); a bare `test_<x>` is defined in any tracked test file. A named
+    module that is no key resolves nothing."""
     parts = cell.split("::")
     name = parts[-1].split(".")[-1]
-    defined = re.compile(rf"^[ \t]*(?:async[ \t]+)?def {name}\(", re.M)
+
+    def defined(files):
+        return any(re.search(DEFINES[kind].format(name=name), text, re.M) for kind, text in files)
     dotted = parts[0].split(".")[:-1]
     if len(parts) == 1 and not dotted:
-        return any(defined.search(t) for t in modules.values())
+        return any(defined(files) for files in modules.values())
     mods = parts[:1] if len(parts) > 1 else [".".join(dotted[:k]) for k in range(len(dotted), 0, -1)]
     mod = next((m for m in mods if m in modules), None)
-    return mod is not None and bool(defined.search(modules[mod]))
+    return mod is not None and defined(modules[mod])
 
 
 def _siblings(root, pkg, needed, longest, findings, res, pfx):
@@ -3268,6 +3348,19 @@ def _siblings(root, pkg, needed, longest, findings, res, pfx):
         res.passed(f"{pfx}.siblings")
 
 
+def fail_lines(text: str) -> list[str]:
+    """DEC-0038 (any-fail-line): the first cell of every claims.md line whose last '|'-separated field (the result
+    cell, a pipe-less GFM row's trailing field, or a line with no '|' as a whole) is FAIL, whatever its table
+    position: a header, a line after a separator or a blank line, a row with no leading '|'."""
+    out = []
+    for l in text.splitlines():
+        l = l.strip()
+        cells = _cells(l if l.startswith("|") else "|" + l)
+        if cells[-1] == "FAIL":
+            out.append(cells[0])
+    return out
+
+
 def _claims(pkg, res, pfx):
     path = os.path.join(pkg, "claims.md")
     if not os.path.isfile(path):
@@ -3277,7 +3370,7 @@ def _claims(pkg, res, pfx):
         res.fail(f"{pfx}.claims", "claims.md is not a Markdown table (header row + separator)")
         return
     malformed = [r for r in rows if len(r) != 5 or not all(r[:4]) or r[4] not in ("PASS", "FAIL")]
-    failed = [r[0] for r in rows if len(r) == 5 and r[4] == "FAIL"]
+    failed = fail_lines(_read(path))
     if not rows:
         res.fail(f"{pfx}.claims", "no executed claims; a claim with no executable check is a finding")
     elif malformed:
@@ -3445,7 +3538,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4; 69 after the b5 fix wave B5-FIX-6; 78 after the b5 fix wave S2-b5-finalfix3); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
+Run: `python3 -m unittest tools.gates.tests.test_gate_review_package -v` → `OK` (62 tests; 64 after the b5 final-review fix wave B5-FIX-4; 69 after the b5 fix wave B5-FIX-6; 78 after the b5 fix wave S2-b5-finalfix3; 81 after its round 10); `python3 tools/gates/run_all.py` → only `PASS` (30 lines at this block, with no package present); the full suite 423 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -3756,6 +3849,28 @@ class MakeReviewPackage(unittest.TestCase):
                 self.assertIn(f"ignored file(s) under the paths the gates read: {rel}", out)
                 self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
                 os.remove(os.path.join(self.root, rel))
+
+    def test_ignored_file_under_another_plan_the_gates_read_fails(self):    # B5-FIX-16 (DEC-0039 widen-all-plans)
+        """The plan of every ledger in the state dir counts, not only the package's own: an excluded plan
+        that another ledger (gx) names is refused; a state dir with no ledger.md or a line 1 naming no plan
+        adds no path."""
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan: docs/superpowers/plans/fx.md\n")
+        rf.write(self.root, "docs/superpowers/plans/fx.md", "# plan\n")
+        rf.write(self.root, "docs/superpowers/state/gx/ledger.md", "plan: docs/superpowers/plans/gx.md\n")
+        rf.write(self.root, "docs/superpowers/state/hx/ledger.md", "no plan line\n")
+        rf.write(self.root, "docs/superpowers/state/ix/notes.md", "not a ledger\n")
+        head = rf.commit(self.root, "two ledgers")
+        rf.write(self.root, "docs/superpowers/plans/gx.md", "# another plan\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write("/docs/superpowers/plans/gx.md\n")
+        self.assertTrue(rf.git(self.root, "check-ignore", "docs/superpowers/plans/gx.md"))
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/gx.md", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+        os.remove(os.path.join(self.root, "docs/superpowers/plans/gx.md"))
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
 
     def test_packages_dir_and_pycache_stay_allowed(self):    # B5-FIX-16 (DEC-0029, DEC-0033)
         rf.write(self.root, f"{REVIEW}/0/notes.md", "kept\n")    # the packages dir: ignored by .gitignore
@@ -4107,15 +4222,19 @@ def _write(path: str, data) -> None:
         f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
 
 
-def _ignored(root: str, plan: str) -> list[str]:
+def _ignored(root: str) -> list[str]:
     """B5-FIX-16 (DEC-0029): git-ignored or excluded untracked files under the paths the gates read
-    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see. Exempt:
+    (tools/gates, the state dir, and, DEC-0039 widen-all-plans, the plan the line 1 of every
+    <state>/<name>/ledger.md names, not only the package's own), which git status cannot see. Exempt:
     the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
     directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
     ':(exclude)tools/gates' drops nothing)."""
     paths = ["tools/gates", STATE]
-    ledger = os.path.join(root, STATE, plan, "ledger.md")
-    if os.path.isfile(ledger):
+    state = os.path.join(root, STATE)
+    for name in sorted(os.listdir(state)):
+        ledger = os.path.join(state, name, "ledger.md")
+        if not os.path.isfile(ledger):
+            continue
         with open(ledger, "rb") as f:
             text = f.read().decode("utf-8", "replace")
         m = LEDGER_PLAN.match(text.splitlines()[0] if text else "")    # line 1 as gate_plan reads it (R-A2-2)
@@ -4136,7 +4255,7 @@ def _package(root: str, a) -> tuple[str, int]:
     if not gitinfo.status_clean(root):
         raise Refused("working tree is not clean: gates.txt must describe the commit under review; "
                       "commit or stash first (the ignored .superpowers/ does not count)")
-    ignored = _ignored(root, a.plan)
+    ignored = _ignored(root)
     if ignored:
         raise Refused(f"ignored file(s) under the paths the gates read: {', '.join(ignored[:5])}; "
                       "delete them or move them out so gates.txt describes HEAD")
@@ -4199,7 +4318,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (30 tests; 33 after the b5 final-review fix wave B5-FIX-4; 38 after the b5 fix wave S2-b5-finalfix3; 43 after its fix round 1); `python3 tools/gates/run_all.py` → only `PASS`.
+Run: `python3 -m unittest tools.gates.tests.test_make_review_package -v` → `OK` (30 tests; 33 after the b5 final-review fix wave B5-FIX-4; 38 after the b5 fix wave S2-b5-finalfix3; 43 after its fix round 1; 44 after its round 10); `python3 tools/gates/run_all.py` → only `PASS`.
 
 - [ ] **Step 5: Commit**
 
@@ -5442,6 +5561,49 @@ class LedgerCopies(unittest.TestCase):
         os.chmod(os.path.join(root, self.REL), 0o755)
         self.assertInFlight(root)
 
+    def test_core_filemode_false_ignores_the_work_tree_exec_bit_only(self):    # B5-FIX-5 DEC-0041 honour-filemode
+        """core.fileMode=false: an exec-bit-only change in the work tree reads closed, as git status shows it
+        clean; a staged mode change and a symlink stay in flight (git shows both)."""
+        root = self.repo(self.CLOSED)
+        rf.git(root, "config", "core.fileMode", "false")
+        os.chmod(os.path.join(root, self.REL), 0o755)
+        self.assertEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True,
+                                             check=True).stdout)
+        self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+        rf.git(root, "update-index", "--chmod=+x", self.REL)
+        self.assertInFlight(root)
+        root = self.repo(self.CLOSED)
+        rf.git(root, "config", "core.fileMode", "false")
+        path = os.path.join(root, self.REL)
+        rf.write(root, "docs/superpowers/state/fx/real.md", self.CLOSED)
+        os.remove(path)
+        os.symlink("real.md", path)
+        self.assertInFlight(root)
+        root = self.repo(self.CLOSED)    # a type change: a committed symlink whose target text is the ledger,
+        rf.git(root, "config", "core.fileMode", "false")    # replaced by a regular file of the same bytes
+        path = os.path.join(root, self.REL)
+        os.remove(path)
+        os.symlink(self.CLOSED, path)
+        rf.commit(root, "ledger as a symlink")
+        self.assertEqual("120000", rf.git(root, "ls-tree", "HEAD", self.REL).split()[0])
+        os.remove(path)
+        rf.write(root, self.REL, self.CLOSED)
+        self.assertInFlight(root)
+
+    def test_core_filemode_true_holds_the_work_tree_exec_bit_in_flight(self):    # B5-FIX-5 DEC-0041 honour-filemode
+        """core.fileMode=true, or unset at every level (git's default is true; no global or system config is
+        read): an exec-bit-only work-tree change is in flight."""
+        for setting in ("true", None):
+            with self.subTest(setting=setting), mock.patch.dict(os.environ, {} if setting else
+                                                                 {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+                root = self.repo(self.CLOSED)
+                rf.git(root, "config", "core.fileMode", "true") if setting else \
+                    rf.git(root, "config", "--unset", "core.fileMode")
+                os.chmod(os.path.join(root, self.REL), 0o755)
+                self.assertNotEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                                        capture_output=True, check=True).stdout)
+                self.assertInFlight(root)
+
     def test_state_dir_replaced_by_a_symlink_is_in_flight(self):    # B5-FIX-5 DEC-0034
         root = self.repo(self.CLOSED)
         state = os.path.join(root, "docs/superpowers/state")
@@ -6091,6 +6253,25 @@ def _work_mode(root: str, rel: str) -> str:
     return "100755" if os.stat(path).st_mode & 0o100 else "100644"
 
 
+REGULAR = ("100644", "100755")
+
+
+def _file_mode(root: str) -> bool:
+    """core.fileMode as git reads it for root (DEC-0041 honour-filemode); true when unset or unreadable."""
+    r = subprocess.run(["git", "config", "--bool", "core.fileMode"], cwd=root, capture_output=True, check=False)
+    return r.stdout.decode("utf-8", "replace").strip() != "false"
+
+
+def _modes_agree(root: str, rel: str, file_mode: bool) -> bool:
+    """DEC-0034: the work tree, index and HEAD entries of <rel> have one mode and type; DEC-0041: with
+    core.fileMode=false a regular file's work-tree exec bit is ignored, as git ignores it. Called only once
+    all three copies exist."""
+    index_mode, work_mode = _git_mode(root, ["ls-files", "-s"], rel), _work_mode(root, rel)
+    if not file_mode and work_mode in REGULAR and index_mode in REGULAR:
+        work_mode = index_mode
+    return work_mode == index_mode == _git_mode(root, ["ls-tree", "HEAD"], rel)
+
+
 def plans_in_flight(root: str) -> list[tuple[str, str]]:
     """(state-dir name, plan path) for every ledger that is in flight. A ledger is any <STATE>/<name>/ledger.md
     in the working tree, the index or HEAD (B5-FIX-5: a ledger deleted in the working tree or the index is
@@ -6098,13 +6279,16 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
     line (B5-FIX-4: an uncommitted 'CHECKPOINT b<N+1>' after a committed 'CHECKPOINT b<N>' is in flight;
     B5-FIX-5: a copy missing from any of the three, or lines staged while the working tree equals HEAD, is
     in flight; a ledger absent at HEAD is in flight; DEC-0034: a copy whose mode or type differs, a
-    symlink on its working-tree path included, is in flight). Line 1 'plan: <plan file>' is read from the newest
+    symlink on its working-tree path included, is in flight; DEC-0041: with core.fileMode=false the
+    working tree's exec bit is ignored as git ignores it, while a staged mode change, a type change and a
+    symlink stay in flight). Line 1 'plan: <plan file>' is read from the newest
     copy that exists: the working tree, else the index, else HEAD (the copy the author is changing)."""
     state = os.path.join(root, STATE)
     if not os.path.isdir(state):
         raise GateError(f"{STATE}/ missing")
     names = (_work_ledgers(state) | _git_ledgers(root, ["ls-files"])
              | _git_ledgers(root, ["ls-tree", "-r", "--name-only", "HEAD"]))
+    file_mode = _file_mode(root)
     out = []
     for name in sorted(names):
         rel = f"{STATE}/{name}/ledger.md"
@@ -6120,9 +6304,7 @@ def plans_in_flight(root: str) -> list[tuple[str, str]]:
         if not m:
             raise GateError(f"{rel}: line 1 must be 'plan: <plan file>'")
         # DEC-0034: the copies also agree on file mode and type (a symlink, an exec bit staged or not)
-        if not (_closed(text) and copies[0] == copies[1] == copies[2]
-                and _work_mode(root, rel) == _git_mode(root, ["ls-files", "-s"], rel)
-                == _git_mode(root, ["ls-tree", "HEAD"], rel)):
+        if not (_closed(text) and copies[0] == copies[1] == copies[2] and _modes_agree(root, rel, file_mode)):
             out.append((name, m.group(1)))
     return out
 
@@ -6243,7 +6425,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1; 134 and a suite of 638 after its round 10); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 

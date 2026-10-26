@@ -1071,6 +1071,49 @@ class LedgerCopies(unittest.TestCase):
         os.chmod(os.path.join(root, self.REL), 0o755)
         self.assertInFlight(root)
 
+    def test_core_filemode_false_ignores_the_work_tree_exec_bit_only(self):    # B5-FIX-5 DEC-0041 honour-filemode
+        """core.fileMode=false: an exec-bit-only change in the work tree reads closed, as git status shows it
+        clean; a staged mode change and a symlink stay in flight (git shows both)."""
+        root = self.repo(self.CLOSED)
+        rf.git(root, "config", "core.fileMode", "false")
+        os.chmod(os.path.join(root, self.REL), 0o755)
+        self.assertEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True,
+                                             check=True).stdout)
+        self.assertEqual((0, "PASS plan.in_flight\n"), gate(root, ["--in-flight"]))
+        rf.git(root, "update-index", "--chmod=+x", self.REL)
+        self.assertInFlight(root)
+        root = self.repo(self.CLOSED)
+        rf.git(root, "config", "core.fileMode", "false")
+        path = os.path.join(root, self.REL)
+        rf.write(root, "docs/superpowers/state/fx/real.md", self.CLOSED)
+        os.remove(path)
+        os.symlink("real.md", path)
+        self.assertInFlight(root)
+        root = self.repo(self.CLOSED)    # a type change: a committed symlink whose target text is the ledger,
+        rf.git(root, "config", "core.fileMode", "false")    # replaced by a regular file of the same bytes
+        path = os.path.join(root, self.REL)
+        os.remove(path)
+        os.symlink(self.CLOSED, path)
+        rf.commit(root, "ledger as a symlink")
+        self.assertEqual("120000", rf.git(root, "ls-tree", "HEAD", self.REL).split()[0])
+        os.remove(path)
+        rf.write(root, self.REL, self.CLOSED)
+        self.assertInFlight(root)
+
+    def test_core_filemode_true_holds_the_work_tree_exec_bit_in_flight(self):    # B5-FIX-5 DEC-0041 honour-filemode
+        """core.fileMode=true, or unset at every level (git's default is true; no global or system config is
+        read): an exec-bit-only work-tree change is in flight."""
+        for setting in ("true", None):
+            with self.subTest(setting=setting), mock.patch.dict(os.environ, {} if setting else
+                                                                 {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+                root = self.repo(self.CLOSED)
+                rf.git(root, "config", "core.fileMode", "true") if setting else \
+                    rf.git(root, "config", "--unset", "core.fileMode")
+                os.chmod(os.path.join(root, self.REL), 0o755)
+                self.assertNotEqual(b"", subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                                        capture_output=True, check=True).stdout)
+                self.assertInFlight(root)
+
     def test_state_dir_replaced_by_a_symlink_is_in_flight(self):    # B5-FIX-5 DEC-0034
         root = self.repo(self.CLOSED)
         state = os.path.join(root, "docs/superpowers/state")

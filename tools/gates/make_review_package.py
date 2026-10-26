@@ -80,15 +80,19 @@ def _write(path: str, data) -> None:
         f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
 
 
-def _ignored(root: str, plan: str) -> list[str]:
+def _ignored(root: str) -> list[str]:
     """B5-FIX-16 (DEC-0029): git-ignored or excluded untracked files under the paths the gates read
-    (tools/gates, the state dir, the plan the ledger's line 1 names), which git status cannot see. Exempt:
+    (tools/gates, the state dir, and, DEC-0039 widen-all-plans, the plan the line 1 of every
+    <state>/<name>/ledger.md names, not only the package's own), which git status cannot see. Exempt:
     the packages dir (DEC-0029: a ledger may name a plan under it) and every file under a __pycache__
     directory, at any depth (DEC-0033). The pathspecs are literal (R-A2-3: a plan path such as
     ':(exclude)tools/gates' drops nothing)."""
     paths = ["tools/gates", STATE]
-    ledger = os.path.join(root, STATE, plan, "ledger.md")
-    if os.path.isfile(ledger):
+    state = os.path.join(root, STATE)
+    for name in sorted(os.listdir(state)):
+        ledger = os.path.join(state, name, "ledger.md")
+        if not os.path.isfile(ledger):
+            continue
         with open(ledger, "rb") as f:
             text = f.read().decode("utf-8", "replace")
         m = LEDGER_PLAN.match(text.splitlines()[0] if text else "")    # line 1 as gate_plan reads it (R-A2-2)
@@ -109,7 +113,7 @@ def _package(root: str, a) -> tuple[str, int]:
     if not gitinfo.status_clean(root):
         raise Refused("working tree is not clean: gates.txt must describe the commit under review; "
                       "commit or stash first (the ignored .superpowers/ does not count)")
-    ignored = _ignored(root, a.plan)
+    ignored = _ignored(root)
     if ignored:
         raise Refused(f"ignored file(s) under the paths the gates read: {', '.join(ignored[:5])}; "
                       "delete them or move them out so gates.txt describes HEAD")

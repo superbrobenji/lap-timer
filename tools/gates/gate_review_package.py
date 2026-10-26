@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +38,8 @@ GATE_LINE = re.compile(r"^(PASS|FAIL) \S+")
 DIFF_BODY = re.compile(r"^(@@ |--- |\+\+\+ |index |new file mode|deleted file mode|old mode|new mode"
                        r"|similarity index|rename |copy |Binary files )")
 TEST_NAME = re.compile(r"^(?:[\w.\-/]+::)*(?:\w+\.)*test_\w+$")
-TEST_TREES = ("tools/gates/tests", "tools/lint", "tools/tracks", "tools")    # the dirs holding test_*.py
+TEST_FILE = re.compile(r"^test_\w*\.(py|c)$")    # DEC-0037: tracked test_*.py, and Unity test_*.c sources
+DEFINES = {"py": r"^[ \t]*(?:async[ \t]+)?def {name}\(", "c": r"^[ \t]*void[ \t]+{name}[ \t]*\([ \t]*void[ \t]*\)"}
 
 
 def _read(path: str) -> str:
@@ -177,34 +179,40 @@ def _sibling_ok(cell: str, findings: list) -> bool:
 
 
 def test_modules(root: str) -> dict:
-    """{key: source} of every .py file directly in a TEST_TREES dir; a file's keys are its root-relative
-    path, that path dotted without '.py', and its bare stem (the first tree holding a stem wins)."""
+    """{key: [(kind, source), ...]} of every tracked test file (DEC-0037: `git ls-files` under root, basename
+    test_*.py or a Unity test_*.c); a file's keys are its root-relative path, that path dotted without the
+    extension, and its bare stem. A key two files share (a stem in two dirs) lists both."""
+    r = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=False)
     out = {}
-    for tree in TEST_TREES:
-        d = os.path.join(root, tree)
-        for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-            path = os.path.join(d, n)
-            if n.endswith(".py") and os.path.isfile(path):
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    text = f.read()
-                for key in (f"{tree}/{n}", f"{tree}/{n[:-3]}".replace("/", "."), n[:-3]):
-                    out.setdefault(key, text)
+    for rel in sorted(r.stdout.decode("utf-8", "surrogateescape").split("\0")):    # a failing git prints nothing
+        m = TEST_FILE.match(os.path.basename(rel))
+        path = os.path.join(root, rel)
+        if not m or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8", errors="replace") as f:
+            entry = (m.group(1), f.read())
+        stem = rel[:-len(m.group(1)) - 1]
+        for key in (rel, stem.replace("/", "."), os.path.basename(stem)):
+            out.setdefault(key, []).append(entry)
     return out
 
 
 def defines_test(cell: str, modules: dict) -> bool:
-    """B5-FIX-26 (DEC-0035): the test a siblings.md cell names exists: its module (the part before the
-    first '::', else the longest dotted prefix that is a module key) defines `def <name>`; a bare
-    `test_<x>` is defined in any test module. A named module that is no key resolves nothing."""
+    """B5-FIX-26 (DEC-0035, DEC-0037): the test a siblings.md cell names exists: a file its module (the part
+    before the first '::', else the longest dotted prefix that is a module key) names defines it (`def <name>(`
+    in Python, `void <name>(void)` in Unity C); a bare `test_<x>` is defined in any tracked test file. A named
+    module that is no key resolves nothing."""
     parts = cell.split("::")
     name = parts[-1].split(".")[-1]
-    defined = re.compile(rf"^[ \t]*(?:async[ \t]+)?def {name}\(", re.M)
+
+    def defined(files):
+        return any(re.search(DEFINES[kind].format(name=name), text, re.M) for kind, text in files)
     dotted = parts[0].split(".")[:-1]
     if len(parts) == 1 and not dotted:
-        return any(defined.search(t) for t in modules.values())
+        return any(defined(files) for files in modules.values())
     mods = parts[:1] if len(parts) > 1 else [".".join(dotted[:k]) for k in range(len(dotted), 0, -1)]
     mod = next((m for m in mods if m in modules), None)
-    return mod is not None and bool(defined.search(modules[mod]))
+    return mod is not None and defined(modules[mod])
 
 
 def _siblings(root, pkg, needed, longest, findings, res, pfx):
@@ -232,6 +240,19 @@ def _siblings(root, pkg, needed, longest, findings, res, pfx):
         res.passed(f"{pfx}.siblings")
 
 
+def fail_lines(text: str) -> list[str]:
+    """DEC-0038 (any-fail-line): the first cell of every claims.md line whose last '|'-separated field (the result
+    cell, a pipe-less GFM row's trailing field, or a line with no '|' as a whole) is FAIL, whatever its table
+    position: a header, a line after a separator or a blank line, a row with no leading '|'."""
+    out = []
+    for l in text.splitlines():
+        l = l.strip()
+        cells = _cells(l if l.startswith("|") else "|" + l)
+        if cells[-1] == "FAIL":
+            out.append(cells[0])
+    return out
+
+
 def _claims(pkg, res, pfx):
     path = os.path.join(pkg, "claims.md")
     if not os.path.isfile(path):
@@ -241,7 +262,7 @@ def _claims(pkg, res, pfx):
         res.fail(f"{pfx}.claims", "claims.md is not a Markdown table (header row + separator)")
         return
     malformed = [r for r in rows if len(r) != 5 or not all(r[:4]) or r[4] not in ("PASS", "FAIL")]
-    failed = [r[0] for r in rows if len(r) == 5 and r[4] == "FAIL"]
+    failed = fail_lines(_read(path))
     if not rows:
         res.fail(f"{pfx}.claims", "no executed claims; a claim with no executable check is a finding")
     elif malformed:

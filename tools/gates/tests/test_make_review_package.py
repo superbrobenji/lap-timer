@@ -232,6 +232,28 @@ class MakeReviewPackage(unittest.TestCase):
                 self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
                 os.remove(os.path.join(self.root, rel))
 
+    def test_ignored_file_under_another_plan_the_gates_read_fails(self):    # B5-FIX-16 (DEC-0039 widen-all-plans)
+        """The plan of every ledger in the state dir counts, not only the package's own: an excluded plan
+        that another ledger (gx) names is refused; a state dir with no ledger.md or a line 1 naming no plan
+        adds no path."""
+        rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan: docs/superpowers/plans/fx.md\n")
+        rf.write(self.root, "docs/superpowers/plans/fx.md", "# plan\n")
+        rf.write(self.root, "docs/superpowers/state/gx/ledger.md", "plan: docs/superpowers/plans/gx.md\n")
+        rf.write(self.root, "docs/superpowers/state/hx/ledger.md", "no plan line\n")
+        rf.write(self.root, "docs/superpowers/state/ix/notes.md", "not a ledger\n")
+        head = rf.commit(self.root, "two ledgers")
+        rf.write(self.root, "docs/superpowers/plans/gx.md", "# another plan\n")
+        with open(os.path.join(self.root, ".git/info/exclude"), "a", encoding="utf-8") as f:
+            f.write("/docs/superpowers/plans/gx.md\n")
+        self.assertTrue(rf.git(self.root, "check-ignore", "docs/superpowers/plans/gx.md"))
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(1, rc, out)
+        self.assertIn("ignored file(s) under the paths the gates read: docs/superpowers/plans/gx.md", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, REVIEW)))
+        os.remove(os.path.join(self.root, "docs/superpowers/plans/gx.md"))
+        rc, out = self.make("fx", "1", self.base, head, "--only", "register")
+        self.assertEqual(0, rc, out)
+
     def test_packages_dir_and_pycache_stay_allowed(self):    # B5-FIX-16 (DEC-0029, DEC-0033)
         rf.write(self.root, f"{REVIEW}/0/notes.md", "kept\n")    # the packages dir: ignored by .gitignore
         rf.write(self.root, "docs/superpowers/state/fx/ledger.md", "plan:\n")    # names no plan: no extra path
