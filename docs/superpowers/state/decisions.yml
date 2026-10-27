@@ -469,3 +469,67 @@
   asked_at: {sha: "79f0d16", by: session}
   answer: "ci-kill (owner in chat, 2026-10-26: \"use recommended\"; the session had recommended ci-kill)"
   answered_at: {sha: "79f0d16", by: superbrobenji}
+- id: DEC-0051
+  class: finding-class
+  question: "b5 round 11 Q-A1-1 (B5-FIX-26): a nested or dead-code 'def test_x' resolves as an existing test (ast.walk)."
+  options:
+    - {label: module-and-class, cost: "only module-level and class-body defs resolve; B5-FIX-26's class narrows to that"}
+    - {label: keep, cost: "keep ast.walk"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "module-and-class (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended module-and-class)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0052
+  class: finding-class
+  question: "b5 round 11 Q-P2A1 (B5-FIX-26): a Unity 'void test_x(void)' inside a block comment or '#if 0' counts as a test."
+  options:
+    - {label: new-row, cost: "register a new row (not B5-FIX-26)"}
+    - {label: widen-fix26, cost: "widen B5-FIX-26"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "new-row (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended new-row)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0053
+  class: finding-class
+  question: "b5 round 11 R-A2r11-Q1 (B5-FIX-16): a tracked symlink under plans/ pointing at an ignored file passes, and the gates read that file."
+  options:
+    - {label: new-row, cost: "register a new row (not B5-FIX-16)"}
+    - {label: widen-fix16, cost: "widen B5-FIX-16 to symlink targets"}
+    - {label: out-of-scope, cost: "rule it out of scope"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "new-row (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended new-row)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0054
+  class: spec-direction
+  question: "b5 round 11 D1: DEC-0044 says a plan or spec path under __pycache__ is reported, but make_review_package.py:39 and :113-115 exempt tools/gates/__pycache__/p.md and a spec under the state dir's __pycache__."
+  options:
+    - {label: report-any-md, cost: "report any .md under any __pycache__, as DEC-0044 reads; code changes"}
+    - {label: text-to-code, cost: "keep the exemption by tree and change the DEC-0044 text"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "report-any-md (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended report-any-md)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0055
+  class: scope
+  question: "b5 round 11 D2 (DEC-0048): gate_plan reads the in-flight plan's spec only, while make_review_package's _specs checks every plan's spec (34); README says gate_plan checks each one."
+  options:
+    - {label: all-specs, cost: "keep checking every plan's spec; fix the README"}
+    - {label: in-flight-only, cost: "check only the in-flight plans' specs"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "all-specs (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended all-specs)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0056
+  class: scope
+  question: "b5 round 11: which S3 task owns the DEC-0047 row (lib render prints a reason on a PASS line; S3 plan :2214, :2425 rely on it)? The S3 plan has no pre-flight task."
+  options:
+    - {label: s3-task-6, cost: "S3 Task 6, where the relying text sits"}
+    - {label: s3-task-1, cost: "S3 Task 1, the first task of S3"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "s3-task-6 (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended s3-task-6)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0057
+  class: finding-class
+  question: "b5 round 11 R-P2A3-1: the overlap check claims one key per file; full caseless matching is filed as a B5-FIX-14 defect."
+  options:
+    - {label: in-class, cost: "inside B5-FIX-14's class: a defect of the row"}
+    - {label: outside, cost: "outside the class: widen or new row"}
+  asked_at: {sha: "163aee0", by: session}
+  answer: "in-class (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended in-class)"
+  answered_at: {sha: "163aee0", by: superbrobenji}
