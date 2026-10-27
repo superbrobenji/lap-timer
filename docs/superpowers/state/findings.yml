@@ -1600,3 +1600,96 @@
   - state: planned
     sha: 8db03b8
     by: controller
+- id: B5-U6
+  source: review
+  severity: LOW
+  class: 'gate_dispatch BUDGET_RE uses \d and $, so a ## Budget value with non-ASCII digits
+    (Arabic-Indic, full-width) or a trailing newline parses and passes the cap check; the budget
+    input domain is not ASCII-whitelisted (DEC-0087: owner task S2-b5-budget; from b4, found in
+    b5 round 12 as U-1)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: '39'
+    sha: 740f6e9
+  repro: 'BUDGET_RE.match("tokens=١٠ minutes=5") matches and int() gives 10; the
+    same for full-width digits and for "tokens=10 minutes=5\n"'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-budget
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 740f6e9
+    by: session
+  - state: planned
+    sha: 740f6e9
+    by: controller
+- id: B5-U7
+  source: review
+  severity: LOW
+  class: 'gate_dispatch --config-check never validates the triggers block: a negative, non-integer
+    or missing controller/implementer/reviewer cap prints only PASS, then every dispatch of that
+    role FAILs dispatch.budget (negative) or crashes in _budget with TypeError/KeyError
+    (DEC-0087: owner task S2-b5-budget; from b4, found in b5 round 12 as U-2)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: 200-219
+    sha: 740f6e9
+  repro: 'in-memory config: triggers.controller.tokens=-5, triggers.implementer.tokens="lots",
+    triggers.reviewer removed; check_config prints only PASS for each; _budget gives FAIL (exceeds
+    -5), TypeError, KeyError'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-budget
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 740f6e9
+    by: session
+  - state: planned
+    sha: 740f6e9
+    by: controller
+- id: B5-U8
+  source: review
+  severity: LOW
+  class: 'config.yml triggers keys controller.tasks, implementer.tasks and reviewer.reviews have
+    no reader (gate_dispatch reads only tokens and minutes; block.max_tasks is separate), and spec
+    3.1 does not state which cap applies to the investigator, audit and exception roles (code
+    uses the reviewer cap for every role that is not controller or implementer) (DEC-0087: owner
+    task S2-T7, gate_checkpoint, the hard stop spec 3.1 names; the role mapping enters Task 7''s
+    D24 table for owner approval; found in b5 round 12 as U-3)'
+  siblings: []
+  cites:
+  - file: tools/gates/config.yml
+    lines: 2-5
+    sha: 740f6e9
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 63-68
+    sha: 740f6e9
+  repro: 'git grep -n triggers -- tools: only gate_dispatch.py:206 reads it, and only tokens and
+    minutes; in-memory triggers.controller.tasks=0 and reviewer.reviews="x": check_config prints only PASS'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-T7
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 740f6e9
+    by: session
+  - state: planned
+    sha: 740f6e9
+    by: controller
