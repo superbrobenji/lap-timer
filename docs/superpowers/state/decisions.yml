@@ -811,3 +811,138 @@
   asked_at: {sha: "740f6e9", by: session}
   answer: "session-fit (owner in chat, 2026-10-27: \"recommended\"; the session had recommended session-fit)"
   answered_at: {sha: "740f6e9", by: superbrobenji}
+- id: DEC-0088
+  class: spec-direction
+  question: "b5 round 13 D30 investigation (b5r13-d30-investigation.md): which process options O1-O5 to adopt, for b5 now or from b6?"
+  options:
+    - {label: all-five-b5, cost: "O1 generated D24 skeleton + checklist extension; O2 default contract rules and one shared fail-closed helper (amends D25); O3 retroactive class restatement + idiom sweep; O4 mechanical commit gate (pre-commit runs run_all and the gate suite on both interpreters, text commits and session commits included; items on shared files serial); O5 one drafter per gate table, observed 'today' cells, per-area question numbering, harness usage counts over self-reports. Spec D31-D35; b5 amendment redrafted on them"}
+    - {label: o4-o3-now, cost: "O4 + O3 now, O1/O2/O5 from b6; Q22-Q45 answered as drafted"}
+    - {label: o2-o4-now, cost: "O2 + O4 now only"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "all-five-b5 (owner in chat, 2026-10-27: \"recommended. we need to fix our process to prevent this from hapenning again\"; the session had recommended all-five-b5)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0089
+  class: finding-class
+  question: "b5 round 13 D30 investigation (b5r13-d30-investigation.md): R-B-13 (NAME accepts a trailing LF), R-A-5 (<plan> not a directory skipped), R-B-1 (attributes make diff.patch a binary stub) sit next to pinned B5-FIX-9, B5-FIX-6, B5-FIX-4 V-1"
+  options:
+    - {label: widen-pinned, cost: "D26 retroactive: restate the three pinned classes by dimension (B5-FIX-9: name grammar incl. line terminators; B5-FIX-6: a non-directory at any package-tree level; B5-FIX-4 V-1: repository state that changes git output); rows reopen, re-review, re-pin"}
+    - {label: new-rows, cost: "register three new rows; pinned classes stay"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "widen-pinned (owner in chat, 2026-10-27: \"recommended. we need to fix our process to prevent this from hapenning again\"; the session had recommended widen-pinned)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0090
+  class: triage
+  question: "b5 round 13 D30 investigation (b5r13-d30-investigation.md): owners for the 8 code defects (R-B-1, -2, -3, -4, -13, R-A-5, -6, R-C-2), U-D-1 (740f6e9 test_hooks red), R-D-1 (fc759c9 text-guard red) and the round-13 leftovers (U-4 spec D22 old caps, U-5 README dispatch.budget, UF-2 S1 :7352 controller copy, UF-3 fable_fallback lines, UF-4 gate_plan --plan on umbrella/S1, U-D-2 model_rank trust, the $-anchor idiom at gate_plan.py:61/:82)"
+  options:
+    - {label: session-fit, cost: "code defects: the fix wave under each gate's owner task, against the redrafted tables; U-D-1 and R-D-1: fixed first, with the O4 commit gate, so the suite is green before the gate lands; leftovers: placed by the session to the nearest owner task and listed to the owner"}
+    - {label: issues, cost: "one GitHub issue each"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "session-fit (owner in chat, 2026-10-27: \"recommended. we need to fix our process to prevent this from hapenning again\"; the session had recommended session-fit)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0091
+  class: finding-class
+  question: "b5 round 13 B5-CAPS-1: after DEC-0063 drops test_readme_states_no_budget_cap, the 'README text naming caps' sibling cell has no valid form (gate_review_package siblings accept a test name or a finding id)"
+  options:
+    - {label: same-d3-row, cost: "the README cell names the same new D3 finding id: one row covers two siblings"}
+    - {label: second-row, cost: "a second finding row for the README cell"}
+    - {label: keep-readme-test, cost: "keep test_readme_states_no_budget_cap, against DEC-0063"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "same-d3-row (owner in chat, 2026-10-27: \"recommended. we need to fix our process to prevent this from hapenning again\"; the session had recommended same-d3-row)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0092
+  class: scope
+  question: "b5 round 13: amendment questions Q22-Q45 and the reviewers' new questions (A Q46/Q47, B D-B-1, C x3, D D-1/D-2)"
+  options:
+    - {label: defer-to-redraft, cost: "not answered now; the section is redrafted on D31-D35 (generated skeleton, default contract) and the questions the defaults do not settle return as one numbered list"}
+    - {label: answer-now, cost: "answer Q22-Q45 as drafted"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "defer-to-redraft (owner in chat, 2026-10-27: \"recommended. we need to fix our process to prevent this from hapenning again\"; the session had recommended defer-to-redraft)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0093
+  class: spec-direction
+  question: "B5-PROC-1 review F6 (investigation §5 decision 4): how far does the D32 symlink rule reach? DEC-0066 says 'a symlink anywhere below the root FAILs'."
+  options:
+    - {label: below-root, cost: "below the repository root only, as DEC-0066: no change for /tmp paths; a --plan link outside the root is out of scope"}
+    - {label: any-component, cost: "any path component: runs through /tmp or /var on macOS fail unless gates and tests realpath their roots first; more tests"}
+    - {label: below-root-plus-args, cost: "below the root, plus a path argument that is itself a symlink: covers --plan outside the root; one realpath of the root"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "below-root-plus-args (owner in chat, 2026-10-27: \"recommended\"; the session had recommended below-root-plus-args)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0094
+  class: scope
+  question: "B5-PROC-1 review F11: D31-D33 and D35 reach no reviewer or verifier strict block. Scope of B5-PROC-1?"
+  options:
+    - {label: widen-proc1, cost: "widen B5-PROC-1 to the reviewer and verifier Coverage paragraphs and the controller drafter sentence (one more review)"}
+    - {label: separate-row, cost: "a separate row for those blocks; the commit-gate text lands alone"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "widen-proc1 (owner in chat, 2026-10-27: \"recommended\"; the session had recommended widen-proc1)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0095
+  class: spec-direction
+  question: "B5-PROC-1 re-review 3 I6: strict-block size cap. S1 plan :7201 says 4000 bytes; the session raised the local check-skill.sh cap to 5000 (earlier session) and 5500 (2026-10-27) without an owner decision; the staged controller.md is 5083 bytes."
+  options:
+    - {label: cap-5500, cost: "amend S1 plan :7201 to 5500 and ledger both raises; about 1.5 KB less task room per dispatch under the 12000-character cap"}
+    - {label: cap-5000, cost: "trim controller.md by at least 84 bytes; amend the plan to 5000; one more review"}
+    - {label: cap-4000, cost: "cut every block under 4000 bytes as the plan says; a rewrite of four prompts and another review"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "cap-5500 (owner in session question, 2026-10-27: picked '5500, amend plan (Recommended)'; the session had recommended cap-5500)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0096
+  class: finding-class
+  question: "B5-PROC-1 fix round 4: the class cites DEC-0088..0094 and does not name the DEC-0095 text (S1 plan :7201/:7220/:7540 cap, ledger line). Widen or new row?"
+  options:
+    - {label: widen-proc1, cost: "one class line; the same re-review covers it"}
+    - {label: separate-row, cost: "a new row in the same commit"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "widen-proc1 (owner in session question, 2026-10-27: picked 'Widen B5-PROC-1 (Recommended)'; the session had recommended widen-proc1)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0097
+  class: triage
+  question: "B5-UD-1 (740f6e9 turned test_hooks red) and B5-RD-1 (fc759c9 turned test_s2_plan_blocks_hold_the_dec_0060_caps red): severity and ids?"
+  options:
+    - {label: medium-keep-ids, cost: "MEDIUM (a red suite blocks every commit under D34); ids keep the investigation names"}
+    - {label: low-keep-ids, cost: "LOW like the other B5-U rows"}
+    - {label: medium-renumber, cost: "B5-U9/B5-U10; rename in D34, the plan and both rows"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "medium-keep-ids (owner in session question, 2026-10-27: picked 'MEDIUM, keep ids (Recommended)'; the session had recommended medium-keep-ids)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0098
+  class: spec-direction
+  question: "B5-PROC-1 re-review 5 K1 (after round 5 of 5): the interim by-hand clean-tree rule in D34 passes when .git/info/exclude or a clean filter in .git/info/attributes plus local config hides a change, so the tree tested can differ from the tree committed (two scratch-repo reproducers; the checkout is not affected)."
+  options:
+    - {label: scope-default-config, cost: "reword: the interim rule holds under default git config and no .git/info overrides (D28 honest mistakes); the D34 pre-commit hook (B5-PROC-2) tests the committed tree itself and its D24 table carries the ignore and filter rows; one more text round and review"}
+    - {label: extend-check, cost: "add config and .git/info checks to the by-hand rule now; a sixth text round with longer strict-block text"}
+    - {label: land-register, cost: "commit as is and register K1 as a row; D34 keeps a known false sentence until it closes"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "scope-default-config (owner in session question, 2026-10-27: picked 'Scope to default config (Recommended)'; the session had recommended scope-default-config)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0099
+  class: spec-direction
+  question: "B5-PROC-1 re-review 6 (stopped DENIED after every requested check passed; a probe that set HOME was refused by the hook): do git's global ignore and attributes files (~/.config/git/ignore, ~/.config/git/attributes) count as 'default git config' in D34's interim by-hand rule (DEC-0098)?"
+  options:
+    - {label: name-excluded, cost: "reword to 'default git config with no global or .git/info ignore or attributes files'; the hook row (B5-PROC-2) covers them; a one-line text round, then a fresh reviewer verdict that needs no HOME probe"}
+    - {label: count-as-default, cost: "keep the text and record that global files are part of default config"}
+    - {label: accept-as-approval, cost: "treat re-review 6 as clean and commit; the question becomes a B5-PROC-2 table row"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "name-excluded (owner in session question, 2026-10-27: picked 'Name them as excluded (Recommended)'; the session had recommended name-excluded)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0100
+  class: spec-direction
+  question: "B5-PROC-1 text round 7: this host has ~/.config/git/ignore (one rule, **/.claude/settings.local.json), so D34's DEC-0099 scope ('no global or .git/info ignore or attributes files') does not hold here, though the rule hides nothing the gates read."
+  options:
+    - {label: scope-paths-read, cost: "reword to 'no global or .git/info ignore or attributes rule matching a path the run reads': true on this host; a one-clause text round, then a fresh reviewer verdict"}
+    - {label: accept-hook-row, cost: "leave the text; the B5-PROC-2 hook row covers global files; the interim sentence stays false on this host until the hook lands"}
+    - {label: owner-removes-file, cost: "the owner deletes or moves ~/.config/git/ignore (affects every repo on the machine)"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "scope-paths-read (owner in session question, 2026-10-27: picked 'Scope to paths the run reads (Recommended)'; the session had recommended scope-paths-read)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0101
+  class: spec-direction
+  question: "B5-PROC-1 final re-review P-1: a stale __pycache__ .pyc (source mtime and size unchanged) lets run_all pass on a broken staged edit; the fourth edge (after ignore files, clean filters, global ignore) of the interim by-hand rule's claim that the tree tested is the tree committed."
+  options:
+    - {label: drop-the-promise, cost: "the interim rule keeps only the commands (run with PYTHONDONTWRITEBYTECODE=1 and PYTHONPYCACHEPREFIX set to a fresh empty directory) and the clean-tree check, and claims no tree equality; the guarantee belongs to the B5-PROC-2 hook, which runs on a fresh export of the index; P-1, ignore, filter and global files are its D24 rows; one text round and a final review"}
+    - {label: pycache-flag-only, cost: "add the pycache setting to the D34 commands and keep the equality sentence; further edges may follow"}
+    - {label: commit-register, cost: "commit as is and register P-1 as a B5-PROC-2 row"}
+  asked_at: {sha: "64f7ad7", by: session}
+  answer: "drop-the-promise (owner in session question, 2026-10-27: picked 'Drop the promise (Recommended)'; the session had recommended drop-the-promise)"
+  answered_at: {sha: "64f7ad7", by: superbrobenji}

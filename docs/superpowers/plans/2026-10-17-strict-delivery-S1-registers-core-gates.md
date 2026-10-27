@@ -7198,7 +7198,7 @@ The owner restarts the Claude Code session after this block merges: hooks in a n
 
 **Interfaces:**
 - Consumes: the dispatch grammar and role names in the umbrella; `tools/gates/config.yml` `models`.
-- Produces: the prompt files that S2's `gate_dispatch` compares byte for byte against each dispatch's `## Strict block`. Every file is UTF-8 with a single trailing newline. The dispatch cap is 12,000 characters (`dispatch.max_prompt_chars`), so each block stays at or under 4,000 bytes. Each block states: the verification method (direct + contradiction), the zero-bug rule, no subagents (the controller instead: the only dispatcher, with dispatch discipline), the report contract with the `status:` first line, budget obedience, and the owner-only stop rule. Reviewer and verifier blocks also state: execute every claim, re-run every gate, re-run the mutation, sibling check, and a contradiction pass on the new surface. Role → file: controller/sub-controller → `controller.md`; implementer and implementer_transcription → `implementer.md`; task_reviewer and final_reviewer → `reviewer.md`; final_verifier → `verifier.md`; exception_reviewer → `exception-reviewer.md`; investigator, audit_reviewer, audit_verifier → the files of the same names.
+- Produces: the prompt files that S2's `gate_dispatch` compares byte for byte against each dispatch's `## Strict block`. Every file is UTF-8 with a single trailing newline. The dispatch cap is 12,000 characters (`dispatch.max_prompt_chars`), so each block stays at or under 5,500 bytes (DEC-0095). Each block states: the verification method (direct + contradiction), the zero-bug rule, no subagents (the controller instead: the only dispatcher, with dispatch discipline), the report contract with the `status:` first line, budget obedience, and the owner-only stop rule. Reviewer and verifier blocks also state: execute every claim, re-run every gate, re-run the mutation, sibling check, and a contradiction pass on the new surface. Role → file: controller/sub-controller → `controller.md`; implementer and implementer_transcription → `implementer.md`; task_reviewer and final_reviewer → `reviewer.md`; final_verifier → `verifier.md`; exception_reviewer → `exception-reviewer.md`; investigator, audit_reviewer, audit_verifier → the files of the same names.
 
 - [ ] **Step 1: Write the acceptance check first (it fails: the files do not exist)**
 
@@ -7217,7 +7217,7 @@ for s in "## When it applies" "## Precedence" "## Roles and models" "## Decision
 for r in controller implementer reviewer verifier exception-reviewer investigator audit-reviewer audit-verifier; do
   f="$D/prompts/$r.md"
   [ -f "$f" ] || { echo "MISSING $f"; bad=1; continue; }
-  n=$(wc -c < "$f"); [ "$n" -le 4000 ] || { echo "$r.md is $n bytes (> 4000)"; bad=1; }
+  n=$(wc -c < "$f"); [ "$n" -le 5500 ] || { echo "$r.md is $n bytes (> 5500)"; bad=1; }
   [ "$(tail -c 1 "$f" | od -An -c | tr -d ' ')" = '\n' ] || { echo "$r.md: no trailing newline"; bad=1; }
   for p in "Verification method." "by contradiction" "Zero bugs." "Owner-only decisions." "NEEDS_DECISION" "Budget." "Background work." "Report contract." 'first line is exactly `status: <DONE|DONE_WITH_FINDINGS|NEEDS_DECISION|BLOCKED|DENIED>`'; do need "$f" "$p"; done
   if [ "$r" = controller ]; then need "$f" "You are the only role that dispatches."; else need "$f" "No subagents."; fi
@@ -7537,7 +7537,7 @@ Report contract. Write the full report to the dispatch's ## Report path. Its fir
 - [ ] **Step 4: Run the acceptance check**
 
 Run: `bash .superpowers/sdd/strict-delivery/check-skill.sh && wc -c ~/.claude/skills/strict-delivery/prompts/*.md`
-Expected: `skill skeleton OK`; sizes between 2,800 and 4,000 bytes each (prototype: audit-reviewer 3165, audit-verifier 3043, controller 3710, exception-reviewer 3217, implementer 3261, investigator 2879, reviewer 3852, verifier 3915).
+Expected: `skill skeleton OK`; sizes between 2,800 and 5,500 bytes each (DEC-0095; prototype: audit-reviewer 3165, audit-verifier 3043, controller 3710, exception-reviewer 3217, implementer 3261, investigator 2879, reviewer 3852, verifier 3915).
 
 Mutation check: delete the sentence starting `Sibling check:` from `verifier.md`. The check must print `MISSING in verifier.md: Sibling check` and exit 1. Restore and run again: OK.
 

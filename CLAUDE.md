@@ -9,6 +9,7 @@ These override superpowers and every other skill. Source: `docs/superpowers/spec
 - Owner-only: triage, spec direction, plan scope, merge grants, hardware, model policy, issue closure, finding-class changes.
 - Zero bugs: a change's own bug makes it incomplete; an unrelated bug gets an investigation, an issue and an owner (`gate_register`).
 - Findings that keep arriving are a process defect (spec D30): stop fixing, investigate where they entered and why reviews missed them, bring the owner process changes.
+- Every commit, the session's and text-only included, first passes `run_all` and the gate suite on both interpreters (spec D34, whose Order lets one commit after 64f7ad7, the one landing D34, land on a red suite; the pre-commit hook enforces it once row B5-PROC-2 lands); session-written spec, CLAUDE.md, strict-block and plan text is applied (saved, for `~/.claude` text) or committed only after a task review of that exact diff (spec D34).
 - Pinned = production-path test + mutation transcript (`gate_review_package`).
 - Model map by role (§5); never dispatch outside it (`gate_dispatch`).
 - Block = PR, ≤3 tasks; clean tree at every checkpoint; one block per context; merge only on all-green under a grant (`gate_merge_ready`, `gate_checkpoint`).

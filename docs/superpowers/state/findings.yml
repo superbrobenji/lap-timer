@@ -1693,3 +1693,171 @@
   - state: planned
     sha: 740f6e9
     by: controller
+- id: B5-PROC-1
+  source: owner requirement (DEC-0088)
+  severity: MEDIUM
+  class: 'process text for the round-13 D30 investigation (DEC-0088..0096): spec D31-D35, the section
+    6 step 3, 5 and 7 pointers, section 8 Git hooks, section 12 and CLAUDE.md commit-gate bullet,
+    section 14 runtime; SKILL.md pipeline step 5; the controller and implementer commit-gate
+    paragraphs and the reviewer and verifier Coverage sentences (DEC-0094); the S1 plan strict-block
+    cap 5500 at :7201, :7220, :7540 and its tracked-ledger line (DEC-0095, widened by DEC-0096); each states its DEC
+    answer exactly, conflicts with no other spec row, CLAUDE.md line or strict block, and is
+    executable as written'
+  siblings:
+  - spec D24-D30 rows
+  - ~/.claude/skills/strict-delivery/prompts controller.md, implementer.md, reviewer.md, verifier.md
+  - ~/.claude/skills/strict-delivery/SKILL.md
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: '44'
+    sha: 64f7ad7
+  - file: CLAUDE.md
+    lines: '11'
+    sha: 64f7ad7
+  repro: 'D31-D35 are inserted after the D30 row (spec :44 at 64f7ad7) and the commit-gate bullet
+    after the D30 bullet (CLAUDE.md :11 at 64f7ad7); the strict-block and SKILL.md text waits as
+    reviewed copies in the plan workspace .superpowers/sdd/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints/b5-proc1-staged/
+    (git-ignored), installed into ~/.claude only after the commit that lands this row (S2 plan, S2-b5-process subsection)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 64f7ad7
+    by: session
+  - state: planned
+    sha: 64f7ad7
+    by: controller
+- id: B5-PROC-2
+  source: owner requirement (DEC-0088)
+  severity: MEDIUM
+  class: 'process code for DEC-0088: the D31 skeleton generator (every filesystem, subprocess and
+    argparse call of a gate, one row per path or argument and checklist dimension), the D32 shared
+    fail-closed helper in tools/gates/lib, and the D34 pre-commit gate (run_all plus the gate suite
+    on /usr/bin/python3 and tools/.venv/bin/python3 on the tree being committed; a missing
+    interpreter refuses); each with tests and a mutation transcript'
+  siblings:
+  - tools/gates/hooks/git-pre-commit.sh and install-hooks.sh
+  - B5-U3 (#147, commit-time gates run only register and claims)
+  - 'DEC-0098, DEC-0101: the D34 pre-commit gate runs the set on a fresh export of the index and alone makes the tree tested the tree committed (the by-hand rule claims no equality); its D24 table carries the stale-bytecode row (P-1: in-repo __pycache__/ and the interpreter''s pycache prefix), the ignore rows (.git/info/exclude, core.excludesFile, the global ~/.config/git/ignore) and the attribute and filter rows (.git/info/attributes, filter.*, core.attributesFile, the global ~/.config/git/attributes; DEC-0099)'
+  - spec section 8 Git hooks
+  cites:
+  - file: tools/gates/hooks/git-pre-commit.sh
+    lines: '60'
+    sha: 64f7ad7
+  repro: 'git-pre-commit.sh ends exec python3 tools/gates/run_all.py --only register,claims: a
+    commit that turns the suite red passes (740f6e9, fc759c9)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 64f7ad7
+    by: session
+  - state: planned
+    sha: 64f7ad7
+    by: controller
+- id: B5-PROC-3
+  source: owner requirement (DEC-0088)
+  severity: MEDIUM
+  class: 'D33 adoption sweep: every pinned row (27 at 64f7ad7) has its class restated by input
+    dimension once, by the controller of the next round; each widening not already covered by a
+    DEC (DEC-0089 covers B5-FIX-9, B5-FIX-6, B5-FIX-4 V-1) is an owner question'
+  siblings:
+  - DEC-0089 rows B5-FIX-9, B5-FIX-6, B5-FIX-4
+  cites:
+  - file: docs/superpowers/state/findings.yml
+    lines: '1'
+    sha: 64f7ad7
+  repro: 'yaml count of rows with state pinned at 64f7ad7 gives 27; none has a class restated by
+    dimension per D26'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-sweep
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 64f7ad7
+    by: session
+  - state: planned
+    sha: 64f7ad7
+    by: controller
+- id: B5-UD-1
+  source: review
+  severity: MEDIUM
+  class: 'a session text commit turned the gate suite red: 740f6e9 added the D30 bullet to spec
+    section 12 and CLAUDE.md without moving the bullet count in
+    test_hooks.ProjectWiring.test_claude_md_carries_spec_section_12_verbatim_and_nothing_else
+    (found in the b5 round-13 D30 investigation as U-D-1; DEC-0090: fixed in the first commit of
+    owner task S2-b5-process-code, the next commit after B5-PROC-1 lands, spec D34 Order)'
+  siblings:
+  - B5-RD-1
+  cites:
+  - file: tools/gates/tests/test_hooks.py
+    lines: '996'
+    sha: 64f7ad7
+  repro: 'PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest
+    tools.gates.tests.test_hooks.ProjectWiring.test_claude_md_carries_spec_section_12_verbatim_and_nothing_else
+    fails with AssertionError 11 != 12 at 740f6e9 and at 64f7ad7, and passes at 552ab31 (740f6e9~1)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 64f7ad7
+    by: session
+  - state: planned
+    sha: 64f7ad7
+    by: controller
+- id: B5-RD-1
+  source: review
+  severity: MEDIUM
+  class: 'a plan text commit turned the gate suite red: fc759c9 added old-cap text
+    (tokens=150000 minutes=45, S2 plan :7143) that
+    test_gate_dispatch.GateDispatch.test_s2_plan_blocks_hold_the_dec_0060_caps refuses (found in
+    the b5 round-13 D30 investigation as R-D-1; DEC-0090: fixed in the first commit of owner task
+    S2-b5-process-code, the next commit after B5-PROC-1 lands, spec D34 Order)'
+  siblings:
+  - B5-UD-1
+  cites:
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md
+    lines: '7143'
+    sha: 64f7ad7
+  repro: 'PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest
+    tools.gates.tests.test_gate_dispatch.GateDispatch.test_s2_plan_blocks_hold_the_dec_0060_caps
+    fails with AssertionError ''tokens=150000 '' unexpectedly found at fc759c9 and at 64f7ad7, and
+    passes at 25848b3 (fc759c9~1)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 64f7ad7
+    by: session
+  - state: planned
+    sha: 64f7ad7
+    by: controller
