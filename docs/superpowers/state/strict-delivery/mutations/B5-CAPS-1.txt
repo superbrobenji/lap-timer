@@ -1,0 +1,5 @@
+finding: B5-CAPS-1
+test: test_gate_dispatch::test_budget_caps_follow_dec_0060
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_budget_caps_follow_dec_0060 -> PASS
+step 2 (fix reverted: perl -pi -e 's/tokens: 500000, minutes: 180/tokens: 250000, minutes: 90/; s/tasks: 1, tokens: 300000/tasks: 1, tokens: 150000/; s/reviews: 1, tokens: 250000/reviews: 1, tokens: 120000/' tools/gates/config.yml puts back the pre-DEC-0060 triggers (controller 250000 / 90, implementer 150000, reviewer 120000), restored by git checkout -- tools/gates/config.yml): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_budget_caps_follow_dec_0060 -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_gate_dispatch.GateDispatch.test_budget_caps_follow_dec_0060 -> PASS

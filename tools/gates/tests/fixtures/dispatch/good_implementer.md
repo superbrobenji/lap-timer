@@ -2,7 +2,7 @@
 ## Brief: docs/brief.md
 ## Findings: SD-FX-1
 ## Claims: C-fx.ok
-## Budget: tokens=150000 minutes=60
+## Budget: tokens=300000 minutes=60
 ## Model: sonnet
 ## Report: reports/t1.md
 ## Strict block

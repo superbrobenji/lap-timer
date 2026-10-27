@@ -2,7 +2,7 @@
 ## Brief: docs/brief.md
 ## Findings: SD-FX-2
 ## Claims: none
-## Budget: tokens=120000 minutes=30
+## Budget: tokens=250000 minutes=30
 ## Model: opus
 ## Report: reports/r1.md
 ## Strict block

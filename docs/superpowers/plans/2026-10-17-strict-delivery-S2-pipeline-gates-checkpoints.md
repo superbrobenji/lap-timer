@@ -328,7 +328,7 @@ Re-run every gate clean. Execute every claim in the report, the commits and the 
 ## Brief: docs/brief.md
 ## Findings: SD-FX-1
 ## Claims: C-fx.ok
-## Budget: tokens=150000 minutes=60
+## Budget: tokens=300000 minutes=60
 ## Model: sonnet
 ## Report: reports/t1.md
 ## Strict block
@@ -346,7 +346,7 @@ Implement fixture task 1 from docs/brief.md.
 ## Brief: docs/brief.md
 ## Findings: SD-FX-2
 ## Claims: none
-## Budget: tokens=120000 minutes=30
+## Budget: tokens=250000 minutes=30
 ## Model: opus
 ## Report: reports/r1.md
 ## Strict block
@@ -601,12 +601,12 @@ class GateDispatch(unittest.TestCase):
         self.assertFailLine(rc, out, "dispatch.grammar")
 
     def test_budget_over_role_cap_fails(self):
-        rc, out = self.dispatch(self.variant("tokens=150000", "tokens=150001"))
+        rc, out = self.dispatch(self.variant("tokens=300000", "tokens=300001"))
         self.assertFailLine(rc, out, "dispatch.budget")
 
     def test_budget_with_trailing_text_fails(self):
-        rc, out = self.dispatch(self.variant("## Budget: tokens=150000 minutes=60\n",
-                                             "## Budget: tokens=150000 minutes=60 extra\n"))
+        rc, out = self.dispatch(self.variant("## Budget: tokens=300000 minutes=60\n",
+                                             "## Budget: tokens=300000 minutes=60 extra\n"))
         self.assertFailLine(rc, out, "dispatch.budget")
         self.assertIn("expected 'tokens=<n> minutes=<n>'", out)
 
@@ -681,17 +681,82 @@ class GateDispatch(unittest.TestCase):
             self.assertEqual(0, rc, f"{role}: {out}")
 
     def test_controller_budget_caps(self):
-        rc, out = self.dispatch_role(self.role_prompt("controller", budget="tokens=250000 minutes=90"))
+        rc, out = self.dispatch_role(self.role_prompt("controller", budget="tokens=500000 minutes=180"))
         self.assertEqual(0, rc, out)
-        for budget in ("tokens=250001 minutes=90", "tokens=250000 minutes=91"):
+        for budget in ("tokens=500001 minutes=180", "tokens=500000 minutes=181"):
             rc, out = self.dispatch_role(self.role_prompt("controller", budget=budget))
             self.assertFailLine(rc, out, "dispatch.budget")
 
     def test_reviewer_token_cap(self):
-        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", budget="tokens=120000 minutes=30"))
+        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", budget="tokens=250000 minutes=30"))
         self.assertEqual(0, rc, out)
-        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", budget="tokens=120001 minutes=30"))
+        rc, out = self.dispatch_role(self.role_prompt("task_reviewer", budget="tokens=250001 minutes=30"))
         self.assertFailLine(rc, out, "dispatch.budget")
+
+    def test_budget_caps_follow_dec_0060(self):
+        """B5-CAPS-1 (DEC-0060, spec 3.1): every role's budget is read against its trigger in config.yml:
+        controller 500000 tokens / 180 minutes, implementers 300000 tokens, every other role (reviewers,
+        verifiers, audit roles, investigator) 250000 tokens; only the controller has a minutes cap."""
+        old = {"controller": (250000, 90), "implementer": (150000, None), "reviewer": (120000, None)}
+        for role in gate_dispatch.ROLES:
+            cls = ("controller" if role == "controller" else
+                   "implementer" if role in gate_dispatch.IMPLEMENTERS else "reviewer")
+            cap_t, cap_m = {"controller": (500000, 180), "implementer": (300000, None),
+                            "reviewer": (250000, None)}[cls]
+            minutes = cap_m or 60
+            want = f"(tokens {cap_t}" + (f", minutes {cap_m})" if cap_m else ")")
+            ok = [f"tokens={cap_t} minutes={minutes}", f"tokens={old[cls][0]} minutes={old[cls][1] or 60}"]
+            bad = [f"tokens={cap_t + 1} minutes={minutes}"]
+            if cap_m:
+                bad.append(f"tokens={cap_t} minutes={cap_m + 1}")
+            else:
+                ok.append(f"tokens={cap_t} minutes=100000")    # no minutes cap below the controller
+            for budget in ok:
+                with self.subTest(role=role, budget=budget):
+                    rc, out = self.dispatch_role(self.role_prompt(role, budget=budget))
+                    self.assertEqual(0, rc, out)
+                    self.assertIn("PASS dispatch.budget\n", out)
+            for budget in bad:
+                with self.subTest(role=role, budget=budget):
+                    rc, out = self.dispatch_role(self.role_prompt(role, budget=budget))
+                    self.assertFailLine(rc, out, "dispatch.budget")
+                    self.assertIn(f"exceeds the {role} trigger {want}", out)
+
+    def test_s2_plan_blocks_hold_the_dec_0060_caps(self):
+        """Sibling 'S2 plan blocks of the changed files (D3)' (B5-CAPS-1): the plan's copies of the two dispatch
+        fixtures equal the files; its blocks of this file and of test_hooks.py hold the DEC-0060 budget lines and
+        none of the old ones (built from ints, so this file's own copy in the plan does not hold them)."""
+        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
+                  encoding="utf-8") as f:
+            plan = f.read()
+        for name, caption in (("good_implementer.md", " (the strict block"), ("good_reviewer.md", ":\n```\n")):
+            start = plan.index(f"`tools/gates/tests/fixtures/dispatch/{name}`{caption}")
+            body = plan[plan.index("```\n", start) + 4:]
+            self.assertEqual(fixture(name), body[:body.index("\n```\n") + 1], name)
+        for line in ('budget="tokens=500000 minutes=180"', '("tokens=500001 minutes=180", "tokens=500000 minutes=181")',
+                     '"tokens=300000", "tokens=300001"', 'budget="tokens=250001 minutes=30"',
+                     "    def test_budget_caps_follow_dec_0060(self):\n",
+                     '("## Budget: tokens=300000 minutes=60\\n", "## Budget: tokens=100000 minutes=60\\n")'):
+            self.assertIn(line, plan)
+        for t, m in ((150000, None), (120000, None), (250000, 90), (250001, 90), (150001, None), (120001, None)):
+            old = f"tokens={t}" + (f" minutes={m}" if m else "")
+            self.assertNotIn(old + ("" if m else " "), plan)
+            self.assertNotIn(f'"{old}"', plan)
+
+    def test_readme_states_no_budget_cap(self):
+        """Sibling 'README text naming caps' (B5-CAPS-1): tools/gates/README.md states no trigger value, old or
+        new (config.yml and spec 3.1 hold them), so no README text can drift from the config. Spellings read:
+        digits, NNNk / NNN k / NNNK, comma, underscore and space thousands separators; minutes as N min, N-min,
+        minutes=N and minutes: N."""
+        with open(os.path.join(rf.REAL, "tools", "gates", "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        for n in (500000, 300000, 250000, 150000, 120000):
+            for form in (str(n), f"{n // 1000}k", f"{n // 1000} k", f"{n // 1000}K", f"{n:,}", f"{n:_}",
+                         f"{n:,}".replace(",", " ")):
+                self.assertNotIn(form, readme)
+        for m in (180, 90):
+            for form in (f"{m} min", f"{m}-min", f"minutes={m}", f"minutes: {m}"):
+                self.assertNotIn(form, readme)
 
     def test_zero_budget_fails(self):
         for budget in ("tokens=0 minutes=10", "tokens=1000 minutes=0"):
@@ -1440,7 +1505,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
-Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75, the b5 fix wave S2-b5-finalfix3 to 76, its fix round 1 to 77). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75, the b5 fix wave S2-b5-finalfix3 to 76, its fix round 1 to 77, B5-CAPS-1 (DEC-0060 caps, b5 round 12) to 80 and a suite of 660 (one skipped on APFS)). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
 
 - [ ] **Step 6: Commit**
 
@@ -1632,7 +1697,7 @@ class AgentDispatchHook(unittest.TestCase):
         shutil.copyfile(os.path.join(DISPATCH_FIX, "prompts", "implementer.md"), os.path.join(prompts, "verifier.md"))
         prompt = self.good
         for old, new in (("## Role: implementer\n", "## Role: final_verifier\n"),
-                         ("## Budget: tokens=150000 minutes=60\n", "## Budget: tokens=100000 minutes=60\n"),
+                         ("## Budget: tokens=300000 minutes=60\n", "## Budget: tokens=100000 minutes=60\n"),
                          ("## Model: sonnet\n", f"## Model: {model}\n")):
             self.assertIn(old, prompt)
             prompt = prompt.replace(old, new, 1)

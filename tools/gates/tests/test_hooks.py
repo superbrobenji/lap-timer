@@ -1104,7 +1104,7 @@ class AgentDispatchHook(unittest.TestCase):
         shutil.copyfile(os.path.join(DISPATCH_FIX, "prompts", "implementer.md"), os.path.join(prompts, "verifier.md"))
         prompt = self.good
         for old, new in (("## Role: implementer\n", "## Role: final_verifier\n"),
-                         ("## Budget: tokens=150000 minutes=60\n", "## Budget: tokens=100000 minutes=60\n"),
+                         ("## Budget: tokens=300000 minutes=60\n", "## Budget: tokens=100000 minutes=60\n"),
                          ("## Model: sonnet\n", f"## Model: {model}\n")):
             self.assertIn(old, prompt)
             prompt = prompt.replace(old, new, 1)
