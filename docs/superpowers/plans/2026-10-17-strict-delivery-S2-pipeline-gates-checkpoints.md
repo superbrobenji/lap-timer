@@ -17,7 +17,7 @@
 - Merge only on all-green (every CI job incl. advisory) under a per-plan grant entry `grant:<plan>` in `decisions.yml` (spec D22). The grant for this plan is decision `DEC-0001`.
 - Tags: `strict-delivery-b4`, `strict-delivery-b5`, `strict-delivery-b6` on the squash commits.
 - Model map (spec §5): controllers opus; implementers sonnet (haiku only for transcription of complete code); task reviewers opus; final branch reviewer opus; final adversarial verifier Fable; exception reviewer Fable (both opus while the DEC-0018 fallback is on). Never any other Fable use.
-- Triggers (spec §3.1): controller 3 tasks / 250k tokens / 90 min; implementer 1 task / 150k; reviewer 1 review / 120k; any 429 → checkpoint at the task boundary.
+- Triggers (spec §3.1, DEC-0060): controller 3 tasks / 500k tokens / 180 min; implementer 1 task / 300k; reviewer 1 review / 250k; any 429 → checkpoint at the task boundary.
 - Zero warnings; zero gate failures at every commit once the gate exists; every Python script exits non-zero on any failure path; a missing input is a FAIL never "nothing to do" (spec §7).
 - Pinned = production-path test + mutation transcript (spec D7). For gate scripts "production path" = the script's `main()` invoked on a fixture, never a helper called in isolation.
 - No claim trusted (spec D3): every plan-text claim about the repo is verified by the implementer before use; a wrong claim is corrected in the plan and ledgered.

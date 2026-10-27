@@ -162,9 +162,9 @@ Decision schema: `id` (`^DEC-[0-9]{4}$`), `class`, `question`, `options` (list o
 ```yaml
 owner: {handle: superbrobenji}
 triggers:
-  controller: {tasks: 3, tokens: 250000, minutes: 90}
-  implementer: {tasks: 1, tokens: 150000}
-  reviewer: {reviews: 1, tokens: 120000}
+  controller: {tasks: 3, tokens: 500000, minutes: 180}
+  implementer: {tasks: 1, tokens: 300000}
+  reviewer: {reviews: 1, tokens: 250000}
 models:            # minimum model per role; dispatch hook enforces
   controller: opus
   implementer: sonnet

@@ -954,9 +954,9 @@ def load(root) -> dict:
 ```yaml
 owner: {handle: superbrobenji}
 triggers:
-  controller: {tasks: 3, tokens: 250000, minutes: 90}
-  implementer: {tasks: 1, tokens: 150000}
-  reviewer: {reviews: 1, tokens: 120000}
+  controller: {tasks: 3, tokens: 500000, minutes: 180}
+  implementer: {tasks: 1, tokens: 300000}
+  reviewer: {reviews: 1, tokens: 250000}
 models:            # minimum model per role; dispatch hook enforces
   controller: opus
   implementer: sonnet
@@ -7349,7 +7349,7 @@ Dispatch discipline. You are the only role that dispatches. Every dispatch follo
 
 Rulings. Only inside the approved plan, only on plan-vs-spec or task-vs-task conflicts the spec settles, at most 5 per block, each ledgered as `Ruling: what -- why -- cost if wrong -- spec cite` and listed at the checkpoint. Everything else is an owner question.
 
-Merge and checkpoint. Present the gate output; never recommend a merge with a red line or an open "fix before merge". Merge only on every CI job green, advisory included, under the plan's answered grant. Checkpoint at 3 tasks, 250k tokens, 90 minutes or any 429, whichever first; the checkpoint leaves a clean tree, a committed handoff and ledger line, a status update and a resume prompt; then stop: one block per context.
+Merge and checkpoint. Present the gate output; never recommend a merge with a red line or an open "fix before merge". Merge only on every CI job green, advisory included, under the plan's answered grant. Checkpoint at 3 tasks, 500k tokens, 180 minutes or any 429, whichever first; the checkpoint leaves a clean tree, a committed handoff and ledger line, a status update and a resume prompt; then stop: one block per context.
 
 Zero bugs. A defect your own change introduces makes the work incomplete; there is no "minor" and no "follow-up". A defect you find that your change did not cause is not fixed in passing: record file:line, a reproducer and the class statement under "Unrelated findings" so the controller registers it with an owner.
 
