@@ -993,7 +993,7 @@ class ProjectWiring(unittest.TestCase):
             spec = fh.read()
         section = spec.split("## 12. ", 1)[1].split("\n## 13. ", 1)[0]
         bullets = [l for l in section.splitlines() if l.startswith("- ")]
-        self.assertEqual(11, len(bullets))
+        self.assertEqual(13, len(bullets))
         with open(os.path.join(gf.REPO, "CLAUDE.md")) as fh:
             claude = fh.read().splitlines()
         self.assertEqual(bullets, [l for l in claude if l.startswith("- ")])

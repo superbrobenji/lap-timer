@@ -359,42 +359,6 @@ class GateDispatch(unittest.TestCase):
                     self.assertFailLine(rc, out, "dispatch.budget")
                     self.assertIn(f"exceeds the {role} trigger {want}", out)
 
-    def test_s2_plan_blocks_hold_the_dec_0060_caps(self):
-        """Sibling 'S2 plan blocks of the changed files (D3)' (B5-CAPS-1): the plan's copies of the two dispatch
-        fixtures equal the files; its blocks of this file and of test_hooks.py hold the DEC-0060 budget lines and
-        none of the old ones (built from ints, so this file's own copy in the plan does not hold them)."""
-        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
-                  encoding="utf-8") as f:
-            plan = f.read()
-        for name, caption in (("good_implementer.md", " (the strict block"), ("good_reviewer.md", ":\n```\n")):
-            start = plan.index(f"`tools/gates/tests/fixtures/dispatch/{name}`{caption}")
-            body = plan[plan.index("```\n", start) + 4:]
-            self.assertEqual(fixture(name), body[:body.index("\n```\n") + 1], name)
-        for line in ('budget="tokens=500000 minutes=180"', '("tokens=500001 minutes=180", "tokens=500000 minutes=181")',
-                     '"tokens=300000", "tokens=300001"', 'budget="tokens=250001 minutes=30"',
-                     "    def test_budget_caps_follow_dec_0060(self):\n",
-                     '("## Budget: tokens=300000 minutes=60\\n", "## Budget: tokens=100000 minutes=60\\n")'):
-            self.assertIn(line, plan)
-        for t, m in ((150000, None), (120000, None), (250000, 90), (250001, 90), (150001, None), (120001, None)):
-            old = f"tokens={t}" + (f" minutes={m}" if m else "")
-            self.assertNotIn(old + ("" if m else " "), plan)
-            self.assertNotIn(f'"{old}"', plan)
-
-    def test_readme_states_no_budget_cap(self):
-        """Sibling 'README text naming caps' (B5-CAPS-1): tools/gates/README.md states no trigger value, old or
-        new (config.yml and spec 3.1 hold them), so no README text can drift from the config. Spellings read:
-        digits, NNNk / NNN k / NNNK, comma, underscore and space thousands separators; minutes as N min, N-min,
-        minutes=N and minutes: N."""
-        with open(os.path.join(rf.REAL, "tools", "gates", "README.md"), encoding="utf-8") as f:
-            readme = f.read()
-        for n in (500000, 300000, 250000, 150000, 120000):
-            for form in (str(n), f"{n // 1000}k", f"{n // 1000} k", f"{n // 1000}K", f"{n:,}", f"{n:_}",
-                         f"{n:,}".replace(",", " ")):
-                self.assertNotIn(form, readme)
-        for m in (180, 90):
-            for form in (f"{m} min", f"{m}-min", f"minutes={m}", f"minutes: {m}"):
-                self.assertNotIn(form, readme)
-
     def test_zero_budget_fails(self):
         for budget in ("tokens=0 minutes=10", "tokens=1000 minutes=0"):
             rc, out = self.dispatch_role(self.role_prompt("implementer", budget=budget))

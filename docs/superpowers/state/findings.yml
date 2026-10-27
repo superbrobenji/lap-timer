@@ -1861,3 +1861,33 @@
   - state: planned
     sha: 64f7ad7
     by: controller
+- id: B5-CAPS-2
+  source: review
+  severity: MEDIUM
+  class: 'B5-CAPS-1 siblings "S2 plan blocks of the changed files (D3)" and "README text naming caps"
+    have no automated check: DEC-0063 drops test_s2_plan_blocks_hold_the_dec_0060_caps and
+    test_readme_states_no_budget_cap, so an old cap written into a plan block of a changed file or
+    into tools/gates/README.md is caught only by the plans'' own diff commands and a grep (b5r13-rr-caps.md
+    R-caps-4, plan-line mutants M1-M10; DEC-0063 drop, DEC-0091 same-d3-row: one row for both cells)'
+  siblings:
+  - S2 plan blocks of the changed files (D3)
+  - README text naming caps
+  cites:
+  - file: tools/gates/tests/test_gate_dispatch.py
+    lines: 362-397
+    sha: f1057e5
+  repro: 'at the commit that lands this row: put "budget=\"tokens=250000 minutes=90\"" in place of
+    "budget=\"tokens=500000 minutes=180\"" in the S2 plan block of test_gate_dispatch.py and add "250k" to
+    tools/gates/README.md; run_all and the gate suite stay green on both interpreters'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-caps-d3
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: f1057e5
+    by: controller

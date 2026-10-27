@@ -1,0 +1,5 @@
+finding: B5-UD-1
+test: test_hooks::test_claude_md_carries_spec_section_12_verbatim_and_nothing_else
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_hooks.ProjectWiring.test_claude_md_carries_spec_section_12_verbatim_and_nothing_else -> PASS
+step 2 (fix reverted: perl -pi -e 's/self\.assertEqual\(13, len\(bullets\)\)/self.assertEqual(11, len(bullets))/' tools/gates/tests/test_hooks.py puts back the bullet count of the older spec section 12 (AssertionError: 11 != 13), restored by git checkout -- tools/gates/tests/test_hooks.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_hooks.ProjectWiring.test_claude_md_carries_spec_section_12_verbatim_and_nothing_else -> FAIL
+step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_hooks.ProjectWiring.test_claude_md_carries_spec_section_12_verbatim_and_nothing_else -> PASS

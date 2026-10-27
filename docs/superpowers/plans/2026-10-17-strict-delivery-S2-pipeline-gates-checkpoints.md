@@ -722,42 +722,6 @@ class GateDispatch(unittest.TestCase):
                     self.assertFailLine(rc, out, "dispatch.budget")
                     self.assertIn(f"exceeds the {role} trigger {want}", out)
 
-    def test_s2_plan_blocks_hold_the_dec_0060_caps(self):
-        """Sibling 'S2 plan blocks of the changed files (D3)' (B5-CAPS-1): the plan's copies of the two dispatch
-        fixtures equal the files; its blocks of this file and of test_hooks.py hold the DEC-0060 budget lines and
-        none of the old ones (built from ints, so this file's own copy in the plan does not hold them)."""
-        with open(os.path.join(rf.REAL, "docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md"),
-                  encoding="utf-8") as f:
-            plan = f.read()
-        for name, caption in (("good_implementer.md", " (the strict block"), ("good_reviewer.md", ":\n```\n")):
-            start = plan.index(f"`tools/gates/tests/fixtures/dispatch/{name}`{caption}")
-            body = plan[plan.index("```\n", start) + 4:]
-            self.assertEqual(fixture(name), body[:body.index("\n```\n") + 1], name)
-        for line in ('budget="tokens=500000 minutes=180"', '("tokens=500001 minutes=180", "tokens=500000 minutes=181")',
-                     '"tokens=300000", "tokens=300001"', 'budget="tokens=250001 minutes=30"',
-                     "    def test_budget_caps_follow_dec_0060(self):\n",
-                     '("## Budget: tokens=300000 minutes=60\\n", "## Budget: tokens=100000 minutes=60\\n")'):
-            self.assertIn(line, plan)
-        for t, m in ((150000, None), (120000, None), (250000, 90), (250001, 90), (150001, None), (120001, None)):
-            old = f"tokens={t}" + (f" minutes={m}" if m else "")
-            self.assertNotIn(old + ("" if m else " "), plan)
-            self.assertNotIn(f'"{old}"', plan)
-
-    def test_readme_states_no_budget_cap(self):
-        """Sibling 'README text naming caps' (B5-CAPS-1): tools/gates/README.md states no trigger value, old or
-        new (config.yml and spec 3.1 hold them), so no README text can drift from the config. Spellings read:
-        digits, NNNk / NNN k / NNNK, comma, underscore and space thousands separators; minutes as N min, N-min,
-        minutes=N and minutes: N."""
-        with open(os.path.join(rf.REAL, "tools", "gates", "README.md"), encoding="utf-8") as f:
-            readme = f.read()
-        for n in (500000, 300000, 250000, 150000, 120000):
-            for form in (str(n), f"{n // 1000}k", f"{n // 1000} k", f"{n // 1000}K", f"{n:,}", f"{n:_}",
-                         f"{n:,}".replace(",", " ")):
-                self.assertNotIn(form, readme)
-        for m in (180, 90):
-            for form in (f"{m} min", f"{m}-min", f"minutes={m}", f"minutes: {m}"):
-                self.assertNotIn(form, readme)
-
     def test_zero_budget_fails(self):
         for budget in ("tokens=0 minutes=10", "tokens=1000 minutes=0"):
             rc, out = self.dispatch_role(self.role_prompt("implementer", budget=budget))
@@ -1505,7 +1469,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 -m unittest tools.gates.tests.test_gate_dispatch -v`
-Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75, the b5 fix wave S2-b5-finalfix3 to 76, its fix round 1 to 77, B5-CAPS-1 (DEC-0060 caps, b5 round 12) to 80 and a suite of 660 (one skipped on APFS)). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
+Expected: `OK` (38 tests at Task 1's commit; the Step 2 and Step 4 blocks show the tip files after Task 3 and the b4 fix wave B4-FIX-1, where the module has 62 tests; the b5 fix wave B5-FIX-2 brings it to 75, the b5 fix wave S2-b5-finalfix3 to 76, its fix round 1 to 77, B5-CAPS-1 (DEC-0060 caps, b5 round 12) to 80 and a suite of 660 (one skipped on APFS), the b5 round 14 green-suite commit (B5-UD-1, B5-RD-1; DEC-0063 drops the two caps text guards) to 78 and a suite of 658 (one skipped on APFS)). Then `python3 tools/gates/run_all.py` → only `PASS` lines (gate_dispatch is not yet in `GATES`; Task 3 adds it).
 
 - [ ] **Step 6: Commit**
 
@@ -6881,7 +6845,7 @@ CI: `grep -n unittest .github/workflows/gates.yml` prints lines 30 and 32, both 
 
 - [ ] **Step 8: Run to verify they pass**
 
-Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1; 134 and a suite of 638 after its round 10; 135 and a suite of 642 (one skipped on APFS) after its round 10 fix 2; 136 and a suite of 647 (one skipped on APFS) after its round 10 fix 3; 139 and a suite of 655 (one skipped on APFS) after its round 11; 140 and a suite of 657 (one skipped on APFS) after its round 11 fix 1); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
+Run: `python3 -m unittest tools.gates.tests.test_gate_plan -v` → `OK` (91 tests; 95 after the b5 fix wave B5-FIX-2/B5-FIX-3, whose suite is 562 on both interpreters and whose `run_all` adds one `dispatch.config.fable_fallback` line: 132 before the S2-b5-fixwave package exists; 96 and a suite of 564 after its review round 1; 100 and a suite of 573 after the b5 final-review fix wave B5-FIX-4 (unchanged by its fix round 1, which adds subtests only), whose `run_all` is 144 lines before the S2-b5-finalfix package exists; 111 and a suite of 589 after the b5 fix wave B5-FIX-5/B5-FIX-6, whose `run_all` is 155 lines before the S2-b5-finalfix2 package exists; 128 and a suite of 622 after the b5 fix wave S2-b5-finalfix3, whose `run_all` is 167 lines before the S2-b5-finalfix3 package exists; 132 and a suite of 632 after its fix round 1; 134 and a suite of 638 after its round 10; 135 and a suite of 642 (one skipped on APFS) after its round 10 fix 2; 136 and a suite of 647 (one skipped on APFS) after its round 10 fix 3; 139 and a suite of 655 (one skipped on APFS) after its round 11; 140 and a suite of 657 (one skipped on APFS) after its round 11 fix 1; 140 and a suite of 658 (one skipped on APFS) after the b5 round 14 green-suite commit (B5-UD-1, B5-RD-1)); the full suite 544 tests on both interpreters (`PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -W error -m unittest discover -s tools/gates/tests -t .` and the same with `tools/.venv/bin/python3`). Then `python3 tools/gates/run_all.py` → only `PASS`: 120 lines (51 before this task + 69 `plan.strict-delivery.*` lines for this very plan file), 131 once the S2-T6 package exists. Then the approval check: `python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints.md --source 'register:plan=strict-delivery&task=S2-T*'` → only `PASS` (each SD-S2-Tn in exactly one task; `task=S2-*` would also match `B4-FIX-1`, owner.task `S2-b4-fixwave`, and print `FAIL plan.coverage.B4-FIX-1: in no task`).
 
 - [ ] **Step 9: Commit**
 
