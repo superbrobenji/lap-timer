@@ -1565,3 +1565,38 @@
   - state: open
     sha: 79f0d16
     by: session
+- id: B5-CAPS-1
+  source: owner requirement (DEC-0060)
+  severity: MEDIUM
+  class: 'tools/gates/config.yml triggers hold the old agent caps (controller 3 tasks
+    / 250000 tokens / 90 minutes, implementer 150000 tokens, reviewer 120000 tokens)
+    against spec 3.1 as amended by DEC-0060 (controller 500000 tokens / 180 minutes,
+    implementer 300000, reviewer and verifier 250000); every reader of the triggers
+    and every test, fixture and plan block that pins the old values follows'
+  siblings:
+  - config.yml triggers block
+  - gate_dispatch budget check and its tests
+  - dispatch fixtures under tools/gates/tests/fixtures/dispatch
+  - S2 plan blocks of the changed files (D3)
+  - README text naming caps
+  cites:
+  - file: tools/gates/config.yml
+    lines: 2-5
+    sha: 8db03b8
+  repro: 'grep -n tokens tools/gates/config.yml -> controller 250000, implementer 150000,
+    reviewer 120000; spec 3.1 says 500k / 300k / 250k'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-caps
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 8db03b8
+    by: session
+  - state: planned
+    sha: 8db03b8
+    by: controller
