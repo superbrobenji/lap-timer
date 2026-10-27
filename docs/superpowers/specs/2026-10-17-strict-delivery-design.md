@@ -35,6 +35,12 @@ This document designs the process that prevents each mechanism from recurring. I
 | D21 | Build both A (data-driven gates + thin skill) and B (Workflow scripts for the audit fan-out and the block loop). |
 | D22 | Reset checkpoints: bounded agent lifetime; a checkpoint produces a status update, a committed handoff document and a resume prompt; the tree is clean (no worktree but main, no open PR from the plan, no live subagent, no in-progress task); block = PR; the agent merges on all-green (every CI job including advisory) under a per-plan standing grant; parallel worktree tasks allowed with a file-overlap gate and a reviewed integration task; handoff, ledger and decisions committed under `docs/superpowers/state/`; triggers = 3 tasks / 250k tokens / 90 min for a controller, 1 task / 150k for an implementer, 1 review / 120k for a reviewer, any 429; one block per context, the session stops after each block for the owner's `/clear`. |
 | D23 | Rollout ends with a conformance sweep that brings the current tree to green on every gate, run through the pipeline itself. |
+| D24 | Input-domain model (DEC-0058 P1). Every gate task in a plan carries an input-domain table: dimension, values, expected verdict, drawn from a fixed checklist (git object state at HEAD, index and working tree incl. deletion, mode and type; git config keys that change output; file type, permissions, symlinks; encoding; path form incl. root vs toplevel, case and Unicode normalisation; text grammar written as a grammar). The owner approves it with the plan, before implementation; reviewers check coverage against it; `gate_plan` FAILs a gate task without one (from b6). |
+| D25 | No semantics in fix rounds (DEC-0058 P2). A fix that needs an acceptance rule the plan and spec do not state stops as an owner question before code, with the rule written out. Rules in a controller's brief are hypotheses to reviewers, never binding; a controller choice of semantics outside D10's rulings is a process defect. |
+| D26 | Class-wide fixes and re-reviews (DEC-0058 P3). A finding's class names the input dimension, not the reproduced value. The fix covers the whole dimension; its re-review re-runs that dimension's D24 table rows over the whole changed function, not the round diff, and checks every shared-library change against the spec lines it touches. |
+| D27 | Mechanical mutation (DEC-0058 P4). A script mutates every changed branch (comparison, constant, boolean, early return); any survivor FAILs unless registered as equivalent with an argument; reviewers no longer choose the mutant set (gate from b6). |
+| D28 | Threat model (DEC-0058 P5). The gates defend against honest agent mistakes, not adversarial inputs. Inputs outside each gate's stated whitelist (path grammar, regular files only, default git output config, one table per file, and the like) FAIL closed with a named check; they are not handled case by case. A whitelist is set from data in the tree. |
+| D29 | Review sizing (DEC-0058 P6). Review packages are split at plan time so each review fits under the reviewer cap with margin; a final review is split by area from the start (DEC-0023, DEC-0030), never after a budget stop (gate from b6). |
 
 ## 2. Scope, layers, precedence
 
@@ -54,9 +60,9 @@ This document designs the process that prevents each mechanism from recurring. I
 ## 3. Reset checkpoints
 
 ### 3.1 Triggers (defaults, owner-tunable in `tools/gates/config.yml`)
-- Controller (session or sub-controller): 3 tasks completed, or 250k tokens, or 90 minutes, whichever first.
-- Implementer: 1 task, or 150k tokens.
-- Reviewer / verifier: 1 review, or 120k tokens.
+- Controller (session or sub-controller): 3 tasks completed, or 500k tokens, or 180 minutes, whichever first (DEC-0060; was 250k / 90 min).
+- Implementer: 1 task, or 300k tokens (DEC-0060; was 150k).
+- Reviewer / verifier: 1 review, or 250k tokens (DEC-0060; was 120k).
 - Any usage-limit 429: checkpoint at the current task boundary.
 The dispatch hook writes the budget into the dispatch; the controller tracks children from task-notification usage lines and itself from dispatch count and notification sizes; the `Stop` hook and `gate_checkpoint` are the hard stop.
 
@@ -178,11 +184,11 @@ No pasted session history; a size cap on the prompt enforces it.
 
 1. **Intake.** The change exists as a register entry (finding, requirement with claim rows, or maintenance item) before any work. The dispatch hook checks.
 2. **Claim verification.** Every document the change depends on has its cited claim rows `verified` at HEAD. Divergence → D5.
-3. **Plan or micro-plan.** Plans through writing-plans with added header blocks (register ids per task, sibling lists, pinning step, gate list, block boundaries). A micro-plan (one-line fix) carries the same fields in the brief, no plan file. `gate_plan` prints the file-overlap table and the id-coverage table (each routed id in exactly one task; every id from the source report somewhere) and fails on placeholders.
+3. **Plan or micro-plan.** Plans through writing-plans with added header blocks (register ids per task, sibling lists, pinning step, gate list, block boundaries). A micro-plan (one-line fix) carries the same fields in the brief, no plan file. `gate_plan` prints the file-overlap table and the id-coverage table (each routed id in exactly one task; every id from the source report somewhere) and fails on placeholders. Every gate task carries its D24 input-domain table and D28 whitelist, approved with the plan.
 4. **Dispatch** through the hook (§5).
 5. **Implement, TDD.** Failing test first through the production call path; mutation transcript; every sibling tested or filed as its own row; full local gate run (host suite, dc-host, tools tests, P10 full reach, venue lint, spec-api check, all firmware builds at zero warnings, DRAM budget, comment pattern gate); report with each claim marked by the command that proves it.
-6. **Task review, executed.** Reviewer re-runs the gate set clean and the mutation; executes every claim in report, commits and diff comments (direct + contradiction); checks siblings against the class; runs a contradiction pass on the new surface ("assume the fix is wrong for input X"); files new findings as register rows (from this change → task incomplete; unrelated → investigation dispatch + owner). Verdict needs spec ✅, quality ✅, claims-executed ✅.
-7. **Fix loop.** Rounds 1–3 resume the implementer; 4–5 a fresh agent one tier up; a round limit hit is a decision question, not a parked finding.
+6. **Task review, executed.** Reviewer re-runs the gate set clean and the mutation; executes every claim in report, commits and diff comments (direct + contradiction); checks siblings against the class and coverage against the task's D24 table; treats every rule in a controller's brief as a hypothesis (D25); runs a contradiction pass on the new surface ("assume the fix is wrong for input X"); files new findings as register rows (from this change → task incomplete; unrelated → investigation dispatch + owner). Verdict needs spec ✅, quality ✅, claims-executed ✅.
+7. **Fix loop.** Rounds 1–3 resume the implementer; 4–5 a fresh agent one tier up; a round limit hit is a decision question, not a parked finding. A fix covers its finding's whole dimension and its re-review the whole changed function (D26); a fix that needs a rule the plan lacks stops for the owner first (D25).
 8. **Block end** (§3.4).
 9. **Post-merge audit hook.** Files changed by a merged block become coverage rows for the next audit.
 

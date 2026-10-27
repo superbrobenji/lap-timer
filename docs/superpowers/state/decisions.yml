@@ -533,3 +533,32 @@
   asked_at: {sha: "163aee0", by: session}
   answer: "in-class (owner in chat, 2026-10-27: \"for the other questions, use recommended\"; the session had recommended in-class)"
   answered_at: {sha: "163aee0", by: superbrobenji}
+- id: DEC-0058
+  class: spec-direction
+  question: "b5 root-cause report .superpowers/sdd/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints/b5-rca-report.md: 52 defect units in b5, ranked root causes RC1-RC6 (no input-domain model; semantics decided in fix rounds and handed to reviewers as binding; diff-scoped fixes and re-reviews; plan code as no independent oracle; reviewer-chosen mutants; packages above the reviewer cap). Which process changes are adopted?"
+  options:
+    - {label: adopt-p1-p6, cost: "all six: P1 input-domain table per gate task, approved before implementation, gate_plan-checked; P2 no semantics in fix-round briefs (a missing rule is an owner question before code; brief rules are hypotheses to reviewers); P3 class-wide fixes and re-reviews by dimension, shared-lib changes checked against the spec lines they touch; P4 mechanical mutation gate, any survivor FAILs unless registered equivalent; P5 threat model = honest agent mistakes, inputs outside a whitelist fail closed; P6 review packages sized below the reviewer cap at plan time. Spec D24-D29; P1/P4/P6 gate code in b6"}
+    - {label: subset, cost: "adopt a subset"}
+    - {label: none, cost: "keep the process as is"}
+  asked_at: {sha: "6f6355a", by: session}
+  answer: "adopt-p1-p6 (owner in chat, 2026-10-27: \"adopt all six\"; the session had recommended adopt-p1-p6)"
+  answered_at: {sha: "6f6355a", by: superbrobenji}
+- id: DEC-0059
+  class: scope
+  question: "b5 has five open rows (B5-FIX-5, -10, -14, -16, -26) with new findings every round. Apply the new process to b5 or freeze it?"
+  options:
+    - {label: apply-to-b5, cost: "P2, P3, P5 as spec now; input-domain tables and whitelists for gate_review_package, make_review_package and gate_plan as an S2 plan amendment for owner approval; one class-wide fix wave against the tables; then CHECKPOINT b5. P1/P4/P6 gate code enters b6 scope"}
+    - {label: freeze-b5, cost: "open rows become issue-owned rows; all six changes start in b6"}
+  asked_at: {sha: "6f6355a", by: session}
+  answer: "apply-to-b5 (owner in chat, 2026-10-27: \"option a for b5\"; the session had recommended apply-to-b5)"
+  answered_at: {sha: "6f6355a", by: superbrobenji}
+- id: DEC-0060
+  class: model-policy
+  question: "Agent caps (config triggers, spec 3.1) are hit too often: sub-controllers stop on the 90-minute clock, reviewers and verifiers on the 120k token cap. New caps?"
+  options:
+    - {label: double-all, cost: "controller 500k tokens / 180 min, implementer 300k, reviewer and verifier 250k"}
+    - {label: reviewers-and-minutes, cost: "controller 250k / 180 min, implementer 150k, reviewer and verifier 250k"}
+    - {label: triple-all, cost: "controller 750k / 240 min, implementer 450k, reviewer and verifier 360k"}
+  asked_at: {sha: "6f6355a", by: session}
+  answer: "double-all (owner in chat, 2026-10-27: \"we should also raise the token cap\"; picked Double all in the session's question; the session had recommended double-all)"
+  answered_at: {sha: "6f6355a", by: superbrobenji}
