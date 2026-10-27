@@ -2420,7 +2420,7 @@ Invoke the strict-delivery skill. Read docs/superpowers/state/strict-delivery/ha
 
 **Siblings:** none -- the register row SD-S2-T4 lists no siblings
 
-**Input domain:** rows T4.1-T4.26, TL.1-TL.5 and TD.1-TD.6, whitelists W4.1-W4.9, WL.1 and WD.1 in the section "b5 input domain and whitelists (DEC-0059)" before the b5 checkpoint; cells marked OPEN wait for the owner (D25).
+**Input domain:** rows T4.1-T4.27, TL.1-TL.5 and TD.1-TD.7, whitelists W4.1-W4.9, WL.1 and WD.1 in the section "b5 input domain and whitelists (DEC-0059)" before the b5 checkpoint; cells marked OPEN wait for the owner (D25).
 
 **Gates:** run_all, review_package
 
@@ -4721,7 +4721,7 @@ Expected: `gate_register` all `PASS` (on the staged files); then both suites and
 
 **Siblings:** none -- the register row SD-S2-T6 lists no siblings
 
-**Input domain:** rows T6.1-T6.23 and whitelists W6.1-W6.4 in the section "b5 input domain and whitelists (DEC-0059)" before the b5 checkpoint; cells marked OPEN wait for the owner (D25).
+**Input domain:** rows T6.1-T6.25 and whitelists W6.1-W6.4 in the section "b5 input domain and whitelists (DEC-0059)" before the b5 checkpoint; cells marked OPEN wait for the owner (D25).
 
 **Gates:** run_all, review_package, plan
 
@@ -6967,7 +6967,7 @@ Data commands (scratch clone of `72b7018` under the DEC-0032 guard, packages cop
 | T4.6 | file type | a review/ entry that is not a directory (file, dot-file) | FAIL \<pfx\>.input | DEC-0022 |
 | T4.7 | symlinks | review/, `<task>` or a package file a symlink to a valid target | today followed and checked | OPEN Q1 |
 | T4.8 | file type | a required file absent or a directory | FAIL \<pfx\>.file.\<name\> | spec §7 :197 (missing input); umbrella :266 |
-| T4.9 | encoding | a package file empty, non-UTF-8, UTF-8 with BOM, CRLF | empty: today FAIL file.\<name\>; non-UTF-8: today FAIL review_package.input naming no file; BOM, CRLF: today read as text | OPEN Q2 |
+| T4.9 | encoding | a package file empty, non-UTF-8, UTF-8 with BOM, CRLF | empty: today FAIL file.\<name\>; non-UTF-8: today FAIL review_package.input naming no file; BOM: today the first line fails that file's own check (FAIL \<pfx\>.gates, .commits, .diff, .claims, .siblings or .mutation.\<id\>); CRLF: today accepted | OPEN Q2 |
 | T4.10 | path form, --dir | `<root>/.superpowers/sdd/<plan>/review/<task>`, relative or absolute, root as given or its realpath | checked as that package | plan :2429 (CLI) |
 | T4.11 | path form, --dir | any other component count, outside the root, a `..` leaving it, a missing dir | FAIL review_package.input | plan :2429; spec §7 :197 |
 | T4.12 | path form, root | root a subdirectory of the repo top, or not in a repo (test_modules runs `git ls-files` with cwd = root) | today: names resolve against root's listing; no repo: none resolve | OPEN Q3 |
@@ -6981,20 +6981,21 @@ Data commands (scratch clone of `72b7018` under the DEC-0032 guard, packages cop
 | T4.20 | git object state | commits.txt, diff.patch, gates.txt against the repo (shas exist, the list is the range, gates.txt is HEAD's) | today not checked | OPEN Q7 |
 | T4.21 | grammar claims.md | rows `claim \| direct \| contradiction \| output \| PASS/FAIL`; a FAIL in any line (second table, after a blank, no leading pipe, header); a row not 5 cells or an empty cell; no table; header only | PASS; FAIL \<pfx\>.claims; FAIL; FAIL; FAIL | umbrella :257, :266; B5-FIX-22; DEC-0038 |
 | T4.22 | grammar claims.md | a second table, prose lines, an unescaped `\|` inside a code span | today read as rows (any FAIL counts) | OPEN Q8 |
-| T4.23 | grammar siblings.md | 2-cell rows; rows fewer than the longest register siblings list; a register sibling not listed; cell 2 a register id | FAIL; FAIL; FAIL; PASS \<pfx\>.siblings | umbrella :257; plan :2429 |
-| T4.24 | name resolution siblings.md | cell 2 `module::name`, dotted id, bare `test_x`; module key = path, dotted path, stem; name at module or class level; nested or dead def; Unity `[static] void test_x(void)`; Unity in `#if 0` or a comment; a file that does not parse; no such module or name | resolves; resolves; does not resolve (FAIL); resolves; separate row; defines nothing; FAIL \<pfx\>.siblings | DEC-0035, DEC-0037, DEC-0046, DEC-0051, DEC-0052 |
+| T4.23 | grammar siblings.md | a row not 2 cells or with an empty cell 1; rows fewer than the longest register siblings list; a register sibling not listed; cell 2 a register id | FAIL; FAIL; FAIL; PASS \<pfx\>.siblings | umbrella :257; plan :2429 |
+| T4.24 | name resolution siblings.md | cell 2 `module::name`, dotted id, bare `test_x`; module key = path, dotted path, stem; name at module or class level; nested or dead def; Unity `[static] void test_x(void)`; Unity in `#if 0` or a comment; a file that does not parse; no such module or name | resolves; resolves; resolves; does not resolve (FAIL), today resolves (ast.walk); resolves; separate row (DEC-0052); OPEN Q19, today defines nothing (FAIL \<pfx\>.siblings); FAIL \<pfx\>.siblings | DEC-0035, DEC-0037, DEC-0046, DEC-0051, DEC-0052; a file that does not parse: OPEN Q19 (the code cites reviewer finding R-A1-4, not a DEC) |
 | T4.25 | grammar mutation-\<id\>.txt | exactly 5 non-blank lines; `finding: <id>`; `test: <name>`; steps PASS/FAIL/PASS, one command; step 2 names how; the command names the test (shell tokens) and, for a `::` pin, its module; test equals the pin test | each else FAIL \<pfx\>.mutation.\<id\> | umbrella :259-266; B5-FIX-17, B5-FIX-18; B5-FIX-4 V-5 |
 | T4.26 | register state | mutation file for an id with no row; no owned row and no mutation file; pin.test absent or not a string | FAIL \<pfx\>.finding.\<id\>; FAIL \<pfx\>.mutation; today the pin cross-check is skipped | plan :2429; pin.test absent: OPEN Q10 |
+| T4.27 | path form, --dir | a case variant of the plan or task component (`s2-t5`, `Strict-Delivery`) on a case-insensitive filesystem | today checked as that package (rc 0 at 3313502, APFS) | OPEN Q21 |
 
 #### T5 make_review_package: D24 table
 
 | row | dimension | values | expected verdict | settled by |
 |---|---|---|---|---|
-| T5.1 | git config, output | color.ui, color.diff, color.log, core.abbrev, i18n.logOutputEncoding, log.showSignature, diff.external, diff textconv, diff.noprefix and mnemonicPrefix | pinned on the command line; package forms unchanged | B5-FIX-4 V-1, V-2; plan :3831 |
+| T5.1 | git config, output | color.ui, color.diff, color.log, core.abbrev, i18n.logOutputEncoding, log.showSignature, diff.external, diff textconv, diff.noprefix and mnemonicPrefix; diff.context (today overridden by the helper's -U10) | pinned on the command line; package forms unchanged | B5-FIX-4 V-1, V-2; plan :3831 |
 | T5.2 | git config, output | core.quotePath true or false with a non-ASCII first path | quoted or raw header; both PASS the gate | B5-FIX-7 |
-| T5.3 | git config, output | keys not pinned: diff.renames, diff.algorithm, diff.relative, diff.context, diff.indentHeuristic, core.autocrlf, core.eol, pretty and format aliases | today the output changes and the helper still writes it | OPEN Q11 |
+| T5.3 | git config, output | keys not pinned: diff.renames, diff.algorithm, diff.relative, diff.indentHeuristic, core.autocrlf, core.eol, pretty and format aliases | today the output changes and the helper still writes it | OPEN Q11 |
 | T5.4 | git config, environment | the config-override environment variables (count, key and value forms) and a global or system config file | today honoured by every git call | OPEN Q11 |
-| T5.5 | git object state | tracked change unstaged or staged, untracked file, deletion; assume-unchanged or skip-worktree flag | refused rc 1 | spec §3.4 :77; plan :3831 |
+| T5.5 | git object state | tracked change unstaged or staged, untracked file, deletion; assume-unchanged or skip-worktree flag | today refused rc 1 | OPEN Q18 |
 | T5.6 | git config, status | core.fileMode=false with an exec-bit change; core.symlinks=false; core.ignorecase; status.* keys; core.untrackedCache, core.fsmonitor | today whatever git status shows | OPEN Q12 |
 | T5.7 | ignore state | a file hidden by .git/info/exclude, .gitignore or core.excludesFile under tools/gates, the state dir, every ledger's plan, every docs/superpowers/plans/*.md, every plan's spec | refused rc 1 | DEC-0029, DEC-0039, DEC-0048, DEC-0055 |
 | T5.8 | ignore state | a `__pycache__` file under tools/gates or the state dir; any `.md` under any `__pycache__`; a `__pycache__` file elsewhere in a read path | exempt; refused; refused | DEC-0033, DEC-0044, DEC-0054 |
@@ -7004,7 +7005,7 @@ Data commands (scratch clone of `72b7018` under the DEC-0032 guard, packages cop
 | T5.12 | path form | case-insensitive filesystem (`.GIT` resolves): icase pathspecs | today icase on such a filesystem | OPEN Q13 (set in a fix round, no DEC) |
 | T5.13 | path form, root | root = CLAUDE_PROJECT_DIR or the toplevel; root a subdirectory | today git paths are toplevel-relative, ledgers root-relative | OPEN Q3 |
 | T5.14 | grammar, names | plan and task `[A-Za-z0-9][A-Za-z0-9._-]*`; a slash or any other name | accepted; refused | B5-FIX-9 |
-| T5.15 | git object state, range | unknown rev; base not an ancestor; empty range; head is not HEAD; empty diff | refused rc 1 | plan :3831 |
+| T5.15 | git object state, range | unknown rev; base not an ancestor; empty range; head is not HEAD; empty diff | today refused rc 1 | OPEN Q18 |
 | T5.16 | encoding | a ledger, plan or spec that is not UTF-8 | today decoded with replacement, no refusal | OPEN Q2 |
 | T5.17 | file type | a ledger, plan or spec read through a symlink; a state entry that is a file | today followed; skipped | OPEN Q1 |
 | T5.18 | file system | the package dir cannot be written | refused rc 1 | spec §7 :197 |
@@ -7036,6 +7037,8 @@ Data commands (scratch clone of `72b7018` under the DEC-0032 guard, packages cop
 | T6.21 | grammar, ledger | line 1 `plan: <path>`; else; the named plan missing; `CHECKPOINT b<N>` as the last non-empty line | -; FAIL plan.input; FAIL plan.\<slug\>.file; closed when T6.11 holds | plan :4732; spec §7 :197 |
 | T6.22 | path form, ledger and Spec | line 1 path and the `**Spec:**` first backticked span: absolute, `..`, case variant, outside the root | today opened as given | OPEN Q14 |
 | T6.23 | grammar, fences | closing fence indented more than 3 spaces; a fence never closed | not a close; FAIL plan.fence | B5-FIX-19 |
+| T6.24 | permissions | the plan file (--plan or --in-flight) or a ledger mode 000 | today FAIL plan.input (Permission denied) | OPEN Q20 |
+| T6.25 | encoding | the plan file not UTF-8; UTF-8 with BOM; CRLF | today: not UTF-8 FAIL plan.input; BOM and CRLF PASS (no FAIL line) | OPEN Q2 |
 
 #### TD gate_dispatch fallback and TL lib Result: D24 table
 
@@ -7047,6 +7050,7 @@ Data commands (scratch clone of `72b7018` under the DEC-0032 guard, packages cop
 | TD.4 | config type | a str, bool, float or missing rank for opus, fable or the fallback | FAIL dispatch.config.fable_fallback (and dispatch.config.model_rank) | B5-FIX-8 |
 | TD.5 | config type | model_rank not a mapping; an extra unknown model | open rows B5-U5, B5-U4 | B5-U4, B5-U5 (not b5) |
 | TD.6 | scope | fallback model for a role outside fable_roles | FAIL dispatch.model.rank | spec D18 |
+| TD.7 | file type, permissions, encoding | config.yml missing; a directory; mode 000; not UTF-8; invalid YAML | today FAIL dispatch.input naming the file, each | missing: spec §7 :197; the others: OPEN Q20 |
 | TL.1 | output | `passed(id)` | `PASS <id>`, no reason | spec §7 :197; DEC-0024 |
 | TL.2 | output | `fail(id, reason)`, a reason with line breaks | `FAIL <id>: <reason>` on one line | spec §7 :197 |
 | TL.3 | output | a Line built directly with status PASS and a reason | today `PASS <id>: <reason>` | DEC-0047, DEC-0056 (S3 Task 6 row) |
@@ -7072,7 +7076,7 @@ Everything outside an entry FAILs closed with the check id named. "settled" = an
 | W5.2 | status keys at defaults (core.fileMode true, core.symlinks true, no status.*, no fsmonitor) | new: refused "status-affecting git config \<key\>" | local core.filemode=true wins over global false; no status.* keys | OPEN Q12 |
 | W5.3 | ignored-file scope and exemptions of T5.7-T5.9 | refused rc 1 | 0 ignored files under tools/gates and docs/superpowers in the clone | settled (DEC-0029, -0033, -0039, -0044, -0048, -0054, -0055); widening OPEN Q13 |
 | W5.4 | names `[A-Za-z0-9][A-Za-z0-9._-]*` | refused rc 1 | 7 package names, all match | settled (B5-FIX-9) |
-| W6.1 | Files, ledger line 1 and Spec paths: relative, ASCII segments `[A-Za-z0-9._-]+` joined by `/`, optional `:range` on Files items | plan.files.N; plan.input (ledger); plan.header.spec-path | 35 plans, 460 items, 449 with a leading span: 13 outside the set (6 `~/`, 7 glob or brace), 4 whitespace, 1 non-ASCII, 0 backslash, 0 absolute, 0 `..`, 40 with `:range`; S1-S5 and umbrella: 135 items, 8 outside (7 `~/.claude/...`, brace sets), 54 with more than one span; tracked files: 716, 0 non-ASCII, 0 case collisions | OPEN Q14 |
+| W6.1 | Files, ledger line 1 and Spec paths: relative, ASCII segments `[A-Za-z0-9._-]+` joined by `/`, optional `:range` on Files items | plan.files.N; plan.input (ledger); plan.header.spec-path | 35 plans, 460 items, 449 with a leading span: 18 outside the set, 17 distinct (6 `~/`, 6 glob or brace, 2 trailing-slash directories `components/app/logger/test/` and `components/core/tracks/test/`, 3 `:range` lists holding spaces, 1 command `python3 tools/spec_api_check.py`; 7 hold whitespace, 1 non-ASCII), 0 backslash, 0 absolute, 0 `..`, 40 with `:range`; S1-S5 and umbrella: 135 items, 8 outside (6 `~/.claude/...`, 2 brace sets), 54 with more than one span; tracked files: 716, 0 non-ASCII, 0 case collisions | OPEN Q14 |
 | W6.2 | overlap key under W6.1: ASCII lower-case of the normalised path | plan.overlap.A-B | as W6.1 | OPEN Q14 |
 | W6.3 | pin title: the ASCII word `pin` with an ASCII non-letter, non-digit, non-`_`, non-`-` neighbour or none | plan.pin.N | 1678 step titles: 146 hold non-ASCII; words: pin 21, Pin 5, per-pin 2, pinned 1, pin-map 1; strict-delivery titles holding pin: 22, all ASCII around the word | OPEN Q15 |
 | W6.4 | ledger: regular file, mode 100644 at work tree, index and HEAD, UTF-8 without BOM, LF | new: plan.\<slug\>.ledger | 1 ledger (strict-delivery): mode 100644, LF, line 1 `plan: docs/superpowers/plans/2026-10-17-strict-delivery-S2-...`, 4 CHECKPOINT lines all `CHECKPOINT b<N> ...` | OPEN Q16 |
@@ -7086,7 +7090,8 @@ Everything outside an entry FAILs closed with the check id named. "settled" = an
 | B5-FIX-5 (open) | T6.11, T6.12, T6.13, T6.14, T6.15 | W6.4 |
 | B5-FIX-10 (open) | TL.1, TL.3, TL.4, T4.19 | W4.5, WL.1 |
 | B5-FIX-14 (open) | T6.5, T6.6, T6.7 | W6.1, W6.2 |
-| B5-FIX-16 (open) | T5.7, T5.8, T5.9, T5.10, T5.11, T5.12, T5.17 | W5.3 |
+| B5-FIX-16 (open) | T5.7, T5.8, T5.9, T5.11, T5.12 | W5.3 |
+| DEC-0053 row (to register) | T5.10, T5.17 | - |
 | B5-FIX-26 (open) | T4.13, T4.23, T4.24 | W4.7, W4.9 |
 | B5-FIX-2 (pinned) | TD.1, TD.2, TD.6 | WD.1 |
 | B5-FIX-3 (pinned) | T6.8, T6.10 | W6.3 |
@@ -7099,11 +7104,11 @@ Everything outside an entry FAILs closed with the check id named. "settled" = an
 | B5-FIX-7 (pinned) | T4.15, T4.17, T5.2 | W4.3, W4.4 |
 | B5-FIX-8 (pinned) | TD.3, TD.4 | WD.1 |
 | B5-FIX-9 (pinned) | T5.14 | W5.4 |
-| B5-FIX-12 (pinned) | T6.2 | W6.1 |
+| B5-FIX-12 (pinned) | T6.2 | - |
 | B5-FIX-13 (pinned) | T6.3 | W6.1 |
 | B5-FIX-15 (pinned) | T6.8, T6.9 | W6.3 |
 | B5-FIX-17, B5-FIX-18 (pinned) | T4.25 | W4.8 |
-| B5-FIX-20 (pinned) | T6.18 | W6.1 |
+| B5-FIX-20 (pinned) | T6.18 | - |
 | B5-FIX-21 (pinned) | T4.5 | W4.1 |
 | B5-FIX-22 (pinned) | T4.21 | W4.6 |
 | B5-FIX-23 (pinned) | T4.4 | W4.1 |
@@ -7111,17 +7116,17 @@ Everything outside an entry FAILs closed with the check id named. "settled" = an
 | B5-FIX-25 (pinned) | T6.20 | W6.4 |
 | B5-FIX-19 (pinned) | T6.23 (fence indent only) | - |
 
-Uncovered (b5-rca-report §1, §3), with the reason: B5-FIX-11 (plan text cite, no gate input); B5-FIX-19 block-cap and CHECKPOINT-ends-Files branches (untested branches, a D27 mechanical-mutation matter, not an input dimension); B5-FIX-9 pending-hint branch M29 (an output message, D27); B5-FIX-4 V-5 runnability of the step 2 revert command (only its presence is grammar, T4.25; replay is the reviewer's); DEC-0030, DEC-0032, DEC-0036, DEC-0042, DEC-0047 render scope, DEC-0050, DEC-0056 (process or migration rulings, rca §4); B5-U1..U5 (unrelated rows, not b5 surfaces; TD.5 names B5-U4, B5-U5 only).
+Uncovered (b5-rca-report §1, §3), with the reason: B5-FIX-11 (plan text cite, no gate input); B5-FIX-19 block-cap and CHECKPOINT-ends-Files branches (untested branches, a D27 mechanical-mutation matter, not an input dimension); B5-FIX-9 pending-hint branch M29 (an output message, D27); B5-FIX-4 V-5 runnability of the step 2 revert command (only its presence is grammar, T4.25; replay is the reviewer's); DEC-0030, DEC-0032, DEC-0036, DEC-0042, DEC-0047 (TL.3 records today's behaviour; the fix is the S3 Task 6 row), DEC-0050, DEC-0056 (process or migration rulings, rca §4); B5-U1..U5 (unrelated rows, not b5 surfaces; TD.5 names B5-U4, B5-U5 only).
 
 #### Open questions for the owner
 
 | Q | question | options and cost |
 |---|---|---|
 | Q1 | Symlinks and non-regular files in gate inputs (T4.7, T5.17, W4.1) | (a) real directories and regular files only; a symlink anywhere below the root FAILs `<pfx>.input` or refuses the helper: one helper per gate, about 6 tests; data shows 0 symlinks in packages and 0 tracked symlinks. (b) follow symlinks as today and state it: no code; chains like DEC-0053 stay possible. (c) follow only targets inside the root: one realpath check per read, about 4 tests. |
-| Q2 | Encoding, BOM, CRLF and empty files (T4.9, T5.16, T6.20, W4.2) | (a) UTF-8 without BOM, LF only, non-empty, else FAIL naming the file (new `<pfx>.encoding`; ledger plan.input): about 3 tests per gate; 0 BOM and 0 CR in the 64 package files and the ledger. (b) normalise BOM and CRLF before parsing: about 2 tests per gate; accepts editor output silently. |
+| Q2 | Encoding, BOM, CRLF and empty files (T4.9, T5.16, T6.20, T6.25, W4.2) | (a) UTF-8 without BOM, LF only, non-empty, else FAIL naming the file (new `<pfx>.encoding`; ledger plan.input): about 3 tests per gate; 0 BOM and 0 CR in the 64 package files and the ledger. (b) normalise BOM and CRLF before parsing: about 2 tests per gate; accepts editor output silently. |
 | Q3 | Root form (T4.12, T5.13, T6.19) | (a) root must equal the realpath of `git rev-parse --show-toplevel`, else FAIL `<gate>.input`: one lib check and 3 tests; B5-FIX-20's subdirectory support becomes a refusal. (b) support a subdirectory root at every git call site (as B5-FIX-20 did for the ledger): per-site work, about 2 tests per site. |
 | Q4 | "Tracked" for sibling test resolution (T4.13) | (a) the HEAD tree's test files and their committed text: matches "the package describes HEAD"; one git call, 3 tests. (b) the index listing and work-tree text, as today: no code; a staged-only test resolves. |
-| Q5 | Line grammar details in commits.txt, gates.txt and mutation files (T4.15, T4.16) | (a) refuse blank lines, trailing spaces and upper-case hex: 3 tests; all 7 packages already comply. (b) ignore blank lines and strip as today, state it: no code. |
+| Q5 | Line grammar details in commits.txt, gates.txt and mutation files (T4.15, T4.16) | (a) refuse blank lines and trailing spaces (upper-case hex is already refused today): 2 tests; all 7 packages comply. (b) ignore blank lines and strip as today, and keep refusing upper-case hex, state it: no code. |
 | Q6 | diff.patch body (T4.18, W4.4) | (a) every line is a diff header, hunk header or a ` `, `+`, `-`, `\` line: about 20 lines, 4 tests; refuses ANSI codes and truncation. (b) first line and one body line, as today: no code. |
 | Q7 | Package against the repo (T4.20) | (a) gate_review_package checks commits.txt against `git rev-list` of the range and diff.patch against `git diff`: about 30 lines, git calls in a gate that today reads files only. (b) leave it to make_review_package (the only writer): no code; a hand-edited package passes. |
 | Q8 | claims.md one table (T4.22, W4.6) | (a) exactly one table and no other non-blank line, else FAIL `<pfx>.claims`: 2 tests; 7 of 7 packages comply; DEC-0038 any-fail-line stays as a second check. (b) keep reading every line (DEC-0038 only): no code. |
@@ -7130,10 +7135,14 @@ Uncovered (b5-rca-report §1, §3), with the reason: B5-FIX-11 (plan text cite, 
 | Q11 | git output config in make_review_package (T5.3, T5.4, W5.1) | (a) refuse when the effective config sets any output key outside the pinned set, or a config-override environment variable is set: one `git config --list` read, about 5 tests; this machine sets none. (b) run git with global and system config switched off by git's documented environment switch (named in words): 2 tests; repo-local keys still apply. (c) keep pinning keys one by one: per-key cost, the chain of V-1, V-2 continues. |
 | Q12 | git keys that change status and path reads (T5.6, T6.15, W5.2) | (a) whitelist: core.fileMode, core.symlinks true; core.ignorecase and core.precomposeunicode as the filesystem reports; no status.*, fsmonitor or untrackedCache keys; else FAIL closed: about 6 tests. (b) honour each key as git does (the DEC-0041, DEC-0049 pattern): per-key code and tests. |
 | Q13 | Scope of the ignored-file check (T5.11, T5.12) | (a) every path any gate in gates.txt reads, including gate_dispatch's prompt files outside the repo (refuse when unknown): a per-gate read list, about 8 tests. (b) the DEC list only (tools/gates, state, plans, specs), and rule on the fix-round icase pathspec rule (keep or drop): no new scope. |
-| Q14 | Path grammar for Files items, ledger line 1 and the Spec path (T6.4, T6.7, T6.22, W6.1, W6.2) | (a) W6.1 ASCII grammar, overlap on ASCII lower case; NFC/NFD and caseless rows (DEC-0045, DEC-0057) retire as refusals: about 10 tests; 8 of 135 strict-delivery items need rewriting (`~/.claude/...`, brace sets). (b) (a) plus a `~/` prefix for paths outside the repo, excluded from the overlap check: 3 more tests; braces still rewritten. (c) keep today's Unicode handling (B5-FIX-14 as classed): no grammar; the case-by-case chain continues. |
+| Q14 | Path grammar for Files items, ledger line 1 and the Spec path (T6.4, T6.7, T6.22, W6.1, W6.2) | (a) W6.1 ASCII grammar, overlap on ASCII lower case; NFC/NFD and caseless rows (DEC-0045, DEC-0057) retire as refusals: about 10 tests; 8 of 135 strict-delivery items need rewriting (`~/.claude/...`, brace sets), and 2 directory items in older plans. (b) (a) plus a `~/` prefix for paths outside the repo, excluded from the overlap check: 3 more tests; braces still rewritten. (c) keep today's Unicode handling (B5-FIX-14 as classed): no grammar; the case-by-case chain continues. |
 | Q15 | Pin title neighbours (T6.9, W6.3) | (a) W6.3 ASCII rule; a non-ASCII neighbour does not count: 3 tests; 22 of 22 strict-delivery pin titles comply. (b) keep the Unicode categories (B5-FIX-15): no code. |
 | Q16 | Ledger whitelist (W6.4) | (a) a ledger that is not a regular 100644 UTF-8 LF file at all three copies FAILs `plan.<slug>.ledger` (new); mode and type comparison (DEC-0034, -0041, -0049) becomes a refusal: about 6 tests; the one ledger complies. (b) keep comparing and holding in flight: no code. |
 | Q17 | Result line grammar at the source (TL.4, WL.1) | (a) lib refuses an id outside `[A-Za-z0-9_.-]+` and a FAIL with an empty reason (FAIL `<gate>.input`): 3 tests, every gate's ids checked once; 552 of 552 package lines comply. (b) leave it to consumers (GATE_LINE): no code. |
+| Q18 | Clean-tree and range rules of make_review_package (T5.5, T5.15); no spec line, Interfaces line or answered DEC states them: spec :77 is the §3.4 heading on block-end clean state and plan :3831 says only "exit 0 only when the range is valid and every gate in gates.txt passed"; the rules appear in the plan only inside Task 5's code, test and README blocks (plan :4457, :4584, :4593, :4599, :6830; D3 copies of the fix-round code b66deaf, 869ed10) | (a) adopt today's rule (untracked, staged, unstaged, deletion and hidden-flag files refused; head must be HEAD; unknown rev, non-ancestor base, empty range and empty diff refused) and state it in an Interfaces line: no code. (b) refuse only tracked changes and let untracked files through: 1 code change, 2 tests; the B5-FIX-16 class narrows. |
+| Q19 | A sibling's test file that does not parse (T4.24); no DEC states the verdict (the code cites reviewer finding R-A1-4) | (a) it defines nothing and the sibling FAILs \<pfx\>.siblings, as today; state it: no code; the FAIL line names the test, not the file. (b) FAIL \<pfx\>.siblings naming the unparseable file: about 5 lines, 1 test. (c) skip the file and resolve the name in the other tracked test files: about 3 lines, 1 test; a broken file hides a missing test. |
+| Q20 | An input file that exists but cannot be read or parsed (T6.24, TD.7); spec §7 :197 settles only a missing input | (a) FAIL `<gate>.input` naming the file, as today, and state it in the spec's common contract: no code. (b) a check id per input file (`plan.<slug>.input`, `dispatch.config.input`): about 4 lines and 2 tests per gate. |
+| Q21 | Spelling of the --dir path (T4.27) | (a) every --dir component must equal the on-disk name byte for byte, else FAIL review_package.input: one directory listing per component, 2 tests. (b) accept whatever the filesystem resolves, as today, and state it: no code. |
 
 ### b5 checkpoint
 
