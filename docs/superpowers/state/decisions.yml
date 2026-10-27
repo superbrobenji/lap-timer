@@ -562,3 +562,12 @@
   asked_at: {sha: "6f6355a", by: session}
   answer: "double-all (owner in chat, 2026-10-27: \"we should also raise the token cap\"; picked Double all in the session's question; the session had recommended double-all)"
   answered_at: {sha: "6f6355a", by: superbrobenji}
+- id: DEC-0061
+  class: spec-direction
+  question: "b5 showed defects arriving every review round for 11 rounds; the owner asked that the response (stop, investigate root cause, change the process) be process, not memory. What triggers it?"
+  options:
+    - {label: spec-d30, cost: "spec D30 + controller strict block + SKILL.md + CLAUDE.md: trigger = a re-review finds a new defect in the block's code outside the fix's recorded class, or a second fix wave after the final review; then a read-only investigation and owner process options"}
+    - {label: memory-only, cost: "a session memory note; not enforced"}
+  asked_at: {sha: "8db03b8", by: session}
+  answer: "spec-d30 (owner in chat, 2026-10-27: \"it shouldn't be just in memory. it should be process\"; trigger wording drafted by the session, owner may adjust)"
+  answered_at: {sha: "8db03b8", by: superbrobenji}

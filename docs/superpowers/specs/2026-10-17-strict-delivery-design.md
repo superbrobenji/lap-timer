@@ -41,6 +41,7 @@ This document designs the process that prevents each mechanism from recurring. I
 | D27 | Mechanical mutation (DEC-0058 P4). A script mutates every changed branch (comparison, constant, boolean, early return); any survivor FAILs unless registered as equivalent with an argument; reviewers no longer choose the mutant set (gate from b6). |
 | D28 | Threat model (DEC-0058 P5). The gates defend against honest agent mistakes, not adversarial inputs. Inputs outside each gate's stated whitelist (path grammar, regular files only, default git output config, one table per file, and the like) FAIL closed with a named check; they are not handled case by case. A whitelist is set from data in the tree. |
 | D29 | Review sizing (DEC-0058 P6). Review packages are split at plan time so each review fits under the reviewer cap with margin; a final review is split by area from the start (DEC-0023, DEC-0030), never after a budget stop (gate from b6). |
+| D30 | Convergence trigger (DEC-0061). Defects that keep arriving are a process defect, not bugs to chase. When a re-review finds a new defect in the block's code outside the fix's recorded class, or a block needs a second fix wave after its final review, the controller stops dispatching fixes, dispatches a read-only investigator (where each defect entered; why the review that had it in scope missed it; ranked root causes) and brings the owner process changes with that evidence; freeze, continue or cap are never the only options offered. |
 
 ## 2. Scope, layers, precedence
 
@@ -188,7 +189,7 @@ No pasted session history; a size cap on the prompt enforces it.
 4. **Dispatch** through the hook (§5).
 5. **Implement, TDD.** Failing test first through the production call path; mutation transcript; every sibling tested or filed as its own row; full local gate run (host suite, dc-host, tools tests, P10 full reach, venue lint, spec-api check, all firmware builds at zero warnings, DRAM budget, comment pattern gate); report with each claim marked by the command that proves it.
 6. **Task review, executed.** Reviewer re-runs the gate set clean and the mutation; executes every claim in report, commits and diff comments (direct + contradiction); checks siblings against the class and coverage against the task's D24 table; treats every rule in a controller's brief as a hypothesis (D25); runs a contradiction pass on the new surface ("assume the fix is wrong for input X"); files new findings as register rows (from this change → task incomplete; unrelated → investigation dispatch + owner). Verdict needs spec ✅, quality ✅, claims-executed ✅.
-7. **Fix loop.** Rounds 1–3 resume the implementer; 4–5 a fresh agent one tier up; a round limit hit is a decision question, not a parked finding. A fix covers its finding's whole dimension and its re-review the whole changed function (D26); a fix that needs a rule the plan lacks stops for the owner first (D25).
+7. **Fix loop.** Rounds 1–3 resume the implementer; 4–5 a fresh agent one tier up; a round limit hit is a decision question, not a parked finding. A fix covers its finding's whole dimension and its re-review the whole changed function (D26); a fix that needs a rule the plan lacks stops for the owner first (D25). Findings that keep arriving trigger D30.
 8. **Block end** (§3.4).
 9. **Post-merge audit hook.** Files changed by a merged block become coverage rows for the next audit.
 
@@ -272,6 +273,7 @@ Cost scale: blast radius 1–3 (tooling 1, UI 2, timing/data-integrity/supervisi
 - Controller rulings only inside an approved plan, on plan-vs-spec or task-vs-task conflicts the spec settles, max 5 per block, listed at the checkpoint; everything else is a decision question for the owner (`gate_decisions`).
 - Owner-only: triage, spec direction, plan scope, merge grants, hardware, model policy, issue closure, finding-class changes.
 - Zero bugs: a change's own bug makes it incomplete; an unrelated bug gets an investigation, an issue and an owner (`gate_register`).
+- Findings that keep arriving are a process defect (spec D30): stop fixing, investigate where they entered and why reviews missed them, bring the owner process changes.
 - Pinned = production-path test + mutation transcript (`gate_review_package`).
 - Model map by role (§5); never dispatch outside it (`gate_dispatch`).
 - Block = PR, ≤3 tasks; clean tree at every checkpoint; one block per context; merge only on all-green under a grant (`gate_merge_ready`, `gate_checkpoint`).

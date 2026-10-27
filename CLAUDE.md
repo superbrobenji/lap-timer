@@ -8,6 +8,7 @@ These override superpowers and every other skill. Source: `docs/superpowers/spec
 - Controller rulings only inside an approved plan, on plan-vs-spec or task-vs-task conflicts the spec settles, max 5 per block, listed at the checkpoint; everything else is a decision question for the owner (`gate_decisions`).
 - Owner-only: triage, spec direction, plan scope, merge grants, hardware, model policy, issue closure, finding-class changes.
 - Zero bugs: a change's own bug makes it incomplete; an unrelated bug gets an investigation, an issue and an owner (`gate_register`).
+- Findings that keep arriving are a process defect (spec D30): stop fixing, investigate where they entered and why reviews missed them, bring the owner process changes.
 - Pinned = production-path test + mutation transcript (`gate_review_package`).
 - Model map by role (§5); never dispatch outside it (`gate_dispatch`).
 - Block = PR, ≤3 tasks; clean tree at every checkpoint; one block per context; merge only on all-green under a grant (`gate_merge_ready`, `gate_checkpoint`).
