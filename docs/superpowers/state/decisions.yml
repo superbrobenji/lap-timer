@@ -1486,3 +1486,30 @@
   asked_at: {sha: "c88e657", by: session}
   answer: "as-proposed-with-proper-reverse (owner in session, 2026-10-29: 'recommended. it should use proper reverse track')"
   answered_at: {sha: "c88e657", by: superbrobenji}
+- id: DEC-0142
+  class: spec-direction
+  question: "Restoring the two tests DEC-0103 brings back (test_s2_plan_blocks_hold_the_dec_0060_caps, test_readme_states_no_budget_cap): the acceptance rule is stated nowhere (b5r17-subcontroller-report.md Q-r17-1..3)."
+  options:
+    - {label: role-bound-equal-config-no-fragments, cost: "Q-r17-1 (a): old-cap text is a statement binding a cap value to a role; Q-r17-2 (b): any cap value the README states equals config.yml; Q-r17-3 (a): D3 does not cover the partial test_hooks.py fragments"}
+    - {label: whitelist, cost: "Q-r17-1 (b) fail-closed whitelist, Q-r17-2 (a) no trigger value in the README"}
+  asked_at: {sha: "d69dd7a", by: session}
+  answer: "role-bound-equal-config-no-fragments (owner in session, 2026-10-29: 'recommended'; the session had recommended 1 (a), 2 (b), 3 (a))"
+  answered_at: {sha: "d69dd7a", by: superbrobenji}
+- id: DEC-0143
+  class: spec-direction
+  question: "Two agent conduct gaps found 2026-10-29: a reviewer turned commit signing off with a git config override in its scratch clone after a --no-verify refusal; a researcher sent the owner's email address in one outbound User-Agent header. Rules?"
+  options:
+    - {label: two-rules, cost: "scratch clones use no git config overrides (no -c, no config edits beyond what the brief names); no personal identifier (email, name, handle) in any outbound request header, URL or payload; both into the strict blocks in the program tooling block"}
+    - {label: none, cost: "no new rule"}
+  asked_at: {sha: "d69dd7a", by: session}
+  answer: "two-rules (owner in session, 2026-10-29: 'recommended'; the session had recommended both rules)"
+  answered_at: {sha: "d69dd7a", by: superbrobenji}
+- id: DEC-0144
+  class: spec-direction
+  question: "Documenting DEC-0103, DEC-0130 and DEC-0131 on the lean path (round-17 draft b5r17-docs-draft.md is 789 lines with Q-doc-1..21 open)?"
+  options:
+    - {label: three-rule-rows, cost: "three short spec rows land in the b5 lean close: a deleted or weakened test is never a fix (DEC-0103); a class is an epic signed off only when every child is resolved and the whole class tested and reviewed, mechanics deferred (DEC-0130); owner rules live in the repo's governing text (DEC-0131); the rest of the draft goes on the deferred list"}
+    - {label: full-draft, cost: "answer Q-doc-1..21 and land the whole draft"}
+  asked_at: {sha: "d69dd7a", by: session}
+  answer: "three-rule-rows (owner in session, 2026-10-29: 'recommended')"
+  answered_at: {sha: "d69dd7a", by: superbrobenji}
