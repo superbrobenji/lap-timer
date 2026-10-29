@@ -1477,3 +1477,12 @@
   asked_at: {sha: "ec1c3c5", by: session}
   answer: "from-2-weeks (owner in session, 2026-10-29: 'the fist date isn't a hard date yet, but it can be anywhere from 2 weeks from now onwards')"
   answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0141
+  class: scope
+  question: "Track research open questions (.superpowers/sdd/program/tracks-research.md section 6): S/F line, gate width, Killarney Short layouts, sectors, Kyalami id/name/length, Killarney Full Reverse."
+  options:
+    - {label: as-proposed-with-proper-reverse, cost: "S/F at the white line by the timing box (Killarney) and the painted grid-head line (Kyalami); 30 m gates; Short layouts kept, unverified, corrected centre, length unsourced; derived sector thirds; Kyalami id 1, layout GP, 4522 m; Killarney Full Reverse modelled as the real reverse layout (anticlockwise, two sources), its chicane ends, length and timing line UNKNOWN until marked on track or supplied by WPMC/ZA Timing"}
+    - {label: as-proposed-reuse-full, cost: "as proposed, Full Reverse reuses the Full line and length"}
+  asked_at: {sha: "c88e657", by: session}
+  answer: "as-proposed-with-proper-reverse (owner in session, 2026-10-29: 'recommended. it should use proper reverse track')"
+  answered_at: {sha: "c88e657", by: superbrobenji}
