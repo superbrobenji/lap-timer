@@ -1589,16 +1589,25 @@
     kind: plan
     plan: strict-delivery
     task: S2-b5-caps
-  state: planned
-  pin: null
+  state: pinned
+  pin:
+    test: test_gate_dispatch::test_budget_caps_follow_dec_0060
+    transcript: docs/superpowers/state/strict-delivery/mutations/B5-CAPS-1.txt
   ruling: null
-  evidence: []
+  evidence:
+  - docs/superpowers/state/strict-delivery/reviews/S2-b5-caps.md
   history:
   - state: open
     sha: 8db03b8
     by: session
   - state: planned
     sha: 8db03b8
+    by: controller
+  - state: in-progress
+    sha: 41aec62
+    by: controller
+  - state: pinned
+    sha: 6a7b2f9
     by: controller
 - id: B5-U6
   source: review
