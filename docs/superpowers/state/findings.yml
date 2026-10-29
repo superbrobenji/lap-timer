@@ -574,16 +574,25 @@
 - id: B5-FIX-5
   source: review
   severity: LOW
-  class: 'gate_plan.plans_in_flight (this block''s Task 6 code, gate_plan.py:493-511)
-    reads an uncommitted ledger change as ''not in flight'' in two cases the b5 second-pass
-    verifier reproduced: (a) a ledger deleted in the working tree while it ends in
-    CHECKPOINT at HEAD (the working-tree glob never sees it); (b) extra ledger lines
-    staged in the index while the working file equals HEAD (only working bytes are
-    compared with HEAD); DEC-0034 widen-fix5: the three copies (HEAD, index, working
-    tree) are compared by file mode and type as well as bytes, so an uncommitted change
-    that keeps the bytes (a work-tree symlink, a mode change staged or in the work
-    tree, a state dir replaced by a symlink) is in flight (b5r8-review1 R1-1, A3 verifier
-    O-1)'
+  class: 'gate_plan.plans_in_flight (this block''s code) reads a ledger as ''not in flight'' when the copies it
+    compares are wrong or unknown. Restated by dimension (DEC-0125 widen-b5-fix-5). Dimension 1, git object state
+    (first registered at gate_plan.py:493-511, ce40e09): (a) a ledger deleted in the working tree while it ends in
+    CHECKPOINT at HEAD; (b) extra ledger lines staged in the index while the working file equals HEAD; DEC-0034
+    widen-fix5: the three copies (HEAD, index, working tree) are compared by file mode and type as well as bytes,
+    so an uncommitted change that keeps the bytes (a work-tree symlink, a mode change staged or in the work tree,
+    a state dir replaced by a symlink) is in flight (b5r8-review1 R1-1, A3 verifier O-1). Dimension 2, DEC-0125:
+    every git outcome of every git call gate_plan makes -- a git command that fails (rc not 0) or cannot start
+    (OSError), a missing or unusable repository (.git moved away, HEAD unresolvable, unborn HEAD, index unreadable),
+    and the DEC-0068 a non-repository root (root not the realpath of git rev-parse --show-toplevel, given by --root
+    or CLAUDE_PROJECT_DIR) -- at _git_bytes git show (:521-525), _git_ledgers git ls-files and git ls-tree HEAD
+    (:528-535), _git_mode (:550-557), _git_bool git config --bool (:579-582) and the root gate_plan resolves
+    (:648 repo_root, lib/__init__.py:61-70); today a failing listing adds no ledger name, so a ledger that only
+    the index or HEAD holds gets no plan check (b5r15-d30-investigation.md sections 1 and 5; b5r15-rr-helper.md
+    unrelated 1). Expected verdict: DEC-0068 a FAIL plan.input for the non-repository root; for a git failure
+    inside a repository the rule is open (Q-FH-16, owner). Sites outside gate_plan: B5-UR-11 and B5-UR-12.
+    Siblings for dimension 2 are named here and in the repro, not in the siblings list: the S2-b5-finalfix2
+    review package (git-ignored) has a siblings.md row for each listed sibling, and a new sibling without a
+    test or finding cell turns run_all red (owner question in the round-16 decision sheet)'
   siblings:
   - ledger deleted in the working tree
   - ledger lines staged only
@@ -596,10 +605,20 @@
   - file: tools/gates/gate_plan.py
     lines: 493-511
     sha: ce40e09
-  repro: commit a ledger ending CHECKPOINT b5; then (a) rm it, or (b) append a line,
+  - file: tools/gates/gate_plan.py
+    lines: 521-582
+    sha: d544bad
+  - file: tools/gates/lib/__init__.py
+    lines: 61-70
+    sha: d544bad
+  repro: 'commit a ledger ending CHECKPOINT b5; then (a) rm it, or (b) append a line,
     git add it, then restore the work tree to the HEAD bytes (git show HEAD:<ledger>
     > <ledger>, the MM state; git checkout -- restores from the index and does not
-    reproduce); gate_plan --in-flight prints no plan.<slug> line
+    reproduce); gate_plan --in-flight prints no plan.<slug> line. Dimension 2 (controller, round 16, guarded
+    clone at d544bad): rm docs/superpowers/state/strict-delivery/ledger.md and append ''### Task 99: x'' and TBD to
+    the S2 plan: gate_plan --root . --in-flight -> rc 1, 5 FAIL (first FAIL plan.strict-delivery.files.99); the
+    same with .git/HEAD set to ''garbage'', or with .git moved away -> rc 0, one line (PASS plan.in_flight); a git
+    archive copy (not a repository) as CLAUDE_PROJECT_DIR -> rc 0, 69 PASS, no plan.input FAIL'
   owner:
     kind: plan
     plan: strict-delivery
@@ -2593,4 +2612,199 @@
     by: controller
   - state: planned
     sha: 6a7b2f9
+    by: controller
+- id: B5-UR-10
+  source: review
+  severity: LOW
+  class: 'run_all --only takes a list whose names are not matched as whole strings: each comma-separated item is
+    stripped and empty items are dropped (run_all.py:80), so '' register '' and ''register,,'' run the register
+    gate where spec D32 says names and values match as whole strings (b5r15-rr-precommit.md UF-R2-PC-1; pre-b5,
+    151f2bba)'
+  siblings: []
+  cites:
+  - file: tools/gates/run_all.py
+    lines: '80'
+    sha: d544bad
+  repro: 'guarded clone at d544bad: run_all.py --root . --only '' register '' -> rc 0, 6 PASS lines; --only ''register,,''
+    -> rc 0, 6 lines; contradiction --only registerx -> rc 1 ''FAIL run_all.unknown: no gate named ''registerx'''''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d544bad
+    by: controller
+  - state: planned
+    sha: d544bad
+    by: controller
+- id: B5-UR-11
+  source: review
+  severity: MEDIUM
+  class: 'DEC-0068 a (root must equal the realpath of git rev-parse --show-toplevel, else FAIL <gate>.input) is
+    applied in no gate and no row owned it: lib repo_root returns CLAUDE_PROJECT_DIR unchecked (lib/__init__.py:61-63;
+    pre-b5, e2a20af0) and no gate compares a --root with the toplevel, so a gate run on a non-repository root
+    passes (b5r15-d30-investigation.md finding 2; b5r15-rr-skeleton.md unrelated). gate_plan''s instance is
+    B5-FIX-5 dimension 2 (DEC-0125)'
+  siblings:
+  - CLAUDE_PROJECT_DIR not a repository (every gate on its default root)
+  - --root not a repository
+  - root a subdirectory of the toplevel
+  - gate_review_package test_modules on a non-repository root (:193) reads no test names; test_gate_review_package.py:496-502
+    (B5-FIX-26) asserts the siblings FAIL, not review_package.input
+  cites:
+  - file: tools/gates/lib/__init__.py
+    lines: 61-63
+    sha: d544bad
+  - file: tools/gates/gate_review_package.py
+    lines: '193'
+    sha: d544bad
+  repro: 'git archive d544bad into a scratch dir (not a repository), cwd there: CLAUDE_PROJECT_DIR=<that dir> gate_dispatch.py
+    --config-check -> rc 0, PASS lines only; contradiction, CLAUDE_PROJECT_DIR unset, same cwd -> rc 1 ''FAIL dispatch.input:
+    git rev-parse --show-toplevel: fatal: not a git repository''; gate_review_package.test_modules(<that dir>) -> 0
+    keys vs 288 on a clone'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d544bad
+    by: controller
+  - state: planned
+    sha: d544bad
+    by: controller
+- id: B5-UR-12
+  source: review
+  severity: LOW
+  class: 'git outcome outside gate_plan (the B5-FIX-5 dimension 2 class at the other gates; b5r15-d30-investigation.md
+    section 5): a failing git is read as data or as the wrong refusal -- make_review_package _range reads git merge-base
+    --is-ancestor rc 128 (git failed) as rc 1 and refuses ''HEAD is not a descendant of BASE'' (:69-71, b5 41940dc);
+    gate_review_package test_modules reads a failing git ls-files inside a repository as no test files (:193, b5
+    c2badae); the rule for a git failure inside a repository is open (Q-FH-16)'
+  siblings:
+  - make_review_package.py:70 merge-base rc 128
+  - gate_review_package.py:193 ls-files failing inside a repository
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: 69-71
+    sha: d544bad
+  - file: tools/gates/gate_review_package.py
+    lines: '193'
+    sha: d544bad
+  repro: 'guarded clone at d544bad, PATH led by a shim git that exits 128 for merge-base and runs the real git otherwise:
+    make_review_package._range(''.'', ''6a7b2f9'', ''d544bad'') -> Refused ''HEAD is not a descendant of BASE: 6a7b2f9..d544bad'';
+    real git -> (6a7b2f9..., d544bad..., 3); real git reversed d544bad..6a7b2f9 (rc 1) -> the same refusal text'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-make-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d544bad
+    by: controller
+  - state: planned
+    sha: d544bad
+    by: controller
+- id: B5-UR-13
+  source: review
+  severity: LOW
+  class: 'installed strict-delivery prompt hashes are not ledgered after a re-install: the installed prompts/controller.md
+    sha256 b0fdc5ed2761... (the B5-PROC-1 install, S2 plan :7185) has no line in docs/superpowers/state/strict-delivery/ledger.md,
+    which carries the earlier install hashes (:82, :95; S1 plan T9 Step 5 re-ledger convention) (b5r15-d36rev-report.md U-1)'
+  siblings:
+  - SKILL.md, implementer.md, reviewer.md, verifier.md hashes of the same install
+  cites:
+  - file: docs/superpowers/state/strict-delivery/ledger.md
+    lines: 82-95
+    sha: d544bad
+  repro: 'shasum -a 256 ~/.claude/skills/strict-delivery/prompts/controller.md -> b0fdc5ed27617674...; grep -c b0fdc5ed2761
+    docs/superpowers/state/strict-delivery/ledger.md -> 0; git grep b0fdc5ed2761 d544bad -> only the S2 plan :7185;
+    contradiction: ledger.md :82 and :95 hold earlier prompts/controller.md hashes'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d544bad
+    by: controller
+  - state: planned
+    sha: d544bad
+    by: controller
+- id: B5-UR-14
+  source: review
+  severity: LOW
+  class: 'a decided cap no gate enforces: the DEC-0095 cap-5500 strict-block size cap is checked only by the git-ignored
+    .superpowers/sdd/strict-delivery/check-skill.sh (:13); neither run_all nor the gate suite checks it (b5r15-d36rev-report.md
+    U-2)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/state/decisions.yml
+    lines: 880-889
+    sha: d544bad
+  repro: 'grep -rln 5500 tools/gates -> 0 files; git check-ignore -v .superpowers/sdd/strict-delivery/check-skill.sh
+    -> .gitignore:18; contradiction: check-skill.sh:13 holds the 5500 test'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d544bad
+    by: controller
+  - state: planned
+    sha: d544bad
+    by: controller
+- id: B5-UR-15
+  source: review
+  severity: MEDIUM
+  class: 'an answered spec-direction DEC gets no register row, so nothing makes an implementer apply it to existing code
+    (b5r15-d30-investigation.md RC-H): at d544bad 27 answered spec-direction DECs are cited by no findings row, 17
+    of them in the amendment answers DEC-0066..0086 (the investigation counted 16 at e17dc90; four of the 21 are
+    cited: DEC-0066, -0067, -0082, -0085); which of them change code is the owner''s call'
+  siblings:
+  - DEC-0011, DEC-0015, DEC-0016, DEC-0017, DEC-0032, DEC-0036, DEC-0054, DEC-0058, DEC-0061, DEC-0068, DEC-0069,
+    DEC-0070, DEC-0071, DEC-0072, DEC-0073, DEC-0074, DEC-0075, DEC-0076, DEC-0077, DEC-0078, DEC-0079, DEC-0080,
+    DEC-0081, DEC-0083, DEC-0084, DEC-0086, DEC-0100
+  cites:
+  - file: docs/superpowers/state/decisions.yml
+    lines: 631-639
+    sha: d544bad
+  repro: 'for each answered decisions.yml entry of class spec-direction, count its id in findings.yml (PyYAML load,
+    str.count) -> 27 with 0 hits (list in siblings); contradiction: DEC-0066 3 hits, DEC-0067, -0082, -0085 1 each'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: d544bad
+    by: controller
+  - state: planned
+    sha: d544bad
     by: controller
