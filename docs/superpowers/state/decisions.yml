@@ -946,3 +946,367 @@
   asked_at: {sha: "64f7ad7", by: session}
   answer: "drop-the-promise (owner in session question, 2026-10-27: picked 'Drop the promise (Recommended)'; the session had recommended drop-the-promise)"
   answered_at: {sha: "64f7ad7", by: superbrobenji}
+- id: DEC-0102
+  class: spec-direction
+  question: 'b5 round 14 item B (b5r14-subcontroller-report.md): DEC-0089 widens B5-FIX-9, B5-FIX-6 and B5-FIX-4
+    V-1 and spec D33 says a widened row reopens, but gate_register allows pinned -> closed or merged only (tools/gates/lib/registers.py:16;
+    probe at f1057e5: ''FAIL register.transition.B5-FIX-9: transition: pinned -> open is illegal''); spec 4.1 lists
+    no transition table. Also, a sibling added to a pinned row needs a siblings.md cell (a test name or a registered
+    finding id) in that row''s package before run_all passes. How does a widened pinned row reopen?'
+  options:
+  - label: add-transition
+    cost: 'code: pinned -> open (or planned) in FINDING_TRANSITIONS, the evidence rule for a reopened row (old pin
+      kept in history, new pin replaces it), tests and the S1 plan block; one task review; then one state commit
+      reopens the three rows with their restated classes'
+  - label: successor-rows
+    cost: 'no code: the three rows stay pinned; three new open rows (R-B-13, R-A-5, R-B-1) carry the widened dimensions
+      and cite the pinned rows; DEC-0089''s ''rows reopen'' is not done as worded'
+  - label: amend-d33
+    cost: 'spec text: D33 says a widened pinned row stays pinned and a successor row carries the dimension; the
+      register effect of successor-rows plus one reviewed spec text round'
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0103
+  class: triage
+  question: 'b5 round 14 item A: B5-RD-1''s fix (DEC-0063) deletes the test that went red, so no production-path
+    test can fail when the fix is reverted, and B5-UD-1''s class (''a session text commit turned the gate suite
+    red'') is what the D34 pre-commit gate (B5-PROC-2) refuses. Pin form for B5-RD-1 and B5-UD-1?'
+  options:
+  - label: pin-on-hook
+    cost: both stay planned until the B5-PROC-2 pre-commit gate lands; each pins on that gate's test that a commit
+      turning the suite red is refused (one transcript each)
+  - label: close-with-evidence
+    cost: B5-RD-1 goes planned -> open -> closed with the green commit and its review as evidence (no pin); B5-UD-1
+      pins on test_claude_md_carries_spec_section_12_verbatim_and_nothing_else with its transcript
+  - label: pin-ud1-only
+    cost: B5-UD-1 pins now as above; B5-RD-1 waits for the hook as pin-on-hook
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0104
+  class: scope
+  question: 'b5 round 14 item B (DEC-0090 session-fit): the placements need owner tasks that have no review package
+    yet (gate_review_package requires a mutation-<id>.txt in an existing package for every row its task owns, so
+    S2-T4/T5/T6, S2-b5-caps and the S2-b5-finalfix* tasks cannot take new rows: probe at f1057e5 ''FAIL review_package.strict-delivery.S2-T4.mutation.B5-ZZ-1'').
+    The controller used new task ids S2-b5-fix-review-package, S2-b5-fix-make-package, S2-b5-fix-plan (the per-gate
+    fix wave, DEC-0092 redraft) and S2-b5-caps-d3 (B5-CAPS-2, B5-UF-3), and the existing S2-b5-process and S2-b5-budget.
+    Confirm?'
+  options:
+  - label: confirm
+    cost: the S2 plan redraft (DEC-0092) names these tasks and their packages; no register change
+  - label: rename-or-move
+    cost: the owner names other tasks; one state commit moves the rows
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0105
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned SD-S2-T1..SD-S2-T6: the class names a whole rollout task (''strict-delivery
+    rollout step 3: gate_dispatch'', ...), not a defect value. Restate?'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''every
+      row of Task N''s D24 input-domain table'' (S2 plan, redrafted per DEC-0092); six reopen once the tables are
+      approved; six re-reviews'
+  - label: keep-requirement-rows
+    cost: 'no restatement: requirement rows, their domain is the task''s D24 table already; no reopen'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0106
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B4-FIX-1: class ''handle_agent ignores tool_input.subagent_type
+    ... fork'' plus F2-F6, V1, DEC-0012.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      Agent tool_input fields that decide which model and context a dispatch runs on: subagent_type (absent, null,
+      every case or spelling of fork, an agent type whose definition fixes a model) and model (absent, null, alias),
+      and their agreement with ## Model'''
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0107
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-2: class ''DEC-0018 opus fallback for the Fable roles
+    is not implemented''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''role
+      x model x fable_fallback state (absent, null, opus, another model, a non-string) at dispatch and at --config-check,
+      for every fable-minimum role'' (overlaps B5-FIX-8)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0108
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-3 (a), B5-FIX-15, B5-FIX-4 V-4: three value-level classes
+    of one input: the pin-step title (bare substring; re.I folds and Cf joiners; ''pin-less'').'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: one
+      dimension, ''the pin-step title as a text grammar: the ASCII word pin as a whole word in every case, Unicode
+      case folds, hyphen, joiner, format and combining neighbours'', held by B5-FIX-15; B5-FIX-3 (b) restated as
+      ''the id form of every per-task check id (one grammar)'''
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0109
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-4 V-2, V-3, V-5, F1: V-1 is widened by DEC-0089 (''repository
+    state that changes git output''); the other parts are value-level.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: V-2
+      folds into V-1''s dimension (core.abbrev and i18n.logOutputEncoding are config that changes git output); V-3
+      ''the ledger''s three copies (HEAD, index, work tree) x last-line grammar (CHECKPOINT forms, block numbers,
+      trailing text)''; V-5 ''transcript step-2 grammar: a runnable revert command''; F1 ''emptiness at every package-tree
+      level (sdd, <plan>, review/, <task>)'''
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0110
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-7: class ''quoted first diff path; empty or space-led
+    subject''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''every
+      commits.txt and diff.patch form git produces for a range: quoted paths (every core.quotePath byte), empty
+      and space-led subjects, binary, rename and copy headers, mode-only and type changes, submodules, deleted or
+      empty files, merges'' (meets R-A-1 vs DEC-0070, deferred by DEC-0092)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0111
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-8: class ''fallback rank str or bool; fable_fallback
+    other than opus''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      type and value of every model_rank entry and of fable_fallback (int, bool, str, float, None, missing, negative,
+      duplicate) at --config-check and at dispatch time''; B5-UD-2 (registered under S2-b5-budget) would then be
+      its sibling instead of its own row'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0112
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-11: plan-text row (S2 plan cite of run_all GATES order).'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''every
+      plan line that states the run_all GATES order or cites a ruling for it'''
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0113
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-12: class ''a Files-style item after a fence, a **Field:**
+    line or a step''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      position of a Files-style item relative to a task''s structure: after any line kind (fence, field line, step,
+      heading, blank, list item, quote, table, HTML comment), nested lists and fences'''
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0114
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-13: class ''absolute Files paths and a .. component''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      Files path form: absolute, .., ./, //, trailing slash, backslash, ~, URL, empty, whitespace, a symlink component,
+      case and Unicode normalisation'' (overlaps open B5-FIX-14)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0115
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-17, B5-FIX-18: two value-level classes of one relation:
+    pin.test vs the transcript command (module half ignored; whitespace split without shell parsing).'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: one
+      dimension, ''the transcript command grammar against the pin.test grammar: module path, class, dotted vs ::
+      forms, shell quoting and escapes, environment assignments, several commands'' (meets R-A-3, deferred by DEC-0092)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0116
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-19, B5-FIX-24: untested-branch rows (surviving mutants
+    in gate_plan and plans_in_flight).'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''every
+      changed branch of gate_plan Task 6 and B5-FIX-5 code has a killing mutant (comparison, constant, boolean,
+      early return)'', the D27 mechanical mutation dimension'
+  - label: leave-to-d27
+    cost: 'no restatement: the D27 mutation gate (from b6) covers the dimension; no reopen'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0117
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-20: class ''root a subdirectory: index and HEAD copies
+    relative to the top''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      root argument form for every read in gate_plan and plans_in_flight: root = toplevel, a subdirectory, a path
+      through a symlink, a worktree, relative or absolute'' (meets D32 and DEC-0093)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0118
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-21: class ''unreadable <plan>, review/ or <task> dir
+    skipped''; R-A-6 (unreadable package file, registered as B5-RA-6) is the same permissions dimension one level
+    down.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''permissions
+      at every package-tree level (.superpowers, sdd, <plan>, review/, <task>, each package file): unreadable, unlistable,
+      untraversable''; B5-RA-6 then folds in as a sibling'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0119
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-22: class ''FAIL row after a blank line or in a second
+    table''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      claims.md document grammar: number and position of tables, blank and non-table lines, header and separator
+      forms'' (meets grammar G1, deferred by DEC-0092)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0120
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-23: class ''dangling <plan>/review symlink''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''symlink
+      kinds at every package-tree level (dangling, to a file, to a directory, a loop, outside the root)'' (overlaps
+      B5-FIX-6 under DEC-0089 and D32)'
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0121
+  class: finding-class
+  question: 'D33 adoption sweep (B5-PROC-3), pinned B5-FIX-25: class ''non-UTF-8 ledger names no file''.'
+  options:
+  - label: widen
+    cost: 'the row reopens (mechanics: DEC-0102), its class is restated as written, the D33 idiom grep and new siblings
+      are registered in the same commit, new tests, one re-review and a re-pin. Proposed class by dimension: ''the
+      encoding of every file gate_plan reads (ledger copies, plan, Spec target, registers): non-UTF-8, BOM, CRLF,
+      NUL, empty'''
+  - label: keep
+    cost: the class stays value-level; a defect found in the wider dimension is a new row when found
+  asked_at:
+    sha: 6a7b2f9
+    by: controller
+  answer: null
+  answered_at: null
+- id: DEC-0122
+  class: model-policy
+  question: "b5 round 14 ran 237 of 180 minutes: the controller dispatched children (budget minutes=60, measured 88-96 min) after the point where they could finish before its own 80 % line, and the 80 % stop is not enforced mechanically. Add a budget-fit rule for dispatches?"
+  options:
+    - {label: budget-fit-rule, cost: "spec D36 + one sentence in the controller strict block: a child is dispatched only when its minutes budget ends by the controller's 80 % line, sized from the ledger's harness-measured duration of like work; rounds carry less work per round; one reviewed text round and an install"}
+    - {label: no-rule, cost: "keep D35 as is; overruns stay a reported process defect each round"}
+  asked_at: {sha: "6a7b2f9", by: session}
+  answer: "budget-fit-rule (owner in session, 2026-10-29: 'go, plus the budget rule'; the session had proposed the rule)"
+  answered_at: {sha: "6a7b2f9", by: superbrobenji}

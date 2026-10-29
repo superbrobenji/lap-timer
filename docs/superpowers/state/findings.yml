@@ -1891,3 +1891,697 @@
   - state: open
     sha: f1057e5
     by: controller
+- id: B5-RB-2
+  source: review
+  severity: MEDIUM
+  class: 'The helper writes through symlinks in the package path to places outside the root (b5r13-rr-amd-B.md R-B-2,
+    D24 file type and symlinks applied to write targets; DEC-0066 (a) ''a symlink anywhere below the root ... refuses
+    the helper''; spec D32): make_review_package os.makedirs and _write (make_review_package.py:158-163) follow
+    a symlinked .superpowers/sdd/<plan>, review/, <task> or an existing commits.txt, diff.patch or gates.txt'
+  siblings:
+  - a symlinked .superpowers/sdd/<plan>, review/ or <task> directory
+  - an existing commits.txt, diff.patch or gates.txt that is a symlink
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: 158-163
+    sha: 6a7b2f9
+  repro: 'ln -s $W/outside.txt .superpowers/sdd/strict-delivery/review/R13B/commits.txt, run the helper: rc 0 and
+    outside.txt holds the commit line; .superpowers/sdd/strict-delivery a symlink to $W/elsewhere: rc 0 and the
+    package is written there (b5r13-d30-investigation.md repro.sh sym)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-make-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-RB-3
+  source: review
+  severity: MEDIUM
+  class: 'A ledger.md that is a directory or a FIFO is silently skipped: rc 0 each (code :100 os.path.isfile, then
+    continue); DEC-0066 (a) reads ''real directories and regular files only'' (b5r13-rr-amd-B.md R-B-3; spec D32
+    wrong kind FAILs the item''s input check)'
+  siblings:
+  - ledger.md a directory
+  - ledger.md a FIFO or another non-regular file
+  - a plan file of the ledger that is not a regular file (make_review_package.py:124)
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: '100'
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: docs/superpowers/state/zz/ledger.md a directory, then mkfifo in its place; make_review_package
+    on a clean range: rc 0 both; a regular ledger naming an ignored plan: rc 1 (b5r13-d30-investigation.md repro.sh
+    ledger)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-make-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-RB-4
+  source: review
+  severity: MEDIUM
+  class: 'An unreadable ledger or plan that git ignores crashes the helper instead of refusing it: chmod 000 on
+    an ignored ledger gives a Traceback at make_review_package.py:102 (_ignored) PermissionError [Errno 13], an
+    ignored plan chmod 000 a Traceback at :126 (_specs); chmod 644 gives rc 1 ''ignored file(s) under the paths
+    the gates read'' (b5r13-rr-amd-B.md R-B-4; the dimension is permissions, outside B5-FIX-16''s class, ignore
+    state; spec D32 unreadable FAILs the item''s input check)'
+  siblings:
+  - unreadable ignored ledger.md (:102)
+  - unreadable ignored plan file (:126)
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: '102'
+    sha: 6a7b2f9
+  - file: tools/gates/make_review_package.py
+    lines: '126'
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: state dir zzu excluded, chmod 000 docs/superpowers/state/zzu/ledger.md, run the helper:
+    Traceback PermissionError at :102; same for an excluded plan zz_u.md at :126 (b5r13-d30-investigation.md repro.sh
+    perm)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-make-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-RA-6
+  source: review
+  severity: MEDIUM
+  class: 'No T4 row for a package file that exists but cannot be read (mode 000). Today: --dir FAIL review_package.input
+    ''[Errno 13] ...'' (file named only in the errno text); --all stops at the first such file with 0 PASS lines,
+    so every other package goes unchecked (b5r13-rr-amd-A.md R-A-6; _read gate_review_package.py:52-53 has no catch
+    and _check_entry :403-415 no per-package isolation; DEC-0085 (Q20 a), spec D32 unreadable input FAILs that item
+    and in a multi-item run the others still run)'
+  siblings:
+  - --dir on a package with an unreadable file
+  - --all with one unreadable package file among readable packages
+  cites:
+  - file: tools/gates/gate_review_package.py
+    lines: 52-53
+    sha: 6a7b2f9
+  - file: tools/gates/gate_review_package.py
+    lines: 403-415
+    sha: 6a7b2f9
+  repro: 'in a guarded clone with the packages copied: chmod 000 .superpowers/sdd/strict-delivery/review/S2-T4/claims.md;
+    gate_review_package.py --all: rc 1, 0 PASS lines, ''FAIL review_package.input: [Errno 13]''; readable: 22 PASS
+    (b5r13-d30-investigation.md repro.sh unread)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-review-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-RC-2
+  source: review
+  severity: MEDIUM
+  class: 'Missing D24 symlink rows (b5r13-rr-amd-C.md R-C-2): gate_plan reads the plan file (--plan, or the ledger''s
+    line 1), the Spec target, findings.yml and the other registers, and a symlinked docs, docs/superpowers or docs/superpowers/plans
+    component, each through a symlink without refusing it: `--plan link.md` pointing at the good plan gives rc 0
+    (gate_plan.py:425-426, _resolve then os.path.isfile, which follows links; DEC-0066 (a), DEC-0093 a path argument
+    that is itself a symlink, spec D32)'
+  siblings:
+  - --plan a symlink inside the root
+  - --plan a symlink outside the root (DEC-0093)
+  - the ledger line-1 plan a symlink
+  - the Spec target a symlink
+  - a register file a symlink
+  - a symlinked docs, docs/superpowers or docs/superpowers/plans component
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: 425-426
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: ln -s <good plan> link.md; python3 tools/gates/gate_plan.py --plan link.md: rc 0,
+    0 FAIL lines; --plan a missing file: rc 1 FAIL plan.file (b5r13-d30-investigation.md repro.sh plansym)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-U9
+  source: review
+  severity: MEDIUM
+  class: 'docs/superpowers/specs/2026-10-17-strict-delivery-design.md:36 (decision row D22) ''triggers = 3 tasks
+    / 250k tokens / 90 min for a controller, 1 task / 150k for an implementer, 1 review / 120k for a reviewer, any
+    429''. Contradicts spec §3.1 :64-66 (DEC-0060). From 73cd3cc; 5386f19 amended §3.1 but not D22. Class: DEC-0060''s
+    spec edit did not follow every spec statement of the caps (b5r13-rr-caps.md U-4, lines at 64f7ad7; §3.1 is :69-71
+    at f1057e5; DEC-0090 session-fit: a new row, not a B5-CAPS-1 widening)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: '36'
+    sha: 6a7b2f9
+  repro: sed -n 36p docs/superpowers/specs/2026-10-17-strict-delivery-design.md | grep -o 'triggers = .*' prints
+    the old caps; sed -n 69,71p of the same file (§3.1 at f1057e5) states the DEC-0060 caps
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-U10
+  source: review
+  severity: LOW
+  class: 'tools/gates/README.md:164-185 (gate_dispatch section) lists every dispatch check except the budget-vs-role-trigger
+    check: grep -c dispatch.budget tools/gates/README.md = 0, while gate_dispatch.py:200-219 emits dispatch.budget
+    (from fe3f146). Class: README check list incomplete for gate_dispatch (b5r13-rr-caps.md U-5)'
+  siblings: []
+  cites:
+  - file: tools/gates/README.md
+    lines: 164-185
+    sha: 6a7b2f9
+  repro: grep -c dispatch.budget tools/gates/README.md -> 0; grep -c dispatch.budget tools/gates/gate_dispatch.py
+    -> at least 1
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-budget
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UF-2
+  source: review
+  severity: LOW
+  class: 'S1 plan :7342-7362 controller strict-block copy vs ~/.claude/skills/strict-delivery/prompts/controller.md:
+    the prompt has paragraphs the copy lacks (''Semantics (spec D24-D26). ...'', ''Convergence (spec D30). ...'').
+    Class: the S1 plan prompt copies (''S2 compares them byte for byte'', S1 :7338) are not re-synced when the installed
+    prompts change; only controller.md was diffed, the other seven prompt copies were not checked (b5r13-caps-fix1-report.md
+    UF-2)'
+  siblings:
+  - the other seven S1 prompt copies
+  cites:
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md
+    lines: 7342-7362
+    sha: 6a7b2f9
+  repro: 'extract the S1 :7342-7362 fenced copy and diff it against ~/.claude/skills/strict-delivery/prompts/controller.md:
+    the Semantics, Convergence and Commit gate paragraphs are only in the installed file'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UF-3
+  source: review
+  severity: LOW
+  class: 'umbrella config.yml block (from :163) and S1 block (from :955) lack config.yml :35-37 (DEC-0018 fable_fallback
+    comment and fable_fallback: opus), so S1 :950''s ''(no output)'' stays false. Pre-existing (present at 72b7018
+    per b5r12-rr-caps.md, at 25848b3). Class: plan blocks of config.yml not following config.yml changes outside
+    the triggers. Whether the plan should carry a session-set value is an owner question (DEC-0018 says only the
+    session sets it) (b5r13-caps-fix1-report.md UF-3)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery.md
+    lines: '163'
+    sha: 6a7b2f9
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery-S1-registers-core-gates.md
+    lines: '955'
+    sha: 6a7b2f9
+  repro: 'diff the fenced yaml block holding umbrella :163 (lines 163-196 at f1057e5), and the one holding S1 :955
+    (955-988), against tools/gates/config.yml: each prints the 34a35,37 hunk ''> # DEC-0018: fable_fallback names
+    the model ...'''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-caps-d3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UF-4
+  source: review
+  severity: LOW
+  class: gate_plan.py --plan on the umbrella (2 FAIL) and S1 (39 FAIL) plans returns rc 1 at base and tip; these
+    plans fail the plan gate's current rules. Whether these are known/registered was not checked (b5r13-caps-fix1-report.md
+    UF-4)
+  siblings:
+  - umbrella plan
+  - S1 plan
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '425'
+    sha: 6a7b2f9
+  repro: python3 tools/gates/gate_plan.py --plan docs/superpowers/plans/2026-10-17-strict-delivery.md; echo $? ->
+    1 (2 FAIL); the same on the S1 plan -> 1 (39 FAIL)
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UD-2
+  source: review
+  severity: LOW
+  class: 'The gate_dispatch dispatch path (gate_dispatch.py:113-128) uses model_rank values that only --config-check
+    validates. With fable: true, a Fable-minimum role on opus PASSes dispatch.model.rank at the PreToolUse hook.
+    Origin is the b4 rank check. Whether this falls inside B5-FIX-8''s class (sibling ''bool rank of opus, fable
+    or the fallback model'') or B5-U4/U5 is a class question for the owner (b5r13-rr-amd-D.md U-D-2)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: 113-128
+    sha: 6a7b2f9
+  repro: 'in-memory or clone config with model_rank fable: true; a final_verifier dispatch on opus through gate_dispatch
+    --prompt: PASS dispatch.model.rank; --config-check FAILs model_rank (b5r13-rr-amd-D.md td.py/tc.py case TD.4
+    fable bool)'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-budget
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-ID-1
+  source: review
+  severity: LOW
+  class: 'D33 idiom sweep of R-B-13 (regex anchored with $ applied with match accepts a trailing line terminator):
+    gate_plan.py:61 GATE_NAME = re.compile(r''^[a-z0-9_]+$'') used with GATE_NAME.match at :408 accepts ''plan\n''
+    at regex level (fullmatch refuses it); reachability through main() not shown, the values are split lines (b5r13-d30-investigation.md
+    Unrelated findings)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '61'
+    sha: 6a7b2f9
+  - file: tools/gates/gate_plan.py
+    lines: '408'
+    sha: 6a7b2f9
+  repro: python3 -c "import sys; sys.path.insert(0,'.'); from tools.gates import gate_plan as g; print(bool(g.GATE_NAME.match('plan\n')),
+    bool(g.GATE_NAME.fullmatch('plan\n')))" -> True False
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-ID-2
+  source: review
+  severity: LOW
+  class: 'D33 idiom sweep of R-B-13: gate_plan.py:82 ID_RE = re.compile(r''^[A-Z0-9]+(-[A-Za-z0-9]+)+$'') used with
+    ID_RE.match at :156 accepts ''B5-FIX-1\n'' at regex level (fullmatch refuses it); reachability through main()
+    not shown, the values are split lines (b5r13-d30-investigation.md Unrelated findings)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '82'
+    sha: 6a7b2f9
+  - file: tools/gates/gate_plan.py
+    lines: '156'
+    sha: 6a7b2f9
+  repro: python3 -c "import sys; sys.path.insert(0,'.'); from tools.gates import gate_plan as g; print(bool(g.ID_RE.match('B5-FIX-1\n')),
+    bool(g.ID_RE.fullmatch('B5-FIX-1\n')))" -> True False
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-1
+  source: review
+  severity: MEDIUM
+  class: 'A register or config file that is not a regular file hangs the gate: load_yaml (lib/__init__.py:100-106)
+    opens it with no kind check, so a FIFO findings.yml blocks gate_register forever (spec D32: an input of the
+    wrong kind FAILs that item''s input check; b5r14-draft-helper-report.md unrelated 1, confirmed by b5r14-tablerev-helper.md)'
+  siblings:
+  - findings.yml a FIFO
+  - decisions.yml, claims.yml or config.yml a FIFO or another non-regular file
+  cites:
+  - file: tools/gates/lib/__init__.py
+    lines: 100-106
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: rm docs/superpowers/state/findings.yml; mkfifo it; python3 tools/gates/gate_register.py
+    under a 10 s timeout -> TIMEOUT; the regular file -> rc 0 ''PASS register.report'''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-2
+  source: review
+  severity: LOW
+  class: 'An input FAIL reason names the file by its absolute, machine-dependent path: gate_plan --plan on an unreadable
+    file gives ''FAIL plan.input: [Errno 13] Permission denied: <absolute path>'' (gate_plan.py:142 _read, str(exc)),
+    while load_yaml''s docstring (lib/__init__.py:101-102) promises names relative to the root (b5r14-draft-helper-report.md
+    unrelated 2; Q-FH-6)'
+  siblings:
+  - every input reason built from str(OSError)
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '142'
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: cp the S2 plan to u.md; chmod 000 u.md; python3 tools/gates/gate_plan.py --plan u.md
+    -> ''FAIL plan.input: [Errno 13] Permission denied: ''/private/tmp/.../u.md'''''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-3
+  source: review
+  severity: MEDIUM
+  class: 'gate_claims --mark-stale writes claims.yml through a symlink to a file outside the root (gate_claims.py:95
+    open(..., ''w'') follows it; spec D32: a write target with a symlink below the root FAILs the input check; sibling
+    of B5-RB-2 in another gate; b5r14-tablerev-helper.md unrelated 1)'
+  siblings:
+  - claims.yml a symlink
+  - a symlinked docs, docs/superpowers or docs/superpowers/state component
+  cites:
+  - file: tools/gates/gate_claims.py
+    lines: '95'
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: claims.yml -> $S/out3/claims.yml holding one verified claim citing tools/gates/tests/test_hooks.py
+    at HEAD~1; gate_claims.py --mark-stale --base <HEAD~1> -> rc 0 and the outside file reads ''state: stale'''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-4
+  source: review
+  severity: MEDIUM
+  class: 'make_review_package blocks forever on a FIFO write target: _write (make_review_package.py:82) opens an
+    existing FIFO diff.patch for writing (spec D32: a write target of the wrong kind FAILs the input check; b5r14-tablerev-helper.md
+    unrelated 2)'
+  siblings:
+  - commits.txt, diff.patch or gates.txt a FIFO or another non-regular file
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: '82'
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: mkfifo .superpowers/sdd/strict-delivery/review/t/diff.patch; make_review_package.py
+    strict-delivery t HEAD~1 HEAD --only gate_claims under a 10 s timeout -> TIMEOUT; without the FIFO -> rc 1 and
+    commits.txt, diff.patch, gates.txt written'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-make-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-5
+  source: review
+  severity: LOW
+  class: 'str.splitlines treats VT, FF, NEL, FS and U+2028 as line ends where the gates read LF-only text (DEC-0067
+    a ''LF only''): a header line after a VT reads as its own line (b5r14-tablerev-helper.md unrelated 3; D33 idiom
+    splitlines( in tools/gates)'
+  siblings:
+  - gate_plan.py:247, :517, :627
+  - gate_review_package.py:58, :68, :168, :271
+  - make_review_package.py:104, :148
+  - lib/__init__.py:51
+  - lib/gitinfo.py:62, :154
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '247'
+    sha: 6a7b2f9
+  repro: python3 -c "print(len('a\x0bb'.splitlines()), len('a\x0cb'.splitlines()), len('a\x0bb'.split('\n')))" ->
+    2 2 1; grep -n 'splitlines(' tools/gates/*.py tools/gates/lib/*.py -> 12 hits
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-6
+  source: review
+  severity: MEDIUM
+  class: 'A failed package write leaves a truncated package on disk: make_review_package.py:160-163 writes the files
+    in place, so ''cannot write ...: File too large'' leaves diff.patch cut short (partial write, Q-FH-12; b5r14-tablerev-helper.md
+    unrelated 4)'
+  siblings:
+  - commits.txt, diff.patch, gates.txt cut by any write error
+  cites:
+  - file: tools/gates/make_review_package.py
+    lines: 160-163
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: (ulimit -f 4; make_review_package.py strict-delivery t 72b7018 HEAD --only gate_claims)
+    -> ''cannot write .superpowers/sdd/strict-delivery/review/t: File too large'' and diff.patch 4096 bytes left;
+    without the ulimit diff.patch is 200086 bytes'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-make-package
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-7
+  source: review
+  severity: LOW
+  class: 'Check ids carry a path, outside DEC-0082 a''s id grammar [A-Za-z0-9_.-]+ (answered, not implemented):
+    ''FAIL decisions.scan.sub/f.md'' (b5r14-tablerev-helper.md unrelated 6)'
+  siblings:
+  - gate_decisions.py:72, :79, :83 decisions.scan.<rel>
+  - gate_register.py:181 register.marker.<relpath>
+  - gate_register.py:188 register.report.<rel>.<rid>
+  cites:
+  - file: tools/gates/gate_decisions.py
+    lines: 72-83
+    sha: 6a7b2f9
+  - file: tools/gates/gate_register.py
+    lines: 181-188
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: mkdir sub; echo hi > sub/f.md; chmod 000 sub/f.md; gate_decisions.py --scan sub/f.md
+    -> ''FAIL decisions.scan.sub/f.md: cannot read: Permission denied'''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-8
+  source: review
+  severity: MEDIUM
+  class: 'A sourceless module in the gate import path shadows a dependency and run_all crashes with a traceback
+    instead of a section 7 named line: the script directory tools/gates stays on sys.path ahead of site-packages
+    (run_all.py:19 inserts only the root before it), so a tools/gates/yaml.pyc replaces PyYAML (the untracked-file
+    guard does not cover a tracked or staged file; b5r14-tablerev-precommit.md UF-PC-R1)'
+  siblings:
+  - sys.path.insert in gate_claims.py:26, gate_decisions.py:24, gate_dispatch.py:18, gate_plan.py:32, gate_register.py:27,
+    gate_review_package.py:27, hooks/pre_tool_use.py:276, :327, make_review_package.py:30
+  cites:
+  - file: tools/gates/run_all.py
+    lines: '19'
+    sha: 6a7b2f9
+  repro: 'in a guarded clone: py_compile gate_claims.py to tools/gates/yaml.pyc; PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=<fresh>
+    /usr/bin/python3 tools/gates/run_all.py --only register,claims -> ''ImportError: cannot import name ''GateError''
+    from partially initialized module ''tools.gates.lib''''; without it -> ''PASS claims.stale'''
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
+- id: B5-UR-9
+  source: review
+  severity: MEDIUM
+  class: CI runs the gate suite without -W error (gates.yml:30, :32), while the spec D34 commit-gate command uses
+    -W error, so a warning-only regression passes CI (b5r14-draft-precommit-report.md UF-PC-1, confirmed by b5r14-tablerev-precommit.md;
+    Q-PC-12)
+  siblings: []
+  cites:
+  - file: .github/workflows/gates.yml
+    lines: 30-32
+    sha: 6a7b2f9
+  repro: grep -nE 'unittest' .github/workflows/gates.yml -> ':30 python3.9 -m unittest discover -v -s tools/gates/tests
+    -t .' and :32 the same for python3.12; spec :48 '<py> -W error -m unittest discover'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 6a7b2f9
+    by: controller
+  - state: planned
+    sha: 6a7b2f9
+    by: controller
