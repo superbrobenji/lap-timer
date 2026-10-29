@@ -967,8 +967,8 @@
   asked_at:
     sha: 6a7b2f9
     by: controller
-  answer: null
-  answered_at: null
+  answer: "successor-rows (owner in session, 2026-10-29: '0102 successor-rows'; DEC-0127 read-as-stored, no session recommendation)"
+  answered_at: {sha: "6261372", by: superbrobenji}
 - id: DEC-0103
   class: triage
   question: 'b5 round 14 item A: B5-RD-1''s fix (DEC-0063) deletes the test that went red, so no production-path
@@ -986,8 +986,8 @@
   asked_at:
     sha: 6a7b2f9
     by: controller
-  answer: null
-  answered_at: null
+  answer: "restore-and-fix, none of the listed options (owner in session, 2026-10-29: 'we cannot simply delete a test to \"fix\" something. the thing or the test must be fixed. if a test was deleted as a fix, it needs to be readded and fixed.'). Effect: the two tests DEC-0063 dropped in 6a7b2f9 (test_s2_plan_blocks_hold_the_dec_0060_caps, test_readme_states_no_budget_cap) are restored and fixed; this supersedes DEC-0063 drop; B5-RD-1 pins on the restored test; B5-UD-1 pins on test_claude_md_carries_spec_section_12_verbatim_and_nothing_else"
+  answered_at: {sha: "6261372", by: superbrobenji}
 - id: DEC-0104
   class: scope
   question: 'b5 round 14 item B (DEC-0090 session-fit): the placements need owner tasks that have no review package
@@ -1004,8 +1004,8 @@
   asked_at:
     sha: 6a7b2f9
     by: controller
-  answer: null
-  answered_at: null
+  answer: "confirm (owner in session, 2026-10-29: '104 confirm')"
+  answered_at: {sha: "6261372", by: superbrobenji}
 - id: DEC-0105
   class: finding-class
   question: 'D33 adoption sweep (B5-PROC-3), pinned SD-S2-T1..SD-S2-T6: the class names a whole rollout task (''strict-delivery
@@ -1023,8 +1023,8 @@
   asked_at:
     sha: 6a7b2f9
     by: controller
-  answer: null
-  answered_at: null
+  answer: "keep-requirement-rows (owner in session, 2026-10-29: '105 keep-requirement-roles')"
+  answered_at: {sha: "6261372", by: superbrobenji}
 - id: DEC-0106
   class: finding-class
   question: 'D33 adoption sweep (B5-PROC-3), pinned B4-FIX-1: class ''handle_agent ignores tool_input.subagent_type
@@ -1378,3 +1378,12 @@
   asked_at: {sha: "5270ecc", by: session}
   answer: "approve-except-flagged (owner in session, 2026-10-29: 'recommended'; the session had recommended approve-except-flagged)"
   answered_at: {sha: "5270ecc", by: superbrobenji}
+- id: DEC-0130
+  class: spec-direction
+  question: "How do a finding's class and the defects reviews find relate (owner statement while answering DEC-0102..0105, 2026-10-29; context: the D33 widen/keep sweep DEC-0106..0121)?"
+  options:
+    - {label: class-as-epic, cost: "a class is an epic with child rows (tickets); defects reviews find in the class's dimension become child rows under it; the class is signed off only when every child is resolved and the full class is tested and reviewed; spec text (new D row), register schema and gate_register change, a mapping of the pinned rows, each through the pipeline with owner approval of the design"}
+    - {label: status-quo, cost: "classes widen or stay value-level per row (D33 widen/keep)"}
+  asked_at: {sha: "6261372", by: session}
+  answer: "class-as-epic (owner in session, 2026-10-29, verbatim: 'this seems like a ways of working issue we are trying to define. a class can be seen as an epic that has child rows or tickets. when reviews find bugs, then the bugs fall under that class, and the class cannot be signed off until all bugs are resolved and the full class tested and reviewed'). The design (spec row, register and gate mechanics, mapping of DEC-0106..0121's rows) comes back to the owner for approval before any code"
+  answered_at: {sha: "6261372", by: superbrobenji}
