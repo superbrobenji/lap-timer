@@ -1310,3 +1310,41 @@
   asked_at: {sha: "6a7b2f9", by: session}
   answer: "budget-fit-rule (owner in session, 2026-10-29: 'go, plus the budget rule'; the session had proposed the rule)"
   answered_at: {sha: "6a7b2f9", by: superbrobenji}
+- id: DEC-0123
+  class: model-policy
+  question: "D36 (b5r15-d36rev-report.md R-d36-1, Q-d36-1): the session dispatching a 180-minute sub-controller can never fit the session's own 80 % line (180 > 144). Does D36 bind the session?"
+  options:
+    - {label: exempt-session, cost: "D36 binds controllers dispatched with a ## Budget line; the session dispatching a sub-controller is exempt and the sub-controller's own 80 % stop bounds it; one clause"}
+    - {label: shorter-sub-controllers, cost: "sub-controllers get at most 144 minus the session's elapsed minutes; shorter rounds, more rounds"}
+    - {label: clock-restarts, cost: "the session clock restarts at each sub-controller hand-back; one more defined term, §3.1 'since its start' changes"}
+  asked_at: {sha: "0fec6c3", by: session}
+  answer: "exempt-session (owner in session, 2026-10-29: 'recommended' to the session's four questions; the session had recommended exempt-session)"
+  answered_at: {sha: "0fec6c3", by: superbrobenji}
+- id: DEC-0124
+  class: model-policy
+  question: "D36 (R-d36-2, Q-d36-2): work whose measured like-work duration alone exceeds 0.8 x the controller's minutes never fits. What happens to it?"
+  options:
+    - {label: split-at-plan-time, cost: "split at plan time as D29 splits reviews; plan-text rounds per such task"}
+    - {label: owner-question, cost: "an owner question per case; an owner stop each time"}
+    - {label: raise-cap, cost: "raise the controller minutes trigger; longer rounds, config.yml and gate_dispatch change"}
+  asked_at: {sha: "0fec6c3", by: session}
+  answer: "split-at-plan-time (owner in session, 2026-10-29: 'recommended'; the session had recommended split-at-plan-time)"
+  answered_at: {sha: "0fec6c3", by: superbrobenji}
+- id: DEC-0125
+  class: finding-class
+  question: "b5 round 15 D30 (b5r15-d30-investigation.md): gate_plan reads a failing git as 'in flight' or 'no value' (gate_plan.py:530 _git_ledgers; b5 code, outside every recorded class). Widen open, unpinned B5-FIX-5 or a new row?"
+  options:
+    - {label: widen-b5-fix-5, cost: "B5-FIX-5 (open, unpinned, no reopen needed) is restated by dimension: every git outcome (command failure, missing repository, DEC-0068 a non-repository root) for each git call gate_plan makes; its fix and re-review cover the whole dimension"}
+    - {label: new-row, cost: "a separate git-outcome row; B5-FIX-5 unchanged"}
+  asked_at: {sha: "0fec6c3", by: session}
+  answer: "widen-b5-fix-5 (owner in session, 2026-10-29: 'recommended'; the session had recommended widen-b5-fix-5)"
+  answered_at: {sha: "0fec6c3", by: superbrobenji}
+- id: DEC-0126
+  class: scope
+  question: "About 100 open owner questions after b5 round 15 (Q-d36-3..7, DEC-0102..0121, Q-PC/Q-FH/Q-SG table questions, Q-D32-W, the four D30 process changes, 22 row placements and severities, the unregistered process notes). How are they brought to the owner?"
+  options:
+    - {label: decision-sheet, cost: "one sheet, each question with options, costs and a session recommendation, task-reviewed before the owner sees it; the owner approves it whole or marks exceptions; one drafting and review round"}
+    - {label: chat-batches, cost: "AskUserQuestion four at a time; slower, every answer picked directly"}
+  asked_at: {sha: "0fec6c3", by: session}
+  answer: "decision-sheet (owner in session, 2026-10-29: 'recommended'; the session had recommended decision-sheet)"
+  answered_at: {sha: "0fec6c3", by: superbrobenji}
