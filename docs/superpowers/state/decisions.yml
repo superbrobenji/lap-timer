@@ -1387,3 +1387,12 @@
   asked_at: {sha: "6261372", by: session}
   answer: "class-as-epic (owner in session, 2026-10-29, verbatim: 'this seems like a ways of working issue we are trying to define. a class can be seen as an epic that has child rows or tickets. when reviews find bugs, then the bugs fall under that class, and the class cannot be signed off until all bugs are resolved and the full class tested and reviewed'). The design (spec row, register and gate mechanics, mapping of DEC-0106..0121's rows) comes back to the owner for approval before any code"
   answered_at: {sha: "6261372", by: superbrobenji}
+- id: DEC-0131
+  class: spec-direction
+  question: "Where do owner rules given in session live (context: the session saved DEC-0103 'a deleted test is not a fix' and DEC-0130 'class as epic' only to its private memory)?"
+  options:
+    - {label: always-document, cost: "every owner rule is written into the repo's governing text (spec rows, CLAUDE.md where it is a session rule, the strict-delivery blocks where a role must follow it) through the pipeline; memory may point at it but never replaces it; DEC-0103 and DEC-0130 are documented first"}
+    - {label: memory-ok, cost: "rules may live in session memory only"}
+  asked_at: {sha: "6d6c36e", by: session}
+  answer: "always-document (owner in session, 2026-10-29: \"don't jsut save to memory. always document. go\")"
+  answered_at: {sha: "6d6c36e", by: superbrobenji}
