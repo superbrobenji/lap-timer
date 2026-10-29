@@ -589,10 +589,12 @@
     (:648 repo_root, lib/__init__.py:61-70); today a failing listing adds no ledger name, so a ledger that only
     the index or HEAD holds gets no plan check (b5r15-d30-investigation.md sections 1 and 5; b5r15-rr-helper.md
     unrelated 1). Expected verdict: DEC-0068 a FAIL plan.input for the non-repository root; for a git failure
-    inside a repository the rule is open (Q-FH-16, owner). Sites outside gate_plan: B5-UR-11 and B5-UR-12.
-    Siblings for dimension 2 are named here and in the repro, not in the siblings list: the S2-b5-finalfix2
-    review package (git-ignored) has a siblings.md row for each listed sibling, and a new sibling without a
-    test or finding cell turns run_all red (owner question in the round-16 decision sheet)'
+    inside a repository FAIL plan.input (DEC-0129, sheet row Q-FH-16 (a)). Sites outside gate_plan: B5-UR-11, B5-UR-12
+    and B5-UR-20..23.
+    D33 idiom hits (DEC-0128 fix-per-d33, b5 round 17) are in the siblings list with the grep pattern: the four
+    in gate_plan (dimension 2) each registered as its own row, B5-UR-16..19; the two outside gate_plan
+    (gate_review_package.py:193, make_review_package.py:70) share B5-UR-12, registered at 5270ecc before DEC-0128
+    (sheet rows A1-1b and S-D-1 open); the shell hits as B5-UR-20..23'
   siblings:
   - ledger deleted in the working tree
   - ledger lines staged only
@@ -601,6 +603,16 @@
   - ledger mode change staged
   - ledger mode change in the work tree only
   - state dir replaced by a symlink
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: gate_plan.py:524 _git_bytes git show (B5-UR-16)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: gate_plan.py:530 _git_ledgers git ls-files and git ls-tree HEAD (B5-UR-17)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: gate_plan.py:556 _git_mode git ls-files -s and git ls-tree HEAD (B5-UR-18)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: gate_plan.py:582 _git_bool git config --bool (B5-UR-19)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: gate_review_package.py:193 test_modules git ls-files (B5-UR-12)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: make_review_package.py:70 _range git merge-base --is-ancestor (B5-UR-12)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: hooks/git-pre-commit.sh:35 git status piped to awk (B5-UR-20)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: install-hooks.sh:14 git rev-parse --git-common-dir inside cd (B5-UR-21)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: hooks/git-pre-push.sh:18 git rev-parse --verify HEAD or true (B5-UR-22)'
+  - 'D33 idiom: a git call whose failure (non-zero rc, or git that cannot start) is read as data or as the wrong refusal; grep git grep -n -F -e ''subprocess.run(["git"'' -e ''check=False'' -e ''$(git '' -e ''git status'' -e ''git read-tree'' -- tools/gates '':!tools/gates/tests'' at 2e43f13: hooks/git-pre-push.sh:30 git rev-parse --verify local sha or true (B5-UR-23)'
   cites:
   - file: tools/gates/gate_plan.py
     lines: 493-511
@@ -2807,4 +2819,204 @@
     by: controller
   - state: planned
     sha: d544bad
+    by: controller
+- id: B5-UR-16
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: LOW
+  class: 'B5-FIX-5 dimension 2 hit (DEC-0125): _git_bytes (gate_plan.py:521-525) returns None when git show fails, as when the path is absent from HEAD or the index: a failing git reads as a missing copy'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '524'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when its subcommand is show: _git_bytes(''.'', ''HEAD:docs/superpowers/state/strict-delivery/ledger.md'') -> None, the value for HEAD:docs/nope.md; contradiction: real git -> the ledger bytes; with no git on PATH the helper raises FileNotFoundError, which the gate path reports as FAIL plan.input (lib/__init__.py:148-150), not a defect'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-17
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: MEDIUM
+  class: 'B5-FIX-5 dimension 2 hit (DEC-0125): _git_ledgers (gate_plan.py:528-536) ignores the rc of git ls-files and git ls-tree HEAD: a failing listing adds no ledger name, so a ledger that only the index or HEAD holds gets no plan check (fail-open, b5r15-d30-investigation.md section 1)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '530'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when its subcommand is ls-files (then ls-tree): _git_ledgers(''.'', [''ls-files'']) -> set() and _git_ledgers(''.'', [''ls-tree'', ''-r'', ''--name-only'', ''HEAD'']) -> set(); contradiction: real git -> {''strict-delivery''} for both; with no git on PATH the helper raises FileNotFoundError, which the gate path reports as FAIL plan.input (lib/__init__.py:148-150), not a defect'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-18
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: LOW
+  class: 'B5-FIX-5 dimension 2 hit (DEC-0125): _git_mode (gate_plan.py:549-561) ignores the rc of git ls-files -s and git ls-tree HEAD: a failing listing returns None, the value for no such entry'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '556'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when its subcommand is ls-files (then ls-tree): _git_mode(''.'', [''ls-files'', ''-s''], ''docs/superpowers/state/strict-delivery/ledger.md'') -> None and _git_mode(''.'', [''ls-tree'', ''HEAD''], the same path) -> None; contradiction: real git -> ''100644'' for both; with no git on PATH the helper raises FileNotFoundError, which the gate path reports as FAIL plan.input (lib/__init__.py:148-150), not a defect'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-19
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: LOW
+  class: 'B5-FIX-5 dimension 2 hit (DEC-0125): _git_bool (gate_plan.py:579-583) ignores the rc of git config --bool: a failing git reads as true (the unset default), so core.fileMode=false or core.symlinks=false set in the repository is read as true (DEC-0041, DEC-0049 handling skipped)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_plan.py
+    lines: '582'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when its subcommand is config, in a clone with core.fileMode and core.symlinks set false: _git_bool(''.'', ''core.fileMode'') -> True and _git_bool(''.'', ''core.symlinks'') -> True; contradiction: real git -> False for both; with no git on PATH the helper raises FileNotFoundError, which the gate path reports as FAIL plan.input (lib/__init__.py:148-150), not a defect'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-fix-plan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-20
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: MEDIUM
+  class: 'D33 idiom hit outside gate_plan (b3 code, 07d7b29): git-pre-commit.sh:35-39 pipes git status into awk under set -eu without pipefail, so a failing git status reads as a clean tree and the pre-commit.unstaged / pre-push.uncommitted check passes (fail-open)'
+  siblings: []
+  cites:
+  - file: tools/gates/hooks/git-pre-commit.sh
+    lines: '35-39'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when an argument is status, an unstaged edit in tools/gates/gate_plan.py: sh tools/gates/hooks/git-pre-commit.sh -> rc 0, no FAIL line; contradiction: real git -> rc 1, FAIL pre-commit.unstaged'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-21
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: LOW
+  class: 'D33 idiom hit outside gate_plan (b3 code, 07d7b29): install-hooks.sh:14 runs git rev-parse --git-common-dir inside cd "$(...)"; a failing git gives cd an empty argument, which succeeds, so common reads as the work-tree root instead of the git common dir and the hooks-directory refusal compares against the wrong directory'
+  siblings: []
+  cites:
+  - file: tools/gates/install-hooks.sh
+    lines: '14'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when an argument is --git-common-dir: the line-14 expression under set -euo pipefail -> rc 0, common = the clone root; contradiction: real git -> common = <root>/.git'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-22
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: MEDIUM
+  class: 'D33 idiom hit outside gate_plan (b3 code, 07d7b29): git-pre-push.sh:18 reads a failing git rev-parse --verify -q HEAD (|| true) as an unborn HEAD: a deletes-only push then exits 0 without running git-pre-commit.sh --pre-push, and any other push gets the wrong refusal (pushed from an unborn HEAD)'
+  siblings: []
+  cites:
+  - file: tools/gates/hooks/git-pre-push.sh
+    lines: '18'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when an argument is HEAD, HEAD = 2e43f13: stdin ''refs/heads/x <40 zeros> refs/heads/x <HEAD sha>'' -> 0 PASS lines (no gate run), stdin ''refs/heads/x <HEAD sha> refs/heads/x <40 zeros>'' -> FAIL pre-push.not-head ... pushed from an unborn HEAD; contradiction: real git -> 10 PASS lines for the delete'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
+    by: controller
+- id: B5-UR-23
+  source: D33 idiom sweep of B5-FIX-5 (DEC-0128 fix-per-d33)
+  severity: LOW
+  class: 'D33 idiom hit outside gate_plan (b3 code, 07d7b29): git-pre-push.sh:30 reads a failing git rev-parse --verify -q <sha>^{commit} (|| true) as a sha other than HEAD and refuses with the wrong text (is not the checked-out HEAD)'
+  siblings: []
+  cites:
+  - file: tools/gates/hooks/git-pre-push.sh
+    lines: '30'
+    sha: 2e43f13
+  repro: 'a guarded clone at 2e43f13, PATH led by a shim git that exits 128 when an argument is <HEAD sha>^{commit}: stdin ''refs/heads/x <HEAD sha> refs/heads/x <40 zeros>'' -> FAIL pre-push.not-head ... is not the checked-out HEAD; contradiction: real git -> 10 PASS lines'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: S2-b5-process-code
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2e43f13
+    by: controller
+  - state: planned
+    sha: 2e43f13
     by: controller
