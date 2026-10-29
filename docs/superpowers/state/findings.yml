@@ -3020,3 +3020,28 @@
   - state: planned
     sha: 2e43f13
     by: controller
+- id: PROG-1
+  source: owner replan 2026-10-29 (DEC-0132..DEC-0140)
+  severity: MEDIUM
+  class: 'the 2026-10-29 replan exists only as session drafts: the umbrella plan has no replan or deferred list, and there is no two-stream playbook, program-tooling plan, prototype field-ready plan or docs-reorganisation plan in the repository (drafts .superpowers/sdd/program/draft/)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/plans/2026-10-17-strict-delivery.md
+    lines: '339'
+    sha: ec1c3c5
+  repro: 'grep -c "Replan 2026-10-29" docs/superpowers/plans/2026-10-17-strict-delivery.md -> 0; ls docs/superpowers/playbooks -> absent'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: program-replan
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: ec1c3c5
+    by: session
+  - state: planned
+    sha: ec1c3c5
+    by: session

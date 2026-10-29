@@ -1396,3 +1396,84 @@
   asked_at: {sha: "6d6c36e", by: session}
   answer: "always-document (owner in session, 2026-10-29: \"don't jsut save to memory. always document. go\")"
   answered_at: {sha: "6d6c36e", by: superbrobenji}
+- id: DEC-0132
+  class: scope
+  question: "Strict delivery ran far past an unstated estimate (b5 open 2026-10-19..29 for three planned tasks; no duration estimate in spec or umbrella plan) and the prototype is due in about two weeks. Replan the rest of the umbrella plan?"
+  options:
+    - {label: bare-bones, cost: "b5 lean close (fix only defects a normal repository reaches: the B5-FIX-5 class with B5-UR-16..19, B5-RD-1/B5-UD-1 per DEC-0103, B5-UR-9; other b5 rows stay open as tracked rows), S3 Tasks 1-6 plus Task 8's grace deletion; b6, S3 T7/T9/rest of T8, S4, S5, bootstrap and conformance deferred and listed; lean-path rules; full plan resumes from the umbrella's deferred list"}
+    - {label: continue, cost: "finish b5 as planned (about 1-2 more weeks), then the remaining blocks; no prototype in two weeks"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "bare-bones (owner in session, 2026-10-29: 'this replan sounds good. we just need to document what to come back to in order to fully implement everything'; earlier: 'set up just the bare bones of the remaining strict delivery work as the power of 10 checks are vital for the issues we faced')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0133
+  class: scope
+  question: "Run strict delivery and the prototype in parallel, and how are they coordinated without a multi-day session?"
+  options:
+    - {label: two-streams-playbook, cost: "two streams with disjoint file ownership and ID ranges, a tracked playbook and board, short sessions (one block or one sync) each ending at a /clear checkpoint; a context contract (read lists in config, loader, receipt hook, citation checker) and a drift check built first as stream A's program tooling block; the umbrella's 'no other worktree or branch at a checkpoint' allows the two stream branches and their task worktrees"}
+    - {label: serial, cost: "finish the strict-delivery bare bones first, then the prototype; about 8 prototype days instead of 12"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "two-streams-playbook (owner in session, 2026-10-29: 'could we also utilise hyperparrallelism to work on both strict delivery and the prototype at the same time?'; 'we should use some playbook to keep track of both streams and prevent drift. we also can't have one session like this one running for multiple days so we need a way to coordinate them in a way that we can still use /clear checkpoints'; 'we need a way for new sessions to also know what files to look at so nothing is missed. either via skill or config. drift is also defined as an agent not getting the full context either through not reading a file it should have or via halucinations. so everyhting needs to be very strictly documented an read in a way that guarentees this does not happen'; 'go ahead')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0134
+  class: scope
+  question: "What must the prototype deliver, and does owner ruling 6 (pre-bench work parked until the umbrella plan is complete) still hold?"
+  options:
+    - {label: field-test-ready, cost: "real GPS and IMU (roadmap 8.1-8.4), the engine HIGHs CE-N2..N5, the track-data HIGHs IO-N1..N4, APP-N1, DRV-N1, tracks, on-device gate marking, storage measurement and dev-kit offload, bench-doc fixes and a bench day, a road capture replayed on the host; ruling 6 lifted for this stream; Plan 6 battery, Plan 9, sub-project C and the rest stay tracked"}
+    - {label: whole-roadmap, cost: "every roadmap plan; not reachable in two weeks"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "field-test-ready (owner in session, 2026-10-29: 'the whole roadmap isn't required for the prototype. we just need to get it to a point where it's ready for field testing on the track'; the battery 'does not move the battery pack out of scope')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0135
+  class: hardware
+  question: "As-built prototype hardware and power procedure (the transcripts never recorded the owner confirming the GPS, IMU or power-bank wiring; .superpowers/sdd/program/wiring-extract.md)."
+  options:
+    - {label: as-instructed-and-working, cost: "the as-built wiring is the final instructed wiring (GPS VCC to VIN 5 V, TX 16, RX 17, PPS 36, EN open; IMU 3V3, SDA 21, SCL 22, INT 27; display and dev-kit link as confirmed); power bank into the lap timer USB; field: 5 V link in, dev-kit off the laptop; between sessions: power bank out first, laptop powers both via the dev-kit and the 5 V link (one 5 V source at a time); bring-up on the bench proves it"}
+    - {label: re-survey, cost: "the owner lists every pin again before any driver work"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "as-instructed-and-working (owner in session, 2026-10-29: 'all hardware works and is wired correctly. the power bank will be plugged into the usb port. when the dev kit is connected to the laptimer in field testing, it'll be powered by the laptimer and disconnected from the laptop. between sessions it will be connected to the laptop to get all logs and data from it and the laptimer'; on the 5 V link: 'no since I plugged both into the laptop for debugging. I can add/remove it as needed'; between sessions: 'I think option a' (power bank out, laptop powers both))"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0136
+  class: scope
+  question: "Which tracks does the prototype bundle (the bundled table is compiled into the app image and uses no session storage)?"
+  options:
+    - {label: killarney-zwartkops-kyalami, cost: "keep Killarney Full, Full Reverse, Short, Short Reverse and Zwartkops; add Kyalami as a third venue for the auto-detect test; Killarney and Kyalami coordinates from cited web research, verified stays false until on-track marking confirms them"}
+    - {label: killarney-main-only, cost: "Killarney Full and Full Reverse only"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "killarney-zwartkops-kyalami (owner in session, 2026-10-29: 'if the maps don't affect it, then it's worth adding one more like kialami just for a 3rd in the autodetect test. the coorinates and secotors for killarney should be on the internet'; 'yes keep bundled')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0137
+  class: scope
+  question: "Is on-device gate marking (spec F7) in the prototype scope?"
+  options:
+    - {label: in-scope, cost: "F7 built and bench-tested as backup and as the on-track confirmation of the researched lines"}
+    - {label: out, cost: "rely on researched coordinates only"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "in-scope (owner in session, 2026-10-29: 'i think the on-device should be in scope regardless for backup and testing')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0138
+  class: scope
+  question: "Session storage for field testing (the 1.3125 MB storage partition is fixed by partitions.csv)?"
+  options:
+    - {label: measure-and-offload, cost: "a log-rate measurement (minutes of riding per MB, sessions per filesystem) on the bench day; sessions offloaded to the dev-kit when it is plugged in, with a dev-kit storage guard (free-space check, refuse rather than fill, delete on the lap timer only after a verified copy) and dev-kit to laptop export; partition table unchanged"}
+    - {label: repartition, cost: "give up an OTA slot or shrink both; loses or risks OTA"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "measure-and-offload (owner in session, 2026-10-29: 'yes add a log rate measurement. we can also dump sessions onto the devkit when it is plugged in to save storage. just keep an aye on it's own storage problems')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0139
+  class: scope
+  question: "Docs and agent context in one uniform place: index on the current paths, or index and move?"
+  options:
+    - {label: index-and-move, cost: "gate paths become one config table, then one move to a layout the owner approves, docs/INDEX.md and an index gate; at a sync point after the b5 merge with no stream branch open on the moved paths; about 1 day"}
+    - {label: index-only, cost: "INDEX.md on the current paths; no gate change"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "index-and-move (owner in session, 2026-10-29: 'we should clean up all the docs and contexts so it's in one uniform place for the agents to find'; 'the docs should be indexed, but also moved to a more sensible place and together')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
+- id: DEC-0140
+  class: scope
+  question: "First field-test date?"
+  options:
+    - {label: from-2-weeks, cost: "not fixed; any day from about 2026-11-12; plan for field-ready by 2026-11-12, later days are buffer"}
+    - {label: fixed-date, cost: "the owner names a date"}
+  asked_at: {sha: "ec1c3c5", by: session}
+  answer: "from-2-weeks (owner in session, 2026-10-29: 'the fist date isn't a hard date yet, but it can be anywhere from 2 weeks from now onwards')"
+  answered_at: {sha: "ec1c3c5", by: superbrobenji}
