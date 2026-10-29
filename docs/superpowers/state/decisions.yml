@@ -1348,3 +1348,33 @@
   asked_at: {sha: "0fec6c3", by: session}
   answer: "decision-sheet (owner in session, 2026-10-29: 'recommended'; the session had recommended decision-sheet)"
   answered_at: {sha: "0fec6c3", by: superbrobenji}
+- id: DEC-0127
+  class: scope
+  question: "Decision sheet Q0-1 (docs/superpowers/state/strict-delivery/decision-sheets/b5r16.md): gate_dispatch FAILs any dispatch naming an unanswered DEC (gate_dispatch.py:233-247), so DEC-0102..0121 could not be drafted or reviewed for the sheet. How do these 20 reach the owner?"
+  options:
+    - {label: read-as-stored, cost: "the session brings them to the owner as stored in decisions.yml, each with its options and costs; no session recommendation and no review for those 20; no code"}
+    - {label: gate-exemption, cost: "a gate task exempts sheet dispatches from dispatch.decisions; code, tests, package, review first; a new exemption in a halting gate (spec D10)"}
+    - {label: session-drafts, cost: "the session drafts section B itself; its review hits the same FAIL, so it stays unreviewed, against DEC-0126"}
+  asked_at: {sha: "5270ecc", by: session}
+  answer: "read-as-stored (owner in session, 2026-10-29: 'recommended'; the session had recommended read-as-stored)"
+  answered_at: {sha: "5270ecc", by: superbrobenji}
+- id: DEC-0128
+  class: finding-class
+  question: "Decision sheet Q0-2: 5270ecc put B5-FIX-5's D33 idiom hits (gate_plan.py:524, :530, :556, :582 and the other unchecked-rc git calls) in its class text, not in its siblings with each hit registered (spec D33 :47, :195). Fix?"
+  options:
+    - {label: fix-per-d33, cost: "one state commit writes the grep pattern and every hit into B5-FIX-5's siblings and registers each hit as its own row (about 5 rows, owner tasks per DEC-0104); siblings.md cells per hit"}
+    - {label: defer-to-fix-task, cost: "list them when B5-FIX-5's fix task makes its package; an owner exception to D33 'same commit'"}
+    - {label: keep, cost: "leave them in the class text, against D33 as worded"}
+  asked_at: {sha: "5270ecc", by: session}
+  answer: "fix-per-d33 (owner in session, 2026-10-29: 'recommended'; the session had recommended fix-per-d33)"
+  answered_at: {sha: "5270ecc", by: superbrobenji}
+- id: DEC-0129
+  class: scope
+  question: "Decision sheet docs/superpowers/state/strict-delivery/decision-sheets/b5r16.md (sha256 8bef9f6229b34de254243ebe284c2d4e7de09b7cc9138aad44530980d299839b; sections 0, A, C, D; 132 rows, 19 SETTLED; section B not drafted, see DEC-0127). Approve?"
+  options:
+    - {label: approve-except-flagged, cost: "every row's recommendation is the owner's answer, except rows A1-1b, Q-FH-10, Q-FH-11 and S-D-1 (residual findings R2-A-2, R2-D-1, R2-D-2, R2-D-4, R2-D-3), which get one text fix round and a re-review and return to the owner; Q0-1 and Q0-2 are answered by DEC-0127 and DEC-0128"}
+    - {label: owner-reads-first, cost: "the owner reads the sheet and marks rows"}
+    - {label: chat-batches, cost: "rows asked four at a time"}
+  asked_at: {sha: "5270ecc", by: session}
+  answer: "approve-except-flagged (owner in session, 2026-10-29: 'recommended'; the session had recommended approve-except-flagged)"
+  answered_at: {sha: "5270ecc", by: superbrobenji}
