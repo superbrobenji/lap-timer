@@ -1577,3 +1577,55 @@
   asked_at: {sha: "2134a43", by: session}
   answer: "defer-both (owner in session, 2026-10-29: 'recommended'; the session had recommended defer-both)"
   answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0152
+  class: spec-direction
+  question: 'Spec row numbers for the three DEC-0144 rules (fix round Q-prog-1)?'
+  options:
+    - {label: d37-d39, cost: 'D37-D39 as the round-17 draft numbers them; D36 stays reserved for the budget rule'}
+    - {label: d36-d38, cost: 'renumber, re-editing the budget draft'}
+  asked_at: {sha: "6ba57dc", by: session}
+  answer: "d37-d39 (owner in session, 2026-10-29: 'recommend'; the session had recommended d37-d39)"
+  answered_at: {sha: "6ba57dc", by: superbrobenji}
+- id: DEC-0153
+  class: scope
+  question: 'PR base and grant for block/program-tooling (Q-prog-2)?'
+  options:
+    - {label: base-b5-grant-0001, cost: "PR base block/strict-delivery-b5, so it lands in b5's squash; grant:strict-delivery (DEC-0001) covers it as part of the umbrella replan"}
+    - {label: base-main, cost: 'PR base main, carrying every b5 commit'}
+  asked_at: {sha: "6ba57dc", by: session}
+  answer: "base-b5-grant-0001 (owner in session, 2026-10-29: 'recommend'; the session had recommended base-b5-grant-0001)"
+  answered_at: {sha: "6ba57dc", by: superbrobenji}
+- id: DEC-0154
+  class: scope
+  question: 'Stream B PRs while b5 is unmerged (Q-prog-3)?'
+  options:
+    - {label: after-b5, cost: 'each stream B PR merges only after b5 has merged and a sync has rebased stream B onto main; until then stream B blocks accumulate on its branch, the next block branching from the previous tip'}
+    - {label: hold-all, cost: 'hold every stream B PR until b5 merges'}
+  asked_at: {sha: "6ba57dc", by: session}
+  answer: "after-b5 (owner in session, 2026-10-29: 'recommend'; the session had recommended after-b5)"
+  answered_at: {sha: "6ba57dc", by: superbrobenji}
+- id: DEC-0155
+  class: merge-grant
+  question: grant:prototype-field-ready
+  options: []
+  asked_at: {sha: "6ba57dc", by: session}
+  answer: "yes (owner in session, 2026-10-29: 'recommend', to the session's recommendation that each prototype block PR merges when every check passes, on the owner's sentence 'merge when all checks pass')"
+  answered_at: {sha: "6ba57dc", by: superbrobenji}
+- id: DEC-0156
+  class: scope
+  question: 'Prototype block numbering (Q-prog-5: the handoff format and gate_plan read b<digits>)?'
+  options:
+    - {label: b1-b6, cost: 'the prototype blocks are b1..b6 (P0..P5 renamed)'}
+    - {label: map, cost: 'keep P<k> mapped to b<k+1>'}
+  asked_at: {sha: "6ba57dc", by: session}
+  answer: "b1-b6 (owner in session, 2026-10-29: 'recommend'; the session had recommended b1-b6)"
+  answered_at: {sha: "6ba57dc", by: superbrobenji}
+- id: DEC-0157
+  class: scope
+  question: 'Ownership of .github/workflows/ci.yml (Q-prog-6)?'
+  options:
+    - {label: stream-a, cost: 'stream A owns ci.yml (P10 changes it); stream B asks at a sync for a firmware CI change; paths no row names go to the owner at a sync'}
+    - {label: split-by-job, cost: 'split ownership by job'}
+  asked_at: {sha: "6ba57dc", by: session}
+  answer: "stream-a (owner in session, 2026-10-29: 'recommend'; the session had recommended stream-a)"
+  answered_at: {sha: "6ba57dc", by: superbrobenji}
