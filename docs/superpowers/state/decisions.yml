@@ -1513,3 +1513,67 @@
   asked_at: {sha: "d69dd7a", by: session}
   answer: "three-rule-rows (owner in session, 2026-10-29: 'recommended')"
   answered_at: {sha: "d69dd7a", by: superbrobenji}
+- id: DEC-0145
+  class: scope
+  question: 'Lean-path review shape (review .superpowers/sdd/program/program-docs-review.md D-1)?'
+  options:
+    - {label: one-pair-per-block, cost: 'one opus final reviewer and one final verifier per block, the DEC-0030 split by area lifted; no D24 tables or D30 investigations for developer tooling unless the owner asks; less review per block'}
+    - {label: split-by-area, cost: 'keep the DEC-0030 split; about one extra pair per task at each block end'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "one-pair-per-block (owner in session, 2026-10-29: 'recommended'; the session had recommended one-pair-per-block)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0146
+  class: scope
+  question: 'Docs reorganisation timing while stream B always has a branch open (D-2)?'
+  options:
+    - {label: index-now-move-after, cost: 'docs/INDEX.md and the context read lists on the current paths now; the physical move (DEC-0139) right after field-readiness'}
+    - {label: pause-b, cost: 'stream B pauses one day after the b5 merge for the move'}
+    - {label: partial, cost: 'move stream A paths now, the rest later'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "index-now-move-after (owner in session, 2026-10-29: 'recommended'; the session had recommended index-now-move-after)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0147
+  class: scope
+  question: 'Prototype IMU and GPS scope given no MOSFET on GPIO26 and PARK wake tied to Plan 6 (D-3)?'
+  options:
+    - {label: calibration-and-ubx-modes, cost: 'roadmap 8.4 calibration only (orientation capture, forward learning); PARK wake, low-power motion and the IMU ladder deferred to Plan 6; GPS power modes by UBX software commands only'}
+    - {label: full, cost: 'full 8.4 and a GPS power switch; hardware not owned'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "calibration-and-ubx-modes (owner in session, 2026-10-29: 'recommended'; the session had recommended calibration-and-ubx-modes)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0148
+  class: scope
+  question: 'Where does the program tooling block run (b5 would pass 3 tasks; CLAUDE.md block = PR, <=3 tasks) (D-4)?'
+  options:
+    - {label: own-branch, cost: 'its own branch and PR from the b5 tip, merged before the b5 lean close'}
+    - {label: inside-b5, cost: 'inside b5, past the 3-task rule'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "own-branch (owner in session, 2026-10-29: 'recommended'; the session had recommended own-branch)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0149
+  class: finding-class
+  question: 'S3 plan :47 open question: P10 violations the full reach surfaces (spec D13 zero grace vs rollout step 4 register rows) (D-5)?'
+  options:
+    - {label: tracked-rows, cost: 'an open findings row keeps its site from blocking; a stale row blocks; owner ruling 3 still cleans every touched file'}
+    - {label: ci-red, cost: 'CI red until S5 cleans every site; blocks both streams'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "tracked-rows (owner in session, 2026-10-29: 'recommended'; the session had recommended tracked-rows)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0150
+  class: scope
+  question: 'B5-UF-4 (gate_plan FAILs the umbrella and S1 plans; neither is in flight, run_all passes) (D-6)?'
+  options:
+    - {label: defer-tracked, cost: 'defer as a tracked row in the deferred list'}
+    - {label: lean-close, cost: 'fix in the b5 lean close, about 0.5 day'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "defer-tracked (owner in session, 2026-10-29: 'recommended'; the session had recommended defer-tracked)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
+- id: DEC-0151
+  class: scope
+  question: "S3 Task 8's grace-list deletion depends on Task 7's register parser (review F7) (D-7)?"
+  options:
+    - {label: defer-both, cost: "defer Task 8's grace deletion with Task 7; the five grace-listed sites stay report-only, listed in the deferred items"}
+    - {label: add-task-7, cost: 'add Task 7 to the bare bones, about one more day'}
+  asked_at: {sha: "2134a43", by: session}
+  answer: "defer-both (owner in session, 2026-10-29: 'recommended'; the session had recommended defer-both)"
+  answered_at: {sha: "2134a43", by: superbrobenji}
