@@ -1712,8 +1712,8 @@
     - {label: edit-per-checkpoint, cost: 'ranges stay exact; every checkpoint that grows a listed file edits context.yml through the pipeline; a missed edit is silent'}
     - {label: context-files, cost: "volatile files are listed only through the handoff's context_files, written at each checkpoint; handoff schema grows"}
   asked_at: {sha: "45f5349", by: session}
-  answer: null
-  answered_at: null
+  answer: "open-end (owner in session, 2026-10-30: 'recommended for all'; the session had recommended open-end)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0167
   class: scope
   question: "Program tooling T1 review Q-PROG-3: the sync read list reads stream B's handoff at ref origin/block/prototype-b1; when stream B moves to block/prototype-b2 the stale ref still loads (rc 0) and the loader does not fetch. How is the ref kept current?"
@@ -1722,8 +1722,8 @@
     - {label: edit-per-block, cost: 'context.yml edited at each stream B block start through the pipeline; a missed edit is silent'}
     - {label: fetch-first, cost: 'the loader runs git fetch before reading refs; a network call per load, still a fixed branch name'}
   asked_at: {sha: "45f5349", by: session}
-  answer: null
-  answered_at: null
+  answer: "from-board (owner in session, 2026-10-30: 'recommended for all'; the session had recommended from-board)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0168
   class: scope
   question: "Program tooling T1 review Q-PROG-4: the playbook's start of session reads 'the plan the handoff names'; the stream-a-block list does not list it (the plan changes per block; the S2 plan is 8,695 lines) and no handoff carries context_files yet. How does the plan enter the read list?"
@@ -1732,8 +1732,8 @@
     - {label: whole-plan, cost: "the loader lists the handoff's plan: file whole, split into capped entries; every session reads the whole plan (S2: about 8,700 lines)"}
     - {label: per-block-list, cost: 'context.yml lists the plan per block, edited at each block start through the pipeline'}
   asked_at: {sha: "45f5349", by: session}
-  answer: null
-  answered_at: null
+  answer: "context-files (owner in session, 2026-10-30: 'recommended for all'; the session had recommended context-files)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0169
   class: scope
   question: "Ownership of .github/PULL_REQUEST_TEMPLATE.md: no playbook ownership row names it (docs/INDEX.md lists it unassigned, program tooling T1)."
@@ -1741,8 +1741,8 @@
     - {label: stream-a, cost: 'stream A owns it beside gates.yml and ci.yml; stream B asks at a sync for a change; one table cell (recommended)'}
     - {label: stream-b, cost: 'stream B owns it beside firmware.yml'}
   asked_at: {sha: "45f5349", by: session}
-  answer: null
-  answered_at: null
+  answer: "stream-a (owner in session, 2026-10-30: 'recommended for all'; the session had recommended stream-a)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0170
   class: scope
   question: "Program tooling T1 re-review 2 Q-PROG-1: a printable tracked path may hold the loader's own field markers (`docs/x lines 1-3 blob 0 -- y.md` loads and prints one ambiguous line); no tracked path holds a space today. Narrow the path whitelist?"
@@ -1750,8 +1750,8 @@
     - {label: narrow, cost: "paths limited to [A-Za-z0-9._/-] plus printable non-ASCII, no whitespace; one loader check and one test (recommended)"}
     - {label: keep, cost: 'the expected-list JSON stays the machine record; a reader of stdout may misparse such a path'}
   asked_at: {sha: "cf824cd", by: session}
-  answer: null
-  answered_at: null
+  answer: "narrow (owner in session, 2026-10-30: 'recommended for all'; the session had recommended narrow)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0171
   class: spec-direction
   question: "Program tooling T1 (load_context.py): each of three re-reviews found new defects outside the earlier fix's class (round 2: TypeError on mixed-type YAML keys, stale expected list kept; round 3: unbounded FAIL output F5, PermissionError not failing closed F6). Spec D30's trigger is met; DEC-0145 lifted D30 investigation rounds and D24 tables for developer tooling. How does Task 1 proceed?"
@@ -1779,8 +1779,8 @@
     - {label: strict-whole, cost: 'any malformed handoff front matter fails the load naming the handoff; a typo blocks stream sessions until fixed; no new code (recommended)'}
     - {label: strict-context-files, cost: 'only context_files is parsed strictly, other fields ignored; a second parse path, one row and a test'}
   asked_at: {sha: "db93e7f", by: session}
-  answer: null
-  answered_at: null
+  answer: "strict-whole (owner in session, 2026-10-30: 'recommended for all'; the session had recommended strict-whole)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0174
   class: spec-direction
   question: "Program tooling T1 re-review 4 Q-PROG-3: a failed load that cannot delete the earlier expected list empties it in place; playbook :49 refuses only a session with no expected list. What does an emptied list mean?"
@@ -1788,8 +1788,8 @@
     - {label: empty-is-none, cost: "keep emptying; Task 2's hook treats an empty or invalid expected list as no list and refuses naming the loader command; one Task 2 row and test (recommended)"}
     - {label: never-empty, cost: 'never empty; the FAIL line names the list as still standing; the stale list stays readable'}
   asked_at: {sha: "db93e7f", by: session}
-  answer: null
-  answered_at: null
+  answer: "empty-is-none (owner in session, 2026-10-30: 'recommended for all'; the session had recommended empty-is-none)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
 - id: DEC-0175
   class: spec-direction
   question: "Program tooling T1 re-review 4 Q-PROG-4: without --root or CLAUDE_PROJECT_DIR the loader finds the root through lib repo_root(), which honours the caller's GIT_DIR/GIT_WORK_TREE (cwd in repo A, GIT_* set to repo B loads B's list, rc 0), while row E2 says GIT_* is ignored. Which way?"
@@ -1798,5 +1798,5 @@
     - {label: lib-strips, cost: 'lib repo_root ignores GIT_* for every gate; touches every b5 gate and needs regression checks'}
     - {label: follow-git, cost: "narrow row E2 to the loader's git calls; root discovery follows git's environment; no code change"}
   asked_at: {sha: "db93e7f", by: session}
-  answer: null
-  answered_at: null
+  answer: "loader-strips (owner in session, 2026-10-30: 'recommended for all'; the session had recommended loader-strips)"
+  answered_at: {sha: "34ed635", by: superbrobenji}
