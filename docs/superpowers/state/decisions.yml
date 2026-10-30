@@ -1704,3 +1704,42 @@
   asked_at: {sha: "667e0d7", by: session}
   answer: "fix-now (owner in session, 2026-10-30: 'recommended'; the session had recommended fix-now)"
   answered_at: {sha: "667e0d7", by: superbrobenji}
+- id: DEC-0166
+  class: scope
+  question: 'Program tooling T1 review Q-PROG-1: context.yml ranges are fixed (handoff 1-45); a listed file that grows past its range leaves its tail unlisted with rc 0. How are growing files listed?'
+  options:
+    - {label: open-end, cost: "an `a-end` range the loader resolves to the current line count and splits into entries within the line and byte caps; contract text in the playbook and plan changes; one loader branch and tests (recommended)"}
+    - {label: edit-per-checkpoint, cost: 'ranges stay exact; every checkpoint that grows a listed file edits context.yml through the pipeline; a missed edit is silent'}
+    - {label: context-files, cost: "volatile files are listed only through the handoff's context_files, written at each checkpoint; handoff schema grows"}
+  asked_at: {sha: "45f5349", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0167
+  class: scope
+  question: "Program tooling T1 review Q-PROG-3: the sync read list reads stream B's handoff at ref origin/block/prototype-b1; when stream B moves to block/prototype-b2 the stale ref still loads (rc 0) and the loader does not fetch. How is the ref kept current?"
+  options:
+    - {label: from-board, cost: "the loader takes stream B's branch from the board row and fails when that ref is missing; one parser of the board's branch cell, shared with the drift check (recommended)"}
+    - {label: edit-per-block, cost: 'context.yml edited at each stream B block start through the pipeline; a missed edit is silent'}
+    - {label: fetch-first, cost: 'the loader runs git fetch before reading refs; a network call per load, still a fixed branch name'}
+  asked_at: {sha: "45f5349", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0168
+  class: scope
+  question: "Program tooling T1 review Q-PROG-4: the playbook's start of session reads 'the plan the handoff names'; the stream-a-block list does not list it (the plan changes per block; the S2 plan is 8,695 lines) and no handoff carries context_files yet. How does the plan enter the read list?"
+  options:
+    - {label: context-files, cost: "each checkpoint writes the next task's plan section into its handoff's context_files (path, lines, why); the loader already appends it; one more field per checkpoint (recommended)"}
+    - {label: whole-plan, cost: "the loader lists the handoff's plan: file whole, split into capped entries; every session reads the whole plan (S2: about 8,700 lines)"}
+    - {label: per-block-list, cost: 'context.yml lists the plan per block, edited at each block start through the pipeline'}
+  asked_at: {sha: "45f5349", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0169
+  class: scope
+  question: "Ownership of .github/PULL_REQUEST_TEMPLATE.md: no playbook ownership row names it (docs/INDEX.md lists it unassigned, program tooling T1)."
+  options:
+    - {label: stream-a, cost: 'stream A owns it beside gates.yml and ci.yml; stream B asks at a sync for a change; one table cell (recommended)'}
+    - {label: stream-b, cost: 'stream B owns it beside firmware.yml'}
+  asked_at: {sha: "45f5349", by: session}
+  answer: null
+  answered_at: null
