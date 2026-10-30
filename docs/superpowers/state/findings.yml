@@ -3155,7 +3155,7 @@
     kind: plan
     plan: prototype
     task: b1-T3
-  state: planned
+  state: in-progress
   pin: null
   ruling: null
   evidence: []
@@ -3165,4 +3165,7 @@
     by: controller
   - state: planned
     sha: 39a3e8a
+    by: controller
+  - state: in-progress
+    sha: f5f35d6
     by: controller
