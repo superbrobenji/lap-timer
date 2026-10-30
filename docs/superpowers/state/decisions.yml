@@ -1800,3 +1800,22 @@
   asked_at: {sha: "db93e7f", by: session}
   answer: "loader-strips (owner in session, 2026-10-30: 'recommended for all'; the session had recommended loader-strips)"
   answered_at: {sha: "34ed635", by: superbrobenji}
+- id: DEC-0176
+  class: scope
+  question: "Program tooling Task 1 used all 5 fix rounds (spec §6 step 7: a round limit hit is a decision question). Round-5 re-review of 4cdfc87: F10 the new board parser (tools/program/board.py) is not pinned (symlinked board read through, FIFO board hangs, grammar mutants survive, a git-state row missing); F11 the docs/:(glob)*.md subtest was deleted rather than restored and fixed (DEC-0103); F12 table L3 says end equals the wc -l count (false without a final newline) and a test comment cites a missing row H5. How does Task 1 proceed?"
+  options:
+    - {label: round-6-and-d30, cost: 'one more round by a fresh opus implementer for F10-F12 and a scoped re-review; in parallel a read-only opus investigator reports why each round found a new class, with ranked process changes; about 3 agents (recommended)'}
+    - {label: round-6-only, cost: 'one more round and a scoped re-review, no investigation; the repeated-class pattern stays unexplained'}
+    - {label: d30-first, cost: 'no fix until the investigator reports and the owner picks process changes; slowest, Task 2 waits'}
+  asked_at: {sha: "4cdfc87", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0177
+  class: spec-direction
+  question: "Program tooling T1 re-review 5 Q-PROG-5: with ref board:B, does the loader read stream B's branch from the working-tree board or from HEAD's board?"
+  options:
+    - {label: working-tree, cost: 'the file on disk, tracked, through the D32 checks, as every other read-list entry; a sync that just edited the board sees its edit; one table row and a test (recommended)'}
+    - {label: head, cost: 'git show HEAD:board.md; only a committed board counts, an uncommitted edit is ignored until committed'}
+  asked_at: {sha: "4cdfc87", by: session}
+  answer: null
+  answered_at: null
