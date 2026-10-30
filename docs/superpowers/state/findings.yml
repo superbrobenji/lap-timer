@@ -3085,3 +3085,78 @@
   - state: closed
     sha: 667e0d7
     by: session
+- id: PROG-T1
+  source: docs/superpowers/plans/2026-10-29-program-tooling.md
+  severity: INFO
+  class: 'program tooling Task 1: spike, read lists (context.yml), load_context.py, docs/INDEX.md (DEC-0133, DEC-0146)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/plans/2026-10-29-program-tooling.md
+    lines: 34-56
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+  repro: null
+  owner:
+    kind: plan
+    plan: program-tooling
+    task: T1
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+    by: controller
+  - state: planned
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+    by: controller
+- id: PROG-T2
+  source: docs/superpowers/plans/2026-10-29-program-tooling.md
+  severity: INFO
+  class: 'program tooling Task 2: Read receipt hooks, ## Context dispatch line, session_start reading order, DEC-0143 strict-block sentences (DEC-0133, DEC-0143)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/plans/2026-10-29-program-tooling.md
+    lines: 58-88
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+  repro: null
+  owner:
+    kind: plan
+    plan: program-tooling
+    task: T2
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+    by: controller
+  - state: planned
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+    by: controller
+- id: PROG-T3
+  source: docs/superpowers/plans/2026-10-29-program-tooling.md
+  severity: INFO
+  class: 'program tooling Task 3: check_cites.py, drift_check.py, board citations (DEC-0133)'
+  siblings: []
+  cites:
+  - file: docs/superpowers/plans/2026-10-29-program-tooling.md
+    lines: 90-109
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+  repro: null
+  owner:
+    kind: plan
+    plan: program-tooling
+    task: T3
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+    by: controller
+  - state: planned
+    sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
+    by: controller
