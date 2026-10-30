@@ -8,11 +8,11 @@ Owner ruling (DEC-0135, as-instructed-and-working): `docs/superpowers/state/deci
 
 ## Boards
 
-Lap timer and dev-kit are two ESP32 DevKit boards of the same model: `docs/superpowers/state/program/sources/wiring-extract.md:164@39a3e8a "both boards are the same. its esp-wroom-32d"`. The BOM names a DevKit V1 (WROOM-32, CH340); see "Divergences" in the b1 Task 2 report.
+Lap timer and dev-kit are two ESP32 DevKit boards of the same model: `docs/superpowers/state/program/sources/wiring-extract.md:164@39a3e8a "both boards are the same. its esp-wroom-32d"`. Divergence, no side picked: `docs/hardware/bom.md:9@39a3e8a "ESP32 DevKit V1 (ESP32-WROOM-32, CH340, 4 MB) \| 1"` names a DevKit V1 with CH340 and quantity 1, while the owner names another model and two boards are built. The BOM row text is left as is.
 
 ## GPS: G28U7FTTL-P (5 V part), on UART2
 
-Supply and EN: `docs/superpowers/state/decisions.yml:1430@39a3e8a "GPS VCC to VIN 5 V"`. The part is a 5 V part, with 3.3 V logic on TX and RX.
+Supply and EN: `docs/superpowers/state/decisions.yml:1430@39a3e8a "GPS VCC to VIN 5 V"`. The part is a 5 V part: `docs/superpowers/state/program/sources/wiring-extract.md:89@39a3e8a "it's definitley a 5v"`. TX and RX are 3.3 V logic: `docs/superpowers/specs/2026-09-14-lap-timer-design.md:140@39a3e8a "in \| 3.3 V"`.
 
 | Signal | Pin | Source |
 |---|---|---|
@@ -30,7 +30,7 @@ The firmware assigns no GPS UART pins today; the driver is a stub: `components/d
 
 ## IMU: GY-521 (MPU-6050)
 
-VCC 3V3 and GND; AD0, XDA and XCL not connected (AD0 floating gives address 0x68).
+VCC 3V3 and GND (GND row: `docs/superpowers/state/program/sources/wiring-extract.md:110@39a3e8a "GY-521 GND"`, covered by the DEC-0135 ruling); AD0, XDA and XCL not connected (AD0 floating gives address 0x68: `docs/superpowers/state/program/sources/wiring-extract.md:114@39a3e8a "AD0 floating gives 0x68"`).
 
 | Signal | Pin | Source |
 |---|---|---|
@@ -55,7 +55,7 @@ VCC to 3V3 and GND to GND: `docs/superpowers/state/program/sources/wiring-extrac
 
 ## Buttons
 
-6 mm tactiles, not the 12 mm sealed buttons of the original BOM: `docs/superpowers/state/program/sources/wiring-extract.md:57@39a3e8a "would 6mm tactile push buttons work?"`. Active-high with pull-down: `components/drivers/board_devkit_v1/board.c:57@39a3e8a "active-high, pull-down"`.
+6 mm tactiles, not the 12 mm sealed buttons of the original BOM: `docs/superpowers/state/program/sources/wiring-extract.md:52@39a3e8a "buttons wired in"`. Active-high with pull-down: `components/drivers/board_devkit_v1/board.c:57@39a3e8a "active-high, pull-down"`.
 
 | Signal | Pin | Source |
 |---|---|---|

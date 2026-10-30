@@ -1,6 +1,6 @@
 # Prototype bill of materials
 
-Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superpowers/specs/2026-09-14-lap-timer-design.md`. Status (set 2026-10-30 from the owner's DEC-0135 answer and the wiring extract; see "Status sources"): **built** (wired in the prototype), **owned** (in hand, not part of the wiring), **not built**, or **unknown (owner question)** where no tracked source settles it. The earlier status is kept as "(was: ...)". The as-built wiring is in `docs/hardware/wiring.md`. Prices are approximate South African landed prices in September 2026 and are only there to size the order.
+Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superpowers/specs/2026-09-14-lap-timer-design.md`. Status legend (ruling, F6 of the b1 Task 2 review; the plan labels "no MOSFET is owned and nothing is wired to GPIO26" as "not built", `docs/superpowers/plans/2026-10-29-prototype-field-ready.md:31@6c3f445 "no MOSFET is owned and nothing is wired to GPIO26"`): **built** = wired in the prototype; **owned** = in hand, not wired; **not built** = not in hand (neither owned nor wired); **unknown (owner question)** = no tracked source settles whether the part is in hand. The earlier status is kept as "(was: ...)". Set 2026-10-30 from the owner's DEC-0135 answer and the wiring extract (see "Status sources"). The as-built wiring is in `docs/hardware/wiring.md`. The "Upgrade path" table lists alternatives, not prototype rows, and has no status.
 
 ## Core electronics
 
@@ -16,16 +16,16 @@ Motorcycle prototype (`moto_neo6m` build). Spec references point at `docs/superp
 
 | # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
 |---|------|-----|---------|------|--------|-----------|--------|
-| 5 | 18650 INR 3000 mAh 15 A, flat top | 2 | battery pack, wired in parallel (1S2P) | §3.1 | not built (was: ordered, ~21 Sep 2026) | Communica / local vape shops | R120 ea |
-| 6 | 2-slot 18650 holder | 1 | pack | §3.1 | not built (was: ordered, ~21 Sep 2026) | Communica | R30 |
-| 7 | TP4056 charger module, 6-pad (DW01A + FS8205A protection) | 1 | charging + cell protection | §3.1, §3.2 | not built (was: ordered, ~21 Sep 2026 (verify 6-pad)) | Communica / Micro Robotics | R25 |
-| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≥ 600 mA output, ≤ 60 µA quiescent | §3.1, §3.2 | not built (was: to order) | RS Components ZA / Mantech / AliExpress | R20 |
-| 9 | 10 µF ceramic capacitor | 2 | regulator in/out | §3.1 | not built (was: to order) | Communica | R5 |
+| 5 | 18650 INR 3000 mAh 15 A, flat top | 2 | battery pack, wired in parallel (1S2P) | §3.1 | unknown (owner question) (was: ordered, ~21 Sep 2026) | Communica / local vape shops | R120 ea |
+| 6 | 2-slot 18650 holder | 1 | pack | §3.1 | unknown (owner question) (was: ordered, ~21 Sep 2026) | Communica | R30 |
+| 7 | TP4056 charger module, 6-pad (DW01A + FS8205A protection) | 1 | charging + cell protection | §3.1, §3.2 | unknown (owner question) (was: ordered, ~21 Sep 2026 (verify 6-pad)) | Communica / Micro Robotics | R25 |
+| 8 | XC6220B331MR or AP2112K-3.3 LDO regulator | 1 (+1 spare) | 3.3 V rail into the DevKit 3V3 pin, ≥ 600 mA output, ≤ 60 µA quiescent | §3.1, §3.2 | unknown (owner question) (was: to order) | RS Components ZA / Mantech / AliExpress | R20 |
+| 9 | 10 µF ceramic capacitor | 2 | regulator in/out | §3.1 | unknown (owner question) (was: to order) | Communica | R5 |
 | 10 | 470 µF electrolytic capacitor, 6.3 V+ | 1 | rail bulk for radio bursts | §3.1 | not built (was: to order) | Communica | R5 |
 | 11 | P-channel MOSFET AO3401A or SI2301 | 1 (+1 spare) | GPS power switch (PARK) | §3.1, §3.3 | not built (was: to order) | Mantech / RS / AliExpress | R10 |
 | 12 | 100 kΩ resistor | 5 | MOSFET gate pull-up, 3× button pull-downs, CHRG pull-up | §3.1, §3.3 | unknown (owner question) (was: to order) | Communica | R5 |
-| 13 | 470 kΩ resistor | 2 | battery divider | §3.1 | not built (was: to order) | Communica | R5 |
-| 14 | 100 nF ceramic capacitor | 1 | divider filter | §3.1 | not built (was: to order) | Communica | R2 |
+| 13 | 470 kΩ resistor | 2 | battery divider | §3.1 | unknown (owner question) (was: to order) | Communica | R5 |
+| 14 | 100 nF ceramic capacitor | 1 | divider filter | §3.1 | unknown (owner question) (was: to order) | Communica | R2 |
 | 15 | SS14 Schottky diode | 1 | optional: USB + battery co-existence | §3.2 | not built (was: to order (optional)) | Communica | R3 |
 | 16 | Slide or rocker switch, 3 A | 1 | pack disconnect | §3.2 | not built (was: to order) | Communica | R15 |
 
@@ -44,8 +44,8 @@ New lines from the Plan 5.6 physical-interface design (`docs/superpowers/specs/2
 
 | # | Part | Qty | Purpose | Spec | Status | Where (ZA) | Approx |
 |---|------|-----|---------|------|--------|-----------|--------|
-| 17 | 12 mm momentary pushbutton, sealed, glove-friendly | 3 | MODE / UP / DOWN | §3.3, §20.8 | not built (6 mm tactiles built instead, see wiring.md) (was: to order) | Communica / AliExpress | R15 ea |
-| 18 | Silicone hook-up wire, 22–26 AWG, and Dupont leads | 1 lot | interconnect | §3.4 | built (Dupont leads) (was: to order) | Communica | R60 |
+| 17 | 12 mm momentary pushbutton, sealed, glove-friendly | 3 | MODE / UP / DOWN | §3.3, §20.8 | unknown (owner question) (was: to order) | Communica / AliExpress | R15 ea |
+| 18 | Silicone hook-up wire, 22–26 AWG, and Dupont leads | 1 lot | interconnect | §3.4 | built (was: to order) | Communica | R60 |
 | 19 | Prototyping perfboard 5×7 cm | 1 | regulator, MOSFET, divider, pull-downs | §3.4 | not built (was: to order) | Communica | R20 |
 | 20 | IP65 ABS enclosure ≈ 115×90×55 mm, clear lid | 1 | weatherproof housing; e-paper behind the lid | §2.3 C3 | unknown (owner question) (was: to order) | Communica / Mantech | R120 |
 | 21 | RAM-style ball mount or handlebar clamp | 1 | mounting on the bike | §2.3 C3 | unknown (owner question) (was: to order) | local motorcycle shop | R250 |
@@ -63,30 +63,35 @@ New lines from the Plan 5.6 physical-interface design (`docs/superpowers/specs/2
 
 ## Upgrade path (not needed for the prototype)
 
-| Part | Replaces | Spec | Status |
+| Part | Replaces | Spec |
 |------|----------|------|
-| SEQURE M10-25Q (u-blox M10, 10 Hz, QMC5883L) | G28U7FTTL-P (row 2) | §3.5, O3 | not built (future) |
-| microSD SPI module | internal-only storage | §13.2, O4 | not built (future) |
-| Sharp memory LCD LS027B7DH01 or 2.42" SSD1309 OLED | e-paper (live delta variant) | O5 | not built (future) |
-| Battery-native ESP32 board (FireBeetle 2, FeatherS3) | DevKit + external regulator | §3.5 | not built (future) |
+| SEQURE M10-25Q (u-blox M10, 10 Hz, QMC5883L) | G28U7FTTL-P (row 2) | §3.5, O3 |
+| microSD SPI module | internal-only storage | §13.2, O4 |
+| Sharp memory LCD LS027B7DH01 or 2.42" SSD1309 OLED | e-paper (live delta variant) | O5 |
+| Battery-native ESP32 board (FireBeetle 2, FeatherS3) | DevKit + external regulator | §3.5 |
 
 ## Order checklist (window B, before session 6.1)
 
-Items 8–16 and 17–23 above; the regulator (8) and MOSFET (11) gate the power work in plan 6. Confirm the TP4056 (7) is the 6-pad protected version on arrival; if not, order one before wiring the pack.
+Rows 8–16 and 19–23 above that are not built or unknown (row 17 is replaced by the wired 6 mm tactiles, row 18 is built); the regulator (8) and MOSFET (11) gate the power work in plan 6. Confirm the TP4056 (7) is the 6-pad protected version on arrival; if not, order one before wiring the pack.
 
 
 ## Status sources
 
-Each citation is `path:line@sha "quote"`.
+Each citation is `path:line@sha "quote"`. Under the legend, a row is "not built" only where a tracked source says the part is not in hand; a stale "to order" alone does not settle it.
 
-- Rows 1-4 built: `docs/superpowers/state/decisions.yml:1433@39a3e8a "all hardware works and is wired correctly"`; GPS and IMU parts owner-identified: `docs/superpowers/state/program/sources/wiring-extract.md:211@39a3e8a "owner-confirmed GPS + IMU"`. Row 1 names one board; two are built (lap timer and dev-kit, `docs/superpowers/state/program/sources/wiring-extract.md:164@39a3e8a "both boards are the same"`).
+- Rows 1-4 built: `docs/superpowers/state/decisions.yml:1433@39a3e8a "all hardware works and is wired correctly"`; GPS and IMU parts owner-identified: `docs/superpowers/state/program/sources/wiring-extract.md:211@39a3e8a "owner-confirmed GPS + IMU"`.
+- Divergence, row 1: it names one board (qty 1), two are built (lap timer and dev-kit), and the owner names another model: `docs/superpowers/state/program/sources/wiring-extract.md:164@39a3e8a "both boards are the same"`; the row text is left as is.
+- Divergence, row 2: qty 1, but the owner has at least two modules: `docs/superpowers/state/program/sources/wiring-extract.md:185@39a3e8a "swapped module same behaviour"`; the row text is left as is.
 - Row 4a: no tracked source says the 2.9" panel is in hand; unknown (owner question).
-- Rows 5-16 not built (the battery pack and its power circuit): `docs/superpowers/state/program/sources/wiring-extract.md:149@39a3e8a "the only thing that isn't is the battery"`; row 11 (GPS power MOSFET on GPIO26): `docs/superpowers/state/program/sources/wiring-extract.md:96@39a3e8a "not built; no MOSFET owned"`.
-- Row 12: it also serves the three button pull-downs, which the owner never confirmed fitted: `docs/superpowers/state/program/sources/wiring-extract.md:56@39a3e8a "The owner never said the resistors were fitted"`; unknown (owner question).
-- Row 17: the 6 mm tactiles are built instead: `docs/superpowers/state/program/sources/wiring-extract.md:57@39a3e8a "would 6mm tactile push buttons work?"`.
-- Row 18: `docs/superpowers/state/program/sources/wiring-extract.md:71@39a3e8a "normal duponts for now"`.
-- Row 19: its contents are the power circuit (rows 5-16 source).
-- Rows 20-23, 25-27: no tracked source settles them; unknown (owner question). Row 25: `docs/superpowers/state/program/sources/wiring-extract.md:176@39a3e8a "i dont have a multimeter"` is the owner's 2026-10-12 line against "owned (verify)"; whether one has been bought since is not recorded.
-- Row 24: connector type unresolved: `docs/superpowers/state/program/sources/wiring-extract.md:181@39a3e8a "both boards are the same"`; unknown (owner question).
-- Rows 28-31 (RJ45 dev-kit port, Plan 6): `docs/superpowers/state/program/sources/wiring-extract.md:71@39a3e8a "so we can ignore ethernet for now"`.
-- Upgrade path rows: none is part of the prototype: `docs/hardware/bom.md:64@39a3e8a "Upgrade path (not needed for the prototype)"`.
+- Rows 5-7 (cells, holder, TP4056): the owner's two statements conflict, so unknown: `docs/superpowers/state/program/sources/wiring-extract.md:180@39a3e8a "for battery, this is what I currently have"` against `docs/superpowers/state/program/sources/wiring-extract.md:180@39a3e8a "I currently don't have any of the battery systems"`. The pack is not wired: `docs/superpowers/state/program/sources/wiring-extract.md:149@39a3e8a "the only thing that isn't is the battery"`.
+- Row 8 (XC6220/AP2112K): the owner has an AMS1117, not this part: `docs/superpowers/state/program/sources/wiring-extract.md:179@39a3e8a "also have multiple ans1117"`; whether the listed part is in hand is unsettled, so unknown.
+- Rows 9, 12, 13, 14 (10 uF capacitors, 100 kohm and 470 kohm resistors, 100 nF): the owner's general statement does not name the values, so unknown: `docs/superpowers/state/program/sources/wiring-extract.md:177@39a3e8a "I also have plenty of ceramic capacitors and resistors"`. Row 12 also serves the button pull-downs, never confirmed fitted: `docs/superpowers/state/program/sources/wiring-extract.md:56@39a3e8a "The owner never said the resistors were fitted"`.
+- Rows 10, 15 not built (not in hand): `docs/superpowers/state/program/sources/wiring-extract.md:212@39a3e8a "owner never reported having them"`.
+- Row 11 (GPS power MOSFET on GPIO26) not built: `docs/superpowers/state/program/sources/wiring-extract.md:96@39a3e8a "not built; no MOSFET owned"`; `docs/superpowers/plans/2026-10-29-prototype-field-ready.md:31@6c3f445 "no MOSFET is owned and nothing is wired to GPIO26"`.
+- Row 16 not built: `docs/superpowers/state/program/sources/wiring-extract.md:199@39a3e8a "not owned; wrong rating"`.
+- Row 17 (12 mm sealed buttons): the 6 mm tactiles are wired instead (`docs/superpowers/state/program/sources/wiring-extract.md:52@39a3e8a "buttons wired in"`); whether the 12 mm buttons are in hand is unsettled, so unknown.
+- Row 18 built: `docs/superpowers/state/program/sources/wiring-extract.md:71@39a3e8a "normal duponts for now"`.
+- Row 19 not built (not in hand): `docs/superpowers/state/program/sources/wiring-extract.md:206@39a3e8a "consistent (neither owned)"`.
+- Rows 20-23, 24, 26, 27: no tracked source settles them; unknown (owner question). Row 24's connector type is also unresolved: `docs/superpowers/state/program/sources/wiring-extract.md:181@39a3e8a "both boards are the same"`.
+- Row 25: `docs/superpowers/state/program/sources/wiring-extract.md:176@39a3e8a "i dont have a multimeter"` is the owner's 2026-10-12 line against "owned (verify)"; whether one has been bought since is not recorded, so unknown.
+- Rows 28-31 (RJ45 dev-kit port, Plan 6) not built: `docs/superpowers/state/program/sources/wiring-extract.md:212@39a3e8a "owner never reported having them"`; set aside for the prototype: `docs/superpowers/state/program/sources/wiring-extract.md:71@39a3e8a "so we can ignore ethernet for now"`.
