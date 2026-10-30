@@ -3181,3 +3181,27 @@
   - state: open
     sha: cf824cd
     by: session
+- id: PROG-U2
+  source: review
+  severity: LOW
+  class: 'an unbounded digit run parsed with int() in a gate (gate_dispatch _budget, gate_plan block number) raises past 4,300 digits on Python >= 3.11, so the gate prints a generic dispatch.input FAIL instead of its named check, and the verdict differs between interpreters (present since b5, not caused by program tooling)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: '205'
+    sha: db93e7f
+  - file: tools/gates/gate_plan.py
+    lines: '271'
+    sha: db93e7f
+  repro: 'a dispatch prompt with "## Budget: tokens=<5000 nines> minutes=90": tools/.venv/bin/python3 tools/gates/gate_dispatch.py --prompt <file> --tool-model opus -> FAIL dispatch.input: Exceeds the limit (4300 digits); /usr/bin/python3 -> FAIL dispatch.budget'
+  owner:
+    kind: issue
+    number: 153
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: db93e7f
+    by: session

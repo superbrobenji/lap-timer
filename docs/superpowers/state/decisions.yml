@@ -1772,3 +1772,31 @@
   asked_at: {sha: "dd1c382", by: session}
   answer: "clip-and-cap (owner in session, 2026-10-30: 'recommended'; the session had recommended clip-and-cap)"
   answered_at: {sha: "ba8a3e6", by: superbrobenji}
+- id: DEC-0173
+  class: spec-direction
+  question: "Program tooling T1 re-review 4 Q-PROG-2: the loader parses the whole handoff front matter with the strict YAML loader, so a duplicate or merge key in any field (two plan: lines) fails the stream's load. Keep it?"
+  options:
+    - {label: strict-whole, cost: 'any malformed handoff front matter fails the load naming the handoff; a typo blocks stream sessions until fixed; no new code (recommended)'}
+    - {label: strict-context-files, cost: 'only context_files is parsed strictly, other fields ignored; a second parse path, one row and a test'}
+  asked_at: {sha: "db93e7f", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0174
+  class: spec-direction
+  question: "Program tooling T1 re-review 4 Q-PROG-3: a failed load that cannot delete the earlier expected list empties it in place; playbook :49 refuses only a session with no expected list. What does an emptied list mean?"
+  options:
+    - {label: empty-is-none, cost: "keep emptying; Task 2's hook treats an empty or invalid expected list as no list and refuses naming the loader command; one Task 2 row and test (recommended)"}
+    - {label: never-empty, cost: 'never empty; the FAIL line names the list as still standing; the stale list stays readable'}
+  asked_at: {sha: "db93e7f", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0175
+  class: spec-direction
+  question: "Program tooling T1 re-review 4 Q-PROG-4: without --root or CLAUDE_PROJECT_DIR the loader finds the root through lib repo_root(), which honours the caller's GIT_DIR/GIT_WORK_TREE (cwd in repo A, GIT_* set to repo B loads B's list, rc 0), while row E2 says GIT_* is ignored. Which way?"
+  options:
+    - {label: loader-strips, cost: 'load_context ignores GIT_* in its own root discovery too, matching row E2; no gate behaviour changes; one row and a test (recommended)'}
+    - {label: lib-strips, cost: 'lib repo_root ignores GIT_* for every gate; touches every b5 gate and needs regression checks'}
+    - {label: follow-git, cost: "narrow row E2 to the loader's git calls; root discovery follows git's environment; no code change"}
+  asked_at: {sha: "db93e7f", by: session}
+  answer: null
+  answered_at: null
