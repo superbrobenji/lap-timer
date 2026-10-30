@@ -1629,3 +1629,30 @@
   asked_at: {sha: "6ba57dc", by: session}
   answer: "stream-a (owner in session, 2026-10-29: 'recommend'; the session had recommended stream-a)"
   answered_at: {sha: "6ba57dc", by: superbrobenji}
+- id: DEC-0158
+  class: issue-close
+  question: 'How does PROG-1 (replan documents) sign off, given registers.py pins only a test_<name> and the row is documentation (re-review R-1, Q-rr-1)?'
+  options:
+    - {label: close-with-evidence, cost: 'close PROG-1 on the tracked re-review report and the landing commit, no test; the closure is this owner answer'}
+    - {label: add-text-test, cost: 'write a test that the replan documents exist at their paths, a test of text presence only'}
+  asked_at: {sha: "314b46d", by: session}
+  answer: "close-with-evidence (owner in session, 2026-10-30: 'recommend'; the session had recommended close-with-evidence)"
+  answered_at: {sha: "314b46d", by: superbrobenji}
+- id: DEC-0159
+  class: scope
+  question: 'The deferred list and board cite git-ignored workspace files (re-review R-2, Q-rr-2)?'
+  options:
+    - {label: import-sources, cost: 'copy every cited workspace file into tracked docs/superpowers/state/program/sources/ and repoint the citations there, a few hundred KB of text (DEC-0131)'}
+    - {label: exception, cost: 'allow workspace citations as an exception to DEC-0131; a git clean loses them'}
+  asked_at: {sha: "314b46d", by: session}
+  answer: "import-sources (owner in session, 2026-10-30: 'recommend'; the session had recommended import-sources)"
+  answered_at: {sha: "314b46d", by: superbrobenji}
+- id: DEC-0160
+  class: scope
+  question: 'Merge grant for the docs-reorganisation block (re-review R-7, Q-rr-3)?'
+  options:
+    - {label: grant-0001, cost: 'grant:strict-delivery (DEC-0001) covers it as part of the umbrella replan; the plan names its branch and ledger'}
+    - {label: new-grant, cost: 'a separate grant:docs-reorganisation question when the block is ready'}
+  asked_at: {sha: "314b46d", by: session}
+  answer: "grant-0001 (owner in session, 2026-10-30: 'recommend'; the session had recommended grant-0001)"
+  answered_at: {sha: "314b46d", by: superbrobenji}
