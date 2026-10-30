@@ -1656,3 +1656,31 @@
   asked_at: {sha: "314b46d", by: session}
   answer: "grant-0001 (owner in session, 2026-10-30: 'recommend'; the session had recommended grant-0001)"
   answered_at: {sha: "314b46d", by: superbrobenji}
+- id: DEC-0161
+  class: scope
+  question: 'Personal identifiers left in the imported sources (fix round 2, Q-fix2-1): the owner user name in 11 encoded transcript paths, the GitHub handle once, one WPMC business email?'
+  options:
+    - {label: redact-name-and-third-party, cost: 'replace the user name in encoded paths with ~, keep the GitHub handle (decisions.yml already records it on every answer), replace the WPMC email with "WPMC contact (their website)"; each listed in the manifest'}
+    - {label: leave, cost: 'leave all three as imported'}
+  asked_at: {sha: "61f34ea", by: session}
+  answer: "redact-name-and-third-party (owner in session, 2026-10-30: 'recommended'; the session had recommended redact-name-and-third-party)"
+  answered_at: {sha: "61f34ea", by: superbrobenji}
+- id: DEC-0162
+  class: scope
+  question: 'The nine imported re-review files (165 KB) the umbrella cites only as "their re-reviews" (Q-fix2-2)?'
+  options:
+    - {label: keep-no-transitive, cost: 'keep the nine; do not import the files the imports themselves cite (the imports are a snapshot)'}
+    - {label: drop, cost: 'drop the nine; the umbrella cites no path for them'}
+    - {label: transitive, cost: 'import every workspace file the imports cite, recursively; unbounded'}
+  asked_at: {sha: "61f34ea", by: session}
+  answer: "keep-no-transitive (owner in session, 2026-10-30: 'recommended'; the session had recommended keep-no-transitive)"
+  answered_at: {sha: "61f34ea", by: superbrobenji}
+- id: DEC-0163
+  class: scope
+  question: 'decisions.yml line 538 cites the git-ignored b5 root-cause report b5-rca-report.md (Q-fix2-3, same class as DEC-0159)?'
+  options:
+    - {label: import-now, cost: 'import b5-rca-report.md into docs/superpowers/state/program/sources/ with a manifest row mapping the decisions.yml citation to it; the answered decision text stays unchanged'}
+    - {label: later, cost: 'leave it for the docs-reorganisation block'}
+  asked_at: {sha: "61f34ea", by: session}
+  answer: "import-now (owner in session, 2026-10-30: 'recommended'; the session had recommended import-now)"
+  answered_at: {sha: "61f34ea", by: superbrobenji}
