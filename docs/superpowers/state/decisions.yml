@@ -1760,8 +1760,8 @@
     - {label: round-4-only, cost: 'a fresh opus implementer fixes F5 and F6 only; rounds 4-5 remain, then an owner question at the cap; more dimensions may keep arriving'}
     - {label: d30-investigation, cost: 'a read-only opus investigator reports where each defect entered and why reviews missed it, with ranked process changes, before any further fix; slowest'}
   asked_at: {sha: "dd1c382", by: session}
-  answer: null
-  answered_at: null
+  answer: "d24-table-round-4 (owner in session, 2026-10-30: 'recommended'; the session had recommended d24-table-round-4)"
+  answered_at: {sha: "ba8a3e6", by: superbrobenji}
 - id: DEC-0172
   class: spec-direction
   question: "Program tooling T1 F5: plan :20 and playbook :47 bound the loader's whole output under 16 KB, but FAIL output is unbounded (a 213-byte context.yml alias chain printed 52,280 bytes; 300 missing paths 30,490 bytes). Which rule bounds FAIL output?"
@@ -1770,5 +1770,5 @@
     - {label: first-n, cost: 'only the first N FAIL lines (50) plus a count line, values clipped; the bound is N times the clip length'}
     - {label: count-only, cost: 'past 16 KB one summary FAIL with the count and no detail lines; the session loses the details'}
   asked_at: {sha: "dd1c382", by: session}
-  answer: null
-  answered_at: null
+  answer: "clip-and-cap (owner in session, 2026-10-30: 'recommended'; the session had recommended clip-and-cap)"
+  answered_at: {sha: "ba8a3e6", by: superbrobenji}

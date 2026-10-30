@@ -9,3 +9,4 @@ plan: docs/superpowers/plans/2026-10-29-program-tooling.md
 - Asked for the owner: DEC-0166..0170 (growing ranges, stale sync ref, plan in the read list, PR template owner, path field markers). Registered PROG-U1 (issue #150, unrelated).
 - Conduct incidents: round-1 re-review ran `git -c user.name/-c user.email` once in a scratch repo (dispatch said no git config overrides); round-2 re-review wrote one scratch copy to /tmp/x (deleted). Both self-reported.
 - Resume: after the owner answers DEC-0171 and DEC-0172, dispatch round 4 per the answer (rounds 4-5: fresh agent one tier up, opus); review workspace .superpowers/sdd/2026-10-29-program-tooling/ (progress.md, task-1-report.md, task-1-rereview-3.md); package .superpowers/sdd/program-tooling/review/T1/.
+- Owner answered DEC-0171 d24-table-round-4 and DEC-0172 clip-and-cap (in session, 2026-10-30, "recommended"); Task 1 resumes at fix round 4 (fresh opus implementer).
