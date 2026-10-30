@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import tempfile
 import unittest
 from unittest import mock
 
@@ -56,6 +57,9 @@ class LoadContext(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": SID})
         patcher.start()
         self.addCleanup(patcher.stop)
+        for rel in (A_HANDOFF, B_HANDOFF):                # both handoffs exist in the real tree; a missing one FAILs (D32)
+            gf.write(self.root, rel, front(None))
+        gf.commit_all(self.root, "handoffs")
 
     def put(self, rel, text):
         gf.write(self.root, rel, text)
@@ -584,6 +588,468 @@ class LoadContext(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertTrue(os.path.exists(os.path.join(self.root, EXPECTED, SID, "sync.json")))
         self.assertTrue(os.path.exists(other))
+
+    # -- fix round 4: the input-domain table docs/superpowers/state/program-tooling/T1-input-domain.md -----------
+    def call(self, argv, env=None, cwd=None):
+        """main(argv) as is (no --root added); (rc, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        old = os.getcwd()
+        with mock.patch.dict(os.environ, env or {}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                if cwd:
+                    os.chdir(cwd)
+                rc = load_context.main(argv)
+            finally:
+                os.chdir(old)
+        return rc, out.getvalue(), err.getvalue()
+
+    def assertAllNamed(self, rc, out, fid=None, text=""):
+        """rc 1, every line a printable FAIL line, never the catch-all, total under 16,384 bytes."""
+        self.assertEqual(rc, 1, out)
+        self.assertLess(len(out.encode()), 16384)
+        for line in out.splitlines():
+            self.assertRegex(line, r"^FAIL context\.[^\n]*: ", ascii(out))
+            self.assertTrue(line.isprintable(), ascii(line))
+        self.assertNotIn("internal", out)
+        if fid is not None:
+            self.assertRegex(out, r"(?m)^FAIL " + re.escape(fid) + r": ")
+        self.assertIn(text, out)
+
+    def outside(self):
+        d = gf.new_repo()
+        self.addCleanup(gf.remove, d)
+        return d
+
+    def unblock_fifo_later(self, path, after=3.0):
+        """A daemon thread opens `path` for writing after `after` s if a reader blocks on it, so a loader that opens a FIFO cannot hang the suite."""
+        import threading
+        import time
+
+        def run():
+            time.sleep(after)
+            try:
+                os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+        threading.Thread(target=run, daemon=True).start()
+
+    LIST = os.path.join(EXPECTED, SID, KIND + ".json")
+
+    def test_fail_output_values_are_clipped_and_the_output_capped_below_16_kb(self):
+        self.put("docs/a.md", lines_file(3))
+        for depth in (4, 5, 9):                  # 9: 10**9 leaves; the echo's work is bounded, never the expanded size
+            with self.subTest(alias_chain=depth):
+                rows = ["x0: &a0 [" + ", ".join(["xxxxxxxxxx"] * 10) + "]"]
+                rows += [f"x{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 10) + "]" for i in range(1, depth + 1)]
+                rc, out = self.run_loader(raw="\n".join(rows) + f"\nlists: {{{KIND}: [*a{depth}, *a{depth}]}}\n")
+                self.assertAllNamed(rc, out, f"context.{KIND}.entry", "entry is not a mapping")
+                self.assertEqual(len(out.splitlines()), 2, out)
+                for line in out.splitlines():
+                    self.assertLessEqual(len(line.split(": ", 1)[1]), len("entry is not a mapping: ") + 200)
+        with self.subTest("a 5,000-character path, ref and lines"):
+            long = "docs/" + "p" * 5000 + ".md"
+            rc, out = self.run_loader(entries=[entry(long, "1-1"), entry("docs/a.md", "1-1", ref="-" + "r" * 5000),
+                                               entry("docs/a.md", "1-" + "9" * 5000 + "x")])
+            self.assertAllNamed(rc, out)
+            self.assertEqual(len(out.splitlines()), 3, out)
+            ident = out.splitlines()[0][len(f"FAIL context.{KIND}."):].split(": ")[0]
+            self.assertEqual(len(ident), 200)
+            self.assertTrue(all(len(l) < 200 + 200 + 120 for l in out.splitlines()), out)
+        with self.subTest("a 100,000-character kind"):
+            rc, out, _ = self.call(["--root", self.root, "k" * 100000])
+            self.assertAllNamed(rc, out)
+            self.assertLess(len(out), 600, out)
+        with self.subTest("300 missing paths"):
+            rc, out = self.run_loader(entries=[entry(f"docs/missing-{i:03d}-" + "q" * 80 + ".md", "1-1") for i in range(300)])
+            self.assertAllNamed(rc, out)
+            m = re.search(rf"(?m)^FAIL context\.{KIND}\.output: (\d+) further failures not shown\n\Z", out)
+            self.assertIsNotNone(m, out[-300:])
+
+    def test_every_failure_is_counted_when_the_output_is_capped(self):
+        rc, out = self.run_loader(entries=[entry(f"docs/gone-{i:04d}.md", "1-1") for i in range(1000)])
+        self.assertAllNamed(rc, out)
+        lines = out.splitlines()
+        m = re.fullmatch(rf"FAIL context\.{KIND}\.output: (\d+) further failures not shown", lines[-1])
+        self.assertIsNotNone(m, lines[-1])
+        self.assertEqual(len(lines) - 1 + int(m.group(1)), 1000)
+        self.assertEqual([l.split(": ")[0] for l in lines[:-1]], [f"FAIL context.{KIND}.docs/gone-{i:04d}.md" for i in range(len(lines) - 1)])
+        self.assertGreater(len(out.encode()) + len(lines[0]) + 1, 16384 - len(lines[-1]) - 1)     # filled: the next line would cross
+
+    def reset_context_dir(self):
+        d = os.path.join(self.root, ".superpowers")
+        for base, dirs, _ in os.walk(d):
+            for x in dirs:
+                if not os.path.islink(os.path.join(base, x)):
+                    os.chmod(os.path.join(base, x), 0o755)
+        if os.path.islink(d) or os.path.isfile(d):
+            os.unlink(d)
+        else:
+            gf.remove(d)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
+    def test_expected_list_write_errors_are_named_fails(self):
+        self.put("docs/a.md", lines_file(3))
+        good = [entry("docs/a.md", "1-3")]
+        far = self.outside()
+        exp, sid_dir = os.path.join(self.root, EXPECTED), os.path.join(self.root, EXPECTED, SID)
+        target = os.path.join(far, "victim.json")
+
+        def setup(case):
+            if case == "list is a directory":
+                os.makedirs(os.path.join(sid_dir, KIND + ".json"))
+            elif case == "list is a symlink":
+                os.makedirs(sid_dir)
+                with open(target, "w") as fh:
+                    fh.write("victim\n")
+                os.symlink(target, os.path.join(sid_dir, KIND + ".json"))
+            elif case == "expected is a regular file":
+                os.makedirs(os.path.dirname(exp))
+                open(exp, "w").close()
+            elif case == "session directory is a symlink":
+                os.makedirs(exp)
+                os.symlink(far, sid_dir)
+            elif case == ".superpowers is a symlink":
+                os.symlink(far, os.path.join(self.root, ".superpowers"))
+            elif case == "session directory unwritable":
+                os.makedirs(sid_dir)
+                os.chmod(sid_dir, 0o555)
+        for case in ("list is a directory", "list is a symlink", "expected is a regular file",
+                     "session directory is a symlink", ".superpowers is a symlink", "session directory unwritable"):
+            with self.subTest(case):
+                self.reset_context_dir()
+                setup(case)
+                rc, out = self.run_loader(entries=good)
+                self.assertAllNamed(rc, out, f"context.{KIND}.{self.LIST}")
+                self.assertFalse(os.path.isfile(os.path.join(far, KIND + ".json")), "written through a symlink")
+                if case == "list is a symlink":
+                    with open(target) as fh:
+                        self.assertEqual(fh.read(), "victim\n")
+                self.reset_context_dir()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
+    def test_expected_list_removal_errors_are_named_fails(self):
+        self.put("docs/a.md", lines_file(3))
+        good, bad = [entry("docs/a.md", "1-3")], [entry("docs/nope.md", "1-3")]
+        listed = os.path.join(self.root, self.LIST)
+        sid_dir = os.path.dirname(listed)
+        self.addCleanup(lambda: os.path.isdir(sid_dir) and os.chmod(sid_dir, 0o755))
+        for file_mode, text in ((0o644, "emptied"), (0o444, "still stands")):
+            with self.subTest(file_mode=oct(file_mode)):
+                self.reset_context_dir()
+                rc, out = self.run_loader(entries=good)
+                self.assertEqual(rc, 0, out)
+                os.chmod(listed, file_mode)
+                os.chmod(sid_dir, 0o555)
+                rc, out = self.run_loader(entries=bad)
+                os.chmod(sid_dir, 0o755)
+                self.assertAllNamed(rc, out, f"context.{KIND}.{self.LIST}", text)
+                self.assertIn("docs/nope.md", out)
+                with open(listed, "rb") as fh:
+                    self.assertEqual(fh.read() == b"", text == "emptied")
+        with self.subTest("the list is a directory"):
+            self.reset_context_dir()
+            os.makedirs(listed)
+            rc, out = self.run_loader(entries=bad)
+            self.assertAllNamed(rc, out, f"context.{KIND}.{self.LIST}", "could not be removed")
+        with self.subTest("a symlinked session directory"):
+            self.reset_context_dir()
+            far = self.outside()
+            with open(os.path.join(far, KIND + ".json"), "w") as fh:
+                fh.write("{}\n")
+            os.makedirs(os.path.dirname(sid_dir))
+            os.symlink(far, sid_dir)
+            rc, out = self.run_loader(entries=bad)
+            self.assertAllNamed(rc, out, f"context.{KIND}.{self.LIST}", "symlink")
+            self.assertTrue(os.path.isfile(os.path.join(far, KIND + ".json")), "removed through a symlink")
+        self.reset_context_dir()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
+    def test_ref_copy_write_target_errors_are_named_fails(self):
+        gf.git(self.root, "checkout", "-q", "-b", "other")
+        self.put("docs/theirs.md", "from the other branch\n")
+        gf.commit_all(self.root, "other")
+        gf.git(self.root, "checkout", "-q", "main")
+        e = [entry("docs/theirs.md", "1-1", ref="other")]
+        copy = os.path.join(self.root, load_context.ref_copy_path("other", "docs/theirs.md"))
+        refs = os.path.join(self.root, ".superpowers", "context", "refs")
+        far = self.outside()
+        victim = os.path.join(far, "victim.md")
+
+        def setup(case):
+            if case == "copy is a symlink":
+                os.makedirs(os.path.dirname(copy))
+                with open(victim, "w") as fh:
+                    fh.write("victim\n")
+                os.symlink(victim, copy)
+            elif case == "copy is a directory":
+                os.makedirs(copy)
+            elif case == "refs is a regular file":
+                os.makedirs(os.path.dirname(refs))
+                open(refs, "w").close()
+            elif case == ".superpowers is a symlink":
+                os.symlink(far, os.path.join(self.root, ".superpowers"))
+            elif case == "copy directory unwritable":
+                os.makedirs(os.path.dirname(copy))
+                os.chmod(os.path.dirname(copy), 0o555)
+        for case in ("copy is a symlink", "copy is a directory", "refs is a regular file", ".superpowers is a symlink",
+                     "copy directory unwritable"):
+            with self.subTest(case):
+                self.reset_context_dir()
+                setup(case)
+                rc, out = self.run_loader(entries=e)
+                self.assertAllNamed(rc, out, f"context.{KIND}.docs/theirs.md")
+                self.assertFalse(os.path.exists(os.path.join(far, "context")), "written through a symlink")
+                if case == "copy is a symlink":
+                    with open(victim) as fh:
+                        self.assertEqual(fh.read(), "victim\n")
+                self.reset_context_dir()
+
+    def test_context_yml_of_the_wrong_kind_is_a_named_fail(self):
+        self.put("docs/a.md", lines_file(3))
+        gf.commit_all(self.root, "a")
+        text = ctx([entry("docs/a.md", "1-3")])
+        full = os.path.join(self.root, CTX)
+        prog = os.path.dirname(full)
+        cases = ("a directory", "a FIFO", "a symlink", "a symlinked directory component", "not UTF-8")
+        if os.geteuid() != 0:
+            cases += ("mode 000",)
+        for case in cases:
+            with self.subTest(case):
+                gf.remove(prog) if not os.path.islink(prog) else os.unlink(prog)
+                os.makedirs(prog)
+                if case == "a directory":
+                    os.makedirs(full)
+                elif case == "a FIFO":
+                    os.mkfifo(full)
+                    self.unblock_fifo_later(full)
+                elif case == "a symlink":
+                    self.put("docs/real.yml", text)
+                    os.symlink(os.path.join(self.root, "docs/real.yml"), full)
+                elif case == "a symlinked directory component":
+                    os.rmdir(prog)
+                    self.put("docs/real-prog/context.yml", text)
+                    os.symlink(os.path.join(self.root, "docs/real-prog"), prog)
+                elif case == "not UTF-8":
+                    with open(full, "wb") as fh:
+                        fh.write(b"lists: \xff\xfe\n")
+                elif case == "mode 000":
+                    self.put(CTX, text)
+                    os.chmod(full, 0)
+                    self.addCleanup(lambda: os.path.exists(full) and os.chmod(full, 0o644))
+                rc, out = self.run_loader(argv=[KIND], commit=False)
+                self.assertAllNamed(rc, out, f"context.{KIND}.list", CTX)
+                if case in ("a directory", "a FIFO"):
+                    self.assertIn("not a regular file", out)          # refused before any open: a FIFO never blocks
+                if os.path.exists(full) and not os.path.islink(full) and os.path.isfile(full):
+                    os.chmod(full, 0o644)
+        with self.subTest("untracked context.yml loads from the working tree"):
+            gf.remove(prog) if not os.path.islink(prog) else os.unlink(prog)
+            gf.commit_all(self.root, "no context")
+            self.put(CTX, text)
+            rc, out = self.run_loader(argv=[KIND], commit=False)
+            self.assertEqual(rc, 0, out)
+
+    def test_handoff_of_the_wrong_kind_or_grammar_is_a_named_fail(self):
+        self.put("docs/a.md", lines_file(3))
+        good = front([entry("docs/a.md", "1-3")])
+        full = os.path.join(self.root, A_HANDOFF)
+        cases = ("missing", "a directory", "a FIFO", "a symlink", "not UTF-8", "duplicate context_files", "merge key")
+        if os.geteuid() != 0:
+            cases += ("mode 000",)
+        for case in cases:
+            with self.subTest(case):
+                if os.path.isdir(full) and not os.path.islink(full):
+                    os.rmdir(full)
+                elif os.path.lexists(full):
+                    os.unlink(full)
+                if case == "a directory":
+                    os.makedirs(full)
+                elif case == "a FIFO":
+                    os.mkfifo(full)
+                    self.unblock_fifo_later(full)
+                elif case == "a symlink":
+                    self.put("docs/real-handoff.md", good)
+                    os.symlink(os.path.join(self.root, "docs/real-handoff.md"), full)
+                elif case == "not UTF-8":
+                    with open(full, "wb") as fh:
+                        fh.write(b"---\nplan: \xff\n---\n")
+                elif case == "duplicate context_files":
+                    self.put(A_HANDOFF, "---\ncontext_files: []\ncontext_files: [{path: docs/a.md, lines: 1-3, why: w}]\n---\n")
+                elif case == "merge key":
+                    self.put(A_HANDOFF, "---\nbase: &b {context_files: []}\n<<: *b\n---\n")
+                elif case == "mode 000":
+                    self.put(A_HANDOFF, good)
+                    os.chmod(full, 0)
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")], commit=False)
+                if os.path.isfile(full) and not os.path.islink(full):
+                    os.chmod(full, 0o644)
+                self.assertAllNamed(rc, out, f"context.{KIND}.{A_HANDOFF}")
+                if case in ("a directory", "a FIFO"):
+                    self.assertIn("not a regular file", out)
+
+    def test_unreadable_entry_file_is_a_named_fail(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put("docs/pipe.md", lines_file(3))
+        gf.commit_all(self.root, "files")
+        os.unlink(os.path.join(self.root, "docs/pipe.md"))
+        os.mkfifo(os.path.join(self.root, "docs/pipe.md"))
+        self.unblock_fifo_later(os.path.join(self.root, "docs/pipe.md"))
+        rc, out = self.run_loader(entries=[entry("docs/pipe.md", "1-1")], commit=False)
+        self.assertAllNamed(rc, out, f"context.{KIND}.docs/pipe.md")
+        if os.geteuid() != 0:
+            full = os.path.join(self.root, "docs/a.md")
+            os.chmod(full, 0)
+            self.addCleanup(os.chmod, full, 0o644)
+            rc, out = self.run_loader(entries=[entry("docs/a.md", "1-1")], commit=False)
+            self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", "unreadable")
+
+    def test_root_must_be_a_work_tree_top_and_not_a_symlink(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put("docs/sub/" + CTX, ctx([entry("docs/a.md", "1-3")]))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "tree")
+        far = self.outside()
+        link = os.path.join(far, "link")
+        os.symlink(self.root, link)
+        plain = tempfile.mkdtemp(prefix="not-a-repo-")         # outside any git work tree
+        self.addCleanup(gf.remove, plain)
+        os.makedirs(os.path.join(plain, os.path.dirname(CTX)))
+        with open(os.path.join(plain, CTX), "w") as fh:
+            fh.write(ctx([entry("docs/a.md", "1-3")]))
+        cases = {"missing": os.path.join(far, "nope"), "a regular file": os.path.join(self.root, "README.md"),
+                 "a symlink": link, "a subdirectory": os.path.join(self.root, "docs/sub"), "not a git work tree": plain}
+        for name, root in cases.items():
+            with self.subTest(root=name):
+                rc, out, _ = self.call(["--root", root, KIND])
+                self.assertAllNamed(rc, out, "context.input")
+            with self.subTest(env=name):
+                rc, out, _ = self.call([KIND], env={"CLAUDE_PROJECT_DIR": root})
+                self.assertAllNamed(rc, out, "context.input")
+        with self.subTest("relative root with a trailing slash"):
+            rc, out, _ = self.call(["--root", os.path.basename(self.root) + "/", KIND], cwd=os.path.dirname(self.root))
+            self.assertEqual(rc, 0, out)
+        with self.subTest("no root outside any repository"):
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            rc, out, _ = self.call([KIND], cwd=plain)
+            self.assertAllNamed(rc, out, "context.input")
+
+    def test_git_environment_and_config_cannot_change_what_is_read(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put("docs/:(glob)*.md", lines_file(3))
+        self.put("docs/été.md", lines_file(3))
+        other = self.outside()
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+        self.assertEqual(rc, 0, out)
+        for env in ({"GIT_DIR": os.path.join(other, ".git")}, {"GIT_WORK_TREE": other}, {"GIT_LITERAL_PATHSPECS": "0"},
+                    {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.precomposeunicode", "GIT_CONFIG_VALUE_0": "false"}):
+            with self.subTest(env=env):
+                rc, out, _ = self.call(["--root", self.root, KIND], env=env)      # the fixture is committed: no git call of the test under env
+                self.assertEqual(rc, 0, out)
+        with self.subTest("pathspec magic in a tracked name is literal"):
+            rc, out = self.run_loader(entries=[entry("docs/:(glob)*.md", "1-3")])
+            self.assertEqual(rc, 0, out)
+        with self.subTest("repository config and attributes"):
+            with open(os.path.join(self.root, ".git", "config"), "a") as fh:
+                fh.write('[core]\n\tquotePath = true\n[color]\n\tui = always\n[diff "up"]\n\ttextconv = tr a-z A-Z\n')
+            self.put(".gitattributes", "*.md diff=up\n")
+            gf.commit_all(self.root, "attrs")
+            rc, out = self.run_loader(entries=[entry("docs/été.md", "1-3"), entry("docs/a.md", "1-3", ref="HEAD")])
+            self.assertEqual(rc, 0, out)
+            copy = out.splitlines()[1].split(" ")[0]
+            with open(os.path.join(self.root, copy), "rb") as fh:
+                self.assertEqual(fh.read(), lines_file(3).encode())
+        with self.subTest("git not on PATH"), mock.patch.dict(os.environ, {"PATH": os.path.join(other, "no-bin")}):
+            rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")], commit=False)
+            self.assertEqual(rc, 1, out)
+            self.assertEqual(len(out.splitlines()), 1, out)
+            self.assertRegex(out, rf"^FAIL context\.(input|{KIND}\.[^\n]*): ")
+
+    def test_path_matches_the_tracked_name_as_a_whole_string(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put("docs/é.md", lines_file(3))           # NFC
+        for path in ("docs/A.md", "docs/é.md"):           # case variant; NFD spelling
+            with self.subTest(path=ascii(path)):
+                rc, out = self.run_loader(entries=[entry(path, "1-3")])
+                self.assertAllNamed(rc, out)
+                self.assertRegex(out, r"(missing path|tracked at HEAD)")
+
+    def test_yaml_tags_documents_depth_and_numbers_are_named_fails(self):
+        self.put("docs/a.md", lines_file(3))
+        k = KIND
+        raws = {
+            "python tag": f"lists: {{{k}: [!!python/object/apply:os.system [true]]}}\n",
+            "unknown local tag": f"lists: {{{k}: [!foo x]}}\n",
+            "two documents": f"lists: {{{k}: [{self.GOOD}]}}\n---\nlists: {{}}\n",
+            "deep nesting": "lists: " + "[" * 5000 + "]" * 5000 + "\n",
+            "deep nesting in an entry": f"lists: {{{k}: [" + "[" * 5000 + "]" * 5000 + "]}\n",
+            "5000-digit lines": f"lists: {{{k}: [{{path: docs/a.md, lines: {'7' * 5000}, why: w}}]}}\n",
+            "binary path": f"lists: {{{k}: [{{path: !!binary ZG9jcy9hLm1k, lines: 1-3, why: w}}]}}\n",
+            "set entry": f"lists: {{{k}: [!!set {{docs/a.md}}]}}\n",
+            "timestamp lines": f"lists: {{{k}: [{{path: docs/a.md, lines: 2026-10-30, why: w}}]}}\n",
+            "date key in an entry": f"lists: {{{k}: [{{path: docs/a.md, lines: 1-3, why: w, 2026-10-30: x}}]}}\n",
+            "duplicate key": f"lists: {{{k}: [{self.GOOD}]}}\nlists: {{}}\n",
+            "merge key": f"base: &b {{path: docs/a.md}}\nlists: {{{k}: [{{<<: *b, lines: 1-3, why: w}}]}}\n",
+        }
+        for name, raw in raws.items():
+            with self.subTest(name):
+                rc, out = self.run_loader(raw=raw)
+                self.assertAllNamed(rc, out)
+                self.assertEqual(len(out.splitlines()), 1, out)
+
+    def test_arguments_and_session_id_match_as_whole_strings(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        for argv in ([KIND + "\n"], ["Stream-a-block"], ["-x"], ["--bogus=" + "x" * 100000, KIND], ["-h"]):
+            with self.subTest(argv=ascii(argv)[:40]):
+                rc, out, err = self.call(["--root", self.root, *argv])
+                self.assertAllNamed(rc, out, "context.input")
+                self.assertLess(len(out.encode()) + len(err.encode()), 16384)
+        with self.subTest("session id with a trailing line terminator"):
+            rc, out, _ = self.call(["--root", self.root, KIND], env={"CLAUDE_CODE_SESSION_ID": SID + "\n"})
+            self.assertAllNamed(rc, out, f"context.{KIND}.session")
+
+    def test_ref_that_is_not_a_commit_and_unborn_head(self):
+        self.put("docs/a.md", lines_file(3))
+        gf.commit_all(self.root, "a")
+        blob_sha = gf.git(self.root, "rev-parse", "HEAD:docs/a.md")
+        tree_sha = gf.git(self.root, "rev-parse", "HEAD^{tree}")
+        gf.git(self.root, "tag", "-a", "-m", "t", "annotated", "HEAD")
+        for ref in (blob_sha, tree_sha):
+            with self.subTest(ref=ref):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", ref=ref)])
+                self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", "missing ref")
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", ref="annotated")])
+        self.assertEqual(rc, 0, out)
+        unborn = self.outside()
+        gf.remove(os.path.join(unborn, ".git"))
+        gf.git(unborn, "init", "-q")
+        gf.write(unborn, "docs/a.md", lines_file(3))
+        gf.write(unborn, CTX, ctx([entry("docs/a.md", "1-3")]))
+        rc, out, _ = self.call(["--root", unborn, KIND])
+        self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", "tracked at HEAD")
+
+    def test_stdout_is_utf8_whatever_the_locale(self):
+        import subprocess
+        import sys
+        name = "docs/über.md"
+        self.put(name, lines_file(3))
+        self.put(CTX, ctx([entry(name, "1-3", "café")]))
+        gf.commit_all(self.root, "ctx")
+        env = {**os.environ, "PYTHONIOENCODING": "ascii", "LC_ALL": "C", "LANG": "C", "PYTHONDONTWRITEBYTECODE": "1"}
+        p = subprocess.run([sys.executable, load_context.__file__, "--root", self.root, KIND],
+                           capture_output=True, env=env, check=False)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.decode("utf-8"), f"{name} lines 1-3 blob {blob(lines_file(3).encode())} -- café\n")
+
+    def test_yaml_aliases_and_anchors_load_like_written_out_entries(self):
+        self.put("docs/a.md", lines_file(3))
+        rc, out = self.run_loader(raw=f"w: &w the why\nlists: {{{KIND}: [&e {{path: docs/a.md, lines: 1-3, why: *w}}, *e]}}\n")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(out.splitlines()), 2, out)
+        self.assertTrue(out.splitlines()[0].endswith(" -- the why"), out)
+        rc, out = self.run_loader(raw=f"lists: {{{KIND}: [&r [*r]]}}\n")
+        self.assertAllNamed(rc, out, f"context.{KIND}.entry", "not a mapping")
 
     # -- the committed read lists ------------------------------------------------------------
     def test_committed_context_yml_has_a_list_for_every_kind_and_dispatch_role(self):
