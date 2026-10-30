@@ -44,7 +44,7 @@ from tools.gates.lib import GateError, gate_args, load_yaml, repo_root  # noqa: 
 MAX_LINES = 2000        # the Read tool's per-call line limit
 MAX_BYTES = 16000       # a range of at most MAX_LINES lines and this many bytes stays under the Read tool's 25,000-token limit
 #   (measured 2026-10-30, plan program-tooling Global Constraints: worst case 1.0 token per byte of any content incl. line prefixes,
-#   so 16,000 bytes is at most about 16,000 tokens, with margin for the 1.3-token line-number prefix of up to 2000 lines)
+#   so 16,000 bytes in at most 2000 lines is at most about 16,000 + 2000 x 2 = 20,000 tokens)
 MAX_OUTPUT = 16384      # the loader's stdout must be LESS than this (16 KB); below the Bash tool's 25,000-byte limit
 CONTEXT_YML = "docs/superpowers/state/program/context.yml"
 HANDOFFS = {"stream-a-block": "docs/superpowers/state/strict-delivery/handoff.md",
@@ -73,20 +73,25 @@ def git_bytes(root: str, *args) -> "subprocess.CompletedProcess":
     return subprocess.run(["git", "-C", root, *args], capture_output=True, check=False)
 
 
-CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def unprintable(text) -> bool:
+    """True when `text` holds a character str.isprintable() rejects (controls incl. C1, line and paragraph
+    separators, bidi and zero-width format characters, tab, newline): none may reach a path or an output line."""
+    return not str(text).isprintable()
 
 
 def show(text) -> str:
-    """text with every control character written as \\xNN, so a FAIL id is always one line."""
-    return CONTROL_RE.sub(lambda m: "\\x%02x" % ord(m.group(0)), str(text))
+    """text with every non-printable character written as a \\x/\\u escape, so a FAIL line is always one line."""
+    return "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in str(text))
 
 
 def path_problem(path):
     """Why `path` is outside the whitelist (relative, no control character, not under .git/), or None."""
     if not isinstance(path, str) or path == "":
         return "path is missing"
-    if CONTROL_RE.search(path):
-        return "path holds a control character"
+    if unprintable(path):
+        return "path holds a non-printable character"
     if path.startswith("/") or "\\" in path or os.path.normpath(path) != path or ".." in path.split("/"):
         return "path is absolute, has '..' or a backslash, or is not normalised"
     if path.split("/")[0] == ".git":
@@ -95,7 +100,7 @@ def path_problem(path):
 
 
 def safe_ref(ref) -> bool:
-    return isinstance(ref, str) and ref != "" and not ref.startswith("-") and re.fullmatch(r"[^\s\x00-\x1f\x7f:~^?*\[\\]+(?:[~^][0-9]*)*", ref) is not None
+    return isinstance(ref, str) and ref != "" and not ref.startswith("-") and not unprintable(ref) and re.fullmatch(r"[^\s\x00-\x1f\x7f:~^?*\[\\]+(?:[~^][0-9]*)*", ref) is not None
 
 
 def ref_copy_path(ref: str, path: str) -> str:
@@ -164,12 +169,12 @@ def check_entry(root: str, e) -> tuple:
         raise Failure(ident, problem)
     unknown = sorted(set(e) - ENTRY_KEYS)
     if unknown:
-        raise Failure(ident, f"unknown key(s) {', '.join(map(str, unknown))}")
+        raise Failure(ident, f"unknown key(s) {', '.join(show(k) for k in unknown)}")
     why = e.get("why")
     if not isinstance(why, str) or not why.strip():
         raise Failure(ident, "why is missing or empty")
-    if CONTROL_RE.search(why.replace("\n", " ").replace("\t", " ").replace("\r", " ")):
-        raise Failure(ident, "why holds a control character")
+    if unprintable(why):
+        raise Failure(ident, "why holds a non-printable character")
     if "ref" in e and not isinstance(e["ref"], str):
         raise Failure(ident, f"ref is not a string: {e['ref']!r}")
     lines = e.get("lines")
@@ -232,7 +237,7 @@ def load(root: str, kind: str) -> tuple:
     fails = []
 
     def fail(ident, reason):
-        fails.append(f"FAIL context.{kind}.{ident}: {reason}")
+        fails.append(f"FAIL context.{kind}.{show(ident)}: {show(reason)}")
 
     try:
         lists = load_yaml(os.path.join(root, CONTEXT_YML), root)

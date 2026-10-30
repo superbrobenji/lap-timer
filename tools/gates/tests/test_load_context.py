@@ -306,7 +306,7 @@ class LoadContext(unittest.TestCase):
                 self.assertEqual(rc, 1, out)
                 self.assertEqual(len(out.splitlines()), 1, out)          # never an injected extra line
                 self.assertRegex(out, r"(?m)^FAIL context\." + KIND + r"\.[^\n]*: ")
-                self.assertIn("control character", out)
+                self.assertIn("non-printable character", out)
 
     def test_path_under_dot_git_is_refused(self):
         rc, out = self.run_loader(entries=[entry(".git/HEAD", "1-1")])
@@ -357,12 +357,40 @@ class LoadContext(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertEqual(len(out.splitlines()), 2, out)
         self.assertIn("docs/ghost.md", out)
-        self.assertIn("control character", out)
+        self.assertIn("non-printable character", out)
+
+    NONPRINTABLE = ("\u0085", "\u2028", "\u2029", "\u202e", "\t", "\x9b", "\u200b", "\ufeff")
+
+    def test_any_nonprintable_character_in_path_why_ref_or_lines_is_refused(self):
+        self.put("docs/a.md", lines_file(3))
+        for ch in self.NONPRINTABLE:
+            for field in ("path", "why", "ref", "lines"):
+                with self.subTest(char=ascii(ch), field=field):
+                    e = entry("docs/a.md", "1-3")
+                    if field == "path":
+                        e["path"] = f"docs/a{ch}.md"
+                    elif field == "why":
+                        e["why"] = f"ok{ch}bad"
+                    elif field == "ref":
+                        e["ref"] = f"HEAD{ch}"
+                    else:
+                        e["lines"] = f"1-3{ch}"
+                    rc, out = self.run_loader(entries=[e])
+                    self.assertEqual(rc, 1, out)
+                    self.assertEqual(len(out.splitlines()), 1, ascii(out))      # no injected line
+                    self.assertRegex(out, rf"^FAIL context\.{KIND}\.[^\n]*: ")
+                    self.assertTrue(out.isprintable() or out.endswith("\n") and out[:-1].isprintable(), ascii(out))
+
+    def test_printable_non_ascii_path_still_loads(self):
+        self.put("docs/\u00fcn\u00ef\u4e2d.md", lines_file(3))
+        rc, out = self.run_loader(entries=[entry("docs/\u00fcn\u00ef\u4e2d.md", "1-3", "caf\u00e9")])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(out.splitlines()), 1)
 
     def test_why_with_a_control_character_is_refused(self):
         self.put("docs/a.md", lines_file(3))
         rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", "ok\x01bad")])
-        self.assertFailed(rc, out, f"context.{KIND}.docs/a.md", "control character")
+        self.assertFailed(rc, out, f"context.{KIND}.docs/a.md", "non-printable character")
 
     def test_empty_file_is_refused(self):
         self.put("docs/empty.md", "")
