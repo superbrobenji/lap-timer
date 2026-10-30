@@ -1684,3 +1684,23 @@
   asked_at: {sha: "61f34ea", by: session}
   answer: "import-now (owner in session, 2026-10-30: 'recommended'; the session had recommended import-now)"
   answered_at: {sha: "61f34ea", by: superbrobenji}
+- id: DEC-0164
+  class: scope
+  question: 'Ownership of the project memory notes under ~/.claude/projects/ (replan re-review round 3, Q-rr3-1)?'
+  options:
+    - {label: shared, cost: "shared like the registers: each stream adds its own notes and never edits the other's; the docs move rewrites them once with no stream B branch open; one sentence under the playbook's Shared files"}
+    - {label: stream-a, cost: 'stream A owns them; stream B waits for a sync for each new note'}
+    - {label: no-row, cost: 'unassigned; the docs-reorganisation block raises them at the sync before its Task 2 (DEC-0157)'}
+  asked_at: {sha: "667e0d7", by: session}
+  answer: "shared (owner in session, 2026-10-30: 'recommended'; the session had recommended shared)"
+  answered_at: {sha: "667e0d7", by: superbrobenji}
+- id: DEC-0165
+  class: scope
+  question: 'Where PROG-2 goes (decisions.yml :1428, :1482, :1518 cite imported workspace files with no MANIFEST map row; Q-rr3-2)?'
+  options:
+    - {label: fix-now, cost: "add the three rows to MANIFEST's tracked-citation map in the replan landing commit; PROG-2 lands closed with that evidence"}
+    - {label: docs-reorg-t2, cost: 'route to docs-reorganisation Task 2, fixed after field-ready'}
+    - {label: issue, cost: 'a GitHub issue outside the plans'}
+  asked_at: {sha: "667e0d7", by: session}
+  answer: "fix-now (owner in session, 2026-10-30: 'recommended'; the session had recommended fix-now)"
+  answered_at: {sha: "667e0d7", by: superbrobenji}
