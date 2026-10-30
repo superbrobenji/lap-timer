@@ -2,9 +2,9 @@
 
 The hardware as built on 2026-10-29, written from the owner's DEC-0135 answer and the pin defines in the tracked code. Every fact cites a tracked file as `path:line@sha "quote"`; a quote is a substring of that line in `git show <sha>:<path>`. Pin numbers are GPIO numbers. A pin in a table below appears inside its first citation's quote.
 
-Sources: the owner's DEC-0135 answer (`docs/superpowers/state/decisions.yml`), the board and display pin defines (`components/drivers/board_devkit_v1/board.c`, `components/drivers/display_epaper_ssd1680/display_epaper.c`), the dev-kit link defines, and the owner-transcript extract `docs/superpowers/state/program/sources/wiring-extract.md` (rows there marked UNCONFIRMED are covered here only through the DEC-0135 answer). Spec pin map: `docs/superpowers/specs/2026-09-14-lap-timer-design.md` §3.3.
+Sources: the owner's DEC-0135 answer (`docs/superpowers/state/decisions.yml`), the board and display pin defines (`components/drivers/board_devkit_v1/board.c`, `components/drivers/display_epaper_ssd1680/display_epaper.c`), the dev-kit link defines, and the owner-transcript extract `docs/superpowers/state/program/sources/wiring-extract.md`. Spec pin map: `docs/superpowers/specs/2026-09-14-lap-timer-design.md` §3.3.
 
-Owner ruling (DEC-0135, as-instructed-and-working): `docs/superpowers/state/decisions.yml:1433@39a3e8a "all hardware works and is wired correctly"`. The wiring below is the instructed wiring; the bench day proves it.
+Owner ruling (DEC-0135, as-instructed-and-working): `docs/superpowers/state/decisions.yml:1433@39a3e8a "all hardware works and is wired correctly"`. The wiring below is the instructed wiring; `docs/superpowers/state/decisions.yml:1430@39a3e8a "bring-up on the bench proves it"`.
 
 ## Boards
 
@@ -22,11 +22,11 @@ Supply and EN: `docs/superpowers/state/decisions.yml:1430@39a3e8a "GPS VCC to VI
 | GPS VCC | VIN | `docs/superpowers/state/decisions.yml:1430@39a3e8a "GPS VCC to VIN 5 V"` |
 | GPS EN | not connected | `docs/superpowers/state/decisions.yml:1430@39a3e8a "EN open"` |
 
-The firmware assigns no GPS UART pins today; the driver is a stub: `components/drivers/gps_neo6m/gps_neo6m.c:4@39a3e8a "This stub exists so moto_neo6m"`. GPIO16 and GPIO17 come from the DEC-0135 answer and the spec only; no tracked define carries them. PPS is wired; the board define reads `components/drivers/board_devkit_v1/board.c:61@39a3e8a "used only on the M10"`.
+The GPS driver is a stub, and its UART setup is not yet written: `components/drivers/gps_neo6m/gps_neo6m.c:4@39a3e8a "This stub exists so moto_neo6m"`; `components/drivers/gps_neo6m/gps_neo6m.c:3@39a3e8a "The real UBX driver (UART setup, config push"`. GPIO16 and GPIO17 come from the DEC-0135 answer and the spec only; no tracked define carries them. PPS is wired: `docs/superpowers/state/decisions.yml:1430@39a3e8a "PPS 36"`; the board define reads `components/drivers/board_devkit_v1/board.c:61@39a3e8a "used only on the M10"`.
 
 ## GPS power switch: not built
 
-`components/drivers/board_devkit_v1/board.c:48@39a3e8a "drive LOW = GPS on"` defines `PIN_GPS_PWR` as GPIO26 (`components/drivers/board_devkit_v1/board.c:48@39a3e8a "GPIO_NUM_26"`). No MOSFET is owned and nothing is wired to GPIO26: `docs/superpowers/state/program/sources/wiring-extract.md:96@39a3e8a "not built; no MOSFET owned"`. GPS power modes use UBX software commands only (DEC-0147, `docs/superpowers/state/decisions.yml:1535@39a3e8a "id: DEC-0147"`).
+`components/drivers/board_devkit_v1/board.c:48@39a3e8a "drive LOW = GPS on"` defines `PIN_GPS_PWR` as GPIO26 (`components/drivers/board_devkit_v1/board.c:48@39a3e8a "GPIO_NUM_26"`). No MOSFET is owned and nothing is wired to GPIO26: `docs/superpowers/state/program/sources/wiring-extract.md:96@39a3e8a "not built; no MOSFET owned"`; `docs/superpowers/plans/2026-10-29-prototype-field-ready.md:31@6c3f445 "no MOSFET is owned and nothing is wired to GPIO26"`. GPS power modes use UBX software commands only (DEC-0147, `docs/superpowers/state/decisions.yml:1539@39a3e8a "GPS power modes by UBX software commands only"`).
 
 ## IMU: GY-521 (MPU-6050)
 
@@ -51,11 +51,11 @@ VCC 3V3 and GND (GND row: `docs/superpowers/state/program/sources/wiring-extract
 | RST | GPIO13 | `components/drivers/display_epaper_ssd1680/display_epaper.c:35@39a3e8a "GPIO_NUM_13"` |
 | BUSY | GPIO35 | `components/drivers/display_epaper_ssd1680/display_epaper.c:36@39a3e8a "GPIO_NUM_35"` |
 
-VCC to 3V3 and GND to GND: `docs/superpowers/state/program/sources/wiring-extract.md:39@39a3e8a "HAT VCC"`. RST is on GPIO13 because GPIO4 is the dev-kit detect wire: `docs/superpowers/state/program/sources/wiring-extract.md:37@39a3e8a "we can't plug rst to pin 4"`.
+VCC to 3V3 and GND to GND: `docs/superpowers/state/program/sources/wiring-extract.md:39@39a3e8a "3V3, GND"`. RST is on GPIO13 because GPIO4 is the dev-kit detect wire: `docs/superpowers/state/program/sources/wiring-extract.md:37@39a3e8a "we can't plug rst to pin 4"`.
 
 ## Buttons
 
-6 mm tactiles, not the 12 mm sealed buttons of the original BOM: `docs/superpowers/state/program/sources/wiring-extract.md:52@39a3e8a "buttons wired in"`. Active-high with pull-down: `components/drivers/board_devkit_v1/board.c:57@39a3e8a "active-high, pull-down"`.
+6 mm tactiles: `docs/superpowers/state/program/sources/wiring-extract.md:52@39a3e8a "6 mm 4-leg tactile"`; the owner: `docs/superpowers/state/program/sources/wiring-extract.md:52@39a3e8a "buttons wired in"`. Active-high with pull-down: `components/drivers/board_devkit_v1/board.c:57@39a3e8a "active-high, pull-down"`.
 
 | Signal | Pin | Source |
 |---|---|---|
@@ -80,6 +80,6 @@ Wiring: dev-kit 17 to lap-timer RX0, dev-kit 16 to lap-timer TX0. No 5 V wire to
 
 ## Power (DEC-0134, DEC-0135)
 
-- Field: power bank into the lap timer's USB port (`docs/superpowers/state/decisions.yml:1433@39a3e8a "the power bank will be plugged into the usb port"`); the 5 V wire is in, and the dev-kit is powered by the lap timer and off the laptop (`docs/superpowers/state/decisions.yml:1433@39a3e8a "it'll be powered by the laptimer and disconnected from the laptop"`). While riding, the dev-kit is held in reset or kept off the lap timer's RX0; offload only between sessions (DEC-0312, `docs/superpowers/state/prototype/pending-decisions.yml:126@f97ff2a "devkit-off-rx0 (owner in session"`).
-- Between sessions: unplug the power bank first, then the dev-kit goes on the laptop and powers both boards through the 5 V wire (`docs/superpowers/state/decisions.yml:1433@39a3e8a "I think option a"`; `docs/superpowers/state/decisions.yml:1430@39a3e8a "one 5 V source at a time"`).
+- Field: power bank into the lap timer's USB port (`docs/superpowers/state/decisions.yml:1433@39a3e8a "the power bank will be plugged into the usb port"`); the dev-kit is powered by the lap timer and off the laptop (`docs/superpowers/state/decisions.yml:1433@39a3e8a "it'll be powered by the laptimer and disconnected from the laptop"`; `docs/superpowers/state/decisions.yml:1430@39a3e8a "field: 5 V link in, dev-kit off the laptop"`). DEC-0312, `docs/superpowers/state/prototype/pending-decisions.yml:123@b7cb0fa "the dev-kit stays in reset or off RX0 while riding; offload only between sessions"`.
+- Between sessions: `docs/superpowers/state/decisions.yml:1430@39a3e8a "between sessions: power bank out first, laptop powers both via the dev-kit and the 5 V link (one 5 V source at a time)"`; the owner: `docs/superpowers/state/decisions.yml:1433@39a3e8a "power bank out, laptop powers both"`.
 - Battery pack (Plan 6): not built, and still in scope after the prototype: `docs/superpowers/state/program/sources/wiring-extract.md:24@39a3e8a "does not move the battery pack out of scope"`.
