@@ -8,11 +8,11 @@ Owner ruling (DEC-0135, as-instructed-and-working): `docs/superpowers/state/deci
 
 ## Boards
 
-Lap timer and dev-kit are two ESP32 DevKit boards of the same model: `docs/superpowers/state/program/sources/wiring-extract.md:164@39a3e8a "both boards are the same. its esp-wroom-32d"`. Divergence, no side picked: `docs/hardware/bom.md:9@39a3e8a "ESP32 DevKit V1 (ESP32-WROOM-32, CH340, 4 MB) \| 1"` names a DevKit V1 with CH340 and quantity 1, while the owner names another model and two boards are built. The BOM row text is left as is.
+Two ESP32 boards, the same model: the lap timer carries the IMU, GPS, buttons and display, and the dev-kit is the second board (`docs/superpowers/state/prototype/ledger.md:20@f97ff2a "I have a second esp32(the dev kit)"`; DEC-0311, `docs/superpowers/state/prototype/pending-decisions.yml:117@f97ff2a "two ESP32 boards, the lap timer wired with IMU, GPS, buttons and display"`). The model is the owner's: `docs/superpowers/state/program/sources/wiring-extract.md:164@39a3e8a "both boards are the same. its esp-wroom-32d"`. The BOM row for the boards is in `docs/hardware/bom.md` (row 1).
 
 ## GPS: G28U7FTTL-P (5 V part), on UART2
 
-Supply and EN: `docs/superpowers/state/decisions.yml:1430@39a3e8a "GPS VCC to VIN 5 V"`. The part is a 5 V part: `docs/superpowers/state/program/sources/wiring-extract.md:89@39a3e8a "it's definitley a 5v"`. TX and RX are 3.3 V logic: `docs/superpowers/specs/2026-09-14-lap-timer-design.md:140@39a3e8a "in \| 3.3 V"`.
+Supply and EN: `docs/superpowers/state/decisions.yml:1430@39a3e8a "GPS VCC to VIN 5 V"`. The part is a 5 V part: `docs/superpowers/state/program/sources/wiring-extract.md:89@39a3e8a "it's definitley a 5v"`. The spec requires 3.3 V on both UART2 lines, receive and transmit: `docs/superpowers/specs/2026-09-14-lap-timer-design.md:140@39a3e8a "in \| 3.3 V"` and `docs/superpowers/specs/2026-09-14-lap-timer-design.md:141@39a3e8a "out \| 3.3 V"`.
 
 | Signal | Pin | Source |
 |---|---|---|
@@ -30,7 +30,7 @@ The firmware assigns no GPS UART pins today; the driver is a stub: `components/d
 
 ## IMU: GY-521 (MPU-6050)
 
-VCC 3V3 and GND (GND row: `docs/superpowers/state/program/sources/wiring-extract.md:110@39a3e8a "GY-521 GND"`, covered by the DEC-0135 ruling); AD0, XDA and XCL not connected (AD0 floating gives address 0x68: `docs/superpowers/state/program/sources/wiring-extract.md:114@39a3e8a "AD0 floating gives 0x68"`).
+VCC 3V3 and GND (GND row: `docs/superpowers/state/program/sources/wiring-extract.md:110@39a3e8a "GY-521 GND"`, covered by the DEC-0135 ruling); AD0, XDA and XCL not connected (AD0 floating gives address 0x68: `docs/superpowers/state/program/sources/wiring-extract.md:114@39a3e8a "AD0 floating gives 0x68"`). The IMU's SDA and SCL are on GPIO21 and GPIO22: the owner found both pins (`docs/superpowers/state/prototype/ledger.md:20@f97ff2a "i did find 21 and 22"`; DEC-0311, `docs/superpowers/state/prototype/pending-decisions.yml:117@f97ff2a "IMU SDA 21, SCL 22 as wiring.md states"`).
 
 | Signal | Pin | Source |
 |---|---|---|
@@ -80,6 +80,6 @@ Wiring: dev-kit 17 to lap-timer RX0, dev-kit 16 to lap-timer TX0. No 5 V wire to
 
 ## Power (DEC-0134, DEC-0135)
 
-- Field: power bank into the lap timer's USB port (`docs/superpowers/state/decisions.yml:1433@39a3e8a "the power bank will be plugged into the usb port"`); the 5 V wire is in, and the dev-kit is powered by the lap timer and off the laptop (`docs/superpowers/state/decisions.yml:1433@39a3e8a "it'll be powered by the laptimer and disconnected from the laptop"`).
+- Field: power bank into the lap timer's USB port (`docs/superpowers/state/decisions.yml:1433@39a3e8a "the power bank will be plugged into the usb port"`); the 5 V wire is in, and the dev-kit is powered by the lap timer and off the laptop (`docs/superpowers/state/decisions.yml:1433@39a3e8a "it'll be powered by the laptimer and disconnected from the laptop"`). While riding, the dev-kit is held in reset or kept off the lap timer's RX0; offload only between sessions (DEC-0312, `docs/superpowers/state/prototype/pending-decisions.yml:126@f97ff2a "devkit-off-rx0 (owner in session"`).
 - Between sessions: unplug the power bank first, then the dev-kit goes on the laptop and powers both boards through the 5 V wire (`docs/superpowers/state/decisions.yml:1433@39a3e8a "I think option a"`; `docs/superpowers/state/decisions.yml:1430@39a3e8a "one 5 V source at a time"`).
 - Battery pack (Plan 6): not built, and still in scope after the prototype: `docs/superpowers/state/program/sources/wiring-extract.md:24@39a3e8a "does not move the battery pack out of scope"`.
