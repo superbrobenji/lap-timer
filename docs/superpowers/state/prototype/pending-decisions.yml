@@ -1,0 +1,145 @@
+# Stream B owner questions staged for docs/superpowers/state/decisions.yml (2026-10-30, b1 controller).
+# Not appended there: tools/gates/tests/test_registers.py:54 asserts that decision ids run DEC-0001..DEC-<n> with no
+# gap, so a DEC-0300 row (the stream B range, playbook "Shared files") turns the gate suite red and spec D34 blocks the
+# commit. DEC-0314 at the end asks the owner how to land them; the next sync appends these rows (or renumbered rows)
+# to decisions.yml and records the answers there.
+- id: DEC-0300
+  class: scope
+  question: 'Prototype b1 D30 (investigation imported in docs/superpowers/state/prototype/ledger.md, 2026-10-30 entry): planning-text tasks got tracker rows PT-B1-T1..T3, so gate_review_package demanded a mutation-<id>.txt (task_findings, tools/gates/gate_review_package.py:300-310) and the controller had ad-hoc git-ignored checkers written; each review found wrong content the checker passed (T1 F-2, F-4; T2 F2 twice) and fix rounds added new defects. How do planning-text tasks of the prototype plan finish?'
+  options:
+    - {label: close-with-evidence, cost: 'as DEC-0158 did for PROG-1: no checker, no mutation; each row closes on its tracked review report and landing commit by owner answer; needs a gate_review_package allowance for planning-text rows (stream A file, raised at a sync) or the b1 packages keep a placeholder transcript until then'}
+    - {label: no-register-row, cost: 'planning-text tasks get no register row; gate_dispatch needs a findings "none" allowance for implementer dispatches (stream A file); the three b1 rows are withdrawn by owner answer'}
+    - {label: tracked-test, cost: 'a tracked test_<name> checker per planning-text task with an input-domain table, pinned like code; about 0.5 day per task; the reviewer-invented-mutant churn shrinks but does not end'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0301
+  class: scope
+  question: 'Where do stream B owner-question ids live? Task 1 fix round 1 cited Q-PT-1..3 in the tracked plan while they were defined only in a git-ignored report (re-review F-5).'
+  options:
+    - {label: decisions-only, cost: 'every owner question is a DEC-03xx row here; tracked plan text cites only DEC ids; the b1 plan rows are rewritten to cite DEC-0307/DEC-0308'}
+    - {label: plan-preamble, cost: 'the plan keeps a numbered question list (as DN-1..4 today) mirrored here; two places to keep in step'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0302
+  class: scope
+  question: 'Fix-round shape for stream B text tasks after b1 D30 (fix rounds added uncited facts, a legend resting on a withdrawn ruling and statuses without evidence; scoped re-reviews only saw the fix diff)?'
+  options:
+    - {label: restate-and-sweep, cost: 'every fix brief restates the task''s binding constraints verbatim, and every re-review sweeps each constraint over the whole changed section, not the diff; longer re-reviews'}
+    - {label: citation-gate-first, cost: 'stream B text tasks wait for program tooling check_cites.py (stream A) so citation defects fail a gate; delays b1 until it lands'}
+    - {label: both, cost: 'both costs'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0303
+  class: scope
+  question: 'Prototype scope table DN-1: 21 audit rows (CE-N1, CE-N6, CE-V-2, IO-N5, IO-N8, APP-N3..N8, APP-N10, APP-N11, DC-N3, DC-N4, CE-#118, IO-N17, IO-V1, IO-V4, DRV-N10, F5-5) change what the device times, logs, offloads or exports (the DEC-0134 rule says in) but no Scope (in) item names them. In or out?'
+  options:
+    - {label: all-in, cost: 'b3/b4 gain about 20 host-tested fixes, about 2-3 days against 2026-11-12; APP-N3..N6 and N11 need the #128 design note first'}
+    - {label: all-out, cost: 'the field test can hit silent log loss (APP-N5, APP-N8, APP-N11) and false laps under frame loss (CE-N1)'}
+    - {label: per-row, cost: 'in: APP-N5, APP-N8/F5-5, APP-N11, CE-N1, and DC-N3, DC-N4, DRV-N10 once the b4 offload design shows them on its path; out: the rest; one sync item per row'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0304
+  class: triage
+  question: 'Prototype scope table DN-2: 42 out rows are tracked only in audit 2 section 6 (no issue, no roadmap row), while the plan says an out row stays on the roadmap or as an issue. How are they tracked?'
+  options:
+    - {label: umbrella-issue, cost: 'one GitHub issue listing the ids; minutes'}
+    - {label: issue-per-row, cost: '42 issues'}
+    - {label: roadmap-row, cost: 'one roadmap row under the F5 close-out section, written by a stream B task'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0305
+  class: scope
+  question: 'Prototype scope table DN-3 and Q-PT-4: crash or reset risk while riding (F5-8 #53 task stacks, DRV-N4) is not data content, so the DEC-0134 rule does not settle it; the implementer''s rule sends ride-time crash risk to the owner and init-only or console-only risk out. Confirm or replace the rule and rule the rows.'
+  options:
+    - {label: rule-and-in, cost: 'confirm the rule; F5-8 and DRV-N4 in: a 1 h soak per env on the bench day, then size the stacks, about 0.5 day in b5/b6, plus the DRV-N4 fix'}
+    - {label: rule-and-out, cost: 'confirm the rule; both stay on #53/F5 and the audit; a ride-time crash can end a field session'}
+    - {label: literal-out, cost: 'replace the rule with the literal "out otherwise": all availability risk out'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0306
+  class: scope
+  question: 'Prototype scope table DN-4: F5-12 (#92 bench checklist) runs every remaining box and closes #92; Scope (in) 8 runs one bench day on the audit 2 section 5 rows only. In or out?'
+  options:
+    - {label: in, cost: 'the b6 bench day also runs the remaining #92 boxes; a longer bench day; closing #92 stays the owner''s'}
+    - {label: out, cost: 'b6 runs Scope (in) 8 only; #92 stays with F5'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0307
+  class: hardware
+  question: 'Q-PT-1: will an OTA push ever happen at the track while a session is open? Scope rows APP-N2 and APP-N12 are out only because DEC-0135 names log retrieval and no OTA.'
+  options:
+    - {label: no-ota-at-track, cost: 'APP-N2 and APP-N12 stay out'}
+    - {label: ota-at-track, cost: 'both rows in (b3/b4 fixes, about 0.5 day)'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0308
+  class: scope
+  question: 'Q-PT-2: CE-#11 and H1 (PPS re-acquisition, #11) are out because the stub driver has has_pps = 0 (components/drivers/gps_neo6m/gps_neo6m.c:26) while PPS is wired to GPIO36. Does the b2 real GPS driver use PPS?'
+  options:
+    - {label: no-pps, cost: 'driver keeps has_pps = 0; CE-#11 and H1 stay out'}
+    - {label: pps, cost: 'driver sets has_pps; CE-#11 and H1 come in with b3 tasks'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0309
+  class: hardware
+  question: 'Q-BOM-1: in docs/hardware/bom.md, does "not built" mean not in hand, or in hand but not wired? The controller ruled "not in hand" from plan :31 ("no MOSFET is owned and nothing is wired to GPIO26"); the re-review showed that line fits both readings, so the ruling is withdrawn.'
+  options:
+    - {label: not-in-hand, cost: 'legend: built = wired, owned = in hand not wired, not built = not in hand; rows without in-hand evidence stay unknown'}
+    - {label: not-wired, cost: 'legend: built = wired, not built = not wired whatever is in hand; owned drops or merges; fewer unknown rows'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0310
+  class: hardware
+  question: 'BOM in-hand status that tracked sources do not settle: rows 4a, 5-10, 12-17, 19, 20-31 of docs/hardware/bom.md (several rest on blank cells or on never being mentioned); and should the field power bank get a BOM row?'
+  options:
+    - {label: owner-lists, cost: 'the owner states each row''s status at the sync; one text fix in b1'}
+    - {label: bench-day, cost: 'rows stay unknown until the b6 bench-day inventory'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0311
+  class: hardware
+  question: 'Two hardware divergences, no side picked: (1) bom.md row 1 lists one DevKit V1 (CH340); the owner said "both boards are the same. its esp-wroom-32d", with two boards built; (2) the wiring extract records the owner''s IMU remark "i dont see a 21 or 22" unresolved, while DEC-0135 says all hardware works and is wired correctly (wiring.md follows DEC-0135).'
+  options:
+    - {label: owner-confirms, cost: 'the owner confirms board count and type and the IMU SDA 21 / SCL 22 wiring; bom.md and wiring.md updated in a b1 fix'}
+    - {label: bench-check, cost: 'checked on the b6 bench day; docs stay as written until then'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0312
+  class: hardware
+  question: 'Q-HW-1: in the field the power bank feeds the lap timer USB while the dev-kit drives lap-timer RX0 (wiring extract warning on UART0 contention); this shapes the b4 offload design. Which field arrangement?'
+  options:
+    - {label: devkit-off-rx0, cost: 'the dev-kit stays in reset or off RX0 while riding; offload only between sessions'}
+    - {label: design-in-b4, cost: 'the b4 task text designs UART0 sharing explicitly; more b4 work'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0313
+  class: triage
+  question: 'Two gate defects stream B found in stream A files: (1) gate_review_package task_findings (tools/gates/gate_review_package.py:300-310) demands a mutation transcript for every row a task owns, while the umbrella says "for every finding the task closes" (docs/superpowers/plans/2026-10-17-strict-delivery.md:257); (2) gate_review_package _gates (:173) does not tie gates.txt to the package head, so a stale gates.txt passes. Who owns them?'
+  options:
+    - {label: stream-a-rows, cost: 'stream A registers both under its prefixes and fixes them in its lean close or deferred list'}
+    - {label: issues, cost: 'two GitHub issues outside the plans'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
+- id: DEC-0314
+  class: spec-direction
+  question: 'The playbook gives stream B decision ids DEC-0300..DEC-0499 ("Shared files"), but tools/gates/tests/test_registers.py:54 (a stream A file) requires decision ids DEC-0001..DEC-<n> with no gap, so no stream B question can land in decisions.yml without a red gate suite. Which gives?'
+  options:
+    - {label: test-allows-ranges, cost: 'stream A changes the test (and any gate that assumes contiguity) to accept the two stream ranges; that stream A task runs before stream B records questions'}
+    - {label: contiguous-ids, cost: 'stream B takes the next free id (DEC-0166 on) and the playbook drops the ranges; the drift check range rule changes; concurrent appends from both streams become id clashes at rebase'}
+  asked_at: {sha: "6df7981", by: controller}
+  answer: null
+  answered_at: null
