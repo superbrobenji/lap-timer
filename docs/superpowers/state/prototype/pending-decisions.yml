@@ -150,8 +150,8 @@
     - {label: one-combined-round, cost: 'after DEC-0316..DEC-0324 are answered, one fix round over Tasks 1-3 with two process rules added to every brief: (P-7) an owner answer is quoted and cited by its chosen option line, never paraphrased; (P-8) a sweep may cut or cite a fact, never reword it into a new one; restate-and-sweep re-reviews; about 0.5 day'}
     - {label: investigate-first, cost: 'a read-only opus investigation of the Task 3 findings (where each entered, why the brief did not prevent it) before the round; about 1 h more'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "one-combined-round (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended one-combined-round)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0316
   class: scope
   question: 'Task 1 re-review 2 Q-PT-5: does the plan citation rule (plan :20, every file fact cites a tracked file) cover the replan-written lines :25, :33, :34, :43, :46 (b1248ca), which carry facts with no citation?'
@@ -159,8 +159,8 @@
     - {label: cite-now, cost: 'the next fix round cites them; a small text fix'}
     - {label: stands, cost: 'the replan text stands as written; reviewers stop reporting it'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "cite-now (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended cite-now)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0317
   class: hardware
   question: 'Task 2 re-review 2 Q-HW-2: does the field power bank get a BOM row? DEC-0310 (bench-day) left the existing unknown rows to the b6 inventory; its answer does not mention the power bank, yet bom.md:3 at cd84605 says it does (W2).'
@@ -168,8 +168,8 @@
     - {label: row-now-built, cost: 'add the row now as built, from decisions.yml:1433 ("the power bank will be plugged into the usb port") and the wiring extract'}
     - {label: b6-inventory, cost: 'the b6 bench-day inventory adds it; bom.md:3 is reworded to cite this answer'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "row-now-built (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended row-now-built)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0318
   class: spec-direction
   question: 'GPS ladder 30 s step (b2 Task 4 Step 5): spec 7.5 power-cycles the GPS through board_gps_power, but nothing is wired to GPIO26 (DEC-0147). What does the 30 s step do?'
@@ -178,8 +178,8 @@
     - {label: skip, cost: 'go straight to SYS_GPS_DEAD at 60 s; no recovery attempt'}
     - {label: keep-noop, cost: 'keep the board_gps_power call, which does nothing on this hardware; the roadmap 8.2 exit passes without proving recovery'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "ubx-reset (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended ubx-reset)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0319
   class: spec-direction
   question: 'CE-N1 chord rule (b3 Task 7 Step 2): spec 6.4 lets a chord of absent fixes shorter than 5 s count as a VALID lap. Which rule replaces it?'
@@ -187,8 +187,8 @@
     - {label: missed-fix, cost: 'flag LAP_F_GPS_LOST when the chord spans at least one missed fix at the configured rate (more than 1.5 periods); laps under frame loss are marked, not discarded; spec 6.4 amended'}
     - {label: fixed-threshold, cost: 'a fixed threshold such as 1 s; simpler, lets smaller errors through; spec 6.4 amended'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "missed-fix (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended missed-fix)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0320
   class: hardware
   question: 'Soak env set (b6, DEC-0305 "a 1 h soak per env"): which envs? build.sh refuses moto_m10, moto_m10_sd and moto_neo6m_wifi ("driver not implemented", build.sh:88), so only moto_neo6m and moto_sim (and the car envs, other hardware) build.'
@@ -196,8 +196,8 @@
     - {label: field-image, cost: 'moto_neo6m only: 1 h'}
     - {label: field-and-sim, cost: 'moto_neo6m and moto_sim: 2 h'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "field-image (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended field-image)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0321
   class: scope
   question: 'Task 3 review Q-PT-6: the dev-kit has no room to store offloaded sessions: its data partition is 960 KB (devcontroller/partitions.csv:9) and the black box keeps 832 KB of it (devcontroller/main/main.c:58); a session is about 0.95 MB per hour. Where do offloaded sessions go (b4 offload task)?'
@@ -206,8 +206,8 @@
     - {label: repartition, cost: 'reallocate the dev-kit ota_stage or www partition; loses or shrinks dev-kit OTA staging or the web UI; about 0.5 day'}
     - {label: stream-to-laptop, cost: 'the dev-kit does not store; it streams the session through to the laptop, so the laptop must be connected at offload; changes the shape of DEC-0138 (dev-kit storage guard)'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "stream-to-laptop (owner in session, 2026-10-30: 'recommended for all', then on this question: 'we can store to laptop when we plug the laptop into the dev kit. but we cannot connect a laptop while doing laps': sessions stay on the lap timer while riding and are offloaded through the dev-kit to the laptop only when the laptop is plugged into the dev-kit)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0322
   class: scope
   question: 'Task 3 review Q-PT-7: on-device gate marking (b4) reads the saved track back through the dev-kit relay, which cuts JSON replies at 512 B with rc 0 (DC-N3, out unless on the offload path); the tracks JSON is about 1.1 KB. How is the save checked?'
@@ -216,8 +216,8 @@
     - {label: bring-dc-n3-in, cost: 'DC-N3 comes in for the marking task as well; about 0.25 day'}
     - {label: status-verb, cost: 'a new non-relay read-back (a status line naming the saved venue); about 0.25 day'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "usb-console (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended usb-console)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0323
   class: scope
   question: 'Task 3 review Q-PT-8 (F2): fixes in pipeline.c, logger.c, cmd.c, lt_nvs.c, ui.c and the dev-kit offload.c have no host build, and the strict-delivery spec bars hardware-only bench rows from pinning (spec 2026-10-17 :261). How do those fixes get a production-path pin?'
@@ -226,8 +226,8 @@
     - {label: host-harness, cost: 'a host harness that links the app files; about 0.5 day each in b3 and b4'}
     - {label: spec-change, cost: 'allow a bench row with a runnability transcript to pin; a strict-delivery spec change (stream A)'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "pure-file (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended pure-file)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
 - id: DEC-0324
   class: spec-direction
   question: 'Issue #152: lap-timer spec 8.5 IMU self-test sets FT = 0 when the test code is 0 (:1271) and then divides by FT (:1272). What does the self-test report for that axis (b2 IMU task input row "test code 0")?'
@@ -235,5 +235,5 @@
     - {label: axis-fails, cost: 'FT = 0 means the axis fails (pass_mask bit clear); spec 8.5 amended'}
     - {label: axis-skipped, cost: 'the axis is not tested and reported as such (a separate mask bit); spec 8.5 amended; one more field'}
   asked_at: {sha: "f5f35d6", by: controller}
-  answer: null
-  answered_at: null
+  answer: "axis-fails (owner in session, 2026-10-30: 'recommended for all'; the session then listed its recommendation per question; the session had recommended axis-fails)"
+  answered_at: {sha: "1cbe768", by: superbrobenji}
