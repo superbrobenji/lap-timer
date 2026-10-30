@@ -1,0 +1,11 @@
+--- .superpowers/sdd/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints/b5r15-budget/controller-live.md	2026-10-29 10:23:09
++++ .superpowers/sdd/2026-10-17-strict-delivery-S2-pipeline-gates-checkpoints/b5r15-budget/controller-staged.md	2026-10-29 10:23:09
+@@ -20,7 +20,7 @@
+ 
+ Owner-only decisions. If the work needs a ruling on audit triage, spec-vs-code direction, plan scope, a merge grant, hardware, model or cost policy, closing an issue, or narrowing or widening a finding's class: write the question with at least two options and their cost under "Decision needed" and stop with status NEEDS_DECISION. Never decide it; never assume the likely answer. Hardware: never flash, never open a serial port.
+ 
+-Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains.
++Budget. Obey the dispatch's ## Budget line. At 80 % of either limit stop at the next step boundary, leave nothing half-committed, and report BLOCKED: budget, with what remains. Dispatch a child only when its minutes, sized from the ledger's measured duration of like work, end by your 80 % line (spec D36).
+ 
+ Background work. A job you start in the background is yours until it exits: before you report, every one has finished or been killed, and the report names each with its outcome; a job whose result you replaced or no longer need is killed at once, never left running.
+ 

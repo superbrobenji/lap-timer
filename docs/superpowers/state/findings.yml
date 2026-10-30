@@ -3034,14 +3034,54 @@
     kind: plan
     plan: strict-delivery
     task: program-replan
-  state: planned
+  state: closed
   pin: null
-  ruling: null
-  evidence: []
+  ruling: DEC-0158
+  evidence:
+  - docs/superpowers/state/program/sources/program-docs-review.md
+  - docs/superpowers/state/program/sources/program-docs-rereview2.md
   history:
   - state: open
     sha: ec1c3c5
     by: session
   - state: planned
     sha: ec1c3c5
+    by: session
+  - state: open
+    sha: 667e0d7
+    by: session
+  - state: closed
+    sha: 667e0d7
+    by: session
+- id: PROG-2
+  source: replan final re-review program-docs-rereview2.md (unrelated finding)
+  severity: LOW
+  class: 'tracked decisions.yml text cites git-ignored workspace files whose imported copies under docs/superpowers/state/program/sources/ have no MANIFEST citation-map row (decisions.yml :1428 wiring-extract.md, :1482 tracks-research.md, :1518 program-docs-review.md); DEC-0163 mapped only :538'
+  siblings: []
+  cites:
+  - file: docs/superpowers/state/decisions.yml
+    lines: '1428'
+    sha: 667e0d7
+  - file: docs/superpowers/state/decisions.yml
+    lines: '1482'
+    sha: 667e0d7
+  - file: docs/superpowers/state/decisions.yml
+    lines: '1518'
+    sha: 667e0d7
+  repro: 'grep -c "decisions.yml:1428\|decisions.yml:1482\|decisions.yml:1518" docs/superpowers/state/program/sources/MANIFEST.md -> 0'
+  owner:
+    kind: plan
+    plan: strict-delivery
+    task: program-replan
+  state: closed
+  pin: null
+  ruling: DEC-0165
+  evidence:
+  - docs/superpowers/state/program/sources/MANIFEST.md
+  history:
+  - state: open
+    sha: 667e0d7
+    by: session
+  - state: closed
+    sha: 667e0d7
     by: session

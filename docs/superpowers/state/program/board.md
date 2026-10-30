@@ -1,0 +1,13 @@
+# Stream board (playbook `docs/superpowers/playbooks/two-streams.md`)
+
+Updated by sync sessions; each block's checkpoint commit edits only its own stream's row. A citation of a line in a file tracked at 667e0d7 has the form `path:line@sha "quote"`. A file the replan commit imports under `docs/superpowers/state/program/sources/` is named by path and section, because that commit cannot cite its own sha; program tooling Task 3 Step 4 rewrites each into `path:line@sha "quote"`. Plan and handoff paths name files to read; they are not citations. `tools/program/check_cites.py` checks the form once the program tooling block lands.
+
+| stream | block | branch / worktree | next task | estimate / used | status | blockers | pending owner decisions | delivers |
+|---|---|---|---|---|---|---|---|---|
+| A strict delivery | program tooling (umbrella "Replan 2026-10-29", step 1; then step 2, the b5 lean close) | `block/program-tooling` from the b5 tip, PR base `block/strict-delivery-b5`, grant DEC-0001 (DEC-0148, DEC-0153) / main checkout | Task 1 spike + read lists + loader + index (`docs/superpowers/plans/2026-10-29-program-tooling.md`) | 2 days / 0 | ready | none | the sixteen D33 sweep questions, deferred (`docs/superpowers/state/decisions.yml:1028@667e0d7 "- id: DEC-0106"` to `docs/superpowers/state/decisions.yml:1303@667e0d7 "answered_at: null"`); round-17 owner question on the docs reviewer's commit-signing override in a scratch clone (the incident: `docs/superpowers/state/decisions.yml:1500@667e0d7 "a reviewer turned commit signing off with a git config override"`; DEC-0143 sets the rule; the open question: `docs/superpowers/state/program/sources/b5r17-subcontroller-report.md` section "denials") | DEC-0133 context contract, board, drift check; DEC-0146 index |
+| B prototype | b1 (scope table, wiring doc, tasks in full) | `block/prototype-b1` (created by the first stream B session from the b5 tip; blocks accumulate on stream B's branch until b5 merges and a sync rebases it, DEC-0154) / `../lap-timer-worktrees/prototype` | b1 Task 1 (`docs/superpowers/plans/2026-10-29-prototype-field-ready.md`) | 0.5 day / 0 | ready | none | the Killarney Full Reverse map and timing-loop position (owner may ask WPMC or ZA Timing) | DEC-0134 field-test readiness |
+
+## Sync log
+| date | by | what changed |
+|---|---|---|
+| 2026-10-29 | session | board created at the replan (DEC-0132..DEC-0157) |

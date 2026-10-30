@@ -1,0 +1,9 @@
+- id: DEC-0122
+  class: model-policy
+  question: "b5 round 14 ran 237 of 180 minutes: the controller dispatched children (budget minutes=60, measured 88-96 min) after the point where they could finish before its own 80 % line, and the 80 % stop is not enforced mechanically. Add a budget-fit rule for dispatches?"
+  options:
+    - {label: budget-fit-rule, cost: "spec D36 + one sentence in the controller strict block: a child is dispatched only when its minutes budget ends by the controller's 80 % line, sized from the ledger's harness-measured duration of like work; rounds carry less work per round; one reviewed text round and an install"}
+    - {label: no-rule, cost: "keep D35 as is; overruns stay a reported process defect each round"}
+  asked_at: {sha: "6a7b2f9", by: session}
+  answer: "budget-fit-rule (owner in session, 2026-10-29: 'go, plus the budget rule'; the session had proposed the rule)"
+  answered_at: {sha: "6a7b2f9", by: superbrobenji}
