@@ -42,8 +42,10 @@ import yaml  # noqa: E402
 from tools.gates.lib import GateError, gate_args, load_yaml, repo_root  # noqa: E402
 
 MAX_LINES = 2000        # the Read tool's per-call line limit
-MAX_BYTES = 64000       # largest range one Read returns whole in the strictest session measured (spike 2026-10-30)
-MAX_OUTPUT = 16384      # the loader's whole stdout; below the Bash tool's 25,000-byte limit
+MAX_BYTES = 16000       # a range of at most MAX_LINES lines and this many bytes stays under the Read tool's 25,000-token limit
+#   (measured 2026-10-30, plan program-tooling Global Constraints: worst case 1.0 token per byte of any content incl. line prefixes,
+#   so 16,000 bytes is at most about 16,000 tokens, with margin for the 1.3-token line-number prefix of up to 2000 lines)
+MAX_OUTPUT = 16384      # the loader's stdout must be LESS than this (16 KB); below the Bash tool's 25,000-byte limit
 CONTEXT_YML = "docs/superpowers/state/program/context.yml"
 HANDOFFS = {"stream-a-block": "docs/superpowers/state/strict-delivery/handoff.md",
             "stream-b-block": "docs/superpowers/state/prototype/handoff.md"}
@@ -71,9 +73,25 @@ def git_bytes(root: str, *args) -> "subprocess.CompletedProcess":
     return subprocess.run(["git", "-C", root, *args], capture_output=True, check=False)
 
 
-def safe_relpath(path) -> bool:
-    return (isinstance(path, str) and path != "" and "\0" not in path and not path.startswith("/")
-            and "\\" not in path and os.path.normpath(path) == path and ".." not in path.split("/"))
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def show(text) -> str:
+    """text with every control character written as \\xNN, so a FAIL id is always one line."""
+    return CONTROL_RE.sub(lambda m: "\\x%02x" % ord(m.group(0)), str(text))
+
+
+def path_problem(path):
+    """Why `path` is outside the whitelist (relative, no control character, not under .git/), or None."""
+    if not isinstance(path, str) or path == "":
+        return "path is missing"
+    if CONTROL_RE.search(path):
+        return "path holds a control character"
+    if path.startswith("/") or "\\" in path or os.path.normpath(path) != path or ".." in path.split("/"):
+        return "path is absolute, has '..' or a backslash, or is not normalised"
+    if path.split("/")[0] == ".git":
+        return "path is under .git/"
+    return None
 
 
 def safe_ref(ref) -> bool:
@@ -85,22 +103,47 @@ def ref_copy_path(ref: str, path: str) -> str:
     return os.path.join(CONTEXT_DIR, "refs", tag, path)
 
 
+def tree_mode(root: str, rev: str, path: str):
+    """The git mode of `path` in tree `rev` ('100644', '120000', '040000', ...), or None when absent."""
+    p = git_bytes(root, "ls-tree", "-z", rev, "--", path)
+    if p.returncode != 0:
+        return None
+    for row in p.stdout.split(b"\0"):
+        meta, _, name = row.partition(b"\t")
+        if name.decode("utf-8", "replace") == path:
+            return meta.split(b" ")[0].decode()
+    return None
+
+
 def read_bytes(root: str, e: dict, ident: str):
-    """(path-to-read, bytes) for an entry; a Failure when the path, the ref or the path at the ref is absent."""
+    """(path-to-read, bytes) for an entry: a regular file tracked at HEAD (at the ref), no symlink component."""
     path, ref = e["path"], e.get("ref")
     if ref is None:
+        parts = path.split("/")
+        for i in range(len(parts)):
+            if os.path.islink(os.path.join(root, *parts[:i + 1])):
+                raise Failure(ident, f"symlink in path ({'/'.join(parts[:i + 1])})")
         full = os.path.join(root, path)
         if not os.path.isfile(full):
             raise Failure(ident, "missing path (not a file under the root)")
-        if not os.path.realpath(full).startswith(os.path.realpath(root) + os.sep):
-            raise Failure(ident, "path resolves outside the root")
+        if tree_mode(root, "HEAD", path) not in ("100644", "100755"):
+            raise Failure(ident, "not a regular file tracked at HEAD")
         with open(full, "rb") as fh:
             return path, fh.read()
     if not safe_ref(ref):
-        raise Failure(ident, f"unsafe ref {ref!r}")
-    if git_bytes(root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}").returncode != 0:
+        raise Failure(ident, f"unsafe ref {show(ref)!r}")
+    rev = git_bytes(root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}")
+    if rev.returncode != 0:
         raise Failure(ident, f"missing ref {ref}")
-    shown = git_bytes(root, "show", f"{ref}:{path}")
+    sha = rev.stdout.decode().strip()
+    mode = tree_mode(root, sha, path)
+    if mode is None:
+        raise Failure(ident, f"missing path at ref {ref}")
+    if mode == "120000":
+        raise Failure(ident, f"symlink at ref {ref}")
+    if mode not in ("100644", "100755"):
+        raise Failure(ident, f"not a regular file at ref {ref}")
+    shown = git_bytes(root, "show", f"{sha}:{path}")
     if shown.returncode != 0:
         raise Failure(ident, f"missing path at ref {ref}")
     rel = ref_copy_path(ref, path)
@@ -115,15 +158,18 @@ def check_entry(root: str, e) -> tuple:
     """(path-to-read, lines, blob, why) for one entry, or a Failure."""
     if not isinstance(e, dict):
         raise Failure("entry", f"entry is not a mapping: {e!r}")
-    ident = e["path"] if isinstance(e.get("path"), str) and e["path"] else "entry"
-    if not safe_relpath(e.get("path")):
-        raise Failure(ident, f"path is missing or unsafe (absolute, '..', backslash): {e.get('path')!r}")
+    ident = show(e["path"]) if isinstance(e.get("path"), str) and e["path"] else "entry"
+    problem = path_problem(e.get("path"))
+    if problem:
+        raise Failure(ident, problem)
     unknown = sorted(set(e) - ENTRY_KEYS)
     if unknown:
         raise Failure(ident, f"unknown key(s) {', '.join(map(str, unknown))}")
     why = e.get("why")
     if not isinstance(why, str) or not why.strip():
         raise Failure(ident, "why is missing or empty")
+    if CONTROL_RE.search(why.replace("\n", " ").replace("\t", " ").replace("\r", " ")):
+        raise Failure(ident, "why holds a control character")
     if "ref" in e and not isinstance(e["ref"], str):
         raise Failure(ident, f"ref is not a string: {e['ref']!r}")
     lines = e.get("lines")
@@ -134,6 +180,8 @@ def check_entry(root: str, e) -> tuple:
     if b - a + 1 > MAX_LINES:
         raise Failure(ident, f"range {a}-{b} is over {MAX_LINES} lines")
     read_path, data = read_bytes(root, e, ident)
+    if not data:
+        raise Failure(ident, "empty file: nothing a Read can cover")
     rows = data.split(b"\n")           # the Read tool counts the empty line after a final newline
     if b > len(rows):
         raise Failure(ident, f"missing range: {a}-{b} is past the end of the file ({len(rows)} lines)")
@@ -213,8 +261,8 @@ def load(root: str, kind: str) -> tuple:
     if not fails and not SESSION_RE.fullmatch(session):
         fail("session", "CLAUDE_CODE_SESSION_ID is unset or not a session id: the expected list has no key")
     text = "".join(f"{p} lines {l} blob {s} -- {w}\n" for p, l, s, w in rows)
-    if not fails and len(text.encode()) > MAX_OUTPUT:
-        fail("output", f"the list prints {len(text.encode())} bytes, over {MAX_OUTPUT} bytes")
+    if not fails and len(text.encode()) >= MAX_OUTPUT:
+        fail("output", f"the list prints {len(text.encode())} bytes, {MAX_OUTPUT} bytes or more")
     if fails:
         if SESSION_RE.fullmatch(session):     # fail closed: a failed load leaves no earlier list standing
             with contextlib.suppress(FileNotFoundError):

@@ -1,7 +1,7 @@
 # Read lists (program tooling Task 1, DEC-0133). One list per session kind and per dispatch role (a key of
 # `models` in tools/gates/config.yml). `python3 tools/program/load_context.py <name>` prints a list and writes the
 # session's expected list; docs/superpowers/playbooks/two-streams.md "Context contract" is the contract.
-# An entry: path, lines "a-b" (at most 2000 lines and 64000 bytes: split a longer section into several entries),
+# An entry: path, lines "a-b" (at most 2000 lines and 16000 bytes: split a longer section into several entries),
 # why, optional ref (a git ref; the loader reads `git show <ref>:<path>`). A stream kind also gets the
 # `context_files` list of its handoff front matter. Changed only through the pipeline.
 lists:
@@ -51,10 +51,15 @@ lists:
   - *id001
   - *id002
   - *id003
-  - &id006
-    path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
-    lines: 1-308
-    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   implementer:
   - *id001
@@ -67,32 +72,80 @@ lists:
   task_reviewer:
   - *id001
   - *id002
-  - *id006
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   final_reviewer:
   - *id001
   - *id002
-  - *id006
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   final_verifier:
   - *id001
   - *id002
-  - *id006
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   exception_reviewer:
   - *id001
   - *id002
-  - *id006
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   audit_reviewer:
   - *id001
   - *id002
-  - *id006
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   audit_verifier:
   - *id001
   - *id002
-  - *id006
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 1-52
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 1 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 53-211
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 2 of 3)'
+  - path: docs/superpowers/specs/2026-10-17-strict-delivery-design.md
+    lines: 212-308
+    why: 'strict-delivery spec: verification method, roles, input-domain rules (D24-D28), commit gate (D34) (part 3 of 3)'
   - *id005
   investigator:
   - *id001

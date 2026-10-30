@@ -60,11 +60,13 @@ class LoadContext(unittest.TestCase):
     def put(self, rel, text):
         gf.write(self.root, rel, text)
 
-    def run_loader(self, kind=KIND, entries=None, raw=None, argv=None):
+    def run_loader(self, kind=KIND, entries=None, raw=None, argv=None, commit=True):
         if raw is not None:
             self.put(CTX, raw)
         elif entries is not None:
             self.put(CTX, ctx(entries, kind))
+        if commit and gf.git(self.root, "status", "--porcelain"):      # the loader reads files tracked at HEAD
+            gf.commit_all(self.root, "fixture")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             rc = load_context.main(["--root", self.root, *(argv if argv is not None else [kind])])
@@ -94,16 +96,16 @@ class LoadContext(unittest.TestCase):
             "kind": KIND, "session": SID,
             "entries": [{"path": "docs/a.md", "lines": "5-12", "blob": blob(data)}]})
 
-    def test_limits_are_inclusive_2000_lines_and_64000_bytes(self):
-        self.put("docs/two-k.md", lines_file(2000))          # 2000 lines + the empty line after the final \n
+    def test_limits_are_inclusive_2000_lines_and_16000_bytes(self):
+        self.put("docs/two-k.md", "x\n" * 2000)          # 2000 lines + the empty line after the final \n
         tail = ["tail"]
-        at_cap = ["y" * 99] * 639 + ["y" * 100] + tail          # lines 1-640 joined: 639*99 + 100 + 639 = 64,000 bytes
+        at_cap = ["y" * 99] * 159 + ["y" * 100] + tail          # lines 1-160 joined: 159*99 + 100 + 159 = 16,000 bytes
         self.put("docs/edge.md", "\n".join(at_cap) + "\n")
-        self.put("docs/over.md", "\n".join(["y" * 99] * 639 + ["y" * 101] + tail) + "\n")     # 64,001 bytes
-        rc, out = self.run_loader(entries=[entry("docs/two-k.md", "1-2000"), entry("docs/edge.md", "1-640")])
+        self.put("docs/over.md", "\n".join(["y" * 99] * 159 + ["y" * 101] + tail) + "\n")     # 16,001 bytes
+        rc, out = self.run_loader(entries=[entry("docs/two-k.md", "1-2000"), entry("docs/edge.md", "1-160")])
         self.assertEqual(rc, 0, out)
-        rc, out = self.run_loader(entries=[entry("docs/over.md", "1-640")])
-        self.assertFailed(rc, out, f"context.{KIND}.docs/over.md", "over 64000 bytes")
+        rc, out = self.run_loader(entries=[entry("docs/over.md", "1-160")])
+        self.assertFailed(rc, out, f"context.{KIND}.docs/over.md", "over 16000 bytes")
 
     def test_read_counts_the_empty_line_after_a_final_newline(self):
         self.put("docs/a.md", "one\ntwo\n")                  # the Read tool reports totalLines 3 for this
@@ -134,16 +136,15 @@ class LoadContext(unittest.TestCase):
 
     def test_range_within_2000_lines_but_over_the_byte_cap(self):
         self.put("docs/dense.md", lines_file(1500, width=60))      # 1500 lines of ~75 bytes: about 112 KB
-        rc, out = self.run_loader(entries=[entry("docs/dense.md", "1-1500")])
-        self.assertFailed(rc, out, f"context.{KIND}.docs/dense.md", "over 64000 bytes")
-        rc, out = self.run_loader(entries=[entry("docs/dense.md", "1-1000")])
-        self.assertFailed(rc, out, f"context.{KIND}.docs/dense.md", "over 64000 bytes")
-        rc, out = self.run_loader(entries=[entry("docs/dense.md", "1-500")])
+        for rng in ("1-1500", "1-300"):
+            rc, out = self.run_loader(entries=[entry("docs/dense.md", rng)])
+            self.assertFailed(rc, out, f"context.{KIND}.docs/dense.md", "over 16000 bytes")
+        rc, out = self.run_loader(entries=[entry("docs/dense.md", "1-200")])
         self.assertEqual(rc, 0, out)
 
     def test_byte_cap_is_per_range_not_per_file(self):
         self.put("docs/dense.md", lines_file(1500, width=60))
-        rc, out = self.run_loader(entries=[entry("docs/dense.md", "1-700"), entry("docs/dense.md", "701-1400")])
+        rc, out = self.run_loader(entries=[entry("docs/dense.md", "1-200"), entry("docs/dense.md", "201-400")])
         self.assertEqual(rc, 0, out)
 
     def test_entry_with_a_ref_is_copied_and_the_copy_is_listed(self):
@@ -179,12 +180,6 @@ class LoadContext(unittest.TestCase):
                 rc, out = self.run_loader(entries=[e])
                 self.assertFailed(rc, out, f"context.{KIND}.{e['path']}")
 
-    def test_symlink_out_of_the_root_is_refused(self):
-        os.makedirs(os.path.join(self.root, "docs"), exist_ok=True)
-        os.symlink("/etc/hosts", os.path.join(self.root, "docs", "link.md"))
-        rc, out = self.run_loader(entries=[entry("docs/link.md", "1-1")])
-        self.assertFailed(rc, out, f"context.{KIND}.docs/link.md", "outside the root")
-
     def test_output_over_16_kb(self):
         self.put("docs/a.md", lines_file(10))
         why = "w" * 400
@@ -192,6 +187,20 @@ class LoadContext(unittest.TestCase):
         self.assertFailed(rc, out, f"context.{KIND}.output", "16384")
         rc, out = self.run_loader(entries=[entry("docs/a.md", "1-1", why)] * 20)        # about 10 KB
         self.assertEqual(rc, 0, out)
+
+    def test_output_boundary_16383_passes_and_16384_fails(self):
+        self.put("docs/a.md", lines_file(10))
+        line = len(f"docs/a.md lines 1-1 blob {'0' * 40} -- \n")
+        for size, want in ((16383, 0), (16384, 1)):
+            with self.subTest(size=size):
+                fixed = size - 3 * line                         # three entries; the last why takes the remainder
+                whys = ["w" * 4000, "w" * 4000, "w" * (fixed - 8000)]
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-1", w) for w in whys])
+                if want:
+                    self.assertFailed(rc, out, f"context.{KIND}.output", "16384")
+                else:
+                    self.assertEqual(rc, 0, out)
+                    self.assertEqual(len(out.encode()), size)
 
     def test_all_failures_are_listed_not_only_the_first(self):
         self.put("docs/a.md", lines_file(3))
@@ -288,6 +297,79 @@ class LoadContext(unittest.TestCase):
                 rc, out = self.run_loader(entries=[entry("docs/a.md", "1-5")])
                 self.assertEqual(rc, 1, out)
                 self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.{re.escape(A_HANDOFF)}")
+
+    # -- the path whitelist (D28): a regular file tracked at HEAD (at the ref), no symlink component, no control char
+    def test_path_with_a_control_character_is_refused(self):
+        for bad in ("docs/a\nfake.md", "docs/a\tb.md", "docs/a\x01.md", "docs/a\x7f.md", "docs/a\r.md"):
+            with self.subTest(path=repr(bad)):
+                rc, out = self.run_loader(entries=[entry(bad, "1-1")])
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(len(out.splitlines()), 1, out)          # never an injected extra line
+                self.assertRegex(out, r"(?m)^FAIL context\." + KIND + r"\.[^\n]*: ")
+                self.assertIn("control character", out)
+
+    def test_path_under_dot_git_is_refused(self):
+        rc, out = self.run_loader(entries=[entry(".git/HEAD", "1-1")])
+        self.assertFailed(rc, out, f"context.{KIND}..git/HEAD", ".git")
+
+    def test_untracked_file_is_refused(self):
+        self.put("docs/new.md", lines_file(3))
+        rc, out = self.run_loader(entries=[entry("docs/new.md", "1-3")], commit=False)
+        self.assertFailed(rc, out, f"context.{KIND}.docs/new.md", "not a regular file tracked at HEAD")
+
+    def test_symlinked_file_and_symlinked_directory_component_are_refused(self):
+        self.put("real/a.md", lines_file(3))
+        os.symlink("real/a.md", os.path.join(self.root, "link.md"))
+        os.symlink("real", os.path.join(self.root, "linkdir"))
+        for path in ("link.md", "linkdir/a.md"):
+            with self.subTest(path=path):
+                rc, out = self.run_loader(entries=[entry(path, "1-3")])
+                self.assertFailed(rc, out, f"context.{KIND}.{path}", "symlink")
+
+    def test_directory_is_refused(self):
+        self.put("docs/sub/a.md", lines_file(3))
+        rc, out = self.run_loader(entries=[entry("docs/sub", "1-1")])
+        self.assertEqual(rc, 1, out)
+        self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.docs/sub: ")
+
+    def test_file_at_a_ref_must_be_a_tracked_regular_file(self):
+        gf.git(self.root, "checkout", "-q", "-b", "other")
+        self.put("real/a.md", lines_file(3))
+        os.symlink("real/a.md", os.path.join(self.root, "link.md"))
+        gf.commit_all(self.root, "other")
+        gf.git(self.root, "checkout", "-q", "main")
+        for path, text in (("link.md", "symlink"), ("real", "not a regular file"), ("real/nope.md", "missing path at ref")):
+            with self.subTest(path=path):
+                rc, out = self.run_loader(entries=[entry(path, "1-1", ref="other")])
+                self.assertFailed(rc, out, f"context.{KIND}.{path}", text)
+
+    def test_handoff_context_files_go_through_the_same_whitelist(self):
+        self.put("docs/a.md", lines_file(5))
+        self.put("docs/new.md", lines_file(5))
+        self.put(A_HANDOFF, front([entry("docs/new.md", "1-5")]))
+        gf.commit_all(self.root, "handoff")
+        os.unlink(os.path.join(self.root, "docs/new.md"))
+        self.put("docs/new.md", lines_file(5))        # tracked, so fine
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-5")])
+        self.assertEqual(rc, 0, out)
+        self.put(A_HANDOFF, front([entry("docs/ghost.md", "1-5"), entry("docs/x\ny.md", "1-1")]))
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-5")])
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(out.splitlines()), 2, out)
+        self.assertIn("docs/ghost.md", out)
+        self.assertIn("control character", out)
+
+    def test_why_with_a_control_character_is_refused(self):
+        self.put("docs/a.md", lines_file(3))
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", "ok\x01bad")])
+        self.assertFailed(rc, out, f"context.{KIND}.docs/a.md", "control character")
+
+    def test_empty_file_is_refused(self):
+        self.put("docs/empty.md", "")
+        for lines in ("1-1", "1-2"):
+            with self.subTest(lines=lines):
+                rc, out = self.run_loader(entries=[entry("docs/empty.md", lines)])
+                self.assertFailed(rc, out, f"context.{KIND}.docs/empty.md", "empty file")
 
     # -- the committed read lists ------------------------------------------------------------
     def test_committed_context_yml_has_a_list_for_every_kind_and_dispatch_role(self):

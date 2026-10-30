@@ -13,7 +13,7 @@ comm -3 <(git ls-files '*.md' | sort) <(grep -o '^| `[^`]*`' docs/INDEX.md | sed
 | `.github/PULL_REQUEST_TEMPLATE.md` | Session -- Roadmap session: <!-- e.g. 1.2 --> | unassigned |
 | `CLAUDE.md` | Project instructions (strict delivery) | A |
 | `README.md` | lap-timer | B |
-| `docs/INDEX.md` | Index of every tracked document: path, purpose, owning stream | A |
+| `docs/INDEX.md` | Document index | A |
 | `docs/bench/next-bench-day.md` | Next bench day — checklist (opened 2026-10-05) | B |
 | `docs/display-glyphs.md` | Display glyphs — what each icon in the status strip means | B |
 | `docs/hardware/bom.md` | Prototype bill of materials | B |
