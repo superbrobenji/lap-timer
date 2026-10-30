@@ -1,0 +1,5 @@
+finding: PROG-T1
+test: test_load_context::test_range_within_2000_lines_but_over_the_byte_cap
+step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_load_context.LoadContext.test_range_within_2000_lines_but_over_the_byte_cap -> PASS
+step 2 (fix reverted: perl -pi -e 's/^    if size > MAX_BYTES:/    if False:/' tools/program/load_context.py removes the loader's byte-cap check): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_load_context.LoadContext.test_range_within_2000_lines_but_over_the_byte_cap -> FAIL
+step 3 (fix restored: perl -pi -e 's/^    if False:/    if size > MAX_BYTES:/' tools/program/load_context.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_load_context.LoadContext.test_range_within_2000_lines_but_over_the_byte_cap -> PASS
