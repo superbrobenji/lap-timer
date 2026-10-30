@@ -3160,3 +3160,24 @@
   - state: planned
     sha: 39a3e8aa45fb4c8e5ea654f81b33b6c3c9b15088
     by: controller
+- id: PROG-U1
+  source: review
+  severity: LOW
+  class: 'gate_dispatch check_config sorts and joins config.yml models keys without a type check, so a non-string key (7: opus) raises an uncaught TypeError instead of a named dispatch.config.models FAIL (present since b5, not caused by program tooling)'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: 319-321
+    sha: cf824cd
+  repro: 'conf["models"][7]="opus"; gate_dispatch.check_config(conf, Result("dispatch")) -> TypeError: sequence item 0: expected str instance, int found'
+  owner:
+    kind: issue
+    number: 150
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: cf824cd
+    by: session
