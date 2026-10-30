@@ -302,11 +302,12 @@ class LoadContext(unittest.TestCase):
     def test_path_with_a_control_character_is_refused(self):
         for bad in ("docs/a\nfake.md", "docs/a\tb.md", "docs/a\x01.md", "docs/a\x7f.md", "docs/a\r.md"):
             with self.subTest(path=repr(bad)):
+                self.put(bad, lines_file(3))                      # tracked, so only the printable check can refuse it
                 rc, out = self.run_loader(entries=[entry(bad, "1-1")])
                 self.assertEqual(rc, 1, out)
                 self.assertEqual(len(out.splitlines()), 1, out)          # never an injected extra line
-                self.assertRegex(out, r"(?m)^FAIL context\." + KIND + r"\.[^\n]*: ")
-                self.assertIn("non-printable character", out)
+                self.assertRegex(out, r"(?m)^FAIL context\." + KIND + r"\.[^\n]*: path holds a non-printable character")
+                self.assertIn(bad.encode("unicode_escape").decode(), out)
 
     def test_path_under_dot_git_is_refused(self):
         rc, out = self.run_loader(entries=[entry(".git/HEAD", "1-1")])
@@ -361,25 +362,63 @@ class LoadContext(unittest.TestCase):
 
     NONPRINTABLE = ("\u0085", "\u2028", "\u2029", "\u202e", "\t", "\x9b", "\u200b", "\ufeff")
 
+    def assertOneEscapedLine(self, rc, out, reason):
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(out.splitlines()), 1, ascii(out))                  # no injected line
+        self.assertRegex(out, rf"^FAIL context\.{KIND}\.[^\n]*: ")
+        self.assertIn(reason, out)
+        self.assertTrue(out.endswith("\n") and out[:-1].isprintable(), ascii(out))     # no raw non-printable character
+        self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED, SID, KIND + ".json")))
+
     def test_any_nonprintable_character_in_path_why_ref_or_lines_is_refused(self):
         self.put("docs/a.md", lines_file(3))
         for ch in self.NONPRINTABLE:
-            for field in ("path", "why", "ref", "lines"):
-                with self.subTest(char=ascii(ch), field=field):
-                    e = entry("docs/a.md", "1-3")
-                    if field == "path":
-                        e["path"] = f"docs/a{ch}.md"
-                    elif field == "why":
-                        e["why"] = f"ok{ch}bad"
-                    elif field == "ref":
-                        e["ref"] = f"HEAD{ch}"
-                    else:
-                        e["lines"] = f"1-3{ch}"
-                    rc, out = self.run_loader(entries=[e])
-                    self.assertEqual(rc, 1, out)
-                    self.assertEqual(len(out.splitlines()), 1, ascii(out))      # no injected line
-                    self.assertRegex(out, rf"^FAIL context\.{KIND}\.[^\n]*: ")
-                    self.assertTrue(out.isprintable() or out.endswith("\n") and out[:-1].isprintable(), ascii(out))
+            with self.subTest(char=ascii(ch), field="path"):
+                bad = f"docs/a{ch}.md"
+                self.put(bad, lines_file(3))                   # created and tracked: only the printable check can refuse it
+                rc, out = self.run_loader(entries=[entry(bad, "1-3")])
+                self.assertOneEscapedLine(rc, out, "path holds a non-printable character")
+            with self.subTest(char=ascii(ch), field="why"):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", f"ok{ch}bad")])
+                self.assertOneEscapedLine(rc, out, "why holds a non-printable character")
+            with self.subTest(char=ascii(ch), field="ref"):
+                name = f"b{ch}x"
+                try:
+                    gf.git(self.root, "branch", name, "HEAD")      # a ref that exists, so only the ref check can refuse it
+                except AssertionError:
+                    pass                                           # git itself refuses this name (tab)
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", ref=name)])
+                self.assertOneEscapedLine(rc, out, "unsafe ref")
+            with self.subTest(char=ascii(ch), field="lines"):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", f"1-3{ch}")])
+                self.assertOneEscapedLine(rc, out, "missing range")
+
+    def test_every_fail_line_is_escaped_and_one_line_at_every_level(self):
+        ch = "\u202e"
+        self.put("docs/a.md", lines_file(3))
+        cases = {
+            "invalid context.yml": dict(raw=f"lists: [\n  {ch}: x\n  {ch} bad: [\n"),
+            "invalid context.yml, control char": dict(raw=f"lists: {{a: \"x{ch}\ty\"\n"),
+            "lists not a mapping": dict(raw=f"lists: 3{ch}\n"),
+            "kind missing": dict(kind="sync", raw=ctx([entry("docs/a.md", "1-1")])),
+            "unknown key": dict(entries=[dict(entry("docs/a.md", "1-1"), **{f"k{ch}": 1})]),
+        }
+        for name, kw in cases.items():
+            with self.subTest(name):
+                rc, out = self.run_loader(**kw)
+                self.assertEqual(rc, 1, out)
+                self.assertGreaterEqual(len(out.splitlines()), 1)
+                self.assertEqual(len(out.splitlines()), 1, ascii(out))
+                self.assertRegex(out, r"^FAIL context\.[a-z-]+\.[^\n]*: ")
+                self.assertTrue(out.endswith("\n") and out[:-1].isprintable(), ascii(out))
+        for name, front_text in (("handoff yaml error", f"---\nplan: [\n{ch}x: y\n---\nbody\n"),
+                                 ("handoff yaml error, line separator", f"---\nplan: \"a\u2028b\u0085{ch}\n---\nbody\n")):
+            with self.subTest(name):
+                self.put(A_HANDOFF, front_text)
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(len(out.splitlines()), 1, ascii(out))
+                self.assertTrue(out.endswith("\n") and out[:-1].isprintable(), ascii(out))
 
     def test_printable_non_ascii_path_still_loads(self):
         self.put("docs/\u00fcn\u00ef\u4e2d.md", lines_file(3))
@@ -398,6 +437,153 @@ class LoadContext(unittest.TestCase):
             with self.subTest(lines=lines):
                 rc, out = self.run_loader(entries=[entry("docs/empty.md", lines)])
                 self.assertFailed(rc, out, f"context.{KIND}.docs/empty.md", "empty file")
+
+    # -- malformed structure at any level is a named FAIL, never an exception (D28) ---------------------
+    GOOD = "{path: docs/a.md, lines: 1-3, why: w}"
+
+    def assertNamedOneLineFail(self, rc, out):
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(len(out.splitlines()), 1, ascii(out))
+        self.assertRegex(out, rf"^FAIL context\.{KIND}\.[^\n]*: ")
+        self.assertNotIn("Traceback", out)
+        self.assertTrue(out[:-1].isprintable(), ascii(out))
+
+    def test_malformed_context_yml_structure_is_a_named_fail_at_every_level(self):
+        self.put("docs/a.md", lines_file(3))
+        k, g = KIND, self.GOOD
+        raws = {
+            "mixed str and int keys in an entry": f"lists: {{{k}: [{{path: docs/a.md, lines: 1-3, why: w, 1: x, b: y}}]}}\n",
+            "null key in an entry": f"lists: {{{k}: [{{path: docs/a.md, lines: 1-3, why: w, ~: y, b: z}}]}}\n",
+            "only an int key in an entry": f"lists: {{{k}: [{{path: docs/a.md, lines: 1-3, why: w, 1: x}}]}}\n",
+            "bool key in an entry": f"lists: {{{k}: [{{path: docs/a.md, lines: 1-3, why: w, true: x}}]}}\n",
+            "int key in lists": f"lists: {{1: [{g}], {k}: [{g}]}}\n",
+            "null key in lists": f"lists: {{~: [{g}], {k}: [{g}]}}\n",
+            "int top-level key": f"1: x\nlists: {{{k}: [{g}]}}\n",
+            "null top-level key": f"~: x\nlists: {{{k}: [{g}]}}\n",
+            "top level is a list": f"- lists\n",
+            "top level is a scalar": "3\n",
+            "top level is empty": "",
+            "lists is null": "lists: ~\n",
+            "lists is a list": f"lists: [{g}]\n",
+            "kind list is null": f"lists: {{{k}: ~}}\n",
+            "kind list is a mapping": f"lists: {{{k}: {g}}}\n",
+            "kind list is a string": f"lists: {{{k}: docs/a.md}}\n",
+            "entry is null": f"lists: {{{k}: [~]}}\n",
+            "entry is a list": f"lists: {{{k}: [[docs/a.md, 1-3, w]]}}\n",
+            "entry is a string": f"lists: {{{k}: [docs/a.md]}}\n",
+            "entry is a bool": f"lists: {{{k}: [true]}}\n",
+        }
+        for field, bad in (("path", ("~", "3", "true", "[docs/a.md]", "{a: b}", "1.5")),
+                           ("lines", ("~", "3", "true", "[1, 3]", "{a: b}", "1.5")),
+                           ("why", ("~", "3", "true", "[w]", "{a: b}", "1.5")),
+                           ("ref", ("~", "3", "true", "[HEAD]", "{a: b}", "1.5"))):
+            for v in bad:
+                e = {"path": "docs/a.md", "lines": "1-3", "why": "w"}
+                body = ", ".join(f"{kk}: {vv}" for kk, vv in e.items() if kk != field)
+                raws[f"{field} is {v}"] = f"lists: {{{k}: [{{{body}, {field}: {v}}}]}}\n"
+        for name, raw in raws.items():
+            with self.subTest(name):
+                rc, out = self.run_loader(raw=raw)
+                self.assertNamedOneLineFail(rc, out)
+                self.assertNotIn("unexpected", out)              # a named check refused it, not the catch-all
+                if name.endswith("key in an entry") or name.startswith("mixed"):
+                    self.assertIn("unknown key", out)
+
+    def test_malformed_handoff_context_files_structure_is_a_named_fail(self):
+        self.put("docs/a.md", lines_file(3))
+        body = "{path: docs/a.md, lines: 1-3, why: w"
+        texts = {
+            "front matter is a list": "---\n- a\n---\nbody\n",
+            "front matter is a scalar": "---\n3\n---\nbody\n",
+            "context_files is null": "---\ncontext_files: ~\n---\nbody\n",
+            "context_files is a mapping": f"---\ncontext_files: {body}}}\n---\nbody\n",
+            "context_files is a string": "---\ncontext_files: docs/a.md\n---\nbody\n",
+            "entry is null": "---\ncontext_files: [~]\n---\nbody\n",
+            "entry is a list": "---\ncontext_files: [[docs/a.md]]\n---\nbody\n",
+            "entry mixed key types": f"---\ncontext_files: [{body}, 1: x, b: y}}]\n---\nbody\n",
+            "entry null key": f"---\ncontext_files: [{body}, ~: x, b: y}}]\n---\nbody\n",
+            "entry path null": "---\ncontext_files: [{path: ~, lines: 1-3, why: w}]\n---\nbody\n",
+            "entry lines list": "---\ncontext_files: [{path: docs/a.md, lines: [1], why: w}]\n---\nbody\n",
+            "entry why mapping": "---\ncontext_files: [{path: docs/a.md, lines: 1-3, why: {a: b}}]\n---\nbody\n",
+            "entry ref int": "---\ncontext_files: [{path: docs/a.md, lines: 1-3, why: w, ref: 3}]\n---\nbody\n",
+        }
+        for name, text in texts.items():
+            with self.subTest(name):
+                self.put(A_HANDOFF, text)
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+                self.assertNamedOneLineFail(rc, out)
+                self.assertNotIn("unexpected", out)
+                if "key" in name:
+                    self.assertIn("unknown key", out)
+
+    # -- fail closed: any failure removes the session's earlier expected list for the kind ------------
+    def test_every_kind_of_failure_removes_an_earlier_expected_list(self):
+        self.put("docs/a.md", lines_file(3))
+        g = self.GOOD
+        good = [entry("docs/a.md", "1-3")]
+        overflow = [entry("docs/a.md", "1-1", "w" * 400)] * 60
+
+        def mock_exc():
+            return mock.patch.object(load_context, "check_entry", side_effect=RuntimeError("boom"))
+
+        failures = {
+            "entry: missing path": dict(entries=[entry("docs/nope.md", "1-3")]),
+            "entry: bad range": dict(entries=[entry("docs/a.md", "1-9")]),
+            "list: invalid yaml": dict(raw="lists: [\n"),
+            "list: lists not a mapping": dict(raw="lists: 3\n"),
+            "list: lists null": dict(raw="lists: ~\n"),
+            "list: kind missing": dict(raw=f"lists: {{sync: [{g}]}}\n"),
+            "list: kind list empty": dict(raw=f"lists: {{{KIND}: []}}\n"),
+            "list: kind list not a list": dict(raw=f"lists: {{{KIND}: 3}}\n"),
+            "list: mixed key types": dict(raw=f"lists: {{{KIND}: [{{path: docs/a.md, lines: 1-3, why: w, 1: x, b: y}}]}}\n"),
+            "list: context.yml missing": dict(raw=None),
+            "output over the cap": dict(entries=overflow),
+        }
+        for name, kw in failures.items():
+            with self.subTest(name):
+                rc, out = self.run_loader(entries=good)
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(os.path.exists(os.path.join(self.root, EXPECTED, SID, KIND + ".json")), name)
+                if name == "list: context.yml missing":
+                    os.unlink(os.path.join(self.root, CTX))
+                    gf.commit_all(self.root, "drop")
+                    rc, out = self.run_loader(argv=[KIND])
+                else:
+                    rc, out = self.run_loader(**kw)
+                self.assertEqual(rc, 1, out)
+                self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED, SID, KIND + ".json")), name)
+        with self.subTest("handoff failure"):
+            rc, out = self.run_loader(entries=good)
+            self.assertEqual(rc, 0, out)
+            self.put(A_HANDOFF, "no front matter\n")
+            rc, out = self.run_loader(entries=good)
+            self.assertEqual(rc, 1, out)
+            self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED, SID, KIND + ".json")))
+        with self.subTest("an exception"):
+            self.put(A_HANDOFF, front(None))
+            rc, out = self.run_loader(entries=good)
+            self.assertEqual(rc, 0, out)
+            with mock_exc():
+                rc, out = self.run_loader(entries=good)
+            self.assertNamedOneLineFail(rc, out)
+            self.assertIn("RuntimeError", out)
+            self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED, SID, KIND + ".json")))
+
+    def test_a_failure_leaves_other_kinds_and_other_sessions_alone(self):
+        self.put("docs/a.md", lines_file(3))
+        both = yaml.safe_dump({"lists": {KIND: [entry("docs/a.md", "1-3")], "sync": [entry("docs/a.md", "1-3")]}})
+        rc, out = self.run_loader(raw=both)
+        self.assertEqual(rc, 0, out)
+        rc, out = self.run_loader(kind="sync", argv=["sync"])
+        self.assertEqual(rc, 0, out)
+        other = os.path.join(self.root, EXPECTED, "other-session-1234", KIND + ".json")
+        os.makedirs(os.path.dirname(other))
+        with open(other, "w") as fh:
+            fh.write("{}\n")
+        rc, out = self.run_loader(raw="lists: ~\n")
+        self.assertEqual(rc, 1, out)
+        self.assertTrue(os.path.exists(os.path.join(self.root, EXPECTED, SID, "sync.json")))
+        self.assertTrue(os.path.exists(other))
 
     # -- the committed read lists ------------------------------------------------------------
     def test_committed_context_yml_has_a_list_for_every_kind_and_dispatch_role(self):

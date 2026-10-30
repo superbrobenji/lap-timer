@@ -20,8 +20,8 @@ Expected list (git-ignored), written only on success, atomically:
   {"kind": <kind>, "session": <session id>, "entries": [{"path": <path-to-read>, "lines": "a-b", "blob": <sha>}]}
 The session id is $CLAUDE_CODE_SESSION_ID (equal to the hook input's session_id, spike 2026-10-30).
 
-A failure prints only `FAIL context.<kind>.<path>: <reason>` lines (rc 1), never a partial list and never
-an expected list: a missing path, a missing or malformed range (a range past the end of the file included),
+A failure prints only `FAIL context.<kind>.<path>: <reason>` lines (rc 1), each one escaped line, never a
+partial list; it also removes the session's earlier expected list for the kind: a missing path, a missing or malformed range (a range past the end of the file included),
 a range over MAX_LINES lines or over MAX_BYTES bytes, a missing ref, an unsafe path or ref, an unreadable
 list, no session id, and a printed list over MAX_OUTPUT bytes.
 """
@@ -136,7 +136,7 @@ def read_bytes(root: str, e: dict, ident: str):
         with open(full, "rb") as fh:
             return path, fh.read()
     if not safe_ref(ref):
-        raise Failure(ident, f"unsafe ref {show(ref)!r}")
+        raise Failure(ident, f"unsafe ref {ref!r}")
     rev = git_bytes(root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}")
     if rev.returncode != 0:
         raise Failure(ident, f"missing ref {ref}")
@@ -163,13 +163,13 @@ def check_entry(root: str, e) -> tuple:
     """(path-to-read, lines, blob, why) for one entry, or a Failure."""
     if not isinstance(e, dict):
         raise Failure("entry", f"entry is not a mapping: {e!r}")
-    ident = show(e["path"]) if isinstance(e.get("path"), str) and e["path"] else "entry"
+    ident = e["path"] if isinstance(e.get("path"), str) and e["path"] else "entry"
     problem = path_problem(e.get("path"))
     if problem:
         raise Failure(ident, problem)
-    unknown = sorted(set(e) - ENTRY_KEYS)
+    unknown = sorted((k for k in e if k not in ENTRY_KEYS), key=repr)      # keys of any YAML type
     if unknown:
-        raise Failure(ident, f"unknown key(s) {', '.join(show(k) for k in unknown)}")
+        raise Failure(ident, f"unknown key(s) {', '.join(repr(k) for k in unknown)}")
     why = e.get("why")
     if not isinstance(why, str) or not why.strip():
         raise Failure(ident, "why is missing or empty")
@@ -209,7 +209,7 @@ def handoff_entries(root: str, kind: str) -> list:
     try:
         front = yaml.safe_load(m.group(1))
     except yaml.YAMLError as exc:
-        raise Failure(rel, f"front matter is not valid YAML: {' '.join(str(exc).split())}") from None
+        raise Failure(rel, f"front matter is not valid YAML: {exc}") from None
     if not isinstance(front, dict):
         raise Failure(rel, "front matter is not a mapping")
     if "context_files" not in front:
@@ -232,25 +232,41 @@ def write_expected(root: str, kind: str, session: str, entries: list) -> None:
     os.replace(tmp, os.path.join(d, kind + ".json"))
 
 
-def load(root: str, kind: str) -> tuple:
-    """(rc, text)."""
-    fails = []
+def one_line(text) -> str:
+    """text with every non-printable character (line breaks included) escaped, then runs of spaces collapsed: one printable line."""
+    return " ".join(show(text).split())
 
-    def fail(ident, reason):
-        fails.append(f"FAIL context.{kind}.{show(ident)}: {show(reason)}")
 
-    try:
-        lists = load_yaml(os.path.join(root, CONTEXT_YML), root)
-    except GateError as exc:
-        return 1, f"FAIL context.{kind}.list: {exc}\n"
-    table = lists.get("lists") if isinstance(lists, dict) else None
+def table_problem(doc, kind: str):
+    """(problem, list) for the parsed context.yml: problem is None when `kind` names a non-empty list of it."""
+    if not isinstance(doc, dict):
+        return f"{CONTEXT_YML} is not a mapping", None
+    if not all(isinstance(k, str) for k in doc):
+        return f"{CONTEXT_YML} has a key that is not a string", None
+    table = doc.get("lists")
     if not isinstance(table, dict):
-        return 1, f"FAIL context.{kind}.list: {CONTEXT_YML} has no `lists` mapping\n"
+        return f"{CONTEXT_YML} has no `lists` mapping", None
+    if not all(isinstance(k, str) for k in table):
+        return f"{CONTEXT_YML} `lists` has a key that is not a string", None
     if kind not in table:
-        return 1, f"FAIL context.{kind}.list: no list named {kind!r} in {CONTEXT_YML}\n"
+        return f"no list named {kind!r} in {CONTEXT_YML}", None
     base = table[kind]
     if not isinstance(base, list) or not base:
-        return 1, f"FAIL context.{kind}.list: list {kind!r} is not a non-empty sequence\n"
+        return f"list {kind!r} is not a non-empty sequence", None
+    return None, base
+
+
+def build(root: str, kind: str, session: str, fail) -> str:
+    """The text to print for `kind`, writing its expected list; every failure goes to fail(ident, reason) and returns ''."""
+    try:
+        doc = load_yaml(os.path.join(root, CONTEXT_YML), root)
+    except GateError as exc:
+        fail("list", exc)
+        return ""
+    problem, base = table_problem(doc, kind)
+    if problem:
+        fail("list", problem)
+        return ""
     items = list(base)
     try:
         items += handoff_entries(root, kind)
@@ -262,18 +278,35 @@ def load(root: str, kind: str) -> tuple:
             rows.append(check_entry(root, e))
         except Failure as f:
             fail(f.ident, f.reason)
-    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-    if not fails and not SESSION_RE.fullmatch(session):
-        fail("session", "CLAUDE_CODE_SESSION_ID is unset or not a session id: the expected list has no key")
     text = "".join(f"{p} lines {l} blob {s} -- {w}\n" for p, l, s, w in rows)
-    if not fails and len(text.encode()) >= MAX_OUTPUT:
+    if fail.count == 0 and not SESSION_RE.fullmatch(session):
+        fail("session", "CLAUDE_CODE_SESSION_ID is unset or not a session id: the expected list has no key")
+    if fail.count == 0 and len(text.encode()) >= MAX_OUTPUT:
         fail("output", f"the list prints {len(text.encode())} bytes, {MAX_OUTPUT} bytes or more")
+    if fail.count == 0:
+        write_expected(root, kind, session, rows)
+    return text
+
+
+def load(root: str, kind: str) -> tuple:
+    """(rc, text). Every failure is one `FAIL context.<kind>.<id>: <reason>` line, escaped, whatever the failure level."""
+    fails = []
+
+    def fail(ident, reason):
+        fails.append(f"FAIL context.{kind}.{one_line(ident)}: {one_line(reason)}")
+        fail.count = len(fails)
+    fail.count = 0
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    text = ""
+    try:
+        text = build(root, kind, session, fail)
+    except Exception as exc:          # fail closed: nothing outside the whitelist may escape as a traceback
+        fail("internal", f"unexpected {type(exc).__name__}: {exc}")
     if fails:
         if SESSION_RE.fullmatch(session):     # fail closed: a failed load leaves no earlier list standing
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(os.path.join(root, CONTEXT_DIR, "expected", session, kind + ".json"))
         return 1, "\n".join(fails) + "\n"
-    write_expected(root, kind, session, rows)
     return 0, text
 
 
@@ -288,7 +321,7 @@ def main(argv=None) -> int:
         root = os.path.abspath(ns.root) if ns.root else repo_root()
     except (SystemExit, ValueError, GateError) as exc:
         why = str(exc) if isinstance(exc, (ValueError, GateError)) else f"bad arguments (argparse exit {exc.code})"
-        print(f"FAIL context.input: {why}")
+        print(f"FAIL context.input: {one_line(why)}")
         return 1
     rc, text = load(root, ns.kind)
     sys.stdout.write(text)
