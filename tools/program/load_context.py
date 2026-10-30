@@ -5,7 +5,12 @@
 
 <kind> is a key of `lists` in docs/superpowers/state/program/context.yml: a session kind
 (stream-a-block, stream-b-block, sync) or a dispatch role (a key of `models` in tools/gates/config.yml).
-Each entry is {path, lines "a-b", why, optional ref}. For the stream kinds the front matter `context_files`
+Each entry is {path, lines "a-b" or "a-end", why, optional ref}. `a-end` (DEC-0166) resolves to the file's
+current last line (the last line holding text: a final newline ends that line) and is split into consecutive
+entries of at most MAX_LINES lines and MAX_BYTES bytes each; stdout and the expected list carry the resolved
+ranges. `ref: board:B` (DEC-0167) reads origin/<branch>, the branch being the first backticked name in the branch
+cell of stream B's row on the board (tools/program/board.py). A path holds only [A-Za-z0-9._/-] and printable
+non-ASCII characters (DEC-0170). For the stream kinds the front matter `context_files`
 list of the kind's handoff is appended (stream-a-block: strict-delivery handoff, stream-b-block: prototype
 handoff); an absent field adds nothing.
 
@@ -34,6 +39,7 @@ docs/superpowers/state/program-tooling/T1-input-domain.md.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -48,7 +54,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import yaml  # noqa: E402
 
-from tools.gates.lib import GateError, _StrictLoader, gate_args, load_yaml, repo_root  # noqa: E402
+from tools.gates.lib import GateError, _StrictLoader, gate_args, load_yaml  # noqa: E402
+from tools.program.board import BOARD, BoardError, stream_branch  # noqa: E402
 
 MAX_LINES = 2000        # the Read tool's per-call line limit
 MAX_BYTES = 16000       # a range of at most MAX_LINES lines and this many bytes stays under the Read tool's 25,000-token limit
@@ -62,7 +69,10 @@ HANDOFFS = {"stream-a-block": "docs/superpowers/state/strict-delivery/handoff.md
 CONTEXT_DIR = os.path.join(".superpowers", "context")
 KIND_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,63}")
-RANGE_RE = re.compile(r"([1-9][0-9]*)-([1-9][0-9]*)")
+RANGE_RE = re.compile(r"([1-9][0-9]*)-([1-9][0-9]*|end)")
+MAX_DIGITS = 18         # a line number with more digits is past the end of any file; never converted (3.11+ int() refuses 4,300)
+PATH_ASCII = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-")     # DEC-0170
+BOARD_REFS = {"board:B": "B"}      # DEC-0167: the ref is origin/<the branch in this stream's board row>
 ENTRY_KEYS = {"path", "lines", "why", "ref"}
 
 
@@ -159,8 +169,12 @@ def remove_list(root: str, rel: str):
     if link is not None:
         return f"earlier expected list not removed: symlink in path ({echo(link)})"
     full = os.path.join(root, rel)
-    if not os.path.lexists(full):
-        return None
+    try:                                             # os.path.lexists() reads EACCES as "absent" (F8)
+        os.lstat(full)
+    except OSError as exc:
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)) or exc.errno == errno.ENAMETOOLONG:
+            return None                              # no file can stand at that name
+        return f"earlier expected list cannot be checked ({exc.strerror or type(exc).__name__}): it may still stand"
     try:
         os.unlink(full)
         return None
@@ -192,6 +206,8 @@ def path_problem(path):
         return "path is missing"
     if unprintable(path):
         return "path holds a non-printable character"
+    if any(c not in PATH_ASCII and (c.isascii() or not c.isprintable()) for c in path):
+        return "path holds a character outside [A-Za-z0-9._/-] and printable non-ASCII (whitespace included)"
     if path.startswith("/") or "\\" in path or os.path.normpath(path) != path or ".." in path.split("/"):
         return "path is absolute, has '..' or a backslash, or is not normalised"
     if path.split("/")[0] == ".git":
@@ -220,6 +236,24 @@ def tree_mode(root: str, rev: str, path: str):
     return None
 
 
+def board_ref(root: str, ident: str, stream: str) -> str:
+    """origin/<branch> for the stream's board row (DEC-0167), or a Failure naming the board problem."""
+    problem = input_problem(root, BOARD)
+    if problem:
+        raise Failure(ident, f"ref board:{stream}: board {BOARD} {problem}")
+    try:
+        with open(os.path.join(root, BOARD), "rb") as fh:
+            text = fh.read().decode("utf-8")
+    except OSError as exc:
+        raise Failure(ident, f"ref board:{stream}: board {BOARD} unreadable ({exc.strerror})") from None
+    except UnicodeDecodeError:
+        raise Failure(ident, f"ref board:{stream}: board {BOARD} is not valid UTF-8") from None
+    try:
+        return "origin/" + stream_branch(text, stream)
+    except BoardError as exc:
+        raise Failure(ident, f"ref board:{stream}: {BOARD}: {echo(str(exc))}") from None
+
+
 def read_bytes(root: str, e: dict, ident: str):
     """(path-to-read, bytes) for an entry: a regular file tracked at HEAD (at the ref), no symlink component."""
     path, ref = e["path"], e.get("ref")
@@ -237,11 +271,15 @@ def read_bytes(root: str, e: dict, ident: str):
                 return path, fh.read()
         except OSError as exc:
             raise Failure(ident, f"unreadable ({exc.strerror})") from None
+    origin = ""
+    if ref in BOARD_REFS:
+        stream = BOARD_REFS[ref]
+        ref, origin = board_ref(root, ident, stream), f" (the branch in the board's stream {stream} row)"
     if not safe_ref(ref):
         raise Failure(ident, f"unsafe ref {echo(ref)}")
     rev = git_bytes(root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}")
     if rev.returncode != 0:
-        raise Failure(ident, f"missing ref {echo(ref)}")
+        raise Failure(ident, f"missing ref {echo(ref)}{origin}")
     sha = rev.stdout.decode().strip()
     mode = tree_mode(root, sha, path)
     if mode is None:
@@ -260,8 +298,40 @@ def read_bytes(root: str, e: dict, ident: str):
     return rel, shown.stdout
 
 
-def check_entry(root: str, e) -> tuple:
-    """(path-to-read, lines, blob, why) for one entry, or a Failure."""
+def parse_range(lines, ident: str) -> tuple:
+    """(a, b) for `lines` "a-b", (a, None) for "a-end", or a Failure; the echoed value is clipped (DEC-0172) and no
+    digit count reaches int() unbounded (F7)."""
+    m = RANGE_RE.fullmatch(lines) if isinstance(lines, str) else None
+    if m is None:
+        raise Failure(ident, f"missing range: lines must be 'a-b' with 1 <= a <= b, or 'a-end', got {echo(lines)}")
+    if any(len(g) > MAX_DIGITS for g in m.groups()):
+        raise Failure(ident, f"missing range: a line number of over {MAX_DIGITS} digits is past the end of any file, got {echo(lines)}")
+    a, b = int(m.group(1)), (None if m.group(2) == "end" else int(m.group(2)))
+    if b is not None and a > b:
+        raise Failure(ident, f"missing range: lines must be 'a-b' with 1 <= a <= b, or 'a-end', got {echo(lines)}")
+    if b is not None and b - a + 1 > MAX_LINES:
+        raise Failure(ident, f"range {echo(lines)} is over {MAX_LINES} lines")
+    return a, b
+
+
+def split_open_range(rows: list, a: int, last: int, lines: str, ident: str) -> list:
+    """Consecutive (x, y) ranges covering a..last, each of at most MAX_LINES lines and MAX_BYTES bytes (DEC-0166);
+    a single line over MAX_BYTES is a Failure."""
+    out, x = [], a
+    while x <= last:
+        y, size = x, len(rows[x - 1])
+        if size > MAX_BYTES:
+            raise Failure(ident, f"line {x} is {size} bytes, over {MAX_BYTES} bytes: {echo(lines)} cannot be split into readable ranges")
+        while y < last and y - x + 1 < MAX_LINES and size + 1 + len(rows[y]) <= MAX_BYTES:
+            size += 1 + len(rows[y])
+            y += 1
+        out.append((x, y))
+        x = y + 1
+    return out
+
+
+def check_entry(root: str, e) -> list:
+    """[(path-to-read, lines, blob, why)] for one entry (several for an `a-end` range), or a Failure."""
     if not isinstance(e, dict):
         raise Failure("entry", f"entry is not a mapping: {echo(e)}")
     ident = e["path"] if isinstance(e.get("path"), str) and e["path"] else "entry"
@@ -279,22 +349,23 @@ def check_entry(root: str, e) -> tuple:
     if "ref" in e and not isinstance(e["ref"], str):
         raise Failure(ident, f"ref is not a string: {echo(e['ref'])}")
     lines = e.get("lines")
-    m = RANGE_RE.fullmatch(lines) if isinstance(lines, str) else None
-    if m is None or int(m.group(1)) > int(m.group(2)):
-        raise Failure(ident, f"missing range: lines must be 'a-b' with 1 <= a <= b, got {echo(lines)}")
-    a, b = int(m.group(1)), int(m.group(2))
-    if b - a + 1 > MAX_LINES:
-        raise Failure(ident, f"range {a}-{b} is over {MAX_LINES} lines")
+    a, b = parse_range(lines, ident)
     read_path, data = read_bytes(root, e, ident)
     if not data:
         raise Failure(ident, "empty file: nothing a Read can cover")
     rows = data.split(b"\n")           # the Read tool counts the empty line after a final newline
+    sha, why = blob_sha(data), " ".join(why.split())
+    if b is None:                      # a-end: the last line holding text (a final newline ends it)
+        last = len(rows) - 1 if data.endswith(b"\n") else len(rows)
+        if a > last:
+            raise Failure(ident, f"missing range: {echo(lines)} starts past the last line ({last})")
+        return [(read_path, f"{x}-{y}", sha, why) for x, y in split_open_range(rows, a, last, lines, ident)]
     if b > len(rows):
-        raise Failure(ident, f"missing range: {a}-{b} is past the end of the file ({len(rows)} lines)")
+        raise Failure(ident, f"missing range: {echo(lines)} is past the end of the file ({len(rows)} lines)")
     size = len(b"\n".join(rows[a - 1:b]))
     if size > MAX_BYTES:
-        raise Failure(ident, f"range {a}-{b} is {size} bytes, over {MAX_BYTES} bytes")
-    return read_path, f"{a}-{b}", blob_sha(data), " ".join(why.split())
+        raise Failure(ident, f"range {echo(lines)} is {size} bytes, over {MAX_BYTES} bytes")
+    return [(read_path, f"{a}-{b}", sha, why)]
 
 
 def handoff_entries(root: str, kind: str) -> list:
@@ -391,7 +462,7 @@ def build(root: str, kind: str, session: str, fail) -> str:
     rows = []
     for e in items:
         try:
-            rows.append(check_entry(root, e))
+            rows.extend(check_entry(root, e))
         except Failure as f:
             fail(f.ident, f.reason)
     text = "".join(f"{p} lines {l} blob {s} -- {w}\n" for p, l, s, w in rows)
@@ -444,6 +515,21 @@ def capped(kind: str, fails: list) -> str:
         shown += 1
 
 
+def find_root() -> str:
+    """$CLAUDE_PROJECT_DIR if set, else the top of the git work tree holding the cwd, found with every GIT_* variable
+    removed (DEC-0175: the caller's GIT_DIR/GIT_WORK_TREE never choose the tree); ValueError when there is none."""
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env:
+        return env
+    try:
+        p = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, check=False, env=git_env())
+    except OSError as exc:
+        raise ValueError(f"git cannot run ({exc.strerror})") from None
+    if p.returncode != 0:
+        raise ValueError("no --root, no CLAUDE_PROJECT_DIR, and the working directory is not in a git work tree")
+    return p.stdout.decode("utf-8", "replace").strip()
+
+
 def root_problem(root: str):
     """Why `root` (--root, else $CLAUDE_PROJECT_DIR, else the git top level) is not the top of a git work tree, or
     None: a symlink (spec D32, DEC-0093), not a directory, or not that tree's top (entries are repository paths)."""
@@ -474,7 +560,7 @@ def main(argv=None) -> int:
         ns = ap.parse_args(argv)
         if not KIND_RE.fullmatch(ns.kind):
             raise ValueError(f"kind {echo(ns.kind)} is not [a-z0-9_-]+")
-        root = os.path.abspath(ns.root if ns.root else repo_root())
+        root = os.path.abspath(ns.root if ns.root else find_root())
         problem = root_problem(root)
         if problem:
             raise ValueError(problem)

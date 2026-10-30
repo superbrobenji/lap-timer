@@ -935,7 +935,6 @@ class LoadContext(unittest.TestCase):
 
     def test_git_environment_and_config_cannot_change_what_is_read(self):
         self.put("docs/a.md", lines_file(3))
-        self.put("docs/:(glob)*.md", lines_file(3))
         self.put("docs/été.md", lines_file(3))
         other = self.outside()
         rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
@@ -945,9 +944,6 @@ class LoadContext(unittest.TestCase):
             with self.subTest(env=env):
                 rc, out, _ = self.call(["--root", self.root, KIND], env=env)      # the fixture is committed: no git call of the test under env
                 self.assertEqual(rc, 0, out)
-        with self.subTest("pathspec magic in a tracked name is literal"):
-            rc, out = self.run_loader(entries=[entry("docs/:(glob)*.md", "1-3")])
-            self.assertEqual(rc, 0, out)
         with self.subTest("repository config and attributes"):
             with open(os.path.join(self.root, ".git", "config"), "a") as fh:
                 fh.write('[core]\n\tquotePath = true\n[color]\n\tui = always\n[diff "up"]\n\ttextconv = tr a-z A-Z\n')
@@ -1051,6 +1047,245 @@ class LoadContext(unittest.TestCase):
         rc, out = self.run_loader(raw=f"lists: {{{KIND}: [&r [*r]]}}\n")
         self.assertAllNamed(rc, out, f"context.{KIND}.entry", "not a mapping")
 
+    # -- fix round 5: F7, F8, F9 and DEC-0166/0167/0170/0173/0175 (table rows L3, T3, A4, P4, P9, H2, H5, R6, B1-B3) --
+    def board(self, b_cell="`block/prototype-b9` / worktree", extra_rows=""):
+        head = "| stream | block | branch / worktree | next task |\n|---|---|---|---|\n"
+        return ("# Stream board\n\nprose\n\n" + head + "| A strict delivery | x | `block/program-tooling` / main | t |\n"
+                + (f"| B prototype | b9 | {b_cell} | t |\n" if b_cell is not None else "") + extra_rows
+                + "\n## Sync log\n| date | by |\n|---|---|\n")
+
+    def stream_b_branch(self, branch="block/prototype-b9", text="from b9\nsecond\n"):
+        """A commit holding B's handoff, reachable as origin/<branch> (a remote-tracking ref)."""
+        gf.git(self.root, "checkout", "-q", "-b", "tmp-b")
+        self.put(B_HANDOFF, text)
+        gf.commit_all(self.root, "b")
+        gf.git(self.root, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+        gf.git(self.root, "checkout", "-q", "main")
+        gf.git(self.root, "branch", "-q", "-D", "tmp-b")
+
+    def test_range_numbers_are_clipped_and_any_digit_count_is_a_named_fail(self):
+        self.put("docs/a.md", lines_file(3))
+        long9 = "9" * 5000
+        for lines in ("1-" + long9, long9 + "-" + long9, long9 + "-1", "1-" + "9" * 19, "1-" + "9" * 300, long9 + "-end"):
+            with self.subTest(lines=lines[:30] + f"...({len(lines)})"):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", lines), entry("docs/missing.md", "1-1")])
+                self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", "range")
+                self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.docs/missing\.md: missing path")      # X1: never hidden
+                for line in out.splitlines():
+                    self.assertLess(len(line), 200 + 200 + 120, line[:300])
+        with self.subTest("300 entries of 4,000-digit ranges: clipped lines, most of them shown"):
+            rc, out = self.run_loader(entries=[entry("docs/a.md", "1-" + "8" * 4000)] * 300)
+            self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", "range")
+            self.assertGreater(len(out.splitlines()), 40, out[:300])
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
+    def test_an_earlier_list_that_cannot_be_checked_is_named_as_possibly_standing(self):
+        self.put("docs/a.md", lines_file(3))
+        good, bad = [entry("docs/a.md", "1-3")], [entry("docs/nope.md", "1-3")]
+        listed = os.path.join(self.root, self.LIST)
+        sid_dir, exp_dir = os.path.dirname(listed), os.path.dirname(os.path.dirname(listed))
+        self.addCleanup(lambda: [os.path.isdir(d) and os.chmod(d, 0o755) for d in (exp_dir, sid_dir)])
+        for which, d, mode in (("session dir", sid_dir, 0o600), ("session dir", sid_dir, 0o000), ("expected dir", exp_dir, 0o000)):
+            with self.subTest(which=which, mode=oct(mode)):
+                self.reset_context_dir()
+                rc, out = self.run_loader(entries=good)
+                self.assertEqual(rc, 0, out)
+                self.put(CTX, ctx(bad))
+                gf.commit_all(self.root, "bad list")
+                os.chmod(d, mode)
+                rc, out = self.run_loader(commit=False)
+                os.chmod(d, 0o755)
+                self.assertAllNamed(rc, out, f"context.{KIND}.{self.LIST}", "may still stand")
+                self.assertIn("docs/nope.md", out)
+                self.assertTrue(os.path.isfile(listed))          # it did stand: the FAIL line is the only notice
+        self.reset_context_dir()
+
+    def test_a_long_kind_is_clipped_in_the_fail_id_and_the_failure_is_shown(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        rc, out, _ = self.call(["--root", self.root, "k" * 100000])
+        self.assertAllNamed(rc, out)
+        self.assertEqual(len(out.splitlines()), 1, out[:300])
+        self.assertTrue(out.startswith("FAIL context." + "k" * 197 + "....list: no list named " + "k" * 197 + "... in "), out[:300])
+        self.assertNotIn("further failures not shown", out)
+
+    def test_pathspec_magic_at_the_path_start_is_refused_by_the_whitelist(self):
+        for name in (":(glob)*.md", ":(icase)a.md", ":!a.md", "*.md"):
+            with self.subTest(path=name):
+                self.put(name, lines_file(3))           # tracked, at the path start: git would read it as magic or a glob
+                rc, out = self.run_loader(entries=[entry(name, "1-3")])
+                self.assertAllNamed(rc, out, f"context.{KIND}.{name}", "path holds a character outside [A-Za-z0-9._/-]")
+
+    def test_paths_are_narrowed_to_a_safe_set_and_any_whitespace_fails(self):
+        for name in ("docs/a b.md", "docs/a:b.md", "docs/a+b.md", "docs/a'b.md", "docs/a@b.md", "docs/(x).md",
+                     "docs/x lines 1-3 blob 0 -- y.md", "docs/a,b.md", "docs/a~b.md"):
+            with self.subTest(path=name):
+                self.put(name, lines_file(3))
+                rc, out = self.run_loader(entries=[entry(name, "1-3")])
+                self.assertAllNamed(rc, out, f"context.{KIND}.{name}", "path holds a character outside [A-Za-z0-9._/-]")
+        for name in ("docs/a b.md", "docs/a　b.md", "docs/a b.md"):      # non-ASCII whitespace
+            with self.subTest(path=ascii(name)):
+                self.put(name, lines_file(3))
+                rc, out = self.run_loader(entries=[entry(name, "1-3")])
+                self.assertAllNamed(rc, out, None, "path holds")
+        with self.subTest("handoff context_files use the same check"):
+            self.put("docs/c d.md", lines_file(3))
+            self.put(A_HANDOFF, front([entry("docs/c d.md", "1-3")]))
+            self.put("docs/ok-1_2.v.md", lines_file(3))
+            rc, out = self.run_loader(entries=[entry("docs/ok-1_2.v.md", "1-3")])
+            self.assertAllNamed(rc, out, f"context.{KIND}.docs/c d.md", "outside [A-Za-z0-9._/-]")
+        with self.subTest("every allowed ASCII character and printable non-ASCII load"):
+            self.put(A_HANDOFF, front(None))
+            for name in ("docs/AZaz09._-/x.md", "docs/über-日本.md"):
+                self.put(name, lines_file(3))
+                rc, out = self.run_loader(entries=[entry(name, "1-3")])
+                self.assertEqual(rc, 0, out)
+
+    def test_handoff_front_matter_depth_and_number_size_are_named_fails(self):
+        self.put("docs/a.md", lines_file(3))
+        cases = {"5,000-deep nesting": "---\nplan: " + "[" * 5000 + "]" * 5000 + "\n---\n",
+                 "5,000-digit integer": "---\nplan: " + "9" * 5000 + "\n---\n"}
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.put(A_HANDOFF, text)
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+                self.assertNotIn("internal", out)
+                if name.startswith("5,000-deep") or rc != 0:         # 3.9 reads a 5,000-digit int; 3.11+ refuses it
+                    self.assertAllNamed(rc, out, f"context.{KIND}.{A_HANDOFF}", "front matter is not valid YAML")
+
+    def test_a_duplicate_key_in_any_handoff_field_fails_the_load(self):
+        self.put("docs/a.md", lines_file(3))
+        for text in ("---\nplan: a\nplan: b\n---\n", "---\nnext: {x: 1, x: 2}\ncontext_files: []\n---\n"):
+            with self.subTest(text=text):
+                self.put(A_HANDOFF, text)
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+                self.assertAllNamed(rc, out, f"context.{KIND}.{A_HANDOFF}", "front matter is not valid YAML")
+
+    def test_root_discovery_ignores_the_git_environment(self):
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3", "from repo A")]))
+        gf.commit_all(self.root, "a")
+        other = self.outside()
+        gf.write(other, "docs/b.md", lines_file(3))
+        gf.write(other, CTX, ctx([entry("docs/b.md", "1-3", "from repo B")]))
+        for rel in (A_HANDOFF, B_HANDOFF):
+            gf.write(other, rel, front(None))
+        gf.commit_all(other, "b")
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        for env in ({"GIT_DIR": os.path.join(other, ".git"), "GIT_WORK_TREE": other}, {"GIT_DIR": os.path.join(other, ".git")}):
+            with self.subTest(env=sorted(env)):
+                rc, out, _ = self.call([KIND], env=env, cwd=os.path.join(self.root, "docs"))
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(out.startswith("docs/a.md lines 1-3 blob ") and out.endswith(" -- from repo A\n"), out)
+                self.assertFalse(os.path.exists(os.path.join(other, EXPECTED)), "the other repository's list was written")
+
+    def test_open_ended_range_resolves_to_the_last_line(self):
+        self.put("docs/a.md", lines_file(30))
+        self.put("docs/nonl.md", "one\ntwo\nthree")
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-end", "all"), entry("docs/a.md", "5-end"),
+                                           entry("docs/nonl.md", "2-end"), entry("docs/a.md", "30-end")])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([" ".join(l.split(" ")[:3]) for l in out.splitlines()],
+                         ["docs/a.md lines 1-30", "docs/a.md lines 5-30", "docs/nonl.md lines 2-3", "docs/a.md lines 30-30"])
+        self.assertEqual([e["lines"] for e in self.expected()["entries"]], ["1-30", "5-30", "2-3", "30-30"])
+
+    def test_open_ended_range_is_split_within_2000_lines_and_16000_bytes(self):
+        self.put("docs/long.md", lines_file(4500))                 # about 10 bytes a line: the byte cap binds
+        self.put("docs/short.md", "x\n" * 4500)                     # 2 bytes a line: the 2000-line cap binds
+        self.put("docs/dense.md", lines_file(1500, width=60))
+        for path, n in (("docs/long.md", 4500), ("docs/short.md", 4500), ("docs/dense.md", 1500)):
+            with self.subTest(path=path):
+                rc, out = self.run_loader(entries=[entry(path, "1-end", "the whole file")])
+                self.assertEqual(rc, 0, out)
+                with open(os.path.join(self.root, path), "rb") as fh:
+                    rows = fh.read().split(b"\n")
+                got = [tuple(map(int, l.split(" ")[2].split("-"))) for l in out.splitlines()]
+                self.assertEqual(got[0][0], 1)
+                self.assertEqual(got[-1][1], n)
+                for (a, b), nxt in zip(got, got[1:] + [(n + 1, None)]):
+                    self.assertEqual(nxt[0], b + 1)                       # consecutive, no gap, no overlap
+                    self.assertLessEqual(b - a + 1, 2000)
+                    self.assertLessEqual(len(b"\n".join(rows[a - 1:b])), 16000)
+                    if b < n:                                             # greedy: one more line would cross a cap
+                        self.assertTrue(b - a + 1 == 2000 or len(b"\n".join(rows[a - 1:b + 1])) > 16000, (a, b))
+                self.assertGreater(len(got), 2)
+                if path == "docs/short.md":
+                    self.assertEqual(got, [(1, 2000), (2001, 4000), (4001, 4500)])
+                self.assertTrue(all(l.endswith(" -- the whole file") for l in out.splitlines()))
+                self.assertEqual([e["lines"] for e in self.expected()["entries"]], [f"{a}-{b}" for a, b in got])
+
+    def test_open_ended_range_failures_are_named(self):
+        self.put("docs/a.md", lines_file(10))
+        self.put("docs/wide.md", "short\n" + "w" * 16001 + "\nshort\n")
+        self.put("docs/empty.md", "")
+        cases = (("docs/a.md", "11-end", "past the last line"), ("docs/a.md", "1-End", "range"), ("docs/a.md", "end-end", "range"),
+                 ("docs/a.md", "1-endx", "range"), ("docs/a.md", "1-end\n", "range"), ("docs/a.md", "0-end", "range"),
+                 ("docs/wide.md", "1-end", "line 2 is 16001 bytes"), ("docs/empty.md", "1-end", "empty file"))
+        for path, lines, text in cases:
+            with self.subTest(lines=ascii(lines), path=path):
+                rc, out = self.run_loader(entries=[entry(path, lines)])
+                self.assertAllNamed(rc, out, f"context.{KIND}.{path}", text)
+        with self.subTest("a split that overflows the 16 KB output"):
+            self.put("docs/huge.md", lines_file(100000))
+            rc, out = self.run_loader(entries=[entry("docs/huge.md", "1-end", "w" * 300)])
+            self.assertAllNamed(rc, out, f"context.{KIND}.output", "16384")
+
+    def test_open_ended_range_on_a_ref_resolves_on_the_copy(self):
+        gf.git(self.root, "checkout", "-q", "-b", "other")
+        self.put("docs/theirs.md", lines_file(7))
+        gf.commit_all(self.root, "other")
+        gf.git(self.root, "checkout", "-q", "main")
+        rc, out = self.run_loader(entries=[entry("docs/theirs.md", "3-end", ref="other")])
+        self.assertEqual(rc, 0, out)
+        self.assertRegex(out, r"^\.superpowers/context/refs/[^ ]+/docs/theirs\.md lines 3-7 blob ")
+
+    def test_sync_reads_stream_b_handoff_from_the_board_branch(self):
+        self.stream_b_branch()
+        self.put("docs/superpowers/state/program/board.md", self.board())
+        rc, out = self.run_loader(kind="sync", entries=[entry(B_HANDOFF, "1-end", "B's handoff", ref="board:B")])
+        self.assertEqual(rc, 0, out)
+        want = load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF)
+        self.assertEqual(out, f"{want} lines 1-2 blob {blob(b'from b9' + bytes([10]) + b'second' + bytes([10]))} -- B's handoff\n")
+        self.assertEqual(self.expected("sync")["entries"][0]["path"], want)
+
+    def test_board_problems_are_named_fails(self):
+        board_rel = "docs/superpowers/state/program/board.md"
+        self.stream_b_branch()
+        cases = {
+            "board missing": (None, "board"),
+            "no stream B row": (self.board(b_cell=None), "no stream B row"),
+            "two stream B rows": (self.board(extra_rows="| B again | b2 | `block/prototype-b2` | t |\n"), "more than one stream B row"),
+            "no backticked branch": (self.board(b_cell="block/prototype-b9 / worktree"), "backticked branch"),
+            "empty backticks": (self.board(b_cell="`` / worktree"), "not a branch name"),
+            "unsafe branch": (self.board(b_cell="`--upload-pack=x` / w"), "not a branch name"),
+            "branch with a space": (self.board(b_cell="`block/a b` / w"), "not a branch name"),
+            "branch with a dot-dot component": (self.board(b_cell="`block/../x` / w"), "not a branch name"),
+            "branch with dot-dot inside a name": (self.board(b_cell="`block/a..b` / w"), "not a branch name"),
+            "branch ending in .lock": (self.board(b_cell="`block/x.lock` / w"), "not a branch name"),
+            "branch ending in a dot": (self.board(b_cell="`block/x.` / w"), "not a branch name"),
+            "missing ref": (self.board(b_cell="`block/prototype-b7` / w"), "missing ref"),
+            "row without a branch cell": (self.board(b_cell=None, extra_rows="| B prototype | b9 |\n"), "no branch cell"),
+            "no stream table": ("# Stream board\n\n| what | branch |\n|---|---|\n| B | `block/prototype-b9` |\n", "no stream table"),
+            "board not UTF-8": (None, "not valid UTF-8"),
+            "no branch column": (self.board().replace("branch / worktree", "where"), "no branch column"),
+            "long cell": (self.board(b_cell="`" + "b" * 5000 + "` / w"), "missing ref"),
+        }
+        for name, (text, reason) in cases.items():
+            with self.subTest(name):
+                full = os.path.join(self.root, board_rel)
+                if name == "board not UTF-8":
+                    with open(full, "wb") as fh:
+                        fh.write(self.board().encode() + bytes([0xff]))
+                elif text is None:
+                    if os.path.exists(full):
+                        os.unlink(full)
+                else:
+                    self.put(board_rel, text)
+                rc, out = self.run_loader(kind="sync", entries=[entry(B_HANDOFF, "1-end", ref="board:B")], argv=["sync"])
+                self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", reason)
+                self.assertLess(max(len(l) for l in out.splitlines()), 600)
+
     # -- the committed read lists ------------------------------------------------------------
     def test_committed_context_yml_has_a_list_for_every_kind_and_dispatch_role(self):
         real = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -1063,9 +1298,10 @@ class LoadContext(unittest.TestCase):
             for e in entries:
                 with self.subTest(list=name, path=e.get("path")):
                     self.assertLessEqual(set(e), {"path", "lines", "why", "ref"})
-                    m = re.fullmatch(r"([1-9][0-9]*)-([1-9][0-9]*)", e["lines"])
+                    m = re.fullmatch(r"([1-9][0-9]*)-([1-9][0-9]*|end)", e["lines"])
                     self.assertIsNotNone(m)
-                    self.assertLessEqual(int(m.group(2)) - int(m.group(1)) + 1, 2000)
+                    if m.group(2) != "end":
+                        self.assertLessEqual(int(m.group(2)) - int(m.group(1)) + 1, 2000)
                     self.assertTrue(e["why"].strip())
 
 

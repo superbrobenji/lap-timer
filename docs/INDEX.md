@@ -10,7 +10,7 @@ comm -3 <(git ls-files '*.md' | sort) <(grep -o '^| `[^`]*`' docs/INDEX.md | sed
 
 | path | purpose | stream |
 |---|---|---|
-| `.github/PULL_REQUEST_TEMPLATE.md` | Session -- Roadmap session: <!-- e.g. 1.2 --> | unassigned |
+| `.github/PULL_REQUEST_TEMPLATE.md` | Session -- Roadmap session: <!-- e.g. 1.2 --> | A |
 | `CLAUDE.md` | Project instructions (strict delivery) | A |
 | `README.md` | lap-timer | B |
 | `docs/INDEX.md` | Document index | A |

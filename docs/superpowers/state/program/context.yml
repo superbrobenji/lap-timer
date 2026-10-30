@@ -1,9 +1,11 @@
 # Read lists (program tooling Task 1, DEC-0133). One list per session kind and per dispatch role (a key of
 # `models` in tools/gates/config.yml). `python3 tools/program/load_context.py <name>` prints a list and writes the
 # session's expected list; docs/superpowers/playbooks/two-streams.md "Context contract" is the contract.
-# An entry: path, lines "a-b" (at most 2000 lines and 16000 bytes: split a longer section into several entries),
-# why, optional ref (a git ref; the loader reads `git show <ref>:<path>`). A stream kind also gets the
-# `context_files` list of its handoff front matter. Changed only through the pipeline.
+# An entry: path, lines "a-b" (at most 2000 lines and 16000 bytes: split a longer section into several entries) or
+# "a-end" for a file that grows (handoffs, board, ledgers, registers; the loader resolves `end` to the file's last
+# line and splits the range within both caps, DEC-0166), why, optional ref (a git ref; the loader reads
+# `git show <ref>:<path>`; `board:B` is origin/<the branch in stream B's board row>, DEC-0167). A stream kind also
+# gets the `context_files` list of its handoff front matter. Changed only through the pipeline.
 lists:
   stream-a-block:
   - &id001
@@ -16,11 +18,11 @@ lists:
     why: 'the two-stream playbook: state locations, ownership, context contract, drift checks, stated limits'
   - &id003
     path: docs/superpowers/state/program/board.md
-    lines: 1-13
+    lines: 1-end
     why: 'the stream board: where each stream is and what is pending'
   - &id004
     path: docs/superpowers/state/strict-delivery/handoff.md
-    lines: 1-45
+    lines: 1-end
     why: 'stream A handoff: next block, traps, open rows, resume prompt'
   - &id005
     path: tools/gates/config.yml
@@ -34,7 +36,7 @@ lists:
   - *id002
   - *id003
   - path: docs/superpowers/state/prototype/handoff.md
-    lines: 1-39
+    lines: 1-end
     why: 'stream B handoff: next block, traps, open rows, resume prompt'
   - path: docs/superpowers/plans/2026-10-29-prototype-field-ready.md
     lines: 1-117
@@ -44,9 +46,9 @@ lists:
   - *id003
   - *id004
   - path: docs/superpowers/state/prototype/handoff.md
-    lines: 1-39
+    lines: 1-end
     why: stream B handoff as pushed on its branch (the sync reads the other stream from origin)
-    ref: origin/block/prototype-b1
+    ref: board:B
   controller:
   - *id001
   - *id002
