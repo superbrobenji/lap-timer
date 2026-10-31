@@ -1265,10 +1265,12 @@ class Mutate(unittest.TestCase):
         self.addCleanup(kill_recorded_groups, files["MUTATE_TEST_RUNLOG"])
         return tmp, files
 
-    def start_tool(self, argv, env):
+    def start_tool(self, argv, env, ignore_sigint=False):
         """The real file as a process in its own session, killed with its group and reaped when the test ends."""
         p = subprocess.Popen([PY, MUTATE, *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.scratch,
-                             env=env, start_new_session=True)
+                             env=env, start_new_session=True,
+                             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN if ignore_sigint else signal.SIG_DFL))
+        # the caller's disposition is not inherited (a background job of a shell starts with SIGINT ignored, DEC-0290)
 
         def reap():
             with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -1328,6 +1330,28 @@ class Mutate(unittest.TestCase):
     def test_sigint_stops_the_run_and_leaves_nothing(self):
         """Row M-X3 (DEC-0275, DEC-0276): at once, no further mutant, test processes killed, scratch removed, rc 2."""
         self.interrupt_run(signal.SIGINT, "SIGINT")
+
+    def test_an_inherited_ignored_sigint_is_kept(self):
+        """Row M-X3b (DEC-0290 keep-inherited-ignore): started with SIGINT ignored (nohup, a background job), the tool
+        installs no SIGINT handler: SIGINT does not stop the run; SIGTERM still does (M-X4)."""
+        head = self.hang_head()
+        tmp, files = self.hang_env()
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_hang.A", "--py", PY, "--jobs", "1"]
+        p = self.start_tool(argv, dict(os.environ, TMPDIR=tmp, **files), ignore_sigint=True)
+        pid, pgid, _ = self.wait_for_hang(p, files["MUTATE_TEST_HANGLOG"])
+        os.kill(p.pid, signal.SIGINT)
+        time.sleep(3)
+        self.assertIsNone(p.poll(), "the tool stopped on a SIGINT it inherited as ignored")
+        self.assertEqual(len(recorded(files["MUTATE_TEST_RUNLOG"])), 2)
+        self.assertTrue(group_members(pgid), "the hung test run was killed by the ignored SIGINT")
+        os.kill(p.pid, signal.SIGTERM)
+        try:
+            out, err = p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("the tool did not stop within 30 s of SIGTERM")
+        self.assertEqual((p.returncode, out.decode(), err.decode()), (2, "FAIL mutate.interrupt: stopped by SIGTERM\n", ""))
+        self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
 
     def test_sigterm_stops_the_run_and_leaves_nothing(self):
         """Row M-X4 (DEC-0275, DEC-0276): as M-X3 with SIGTERM."""

@@ -881,6 +881,8 @@ def main(argv=None) -> int:
     previous = {}
     if threading.current_thread() is threading.main_thread():   # M-X3, M-X4: for this run only
         for sig in (signal.SIGINT, signal.SIGTERM):
+            if sig == signal.SIGINT and signal.getsignal(sig) == signal.SIG_IGN:
+                continue                  # DEC-0290 keep-inherited-ignore: a caller that ignores SIGINT (nohup) is respected
             previous[sig] = signal.signal(sig, Stop.handler)
     try:
         try:
