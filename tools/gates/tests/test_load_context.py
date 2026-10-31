@@ -1689,6 +1689,21 @@ class LoadContext(unittest.TestCase):
             rc, out, _ = self.call([KIND], env={"CLAUDE_PROJECT_DIR": ""}, cwd=os.path.join(self.root, "docs"))
             self.assertEqual((rc, out), (0, f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n"))
 
+    def test_a_whitespace_only_claude_project_dir_is_an_empty_root(self):
+        """Rows R5/R1 (DEC-0250 treat-as-empty, Q-PROG-9): CLAUDE_PROJECT_DIR set to whitespace only gives the whole line
+        `FAIL context.input: --root is empty`, never a relative path under the cwd, never the cwd's tree, no list."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        plain = tempfile.mkdtemp(prefix="not-a-repo-")
+        self.addCleanup(gf.remove, plain)
+        for value in (" ", "  ", "\t", "\n", " \t\n"):
+            for cwd in (self.root, os.path.join(self.root, "docs"), plain):
+                with self.subTest(value=ascii(value), cwd=os.path.basename(cwd)):
+                    rc, out, err = self.call([KIND], env={"CLAUDE_PROJECT_DIR": value}, cwd=cwd)
+                    self.assertEqual((rc, out, err), (1, "FAIL context.input: --root is empty\n", ""))
+                    self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED)))
+
     def test_a_root_whose_name_ends_in_whitespace_is_that_root(self):
         """Rows R1/R5/R6: git prints the top level followed by one newline; only that newline is removed, so a work tree
         whose directory name ends in a space or a tab loads (by --root, CLAUDE_PROJECT_DIR and discovery)."""

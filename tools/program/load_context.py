@@ -525,6 +525,8 @@ def find_root() -> str:
     removed (DEC-0175: the caller's GIT_DIR/GIT_WORK_TREE never choose the tree); ValueError when there is none."""
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env:
+        if not env.strip():                          # DEC-0250 treat-as-empty: the --root "is empty" form (R5, R1)
+            raise ValueError("--root is empty")
         return env
     try:
         p = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, check=False, env=git_env())

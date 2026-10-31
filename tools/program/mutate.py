@@ -6,7 +6,8 @@
   python3 tools/program/mutate.py --list-operators
 
 Sites. The lines of each --file (a .py file, a regular file at --head) that `git diff -U0 <base> <head>` adds or
-changes, every GIT_* variable removed from git's environment as the loader does. A mutant is in scope when the text it
+changes, every GIT_* variable removed from git's environment as the loader does, the diff's algorithm, heuristic,
+hunk joining and text mode pinned (DIFF_PINS) so repository config and attributes cannot move a site. A mutant is in scope when the text it
 replaces touches a site line; its reported line is the line that text starts on.
 
 Operators. OPERATORS, a fixed list, each applied alone to every match on the sites (Python ast positions, never a
@@ -19,7 +20,7 @@ Run. Each worker clones the root into its own scratch directory (tempfile.mkdtem
 guard refuses a scratch directory that is the root or inside it and a copy that is not its own work-tree top. The
 --test ids first run on the unmutated copy under each --py: they must run at least one test and pass. Then, for each
 mutant: the file in the copy is written with the mutant, the --test ids run in one `<py> -W error -m unittest -f` per
---py (cwd the copy, GIT_* removed, bytecode off), the file is restored and byte-compared, and `git status` of the copy
+--py (cwd the copy, GIT_* and TEST_ENV_DROP removed, bytecode off), the file is restored and byte-compared, and `git status` of the copy
 must be empty. A run that fails or errors, or outlives TIMEOUT_FLOOR + TIMEOUT_FACTOR x the unmutated run, KILLS the
 mutant; a run that passes means it SURVIVED; a mutant whose text is not found at its position, or equals the original,
 or does not compile, is BADMATCH (never run).
@@ -43,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import io
 import json
 import os
@@ -105,6 +107,8 @@ ID_SPEC_RE = re.compile(r"(m[0-9]{4,})(?:-(m[0-9]{4,}))?")
 ID_SHAPE = "is not an id m<nnnn> or a range m<nnnn>-m<nnnn> as the tool prints them"
 RAN_RE = re.compile(r"^Ran ([0-9]+) tests? in ", re.M)
 REGULAR = (b"100644", b"100755")
+TEST_ENV_DROP = ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH", "PYTHONUSERBASE", "PYTHONSTARTUP", "PYTHONPLATLIBDIR")
+DIFF_PINS = ("--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--text")   # M-G3, M-G4 (DEC-0260)
 
 
 class Fail(Exception):
@@ -125,6 +129,18 @@ def show(value) -> str:
     return clip(repr(value))
 
 
+def one_line(text: str) -> str:
+    """The loader's O3 rule: every non-printable character (line breaks included) escaped, runs of spaces collapsed,
+    then cut to CLIP characters (M-X2, DEC-0264)."""
+    escaped = "".join(c if c.isprintable() else c.encode("unicode_escape").decode() for c in text)
+    return clip(" ".join(escaped.split()))
+
+
+def git_top(stdout: bytes) -> str:
+    """git's toplevel as argv and os.environ decode a path, only git's final newline removed (M-R9, M-R10, M-G1; R7, R8)."""
+    return os.fsdecode(stdout).removesuffix("\n")
+
+
 def clean_env() -> dict:
     """The caller's environment without any GIT_* variable (the root names the repository), pathspecs literal."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -133,7 +149,10 @@ def clean_env() -> dict:
 
 
 def git_run(cwd: str, *args) -> "subprocess.CompletedProcess":
-    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, check=False, env=clean_env())
+    try:
+        return subprocess.run(["git", "-C", cwd, *args], capture_output=True, check=False, env=clean_env())
+    except OSError as exc:                      # M-G5 (DEC-0261): git not on PATH is a named FAIL, R5's strerror form
+        raise Fail("git", f"git cannot run ({exc.strerror})") from None
 
 
 def git(cwd: str, *args) -> bytes:
@@ -156,20 +175,26 @@ def read_file(path: str) -> bytes:
 # --- arguments -----------------------------------------------------------------------------------------------------
 
 def parse_args(argv: list) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(prog="mutate", add_help=False, allow_abbrev=False)
+    ap = argparse.ArgumentParser(prog="mutate", allow_abbrev=False)
     for name in ("--root", "--base", "--head", "--jobs", "--ids", "--file", "--test", "--py"):
         ap.add_argument(name, action="append", default=[])
-    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--json", action="count", default=0)
     ap.add_argument("--list-operators", action="store_true")
 
     def refuse(message):                 # argparse would print its usage and exit 2 without a named check
         raise Fail("args", f"bad arguments: {message}")
     ap.error = refuse
-    ns = ap.parse_args(argv)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):        # M-O3 (DEC-0272): -h prints the usage on stderr
+            ns = ap.parse_args(argv)
+    except SystemExit as exc:
+        raise Fail("args", f"bad arguments (argparse exit {exc.code})") from None
     if ns.list_operators:
         if argv != ["--list-operators"]:
             raise Fail("args", "--list-operators takes no other argument")
         return ns
+    if ns.json > 1:                      # M-O1 (DEC-0265)
+        raise Fail("args", "--json is given more than once")
     for name in ("root", "base", "head", "jobs", "ids"):
         values = getattr(ns, name)
         if len(values) > 1:
@@ -185,6 +210,10 @@ def parse_args(argv: list) -> argparse.Namespace:
         for v in values:
             if values.count(v) > 1:
                 raise Fail("args", f"--{name} {show(v)} is given twice")
+    for inner in ns.test:                # M-T4 (DEC-0265, DEC-0276): one id inside another, in either order
+        for outer in ns.test:
+            if inner.startswith(outer + "."):
+                raise Fail("args", f"--test {show(inner)} overlaps --test {show(outer)}")
     jobs = ns.jobs if ns.jobs is not None else "1"
     if not re.fullmatch(r"[1-9][0-9]?", jobs) or int(jobs) > MAX_JOBS:
         raise Fail("args", f"--jobs {show(jobs)} is not an integer from 1 to {MAX_JOBS}")
@@ -207,14 +236,17 @@ def parse_ids(spec: str) -> tuple:
 
 
 def check_root(root: str) -> str:
-    if not root:
+    if not root.strip():                 # M-R3 (DEC-0253): whitespace only is empty, as R1
         raise Fail("root", "--root is empty")
+    root = os.path.abspath(root)         # M-R5 (DEC-0254): named by its absolute path; a trailing / never hides a link
+    if os.path.islink(root):             # M-R6 (DEC-0255, D32)
+        raise Fail("root", f"--root {show(root)} is a symlink")
     if not os.path.isdir(root):
         raise Fail("root", f"--root {show(root)} is not a directory")
     top = git_run(root, "rev-parse", "--show-toplevel")
-    if top.returncode != 0 or os.path.realpath(top.stdout.decode("utf-8", "replace").strip()) != os.path.realpath(root):
+    if top.returncode != 0 or os.path.realpath(git_top(top.stdout)) != os.path.realpath(root):
         raise Fail("root", f"--root {show(root)} is not the top of a git work tree")
-    return os.path.abspath(root)
+    return root
 
 
 def resolve(root: str, name: str, rev: str) -> str:
@@ -231,7 +263,7 @@ def head_source(root: str, head: str, path: str) -> str:
         raise Fail("file", f"{show(path)} is not a normalized path relative to the root")
     entry = git(root, "ls-tree", "-z", head, "--", path)
     fields = entry.split(b"\t", 1)
-    if len(fields) != 2 or fields[1] != path.encode() + b"\0" or fields[0].split(b" ")[0] not in REGULAR:
+    if len(fields) != 2 or fields[1] != os.fsencode(path) + b"\0" or fields[0].split(b" ")[0] not in REGULAR:
         raise Fail("file", f"{show(path)} is not a regular file at {head}")
     if not path.endswith(".py"):
         raise Fail("file", f"{show(path)} is not a .py file")
@@ -250,7 +282,8 @@ def head_source(root: str, head: str, path: str) -> str:
 
 
 def changed_lines(root: str, base: str, head: str, path: str) -> set:
-    out = git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", base, head, "--", path)
+    out = git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", *DIFF_PINS, base, head,
+              "--", path)
     lines = set()
     for m in HUNK_RE.finditer(out):
         start, count = int(m.group(1)), int(m.group(2)) if m.group(2) is not None else 1
@@ -471,6 +504,8 @@ class Copy:
     def __init__(self, root: str):
         scratch = tempfile.mkdtemp(prefix="mutate-")
         if inside(scratch, root):
+            with contextlib.suppress(OSError):   # M-E1 (DEC-0032): the refused (new, empty) directory is not left there
+                os.rmdir(scratch)
             raise Fail("guard", f"the scratch copy {show(scratch)} is the root or inside it")
         self.scratch = scratch
         self.tree = os.path.join(scratch, "tree")
@@ -479,7 +514,7 @@ class Copy:
     def make(self, root: str, head: str) -> None:
         git(self.scratch, "clone", "-q", "--no-hardlinks", "--no-checkout", "--", root, self.tree)
         top = git_run(self.tree, "rev-parse", "--show-toplevel")
-        toplevel = top.stdout.decode("utf-8", "replace").strip() if top.returncode == 0 else "none"
+        toplevel = git_top(top.stdout) if top.returncode == 0 else "none"
         if top.returncode != 0 or os.path.realpath(toplevel) != os.path.realpath(self.tree) or inside(toplevel, root):
             raise Fail("guard", f"the scratch copy {show(self.tree)} is not its own work-tree top (git toplevel {show(toplevel)})")
         git(self.tree, "reset", "-q", "--hard", head)
@@ -495,7 +530,7 @@ class Copy:
 
     def run_tests(self, py: str, tests: list, timeout) -> tuple:
         """(rc or None on timeout, number of tests run, seconds) of one unittest run in the copy."""
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k not in TEST_ENV_DROP}   # M-E3
         env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPYCACHEPREFIX=self.pycache)
         t0 = time.monotonic()
         p = subprocess.Popen([py, "-W", "error", "-m", "unittest", "-f", *tests], cwd=self.tree, env=env,
@@ -574,6 +609,9 @@ def run_all(root: str, head: str, mutants: list, sources: dict, pys: list, tests
             printer: Printer) -> None:
     """Every mutant under every --py, `jobs` guarded copies at a time; results land in each mutant's dict."""
     copies, stop, failures = [], threading.Event(), []
+    tmp = os.environ.get("TMPDIR")
+    if tmp is not None and not (os.path.isdir(tmp) and os.access(tmp, os.W_OK | os.X_OK)):   # M-E2 (DEC-0262)
+        raise Fail("guard", f"TMPDIR {show(tmp)} is not a writable directory")
     try:
         for _ in range(max(1, min(jobs, len(mutants)))):
             copies.append(Copy(root))
@@ -594,7 +632,7 @@ def run_all(root: str, head: str, mutants: list, sources: dict, pys: list, tests
                     stop.set()
                     return
                 except Exception as exc:            # never a traceback, and the other workers stop too
-                    failures.append(Fail("internal", f"{type(exc).__name__}: {exc}"))
+                    failures.append(Fail("internal", one_line(f"{type(exc).__name__}: {exc}")))
                     stop.set()
                     return
                 mutants[i]["results"] = {label: r for label, (r, _) in res.items()}
@@ -645,6 +683,10 @@ def prepare(ns) -> tuple:
         if not TEST_ID_RE.fullmatch(t):
             raise Fail("test", f"{show(t)} is not a unittest id")
     pys = [(p, check_py(p)) for p in ns.py]
+    for i, (b, exe) in enumerate(pys):   # M-P4 (DEC-0265, DEC-0276): one interpreter under two spellings
+        for a, earlier in pys[:i]:
+            if os.path.realpath(exe) == os.path.realpath(earlier):
+                raise Fail("args", f"--py {show(b)} is the same interpreter as --py {show(a)}")
     for i, m in enumerate(mutants, 1):
         m["id"] = f"m{i:04d}"
     last = len(mutants)
@@ -683,16 +725,32 @@ def execute(ns) -> int:
     return rc
 
 
+def json_form(argv: list) -> bool:
+    """Whether a FAIL prints in JSON form: --json as argparse parses it (M-O2, DEC-0272), so `-- --json` is not it."""
+    ap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    ap.add_argument("--json", action="count", default=0)
+
+    def refuse(message):
+        raise Fail("args", message)
+    ap.error = refuse
+    try:
+        return ap.parse_known_args(argv)[0].json > 0
+    except Fail:
+        return False
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    as_json = "--json" in argv
+    if hasattr(sys.stdout, "reconfigure"):   # M-E4 (DEC-0263, O4): UTF-8 whatever the locale; a name git stores as
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")   # bytes that are not UTF-8 prints escaped
+    as_json = json_form(argv)
     try:
         try:
             return execute(parse_args(argv))
         except Fail:
             raise
-        except Exception as exc:          # never a traceback: an unexpected error is a named FAIL too
-            raise Fail("internal", f"{type(exc).__name__}: {exc}") from None
+        except Exception as exc:          # never a traceback: an unexpected error is a named FAIL too (one line, M-X2)
+            raise Fail("internal", one_line(f"{type(exc).__name__}: {exc}")) from None
     except Fail as exc:
         if as_json:
             print(json.dumps({"rc": 2, "fail": [{"check": f"mutate.{exc.check}", "reason": exc.reason}]}))

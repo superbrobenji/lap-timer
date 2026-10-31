@@ -5,7 +5,9 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -16,6 +18,7 @@ from tools.gates.tests import gitfixture as gf
 from tools.program import mutate
 
 PY = sys.executable
+MUTATE = os.path.abspath(mutate.__file__)
 
 MOD_BASE = '''"""m"""
 UNCHANGED = 1 == 2
@@ -450,7 +453,7 @@ class Mutate(unittest.TestCase):
                 rc, out = self.call(self.args())
                 self.assertEqual(rc, 2)
                 self.assertEqual(out, f"FAIL mutate.guard: the scratch copy {target!r} is the root or inside it\n")
-        os.rmdir(inside)
+        self.assertFalse(os.path.exists(inside))        # round 9a (M-E1): the refused, empty scratch directory is removed
         self.assert_checkout_untouched()
 
     def symlink_to(self, target):
@@ -663,6 +666,558 @@ class Mutate(unittest.TestCase):
             rc, out = self.call(self.args())
         self.assertEqual(rc, 1, out)
         self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    # --- fix round 9a: the rows of T1-mutate-input-domain.md (F18, F17, DEC-0251..DEC-0276) ------------------------
+
+    def tool(self, argv, env=None, cwd=None):
+        """The real file as a process: (rc, stdout, stderr), for rows whose input is the process environment."""
+        full = dict(os.environ if env is None else env)
+        p = subprocess.run([PY, MUTATE, *argv], capture_output=True, cwd=cwd or self.scratch, env=full, check=False)
+        return p.returncode, p.stdout.decode("utf-8"), p.stderr.decode("utf-8", "replace")
+
+    def call_in(self, cwd, argv):
+        old = os.getcwd()
+        os.chdir(cwd)
+        try:
+            return self.call(argv)
+        finally:
+            os.chdir(old)
+
+    def kill_args(self, root, extra=()):
+        return ["--root", root, "--base", self.base, "--head", self.head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_kill.A", "--py", PY] + list(extra)
+
+    def copy_repo(self, name):
+        """The fixture repository copied to <scratch>/<name> (str or bytes), or None when the filesystem refuses it."""
+        dest = os.path.join(self.scratch, os.fsdecode(name))
+        try:
+            shutil.copytree(self.root, dest, symlinks=True)
+        except (OSError, shutil.Error):
+            shutil.rmtree(dest, ignore_errors=True)
+            return None
+        return dest
+
+    def commit_files(self, files, msg):
+        for rel, data in files.items():
+            path = os.path.join(self.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data.encode("utf-8") if isinstance(data, str) else data)
+        return gf.commit_all(self.root, msg)
+
+    def test_an_option_without_its_value_is_a_named_fail(self):
+        """Rows M-R1, M-S1, M-F1, M-T1, M-P1: an option as the last argument, with no value."""
+        for name in ("--root", "--base", "--head", "--file", "--test", "--py", "--jobs", "--ids"):
+            with self.subTest(name):
+                rc, out = self.call(self.args() + [name])
+                self.assertEqual((rc, out), (2, f"FAIL mutate.args: bad arguments: argument {name}: expected one argument\n"))
+
+    def test_a_whitespace_only_root_is_empty(self):
+        """Row M-R3 (DEC-0253 empty-form): never a path, never the cwd's tree."""
+        for root in (" ", "  ", "\t", "\n", " \t\n"):
+            for argv in (self.kill_args(root), ["--root=" + root] + self.kill_args(self.root)[2:]):
+                with self.subTest(root=ascii(root), form=argv[0][:7]):
+                    rc, out = self.call_in(self.root, argv)
+                    self.assertEqual((rc, out), (2, "FAIL mutate.root: --root is empty\n"))
+
+    def test_a_relative_root_is_normalised_and_a_bad_one_named_absolute(self):
+        """Row M-R5 (DEC-0254 name-abspath): relative, `..` and trailing-/ roots load as the tree; a relative bad root is
+        named by its absolute path."""
+        want = self.call(self.kill_args(self.root))
+        parent, name = os.path.split(self.root)
+        for cwd, root in ((parent, name), (parent, "./" + name + "/"), (parent, name + "/"),
+                          (self.root, os.path.join(self.root, "pkg", "..")), (self.root, ".")):
+            with self.subTest(root=root):
+                self.assertEqual(self.call_in(cwd, self.kill_args(root)), want)
+        absolute = os.path.join(os.path.realpath(self.root), "nope")     # the cwd as the process sees it
+        for root in ("nope", "./nope/", "pkg/../nope"):
+            with self.subTest(root=root):
+                rc, out = self.call_in(self.root, self.kill_args(root))
+                self.assertEqual((rc, out), (2, f"FAIL mutate.root: --root {absolute!r} is not a directory\n"))
+
+    def test_a_symlinked_root_is_refused(self):
+        """Row M-R6 (DEC-0255 refuse-symlink, D32): the same whole line with or without a trailing /, absolute or relative."""
+        link = os.path.join(self.scratch, "lnk")
+        os.symlink(self.root, link)
+        seen = os.path.join(os.path.realpath(self.scratch), "lnk")      # a relative one, from the cwd as the process sees it
+        for root, want in ((link, link), (link + "/", link), ("lnk", seen), ("lnk/", seen)):
+            with self.subTest(root=root):
+                rc, out = self.call_in(self.scratch, self.kill_args(root))
+                self.assertEqual((rc, out), (2, f"FAIL mutate.root: --root {want!r} is a symlink\n"))
+
+    def test_a_root_of_the_wrong_kind_is_not_a_directory(self):
+        """Row M-R7 (D32): a regular file and a FIFO."""
+        plain = os.path.join(self.scratch, "plain")
+        open(plain, "w").close()
+        fifo = os.path.join(self.scratch, "fifo")
+        os.mkfifo(fifo)
+        for root in (plain, fifo):
+            with self.subTest(root=root):
+                self.assertEqual(self.call(self.kill_args(root)), (2, f"FAIL mutate.root: --root {root!r} is not a directory\n"))
+
+    def test_git_dirs_bare_and_unreadable_roots_are_not_a_top(self):
+        """Row M-R8: <top>/.git, a bare repository, a plain directory, mode 000."""
+        bare = os.path.join(self.scratch, "bare.git")
+        gf.git(self.scratch, "clone", "-q", "--bare", self.root, bare)
+        plain = os.path.join(self.scratch, "plain")
+        os.mkdir(plain)
+        roots = [os.path.join(self.root, ".git"), bare, plain]
+        if os.geteuid() != 0:
+            locked = os.path.join(self.scratch, "locked")
+            shutil.copytree(self.root, locked)
+            os.chmod(locked, 0)
+            self.addCleanup(os.chmod, locked, 0o755)
+            roots.append(locked)
+        for root in roots:
+            with self.subTest(root=root):
+                self.assertEqual(self.call(self.kill_args(root)),
+                                 (2, f"FAIL mutate.root: --root {root!r} is not the top of a git work tree\n"))
+
+    def test_a_root_whose_name_ends_in_whitespace_is_that_root(self):
+        """Row M-R9 (F17, DEC-0256 loader-fix): only git's final newline is removed from its toplevel."""
+        want = self.call(self.kill_args(self.copy_repo("t")))
+        self.assertEqual(want[0], 1, want)
+        for name in ("t ", "t\t", "t \t", "t  "):
+            with self.subTest(name=ascii(name)):
+                self.assertEqual(self.call(self.kill_args(self.copy_repo(name))), want)
+
+    def test_a_root_whose_name_is_not_valid_utf8_is_that_root(self):
+        """Rows M-R10 and M-R13 (F17, DEC-0256, R8): a root named with a byte that is not UTF-8 loads (Linux; skipped
+        where the filesystem refuses the name), and a missing one is a named FAIL with no traceback."""
+        missing = os.path.join(self.scratch, os.fsdecode(b"t-\xff"))
+        self.assertEqual(self.call(self.kill_args(missing)), (2, f"FAIL mutate.root: --root {missing!r} is not a directory\n"))
+        root = self.copy_repo(b"tree-\xff")
+        if root is None:
+            self.skipTest("the filesystem refuses a name that is not UTF-8 (macOS APFS: EILSEQ)")
+        want = self.call(self.kill_args(self.copy_repo("tree")))
+        self.assertEqual(want[0], 1, want)
+        self.assertEqual(self.call(self.kill_args(root)), want)
+
+    def test_any_work_tree_top_is_a_root(self):
+        """Row M-R11 (DEC-0266 any-worktree-top): a linked worktree top and a repository other than this project."""
+        want = self.call(self.kill_args(self.root))
+        self.assertEqual(want[0], 1, want)
+        wt = os.path.join(self.scratch, "wt")
+        gf.git(self.root, "worktree", "add", "-q", "--detach", wt, self.head)
+        self.assertEqual(self.call(self.kill_args(wt)), want)
+        self.assertNotEqual(os.path.realpath(self.root), os.path.realpath(gf.REPO))
+
+    def test_a_dirty_root_is_read_at_head_and_left_as_it_was(self):
+        """Row M-R12 (DEC-0247 clone rule): a modified file and an untracked file in the root."""
+        want = self.call(self.kill_args(self.root))
+        gf.write(self.root, "pkg/kill.py", "def f(a):\n    return True\n")
+        gf.write(self.root, "stray.py", "X = 1\n")
+        before = gf.git(self.root, "status", "--porcelain", "--untracked-files=all")
+        self.assertEqual(self.call(self.kill_args(self.root)), want)
+        self.assertEqual(gf.git(self.root, "status", "--porcelain", "--untracked-files=all"), before)
+        with open(os.path.join(self.root, "pkg/kill.py"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "def f(a):\n    return True\n")
+
+    def test_a_tmpdir_whose_name_is_not_valid_utf8_holds_the_copy(self):
+        """Row M-G1 (F17, DEC-0257): the clone's toplevel is decoded with os.fsdecode (Linux; skipped where the
+        filesystem refuses the name)."""
+        want = self.call(self.kill_args(self.root))
+        tmp = os.path.join(self.scratch, os.fsdecode(b"tmp-\xff"))
+        try:
+            os.mkdir(tmp)
+        except OSError:
+            self.skipTest("the filesystem refuses a name that is not UTF-8 (macOS APFS: EILSEQ)")
+        with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+            got = self.call(self.kill_args(self.root))
+        self.assertEqual(got, want)
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_git_ceiling_directories_cannot_redirect_the_run(self):
+        """Row M-G2 subcase: GIT_CEILING_DIRECTORIES naming the root."""
+        want = self.call(self.kill_args(self.root))
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": self.root}):
+            self.assertEqual(self.call(self.kill_args(self.root)), want)
+
+    def test_repository_diff_config_and_attributes_cannot_change_the_sites(self):
+        """Rows M-G3, M-G4 (DEC-0260 pin-diff, D32): diff.algorithm, diff.indentHeuristic, diff.interHunkContext in the
+        root's config and a `-diff` attribute leave the mutant list as it is without them."""
+        body = "def f(a):\n    x = a > 1\n    y = a > 2\n    z = a > 3\n    return x\n"
+        base = self.commit_files({"pkg/cfg.py": body}, "cfg base")
+        head = self.commit_files({"pkg/cfg.py": "def f(a):\n    x = a > 9\n    y = a > 2\n    z = a > 8\n    return x\n"},
+                                 "cfg head")
+        argv = ["--root", self.root, "--base", base, "--head", head, "--file", "pkg/cfg.py", "--test", "pkg.test_mod",
+                "--py", PY, "--jobs", "4"]
+
+        def key():
+            rc, doc = self.run_json(argv)
+            return rc, [(m["id"], m["line"], m["operator"]) for m in doc["mutants"]] if "mutants" in doc else doc
+        want = key()
+        self.assertEqual({line for _, line, _ in want[1]}, {2, 4})
+        for k, v in (("diff.algorithm", "patience"), ("diff.indentHeuristic", "false"), ("diff.interHunkContext", "5")):
+            with self.subTest(k):
+                gf.git(self.root, "config", k, v)
+                self.assertEqual(key(), want)
+                gf.git(self.root, "config", "--unset", k)
+        with self.subTest("-diff attribute"):
+            with open(os.path.join(self.root, ".git", "info", "attributes"), "w", encoding="utf-8") as fh:
+                fh.write("*.py -diff\n")
+            self.assertEqual(key(), want)
+
+    def test_repository_diff_algorithm_cannot_change_the_mod_sites(self):
+        """Row M-G3 on a text where patience and myers choose different lines (changed lines: myers 2, 4, 5; patience 1, 4, 5)."""
+        base = self.commit_files({"pkg/alg.py": "pass\nA = 1 > 0\nC = 3 > 2\nA = 1 > 0\nA = 1 > 0\n"}, "alg base")
+        head = self.commit_files({"pkg/alg.py": "A = 1 > 0\npass\nA = 1 > 0\nD = 4 > 3\nB = 2 > 1\n"}, "alg head")
+        argv = ["--root", self.root, "--base", base, "--head", head, "--file", "pkg/alg.py", "--test", "pkg.test_mod",
+                "--py", PY, "--jobs", "4"]
+        want = [(m["line"], m["operator"]) for m in self.run_json(argv)[1]["mutants"]]
+        self.assertEqual(sorted({line for line, _ in want}), [4, 5])          # line 2 (pass) has no operator site
+        gf.git(self.root, "config", "diff.algorithm", "patience")
+        self.assertEqual([(m["line"], m["operator"]) for m in self.run_json(argv)[1]["mutants"]], want)
+
+    def test_git_missing_is_a_named_git_fail(self):
+        """Row M-G5 (DEC-0261 named-git-fail, R5): git not on PATH."""
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}):
+            self.assertEqual(self.call(self.kill_args(self.root)), (2, "FAIL mutate.git: git cannot run (No such file or directory)\n"))
+
+    def test_commit_ish_forms_resolve_to_the_full_sha(self):
+        """Row M-S2 (DEC-0267 rev-parse-forms): each form runs and the summary prints the full sha."""
+        self.assertEqual(gf.git(self.root, "rev-parse", "main@{1}"), self.base)
+        gf.git(self.root, "tag", "light", self.head)
+        gf.git(self.root, "tag", "-a", "-m", "ann", "ann", self.head)
+        b, h = self.base, self.head
+        cases = [(b, b, form, h) for form in ("HEAD", "main", "refs/heads/main", "light", "ann", h[:7], h.upper())]
+        cases += [(form, b, h, h) for form in ("HEAD~1", "HEAD^", "main@{1}")]
+        self.run_forms(cases)
+        dangling = self.commit_files({"README.md": "dangling\n"}, "dangling")
+        gf.git(self.root, "reset", "-q", "--hard", h)
+        self.assertEqual(gf.git(self.root, "branch", "--contains", dangling), "")
+        self.run_forms([(b, b, dangling, dangling)])
+
+    def run_forms(self, cases):
+        for b_arg, b_sha, h_arg, h_sha in cases:
+            with self.subTest(base=b_arg, head=h_arg):
+                argv = ["--root", self.root, "--base", b_arg, "--head", h_arg] + self.kill_args(self.root)[6:] + ["--ids", "m0001"]
+                rc, out = self.call(argv)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"summary: base {b_sha} head {h_sha}, ids m0001, 1 mutants in 1 file, 1 test, 1 interpreter",
+                              out.splitlines())
+
+    def test_values_that_are_not_a_commit_are_named_fails(self):
+        """Row M-S3 (D28, D32): forms that are not a commit, matched whole."""
+        tree = gf.git(self.root, "rev-parse", self.head + "^{tree}")
+        blob = gf.git(self.root, "rev-parse", self.head + ":pkg/kill.py")
+        h = self.head
+        for v in (tree, blob, h + ":pkg", f"{self.base}..{h}", h + "^{tree}", ":/base", "f" * 40, "nope", "", " ",
+                  h + " ", " " + h, h + "\n", "x" * 500):
+            with self.subTest(v=v[:50]):
+                rc, out = self.call(["--root", self.root, "--base", self.base, "--head=" + v] + self.kill_args(self.root)[6:])
+                self.assertEqual((rc, out), (2, f"FAIL mutate.sha: --head {mutate.show(v)} is not a commit\n"))
+        self.assertEqual(self.call(["--root", self.root, "--base", self.base, "--head", "-x"] + self.kill_args(self.root)[6:]),
+                         (2, "FAIL mutate.args: bad arguments: argument --head: expected one argument\n"))
+
+    def test_a_range_with_no_changed_line_is_a_named_fail(self):
+        """Row M-S4 (DEC-0268 keep-split): base == head, reversed, unrelated history."""
+        gf.git(self.root, "checkout", "-q", "--orphan", "other")
+        other = gf.commit_all(self.root, "unrelated")
+        gf.git(self.root, "checkout", "-q", "main")
+        for b, h in ((self.head, self.head), (self.head, self.base), (other, self.head)):
+            with self.subTest(base=b, head=h):
+                rc, out = self.call(["--root", self.root, "--base", b, "--head", h] + self.kill_args(self.root)[6:])
+                self.assertEqual((rc, out), (2, f"FAIL mutate.file: 'pkg/kill.py' has no changed lines in {b}..{h}\n"))
+
+    def test_file_path_forms_that_are_not_normalized_are_refused(self):
+        """Row M-F2 subcases: `//` and a trailing `/`."""
+        for v in ("pkg//kill.py", "pkg/kill.py/", "pkg/./kill.py", "pkg/../pkg/kill.py"):
+            with self.subTest(v=v):
+                argv = self.args(files=[v])
+                self.assertEqual(self.call(argv), (2, f"FAIL mutate.file: {v!r} is not a normalized path relative to the root\n"))
+
+    def test_a_file_matches_the_tracked_name_as_a_whole_string(self):
+        """Row M-F3 (D32): no pathspec magic, no case folding, no whitespace trimming."""
+        for v in ("pkg/kill.py ", " ", "pkg/Kill.py", "pkg/*.py", ":(glob)pkg/*.py", ".git/config", "pkg/kill.p"):
+            with self.subTest(v=v):
+                self.assertEqual(self.call(self.args(files=[v])), (2, f"FAIL mutate.file: {v!r} is not a regular file at {self.head}\n"))
+
+    def test_a_symlinked_component_or_deleted_file_is_refused_and_100755_runs(self):
+        """Row M-F4 (D32)."""
+        os.symlink("pkg", os.path.join(self.root, "lnk"))
+        os.remove(os.path.join(self.root, "pkg/spin.py"))
+        os.chmod(os.path.join(self.root, "pkg/kill.py"), 0o755)
+        head = gf.commit_all(self.root, "kinds")
+        for v in ("lnk/kill.py", "lnk", "pkg/spin.py"):
+            with self.subTest(v=v):
+                rc, out = self.call(["--root", self.root, "--base", self.base, "--head", head, "--file", v, "--test",
+                                     "pkg.test_kill.A", "--py", PY])
+                self.assertEqual((rc, out), (2, f"FAIL mutate.file: {v!r} is not a regular file at {head}\n"))
+        self.assertEqual(gf.git(self.root, "ls-tree", head, "pkg/kill.py").split()[0], "100755")
+        rc, out = self.call(["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py", "--test",
+                             "pkg.test_kill.A", "--py", PY])
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_names_that_are_not_py_files_are_refused(self):
+        """Row M-F5 subcases (DEC-0269 as-built): `.PY` and `.pyi`."""
+        head = self.commit_files({"pkg/x.PY": "X = 1\n", "pkg/x.pyi": "X: int\n"}, "not py")
+        for v in ("pkg/x.PY", "pkg/x.pyi"):
+            with self.subTest(v=v):
+                rc, out = self.call(["--root", self.root, "--base", self.head, "--head", head, "--file", v, "--test",
+                                     "pkg.test_kill.A", "--py", PY])
+                self.assertEqual((rc, out), (2, f"FAIL mutate.file: {v!r} is not a .py file\n"))
+
+    def test_a_bom_is_refused_and_a_coding_cookie_is_read_as_utf8(self):
+        """Row M-F6 (DEC-0269 as-built)."""
+        head = self.commit_files({"pkg/bom.py": b"\xef\xbb\xbfX = 1\n",
+                                  "pkg/cookie.py": "# -*- coding: latin-1 -*-\nX = '\u00e9' == 'x'\n"}, "enc")
+        rng = ["--root", self.root, "--base", self.head, "--head", head, "--test", "pkg.test_mod", "--py", PY]
+        self.assertEqual(self.call(rng + ["--file", "pkg/bom.py"]),
+                         (2, f"FAIL mutate.file: 'pkg/bom.py' at {head} is not Python source (line 1)\n"))
+        rc, doc = self.run_json(rng + ["--file", "pkg/cookie.py"])
+        self.assertEqual([(m["line"], m["operator"], m["old"]) for m in doc["mutants"]],
+                         [(2, "str-empty", "'\u00e9'"), (2, "cmp-eq-ne", "=="), (2, "str-empty", "'x'")])
+        self.assertEqual(rc, 1)
+
+    def test_a_nul_byte_is_a_named_fail_on_each_interpreter(self):
+        """Row M-F8 (DEC-0270 as-built): the tool's interpreter decides the text."""
+        head = self.commit_files({"pkg/nul.py": b"X = 1\x00\n"}, "nul")
+        rc, out = self.call(["--root", self.root, "--base", self.head, "--head", head, "--file", "pkg/nul.py", "--test",
+                             "pkg.test_mod", "--py", PY])
+        want = ("FAIL mutate.internal: ValueError: source code string cannot contain null bytes\n"
+                if sys.version_info < (3, 12) else f"FAIL mutate.file: 'pkg/nul.py' at {head} is not Python source (line None)\n")
+        self.assertEqual((rc, out), (2, want))
+
+    def test_the_tool_interpreter_decides_python_source(self):
+        """Row M-F9 (DEC-0270 as-built): `match` is source on 3.10+ only."""
+        head = self.commit_files({"pkg/m.py": "match x:\n    case 1:\n        y = 2\n"}, "match")
+        rc, out = self.call(["--root", self.root, "--base", self.head, "--head", head, "--file", "pkg/m.py", "--test",
+                             "pkg.test_mod", "--py", PY])
+        if sys.version_info < (3, 10):
+            self.assertEqual((rc, out), (2, f"FAIL mutate.file: 'pkg/m.py' at {head} is not Python source (line 1)\n"))
+        else:
+            self.assertEqual(rc, 1, out)
+            self.assertEqual(out.splitlines()[:4], [f"m000{i} pkg/m.py:{2 + (i > 2)} int-{op} SURVIVED {PY}"
+                                                 for i, op in ((1, "inc"), (2, "dec"), (3, "inc"), (4, "dec"))])
+
+    def test_changed_lines_without_an_operator_site_pass_with_no_mutant(self):
+        """Row M-F10 (DEC-0268, DEC-0247): a comment and `pass`, or only a docstring, changed."""
+        head = self.commit_files({"pkg/kill.py": KILL_HEAD + "# note\npass\n", "pkg/doc.py": DOC_HEAD.replace("module doc", "mod")},
+                                 "no sites")
+        for f in ("pkg/kill.py", "pkg/doc.py"):
+            with self.subTest(f):
+                rc, out = self.call(["--root", self.root, "--base", self.head, "--head", head, "--file", f, "--test",
+                                     "pkg.test_mod", "--py", PY])
+                self.assertEqual((rc, out.splitlines()), (0, [
+                    f"summary: base {self.head} head {head}, 0 mutants in 1 file, 1 test, 1 interpreter",
+                    f"summary {PY}: 0 KILLED, 0 SURVIVED, 0 BADMATCH"]))
+
+    def test_an_added_or_renamed_file_is_all_sites(self):
+        """Row M-F12 (DEC-0234 "every changed line"; --no-renames)."""
+        gf.git(self.root, "mv", "pkg/mod.py", "pkg/ren.py")
+        head = self.commit_files({"pkg/new.py": "A = 1 == 2\nB = 3\n"}, "add and rename")
+        rng = ["--root", self.root, "--base", self.head, "--head", head, "--test", "pkg.test_mod", "--py", PY, "--jobs", "4"]
+        doc = self.run_json(rng + ["--file", "pkg/new.py"])[1]
+        self.assertEqual(sorted({m["line"] for m in doc["mutants"]}), [1, 2])
+        ren = self.run_json(rng + ["--file", "pkg/ren.py"])[1]
+        lines = {m["line"] for m in ren["mutants"]}
+        self.assertTrue({2, 53}.issubset(lines), lines)         # UNCHANGED and TAIL: unchanged text, but the file is new
+
+    def test_non_ascii_and_space_file_names_run(self):
+        """Row M-F13 (DEC-0269 as-built)."""
+        for name in ("pkg/\u00e9.py", "pkg/sp .py"):
+            with self.subTest(name):
+                head = self.commit_files({name: KILL_HEAD}, "name")
+                rc, out = self.call(["--root", self.root, "--base", self.base, "--head", head, "--file", name, "--test",
+                                     "pkg.test_mod", "--py", PY, "--ids", "m0002"])
+                self.assertEqual((rc, out.splitlines()[0]), (1, f"m0002 {name}:5 return-none SURVIVED {PY}"))
+
+    def test_a_file_whose_name_is_not_valid_utf8_runs(self):
+        """Row M-F14 (DEC-0258 fsencode, R8): compared as os.fsencode bytes (Linux; skipped where the filesystem refuses)."""
+        name = os.fsdecode(b"pkg/k\xff.py")
+        try:
+            head = self.commit_files({name: KILL_HEAD}, "bytes name")
+        except OSError:
+            self.skipTest("the filesystem refuses a name that is not UTF-8 (macOS APFS: EILSEQ)")
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", name, "--test", "pkg.test_mod",
+                "--py", PY, "--ids", "m0002"]
+        rc, out = self.call(argv)
+        self.assertEqual((rc, out.splitlines()[0]), (1, f"m0002 {name}:5 return-none SURVIVED {PY}"))
+        rc, out, err = self.tool([os.fsencode(a) for a in argv])
+        self.assertEqual((rc, out.splitlines()[0], err), (1, f"m0002 pkg/k\\udcff.py:5 return-none SURVIVED {PY}", ""))
+
+    def test_test_ids_match_the_ascii_grammar_whole(self):
+        """Row M-T2 (D32, DEC-0271 as-built)."""
+        for v in ("", " ", "pkg.test_kill.A ", "pkg.test_kill.A\n", "-x", "pkg..x", "pkg/test_kill.py", "pkg.t\u00e9st"):
+            with self.subTest(v=ascii(v)):
+                self.assertEqual(self.call(self.args(tests=[]) + ["--test=" + v]), (2, f"FAIL mutate.test: {v!r} is not a unittest id\n"))
+
+    def test_test_ids_that_do_not_exist_are_baseline_fails(self):
+        """Row M-T3 subcases: a missing class, a missing method, one good id with one missing."""
+        for tests in (["pkg.test_kill.Nope"], ["pkg.test_kill.A.test_nope"], ["pkg.test_kill.A", "pkg.test_kill.Nope"]):
+            with self.subTest(tests):
+                self.assertEqual(self.call(self.args(tests=tests)),
+                                 (2, f"FAIL mutate.baseline: the tests fail on the unmutated copy under {PY!r} (rc 1)\n"))
+
+    def test_overlapping_test_ids_are_a_named_fail(self):
+        """Row M-T4 (DEC-0265, DEC-0276): the id inside the other is named first, in either order."""
+        for tests in (["pkg.test_kill", "pkg.test_kill.A"], ["pkg.test_kill.A", "pkg.test_kill"], ["pkg", "pkg.test_kill.A"]):
+            inner, outer = sorted(tests, key=len, reverse=True)
+            with self.subTest(tests):
+                self.assertEqual(self.call(self.args(tests=tests)),
+                                 (2, f"FAIL mutate.args: --test {inner!r} overlaps --test {outer!r}\n"))
+        rc, out = self.call(self.args(tests=["pkg.test_kill.A", "pkg.test_kill.B", "pkg.test_kil"]))
+        self.assertEqual(rc, 2)                              # a prefix that is not a dotted component does not overlap
+        self.assertIn("FAIL mutate.baseline:", out)
+
+    def test_py_values_that_are_not_an_executable_file_are_refused(self):
+        """Row M-P2 subcases: '', ' ', a trailing space, a bare name."""
+        for v in ("", " ", PY + " ", "python3"):
+            with self.subTest(v=v):
+                self.assertEqual(self.call(self.args(pys=[]) + ["--py=" + v]), (2, f"FAIL mutate.py: {v!r} is not an executable file\n"))
+
+    def test_a_symlinked_interpreter_is_accepted(self):
+        """Row M-P3 (DEC-0259 exception): absolute and relative, labelled by the argument as given."""
+        os.symlink(PY, os.path.join(self.scratch, "venvlink"))
+        for v in (os.path.join(self.scratch, "venvlink"), "venvlink", "./venvlink"):
+            with self.subTest(v=v):
+                rc, out = self.call_in(self.scratch, self.args(pys=[v]))
+                self.assertEqual(rc, 1, out)
+                self.assertIn(f"summary {v}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_one_interpreter_under_two_spellings_is_a_named_fail(self):
+        """Row M-P4 (DEC-0265, DEC-0276): compared by realpath."""
+        link = os.path.join(self.scratch, "venvlink")
+        os.symlink(PY, link)
+        for a, b in ((PY, link), (link, os.path.realpath(PY)), (PY, os.path.join(os.path.dirname(PY), ".", os.path.basename(PY)))):
+            with self.subTest(a=a, b=b):
+                self.assertEqual(self.call(self.args(pys=[a, b])),
+                                 (2, f"FAIL mutate.args: --py {b!r} is the same interpreter as --py {a!r}\n"))
+
+    def test_an_interpreter_that_fails_is_a_baseline_fail(self):
+        """Row M-P5 (D28): /usr/bin/false, an exit 3, /bin/echo."""
+        three = os.path.join(self.scratch, "three")
+        with open(three, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 3\n")
+        os.chmod(three, 0o755)
+        for v in (shutil.which("false"), three, shutil.which("echo")):
+            with self.subTest(v=v):
+                self.assertEqual(self.call(self.args(pys=[v])),
+                                 (2, f"FAIL mutate.baseline: the tests run no test on the unmutated copy under {v!r}\n"))
+
+    def test_a_fake_interpreter_is_trusted_as_d28_scopes(self):
+        """Row M-P6 (D28 honest mistakes): an executable that prints unittest's line is believed."""
+        fake = os.path.join(self.scratch, "fake")
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho 'Ran 1 test in 0.000s' >&2\nexit 0\n")
+        os.chmod(fake, 0o755)
+        rc, out = self.call(self.args(pys=[fake]))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"summary {fake}: 0 KILLED, 4 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_jobs_grammar_is_matched_whole(self):
+        """Row M-J1 (DEC-0271 as-built)."""
+        for v in ("", " 2", "2 ", "01", "+2", "\u0662", "1e1", "0", "65", "x", "-1"):
+            with self.subTest(v=ascii(v)):
+                self.assertEqual(self.call(self.args(extra=["--jobs=" + v])),
+                                 (2, f"FAIL mutate.args: --jobs {v!r} is not an integer from 1 to 64\n"))
+        for v in ("1", "64"):
+            with self.subTest(v):
+                self.assertEqual(self.call(self.args(extra=["--jobs", v]))[0], 1)
+
+    def test_json_given_twice_is_a_named_fail(self):
+        """Row M-O1 (DEC-0265, DEC-0276): in JSON form; `--json=x` and `--js` are argparse refusals in text form."""
+        rc, out = self.call(self.args(extra=["--json", "--json"]))
+        self.assertEqual((rc, json.loads(out)), (2, {"rc": 2, "fail": [{"check": "mutate.args", "reason": "--json is given more than once"}]}))
+        self.assertEqual(self.call(self.args(extra=["--json=x"])),
+                         (2, "FAIL mutate.args: bad arguments: argument --json: ignored explicit argument 'x'\n"))
+        self.assertEqual(self.call(self.args(extra=["--js"])), (2, "FAIL mutate.args: bad arguments: unrecognized arguments: --js\n"))
+
+    def test_the_output_form_follows_the_parsed_json_option(self):
+        """Row M-O2 (DEC-0272 parsed-json-usage): `--json` after `--` is not the option."""
+        self.assertEqual(self.call(self.args(extra=["--", "--json"])),
+                         (2, "FAIL mutate.args: bad arguments: unrecognized arguments: -- --json\n"))
+        rc, out = self.call(self.args(extra=["--json", "--bogus"]))
+        self.assertEqual((rc, json.loads(out)["fail"][0]["reason"]), (2, "bad arguments: unrecognized arguments: --bogus"))
+
+    def test_h_prints_usage(self):
+        """Row M-O3 (DEC-0272, DEC-0276, A6): usage on stderr, the whole FAIL line on stdout, rc 2."""
+        for argv in (["-h"], self.args(extra=["-h"])):
+            with self.subTest(argv=argv[-1]):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc, out = self.call(argv)
+                self.assertEqual((rc, out), (2, "FAIL mutate.args: bad arguments (argparse exit 0)\n"))
+                self.assertTrue(err.getvalue().startswith("usage: mutate "), err.getvalue())
+        rc, out, err = self.tool(["-h"])
+        self.assertEqual((rc, out), (2, "FAIL mutate.args: bad arguments (argparse exit 0)\n"))
+        self.assertTrue(err.startswith("usage: mutate "), err)
+
+    def test_a_tmpdir_inside_the_root_is_a_guard_fail(self):
+        """Row M-E1 (DEC-0032): a real TMPDIR inside the root; the refused scratch directory is not left in the root."""
+        sub = os.path.join(self.root, "sub")
+        os.mkdir(sub)
+        for tmp in (self.root, sub):
+            with self.subTest(tmp=tmp):
+                rc, out, err = self.tool(self.kill_args(self.root), env=dict(os.environ, TMPDIR=tmp))
+                self.assertEqual((rc, err), (2, ""))
+                self.assertRegex(out, r"\AFAIL mutate.guard: the scratch copy '" + re.escape(tmp) + r"/mutate-[^/']+' is the root or "
+                                      r"inside it\n\Z")
+        self.assertEqual(os.listdir(sub), [])
+        self.assertEqual(sorted(n for n in os.listdir(self.root) if n.startswith("mutate-")), [])
+
+    def test_a_tmpdir_that_is_not_a_writable_directory_is_a_guard_fail(self):
+        """Row M-E2 (DEC-0262 check-tmpdir, DEC-0276): missing, read-only, a regular file, empty; nothing runs."""
+        ro = os.path.join(self.scratch, "ro")
+        os.mkdir(ro, 0o555)
+        self.addCleanup(os.chmod, ro, 0o755)
+        plain = os.path.join(self.scratch, "plain")
+        open(plain, "w").close()
+        values = [os.path.join(self.scratch, "nope"), plain, ""] + ([ro] if os.geteuid() != 0 else [])
+        for tmp in values:
+            with self.subTest(tmp=tmp), mock.patch.dict(os.environ, {"TMPDIR": tmp}), \
+                    mock.patch.object(tempfile, "tempdir", None), mock.patch.object(mutate.Copy, "make") as make:
+                self.assertEqual(self.call(self.kill_args(self.root)),
+                                 (2, f"FAIL mutate.guard: TMPDIR {tmp!r} is not a writable directory\n"))
+                make.assert_not_called()
+
+    def test_python_path_variables_cannot_redirect_the_tests(self):
+        """Row M-E3 (DEC-0273 drop-python-paths, DEC-0276): the six variables are removed from the test runs."""
+        want = self.call(self.kill_args(self.root))
+        self.assertEqual(want[0], 1, want)
+        junk = os.path.join(self.scratch, "nope")
+        sets = [{"PYTHONSAFEPATH": "1", "PYTHONPATH": self.root}, {"PYTHONPATH": self.root}, {"PYTHONHOME": junk},
+                {"PYTHONSAFEPATH": "1"}, {"PYTHONUSERBASE": junk}, {"PYTHONSTARTUP": junk}, {"PYTHONPLATLIBDIR": "nope"}]
+        for env in sets:
+            with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
+                self.assertEqual(self.call(self.kill_args(self.root)), want)
+
+    def test_stdout_is_utf8_whatever_the_locale(self):
+        """Row M-E4 (DEC-0263 utf8-stdout, O4): a non-ASCII --file name under PYTHONIOENCODING=ascii and LC_ALL=C."""
+        name = "pkg/\u00e9.py"
+        head = self.commit_files({name: KILL_HEAD}, "name")
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", name, "--test", "pkg.test_mod", "--py", PY]
+        for extra in ({"PYTHONIOENCODING": "ascii"}, {"LC_ALL": "C", "LANG": "C"}):
+            with self.subTest(extra):
+                rc, out, err = self.tool(argv, env=dict(os.environ, **extra))
+                self.assertEqual((rc, err), (1, ""))
+                self.assertEqual(out.splitlines()[0], f"m0002 {name}:5 return-none SURVIVED {PY}")
+                self.assertEqual(out.splitlines()[4], f"summary: base {self.base} head {head}, 4 mutants in 1 file, 1 test, 1 interpreter")
+
+    def test_output_is_not_capped(self):
+        """Row M-X1 (DEC-0274 no-cap): a run printing more than 16,384 bytes prints every line."""
+        n = 120
+        head = self.commit_files({"pkg/big.py": "".join(f"X{i} = {i}\n" for i in range(n))}, "big")
+        rc, out = self.call(["--root", self.root, "--base", self.head, "--head", head, "--file", "pkg/big.py", "--test",
+                             "pkg.test_mod", "--py", PY, "--jobs", "8"])
+        lines = out.splitlines()
+        self.assertGreater(len(out.encode()), 16384)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(lines), 2 * n + 2 + 2 * n)
+        self.assertEqual(lines[-1], f"SURVIVED m{2 * n:04d} pkg/big.py:{n}:{len(f'X{n - 1} = ') + 1} int-dec '{n - 1}' -> '{n - 2}'")
+
+    def test_an_internal_fail_is_one_clipped_line(self):
+        """Row M-X2 (DEC-0264 clip-one-line, DEC-0276, O3): escaped and clipped to 200 characters plus `...`."""
+        text = "a\nb\tc   d" + "x" * 5000                     # runs of spaces collapse, as the loader's one_line
+        want_reason = mutate.clip("RuntimeError: a\\nb\\tc d" + "x" * 5000)
+        for where in ("run_all", "run_mutant"):
+            with self.subTest(where), mock.patch.object(mutate, where, side_effect=RuntimeError(text)):
+                rc, out = self.call(self.args())
+                self.assertEqual((rc, out), (2, f"FAIL mutate.internal: {want_reason}\n"))
+                self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(len(want_reason), 203)
 
 
 if __name__ == "__main__":
