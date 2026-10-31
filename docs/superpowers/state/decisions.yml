@@ -2855,3 +2855,30 @@
   asked_at: {sha: "f5c122a", by: session}
   answer: "adopt-now (owner in session, 2026-10-31: 'recommended for all'; the session had recommended adopt-now)"
   answered_at: {sha: "f5c122a", by: superbrobenji}
+- id: DEC-0290
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9b, mutation tool run lifecycle: a caller that already ignores SIGINT (SIG_IGN inherited, e.g. nohup). Which?'
+  options:
+    - {label: keep-inherited-ignore, cost: 'respect the caller: when SIGINT is inherited as ignored the tool does not install its handler, as Python and nohup do; a small change and a test (recommended)'}
+    - {label: install-anyway, cost: 'the tool installs its SIGINT handler anyway (as built in 9b)'}
+  asked_at: {sha: "f1405c4", by: session}
+  answer: "keep-inherited-ignore (owner in session, 2026-11-01: 'recommended for all'; the session had recommended keep-inherited-ignore)"
+  answered_at: {sha: "f1405c4", by: superbrobenji}
+- id: DEC-0291
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9b, mutation tool run lifecycle: which stale scratch copies the next run removes (DEC-0278). Which?'
+  options:
+    - {label: strict-pid-no-symlinks, cost: 'any mutate-* directory whose pid file holds exactly a pid that no longer runs; symlinks never followed (as built) (recommended)'}
+    - {label: narrow-name, cost: 'also narrow the name to mutate- plus exactly 8 characters'}
+  asked_at: {sha: "f1405c4", by: session}
+  answer: "strict-pid-no-symlinks (owner in session, 2026-11-01: 'recommended for all'; the session had recommended strict-pid-no-symlinks)"
+  answered_at: {sha: "f1405c4", by: superbrobenji}
+- id: DEC-0292
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9b, mutation tool run lifecycle: a TMPDIR that can be written but not listed. Which?'
+  options:
+    - {label: run-without-cleanup, cost: 'the run goes on and removes no stale copy; the directory still serves the run, so DEC-0262 holds (as built) (recommended)'}
+    - {label: guard-fail, cost: 'FAIL mutate.guard'}
+  asked_at: {sha: "f1405c4", by: session}
+  answer: "run-without-cleanup (owner in session, 2026-11-01: 'recommended for all'; the session had recommended run-without-cleanup)"
+  answered_at: {sha: "f1405c4", by: superbrobenji}
