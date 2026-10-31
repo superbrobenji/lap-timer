@@ -1981,3 +1981,40 @@
   asked_at: {sha: "f2c8dab", by: session}
   answer: "separate-worktrees (owner in session, 2026-10-31: 'recommended for all'; the session had recommended separate-worktrees)"
   answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0195
+  class: spec-direction
+  question: 'Plan re-review X-6: under DEC-0193 no-gap-per-range, two stream A blocks appending decisions.yml rows on their own branches take the same next id. Where do new decision rows land while stream A blocks run at once?'
+  options:
+    - {label: session-writes, cost: 'only the program session writes decisions.yml, on block/program-tooling; a block cites the id after the session''s commit; one session commit plus a block rebase per question (recommended)'}
+    - {label: renumber-on-merge, cost: 'each block writes on its own branch and the second merge renumbers; renumbering breaks citations already written'}
+    - {label: sub-ranges, cost: 'each concurrent block gets its own id sub-range; DEC-0193 needs a new answer'}
+  asked_at: {sha: "71d4039", by: session}
+  answer: "session-writes (owner in session, 2026-10-31: 'recommended'; the session had recommended session-writes)"
+  answered_at: {sha: "71d4039", by: superbrobenji}
+- id: DEC-0196
+  class: scope
+  question: 'Plan re-review X-7: the playbook ownership table names neither docs/superpowers/state/option-line-gate/, docs/superpowers/state/stream-controller/ nor the two 2026-10-31 plan files. Who owns them?'
+  options:
+    - {label: stream-a, cost: 'stream A; one sentence added to the playbook ownership row A by the option-line block (recommended)'}
+    - {label: at-sync, cost: 'assigned at the next sync (playbook :29); both blocks wait'}
+  asked_at: {sha: "71d4039", by: session}
+  answer: "stream-a (owner in session, 2026-10-31: 'recommended'; the session had recommended stream-a)"
+  answered_at: {sha: "71d4039", by: superbrobenji}
+- id: DEC-0197
+  class: spec-direction
+  question: 'Plan re-review S-5: may a stream controller edit tools/gates/hooks/, .claude/ or ~/.claude/ only where its plan''s task lists them?'
+  options:
+    - {label: adopt, cost: 'yes, an owner rule for every stream controller and its workers, written into the stream controller strict block (recommended)'}
+    - {label: drop, cost: 'no such rule; the stream controller strict block omits it'}
+  asked_at: {sha: "71d4039", by: session}
+  answer: "adopt (owner in session, 2026-10-31: 'recommended'; the session had recommended adopt)"
+  answered_at: {sha: "71d4039", by: superbrobenji}
+- id: DEC-0198
+  class: scope
+  question: 'Plan re-review O-10: DEC-0190 says stream B runs the option-line gate from the pilot''s worktree before the merge, and spec §3.4 removes a block''s worktrees after its merge. Where does stream B run it after the merge?'
+  options:
+    - {label: worktree-then-checkout, cost: 'from the pilot worktree before the merge, then from a block/program-tooling checkout after it, until a sync wires the gate into stream B''s tree; no worktree kept past its block (recommended)'}
+    - {label: keep-worktree, cost: 'keep the pilot worktree until a sync wires the gate; an exception to §3.4''s worktree removal'}
+  asked_at: {sha: "71d4039", by: session}
+  answer: "worktree-then-checkout (owner in session, 2026-10-31: 'recommended'; the session had recommended worktree-then-checkout)"
+  answered_at: {sha: "71d4039", by: superbrobenji}
