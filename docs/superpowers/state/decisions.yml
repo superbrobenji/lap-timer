@@ -2439,3 +2439,21 @@
   asked_at: {sha: "cb049a5", by: session}
   answer: "fail-like-loader (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended fail-like-loader)"
   answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0244
+  class: spec-direction
+  question: 'Option-line gate Task 2 table D-1 (rows S6 vs U8): a decision row in a --source register whose answered_at.by is not the owner handle. Which FAIL applies?'
+  options:
+    - {label: register-input-fail, cost: 'the register input FAILs, as for any invalid row (DEC-0225); row U8 follows (recommended)'}
+    - {label: use-fail, cost: 'only that decision''s uses FAIL'}
+  asked_at: {sha: "18b75c9", by: session}
+  answer: "register-input-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended register-input-fail)"
+  answered_at: {sha: "18b75c9", by: superbrobenji}
+- id: DEC-0245
+  class: spec-direction
+  question: 'Stream controller plan D-2: DEC-0195 (only the program session writes decisions.yml) was asked about concurrent stream A blocks. Does it bind stream B''s stream controller?'
+  options:
+    - {label: stream-a-only, cost: 'DEC-0195 binds stream A only; stream B''s stream controller writes rows in its own range (DEC-0300 on) on its own branch, which cannot clash with stream A ids; the plan keeps DEC-0183''s "to decisions.yml" (recommended)'}
+    - {label: session-writes-all, cost: 'the program session writes every decision row for both streams; stream B rows would land on a stream A branch'}
+  asked_at: {sha: "18b75c9", by: session}
+  answer: "stream-a-only (owner in session, 2026-10-31: 'recommended'; the session had recommended stream-a-only)"
+  answered_at: {sha: "18b75c9", by: superbrobenji}
