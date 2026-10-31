@@ -2521,3 +2521,210 @@
   asked_at: {sha: "ca7b28c", by: session}
   answer: "fail (owner in session, 2026-10-31: 'recommended for all'; the session had recommended fail)"
   answered_at: {sha: "ca7b28c", by: superbrobenji}
+- id: DEC-0253
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D1 M-R3: a whitespace-only --root gives "is not a directory"; loader row R1 gives "--root is empty". Which?'
+  options:
+    - {label: empty-form, cost: 'refuse it as empty, as R1 (recommended)'}
+    - {label: keep, cost: 'keep the current text'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "empty-form (owner in session, 2026-10-31: 'all recommended'; the session had recommended empty-form)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0254
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D2 M-R5: a missing relative --root is named by its raw value; loader row R4 names the absolute path. Which?'
+  options:
+    - {label: name-abspath, cost: 'name the absolute path (recommended)'}
+    - {label: keep, cost: 'keep the raw value'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "name-abspath (owner in session, 2026-10-31: 'all recommended'; the session had recommended name-abspath)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0255
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D3 M-R6: a symlinked --root is accepted; the D32 default refuses a symlink. Which?'
+  options:
+    - {label: refuse-symlink, cost: 'FAIL --root <abs> is a symlink (recommended)'}
+    - {label: exception, cost: 'owner exception for this tool'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "refuse-symlink (owner in session, 2026-10-31: 'all recommended'; the session had recommended refuse-symlink)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0256
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D4 M-R9/M-R10 (F17, mutate.py:215): a root whose name ends in whitespace or is not valid UTF-8 is refused; loader rows R7/R8 load it. Which?'
+  options:
+    - {label: loader-fix, cost: 'os.fsdecode, remove only git''s final newline, tests on Linux and macOS (recommended)'}
+    - {label: keep-refusal, cost: 'keep refusing such roots'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "loader-fix (owner in session, 2026-10-31: 'all recommended'; the session had recommended loader-fix)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0257
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D5 M-G1 (F17, mutate.py:482): a non-UTF-8 TMPDIR fails the clone guard. Which?'
+  options:
+    - {label: loader-fix, cost: 'the same fix as D4 (recommended)'}
+    - {label: keep, cost: 'keep the guard FAIL'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "loader-fix (owner in session, 2026-10-31: 'all recommended'; the session had recommended loader-fix)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0258
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D6 M-F14: a --file name that is not valid UTF-8 gives FAIL internal; loader row R8 loads such a name. Which?'
+  options:
+    - {label: fsencode, cost: 'compare with os.fsencode(path), Linux test (recommended)'}
+    - {label: named-fail, cost: 'a named mutate.file FAIL for non-UTF-8 names'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "fsencode (owner in session, 2026-10-31: 'all recommended'; the session had recommended fsencode)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0259
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D7 M-P3: a symlinked --py is accepted; the D32 default refuses a symlink. Which?'
+  options:
+    - {label: exception, cost: 'owner exception: an interpreter path is not a repository path, and virtualenv interpreters are symlinks (recommended)'}
+    - {label: refuse-symlink, cost: 'refuse a symlinked --py; callers pass the realpath'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "exception (owner in session, 2026-10-31: 'all recommended'; the session had recommended exception)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0260
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D8 M-G3/M-G4: repository diff.algorithm config and -diff attributes change the mutant site set; D32 says pinned. Which?'
+  options:
+    - {label: pin-diff, cost: 'pin the diff call''s algorithm, heuristic and text mode (recommended)'}
+    - {label: keep, cost: 'sites may depend on repository config'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "pin-diff (owner in session, 2026-10-31: 'all recommended'; the session had recommended pin-diff)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0261
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D9 M-G5: git missing gives FAIL internal; loader row R5''s form is a named input FAIL. Which?'
+  options:
+    - {label: named-git-fail, cost: 'a named mutate.git FAIL "git cannot run (...)" (recommended)'}
+    - {label: keep, cost: 'keep FAIL internal'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "named-git-fail (owner in session, 2026-10-31: 'all recommended'; the session had recommended named-git-fail)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0262
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D10 M-E2: a missing or read-only TMPDIR is silently replaced; D32 says a write target of the wrong kind FAILs. Which?'
+  options:
+    - {label: check-tmpdir, cost: 'a set TMPDIR must be a writable directory, else FAIL mutate.guard (recommended)'}
+    - {label: keep, cost: 'keep tempfile''s fallback'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "check-tmpdir (owner in session, 2026-10-31: 'all recommended'; the session had recommended check-tmpdir)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0263
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D11 M-E4: PYTHONIOENCODING=ascii plus a non-ASCII file name gives FAIL internal and loses results; loader row O4 says stdout is UTF-8. Which?'
+  options:
+    - {label: utf8-stdout, cost: 'reconfigure stdout to UTF-8 as the loader does (recommended)'}
+    - {label: keep, cost: 'keep'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "utf8-stdout (owner in session, 2026-10-31: 'all recommended'; the session had recommended utf8-stdout)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0264
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), D12 M-X2: an internal FAIL is unclipped and may span lines, against row O3 and mutate.py:37. Which?'
+  options:
+    - {label: clip-one-line, cost: 'clip and escape it into one line (recommended)'}
+    - {label: keep, cost: 'keep'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "clip-one-line (owner in session, 2026-10-31: 'all recommended'; the session had recommended clip-one-line)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0265
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-1: repetition (--json twice, two spellings of one interpreter, overlapping test ids). Which?'
+  options:
+    - {label: named-fail, cost: 'every repeat is a named FAIL, as DEC-0242 (recommended)'}
+    - {label: keep-mix, cost: 'keep the current mix'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "named-fail (owner in session, 2026-10-31: 'all recommended'; the session had recommended named-fail)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0266
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-2: which repositories --root may name. Which?'
+  options:
+    - {label: any-worktree-top, cost: 'any work-tree top (recommended)'}
+    - {label: project-only, cost: 'only the project''s'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "any-worktree-top (owner in session, 2026-10-31: 'all recommended'; the session had recommended any-worktree-top)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0267
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-3: commit-ish forms for --base and --head. Which?'
+  options:
+    - {label: rev-parse-forms, cost: 'any form git rev-parse accepts (recommended)'}
+    - {label: full-sha, cost: 'full 40-hex sha only'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "rev-parse-forms (owner in session, 2026-10-31: 'all recommended'; the session had recommended rev-parse-forms)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0268
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-4: an empty mutant set (no changed line; no operator site); the docstring-only --ids range is DEC-0252. Which?'
+  options:
+    - {label: keep-split, cost: 'no changed line FAILs, no operator site PASSes (recommended)'}
+    - {label: all-fail, cost: 'both FAIL (or all-pass: both rc 0)'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "keep-split (owner in session, 2026-10-31: 'all recommended'; the session had recommended keep-split)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0269
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-5: the --file whitelist (.py only, UTF-8 only, cookie ignored, BOM refused, no CR, any name characters). Which?'
+  options:
+    - {label: as-built, cost: 'as built (recommended)'}
+    - {label: detect-encoding, cost: 'detect the source encoding (or narrow names to the loader''s P9 set)'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "as-built (owner in session, 2026-10-31: 'all recommended'; the session had recommended as-built)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0270
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-6: the tool''s own interpreter decides what counts as Python source (NUL byte, match statement). Which?'
+  options:
+    - {label: as-built, cost: 'as built (recommended)'}
+    - {label: nul-fail-pinned, cost: 'a named NUL FAIL and one pinned interpreter'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "as-built (owner in session, 2026-10-31: 'all recommended'; the session had recommended as-built)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0271
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-7: argument grammars (--jobs 1-64, --test ASCII-only, the --ids shape). Which?'
+  options:
+    - {label: as-built, cost: 'as built (recommended)'}
+    - {label: widen-test, cost: 'widen --test to Python identifiers'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "as-built (owner in session, 2026-10-31: 'all recommended'; the session had recommended as-built)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0272
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-9: the `-- --json` FAIL comes out in JSON form; -h is an unknown argument. Which?'
+  options:
+    - {label: parsed-json-usage, cost: 'use the parsed --json and give -h a usage line (recommended)'}
+    - {label: keep, cost: 'keep'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "parsed-json-usage (owner in session, 2026-10-31: 'all recommended'; the session had recommended parsed-json-usage)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0273
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-10: the environment passed to the tests (PYTHONSAFEPATH plus PYTHONPATH gives false survivors). Which?'
+  options:
+    - {label: drop-python-paths, cost: 'drop the PYTHON* path variables (recommended)'}
+    - {label: keep, cost: 'keep (or whitelist-env: pass only a whitelist)'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "drop-python-paths (owner in session, 2026-10-31: 'all recommended'; the session had recommended drop-python-paths)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0274
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-11: output size has no cap (191,895 bytes for the round 8 run). Which?'
+  options:
+    - {label: no-cap, cost: 'no cap; a cap could hide survivors (recommended)'}
+    - {label: cap, cost: 'a DEC-0172-style cap'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "no-cap (owner in session, 2026-10-31: 'all recommended'; the session had recommended no-cap)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0275
+  class: scope
+  question: 'Program tooling T1 mutation tool table (F18), Q-MUT-12: run lifecycle (SIGINT runs the queue out; SIGTERM/SIGKILL leave scratch dirs and test processes; no baseline timeout). Which?'
+  options:
+    - {label: clean-stop-timeout, cost: 'stop cleanly on a signal and add a baseline timeout (recommended)'}
+    - {label: keep, cost: 'keep'}
+  asked_at: {sha: "8508de5", by: session}
+  answer: "clean-stop-timeout (owner in session, 2026-10-31: 'all recommended'; the session had recommended clean-stop-timeout)"
+  answered_at: {sha: "8508de5", by: superbrobenji}
