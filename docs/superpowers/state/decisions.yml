@@ -2818,3 +2818,40 @@
   asked_at: {sha: "8ff8372", by: session}
   answer: "backslashreplace (owner in session, 2026-10-31: 'recommended'; the session had recommended backslashreplace)"
   answered_at: {sha: "8ff8372", by: superbrobenji}
+- id: DEC-0286
+  class: scope
+  question: 'Review-round speed 1: per-mutant test selection in tools/program/mutate.py (measure line coverage per test once, run only the covering tests per mutant; a mutant on a line no test covers is SURVIVED without a run). When?'
+  options:
+    - {label: process-block, cost: 'build it in the D30 process block next to the tool''s self-run (DEC-0249); Task 1 does not grow; full runs stay 1.5-2.7 h until then (recommended)'}
+    - {label: now-in-task-1, cost: 'build it now as a Task 1 round; about 2-3 h plus its own table, review and mutants; full runs drop to about 15-30 min after it'}
+    - {label: never, cost: 'no cost; every full run stays 1.5-2.7 h'}
+  asked_at: {sha: "f5c122a", by: session}
+  answer: "process-block (owner in session, 2026-10-31: 'recommended for all'; the session had recommended process-block)"
+  answered_at: {sha: "f5c122a", by: superbrobenji}
+- id: DEC-0287
+  class: scope
+  question: 'Review-round speed 2: incremental mutation runs in re-reviews (a re-review runs only the mutants on lines changed since the last full run, by --ids; the full set runs once before the task is approved, so D27 still covers every changed branch). Adopt?'
+  options:
+    - {label: adopt, cost: 'no code; re-reviews save about 1.5-2.5 h each; a defect a fix brings into an unchanged line through a shared helper is seen only at the final full run (recommended)'}
+    - {label: full-every-review, cost: 'every re-review runs the full set, as now'}
+  asked_at: {sha: "f5c122a", by: session}
+  answer: "adopt (owner in session, 2026-10-31: 'recommended for all'; the session had recommended adopt)"
+  answered_at: {sha: "f5c122a", by: superbrobenji}
+- id: DEC-0288
+  class: scope
+  question: 'Review-round speed 3: the D34 commit checks run the gate suite on the two interpreters in parallel instead of one after the other. Adopt?'
+  options:
+    - {label: adopt, cost: 'about 9 min down to about 5 per run, saved several times per round; more load while it runs, so PROG-U7 (#158, the 2.0 s wall-clock test) gets more likely to flake until it is fixed; the dispatch text and the session script change (recommended)'}
+    - {label: serial, cost: 'keep the runs one after the other'}
+  asked_at: {sha: "f5c122a", by: session}
+  answer: "adopt (owner in session, 2026-10-31: 'recommended for all'; the session had recommended adopt)"
+  answered_at: {sha: "f5c122a", by: superbrobenji}
+- id: DEC-0289
+  class: scope
+  question: 'Review-round speed 4: input-domain tables written and owner-settled before a fix round''s code (DEC-0178 change 1), applied now to every remaining Task 1 round and to blocks dispatched before the process block lands, instead of waiting for it. Adopt?'
+  options:
+    - {label: adopt-now, cost: 'the session drafts a table (investigator) before each round that adds code; one question batch per round instead of stops mid-round; about 30-60 min of table work per round (recommended)'}
+    - {label: wait-for-process-block, cost: 'rounds continue as now until the process block lands'}
+  asked_at: {sha: "f5c122a", by: session}
+  answer: "adopt-now (owner in session, 2026-10-31: 'recommended for all'; the session had recommended adopt-now)"
+  answered_at: {sha: "f5c122a", by: superbrobenji}
