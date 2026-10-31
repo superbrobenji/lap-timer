@@ -25,6 +25,14 @@ must be empty. A run that fails or errors, or outlives TIMEOUT_FLOOR + TIMEOUT_F
 mutant; a run that passes means it SURVIVED; a mutant whose text is not found at its position, or equals the original,
 or does not compile, is BADMATCH (never run).
 
+Lifecycle (DEC-0275..DEC-0280). Each test run is a small watcher (WATCH, the tool's interpreter, -I) leading the run's
+own session with the test command as its child: every WATCH_PERIOD it checks that the tool still runs and otherwise
+kills its own process group, so SIGKILL of the tool leaves no test process. Each scratch directory holds PID_FILE, the
+tool's pid; a run removes every mutate-* scratch directory whose recorded pid is gone and keeps one whose pid runs.
+SIGINT or SIGTERM stops a run at once: no further run starts, the runs in progress are killed with their groups, the
+scratch directories are removed and the last line is `FAIL mutate.interrupt: stopped by SIGINT` (or SIGTERM), rc 2.
+An unmutated run that outlives BASELINE_TIMEOUT is killed with its group: FAIL mutate.baseline.
+
 Output (stdout), in id order:
   <id> <file>:<line> <operator> <KILLED|SURVIVED|BADMATCH> <py>       one line per mutant per --py, --py order
   summary: base <sha> head <sha>, <n> mutants in <k> file(s), <t> test(s), <p> interpreter(s)
@@ -99,6 +107,10 @@ ATTR_OPS = {"fullmatch": ("match", "fullmatch-match"), "match": ("search", "matc
 PASS_STMTS = (ast.Raise, ast.Continue, ast.Break)
 TIMEOUT_FLOOR = 60.0        # seconds a mutated test run may take on top of TIMEOUT_FACTOR x the unmutated run
 TIMEOUT_FACTOR = 10.0
+BASELINE_TIMEOUT = 600.0    # seconds an unmutated run may take (M-X5, DEC-0275, DEC-0276)
+WATCH_PERIOD = 1.0          # seconds between a test run's checks that the tool still runs (M-X7, DEC-0279)
+PID_FILE = "mutate.pid"     # in each scratch directory: the pid of the run that made it (M-X7, DEC-0278)
+PID_RE = re.compile(r"[1-9][0-9]*\n")
 CLIP = 200                  # every value a FAIL line echoes is cut to this many characters
 MAX_JOBS = 64
 TEST_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
@@ -108,7 +120,7 @@ ID_SHAPE = "is not an id m<nnnn> or a range m<nnnn>-m<nnnn> as the tool prints t
 RAN_RE = re.compile(r"^Ran ([0-9]+) tests? in ", re.M)
 REGULAR = (b"100644", b"100755")
 TEST_ENV_DROP = ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH", "PYTHONUSERBASE", "PYTHONSTARTUP", "PYTHONPLATLIBDIR")
-DIFF_PINS = ("--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--text")   # M-G3, M-G4 (DEC-0260)
+DIFF_PINS = ("--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--text")   # M-G3, M-G4 (DEC-0260, DEC-0281)
 
 
 class Fail(Exception):
@@ -118,6 +130,66 @@ class Fail(Exception):
         super().__init__(reason)
         self.check = check
         self.reason = reason
+
+
+# Each test run is this watcher (the group leader of the run's own session) and the test command as its child. Every
+# WATCH_PERIOD it checks that its parent is still the tool; when the tool is gone (SIGKILL included) it kills its own
+# process group (M-X7, DEC-0277, DEC-0279). An exec failure of the command is sent back on the report pipe so the tool
+# raises it as before; the command's exit status is passed on as its own (a signal death by the same signal).
+WATCH = r"""
+import json, os, signal, subprocess, sys
+tool, report = int(sys.argv[1]), int(sys.argv[2])
+period = float(sys.argv[3])
+try:
+    child = subprocess.Popen(sys.argv[4:])
+except OSError as exc:
+    os.write(report, json.dumps([exc.errno, exc.filename]).encode())
+    sys.exit(127)
+os.close(report)
+while True:
+    try:
+        rc = child.wait(timeout=period)
+        break
+    except subprocess.TimeoutExpired:
+        if os.getppid() != tool:
+            os.killpg(0, signal.SIGKILL)
+if rc < 0:
+    try:
+        signal.signal(-rc, signal.SIG_DFL)
+    except (OSError, ValueError):
+        pass
+    os.kill(os.getpid(), -rc)
+sys.exit(rc)
+"""
+
+
+class Stop:
+    """SIGINT and SIGTERM stop a run at once (M-X3, M-X4; DEC-0275, DEC-0276): the handler records the signal and
+    kills the process group of every test run in progress; no further run starts; main prints FAIL mutate.interrupt."""
+    signal = None
+    procs = set()
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.signal, cls.procs = None, set()
+
+    @classmethod
+    def handler(cls, signum, frame) -> None:
+        if cls.signal is None:
+            cls.signal = signum
+        for p in list(cls.procs):
+            kill_group(p)
+
+    @classmethod
+    def check(cls) -> None:
+        if cls.signal is not None:
+            raise Fail("interrupt", f"stopped by {signal.Signals(cls.signal).name}")
+
+
+def kill_group(p) -> None:
+    if p.returncode is None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(p.pid, signal.SIGKILL)
 
 
 def clip(text: str) -> str:
@@ -510,6 +582,8 @@ class Copy:
         self.scratch = scratch
         self.tree = os.path.join(scratch, "tree")
         self.pycache = os.path.join(scratch, "pycache")
+        with open(os.path.join(scratch, PID_FILE), "w", encoding="ascii") as fh:   # M-X7 (DEC-0278)
+            fh.write(f"{os.getpid()}\n")
 
     def make(self, root: str, head: str) -> None:
         git(self.scratch, "clone", "-q", "--no-hardlinks", "--no-checkout", "--", root, self.tree)
@@ -532,14 +606,37 @@ class Copy:
         """(rc or None on timeout, number of tests run, seconds) of one unittest run in the copy."""
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k not in TEST_ENV_DROP}   # M-E3
         env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPYCACHEPREFIX=self.pycache)
+        Stop.check()                               # M-X3, M-X4: no run starts after a signal
         t0 = time.monotonic()
-        p = subprocess.Popen([py, "-W", "error", "-m", "unittest", "-f", *tests], cwd=self.tree, env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        report, w = os.pipe()
         try:
-            _, err = p.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:          # the whole process group: no test child outlives its run
-            os.killpg(p.pid, signal.SIGKILL)
-            p.communicate()
+            try:
+                p = subprocess.Popen([sys.executable, "-I", "-c", WATCH, str(os.getpid()), str(w), repr(WATCH_PERIOD),
+                                      py, "-W", "error", "-m", "unittest", "-f", *tests], cwd=self.tree, env=env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                                     pass_fds=(w,))
+            finally:
+                os.close(w)
+            Stop.procs.add(p)
+            try:
+                if Stop.signal is not None:            # the signal came between the check and the registration
+                    kill_group(p)
+                try:
+                    _, err = p.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:      # the whole process group: no test child outlives its run
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.communicate()
+                    err = None
+            finally:
+                Stop.procs.discard(p)
+            failed = b"".join(iter(lambda: os.read(report, 4096), b""))
+        finally:
+            os.close(report)
+        Stop.check()
+        if failed:                                     # the command could not start: raised as Popen raised it
+            errno, filename = json.loads(failed)
+            raise OSError(errno, os.strerror(errno), filename)
+        if err is None:
             return None, 0, time.monotonic() - t0
         ran = RAN_RE.findall(err.decode("utf-8", "replace"))
         return p.returncode, int(ran[-1]) if ran else 0, time.monotonic() - t0
@@ -551,7 +648,10 @@ def baseline(copy: Copy, pys: list, tests: list) -> dict:
     """Timeout per --py (label) from an unmutated run, which must run a test and pass."""
     timeouts = {}
     for label, exe in pys:
-        rc, ran, secs = copy.run_tests(exe, tests, None)
+        rc, ran, secs = copy.run_tests(exe, tests, BASELINE_TIMEOUT)
+        if rc is None:                       # M-X5 (DEC-0275, DEC-0276): its process group is killed by run_tests
+            raise Fail("baseline", f"the tests did not finish on the unmutated copy under {show(label)} "
+                                   f"within {BASELINE_TIMEOUT:g} s")
         if ran == 0:
             raise Fail("baseline", f"the tests run no test on the unmutated copy under {show(label)}")
         if rc != 0:
@@ -605,6 +705,36 @@ class Printer:
                 self.next += 1
 
 
+def pid_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, OverflowError):     # another user's process, or no pid this system has: kept
+        return False
+    return False
+
+
+def remove_stale(parent: str) -> None:
+    """M-X7 (DEC-0278): remove each mutate-* scratch directory whose PID_FILE names a pid that is gone (a run killed
+    by SIGKILL); a directory whose pid runs (a concurrent run's), a symlink, or one without a regular PID_FILE of the
+    form this tool writes, is kept."""
+    try:
+        names = os.listdir(parent)
+    except OSError:                      # a TMPDIR that cannot be listed: nothing is removed
+        return
+    for name in names:
+        pidfile = os.path.join(parent, name, PID_FILE)
+        if not name.startswith("mutate-") or os.path.islink(pidfile) or not os.path.isfile(pidfile):
+            continue
+        try:
+            text = read_file(pidfile).decode("ascii", "replace")
+        except OSError:
+            continue
+        if PID_RE.fullmatch(text) and pid_gone(int(text)):
+            shutil.rmtree(os.path.join(parent, name), ignore_errors=True)   # never through a symlink (rmtree)
+
+
 def run_all(root: str, head: str, mutants: list, sources: dict, pys: list, tests: list, jobs: int,
             printer: Printer) -> None:
     """Every mutant under every --py, `jobs` guarded copies at a time; results land in each mutant's dict."""
@@ -614,7 +744,10 @@ def run_all(root: str, head: str, mutants: list, sources: dict, pys: list, tests
         raise Fail("guard", f"TMPDIR {show(tmp)} is not a writable directory")
     try:
         for _ in range(max(1, min(jobs, len(mutants)))):
+            Stop.check()
             copies.append(Copy(root))
+            if len(copies) == 1:             # inside the guard: the copies' own directory, never the root
+                remove_stale(os.path.dirname(copies[0].scratch))
             copies[-1].make(root, head)
         timeouts = baseline(copies[0], pys, tests)
         queue, qlock = list(range(len(mutants))), threading.Lock()
@@ -744,19 +877,32 @@ def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):   # M-E4 (DEC-0263, O4): UTF-8 whatever the locale; a name git stores as
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")   # bytes that are not UTF-8 prints escaped
     as_json = json_form(argv)
+    Stop.reset()
+    previous = {}
+    if threading.current_thread() is threading.main_thread():   # M-X3, M-X4: for this run only
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, Stop.handler)
     try:
         try:
-            return execute(parse_args(argv))
-        except Fail:
-            raise
-        except Exception as exc:          # never a traceback: an unexpected error is a named FAIL too (one line, M-X2)
-            raise Fail("internal", one_line(f"{type(exc).__name__}: {exc}")) from None
-    except Fail as exc:
-        if as_json:
-            print(json.dumps({"rc": 2, "fail": [{"check": f"mutate.{exc.check}", "reason": exc.reason}]}))
-        else:
-            print(f"FAIL mutate.{exc.check}: {exc.reason}")
-        return 2
+            try:
+                rc = execute(parse_args(argv))
+            except Fail:
+                raise
+            except Exception as exc:      # never a traceback: an unexpected error is a named FAIL too (one line, M-X2)
+                raise Fail("internal", one_line(f"{type(exc).__name__}: {exc}")) from None
+            Stop.check()                  # a signal during the report still ends the output with its FAIL
+            return rc
+        except Fail as exc:
+            if Stop.signal is not None:   # whatever the killed runs made of it, the run was stopped by the signal
+                exc = Fail("interrupt", f"stopped by {signal.Signals(Stop.signal).name}")
+            if as_json:
+                print(json.dumps({"rc": 2, "fail": [{"check": f"mutate.{exc.check}", "reason": exc.reason}]}))
+            else:
+                print(f"FAIL mutate.{exc.check}: {exc.reason}")
+            return 2
+    finally:
+        for sig, handler in previous.items():   # None: a handler not set from Python, put back as the default
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
 
 
 if __name__ == "__main__":

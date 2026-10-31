@@ -7,9 +7,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -193,6 +195,36 @@ from pkg import spin
 class S(unittest.TestCase):
     def test_spin(self):
         self.assertEqual(spin.spin(3), 0)
+'''
+HANG_TEST = '''import os
+import subprocess
+import time
+import unittest
+
+from pkg import kill
+
+with open(os.environ["MUTATE_TEST_RUNLOG"], "a", encoding="utf-8") as log:
+    log.write(f"{os.getpid()} {os.getpgrp()}\\n")
+
+
+def hang():
+    child = subprocess.Popen(["sleep", "300"])
+    with open(os.environ["MUTATE_TEST_HANGLOG"], "a", encoding="utf-8") as fh:
+        fh.write(f"{os.getpid()} {os.getpgrp()} {child.pid}\\n")
+    while True:
+        time.sleep(3600)
+
+
+class A(unittest.TestCase):
+    def test_two_is_over(self):
+        if kill.f(2) is not True:
+            hang()
+        self.assertIs(kill.f(2), True)
+
+
+class Z(unittest.TestCase):
+    def test_hangs(self):
+        hang()
 '''
 ALL_OPERATORS = ["cmp-eq-ne", "cmp-ne-eq", "cmp-lt-le", "cmp-le-lt", "cmp-gt-ge", "cmp-ge-gt", "cmp-in-notin",
                  "cmp-notin-in", "cmp-is-isnot", "cmp-isnot-is", "not-remove", "not-add", "and-or", "or-and",
@@ -1218,6 +1250,335 @@ class Mutate(unittest.TestCase):
                 self.assertEqual((rc, out), (2, f"FAIL mutate.internal: {want_reason}\n"))
                 self.assertEqual(len(out.splitlines()), 1)
         self.assertEqual(len(want_reason), 203)
+
+    # --- run lifecycle (rows M-X3, M-X4, M-X5, M-X7; DEC-0275, DEC-0276, DEC-0277..DEC-0280) -----------------
+
+    def hang_head(self):
+        """A head whose pkg.test_hang.A hangs on a mutant of kill.py and pkg.test_hang.Z always hangs."""
+        return self.commit_files({"pkg/kill.py": KILL_HEAD, "pkg/test_hang.py": HANG_TEST}, "hang")
+
+    def hang_env(self):
+        tmp = os.path.join(self.scratch, "tmp")
+        os.mkdir(tmp)
+        files = {"MUTATE_TEST_HANGLOG": os.path.join(self.scratch, "hangs.log"),
+                 "MUTATE_TEST_RUNLOG": os.path.join(self.scratch, "runs.log")}
+        self.addCleanup(kill_recorded_groups, files["MUTATE_TEST_RUNLOG"])
+        return tmp, files
+
+    def start_tool(self, argv, env):
+        """The real file as a process in its own session, killed with its group and reaped when the test ends."""
+        p = subprocess.Popen([PY, MUTATE, *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.scratch,
+                             env=env, start_new_session=True)
+
+        def reap():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()
+        self.addCleanup(reap)
+        return p
+
+    def wait_for_hang(self, p, hanglog):
+        """(pid, pgid, child pid) of the first hung test run once it has written them; the tool must still run."""
+        deadline = time.monotonic() + 60
+        while not recorded(hanglog):
+            self.assertIsNone(p.poll(), "the tool ended before the hung test run started")
+            self.assertLess(time.monotonic(), deadline, "the hung test run did not start within 60 s")
+            time.sleep(0.05)
+        return recorded(hanglog)[0]
+
+    def assert_runs_gone(self, runlog):
+        """No live process of any test run's group remains: polled up to 10 s, passing as soon as none is left
+        (DEC-0280; checked by the process listing; the groups from the run log, re-read at each poll)."""
+        deadline = time.monotonic() + 10
+        while True:
+            groups = sorted({row[1] for row in recorded(runlog)})
+            left = {g: group_members(g) for g in groups}
+            left = {g: m for g, m in left.items() if m}
+            if not left or time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
+        self.assertTrue(groups, "no test run recorded itself")
+        self.assertEqual(left, {}, "processes of the test runs' groups outlived the tool")
+
+    def interrupt_run(self, sig, name):
+        head = self.hang_head()
+        tmp, files = self.hang_env()
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_hang.A", "--py", PY, "--jobs", "1"]
+        p = self.start_tool(argv, dict(os.environ, TMPDIR=tmp, **files))
+        pid, pgid, _ = self.wait_for_hang(p, files["MUTATE_TEST_HANGLOG"])
+        self.assertNotEqual(pgid, p.pid)
+        os.kill(p.pid, sig)
+        try:
+            out, err = p.communicate(timeout=30)    # the mutant timeout is at least TIMEOUT_FLOOR (60 s)
+        except subprocess.TimeoutExpired:
+            self.fail(f"{name}: the tool did not stop within 30 s of the signal")
+        self.assertEqual((p.returncode, out.decode(), err.decode()), (2, f"FAIL mutate.interrupt: stopped by {name}\n", ""))
+        runs = recorded(files["MUTATE_TEST_RUNLOG"])
+        self.assertEqual(len(runs), 2, f"a mutant started after {name}: {runs}")   # the baseline and the hung mutant
+        self.assertEqual(runs[1], (pid, pgid))
+        self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
+        self.assertEqual(os.listdir(tmp), [])
+        self.assert_checkout_untouched_at(head)
+
+    def assert_checkout_untouched_at(self, head):
+        self.assertEqual(gf.git(self.root, "status", "--porcelain", "--untracked-files=all", "--ignored"), "")
+        self.assertEqual(gf.git(self.root, "rev-parse", "HEAD"), head)
+
+    def test_sigint_stops_the_run_and_leaves_nothing(self):
+        """Row M-X3 (DEC-0275, DEC-0276): at once, no further mutant, test processes killed, scratch removed, rc 2."""
+        self.interrupt_run(signal.SIGINT, "SIGINT")
+
+    def test_sigterm_stops_the_run_and_leaves_nothing(self):
+        """Row M-X4 (DEC-0275, DEC-0276): as M-X3 with SIGTERM."""
+        self.interrupt_run(signal.SIGTERM, "SIGTERM")
+
+    def test_a_signal_handler_of_the_caller_is_restored_after_main(self):
+        """main() installs the M-X3/M-X4 handlers for its run only: the caller's handlers come back, on a FAIL too."""
+        before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+        for argv in (self.args(), ["--root", ""]):
+            with self.subTest(argv=argv[:2]):
+                self.call(argv)
+                self.assertEqual((signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)), before)
+
+    def test_a_hung_baseline_is_killed_by_its_timeout(self):
+        """Row M-X5 (DEC-0275, DEC-0276): 600 s, the process group killed, scratch removed, rc 2 (the constant patched
+        down here, as the row's test cell says)."""
+        self.assertEqual(mutate.BASELINE_TIMEOUT, 600)
+        head = self.hang_head()
+        tmp, files = self.hang_env()
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_hang.Z", "--py", PY]
+        for limit, text in ((5.0, "5"), (5.5, "5.5")):
+            with self.subTest(limit=limit), mock.patch.object(mutate, "BASELINE_TIMEOUT", limit), \
+                    mock.patch.dict(os.environ, dict(files, TMPDIR=tmp)), mock.patch.object(tempfile, "tempdir", None):
+                for log in files.values():
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(log)
+                guard = threading.Timer(limit + 55, kill_recorded_groups, [files["MUTATE_TEST_RUNLOG"]])
+                guard.start()                   # without the timeout the run would never end: the test ends red
+                self.addCleanup(guard.cancel)
+                self.assertEqual(self.call(argv), (2, "FAIL mutate.baseline: the tests did not finish on the unmutated "
+                                                      f"copy under {PY!r} within {text} s\n"))
+                self.assertEqual(len(recorded(files["MUTATE_TEST_HANGLOG"])), 1)
+                self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
+                self.assertEqual(os.listdir(tmp), [])
+
+    def test_test_processes_die_with_a_sigkilled_tool(self):
+        """Row M-X7 (DEC-0277, DEC-0279, DEC-0280): SIGKILL of the tool; its test processes kill their own group."""
+        self.assertEqual(mutate.WATCH_PERIOD, 1.0)
+        head = self.hang_head()
+        tmp, files = self.hang_env()
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_hang.A", "--py", PY, "--jobs", "2"]
+        p = self.start_tool(argv, dict(os.environ, TMPDIR=tmp, **files))
+        self.wait_for_hang(p, files["MUTATE_TEST_HANGLOG"])
+        os.kill(p.pid, signal.SIGKILL)
+        p.wait()
+        self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
+        left = sorted(os.listdir(tmp))
+        self.assertEqual(len(left), 2, left)              # the killed run's copies, each recording the run's pid
+        for name in left:
+            self.assertTrue(name.startswith("mutate-"), name)
+            with open(os.path.join(tmp, name, "mutate.pid"), encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), f"{p.pid}\n")
+        with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+            self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
+        self.assertEqual(os.listdir(tmp), [])             # the next run removed the stale copies, and its own
+
+    def test_the_next_run_removes_only_stale_scratch_copies(self):
+        """Row M-X7 (DEC-0278): a mutate-* copy whose recorded pid is gone is removed; one whose pid runs (a concurrent
+        run's) is kept, as is anything that is not such a copy."""
+        tmp = os.path.join(self.scratch, "tmp")
+        os.mkdir(tmp)
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        dead, live = str(gone.pid), str(os.getpid())
+
+        def copy(name, pid_text, kind="dir"):
+            path = os.path.join(tmp, name)
+            os.makedirs(os.path.join(path, "tree", "pkg"))
+            gf.write(path, "tree/pkg/x.py", "x = 1\n")
+            if pid_text is not None:
+                pidfile = os.path.join(path, "mutate.pid")
+                if kind == "dir":
+                    gf.write(path, "mutate.pid", pid_text)
+                else:
+                    os.mkdir(pidfile)
+            return path
+        stale = [copy("mutate-aaaaaaaa", dead + "\n"), copy("mutate-test-bbbbbbbb", dead + "\n")]
+        kept = [copy("mutate-cccccccc", live + "\n"), copy("mutate-dddddddd", None), copy("mutate-eeeeeeee", "x\n"),
+                copy("mutate-ffffffff", ""), copy("mutate-gggggggg", "0\n"), copy("mutate-hhhhhhhh", "9" * 30 + "\n"),
+                copy("mutate-iiiiiiii", dead + "\n", kind="pid-is-a-dir"), copy("other-jjjjjjjj", dead + "\n"),
+                copy("mutate-kkkkkkkk", " " + dead + "\n"), copy("mutate-llllllll", dead),
+                copy("mutate-oooooooo", dead + "\n1\n"), copy("mutate-pppppppp", "1\n"),
+                copy("mutate-qqqqqqqq", None)]
+        target = copy("target", dead + "\n")
+        os.symlink(os.path.join(target, "mutate.pid"), os.path.join(kept[-1], "mutate.pid"))   # a symlinked pid file
+        os.symlink(target, os.path.join(tmp, "mutate-mmmmmmmm"))
+        kept += [target, os.path.join(tmp, "mutate-mmmmmmmm")]
+        plain = os.path.join(tmp, "mutate-nnnnnnnn")
+        open(plain, "w").close()
+        kept.append(plain)
+        with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+            self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
+        self.assertEqual(sorted(os.listdir(tmp)), sorted(os.path.basename(k) for k in kept))
+        self.assertTrue(os.path.isfile(os.path.join(target, "tree", "pkg", "x.py")))
+
+    def test_a_signal_while_the_copies_are_made_stops_before_the_next_copy(self):
+        """Rows M-X3, M-X4: no further copy is made after the signal, and the FAIL is the interrupt whatever the
+        stopped step made of it (a clone killed by the terminal's SIGINT is a git FAIL)."""
+        tmp = os.path.join(self.scratch, "tmp")
+        os.mkdir(tmp)
+        for how in ("returns", "fails"):
+            made = []
+
+            def make(copy, root, head):
+                made.append(copy.scratch)
+                mutate.Stop.handler(signal.SIGINT, None)
+                if how == "fails":
+                    raise mutate.Fail("git", "git clone failed: 'killed'")
+            with self.subTest(how), mock.patch.object(mutate.Copy, "make", make), \
+                    mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+                self.assertEqual(self.call(self.args(extra=["--jobs", "2"])),
+                                 (2, "FAIL mutate.interrupt: stopped by SIGINT\n"))
+                self.assertEqual(len(made), 1)
+                self.assertEqual(os.listdir(tmp), [])
+
+    def test_a_signal_during_the_report_ends_the_output_with_its_fail(self):
+        """Rows M-X3, M-X4: stdout ends with the FAIL line whenever the signal comes."""
+        real = mutate.report_text
+
+        def report(*a):
+            real(*a)
+            mutate.Stop.handler(signal.SIGTERM, None)
+        with mock.patch.object(mutate, "report_text", report):
+            rc, out = self.call(self.args())
+        self.assertEqual((rc, out.splitlines()[-1]), (2, "FAIL mutate.interrupt: stopped by SIGTERM"))
+        self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+        rc, out = self.call(self.args())                     # the next run in the same process is not stopped
+        self.assertEqual((rc, out.splitlines()[-1].startswith("SURVIVED ")), (1, True), out)
+
+    def test_a_signal_between_the_start_and_the_registration_kills_the_run(self):
+        """Rows M-X3, M-X4: a signal that lands after a test run starts but before the handler can see it still kills
+        that run at once (not by a timeout)."""
+        head = self.hang_head()
+        tmp, files = self.hang_env()
+        real, runs = subprocess.Popen, []
+
+        def popen(args, *a, **kw):
+            p = real(args, *a, **kw)
+            if args[:3] == [sys.executable, "-I", "-c"]:       # a test run, not a git call
+                runs.append(p.pid)
+                mutate.Stop.handler(signal.SIGINT, None)
+            return p
+        fired = []
+
+        def guard():
+            fired.append(True)
+            kill_recorded_groups(files["MUTATE_TEST_RUNLOG"])
+        timer = threading.Timer(60, guard)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_hang.Z", "--py", PY]
+        with mock.patch.object(mutate.subprocess, "Popen", popen), mock.patch.dict(os.environ, dict(files, TMPDIR=tmp)), \
+                mock.patch.object(tempfile, "tempdir", None):
+            self.assertEqual(self.call(argv), (2, "FAIL mutate.interrupt: stopped by SIGINT\n"))
+        timer.cancel()
+        self.assertEqual(fired, [], "the run was not killed by the tool")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(group_members(runs[0]), [])          # the tool killed and reaped it before it returned
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_a_tmpdir_that_cannot_be_listed_runs_and_removes_nothing(self):
+        """Row M-X7 (DEC-0278): the removal of stale copies needs a listing; a TMPDIR that is writable but cannot be
+        listed (mode 333) runs as before."""
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file modes")
+        tmp = os.path.join(self.scratch, "tmp")
+        os.mkdir(tmp, 0o333)
+        self.addCleanup(os.chmod, tmp, 0o755)
+        with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+            rc, out = self.call(self.args())
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_no_run_starts_after_a_signal(self):
+        """Rows M-X3, M-X4: a signal between two mutant runs; the next run does not start."""
+        real_clean, real_popen, runs = mutate.Copy.assert_clean, subprocess.Popen, []
+
+        def clean(copy, who):
+            real_clean(copy, who)
+            if who == "m0001":
+                mutate.Stop.handler(signal.SIGINT, None)
+
+        def popen(args, *a, **kw):
+            if args[:3] == [sys.executable, "-I", "-c"]:
+                runs.append(args)
+            return real_popen(args, *a, **kw)
+        with mock.patch.object(mutate.Copy, "assert_clean", clean), mock.patch.object(mutate.subprocess, "Popen", popen):
+            rc, out = self.call(self.args(extra=["--jobs", "1"]))
+        self.assertEqual((rc, out), (2, f"m0001 pkg/kill.py:5 return-none KILLED {PY}\n"
+                                        "FAIL mutate.interrupt: stopped by SIGINT\n"))
+        self.assertEqual(len(runs), 2)                         # the baseline and m0001
+
+    def test_a_test_run_killed_by_a_signal_reports_that_signal(self):
+        """As built before round 9b (the M-X7 watcher passes the status on): a test process killed by SIGABRT."""
+        head = self.commit_files({"pkg/test_abort.py": KILL_TEST.replace(
+            "        self.assertIs(kill.f(2), True)",
+            "        if kill.f(2) is not True:\n            import os, signal; os.kill(os.getpid(), signal.SIGABRT)\n"
+            "        self.assertIs(kill.f(2), True)")}, "abort")
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_abort.A", "--py", PY]
+        rc, doc = self.run_json(argv)
+        self.assertEqual(rc, 1, doc)
+        self.assertEqual([m["reason"][PY] for m in doc["mutants"]],
+                         [f"tests failed (rc -{int(signal.SIGABRT)})", "tests passed", f"tests failed (rc -{int(signal.SIGABRT)})",
+                          "tests passed"])
+
+    def test_a_module_in_the_root_cannot_shadow_the_watcher(self):
+        """Row M-X7: the watcher runs isolated (-I), so a json.py or subprocess.py at the top of the copy (its cwd) is
+        not what it imports."""
+        head = self.commit_files({"json.py": "raise SystemExit('the root json.py was imported')\n",
+                                  "subprocess.py": "raise SystemExit('the root subprocess.py was imported')\n"}, "shadow")
+        rc, out = self.call(["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                             "--test", "pkg.test_kill.A", "--py", PY])
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_an_interpreter_that_cannot_start_is_an_internal_fail(self):
+        """As built before round 9b (the M-X7 watcher must keep it): an executable file the system cannot exec."""
+        bad = os.path.join(self.scratch, "noexec")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("not a script\n")
+        os.chmod(bad, 0o755)
+        self.assertEqual(self.call(self.args(pys=[bad])),
+                         (2, f"FAIL mutate.internal: OSError: [Errno 8] Exec format error: {bad!r}\n"))
+
+
+def group_members(pgid):
+    """Pids of the live (not zombie) processes in process group pgid, from the process listing."""
+    out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, check=True).stdout
+    rows = [line.split() for line in out.splitlines()]
+    return [int(r[0]) for r in rows if len(r) >= 3 and r[1] == str(pgid) and not r[2].startswith("Z")]
+
+
+def recorded(log):
+    """The complete lines of a fixture log as tuples of ints ([] while it does not exist)."""
+    try:
+        with open(log, encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return []
+    return [tuple(int(v) for v in line.split()) for line in text.splitlines(keepends=True) if line.endswith("\n")]
+
+
+def kill_recorded_groups(runlog):
+    """Test cleanup: every test run's group the run log names, if it is still there."""
+    for row in recorded(runlog):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(row[1], signal.SIGKILL)
 
 
 if __name__ == "__main__":
