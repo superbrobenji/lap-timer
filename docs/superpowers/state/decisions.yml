@@ -1894,3 +1894,90 @@
   asked_at: {sha: "221e8cb", by: session}
   answer: "own-block-after-ladder (owner in session, 2026-10-31: 'for the rest recommended is fine'; the session had recommended own-block-after-ladder)"
   answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0186
+  class: scope
+  question: 'Program tooling T1 re-review 6 (task-1-rereview-6.md): F13, rows without a red-turning test, a third time (8 of 33 reviewer-removed handlings survive, 2 equivalent; R4 --root symlink loads rc 0; H1 assertion at test_load_context.py:911 vacuous; W1, H2, B2, B4/P7 values missing) and F14 (board.py branch column by prefix). D30 is on (DEC-0178). How does Task 1 proceed?'
+  options:
+    - {label: round-7-reviewer-mutants, cost: 'a fresh opus implementer; the reviewer''s mutation script and its surviving mutants are the acceptance test, every one red before the report, run by the implementer; a scoped re-review; about 0.5 day (recommended)'}
+    - {label: mutation-tool-first, cost: 'build the mechanical mutation tool (DEC-0178 change 4) first, then a fix round on its output; about 1 extra day'}
+    - {label: close-with-rows, cost: 'Task 1 closes now with F13 and F14 registered for Task 2; an owner exception to zero bugs'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "round-7-reviewer-mutants (owner in session, 2026-10-31: 'recommended for all'; the session had recommended round-7-reviewer-mutants)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0187
+  class: spec-direction
+  question: 'Program tooling T1 re-review 6 Q-PROG-6 (F14): how does tools/program/board.py find the branch column of the board''s stream table?'
+  options:
+    - {label: first-word-whole, cost: 'the header cell''s first word is `branch`, matched whole, like the row-label rule; one line, B2 values, one test (recommended)'}
+    - {label: whole-cell, cost: 'the whole header cell equals `branch / worktree`; any edit to that header breaks every sync'}
+    - {label: keep-prefix, cost: 'keep the prefix match as a registered D32 exception; a wrong-column read stays possible'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "first-word-whole (owner in session, 2026-10-31: 'recommended for all'; the session had recommended first-word-whole)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0188
+  class: spec-direction
+  question: 'Program tooling T1 re-review 6 Q-PROG-7: the loader''s session id pattern allows 8-64 characters, a bound no plan or playbook line gives. What is the rule?'
+  options:
+    - {label: uuid, cost: 'fullmatch the hook''s real session id form (a UUID; the Task 1 spike showed CLAUDE_CODE_SESSION_ID equals the hook session_id), re-checked by a spike; a test (recommended)'}
+    - {label: keep-8-64, cost: 'keep 8-64 characters; E1 values and a test'}
+    - {label: no-bounds, cost: 'drop the bounds, keep the clip; an id of any length names a directory'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "uuid (owner in session, 2026-10-31: 'recommended for all'; the session had recommended uuid)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0189
+  class: model-policy
+  question: 'Stream controller plan Q-LAD-1: the program session dispatches across blocks, so one block per context cannot bind it (DEC-0123 already exempts the dispatching session from the controller budget). What bounds its lifetime?'
+  options:
+    - {label: sync-or-two-handbacks, cost: 'it stops for the owner''s clear at each sync or after every second stream-controller hand-back, whichever first (recommended)'}
+    - {label: controller-triggers, cost: 'the controller triggers 500k tokens / 180 min, stopping at 80 %'}
+    - {label: owner-clears, cost: 'no own trigger; the owner clears when the context feels long'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "sync-or-two-handbacks (owner in session, 2026-10-31: 'recommended for all'; the session had recommended sync-or-two-handbacks)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0190
+  class: scope
+  question: 'The option-line pilot block and the stream controller block cite decisions (DEC-0166 on) that exist only on block/program-tooling, while the b5 tip 39a3e8a stops at DEC-0165, and DEC-0153 covers only the program tooling PR. What base and merge grant do they use?'
+  options:
+    - {label: stack-on-program-tooling, cost: 'branch from the block/program-tooling tip and merge into block/program-tooling under DEC-0001, this answer extending DEC-0153 to both blocks; stream B runs the gate from the pilot''s worktree before the merge (recommended)'}
+    - {label: base-b5-copy-rows, cost: 'branch from the b5 tip and copy the needed decision rows; duplicate rows and a rebase conflict'}
+    - {label: from-main, cost: 'branch from main per playbook :21; main lacks the b5 gates'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "stack-on-program-tooling (owner in session, 2026-10-31: 'recommended for all'; the session had recommended stack-on-program-tooling)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0191
+  class: scope
+  question: 'After the stream controller block (DEC-0184, DEC-0185), which runs next?'
+  options:
+    - {label: program-tooling-then-process, cost: 'program tooling Tasks 2-3 first (they get input tables under DEC-0179), then the D30 process block (recommended)'}
+    - {label: process-first, cost: 'the D30 process block first; Tasks 2-3 wait about a day'}
+    - {label: parallel, cost: 'both in parallel worktrees; they conflict on SKILL.md, controller.md and the umbrella plan'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "program-tooling-then-process (owner in session, 2026-10-31: 'recommended for all'; the session had recommended program-tooling-then-process)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0192
+  class: spec-direction
+  question: 'Option-line gate (DEC-0325, DEC-0326): where must the citation of a decision''s chosen option line sit relative to the DEC id use?'
+  options:
+    - {label: same-line, cost: 'on the same line as the DEC id, the rule stream B''s prototype checked (recommended)'}
+    - {label: same-sentence, cost: 'in the same sentence or paragraph; fewer flags, harder to check by script'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "same-line (owner in session, 2026-10-31: 'recommended for all'; the session had recommended same-line)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0193
+  class: spec-direction
+  question: 'Decision id ranges (DEC-0314 test-allows-ranges): which rule does the registers test pin?'
+  options:
+    - {label: no-gap-per-range, cost: 'each stream''s ids run without a gap from its range start (DEC-0001 for stream A, DEC-0300 for stream B); a skipped id fails (recommended)'}
+    - {label: unique-in-range, cost: 'ids are unique and inside their stream''s range; gaps allowed'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "no-gap-per-range (owner in session, 2026-10-31: 'recommended for all'; the session had recommended no-gap-per-range)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
+- id: DEC-0194
+  class: spec-direction
+  question: 'Two stream A blocks at once (the option-line pilot beside the stream controller block or program tooling): spec D22''s clean tree names no worktree but main and no open PR from the plan. What holds?'
+  options:
+    - {label: separate-worktrees, cost: 'allowed, each block in its own worktree; D22''s clean tree means the block''s own worktree and PR; the stream controller block''s Task 1 writes it into the spec (recommended)'}
+    - {label: keep-d22, cost: 'D22 unchanged; the pilot waits for the stream controller block'}
+  asked_at: {sha: "f2c8dab", by: session}
+  answer: "separate-worktrees (owner in session, 2026-10-31: 'recommended for all'; the session had recommended separate-worktrees)"
+  answered_at: {sha: "f2c8dab", by: superbrobenji}
