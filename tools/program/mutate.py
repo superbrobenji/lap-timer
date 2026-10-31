@@ -162,7 +162,7 @@ def parse_args(argv: list) -> argparse.Namespace:
     ap.error = refuse
     ns = ap.parse_args(argv)
     if ns.list_operators:
-        if [a for a in argv if a not in ("--list-operators", "--json")]:
+        if argv != ["--list-operators"]:
             raise Fail("args", "--list-operators takes no other argument")
         return ns
     for name in ("root", "base", "head"):

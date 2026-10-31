@@ -474,6 +474,7 @@ class Mutate(unittest.TestCase):
             (rng + ok + ["--jobs", "65"], "FAIL mutate.args: --jobs '65' is not an integer from 1 to 64"),
             (rng + ok + ["--jobs", "x"], "FAIL mutate.args: --jobs 'x' is not an integer from 1 to 64"),
             (["--list-operators", "--root", r], "FAIL mutate.args: --list-operators takes no other argument"),
+            (["--list-operators", "--list-operators"], "FAIL mutate.args: --list-operators takes no other argument"),
             (["--root", "", "--base", b, "--head", h] + ok, "FAIL mutate.root: --root is empty"),
             (["--root", os.path.join(r, "nope"), "--base", b, "--head", h] + ok,
              f"FAIL mutate.root: --root {os.path.join(r, 'nope')!r} is not a directory"),
@@ -535,6 +536,9 @@ class Mutate(unittest.TestCase):
         self.assertEqual((rc, out), (2, f"FAIL mutate.baseline: the tests fail on the unmutated copy under {PY!r} (rc 1)\n"))
 
     def test_json_failures_and_no_traceback(self):
+        rc, doc = self.run_json(["--list-operators"])
+        self.assertEqual((rc, doc), (2, {"rc": 2, "fail": [{"check": "mutate.args",
+                                                           "reason": "--list-operators takes no other argument"}]}))
         rc, doc = self.run_json(["--root", ""])
         self.assertEqual((rc, doc), (2, {"rc": 2, "fail": [{"check": "mutate.args", "reason": "--base is missing"}]}))
         with mock.patch.object(mutate, "run_all", side_effect=RuntimeError("boom")):
