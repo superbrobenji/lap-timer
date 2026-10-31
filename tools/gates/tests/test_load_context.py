@@ -1502,7 +1502,8 @@ class LoadContext(unittest.TestCase):
 
     def test_the_branch_column_is_the_header_cell_whose_first_word_is_branch(self):
         """Row B2 (fix round 7, F14, DEC-0187 first-word-whole): the branch column is the first header cell whose first
-        whitespace-separated word is exactly `branch`; `branching ...`, `branches`, `Branch` and `branch/worktree` are not."""
+        space-separated word (DEC-0235 spaces-only) is exactly `branch`; `branching ...`, `branches`, `Branch`,
+        `branch/worktree` and `branch<tab>/ worktree` are not."""
         self.stream_b_branch()
         head = "| stream | {h1} | {h2} | next task |\n|---|---|---|---|\n"
         row = "| A strict delivery | `block/program-tooling` | `block/program-tooling` / main | t |\n| B prototype | {c1} | {c2} | t |\n"
@@ -1516,7 +1517,6 @@ class LoadContext(unittest.TestCase):
                  "a branch/worktree column before the branch column": board("branch/worktree", "branch / worktree"),
                  "an old branch column before the branch column": board("old branch", "branch / worktree"),
                  "the branch column alone": board("block", "branch"),
-                 "a tab after the first word": board("block", "branch\t/ worktree"),
                  "two branch columns: the first counts": board("block", "branch / worktree").replace(
                      "| next task |", "| branch b |").replace("| t |\n| B", "| `block/prototype-b7` |\n| B").replace(
                      "/ w | t |", "/ w | `block/prototype-b7` |")}
@@ -1530,7 +1530,8 @@ class LoadContext(unittest.TestCase):
         for name, h2 in (("only a branching column", "branching notes"), ("only a branches column", "branches"),
                          ("only a Branch column", "Branch"), ("only a branch/worktree column", "branch/worktree"),
                          ("only a BRANCH column", "BRANCH / worktree"), ("only an empty header cell", ""),
-                         ("only an old branch column", "old branch")):
+                         ("only an old branch column", "old branch"),
+                         ("a tab after the first word (DEC-0235 spaces-only; loaded in round 7)", "branch\t/ worktree")):
             with self.subTest(name):
                 self.put(self.BOARD_REL, board("block", h2, c1="b9"))
                 rc, out = self.run_sync(commit=True)
@@ -1661,6 +1662,459 @@ class LoadContext(unittest.TestCase):
                 rc, out = self.run_loader(entries=[entry(path, "1-end")])
                 self.assertEqual(rc, 0, out)
                 self.assertEqual([l.split(" ")[2] for l in out.splitlines()], want)
+
+    # -- fix round 8b: every SURVIVED mutant of the r8 run (r8-mutate.txt), F15, F16, DEC-0235 -------------------------
+    # Each test pins the observable value a mutant changes: the whole output text, the whole FAIL reason, the rc, the
+    # bytes written. Mutant ids are those of r8-mutate.txt (base 762a7bb, head f7be2a4).
+    def test_an_empty_root_is_a_named_fail_never_the_cwd_tree(self):
+        """Row R1 (F15): `--root ""` (and a whitespace-only --root) is FAIL context.input "--root is empty", as the gates
+        (gate_register, gate_claims, gate_decisions, run_all) refuse it; never the cwd's tree, never root discovery."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        plain = tempfile.mkdtemp(prefix="not-a-repo-")
+        self.addCleanup(gf.remove, plain)
+        for root in ("", " ", "  ", "\t", "\n", " \t\n"):
+            for cwd in (self.root, plain):
+                for form in (["--root", root, KIND], ["--root=" + root, KIND], [KIND, "--root", root]):
+                    with self.subTest(root=ascii(root), cwd=os.path.basename(cwd), form=ascii(form[0])[:9]):
+                        rc, out, err = self.call(form, cwd=cwd)
+                        self.assertEqual((rc, out, err), (1, "FAIL context.input: --root is empty\n", ""))
+                        self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED)))
+        with self.subTest("CLAUDE_PROJECT_DIR set: an empty --root still fails"):
+            rc, out, _ = self.call(["--root", "", KIND], env={"CLAUDE_PROJECT_DIR": self.root}, cwd=plain)
+            self.assertEqual((rc, out), (1, "FAIL context.input: --root is empty\n"))
+        with self.subTest("an empty CLAUDE_PROJECT_DIR is unset (lib.repo_root's rule): the cwd's tree is found"):
+            rc, out, _ = self.call([KIND], env={"CLAUDE_PROJECT_DIR": ""}, cwd=os.path.join(self.root, "docs"))
+            self.assertEqual((rc, out), (0, f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n"))
+
+    def test_a_root_whose_name_ends_in_whitespace_is_that_root(self):
+        """Rows R1/R5/R6: git prints the top level followed by one newline; only that newline is removed, so a work tree
+        whose directory name ends in a space or a tab loads (by --root, CLAUDE_PROJECT_DIR and discovery)."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        want = f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n"
+        parent = tempfile.mkdtemp(prefix="spaced-")
+        self.addCleanup(gf.remove, parent)
+        for name in ("tree ", "tree\t", "tree  \t "):
+            moved = os.path.join(os.path.realpath(parent), name)
+            os.rename(self.root, moved)
+            try:
+                for how, argv, env, cwd in (("--root", ["--root", moved, KIND], None, None),
+                                            ("CLAUDE_PROJECT_DIR", [KIND], {"CLAUDE_PROJECT_DIR": moved}, None),
+                                            ("discovery", [KIND], None, os.path.join(moved, "docs"))):
+                    with self.subTest(name=ascii(name), how=how):
+                        if how == "discovery":
+                            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                        rc, out, _ = self.call(argv, env=env, cwd=cwd)
+                        self.assertEqual((rc, out), (0, want))
+                        self.assertTrue(os.path.isfile(os.path.join(moved, EXPECTED, SID, KIND + ".json")))
+            finally:
+                os.rename(moved, self.root)
+
+    def test_argument_and_discovery_failures_are_pinned_whole(self):
+        """Rows A2, A5, A6, R5, R6, X2 (m0888 m0889 m0892 m0896 m0897 m0916 m0917 m0942 m0945 m0947 m0954 m0961)."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        plain = tempfile.mkdtemp(prefix="not-a-repo-")
+        self.addCleanup(gf.remove, plain)
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        no_git = {"PATH": os.path.join(plain, "no-bin")}
+        cases = (("unknown option", ["--root", self.root, "--bogus", KIND], None, None,
+                  "FAIL context.input: bad arguments: unrecognized arguments: --bogus\n"),
+                 ("kind outside the grammar", ["--root", self.root, "../x"], None, None,
+                  "FAIL context.input: kind ../x is not [a-z0-9_-]+\n"),
+                 ("-h", ["--root", self.root, "-h"], None, None, "FAIL context.input: bad arguments (argparse exit 0)\n"),
+                 ("no root outside any work tree", [KIND], None, plain,
+                  "FAIL context.input: no --root, no CLAUDE_PROJECT_DIR, and the working directory is not in a git work tree\n"),
+                 ("no root, git not on PATH", [KIND], no_git, os.path.join(self.root, "docs"),
+                  "FAIL context.input: git cannot run (No such file or directory)\n"),
+                 ("--root, git not on PATH", ["--root", self.root, KIND], no_git, None,
+                  "FAIL context.input: git cannot run (No such file or directory)\n"))
+        for name, argv, env, cwd, want in cases:
+            with self.subTest(name):
+                rc, out, err = self.call(argv, env=env, cwd=cwd)
+                self.assertEqual((rc, out), (1, want))
+                if name == "-h":
+                    self.assertEqual(err.splitlines()[0], "usage: load_context [-h] [--root ROOT] kind")
+                    self.assertIn("\n  kind         a session kind or dispatch role named in context.yml\n", err)
+                else:
+                    self.assertEqual(err, "")
+                self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED)))
+
+    def test_failure_reasons_are_pinned_whole(self):
+        """Rows C6, C9, H2, X2 (m0612 m0686 m0781 m0782 m0835): the FAIL id and the reason, whole."""
+        self.put("docs/a.md", lines_file(3))
+        good = entry("docs/a.md", "1-3")
+        with self.subTest("ref not a string"):
+            rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", ref=5)])
+            self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.docs/a.md: ref is not a string: 5\n"))
+        with self.subTest("front matter not a mapping"):
+            self.put(A_HANDOFF, "---\n- a\n---\nbody\n")
+            rc, out = self.run_loader(entries=[good])
+            self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.{A_HANDOFF}: front matter is not a mapping\n"))
+            self.put(A_HANDOFF, front(None))
+        with self.subTest("context.yml nested too deep to parse"):
+            rc, out = self.run_loader(raw="lists: " + "[" * 5000 + "]" * 5000 + "\n")
+            self.assertEqual(rc, 1, out)
+            self.assertTrue(out.startswith(f"FAIL context.{KIND}.list: {CTX}: cannot be parsed: RecursionError: "), out)
+            self.assertEqual(len(out.splitlines()), 1, out)
+        with self.subTest("anything else raised"):
+            with mock.patch.object(load_context, "check_entry", side_effect=RuntimeError("boom")):
+                rc, out = self.run_loader(entries=[good])
+            self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.internal: unexpected RuntimeError: boom\n"))
+
+    def test_yaml_values_are_echoed_bounded_per_level_and_per_container(self):
+        """Rows C6, C8 (m0174-m0181): an echoed YAML value shows at most 3 levels and 6 items of a list, mapping or set."""
+        self.put("docs/a.md", lines_file(3))
+        cases = (("a list of 7", "[1, 2, 3, 4, 5, 6, 7]", "[1, 2, 3, 4, 5, 6, ...]"),
+                 ("a list of 6", "[1, 2, 3, 4, 5, 6]", "[1, 2, 3, 4, 5, 6]"),
+                 ("a mapping of 7", "{a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7}", "{'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5, 'f': 6, ...}"),
+                 ("a mapping of 6", "{a: 1, b: 2, c: 3, d: 4, e: 5, f: 6}", "{'a': 1, 'b': 2, 'c': 3, 'd': 4, 'e': 5, 'f': 6}"),
+                 ("a set of 7", "!!set {g, f, e, d, c, b, a}", "{'a', 'b', 'c', 'd', 'e', 'f', ...}"),
+                 ("a set of 6", "!!set {f, e, d, c, b, a}", "{'a', 'b', 'c', 'd', 'e', 'f'}"),
+                 ("4 levels", "[[[[1]]]]", "[[[[...]]]]"),
+                 ("3 levels", "[[[1]]]", "[[[1]]]"))
+        for name, value, shown in cases:
+            with self.subTest(name):
+                rc, out = self.run_loader(raw=f"lists: {{{KIND}: [{{path: docs/a.md, lines: 1-3, why: w, ref: {value}}}]}}\n")
+                self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.docs/a.md: ref is not a string: {shown}\n"))
+
+    def test_a_value_of_exactly_200_characters_is_echoed_whole(self):
+        """Row P8 (m0188): 200 characters is the clip, inclusive; 201 is cut to 197 and `...`."""
+        p200 = "docs/" + "p" * 192 + ".md"
+        p201 = "docs/" + "p" * 193 + ".md"
+        rc, out = self.run_loader(entries=[entry(p200, "1-1"), entry(p201, "1-1")])
+        self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.{p200}: missing path (not a file under the root)\n"
+                                        f"FAIL context.{KIND}.{p201[:197]}...: missing path (not a file under the root)\n"))
+
+    def test_the_ref_copy_path_is_pinned_whole(self):
+        """Row T1 (m0337-m0343): the copy of `git show <ref>:<path>` is .superpowers/context/refs/<tag>/<path>, <tag> the
+        ref with every character outside [A-Za-z0-9._-] written `_`, cut to 40 characters, then `-` and the first 8 hex
+        digits of sha1(ref)."""
+        name = "feature/x." + "y" * 36 + "-z/w"
+        gf.git(self.root, "checkout", "-q", "-b", name)
+        self.put("docs/x.md", lines_file(3))
+        gf.commit_all(self.root, "x")
+        gf.git(self.root, "checkout", "-q", "main")
+        sha8 = hashlib.sha1(name.encode()).hexdigest()[:8]
+        tag = "feature_x." + "y" * 30 + "-" + sha8                       # 40 characters of "feature_x.yyy...yyy-z_w", then -<sha8>
+        self.assertEqual(len(tag), 40 + 1 + 8)
+        rc, out = self.run_loader(entries=[entry("docs/x.md", "1-3", ref=name)])
+        self.assertEqual((rc, out), (0, f".superpowers/context/refs/{tag}/docs/x.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n"))
+        self.assertTrue(os.path.isfile(os.path.join(self.root, ".superpowers/context/refs", tag, "docs/x.md")))
+
+    def test_a_ref_with_git_revision_syntax_anywhere_in_it_is_unsafe(self):
+        """Row F1 (m0334): the ref grammar is matched as a whole string; `:`, `?`, `*`, `[`, `\\`, whitespace and a `~`
+        or `^` not followed by digits only are refused wherever they stand. `HEAD~1` and `HEAD^` load."""
+        self.put("docs/a.md", lines_file(3))
+        gf.commit_all(self.root, "a")
+        self.put("docs/b.md", "b\n")
+        gf.commit_all(self.root, "b")
+        for ref in ("main:docs/a.md", "HEAD:docs/a.md", "ma?n", "ma*n", "ma[n", "ma\\n", "ma n", "HEAD~x", "HEAD^x",
+                    "HEAD~1:docs/a.md", "HEAD^{tree}", "HEAD@{0}:x"):
+            with self.subTest(ref=ref):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", ref=ref)])
+                self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.docs/a.md: unsafe ref {ref}\n"))
+        for ref in ("HEAD~1", "HEAD^"):
+            with self.subTest(ref=ref):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", ref=ref)])
+                self.assertEqual(rc, 0, out)
+
+    def test_a_ref_whose_blob_cannot_be_read_is_a_named_fail(self):
+        """Row F3 (m0475 m0479 m0480): the tree at the ref names the file but its blob object is missing (a damaged or
+        partial repository): `git cat-file blob` fails, FAIL "missing path at ref <ref>", no copy written."""
+        gf.git(self.root, "checkout", "-q", "-b", "other")
+        self.put("docs/x.md", "only on other 8b\n")
+        gf.commit_all(self.root, "x")
+        gf.git(self.root, "checkout", "-q", "main")
+        sha = gf.git(self.root, "rev-parse", "other:docs/x.md")
+        os.unlink(os.path.join(self.root, ".git", "objects", sha[:2], sha[2:]))
+        rc, out = self.run_loader(entries=[entry("docs/x.md", "1-1", ref="other")])
+        self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.docs/x.md: missing path at ref other\n"))
+        self.assertFalse(os.path.exists(os.path.join(self.root, load_context.CONTEXT_DIR, "refs")))
+
+    def test_a_line_number_of_exactly_18_digits_is_converted(self):
+        """Row L1 (m0498): 18 digits is the bound, inclusive; 19 digits is refused before int()."""
+        self.put("docs/a.md", lines_file(3))
+        n18, n19 = "9" * 18, "9" * 19
+        cases = ((f"1-{n18}", f"range 1-{n18} is over 2000 lines"),
+                 (f"{n18}-end", f"missing range: {n18}-end starts past the last line (3)"),
+                 (f"{n18}-{n18}", f"missing range: {n18}-{n18} is past the end of the file (4 lines)"),
+                 (f"1-{n19}", f"missing range: a line number of over 18 digits is past the end of any file, got 1-{n19}"),
+                 (f"{n19}-end", f"missing range: a line number of over 18 digits is past the end of any file, got {n19}-end"))
+        for lines, reason in cases:
+            with self.subTest(lines=lines):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", lines)])
+                self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.docs/a.md: {reason}\n"))
+
+    def test_a_single_line_of_exactly_16000_bytes_is_one_open_ended_range(self):
+        """Row L4 (m0539, F16b): one line of 16,000 bytes is readable (lines 1-1); 16,001 bytes is the named FAIL."""
+        for n, final in ((16000, "\n"), (16000, ""), (16001, "\n")):
+            with self.subTest(bytes=n, final=ascii(final)):
+                data = "z" * n + final
+                self.put("docs/one.md", data)
+                rc, out = self.run_loader(entries=[entry("docs/one.md", "1-end")])
+                if n == 16000:
+                    self.assertEqual((rc, out), (0, f"docs/one.md lines 1-1 blob {blob(data.encode())} -- because\n"))
+                else:
+                    self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.docs/one.md: line 1 is 16001 bytes, over 16000 "
+                                                    "bytes: 1-end cannot be split into readable ranges\n"))
+
+    def test_the_why_is_one_line_with_runs_of_spaces_collapsed(self):
+        """Row W1 output (F16c): the printed why is the why's words joined by one space (` -- a b` for `a   b`)."""
+        self.put("docs/a.md", lines_file(3))
+        for why, shown in (("a   b", "a b"), ("  lead and trail  ", "lead and trail"), ("one", "one")):
+            with self.subTest(why=ascii(why)):
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3", why)])
+                self.assertEqual((rc, out), (0, f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- {shown}\n"))
+
+    def test_the_expected_list_bytes_are_pinned(self):
+        """Row T2 (m0720 m0721 m0722): the expected list is JSON with indent 1 and a final newline."""
+        data = lines_file(30).encode()
+        self.put("docs/a.md", data.decode())
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "5-12"), entry("docs/a.md", "1-1")])
+        self.assertEqual(rc, 0, out)
+        with open(os.path.join(self.root, self.LIST), "rb") as fh:
+            got = fh.read()
+        b = blob(data)
+        self.assertEqual(got, ('{\n "kind": "stream-a-block",\n "session": "' + SID + '",\n "entries": [\n  {\n'
+                               '   "path": "docs/a.md",\n   "lines": "5-12",\n   "blob": "' + b + '"\n  },\n  {\n'
+                               '   "path": "docs/a.md",\n   "lines": "1-1",\n   "blob": "' + b + '"\n  }\n ]\n}\n').encode())
+
+    def miss(self, path):
+        return f"FAIL context.{KIND}.{path}: missing path (not a file under the root)\n"
+
+    def path_of(self, i, line_bytes):
+        """A missing path whose FAIL line is exactly `line_bytes` bytes."""
+        n = line_bytes - len(self.miss(""))
+        path = f"docs/c{i:03d}" + "q" * (n - 12) + ".md"
+        self.assertEqual(len(path), n)
+        self.assertTrue(12 <= n <= 200, n)
+        return path
+
+    def rest(self, k):
+        return f"FAIL context.{KIND}.output: {k} further failures not shown\n"
+
+    def test_the_failure_output_cap_is_exact_at_16384_bytes(self):
+        """Row O2 (F16e; m0859 m0862 m0863 m0864 m0873, DEC-0172): FAIL lines totalling 16,383 bytes are printed whole,
+        16,384 bytes are capped; when capped, a line is shown exactly when the lines so far, it and the count line stay
+        under 16,384 bytes."""
+        with self.subTest("all lines total 16,383 bytes: printed whole"):
+            paths = [self.path_of(i, 229) for i in range(71)]
+            last = 16383 - sum(len(self.miss(p)) for p in paths)
+            paths.append(self.path_of(71, last))
+            want = "".join(self.miss(p) for p in paths)
+            self.assertEqual(len(want.encode()), 16383)
+            rc, out = self.run_loader(entries=[entry(p, "1-1") for p in paths])
+            self.assertEqual((rc, out), (1, want))
+        with self.subTest("all lines total 16,384 bytes: capped"):
+            paths[-1] = self.path_of(71, last + 1)
+            lines = [self.miss(p) for p in paths]
+            self.assertEqual(len("".join(lines).encode()), 16384)
+            rc, out = self.run_loader(entries=[entry(p, "1-1") for p in paths])
+            shown = max(s for s in range(len(lines)) if len("".join(lines[:s]) + self.rest(len(lines) - s)) < 16384)
+            self.assertEqual((rc, out), (1, "".join(lines[:shown]) + self.rest(len(lines) - shown)))
+            self.assertLess(len(out.encode()), 16384)
+        for total in (16383, 16384):
+            with self.subTest(f"the shown lines, the next line and the count line total {total} bytes"):
+                head = [self.path_of(i, 240) for i in range(67)]
+                tail = [self.path_of(100 + i, 240) for i in range(20)]           # 20 or 21 not shown: two digits either way
+                n = total - sum(len(self.miss(p)) for p in head) - len(self.rest(20))
+                paths = head + [self.path_of(67, n)] + tail
+                lines = [self.miss(p) for p in paths]
+                rc, out = self.run_loader(entries=[entry(p, "1-1") for p in paths])
+                if total == 16383:                     # under 16,384: line 68 is shown
+                    want = "".join(lines[:68]) + self.rest(20)
+                    self.assertEqual(len(want.encode()), 16383)
+                else:                                  # 16,384 is not under it: line 68 is not shown
+                    want = "".join(lines[:67]) + self.rest(21)
+                self.assertEqual((rc, out), (1, want))
+
+    def test_an_invalid_session_id_never_removes_a_file(self):
+        """Row E1/T3 (m0841 m0843): with a session id that is not a lowercase UUID as a whole string, no earlier list is
+        looked for, so a file its spelling would name (a `..` path, an empty component) is never removed."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        exp = os.path.join(self.root, EXPECTED)
+        os.makedirs(os.path.join(exp, SID))
+        victims = {"../../x": os.path.join(self.root, ".superpowers/x", KIND + ".json"),
+                   SID + "/../../../x": os.path.join(self.root, ".superpowers/x", KIND + ".json"),
+                   "": os.path.join(exp, KIND + ".json"),
+                   SID + "\n": os.path.join(exp, SID + "\n", KIND + ".json")}
+        for sid, victim in victims.items():
+            with self.subTest(sid=ascii(sid)):
+                os.makedirs(os.path.dirname(victim), exist_ok=True)
+                with open(victim, "w") as fh:
+                    fh.write("victim\n")
+                rc, out, _ = self.call(["--root", self.root, KIND], env={"CLAUDE_CODE_SESSION_ID": sid})
+                self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.session: CLAUDE_CODE_SESSION_ID is unset or not a "
+                                                "session id (a lowercase UUID): the expected list has no key\n"))
+                with open(victim) as fh:
+                    self.assertEqual(fh.read(), "victim\n")
+
+    def test_an_earlier_list_that_is_a_symlink_is_removed_not_followed(self):
+        """Row T3 (m0202 m0243): the earlier list itself being a symlink is removed (the link, never its target); only a
+        symlinked directory component is refused."""
+        self.put("docs/a.md", lines_file(3))
+        far = self.outside()
+        target = os.path.join(far, "victim.json")
+        with open(target, "w") as fh:
+            fh.write("victim\n")
+        listed = os.path.join(self.root, self.LIST)
+        os.makedirs(os.path.dirname(listed))
+        os.symlink(target, listed)
+        rc, out = self.run_loader(entries=[entry("docs/nope.md", "1-3")])
+        self.assertEqual((rc, out), (1, self.miss("docs/nope.md")))
+        self.assertFalse(os.path.lexists(listed))
+        with open(target) as fh:
+            self.assertEqual(fh.read(), "victim\n")
+
+    def unlink_dir_error(self):
+        """The platform's strerror for unlink() of a directory (EPERM on macOS, EISDIR on Linux)."""
+        d = tempfile.mkdtemp(prefix="unlink-probe-")
+        self.addCleanup(gf.remove, d)
+        with self.assertRaises(OSError) as cm:
+            os.unlink(d)
+        return cm.exception.strerror
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores permissions")
+    def test_removal_and_write_failures_are_pinned_whole_and_leave_no_temporary_file(self):
+        """Rows T2, T3 (m0237 m0261): the whole reason names the OS error text; a failed write leaves no temporary file."""
+        self.put("docs/a.md", lines_file(3))
+        listed = os.path.join(self.root, self.LIST)
+        sid_dir = os.path.dirname(listed)
+        self.addCleanup(lambda: os.path.isdir(sid_dir) and os.chmod(sid_dir, 0o755))
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+        self.assertEqual(rc, 0, out)
+        os.chmod(sid_dir, 0o555)
+        rc, out = self.run_loader(entries=[entry("docs/nope.md", "1-3")])
+        os.chmod(sid_dir, 0o755)
+        self.assertEqual((rc, out), (1, self.miss("docs/nope.md") + f"FAIL context.{KIND}.{self.LIST}: earlier expected "
+                                        "list could not be removed (Permission denied): emptied instead\n"))
+        self.reset_context_dir()
+        os.makedirs(listed)
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
+        self.assertEqual((rc, out), (1, f"FAIL context.{KIND}.{self.LIST}: cannot write {self.LIST}: Is a directory\n"
+                                        f"FAIL context.{KIND}.{self.LIST}: earlier expected list could not be removed or "
+                                        f"emptied ({self.unlink_dir_error()}): it still stands\n"))
+        self.assertEqual(os.listdir(sid_dir), [KIND + ".json"])
+        self.reset_context_dir()
+
+    def test_git_environment_variables_never_reach_git(self):
+        """Row E2 (F16a): every GIT_* variable is removed for every git call, root discovery included; a GIT_OBJECT_DIRECTORY,
+        GIT_COMMON_DIR, GIT_INDEX_FILE, GIT_CEILING_DIRECTORIES or GIT_NAMESPACE of the caller changes nothing."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3"), entry("docs/a.md", "1-3", ref="HEAD")]))
+        gf.commit_all(self.root, "ctx")
+        rc, want = self.run_loader(argv=[KIND])
+        self.assertEqual(rc, 0, want)
+        empty = self.outside()
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        for env in ({"GIT_OBJECT_DIRECTORY": os.path.join(empty, "objects-none")}, {"GIT_COMMON_DIR": os.path.join(empty, ".git")},
+                    {"GIT_INDEX_FILE": os.path.join(empty, "no-index")}, {"GIT_NAMESPACE": "x"},
+                    {"GIT_CEILING_DIRECTORIES": self.root}, {"GIT_CONFIG_GLOBAL": os.path.join(empty, "cfg"), "GIT_CONFIG_NOSYSTEM": "1"}):
+            for how, argv, cwd in (("--root", ["--root", self.root, KIND], None), ("discovery", [KIND], os.path.join(self.root, "docs"))):
+                with self.subTest(env=sorted(env), how=how):
+                    rc, out, err = self.call(argv, env=env, cwd=cwd)
+                    self.assertEqual((rc, out, err), (0, want, ""))
+
+    def test_the_real_file_imports_this_repository_whatever_pythonpath_holds(self):
+        """Row O5b (m0128): `python3 tools/program/load_context.py` puts this repository first on sys.path, so the
+        `tools.gates` of another `tools` namespace directory on PYTHONPATH is never imported (this repository's `tools`
+        is a namespace package: a regular `tools` package elsewhere shadows it whatever the order, an unrelated finding)."""
+        import subprocess
+        import sys
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        fake = self.outside()
+        gf.write(fake, "tools/gates/__init__.py", "raise SystemExit('the other tools.gates was imported')\n")
+        script = os.path.abspath(load_context.__file__)
+        for extra in ({}, {"PYTHONSAFEPATH": "1"}):
+            with self.subTest(env=sorted(extra)):
+                env = dict(os.environ, PYTHONPATH=fake, PYTHONDONTWRITEBYTECODE="1", **extra)
+                p = subprocess.run([sys.executable, script, "--root", self.root, KIND], capture_output=True, text=True, env=env)
+                self.assertEqual((p.returncode, p.stdout, p.stderr),
+                                 (0, f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n", ""))
+
+    # -- board.py (rows B2, DEC-0187, DEC-0235) ------------------------------------------------------------------------
+    def test_board_table_rows_and_cells(self):
+        """Row B2 (m0004 m0007 m0008 m0011 m0013 m0014 m0017 m0027 m0028 m0034 m0035 m0040 m0045 m0046 m0047): through
+        board.stream_table and board.cells, the functions the loader and the drift check call."""
+        from tools.program import board
+        for line, want in (("| a | b |", ["a", "b"]), ("|a|b|", ["a", "b"]), ("|a|b", ["a", "b"]), (" | a | b | ", ["a", "b"]),
+                           ("|a|b\\|", ["a", "b\\|"]), ("| a \\| b | c |", ["a \\| b", "c"]), ("|", [""]), ("||", [""])):
+            with self.subTest(cells=line):
+                self.assertEqual(board.cells(line), want)
+        tables = (("separator rows are not rows",
+                   "x\n| stream | branch |\n|---|:---:|\n| ---x | ---y |\n| A | `a` |\n|:---|---:|\n| B | `b` |\n\n| B | c |\n",
+                   (["stream", "branch"], [["---x", "---y"], ["A", "`a`"], ["B", "`b`"]])),
+                  ("a table with no separator row", "| stream | branch |\n| A | `a` |\n| B | `b` |\n",
+                   (["stream", "branch"], [["A", "`a`"], ["B", "`b`"]])),
+                  ("no trailing pipes", "| stream | branch\n|---|---\n| A | `a`\n| B | `b`\nB | after\n",
+                   (["stream", "branch"], [["A", "`a`"], ["B", "`b`"]])),
+                  ("compact cells", "|stream|branch|\n|---|---|\n|B|`b`|\n", (["stream", "branch"], [["B", "`b`"]])),
+                  ("a line not starting with a pipe is not the header", "> stream | note\n- stream | x |\n| stream | branch |\n| B | `b` |\n",
+                   (["stream", "branch"], [["B", "`b`"]])))
+        for name, text, want in tables:
+            with self.subTest(name):
+                self.assertEqual(board.stream_table(text), want)
+        with self.subTest("no table"):
+            with self.assertRaises(board.BoardError):
+                board.stream_table("stream | branch |\n")
+
+    def test_board_branch_column_and_cell(self):
+        """Row B2 (m0093, F16d): the first branch column counts even when the row is too short for a later one; the
+        first backticked name of the cell is the branch."""
+        from tools.program import board
+        two = "| stream | branch / worktree | notes | branch old |\n|---|---|---|---|\n"
+        self.assertEqual(board.stream_branch(two + "| B | `block/x` |\n", "B"), "block/x")
+        self.assertEqual(board.stream_branch(two + "| B | `block/x` / `wt-name` | n | `block/y` |\n", "B"), "block/x")
+        self.stream_b_branch()
+        self.put(self.BOARD_REL, self.board(b_cell="`block/prototype-b9` / `wt-name`"))
+        rc, out = self.run_sync(commit=True)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out.startswith(".superpowers/context/refs/origin_block_prototype-b9-"), out)
+        with self.subTest("a compact board with no trailing pipes loads through the loader"):
+            self.put(self.BOARD_REL, "# board\n|stream|branch / worktree\n|---|---\n|A|`block/program-tooling`\n|B|`block/prototype-b9`\n")
+            rc, out = self.run_sync(commit=True)
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.startswith(".superpowers/context/refs/origin_block_prototype-b9-"), out)
+
+    def test_the_first_word_rules_split_on_spaces_only(self):
+        """DEC-0235 spaces-only: the branch-column rule takes the header cell's first word as the row-label rule takes
+        the row label's, split on a space (U+0020) only; a tab, a vertical tab, a form feed, U+001C-U+001F, U+0085,
+        NBSP, U+2003, U+2028 or U+3000 after `branch` (or `B`) joins the word. Whitespace at the cell's ends is stripped."""
+        from tools.program import board
+        sep = "|---|---|\n"
+        no_column = "no branch column (a header cell whose first word is `branch`)"
+        for ws in ("\t", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\xa0", "\u2003", "\u2028", "\u3000"):
+            with self.subTest(header=ascii(ws)):
+                with self.assertRaises(board.BoardError) as cm:
+                    board.stream_branch(f"| stream | branch{ws}/ worktree |\n" + sep + "| B | `block/x` |\n", "B")
+                self.assertEqual(str(cm.exception), no_column)
+            with self.subTest(row_label=ascii(ws)):
+                with self.assertRaises(board.BoardError) as cm:
+                    board.stream_branch("| stream | branch |\n" + sep + f"| B{ws}prototype | `block/x` |\n", "B")
+                self.assertEqual(str(cm.exception), "no stream B row")
+            with self.subTest(header_end=ascii(ws)):
+                self.assertEqual(board.stream_branch(f"| stream | {ws}branch{ws} |\n" + sep + f"| {ws}B{ws} | `block/x` |\n", "B"), "block/x")
+        for header in ("branch / worktree", "branch", "branch  two spaces"):
+            with self.subTest(header=header):
+                self.assertEqual(board.stream_branch(f"| stream | {header} |\n" + sep + "| B prototype | `block/x` |\n", "B"), "block/x")
+        with self.subTest("a newline in the header cell ends the header line"):
+            with self.assertRaises(board.BoardError) as cm:
+                board.stream_branch("| stream | branch\nx / worktree |\n" + sep + "| B | `block/x` |\n", "B")
+            self.assertEqual(str(cm.exception), "no stream B row")
+        with self.subTest("through the loader: a tab after branch is no branch column"):
+            self.stream_b_branch()
+            self.put(self.BOARD_REL, self.board().replace("branch / worktree", "branch\t/ worktree"))
+            rc, out = self.run_sync(commit=True)
+            self.assertEqual((rc, out), (1, f"FAIL context.sync.{B_HANDOFF}: ref board:B: {self.BOARD_REL}: {no_column}\n"))
 
     # -- the committed read lists ------------------------------------------------------------
     def test_committed_context_yml_has_a_list_for_every_kind_and_dispatch_role(self):

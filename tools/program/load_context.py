@@ -532,7 +532,7 @@ def find_root() -> str:
         raise ValueError(f"git cannot run ({exc.strerror})") from None
     if p.returncode != 0:
         raise ValueError("no --root, no CLAUDE_PROJECT_DIR, and the working directory is not in a git work tree")
-    return p.stdout.decode("utf-8", "replace").strip()
+    return p.stdout.decode("utf-8", "replace").removesuffix("\n")      # only git's newline: a name may end in a space
 
 
 def root_problem(root: str):
@@ -546,7 +546,7 @@ def root_problem(root: str):
         top = git_bytes(root, "rev-parse", "--show-toplevel")
     except OSError as exc:
         return f"git cannot run ({exc.strerror})"
-    if top.returncode != 0 or os.path.realpath(top.stdout.decode("utf-8", "replace").strip()) != os.path.realpath(root):
+    if top.returncode != 0 or os.path.realpath(top.stdout.decode("utf-8", "replace").removesuffix("\n")) != os.path.realpath(root):
         return f"root {echo(root)} is not the top of a git work tree"
     return None
 
@@ -563,9 +563,11 @@ def main(argv=None) -> int:
     ap.error = refuse
     try:
         ns = ap.parse_args(argv)
+        if ns.root is not None and not ns.root.strip():      # F15: as the gates, never the cwd's tree
+            raise ValueError("--root is empty")
         if not KIND_RE.fullmatch(ns.kind):
             raise ValueError(f"kind {echo(ns.kind)} is not [a-z0-9_-]+")
-        root = os.path.abspath(ns.root if ns.root else find_root())
+        root = os.path.abspath(ns.root if ns.root is not None else find_root())
         problem = root_problem(root)
         if problem:
             raise ValueError(problem)
