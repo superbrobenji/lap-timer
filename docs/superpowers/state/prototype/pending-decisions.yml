@@ -246,8 +246,8 @@
     - {label: reviewer-edit-list, cost: 'the re-reviewer writes the exact edit list (line, old text, new text) and the implementer applies it verbatim, then a fresh review; about 0.5 day per round; may still find old-text defects'}
     - {label: close-with-list, cost: 'b1 checkpoints at a6e475e with every open text finding registered as a PT- row owned by the first b2-b6 task that touches the line; departs from the zero-bugs rule for planning text, owner exception; b2 starts now'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "script-gate-first (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended script-gate-first)"
+  answered_at: {sha: "feeec70", by: superbrobenji}
 - id: DEC-0326
   class: scope
   question: 'Task 1 re-review 3 Q-PT-9: must every use of an owner answer in tracked stream B text carry its chosen option line quoted, including the about 28 Scope table rows that cite a DEC id only (P-7 was written for new text)?'
@@ -255,8 +255,8 @@
     - {label: every-use, cost: 'every DEC use in the plan and docs/hardware quotes its option line; a text fix over about 28 table rows and the "Owner answers applied" list; a gate can then check it mechanically'}
     - {label: new-uses-only, cost: 'id-only cites written before DEC-0315 stand; only new or changed text quotes the option line; no mechanical check possible'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "every-use (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended every-use)"
+  answered_at: {sha: "feeec70", by: superbrobenji}
 - id: DEC-0327
   class: spec-direction
   question: 'Task 1 re-review 3 Q-PT-10: the plan (Scope table preamble and Task 1 Step 2) attributes the in/out rule "in when it changes what the device measures, times, logs, offloads or exports on the track" to DEC-0134, but DEC-0134 in decisions.yml does not state that rule. Whose rule is it?'
@@ -264,8 +264,8 @@
     - {label: owner-confirms-rule, cost: 'the owner confirms the rule as an answer recorded here; the plan cites this answer instead of DEC-0134'}
     - {label: plan-rule, cost: 'the rule is the plan''s own reading of DEC-0134 and is worded as such; the verdicts stand'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "owner-confirms-rule (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended owner-confirms-rule and showed the rule it confirms: 'in when it changes what the device measures, times, logs, offloads or exports on the track')"
+  answered_at: {sha: "feeec70", by: superbrobenji}
 - id: DEC-0328
   class: scope
   question: 'F5-8 pin (b6 Task 17): no host test pins a stack size without a rule no spec or plan line states. The strict-delivery spec (2026-10-17 :261) allows bench rows "only with a runnability transcript" and bars [hardware-only] rows from pinning. How does F5-8 get its pin?'
@@ -274,8 +274,8 @@
     - {label: owner-close, cost: 'F5-8 closes by owner answer on the second-soak transcript, as DEC-0300 did for planning rows; gate_plan pin.17 needs an allowance (stream A)'}
     - {label: runnability-row, cost: 'the soak is a runnability-transcript bench row and is the pin (no spec text change if read that way); gate_plan still needs a test name (stream A)'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "consistency-test (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended consistency-test)"
+  answered_at: {sha: "feeec70", by: superbrobenji}
 - id: DEC-0329
   class: spec-direction
   question: 'DEC-0318 (ubx-reset) states only "send a UBX software reset (CFG-RST) at 30 s; spec 7.5 amended". Not stated: the CFG-RST payload (navBbrMask, resetMode); whether "1 s, gps_configure()" still follows in the 30 s row; what the 60 s retry row sends; the log code. Which sequence?'
@@ -284,8 +284,8 @@
     - {label: reset-only, cost: 'CFG-RST only; reconfiguration left to reset detection (spec 7.3.5); a new log code appended to lt_err.h; depends on the module emitting NMEA after reset'}
     - {label: owner-names, cost: 'the owner names the payload and the sequence'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "reset-then-configure (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended reset-then-configure)"
+  answered_at: {sha: "feeec70", by: superbrobenji}
 - id: DEC-0330
   class: spec-direction
   question: 'IMU FIFO timestamps (b2 Task 5): spec 8.4 step 5 "mono_us[i] = read_mono_us - (n - 1 - i) * 10000" goes below 0 when read_mono_us < (n - 1) * 10000 (shortly after boot). The spec states no rule for that case. What does the driver do?'
@@ -294,8 +294,8 @@
     - {label: drop-samples, cost: 'drop samples whose stamp would be negative; loses at most (n - 1) * 10 ms of samples once after boot; one line'}
     - {label: cannot-occur, cost: 'spec 8.4 says it cannot occur, with the reason, and mpu.c asserts it; a spec amendment'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "drop-samples (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended drop-samples)"
+  answered_at: {sha: "feeec70", by: superbrobenji}
 - id: DEC-0331
   class: spec-direction
   question: 'Spec 8.4 contradicts itself: step 1 (:1259) treats a FIFO count above 1000 as overflow, step 3 (:1261) says "84 samples per 50 ms is never exceeded", and 84 x 12 = 1008 bytes. Production reads at most IMU_BATCH = 16 samples (components/app/pipeline/pipeline.c:75). Which gives?'
@@ -304,5 +304,5 @@
     - {label: raise-threshold, cost: 'raise the overflow threshold in step 1 to cover 84 samples (1008 bytes); driver behaviour changes; tested in b2 Task 5'}
     - {label: test-reachable, cost: 'leave the spec; b2 Task 5 tests only the reachable n; the contradiction stays in the spec'}
   asked_at: {sha: "a6e475e", by: controller}
-  answer: null
-  answered_at: null
+  answer: "amend-83 (owner in session, 2026-10-31: 'let's use recommended for all'; the session then listed its recommendation per question, and the owner confirmed: 'yes'; the session had recommended amend-83)"
+  answered_at: {sha: "feeec70", by: superbrobenji}
