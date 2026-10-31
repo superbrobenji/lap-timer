@@ -1819,3 +1819,78 @@
   asked_at: {sha: "4cdfc87", by: session}
   answer: "working-tree (owner in session, 2026-10-31: 'recommended'; the session had recommended working-tree)"
   answered_at: {sha: "d6cc70c", by: superbrobenji}
+- id: DEC-0178
+  class: spec-direction
+  question: "Program tooling T1 D30 investigation (task-1-d30-report.md, 7 ranked changes): which process changes are adopted? (1) a D24/D31 table and D28 whitelist at plan time for any task that prints FAIL lines or feeds a hook, the 'developer tooling' lift defined or dropped; (2) measurement briefs name the worst case and keep redacted raw evidence; (3) contradiction cells state the negated claim, plus a cited-id cross-check; (4) mechanical mutation of every changed branch before review; (5) DEC-0103 into the implementer and reviewer strict blocks, plus a check that fails a diff removing a test without a register row; (6) owner answers adding semantics land as their own planned task, not inside a fix round; (7) D30 stays on for all tooling."
+  options:
+    - {label: adopt-1-5-6-7-then-3-4, cost: 'changes 1, 5, 6 and 7 in a process block; 3 and 4 as a later tooling task; 2 as brief text (recommended)'}
+    - {label: adopt-all-now, cost: 'all seven in one process block; bigger block, more review'}
+    - {label: adopt-none, cost: 'keep the lean path as is; findings keep arriving one class per round'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "adopt-1-5-6-7-then-3-4 (owner in session, 2026-10-31: 'recommended for all'; the session had recommended adopt-1-5-6-7-then-3-4)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0179
+  class: spec-direction
+  question: "Program tooling T1 D30 investigation: does tools/program/load_context.py (prints FAIL lines, consumed by Task 2's hook) count as a gate under spec D24?"
+  options:
+    - {label: yes-gate, cost: 'Tasks 2 and 3 each get an input-domain table before dispatch (one drafter each) (recommended)'}
+    - {label: no-lean, cost: 'keep the lean-path lift; accept per-round discovery'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "yes-gate (owner in session, 2026-10-31: 'recommended for all'; the session had recommended yes-gate)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0180
+  class: scope
+  question: "Stream B b1 waits on stream A for the option-line gate (DEC-0325, DEC-0326) and the decision-id range test (DEC-0314). When does stream A build them?"
+  options:
+    - {label: pilot-sub-controller-now, cost: 'a two-task block (DEC-0314 test change, option-line gate reading decisions.yml and stream B pending-decisions.yml) run now by an opus sub-controller (existing controller role, 500k / 180 min) in its own worktree beside the ladder block; stream B unblocked in about a day; it never touches the hooks, .claude/ or ~/.claude (recommended)'}
+    - {label: after-ladder, cost: 'the block waits for the stream-controller ladder block; stream B idles one to two days longer'}
+    - {label: after-b1, cost: 'a new block after program tooling b1 closes; stream B idles two days or more'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "pilot-sub-controller-now (owner in session, 2026-10-31: 'for the rest recommended is fine'; the session had recommended pilot-sub-controller-now; this replaces the owner's earlier 'recommended for all' to the session's after-b1 recommendation, given before the sub-controller pattern was offered)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0181
+  class: spec-direction
+  question: "The owner asked for a controller type above the sub-controller that runs one stream's block end to end as a subagent of the session and reports once. What ladder?"
+  options:
+    - {label: program-session-stream-controller, cost: 'level 1 program session (the terminal: dispatches stream controllers, relays owner questions, merges on the owner sentence, runs syncs); level 2 stream controller (new opus role, one block of one stream, start to checkpoint); level 3 sub-controller (existing, optional); level 4 workers unchanged; every block runs in its own worktree so the program session checkout, whose hooks every agent runs, stays at a stable commit; gate_dispatch refuses a stream controller dispatched by a subagent; stream B moves to it after its next clear (recommended)'}
+    - {label: raise-sub-controller-caps, cost: 'no new role; the existing controller triggers are raised for sub-controllers only'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "program-session-stream-controller (owner in session, 2026-10-31: 'define a new controller type that reflects this responsibility, since it's higher up the ladder than a sub-controller. I then also want to bring in stream b in this same way after it's next /clear', then 'for the rest recommended is fine'; the session had recommended program-session-stream-controller)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0182
+  class: model-policy
+  question: "Stream controller budget: how much may one stream controller use before it stops?"
+  options:
+    - {label: relay-on-budget, cost: '500k tokens / 180 min; at 80 % it checkpoints at a task boundary and the program session re-dispatches a fresh one from the handoff (session recommendation)'}
+    - {label: one-budget-per-block, cost: '1.5M tokens / 480 min for the whole block; fewer handoffs, larger context, more compaction risk'}
+    - {label: tokens-only, cost: 'no clock, tokens only'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "relay-on-budget at 1M tokens / 180 min (owner in session, 2026-10-31: 'for option 1. I think a but with 1M instead of 500k though', replacing an earlier message the same day choosing one-budget-per-block at 1M; the session had recommended relay-on-budget; minutes kept at the option's 180)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0183
+  class: spec-direction
+  question: "A stream controller meets an owner-only question mid-block. What does it do?"
+  options:
+    - {label: halt-and-return, cost: 'writes the question to decisions.yml, halts NEEDS_DECISION and returns; the program session relays it and re-dispatches from the handoff after the answer (recommended)'}
+    - {label: continue-and-batch, cost: 'keeps working on tasks the question does not touch; questions batched to the checkpoint'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "halt-and-return (owner in session, 2026-10-31: 'for the rest recommended is fine'; the session had recommended halt-and-return)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0184
+  class: scope
+  question: "The ladder block changes gate_dispatch.py, SKILL.md and controller.md, which program tooling Task 2 also changes. Order?"
+  options:
+    - {label: pause-b1-after-t1, cost: 'program tooling b1 checkpoints after Task 1 is approved; the ladder block (3 tasks: spec, CLAUDE.md and playbook text; config role and triggers plus gate_dispatch nesting checks; SKILL.md and prompts/stream-controller.md) runs next in a fresh context; b1 Tasks 2-3 resume as the first stream controller (recommended)'}
+    - {label: after-b1, cost: 'the ladder block runs after the whole of b1; the pattern arrives later'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "pause-b1-after-t1 (owner in session, 2026-10-31: 'for the rest recommended is fine'; the session had recommended pause-b1-after-t1)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
+- id: DEC-0185
+  class: scope
+  question: "The adopted D30 process changes (DEC-0178) edit the same spec, umbrella and prompt-block files as the ladder block. Where do they land?"
+  options:
+    - {label: own-block-after-ladder, cost: 'their own block straight after the ladder block (recommended)'}
+    - {label: fold-into-ladder, cost: 'one block of more than 3 tasks; needs an owner block-size exception'}
+  asked_at: {sha: "221e8cb", by: session}
+  answer: "own-block-after-ladder (owner in session, 2026-10-31: 'for the rest recommended is fine'; the session had recommended own-block-after-ladder)"
+  answered_at: {sha: "221e8cb", by: superbrobenji}
