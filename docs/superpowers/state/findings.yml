@@ -3277,3 +3277,45 @@
   - state: open
     sha: cb049a5
     by: session
+- id: PROG-U6
+  source: review
+  severity: LOW
+  class: 'the repository''s import root is not pinned: tools/ is a namespace package, so a regular top-level tools package on sys.path shadows it for every entry point'
+  siblings: []
+  cites:
+  - file: tools/gates/run_all.py
+    lines: '1'
+    sha: fb2ca21
+  repro: 'mkdir -p d/tools && echo "raise SystemExit(1)" > d/tools/__init__.py; PYTHONPATH=d python3 tools/gates/run_all.py -> exits from the foreign package'
+  owner:
+    kind: issue
+    number: 157
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: fb2ca21
+    by: session
+- id: PROG-U7
+  source: review
+  severity: LOW
+  class: 'a unit test asserts a wall-clock bound, so the D34 suite goes red under machine load without a code change'
+  siblings: []
+  cites:
+  - file: tools/gates/tests/test_hooks.py
+    lines: '336'
+    sha: fb2ca21
+  repro: 'run the suite while the machine is loaded (load average about 28): test_long_runs_of_backslashes_and_options_do_not_stall_the_hook fails at 2.04 s / 2.32 s against a 2.0 s bound'
+  owner:
+    kind: issue
+    number: 158
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: fb2ca21
+    by: session
