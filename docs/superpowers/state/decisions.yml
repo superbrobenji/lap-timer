@@ -2348,3 +2348,94 @@
   asked_at: {sha: "82bf2ce", by: session}
   answer: "refused (owner in session, 2026-10-31: 'recommended'; the session had recommended refused)"
   answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0234
+  class: scope
+  question: 'Program tooling T1 re-review 7 (task-1-rereview-7.md): the reviewer''s own 52 mutants left 5 non-equivalent survivors (E2, L4, W1, B2, O2: F16, the class''s fourth arrival) and F15 (an empty --root loads the cwd repository, load_context.py:568). Hand-picked mutant lists do not converge. How does Task 1 proceed?'
+  options:
+    - {label: mutation-tool-now, cost: 'build the mechanical mutation tool (DEC-0178 change 4) now: a script applies a fixed operator set to every changed line and both implementer and reviewer run the same set; then round 8 fixes F15 and every survivor; about 1 day (recommended)'}
+    - {label: round-8-reviewer-mutants, cost: 'round 8 against re-review 7''s 52 mutants plus F15; about 0.5 day; a round 9 reviewer will likely find more'}
+    - {label: approve-with-rows, cost: 'Task 1 approved now with F15 and the survivors registered for Task 2; an owner exception to zero bugs'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "mutation-tool-now (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended mutation-tool-now)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0235
+  class: spec-direction
+  question: 'Program tooling T1 re-review 7 Q-PROG-8: the board branch-column rule (DEC-0187 first-word-whole, ''like the row-label rule'') splits words on any whitespace; the row-label rule splits on spaces only. Which?'
+  options:
+    - {label: spaces-only, cost: 'the branch-column rule splits on spaces only, as the row-label rule (recommended)'}
+    - {label: any-whitespace, cost: 'both rules split on any whitespace'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "spaces-only (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended spaces-only)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0236
+  class: spec-direction
+  question: 'Option-line gate Task 1 table row G16 (Q-RNG-4 as asked; DEC-0214 recorded it as ''no stream B rows'', a different case): a register with no stream A rows (only DEC-0300 onward), or the register [], in the range check:'
+  options:
+    - {label: fail-0001, cost: 'FAIL decisions.range.DEC-0001, since a register starts with the merge grant DEC-0001 (recommended)'}
+    - {label: pass, cost: 'PASS'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "fail-0001 (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended fail-0001)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0237
+  class: spec-direction
+  question: 'Option-line gate Task 1 table U-R3: a row with a well-formed id that fails another schema check, in the range check:'
+  options:
+    - {label: counts, cost: 'it counts for the range check; the schema check reports the defect (recommended)'}
+    - {label: left-out, cost: 'left out, so it also shows as a gap'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "counts (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended counts)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0238
+  class: spec-direction
+  question: 'Option-line gate Task 2 table U-U2: a citation of an answer line (rows whose answer matches no option, DEC-0217; merge grants, DEC-0218): what must its quote hold?'
+  options:
+    - {label: answer-first-word, cost: 'the answer''s first word, e.g. restore-and-fix or yes (recommended)'}
+    - {label: any-non-blank, cost: 'any non-blank text'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "answer-first-word (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended answer-first-word)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0239
+  class: spec-direction
+  question: 'Option-line gate Task 2 table U-U3: DEC-0222 excludes DEC ids inside quotes. Which quotes?'
+  options:
+    - {label: citation-quotes, cost: 'only the quoted text of a citation path:line@sha "quote" (recommended)'}
+    - {label: any-double-quoted, cost: 'any double-quoted text'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "citation-quotes (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended citation-quotes)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0240
+  class: spec-direction
+  question: 'Option-line gate Task 2 table U-U4: git replacement objects (refs/replace) when the gate reads a register at a sha:'
+  options:
+    - {label: ignore-replace, cost: 'ignored (GIT_NO_REPLACE_OBJECTS=1), so a read at a sha is exact (recommended)'}
+    - {label: git-default, cost: 'git''s default'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "ignore-replace (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended ignore-replace)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0241
+  class: spec-direction
+  question: 'Option-line gate Task 2 table U-U5: where does the answer''s first token (DEC-0216) end?'
+  options:
+    - {label: space-or-paren, cost: 'at the first space or ''('' (recommended)'}
+    - {label: space-only, cost: 'at the first space only'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "space-or-paren (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended space-or-paren)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0242
+  class: spec-direction
+  question: 'Option-line gate Task 2 table U-U6: the same file given twice:'
+  options:
+    - {label: named-fail, cost: 'a named input FAIL (recommended)'}
+    - {label: check-once, cost: 'checked once, silently'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "named-fail (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended named-fail)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
+- id: DEC-0243
+  class: spec-direction
+  question: 'Option-line gate Task 2 table U-U7: a file staged but not committed (DEC-0226 ''tracked ... like DEC-0177''):'
+  options:
+    - {label: fail-like-loader, cost: 'FAIL, as the loader does: it must be tracked at HEAD (recommended)'}
+    - {label: pass-ls-files, cost: 'PASS, as git ls-files counts it'}
+  asked_at: {sha: "cb049a5", by: session}
+  answer: "fail-like-loader (owner in session, 2026-10-31: 'rocommended' [sic, read as recommended]; the session had recommended fail-like-loader)"
+  answered_at: {sha: "cb049a5", by: superbrobenji}
