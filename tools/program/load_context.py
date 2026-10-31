@@ -233,7 +233,7 @@ def tree_mode(root: str, rev: str, path: str):
         return None
     for row in p.stdout.split(b"\0"):
         meta, _, name = row.partition(b"\t")
-        if name.decode("utf-8", "replace") == path:
+        if os.fsdecode(name) == path:                 # the name as open() and argv encode a path (R8)
             return meta.split(b" ")[0].decode()
     return None
 
@@ -532,7 +532,7 @@ def find_root() -> str:
         raise ValueError(f"git cannot run ({exc.strerror})") from None
     if p.returncode != 0:
         raise ValueError("no --root, no CLAUDE_PROJECT_DIR, and the working directory is not in a git work tree")
-    return p.stdout.decode("utf-8", "replace").removesuffix("\n")      # only git's newline: a name may end in a space
+    return os.fsdecode(p.stdout).removesuffix("\n")     # as argv and os.environ decode a path (R8); only git's newline (R7)
 
 
 def root_problem(root: str):
@@ -546,7 +546,7 @@ def root_problem(root: str):
         top = git_bytes(root, "rev-parse", "--show-toplevel")
     except OSError as exc:
         return f"git cannot run ({exc.strerror})"
-    if top.returncode != 0 or os.path.realpath(top.stdout.decode("utf-8", "replace").removesuffix("\n")) != os.path.realpath(root):
+    if top.returncode != 0 or os.path.realpath(os.fsdecode(top.stdout).removesuffix("\n")) != os.path.realpath(root):
         return f"root {echo(root)} is not the top of a git work tree"
     return None
 

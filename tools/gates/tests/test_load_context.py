@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -1712,6 +1713,94 @@ class LoadContext(unittest.TestCase):
                         self.assertTrue(os.path.isfile(os.path.join(moved, EXPECTED, SID, KIND + ".json")))
             finally:
                 os.rename(moved, self.root)
+
+    def non_utf8_parent(self, name: bytes):
+        """A fresh directory holding the directory `name` (bytes), or skipTest when the filesystem refuses the name
+        (probed by trying: APFS refuses a name that is not valid UTF-8, errno EILSEQ)."""
+        parent = os.path.realpath(tempfile.mkdtemp(prefix="bytes-"))
+        self.addCleanup(gf.remove, parent)
+        try:
+            os.mkdir(os.path.join(os.fsencode(parent), name))
+        except OSError as exc:
+            self.skipTest(f"this filesystem refuses the directory name {name!r} ({exc.strerror})")
+        return parent
+
+    def test_a_root_whose_name_is_not_valid_utf8_is_that_root(self):
+        """Row R8 (PROG-T1-8b-1): argv and os.environ carry such a name with surrogateescape, so git's top level is
+        decoded the same way (os.fsdecode); the tree loads by --root, CLAUDE_PROJECT_DIR and discovery, and a FAIL line
+        that names such a root prints the escape `\\udcff`, never raising."""
+        if os.fsdecode(b"\xff") != "\udcff":
+            self.skipTest(f"the filesystem encoding is {sys.getfilesystemencoding()}, not UTF-8: the pinned escape differs")
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        want = f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n"
+        parent = self.non_utf8_parent(b"plain-\xff")
+        moved = os.path.join(parent, os.fsdecode(b"tree-\xff"))
+        os.rename(self.root, moved)
+        self.addCleanup(os.rename, moved, self.root)
+        for how, argv, env, cwd in (("--root", ["--root", moved, KIND], None, None),
+                                    ("CLAUDE_PROJECT_DIR", [KIND], {"CLAUDE_PROJECT_DIR": moved}, None),
+                                    ("discovery", [KIND], None, os.path.join(moved, "docs"))):
+            with self.subTest(how=how):
+                if how == "discovery":
+                    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+                rc, out, err = self.call(argv, env=env, cwd=cwd)
+                self.assertEqual((rc, out, err), (0, want, ""))
+                self.assertTrue(os.path.isfile(os.path.join(moved, EXPECTED, SID, KIND + ".json")))
+        for name, tail in (("plain-\udcff", "is not the top of a git work tree"), ("gone-\udcff", "is not a directory")):
+            with self.subTest(fail=ascii(name)):
+                line = f"FAIL context.input: root {parent}/{name.replace(chr(0xdcff), '[ESC]')} {tail}\n"
+                self.assertLess(len(line), 200, "the parent path is too long for the pinned unclipped line")
+                rc, out, err = self.call(["--root", os.path.join(parent, name), KIND])
+                self.assertEqual((rc, out, err), (1, line.replace("[ESC]", "\\udcff"), ""))
+
+    def test_a_root_and_a_path_in_a_non_utf8_locale_are_the_same_bytes(self):
+        """Row R8 (PROG-T1-8b-1, the whole dimension): under a locale whose filesystem encoding is ISO-8859-1, argv,
+        os.environ, open() and git's arguments use that encoding, so git's top level (find_root, root_problem) and
+        ls-tree's names (tree_mode) are decoded with it too (os.fsdecode). The real file runs as a subprocess; skipped
+        when no such locale is installed (probed by running the interpreter under each candidate)."""
+        import subprocess
+        parent = self.non_utf8_parent(b"lat-\xe9")
+        os.rmdir(os.path.join(os.fsencode(parent), b"lat-\xe9"))
+        locale_env = None
+        for name in ("en_US.ISO-8859-1", "en_US.ISO8859-1", "de_DE.ISO-8859-1", "en_US.iso88591"):
+            env = dict(os.environ, LC_ALL=name, PYTHONDONTWRITEBYTECODE="1", CLAUDE_CODE_SESSION_ID=SID)
+            env.pop("PYTHONUTF8", None)
+            env.pop("PYTHONIOENCODING", None)
+            p = subprocess.run([sys.executable, "-c", "import sys; print(sys.getfilesystemencoding())"],
+                               capture_output=True, env=env, check=False)
+            if p.stdout.strip().lower() in (b"iso-8859-1", b"iso8859-1", b"latin-1"):
+                locale_env = env
+                break
+        if locale_env is None:
+            self.skipTest("no installed locale gives this interpreter an ISO-8859-1 filesystem encoding")
+        script = os.path.abspath(load_context.__file__)
+        for root_name, file_name in ((b"tree", b"\xe9.md"), (b"lat-\xe9", b"a.md"), (b"lat-\xe9", b"\xe9.md")):
+            with self.subTest(root=root_name, file=file_name):
+                root = os.path.join(os.fsencode(parent), root_name)
+                os.rename(os.fsencode(self.root), root)
+                try:
+                    data = lines_file(3).encode()
+                    with open(os.path.join(root, b"docs", file_name), "wb") as fh:
+                        fh.write(data)
+                    path = "docs/" + file_name.decode("latin-1")
+                    gf.write(os.fsdecode(root), CTX, ctx([entry(path, "1-3")]))
+                    gf.commit_all(os.fsdecode(root), "fixture")
+                    want = f"{path} lines 1-3 blob {blob(data)} -- because\n".encode("utf-8")
+                    for how, argv, extra, cwd in (("--root", [b"--root", root], {}, None),
+                                                  ("CLAUDE_PROJECT_DIR", [], {b"CLAUDE_PROJECT_DIR": root}, None),
+                                                  ("discovery", [], {}, os.path.join(root, b"docs"))):
+                        with self.subTest(how=how):
+                            env = {os.fsencode(k): os.fsencode(v) for k, v in locale_env.items() if k != "CLAUDE_PROJECT_DIR"}
+                            env.update(extra)
+                            p = subprocess.run([sys.executable, "-W", "error", script, *argv, KIND.encode()],
+                                               capture_output=True, env=env, cwd=cwd, check=False)
+                            self.assertEqual((p.returncode, p.stdout, p.stderr), (0, want, b""))
+                    os.unlink(os.path.join(root, b"docs", file_name))
+                    gf.commit_all(os.fsdecode(root), "clean")
+                finally:
+                    os.rename(root, os.fsencode(self.root))
 
     def test_argument_and_discovery_failures_are_pinned_whole(self):
         """Rows A2, A5, A6, R5, R6, X2 (m0888 m0889 m0892 m0896 m0897 m0916 m0917 m0942 m0945 m0947 m0954 m0961)."""
