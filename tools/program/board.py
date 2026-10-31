@@ -6,7 +6,7 @@ names the failure; every problem is a BoardError whose message echoes no board t
 
 The stream table is the first Markdown table whose header's first cell is `stream`. A stream's row is the row whose
 first cell's first word is the stream's letter (`A`, `B`); its branch is the first backticked name in the cell under
-the header that starts with `branch`.
+the first header cell whose first whitespace-separated word is exactly `branch` (DEC-0187 first-word-whole).
 """
 from __future__ import annotations
 
@@ -60,9 +60,9 @@ def stream_row(text: str, stream: str) -> tuple:
 def stream_branch(text: str, stream: str) -> str:
     """The branch named in the stream's row: the first backticked name of its `branch` cell, or BoardError."""
     header, row = stream_row(text, stream)
-    column = [i for i, h in enumerate(header) if h.startswith("branch")]
+    column = [i for i, h in enumerate(header) if h.split()[:1] == ["branch"]]      # DEC-0187 first-word-whole
     if not column:
-        raise BoardError("no branch column (a header cell starting with `branch`)")
+        raise BoardError("no branch column (a header cell whose first word is `branch`)")
     if column[0] >= len(row):
         raise BoardError(f"stream {stream} row has no branch cell")
     m = re.search(r"`([^`]*)`", row[column[0]])

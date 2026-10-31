@@ -24,7 +24,8 @@ the loader wrote under .superpowers/context/refs/. <sha> is the git blob sha of 
 Expected list (git-ignored), written only on success, atomically:
   <root>/.superpowers/context/expected/<session id>/<kind>.json
   {"kind": <kind>, "session": <session id>, "entries": [{"path": <path-to-read>, "lines": "a-b", "blob": <sha>}]}
-The session id is $CLAUDE_CODE_SESSION_ID (equal to the hook input's session_id, spike 2026-10-30).
+The session id is $CLAUDE_CODE_SESSION_ID (equal to the hook input's session_id, spike 2026-10-30), a lowercase UUID
+8-4-4-4-12 matched as a whole string (DEC-0188; form re-checked in fix round 7).
 
 A failure prints only `FAIL context.<kind>.<path>: <reason>` lines (rc 1), each one escaped line, never a
 partial list; it also removes the session's earlier expected list for the kind (or empties it, or names it as
@@ -69,7 +70,7 @@ HANDOFFS = {"stream-a-block": "docs/superpowers/state/strict-delivery/handoff.md
             "stream-b-block": "docs/superpowers/state/prototype/handoff.md"}
 CONTEXT_DIR = os.path.join(".superpowers", "context")
 KIND_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
-SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,63}")
+SESSION_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")    # DEC-0188: the hook's id, a lowercase UUID
 RANGE_RE = re.compile(r"([1-9][0-9]*)-([1-9][0-9]*|end)")
 MAX_DIGITS = 18         # a line number with more digits is past the end of any file; never converted (3.11+ int() refuses 4,300)
 PATH_ASCII = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-")     # DEC-0170
@@ -471,7 +472,7 @@ def build(root: str, kind: str, session: str, fail) -> str:
             fail(f.ident, f.reason)
     text = "".join(f"{p} lines {l} blob {s} -- {w}\n" for p, l, s, w in rows)
     if fail.count == 0 and not SESSION_RE.fullmatch(session):
-        fail("session", "CLAUDE_CODE_SESSION_ID is unset or not a session id: the expected list has no key")
+        fail("session", "CLAUDE_CODE_SESSION_ID is unset or not a session id (a lowercase UUID): the expected list has no key")
     if fail.count == 0 and len(text.encode()) >= MAX_OUTPUT:
         fail("output", f"the list prints {len(text.encode())} bytes, {MAX_OUTPUT} bytes or more")
     if fail.count == 0:

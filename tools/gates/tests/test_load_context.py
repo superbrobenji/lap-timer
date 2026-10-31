@@ -229,6 +229,7 @@ class LoadContext(unittest.TestCase):
             ("entry not a mapping", dict(raw="lists: {stream-a-block: [3]}\n"), f"context.{KIND}.entry"),
             ("unknown key", dict(entries=[dict(entry("docs/a.md", "1-1"), extra="x")]), f"context.{KIND}.docs/a.md"),
             ("empty why", dict(entries=[entry("docs/a.md", "1-1", "")]), f"context.{KIND}.docs/a.md"),
+            ("blank why", dict(entries=[entry("docs/a.md", "1-1", "   ")]), f"context.{KIND}.docs/a.md"),
             ("path not a string", dict(entries=[entry(3, "1-1")]), f"context.{KIND}.entry"),
             ("no kind argument", dict(argv=[]), "context.input"),
             ("two kinds", dict(argv=[KIND, "sync"]), "context.input"),
@@ -299,14 +300,29 @@ class LoadContext(unittest.TestCase):
         self.assertFailed(rc, out, f"context.{KIND}.docs/gone.md", "missing path")
 
     def test_malformed_handoff_front_matter_fails(self):
+        """Row H2: each reason whole; a front matter not at the very start of the file (fix round 7, F13d) is none."""
         self.put("docs/a.md", lines_file(5))
-        for text in ("---\nplan: [\n---\nbody\n", "---\ncontext_files: 3\n---\n", "---\ncontext_files: [3]\n---\n",
-                     "no front matter at all\n"):
+        cf = "context_files: [{path: docs/a.md, lines: 1-5, why: w}]\n"
+        none = "handoff has no front matter"
+        cases = (("---\nplan: [\n---\nbody\n", "front matter is not valid YAML: "),
+                 ("---\ncontext_files: 3\n---\n", "context_files is not a list"),
+                 ("---\ncontext_files: [3]\n---\n", "context_files holds an entry that is not a mapping"),
+                 ("no front matter at all\n", none),
+                 ("# title\n---\n" + cf + "---\nbody\n", none),
+                 ("\n---\n" + cf + "---\nbody\n", none),
+                 (" ---\n" + cf + "---\nbody\n", none),
+                 ("body\n\n---\n" + cf + "---\n", none))
+        for text, reason in cases:
             with self.subTest(text=text):
                 self.put(A_HANDOFF, text)
                 rc, out = self.run_loader(entries=[entry("docs/a.md", "1-5")])
-                self.assertEqual(rc, 1, out)
-                self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.{re.escape(A_HANDOFF)}")
+                self.assertAllNamed(rc, out, f"context.{KIND}.{A_HANDOFF}", f"FAIL context.{KIND}.{A_HANDOFF}: {reason}")
+                self.assertEqual(len(out.splitlines()), 1, out)
+        with self.subTest("the same front matter at the start loads"):
+            self.put(A_HANDOFF, "---\n" + cf + "---\nbody\n")
+            rc, out = self.run_loader(entries=[entry("docs/a.md", "1-5")])
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(out.splitlines()), 2, out)
 
     # -- the path whitelist (D28): a regular file tracked at HEAD (at the ref), no symlink component, no control char
     def test_path_with_a_control_character_is_refused(self):
@@ -327,6 +343,10 @@ class LoadContext(unittest.TestCase):
         self.put("docs/new.md", lines_file(3))
         rc, out = self.run_loader(entries=[entry("docs/new.md", "1-3")], commit=False)
         self.assertFailed(rc, out, f"context.{KIND}.docs/new.md", "not a regular file tracked at HEAD")
+        with self.subTest("a symlink at HEAD, a regular file on disk (row P7, fix round 7 F13f)"):
+            self.head_mode_fixture("docs/new.md", "120000", lines_file(3))
+            rc, out = self.run_loader(entries=[entry("docs/new.md", "1-3")], commit=False)
+            self.assertFailed(rc, out, f"context.{KIND}.docs/new.md", "not a regular file tracked at HEAD")
 
     def test_symlinked_file_and_symlinked_directory_component_are_refused(self):
         self.put("real/a.md", lines_file(3))
@@ -421,6 +441,10 @@ class LoadContext(unittest.TestCase):
                 self.assertEqual(len(out.splitlines()), 1, ascii(out))
                 self.assertRegex(out, r"^FAIL context\.[a-z-]+\.[^\n]*: ")
                 self.assertTrue(out.endswith("\n") and out[:-1].isprintable(), ascii(out))
+        with self.subTest("a run of spaces in a FAIL id is one space (one_line: escaped, then spaces collapsed)"):
+            rc, out = self.run_loader(entries=[entry("docs/a  b.md", "1-1")])
+            self.assertEqual(out, f"FAIL context.{KIND}.docs/a b.md: path holds a character outside [A-Za-z0-9._/-] and "
+                                  "printable non-ASCII (whitespace included)\n")
         for name, front_text in (("handoff yaml error", f"---\nplan: [\n{ch}x: y\n---\nbody\n"),
                                  ("handoff yaml error, line separator", f"---\nplan: \"a\u2028b\u0085{ch}\n---\nbody\n")):
             with self.subTest(name):
@@ -435,6 +459,27 @@ class LoadContext(unittest.TestCase):
         rc, out = self.run_loader(entries=[entry("docs/\u00fcn\u00ef\u4e2d.md", "1-3", "caf\u00e9")])
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(out.splitlines()), 1)
+
+    def test_a_blank_or_folded_why_is_a_named_fail(self):
+        """Row W1 (fix round 7, F13c): a whitespace-only why is empty; a folded or literal block ending in a newline is
+        non-printable; a folded block with strip chomping (`>-`) is one printable line and loads."""
+        self.put("docs/a.md", lines_file(3))
+        gf.commit_all(self.root, "a")
+        head = f"lists:\n  {KIND}:\n    - path: docs/a.md\n      lines: 1-3\n      why: "
+        empty, unprintable = "why is missing or empty", "why holds a non-printable character"
+        cases = {"spaces": ('"   "\n', empty), "one space": ('" "\n', empty), "a tab": ('"\\t"\n', empty),
+                 "spaces and a tab": ('" \\t "\n', empty), "an ideographic space": ('"\\u3000"\n', empty),
+                 "an empty folded block": (">\n", empty), "a folded block": (">\n        the a doc\n", unprintable),
+                 "a literal block": ("|\n        one\n        two\n", unprintable)}
+        for name, (value, reason) in cases.items():
+            with self.subTest(name):
+                rc, out = self.run_loader(raw=head + value, commit=False)
+                self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", f"FAIL context.{KIND}.docs/a.md: {reason}\n")
+                self.assertEqual(len(out.splitlines()), 1, out)
+        with self.subTest("a folded block with strip chomping loads"):
+            rc, out = self.run_loader(raw=head + ">-\n        the a\n        doc\n", commit=False)
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.endswith(" -- the a doc\n"), out)
 
     def test_why_with_a_control_character_is_refused(self):
         self.put("docs/a.md", lines_file(3))
@@ -588,7 +633,7 @@ class LoadContext(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         rc, out = self.run_loader(kind="sync", argv=["sync"])
         self.assertEqual(rc, 0, out)
-        other = os.path.join(self.root, EXPECTED, "other-session-1234", KIND + ".json")
+        other = os.path.join(self.root, EXPECTED, "1b6f1c52-7d1e-4f0a-9a57-3c2d8e41aa11", KIND + ".json")
         os.makedirs(os.path.dirname(other))
         with open(other, "w") as fh:
             fh.write("{}\n")
@@ -873,9 +918,16 @@ class LoadContext(unittest.TestCase):
             self.assertEqual(rc, 0, out)
 
     def test_handoff_of_the_wrong_kind_or_grammar_is_a_named_fail(self):
+        """Row H1/H2: the handoff is the only failing input (docs/a.md committed, fix round 7 F13b), each reason whole."""
         self.put("docs/a.md", lines_file(3))
+        gf.commit_all(self.root, "a")
         good = front([entry("docs/a.md", "1-3")])
         full = os.path.join(self.root, A_HANDOFF)
+        reasons = {"missing": "handoff missing or unreadable (No such file or directory)",
+                   "a directory": "handoff not a regular file", "a FIFO": "handoff not a regular file",
+                   "a symlink": f"handoff symlink in path ({A_HANDOFF})", "not UTF-8": "handoff is not valid UTF-8",
+                   "duplicate context_files": "front matter is not valid YAML: ", "merge key": "front matter is not valid YAML: ",
+                   "mode 000": "handoff unreadable (Permission denied)"}
         cases = ("missing", "a directory", "a FIFO", "a symlink", "not UTF-8", "duplicate context_files", "merge key")
         if os.geteuid() != 0:
             cases += ("mode 000",)
@@ -906,9 +958,8 @@ class LoadContext(unittest.TestCase):
                 rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")], commit=False)
                 if os.path.isfile(full) and not os.path.islink(full):
                     os.chmod(full, 0o644)
-                self.assertAllNamed(rc, out, f"context.{KIND}.{A_HANDOFF}")
-                if case in ("a directory", "a FIFO"):
-                    self.assertIn("not a regular file", out)
+                self.assertAllNamed(rc, out, f"context.{KIND}.{A_HANDOFF}", f"FAIL context.{KIND}.{A_HANDOFF}: {reasons[case]}")
+                self.assertEqual(len(out.splitlines()), 1, out)          # the handoff, and nothing else, fails
 
     def test_unreadable_entry_file_is_a_named_fail(self):
         self.put("docs/a.md", lines_file(3))
@@ -952,6 +1003,22 @@ class LoadContext(unittest.TestCase):
         with self.subTest("relative root with a trailing slash"):
             rc, out, _ = self.call(["--root", os.path.basename(self.root) + "/", KIND], cwd=os.path.dirname(self.root))
             self.assertEqual(rc, 0, out)
+        # Row R4 (fix round 7, F13a): the root is normalised by abspath before the symlink check, so a symlinked root
+        # given with a trailing slash (os.path.islink("link/") follows the link) or relative is still the named symlink
+        # FAIL, and a relative bad root is named by its absolute path.
+        in_far = os.path.join(os.path.realpath(far), "link")         # os.getcwd() in `far` is its real path
+        for name, argv, env, cwd, named in (("relative link/", ["--root", "link/", KIND], None, far, in_far),
+                                            ("relative link", ["--root", "link", KIND], None, far, in_far),
+                                            ("absolute link/", ["--root", link + "/", KIND], None, None, link),
+                                            ("CLAUDE_PROJECT_DIR link/", [KIND], {"CLAUDE_PROJECT_DIR": link + "/"}, None, link),
+                                            ("CLAUDE_PROJECT_DIR relative link/", [KIND], {"CLAUDE_PROJECT_DIR": "link/"}, far, in_far)):
+            with self.subTest(name):
+                rc, out, _ = self.call(argv, env=env, cwd=cwd)
+                self.assertAllNamed(rc, out, "context.input")
+                self.assertEqual(out, f"FAIL context.input: root {named} is a symlink\n")
+        with self.subTest("a relative missing root is named by its absolute path"):
+            rc, out, _ = self.call(["--root", "nope", KIND], cwd=far)
+            self.assertEqual(out, f"FAIL context.input: root {os.path.join(os.path.realpath(far), 'nope')} is not a directory\n")
         with self.subTest("no root outside any repository"):
             os.environ.pop("CLAUDE_PROJECT_DIR", None)
             rc, out, _ = self.call([KIND], cwd=plain)
@@ -1034,6 +1101,31 @@ class LoadContext(unittest.TestCase):
             rc, out, _ = self.call(["--root", self.root, KIND], env={"CLAUDE_CODE_SESSION_ID": SID + "\n"})
             self.assertAllNamed(rc, out, f"context.{KIND}.session")
 
+    def test_the_session_id_is_a_lowercase_uuid(self):
+        """Row E1 (fix round 7, DEC-0188 uuid): CLAUDE_CODE_SESSION_ID must fullmatch the hook's session id form, a
+        lowercase UUID 8-4-4-4-12; anything else is FAIL context.<kind>.session and no expected list is written."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        bad = {"upper case": SID.upper(), "no hyphens": SID.replace("-", ""), "one short": SID[:-1], "one long": SID + "0",
+               "braces": "{" + SID + "}", "urn prefix": "urn:uuid:" + SID, "a non-hex letter": "g" + SID[1:],
+               "hyphens moved": SID[:9] + "-" + SID[9:13] + SID[14:], "a leading space": " " + SID,
+               "a trailing newline": SID + "\n", "a fullwidth digit": "\uff10" + SID[1:],
+               "the old 8-64 form, 8": "abcdefgh", "the old 8-64 form, 64": "a" * 64, "the old form, word": "r6probe-session-0002",
+               "a path": "../../x", "empty": ""}
+        for name, sid in bad.items():
+            with self.subTest(name):
+                rc, out, _ = self.call(["--root", self.root, KIND], env={"CLAUDE_CODE_SESSION_ID": sid})
+                self.assertAllNamed(rc, out, f"context.{KIND}.session", f"FAIL context.{KIND}.session: CLAUDE_CODE_SESSION_ID "
+                                    "is unset or not a session id (a lowercase UUID): the expected list has no key\n")
+                self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED)), name)
+        for name, sid in (("the fixture id", SID), ("all zeros", "00000000-0000-0000-0000-000000000000"),
+                          ("all f", "ffffffff-ffff-ffff-ffff-ffffffffffff")):
+            with self.subTest(name):
+                rc, out, _ = self.call(["--root", self.root, KIND], env={"CLAUDE_CODE_SESSION_ID": sid})
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(os.path.isfile(os.path.join(self.root, EXPECTED, sid, KIND + ".json")), name)
+
     def test_ref_that_is_not_a_commit_and_unborn_head(self):
         self.put("docs/a.md", lines_file(3))
         gf.commit_all(self.root, "a")
@@ -1099,6 +1191,9 @@ class LoadContext(unittest.TestCase):
             with self.subTest(lines=lines[:30] + f"...({len(lines)})"):
                 rc, out = self.run_loader(entries=[entry("docs/a.md", lines), entry("docs/missing.md", "1-1")])
                 self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md", "range")
+                # the digit guard names the problem itself on every interpreter (3.9 int() has no digit limit; fix round 7)
+                self.assertIn(f"FAIL context.{KIND}.docs/a.md: missing range: a line number of over 18 digits is past the end "
+                              f"of any file, got {load_context.echo(lines)}\n", out)
                 self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.docs/missing\.md: missing path")      # X1: never hidden
                 for line in out.splitlines():
                     self.assertLess(len(line), 200 + 200 + 120, line[:300])
@@ -1389,6 +1484,9 @@ class LoadContext(unittest.TestCase):
             "a B2 row label": (self.board(b_cell=None, extra_rows=b9_row.replace("| B prototype", "| B2 prototype")),
                                "no stream B row"),
             "a streams header": (self.board().replace("| stream | block |", "| streams | block |"), "no stream table"),
+            "a Stream header (case)": (self.board().replace("| stream | block |", "| Stream | block |"), "no stream table"),
+            "a lower-case b row label (case)": (self.board(b_cell=None, extra_rows=b9_row.replace("| B prototype", "| b prototype")),
+                                                "no stream B row"),
             "a B row after the table's end": (self.board(b_cell=None, extra_rows="\n" + b9_row), "no stream B row"),
         }
         for name, (text, reason) in cases.items():
@@ -1401,6 +1499,42 @@ class LoadContext(unittest.TestCase):
             rc, out = self.run_sync(commit=True)
             self.assertEqual(rc, 0, out)
             self.assertTrue(out.startswith(load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF) + " lines 1-2 "), out)
+
+    def test_the_branch_column_is_the_header_cell_whose_first_word_is_branch(self):
+        """Row B2 (fix round 7, F14, DEC-0187 first-word-whole): the branch column is the first header cell whose first
+        whitespace-separated word is exactly `branch`; `branching ...`, `branches`, `Branch` and `branch/worktree` are not."""
+        self.stream_b_branch()
+        head = "| stream | {h1} | {h2} | next task |\n|---|---|---|---|\n"
+        row = "| A strict delivery | `block/program-tooling` | `block/program-tooling` / main | t |\n| B prototype | {c1} | {c2} | t |\n"
+
+        def board(h1, h2, c1="`block/prototype-b7`", c2="`block/prototype-b9` / w"):
+            return "# Stream board\n\n" + head.format(h1=h1, h2=h2) + row.format(c1=c1, c2=c2) + "\n"
+        b9 = load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF) + " lines 1-2 "
+        loads = {"a branching column before the branch column": board("branching notes", "branch / worktree"),
+                 "a branches column before the branch column": board("branches", "branch / worktree"),
+                 "a Branch column before the branch column": board("Branch", "branch / worktree"),
+                 "a branch/worktree column before the branch column": board("branch/worktree", "branch / worktree"),
+                 "an old branch column before the branch column": board("old branch", "branch / worktree"),
+                 "the branch column alone": board("block", "branch"),
+                 "a tab after the first word": board("block", "branch\t/ worktree"),
+                 "two branch columns: the first counts": board("block", "branch / worktree").replace(
+                     "| next task |", "| branch b |").replace("| t |\n| B", "| `block/prototype-b7` |\n| B").replace(
+                     "/ w | t |", "/ w | `block/prototype-b7` |")}
+        for name, text in loads.items():
+            with self.subTest(name):
+                self.put(self.BOARD_REL, text)
+                rc, out = self.run_sync(commit=True)
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(out.startswith(b9), out)
+        no_column = f"ref board:B: {self.BOARD_REL}: no branch column (a header cell whose first word is `branch`)"
+        for name, h2 in (("only a branching column", "branching notes"), ("only a branches column", "branches"),
+                         ("only a Branch column", "Branch"), ("only a branch/worktree column", "branch/worktree"),
+                         ("only a BRANCH column", "BRANCH / worktree"), ("only an empty header cell", ""),
+                         ("only an old branch column", "old branch")):
+            with self.subTest(name):
+                self.put(self.BOARD_REL, board("block", h2, c1="b9"))
+                rc, out = self.run_sync(commit=True)
+                self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", f"FAIL context.sync.{B_HANDOFF}: {no_column}\n")
 
     def test_the_board_is_read_from_the_working_tree_and_must_be_tracked(self):
         """Row B4 (DEC-0177 working-tree): the board on disk, tracked at HEAD, through the D32 checks."""
@@ -1424,6 +1558,89 @@ class LoadContext(unittest.TestCase):
             self.assertEqual(rc, 0, out)
             self.assertTrue(out.startswith(load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF) + " lines 1-2 "), out)
             self.assertIn(self.BOARD_REL, gf.git(self.root, "status", "--porcelain"))
+        with self.subTest("a symlink at HEAD, a regular file on disk (fix round 7 F13f)"):
+            gf.git(self.root, "rm", "-q", "--cached", self.BOARD_REL)
+            gf.git(self.root, "commit", "-q", "-m", "board untracked")
+            os.unlink(os.path.join(self.root, self.BOARD_REL))
+            self.head_mode_fixture(self.BOARD_REL, "120000", self.board())
+            rc, out = self.run_sync()
+            self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", not_tracked)
+
+    def head_mode_fixture(self, rel, mode, disk_text):
+        """Commit `rel` with git mode `mode` at HEAD (120000 symlink, 040000 directory, 160000 submodule, 100755
+        executable), then leave a regular file holding `disk_text` on disk at `rel` (uncommitted for the first three)."""
+        full = os.path.join(self.root, rel)
+        if os.path.isdir(full) and not os.path.islink(full):
+            gf.remove(full)
+        elif os.path.lexists(full):
+            os.unlink(full)
+        if mode == "120000":
+            self.put("docs/target.md", disk_text)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            os.symlink(os.path.relpath(os.path.join(self.root, "docs/target.md"), os.path.dirname(full)), full)
+            gf.commit_all(self.root, "symlink at HEAD")
+            os.unlink(full)
+        elif mode == "040000":
+            self.put(rel + "/inner.md", disk_text)
+            gf.commit_all(self.root, "directory at HEAD")
+            gf.remove(full)
+        elif mode == "160000":
+            sha = gf.git(self.root, "rev-parse", "HEAD")
+            gf.git(self.root, "update-index", "--add", "--cacheinfo", f"160000,{sha},{rel}")
+            gf.git(self.root, "commit", "-q", "-m", "submodule at HEAD")
+        elif mode == "100755":
+            self.put(rel, disk_text)
+            os.chmod(full, 0o755)
+            gf.commit_all(self.root, "executable at HEAD")
+        self.put(rel, disk_text)
+        if mode == "100755":
+            os.chmod(full, 0o755)
+        self.assertEqual(gf.git(self.root, "ls-tree", "HEAD", "--", rel).split(" ")[0], mode)
+        self.assertTrue(os.path.isfile(full) and not os.path.islink(full))
+
+    def test_a_file_whose_head_mode_is_not_regular_is_refused_even_when_regular_on_disk(self):
+        """Rows P7 and B4 (fix round 7, F13f): the file on disk must be tracked at HEAD as a regular file (mode 100644
+        or 100755); a symlink, a directory or a submodule at HEAD with a regular file on disk is refused, for an entry
+        and for the board. An executable (100755) entry, board or file at a ref loads."""
+        for mode in ("120000", "040000", "160000"):
+            with self.subTest(entry=mode):
+                self.setUp()
+                self.head_mode_fixture("docs/a.md", mode, lines_file(3))
+                rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")], commit=False)
+                self.assertAllNamed(rc, out, f"context.{KIND}.docs/a.md",
+                                    f"FAIL context.{KIND}.docs/a.md: not a regular file tracked at HEAD\n")
+                self.assertEqual(len(out.splitlines()), 1, out)
+            with self.subTest(board=mode):
+                self.setUp()
+                self.stream_b_branch()
+                self.put(CTX, ctx([entry(B_HANDOFF, "1-end", ref="board:B")], "sync"))
+                gf.commit_all(self.root, "context")
+                self.head_mode_fixture(self.BOARD_REL, mode, self.board())
+                rc, out = self.run_sync()
+                self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}",
+                                    f"FAIL context.sync.{B_HANDOFF}: ref board:B: board {self.BOARD_REL} is not a regular file tracked at HEAD\n")
+                self.assertEqual(len(out.splitlines()), 1, out)
+        with self.subTest("an executable entry and an executable board load"):
+            self.setUp()
+            self.stream_b_branch()
+            self.head_mode_fixture("docs/a.md", "100755", lines_file(3))
+            self.head_mode_fixture(self.BOARD_REL, "100755", self.board())
+            self.put(CTX, ctx([entry("docs/a.md", "1-3")], KIND) + ctx([entry(B_HANDOFF, "1-end", ref="board:B")], "sync").replace("lists:\n", ""))
+            gf.commit_all(self.root, "context")
+            rc, out = self.run_loader(argv=[KIND], commit=False)
+            self.assertEqual(out, f"docs/a.md lines 1-3 blob {blob(lines_file(3).encode())} -- because\n")
+            rc, out = self.run_sync()
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.startswith(load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF) + " lines 1-2 "), out)
+        with self.subTest("an executable file at a ref loads"):
+            self.setUp()
+            gf.git(self.root, "checkout", "-q", "-b", "other")
+            self.put("docs/x.md", lines_file(3))
+            os.chmod(os.path.join(self.root, "docs/x.md"), 0o755)
+            gf.commit_all(self.root, "executable at other")
+            gf.git(self.root, "checkout", "-q", "main")
+            rc, out = self.run_loader(entries=[entry("docs/x.md", "1-3", ref="other")])
+            self.assertEqual(out, f"{load_context.ref_copy_path('other', 'docs/x.md')} lines 1-3 blob {blob(lines_file(3).encode())} -- because\n")
 
     def test_a_modified_file_loads_with_the_blob_of_the_bytes_on_disk(self):
         """Row P7: a tracked file edited in the working tree is read as it is on disk (playbook: the blob of the file as read)."""
