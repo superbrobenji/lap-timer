@@ -2,7 +2,7 @@
 """mutate -- mechanical mutation of every changed line (program tooling Task 1, fix round 8a; DEC-0178 change 4, DEC-0234).
 
   python3 tools/program/mutate.py --root <work-tree top> --base <sha> --head <sha> --file <path> [--file ...]
-      --test <unittest id> [--test ...] --py <interpreter> [--py ...] [--jobs N] [--json]
+      --test <unittest id> [--test ...] --py <interpreter> [--py ...] [--jobs N] [--ids <id>|<id>-<id>] [--json]
   python3 tools/program/mutate.py --list-operators
 
 Sites. The lines of each --file (a .py file, a regular file at --head) that `git diff -U0 <base> <head>` adds or
@@ -11,7 +11,8 @@ replaces touches a site line; its reported line is the line that text starts on.
 
 Operators. OPERATORS, a fixed list, each applied alone to every match on the sites (Python ast positions, never a
 regular expression over the text). Nothing inside an f-string is mutated except the whole f-string by str-empty (the
-positions ast gives the parts of an f-string differ between Python versions).
+positions ast gives the parts of an f-string differ between Python versions). A docstring (the str constant that is the
+first statement of a module, class or function body, as Python takes it for __doc__) is not mutated (DEC-0247).
 
 Run. Each worker clones the root into its own scratch directory (tempfile.mkdtemp; `git clone --no-checkout` then
 `git reset --hard <head>`, so the copy holds exactly the files at --head and the checkout is never written). The DEC-0032
@@ -28,8 +29,12 @@ Output (stdout), in id order:
   summary: base <sha> head <sha>, <n> mutants in <k> file(s), <t> test(s), <p> interpreter(s)
   summary <py>: <k> KILLED, <s> SURVIVED, <b> BADMATCH                one line per --py
   SURVIVED <id> <file>:<line>:<col> <operator> <old!r> -> <new!r>      one line per mutant surviving on any --py
-Ids are m0001.. in the order (file, position, operator index): the same base, head and files give the same ids.
---json prints one object instead: {base, head, files, tests, py, operators, mutants: [{id, file, line, col, operator,
+Ids are m0001.. in the order (file, position, operator index): the same base, head and files give the same ids. A
+docstring keeps its ids (it is numbered, never run nor printed), so the other ids are the ones they had before docstrings
+were excluded (DEC-0246). --ids m0560-m0974 (or one id, m0560) runs only those ids, written as the tool prints them; a
+spec of another shape, a range ending before it starts, an id outside m0001..the last id, or a range holding only
+docstrings is FAIL mutate.ids. With --ids the first summary line names it: `summary: base <sha> head <sha>, ids <spec>, ...`.
+--json prints one object instead: {base, head, files, tests, py, ids (the spec or null), operators, mutants: [{id, file, line, col, operator,
 old, new, results: {py: result}, reason: {py: text}}], summary: {py: {KILLED, SURVIVED, BADMATCH}}, rc}.
 rc 0: no mutant SURVIVED; rc 1: a mutant SURVIVED on some --py; rc 2: one line `FAIL mutate.<check>: <reason>` (with
 --json: {"rc": 2, "fail": [{check, reason}]}) for every input outside these rules, never a traceback.
@@ -80,7 +85,7 @@ OPERATORS = (
     ("match-search", "attribute .match to .search"),
     ("startswith-endswith", "attribute .startswith to .endswith"),
     ("strip-rstrip", "attribute .strip to .rstrip"),
-    ("str-empty", "a non-empty string literal (an f-string included) to \"\""),
+    ("str-empty", "a non-empty string literal (an f-string included) to \"\", except a docstring"),
 )
 OP_INDEX = {name: i for i, (name, _) in enumerate(OPERATORS)}
 CMP_OPS = {ast.Eq: ("==", "!=", "cmp-eq-ne"), ast.NotEq: ("!=", "==", "cmp-ne-eq"), ast.Lt: ("<", "<=", "cmp-lt-le"),
@@ -96,6 +101,8 @@ CLIP = 200                  # every value a FAIL line echoes is cut to this many
 MAX_JOBS = 64
 TEST_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 HUNK_RE = re.compile(rb"^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@", re.M)
+ID_SPEC_RE = re.compile(r"(m[0-9]{4,})(?:-(m[0-9]{4,}))?")
+ID_SHAPE = "is not an id m<nnnn> or a range m<nnnn>-m<nnnn> as the tool prints them"
 RAN_RE = re.compile(r"^Ran ([0-9]+) tests? in ", re.M)
 REGULAR = (b"100644", b"100755")
 
@@ -150,9 +157,7 @@ def read_file(path: str) -> bytes:
 
 def parse_args(argv: list) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="mutate", add_help=False, allow_abbrev=False)
-    for name in ("--root", "--base", "--head", "--jobs"):
-        ap.add_argument(name, default=None)
-    for name in ("--file", "--test", "--py"):
+    for name in ("--root", "--base", "--head", "--jobs", "--ids", "--file", "--test", "--py"):
         ap.add_argument(name, action="append", default=[])
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list-operators", action="store_true")
@@ -165,6 +170,11 @@ def parse_args(argv: list) -> argparse.Namespace:
         if argv != ["--list-operators"]:
             raise Fail("args", "--list-operators takes no other argument")
         return ns
+    for name in ("root", "base", "head", "jobs", "ids"):
+        values = getattr(ns, name)
+        if len(values) > 1:
+            raise Fail("args", f"--{name} is given more than once")
+        setattr(ns, name, values[0] if values else None)
     for name in ("root", "base", "head"):
         if getattr(ns, name) is None:
             raise Fail("args", f"--{name} is missing")
@@ -179,7 +189,21 @@ def parse_args(argv: list) -> argparse.Namespace:
     if not re.fullmatch(r"[1-9][0-9]?", jobs) or int(jobs) > MAX_JOBS:
         raise Fail("args", f"--jobs {show(jobs)} is not an integer from 1 to {MAX_JOBS}")
     ns.jobs = int(jobs)
+    if ns.ids is not None:
+        ns.id_range = parse_ids(ns.ids)
     return ns
+
+
+def parse_ids(spec: str) -> tuple:
+    """(first, last) id numbers of an --ids spec `m<nnnn>` or `m<nnnn>-m<nnnn>`, each written as the tool prints it."""
+    m = ID_SPEC_RE.fullmatch(spec)
+    if m is None or any(g is not None and g != f"m{int(g[1:]):04d}" for g in m.groups()):
+        raise Fail("ids", f"--ids {show(spec)} {ID_SHAPE}")
+    first = int(m.group(1)[1:])
+    last = int(m.group(2)[1:]) if m.group(2) is not None else first
+    if last < first:
+        raise Fail("ids", f"--ids {show(spec)} ends before it starts")
+    return first, last
 
 
 def check_root(root: str) -> str:
@@ -390,17 +414,32 @@ def constant_mutants(src, node) -> list:
 def file_mutants(src: Source, sites: set) -> list:
     """Every mutant of the file whose replaced text touches a site line, in (position, operator) order."""
     found = []
-    for node in walk(ast.parse(src.text)):
+    tree = ast.parse(src.text)
+    docs = docstrings(tree)
+    for node in walk(tree):
         for s, e, name, old, new in node_mutants(src, node):
             first, last = src.line_of(s), src.line_of(max(s, e - 1))
             if sites.intersection(range(first, last + 1)):
-                found.append((s, e, name, old, new))
+                found.append((s, e, name, old, new, id(node) in docs))
     found.sort(key=lambda m: (m[0], OP_INDEX[m[2]], m[1]))
     out = []
-    for s, e, name, expected, new in found:
+    for s, e, name, expected, new, doc in found:
         line, old = src.line_of(s), src.text[s:e]
         out.append({"file": src.path, "line": line, "col": s - src.starts[line - 1] + 1, "operator": name,
-                    "start": s, "end": e, "old": old, "new": new, "matched": old.split() == expected.split()})
+                    "start": s, "end": e, "old": old, "new": new, "matched": old.split() == expected.split(),
+                    "docstring": doc})
+    return out
+
+
+def docstrings(tree) -> set:
+    """id() of every docstring node: the str Constant of an expression statement that is the first statement of the
+    module or of a class or (async) function body (what Python stores as __doc__)."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and type(first.value.value) is str:
+                out.add(id(first.value))
     return out
 
 
@@ -582,7 +621,8 @@ def summary(mutants: list, labels: list) -> dict:
 
 def report_text(ctx: dict, mutants: list, labels: list, counts: dict) -> None:
     files = len(ctx["files"])
-    print(f"summary: base {ctx['base']} head {ctx['head']}, {len(mutants)} mutants in {files} file{'s' * (files != 1)}, "
+    ids = f", ids {ctx['ids']}" if ctx["ids"] is not None else ""
+    print(f"summary: base {ctx['base']} head {ctx['head']}{ids}, {len(mutants)} mutants in {files} file{'s' * (files != 1)}, "
           f"{len(ctx['tests'])} test{'s' * (len(ctx['tests']) != 1)}, {len(labels)} interpreter{'s' * (len(labels) != 1)}")
     for label in labels:
         c = counts[label]
@@ -607,8 +647,19 @@ def prepare(ns) -> tuple:
     pys = [(p, check_py(p)) for p in ns.py]
     for i, m in enumerate(mutants, 1):
         m["id"] = f"m{i:04d}"
+    last = len(mutants)
+    mutants = [m for m in mutants if not m["docstring"]]
+    if ns.ids is not None:
+        first, end = ns.id_range
+        if first < 1 or end > last:
+            raise Fail("ids", f"--ids {show(ns.ids)} is outside m0001-m{last:04d}")
+        mutants = [m for m in mutants if first <= int(m["id"][1:]) <= end]
+        if not mutants:
+            raise Fail("ids", f"--ids {show(ns.ids)} selects no mutant: every id in it is a docstring")
+    for m in mutants:
         m["text"] = mutated_text(sources[m["file"]], m)
-    ctx = {"base": base, "head": head, "files": sorted(ns.file), "tests": list(ns.test), "py": list(ns.py)}
+    ctx = {"base": base, "head": head, "files": sorted(ns.file), "tests": list(ns.test), "py": list(ns.py),
+           "ids": ns.ids}
     return root, ctx, sources, mutants, pys
 
 

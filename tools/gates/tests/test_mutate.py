@@ -120,6 +120,51 @@ MOD_MUTANTS = [
 ]
 BADMATCH = {(43, "cond-true"), (51, "return-none")}         # the operator finds no text to change
 
+DOC_HEAD = '''"""module doc"""
+A = "a"
+
+
+class C:
+    """class doc"""
+    B = "b"
+
+    def m(self):
+        """method doc"""
+        "not a docstring"
+        return "r"
+
+
+def f():
+    'single quoted doc'
+    if A:
+        "first in an if body"
+    return 1
+
+
+async def g():
+    """async doc"""
+
+
+def h():
+    f"{A}"
+    x = "y"
+
+
+def k():
+    ("implicit" "concat")
+    return x
+'''
+# (id, line, operator, old) for DOC_HEAD: the docstrings (m0001 m0003 m0005 m0009 m0017 m0020) are not mutated and the
+# ids of the other mutants are the ones they had when docstrings were mutated (DEC-0246, DEC-0247)
+DOC_MUTANTS = [
+    ("m0002", 2, "str-empty", '"a"'), ("m0004", 7, "str-empty", '"b"'), ("m0006", 11, "str-empty", '"not a docstring"'),
+    ("m0007", 12, "return-none", '"r"'), ("m0008", 12, "str-empty", '"r"'),
+    ("m0010", 17, "not-add", "A"), ("m0011", 17, "cond-true", "A"), ("m0012", 17, "cond-false", "A"),
+    ("m0013", 18, "str-empty", '"first in an if body"'),
+    ("m0014", 19, "int-inc", "1"), ("m0015", 19, "int-dec", "1"), ("m0016", 19, "return-none", "1"),
+    ("m0018", 27, "str-empty", 'f"{A}"'), ("m0019", 28, "str-empty", '"y"'), ("m0021", 33, "return-none", "x"),
+]
+
 NOTHING_TEST = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_nothing(self):\n        pass\n"
 KILL_HEAD = '"""k"""\n\n\ndef f(a):\n    return a > 1\n'
 KILL_TEST = '''import unittest
@@ -168,6 +213,7 @@ class Mutate(unittest.TestCase):
         gf.write(self.root, "pkg/mod.py", MOD_HEAD)
         gf.write(self.root, "pkg/kill.py", KILL_HEAD)
         gf.write(self.root, "pkg/spin.py", SPIN_HEAD)
+        gf.write(self.root, "pkg/doc.py", DOC_HEAD)
         self.head = gf.commit_all(self.root, "head")
         self.scratch = tempfile.mkdtemp(prefix="mutate-test-")
         self.addCleanup(shutil.rmtree, self.scratch, True)
@@ -211,6 +257,7 @@ class Mutate(unittest.TestCase):
         self.assertEqual([l.split(" -- ")[0] for l in out.splitlines()], ALL_OPERATORS)
         self.assertEqual([name for name, _ in mutate.OPERATORS], ALL_OPERATORS)
         self.assertTrue(all(l.split(" -- ")[1] for l in out.splitlines()))
+        self.assertIn('str-empty -- a non-empty string literal (an f-string included) to "", except a docstring', out)
 
     def test_every_operator_applies_to_every_changed_site_it_matches(self):
         rc, doc = self.run_json(self.args(files=["pkg/mod.py"], tests=["pkg.test_mod"], extra=["--jobs", "4"]))
@@ -296,6 +343,63 @@ class Mutate(unittest.TestCase):
         self.assertEqual([m["file"] for m in a["mutants"][:4]], ["pkg/kill.py"] * 4)
         self.assertEqual(a["mutants"][4]["id"], "m0005")
         self.assertEqual(a["mutants"][4]["file"], "pkg/mod.py")
+
+    def test_docstrings_are_not_mutated_and_the_other_ids_keep_their_numbers(self):
+        rc, doc = self.run_json(self.args(files=["pkg/doc.py"], tests=["pkg.test_mod"], extra=["--jobs", "4"]))
+        self.assertEqual([(m["id"], m["line"], m["operator"], m["old"]) for m in doc["mutants"]], DOC_MUTANTS)
+        self.assertEqual(rc, 1)
+
+    def test_ids_select_a_range_or_one_id(self):
+        rc, out = self.call(self.args(extra=["--ids", "m0002-m0003"]))
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.splitlines(), [
+            f"m0002 pkg/kill.py:5 cmp-gt-ge SURVIVED {PY}",
+            f"m0003 pkg/kill.py:5 int-inc KILLED {PY}",
+            f"summary: base {self.base} head {self.head}, ids m0002-m0003, 2 mutants in 1 file, 1 test, 1 interpreter",
+            f"summary {PY}: 1 KILLED, 1 SURVIVED, 0 BADMATCH",
+            "SURVIVED m0002 pkg/kill.py:5:14 cmp-gt-ge '>' -> '>='"])
+        rc, out = self.call(self.args(extra=["--ids", "m0003"]))
+        self.assertEqual((rc, out.splitlines()[0]), (0, f"m0003 pkg/kill.py:5 int-inc KILLED {PY}"))
+        self.assertEqual(len(out.splitlines()), 3)
+        full = self.run_json(self.args(files=["pkg/doc.py"], tests=["pkg.test_mod"], extra=["--jobs", "4"]))[1]
+        part = self.run_json(self.args(files=["pkg/doc.py"], tests=["pkg.test_mod"], extra=["--ids", "m0001-m0010"]))[1]
+        self.assertEqual(part["mutants"], [m for m in full["mutants"] if m["id"] <= "m0010"])
+        self.assertEqual([m["id"] for m in part["mutants"]], ["m0002", "m0004", "m0006", "m0007", "m0008", "m0010"])
+        self.assertEqual(part["ids"], "m0001-m0010")
+        self.assertIsNone(full["ids"])
+        self.assert_checkout_untouched()
+
+    def test_a_bad_id_spec_is_a_named_fail(self):
+        doc = ["--root", self.root, "--base", self.base, "--head", self.head, "--file", "pkg/doc.py", "--test",
+               "pkg.test_mod", "--py", PY]
+        shape = "is not an id m<nnnn> or a range m<nnnn>-m<nnnn> as the tool prints them"
+        cases = [(self.args(extra=[f"--ids={spec}"]), f"FAIL mutate.ids: --ids {spec!r} {shape}")
+                 for spec in ("", "m2", "m00002", "0002", "M0002", "m0002-", "-m0002", " m0002", "m0002 ",
+                              "m0001,m0002", "m0001-m0002-m0003", "m0001-0002", "m0001--m0002", "m\u0662\u0662\u0662\u0662")]
+        cases += [
+            (self.args(extra=["--ids", "m0003-m0002"]), "FAIL mutate.ids: --ids 'm0003-m0002' ends before it starts"),
+            (self.args(extra=["--ids", "m0000"]), "FAIL mutate.ids: --ids 'm0000' is outside m0001-m0004"),
+            (self.args(extra=["--ids", "m0005"]), "FAIL mutate.ids: --ids 'm0005' is outside m0001-m0004"),
+            (self.args(extra=["--ids", "m0000-m0004"]), "FAIL mutate.ids: --ids 'm0000-m0004' is outside m0001-m0004"),
+            (self.args(extra=["--ids", "m0001-m0005"]), "FAIL mutate.ids: --ids 'm0001-m0005' is outside m0001-m0004"),
+            (doc + ["--ids", "m0022"], "FAIL mutate.ids: --ids 'm0022' is outside m0001-m0021"),
+            (doc + ["--ids", "m0020"], "FAIL mutate.ids: --ids 'm0020' selects no mutant: every id in it is a docstring"),
+            (doc + ["--ids", "m0001"], "FAIL mutate.ids: --ids 'm0001' selects no mutant: every id in it is a docstring"),
+            (self.args(extra=["--ids", "m0001", "--ids", "m0002"]), "FAIL mutate.args: --ids is given more than once"),
+            (self.args(extra=["--ids", "m0001", "--ids", "m0001"]), "FAIL mutate.args: --ids is given more than once"),
+            (self.args(extra=["--root", self.root]), "FAIL mutate.args: --root is given more than once"),
+            (self.args(extra=["--base", self.base]), "FAIL mutate.args: --base is given more than once"),
+            (self.args(extra=["--head", self.head]), "FAIL mutate.args: --head is given more than once"),
+            (self.args(extra=["--jobs", "2", "--jobs", "3"]), "FAIL mutate.args: --jobs is given more than once"),
+            (self.args(extra=["--ids", "-m0002"]), "FAIL mutate.args: bad arguments: argument --ids: expected one argument"),
+            (["--list-operators", "--ids", "m0001"], "FAIL mutate.args: --list-operators takes no other argument"),
+        ]
+        for argv, want in cases:
+            with self.subTest(argv=argv):
+                self.assertEqual(self.call(argv), (2, want + "\n"))
+        rc, doc_json = self.run_json(self.args(extra=["--ids", "m9"]))
+        self.assertEqual((rc, doc_json), (2, {"rc": 2, "fail": [{"check": "mutate.ids", "reason": f"--ids 'm9' {shape}"}]}))
+        self.assert_checkout_untouched()
 
     def test_a_hung_mutant_is_killed_by_the_timeout(self):
         with mock.patch.object(mutate, "TIMEOUT_FLOOR", 3.0), mock.patch.object(mutate, "TIMEOUT_FACTOR", 1.0):
