@@ -3319,3 +3319,30 @@
   - state: open
     sha: fb2ca21
     by: session
+- id: PROG-U8
+  source: review
+  severity: LOW
+  class: 'git''s show-toplevel output is stripped of the directory name''s own whitespace, so a work tree whose name ends in whitespace resolves to a different path'
+  siblings: []
+  cites:
+  - file: tools/gates/lib/__init__.py
+    lines: '71'
+    sha: ca7b28c
+  - file: tools/gates/hooks/pre_tool_use.py
+    lines: '251'
+    sha: ca7b28c
+  - file: tools/gates/hooks/session_start.py
+    lines: '26'
+    sha: ca7b28c
+  repro: 'cwd in a fresh repository named "tree " (trailing space), CLAUDE_PROJECT_DIR unset: repo_root() returns ".../tree" (isdir False)'
+  owner:
+    kind: issue
+    number: 159
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: ca7b28c
+    by: session

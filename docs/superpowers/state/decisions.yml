@@ -2494,3 +2494,30 @@
   asked_at: {sha: "b5ffdb5", by: session}
   answer: "defer-to-process-block (owner in session, 2026-10-31: 'recommended'; the session had recommended defer-to-process-block)"
   answered_at: {sha: "b5ffdb5", by: superbrobenji}
+- id: DEC-0250
+  class: spec-direction
+  question: 'Program tooling T1 re-review 8 Q-PROG-9: CLAUDE_PROJECT_DIR set to whitespace only is read today as a relative path (FAIL root <cwd>/ is not a directory), while table row R1 makes a whitespace-only --root "--root is empty". Which?'
+  options:
+    - {label: treat-as-empty, cost: 'a whitespace-only CLAUDE_PROJECT_DIR gets the "--root is empty" form; one line and a test (recommended)'}
+    - {label: relative-path, cost: 'keep the relative-path FAIL; add the value and the echo collapse to rows R5/O3 with a test'}
+  asked_at: {sha: "ca7b28c", by: session}
+  answer: "treat-as-empty (owner in session, 2026-10-31: 'recommended for all'; the session had recommended treat-as-empty)"
+  answered_at: {sha: "ca7b28c", by: superbrobenji}
+- id: DEC-0251
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool: an f-string that is the first statement of a module, class or function body is not a docstring to Python (not stored as __doc__). Is it mutated?'
+  options:
+    - {label: keep-python-rule, cost: 'a docstring is what Python stores as __doc__; a leading f-string is still mutated (recommended)'}
+    - {label: any-first-string, cost: 'any leading string, f-string included, is skipped as a docstring'}
+  asked_at: {sha: "ca7b28c", by: session}
+  answer: "keep-python-rule (owner in session, 2026-10-31: 'recommended for all'; the session had recommended keep-python-rule)"
+  answered_at: {sha: "ca7b28c", by: superbrobenji}
+- id: DEC-0252
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool: an --ids range that holds only docstring ids selects no mutant. What does the tool do?'
+  options:
+    - {label: fail, cost: 'FAIL mutate.ids, rc 2 (recommended)'}
+    - {label: empty-pass, cost: 'run nothing and pass'}
+  asked_at: {sha: "ca7b28c", by: session}
+  answer: "fail (owner in session, 2026-10-31: 'recommended for all'; the session had recommended fail)"
+  answered_at: {sha: "ca7b28c", by: superbrobenji}
