@@ -2728,3 +2728,48 @@
   asked_at: {sha: "8508de5", by: session}
   answer: "clean-stop-timeout (owner in session, 2026-10-31: 'all recommended'; the session had recommended clean-stop-timeout)"
   answered_at: {sha: "8508de5", by: superbrobenji}
+- id: DEC-0276
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool table: the values the answers left to the plan (M-R6, M-T4, M-P4, M-O1, M-O3, M-E2, M-E3, M-G3/G4, M-X2, M-X3/X4, M-X5). Approve the session''s proposals?'
+  options:
+    - {label: approve-proposals, cost: 'M-R6 FAIL mutate.root: --root ''<abs>'' is a symlink, rc 2; M-T4 FAIL mutate.args: --test ''<b>'' overlaps --test ''<a>''; M-P4 FAIL mutate.args: --py ''<b>'' is the same interpreter as --py ''<a>'' (by realpath); M-O1 FAIL mutate.args: --json is given more than once; M-O3 usage on stderr, FAIL mutate.args: bad arguments (argparse exit 0), rc 2; M-E2 FAIL mutate.guard: TMPDIR ''<path>'' is not a writable directory, rc 2; M-E3 drop PYTHONPATH, PYTHONHOME, PYTHONSAFEPATH, PYTHONUSERBASE, PYTHONSTARTUP, PYTHONPLATLIBDIR; M-G3/G4 git diff --diff-algorithm=myers --indent-heuristic --no-ext-diff --no-textconv --text; M-X2 escaped and clipped to one line, loader O3 rule, 200 characters plus ...; M-X3/X4 FAIL mutate.interrupt: stopped by SIGINT (or SIGTERM), rc 2, at once, test processes killed, scratch removed; M-X5 600 s, FAIL mutate.baseline: the tests did not finish on the unmutated copy under ''<py>'' within 600 s (recommended)'}
+    - {label: change-rows, cost: 'the owner names rows to change'}
+  asked_at: {sha: "36156ca", by: session}
+  answer: "approve-proposals (owner in session, 2026-10-31: 'a'; the session had recommended approve-proposals)"
+  answered_at: {sha: "36156ca", by: superbrobenji}
+- id: DEC-0277
+  class: scope
+  question: 'Program tooling T1 mutation tool table row M-X7: SIGKILL of the tool cannot be caught, so test processes and scratch copies outlive it. In scope?'
+  options:
+    - {label: tie-to-lifetime, cost: 'tie the test processes to the tool''s life (process group or parent-death check); about 1 h (recommended)'}
+    - {label: out-of-scope, cost: 'no cost; a killed run leaves processes and scratch behind'}
+  asked_at: {sha: "36156ca", by: session}
+  answer: "tie-to-lifetime (owner in session, 2026-10-31: 'a'; the session had recommended tie-to-lifetime)"
+  answered_at: {sha: "36156ca", by: superbrobenji}
+- id: DEC-0278
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool row M-X7 (DEC-0277): what happens to the scratch copies a SIGKILLed run leaves?'
+  options:
+    - {label: next-run-removes-own-stale, cost: 'each scratch copy records its run''s pid; the next run removes a mutate-* copy only when that pid is gone, so concurrent runs keep theirs; about 30 min (recommended)'}
+    - {label: leave, cost: 'no cost; copies pile up in TMPDIR'}
+  asked_at: {sha: "36156ca", by: session}
+  answer: "next-run-removes-own-stale (owner in session, 2026-10-31: 'recommended for both'; the session had recommended next-run-removes-own-stale)"
+  answered_at: {sha: "36156ca", by: superbrobenji}
+- id: DEC-0279
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool row M-X7 (DEC-0277): how do the test processes notice the tool died?'
+  options:
+    - {label: parent-poll-1s, cost: 'each test process checks every 1 s whether the tool still runs and, if not, kills its own process group; dies within about 1 s even when only the tool is killed (recommended)'}
+    - {label: same-group, cost: 'tests in the tool''s process group; die at once only when the whole group is killed'}
+  asked_at: {sha: "36156ca", by: session}
+  answer: "parent-poll-1s (owner in session, 2026-10-31: 'recommended for both'; the session had recommended parent-poll-1s)"
+  answered_at: {sha: "36156ca", by: superbrobenji}
+- id: DEC-0280
+  class: spec-direction
+  question: 'Program tooling T1 mutation tool row M-X7 (DEC-0279): how long does the test wait after SIGKILL of the tool before it asserts no test process remains?'
+  options:
+    - {label: poll-10s, cost: 'up to 10 s, polled, passing as soon as the processes are gone; ten poll periods plus margin, so a busy machine does not turn it red (recommended)'}
+    - {label: fixed-3s, cost: '3 s; tighter, with the load-flake risk of test_hooks.py:336 (#158)'}
+  asked_at: {sha: "36156ca", by: session}
+  answer: "poll-10s (owner in session, 2026-10-31: 'a'; the session had recommended poll-10s)"
+  answered_at: {sha: "36156ca", by: superbrobenji}
