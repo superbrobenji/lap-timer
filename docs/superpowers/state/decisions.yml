@@ -2457,3 +2457,40 @@
   asked_at: {sha: "18b75c9", by: session}
   answer: "stream-a-only (owner in session, 2026-10-31: 'recommended'; the session had recommended stream-a-only)"
   answered_at: {sha: "18b75c9", by: superbrobenji}
+- id: DEC-0246
+  class: scope
+  question: 'Program tooling T1 round 8a stopped on budget after 559 of 974 mutants (82 survivors on both interpreters; a full run takes about 2.7 h). How is the run finished?'
+  options:
+    - {label: continuation-round, cost: 'a short continuation round: docstrings not mutated, an id-range option, then the remaining 415 mutants run; about 70 min of run time (recommended)'}
+    - {label: background-full, cost: 'the session runs all 974 in the background as the tool is; about 2.7 h; docstring survivors stay as noise'}
+    - {label: test-selection, cost: 'per-mutant test selection added first; faster later rounds, more code to review'}
+  asked_at: {sha: "b5ffdb5", by: session}
+  answer: "continuation-round (owner in session, 2026-10-31: 'recommended'; the session had recommended continuation-round)"
+  answered_at: {sha: "b5ffdb5", by: superbrobenji}
+- id: DEC-0247
+  class: spec-direction
+  question: 'Program tooling T1 round 8a: five mutation-tool rules the dispatch did not state (f-string internals not mutated; docstrings get str-empty; BADMATCH = the operator found no text to change; a --jobs option; mutants run in a clone at --head, not a work-tree copy). Which stand?'
+  options:
+    - {label: four-keep-docstrings-skipped, cost: 'keep the f-string, BADMATCH, --jobs and clone rules; docstrings are not mutated (recommended)'}
+    - {label: keep-all-five, cost: 'keep all five as built'}
+  asked_at: {sha: "b5ffdb5", by: session}
+  answer: "four-keep-docstrings-skipped (owner in session, 2026-10-31: 'recommended'; the session had recommended four-keep-docstrings-skipped)"
+  answered_at: {sha: "b5ffdb5", by: superbrobenji}
+- id: DEC-0248
+  class: spec-direction
+  question: 'Program tooling T1: mutations/PROG-T1.txt already holds the loader''s transcript. Where does the mutation tool''s own three-step transcript go?'
+  options:
+    - {label: second-transcript, cost: 'a second transcript file docs/superpowers/state/program-tooling/mutations/PROG-T1-mutate.txt (recommended)'}
+    - {label: package-only, cost: 'the review package only'}
+  asked_at: {sha: "b5ffdb5", by: session}
+  answer: "second-transcript (owner in session, 2026-10-31: 'recommended'; the session had recommended second-transcript)"
+  answered_at: {sha: "b5ffdb5", by: superbrobenji}
+- id: DEC-0249
+  class: scope
+  question: 'Program tooling T1: run the mutation tool on itself (981 mutants of mutate.py, about 2.7 h)?'
+  options:
+    - {label: defer-to-process-block, cost: 'not now; the re-reviewer runs its tests and samples mutants; the full self-run goes to the D30 process block where DEC-0178 change 4 gets its own task (recommended)'}
+    - {label: run-now, cost: 'run it now, before round 8b'}
+  asked_at: {sha: "b5ffdb5", by: session}
+  answer: "defer-to-process-block (owner in session, 2026-10-31: 'recommended'; the session had recommended defer-to-process-block)"
+  answered_at: {sha: "b5ffdb5", by: superbrobenji}
