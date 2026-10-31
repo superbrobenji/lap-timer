@@ -2773,3 +2773,48 @@
   asked_at: {sha: "36156ca", by: session}
   answer: "poll-10s (owner in session, 2026-10-31: 'a'; the session had recommended poll-10s)"
   answered_at: {sha: "36156ca", by: superbrobenji}
+- id: DEC-0281
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9a, mutation tool: the diff call also passes --inter-hunk-context=0, because diff.interHunkContext in repository config adds unchanged lines as sites; DEC-0276''s quoted call does not list it. Which?'
+  options:
+    - {label: keep-inter-hunk, cost: 'keep it and add it to the pinned call (recommended)'}
+    - {label: drop, cost: 'drop it'}
+  asked_at: {sha: "8ff8372", by: session}
+  answer: "keep-inter-hunk (owner in session, 2026-10-31: 'recommended'; the session had recommended keep-inter-hunk)"
+  answered_at: {sha: "8ff8372", by: superbrobenji}
+- id: DEC-0282
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9a, mutation tool: the text for a whitespace-only CLAUDE_PROJECT_DIR (DEC-0250). Which?'
+  options:
+    - {label: root-is-empty, cost: 'FAIL context.input: --root is empty, as DEC-0250''s wording (recommended)'}
+    - {label: named-env, cost: 'FAIL ... CLAUDE_PROJECT_DIR is empty'}
+  asked_at: {sha: "8ff8372", by: session}
+  answer: "root-is-empty (owner in session, 2026-10-31: 'recommended'; the session had recommended root-is-empty)"
+  answered_at: {sha: "8ff8372", by: superbrobenji}
+- id: DEC-0283
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9a, mutation tool: an empty TMPDIR (""). Which?'
+  options:
+    - {label: fail, cost: 'a FAIL, as DEC-0262 makes a set TMPDIR a writable directory (recommended)'}
+    - {label: as-unset, cost: 'treat it as unset'}
+  asked_at: {sha: "8ff8372", by: session}
+  answer: "fail (owner in session, 2026-10-31: 'recommended'; the session had recommended fail)"
+  answered_at: {sha: "8ff8372", by: superbrobenji}
+- id: DEC-0284
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9a, mutation tool: the order of the two names in the overlapping --test FAIL. Which?'
+  options:
+    - {label: narrower-first, cost: 'the narrower id named first whatever the argument order, so the FAIL is stable (recommended)'}
+    - {label: given-order, cost: 'the order given'}
+  asked_at: {sha: "8ff8372", by: session}
+  answer: "narrower-first (owner in session, 2026-10-31: 'recommended'; the session had recommended narrower-first)"
+  answered_at: {sha: "8ff8372", by: superbrobenji}
+- id: DEC-0285
+  class: spec-direction
+  question: 'Program tooling T1 fix round 9a, mutation tool: how a file name that is not valid UTF-8 prints on stdout. Which?'
+  options:
+    - {label: backslashreplace, cost: 'escaped (backslashreplace), so output never raises (recommended)'}
+    - {label: other-form, cost: 'another form'}
+  asked_at: {sha: "8ff8372", by: session}
+  answer: "backslashreplace (owner in session, 2026-10-31: 'recommended'; the session had recommended backslashreplace)"
+  answered_at: {sha: "8ff8372", by: superbrobenji}
