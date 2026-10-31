@@ -9,7 +9,8 @@ Each entry is {path, lines "a-b" or "a-end", why, optional ref}. `a-end` (DEC-01
 current last line (the last line holding text: a final newline ends that line) and is split into consecutive
 entries of at most MAX_LINES lines and MAX_BYTES bytes each; stdout and the expected list carry the resolved
 ranges. `ref: board:B` (DEC-0167) reads origin/<branch>, the branch being the first backticked name in the branch
-cell of stream B's row on the board (tools/program/board.py). A path holds only [A-Za-z0-9._/-] and printable
+cell of stream B's row on the board (tools/program/board.py), the board file as it is on disk and tracked at HEAD
+(DEC-0177). A path holds only [A-Za-z0-9._/-] and printable
 non-ASCII characters (DEC-0170). For the stream kinds the front matter `context_files`
 list of the kind's handoff is appended (stream-a-block: strict-delivery handoff, stream-b-block: prototype
 handoff); an absent field adds nothing.
@@ -237,10 +238,13 @@ def tree_mode(root: str, rev: str, path: str):
 
 
 def board_ref(root: str, ident: str, stream: str) -> str:
-    """origin/<branch> for the stream's board row (DEC-0167), or a Failure naming the board problem."""
+    """origin/<branch> for the stream's board row (DEC-0167), or a Failure naming the board problem. The board is the
+    file on disk (DEC-0177 working-tree: an uncommitted edit counts), tracked at HEAD, through the D32 checks."""
     problem = input_problem(root, BOARD)
     if problem:
         raise Failure(ident, f"ref board:{stream}: board {BOARD} {problem}")
+    if tree_mode(root, "HEAD", BOARD) not in ("100644", "100755"):
+        raise Failure(ident, f"ref board:{stream}: board {BOARD} is not a regular file tracked at HEAD")
     try:
         with open(os.path.join(root, BOARD), "rb") as fh:
             text = fh.read().decode("utf-8")

@@ -177,12 +177,18 @@ class LoadContext(unittest.TestCase):
         self.assertFailed(rc, out, f"context.{KIND}.docs/absent.md", "missing path at ref")
 
     def test_ref_and_path_that_could_inject_or_escape_are_refused(self):
-        for e in (entry("README.md", "1-1", ref="--output=x"), entry("README.md", "1-1", ref=""),
-                  entry("../outside.md", "1-1"), entry("/etc/hosts", "1-1"), entry("docs/../README.md", "1-1"),
-                  entry("../outside.md", "1-1", ref="HEAD")):
+        self.put("docs/a.md", lines_file(3))           # tracked: only the form check can refuse its unnormalised spellings
+        form = "path is absolute, has '..' or a backslash, or is not normalised"
+        for e, text in ((entry("README.md", "1-1", ref="--output=x"), "unsafe ref"), (entry("README.md", "1-1", ref=""), "unsafe ref"),
+                        (entry("../outside.md", "1-1"), form), (entry("/etc/hosts", "1-1"), form),
+                        (entry("docs/../README.md", "1-1"), form), (entry("../outside.md", "1-1", ref="HEAD"), form),
+                        (entry("./docs/a.md", "1-1"), form), (entry("docs//a.md", "1-1"), form), (entry("docs/a.md/", "1-1"), form)):
             with self.subTest(e=e):
                 rc, out = self.run_loader(entries=[e])
-                self.assertFailed(rc, out, f"context.{KIND}.{e['path']}")
+                self.assertFailed(rc, out, f"context.{KIND}.{e['path']}", text)
+        with self.subTest("an empty path"):
+            rc, out = self.run_loader(entries=[entry("", "1-1")])
+            self.assertFailed(rc, out, f"context.{KIND}.entry", "path is missing")
 
     def test_output_over_16_kb(self):
         self.put("docs/a.md", lines_file(10))
@@ -315,7 +321,7 @@ class LoadContext(unittest.TestCase):
 
     def test_path_under_dot_git_is_refused(self):
         rc, out = self.run_loader(entries=[entry(".git/HEAD", "1-1")])
-        self.assertFailed(rc, out, f"context.{KIND}..git/HEAD", ".git")
+        self.assertFailed(rc, out, f"context.{KIND}..git/HEAD", "path is under .git/")
 
     def test_untracked_file_is_refused(self):
         self.put("docs/new.md", lines_file(3))
@@ -335,7 +341,7 @@ class LoadContext(unittest.TestCase):
         self.put("docs/sub/a.md", lines_file(3))
         rc, out = self.run_loader(entries=[entry("docs/sub", "1-1")])
         self.assertEqual(rc, 1, out)
-        self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.docs/sub: ")
+        self.assertRegex(out, rf"(?m)^FAIL context\.{KIND}\.docs/sub: missing path \(not a file under the root\)$")
 
     def test_file_at_a_ref_must_be_a_tracked_regular_file(self):
         gf.git(self.root, "checkout", "-q", "-b", "other")
@@ -519,6 +525,8 @@ class LoadContext(unittest.TestCase):
                 self.assertNotIn("unexpected", out)
                 if "key" in name:
                     self.assertIn("unknown key", out)
+                if name in ("entry is null", "entry is a list"):
+                    self.assertRegex(out, rf"^FAIL context\.{KIND}\.{re.escape(A_HANDOFF)}: context_files holds an entry that is not a mapping$")
 
     # -- fail closed: any failure removes the session's earlier expected list for the kind ------------
     def test_every_kind_of_failure_removes_an_earlier_expected_list(self):
@@ -615,6 +623,21 @@ class LoadContext(unittest.TestCase):
             self.assertRegex(out, r"(?m)^FAIL " + re.escape(fid) + r": ")
         self.assertIn(text, out)
 
+    @contextlib.contextmanager
+    def deadline(self, seconds):
+        """Fail the test (not hang it) when the body runs over `seconds` (row C8: bounded work)."""
+        import signal
+
+        def over(*_):
+            raise AssertionError(f"over the {seconds} s deadline")
+        old = signal.signal(signal.SIGALRM, over)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+
     def outside(self):
         d = gf.new_repo()
         self.addCleanup(gf.remove, d)
@@ -638,7 +661,7 @@ class LoadContext(unittest.TestCase):
     def test_fail_output_values_are_clipped_and_the_output_capped_below_16_kb(self):
         self.put("docs/a.md", lines_file(3))
         for depth in (4, 5, 9):                  # 9: 10**9 leaves; the echo's work is bounded, never the expanded size
-            with self.subTest(alias_chain=depth):
+            with self.subTest(alias_chain=depth), self.deadline(20):
                 rows = ["x0: &a0 [" + ", ".join(["xxxxxxxxxx"] * 10) + "]"]
                 rows += [f"x{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 10) + "]" for i in range(1, depth + 1)]
                 rc, out = self.run_loader(raw="\n".join(rows) + f"\nlists: {{{KIND}: [*a{depth}, *a{depth}]}}\n")
@@ -895,7 +918,7 @@ class LoadContext(unittest.TestCase):
         os.mkfifo(os.path.join(self.root, "docs/pipe.md"))
         self.unblock_fifo_later(os.path.join(self.root, "docs/pipe.md"))
         rc, out = self.run_loader(entries=[entry("docs/pipe.md", "1-1")], commit=False)
-        self.assertAllNamed(rc, out, f"context.{KIND}.docs/pipe.md")
+        self.assertAllNamed(rc, out, f"context.{KIND}.docs/pipe.md", "missing path (not a file under the root)")      # never opened
         if os.geteuid() != 0:
             full = os.path.join(self.root, "docs/a.md")
             os.chmod(full, 0)
@@ -919,12 +942,13 @@ class LoadContext(unittest.TestCase):
         cases = {"missing": os.path.join(far, "nope"), "a regular file": os.path.join(self.root, "README.md"),
                  "a symlink": link, "a subdirectory": os.path.join(self.root, "docs/sub"), "not a git work tree": plain}
         for name, root in cases.items():
+            kind_text = "is not a directory" if name in ("missing", "a regular file") else ""
             with self.subTest(root=name):
                 rc, out, _ = self.call(["--root", root, KIND])
-                self.assertAllNamed(rc, out, "context.input")
+                self.assertAllNamed(rc, out, "context.input", kind_text)
             with self.subTest(env=name):
                 rc, out, _ = self.call([KIND], env={"CLAUDE_PROJECT_DIR": root})
-                self.assertAllNamed(rc, out, "context.input")
+                self.assertAllNamed(rc, out, "context.input", kind_text)
         with self.subTest("relative root with a trailing slash"):
             rc, out, _ = self.call(["--root", os.path.basename(self.root) + "/", KIND], cwd=os.path.dirname(self.root))
             self.assertEqual(rc, 0, out)
@@ -935,6 +959,7 @@ class LoadContext(unittest.TestCase):
 
     def test_git_environment_and_config_cannot_change_what_is_read(self):
         self.put("docs/a.md", lines_file(3))
+        self.put("docs/:(glob)*.md", lines_file(3))
         self.put("docs/été.md", lines_file(3))
         other = self.outside()
         rc, out = self.run_loader(entries=[entry("docs/a.md", "1-3")])
@@ -944,6 +969,9 @@ class LoadContext(unittest.TestCase):
             with self.subTest(env=env):
                 rc, out, _ = self.call(["--root", self.root, KIND], env=env)      # the fixture is committed: no git call of the test under env
                 self.assertEqual(rc, 0, out)
+        with self.subTest("pathspec magic in a tracked name is literal"):      # restored (DEC-0103); DEC-0170 refuses it by name
+            rc, out = self.run_loader(entries=[entry("docs/:(glob)*.md", "1-3")])
+            self.assertAllNamed(rc, out, f"context.{KIND}.docs/:(glob)*.md", "path holds a character outside [A-Za-z0-9._/-]")
         with self.subTest("repository config and attributes"):
             with open(os.path.join(self.root, ".git", "config"), "a") as fh:
                 fh.write('[core]\n\tquotePath = true\n[color]\n\tui = always\n[diff "up"]\n\ttextconv = tr a-z A-Z\n')
@@ -975,6 +1003,7 @@ class LoadContext(unittest.TestCase):
         raws = {
             "python tag": f"lists: {{{k}: [!!python/object/apply:os.system [true]]}}\n",
             "unknown local tag": f"lists: {{{k}: [!foo x]}}\n",
+            "python tag building a valid entry": f"lists: {{{k}: [!!python/object/apply:builtins.dict [[[path, docs/a.md], [lines, 1-3], [why, w]]]]}}\n",
             "two documents": f"lists: {{{k}: [{self.GOOD}]}}\n---\nlists: {{}}\n",
             "deep nesting": "lists: " + "[" * 5000 + "]" * 5000 + "\n",
             "deep nesting in an entry": f"lists: {{{k}: [" + "[" * 5000 + "]" * 5000 + "]}\n",
@@ -1047,7 +1076,7 @@ class LoadContext(unittest.TestCase):
         rc, out = self.run_loader(raw=f"lists: {{{KIND}: [&r [*r]]}}\n")
         self.assertAllNamed(rc, out, f"context.{KIND}.entry", "not a mapping")
 
-    # -- fix round 5: F7, F8, F9 and DEC-0166/0167/0170/0173/0175 (table rows L3, T3, A4, P4, P9, H2, H5, R6, B1-B3) --
+    # -- fix round 5: F7, F8, F9 and DEC-0166/0167/0170/0173/0175 (table rows L1, L3, L4, T3, A4, P4, P9, H2, R6, E2, B1-B3) --
     def board(self, b_cell="`block/prototype-b9` / worktree", extra_rows=""):
         head = "| stream | block | branch / worktree | next task |\n|---|---|---|---|\n"
         return ("# Stream board\n\nprose\n\n" + head + "| A strict delivery | x | `block/program-tooling` / main | t |\n"
@@ -1189,6 +1218,12 @@ class LoadContext(unittest.TestCase):
         self.assertEqual([" ".join(l.split(" ")[:3]) for l in out.splitlines()],
                          ["docs/a.md lines 1-30", "docs/a.md lines 5-30", "docs/nonl.md lines 2-3", "docs/a.md lines 30-30"])
         self.assertEqual([e["lines"] for e in self.expected()["entries"]], ["1-30", "5-30", "2-3", "30-30"])
+        import subprocess
+        for path, nl, end in (("docs/a.md", True, 30), ("docs/nonl.md", False, 3)):      # row L3: wc -l counts newline characters
+            with self.subTest(wc=path):
+                wc = int(subprocess.run(["wc", "-l", os.path.join(self.root, path)], capture_output=True, text=True,
+                                        check=True).stdout.split()[0])
+                self.assertEqual(end, wc if nl else wc + 1)
 
     def test_open_ended_range_is_split_within_2000_lines_and_16000_bytes(self):
         self.put("docs/long.md", lines_file(4500))                 # about 10 bytes a line: the byte cap binds
@@ -1264,7 +1299,8 @@ class LoadContext(unittest.TestCase):
             "branch with dot-dot inside a name": (self.board(b_cell="`block/a..b` / w"), "not a branch name"),
             "branch ending in .lock": (self.board(b_cell="`block/x.lock` / w"), "not a branch name"),
             "branch ending in a dot": (self.board(b_cell="`block/x.` / w"), "not a branch name"),
-            "missing ref": (self.board(b_cell="`block/prototype-b7` / w"), "missing ref"),
+            "missing ref": (self.board(b_cell="`block/prototype-b7` / w"),
+                            "missing ref origin/block/prototype-b7 (the branch in the board's stream B row)"),
             "row without a branch cell": (self.board(b_cell=None, extra_rows="| B prototype | b9 |\n"), "no branch cell"),
             "no stream table": ("# Stream board\n\n| what | branch |\n|---|---|\n| B | `block/prototype-b9` |\n", "no stream table"),
             "board not UTF-8": (None, "not valid UTF-8"),
@@ -1285,6 +1321,129 @@ class LoadContext(unittest.TestCase):
                 rc, out = self.run_loader(kind="sync", entries=[entry(B_HANDOFF, "1-end", ref="board:B")], argv=["sync"])
                 self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", reason)
                 self.assertLess(max(len(l) for l in out.splitlines()), 600)
+
+    # -- fix round 6: F10 (rows B1, B2, B3, B4, L3) ---------------------------------------------
+    BOARD_REL = "docs/superpowers/state/program/board.md"
+
+    def run_sync(self, commit=False):
+        return self.run_loader(kind="sync", entries=[entry(B_HANDOFF, "1-end", ref="board:B")], argv=["sync"], commit=commit)
+
+    def test_every_board_read_problem_is_a_named_fail(self):
+        """Row B1: each problem input_problem() or the read names, never read through, never a hang, never `internal`."""
+        self.stream_b_branch()
+        self.put(self.BOARD_REL, self.board())
+        self.put(CTX, ctx([entry(B_HANDOFF, "1-end", ref="board:B")], "sync"))
+        gf.commit_all(self.root, "board")
+        full = os.path.join(self.root, self.BOARD_REL)
+        prog = os.path.dirname(full)
+        cases = {"a symlink": "symlink in path (docs/superpowers/state/program/board.md)", "a directory": "not a regular file",
+                 "a FIFO": "not a regular file", "missing": "missing or unreadable (No such file or directory)",
+                 "not UTF-8": "is not valid UTF-8"}
+        if os.geteuid() != 0:
+            cases["mode 000"] = "unreadable (Permission denied)"
+        for case, reason in cases.items():
+            with self.subTest(case):
+                os.unlink(full)
+                if case == "a directory":
+                    os.makedirs(full)
+                elif case == "a FIFO":
+                    os.mkfifo(full)
+                    self.unblock_fifo_later(full)
+                elif case == "a symlink":
+                    self.put("docs/real-board.md", self.board())
+                    os.symlink(os.path.join(self.root, "docs/real-board.md"), full)
+                elif case == "not UTF-8":
+                    with open(full, "wb") as fh:
+                        fh.write(self.board().encode() + bytes([0xff]))
+                elif case == "mode 000":
+                    self.put(self.BOARD_REL, self.board())
+                    os.chmod(full, 0)
+                    self.addCleanup(lambda: os.path.isfile(full) and os.chmod(full, 0o644))
+                rc, out = self.run_sync()
+                if case == "mode 000":
+                    os.chmod(full, 0o644)
+                self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", f"ref board:B: board {self.BOARD_REL} {reason}")
+                self.assertEqual(len(out.splitlines()), 1, out)
+                if os.path.isdir(full) and not os.path.islink(full):
+                    os.rmdir(full)
+                elif os.path.lexists(full):
+                    os.unlink(full)
+                gf.git(self.root, "checkout", "--", self.BOARD_REL)
+        with self.subTest("a symlinked directory component (shared with context.yml: row C1 names it first)"):
+            real = os.path.join(self.root, "docs/real-program")
+            os.rename(prog, real)
+            os.symlink(real, prog)
+            rc, out = self.run_sync()
+            self.assertAllNamed(rc, out, "context.sync.list", "symlink in path (docs/superpowers/state/program)")
+            os.unlink(prog)
+            os.rename(real, prog)
+        with self.subTest("the restored board loads"):
+            rc, out = self.run_sync()
+            self.assertEqual(rc, 0, out)
+
+    def test_board_names_and_table_bounds_match_as_whole_strings(self):
+        """Row B2: the row label and the header cell are whole words, an escaped pipe stays in its cell, a blank line ends the table."""
+        self.stream_b_branch()
+        b9_row = "| B prototype | b9 | `block/prototype-b9` / w | t |\n"
+        cases = {
+            "a B2 row label": (self.board(b_cell=None, extra_rows=b9_row.replace("| B prototype", "| B2 prototype")),
+                               "no stream B row"),
+            "a streams header": (self.board().replace("| stream | block |", "| streams | block |"), "no stream table"),
+            "a B row after the table's end": (self.board(b_cell=None, extra_rows="\n" + b9_row), "no stream B row"),
+        }
+        for name, (text, reason) in cases.items():
+            with self.subTest(name):
+                self.put(self.BOARD_REL, text)
+                rc, out = self.run_sync(commit=True)
+                self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", f"ref board:B: {self.BOARD_REL}: {reason}")
+        with self.subTest("an escaped pipe inside a cell"):
+            self.put(self.BOARD_REL, self.board(b_cell=None, extra_rows="| B prototype | b9 \\| b10 | `block/prototype-b9` / w | t |\n"))
+            rc, out = self.run_sync(commit=True)
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.startswith(load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF) + " lines 1-2 "), out)
+
+    def test_the_board_is_read_from_the_working_tree_and_must_be_tracked(self):
+        """Row B4 (DEC-0177 working-tree): the board on disk, tracked at HEAD, through the D32 checks."""
+        self.stream_b_branch()
+        self.put(CTX, ctx([entry(B_HANDOFF, "1-end", ref="board:B")], "sync"))
+        gf.commit_all(self.root, "context")
+        not_tracked = f"ref board:B: board {self.BOARD_REL} is not a regular file tracked at HEAD"
+        with self.subTest("untracked"):
+            self.put(self.BOARD_REL, self.board())
+            rc, out = self.run_sync()
+            self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", not_tracked)
+        with self.subTest("staged, not committed"):
+            gf.git(self.root, "add", self.BOARD_REL)
+            rc, out = self.run_sync()
+            self.assertAllNamed(rc, out, f"context.sync.{B_HANDOFF}", not_tracked)
+        with self.subTest("an uncommitted edit to the B row is what the loader uses"):
+            self.put(self.BOARD_REL, self.board(b_cell="`block/prototype-b7` / w"))
+            gf.commit_all(self.root, "board names b7, which origin lacks")
+            self.put(self.BOARD_REL, self.board())
+            rc, out = self.run_sync()
+            self.assertEqual(rc, 0, out)
+            self.assertTrue(out.startswith(load_context.ref_copy_path("origin/block/prototype-b9", B_HANDOFF) + " lines 1-2 "), out)
+            self.assertIn(self.BOARD_REL, gf.git(self.root, "status", "--porcelain"))
+
+    def test_a_modified_file_loads_with_the_blob_of_the_bytes_on_disk(self):
+        """Row P7: a tracked file edited in the working tree is read as it is on disk (playbook: the blob of the file as read)."""
+        self.put("docs/a.md", lines_file(3))
+        gf.commit_all(self.root, "a")
+        self.put("docs/a.md", lines_file(4))
+        rc, out = self.run_loader(entries=[entry("docs/a.md", "1-4")], commit=False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("docs/a.md", gf.git(self.root, "status", "--porcelain"))
+        self.assertEqual(out, f"docs/a.md lines 1-4 blob {blob(lines_file(4).encode())} -- because\n")
+
+    def test_open_ended_range_split_is_inclusive_at_16000_bytes(self):
+        """Row L3: two lines joining to exactly 16,000 bytes stay one entry; one byte more splits them."""
+        self.put("docs/edge.md", "a" * 7999 + "\n" + "b" * 8000 + "\n")
+        self.put("docs/over.md", "a" * 7999 + "\n" + "b" * 8001 + "\n")
+        for path, want in (("docs/edge.md", ["1-2"]), ("docs/over.md", ["1-1", "2-2"])):
+            with self.subTest(path=path):
+                rc, out = self.run_loader(entries=[entry(path, "1-end")])
+                self.assertEqual(rc, 0, out)
+                self.assertEqual([l.split(" ")[2] for l in out.splitlines()], want)
 
     # -- the committed read lists ------------------------------------------------------------
     def test_committed_context_yml_has_a_list_for_every_kind_and_dispatch_role(self):
