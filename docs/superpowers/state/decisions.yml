@@ -1808,8 +1808,8 @@
     - {label: round-6-only, cost: 'one more round and a scoped re-review, no investigation; the repeated-class pattern stays unexplained'}
     - {label: d30-first, cost: 'no fix until the investigator reports and the owner picks process changes; slowest, Task 2 waits'}
   asked_at: {sha: "4cdfc87", by: session}
-  answer: null
-  answered_at: null
+  answer: "round-6-and-d30 (owner in session, 2026-10-31: 'recommended'; the session had recommended round-6-and-d30)"
+  answered_at: {sha: "d6cc70c", by: superbrobenji}
 - id: DEC-0177
   class: spec-direction
   question: "Program tooling T1 re-review 5 Q-PROG-5: with ref board:B, does the loader read stream B's branch from the working-tree board or from HEAD's board?"
@@ -1817,5 +1817,5 @@
     - {label: working-tree, cost: 'the file on disk, tracked, through the D32 checks, as every other read-list entry; a sync that just edited the board sees its edit; one table row and a test (recommended)'}
     - {label: head, cost: 'git show HEAD:board.md; only a committed board counts, an uncommitted edit is ignored until committed'}
   asked_at: {sha: "4cdfc87", by: session}
-  answer: null
-  answered_at: null
+  answer: "working-tree (owner in session, 2026-10-31: 'recommended'; the session had recommended working-tree)"
+  answered_at: {sha: "d6cc70c", by: superbrobenji}
