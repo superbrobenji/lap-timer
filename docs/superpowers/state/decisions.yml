@@ -2018,3 +2018,333 @@
   asked_at: {sha: "71d4039", by: session}
   answer: "worktree-then-checkout (owner in session, 2026-10-31: 'recommended'; the session had recommended worktree-then-checkout)"
   answered_at: {sha: "71d4039", by: superbrobenji}
+- id: DEC-0199
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-1: where does the refusal of a stream_controller dispatch made by a subagent run, and under what FAIL id?'
+  options:
+    - {label: gate-dispatch-agent-id, cost: 'gate_dispatch takes --agent-id from the hook and FAILs dispatch.nesting after dispatch.role; both entry points testable (recommended)'}
+    - {label: hook-only, cost: 'a hook-only check, FAIL hook.nesting; diverges from DEC-0181 ''gate_dispatch refuses'''}
+    - {label: both, cost: 'both places; two to keep in step'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "gate-dispatch-agent-id (owner in session, 2026-10-31: 'recommended'; the session had recommended gate-dispatch-agent-id)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0200
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-2: the hook input''s agent_id is empty or whitespace:'
+  options:
+    - {label: fail-closed, cost: 'treated as a subagent, the dispatch FAILs (recommended)'}
+    - {label: as-absent, cost: 'treated as absent; a blank-id subagent passes'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "fail-closed (owner in session, 2026-10-31: 'recommended'; the session had recommended fail-closed)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0201
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-3: the hook input''s agent_id is not a string:'
+  options:
+    - {label: named-fail, cost: 'a named FAIL, like the non-string subagent_type rule (recommended)'}
+    - {label: null-absent, cost: 'null is absent, other types FAIL'}
+    - {label: any-present, cost: 'any present value marks a subagent'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "named-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended named-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0202
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-4: agent_type present without agent_id:'
+  options:
+    - {label: either-field, cost: 'either field marks a subagent (recommended)'}
+    - {label: agent-id-only, cost: 'only agent_id counts'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "either-field (owner in session, 2026-10-31: 'recommended'; the session had recommended either-field)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0203
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-5: malformed agent fields on dispatches of other roles:'
+  options:
+    - {label: stream-controller-only, cost: 'validated only for stream_controller dispatches (recommended)'}
+    - {label: every-role, cost: 'validated for every Agent event; changes every role''s verdict'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "stream-controller-only (owner in session, 2026-10-31: 'recommended'; the session had recommended stream-controller-only)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0204
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-6: the Brief header of a stream_controller dispatch:'
+  options:
+    - {label: may-be-none, cost: 'may be none, like controller (recommended)'}
+    - {label: required, cost: 'a brief file is required'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "may-be-none (owner in session, 2026-10-31: 'recommended'; the session had recommended may-be-none)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0205
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-7: the Findings header of a stream_controller dispatch:'
+  options:
+    - {label: may-be-none, cost: 'may be none; its block registers its rows at block start (recommended)'}
+    - {label: must-name-ids, cost: 'must name register ids, like controller'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "may-be-none (owner in session, 2026-10-31: 'recommended'; the session had recommended may-be-none)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0206
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-8: does --config-check validate triggers.stream_controller (presence, positive ints, bool refused)?'
+  options:
+    - {label: named-check, cost: 'yes, a dispatch.config.triggers.stream_controller check (recommended)'}
+    - {label: none, cost: 'no; bad values surface at dispatch (true acts as 1)'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "named-check (owner in session, 2026-10-31: 'recommended'; the session had recommended named-check)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0207
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-9: triggers.stream_controller below the controller''s:'
+  options:
+    - {label: config-fail, cost: 'a config-check FAIL (recommended)'}
+    - {label: no-rule, cost: 'no rule'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "config-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended config-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0208
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-10: models.stream_controller below opus or the controller''s model:'
+  options:
+    - {label: config-fail, cost: 'a config-check FAIL (recommended)'}
+    - {label: no-rule, cost: 'no rule'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "config-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended config-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0209
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-11: the trigger key for the dispatch''s role is missing at dispatch:'
+  options:
+    - {label: named-budget-fail, cost: 'dispatch.budget ''no trigger for role <role>'' (recommended)'}
+    - {label: generic-input, cost: 'keep the generic dispatch.input ''<key>'''}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "named-budget-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended named-budget-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0210
+  class: spec-direction
+  question: 'stream controller plan Task 2 input-domain table (sc-T2) Q-SC-12: a Role header value with a trailing blank or carriage return (PROG-U3):'
+  options:
+    - {label: keep-strip-registered, cost: 'keep the strip for every role as a registered exception, PROG-U3 (issue #154) tracks the class (recommended)'}
+    - {label: fullmatch-all, cost: 'fullmatch every header, a class widening; every role''s verdict changes'}
+    - {label: fullmatch-stream-controller, cost: 'fullmatch only stream_controller; two rules for one header'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "keep-strip-registered (owner in session, 2026-10-31: 'recommended'; the session had recommended keep-strip-registered)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0211
+  class: spec-direction
+  question: 'option-line gate plan Task 1 input-domain table (olg-T1) Q-RNG-1: FAIL id, reason and line count for a gap in a decision-id run:'
+  options:
+    - {label: one-line-per-gap, cost: 'one line per gap, named by the next present id (recommended)'}
+    - {label: one-line-per-id, cost: 'one line per missing id'}
+    - {label: per-id-clipped, cost: 'one line per missing id with DEC-0172 clip-and-cap'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "one-line-per-gap (owner in session, 2026-10-31: 'recommended'; the session had recommended one-line-per-gap)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0212
+  class: spec-direction
+  question: 'option-line gate plan Task 1 input-domain table (olg-T1) Q-RNG-2: does a duplicate id also FAIL the range check?'
+  options:
+    - {label: counted-once, cost: 'no, the duplicate check names it; counted once (recommended)'}
+    - {label: double-fail, cost: 'yes, two lines'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "counted-once (owner in session, 2026-10-31: 'recommended'; the session had recommended counted-once)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0213
+  class: spec-direction
+  question: 'option-line gate plan Task 1 input-domain table (olg-T1) Q-RNG-3: malformed ids in a run:'
+  options:
+    - {label: range-skipped, cost: 'the range check is skipped and the schema check FAILs them; no range PASS line (recommended)'}
+    - {label: left-out, cost: 'left out, so the next id also gaps'}
+    - {label: fill-slot, cost: 'counted as filling its slot'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "range-skipped (owner in session, 2026-10-31: 'recommended'; the session had recommended range-skipped)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0214
+  class: spec-direction
+  question: 'option-line gate plan Task 1 input-domain table (olg-T1) Q-RNG-4: an empty run (no stream B rows):'
+  options:
+    - {label: pass, cost: 'PASS (recommended)'}
+    - {label: require-0001, cost: 'DEC-0001 required'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "pass (owner in session, 2026-10-31: 'recommended'; the session had recommended pass)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0215
+  class: spec-direction
+  question: 'option-line gate plan Task 1 input-domain table (olg-T1) Q-RNG-5: does Task 1 fix gate_decisions'' symlink read-through (PROG-U4) and FIFO hang (B5-UR-1)?'
+  options:
+    - {label: leave-registered, cost: 'no; PROG-U4 (issue #155) and B5-UR-1 keep their owners (recommended)'}
+    - {label: fix-in-task-1, cost: 'fix them in Task 1; changes B5-UR-1''s owner'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "leave-registered (owner in session, 2026-10-31: 'recommended'; the session had recommended leave-registered)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0216
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-1: how is the chosen label read from an answer?'
+  options:
+    - {label: first-token, cost: 'the answer''s first token equals an option label (175 of 176 answered rows) (recommended)'}
+    - {label: label-boundary, cost: 'label plus a boundary, longest first'}
+    - {label: chosen-field, cost: 'a new chosen field'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "first-token (owner in session, 2026-10-31: 'recommended'; the session had recommended first-token)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0217
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-2: a row whose answer matches no option label (DEC-0103):'
+  options:
+    - {label: cite-answer-line, cost: 'such rows are cited by their answer line (recommended)'}
+    - {label: always-fail, cost: 'always FAIL'}
+    - {label: amended-row, cost: 'the session appends an amended row'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "cite-answer-line (owner in session, 2026-10-31: 'recommended'; the session had recommended cite-answer-line)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0218
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-3: merge grants with options: []:'
+  options:
+    - {label: cite-answer-line, cost: 'cited by their answer line (recommended)'}
+    - {label: fail, cost: 'FAIL'}
+    - {label: exempt, cost: 'exempt'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "cite-answer-line (owner in session, 2026-10-31: 'recommended'; the session had recommended cite-answer-line)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0219
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-4: which physical line is the option line for block-style rows and for two options on one line?'
+  options:
+    - {label: label-line, cost: 'the label line only (recommended)'}
+    - {label: whole-span, cost: 'the option''s whole span'}
+    - {label: rewrite-flow, cost: 'rewrite to flow style'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "label-line (owner in session, 2026-10-31: 'recommended'; the session had recommended label-line)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0220
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-5: is the cited line resolved at the cited sha or against the current source?'
+  options:
+    - {label: parse-at-sha, cost: 'parsed at the sha; same id and chosen label (recommended)'}
+    - {label: byte-identical, cost: 'byte-identical to the current line'}
+    - {label: at-sha-any-path, cost: 'as parse-at-sha, also for paths no longer given'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "parse-at-sha (owner in session, 2026-10-31: 'recommended'; the session had recommended parse-at-sha)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0221
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-6: what must the quote contain?'
+  options:
+    - {label: holds-label, cost: 'at least the option label (recommended)'}
+    - {label: any-substring, cost: 'any non-blank substring'}
+    - {label: whole-option, cost: 'the whole option text'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "holds-label (owner in session, 2026-10-31: 'recommended'; the session had recommended holds-label)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0222
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-7: does a DEC id inside a quote count as a use?'
+  options:
+    - {label: exclude-quotes, cost: 'no, matches inside quotes are excluded (recommended)'}
+    - {label: every-match, cost: 'every match counts'}
+    - {label: exclude-ranges-too, cost: 'quotes and range bounds excluded'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "exclude-quotes (owner in session, 2026-10-31: 'recommended'; the session had recommended exclude-quotes)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0223
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-8: the DEC id token pattern:'
+  options:
+    - {label: ref-pattern, cost: 'the existing REF DEC-[0-9]{4} (DEC-0010) (recommended)'}
+    - {label: word-bounded, cost: 'word-bounded'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "ref-pattern (owner in session, 2026-10-31: 'recommended'; the session had recommended ref-pattern)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0224
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-10: one id present in two sources:'
+  options:
+    - {label: input-fail, cost: 'an input FAIL (recommended)'}
+    - {label: equal-labels, cost: 'allowed when the chosen labels are equal'}
+    - {label: decisions-wins, cost: 'decisions.yml wins'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "input-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended input-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0225
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-11: schema-invalid or duplicate rows in a source:'
+  options:
+    - {label: register-input-fail, cost: 'the register input FAILs (recommended)'}
+    - {label: affected-id-only, cost: 'only the affected id''s uses FAIL'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "register-input-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended register-input-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0226
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-12: git state of the files checked:'
+  options:
+    - {label: tracked-read-disk, cost: 'must be tracked; content read from the working tree, like DEC-0177 (recommended)'}
+    - {label: any-state, cost: 'working tree, any state'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "tracked-read-disk (owner in session, 2026-10-31: 'recommended'; the session had recommended tracked-read-disk)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0227
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-13: GIT_* environment variables:'
+  options:
+    - {label: strip, cost: 'ignored, as the loader does (recommended)'}
+    - {label: follow, cost: 'followed, as the gates do'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "strip (owner in session, 2026-10-31: 'recommended'; the session had recommended strip)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0228
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-14: output size (about 104 flags expected on stream B''s plan):'
+  options:
+    - {label: clip-and-cap, cost: 'DEC-0172 clip-and-cap (recommended)'}
+    - {label: uncapped, cost: 'uncapped'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "clip-and-cap (owner in session, 2026-10-31: 'recommended'; the session had recommended clip-and-cap)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0229
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-15: FAIL id grammar:'
+  options:
+    - {label: path-line-dec, cost: 'decision_use.<path>:<line>.<DEC> (recommended)'}
+    - {label: dec-only, cost: 'decision_use.<DEC>'}
+    - {label: with-index, cost: 'path-line-dec plus a use index'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "path-line-dec (owner in session, 2026-10-31: 'recommended'; the session had recommended path-line-dec)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0230
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-16: file paths given:'
+  options:
+    - {label: relative-to-root, cost: 'relative to --root, with plan Step 4 fixed to reach stream B''s wiring.md (recommended)'}
+    - {label: relative-to-cwd, cost: 'relative to the cwd and under the root'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "relative-to-root (owner in session, 2026-10-31: 'recommended'; the session had recommended relative-to-root)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0231
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-17: the --root argument:'
+  options:
+    - {label: required-worktree-top, cost: 'required, a work-tree top (recommended)'}
+    - {label: optional, cost: 'optional (repo_root), any directory'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "required-worktree-top (owner in session, 2026-10-31: 'recommended'; the session had recommended required-worktree-top)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0232
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-18: empty or NUL-holding files:'
+  options:
+    - {label: empty-pass-nul-fail, cost: 'empty passes, NUL FAILs (recommended)'}
+    - {label: both-fail, cost: 'both FAIL'}
+    - {label: both-pass, cost: 'both pass'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "empty-pass-nul-fail (owner in session, 2026-10-31: 'recommended'; the session had recommended empty-pass-nul-fail)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}
+- id: DEC-0233
+  class: spec-direction
+  question: 'option-line gate plan Task 2 input-domain table (olg-T2) Q-USE-20: leading zeros in a cited line number:'
+  options:
+    - {label: refused, cost: 'refused (recommended)'}
+    - {label: accepted, cost: 'accepted'}
+  asked_at: {sha: "82bf2ce", by: session}
+  answer: "refused (owner in session, 2026-10-31: 'recommended'; the session had recommended refused)"
+  answered_at: {sha: "82bf2ce", by: superbrobenji}

@@ -3205,3 +3205,48 @@
   - state: open
     sha: db93e7f
     by: session
+- id: PROG-U3
+  source: review
+  severity: LOW
+  class: 'dispatch header values match after strip, not as whole strings (every header, every role): gate_dispatch accepts a header value with a trailing blank or carriage return, against spec D31'
+  siblings: []
+  cites:
+  - file: tools/gates/gate_dispatch.py
+    lines: '59'
+    sha: 71d4039
+  repro: 'a dispatch prompt whose first line is "## Role: implementer " (trailing blank) or ends in a carriage return: python3 tools/gates/gate_dispatch.py --prompt <file> --tool-model opus -> rc 0'
+  owner:
+    kind: issue
+    number: 154
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 82bf2ce
+    by: session
+- id: PROG-U4
+  source: review
+  severity: LOW
+  class: 'a register or --scan input that is a symlink, or sits under a symlinked component, is read through by the shared register loader and gate_decisions (rc 0, every PASS), against spec D32'
+  siblings: []
+  cites:
+  - file: tools/gates/lib/__init__.py
+    lines: 100-106
+    sha: 71d4039
+  - file: tools/gates/lib/registers.py
+    lines: 382-388
+    sha: 71d4039
+  repro: 'in a guarded scratch clone: mv docs/superpowers/state/decisions.yml ../d; ln -s "$PWD/../d" docs/superpowers/state/decisions.yml; python3 tools/gates/gate_decisions.py -> rc 0, every PASS'
+  owner:
+    kind: issue
+    number: 155
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 82bf2ce
+    by: session
