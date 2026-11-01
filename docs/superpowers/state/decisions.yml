@@ -2882,3 +2882,48 @@
   asked_at: {sha: "f1405c4", by: session}
   answer: "run-without-cleanup (owner in session, 2026-11-01: 'recommended for all'; the session had recommended run-without-cleanup)"
   answered_at: {sha: "f1405c4", by: superbrobenji}
+- id: DEC-0293
+  class: spec-direction
+  question: 'Program tooling T1 re-review 9 (Q-PROG-10), mutation tool run lifecycle: a caller that already ignores SIGTERM (SIG_IGN inherited). Which?'
+  options:
+    - {label: keep-inherited-ignore, cost: 'respect the caller as DEC-0290 does for SIGINT: no handler installed when SIGTERM is inherited as ignored; one line, a row and a test (recommended)'}
+    - {label: as-built, cost: 'the tool installs its SIGTERM handler anyway; a row and a test'}
+  asked_at: {sha: "0b95833", by: session}
+  answer: "keep-inherited-ignore (owner in session, 2026-11-01: 'recommended'; the session had recommended keep-inherited-ignore)"
+  answered_at: {sha: "0b95833", by: superbrobenji}
+- id: DEC-0294
+  class: spec-direction
+  question: 'Program tooling T1 re-review 9 (Q-PROG-11): the empty-root checks use str.strip(), which treats Unicode whitespace (e.g. NBSP) as empty. Which?'
+  options:
+    - {label: as-built-with-rows, cost: 'keep str.strip(); add the Unicode whitespace values to rows R1, R5 and M-R3 with tests; the value already refuses safely (recommended)'}
+    - {label: ascii-only, cost: 'only ASCII whitespace counts as empty (strip(" \t\n\r\v\f")); other values are taken as paths'}
+  asked_at: {sha: "0b95833", by: session}
+  answer: "as-built-with-rows (owner in session, 2026-11-01: 'recommended'; the session had recommended as-built-with-rows)"
+  answered_at: {sha: "0b95833", by: superbrobenji}
+- id: DEC-0295
+  class: spec-direction
+  question: 'Program tooling T1 re-review 9 (Q-PROG-12): stale-copy removal checks os.kill(pid, 0), but pids are per pid namespace; two containers sharing one TMPDIR could remove each other''s live copies. Which?'
+  options:
+    - {label: record-namespace, cost: 'the pid file also records a host/namespace id; copies whose id does not match are kept; about 30 min and a test (recommended)'}
+    - {label: out-of-scope, cost: 'note the limit in row M-X7 only'}
+  asked_at: {sha: "0b95833", by: session}
+  answer: "record-namespace (owner in session, 2026-11-01: 'recommended'; the session had recommended record-namespace)"
+  answered_at: {sha: "0b95833", by: superbrobenji}
+- id: DEC-0296
+  class: spec-direction
+  question: 'Program tooling T1 re-review 9 (Q-PROG-13): SIGHUP and SIGQUIT have no row; SIGHUP kills the tool with no FAIL line. Which?'
+  options:
+    - {label: sighup-as-sigterm, cost: 'SIGHUP handled as SIGTERM (clean FAIL line, rc 2); SIGQUIT keeps its default, covered by the M-X7 path; one line, a row and a test (recommended)'}
+    - {label: as-built-row, cost: 'a row saying the M-X7 path covers both'}
+  asked_at: {sha: "0b95833", by: session}
+  answer: "sighup-as-sigterm (owner in session, 2026-11-01: 'recommended'; the session had recommended sighup-as-sigterm)"
+  answered_at: {sha: "0b95833", by: superbrobenji}
+- id: DEC-0297
+  class: spec-direction
+  question: 'Program tooling T1 re-review 9 (Q-PROG-14): test runs the mutation tool kills on timeout leave gate-test-* fixture directories in TMPDIR (16 seen in r9). Which?'
+  options:
+    - {label: tmpdir-in-copy, cost: 'each test run gets TMPDIR inside the tool''s scratch copy, removed with it; about 20 min, a row and a test (recommended)'}
+    - {label: register-fixture, cost: 'mutate.py as built; register a finding against the fixture cleanup'}
+  asked_at: {sha: "0b95833", by: session}
+  answer: "tmpdir-in-copy (owner in session, 2026-11-01: 'recommended'; the session had recommended tmpdir-in-copy)"
+  answered_at: {sha: "0b95833", by: superbrobenji}
