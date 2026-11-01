@@ -2,6 +2,7 @@
 Run from the repo root: python3 -m unittest tools.gates.tests.test_mutate -v
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -21,6 +22,11 @@ from tools.program import mutate
 
 PY = sys.executable
 MUTATE = os.path.abspath(mutate.__file__)
+# Row M-R3 / loader R1, R5 (DEC-0294 as-built-with-rows): every character other than " \t\n\r\v\f" that str.isspace()
+# accepts (the same 23 on 3.9 and 3.12), each alone, and a mixed value
+UNICODE_SPACES = ("\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\xa0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003",
+                  "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a", "\u2028", "\u2029", "\u202f",
+                  "\u205f", "\u3000")
 
 MOD_BASE = '''"""m"""
 UNCHANGED = 1 == 2
@@ -225,6 +231,25 @@ class A(unittest.TestCase):
 class Z(unittest.TestCase):
     def test_hangs(self):
         hang()
+'''
+TMP_TEST = '''import json
+import os
+import tempfile
+import time
+import unittest
+
+from pkg import kill
+
+
+class A(unittest.TestCase):
+    def test_two_is_over(self):
+        made = tempfile.mkdtemp(prefix="gate-test-")
+        with open(os.environ["MUTATE_TEST_TMPLOG"], "a", encoding="utf-8") as fh:
+            fh.write(json.dumps([made, os.environ.get("TMPDIR"), os.environ.get("TMP"), os.environ.get("TEMP")]) + "\\n")
+        if kill.f(2) is not True:
+            time.sleep(300)
+        self.assertIs(kill.f(2), True)
+        os.rmdir(made)
 '''
 ALL_OPERATORS = ["cmp-eq-ne", "cmp-ne-eq", "cmp-lt-le", "cmp-le-lt", "cmp-gt-ge", "cmp-ge-gt", "cmp-in-notin",
                  "cmp-notin-in", "cmp-is-isnot", "cmp-isnot-is", "not-remove", "not-add", "and-or", "or-and",
@@ -752,6 +777,17 @@ class Mutate(unittest.TestCase):
                     rc, out = self.call_in(self.root, argv)
                     self.assertEqual((rc, out), (2, "FAIL mutate.root: --root is empty\n"))
 
+    def test_a_unicode_whitespace_only_root_is_empty(self):
+        """Row M-R3 (DEC-0294 as-built-with-rows): str.strip() takes every Unicode whitespace character as empty; the
+        same whole line as the ASCII values, today's result, never the cwd's tree."""
+        every = tuple(c for c in map(chr, range(0x110000)) if c.isspace() and c not in " \t\n\r\v\f")
+        self.assertEqual(UNICODE_SPACES, every)
+        for root in UNICODE_SPACES + ("\xa0 \u3000",):
+            for argv in (self.kill_args(root), ["--root=" + root] + self.kill_args(self.root)[2:]):
+                with self.subTest(root=ascii(root), form=argv[0][:7]):
+                    rc, out = self.call_in(self.root, argv)
+                    self.assertEqual((rc, out), (2, "FAIL mutate.root: --root is empty\n"))
+
     def test_a_relative_root_is_normalised_and_a_bad_one_named_absolute(self):
         """Row M-R5 (DEC-0254 name-abspath): relative, `..` and trailing-/ roots load as the tree; a relative bad root is
         named by its absolute path."""
@@ -1216,6 +1252,67 @@ class Mutate(unittest.TestCase):
             with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
                 self.assertEqual(self.call(self.kill_args(self.root)), want)
 
+    def test_python_path_variables_that_change_the_result_are_removed(self):
+        """Row M-E3 (F19 of task-1-rereview-9c.md): a PYTHONPATH directory holding sitecustomize.py and a PYTHONUSERBASE
+        whose user site holds usercustomize.py, each ending the interpreter, would end every test run if kept; removed,
+        the result equals the run without them."""
+        stop = "import os\nos._exit(3)\n"
+        sitepath = os.path.join(self.scratch, "sitepath")
+        gf.write(sitepath, "sitecustomize.py", stop)
+        base = getattr(sys, "_base_executable", None) or PY     # a venv disables the user site; the base keeps it
+        userbase = os.path.join(self.scratch, "userbase")
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+
+        def py_run(exe, env, code):
+            return subprocess.run([exe, "-c", code], env=dict(clean, **env), capture_output=True, text=True, check=False)
+        probe = py_run(base, {"PYTHONUSERBASE": userbase},
+                       "import site; print(site.ENABLE_USER_SITE, site.getusersitepackages())")
+        enabled, usersite = probe.stdout.split()
+        self.assertEqual(enabled, "True", f"{base} has no user site, so PYTHONUSERBASE has no effect: {probe}")
+        gf.write(usersite, "usercustomize.py", stop)
+        cases = [(PY, {"PYTHONPATH": sitepath}), (base, {"PYTHONUSERBASE": userbase})]
+        for exe, env in cases:
+            with self.subTest(env=sorted(env), py=exe):
+                self.assertEqual(py_run(exe, env, "pass").returncode, 3, "the value has no effect when kept")
+                self.assertEqual(py_run(exe, {}, "pass").returncode, 0)
+                argv = self.kill_args(self.root)[:-1] + [exe]
+                want = self.call(argv)
+                self.assertEqual(want[0], 1, want)
+                self.assertIn(f"summary {exe}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", want[1].splitlines())
+                with mock.patch.dict(os.environ, env):
+                    self.assertEqual(self.call(argv), want)
+
+    def test_a_test_run_killed_on_timeout_leaves_no_file_outside_the_copy(self):
+        """Row M-E5 (DEC-0297 tmpdir-in-copy): every test run's TMPDIR, TMP and TEMP is <scratch>/tmp, removed with the
+        scratch directory; the hung runs, killed on their timeout, leave nothing in the caller's TMPDIR."""
+        head = self.commit_files({"pkg/test_tmp.py": TMP_TEST}, "tmp")
+        tmp = os.path.join(self.scratch, "tmp")
+        os.mkdir(tmp)
+        log = os.path.join(self.scratch, "tmp.log")
+        others = {"TMP": os.path.join(self.scratch, "nope-tmp"), "TEMP": os.path.join(self.scratch, "nope-temp")}
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_tmp.A", "--py", PY, "--jobs", "2", "--json"]
+        with mock.patch.object(mutate, "TIMEOUT_FLOOR", 3.0), mock.patch.object(mutate, "TIMEOUT_FACTOR", 1.0), \
+                mock.patch.dict(os.environ, dict(others, TMPDIR=tmp, MUTATE_TEST_TMPLOG=log)), \
+                mock.patch.object(tempfile, "tempdir", None):
+            rc, out = self.call(argv)
+        doc = json.loads(out)
+        self.assertEqual(rc, 1, doc)
+        self.assertEqual(sorted(m["reason"][PY] for m in doc["mutants"]),
+                         ["tests passed", "tests passed", "timeout", "timeout"])
+        with open(log, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh]
+        self.assertEqual(len(rows), 5, rows)              # the baseline and the 4 mutants
+        for made, tmpdir, tmp_, temp in rows:
+            with self.subTest(made=made):
+                scratch = os.path.dirname(tmpdir)
+                self.assertEqual((tmp_, temp, os.path.dirname(made)), (tmpdir, tmpdir, tmpdir))
+                self.assertEqual((os.path.basename(tmpdir), os.path.dirname(scratch)), ("tmp", tmp))
+                self.assertTrue(os.path.basename(scratch).startswith("mutate-"), scratch)
+                self.assertFalse(os.path.exists(made))
+        self.assertEqual(os.listdir(tmp), [])
+        self.assertFalse(any(os.path.exists(p) for p in others.values()))
+
     def test_stdout_is_utf8_whatever_the_locale(self):
         """Row M-E4 (DEC-0263 utf8-stdout, O4): a non-ASCII --file name under PYTHONIOENCODING=ascii and LC_ALL=C."""
         name = "pkg/\u00e9.py"
@@ -1265,12 +1362,15 @@ class Mutate(unittest.TestCase):
         self.addCleanup(kill_recorded_groups, files["MUTATE_TEST_RUNLOG"])
         return tmp, files
 
-    def start_tool(self, argv, env, ignore_sigint=False):
+    def start_tool(self, argv, env, ignore=()):
         """The real file as a process in its own session, killed with its group and reaped when the test ends."""
+        def dispositions():
+            for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                signal.signal(sig, signal.SIG_IGN if sig in ignore else signal.SIG_DFL)
         p = subprocess.Popen([PY, MUTATE, *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.scratch,
-                             env=env, start_new_session=True,
-                             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN if ignore_sigint else signal.SIG_DFL))
-        # the caller's disposition is not inherited (a background job of a shell starts with SIGINT ignored, DEC-0290)
+                             env=env, start_new_session=True, preexec_fn=dispositions)
+        # the caller's dispositions are not inherited (a background job of a shell starts with SIGINT ignored, DEC-0290;
+        # nohup ignores SIGHUP), each set to the test's own
 
         def reap():
             with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -1331,27 +1431,47 @@ class Mutate(unittest.TestCase):
         """Row M-X3 (DEC-0275, DEC-0276): at once, no further mutant, test processes killed, scratch removed, rc 2."""
         self.interrupt_run(signal.SIGINT, "SIGINT")
 
-    def test_an_inherited_ignored_sigint_is_kept(self):
-        """Row M-X3b (DEC-0290 keep-inherited-ignore): started with SIGINT ignored (nohup, a background job), the tool
-        installs no SIGINT handler: SIGINT does not stop the run; SIGTERM still does (M-X4)."""
+    def ignored_run(self, ignored, stop, name):
+        """Started with `ignored` inherited as ignored: that signal leaves the run going (no handler is installed);
+        `stop` still stops it with its FAIL line."""
         head = self.hang_head()
         tmp, files = self.hang_env()
         argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
                 "--test", "pkg.test_hang.A", "--py", PY, "--jobs", "1"]
-        p = self.start_tool(argv, dict(os.environ, TMPDIR=tmp, **files), ignore_sigint=True)
+        p = self.start_tool(argv, dict(os.environ, TMPDIR=tmp, **files), ignore=(ignored,))
         pid, pgid, _ = self.wait_for_hang(p, files["MUTATE_TEST_HANGLOG"])
-        os.kill(p.pid, signal.SIGINT)
+        os.kill(p.pid, ignored)
         time.sleep(3)
-        self.assertIsNone(p.poll(), "the tool stopped on a SIGINT it inherited as ignored")
+        self.assertIsNone(p.poll(), f"the tool stopped on a {signal.Signals(ignored).name} it inherited as ignored")
         self.assertEqual(len(recorded(files["MUTATE_TEST_RUNLOG"])), 2)
-        self.assertTrue(group_members(pgid), "the hung test run was killed by the ignored SIGINT")
-        os.kill(p.pid, signal.SIGTERM)
+        self.assertTrue(group_members(pgid), "the hung test run was killed by the ignored signal")
+        os.kill(p.pid, stop)
         try:
             out, err = p.communicate(timeout=30)
         except subprocess.TimeoutExpired:
-            self.fail("the tool did not stop within 30 s of SIGTERM")
-        self.assertEqual((p.returncode, out.decode(), err.decode()), (2, "FAIL mutate.interrupt: stopped by SIGTERM\n", ""))
+            self.fail(f"the tool did not stop within 30 s of {name}")
+        self.assertEqual((p.returncode, out.decode(), err.decode()), (2, f"FAIL mutate.interrupt: stopped by {name}\n", ""))
         self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
+        self.assertEqual(os.listdir(tmp), [])
+
+    def test_an_inherited_ignored_sigint_is_kept(self):
+        """Row M-X3b (DEC-0290 keep-inherited-ignore): started with SIGINT ignored (nohup, a background job), the tool
+        installs no SIGINT handler: SIGINT does not stop the run; SIGTERM still does (M-X4)."""
+        self.ignored_run(signal.SIGINT, signal.SIGTERM, "SIGTERM")
+
+    def test_an_inherited_ignored_sigterm_is_kept(self):
+        """Row M-X4b (DEC-0293 keep-inherited-ignore): started with SIGTERM ignored, the tool installs no SIGTERM
+        handler: SIGTERM does not stop the run; SIGINT still does (M-X3)."""
+        self.ignored_run(signal.SIGTERM, signal.SIGINT, "SIGINT")
+
+    def test_an_inherited_ignored_sighup_is_kept(self):
+        """Row M-X4c (as built, pending Q-R10-2): started with SIGHUP ignored (nohup), SIGHUP does not stop the run;
+        SIGTERM still does."""
+        self.ignored_run(signal.SIGHUP, signal.SIGTERM, "SIGTERM")
+
+    def test_sighup_stops_the_run_and_leaves_nothing(self):
+        """Row M-X4c (DEC-0296 sighup-as-sigterm): as M-X4, the line naming SIGHUP."""
+        self.interrupt_run(signal.SIGHUP, "SIGHUP")
 
     def test_sigterm_stops_the_run_and_leaves_nothing(self):
         """Row M-X4 (DEC-0275, DEC-0276): as M-X3 with SIGTERM."""
@@ -1359,11 +1479,21 @@ class Mutate(unittest.TestCase):
 
     def test_a_signal_handler_of_the_caller_is_restored_after_main(self):
         """main() installs the M-X3/M-X4 handlers for its run only: the caller's handlers come back, on a FAIL too."""
-        before = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+        sigs = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)   # SIGQUIT: never changed (row M-X4d)
+        before = [signal.getsignal(s) for s in sigs]
+        seen = []
+        real = mutate.execute
+
+        def execute(ns):
+            seen.append([signal.getsignal(s) for s in sigs])
+            return real(ns)
         for argv in (self.args(), ["--root", ""]):
-            with self.subTest(argv=argv[:2]):
+            with self.subTest(argv=argv[:2]), mock.patch.object(mutate, "execute", execute):
                 self.call(argv)
-                self.assertEqual((signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)), before)
+                self.assertEqual([signal.getsignal(s) for s in sigs], before)
+        for during in seen:     # the stop handler while the run goes (unless the suite itself ignores the signal)
+            self.assertEqual([h == mutate.Stop.handler for h in during],
+                             [b != signal.SIG_IGN for b in before[:3]] + [False])
 
     def test_a_hung_baseline_is_killed_by_its_timeout(self):
         """Row M-X5 (DEC-0275, DEC-0276): 600 s, the process group killed, scratch removed, rc 2 (the constant patched
@@ -1405,7 +1535,7 @@ class Mutate(unittest.TestCase):
         for name in left:
             self.assertTrue(name.startswith("mutate-"), name)
             with open(os.path.join(tmp, name, "mutate.pid"), encoding="utf-8") as fh:
-                self.assertEqual(fh.read(), f"{p.pid}\n")
+                self.assertEqual(fh.read(), f"{p.pid} {host_id()}\n")
         with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
             self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
         self.assertEqual(os.listdir(tmp), [])             # the next run removed the stale copies, and its own
@@ -1430,14 +1560,23 @@ class Mutate(unittest.TestCase):
                 else:
                     os.mkdir(pidfile)
             return path
-        stale = [copy("mutate-aaaaaaaa", dead + "\n"), copy("mutate-test-bbbbbbbb", dead + "\n")]
-        kept = [copy("mutate-cccccccc", live + "\n"), copy("mutate-dddddddd", None), copy("mutate-eeeeeeee", "x\n"),
+        hid = host_id()
+        stale = [copy("mutate-aaaaaaaa", f"{dead} {hid}\n"), copy("mutate-test-bbbbbbbb", f"{dead} {hid}\n")]
+        kept = [copy("mutate-cccccccc", f"{live} {hid}\n"), copy("mutate-r-old", dead + "\n"),     # old format: Q-R10-3
+                copy("mutate-r-old-test", dead + "\n"), copy("mutate-r-live-old", live + "\n"),
+                copy("mutate-r-tab", f"{dead}\t{hid}\n"), copy("mutate-r-two", f"{dead}  {hid}\n"),
+                copy("mutate-r-upper", f"{dead} {hid.upper()}\n"), copy("mutate-r-short", f"{dead} {hid[:-1]}\n"),
+                copy("mutate-r-long", f"{dead} {hid}0\n"), copy("mutate-r-nonl", f"{dead} {hid}"),
+                copy("mutate-r-lead", f" {dead} {hid}\n"), copy("mutate-r-more", f"{dead} {hid}\n1\n"),
+                copy("mutate-r-zero", f"0 {hid}\n"), copy("mutate-r-huge", f"{'9' * 30} {hid}\n"),
+                copy("mutate-r-dir", f"{dead} {hid}\n", kind="pid-is-a-dir"),
+                copy("mutate-dddddddd", None), copy("mutate-eeeeeeee", "x\n"),
                 copy("mutate-ffffffff", ""), copy("mutate-gggggggg", "0\n"), copy("mutate-hhhhhhhh", "9" * 30 + "\n"),
                 copy("mutate-iiiiiiii", dead + "\n", kind="pid-is-a-dir"), copy("other-jjjjjjjj", dead + "\n"),
                 copy("mutate-kkkkkkkk", " " + dead + "\n"), copy("mutate-llllllll", dead),
                 copy("mutate-oooooooo", dead + "\n1\n"), copy("mutate-pppppppp", "1\n"),
                 copy("mutate-qqqqqqqq", None)]
-        target = copy("target", dead + "\n")
+        target = copy("target", f"{dead} {hid}\n")
         os.symlink(os.path.join(target, "mutate.pid"), os.path.join(kept[-1], "mutate.pid"))   # a symlinked pid file
         os.symlink(target, os.path.join(tmp, "mutate-mmmmmmmm"))
         kept += [target, os.path.join(tmp, "mutate-mmmmmmmm")]
@@ -1448,6 +1587,26 @@ class Mutate(unittest.TestCase):
             self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
         self.assertEqual(sorted(os.listdir(tmp)), sorted(os.path.basename(k) for k in kept))
         self.assertTrue(os.path.isfile(os.path.join(target, "tree", "pkg", "x.py")))
+
+    def test_a_stale_copy_from_another_host_or_namespace_is_kept(self):
+        """Row M-X7 (DEC-0295 record-namespace): a dead pid with this host's id is removed; a pid file whose id is
+        another host's or pid namespace's is kept whatever its pid; the old `<pid>\\n` form is kept (Q-R10-3)."""
+        tmp = os.path.join(self.scratch, "tmp")
+        os.mkdir(tmp)
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        dead, live, hid = str(gone.pid), str(os.getpid()), host_id()
+        other_ns = hashlib.sha256(os.fsencode(os.uname().nodename) + b"\0" + b"pid:[1]").hexdigest()
+        other_host = hashlib.sha256(b"another-host\0" + os.fsencode(pid_namespace())).hexdigest()
+        files = {"mutate-same": f"{dead} {hid}\n", "mutate-ns": f"{dead} {other_ns}\n",
+                 "mutate-host": f"{dead} {other_host}\n", "mutate-zeros": f"{dead} {'0' * 64}\n",
+                 "mutate-live-ns": f"{live} {other_ns}\n", "mutate-old": f"{dead}\n"}
+        for name, text in files.items():
+            gf.write(os.path.join(tmp, name), "mutate.pid", text)
+        self.assertNotIn(hid, (other_ns, other_host))
+        with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+            self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
+        self.assertEqual(sorted(os.listdir(tmp)), sorted(set(files) - {"mutate-same"}))
 
     def test_a_signal_while_the_copies_are_made_stops_before_the_next_copy(self):
         """Rows M-X3, M-X4: no further copy is made after the signal, and the FAIL is the interrupt whatever the
@@ -1579,6 +1738,19 @@ class Mutate(unittest.TestCase):
         os.chmod(bad, 0o755)
         self.assertEqual(self.call(self.args(pys=[bad])),
                          (2, f"FAIL mutate.internal: OSError: [Errno 8] Exec format error: {bad!r}\n"))
+
+
+def pid_namespace():
+    """Row M-X7 (DEC-0295): the pid namespace link on Linux, "" where /proc/self/ns/pid cannot be read (macOS)."""
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return ""
+
+
+def host_id():
+    """Row M-X7 (DEC-0295): the id a run records beside its pid, as the row states it."""
+    return hashlib.sha256(os.fsencode(os.uname().nodename) + b"\0" + os.fsencode(pid_namespace())).hexdigest()
 
 
 def group_members(pgid):

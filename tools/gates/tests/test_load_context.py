@@ -24,6 +24,11 @@ A_HANDOFF = "docs/superpowers/state/strict-delivery/handoff.md"
 B_HANDOFF = "docs/superpowers/state/prototype/handoff.md"
 EXPECTED = ".superpowers/context/expected"
 KIND = "stream-a-block"
+# Row M-R3 / loader R1, R5 (DEC-0294 as-built-with-rows): every character other than " \t\n\r\v\f" that str.isspace()
+# accepts (the same 23 on 3.9 and 3.12), each alone, and a mixed value
+UNICODE_SPACES = ("\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\xa0", "\u1680", "\u2000", "\u2001", "\u2002", "\u2003",
+                  "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a", "\u2028", "\u2029", "\u202f",
+                  "\u205f", "\u3000")
 
 
 def lines_file(n, width=0):
@@ -1698,6 +1703,38 @@ class LoadContext(unittest.TestCase):
         plain = tempfile.mkdtemp(prefix="not-a-repo-")
         self.addCleanup(gf.remove, plain)
         for value in (" ", "  ", "\t", "\n", " \t\n"):
+            for cwd in (self.root, os.path.join(self.root, "docs"), plain):
+                with self.subTest(value=ascii(value), cwd=os.path.basename(cwd)):
+                    rc, out, err = self.call([KIND], env={"CLAUDE_PROJECT_DIR": value}, cwd=cwd)
+                    self.assertEqual((rc, out, err), (1, "FAIL context.input: --root is empty\n", ""))
+                    self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED)))
+
+    def test_a_unicode_whitespace_only_root_is_empty(self):
+        """Row R1 (DEC-0294 as-built-with-rows): str.strip() takes every Unicode whitespace character as empty, so such a
+        --root gives the same whole line as the ASCII values (today's result), never the cwd's tree, no list."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        plain = tempfile.mkdtemp(prefix="not-a-repo-")
+        self.addCleanup(gf.remove, plain)
+        every = tuple(c for c in map(chr, range(0x110000)) if c.isspace() and c not in " \t\n\r\v\f")
+        self.assertEqual(UNICODE_SPACES, every)
+        for root in UNICODE_SPACES + ("\xa0 \u3000",):
+            for cwd in (self.root, plain):
+                for form in (["--root", root, KIND], ["--root=" + root, KIND], [KIND, "--root", root]):
+                    with self.subTest(root=ascii(root), cwd=os.path.basename(cwd), form=ascii(form[0])[:9]):
+                        rc, out, err = self.call(form, cwd=cwd)
+                        self.assertEqual((rc, out, err), (1, "FAIL context.input: --root is empty\n", ""))
+                        self.assertFalse(os.path.exists(os.path.join(self.root, EXPECTED)))
+
+    def test_a_unicode_whitespace_only_claude_project_dir_is_an_empty_root(self):
+        """Row R5 (DEC-0294 as-built-with-rows): CLAUDE_PROJECT_DIR of Unicode whitespace only is the empty root."""
+        self.put("docs/a.md", lines_file(3))
+        self.put(CTX, ctx([entry("docs/a.md", "1-3")]))
+        gf.commit_all(self.root, "ctx")
+        plain = tempfile.mkdtemp(prefix="not-a-repo-")
+        self.addCleanup(gf.remove, plain)
+        for value in UNICODE_SPACES + ("\xa0 \u3000",):
             for cwd in (self.root, os.path.join(self.root, "docs"), plain):
                 with self.subTest(value=ascii(value), cwd=os.path.basename(cwd)):
                     rc, out, err = self.call([KIND], env={"CLAUDE_PROJECT_DIR": value}, cwd=cwd)

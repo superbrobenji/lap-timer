@@ -28,9 +28,12 @@ or does not compile, is BADMATCH (never run).
 Lifecycle (DEC-0275..DEC-0280). Each test run is a small watcher (WATCH, the tool's interpreter, -I) leading the run's
 own session with the test command as its child: every WATCH_PERIOD it checks that the tool still runs and otherwise
 kills its own process group, so SIGKILL of the tool leaves no test process. Each scratch directory holds PID_FILE, the
-tool's pid; a run removes every mutate-* scratch directory whose recorded pid is gone and keeps one whose pid runs.
-SIGINT or SIGTERM stops a run at once: no further run starts, the runs in progress are killed with their groups, the
-scratch directories are removed and the last line is `FAIL mutate.interrupt: stopped by SIGINT` (or SIGTERM), rc 2.
+tool's pid and its host id (host_id: the host name and, on Linux, the pid namespace; DEC-0295); a run removes every
+mutate-* scratch directory whose recorded pid is gone and whose host id is its own, and keeps the others. Each test run's
+TMPDIR, TMP and TEMP is the scratch directory's tmp, removed with it (DEC-0297).
+SIGINT, SIGTERM or SIGHUP stops a run at once: no further run starts, the runs in progress are killed with their groups,
+the scratch directories are removed and the last line is `FAIL mutate.interrupt: stopped by SIGINT` (or SIGTERM,
+SIGHUP), rc 2. A signal the tool was started with as ignored stays ignored (DEC-0290, DEC-0293).
 An unmutated run that outlives BASELINE_TIMEOUT is killed with its group: FAIL mutate.baseline.
 
 Output (stdout), in id order:
@@ -53,6 +56,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -110,7 +114,8 @@ TIMEOUT_FACTOR = 10.0
 BASELINE_TIMEOUT = 600.0    # seconds an unmutated run may take (M-X5, DEC-0275, DEC-0276)
 WATCH_PERIOD = 1.0          # seconds between a test run's checks that the tool still runs (M-X7, DEC-0279)
 PID_FILE = "mutate.pid"     # in each scratch directory: the pid of the run that made it (M-X7, DEC-0278)
-PID_RE = re.compile(r"[1-9][0-9]*\n")
+PID_RE = re.compile(r"([1-9][0-9]*) ([0-9a-f]{64})\n")      # <pid> <host id> (M-X7, DEC-0291, DEC-0295)
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)   # M-X3, M-X4, M-X4c (DEC-0275, DEC-0296)
 CLIP = 200                  # every value a FAIL line echoes is cut to this many characters
 MAX_JOBS = 64
 TEST_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
@@ -164,7 +169,7 @@ sys.exit(rc)
 
 
 class Stop:
-    """SIGINT and SIGTERM stop a run at once (M-X3, M-X4; DEC-0275, DEC-0276): the handler records the signal and
+    """SIGINT, SIGTERM and SIGHUP stop a run at once (M-X3, M-X4; DEC-0275, DEC-0276): the handler records the signal and
     kills the process group of every test run in progress; no further run starts; main prints FAIL mutate.interrupt."""
     signal = None
     procs = set()
@@ -211,6 +216,16 @@ def one_line(text: str) -> str:
 def git_top(stdout: bytes) -> str:
     """git's toplevel as argv and os.environ decode a path, only git's final newline removed (M-R9, M-R10, M-G1; R7, R8)."""
     return os.fsdecode(stdout).removesuffix("\n")
+
+
+def host_id() -> str:
+    """M-X7 (DEC-0295): SHA-256 hex of the host name, NUL, and the pid namespace link (Linux /proc/self/ns/pid; empty
+    where it cannot be read, as on macOS): pids are compared only within one host and pid namespace."""
+    try:
+        namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        namespace = ""
+    return hashlib.sha256(os.fsencode(os.uname().nodename) + b"\0" + os.fsencode(namespace)).hexdigest()
 
 
 def clean_env() -> dict:
@@ -573,7 +588,7 @@ def inside(path: str, root: str) -> bool:
 class Copy:
     """A guarded clone of the root at head in its own scratch directory (DEC-0032)."""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, host: str):
         scratch = tempfile.mkdtemp(prefix="mutate-")
         if inside(scratch, root):
             with contextlib.suppress(OSError):   # M-E1 (DEC-0032): the refused (new, empty) directory is not left there
@@ -582,8 +597,10 @@ class Copy:
         self.scratch = scratch
         self.tree = os.path.join(scratch, "tree")
         self.pycache = os.path.join(scratch, "pycache")
-        with open(os.path.join(scratch, PID_FILE), "w", encoding="ascii") as fh:   # M-X7 (DEC-0278)
-            fh.write(f"{os.getpid()}\n")
+        self.tmp = os.path.join(scratch, "tmp")        # M-E5 (DEC-0297): the test runs' temporary directory
+        with open(os.path.join(scratch, PID_FILE), "w", encoding="ascii") as fh:   # M-X7 (DEC-0278, DEC-0295)
+            fh.write(f"{os.getpid()} {host}\n")
+        os.mkdir(self.tmp)
 
     def make(self, root: str, head: str) -> None:
         git(self.scratch, "clone", "-q", "--no-hardlinks", "--no-checkout", "--", root, self.tree)
@@ -605,7 +622,8 @@ class Copy:
     def run_tests(self, py: str, tests: list, timeout) -> tuple:
         """(rc or None on timeout, number of tests run, seconds) of one unittest run in the copy."""
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k not in TEST_ENV_DROP}   # M-E3
-        env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPYCACHEPREFIX=self.pycache)
+        env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPYCACHEPREFIX=self.pycache,
+                   TMPDIR=self.tmp, TMP=self.tmp, TEMP=self.tmp)                 # M-E5 (DEC-0297)
         Stop.check()                               # M-X3, M-X4: no run starts after a signal
         t0 = time.monotonic()
         report, w = os.pipe()
@@ -715,10 +733,10 @@ def pid_gone(pid: int) -> bool:
     return False
 
 
-def remove_stale(parent: str) -> None:
-    """M-X7 (DEC-0278): remove each mutate-* scratch directory whose PID_FILE names a pid that is gone (a run killed
-    by SIGKILL); a directory whose pid runs (a concurrent run's), a symlink, or one without a regular PID_FILE of the
-    form this tool writes, is kept."""
+def remove_stale(parent: str, host: str) -> None:
+    """M-X7 (DEC-0278, DEC-0295): remove each mutate-* scratch directory whose PID_FILE names this host id and a pid
+    that is gone (a run killed by SIGKILL); a directory whose pid runs (a concurrent run's), whose host id differs
+    (another host or pid namespace), a symlink, or one without a regular PID_FILE of the form this tool writes, is kept."""
     try:
         names = os.listdir(parent)
     except OSError:                      # a TMPDIR that cannot be listed: nothing is removed
@@ -731,23 +749,24 @@ def remove_stale(parent: str) -> None:
             text = read_file(pidfile).decode("ascii", "replace")
         except OSError:
             continue
-        if PID_RE.fullmatch(text) and pid_gone(int(text)):
+        m = PID_RE.fullmatch(text)
+        if m and m.group(2) == host and pid_gone(int(m.group(1))):
             shutil.rmtree(os.path.join(parent, name), ignore_errors=True)   # never through a symlink (rmtree)
 
 
 def run_all(root: str, head: str, mutants: list, sources: dict, pys: list, tests: list, jobs: int,
             printer: Printer) -> None:
     """Every mutant under every --py, `jobs` guarded copies at a time; results land in each mutant's dict."""
-    copies, stop, failures = [], threading.Event(), []
+    copies, stop, failures, host = [], threading.Event(), [], host_id()
     tmp = os.environ.get("TMPDIR")
     if tmp is not None and not (os.path.isdir(tmp) and os.access(tmp, os.W_OK | os.X_OK)):   # M-E2 (DEC-0262)
         raise Fail("guard", f"TMPDIR {show(tmp)} is not a writable directory")
     try:
         for _ in range(max(1, min(jobs, len(mutants)))):
             Stop.check()
-            copies.append(Copy(root))
+            copies.append(Copy(root, host))
             if len(copies) == 1:             # inside the guard: the copies' own directory, never the root
-                remove_stale(os.path.dirname(copies[0].scratch))
+                remove_stale(os.path.dirname(copies[0].scratch), host)
             copies[-1].make(root, head)
         timeouts = baseline(copies[0], pys, tests)
         queue, qlock = list(range(len(mutants))), threading.Lock()
@@ -879,10 +898,10 @@ def main(argv=None) -> int:
     as_json = json_form(argv)
     Stop.reset()
     previous = {}
-    if threading.current_thread() is threading.main_thread():   # M-X3, M-X4: for this run only
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            if sig == signal.SIGINT and signal.getsignal(sig) == signal.SIG_IGN:
-                continue                  # DEC-0290 keep-inherited-ignore: a caller that ignores SIGINT (nohup) is respected
+    if threading.current_thread() is threading.main_thread():   # M-X3, M-X4, M-X4c: for this run only
+        for sig in STOP_SIGNALS:
+            if signal.getsignal(sig) == signal.SIG_IGN:
+                continue                  # DEC-0290, DEC-0293 keep-inherited-ignore: a caller that ignores it is respected
             previous[sig] = signal.signal(sig, Stop.handler)
     try:
         try:
