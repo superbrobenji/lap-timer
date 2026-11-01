@@ -2954,3 +2954,31 @@
   asked_at: {sha: "9dff441", by: session}
   answer: "keep-old-format (owner in session, 2026-11-01: 'recommended'; the session had recommended keep-old-format)"
   answered_at: {sha: "9dff441", by: superbrobenji}
+- id: DEC-0301
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10b (Q-R10b-1), row M-X7b: a stale-copy candidate whose pid file cannot be read. Which?'
+  options:
+    - {label: keep-unreadable, cost: 'kept: content unknown, never removes a possibly live copy (as built; test_an_unreadable_pid_file_is_kept) (recommended)'}
+    - {label: remove-unreadable, cost: 'removed after forcing a read; a code change, a row, the test inverted, risk of removing a live copy'}
+  asked_at: {sha: "4f96f36", by: session}
+  answer: "keep-unreadable (owner in session, 2026-11-01: 'recommended for all'; the session had recommended keep-unreadable)"
+  answered_at: {sha: "4f96f36", by: superbrobenji}
+- id: DEC-0302
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10b (Q-R10b-2), row M-X8: main() called from a non-main thread. Which?'
+  options:
+    - {label: run-no-handlers, cost: 'the run goes on with no signal handlers installed; signals are the caller''s (as built; test pinned) (recommended)'}
+    - {label: refuse, cost: 'FAIL mutate.args: main() must run in the main thread, rc 2; a few lines, the row and the test inverted'}
+  asked_at: {sha: "4f96f36", by: session}
+  answer: "run-no-handlers (owner in session, 2026-11-01: 'recommended for all'; the session had recommended run-no-handlers)"
+  answered_at: {sha: "4f96f36", by: superbrobenji}
+- id: DEC-0303
+  class: scope
+  question: 'Program tooling T1 (Q-R10b-3): the full mutation run of tools/program/mutate.py against tools.gates.tests.test_mutate takes about 21 h at --jobs 8. How is it finished?'
+  options:
+    - {label: background-after-fix, cost: 'after the Copy.remove fix (ids shift), the session runs the whole set in the background, about 20 h; survivors then killed or argued equivalent in a fix round (recommended)'}
+    - {label: test-selection, cost: 'per-mutant test selection or a smaller --test set; faster but needs building (DEC-0286 process-block scope) and changes what full means'}
+    - {label: chunks, cost: 'the same run in chunks over several rounds; same total time'}
+  asked_at: {sha: "4f96f36", by: session}
+  answer: "background-after-fix (owner in session, 2026-11-01: 'recommended for all'; the session had recommended background-after-fix)"
+  answered_at: {sha: "4f96f36", by: superbrobenji}
