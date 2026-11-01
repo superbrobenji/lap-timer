@@ -2982,3 +2982,12 @@
   asked_at: {sha: "4f96f36", by: session}
   answer: "background-after-fix (owner in session, 2026-11-01: 'recommended for all'; the session had recommended background-after-fix)"
   answered_at: {sha: "4f96f36", by: superbrobenji}
+- id: DEC-0304
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10c (Q-R10c-1): a path in a scratch copy that still cannot be removed after its permission bits are restored (e.g. chflags uchg, another owner, a busy mount). Which?'
+  options:
+    - {label: named-fail, cost: 'the run ends with FAIL mutate.cleanup naming the path left, rc 2; a later run''s stale-copy removal reports it the same way; a leftover is never silent (recommended)'}
+    - {label: warn-and-go-on, cost: 'a warning line naming the path; the result rc is kept'}
+  asked_at: {sha: "403fdae", by: session}
+  answer: "named-fail (owner in session, 2026-11-01: 'rommended' [sic]; the session had recommended named-fail)"
+  answered_at: {sha: "403fdae", by: superbrobenji}
