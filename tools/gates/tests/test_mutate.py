@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -204,6 +205,7 @@ class S(unittest.TestCase):
         self.assertEqual(spin.spin(3), 0)
 '''
 LOCKS_PY = '''import os
+import stat
 import tempfile
 
 SHAPES = {"unlistable": ("d", (("d", 0o333),)), "unwritable": ("d", (("d/f", 0o444), ("d", 0o555))),
@@ -219,6 +221,11 @@ def lock_tree(parent=None, shapes=None, outside=None):
         top = tempfile.mkdtemp(prefix=f"lock-{shape}-", dir=parent)
         if shape == "link":
             os.symlink(outside or os.environ["MUTATE_TEST_OUTSIDE"], os.path.join(top, "link"))
+            continue
+        if shape == "uchg":                 # row M-X9b: a file no restore of the modes makes removable
+            os.mkdir(os.path.join(top, "d"))
+            open(os.path.join(top, "d", "f"), "w").close()
+            os.chflags(os.path.join(top, "d", "f"), stat.UF_IMMUTABLE)
             continue
         deep, modes = SHAPES[shape]
         os.makedirs(os.path.join(top, deep))
@@ -1438,7 +1445,7 @@ class Mutate(unittest.TestCase):
                            timeout=120)
         self.assert_outside_untouched(outside)
         self.assert_checkout_untouched_at(head)
-        return p.returncode, p.stdout.decode(), p.stderr.decode(), os.listdir(tmp)
+        return p.returncode, p.stdout.decode(), p.stderr.decode(), [os.path.join(tmp, n) for n in os.listdir(tmp)]
 
     def test_a_locked_tree_in_the_copy_is_removed_at_the_end(self):
         """Row M-X9: a tree a test leaves in the copy whose modes block a plain removal (each shape alone, the symlink
@@ -1465,16 +1472,93 @@ class Mutate(unittest.TestCase):
         reasons = sorted(m["reason"][PY] for m in json.loads(out)["mutants"])
         self.assertEqual(reasons, ["tests passed", "tests passed", "timeout", "timeout"])
 
+    def assert_only_uchg_left(self, copies):
+        """Row M-X9b: each copy left holds only the immutable files its runs made; the restore removed the rest (the
+        tree, the other locked shapes)."""
+        for copy in copies:
+            held = [os.path.relpath(os.path.join(top, f), copy) for top, _, files in os.walk(copy) for f in files]
+            self.assertTrue(held)
+            for path in held:
+                self.assertRegex(path, r"\Atmp/lock-uchg-[^/]+/d/f\Z")
+
+    def assert_results_then(self, out, tail):
+        """Row M-X9b, text form: the result lines printed as each mutant finished, then `tail`, no summary."""
+        self.assertTrue(out.endswith(tail), out)
+        for row in out[:len(out) - len(tail)].splitlines():
+            self.assertRegex(row, r"\Am\d{4} pkg/kill\.py:\d+ \S+ (KILLED|SURVIVED) \S+\Z")
+
+    def test_a_copy_left_after_the_restore_is_a_named_cleanup_fail(self):
+        """Row M-X9b (owner answer 2026-11-01, named-fail): a copy that still cannot be removed after the restore (a
+        uchg file) ends the run with `FAIL mutate.cleanup: <copy> left`, rc 2: at the normal end, after a mutant's
+        timeout (--json), before the interrupt line on SIGINT, SIGTERM (also --json) and SIGHUP, and in the next run
+        after a SIGKILL (the stale copy). The real file as a process, but the next run's main() in-process."""
+        if not hasattr(os, "chflags") or not hasattr(stat, "UF_IMMUTABLE"):
+            self.skipTest("os.chflags is not available: without root no path here resists the owner's restore")
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file modes")
+        line = "FAIL mutate.cleanup: {} left\n".format
+        with self.subTest("normal end"):
+            rc, out, err, left = self.lock_run("uchg,unlistable,nested")
+            self.assertEqual(len(left), 1, left)
+            self.assertEqual((rc, err), (2, ""))
+            self.assert_results_then(out, line(mutate.show(left[0])))
+            self.assert_only_uchg_left(left)
+        with self.subTest("timeout"):
+            wrap = ("-c", "import sys; sys.path.insert(0, sys.argv[1]); import mutate; mutate.TIMEOUT_FLOOR = 3.0; "
+                          "mutate.TIMEOUT_FACTOR = 1.0; sys.exit(mutate.main(sys.argv[2:]))", os.path.dirname(MUTATE))
+            rc, out, err, left = self.lock_run("uchg", prefix=wrap, extra=["--json"], hang="1")
+            self.assertEqual(len(left), 1, left)
+            self.assertEqual((rc, json.loads(out), err),
+                             (2, {"rc": 2, "fail": [{"check": "mutate.cleanup", "reason": f"{mutate.show(left[0])} left"}]},
+                              ""))
+            self.assert_only_uchg_left(left)
+        head = self.hang_head()
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_hang.A", "--py", PY, "--jobs", "1"]
+        for sig, name, extra in ((signal.SIGINT, "SIGINT", []), (signal.SIGTERM, "SIGTERM", []),
+                                 (signal.SIGTERM, "SIGTERM", ["--json"]), (signal.SIGHUP, "SIGHUP", [])):
+            with self.subTest(name, json=bool(extra)):
+                tmp, files = self.hang_env()
+                p = self.start_tool(argv + extra, dict(os.environ, TMPDIR=tmp, MUTATE_TEST_SHAPES="uchg", **files))
+                self.wait_for_hang(p, files["MUTATE_TEST_HANGLOG"])
+                os.kill(p.pid, sig)
+                out, err = p.communicate(timeout=30)
+                left = [os.path.join(tmp, n) for n in os.listdir(tmp)]
+                self.assertEqual(len(left), 1, left)
+                stop = f"stopped by {name}"
+                want = (json.dumps({"rc": 2, "fail": [{"check": "mutate.cleanup", "reason": f"{mutate.show(left[0])} left"},
+                                                      {"check": "mutate.interrupt", "reason": stop}]}) + "\n" if extra
+                        else line(mutate.show(left[0])) + f"FAIL mutate.interrupt: {stop}\n")
+                self.assertEqual((p.returncode, out.decode(), err.decode()), (2, want, ""))
+                self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
+                self.assert_only_uchg_left(left)
+        with self.subTest("stale copy"):
+            tmp, files = self.hang_env()
+            p = self.start_tool(argv, dict(os.environ, TMPDIR=tmp, MUTATE_TEST_SHAPES="uchg", **files))
+            self.wait_for_hang(p, files["MUTATE_TEST_HANGLOG"])
+            os.kill(p.pid, signal.SIGKILL)
+            p.wait()
+            self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
+            stale = [os.path.join(tmp, n) for n in os.listdir(tmp)]
+            self.assertEqual(len(stale), 1, stale)
+            with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
+                rc, out = self.call(self.kill_args(self.root))
+            self.assertEqual(rc, 2)
+            self.assert_results_then(out, line(mutate.show(stale[0])))
+            self.assertEqual([os.path.join(tmp, n) for n in os.listdir(tmp)], stale)   # the next run's own copy is gone
+            self.assert_only_uchg_left(stale)
+
     def hang_head(self):
         """A head whose pkg.test_hang.A hangs on a mutant of kill.py and pkg.test_hang.Z always hangs."""
         return self.commit_files({"pkg/kill.py": KILL_HEAD, "pkg/locks.py": LOCKS_PY, "pkg/test_hang.py": HANG_TEST},
                                  "hang")
 
     def hang_env(self):
-        tmp = os.path.join(self.scratch, "tmp")
+        where = tempfile.mkdtemp(prefix="hang-", dir=self.scratch)   # its own per call (row M-X9b runs several)
+        tmp = os.path.join(where, "tmp")
         os.mkdir(tmp)
-        files = {"MUTATE_TEST_HANGLOG": os.path.join(self.scratch, "hangs.log"),
-                 "MUTATE_TEST_RUNLOG": os.path.join(self.scratch, "runs.log"),
+        files = {"MUTATE_TEST_HANGLOG": os.path.join(where, "hangs.log"),
+                 "MUTATE_TEST_RUNLOG": os.path.join(where, "runs.log"),
                  "MUTATE_TEST_OUTSIDE": self.outside_dir()}
         self.addCleanup(kill_recorded_groups, files["MUTATE_TEST_RUNLOG"])
         return tmp, files
@@ -1943,11 +2027,15 @@ class Mutate(unittest.TestCase):
 
 
 def force_remove(path):
-    """Test cleanup: `path` removed even when a failed run left a locked tree (row M-X9) in it; symlinks not followed."""
-    for top, dirs, _ in os.walk(path):
-        for name in dirs:
+    """Test cleanup: `path` removed even when a run left a locked tree (rows M-X9, M-X9b: modes, the uchg flag) in it;
+    symlinks not followed."""
+    for top, dirs, files in os.walk(path):
+        for name in dirs + files:
             sub = os.path.join(top, name)
-            if not os.path.islink(sub):
+            if hasattr(os, "chflags"):
+                with contextlib.suppress(OSError):
+                    os.chflags(sub, 0, follow_symlinks=False)
+            if name in dirs and not os.path.islink(sub):
                 with contextlib.suppress(OSError):
                     os.chmod(sub, 0o700)
     shutil.rmtree(path, ignore_errors=True)

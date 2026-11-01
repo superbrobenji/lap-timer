@@ -586,6 +586,11 @@ def inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+class Left:
+    """M-X9b (owner answer 2026-11-01, named-fail): the scratch copies this run could not remove, in removal order."""
+    paths: list = []
+
+
 def unlock(path: str) -> None:
     """M-X9: give the owner read, write and search on `path` when it is a directory (lstat: a symlink is never
     followed, DEC-0291); a path the run cannot change (another owner's) is left as it is (M-X9b)."""
@@ -598,7 +603,8 @@ def unlock(path: str) -> None:
 def remove_tree(path: str) -> None:
     """M-X3, M-X4, M-X6, M-X7, M-X9: remove a scratch copy whose tree a test may have left with modes that block the
     removal: every directory in it is unlocked top-down before rmtree. A symlink at `path` is kept and never followed
-    (rmtree refuses it; DEC-0291); one inside is removed as a link. What still cannot be removed is left (M-X9b)."""
+    (rmtree refuses it; DEC-0291); one inside is removed as a link. A copy still there afterwards is recorded in
+    Left.paths (M-X9b)."""
     if os.path.islink(path):
         return
     unlock(path)
@@ -606,6 +612,8 @@ def remove_tree(path: str) -> None:
         for name in dirs:
             unlock(os.path.join(top, name))
     shutil.rmtree(path, ignore_errors=True)
+    if os.path.lexists(path):
+        Left.paths.append(path)
 
 
 class Copy:
@@ -888,6 +896,8 @@ def execute(ns) -> int:
     root, ctx, sources, mutants, pys = prepare(ns)
     printer = Printer(mutants, not ns.json)
     run_all(root, ctx["head"], mutants, sources, pys, list(ns.test), ns.jobs, printer)
+    if Left.paths:                       # M-X9b: no report; main names every copy left
+        raise Fail("cleanup", f"{show(Left.paths[0])} left")
     counts = summary(mutants, ns.py)
     rc = 1 if any(c["SURVIVED"] for c in counts.values()) else 0
     if ns.json:
@@ -920,6 +930,7 @@ def main(argv=None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")   # bytes that are not UTF-8 prints escaped
     as_json = json_form(argv)
     Stop.reset()
+    Left.paths = []
     previous = {}
     if threading.current_thread() is threading.main_thread():   # M-X3, M-X4, M-X4c: for this run only
         for sig in STOP_SIGNALS:
@@ -939,10 +950,14 @@ def main(argv=None) -> int:
         except Fail as exc:
             if Stop.signal is not None:   # whatever the killed runs made of it, the run was stopped by the signal
                 exc = Fail("interrupt", f"stopped by {signal.Signals(Stop.signal).name}")
+            fails = [Fail("cleanup", f"{show(path)} left") for path in Left.paths]   # M-X9b: first, the FAIL last
+            if exc.check != "cleanup":
+                fails.append(exc)
             if as_json:
-                print(json.dumps({"rc": 2, "fail": [{"check": f"mutate.{exc.check}", "reason": exc.reason}]}))
+                print(json.dumps({"rc": 2, "fail": [{"check": f"mutate.{f.check}", "reason": f.reason} for f in fails]}))
             else:
-                print(f"FAIL mutate.{exc.check}: {exc.reason}")
+                for f in fails:
+                    print(f"FAIL mutate.{f.check}: {f.reason}")
             return 2
     finally:
         for sig, handler in previous.items():   # None: a handler not set from Python, put back as the default
