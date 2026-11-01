@@ -2991,3 +2991,21 @@
   asked_at: {sha: "403fdae", by: session}
   answer: "named-fail (owner in session, 2026-11-01: 'rommended' [sic]; the session had recommended named-fail)"
   answered_at: {sha: "403fdae", by: superbrobenji}
+- id: DEC-0305
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10c, row M-X9b (DEC-0304 named-fail): what one FAIL mutate.cleanup line names. Which?'
+  options:
+    - {label: one-per-copy, cost: 'one line per copy left, naming its mutate-* directory, the thing to remove by hand (as built) (recommended)'}
+    - {label: one-per-path, cost: 'one line per unremovable path inside the copy; exact, but can be many lines'}
+  asked_at: {sha: "a8cf87f", by: session}
+  answer: "one-per-copy (owner in session, 2026-11-01: 'recommended for both'; the session had recommended one-per-copy)"
+  answered_at: {sha: "a8cf87f", by: superbrobenji}
+- id: DEC-0306
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10c, row M-X9b: where the FAIL mutate.cleanup lines appear in the output. Which?'
+  options:
+    - {label: after-results-first-fail, cost: 'after the result lines already printed and before any other FAIL line, no extra summary (as built); nothing already printed is lost (recommended)'}
+    - {label: end-summary, cost: 'one combined summary at the end instead'}
+  asked_at: {sha: "a8cf87f", by: session}
+  answer: "after-results-first-fail (owner in session, 2026-11-01: 'recommended for both'; the session had recommended after-results-first-fail)"
+  answered_at: {sha: "a8cf87f", by: superbrobenji}
