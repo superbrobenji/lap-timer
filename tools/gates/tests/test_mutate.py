@@ -251,6 +251,17 @@ class A(unittest.TestCase):
         self.assertIs(kill.f(2), True)
         os.rmdir(made)
 '''
+GITENV_TEST = '''import os
+import subprocess
+import unittest
+
+
+class G(unittest.TestCase):
+    def test_git_sees_the_copy(self):
+        self.assertEqual(sorted(k for k in os.environ if k.startswith("GIT_")), [])
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True)
+        self.assertEqual(os.path.realpath(top.stdout[:-1]), os.path.realpath(os.getcwd()))
+'''
 ALL_OPERATORS = ["cmp-eq-ne", "cmp-ne-eq", "cmp-lt-le", "cmp-le-lt", "cmp-gt-ge", "cmp-ge-gt", "cmp-in-notin",
                  "cmp-notin-in", "cmp-is-isnot", "cmp-isnot-is", "not-remove", "not-add", "and-or", "or-and",
                  "true-false", "false-true", "int-inc", "int-dec", "cond-true", "cond-false", "return-none",
@@ -1313,6 +1324,19 @@ class Mutate(unittest.TestCase):
         self.assertEqual(os.listdir(tmp), [])
         self.assertFalse(any(os.path.exists(p) for p in others.values()))
 
+    def test_git_variables_of_the_caller_do_not_reach_the_tests(self):
+        """Run (docstring: GIT_* removed from the test runs): the caller's GIT_DIR and GIT_WORK_TREE naming the root
+        would point a test's git at the checkout; the tests see no GIT_* variable and git finds the copy."""
+        head = self.commit_files({"pkg/test_gitenv.py": GITENV_TEST}, "gitenv")
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_kill.A", "--test", "pkg.test_gitenv.G", "--py", PY]
+        want = self.call(argv)
+        self.assertEqual(want[0], 1, want)
+        self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", want[1].splitlines())
+        env = {"GIT_DIR": os.path.join(self.root, ".git"), "GIT_WORK_TREE": self.root}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(self.call(argv), want)
+
     def test_stdout_is_utf8_whatever_the_locale(self):
         """Row M-E4 (DEC-0263 utf8-stdout, O4): a non-ASCII --file name under PYTHONIOENCODING=ascii and LC_ALL=C."""
         name = "pkg/\u00e9.py"
@@ -1572,7 +1596,7 @@ class Mutate(unittest.TestCase):
                 copy("mutate-r-dir", f"{dead} {hid}\n", kind="pid-is-a-dir"),
                 copy("mutate-dddddddd", None), copy("mutate-eeeeeeee", "x\n"),
                 copy("mutate-ffffffff", ""), copy("mutate-gggggggg", "0\n"), copy("mutate-hhhhhhhh", "9" * 30 + "\n"),
-                copy("mutate-iiiiiiii", dead + "\n", kind="pid-is-a-dir"), copy("other-jjjjjjjj", dead + "\n"),
+                copy("mutate-iiiiiiii", dead + "\n", kind="pid-is-a-dir"), copy("other-jjjjjjjj", f"{dead} {hid}\n"),
                 copy("mutate-kkkkkkkk", " " + dead + "\n"), copy("mutate-llllllll", dead),
                 copy("mutate-oooooooo", dead + "\n1\n"), copy("mutate-pppppppp", "1\n"),
                 copy("mutate-qqqqqqqq", None)]
