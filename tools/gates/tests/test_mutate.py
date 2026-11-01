@@ -1786,6 +1786,8 @@ class Mutate(unittest.TestCase):
         exec(LOCKS_PY, locks)                    # row M-X9: the stale copies hold every locked shape
         for path in stale:
             locks["lock_tree"](parent=path, outside=outside)
+        stale.append(copy("mutate-r-ro-top", f"{dead} {hid}\n"))   # row M-X9: the copy's own directory unwritable
+        os.chmod(stale[-1], 0o555)
         guarded = [os.path.join(target, "ro"), os.path.join(kept[0], "ro")]   # the symlink's target; a live copy
         for path in guarded:
             os.mkdir(path, 0o555)

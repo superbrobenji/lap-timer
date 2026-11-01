@@ -896,8 +896,8 @@ def execute(ns) -> int:
     root, ctx, sources, mutants, pys = prepare(ns)
     printer = Printer(mutants, not ns.json)
     run_all(root, ctx["head"], mutants, sources, pys, list(ns.test), ns.jobs, printer)
-    if Left.paths:                       # M-X9b: no report; main names every copy left
-        raise Fail("cleanup", f"{show(Left.paths[0])} left")
+    if Left.paths:                       # M-X9b: no report; main prints one line per copy left (Left.paths)
+        raise Fail("cleanup", "")
     counts = summary(mutants, ns.py)
     rc = 1 if any(c["SURVIVED"] for c in counts.values()) else 0
     if ns.json:
