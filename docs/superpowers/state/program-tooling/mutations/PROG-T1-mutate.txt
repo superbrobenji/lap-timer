@@ -3,3 +3,12 @@ test: test_mutate::test_a_restore_that_differs_is_a_named_fail
 step 1 (fix present): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_mutate.Mutate.test_a_restore_that_differs_is_a_named_fail -> PASS
 step 2 (fix reverted: perl -pi -e 's/^    if not same:/    if False:/' tools/program/mutate.py removes the mutation tool's byte-compare of the restored file, restored by perl -pi -e 's/^    if False:/    if not same:/' tools/program/mutate.py): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_mutate.Mutate.test_a_restore_that_differs_is_a_named_fail -> FAIL
 step 3 (fix restored): PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tools.gates.tests.test_mutate.Mutate.test_a_restore_that_differs_is_a_named_fail -> PASS
+fix round 10c/10d (rows M-X9, M-X9b; run in a scratch clone at a8cf87f with this round's mutate.py and test_mutate.py, TMPDIR in the scratch directory, /usr/bin/python3; X9 = tools.gates.tests.test_mutate.Mutate.test_a_locked_tree_in_the_copy_is_removed_at_the_end, .test_a_locked_tree_is_removed_after_a_mutant_timeout, .test_the_next_run_removes_only_stale_scratch_copies; X9b = .test_a_copy_left_after_the_restore_is_a_named_cleanup_fail, .test_a_copy_left_by_one_main_call_is_not_reported_by_the_next)
+step 4 (M-X9 fix present): python3 -m unittest X9 -> PASS (Ran 3 tests, OK)
+step 5 (M-X9 fix reverted: git show 403fdae:tools/program/mutate.py > tools/program/mutate.py, the code before f57254f, plain rmtree(ignore_errors=True)): python3 -m unittest X9 -> FAIL (failures=8, e.g. Tuples differ: (1, '', ['<tmp>/mutate-...']) != (1, '', []))
+step 6 (M-X9 fix restored: this round's mutate.py copied back): python3 -m unittest X9 -> PASS (Ran 3 tests, OK)
+step 7 (M-X9b fix present): python3 -m unittest X9b -> PASS (Ran 2 tests, OK)
+step 8 (M-X9b fix reverted: git show f57254f:tools/program/mutate.py > tools/program/mutate.py, the code before befa782, no Left and no cleanup FAIL): python3 -m unittest X9b -> FAIL (failures=8, e.g. Tuples differ: (1, '') != (2, ''), 1 != 2)
+step 9 (M-X9b fix restored): python3 -m unittest X9b -> PASS (Ran 2 tests, OK)
+step 10 (M-X9b reset reverted: perl -pi -e 's/^    Left\.paths = \[\]$/    pass/' tools/program/mutate.py): python3 -m unittest .test_a_copy_left_by_one_main_call_is_not_reported_by_the_next -> FAIL (Tuples differ: (2, [], ["FAIL mutate.cleanup: '<tmp>/mutate-...' left"]) != (1, [], []))
+step 11 (reset restored, mutate.py byte-identical to the checkout's: cmp): the same test -> PASS (Ran 1 test, OK)

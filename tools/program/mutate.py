@@ -587,7 +587,7 @@ def inside(path: str, root: str) -> bool:
 
 
 class Left:
-    """M-X9b (owner answer 2026-11-01, named-fail): the scratch copies this run could not remove, in removal order."""
+    """M-X9b (DEC-0304..DEC-0306): the scratch copies this run could not remove, in removal order; main resets it."""
     paths: list = []
 
 

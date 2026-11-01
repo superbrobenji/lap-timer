@@ -1488,7 +1488,7 @@ class Mutate(unittest.TestCase):
             self.assertRegex(row, r"\Am\d{4} pkg/kill\.py:\d+ \S+ (KILLED|SURVIVED) \S+\Z")
 
     def test_a_copy_left_after_the_restore_is_a_named_cleanup_fail(self):
-        """Row M-X9b (owner answer 2026-11-01, named-fail): a copy that still cannot be removed after the restore (a
+        """Row M-X9b (DEC-0304 named-fail, DEC-0305, DEC-0306): a copy that still cannot be removed after the restore (a
         uchg file) ends the run with `FAIL mutate.cleanup: <copy> left`, rc 2: at the normal end, after a mutant's
         timeout (--json), before the interrupt line on SIGINT, SIGTERM (also --json) and SIGHUP, and in the next run
         after a SIGKILL (the stale copy). The real file as a process, but the next run's main() in-process."""
@@ -1547,6 +1547,33 @@ class Mutate(unittest.TestCase):
             self.assert_results_then(out, line(mutate.show(stale[0])))
             self.assertEqual([os.path.join(tmp, n) for n in os.listdir(tmp)], stale)   # the next run's own copy is gone
             self.assert_only_uchg_left(stale)
+
+    def test_a_copy_left_by_one_main_call_is_not_reported_by_the_next(self):
+        """Row M-X9b (DEC-0304 named-fail, DEC-0305 one-per-copy): main() called twice in one process, the first call
+        leaving its copy (a uchg file), the second leaving none: the second prints no cleanup FAIL and its rc is its
+        own (main resets Left.paths). The real main() in-process, its test runs as processes."""
+        if not hasattr(os, "chflags") or not hasattr(stat, "UF_IMMUTABLE"):
+            self.skipTest("os.chflags is not available: without root no path here resists the owner's restore")
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file modes")
+        self.commit_files({"pkg/kill.py": KILL_HEAD, "pkg/locks.py": LOCKS_PY, "pkg/test_lock.py": LOCK_TEST}, "lock")
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_lock.A", "--py", PY]
+        outside = self.outside_dir()
+        runs = []
+        for shapes in ("uchg", "unlistable"):
+            tmp = tempfile.mkdtemp(prefix="tmp-", dir=self.scratch)
+            env = {"TMPDIR": tmp, "MUTATE_TEST_SHAPES": shapes, "MUTATE_TEST_OUTSIDE": outside, "MUTATE_TEST_HANG": ""}
+            with mock.patch.dict(os.environ, env), mock.patch.object(tempfile, "tempdir", None):
+                rc, out = self.call(argv)
+            runs.append((rc, out, [os.path.join(tmp, n) for n in os.listdir(tmp)]))
+        (rc1, out1, left1), (rc2, out2, left2) = runs
+        self.assertEqual((rc1, len(left1)), (2, 1), out1)
+        self.assert_results_then(out1, f"FAIL mutate.cleanup: {mutate.show(left1[0])} left\n")
+        self.assertEqual((rc2, left2, [r for r in out2.splitlines() if r.startswith("FAIL")]), (1, [], []), out2)
+        self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out2.splitlines())
+        self.assert_outside_untouched(outside)
 
     def hang_head(self):
         """A head whose pkg.test_hang.A hangs on a mutant of kill.py and pkg.test_hang.Z always hangs."""
