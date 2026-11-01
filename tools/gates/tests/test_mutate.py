@@ -1831,8 +1831,10 @@ class Mutate(unittest.TestCase):
         with open(bad, "w", encoding="utf-8") as fh:
             fh.write("not a script\n")
         os.chmod(bad, 0o755)
-        self.assertEqual(self.call(self.args(pys=[bad])),
-                         (2, f"FAIL mutate.internal: OSError: [Errno 8] Exec format error: {bad!r}\n"))
+        reason = f"OSError: [Errno 8] Exec format error: {bad!r}"     # clipped as M-X2 clips it: TMPDIR sets its length
+        if len(reason) > mutate.CLIP:
+            reason = reason[:mutate.CLIP] + "..."
+        self.assertEqual(self.call(self.args(pys=[bad])), (2, f"FAIL mutate.internal: {reason}\n"))
 
 
 def pid_namespace():
