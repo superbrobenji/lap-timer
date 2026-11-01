@@ -4,6 +4,7 @@ Run from the repo root: python3 -m unittest tools.gates.tests.test_mutate -v
 import contextlib
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
@@ -1489,12 +1490,12 @@ class Mutate(unittest.TestCase):
         self.ignored_run(signal.SIGTERM, signal.SIGINT, "SIGINT")
 
     def test_an_inherited_ignored_sighup_is_kept(self):
-        """Row M-X4c (as built, pending Q-R10-2): started with SIGHUP ignored (nohup), SIGHUP does not stop the run;
+        """Row M-X4c (DEC-0299 keep-inherited-ignore): started with SIGHUP ignored (nohup), SIGHUP does not stop the run;
         SIGTERM still does."""
         self.ignored_run(signal.SIGHUP, signal.SIGTERM, "SIGTERM")
 
     def test_sighup_stops_the_run_and_leaves_nothing(self):
-        """Row M-X4c (DEC-0296 sighup-as-sigterm): as M-X4, the line naming SIGHUP."""
+        """Row M-X4c (DEC-0296 sighup-as-sigterm, DEC-0298 name-sighup): as M-X4, the line naming SIGHUP."""
         self.interrupt_run(signal.SIGHUP, "SIGHUP")
 
     def test_sigterm_stops_the_run_and_leaves_nothing(self):
@@ -1586,7 +1587,7 @@ class Mutate(unittest.TestCase):
             return path
         hid = host_id()
         stale = [copy("mutate-aaaaaaaa", f"{dead} {hid}\n"), copy("mutate-test-bbbbbbbb", f"{dead} {hid}\n")]
-        kept = [copy("mutate-cccccccc", f"{live} {hid}\n"), copy("mutate-r-old", dead + "\n"),     # old format: Q-R10-3
+        kept = [copy("mutate-cccccccc", f"{live} {hid}\n"), copy("mutate-r-old", dead + "\n"),     # old format: DEC-0300
                 copy("mutate-r-old-test", dead + "\n"), copy("mutate-r-live-old", live + "\n"),
                 copy("mutate-r-tab", f"{dead}\t{hid}\n"), copy("mutate-r-two", f"{dead}  {hid}\n"),
                 copy("mutate-r-upper", f"{dead} {hid.upper()}\n"), copy("mutate-r-short", f"{dead} {hid[:-1]}\n"),
@@ -1614,7 +1615,7 @@ class Mutate(unittest.TestCase):
 
     def test_a_stale_copy_from_another_host_or_namespace_is_kept(self):
         """Row M-X7 (DEC-0295 record-namespace): a dead pid with this host's id is removed; a pid file whose id is
-        another host's or pid namespace's is kept whatever its pid; the old `<pid>\\n` form is kept (Q-R10-3)."""
+        another host's or pid namespace's is kept whatever its pid; the old `<pid>\\n` form is kept (DEC-0300 keep-old-format)."""
         tmp = os.path.join(self.scratch, "tmp")
         os.mkdir(tmp)
         gone = subprocess.Popen(["true"])
@@ -1710,6 +1711,76 @@ class Mutate(unittest.TestCase):
             rc, out = self.call(self.args())
         self.assertEqual(rc, 1, out)
         self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_an_unreadable_pid_file_is_kept(self):
+        """Row M-X7b (as built, pending Q-R10b-1): a mutate-* directory whose regular pid file cannot be read (mode 000)
+        is kept, though it holds a dead pid with this host's id; the run goes on as without it. The listing is put in
+        each order of the unreadable copy, a stale copy and the run's own copy, so no earlier entry decides it."""
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file modes")
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        stale_text = f"{gone.pid} {host_id()}\n"
+        real_listdir = os.listdir
+        for order in itertools.permutations(("unread", "stale", "own")):
+            with self.subTest(order=order):
+                tmp = os.path.join(self.scratch, "tmp-" + "-".join(order))
+                os.mkdir(tmp)
+                gf.write(os.path.join(tmp, "mutate-stale"), "mutate.pid", stale_text)
+                pidfile = os.path.join(tmp, "mutate-unread", "mutate.pid")
+                gf.write(os.path.join(tmp, "mutate-unread"), "mutate.pid", stale_text)
+                os.chmod(pidfile, 0o000)
+                self.addCleanup(os.chmod, pidfile, 0o644)
+                with self.assertRaises(PermissionError):
+                    open(pidfile, "rb").close()
+                lists = []
+
+                def listdir(path=".", tmp=tmp, order=order):
+                    names = real_listdir(path)
+                    if path != tmp:
+                        return names
+                    rank = {"mutate-unread": order.index("unread"), "mutate-stale": order.index("stale")}
+                    lists.append(sorted(names, key=lambda n: rank.get(n, order.index("own"))))
+                    return lists[-1]
+                with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None), \
+                        mock.patch.object(mutate.os, "listdir", listdir):
+                    rc, out = self.call(self.args())
+                self.assertEqual(rc, 1, out)
+                self.assertNotIn("FAIL", out)
+                self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+                self.assertEqual([[n[:7] if n not in ("mutate-unread", "mutate-stale") else n for n in names]
+                                  for names in lists],
+                                 [[{"unread": "mutate-unread", "stale": "mutate-stale", "own": "mutate-"}[k]
+                                   for k in order]])
+                self.assertEqual(real_listdir(tmp), ["mutate-unread"])
+
+    def test_main_from_another_thread_runs_without_installing_handlers(self):
+        """Row M-X8 (as built, pending Q-R10b-2): main() called from a thread that is not the main thread installs no
+        stop handler (signal.signal works only in the main thread) and runs as from the main thread."""
+        sigs = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+        before = [signal.getsignal(s) for s in sigs]
+        rc, out = self.call(self.args())
+        seen, result = [], []
+        real = mutate.execute
+
+        def execute(ns):
+            seen.append([signal.getsignal(s) for s in sigs])
+            return real(ns)
+
+        def body():
+            try:
+                result.append(self.call(self.args()))
+            except BaseException as exc:     # the thread's outcome is asserted below, never lost
+                result.append(exc)
+        with mock.patch.object(mutate, "execute", execute):
+            th = threading.Thread(target=body)
+            th.start()
+            th.join(300)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(result, [(rc, out)])
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(seen, [before])
+        self.assertEqual([signal.getsignal(s) for s in sigs], before)
 
     def test_no_run_starts_after_a_signal(self):
         """Rows M-X3, M-X4: a signal between two mutant runs; the next run does not start."""
