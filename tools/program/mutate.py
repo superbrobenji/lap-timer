@@ -63,6 +63,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -585,6 +586,28 @@ def inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def unlock(path: str) -> None:
+    """M-X9: give the owner read, write and search on `path` when it is a directory (lstat: a symlink is never
+    followed, DEC-0291); a path the run cannot change (another owner's) is left as it is (M-X9b)."""
+    with contextlib.suppress(OSError):
+        st = os.lstat(path)
+        if stat.S_ISDIR(st.st_mode):
+            os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+
+
+def remove_tree(path: str) -> None:
+    """M-X3, M-X4, M-X6, M-X7, M-X9: remove a scratch copy whose tree a test may have left with modes that block the
+    removal: every directory in it is unlocked top-down before rmtree. A symlink at `path` is kept and never followed
+    (rmtree refuses it; DEC-0291); one inside is removed as a link. What still cannot be removed is left (M-X9b)."""
+    if os.path.islink(path):
+        return
+    unlock(path)
+    for top, dirs, _ in os.walk(path):
+        for name in dirs:
+            unlock(os.path.join(top, name))
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class Copy:
     """A guarded clone of the root at head in its own scratch directory (DEC-0032)."""
 
@@ -617,7 +640,7 @@ class Copy:
             raise Fail("copy", f"{who} left the copy changed: {clip(' '.join(status.split()))}")
 
     def remove(self) -> None:
-        shutil.rmtree(self.scratch, ignore_errors=True)
+        remove_tree(self.scratch)
 
     def run_tests(self, py: str, tests: list, timeout) -> tuple:
         """(rc or None on timeout, number of tests run, seconds) of one unittest run in the copy."""
@@ -751,7 +774,7 @@ def remove_stale(parent: str, host: str) -> None:
             continue
         m = PID_RE.fullmatch(text)
         if m and m.group(2) == host and pid_gone(int(m.group(1))):
-            shutil.rmtree(os.path.join(parent, name), ignore_errors=True)   # never through a symlink (rmtree)
+            remove_tree(os.path.join(parent, name))   # never through a symlink (M-X9, DEC-0291)
 
 
 def run_all(root: str, head: str, mutants: list, sources: dict, pys: list, tests: list, jobs: int,

@@ -203,15 +203,53 @@ class S(unittest.TestCase):
     def test_spin(self):
         self.assertEqual(spin.spin(3), 0)
 '''
+LOCKS_PY = '''import os
+import tempfile
+
+SHAPES = {"unlistable": ("d", (("d", 0o333),)), "unwritable": ("d", (("d/f", 0o444), ("d", 0o555))),
+          "unsearchable": ("d", (("d", 0o666),)), "nested": ("a/b", (("a/b", 0o000),)),
+          "inner": ("d/e", (("d/e", 0o000), ("d", 0o333)))}
+
+
+def lock_tree(parent=None, shapes=None, outside=None):
+    """Row M-X9: leave, under `parent` (default the run's TMPDIR), a tree of each shape whose modes block its
+    removal, and a symlink to `outside` (default MUTATE_TEST_OUTSIDE), a directory beside the copy."""
+    names = shapes or os.environ.get("MUTATE_TEST_SHAPES", ",".join([*SHAPES, "link"])).split(",")
+    for shape in names:
+        top = tempfile.mkdtemp(prefix=f"lock-{shape}-", dir=parent)
+        if shape == "link":
+            os.symlink(outside or os.environ["MUTATE_TEST_OUTSIDE"], os.path.join(top, "link"))
+            continue
+        deep, modes = SHAPES[shape]
+        os.makedirs(os.path.join(top, deep))
+        open(os.path.join(top, deep, "f"), "w").close()
+        for rel, mode in modes:
+            os.chmod(os.path.join(top, rel), mode)
+'''
+LOCK_TEST = '''import os
+import time
+import unittest
+
+from pkg import kill, locks
+
+
+class A(unittest.TestCase):
+    def test_two_is_over(self):
+        locks.lock_tree()
+        if kill.f(2) is not True and os.environ.get("MUTATE_TEST_HANG"):
+            time.sleep(300)
+        self.assertIs(kill.f(2), True)
+'''
 HANG_TEST = '''import os
 import subprocess
 import time
 import unittest
 
-from pkg import kill
+from pkg import kill, locks
 
 with open(os.environ["MUTATE_TEST_RUNLOG"], "a", encoding="utf-8") as log:
     log.write(f"{os.getpid()} {os.getpgrp()}\\n")
+locks.lock_tree()                       # row M-X9: every run leaves a tree that blocks a plain removal
 
 
 def hang():
@@ -288,7 +326,7 @@ class Mutate(unittest.TestCase):
         gf.write(self.root, "pkg/doc.py", DOC_HEAD)
         self.head = gf.commit_all(self.root, "head")
         self.scratch = tempfile.mkdtemp(prefix="mutate-test-")
-        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.addCleanup(force_remove, self.scratch)
 
     def call(self, argv):
         out = io.StringIO()
@@ -1375,15 +1413,69 @@ class Mutate(unittest.TestCase):
 
     # --- run lifecycle (rows M-X3, M-X4, M-X5, M-X7; DEC-0275, DEC-0276, DEC-0277..DEC-0280) -----------------
 
+    def outside_dir(self):
+        """A 0o555 directory holding a file, beside the copies: the target of the fixture's symlink (row M-X9)."""
+        path = tempfile.mkdtemp(prefix="outside-", dir=self.scratch)
+        open(os.path.join(path, "f"), "w").close()
+        os.chmod(path, 0o555)
+        return path
+
+    def assert_outside_untouched(self, path):
+        self.assertEqual((oct(os.stat(path).st_mode & 0o7777), os.listdir(path)), (oct(0o555), ["f"]))
+
+    def lock_run(self, shapes, prefix=(), extra=(), hang=""):
+        """Row M-X9: the real file as a process (`prefix` may wrap it) on pkg.test_lock.A, whose runs leave `shapes`
+        under the copy's TMPDIR; (rc, stdout, stderr, the TMPDIR's listing after the run)."""
+        tmp = tempfile.mkdtemp(prefix="tmp-", dir=self.scratch)
+        outside = self.outside_dir()
+        if gf.git(self.root, "show", "-s", "--format=%s", "HEAD") != "lock":
+            self.commit_files({"pkg/kill.py": KILL_HEAD, "pkg/locks.py": LOCKS_PY, "pkg/test_lock.py": LOCK_TEST}, "lock")
+        head = gf.git(self.root, "rev-parse", "HEAD")
+        argv = ["--root", self.root, "--base", self.base, "--head", head, "--file", "pkg/kill.py",
+                "--test", "pkg.test_lock.A", "--py", PY, *extra]
+        env = dict(os.environ, TMPDIR=tmp, MUTATE_TEST_SHAPES=shapes, MUTATE_TEST_OUTSIDE=outside, MUTATE_TEST_HANG=hang)
+        p = subprocess.run([PY, *(prefix or (MUTATE,)), *argv], capture_output=True, cwd=self.scratch, env=env, check=False,
+                           timeout=120)
+        self.assert_outside_untouched(outside)
+        self.assert_checkout_untouched_at(head)
+        return p.returncode, p.stdout.decode(), p.stderr.decode(), os.listdir(tmp)
+
+    def test_a_locked_tree_in_the_copy_is_removed_at_the_end(self):
+        """Row M-X9: a tree a test leaves in the copy whose modes block a plain removal (each shape alone, the symlink
+        to a directory outside, and all together) is removed at the run's normal end; the symlink is not followed."""
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file modes")
+        for shapes in ("unlistable", "unwritable", "unsearchable", "nested", "inner", "link",
+                       "unlistable,unwritable,unsearchable,nested,inner,link"):
+            with self.subTest(shapes=shapes):
+                rc, out, err, left = self.lock_run(shapes)
+                self.assertEqual((rc, err, left), (1, "", []), out)
+                self.assertIn(f"summary {PY}: 2 KILLED, 2 SURVIVED, 0 BADMATCH", out.splitlines())
+
+    def test_a_locked_tree_is_removed_after_a_mutant_timeout(self):
+        """Rows M-X6, M-X9: the copy whose mutant runs were killed on their timeout (int-inc and return-none hang) is
+        removed with the locked trees every run left (the real file's main(), its timeout constants set low)."""
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file modes")
+        wrap = ("-c", "import sys; sys.path.insert(0, sys.argv[1]); import mutate; mutate.TIMEOUT_FLOOR = 3.0; "
+                      "mutate.TIMEOUT_FACTOR = 1.0; sys.exit(mutate.main(sys.argv[2:]))", os.path.dirname(MUTATE))
+        rc, out, err, left = self.lock_run("unlistable,unwritable,unsearchable,nested,inner,link", prefix=wrap,
+                                           extra=["--json"], hang="1")
+        self.assertEqual((rc, err, left), (1, "", []), out)
+        reasons = sorted(m["reason"][PY] for m in json.loads(out)["mutants"])
+        self.assertEqual(reasons, ["tests passed", "tests passed", "timeout", "timeout"])
+
     def hang_head(self):
         """A head whose pkg.test_hang.A hangs on a mutant of kill.py and pkg.test_hang.Z always hangs."""
-        return self.commit_files({"pkg/kill.py": KILL_HEAD, "pkg/test_hang.py": HANG_TEST}, "hang")
+        return self.commit_files({"pkg/kill.py": KILL_HEAD, "pkg/locks.py": LOCKS_PY, "pkg/test_hang.py": HANG_TEST},
+                                 "hang")
 
     def hang_env(self):
         tmp = os.path.join(self.scratch, "tmp")
         os.mkdir(tmp)
         files = {"MUTATE_TEST_HANGLOG": os.path.join(self.scratch, "hangs.log"),
-                 "MUTATE_TEST_RUNLOG": os.path.join(self.scratch, "runs.log")}
+                 "MUTATE_TEST_RUNLOG": os.path.join(self.scratch, "runs.log"),
+                 "MUTATE_TEST_OUTSIDE": self.outside_dir()}
         self.addCleanup(kill_recorded_groups, files["MUTATE_TEST_RUNLOG"])
         return tmp, files
 
@@ -1445,7 +1537,8 @@ class Mutate(unittest.TestCase):
         self.assertEqual(len(runs), 2, f"a mutant started after {name}: {runs}")   # the baseline and the hung mutant
         self.assertEqual(runs[1], (pid, pgid))
         self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
-        self.assertEqual(os.listdir(tmp), [])
+        self.assertEqual(os.listdir(tmp), [])           # row M-X9: with the locked trees each run left
+        self.assert_outside_untouched(files["MUTATE_TEST_OUTSIDE"])
         self.assert_checkout_untouched_at(head)
 
     def assert_checkout_untouched_at(self, head):
@@ -1531,7 +1624,7 @@ class Mutate(unittest.TestCase):
         for limit, text in ((5.0, "5"), (5.5, "5.5")):
             with self.subTest(limit=limit), mock.patch.object(mutate, "BASELINE_TIMEOUT", limit), \
                     mock.patch.dict(os.environ, dict(files, TMPDIR=tmp)), mock.patch.object(tempfile, "tempdir", None):
-                for log in files.values():
+                for log in (files["MUTATE_TEST_HANGLOG"], files["MUTATE_TEST_RUNLOG"]):
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(log)
                 guard = threading.Timer(limit + 55, kill_recorded_groups, [files["MUTATE_TEST_RUNLOG"]])
@@ -1541,7 +1634,8 @@ class Mutate(unittest.TestCase):
                                                       f"copy under {PY!r} within {text} s\n"))
                 self.assertEqual(len(recorded(files["MUTATE_TEST_HANGLOG"])), 1)
                 self.assert_runs_gone(files["MUTATE_TEST_RUNLOG"])
-                self.assertEqual(os.listdir(tmp), [])
+                self.assertEqual(os.listdir(tmp), [])       # row M-X9: with the locked trees the run left
+                self.assert_outside_untouched(files["MUTATE_TEST_OUTSIDE"])
 
     def test_test_processes_die_with_a_sigkilled_tool(self):
         """Row M-X7 (DEC-0277, DEC-0279, DEC-0280): SIGKILL of the tool; its test processes kill their own group."""
@@ -1564,6 +1658,7 @@ class Mutate(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TMPDIR": tmp}), mock.patch.object(tempfile, "tempdir", None):
             self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
         self.assertEqual(os.listdir(tmp), [])             # the next run removed the stale copies, and its own
+        self.assert_outside_untouched(files["MUTATE_TEST_OUTSIDE"])   # row M-X9: the copies' locked trees too
 
     def test_the_next_run_removes_only_stale_scratch_copies(self):
         """Row M-X7 (DEC-0278): a mutate-* copy whose recorded pid is gone is removed; one whose pid runs (a concurrent
@@ -1602,6 +1697,14 @@ class Mutate(unittest.TestCase):
                 copy("mutate-oooooooo", dead + "\n1\n"), copy("mutate-pppppppp", "1\n"),
                 copy("mutate-qqqqqqqq", None)]
         target = copy("target", f"{dead} {hid}\n")
+        outside = self.outside_dir()
+        locks = {}
+        exec(LOCKS_PY, locks)                    # row M-X9: the stale copies hold every locked shape
+        for path in stale:
+            locks["lock_tree"](parent=path, outside=outside)
+        guarded = [os.path.join(target, "ro"), os.path.join(kept[0], "ro")]   # the symlink's target; a live copy
+        for path in guarded:
+            os.mkdir(path, 0o555)
         os.symlink(os.path.join(target, "mutate.pid"), os.path.join(kept[-1], "mutate.pid"))   # a symlinked pid file
         os.symlink(target, os.path.join(tmp, "mutate-mmmmmmmm"))
         kept += [target, os.path.join(tmp, "mutate-mmmmmmmm")]
@@ -1612,6 +1715,8 @@ class Mutate(unittest.TestCase):
             self.assertEqual(self.call(self.kill_args(self.root))[0], 1)
         self.assertEqual(sorted(os.listdir(tmp)), sorted(os.path.basename(k) for k in kept))
         self.assertTrue(os.path.isfile(os.path.join(target, "tree", "pkg", "x.py")))
+        self.assertEqual([oct(os.stat(path).st_mode & 0o7777) for path in guarded], [oct(0o555)] * 2)
+        self.assert_outside_untouched(outside)
 
     def test_a_stale_copy_from_another_host_or_namespace_is_kept(self):
         """Row M-X7 (DEC-0295 record-namespace): a dead pid with this host's id is removed; a pid file whose id is
@@ -1835,6 +1940,17 @@ class Mutate(unittest.TestCase):
         if len(reason) > mutate.CLIP:
             reason = reason[:mutate.CLIP] + "..."
         self.assertEqual(self.call(self.args(pys=[bad])), (2, f"FAIL mutate.internal: {reason}\n"))
+
+
+def force_remove(path):
+    """Test cleanup: `path` removed even when a failed run left a locked tree (row M-X9) in it; symlinks not followed."""
+    for top, dirs, _ in os.walk(path):
+        for name in dirs:
+            sub = os.path.join(top, name)
+            if not os.path.islink(sub):
+                with contextlib.suppress(OSError):
+                    os.chmod(sub, 0o700)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def pid_namespace():
