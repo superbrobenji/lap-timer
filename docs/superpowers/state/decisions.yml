@@ -2927,3 +2927,30 @@
   asked_at: {sha: "0b95833", by: session}
   answer: "tmpdir-in-copy (owner in session, 2026-11-01: 'recommended'; the session had recommended tmpdir-in-copy)"
   answered_at: {sha: "0b95833", by: superbrobenji}
+- id: DEC-0298
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10 (Q-R10-1), row M-X4c: the FAIL text when SIGHUP stops the run (DEC-0296). Which?'
+  options:
+    - {label: name-sighup, cost: 'FAIL mutate.interrupt: stopped by SIGHUP, the M-X3/M-X4 form naming the signal received (as built) (recommended)'}
+    - {label: sigterm-literal, cost: 'the SIGTERM line word for word; one line and the test; names a signal that did not come'}
+  asked_at: {sha: "9dff441", by: session}
+  answer: "name-sighup (owner in session, 2026-11-01: 'recommended'; the session had recommended name-sighup)"
+  answered_at: {sha: "9dff441", by: superbrobenji}
+- id: DEC-0299
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10 (Q-R10-2), row M-X4c: SIGHUP inherited as ignored (nohup). Which?'
+  options:
+    - {label: keep-inherited-ignore, cost: 'kept ignored as DEC-0290/DEC-0293 (as built); nohup works (recommended)'}
+    - {label: install-anyway, cost: 'handler installed anyway; a terminal close stops a nohup run; one line, the test inverted'}
+  asked_at: {sha: "9dff441", by: session}
+  answer: "keep-inherited-ignore (owner in session, 2026-11-01: 'recommended'; the session had recommended keep-inherited-ignore)"
+  answered_at: {sha: "9dff441", by: superbrobenji}
+- id: DEC-0300
+  class: spec-direction
+  question: 'Program tooling T1 fix round 10 (Q-R10-3), row M-X7: an old-format pid file holding only <pid> (tool up to 0b95833). Which?'
+  options:
+    - {label: keep-old-format, cost: 'kept: it records no matching id, so a possibly live old-version copy in another namespace is never removed (as built); old stale copies are removed by hand (recommended)'}
+    - {label: remove-when-dead, cost: 'removed when the pid no longer runs (DEC-0291 old form); one regex alternative and test rows; an old-version run in another namespace can lose its copy'}
+  asked_at: {sha: "9dff441", by: session}
+  answer: "keep-old-format (owner in session, 2026-11-01: 'recommended'; the session had recommended keep-old-format)"
+  answered_at: {sha: "9dff441", by: superbrobenji}
