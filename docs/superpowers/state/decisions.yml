@@ -3065,3 +3065,22 @@
   asked_at: {sha: "2a28719", by: session}
   answer: "range-test-renumber-a (owner in session, 2026-11-02: 'recommended for both'; the session had recommended range-test-renumber-a)"
   answered_at: {sha: "2a28719", by: superbrobenji}
+- id: DEC-0513
+  class: finding-class
+  question: 'PROG-IDS task review (approved spec and quality): the class says "decision ids outside the writing stream''s range", but no check knows which stream wrote a row; stream A rows put back at DEC-0300..0311 still pass test_registers and gate_decisions. How is the class handled?'
+  options:
+    - {label: keep-add-child, cost: 'keep the class; a child finding for stream attribution owned by the sync drift-check task (playbook: every register id lies in its stream''s range); no work now; PROG-IDS closes as the three-runs rule plus the renumber (recommended)'}
+    - {label: narrow, cost: 'narrow PROG-IDS to the three-runs rule; the attribution gap leaves the register'}
+    - {label: register-exception, cost: 'keep the class; a register-only exception: attribution checked by people at sync, never by a gate'}
+  asked_at: {sha: "d8af742", by: session}
+  answer: null
+  answered_at: null
+- id: DEC-0514
+  class: scope
+  question: 'The option-line gate plan (docs/superpowers/plans/2026-10-31-option-line-gate.md lines 7, 31, 52) and its T1 table (rows G10, G3) cap decision ids at DEC-0499 and accept out-of-order ids, against DEC-0512. That block is parked with stream A. When is the plan corrected?'
+  options:
+    - {label: when-block-resumes, cost: 'first step when the option-line block starts: the plan and table take the three ranges, with a plan review; no work this week (recommended)'}
+    - {label: now, cost: 'fix the plan text and table now plus a plan review, about 1-2 h, before stream A parks'}
+  asked_at: {sha: "d8af742", by: session}
+  answer: null
+  answered_at: null
