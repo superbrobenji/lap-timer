@@ -3346,3 +3346,31 @@
   - state: open
     sha: ca7b28c
     by: session
+- id: PROG-IDS
+  source: session
+  severity: MEDIUM
+  class: 'decision ids outside the writing stream''s range: stream A rows DEC-0300..DEC-0311 sit in stream B''s range (playbook two-streams.md:36), and the register test requires gapless ids (test_registers.py:54), so the two streams'' ranges cannot coexist'
+  siblings: []
+  cites:
+  - file: docs/superpowers/playbooks/two-streams.md
+    lines: '36'
+    sha: 2a28719
+  - file: tools/gates/tests/test_registers.py
+    lines: 54-55
+    sha: 2a28719
+  repro: 'grep -n "id: DEC-03" docs/superpowers/state/decisions.yml lists DEC-0300..DEC-0311 asked by session for stream A; stream B holds DEC-0300..DEC-0331 pending on block/prototype-b1'
+  owner:
+    kind: plan
+    plan: program-tooling
+    task: IDS
+  state: planned
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: 2a28719
+    by: session
+  - state: planned
+    sha: 2a28719
+    by: controller
