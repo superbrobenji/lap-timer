@@ -3374,3 +3374,28 @@
   - state: planned
     sha: 2a28719
     by: controller
+- id: PROG-IDS-1
+  source: review
+  severity: MEDIUM
+  class: 'a register id written by one stream inside the other stream''s range passes every check: no gate or test knows which stream wrote a row (child of PROG-IDS, DEC-0513)'
+  siblings: []
+  cites:
+  - file: tools/gates/tests/test_registers.py
+    lines: 54-55
+    sha: cee6081
+  - file: docs/superpowers/playbooks/two-streams.md
+    lines: '56'
+    sha: cee6081
+  repro: 'renumber stream A rows DEC-0500..0511 back to DEC-0300..0311 in decisions.yml: test_registers and gate_decisions still pass (task-ids-review.md R1)'
+  owner:
+    kind: plan
+    plan: program-tooling
+    task: T3
+  state: open
+  pin: null
+  ruling: null
+  evidence: []
+  history:
+  - state: open
+    sha: cee6081
+    by: session
