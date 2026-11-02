@@ -33,7 +33,7 @@ A path neither row names belongs to no stream: the session that needs it stops a
 - Board: a block's checkpoint commit edits only its own stream's row; only a sync edits the other row or appends to the sync log.
 - Memory notes under `~/.claude/projects/`: shared like the registers: each stream adds its own notes and never edits the other's; the docs move rewrites them once, with no stream B branch open (DEC-0164).
 
-ID ranges: stream A records decisions DEC-0132..DEC-0299 and findings with its existing prefixes; stream B records decisions DEC-0300..DEC-0499 and findings with the prefix `PT-`. The docs move (DEC-0139) runs right after field-readiness, when stream B has no branch open (DEC-0146).
+ID ranges: stream A records decisions DEC-0132..DEC-0299 and DEC-0500..DEC-0699 (DEC-0512) and findings with its existing prefixes; stream B records decisions DEC-0300..DEC-0499 and findings with the prefix `PT-`. The docs move (DEC-0139) runs right after field-readiness, when stream B has no branch open (DEC-0146).
 
 ## Session kinds
 1. **Stream A block** -- the owner starts it with the resume prompt in stream A's handoff. It reads its read list, runs one block of the umbrella replan under the strict-delivery skill, checkpoints (clean tree, handoff and ledger committed and pushed, its board row updated), and stops for `/clear`.
