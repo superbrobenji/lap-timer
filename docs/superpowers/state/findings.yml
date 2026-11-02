@@ -3349,7 +3349,7 @@
 - id: PROG-IDS
   source: session
   severity: MEDIUM
-  class: 'decision ids outside the writing stream''s range: stream A rows DEC-0300..DEC-0311 sit in stream B''s range (playbook two-streams.md:36), and the register test requires gapless ids (test_registers.py:54), so the two streams'' ranges cannot coexist'
+  class: 'decision ids outside the writing stream''s range: stream A rows were recorded as DEC-0300..DEC-0311 in stream B''s range (playbook two-streams.md:36) while the register test required gapless ids (test_registers.py:54 at 2a28719), so the two streams'' ranges could not coexist; at d0ce778 those rows are DEC-0500..DEC-0511 and the test pins three gapless runs DEC-0001..DEC-0299, DEC-0300..DEC-0499, DEC-0500..DEC-0699'
   siblings: []
   cites:
   - file: docs/superpowers/playbooks/two-streams.md
@@ -3358,7 +3358,7 @@
   - file: tools/gates/tests/test_registers.py
     lines: 54-55
     sha: 2a28719
-  repro: 'grep -n "id: DEC-03" docs/superpowers/state/decisions.yml lists DEC-0300..DEC-0311 asked by session for stream A; stream B holds DEC-0300..DEC-0331 pending on block/prototype-b1'
+  repro: 'git show 2a28719:docs/superpowers/state/decisions.yml | grep -n "id: DEC-03" lists the stream A rows DEC-0300..DEC-0311 (stream B holds DEC-0300..DEC-0331 pending on block/prototype-b1); at d0ce778 grep -n "id: DEC-03" docs/superpowers/state/decisions.yml lists nothing and grep -n "id: DEC-05" lists DEC-0500..DEC-0512'
   owner:
     kind: plan
     plan: program-tooling
