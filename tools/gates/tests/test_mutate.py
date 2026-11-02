@@ -1488,7 +1488,7 @@ class Mutate(unittest.TestCase):
             self.assertRegex(row, r"\Am\d{4} pkg/kill\.py:\d+ \S+ (KILLED|SURVIVED) \S+\Z")
 
     def test_a_copy_left_after_the_restore_is_a_named_cleanup_fail(self):
-        """Row M-X9b (DEC-0304 named-fail, DEC-0305, DEC-0306): a copy that still cannot be removed after the restore (a
+        """Row M-X9b (DEC-0504 named-fail, DEC-0505, DEC-0506): a copy that still cannot be removed after the restore (a
         uchg file) ends the run with `FAIL mutate.cleanup: <copy> left`, rc 2: at the normal end, after a mutant's
         timeout (--json), before the interrupt line on SIGINT, SIGTERM (also --json) and SIGHUP, and in the next run
         after a SIGKILL (the stale copy). The real file as a process, but the next run's main() in-process."""
@@ -1549,7 +1549,7 @@ class Mutate(unittest.TestCase):
             self.assert_only_uchg_left(stale)
 
     def test_a_copy_left_by_one_main_call_is_not_reported_by_the_next(self):
-        """Row M-X9b (DEC-0304 named-fail, DEC-0305 one-per-copy): main() called twice in one process, the first call
+        """Row M-X9b (DEC-0504 named-fail, DEC-0505 one-per-copy): main() called twice in one process, the first call
         leaving its copy (a uchg file), the second leaving none: the second prints no cleanup FAIL and its rc is its
         own (main resets Left.paths). The real main() in-process, its test runs as processes."""
         if not hasattr(os, "chflags") or not hasattr(stat, "UF_IMMUTABLE"):
@@ -1793,7 +1793,7 @@ class Mutate(unittest.TestCase):
             return path
         hid = host_id()
         stale = [copy("mutate-aaaaaaaa", f"{dead} {hid}\n"), copy("mutate-test-bbbbbbbb", f"{dead} {hid}\n")]
-        kept = [copy("mutate-cccccccc", f"{live} {hid}\n"), copy("mutate-r-old", dead + "\n"),     # old format: DEC-0300
+        kept = [copy("mutate-cccccccc", f"{live} {hid}\n"), copy("mutate-r-old", dead + "\n"),     # old format: DEC-0500
                 copy("mutate-r-old-test", dead + "\n"), copy("mutate-r-live-old", live + "\n"),
                 copy("mutate-r-tab", f"{dead}\t{hid}\n"), copy("mutate-r-two", f"{dead}  {hid}\n"),
                 copy("mutate-r-upper", f"{dead} {hid.upper()}\n"), copy("mutate-r-short", f"{dead} {hid[:-1]}\n"),
@@ -1833,7 +1833,7 @@ class Mutate(unittest.TestCase):
 
     def test_a_stale_copy_from_another_host_or_namespace_is_kept(self):
         """Row M-X7 (DEC-0295 record-namespace): a dead pid with this host's id is removed; a pid file whose id is
-        another host's or pid namespace's is kept whatever its pid; the old `<pid>\\n` form is kept (DEC-0300 keep-old-format)."""
+        another host's or pid namespace's is kept whatever its pid; the old `<pid>\\n` form is kept (DEC-0500 keep-old-format)."""
         tmp = os.path.join(self.scratch, "tmp")
         os.mkdir(tmp)
         gone = subprocess.Popen(["true"])

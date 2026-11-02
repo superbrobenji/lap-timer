@@ -2945,7 +2945,7 @@
   asked_at: {sha: "9dff441", by: session}
   answer: "keep-inherited-ignore (owner in session, 2026-11-01: 'recommended'; the session had recommended keep-inherited-ignore)"
   answered_at: {sha: "9dff441", by: superbrobenji}
-- id: DEC-0300
+- id: DEC-0500
   class: spec-direction
   question: 'Program tooling T1 fix round 10 (Q-R10-3), row M-X7: an old-format pid file holding only <pid> (tool up to 0b95833). Which?'
   options:
@@ -2954,7 +2954,7 @@
   asked_at: {sha: "9dff441", by: session}
   answer: "keep-old-format (owner in session, 2026-11-01: 'recommended'; the session had recommended keep-old-format)"
   answered_at: {sha: "9dff441", by: superbrobenji}
-- id: DEC-0301
+- id: DEC-0501
   class: spec-direction
   question: 'Program tooling T1 fix round 10b (Q-R10b-1), row M-X7b: a stale-copy candidate whose pid file cannot be read. Which?'
   options:
@@ -2963,7 +2963,7 @@
   asked_at: {sha: "4f96f36", by: session}
   answer: "keep-unreadable (owner in session, 2026-11-01: 'recommended for all'; the session had recommended keep-unreadable)"
   answered_at: {sha: "4f96f36", by: superbrobenji}
-- id: DEC-0302
+- id: DEC-0502
   class: spec-direction
   question: 'Program tooling T1 fix round 10b (Q-R10b-2), row M-X8: main() called from a non-main thread. Which?'
   options:
@@ -2972,7 +2972,7 @@
   asked_at: {sha: "4f96f36", by: session}
   answer: "run-no-handlers (owner in session, 2026-11-01: 'recommended for all'; the session had recommended run-no-handlers)"
   answered_at: {sha: "4f96f36", by: superbrobenji}
-- id: DEC-0303
+- id: DEC-0503
   class: scope
   question: 'Program tooling T1 (Q-R10b-3): the full mutation run of tools/program/mutate.py against tools.gates.tests.test_mutate takes about 21 h at --jobs 8. How is it finished?'
   options:
@@ -2982,7 +2982,7 @@
   asked_at: {sha: "4f96f36", by: session}
   answer: "background-after-fix (owner in session, 2026-11-01: 'recommended for all'; the session had recommended background-after-fix)"
   answered_at: {sha: "4f96f36", by: superbrobenji}
-- id: DEC-0304
+- id: DEC-0504
   class: spec-direction
   question: 'Program tooling T1 fix round 10c (Q-R10c-1): a path in a scratch copy that still cannot be removed after its permission bits are restored (e.g. chflags uchg, another owner, a busy mount). Which?'
   options:
@@ -2991,16 +2991,16 @@
   asked_at: {sha: "403fdae", by: session}
   answer: "named-fail (owner in session, 2026-11-01: 'rommended' [sic]; the session had recommended named-fail)"
   answered_at: {sha: "403fdae", by: superbrobenji}
-- id: DEC-0305
+- id: DEC-0505
   class: spec-direction
-  question: 'Program tooling T1 fix round 10c, row M-X9b (DEC-0304 named-fail): what one FAIL mutate.cleanup line names. Which?'
+  question: 'Program tooling T1 fix round 10c, row M-X9b (DEC-0504 named-fail): what one FAIL mutate.cleanup line names. Which?'
   options:
     - {label: one-per-copy, cost: 'one line per copy left, naming its mutate-* directory, the thing to remove by hand (as built) (recommended)'}
     - {label: one-per-path, cost: 'one line per unremovable path inside the copy; exact, but can be many lines'}
   asked_at: {sha: "a8cf87f", by: session}
   answer: "one-per-copy (owner in session, 2026-11-01: 'recommended for both'; the session had recommended one-per-copy)"
   answered_at: {sha: "a8cf87f", by: superbrobenji}
-- id: DEC-0306
+- id: DEC-0506
   class: spec-direction
   question: 'Program tooling T1 fix round 10c, row M-X9b: where the FAIL mutate.cleanup lines appear in the output. Which?'
   options:
@@ -3009,36 +3009,36 @@
   asked_at: {sha: "a8cf87f", by: session}
   answer: "after-results-first-fail (owner in session, 2026-11-01: 'recommended for both'; the session had recommended after-results-first-fail)"
   answered_at: {sha: "a8cf87f", by: superbrobenji}
-- id: DEC-0307
+- id: DEC-0507
   class: scope
-  question: 'Program tooling T1: the full mutation run of mutate.py on itself is about 21 h at --jobs 8 (DEC-0303 background-after-fix). Owner, 2026-11-01: "20 hours is unnacceptable", "20min is long". Cap the run at 20 minutes; how is it reached?'
+  question: 'Program tooling T1: the full mutation run of mutate.py on itself is about 21 h at --jobs 8 (DEC-0503 background-after-fix). Owner, 2026-11-01: "20 hours is unnacceptable", "20min is long". Cap the run at 20 minutes; how is it reached?'
   options:
     - {label: select-and-short-waits, cost: 'per-mutant test selection (coverage map from one traced run) plus test-only short waits for the fixture runs; 100-mutant sample measured first; about 2-3 h of work; estimate 20-30 min (recommended)'}
     - {label: selection-only, cost: 'selection only, real waits kept; likely 1-2 h per run'}
     - {label: short-waits-only, cost: 'short waits only, all tests per mutant; likely 2-4 h per run'}
   asked_at: {sha: "0d71594", by: session}
-  answer: "select-and-short-waits (owner in session, 2026-11-01, picked in the question tool; supersedes DEC-0303)"
+  answer: "select-and-short-waits (owner in session, 2026-11-01, picked in the question tool; supersedes DEC-0503)"
   answered_at: {sha: "0d71594", by: superbrobenji}
-- id: DEC-0308
+- id: DEC-0508
   class: scope
-  question: 'Does the 20-minute mutation-run cap (DEC-0307) apply to every mutation run or only to mutate.py on itself?'
+  question: 'Does the 20-minute mutation-run cap (DEC-0507) apply to every mutation run or only to mutate.py on itself?'
   options:
     - {label: every-run, cost: 'a rule for all mutation runs: a run over 20 min is a tool or test defect; into the spec via the process block (DEC-0286); the loader run (about 95 min) gets the same treatment (recommended)'}
     - {label: this-run-only, cost: 'only mutate.py on itself'}
   asked_at: {sha: "0d71594", by: session}
   answer: "every-run (owner in session, 2026-11-01, picked in the question tool)"
   answered_at: {sha: "0d71594", by: superbrobenji}
-- id: DEC-0309
+- id: DEC-0509
   class: scope
   question: 'Owner, 2026-11-01: one week left before field testing; "we can''t spend a whole day on every change". Program tooling (stream A, internal tooling, estimated 2 days, Task 1 alone about 4 days) is not on the field-test path. What happens to stream A this week?'
   options:
-    - {label: park-a-all-on-b, cost: 'fix round 10d finishes, then stream A stops at a clean checkpoint; Task 1 stays unapproved with its open items ledgered (DEC-0307/DEC-0308 work waits); all sessions on stream B until field testing (recommended)'}
+    - {label: park-a-all-on-b, cost: 'fix round 10d finishes, then stream A stops at a clean checkpoint; Task 1 stays unapproved with its open items ledgered (DEC-0507/DEC-0508 work waits); all sessions on stream B until field testing (recommended)'}
     - {label: finish-t1-then-park, cost: 'the 20-min mutation work and one re-review first, about one more day'}
     - {label: stop-now, cost: 'round 10d stopped mid-work, its uncommitted work may be lost'}
   asked_at: {sha: "0d71594", by: session}
   answer: "park-a-all-on-b (owner in session, 2026-11-01, picked in the question tool)"
   answered_at: {sha: "0d71594", by: superbrobenji}
-- id: DEC-0310
+- id: DEC-0510
   class: scope
   question: 'Until field testing starts: may the session take the recommended option on spec-direction edge-case questions inside an approved plan itself, record each as a decision with asked/answered by session under this standing grant, and list them at each checkpoint for the owner to overturn?'
   options:
@@ -3047,7 +3047,7 @@
   asked_at: {sha: "0d71594", by: session}
   answer: "standing-grant (owner in session, 2026-11-01, picked in the question tool)"
   answered_at: {sha: "0d71594", by: superbrobenji}
-- id: DEC-0311
+- id: DEC-0511
   class: scope
   question: 'Until field testing starts: cap each task''s review loop?'
   options:
@@ -3056,3 +3056,12 @@
   asked_at: {sha: "0d71594", by: session}
   answer: "two-fix-rounds (owner in session, 2026-11-01, picked in the question tool)"
   answered_at: {sha: "0d71594", by: superbrobenji}
+- id: DEC-0512
+  class: scope
+  question: 'Stream A decision rows DEC-0300..DEC-0311 were recorded in stream B''s range (playbook :36), and tools/gates/tests/test_registers.py:54 requires gapless ids. How is the clash fixed?'
+  options:
+    - {label: range-test-renumber-a, cost: 'One small stream A task: change test_registers.py to allow the two stream ranges (DEC-0314 test-allows-ranges, already your answer). Give stream A a new range, DEC-0500..0699, and renumber A''s 12 rows and the 16 lines that cite them. About 2-3 h with review, then stream A parks. Stream B''s 32 pending decisions can then land. (recommended)'}
+    - {label: renumber-b, cost: 'Stream A keeps DEC-0300..0311, and stream B''s 32 pending rows move to DEC-0312 and up at the next sync, rewriting every id they''re cited by in B''s text. No stream A code work, but more text churn in B, and the gap rule stays.'}
+  asked_at: {sha: "2a28719", by: session}
+  answer: "range-test-renumber-a (owner in session, 2026-11-02: 'recommended for both'; the session had recommended range-test-renumber-a)"
+  answered_at: {sha: "2a28719", by: superbrobenji}

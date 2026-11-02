@@ -43,6 +43,34 @@ def with_(row, **kw):
     return out
 
 
+DECISION_RANGES = ((1, 299), (300, 499), (500, 699))    # playbook two-streams.md "Shared files" (DEC-0512)
+
+
+def decision_id_errors(ids) -> list:
+    """PROG-IDS: one error per id that breaks the rule DecisionIdRanges states, in file order."""
+    errs, seen, nxt = [], set(), {lo: lo for lo, _ in DECISION_RANGES}
+    for i in ids:
+        if not (isinstance(i, str) and reg.DECISION_ID.fullmatch(i)):
+            errs.append(f"{i!r}: not a decision id DEC-NNNN")
+            continue
+        n = int(i[4:])
+        run = [(lo, hi) for lo, hi in DECISION_RANGES if lo <= n <= hi]
+        if not run:
+            errs.append(f"{i}: outside DEC-%04d..DEC-%04d" % (DECISION_RANGES[0][0], DECISION_RANGES[-1][1]))
+        elif i in seen:
+            errs.append(f"{i}: duplicate")
+        else:
+            lo, hi = run[0]
+            if n != nxt[lo]:
+                errs.append(f"{i}: expected DEC-%04d next in DEC-%04d..DEC-%04d" % (nxt[lo], lo, hi))
+            nxt[lo] = n + 1
+        seen.add(i)
+    lo, hi = DECISION_RANGES[0]
+    if nxt[lo] == lo:
+        errs.append(f"DEC-%04d: missing, the register has no DEC-%04d..DEC-%04d rows" % (lo, lo, hi))
+    return errs
+
+
 class Loaders(unittest.TestCase):
     def test_bootstrapped_registers_are_valid(self):
         root = lib.CODE_ROOT
@@ -52,7 +80,7 @@ class Loaders(unittest.TestCase):
         self.assertEqual([], reg.load_claims(root))
         decisions = reg.load_decisions(root)
         ids = [d["id"] for d in decisions]       # the live register grows (DEC-0005 at b3): pin the order, not a count
-        self.assertEqual(["DEC-%04d" % n for n in range(1, len(ids) + 1)], ids)
+        self.assertEqual([], decision_id_errors(ids))    # PROG-IDS: three gapless runs (DEC-0512)
         self.assertLessEqual(4, len(ids))
         self.assertEqual([[]] * len(ids), [reg.validate_decision(d) for d in decisions])
         self.assertEqual("merge-grant", decisions[0]["class"])
@@ -74,6 +102,68 @@ class Loaders(unittest.TestCase):
                 reg.load_findings(root)
         finally:
             gf.remove(root)
+
+
+class DecisionIdRanges(unittest.TestCase):
+    """PROG-IDS (DEC-0314 test-allows-ranges, DEC-0193 no-gap-per-range, DEC-0236 fail-0001, DEC-0512): decision ids
+    are, in file order, three gapless runs DEC-0001..DEC-0299, DEC-0300..DEC-0499 and DEC-0500..DEC-0699, rows of
+    different runs interleaved in any order; each run starts at its first id, the first run is never empty. The ids
+    reach the rule through reg.load_decisions on a fixture register, as the live pin reads them."""
+
+    def errors(self, ids):
+        root = tempfile.mkdtemp(prefix="gate-ids-")
+        try:
+            text = "".join(f"- {{id: {i}}}\n" for i in ids) if ids else "[]\n"
+            gf.write(root, os.path.join(gf.STATE, "decisions.yml"), text)
+            return decision_id_errors([d["id"] for d in reg.load_decisions(root)])
+        finally:
+            gf.remove(root)
+
+    @staticmethod
+    def ids(*spans):
+        return ["DEC-%04d" % n for a, b in spans for n in range(a, b + 1)]
+
+    def test_runs_that_pass(self):
+        cases = {
+            "first run only": self.ids((1, 3)),
+            "first and third (the live shape)": self.ids((1, 3), (500, 502)),
+            "all three interleaved": ["DEC-0001", "DEC-0300", "DEC-0002", "DEC-0500", "DEC-0301", "DEC-0003"],
+            "third before second, each run in order": self.ids((1, 2), (500, 501), (300, 301)),
+            "every run at its last id": self.ids((1, 299), (300, 499), (500, 699)),
+            "second run right after a full first run": self.ids((1, 299), (300, 300)),
+        }
+        for name, ids in cases.items():
+            self.assertEqual([], self.errors(ids), name)
+
+    def test_runs_that_fail(self):
+        cases = {
+            "gap in the first run": (self.ids((1, 1), (3, 3)), ["DEC-0003: expected DEC-0002 next in DEC-0001..DEC-0299"]),
+            "gap in the second run": (self.ids((1, 1), (300, 300), (302, 302)),
+                                      ["DEC-0302: expected DEC-0301 next in DEC-0300..DEC-0499"]),
+            "gap in the third run": (self.ids((1, 1), (500, 500), (502, 502)),
+                                     ["DEC-0502: expected DEC-0501 next in DEC-0500..DEC-0699"]),
+            "out of order in a run": (self.ids((1, 1), (3, 3), (2, 2)),
+                                      ["DEC-0003: expected DEC-0002 next in DEC-0001..DEC-0299",
+                                       "DEC-0002: expected DEC-0004 next in DEC-0001..DEC-0299"]),
+            "duplicate in the first run": (self.ids((1, 2), (2, 2)), ["DEC-0002: duplicate"]),
+            "duplicate in the third run": (self.ids((1, 1), (500, 500), (500, 500)), ["DEC-0500: duplicate"]),
+            "above DEC-0699": (self.ids((1, 1), (700, 700)), ["DEC-0700: outside DEC-0001..DEC-0699"]),
+            "DEC-9999": (self.ids((1, 1), (9999, 9999)), ["DEC-9999: outside DEC-0001..DEC-0699"]),
+            "DEC-0000": (self.ids((0, 0), (1, 1)), ["DEC-0000: outside DEC-0001..DEC-0699"]),
+            "first run not at DEC-0001": (self.ids((2, 3)), ["DEC-0002: expected DEC-0001 next in DEC-0001..DEC-0299"]),
+            "second run not at DEC-0300": (self.ids((1, 1), (301, 301)),
+                                           ["DEC-0301: expected DEC-0300 next in DEC-0300..DEC-0499"]),
+            "third run not at DEC-0500": (self.ids((1, 1), (501, 501)),
+                                          ["DEC-0501: expected DEC-0500 next in DEC-0500..DEC-0699"]),
+            "no first run": (self.ids((300, 301)), ["DEC-0001: missing, the register has no DEC-0001..DEC-0299 rows"]),
+            "empty register": ([], ["DEC-0001: missing, the register has no DEC-0001..DEC-0299 rows"]),
+        }
+        for name, (ids, want) in cases.items():
+            self.assertEqual(want, self.errors(ids), name)
+
+    def test_a_malformed_id_is_named_not_raised(self):
+        self.assertEqual(["7: not a decision id DEC-NNNN", "'DEC-12': not a decision id DEC-NNNN"],
+                         decision_id_errors(["DEC-0001", 7, "DEC-12"]))
 
 
 class FindingSchema(unittest.TestCase):
